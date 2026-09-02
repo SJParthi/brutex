@@ -9194,8 +9194,32 @@ fn one_rung(
     // lines. The row is read back from the store, which is the point of having
     // one.
     let text = audit_range_for_attempt(vendor_word, underlying, rung, from, to, min_hits, attempt);
-    let outcome = if let Some(why) = text.strip_prefix("refused: ") {
-        Err(first_line(why.to_owned()))
+    let outcome = if let Some(why) = refusal_reason(&text) {
+        // `refusal_reason` AND NOT `strip_prefix`, because there are three
+        // spellings of a refusal and this arm knew one.
+        //
+        // A HALTED LADDER AND AN EXTINCT ONE BOTH LAND HERE, and neither used
+        // to. `audit_bars` returns early on both -- `ranked_opening`'s
+        // "NOT TRADED / REFUSED -- the streamed ladder did not produce a
+        // complete, closure-certified answer" and `nothing_to_trade`'s
+        // "AUDIT / REFUSED. The streamed sweep offered N survivor(s)". Both are
+        // uppercase and indented, so neither carried the `refused: ` prefix
+        // this tested nor the `NOT_RECORDED` marker below, and both fell
+        // through to `latest_for`.
+        //
+        // That fall-through is the defect. `latest_for` keys on feed,
+        // underlying, rung, span and min_hits -- never the identity -- so a
+        // rung that halted on the budget printed an EARLIER run's combination
+        // count, depth, trades and totals, under this run's banner, with
+        // `complete = yes`. A search that stopped early wearing a completed
+        // search's numbers.
+        //
+        // It is reachable without a knob: one rung asked alone gets the whole
+        // machine's ceiling and completes; the same rung inside the eight gets
+        // an eighth of it and can halt. Same key both times.
+        Err(first_line(
+            why.strip_prefix("refused: ").unwrap_or(why).to_owned(),
+        ))
     } else if let Some(why) = not_recorded_reason(&text) {
         // A ROW THAT DID NOT LAND IS A REFUSAL, NOT A LOOKUP.
         //
@@ -9618,7 +9642,34 @@ fn refusal_reason(page: &str) -> Option<&str> {
     // AT COLUMN ZERO, and that is load-bearing. A completed report prints
     // `  refused    0` INDENTED inside its BARS block; a refusal starts hard
     // left. Trimming first would classify every successful sweep as refused.
-    page.lines().find(|line| line.starts_with("refused"))
+    //
+    // THERE WERE THREE SPELLINGS AND THIS KNEW ONE.
+    //
+    // The comment above says "one predicate, because there were two". There
+    // were three. Two live renderers emit UPPERCASE and INDENTED, and both
+    // return the whole page as the run's answer:
+    //
+    //   `ranked_opening`  -> "NOT TRADED\n  REFUSED -- the streamed ladder ..."
+    //   `nothing_to_trade` -> "\nAUDIT\n  REFUSED. The streamed sweep offered ..."
+    //
+    // Neither starts at column zero and neither is lowercase, so every gate
+    // built on this predicate read them as reports. The consequence is the one
+    // `carries_refusal`'s own doc says it exists to end: nine command arms take
+    // their exit code from here, so `cli screen ... && <next step>` PROCEEDED
+    // on a run that refused to trade.
+    //
+    // The uppercase forms are matched on their own terms rather than by
+    // lowercasing the page: `REFUSED` indented under a section heading is a
+    // deliberate shape, and a case-insensitive match at column zero would still
+    // miss it while newly catching any prose line that happens to begin with
+    // the word.
+    page.lines()
+        .find(|line| {
+            line.starts_with("refused")
+                || line.trim_start().starts_with("REFUSED. ")
+                || line.trim_start().starts_with("REFUSED -- ")
+        })
+        .map(str::trim_start)
 }
 
 /// Whether a rendered report carries a refusal anywhere in it.
@@ -14168,6 +14219,52 @@ mod tests {
 
     /// Every refusal NAMES what was wrong and prints the usage.
     ///
+    /// All three spellings of a refusal are one, and a report is still a report.
+    ///
+    /// The two uppercase forms are what `audit_bars` returns on its two early
+    /// exits — a ladder that halted on the budget, and a sweep whose survivors
+    /// all closed out. Both are indented under a section heading, so neither
+    /// carries the `refused: ` prefix the gates used to test, and both were
+    /// therefore classified as REPORTS: nine command arms exited zero on them,
+    /// and `one_rung` filled the row from an earlier run.
+    ///
+    /// The negative cases are the half that makes this a test rather than an
+    /// assertion that `contains` works. `  refused    0` is a COMPLETED sweep's
+    /// own census line, indented inside its BARS block, and reading it as a
+    /// refusal would classify every successful run as failed.
+    #[test]
+    fn a_refusal_is_recognised_in_every_spelling_a_renderer_emits() {
+        let refusals = [
+            "refused: `nosuchfeed` is not a feed this build knows",
+            "NOT TRADED\n  REFUSED -- the streamed ladder did not produce a \
+             complete, closure-certified answer.",
+            "\nAUDIT\n  REFUSED. The streamed sweep offered 12 survivor(s), but \
+             no CLOSED combination survived.",
+        ];
+        for page in refusals {
+            assert!(
+                super::refusal_reason(page).is_some(),
+                "this spelling must be read as a refusal: {page}"
+            );
+            assert!(
+                super::carries_refusal(page),
+                "and the exit-code gate must agree with it: {page}"
+            );
+        }
+
+        let reports = [
+            "BARS\n  swept   4321\n  refused    0\n",
+            "RESULT RECORDED\n  row 0\n",
+            "  the run was REFUSED-shaped in prose but not a refusal line\n",
+        ];
+        for page in reports {
+            assert!(
+                super::refusal_reason(page).is_none(),
+                "a completed report must not be read as refused: {page}"
+            );
+        }
+    }
+
     /// `CLAUDE.md` §4 requires a refusal to name its reason; "usage:" alone
     /// leaves the operator to work out which of their words was objected to.
     #[test]

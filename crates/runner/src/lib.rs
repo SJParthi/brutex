@@ -247,6 +247,45 @@ impl Sweeper {
         }
     }
 
+    /// [`Self::run_prepared`], keeping the streamed tallies instead of the
+    /// levels.
+    ///
+    /// # Why a second door and not a flag
+    ///
+    /// The two walks return different types, and that is the whole difference:
+    /// [`Sweep`] retains every survivor of every level, [`keep::Streamed`]
+    /// reduces each level to its five exits and a COUNT and drops the level.
+    /// `engine`'s own doc is unambiguous that nothing else differs — *"it is
+    /// the same code: both call `walk_into` and differ only in what they do
+    /// with a level they have finished with"* — and
+    /// `engine::tests::a_streamed_walk_and_a_retaining_walk_are_the_same_walk`
+    /// requires every level, counter, exclusion and survivor to agree.
+    ///
+    /// # What it unblocks
+    ///
+    /// `Sweep` carries no count of combinations CONSIDERED; only `Streamed`
+    /// does, as `streamed`. That is the ledger's `combinations` field, so a
+    /// caller holding a `Sweep` cannot file an honest row — the nearest figure
+    /// it has is `all_frequent().count()`, which is the KEPT total and a
+    /// different quantity. `cli`'s whole-store sweep was in exactly that
+    /// position: it built a run identity per instrument-month and could not
+    /// record it.
+    ///
+    /// It is also the cheaper walk in memory, which matters more here than
+    /// anywhere: the batch runs months in parallel, and retention is what binds.
+    #[must_use]
+    pub fn run_prepared_streamed(&self, column: &Column) -> StreamedOutcome {
+        let live = live_positions();
+        let sweep = self
+            .ladder
+            .walk_streamed(column.bits(), &live, &mut |_, _, _| {});
+        StreamedOutcome {
+            census: column.census(),
+            first_swept: column.first_swept(),
+            sweep,
+        }
+    }
+
     /// [`Self::run`], and then scores what it found.
     ///
     /// # Why this exists beside `run` rather than replacing it
@@ -570,6 +609,22 @@ impl PopulationRun {
     pub fn is_complete(&self) -> bool {
         self.outcome.is_complete() && self.considered == self.redundant.saturating_add(self.closed)
     }
+}
+
+/// What an UNRANKED streamed sweep produced: the census, with level tallies.
+///
+/// [`Outcome`]'s sibling, and distinct from [`RankedOutcome`] below: this one
+/// carries no ranking because its caller does none. The two walks return
+/// different sweep types and a caller wants the census and `first_swept` either
+/// way; see [`Sweeper::run_prepared_streamed`] for which to reach for and why.
+#[derive(Clone, Debug)]
+pub struct StreamedOutcome {
+    /// Where every offered bar went -- swept, still warming, or refused by name.
+    pub census: Census,
+    /// The caller-slice index of the first swept bar, or `None` if none warmed.
+    pub first_swept: Option<usize>,
+    /// The walk, with each level reduced to its tally.
+    pub sweep: engine::keep::Streamed,
 }
 
 /// A ranked sweep's census and exact level tallies, without retained survivors.

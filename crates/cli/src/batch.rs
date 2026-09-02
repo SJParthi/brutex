@@ -518,7 +518,7 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
     let ladder = Ladder::with_min_hits(min_hits)
         .with_ceiling(BATCH_CEILING)
         .with_support_lanes(crate::shared_support_lanes());
-    let outcome = Sweeper::new(ladder).run_prepared(&column);
+    let outcome = Sweeper::new(ladder).run_prepared_streamed(&column);
 
     // THE IDENTITY THIS REPORT'S BANNER HAS ALWAYS PROMISED.
     //
@@ -550,7 +550,15 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
         feed: loaded.vendor.as_str(),
     });
 
-    let kept = outcome.sweep.all_frequent().count();
+    let kept = usize::try_from(
+        outcome
+            .sweep
+            .levels
+            .iter()
+            .map(|level| level.survivors)
+            .sum::<u64>(),
+    )
+    .unwrap_or(usize::MAX);
     let depth = outcome.sweep.depth();
     let completed = outcome.sweep.completed();
 
@@ -570,6 +578,45 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
             .with("completed", completed),
     );
 
+    // AND THE LEDGER, WHICH IS THE HALF THE EVENT ABOVE COULD NOT BE.
+    //
+    // The comment on `id` says this identity is built "same construction as
+    // `sweep_stored`, so sweeping a month here and sweeping it alone produce the
+    // same 64 hex characters, which is the only thing that makes the two
+    // reports comparable." They were comparable in the REPORT and nowhere else:
+    // the row was never appended, so nothing could put the two side by side,
+    // which is what comparable is for.
+    //
+    // THIS NEEDED THE STREAMED WALK FIRST, and that is why it is landing now
+    // rather than with the other three verbs. `Sweep` carries no count of
+    // combinations CONSIDERED -- the nearest figure it holds is
+    // `all_frequent().count()`, the KEPT total, and the ledger's `combinations`
+    // field means considered. Writing one into the other would be a mislabelled
+    // row in an append-only file, which cannot be corrected later. `Streamed`
+    // has the real count, is the same walk by `engine`'s own test, and retains
+    // less -- which matters most here, where months run in parallel.
+    let filed = crate::record_swept_run(
+        crate::Recording {
+            root,
+            feed: loaded.vendor.as_str(),
+            underlying: held.symbol.as_str(),
+            timeframe: held.timeframe.as_str(),
+            from: (held.month.year(), held.month.month()),
+            to: (held.month.year(), held.month.month()),
+            attempt: None,
+            months_asked: 1,
+            months_found: 1,
+        },
+        &id,
+        &outcome.sweep,
+        outcome.census.swept,
+        min_hits,
+    );
+    // A MONTH THAT SWEPT AND COULD NOT BE FILED IS A FACT THIS REPORT SHOWS.
+    // `refused` is the field that already exists for it, and the sweep's own
+    // numbers stay in the row beside the reason -- the walk happened.
+    let refused = filed.err().map(|why| format!("not recorded: {why}"));
+
     Row {
         label,
         bars: outcome.census.swept,
@@ -577,7 +624,7 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
         kept,
         completed,
         identity: Some(runner::identity::RunId::hex(&id)),
-        refused: None,
+        refused,
     }
 }
 
