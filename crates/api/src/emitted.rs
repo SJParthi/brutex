@@ -1498,7 +1498,17 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     /// Counted below as the one UNREACHABLE site, which is the honest column
     /// for it: that column exists for exactly this, and putting it anywhere
     /// else would claim a proof that does not exist.
-    const REACHED_IN_SERVER_TESTS: usize = 12;
+    /// 12 -> 13: `pull.spot window short`, driven by
+    /// `server::tests::a_short_window_says_so_and_not_only_that_a_member_failed`.
+    ///
+    /// It goes in THIS column and not the unreachable one, and that took a
+    /// change to make true. `note_short_window` took a whole `BrokerWindow` and
+    /// read two of its seven fields, so driving it meant assembling an
+    /// `HttpSpec`, a `Window`, a `Granularity` and a `Contract` the function
+    /// never looks at — which is why the site had no test and CI gate 19 found
+    /// it recording a failure with nothing logged. Narrowing the signature to
+    /// the instrument and the reason made the proof a three-line call.
+    const REACHED_IN_SERVER_TESTS: usize = 13;
     /// AND THREE MORE THAT NO TEST IN THIS BINARY DRIVES, added 2026-08-20 and
     /// named here rather than quietly counted: `pull.roll walk starting`,
     /// `pull.roll group starting` and `pull.roll walk finished`. They report a
@@ -1584,7 +1594,7 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // exactly what `cargo test` is and the row costs nothing to reach.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 48,
+        lib_sites, 49,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"

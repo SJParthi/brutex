@@ -6188,7 +6188,11 @@ pub(crate) async fn broker_run(
                 out.reached += 1;
                 out.origin.clone_from(&landed.origin);
                 let mut landed_one = land_one(&landed, site);
-                note_short_window(&landed, &mut landed_one);
+                note_short_window(
+                    &landed.instrument,
+                    landed.unfetched.as_deref(),
+                    &mut landed_one,
+                );
                 // A MEMBER THAT REACHED THE VENDOR AND STILL DID NOT LAND IS A
                 // FAILURE, and it is a different one from a refusal — the
                 // socket worked and the store did not. Both belong on the page;
@@ -7285,11 +7289,42 @@ async fn fetch_chunks(
 /// `site.autopilot` sees it — no new surface, and nothing to remember to check.
 /// Counting it anywhere else would be the fallback that hides a failure
 /// `CLAUDE.md` §4 bans.
-fn note_short_window(landed: &BrokerWindow, into: &mut pull::ingest::Ingested) {
-    if let Some(why) = &landed.unfetched {
+/// # The event, and why it is not the one the caller already emits
+///
+/// The paragraph above is right that the caller's loop reaches this entry:
+/// `note_member_failure` runs over `landed_one.failures` three lines below and
+/// emits `pull.spot / member did not land` at `Error` for every one of them. So
+/// the shortfall does reach `/logs`.
+///
+/// It reaches it under the WRONG NAME. "Member did not land" is what an
+/// operator reads when a fetch produced nothing, and this member produced 65
+/// months of 66 — a contiguous prefix that IS in the store. The generic verdict
+/// and the specific fact are two different things, and the one that tells the
+/// operator what to do is the second.
+///
+/// `Warn` and not `Error` deliberately: the `Error` that follows is the verdict
+/// on the run, and this is the line that qualifies it. Two events, two facts,
+/// and neither is a duplicate of the other.
+/// # Two arguments and not the whole window
+///
+/// It took `&BrokerWindow` and read two of its seven fields. The other five --
+/// an `HttpSpec`, a `Window`, a `Granularity` and a `Contract` among them --
+/// were a parameter no test could build without assembling a vendor request it
+/// does not need, and that is what kept this site untested.
+fn note_short_window(instrument: &str, unfetched: Option<&str>, into: &mut pull::ingest::Ingested) {
+    if let Some(why) = unfetched {
+        let _noted = telemetry::emit(
+            &telemetry::Event::new(
+                telemetry::Level::Warn,
+                "pull.spot",
+                "window short: a contiguous prefix landed and the rest did not",
+            )
+            .with("instrument", telemetry::Value::Str(instrument))
+            .with("why", telemetry::Value::Str(why)),
+        );
         into.failures.push(pull::ingest::Failure {
-            instrument: landed.instrument.clone(),
-            why: why.clone(),
+            instrument: instrument.to_owned(),
+            why: why.to_owned(),
         });
     }
 }
@@ -24841,6 +24876,54 @@ mod tests {
                 "and it says which request of how many this was: {record:?}"
             );
         }
+    }
+
+    /// A short window says so, and not only that a member failed.
+    ///
+    /// `note_short_window` pushes into the same `failures` list every member
+    /// failure uses, so the caller's loop emits `member did not land` for it.
+    /// That is the run's VERDICT and the wrong name for this fact: a member
+    /// that produced 65 months of 66 landed a contiguous prefix that IS in the
+    /// store, and an operator reading "did not land" concludes the opposite.
+    ///
+    /// Driven directly. `unfetched` is set only by `fetch_spot_chunks` on a
+    /// hollow tail, so reaching it any other way needs a socket -- which is why
+    /// narrowing the signature to the two fields it reads was the change that
+    /// made the site testable at all. It is REACHED, and
+    /// `crates/api/src/emitted.rs` counts it on that basis rather than listing
+    /// it as one this binary cannot drive.
+    #[tokio::test]
+    async fn a_short_window_says_so_and_not_only_that_a_member_failed() {
+        let _shared = crate::emitted::sink();
+        let from = crate::emitted::mark();
+
+        let mut into = pull::ingest::Ingested::default();
+        super::note_short_window(
+            "NSE:NIFTY",
+            Some("2021-08 answered hollow and the tail was not fetched"),
+            &mut into,
+        );
+
+        assert_eq!(
+            into.failures.len(),
+            1,
+            "the shortfall still reaches the failures list, which is what makes \
+             the run report that its books do not balance"
+        );
+        let said = crate::emitted::landed(
+            from,
+            "pull.spot",
+            "window short: a contiguous prefix landed and the rest did not",
+        );
+        assert!(
+            said.iter().any(|record| {
+                record.level == telemetry::Level::Warn
+                    && crate::emitted::says(record, "instrument", "NSE:NIFTY")
+                    && crate::emitted::says(record, "why", "answered hollow")
+            }),
+            "and it is in the file under its own name, with the instrument and \
+             the reason: {said:?}"
+        );
     }
 
     /// **THE SITE INSIDE `broker_run`'S LOOP, DRIVEN OVER A REAL UNIVERSE.**
