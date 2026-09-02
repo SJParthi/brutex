@@ -2646,6 +2646,18 @@ pub(crate) struct ProducedPreAdmissionDataV2 {
 }
 
 impl ProducedPreAdmissionDataV2 {
+    /// The V2 record this production measured.
+    ///
+    /// # Why it has no caller yet
+    ///
+    /// The route hands the PAIR -- produced value and its commit -- to every
+    /// V2 successor, because each authenticates one against the other. Reading
+    /// the value alone is what a decoder or a `/pre-admission.json` route would
+    /// do, and neither exists.
+    #[expect(
+        dead_code,
+        reason = "successors take the authenticated pair; nothing reads the bare value yet"
+    )]
     pub(crate) const fn value(&self) -> PreAdmissionDataV2 {
         self.value
     }

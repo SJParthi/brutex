@@ -5221,10 +5221,15 @@ impl<'a> FixedReader<'a> {
 }
 
 #[cfg(test)]
+// `clippy::panic` is NOT in this list, and its absence is the point: there is
+// no bare `panic!` anywhere in this module -- 143 `.expect(` and one
+// `.unwrap()`, every one of them carrying a message. Listing a lint that never
+// fires makes `expect` report the expectation as unfulfilled, which is the
+// mechanism doing its job: an annotation that claims more than it needs is a
+// claim nobody checked.
 #[expect(
     clippy::expect_used,
     clippy::unwrap_used,
-    clippy::panic,
     reason = "private fixed-record tests fail fixture setup loudly and intentionally inspect exact canonical slots"
 )]
 mod tests {

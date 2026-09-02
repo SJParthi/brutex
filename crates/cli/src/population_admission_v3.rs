@@ -2584,13 +2584,6 @@ impl PopulationAdmissionV3EmbeddedProjection {
 ///
 /// Refuses any outer seal/codec/identity mismatch, noncanonical re-encoding,
 /// nested Runner byte/digest/status mismatch, or invalid detached arithmetic.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the verifier is consumed by the pending Population V5 reopen path"
-    )
-)]
 pub(crate) fn verify_population_v5_canonical_record(
     raw: &[u8; POPULATION_ADMISSION_V3_DECISION_BYTES],
 ) -> Result<PopulationAdmissionV3EmbeddedProjection, PopulationAdmissionV3Refusal> {

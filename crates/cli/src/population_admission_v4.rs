@@ -177,6 +177,22 @@ pub(crate) enum AdmissionV4FamilyTerminal {
 }
 
 impl AdmissionV4FamilyTerminal {
+    /// The terminal's own word, for a report an operator reads.
+    ///
+    /// Spelled out rather than `Debug`-printed: `InsufficientForCscv` tells a
+    /// reader nothing about why the family stopped, and the three terminals are
+    /// not interchangeable — "one candidate, no relative PBO" is a very
+    /// different outcome from "the ladder emptied", and a run that conflated
+    /// them would look like the same answer twice.
+    #[must_use]
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Evaluated => "evaluated",
+            Self::InsufficientForCscv => "one candidate, no relative PBO",
+            Self::NaturallyExtinct => "naturally extinct",
+        }
+    }
+
     fn from_statistics(value: StatisticsFamilyTerminalV3) -> Self {
         match value {
             StatisticsFamilyTerminalV3::Evaluated => Self::Evaluated,
@@ -1916,6 +1932,18 @@ pub(crate) struct PopulationAdmissionV4BlockProjection {
 
 impl PopulationAdmissionV4BlockProjection {
     /// Complete Admission block identity.
+    ///
+    /// # Why it has no caller yet
+    ///
+    /// `ledger-v6` prints a block identity, but it reads the one on the
+    /// STRUCTURAL RECEIPT — the value the commit returns — rather than
+    /// reopening the block to ask it. This is the reopened projection's own
+    /// answer, and the two agreeing is a check the verify surface would make,
+    /// not something a report should assert on its own.
+    #[expect(
+        dead_code,
+        reason = "the report cites the receipt's identity; comparing it to the reopened block is the verify surface's job"
+    )]
     pub(crate) const fn block_id(&self) -> [u8; 32] {
         self.block_id
     }
@@ -2298,6 +2326,18 @@ impl PopulationAdmissionV4DecisionProjection {
         &self.runner_decision
     }
     /// Fixed comparison values reconstructed by Runner.
+    ///
+    /// # Why it has no caller yet
+    ///
+    /// These are the evidence values a decision was taken against, gate by
+    /// gate. Printing them per decision is the "why was this rejected" report,
+    /// and it needs the thirty-nine gates to carry meaning first — with
+    /// thirty-seven of them supplied from knobs rather than a settled policy,
+    /// a per-gate margin would be a margin against a placeholder.
+    #[expect(
+        dead_code,
+        reason = "the per-gate rejection report waits on a settled admission policy"
+    )]
     pub(crate) const fn comparison_values(&self) -> AdmissionEvidenceValuesV1 {
         self.comparison_values
     }

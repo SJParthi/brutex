@@ -235,7 +235,7 @@ fn run_route(request: &LedgerAllRequest<'_>, out: &mut String) -> Result<usize, 
             .try_into()
             .map_err(|_| format!("v6 {rung} did not commit exactly two families"))?;
 
-        commit_stored_population_v6_route(
+        let committed_route = commit_stored_population_v6_route(
             nifty,
             banknifty,
             &StoredPopulationV6RouteV1 {
@@ -289,9 +289,63 @@ fn run_route(request: &LedgerAllRequest<'_>, out: &mut String) -> Result<usize, 
         .map_err(|why| format!("v6 {rung} route refused: {why}"))?;
 
         committed = committed.saturating_add(1);
-        let _ = writeln!(out, "  {rung}: Execution V4 committed");
+        if committed == 1 {
+            let _ = writeln!(
+                out,
+                "\n  {:<6}  {:>9}  {:>7}  {:>9}  {:>9}  {:>9}  {:>9}",
+                "rung", "decisions", "cands", "NIFTY", "BANKNIFTY", "draws/seed", "block"
+            );
+        }
+        let (_execution, summary) = committed_route;
+        let _ = writeln!(
+            out,
+            "  {:<6}  {:>9}  {:>7}  {:>9}  {:>9}  {:>4}/{:<4}  {:>9}\n         \
+             NIFTY {} · BANKNIFTY {}",
+            rung,
+            summary.decisions,
+            summary.candidate_count,
+            summary.nifty_candidates,
+            summary.banknifty_candidates,
+            summary.draws,
+            summary.seed,
+            summary.block_length,
+            summary.nifty_terminal,
+            summary.banknifty_terminal,
+        );
+        // THE IDENTITIES, SHORTENED BUT NOT INVENTED. A durable ledger whose
+        // report names no block leaves the operator no way to find the rows it
+        // describes; sixteen hex characters locate one by prefix and still fit
+        // a terminal line. `ordered` is the one to watch across reruns -- §3
+        // rule 5's idempotence means it must not move.
+        let _ = writeln!(
+            out,
+            "         admission {}  statistics {}  ordered {}\n         \
+             universes  NIFTY {}  BANKNIFTY {}",
+            short_id(&summary.admission_block),
+            short_id(&summary.statistics_authority),
+            short_id(&summary.ordered_candidates),
+            short_id(&summary.nifty_universe),
+            short_id(&summary.banknifty_universe),
+        );
     }
     Ok(committed)
+}
+
+/// The first eight bytes of a 32-byte identity, in hex.
+///
+/// # Why a prefix and not the whole thing
+///
+/// Five full identities is 320 hex characters and wraps every terminal, which
+/// makes the line unreadable and so makes the identity useless. Eight bytes is
+/// enough to locate a block by prefix in the ledger it came from, and the full
+/// value is on disk in the record itself — this is a pointer to the answer, not
+/// a substitute for it.
+fn short_id(id: &[u8; 32]) -> String {
+    let mut hex = String::with_capacity(16);
+    for byte in id.iter().take(8) {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
 }
 
 /// Search V4 lineage ceilings, sized against the record's own strides.

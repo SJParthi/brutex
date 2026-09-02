@@ -823,6 +823,23 @@ pub(crate) struct PopulationStatisticsFamilyProjectionV3 {
     value: FamilyEvidenceV3,
 }
 
+/// # Why part of this impl has no caller yet
+///
+/// `ledger-v6` reads `family`, `terminal` and `candidate_universe_id` for its
+/// report — the terms that let a reader FIND the block being described. The
+/// rest are the terms that would let a reader RE-DERIVE it without opening it:
+/// pre-admission sequence and record index, the session and layout digests, the
+/// period/split/segment counts.
+///
+/// That is a verification surface, not a report — `docs/09-verify.md` is where
+/// it belongs — and the annotation is on the impl rather than each method
+/// because `dead_code` reports an impl's unused methods as one group anchored
+/// at the first, so a per-method attribute splits the warning instead of
+/// answering it.
+#[expect(
+    dead_code,
+    reason = "re-derivation is the verify surface's job; the report cites identities instead"
+)]
 impl PopulationStatisticsFamilyProjectionV3 {
     pub(crate) const fn family(self) -> InstrumentFamilyV1 {
         self.value.family

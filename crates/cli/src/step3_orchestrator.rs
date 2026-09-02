@@ -1262,13 +1262,6 @@ fn join_population_v5_inputs(
 /// Its fields stay private so a downstream producer must consume this joined
 /// capability rather than reassemble three detached projections.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the exact joined capability is the input of the pending append-only Population V5 writer"
-    )
-)]
 pub(crate) struct PopulationV5Input {
     candidate: AuthenticatedCandidatePopulationRowV1,
     admission: PopulationAdmissionV3SuccessorProjection,
@@ -1276,13 +1269,6 @@ pub(crate) struct PopulationV5Input {
     finalization_completion_id: [u8; 32],
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the exact joined capability is the input of the pending append-only Population V5 writer"
-    )
-)]
 impl PopulationV5Input {
     /// Literal authenticated Candidate input, including its sealed bytes.
     #[must_use]
@@ -1670,25 +1656,11 @@ fn require_exact_committed_search_lineage_v4(
 /// and every family, family-ordinal, Candidate-universe and Candidate-semantic
 /// term is compared before this value can exist. It remains input evidence,
 /// not an Admission verdict or Finalization capability.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the exact Base/Statistics input pair is consumed by the pending Population Admission V3 production constructor"
-    )
-)]
 pub(crate) struct Step3AdmissionCandidateInputsV3 {
     base: PairedBaseEvidenceRecordProjectionV2,
     statistics: PopulationStatisticsAdmissionCandidateV3,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the exact Base/Statistics input pair is consumed by the pending Population Admission V3 production constructor"
-    )
-)]
 impl Step3AdmissionCandidateInputsV3 {
     /// Base evidence folded in the same pass as the exact Candidate row.
     #[must_use]
@@ -2150,11 +2122,66 @@ pub(crate) struct StoredPopulationV6RouteV1<'a> {
 /// Names the stage that refused. Every root is admitted before its own write
 /// and reauthenticated after it, so a root substituted mid-route refuses rather
 /// than being written through.
+/// What one rung's V6 route decided, in the terms an operator reads.
+///
+/// # Why the route returns this and not only its authority
+///
+/// The Execution V4 capability is deliberately opaque -- a successor holds it,
+/// nobody prints it. But a run that says only "committed" makes the operator
+/// decode a ledger to learn what it decided, and the numbers that answer that
+/// are already computed and already authenticated at the moment the route ends.
+/// Carrying them out costs nothing and is the difference between a durable
+/// ledger and a durable ledger somebody can see.
+///
+/// Every field here is read from a REAUTHENTICATED projection, not from the
+/// in-process preparation, so the report describes what is on disk.
+pub(crate) struct StoredPopulationV6SummaryV1 {
+    /// Bootstrap draws the Statistics V3 procedure actually ran.
+    pub(crate) draws: u64,
+    /// The deterministic seed it ran them under.
+    pub(crate) seed: u64,
+    /// Stationary-bootstrap block length, in periods.
+    pub(crate) block_length: u64,
+    /// Candidates the statistics authority covered.
+    pub(crate) candidate_count: u64,
+    /// NIFTY's admission terminal, as its own name.
+    pub(crate) nifty_terminal: &'static str,
+    /// BANKNIFTY's admission terminal, as its own name.
+    pub(crate) banknifty_terminal: &'static str,
+    /// Candidates NIFTY brought to admission.
+    pub(crate) nifty_candidates: u64,
+    /// Candidates BANKNIFTY brought to admission.
+    pub(crate) banknifty_candidates: u64,
+    /// Admission decisions the block recorded.
+    pub(crate) decisions: u64,
+    /// The Admission V4 block this rung committed, as its own identity.
+    ///
+    /// # Why an identity is in a human report
+    ///
+    /// `CLAUDE.md` §3 rule 3 requires every run to be identified, and a durable
+    /// ledger whose report names no block leaves the operator no way to find
+    /// the rows it is describing. Sixteen hex characters is enough to locate a
+    /// block by prefix and short enough to sit in a terminal column.
+    pub(crate) admission_block: [u8; 32],
+    /// The Statistics V3 authority this rung's decisions were taken against.
+    pub(crate) statistics_authority: [u8; 32],
+    /// The ordering digest of the candidates the statistics covered.
+    ///
+    /// Two runs over one span must produce the same ordering or they are not
+    /// the same run; §3 rule 5's idempotence is visible here and nowhere else
+    /// in the report.
+    pub(crate) ordered_candidates: [u8; 32],
+    /// NIFTY's candidate universe, as its own identity.
+    pub(crate) nifty_universe: [u8; 32],
+    /// BANKNIFTY's candidate universe, as its own identity.
+    pub(crate) banknifty_universe: [u8; 32],
+}
+
 pub(crate) fn commit_stored_population_v6_route(
     nifty_source: CommittedStoredCandidatePreAdmissionV1,
     banknifty_source: CommittedStoredCandidatePreAdmissionV1,
     route: &StoredPopulationV6RouteV1<'_>,
-) -> Result<CommittedStoredExecutionV4, Step3OrchestratorRefusal> {
+) -> Result<(CommittedStoredExecutionV4, StoredPopulationV6SummaryV1), Step3OrchestratorRefusal> {
     let (_base_evidence, mut base_reader) =
         reopen_paired_base_evidence_v2(&nifty_source, &banknifty_source)?;
     let nifty = nifty_source.candidate_pre_admission();
@@ -2209,10 +2236,32 @@ pub(crate) fn commit_stored_population_v6_route(
         route.policy,
     )
     .map_err(|why| format!("Step 3 Population Admission V4 preparation refused: {why}"))?;
+    // THE PROCEDURE'S OWN TERMS, read back off the reopened statistics
+    // authority rather than from the procedure this caller passed in. If the
+    // two ever differed, the report that quoted the input would be describing a
+    // run that did not happen.
+    let projection = statistics.authority_projection();
     let admission =
         commit_population_admission_v4(route.admission_root, route.admission_bounds, prepared)
             .map_err(|why| format!("Step 3 Population Admission V4 commit refused: {why}"))?
             .into_authority();
+    let receipt = admission.structural_receipt();
+    let summary = StoredPopulationV6SummaryV1 {
+        draws: projection.draws(),
+        seed: projection.seed(),
+        block_length: projection.block_length(),
+        candidate_count: projection.candidate_count(),
+        nifty_terminal: receipt.nifty_terminal().name(),
+        banknifty_terminal: receipt.banknifty_terminal().name(),
+        nifty_candidates: receipt.nifty_candidate_count(),
+        banknifty_candidates: receipt.banknifty_candidate_count(),
+        decisions: receipt.decision_count(),
+        admission_block: receipt.block_id(),
+        statistics_authority: statistics.audit().authority_id(),
+        ordered_candidates: projection.ordered_candidate_digest(),
+        nifty_universe: statistics.nifty_family().candidate_universe_id(),
+        banknifty_universe: statistics.banknifty_family().candidate_universe_id(),
+    };
 
     let finalization = commit_population_finalization_v4(
         route.finalization_root,
@@ -2240,8 +2289,10 @@ pub(crate) fn commit_stored_population_v6_route(
         .map_err(|why| format!("Step 3 Population V6 commit refused: {why}"))?
         .into_authority();
 
-    commit_stored_execution_v4(route.execution_root, route.execution_bounds, population)
-        .map_err(|why| format!("Step 3 Execution V4 commit refused: {why}"))
+    let execution =
+        commit_stored_execution_v4(route.execution_root, route.execution_bounds, population)
+            .map_err(|why| format!("Step 3 Execution V4 commit refused: {why}"))?;
+    Ok((execution, summary))
 }
 
 /// Picks the Statistics V3 producer this rung's pair of families calls for.

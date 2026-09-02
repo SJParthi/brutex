@@ -33,7 +33,7 @@ const RUNG_COUNT: usize = 8;
 const MAX_WINNERS: u64 = 25;
 const MAX_WINNERS_USIZE: usize = 25;
 const TOP_TEN: usize = 10;
-const TOP_TEN_U64: u64 = 10;
+pub(crate) const TOP_TEN_U64: u64 = 10;
 const CANONICAL_RUNGS: [u32; RUNG_COUNT] = [60, 120, 180, 300, 600, 900, 1_800, 3_600];
 const CANONICAL_RUNG_NAMES: [&str; RUNG_COUNT] = [
     "1min", "2min", "3min", "5min", "10min", "15min", "30min", "60min",

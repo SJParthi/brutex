@@ -80,13 +80,12 @@ pub(crate) struct AnchoredSearchLineageV4Bounds {
 
 impl AnchoredSearchLineageV4Bounds {
     /// Constructs bounds large enough for `max_pair_records` complete pairs.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the authoritative CLI surface will construct explicit Search V4 bounds in Step 4"
-        )
-    )]
+    // THE ANNOTATION THAT USED TO BE HERE HAS BEEN EARNED OUT. It read "the
+    // authoritative CLI surface will construct explicit Search V4 bounds in
+    // Step 4", and `ledger_v6::lineage_bounds` is that surface. `expect` rather
+    // than `allow` is what made this self-correcting: the build failed the
+    // moment the prediction came true, instead of leaving a stale claim in the
+    // tree for a reader to trust.
     pub(crate) fn new(
         max_pair_records: u64,
         max_member_bytes: u64,

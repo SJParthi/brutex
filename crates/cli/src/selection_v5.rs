@@ -396,6 +396,19 @@ impl SelectionV5RowRecord {
         self.rank
     }
 
+    /// This row's canonical bytes.
+    ///
+    /// # Why it has no caller yet
+    ///
+    /// `ledger-all` prints the Top-10 it read; it does not yet hash what it
+    /// printed. A report that carried the digest of its own rows could be
+    /// checked against the ledger without reopening it, and this is the
+    /// function that would produce it. Recorded as an `expect` rather than an
+    /// `allow` so that wiring it up makes THIS annotation the build failure.
+    #[expect(
+        dead_code,
+        reason = "the digest of a printed report is Step 5; nothing hashes rendered rows today"
+    )]
     pub(crate) fn canonical_record(
         &self,
     ) -> Result<[u8; SELECTION_V5_ROW_BYTES], SelectionV5Refusal> {
@@ -2323,6 +2336,26 @@ impl SelectionV5Authority {
         self.ledger.selected_rows(self.receipt)
     }
 
+    /// The exact Top-10 prefix of this rung's Top-25.
+    ///
+    /// # Why it has no caller yet
+    ///
+    /// `ledger-all` renders the prefix by filtering rank off the all-rung
+    /// successor visit, which yields all two hundred rows at once and never
+    /// holds a single rung's ledger. This is the one-rung door to the same
+    /// prefix, and a per-rung reader — a `/selection.json` route, a single-rung
+    /// verb — is what would use it.
+    /// `cfg_attr(not(test), ...)` and not a bare `expect`: the tests DO call
+    /// this, so under `--all-targets` the lib compiles twice and a bare
+    /// annotation is fulfilled in one pass and unfulfilled in the other. That
+    /// is the pattern every other pending item in this crate already uses.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the all-rung visitor renders the prefix; no single-rung reader exists yet"
+        )
+    )]
     fn top_ten(&mut self) -> Result<Vec<SelectionV5RowRecord>, SelectionV5Refusal> {
         let rows = self.top_twenty_five()?;
         Ok(rows.into_iter().take(TOP_TEN).collect())

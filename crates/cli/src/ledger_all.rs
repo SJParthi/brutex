@@ -616,9 +616,94 @@ fn run_chain(request: &LedgerAllRequest<'_>, out: &mut String) -> Result<usize, 
         sweepers: &sweepers,
         admission: &admission,
     })?;
+    // WRITTEN VERSUS REUSED, AT EVERY STAGE AND NOT JUST THE LAST. A rerun over
+    // an unchanged span should write nothing at all -- that is what §3 rule 5's
+    // idempotence means on disk -- and reporting only the Selection count hid
+    // the two stages where a spurious rewrite would actually show up first.
+    let population_written = population.written_rung_count();
     let execution = commit_execution(population, &tree)?;
+    let execution_written = execution.written_rung_count();
     let selection = commit_selection(execution, &tree, ranking)?;
-    Ok(selection.written_rung_count())
+    let selection_written = selection.written_rung_count();
+    let _ = writeln!(
+        out,
+        "\nBLOCKS WRITTEN RATHER THAN BYTE-IDENTICALLY REUSED, of {} rungs each\n  \
+         Population V5 {population_written}   Execution V3 {execution_written}   \
+         Selection V5 {selection_written}",
+        LEDGER_RUNGS.len()
+    );
+    render_winners(out, selection)?;
+    Ok(selection_written)
+}
+
+/// Prints the ranked winners the run actually selected.
+///
+/// # Why the report ends here and not at "committed"
+///
+/// The chain's whole output is two hundred ranked rows -- eight rungs by
+/// twenty-five ranks -- and until this function they were written to disk and
+/// shown to nobody. A verb that says `COMMITTED` and nothing else asks the
+/// operator to go and decode a ledger to find out what it decided, which is the
+/// same as not answering.
+///
+/// Ten and not twenty-five: `visit_canonical` yields all two hundred, and the
+/// full set is on disk for anything that wants it. A terminal report that runs
+/// to two hundred rows is one nobody reads, and the Top-10 of each rung is the
+/// prefix the selector itself treats as the answer.
+///
+/// # Errors
+///
+/// Refuses if the retained topology stops authenticating mid-visit -- the rows
+/// are read under the same reauthentication every other stage uses, so a
+/// partially-read set is a refusal rather than a short table.
+fn render_winners(
+    out: &mut String,
+    selection: crate::all_rung_selection_v5::CommittedStoredAllRungSelectionV5,
+) -> Result<(), String> {
+    out.push_str(
+        "\nTOP 10 BY RUNG -- paisa unless a column says ppm; profit is the PESSIMISTIC fill\n",
+    );
+    let mut current = String::new();
+    selection.into_successor_set()?.visit_canonical(|winner| {
+        let row = winner.row();
+        let rank = row.rank();
+        // THE SELECTOR'S OWN CONSTANT, not a literal ten. `all_rung_selection_v5`
+        // already defines what a Top-10 prefix is and its
+        // `require_exact_prefix` enforces it; a second 10 written here would be
+        // a copy that can drift from the thing it claims to show.
+        if u64::from(rank) > crate::all_rung_selection_v5::TOP_TEN_U64 {
+            return Ok(());
+        }
+        let rung = row.rung_seconds();
+        if current != rung.to_string() {
+            current = rung.to_string();
+            let _ = writeln!(
+                out,
+                "\n  {rung}s\n    {:>4}  {:>9}  {:>6}  {:>8}  {:>8}  {:>7}  {:>6}",
+                "rank", "profit", "win%", "worstLoss", "drawdown", "avgWin", "R:R"
+            );
+        }
+        let m = row.metrics();
+        let _ = writeln!(
+            out,
+            "    {:>4}  {:>9}  {:>5}.{}  {:>8}  {:>8}  {:>7}  {:>6}",
+            rank,
+            m.pessimistic_profit,
+            m.win_rate_ppm / 10_000,
+            (m.win_rate_ppm / 1_000) % 10,
+            m.worst_loss,
+            m.drawdown,
+            m.average_win,
+            // ABSENT, NOT ZERO. `reward_to_risk_ppm` is `None` when there is no
+            // losing trade to divide by, and printing that as 0.00 would read
+            // as the worst possible ratio when it is the best possible one.
+            m.reward_to_risk_ppm.map_or_else(
+                || "none".to_owned(),
+                |ppm| format!("{}.{:02}", ppm / 1_000_000, (ppm / 10_000) % 100)
+            ),
+        );
+        Ok(())
+    })
 }
 
 /// Everything the Population V5 stage borrows for the length of its commit.
