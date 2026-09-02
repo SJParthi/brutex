@@ -232,6 +232,85 @@
   );
 
   /**
+   * The best rows a RUNNING sweep has found so far, from `/live.json`.
+   *
+   * # The hole this fills
+   *
+   * `crates/cli/src/live.rs` has written this file since it was added — a
+   * bounded min-heap of the best `keep` combinations by |t|, rewritten whenever
+   * the top-N actually moves — and `/live.json` has served it. **No front-end
+   * code ever fetched it.** So a sweep that runs for hours showed the operator
+   * nothing but a spinner, and the one question worth asking during a run —
+   * "has anything cleared the bar yet?" — had no surface at all.
+   *
+   * # Why the rows are not a finding
+   *
+   * `runner::rank` orders by |t| and explicitly does not bless: the bar a row
+   * must clear is `bar_milli`, and each row carries its own `clears_bar`. A
+   * table that showed rank alone would read as a result. Both are rendered.
+   *
+   * The cast sits INSIDE `$state(...)` for the reason the block above gives.
+   */
+  let liveTop = $state(
+    /** @type {{ phase: string, rows: any[], trials: number, barMilli: number, stale: boolean, why: string }} */ ({
+      phase: 'idle',
+      rows: [],
+      trials: 0,
+      barMilli: 0,
+      stale: false,
+      why: ''
+    })
+  );
+
+  /**
+   * Read `/live.json` and keep the newest non-stale run's rows.
+   *
+   * Latest-request-wins is unnecessary here: the endpoint is a whole-file read
+   * of at most `keep` rows and the poll interval is 2 s, so a late reply can
+   * only carry an older heap of the same run — which is what the next tick
+   * replaces anyway. A refusal is NAMED and never rendered as "no rows".
+   */
+  async function fetchLiveTop() {
+    try {
+      const response = await ask_('/live.json', { cache: 'no-store' });
+      if (!response.ok) {
+        liveTop = {
+          ...liveTop,
+          phase: 'failed',
+          why: `/live.json answered ${response.status}. The heap is still being written to the store — this page could not read it back.`
+        };
+        return;
+      }
+      const body = await response.json();
+      const runs = Array.isArray(body?.runs) ? body.runs : [];
+      // THE FRESHEST RUN, and freshness is the file's own claim. `stale` is set
+      // by the server when the heap has not moved for long enough that the run
+      // is probably gone; picking a stale run over a live one would show the
+      // PREVIOUS sweep's winners during this one, which is the exact defect
+      // `live.rs` exists to remove.
+      const best = runs.find((/** @type {any} */ r) => r && r.stale === false) ?? runs[0] ?? null;
+      if (!best || !Array.isArray(best.rows)) {
+        liveTop = { phase: 'empty', rows: [], trials: 0, barMilli: 0, stale: false, why: '' };
+        return;
+      }
+      liveTop = {
+        phase: 'ready',
+        rows: best.rows.slice(0, 25),
+        trials: Number(best.trials) || 0,
+        barMilli: Number(best.bar_milli) || 0,
+        stale: best.stale === true,
+        why: ''
+      };
+    } catch (error) {
+      liveTop = {
+        ...liveTop,
+        phase: 'failed',
+        why: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
+  /**
    * One run's round trips — the rows the trade table below has been drawing
    * padlocks into since it was written.
    *
@@ -2114,6 +2193,11 @@
         // see `live` — so this is where the page learns which rungs have
         // loaded, what threshold each derived, and which have finished.
         fetchLive(next.run);
+        // AND THE BEST ROWS FOUND SO FAR, on the same tick. `fetchLive` folds
+        // per-rung PROGRESS out of `/logs.json`; this reads the ranked heap
+        // itself. They answer different questions and neither is awaited, so a
+        // slow read of one cannot hold up the other.
+        fetchLiveTop();
         pollAt = setTimeout(pollSweep, 2000);
         return;
       }
@@ -2126,6 +2210,9 @@
         // ONE LAST READ, so the finished state shows every rung's outcome
         // rather than freezing on whatever the last poll happened to catch.
         fetchLive(next.run);
+        // ONE FINAL READ OF THE HEAP TOO, so the panel freezes on the run's
+        // real best rows rather than on whatever the last 2-second tick caught.
+        fetchLiveTop();
         // AND THE RANKED COMBINATIONS, which is what was actually being asked
         // for. `fetchLedger` re-reads one row per run; this reads the twenty-five
         // rows behind each of them. Fired together and awaited by neither,
@@ -6694,6 +6781,66 @@
         <span class="dim">· started {when(sweep.run.started_micros)}</span>
       {/if}
     </p>
+    <!-- THE BEST ROWS FOUND SO FAR, WHICH THE SERVER HAS ALWAYS SENT AND THIS
+         PAGE HAS NEVER SHOWN.
+
+         `cli::live` has kept a bounded top-`keep` heap by |t| since it was
+         added, and `/live.json` has served it; nothing here fetched it. A sweep
+         running for hours therefore showed a spinner and nothing else, and the
+         one question worth asking DURING a run -- has anything cleared the bar
+         yet -- had no surface at all.
+
+         `clears_bar` IS RENDERED BESIDE THE RANK, and that pairing is the whole
+         point. `runner::rank` orders by |t| and its own doc says it "does not
+         bless them"; a table showing rank alone would read as a result. The bar
+         itself rises with the number of hypotheses tested, so a row that leads
+         this table can still be nothing. -->
+    {#if liveTop.phase === 'ready' && liveTop.rows.length > 0}
+      <div class="livetop">
+        <p class="livetop-head">
+          <b>Best so far</b>
+          <span class="dim">
+            · {exact(liveTop.trials)} weighed · bar |t| ≥ {(liveTop.barMilli / 1000).toFixed(2)}
+            {#if liveTop.stale}· <span class="pill warn">stale</span>{/if}
+          </span>
+        </p>
+        <div class="livetop-scroll">
+          <table class="livetop-table">
+            <thead>
+              <tr>
+                <th>#</th><th>side</th><th>hits</th><th>trades</th>
+                <th>|t|</th><th>mean paisa</th><th>payoff</th><th>wins</th><th>clears bar</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each liveTop.rows as row (row.rank)}
+                <tr class={row.clears_bar ? 'clears' : ''}>
+                  <td>{row.rank}</td>
+                  <td>{row.direction}</td>
+                  <td>{exact(row.hits)}</td>
+                  <td>{exact(row.n)}</td>
+                  <td>{(Math.abs(row.t_milli) / 1000).toFixed(3)}</td>
+                  <td>{(row.mean_milli_paisa / 1000).toFixed(1)}</td>
+                  <td>{row.payoff_bp} bp</td>
+                  <td>{exact(row.edge_wins)}</td>
+                  <td>{row.clears_bar ? 'YES' : 'no'}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+        <p class="livetop-foot dim">
+          Ordered by <b>|t|</b> — absolute, so a setup that precedes a fall ranks beside one that
+          precedes a rise; the sign is in <b>mean paisa</b>. Rank is not a finding: a row counts
+          only where <b>clears bar</b> says YES, and that bar rises with every hypothesis the run
+          tests. Rewritten only when the top actually moves.
+        </p>
+      </div>
+    {:else if liveTop.phase === 'failed'}
+      <p class="inline-note warn">
+        The best-so-far rows could not be read: {liveTop.why}
+      </p>
+    {/if}
   {:else if sweep.phase === 'done' && sweep.run}
     <!-- THE COMMAND'S OWN NAME, from the payload's `kind`. This read "Sweep
          finished" for every ended run, and with a second writer on the same
@@ -10235,6 +10382,71 @@
   .inline-note.warn {
     border-left-color: var(--warn);
     background: var(--warn-soft);
+  }
+  /* THE BEST-SO-FAR PANEL. Tokens only -- no literal colour -- so it follows
+     the light/dark switch the rest of the page already answers to. */
+  .livetop {
+    margin: 10px 0 14px;
+    border: 1px solid var(--n4);
+    border-radius: 8px;
+    background: var(--n1);
+    overflow: hidden;
+  }
+  .livetop-head {
+    margin: 0;
+    padding: 9px 12px;
+    border-bottom: 1px solid var(--n4);
+    font-size: 13px;
+  }
+  /* THE TABLE SCROLLS INSIDE ITS OWN BOX. Nine columns on a narrow window must
+     not make the PAGE scroll sideways. */
+  .livetop-scroll {
+    overflow-x: auto;
+  }
+  .livetop-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-variant-numeric: tabular-nums;
+    font-size: 12px;
+  }
+  .livetop-table th,
+  .livetop-table td {
+    padding: 5px 12px;
+    text-align: right;
+    white-space: nowrap;
+  }
+  .livetop-table th:nth-child(2),
+  .livetop-table td:nth-child(2),
+  .livetop-table th:last-child,
+  .livetop-table td:last-child {
+    text-align: left;
+  }
+  .livetop-table thead th {
+    border-bottom: 1px solid var(--n4);
+    color: var(--n9);
+    font-weight: 600;
+  }
+  .livetop-table tbody tr:nth-child(even) {
+    background: var(--n2);
+  }
+  /* A ROW THAT CLEARS THE BAR IS THE ONLY ONE THAT COUNTS, so it is the only
+     one marked. Marking every row by rank would say the opposite. */
+  /* `--up` / `--up-soft`, NOT `--good`. This block first wrote `var(--good-soft)`
+     and `var(--good)`, and NEITHER TOKEN EXISTS in `src/lib/theme.css` -- an
+     undefined custom property resolves to nothing, so the one row that matters
+     would have rendered with a transparent background and inherited ink. The
+     build does not catch that; only reading the token table does. */
+  .livetop-table tbody tr.clears {
+    background: var(--up-soft);
+    color: var(--up);
+    font-weight: 600;
+  }
+  .livetop-foot {
+    margin: 0;
+    padding: 8px 12px;
+    border-top: 1px solid var(--n4);
+    font-size: 11px;
+    line-height: 1.5;
   }
   .inline-note b {
     color: var(--n11);
