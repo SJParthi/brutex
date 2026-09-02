@@ -1445,10 +1445,34 @@ jobs:
           ${ssm_leak_fixture}
           ${vendor_error} ${event_field} ${pull_scratch} ${bare_number}
           ${capture_field} ${pull_scratch_2} ${pull_assert} ${pull_asserted_number}"
+          # MATERIALISED ONCE, AND NOT PIPED. `printf '%s\n' $allowed |
+          # grep -qxF` was the shape here, and under `set -euo pipefail` it is
+          # unsound in the direction that fails a green build:
+          #
+          #   `grep -q` exits the instant it MATCHES, which closes the pipe;
+          #   `printf` then takes EPIPE and the pipeline's status is failure;
+          #   `pipefail` promotes that; `!` inverts it; and the gate reports a
+          #   word that IS declared as undeclared.
+          #
+          # It fires on a MATCH, never on a miss, so it cannot hide a real
+          # undeclared literal -- but it invents one at random. Whether printf
+          # has flushed before grep exits depends on the pipe buffer and the
+          # scheduler, which is why this passed on a developer machine and
+          # failed on a runner with the message `printf: write error: Broken
+          # pipe` printed one line above `UNDECLARED SEGMENT-SHAPED LITERAL IN
+          # crates/pull: authorization` -- a word declared in group 13 since
+          # the group was written.
+          #
+          # Writing the list to a file removes the pipe rather than papering
+          # over its status, and does the word-splitting once instead of once
+          # per literal scanned. It is the same class of defect gate 10's own
+          # comment already records for `xargs -r grep -q`, which "RETURNS 123
+          # WHEN ANY BATCH MISSES ... a red build for a reason that is not".
+          printf '%s\n' $allowed > /tmp/gate1d-allowed.txt
           bad=0
           while IFS= read -r word; do
             if [ -z "$word" ]; then continue; fi
-            if ! printf '%s\n' $allowed | grep -qxF -- "$word"; then
+            if ! grep -qxF -- "$word" /tmp/gate1d-allowed.txt; then
               printf 'UNDECLARED SEGMENT-SHAPED LITERAL IN crates/pull: %s\n' "$word"
               { git ls-files 'crates/pull' | xargs grep -nF -- "\"$word\"" || true; } \
                 | head -3
@@ -2680,8 +2704,9 @@ jobs:
               found=$((found + 1)); nr=$((nr + 1))
               if grep -qE '^#!\[forbid\([^]]*\bunsafe_code\b' "$f"; then
                 printf '  ok       %s\n' "$f"
-              elif printf '%s\n' "$allow_root" | awk 'NF{print $1}' \
-                   | grep -qxF -- "$f"; then
+              elif { printf '%s\n' "$allow_root" | awk 'NF{print $1}' \
+                     > /tmp/gate-unsafe-allow.txt; } \
+                   && grep -qxF -- "$f" /tmp/gate-unsafe-allow.txt; then
                 printf '  allowed  %s — no forbid, listed above\n' "$f"
               else
                 printf '  REFUSED  %s carries no #![forbid(unsafe_code)]\n' "$f"
@@ -6759,7 +6784,8 @@ jobs:
               }
               END { if (inb) print nm " " hz }
             ' "$m")
-            if printf '%s\n' "$decl" | grep -qxF "${stem} false"; then
+            printf '%s\n' "$decl" > /tmp/gate-bench-decl.txt
+            if grep -qxF "${stem} false" /tmp/gate-bench-decl.txt; then
               printf '  ok       %s — [[bench]] %s, harness = false\n' "$b" "$stem"
             else
               printf '  REFUSED  %s — %s declares no [[bench]] named %s with\n' "$b" "$m" "$stem"
