@@ -6511,6 +6511,62 @@ impl Rules {
         }
     }
 
+    /// `elite`'s shape with every floor MEASURED off the bars.
+    ///
+    /// # Four numbers nobody chose, on a live path
+    ///
+    /// [`Rules::elite`] above is a `const fn`, and that signature IS the defect:
+    /// a function that cannot take bars cannot measure anything, so its
+    /// `min_win_rate_bp: 8_000`, `min_weakest_bp: 5_000`,
+    /// `min_ret_over_dd_bp: 500` and the `8_000` re-typed inside
+    /// `assurance_floor_bp` are literals — an eighty percent win rate demanded
+    /// of real market data by a caller who typed a stop and a `TOP`.
+    ///
+    /// The operator's standing rule is that no such number may exist: *"we
+    /// should never ever have this static fixed rule ... even no expected static
+    /// fixed winning percentage also ... always make everything runtime
+    /// dynamic"*. An 80% floor is precisely the second clause, and it was
+    /// unreachable through `elite` because the `const` forbade the argument that
+    /// would have fixed it.
+    ///
+    /// # What replaces them
+    ///
+    /// [`Rules::derived`] already measures all four off the series: the
+    /// win-rate floor from the bars' own base rate, the reward-to-risk floor
+    /// from break-even AT that rate, the weakest-period floor from the same base
+    /// rate, and the drawdown floor from buy-and-hold's own ratio on these bars.
+    /// This is that, with the two values the CALLER genuinely stated on top.
+    ///
+    /// # It also closes a run-identity hole, and that was a regression
+    ///
+    /// `policy_of` folds `rules.max_mae_ppm` into the identity. `Rules::elite`
+    /// reads neither stop knob, while `stop_ladder_ppm` reads both — so once a
+    /// stated stop began collapsing the ladder, two `screen` runs with identical
+    /// arguments and different `BRUTEX_MAX_STOP_POINTS` swept different grids
+    /// under ONE identity, and the ledger refused the second as a duplicate.
+    /// `derived` resolves the knobs into `max_mae_ppm`, so the identity moves
+    /// with the answer again. `max_mae_ppm` is re-applied last because an
+    /// operator who typed `MAX_POINTS` positionally has stated it more
+    /// explicitly than an environment variable.
+    ///
+    /// `Rules::elite` survives for the callers where a FIXED rate is the point
+    /// rather than the flaw — `statistical_support_floor`, which pairs it with
+    /// `with_win_rate` to size a floor at a rate it names, and the tests that
+    /// pin admission arithmetic against known constants.
+    #[must_use]
+    pub fn elite_on(
+        bars: &[indicators::Candle],
+        horizon: Horizon,
+        max_mae_ppm: i64,
+        top: usize,
+    ) -> Self {
+        Self {
+            max_mae_ppm,
+            top,
+            ..Self::derived(bars, horizon)
+        }
+    }
+
     /// The same rules with a different stated win rate, and its bound rederived.
     ///
     /// **Both fields move together or the pair is incoherent**, which is the
@@ -9683,7 +9739,9 @@ fn descent_bar_count(
     underlying: &str,
     rung: &str,
     span: ((u16, u8), (u16, u8)),
-) -> Result<u64, String> {
+    max_mae_ppm: i64,
+    top: usize,
+) -> Result<(u64, Rules), String> {
     let (from, to) = span;
     let root = store_root()?;
     let vendor = parse_vendor(vendor_word)?;
@@ -9696,7 +9754,24 @@ fn descent_bar_count(
                 .to_owned(),
         );
     }
-    Ok(bars)
+    // THE FLOORS ARE MEASURED HERE BECAUSE THIS IS WHERE THE BARS ARE.
+    //
+    // The caller had only this count and therefore built `Rules::elite`, whose
+    // four literals -- an eighty percent win rate first among them -- are the
+    // numbers the operator's standing rule forbids. Loading the span a second
+    // time to measure them would double the only expensive thing this function
+    // does, so it returns them beside the count instead.
+    //
+    // `max_mae_ppm` and `top` are the caller's, applied on top: this function
+    // cannot know either, and `elite_on` re-applies them after `derived` has
+    // resolved its own.
+    let rules = Rules::elite_on(
+        &loaded.bars,
+        horizon_for(&loaded.bars, false),
+        max_mae_ppm,
+        top,
+    );
+    Ok((bars, rules))
 }
 
 fn elite_descend_with_attempt(
@@ -9726,10 +9801,11 @@ fn elite_descend_with_attempt(
     //
     // A support is a fraction of a bar count, and a bar count comes from opening
     // the span. Nothing about the floor needs a sweep, a trade or a statistic.
-    let bar_count = match descent_bar_count(vendor_word, underlying, known, span) {
-        Ok(bars) => bars,
-        Err(why) => return format!("refused: {why}\n"),
-    };
+    let (bar_count, rules) =
+        match descent_bar_count(vendor_word, underlying, known, span, max_mae_ppm, top) {
+            Ok(pair) => pair,
+            Err(why) => return format!("refused: {why}\n"),
+        };
     // THE FLOOR IS DERIVED FROM WHAT THE STATISTICS CAN SUPPORT, not from a
     // cadence somebody typed.
     //
@@ -9748,7 +9824,9 @@ fn elite_descend_with_attempt(
     //
     // Measured on the shipped Wilson bound: 80% against a coin-flip floor needs
     // **four** round trips. The old floor demanded 526.
-    let rules = Rules::elite(max_mae_ppm, top);
+    // `rules` came back from `descent_bar_count` measured off the very span this
+    // walk is about to descend. It was `Rules::elite(max_mae_ppm, top)` here,
+    // built from a bar COUNT because that was all this scope had.
     let floor = statistical_floor_ppm(&rules, bar_count);
 
     let ladder = support_ladder(DESCENT_CEILING_PPM, floor);
@@ -10208,13 +10286,28 @@ pub fn screen_range_in_points(
         }
     };
     let reference = reference_price(&span.bars);
-    drop(span);
     let max_mae_ppm = match ceiling_in_ppm(max_points, reference) {
         Ok(ppm) => ppm,
-        Err(why) => return why,
+        Err(why) => {
+            drop(span);
+            return why;
+        }
     };
+    // MEASURED OFF THE SPAN, not read off four literals.
+    //
+    // This was `Rules::elite(max_mae_ppm, top)`, whose `min_win_rate_bp` is
+    // `8_000` -- an eighty percent win rate demanded of real market data by an
+    // operator who typed a stop and a `TOP` and nothing else. `Rules::elite` is
+    // a `const fn` and so could not have measured it; `elite_on` takes the bars
+    // and hands the whole job to `Rules::derived`.
+    //
+    // The `drop(span)` moved BELOW this call rather than above it, which is the
+    // only reason the bars are still here to measure. It sat between
+    // `reference_price` and the conversion purely to release the load early.
+    let rules = Rules::elite_on(&span.bars, horizon_for(&span.bars, false), max_mae_ppm, top);
+    drop(span);
     let policy = Policy {
-        rules: Rules::elite(max_mae_ppm, top),
+        rules,
         lens: runner::rank::Lens::Payoff,
         validate: validate_from_env(),
     };
@@ -13127,6 +13220,15 @@ impl<'a> GridProgress<'a> {
 /// fires on one candidate in `stride`, not on every one. Gate 17's remedy asks
 /// for *"plain integer counters … emitted ONCE at a structural boundary"*, and
 /// a tenth of a rung is the coarsest boundary that still answers the question.
+///
+/// **UNVERIFIED — both halves of that cost sentence are read off the source,
+/// not measured.** No bench times the `fetch_add`, and none counts the emits
+/// against `candidates / stride`. The claim is a reading of `Ordering::Relaxed`
+/// and of the modulo below, which is how a reader could check it, and that is
+/// not the same as having checked it: §3 rule 6 asks for the label rather than
+/// the argument. What IS measured is the defect above — 365 candidates, twenty
+/// minutes, not one record — and that measurement says why this exists, not
+/// what it costs.
 fn note_grid_progress(recording: Option<Recording<'_>>, priced: usize, candidates: usize) {
     let rung = recording.map_or("", |held| held.timeframe);
     let mut event = telemetry::Event::info("cli.audit", "exit grid progress")
@@ -14241,10 +14343,7 @@ mod tests {
         root_from, run, sample_warning, side_of_evidence, streaming_note, support_from_knob, sweep,
         sweep_stored, sweep_with, validates,
     };
-    use super::{
-        Consistency, Horizon, consistency_of, evaluator, grid, grid_step_ppm, ladder_for,
-        stop_ladder_ppm,
-    };
+    use super::{Consistency, Horizon, consistency_of, evaluator, grid, grid_step_ppm, ladder_for};
     use super::{Direction, Side};
     use super::{
         MAX_STOP_POINTS, NIFTY_REFERENCE, PAISA_PER_POINT, STOP_FLOOR_POINTS, hundredths_of,
@@ -14749,6 +14848,99 @@ mod tests {
             crate::stop_ladder_ppm(&bars),
             derived,
             "zero means unset, not a zero-width stop"
+        );
+        crate::knobs::clear_all();
+    }
+
+    /// Fifty POINTS is fifty points; two thousand ppm is whatever the span says.
+    ///
+    /// The ppm knob is relative to [`reference_price`], which is the span's own
+    /// mid, so one number means different stops on different date ranges. That
+    /// is the trap `BRUTEX_MAX_STOP_POINTS` exists to close, and the branch that
+    /// closes it had no test — the collapse test beside this one sets only the
+    /// ppm knob, so the conversion, the precedence and the fall-through were all
+    /// uncovered on a path that decides the entire stop axis.
+    #[test]
+    fn a_stop_stated_in_points_converts_against_these_bars_and_outranks_ppm() {
+        let _serial = crate::knobs::serially();
+        crate::knobs::clear_all();
+
+        let bars = runner::synthetic::sessions(3);
+        let reference = crate::reference_price(&bars);
+        let fifty = crate::points_to_ppm_at(50, reference);
+        assert!(
+            fifty > 0,
+            "the fixture must convert to a real stop or this test proves nothing"
+        );
+
+        // THE POINTS KNOB CONVERTS AGAINST THESE BARS.
+        crate::knobs::set("BRUTEX_MAX_STOP_POINTS", "50");
+        assert_eq!(
+            crate::stop_ladder_ppm(&bars),
+            vec![fifty],
+            "a stop stated in points is converted at this span's own reference, \
+             which is the whole reason the knob exists"
+        );
+
+        // AND IT OUTRANKS PPM, because an operator who set both stated the same
+        // thing twice and the units they think in are the ones that survive.
+        crate::knobs::set("BRUTEX_MAX_MAE_PPM", "777");
+        assert_eq!(
+            crate::stop_ladder_ppm(&bars),
+            vec![fifty],
+            "points wins over ppm when both are set"
+        );
+
+        // ZERO POINTS FALLS THROUGH rather than pinning the ladder at nothing.
+        crate::knobs::set("BRUTEX_MAX_STOP_POINTS", "0");
+        assert_eq!(
+            crate::stop_ladder_ppm(&bars),
+            vec![777],
+            "zero points is unset, so the ppm knob underneath it is honoured"
+        );
+        crate::knobs::clear_all();
+    }
+
+    /// The ladder and `Levels::forced` state ONE number, not two.
+    ///
+    /// They reach the grid by different routes — the ladder through
+    /// `stop_ladder_ppm`, the forced rung through `Rules::max_mae_ppm` — and
+    /// `grid::merged` pushes the forced level onto the ladder and dedups. Equal
+    /// values dedup to one rung and the collapse holds; unequal ones become TWO
+    /// rungs and the stop the operator stated is swept beside one they did not.
+    ///
+    /// `Rules::derived` is what keeps them equal, by resolving the same knobs
+    /// through the same `stated_stop_ppm`. This pins that, because the guarantee
+    /// is a call one edit could quietly drop.
+    #[test]
+    fn the_stated_stop_reaches_the_rules_and_the_ladder_as_one_number() {
+        let _serial = crate::knobs::serially();
+        crate::knobs::clear_all();
+
+        let bars = runner::synthetic::sessions(3);
+        let horizon = crate::horizon_for(&bars, false);
+        crate::knobs::set("BRUTEX_MAX_STOP_POINTS", "50");
+
+        let ladder = crate::stop_ladder_ppm(&bars);
+        let rules = crate::Rules::derived(&bars, horizon);
+        assert_eq!(
+            ladder,
+            vec![rules.max_mae_ppm],
+            "the ladder and the forced rung must be the SAME number, or the \
+             merge yields two stops and the collapse collapses nothing"
+        );
+
+        // `elite_on` carries it too -- that path reads neither knob on its own,
+        // which is what let a stated stop move the answer without moving the
+        // run identity.
+        let elite = crate::Rules::elite_on(&bars, horizon, rules.max_mae_ppm, 25);
+        assert_eq!(
+            elite.max_mae_ppm, rules.max_mae_ppm,
+            "elite_on must carry the caller's stop into the identity term"
+        );
+        assert_ne!(
+            elite.min_win_rate_bp, 8_000,
+            "and it must NOT carry the const profile's invented eighty percent"
         );
         crate::knobs::clear_all();
     }
@@ -18597,7 +18789,7 @@ mod tests {
              distribution, or there is no ladder to walk: floor {floor} cap {cap}"
         );
 
-        let rungs = stop_ladder_ppm(&bars);
+        let rungs = crate::stop_ladder_derived(&bars);
         assert!(
             rungs.len() > 1,
             "the stop must VARY: a one-rung ladder is the collapse where the \
@@ -18627,7 +18819,7 @@ mod tests {
             "the reference is paisa off the bars, not an index level: {reference}"
         );
 
-        let rungs = stop_ladder_ppm(&bars);
+        let rungs = crate::stop_ladder_derived(&bars);
         let tightest = *rungs.first().expect("a ladder is never empty");
         let widest = *rungs.last().expect("a ladder is never empty");
         assert!(
@@ -19057,7 +19249,7 @@ mod tests {
             panic!("this fixture must rank at least one combination");
         };
         let side = side_of_evidence(scored);
-        let stop_rungs = stop_ladder_ppm(&bars);
+        let stop_rungs = crate::stop_ladder_derived(&bars);
         let exits = grid::evaluate(
             &bars,
             &run.column,
