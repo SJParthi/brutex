@@ -75,8 +75,9 @@ use crate::population_statistics_v2::{
     PopulationStatisticsV2ProjectionSource, prepare_population_statistics_v2_from_observations,
 };
 use crate::pre_admission_data::{
-    PreAdmissionDataBoundsV1, PreAdmissionDataReopenAuditV1, PreAdmissionDataV1,
-    produce_pre_admission_data_v1,
+    PreAdmissionDataBoundsV1, PreAdmissionDataBoundsV2, PreAdmissionDataReopenAuditV1,
+    PreAdmissionDataV1, PreAdmissionProductionCommitV2, ProducedPreAdmissionDataV2,
+    produce_pre_admission_data_v1, produce_pre_admission_data_v2,
 };
 use crate::stored::{
     CalendarReceiptV2, CompleteCalendarReceiptV2, DAILY_ELIGIBILITY_POLICY, DAILY_REFERENCE_SCHEMA,
@@ -199,12 +200,49 @@ pub(crate) struct CommittedCandidatePreAdmissionV1 {
     base_evidence_audit: BaseEvidenceReopenAuditV2,
     base_evidence_bounds: BaseEvidenceLedgerBoundsV2,
     pre_admission_audit: PreAdmissionDataReopenAuditV1,
+    /// The SAME candidate measured into the V2 Pre-Admission record, retained
+    /// beside the V1 one rather than instead of it.
+    ///
+    /// # Why both, and why here
+    ///
+    /// V1 and V2 measure one candidate universe; V2 additionally carries the
+    /// extinction/closure reconciliation that the Statistics V3 successor needs
+    /// in order to tell a family that produced nothing from one that was never
+    /// asked. Both are derived from `ProducedCandidateUniverseV1`, which is
+    /// transient -- it exists only inside this commit and is not retained -- so
+    /// a later caller CANNOT produce V2 from a V1 authority. It is produced
+    /// here or it is not produced at all.
+    ///
+    /// They are separate ledger files (`pre-admission-data-v1.bin` and
+    /// `-v2.bin`) under one root, so retaining both costs one more append per
+    /// family per rung and no ambiguity about which record a successor read.
+    pre_admission_v2: ProducedPreAdmissionDataV2,
+    /// The receipt-last commit of [`Self::pre_admission_v2`].
+    ///
+    /// Kept beside the produced value because the V2 successors take BOTH --
+    /// `produce_natural_extinction_observation_v2` authenticates one against
+    /// the other and refuses a produced value that does not belong to the
+    /// commit it is offered with.
+    pre_admission_v2_commit: PreAdmissionProductionCommitV2,
     observations: CandidateFamilyObservationsV1,
     prepared_candidate_receipt: CandidateUniverseReceiptV1,
     prepared_pre_admission: PreAdmissionDataV1,
 }
 
 impl CommittedCandidatePreAdmissionV1 {
+    /// The retained V2 Pre-Admission production and the commit it belongs to.
+    ///
+    /// Returned as a PAIR because every V2 successor takes both and
+    /// authenticates one against the other; handing out either alone would let
+    /// a caller offer a produced value with someone else's commit, which is
+    /// exactly the join those successors exist to refuse.
+    #[must_use]
+    pub(crate) const fn pre_admission_v2(
+        &self,
+    ) -> (&ProducedPreAdmissionDataV2, &PreAdmissionProductionCommitV2) {
+        (&self.pre_admission_v2, &self.pre_admission_v2_commit)
+    }
+
     /// Freshly reopened Candidate V1 audit.
     #[must_use]
     pub(crate) const fn candidate_audit(&self) -> CandidateUniverseReopenAuditV1 {
@@ -3548,12 +3586,57 @@ fn commit_candidate_pre_admission_authority_guarded_v1<'a>(
     };
     require_exact_reopened_join(candidate_facts, pre_admission_facts)?;
 
+    // THE SAME CANDIDATE, MEASURED AGAIN INTO THE V2 RECORD. It has to happen
+    // here: `produce_pre_admission_data_v2` takes `&ProducedCandidateUniverseV1`
+    // and that value is transient -- it is not retained on any committed
+    // authority, so no later caller can derive V2 from a V1 audit. Producing it
+    // now costs one more append per family per rung and is what makes the
+    // Statistics V3 successor route reachable at all.
+    //
+    // The ceilings are V1's, because the two bound the same universe. The V2
+    // record is the wider of the pair, so `PreAdmissionDataBoundsV2::new`
+    // re-checks that the byte ceiling still holds at the V2 stride and refuses
+    // here rather than part-way through a write.
+    let pre_admission_v2_bounds = PreAdmissionDataBoundsV2::new(
+        pre_admission_bounds.max_rows(),
+        pre_admission_bounds.max_file_bytes(),
+    )
+    .map_err(|why| format!("Step 3 Pre-Admission V2 ceilings refused: {why}"))?;
+    let pre_admission_v2 = produce_pre_admission_data_v2(&candidate, &candidate_commit)
+        .map_err(|why| format!("Step 3 Pre-Admission V2 derivation refused: {why}"))?;
+    require_admitted_root_v1(
+        admitted_root,
+        "before Pre-Admission V2 receipt-last append/reopen",
+    )?;
+    let pre_admission_v2_commit = pre_admission_v2
+        .append_and_reopen(root, pre_admission_v2_bounds)
+        .map_err(|why| format!("Step 3 Pre-Admission V2 receipt-last commit refused: {why}"))?;
+    require_admitted_root_v1(
+        admitted_root,
+        "after Pre-Admission V2 receipt-last append/reopen",
+    )?;
+
+    // THE TWO RECORDS MUST DESCRIBE ONE UNIVERSE. V1 and V2 are independent
+    // measurements of the same produced candidate, so a disagreement between
+    // them is a defect in one of the two measurements -- and left unchecked it
+    // would surface much later as a successor joining V2 rows to a V1 receipt
+    // that never described them.
+    let v2_value = pre_admission_v2_commit.audit().value();
+    let pre_admission_v2_facts = ReopenedJoinFactsV1 {
+        universe_id: v2_value.candidate_universe_id(),
+        completion_digest: v2_value.candidate_completion_digest(),
+        row_count: v2_value.candidate_row_count(),
+    };
+    require_exact_reopened_join(candidate_facts, pre_admission_v2_facts)?;
+
     Ok(CommittedCandidatePreAdmissionV1 {
         candidate_audit,
         candidate_bounds,
         base_evidence_audit,
         base_evidence_bounds,
         pre_admission_audit,
+        pre_admission_v2,
+        pre_admission_v2_commit,
         observations,
         prepared_candidate_receipt: prepared_receipt,
         prepared_pre_admission,
