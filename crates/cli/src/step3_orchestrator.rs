@@ -45,10 +45,11 @@ use crate::anchored_search_lineage_v4::{
 use crate::candidate_universe::{
     AuthenticatedCandidatePopulationRowV1, BaseEvidenceLedgerBoundsV2, BaseEvidenceLedgerReaderV2,
     BaseEvidenceReopenAuditV2, CandidateExecutionReplayAuthorityV1, CandidateUniverseBoundsV1,
-    CandidateUniverseLedgerV1, CandidateUniverseProductionSourceV1, CandidateUniverseReceiptV1,
+    CandidateUniverseLedgerV1, CandidateUniverseProductionCommitV1,
+    CandidateUniverseProductionSourceV1, CandidateUniverseReceiptV1,
     CandidateUniverseReopenAuditV1, PairedBaseEvidenceAuthorityV2, PairedBaseEvidenceReaderV2,
-    PairedBaseEvidenceRecordProjectionV2, pair_candidate_base_evidence_v2,
-    produce_candidate_universe_v1,
+    PairedBaseEvidenceRecordProjectionV2, ProducedCandidateUniverseV1,
+    pair_candidate_base_evidence_v2, produce_candidate_universe_v1,
 };
 use crate::population::{
     InstrumentFamilyV1, LongShortExitGridIdentitiesV2, RequestedSpanIdentityV1,
@@ -3814,6 +3815,117 @@ pub(crate) fn commit_candidate_pre_admission_authority_v1<'a>(
     )
 }
 
+/// Measures the produced candidate into the V1 Pre-Admission record, commits
+/// it, and proves the reopened record describes the same universe.
+///
+/// # Errors
+///
+/// Refuses a derivation that does not belong to the offered commit, a root
+/// substituted around the append, a reopened audit whose semantics differ from
+/// the in-process preparation, or a universe/digest/row-count disagreement with
+/// the Candidate authority.
+fn commit_pre_admission_v1(
+    root: &Path,
+    admitted_root: Option<&AdmittedRootV1>,
+    candidate: &ProducedCandidateUniverseV1<'_>,
+    candidate_commit: &CandidateUniverseProductionCommitV1,
+    bounds: PreAdmissionDataBoundsV1,
+    candidate_facts: ReopenedJoinFactsV1,
+) -> Result<(PreAdmissionDataReopenAuditV1, PreAdmissionDataV1), Step3OrchestratorRefusal> {
+    let produced = produce_pre_admission_data_v1(candidate, candidate_commit)
+        .map_err(|why| format!("Step 3 Pre-Admission derivation refused: {why}"))?;
+    let prepared = produced.value();
+    require_admitted_root_v1(
+        admitted_root,
+        "before Pre-Admission receipt-last append/reopen",
+    )?;
+    let commit = produced
+        .append_and_reopen(root, bounds)
+        .map_err(|why| format!("Step 3 Pre-Admission receipt-last commit refused: {why}"))?;
+    require_admitted_root_v1(
+        admitted_root,
+        "after Pre-Admission receipt-last append/reopen",
+    )?;
+    let audit = commit.audit();
+    let value = audit.value();
+    if !same_pre_admission_semantics_v1(&value, &prepared) {
+        return Err(
+            "Step 3 reopened Pre-Admission audit differs from the exact in-process preparation"
+                .to_owned(),
+        );
+    }
+    let facts = ReopenedJoinFactsV1 {
+        universe_id: value.candidate_universe_id(),
+        completion_digest: value.candidate_completion_digest(),
+        row_count: value.candidate_row_count(),
+    };
+    require_exact_reopened_join(candidate_facts, facts)?;
+    Ok((audit, prepared))
+}
+
+/// Measures the same produced candidate into the V2 Pre-Admission record and
+/// commits it beside V1.
+///
+/// # Why it happens inside the candidate commit and not after
+///
+/// `produce_pre_admission_data_v2` takes `&ProducedCandidateUniverseV1`, and
+/// that value is transient — it is not retained on any committed authority, so
+/// no later caller can derive V2 from a V1 audit. It is produced here or it is
+/// not produced at all, which is why every V2 successor in this crate had only
+/// test callers before this existed.
+///
+/// The ceilings are V1's, because the two bound the same universe. The V2
+/// record is the wider of the pair, so `PreAdmissionDataBoundsV2::new` re-checks
+/// that the byte ceiling still holds at the V2 stride and refuses here rather
+/// than part-way through a write.
+///
+/// # Errors
+///
+/// Refuses a ceiling the V2 stride cannot satisfy, a derivation that does not
+/// belong to the offered commit, a root substituted around the append, or a V2
+/// record whose universe, completion digest or row count disagrees with the
+/// Candidate authority. That last one is the point of the join: V1 and V2 are
+/// independent measurements of one universe, and a disagreement left unchecked
+/// would surface much later as a successor joining V2 rows to a receipt that
+/// never described them.
+fn commit_pre_admission_v2(
+    root: &Path,
+    admitted_root: Option<&AdmittedRootV1>,
+    candidate: &ProducedCandidateUniverseV1<'_>,
+    candidate_commit: &CandidateUniverseProductionCommitV1,
+    pre_admission_bounds: PreAdmissionDataBoundsV1,
+    candidate_facts: ReopenedJoinFactsV1,
+) -> Result<(ProducedPreAdmissionDataV2, PreAdmissionProductionCommitV2), Step3OrchestratorRefusal>
+{
+    let bounds = PreAdmissionDataBoundsV2::new(
+        pre_admission_bounds.max_rows(),
+        pre_admission_bounds.max_file_bytes(),
+    )
+    .map_err(|why| format!("Step 3 Pre-Admission V2 ceilings refused: {why}"))?;
+    let produced = produce_pre_admission_data_v2(candidate, candidate_commit)
+        .map_err(|why| format!("Step 3 Pre-Admission V2 derivation refused: {why}"))?;
+    require_admitted_root_v1(
+        admitted_root,
+        "before Pre-Admission V2 receipt-last append/reopen",
+    )?;
+    let commit = produced
+        .append_and_reopen(root, bounds)
+        .map_err(|why| format!("Step 3 Pre-Admission V2 receipt-last commit refused: {why}"))?;
+    require_admitted_root_v1(
+        admitted_root,
+        "after Pre-Admission V2 receipt-last append/reopen",
+    )?;
+
+    let value = commit.audit().value();
+    let facts = ReopenedJoinFactsV1 {
+        universe_id: value.candidate_universe_id(),
+        completion_digest: value.candidate_completion_digest(),
+        row_count: value.candidate_row_count(),
+    };
+    require_exact_reopened_join(candidate_facts, facts)?;
+    Ok((produced, commit))
+}
+
 fn commit_candidate_pre_admission_authority_guarded_v1<'a>(
     root: &Path,
     admitted_root: Option<&AdmittedRootV1>,
@@ -3877,83 +3989,28 @@ fn commit_candidate_pre_admission_authority_guarded_v1<'a>(
         );
     }
 
-    let pre_admission = produce_pre_admission_data_v1(&candidate, &candidate_commit)
-        .map_err(|why| format!("Step 3 Pre-Admission derivation refused: {why}"))?;
-    let prepared_pre_admission = pre_admission.value();
-    require_admitted_root_v1(
-        admitted_root,
-        "before Pre-Admission receipt-last append/reopen",
-    )?;
-    let pre_admission_commit = pre_admission
-        .append_and_reopen(root, pre_admission_bounds)
-        .map_err(|why| format!("Step 3 Pre-Admission receipt-last commit refused: {why}"))?;
-    require_admitted_root_v1(
-        admitted_root,
-        "after Pre-Admission receipt-last append/reopen",
-    )?;
-    let pre_admission_audit = pre_admission_commit.audit();
-    let pre_admission_value = pre_admission_audit.value();
-    if !same_pre_admission_semantics_v1(&pre_admission_value, &prepared_pre_admission) {
-        return Err(
-            "Step 3 reopened Pre-Admission audit differs from the exact in-process preparation"
-                .to_owned(),
-        );
-    }
-
     let candidate_facts = ReopenedJoinFactsV1 {
         universe_id: candidate_audit.universe_id(),
         completion_digest: candidate_audit.content_digest(),
         row_count: candidate_audit.row_count(),
     };
-    let pre_admission_facts = ReopenedJoinFactsV1 {
-        universe_id: pre_admission_value.candidate_universe_id(),
-        completion_digest: pre_admission_value.candidate_completion_digest(),
-        row_count: pre_admission_value.candidate_row_count(),
-    };
-    require_exact_reopened_join(candidate_facts, pre_admission_facts)?;
-
-    // THE SAME CANDIDATE, MEASURED AGAIN INTO THE V2 RECORD. It has to happen
-    // here: `produce_pre_admission_data_v2` takes `&ProducedCandidateUniverseV1`
-    // and that value is transient -- it is not retained on any committed
-    // authority, so no later caller can derive V2 from a V1 audit. Producing it
-    // now costs one more append per family per rung and is what makes the
-    // Statistics V3 successor route reachable at all.
-    //
-    // The ceilings are V1's, because the two bound the same universe. The V2
-    // record is the wider of the pair, so `PreAdmissionDataBoundsV2::new`
-    // re-checks that the byte ceiling still holds at the V2 stride and refuses
-    // here rather than part-way through a write.
-    let pre_admission_v2_bounds = PreAdmissionDataBoundsV2::new(
-        pre_admission_bounds.max_rows(),
-        pre_admission_bounds.max_file_bytes(),
-    )
-    .map_err(|why| format!("Step 3 Pre-Admission V2 ceilings refused: {why}"))?;
-    let pre_admission_v2 = produce_pre_admission_data_v2(&candidate, &candidate_commit)
-        .map_err(|why| format!("Step 3 Pre-Admission V2 derivation refused: {why}"))?;
-    require_admitted_root_v1(
+    let (pre_admission_audit, prepared_pre_admission) = commit_pre_admission_v1(
+        root,
         admitted_root,
-        "before Pre-Admission V2 receipt-last append/reopen",
-    )?;
-    let pre_admission_v2_commit = pre_admission_v2
-        .append_and_reopen(root, pre_admission_v2_bounds)
-        .map_err(|why| format!("Step 3 Pre-Admission V2 receipt-last commit refused: {why}"))?;
-    require_admitted_root_v1(
-        admitted_root,
-        "after Pre-Admission V2 receipt-last append/reopen",
+        &candidate,
+        &candidate_commit,
+        pre_admission_bounds,
+        candidate_facts,
     )?;
 
-    // THE TWO RECORDS MUST DESCRIBE ONE UNIVERSE. V1 and V2 are independent
-    // measurements of the same produced candidate, so a disagreement between
-    // them is a defect in one of the two measurements -- and left unchecked it
-    // would surface much later as a successor joining V2 rows to a V1 receipt
-    // that never described them.
-    let v2_value = pre_admission_v2_commit.audit().value();
-    let pre_admission_v2_facts = ReopenedJoinFactsV1 {
-        universe_id: v2_value.candidate_universe_id(),
-        completion_digest: v2_value.candidate_completion_digest(),
-        row_count: v2_value.candidate_row_count(),
-    };
-    require_exact_reopened_join(candidate_facts, pre_admission_v2_facts)?;
+    let (pre_admission_v2, pre_admission_v2_commit) = commit_pre_admission_v2(
+        root,
+        admitted_root,
+        &candidate,
+        &candidate_commit,
+        pre_admission_bounds,
+        candidate_facts,
+    )?;
 
     Ok(CommittedCandidatePreAdmissionV1 {
         candidate_audit,
