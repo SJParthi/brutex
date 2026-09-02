@@ -99,6 +99,10 @@ static REFUSED: AtomicU64 = AtomicU64::new(0);
 /// exhausted set refuses without overwriting any byte. The fixed ceiling keeps
 /// collision handling O(1) even when a hostile directory pre-creates every
 /// candidate this process would try.
+///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
 const NAME_ATTEMPTS: u8 = 16;
 
 /// One restart-distinguishing hint, sampled once.

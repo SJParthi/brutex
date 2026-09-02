@@ -14,6 +14,10 @@
 //! candidate digests and the duplicate receipt.  Opening and generation checks
 //! scan bounded bytes; bootstrap preparation is explicitly input-dependent.
 //! Only fixed-record offset arithmetic is worst-case O(1).
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 #![expect(
     clippy::large_types_passed_by_value,

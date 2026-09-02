@@ -29,6 +29,10 @@
 //! state. Ledger open is O(receipts). Exact and latest lookup after open are one
 //! average-O(1) `HashMap` probe; Rust's `HashMap` does not provide a worst-case
 //! O(1) guarantee. Construction, hashing, persistence and reopen are not O(1).
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -1794,6 +1798,10 @@ impl SelectionLedgerV4 {
     }
 
     /// Average-O(1) exact receipt lookup; no worst-case O(1) claim is made.
+    ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
     #[must_use]
     pub fn receipt(&self, selection_id: &[u8; 32]) -> Option<&SelectionReceiptV4> {
         self.receipts.get(selection_id)

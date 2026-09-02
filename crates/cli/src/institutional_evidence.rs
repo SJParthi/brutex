@@ -47,6 +47,10 @@
 //! that for every Population V4 cell would repeat the pricing path and is not a
 //! constant-cost population operation.  Until a bound detail receipt exists,
 //! callers must leave those fields `Unmeasured` rather than hide that cost.
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 use indicators::column::{Column, Sourced};
 use indicators::{Candle, IST_OFFSET_MICROS};

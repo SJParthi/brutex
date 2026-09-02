@@ -4263,6 +4263,10 @@ pub struct MemberIndex<const N: usize> {
     /// [`MemberIndex::len`] a read. It is exact rather than approximate: the
     /// builder inserts every member unconditionally, so the number of filled
     /// slots is the number of members it was given.
+    ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
     count: usize,
 }
 

@@ -376,6 +376,10 @@ pub fn data_digest(bars: &[Candle]) -> [u8; OUT_LEN] {
 /// through the unchanged historical function. A projected coarse run is
 /// O(signal bars + execution bars), with O(1) work per bar and no data-sized
 /// allocation.
+///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
 #[must_use]
 pub fn data_digest_with_execution(
     signal: &[Candle],

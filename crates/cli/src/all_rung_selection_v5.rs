@@ -13,6 +13,10 @@
 //! dispatch is O(1) in rung count. Ranking, source authentication, allocation,
 //! persistence, synchronization and filesystem latency remain input- or
 //! system-dependent and are not O(1).
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 // EVERY FIELD ENDS IN `_minute`, AND THAT IS THE DESIGN. This module's own doc
 // says it: "There is deliberately no array constructor, iterator constructor,

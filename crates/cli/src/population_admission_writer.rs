@@ -20,6 +20,10 @@
 //! Preparation and commit are O(rows) time and O(rows) transient memory.
 //! Opening either append-only ledger additionally scans its durable authority.
 //! This path makes no O(1) population, persistence or hashing claim.
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 use std::path::Path;
 

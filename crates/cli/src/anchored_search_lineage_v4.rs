@@ -18,6 +18,10 @@
 //! bounded files and are O(file bytes + pair records), not O(1).  Fixed record
 //! encode/decode and one prepared-pair comparison are O(1).  The in-memory
 //! receipt lookup is average O(1) after bounded validation.
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};

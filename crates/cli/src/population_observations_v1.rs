@@ -25,6 +25,10 @@
 //! Construction, replay, aggregation, split enumeration and hashing are all
 //! input-dependent. This module makes no whole-operation O(1) time, space,
 //! latency, capacity or profitability claim.
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};

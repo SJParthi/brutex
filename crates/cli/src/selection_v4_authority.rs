@@ -15,6 +15,10 @@
 //! or completion lookup inside an already-open ledger is average O(1), not
 //! worst-case O(1).  The join, hashing, open and full Selection V4 passes are
 //! not O(1).
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 use std::fs::File;
 use std::path::{Path, PathBuf};

@@ -44,6 +44,10 @@
 //! append are not O(1), and this module makes no such claim. Serialization uses
 //! one fixed 32-row write chunk; the duplicate-reconciliation sets, not the byte
 //! buffer, are the population-sized append allocation.
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
@@ -2581,6 +2585,10 @@ impl PopulationLedger {
     ///
     /// Opening holds the shared two-file lock while both complete indexes are
     /// built.  The scan is O(total rows + receipts), never hidden as O(1).
+    ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
     ///
     /// # Errors
     ///

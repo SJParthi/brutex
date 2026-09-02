@@ -30,6 +30,10 @@
 //! weakened to preserve an O(1) label. Filesystem latency, hashing, scanning,
 //! duplicate-index construction, crash recovery, and append are not claimed to
 //! be O(1).
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 #![expect(
     dead_code,

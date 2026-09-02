@@ -32,6 +32,10 @@
 //! validated fixed-record offset is O(1) in record count; no whole-ledger,
 //! source measurement, allocation, hash, lock, sync or filesystem latency is
 //! described as O(1).
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};

@@ -833,6 +833,10 @@ impl CommittedStoredSearchLineageV4 {
 /// validated on open and the two fixed Search members are compared field by
 /// field with the retained Runner projections.
 ///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
+///
 /// # Errors
 ///
 /// Refuses a removed or substituted upstream/root directory, a foreign
@@ -999,6 +1003,10 @@ impl CommittedStoredPopulationAdmissionV3 {
 /// Refuses any changed upstream/root identity, Search lineage mismatch,
 /// Candidate/Base/Statistics/Runner arithmetic crosswire, over-bound ledger,
 /// failed sync, corruption, stale handle, or inexact retry.
+///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
 pub(crate) fn commit_stored_population_admission_v3(
     mut search: CommittedStoredSearchLineageV4,
     admission_root: &Path,
@@ -1071,6 +1079,10 @@ impl CommittedStoredPopulationFinalizationV3 {
     /// This complete authority join is O(C + bounded ledger bytes) time and
     /// O(C) output space for C Candidates. It is intentionally not described
     /// as O(1); only each already-authenticated fixed-record address is O(1).
+    ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
     ///
     /// # Errors
     ///
@@ -1592,6 +1604,10 @@ fn require_admission_finalization_join(
 /// O(1), while its end-to-end authenticated read remains O(file bytes) because
 /// stale-safety validates the bounded ledger generation before and after it.
 ///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
+///
 /// # Errors
 ///
 /// Refuses a changed upstream/root identity, Admission/Finalization receipt
@@ -2034,6 +2050,10 @@ impl AdmittedObservationStatisticsRootsV2 {
 /// execute the explicit finite resampling procedure.  The two caller-provided
 /// ledger bounds and procedure contain every applicable ceiling; there is no
 /// implicit default.
+///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
 ///
 /// # Errors
 ///
@@ -2978,6 +2998,10 @@ struct StoredExecutionJoinFactsV1 {
 /// outside this cost contract: it is caller code, may block or perform arbitrary
 /// work, and is invoked only for legacy progress compatibility. The retained
 /// crate-private authority below installs its own no-op observer instead.
+///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
 ///
 /// # Errors
 ///

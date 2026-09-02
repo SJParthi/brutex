@@ -1878,6 +1878,10 @@ impl SelectionLedger {
     }
 
     /// Average-O(1) in-memory selection lookup.
+    ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
     #[must_use]
     pub fn receipt(&self, selection_id: &[u8; 32]) -> Option<&SelectionReceiptV1> {
         self.receipts.get(selection_id)
@@ -1887,6 +1891,10 @@ impl SelectionLedger {
     ///
     /// This is one average-O(1) hash lookup. It never falls back to a different
     /// cohort or timeframe and never infers a "current" span from timestamps.
+    ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
     #[must_use]
     pub fn latest_selection(
         &self,
@@ -2179,6 +2187,10 @@ impl SelectionLedgerV2 {
     }
 
     /// Average-O(1) exact V2 receipt lookup.
+    ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
     #[must_use]
     pub fn receipt(&self, selection_id: &[u8; 32]) -> Option<&SelectionReceiptV2> {
         self.receipts.get(selection_id)
@@ -2187,6 +2199,10 @@ impl SelectionLedgerV2 {
     /// Average-O(1) latest lookup for one exact V2 cohort and rung.
     ///
     /// No V1 receipt, different coverage digest or different rung is eligible.
+    ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
     #[must_use]
     pub fn latest_selection(
         &self,

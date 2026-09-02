@@ -257,6 +257,10 @@ impl SessionBounds {
     /// This is precomputed with the boundary, so outcome measurement and trade
     /// execution use the same O(1) lookup rather than rebuilding parallel
     /// reverse tables.
+    ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
     #[must_use]
     pub fn last_fill_bar(&self, i: usize) -> Option<usize> {
         self.bars.get(i).and_then(|b| b.last_fill_bar)

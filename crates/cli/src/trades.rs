@@ -64,6 +64,10 @@
 //! lookup is therefore O(all trade rows + all ledger rows + all receipts) to
 //! open, then one O(1) identity probe and O(selected trades) to read. It is not
 //! an end-to-end O(1) latency claim.
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 use crate::results::Refusal;
 pub use costs::fill::Direction;
@@ -87,6 +91,10 @@ const _: () = assert!(HEADER_BYTES as u64 == HEADER);
 
 /// One row. Fixed, so `index -> byte offset` is a multiply and the lookup is
 /// O(1) — `CLAUDE.md` §3 rule 4.
+///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
 pub(crate) const STRIDE: u64 = 136;
 const STRIDE_BYTES: usize = 136;
 const _: () = assert!(STRIDE_BYTES as u64 == STRIDE);
@@ -164,6 +172,10 @@ pub struct Row {
     /// run's own block and no lookup at all — weekday is
     /// `(days_since_epoch + 4) % 7` and the minute of the session is a divide.
     /// Without it the question could not be asked of this file.
+    ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
     pub entry_micros: i64,
     /// When the position was CLOSED, same units and same reason.
     ///
@@ -510,6 +522,10 @@ impl Trades {
     }
 
     /// Where a run's rows are, or `None`. **O(1)** — one hash probe.
+    ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
     #[must_use]
     pub fn block(&self, identity: &[u8; 32]) -> Option<Block> {
         self.blocks.get(identity).copied()
@@ -519,6 +535,10 @@ impl Trades {
     ///
     /// Unlike its predecessor, this answers correctly after a restart, because
     /// the index is rebuilt from rows that carry their own identity.
+    ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
     #[must_use]
     pub fn holds(&self, identity: &[u8; 32]) -> bool {
         self.blocks.contains_key(identity)
@@ -787,6 +807,10 @@ impl Trades {
     /// is **O(count)** after an O(1) lookup. A read-only handle additionally
     /// opens/indexes the complete parent ledger and receipt sidecar for commit
     /// proof, so a fresh end-to-end lookup is not O(1).
+    ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
     ///
     /// # Errors
     ///
@@ -1058,6 +1082,10 @@ fn write_fresh_header(file: &mut File, path: &Path) -> Result<(), Refusal> {
 /// A failed seal is omitted from the healthy block index but retained as a
 /// writer-stopping row number, so read-only availability does not let a fresh
 /// process append beyond unexplained history.
+///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
 fn index_of(file: &mut File, len: u64) -> Result<Indexed, Refusal> {
     let count = len.saturating_sub(HEADER) / STRIDE;
     let mut blocks: std::collections::HashMap<[u8; 32], Block> =
@@ -1232,6 +1260,12 @@ mod tests {
     /// The store this replaces set `HashMap::new()` on both open paths, so after
     /// a restart every lookup answered "no such run" while its own header
     /// claimed an O(1) find. Reopening is the only test that separates the two.
+    ///
+    /// This test is the proof --
+    /// `cli::trades::a_reopened_file_still_finds_the_run_it_was_given` -- and what
+    /// it establishes is that the index SURVIVES a reopen, which is the half the
+    /// replaced store got wrong. It says nothing about the probe's cost; no bench
+    /// in this workspace times it.
     #[test]
     fn a_reopened_file_still_finds_the_run_it_was_given() {
         let dir = std::env::temp_dir().join(format!(
@@ -1782,6 +1816,10 @@ pub struct Bucket {
 impl Bucket {
     /// Fold one trade in. Every field is a compare or an add, so this is O(1)
     /// and the whole aggregation is one pass — `CLAUDE.md` §3 rule 4.
+    ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
     fn take(&mut self, row: &Row) {
         self.trades = self.trades.saturating_add(1);
         if row.best > 0 {
@@ -1924,6 +1962,10 @@ impl Period {
 /// Buckets come back SORTED BY KEY, because a calendar read out of order is not
 /// a calendar, and because §3 rule 5 requires two runs over the same bytes to
 /// produce the same output — a `HashMap` iteration would not.
+///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
 #[must_use]
 pub fn by_period(rows: &[Row]) -> Vec<(Period, Vec<Bucket>)> {
     Period::ALL

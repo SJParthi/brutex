@@ -63,6 +63,10 @@
 //! taken inside a loop over bars or candidates: every knob in this workspace is
 //! read once per rung or once per run, which is the granularity gate 17
 //! prescribes for anything that is not free.
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;

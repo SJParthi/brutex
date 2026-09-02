@@ -22,6 +22,10 @@
 //! records is detected as a trailing prefix but is deliberately not resumed:
 //! the module has no authenticated source from which to prove the missing
 //! suffix.  The next write refuses without truncating or rewriting history.
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
@@ -1866,6 +1870,10 @@ struct TrailingDecisionBlockV2 {
 /// `open_read` never creates the root or any child and never returns production
 /// authority.  It scans both explicitly bounded files, verifies every completed
 /// block and builds an average-O(1) block-identity index.
+///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
 pub struct PopulationAdmissionV2Ledger {
     root: PathBuf,
     root_file: File,
@@ -2100,6 +2108,10 @@ impl PopulationAdmissionV2Ledger {
     /// Generation validation is O(file bytes); only the hash-table lookup is
     /// average O(1).
     ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
+    ///
     /// # Errors
     ///
     /// Refuses a lock, same-length mutation, append, symlink/path replacement,
@@ -2136,6 +2148,10 @@ impl PopulationAdmissionV2Ledger {
     /// This performs repeated generation hashing and may rescan the bounded
     /// ledger, so its time is O(total ledger bytes + total ledger records +
     /// block decisions), not O(block) or O(1).
+    ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
     fn append(
         &mut self,
         prepared: &PreparedPopulationAdmissionV2,
@@ -2209,6 +2225,10 @@ impl PopulationAdmissionV2Ledger {
     ///
     /// Full-file generation checks make this O(total ledger bytes + block
     /// decisions), not O(1), despite the initial average-O(1) index hit.
+    ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
     fn reuse_existing(
         &mut self,
         prepared: &PreparedPopulationAdmissionV2,
@@ -2454,6 +2474,10 @@ impl PopulationAdmissionV2Ledger {
     ///
     /// Full-file generation validation plus block reads make this O(total
     /// ledger bytes + block decisions), not O(1).
+    ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
     fn authenticate_structural_receipt(
         &mut self,
         receipt: PopulationAdmissionV2StructuralReceipt,

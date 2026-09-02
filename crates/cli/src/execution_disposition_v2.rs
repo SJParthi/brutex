@@ -23,6 +23,10 @@
 //! completion or row probe is average O(1) after open; one page is O(requested)
 //! with a fixed 256-row ceiling.  File open, hashing, append, sync, Population
 //! V4/admission reconciliation and end-to-end execution are not O(1).
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
@@ -2208,6 +2212,10 @@ impl ExecutionDispositionLedgerV2 {
 
     /// Average-O(1) complete-authority lookup after two generation checks.
     ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
+    ///
     /// # Errors
     ///
     /// Refuses lock failure or any append, replacement or same-length mutation
@@ -2248,6 +2256,10 @@ impl ExecutionDispositionLedgerV2 {
     }
 
     /// Average-O(1) lookup of one exact committed Population V4 row.
+    ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
     ///
     /// # Errors
     ///

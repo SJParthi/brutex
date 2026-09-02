@@ -20,6 +20,10 @@
 //! arithmetic plus one indexed read. Loading is linear in the records in that
 //! one file; lookup is O(1), and the allocation is a fixed maximum per opened
 //! month rather than a map whose size or probe history depends on the data.
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 use std::path::Path;
 

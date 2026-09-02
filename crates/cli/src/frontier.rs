@@ -140,6 +140,10 @@ const MAGIC: [u8; 8] = *b"BRUTEXFR";
 /// zeros in the new fields — a zero drawdown is a spectacular result, and
 /// inventing one for every historical row is the failure §4 bans. The file is
 /// regenerable by re-running the sweep, which is the cheap half of this trade.
+///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
 const VERSION: u32 = 4;
 
 /// Bytes before the first row.

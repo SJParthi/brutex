@@ -11,6 +11,10 @@
 //! This gate performs exactly six mask comparisons and at most six fixed word
 //! checks. It allocates nothing and never walks the vocabulary or a data-sized
 //! collection, so its time and space are O(1) at the fixed V1 mask width.
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 use core::fmt;
 

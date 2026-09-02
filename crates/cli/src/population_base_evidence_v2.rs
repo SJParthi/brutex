@@ -20,6 +20,10 @@
 //! None of those whole-operation costs, nor ledger opening/append/retry, is
 //! described as O(1). Only lookup and fixed-offset record read are O(1) after
 //! the bounded opening scan.
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 use std::collections::HashSet;
 

@@ -11,6 +11,10 @@
 //! comparison and table rendering are proportional to the fixed 16-population,
 //! eight-selection authority surface and to the rendered identity bytes.  No
 //! O(1) claim is made for opening or rendering the report.
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 use crate::admission_store::AdmissionAuthorityLedger;
 use crate::execution_disposition_v2::{AdmissionExecutionMatrixV2, ExecutionDispositionLedgerV2};

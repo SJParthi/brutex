@@ -22,6 +22,10 @@
 //! evaluating its complete coordinate population are linear in their respective
 //! stored records, training bars and grid cells.  No full replay or persistence
 //! operation is claimed O(1).
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -949,6 +953,10 @@ impl PreparedExecutionCapabilitiesV1 {
     /// The population is read in bounded pages. The operation is O(rows), not
     /// O(1); only a later indexed row probe is average O(1).
     ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
+    ///
     /// # Errors
     ///
     /// Refuses absent/stale V4 authority, copied side parameters, any missing,
@@ -1432,6 +1440,10 @@ impl ExecutionCapabilityLedger {
     ///
     /// Opening is O(total stored records), never claimed O(1).
     ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
+    ///
     /// # Errors
     ///
     /// Every structural, semantic, lock and I/O refusal documented by
@@ -1540,6 +1552,10 @@ impl ExecutionCapabilityLedger {
 
     /// One average-O(1) completion lookup after constant-size generation checks.
     ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
+    ///
     /// # Errors
     ///
     /// Refuses a lock failure or any post-open append, replacement or
@@ -1558,6 +1574,10 @@ impl ExecutionCapabilityLedger {
     }
 
     /// One average-O(1) exact side-parameter lookup.
+    ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
     ///
     /// # Errors
     ///
@@ -1591,6 +1611,10 @@ impl ExecutionCapabilityLedger {
     }
 
     /// One average-O(1) committed row-capability lookup.
+    ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
     ///
     /// # Errors
     ///

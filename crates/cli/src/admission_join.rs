@@ -14,6 +14,10 @@
 //! costs.  One page is O(requested rows), bounded by both ledgers' fixed
 //! 256-row ceiling.  Receipt probes are average O(1).  The lock transaction,
 //! hashing, page join, open and persistence are not claimed O(1).
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 use std::fs::File;
 use std::path::{Path, PathBuf};

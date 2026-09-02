@@ -858,6 +858,10 @@ pub struct BarFile {
     /// `AtomicU64` rather than a `Cell`, because it is the only shape that keeps
     /// `BarFile` `Sync` — a reader shared across threads must not become a
     /// compile error in a caller because a cache moved in here.
+    ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
     verified: AtomicU64,
     /// The advisory lock, held for its **drop** and never read again.
     ///
@@ -1787,6 +1791,10 @@ impl BarFile {
     /// otherwise, which is what the bisection has always rested on — so the
     /// window start is addressable in `log2(n_valid)` reads rather than found by
     /// walking. At 8,250 bars that is fourteen.
+    ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
     ///
     /// # Errors
     ///
@@ -3454,6 +3462,13 @@ mod tests {
     /// nothing about it, because it did not look; the refusal arrives at the
     /// first READ, and it arrives per block — record 0 and record 73 are in
     /// different blocks and are refused separately.
+    ///
+    /// This test is the proof —
+    /// `store::file::opening_a_month_verifies_nothing_and_the_first_read_of_each_block_does`
+    /// — and it proves the SHAPE the O(1) open rests on: that no sidecar byte is
+    /// read at open, observed by making every one of them wrong and watching the
+    /// open succeed. It is not a timing; `crates/store/benches/ratio.rs` measures
+    /// the read path (C-28, C-29) and has no row for the open.
     #[test]
     fn opening_a_month_verifies_nothing_and_the_first_read_of_each_block_does() {
         let _sink_is_mine = crate::emits::hold_the_sink();

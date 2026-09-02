@@ -21,6 +21,10 @@
 //! most 200 stream heads per emitted minute.  Persistence, hashing and reopen
 //! are linear in their records.  Only an already-indexed execution-capability
 //! lookup is average O(1); this module makes no end-to-end O(1) claim.
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};

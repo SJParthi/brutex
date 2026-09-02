@@ -1734,6 +1734,10 @@ struct Kept {
 /// next row's stamp — the same misalignment `kept_rows` builds a shared mask to
 /// avoid. `open_interest` is filtered only when it is present, because an empty
 /// vector there means the vendor sends none at all, which is not a length.
+///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
 fn drop_impossible_bars(arrays: &mut ParallelArrays) -> usize {
     let rows = arrays.open.len();
     let mut keep = Vec::with_capacity(rows);

@@ -26,6 +26,10 @@
 //! one shared lock, one generation validation before and after, and one
 //! canonical fixed-record pass. It is O(Admission-file bytes + Candidates),
 //! without accepting caller-authored rows.
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 #![expect(
     dead_code,
@@ -1881,6 +1885,10 @@ struct TrailingRowsV3 {
 /// Opening is O(file bytes + rows) time and retains O(Completions + one
 /// trailing block) memory. The receipt index probe is average O(1) only after
 /// bounded file-generation validation, which is itself O(file bytes).
+///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
 pub(crate) struct PopulationFinalizationV3Ledger {
     root: PathBuf,
     root_file: File,
@@ -2095,6 +2103,10 @@ impl PopulationFinalizationV3Ledger {
     }
 
     /// Revalidates all bounded generations before average-O(1) receipt lookup.
+    ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
     pub(crate) fn reopen_structural_receipt(
         &self,
         finalization_id: &[u8; 32],

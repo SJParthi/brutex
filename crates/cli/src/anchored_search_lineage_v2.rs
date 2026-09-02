@@ -20,6 +20,10 @@
 //! O(1).  After that validation, the in-memory pair lookup is average O(1) and
 //! uses O(completed pairs) space.  Record encode/decode and one pair comparison
 //! are fixed-width O(1).
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -737,6 +741,10 @@ impl AnchoredSearchLineageV2Ledger {
     ///
     /// Generation validation is O(file bytes); only the final hash lookup is
     /// average O(1).
+    ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
     ///
     /// # Errors
     ///

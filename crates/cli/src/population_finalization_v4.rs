@@ -17,6 +17,10 @@
 //! O(file bytes + Candidates), with filesystem-dependent latency and storage.
 //! Only admitted fixed-record offset arithmetic is worst-case O(1) in record
 //! count; the in-memory identity index has average O(1) lookup.
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 #![expect(
     dead_code,

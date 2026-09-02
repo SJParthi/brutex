@@ -1175,6 +1175,10 @@ struct LedgerGenerationWitnessV2 {
 /// The in-memory identity probe is average O(1) only after that scan.  Public
 /// lookup first re-hashes the bounded file to reject same-length mutation, so
 /// the complete lookup operation is O(file bytes), not universally O(1).
+///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
 pub struct PopulationFinalizationV2Ledger {
     root_file: File,
     root_path: PathBuf,
@@ -1424,6 +1428,10 @@ impl PopulationFinalizationV2Ledger {
     ///
     /// Content-generation validation is O(file bytes); only the subsequent
     /// hash-table probe is average O(1).
+    ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
     ///
     /// # Errors
     ///

@@ -12,6 +12,10 @@
 //! Authentication is whole-source work, not O(1): every retained Candidate
 //! ledger and Finalization are freshly revalidated before and after the joined
 //! snapshot.
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 #![expect(
     dead_code,
@@ -2560,6 +2564,10 @@ pub(crate) struct PopulationV6ProductionSourceV1 {
 /// per rung -- never inside a loop over bars or candidates. That is well under
 /// the granularity `CLAUDE.md` §3 rule 4 governs: it is not a per-operation
 /// cost, so it does not touch the O(1) claim either way.
+///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
 enum PopulationV6CandidateAuthoritiesV1 {
     Both {
         nifty: Box<CommittedStoredCandidatePreAdmissionV1>,

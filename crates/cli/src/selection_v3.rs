@@ -16,6 +16,10 @@
 //! is O(receipts); exact and latest lookup after open are one average-O(1) hash
 //! probe.  None of construction, hashing, open or persistence is claimed O(1).
 //!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
+//!
 //! # Replay boundary
 //!
 //! A V3 selection proves which population rows won.  Population V1 rows do not
@@ -1219,6 +1223,10 @@ impl SelectionLedgerV3 {
     }
 
     /// Average-O(1) exact V3 receipt lookup.
+    ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
     #[must_use]
     pub fn receipt(&self, selection_id: &[u8; 32]) -> Option<&SelectionReceiptV3> {
         self.receipts.get(selection_id)

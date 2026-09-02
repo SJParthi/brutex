@@ -18,6 +18,10 @@
 //! Whole-source authentication, policy evaluation, hashing, persistence and
 //! fresh reopen are O(source bytes + Candidates), not O(1).  Only an admitted
 //! fixed-record offset is constant in record count; filesystem latency is not.
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};

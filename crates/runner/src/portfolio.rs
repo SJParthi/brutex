@@ -261,6 +261,10 @@ impl MinuteSchedule {
     }
 
     /// Inclusive global occupancy after this minute, or `None` when flat.
+    ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
     #[must_use]
     pub const fn occupied_through_micros(&self) -> Option<i64> {
         self.occupied_through_micros
@@ -1096,6 +1100,11 @@ mod tests {
     /// Exhaust every absent/reachable/unreachable/refused shape for four
     /// strategies at each of six entry minutes, under flat, expiring-now and
     /// still-open portfolio state: 6 × 3 × 4^4 = 4,608 schedules.
+    ///
+    /// This test is the proof --
+    /// `runner::portfolio::four_strategies_across_six_minutes_exhaust_every_terminal_shape`
+    /// -- and what it establishes is COVERAGE of the terminal shapes, not a cost:
+    /// 4,608 is the size of the enumeration it walks, never a bound on any call.
     #[test]
     fn four_strategies_across_six_minutes_exhaust_every_terminal_shape() {
         const SHAPES: usize = 4 * 4 * 4 * 4;

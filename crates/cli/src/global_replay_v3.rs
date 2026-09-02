@@ -32,6 +32,10 @@
 //! is bounded by the fixed 200-stream surface. Fixed-record address arithmetic
 //! is O(1); filesystem latency, hashing, sorting, scanning, and a complete
 //! replay are not O(1).
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 #![expect(
     dead_code,

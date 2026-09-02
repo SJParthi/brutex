@@ -234,6 +234,10 @@ pub const MAX_CEILING: u32 = 1_000_000;
 /// operator's log records the day allowance falling to 6,352 and a `+1` step
 /// needing 93,648 successes to undo it. Any proportional step fixes that; this
 /// one is the conservative end of the range. D-0322.
+///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
 pub const SUCCESSES_PER_STEP: u32 = 32;
 
 /// How many refusals it takes to walk a span from its ceiling down to one.

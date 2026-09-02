@@ -25,6 +25,10 @@
 //! two-pass record is O(candidates) on disk.  A caller that supplied a capped
 //! evidence prefix has a deterministic Top-N *of that prefix*, never a global
 //! Top-N; completion is a receipt owned by the caller, not inferred here.
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 use core::cmp::Ordering;
 

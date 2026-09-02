@@ -38,6 +38,10 @@
 //! This is not O(1) whole-run time or space. The constant-cost claims remain
 //! the fixed mask/cell primitives, fixed record projection and a validated
 //! fixed-offset row seek.
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 #[path = "population_base_evidence_v2.rs"]
 mod population_base_evidence_v2;
@@ -2699,6 +2703,10 @@ pub(crate) fn pair_candidate_base_evidence_v2(
 /// closed-frontier-by-grid population, observation space also depends on its
 /// accepted-session width, and one cell's materialized trades are transient.
 /// Neither the per-cell replay/folds nor the whole operation is O(1).
+///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
 ///
 /// # Errors
 ///

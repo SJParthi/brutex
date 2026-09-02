@@ -18,6 +18,10 @@
 //! projection validates generations once before and once after one ordered
 //! fixed-record pass; repeated per-ordinal projection is not used for a whole
 //! downstream population.
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
@@ -3502,6 +3506,10 @@ struct TrailingDecisionBlockV3 {
 /// `open_read` never creates a path and never returns authenticated authority.
 /// It verifies every fixed record and builds an average-O(1) receipt index only
 /// after an O(file) bounded generation scan.
+///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
 pub(crate) struct PopulationAdmissionV3Ledger {
     root: PathBuf,
     root_file: File,
@@ -3721,6 +3729,10 @@ impl PopulationAdmissionV3Ledger {
 
     /// Revalidates all bounded file bytes, then performs one average-O(1)
     /// structural receipt lookup. Absence is `Ok(None)`.
+    ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
     ///
     /// # Errors
     ///

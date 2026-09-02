@@ -663,6 +663,10 @@ fn first_line(body: &str) -> &str {
 /// — that the check "walks a list bounded by `MAX_CONSTITUENTS`" — was true of
 /// the inner walk and silent about the outer one, which is how a quadratic
 /// reads as linear.
+///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
 pub fn constituents(body: &str) -> Result<Vec<Constituent<'_>>, NseError> {
     if body.len() > MAX_DOCUMENT_BYTES {
         return Err(NseError::TooLarge {

@@ -45,6 +45,10 @@
 //! PBO median placement remains part of the required full source record and
 //! report, but V1 does not gate on it: no operator-supplied median threshold was
 //! provided, and inventing one here would violate the no-default rule.
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 /// Comparison-projection denominator for bounded rates and probabilities.
 ///

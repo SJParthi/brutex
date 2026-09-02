@@ -5,6 +5,10 @@
 //! Opening scans and validates the bounded ledger once; after that, completion
 //! lookup and a fixed-offset record lookup are O(1) in record count.  Opening,
 //! append, exact retry comparison and fresh-reopen comparison are O(records).
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -458,6 +462,10 @@ impl BaseEvidenceRecordProjectionV2 {
 
 /// Bounded read-only Base Evidence authority with generation-checked O(1)
 /// completion lookup and fixed-offset record reads after its opening scan.
+///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
 pub struct BaseEvidenceLedgerReaderV2 {
     ledger: LedgerV2,
 }

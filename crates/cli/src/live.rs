@@ -200,6 +200,10 @@ const ROWS_AT: usize = HEADER_BYTES + SUMMARY_BYTES;
 /// alive" -- only "when was this file last written". §3 rule 6: the limit is
 /// stated rather than papered over with a shorter timeout that would look
 /// decisive and be wrong.
+///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
 pub const STALE_AFTER_SECS: u64 = 24 * 60 * 60;
 
 /// What a run has found so far, and what it must clear.

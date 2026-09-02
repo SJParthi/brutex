@@ -24,6 +24,10 @@
 //! expected/amortized-O(1) `HashMap` probe; Rust's `HashMap` does not promise
 //! worst-case O(1).  Hashing, filesystem latency, selection, persistence,
 //! recovery and a complete run are not O(1).
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};

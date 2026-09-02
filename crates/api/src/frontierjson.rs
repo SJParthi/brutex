@@ -68,6 +68,10 @@
 //! MiB. Four detail tasks across both routes may be queued or running. The
 //! blocking file/index/encoding path runs on `spawn_blocking`; saturation
 //! answers 429 before another task is queued. D-0435 and limits §125.
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 use std::path::PathBuf;
 

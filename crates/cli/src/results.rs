@@ -592,6 +592,14 @@ pub struct Results {
     ///
     /// The map costs eight bytes per run more than the set. At the 20,000-run
     /// ceiling `api` enforces that is 160 KB, against a file of 5.2 MB.
+    ///
+    /// # The probe is measured, not argued
+    ///
+    /// Row **C-CLI-03**, `cli::ratio::the_duplicate_check_does_not_scan_the_ledger`
+    /// in `crates/cli/benches/ratio.rs`, times [`Results::holds`] -- which is one
+    /// `contains_key` against this map -- on a hit and on a miss over a 1,024-record
+    /// ledger and requires the two to agree within the bench's ceiling. A probe that
+    /// had become a walk would separate them.
     seen: std::collections::HashMap<[u8; 32], u64>,
     /// Byte offset this process has absorbed identities up to.
     ///
@@ -972,6 +980,15 @@ impl Results {
     /// not an address on its own. The result-set commit boundary needs both:
     /// after an exact rerun re-verifies an existing row, its audit event must
     /// name the same stable ledger index as a newly appended row.
+    ///
+    /// # What measures it, and the one step it does not cover
+    ///
+    /// Row **C-CLI-03**, `cli::ratio::the_duplicate_check_does_not_scan_the_ledger`,
+    /// times a probe of the same [`Self::seen`] map. It calls `contains_key` and this
+    /// calls `get`, which differ by returning the value; the two integer operations
+    /// after it are a subtraction and a division by a field. So the bench bounds the
+    /// only step here that could stop being constant, and the remainder is
+    /// arithmetic no measurement would separate from the timer's own noise.
     #[must_use]
     pub(crate) fn index_of_identity(&self, identity: &[u8; 32]) -> Option<u64> {
         let at = self.seen.get(identity)?;
@@ -2209,6 +2226,13 @@ mod tests {
     /// audit rather than by anything failing, which is the shape of every defect
     /// this class produces: nothing is wrong per call, so review has nothing to
     /// catch.
+    ///
+    /// This test is itself the proof --
+    /// `cli::results::a_run_is_found_by_its_identity_and_not_by_its_position` --
+    /// and it proves the SHAPE rather than the constant: that the record handed
+    /// back is the one the identity names, whatever ordinal it sits at. The
+    /// per-probe cost is the separate measurement in `crates/cli/benches/ratio.rs`
+    /// row C-CLI-03.
     #[test]
     fn a_run_is_found_by_its_identity_and_not_by_its_position() {
         let r = root("by-identity");

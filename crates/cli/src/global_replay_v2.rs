@@ -33,6 +33,10 @@
 //! the delegated scheduler uses its documented fixed 200-intent bound.  Hashing
 //! and canonical encoding are linear in their fixed records.  This module
 //! makes no end-to-end O(1) claim.
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};

@@ -24,6 +24,10 @@
 //! `docs/06-limits.md` §147.  Only fixed-record offset arithmetic is worst-case
 //! O(1) in record count.  Hash-map lookup is average O(1), and file hashing,
 //! locks, allocation, bootstrap work and `sync_all` are not constant-time.
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -1505,6 +1509,10 @@ pub struct PopulationStatisticsV2CandidateProjection {
 /// fixed-stride record read; file locking, generation validation and I/O are
 /// not O(1).  Production callers that need the complete family use the bounded
 /// batch projection so generation hashing is not repeated once per candidate.
+///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PopulationStatisticsAdmissionProjectionV3 {
     source: PopulationStatisticsV2ProjectionSource,
@@ -2533,6 +2541,10 @@ impl PopulationStatisticsV2Ledger {
     /// Runner arithmetic performed on each returned candidate remains
     /// fixed-width.  Unlike repeated single-candidate calls, generation hashing
     /// is not multiplied by C.
+    ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
     ///
     /// # Errors
     ///
@@ -3923,6 +3935,10 @@ impl PreparedPopulationStatisticsV2 {
 /// Validation and projection are O(C * (P + S)) time and retained space for C
 /// candidates, P aligned periods and S canonical splits, before the explicit
 /// finite-bootstrap work. This whole-family preparation is not O(1).
+///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
 ///
 /// # Errors
 ///

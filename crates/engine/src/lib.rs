@@ -415,6 +415,14 @@ pub struct Frontier {
     /// duplicates — and a reader could not tell whether they had been dropped by
     /// design or lost by a bug. [`Frontier::reconciles`] now makes that a test
     /// failure rather than something to notice.
+    ///
+    /// The rejection itself is measured rather than argued:
+    /// `engine::ratio::duplicate_rejection_costs_the_same_however_much_is_seen`
+    /// varies the same pre-sized `HashSet<u32>` across 1,000 / 10,000 / 100,000
+    /// already-accepted positions and re-inserts position zero at each size. Its
+    /// own doc records what the row does and does not establish: expected and
+    /// amortised hash-table evidence, never an adversarial guarantee -- which is
+    /// the qualification this sentence carries too.
     pub duplicates: u64,
     /// Positions this level refused before measuring anything else — the D-0080
     /// support-0 / support-1 exclusions. Nonzero only at k=1, because a position
@@ -2430,6 +2438,11 @@ mod tests {
     /// resolved by full key comparison — so what has to be proved is
     /// DISTRIBUTION: that distinct masks do not pile into one bucket, which
     /// would turn an O(1) probe into a walk.
+    ///
+    /// This test is the proof —
+    /// `engine::lib::the_mask_hasher_separates_orderings_and_is_fixed` — and it
+    /// proves distribution, not speed. The per-probe cost is measured separately
+    /// by `engine::ratio::duplicate_rejection_costs_the_same_however_much_is_seen`.
     #[test]
     fn the_mask_hasher_separates_orderings_and_is_fixed() {
         // `hash_one` and not a hand-rolled build/hash/finish: it is the same

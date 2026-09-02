@@ -17,6 +17,10 @@
 //! expected/amortized O(C), with a conservative O(C²) collision worst case;
 //! retained row and uniqueness state is O(C).  Fixed-record offset arithmetic
 //! alone is O(1). Generation validation hashes bounded files and is not O(1).
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 #![expect(
     dead_code,
@@ -1956,6 +1960,10 @@ impl PopulationV5StructuralCommit {
 /// they are O(file bytes), not O(1). Fixed row address arithmetic is O(1).
 /// Receipt-index lookup is expected/amortized O(1), with O(B) collision worst
 /// case for B bounded Completion records.
+///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
 struct PopulationV5Ledger {
     root: PathBuf,
     root_file: File,
@@ -2744,6 +2752,10 @@ impl CommittedStoredPopulationV5 {
 /// C Candidates. Hash-backed duplicate/index work is expected/amortized O(C),
 /// with a conservative O(C²) collision worst case. The operation is
 /// intentionally not described as O(1).
+///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
 pub(crate) fn commit_population_v5(
     root: &Path,
     bounds: PopulationV5Bounds,

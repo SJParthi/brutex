@@ -624,6 +624,10 @@ pub fn spa(returns: &[Vec<i64>], draws: usize, seed: u64, block: usize) -> Optio
 ///
 /// O(B·N·S) time and O(N+S) temporary space for B draws, N periods and S
 /// strategies.  Constructing the receipt is not O(1).
+///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
 #[must_use]
 pub fn white_reality_check_receipt_v1(
     returns: &[Vec<i64>],
@@ -684,6 +688,10 @@ pub fn white_reality_check_receipt_v1(
 ///
 /// O(B·N·S) time and O(N+S) temporary space for B draws, N periods and S
 /// strategies.  Constructing the receipt is not O(1).
+///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
 #[must_use]
 pub fn spa_receipt_v1(
     returns: &[Vec<i64>],
@@ -999,6 +1007,10 @@ impl RomanoWolfAdjustedCandidateV1 {
 /// order used by the suffix maxima.  `family_digest` binds the ordered return
 /// family and every resampling input; moving a probability to another position
 /// therefore changes the authority rather than silently renaming a strategy.
+///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RomanoWolfAdjustedReceiptV1 {
     candidates: Vec<RomanoWolfAdjustedCandidateV1>,
@@ -1012,6 +1024,10 @@ pub struct RomanoWolfAdjustedReceiptV1 {
 
 impl RomanoWolfAdjustedReceiptV1 {
     /// Candidate result by caller position, O(1).
+    ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
     #[must_use]
     pub fn candidate(&self, strategy: usize) -> Option<&RomanoWolfAdjustedCandidateV1> {
         self.candidates.get(strategy)
@@ -1171,6 +1187,10 @@ pub fn romano_wolf_receipt(
 /// draws.  Retained temporary space is O(B·N + B + S).  Candidate lookup on
 /// the completed receipt is O(1); constructing the complete statistical
 /// authority is deliberately not claimed constant-time.
+///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
 #[must_use]
 pub fn romano_wolf_adjusted_p_values_v1(
     returns: &[Vec<i64>],

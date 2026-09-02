@@ -23,6 +23,10 @@
 //! average-O(1) hash probe plus one fixed seek/read; a page is O(requested)
 //! with a fixed 256-row ceiling.  Committing is O(decisions) time.  None of the
 //! open, page, population commit, hashing or persistence work is claimed O(1).
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
