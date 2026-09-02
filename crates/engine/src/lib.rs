@@ -1725,6 +1725,48 @@ impl Ladder {
                         pruned = pruned.saturating_add(1);
                         continue;
                     }
+                    // MEANING PRUNE, AND IT IS A DIFFERENT AXIS FROM THE ONE
+                    // ABOVE.
+                    //
+                    // Anti-monotonicity kills a candidate whose subset is
+                    // INFREQUENT. It has nothing to say about a candidate whose
+                    // bits restate each other: `close_above_pivot_s2_band` and
+                    // `close_above_pivot_s3_band` are both spectacularly
+                    // frequent and so is their union, so the prune above is
+                    // right not to fire — and the result was a ranked table
+                    // headed by seven conditions carrying four facts.
+                    //
+                    // MEASURED, the live sweep's leading row:
+                    // `{15, 65, 82, 84, 182, 186, 185}`, where 84, 182 and 186
+                    // are each exactly implied by 82. It fired on 200,813 bars
+                    // of 609,722 and won 52%.
+                    //
+                    // ONE PAIR IS ENOUGH, WHICH IS WHY THIS STAYS O(1). `keyed`
+                    // groups by `without_highest`, so `a` and `b` share k−2
+                    // positions and differ ONLY in their highest bit. `a ∪ b`
+                    // therefore introduces exactly one pair that neither parent
+                    // already held. By induction from k=2 — where the parents
+                    // are single bits and the pair is checked directly — if
+                    // every level refuses a candidate whose one new pair is
+                    // dead, no surviving itemset can contain a dead pair. So
+                    // this is two six-word scans and a `match`, not a walk over
+                    // the candidate's bits.
+                    //
+                    // COUNTED AS `pruned`, deliberately: `Frontier::reconciles`
+                    // balances `generated` against the reasons a candidate left,
+                    // and a separate counter would need a column everywhere that
+                    // identity is checked. The cost is that the ladder table
+                    // cannot say WHICH prune fired. Named here because the table
+                    // cannot name it.
+                    if let (Some(left), Some(right)) = (highest_position(a), highest_position(b))
+                        && !vocab::implication::pair_is_informative(
+                            u16::try_from(left).unwrap_or(u16::MAX),
+                            u16::try_from(right).unwrap_or(u16::MAX),
+                        )
+                    {
+                        pruned = pruned.saturating_add(1);
+                        continue;
+                    }
                     // COUNTED IN A BATCH, ACROSS EVERY CORE. `column.support`
                     // is Theta(k * bars/64) and is the dominant cost of the
                     // whole walk; everything above it here is a hash probe or a
@@ -1836,6 +1878,24 @@ fn cannot_grow(out: &mut Vec<Itemset>, by: usize) -> bool {
 /// left as a branch no run reaches. At k=2 the prefix of every 1-set IS the
 /// empty mask, which puts all of them in a single block and reproduces the
 /// exhaustive pairing that level requires.
+/// The highest set position, or `None` for an empty mask.
+///
+/// The same six-word reverse scan [`without_highest`] performs, returning the
+/// position rather than clearing it. Written beside it so the two cannot
+/// disagree about which bit is highest — the prefix join's whole correctness
+/// rests on that being one answer.
+fn highest_position(m: &ConditionMask) -> Option<u32> {
+    let words = m.words();
+    for (index, word) in words.iter().enumerate().rev() {
+        if *word != 0 {
+            let bit = 63_u32.saturating_sub(word.leading_zeros());
+            let base = u32::try_from(index).unwrap_or(0).saturating_mul(64);
+            return Some(base.saturating_add(bit));
+        }
+    }
+    None
+}
+
 fn without_highest(m: &ConditionMask) -> ConditionMask {
     let words = m.words();
     for (index, word) in words.iter().enumerate().rev() {
@@ -3549,9 +3609,23 @@ mod tests {
              to the same answer on over a thousand candidates."
         );
         assert_eq!(
-            exits, 10,
+            exits, 12,
             "the shipping region of this file may leave a loop early in exactly \
-             ten places, and every one is accounted for:\n\
+             twelve places, and every one is accounted for.\n\
+             \x20 IT WAS TEN UNTIL THE MEANING PRUNE LANDED, and the two it \
+             added are named first because they are the newest:\n\
+             \x20 1 KEY RETURN -- `highest_position` handing back the top set \
+             position once its reverse word scan finds it. Same shape and same \
+             six-word bound as `without_highest` beside it, and deliberately \
+             beside it: the prefix join's correctness rests on both agreeing \
+             about which bit is highest, so they are read together.\n\
+             \x20 1 FILTER SKIP -- a candidate whose ONE new pair restates \
+             itself or cannot hold. `vocab::implication` proves the pivot chain \
+             exact from `daily.rs:206-215` and the single shared band half at \
+             `daily.rs:579`; anti-monotonicity cannot reach it, because both \
+             bits are frequent and so is their union. It advances rather than \
+             truncating -- the level still enumerates every other pair.\n\
+             \x20 AND THE TEN THAT WERE ALREADY HERE:\n\
              \x20 1 EMPTY-BATCH RETURN -- `drain` handing back an untouched \
              tally when there is nothing to count. It is not optional: \
              `len.div_ceil(lanes())` on an empty batch is a chunk width of \

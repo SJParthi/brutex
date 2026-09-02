@@ -41,6 +41,8 @@
 #![forbid(unsafe_code)]
 
 pub mod error;
+/// Which condition positions say something another position already said.
+pub mod implication;
 pub mod mask;
 pub mod table;
 pub mod tolerance;
