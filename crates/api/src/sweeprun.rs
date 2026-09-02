@@ -1772,13 +1772,19 @@ pub async fn run_json(
 /// The answer when nothing is running anywhere this process can see.
 const NO_SWEEP: &str = r#"{"running":null,"why":"no sweep has been started from this console"}"#;
 
-/// The target `cli` stamps on the records a sweep emits as it advances.
+/// The target prefix `cli` stamps on the records a sweep emits as it advances.
 ///
-/// `cli.audit` and not `cli.sweep`: the sweep verbs render through `audit_bars`,
-/// which is where both the per-rung bracket and the ten-per-rung grid progress
-/// records are emitted. `cli.sweep` covers the synthetic verbs, which never run
-/// here.
-const CLI_SWEEP_TARGET: &str = "cli.audit";
+/// **`cli` and not `cli.audit`.** `telemetry::Query`'s target filter matches an
+/// exact target OR a prefix followed by a dot, so this one word covers every
+/// verb: `cli.audit` (audit-stored, audit-range, screen, elite, descend,
+/// range-all), `cli.sweep` (sweep-stored, sweep-all) and `cli.auto`
+/// (auto-stored).
+///
+/// It was `cli.audit`, and that narrowed the fallback to six of the nine verbs.
+/// `sweep-stored` and `sweep-all` — the two an operator reaches for to sweep one
+/// stored month — stamp `cli.sweep`, so the console went on reporting an idle
+/// machine for exactly the runs this was written to make visible.
+const CLI_SWEEP_TARGET: &str = "cli";
 
 /// How long a silence may run before the page should doubt the sweep.
 ///
@@ -1835,12 +1841,36 @@ fn elsewhere_over(dir: &std::path::Path, now_millis: i64) -> String {
     // Clamped at zero: a store written by a machine whose clock is ahead must
     // not report a sweep in the future.
     let age = now_millis.saturating_sub(last.at_unix_millis).max(0);
+    // `in_flight` AND `attempt` ARE THE PAGE'S CONTRACT, and shipping this
+    // without them made the whole fallback inert.
+    //
+    // `sweep.js`'s `sweepOutcome` tests `run.in_flight` FIRST and falls through
+    // to `phase:'done'` when it is absent, and `adoptRunning` returns early on
+    // anything that is not `'running'` -- so the poll timer was never armed and
+    // the console went on showing `{phase:'idle'}`, which is the exact defect
+    // this function was added to fix. The Rust half answered correctly into a
+    // shape the browser does not read.
+    //
+    // `attempt` is the log-binding token: `fetchLive` refuses a run without a
+    // positive safe integer, and `live-progress.ts` matches a record only when
+    // its `run` AND its `attempt` field both equal it. A terminal sweep has no
+    // browser attempt, so the telemetry RUN ID stands in -- `cli` stamps the
+    // same number into the records' `attempt` field for exactly this reason,
+    // which is what makes the two sides agree.
+    //
+    // `in_flight` is the window applied, not merely reported: the page needs a
+    // boolean and computing it here beats every caller re-deriving it. Both
+    // `age_millis` and `stale_after_millis` stay on the payload so a reader can
+    // see WHY the boolean says what it says -- silence longer than the window
+    // means the sweep stopped, or that it is inside a stretch that emits
+    // nothing, and nothing here can tell those apart.
+    let in_flight = age <= STALE_AFTER_MILLIS;
     format!(
-        r#"{{"running":{{"where":"cli","run":{},"message":{},"at_unix_millis":{},"age_millis":{},"stale_after_millis":{}}}}}"#,
+        r#"{{"running":{{"where":"cli","in_flight":{in_flight},"attempt":{},"run":{},"message":{},"at_unix_millis":{},"age_millis":{age},"stale_after_millis":{}}}}}"#,
+        last.run,
         last.run,
         crate::logs::quoted(&last.message),
         last.at_unix_millis,
-        age,
         STALE_AFTER_MILLIS,
     )
 }

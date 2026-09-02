@@ -1698,6 +1698,28 @@ pub fn install_log() -> String {
 /// holds no loop over bars and none over candidates, so every call site here is
 /// a boundary — one per run, or one per instrument-month in a batch. That is the
 /// granularity gate 17's own comment prescribes as the affordable one.
+/// The token a log record is bound to when no browser attempt supplied one.
+///
+/// # Why the telemetry run id and not a fresh number
+///
+/// `live-progress.ts` folds a record into a rung only when `record.run` and
+/// `record.fields.attempt` BOTH equal the token the page is tracking. The first
+/// of those is stamped by the sink and is not ours to choose, so any attempt
+/// token that is not the run id fails the test — inventing one would produce a
+/// field that looks bound and folds nothing, which is worse than the absent
+/// field it replaced.
+///
+/// `/backtest/run.json`'s terminal-sweep fallback reports this same number as
+/// `attempt`, so the page's token, the record's `run` and the record's `attempt`
+/// are one value chosen once.
+///
+/// `None` when no sink is installed, which is the test binary's ordinary state
+/// and not a failure: the field is then absent exactly as it was before, and a
+/// run with no log to read has nothing to bind anyway.
+fn binding_attempt() -> Option<u64> {
+    telemetry::global().map(telemetry::Sink::run)
+}
+
 pub(crate) fn note(event: &telemetry::Event<'_>) {
     // The result is deliberately discarded HERE and only here. `emit` returns
     // `NotInstalled` rather than panicking when nothing was installed, which is
@@ -1872,7 +1894,19 @@ fn sweep_stored_inner(
         &forward,
         STORED_KEEP,
         runner::rank::Lens::Detectability,
-        &|_, _, _| {},
+        // THE REPORTER, not a closure that discards it.
+        //
+        // This was `&|_, _, _| {}`. `sweep-stored` therefore emitted two events
+        // for an entire run -- the open and the close -- and nothing between,
+        // while the identical call twelve thousand lines down passes
+        // `emit_ladder_level` and reports every ladder level it walks.
+        //
+        // The two events were exactly the shape §4 bans: a run that looks
+        // observed because it opened a bracket, and is silent for the hours
+        // inside it. `emit_ladder_level` is already the reporter this signature
+        // exists for and costs one event per LEVEL, not per bar or candidate --
+        // the granularity gate 17's own comment calls the affordable one.
+        &emit_ladder_level,
     );
     let (outcome, ranked) = (run.outcome, run.ranked);
 
@@ -9132,7 +9166,15 @@ fn rung_sweeping_event(progress: RungProgress<'_>) -> telemetry::Event<'_> {
         .with("from_month", u64::from(progress.from.1))
         .with("to_year", u64::from(progress.to.0))
         .with("to_month", u64::from(progress.to.1));
-    if let Some(attempt) = progress.attempt {
+    // EVERY RUN CARRIES AN ATTEMPT, and a terminal one used to carry none.
+    //
+    // This was `if let Some(attempt) = progress.attempt`, so the field appeared
+    // only for a browser-started sweep. `live-progress.ts` binds a record to a
+    // run only when its `run` AND its `attempt` field BOTH equal the active
+    // token, so a terminal sweep's records matched nothing and the live rung
+    // panel had no events to fold — on exactly the runs an operator watches
+    // longest. See [`binding_attempt`].
+    if let Some(attempt) = progress.attempt.or_else(binding_attempt) {
         event = event.with("attempt", attempt);
     }
     event
@@ -9161,7 +9203,15 @@ fn rung_finished_event<'a>(
         .with("from_month", u64::from(progress.from.1))
         .with("to_year", u64::from(progress.to.0))
         .with("to_month", u64::from(progress.to.1));
-    if let Some(attempt) = progress.attempt {
+    // EVERY RUN CARRIES AN ATTEMPT, and a terminal one used to carry none.
+    //
+    // This was `if let Some(attempt) = progress.attempt`, so the field appeared
+    // only for a browser-started sweep. `live-progress.ts` binds a record to a
+    // run only when its `run` AND its `attempt` field BOTH equal the active
+    // token, so a terminal sweep's records matched nothing and the live rung
+    // panel had no events to fold — on exactly the runs an operator watches
+    // longest. See [`binding_attempt`].
+    if let Some(attempt) = progress.attempt.or_else(binding_attempt) {
         event = event.with("attempt", attempt);
     }
     event

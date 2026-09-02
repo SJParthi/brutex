@@ -1078,8 +1078,26 @@ async fn instruments_json(
     // universe, so the read guard has to outlive them — a temporary taken
     // inline is dropped at the semicolon with the borrows still live, which is
     // the compiler catching the reload's one real hazard rather than a nuisance.
-    let held = site.universe();
-    let mut listing: Vec<_> = held
+    // NAMED `universe` AND NOT `held`, because `held` is REBOUND thirteen lines
+    // down and a shadow does not drop.
+    //
+    // This guard was called `held`; `let held = bars_by_symbol(..)` below then
+    // shadowed the name while the guard itself stayed alive to the end of the
+    // function -- correctly, since `listing` borrows through it. Two later
+    // statements read `site.universe()` again, and with the name taken there was
+    // no way to see that those were a SECOND `read()` on a lock this thread
+    // already held.
+    //
+    // That is a deadlock, not a slow path. `Site::reparse` takes `.write()` on
+    // the same lock and is reachable from `POST /masters/refresh`, and a writer
+    // waiting between the two acquisitions blocks the second one against a guard
+    // only this thread can release. The crate already states the rule twenty-odd
+    // lines from the writer: *"holding both across the same statement is the
+    // deadlock this shape invites."*
+    //
+    // The fix is to acquire once and reuse, which the borrow already required.
+    let universe = site.universe();
+    let mut listing: Vec<_> = universe
         .read
         .merged
         .by_key
@@ -1168,11 +1186,14 @@ async fn instruments_json(
     // below are only measurements when the master decoded and the counter
     // loaded, and until now nothing said which of those held.
     let census = censuses.iter().find(|c| c.vendor == feed);
-    let (master, master_note) = site.universe().read.master(feed);
+    // THE GUARD TAKEN AT THE TOP, not a second `read()` on a lock this thread
+    // already holds. Both of these read `site.universe()` before -- see the
+    // comment on that binding for why that deadlocks against `reparse`.
+    let (master, master_note) = universe.read.master(feed);
     let mut headers = census_headers(census);
     headers.insert(
         axum::http::HeaderName::from_static(UNIVERSE_STATUS_HEADER),
-        note_header(site.universe().read.status()),
+        note_header(universe.read.status()),
     );
     headers.insert(
         axum::http::HeaderName::from_static(MASTER_STATE_HEADER),
