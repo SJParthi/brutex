@@ -1545,7 +1545,6 @@ pub(super) mod tests {
         assert!(kept > 0, "and must keep something, or `>` passes it");
     }
 
-    #[test]
     /// An all-zero bar is refused, and refusing it is what keeps the masks
     /// around it honest.
     ///
