@@ -814,7 +814,7 @@ struct IgnoreRule {
     ///
     /// **Git reads a `.gitignore` in EVERY directory**, and its patterns are
     /// relative to that directory. Reading only the root file made
-    /// `web/.gitignore`'s `.svelte-kit/` invisible, so a SvelteKit build
+    /// `web/.gitignore`'s `.svelte-kit/` invisible, so a `SvelteKit` build
     /// directory that `git status` correctly ignores refused the stamp.
     base: String,
 }

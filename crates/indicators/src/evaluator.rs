@@ -2536,7 +2536,7 @@ mod tests {
     ///
     /// The Muhurat tests use a 60-bar session on a day the exchange declared a holiday. This
     /// is the opposite case and it is the one that was missed for longer: **an ordinary
-    /// Wednesday that stopped.** IST day 18_682 was a normal session until it halted; the
+    /// Wednesday that stopped.** IST day `18_682` was a normal session until it halted; the
     /// reopening ran 15:45–17:00 and is entirely outside the pull's `[09:15, 15:30)` window,
     /// so ingest drops it and re-pulling can never recover it.
     ///

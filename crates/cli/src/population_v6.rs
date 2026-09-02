@@ -3229,7 +3229,6 @@ pub(crate) fn commit_population_v6(
 )]
 mod tests {
     use super::*;
-    use std::io::{Read as _, Seek as _, Write as _};
 
     fn bounds() -> PopulationV6Bounds {
         PopulationV6Bounds::new(8, 1_000_000, 512 * 1_024 * 1_024)
