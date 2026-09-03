@@ -343,6 +343,15 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    machine can finish. Nothing is typed, and
                                    section 6's argument against a depth parameter
                                    is the same argument against this one.
+       cli range-rung   VENDOR UNDERLYING RUNG FROM_Y FROM_M TO_Y TO_M SUPPORT_PPM
+                                   ONE rung, with the WHOLE machine. `range-all`
+                                   divides the candidate ceiling by eight, so a
+                                   rung inside the eight can HALT where the same
+                                   rung alone completes -- and a halted ladder
+                                   records no row at all. Run the eight in
+                                   sequence with this and each gets the full
+                                   ceiling, every support lane, and a row on the
+                                   page the moment it finishes. Takes `auto` too.
        cli ledger-all   VENDOR FROM_Y FROM_M TO_Y TO_M SUPPORT_PPM MAX_POINTS ROOT
                                    the DURABLE all-rung run. Sweeps the span on
                                    all eight rungs and WRITES the ledgers --
@@ -1119,6 +1128,71 @@ fn descend_arm(
 /// The same four number parses and the same four refusals, in the same order,
 /// because two commands taking one shape of argument must reject a bad one
 /// identically or an operator learns two rules.
+/// ONE rung, with the WHOLE machine.
+///
+/// # Why this exists, and it is not a convenience
+///
+/// `range-all` sweeps eight rungs under one `par_iter`, and `sweep_rungs` calls
+/// `SharedBy::these(8)` before it. That divides the machine's candidate ceiling
+/// by eight — 134,217,720 becomes 16,777,215 — and `support_lanes_for` divides
+/// the core count the same way. The division is CORRECT: eight rungs each
+/// taking the whole machine once claimed 157 GB of 48 and the kernel killed the
+/// process at `exit=137`.
+///
+/// But the consequence is that a rung inside the eight can HALT where the same
+/// rung alone completes. `one_rung`'s own comment says so: *"one rung asked
+/// alone gets the whole machine's ceiling and completes; the same rung inside
+/// the eight gets an eighth of it and can halt."* A halted ladder never reaches
+/// `record_swept_run`, so the operator sees a rung burn minutes and leave no
+/// row — indistinguishable from a rung that never started.
+///
+/// `range_over` has taken a rung subset since it was written; it simply had no
+/// verb. Asked for ONE rung it sets `SharedBy::these(1)`, so that rung gets the
+/// full ceiling and every support lane — and a caller running the eight in
+/// sequence gets both a deeper search per rung and a row after each one, rather
+/// than eight starved rungs and nothing until they all finish.
+///
+/// It takes the same `auto` token: support derived per rung from that rung's own
+/// bars, nothing typed.
+fn range_rung_arm(
+    out: &mut String,
+    vendor: &str,
+    underlying: &str,
+    rung: &str,
+    from: (&str, &str),
+    to: (&str, &str),
+    support_ppm: &str,
+) -> u8 {
+    let Some(known) = EVERY_RUNG.iter().find(|r| **r == rung) else {
+        return refuse(
+            out,
+            &format!(
+                "`{rung}` is not a rung this engine sweeps. The eight are: {}",
+                EVERY_RUNG.join(", ")
+            ),
+        );
+    };
+    match (
+        from.0.parse::<u16>(),
+        from.1.parse::<u8>(),
+        to.0.parse::<u16>(),
+        to.1.parse::<u8>(),
+        parse_support_choice(support_ppm),
+    ) {
+        (Ok(fy), Ok(fm), Ok(ty), Ok(tm), Ok(h)) => {
+            let text = range_over(vendor, underlying, &[known], (fy, fm), (ty, tm), h);
+            let refused = carries_refusal(&text);
+            out.push_str(&text);
+            if refused { MISUSED } else { OK }
+        }
+        (Err(_), _, _, _, _) | (_, _, Err(_), _, _) => {
+            refuse(out, "YEAR must be a number like 2026")
+        }
+        (_, Err(_), _, _, _) | (_, _, _, Err(_), _) => refuse(out, "MONTH must be 1..=12"),
+        (_, _, _, _, Err(why)) => refuse(out, why),
+    }
+}
+
 fn range_all_arm(
     out: &mut String,
     vendor: &str,
@@ -1341,6 +1415,9 @@ pub fn run(args: &[String], out: &mut String) -> u8 {
             elite_arm(out, v, u, r, (fy, fm, ty, tm), (pts, n))
         }
         ["range-all", v, u, fy, fm, ty, tm, mh] => range_all_arm(out, v, u, (fy, fm), (ty, tm), mh),
+        ["range-rung", v, u, r, fy, fm, ty, tm, mh] => {
+            range_rung_arm(out, v, u, r, (fy, fm), (ty, tm), mh)
+        }
         ["ledger-all", v, fy, fm, ty, tm, sup, pts, root] => {
             ledger_all_arm(out, v, (fy, fm), (ty, tm), (sup, pts), root, false)
         }
@@ -1407,7 +1484,7 @@ fn unmatched(word: &str, given: usize) -> String {
 /// So it is written down, and `every_command_is_listed_in_both_places` asserts
 /// the list, the dispatch and the usage all name the same set. The duplication
 /// is real; the test is what makes it safe.
-const COMMANDS: [&str; 18] = [
+const COMMANDS: [&str; 19] = [
     "audit",
     "audit-range",
     "audit-stored",
@@ -1419,6 +1496,7 @@ const COMMANDS: [&str; 18] = [
     "ledger-all",
     "ledger-v6",
     "range-all",
+    "range-rung",
     "results",
     "screen",
     "sweep",
