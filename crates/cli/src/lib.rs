@@ -3562,7 +3562,7 @@ fn stop_floor_points(bars: &[indicators::Candle]) -> i64 {
     points.max(1)
 }
 
-fn grid_step_ppm(bars: &[indicators::Candle]) -> i64 {
+fn grid_step_ppm(bars: &[indicators::Candle], hold: usize) -> i64 {
     // NO PRICE, NO POINTS, NO REFERENCE -- THE LADDER IS SIZED IN THE UNIT THE
     // ENGINE ALREADY MEASURES IN.
     //
@@ -3582,6 +3582,25 @@ fn grid_step_ppm(bars: &[indicators::Candle]) -> i64 {
     // -- chosen as a RESOLUTION, not as a price, so it is right on an
     // instrument that moves eight points a day and on one that moves four
     // hundred.
+    // OVER THE HOLD, NOT OVER ONE BAR, and this is the SECOND axis that needed
+    // it. The stop ladder was fixed first; the target and trailing ladders are
+    // stepped by this figure, and at a single bar it produced a step of 16 ppm =
+    // 0.27 index points, with the widest trailing rung near 2.7 -- every rung
+    // inside a typical 6.4-point bar. `Rules::protects` REQUIRES a trailing
+    // order for admission, so the pass mark demanded an exit any single bar
+    // removes. `Levels::stops_ppm`' own doc named the gap: "The stop is the one
+    // axis with a physical floor... Targets and trails keep the derived step."
+    //
+    // Scaled by the WINDOW travel rather than the bar range: a hold of 1 is the
+    // old figure exactly, so the 1-minute rung does not move.
+    let travel = window_range_percentile(bars, hold, 1, 2);
+    let one_bar = range_percentile(bars, 1, 2);
+    // The ratio the hold widens the scale by, in hundredths, floored at 1.00 so
+    // a quieter window can never make the ladder FINER than one bar's.
+    let widen = match (travel, one_bar) {
+        (Some(t), Some(b)) if b > 0 => t.saturating_mul(100).saturating_div(b).max(100),
+        _ => 100,
+    };
     let mut ranges: Vec<i64> = bars
         .iter()
         .filter(|b| b.close > 0)
@@ -3630,7 +3649,15 @@ fn grid_step_ppm(bars: &[indicators::Candle]) -> i64 {
             }
         },
     };
-    median.checked_div(resolution).unwrap_or(median).max(1)
+    // WIDENED BY THE HOLD. `widen` is 100 at a hold of one bar, so the figure is
+    // unchanged there and grows with the travel the position is exposed to.
+    median
+        .saturating_mul(widen)
+        .checked_div(100)
+        .unwrap_or(median)
+        .checked_div(resolution)
+        .unwrap_or(median)
+        .max(1)
 }
 
 /// The reward-to-risk ratios the grid pairs each stop with, in hundredths.
@@ -3914,7 +3941,9 @@ fn grid_rungs(bars: &[indicators::Candle]) -> usize {
         return n.min(rungs_within_cell_budget()).max(2);
     }
     let reference = reference_price(bars);
-    let step_points = ppm_to_points_at(grid_step_ppm(bars), reference).max(1);
+    // ONE BAR: this sizes a DISPLAY rung count, not a priced ladder, and it has
+    // no hold in scope. A hold of 1 is the figure this function has always used.
+    let step_points = ppm_to_points_at(grid_step_ppm(bars, 1), reference).max(1);
     let cap = max_stop_points(bars);
     // At least two rungs, so a ladder always offers a tighter and a looser
     // choice rather than one level dressed as a grid.
@@ -6821,7 +6850,7 @@ fn trade_and_screen<'a>(
         side,
         grid::Levels {
             rungs: grid_rungs(bars),
-            step_ppm: Some(grid_step_ppm(bars)),
+            step_ppm: Some(grid_step_ppm(bars, horizon.as_bars() as usize)),
             forced: (selected.rules.max_mae_ppm > 0).then_some(selected.rules.max_mae_ppm),
             ratios: true,
             stops_ppm: &stop_rungs,
@@ -7958,7 +7987,8 @@ fn win_rate_rungs(trades: u64) -> Vec<i64> {
 fn stop_rungs_in_points(bars: &[indicators::Candle]) -> Vec<i64> {
     let reference = reference_price(bars);
     let per_point = points_to_ppm_at(1, reference).max(1);
-    let step = grid_step_ppm(bars);
+    // ONE BAR, as above: a points-facing display ladder with no hold in scope.
+    let step = grid_step_ppm(bars, 1);
     (1..=grid_rungs(bars))
         .filter_map(|i| i64::try_from(i).ok())
         .map(|i| {
@@ -8658,7 +8688,10 @@ fn policy_of(
         // and the grid keeps changing. Two runs at 40 and at 200 can share a
         // rung count, hold different grids, produce different answers and carry
         // the same `RunId`. The step itself is folded so they cannot.
-        u64::try_from(grid_step_ppm(bars)).unwrap_or(u64::MAX),
+        // THE HOLD IS ALREADY AN IDENTITY TERM, and the step now depends on it, so
+        // hashing the resolved step keeps the fingerprint naming the ladder that
+        // was actually priced rather than a one-bar figure no run used.
+        u64::try_from(grid_step_ppm(bars, horizon.as_bars() as usize)).unwrap_or(u64::MAX),
         // THE FIFTEENTH: the holding period, and it is the term that was missing
         // longest -- since before the knob existed.
         //
@@ -10094,7 +10127,7 @@ fn screen<'a>(
     // the other three were left in the loop. Parallelising the loop hid the
     // redundancy behind more cores rather than removing it.
     let rungs = grid_rungs(bars);
-    let step_ppm = grid_step_ppm(bars);
+    let step_ppm = grid_step_ppm(bars, horizon.as_bars() as usize);
 
     // ACROSS EVERY CORE. This was a sequential `for` over up to `screen_cap()`
     // -- ten thousand -- combinations, each pricing a FULL exit grid over every
@@ -10398,6 +10431,24 @@ fn screen<'a>(
             |c| (c.weakest_bp(), c.worst_day.saturating_neg()),
         );
         core::cmp::Reverse((
+            // PASS LEADS. A row that cleared the operator's stated policy ranks
+            // above one that did not, whatever its money says.
+            //
+            // This key was removed on the argument that the money order is the
+            // interesting one, and that was right while `admits` could empty the
+            // page -- it cannot any more, because `shown_cell` falls back past it
+            // and `screen_cascade` keeps the ranking. So the two reasons to leave
+            // it out are both gone, and the reason to put it back is measured:
+            // on a real 60-minute run every one of the ten displayed rows failed
+            // the run's OWN win-rate rule by forty points and was still headed
+            // "TOP COMBINATIONS". An operator reading that list cannot tell which
+            // rows he would actually be allowed to trade.
+            //
+            // It leads rather than replaces: inside the admitted group and inside
+            // the refused group, the calendar and money keys order exactly as
+            // before, so nothing about the existing ranking is lost -- the list
+            // is partitioned, not resorted.
+            r.admitted,
             weakest,
             worst_period,
             r.cell.return_over_drawdown(),
@@ -10672,7 +10723,7 @@ fn measure_top(
             side,
             grid::Levels {
                 rungs: grid_rungs(bars),
-                step_ppm: Some(grid_step_ppm(bars)),
+                step_ppm: Some(grid_step_ppm(bars, horizon.as_bars() as usize)),
                 forced: (rules.max_mae_ppm > 0).then_some(rules.max_mae_ppm),
                 ratios: true,
                 stops_ppm: &stop_rungs_again,
@@ -14297,14 +14348,23 @@ fn record_frontier(
     // faithful ordering rather than a second invented one.
     let mut ordered: Vec<&&runner::rank::Scored> = by_evidence.iter().collect();
     ordered.sort_by_key(|scored| {
+        // PASS LEADS HERE TOO, matching the report's own order. A row the report
+        // ranks first because it cleared the policy must not appear ninth on the
+        // page; that divergence is the defect this whole function was rewritten
+        // to remove, and reintroducing it on a different key would be the same
+        // bug wearing a new number.
         priced.get(&scored.mask.words()).map_or(
             // UNPRICED SORTS LAST, and `i64::MIN` is what says so. A zeroed row
             // is not a row that lost nothing; it is a row nothing measured.
-            (true, core::cmp::Reverse((i64::MIN, i64::MIN, i64::MIN))),
+            (
+                true,
+                core::cmp::Reverse((false, i64::MIN, i64::MIN, i64::MIN)),
+            ),
             |(cell, _)| {
                 (
                     false,
                     core::cmp::Reverse((
+                        rules.admits(cell),
                         cell.return_over_drawdown(),
                         cell.reward_to_risk_bp(),
                         cell.pessimistic,
@@ -22322,7 +22382,7 @@ mod tests {
                 // derived count made this test take over a minute and proved
                 // nothing the two-rung grid does not.
                 rungs: 2,
-                step_ppm: Some(grid_step_ppm(&bars)),
+                step_ppm: Some(grid_step_ppm(&bars, 1)),
                 forced: None,
                 ratios: false,
                 stops_ppm: &stop_rungs,
