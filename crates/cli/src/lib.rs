@@ -15809,7 +15809,41 @@ fn audit_bars(
         // The row is written BEFORE the report is returned, so a reader who
         // sees `NOT_RECORDED` in the text still finds the run in the ledger,
         // marked by its zero trade count rather than absent.
+        // THE TEN ROWS EXIST EVEN HERE, AND THIS PATH THREW THEM AWAY.
+        //
+        // `by_evidence` is the closed frontier the sweep ranked and `priced`
+        // holds every cell the screen measured. What failed above is the
+        // SELECTION -- no single row cleared the operator's policy -- and that
+        // is a verdict about the rows, not their absence. Recording the ledger
+        // row alone left `frontier.bin` without a block for this identity, so
+        // `/frontier.json` answered 400 and the operator's page showed one row
+        // it could not open. That is the whole complaint, at its last remaining
+        // source.
+        //
+        // Written BEFORE the ledger row on purpose: `Frontier::of_run` hides a
+        // block from read-only callers until the parent ledger row exists, so
+        // preparing first and appending the parent second is the ordering the
+        // success path already uses. A failure here is reported and the ledger
+        // row is still written -- a run that measured something must never
+        // vanish because its detail file refused.
         if let (Some(into), Some(run_id)) = (recording, id) {
+            match record_frontier(into.root, run_id, &by_evidence, rules, &priced) {
+                Ok((said, rows)) => {
+                    let _ = writeln!(
+                        out,
+                        "  the ranked frontier is recorded regardless: {rows} row(s). \
+                         Nothing was ADMITTED, which is a verdict about these rows \
+                         rather than a reason to withhold them.{said}"
+                    );
+                }
+                Err(why) => {
+                    let _ = writeln!(
+                        out,
+                        "  the ranked frontier could NOT be prepared: {why}\n  \
+                         The ledger row below still records the sweep."
+                    );
+                }
+            }
             match record_swept_run(
                 into,
                 run_id,
