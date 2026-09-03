@@ -67,7 +67,8 @@ const row = (rank, admitted) => ({
     trades: true,
     assurance: admitted,
     all: admitted,
-    stop_unchecked: true
+    stop_unchecked: true,
+    protective_exits_unchecked: true
   }
 });
 
@@ -208,7 +209,15 @@ test('raw cell totals, every derived figure, and every rule verdict must agree e
     ['average win', (payload) => (payload.rows[0].avg_win += 1)],
     ['average loss', (payload) => (payload.rows[0].avg_loss -= 1)],
     ['individual verdict', (payload) => (payload.rows[0].meets.assurance = false)],
-    ['unchecked stop', (payload) => (payload.rows[0].meets.stop_unchecked = false)]
+    ['unchecked stop', (payload) => (payload.rows[0].meets.stop_unchecked = false)],
+    // A row claiming the PROTECTIVE-EXIT rule was checked is refused for the
+    // same reason as the stop: `frontier::Row` drops `stop`, `target`, `tsl`
+    // and `ttp`, so nothing downstream can answer that rule from this payload.
+    // A server asserting otherwise is asserting a measurement it did not take.
+    [
+      'unchecked protective exits',
+      (payload) => (payload.rows[0].meets.protective_exits_unchecked = false)
+    ]
   ];
   for (const [name, mutate] of cases) {
     const payload = validPayload();

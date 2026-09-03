@@ -390,7 +390,7 @@ fn write_rows(out: &mut String, rows: &[cli::frontier::Row], rules: &cli::Rules)
         let _ = std::fmt::Write::write_fmt(
             &mut *out,
             format_args!(
-                r#"{{"rank":{},"direction":"{}","mask_words":["{}","{}","{}","{}","{}","{}"],"hits":{},"n":{},"mean_milli_paisa":{},"t_milli":{},"payoff_bp":{},"edge_wins":{},"priced":{},"trades":{},"wins":{},"losses":{},"pessimistic":{},"worst_trade":{},"max_drawdown":{},"min_win":{},"win_rate_bp":{},"reward_to_risk_bp":{},"return_over_drawdown":{},"avg_win":{},"avg_loss":{},"gross_win":{},"gross_loss":{},"meets":{{"win_rate":{},"reward_to_risk":{},"return_over_drawdown":{},"trades":{},"assurance":{},"all":{},"stop_unchecked":{}}}}}"#,
+                r#"{{"rank":{},"direction":"{}","mask_words":["{}","{}","{}","{}","{}","{}"],"hits":{},"n":{},"mean_milli_paisa":{},"t_milli":{},"payoff_bp":{},"edge_wins":{},"priced":{},"trades":{},"wins":{},"losses":{},"pessimistic":{},"worst_trade":{},"max_drawdown":{},"min_win":{},"win_rate_bp":{},"reward_to_risk_bp":{},"return_over_drawdown":{},"avg_win":{},"avg_loss":{},"gross_win":{},"gross_loss":{},"meets":{{"win_rate":{},"reward_to_risk":{},"return_over_drawdown":{},"trades":{},"assurance":{},"all":{},"stop_unchecked":{},"protective_exits_unchecked":{}}}}}"#,
                 row.rank,
                 row.direction.as_str(),
                 row.mask_words[0],
@@ -427,6 +427,7 @@ fn write_rows(out: &mut String, rows: &[cli::frontier::Row], rules: &cli::Rules)
                 v.assurance,
                 v.admitted,
                 v.stop_unchecked,
+                v.protective_exits_unchecked,
             ),
         );
     }

@@ -2754,12 +2754,36 @@ pub struct Verdict {
     /// rate, not the observed rate.
     pub assurance: bool,
     /// Every rule above holds. **Not "every rule holds"** — see
-    /// [`Self::stop_unchecked`].
+    /// [`Self::stop_unchecked`] and [`Self::protective_exits_unchecked`].
     pub admitted: bool,
     /// Always `true`. The stop rule was not evaluated because the row does not
     /// carry `worst_mae`, and a reader must be told that rather than shown a
     /// pass.
     pub stop_unchecked: bool,
+    /// Always `true`. The PROTECTIVE-EXIT rule was not evaluated either, and
+    /// for the same reason: [`Row`] does not carry the exit shape.
+    ///
+    /// # This flag exists because its absence was a lie on the page
+    ///
+    /// `Rules::require_protective_exits` refuses any cell without a stop and a
+    /// trailing order. [`Row::of`] copies a cell's MONEY and drops `stop`,
+    /// `target`, `tsl` and `ttp` entirely, so this type cannot answer the rule
+    /// — and it did not say so. `/frontier.json` emitted `meets.all` and the
+    /// browser rendered a green **PASS** pill for a row whose cell may have had
+    /// no stop at all.
+    ///
+    /// The asymmetry was the defect, not the absence. `stop_unchecked` already
+    /// says *"we did not measure this"* for `max_mae_ppm`, precisely so a
+    /// missing measurement and a passed rule never render alike. This rule was
+    /// missing in the second way — silently — which is the failure wearing a
+    /// success's clothes `CLAUDE.md` §4 bans.
+    ///
+    /// Making it a FIELD rather than fixing the format is deliberate. Carrying
+    /// the exit shape would be a version 6 and a wider row, and the rule
+    /// governs SELECTION, which happened before the row was written. What a
+    /// reader needs is not the shape but the knowledge that this verdict does
+    /// not speak for it.
+    pub protective_exits_unchecked: bool,
     /// Whether this combination was ever priced. An unpriced row fails every
     /// rule on zeros, which is honest but is not the same claim as "priced and
     /// it failed" — the reader needs both.
@@ -2798,8 +2822,14 @@ impl Row {
             return_over_drawdown,
             trades,
             assurance,
+            // FIVE RULES, AND THE NAME SAYS FIVE. Two more exist and neither
+            // can be answered from a `Row`: the stop ceiling needs `worst_mae`
+            // and the protective-exit rule needs the exit shape, and this type
+            // carries neither. Both are reported unchecked rather than folded
+            // in as passes.
             admitted: win_rate && reward_to_risk && return_over_drawdown && trades && assurance,
             stop_unchecked: true,
+            protective_exits_unchecked: true,
             priced: true,
         }
     }

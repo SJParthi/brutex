@@ -41,7 +41,8 @@ const VERDICT_BOOLEANS = Object.freeze([
   'trades',
   'assurance',
   'all',
-  'stop_unchecked'
+  'stop_unchecked',
+  'protective_exits_unchecked'
 ]);
 const I64_MIN = -(1n << 63n);
 const I64_MAX = (1n << 63n) - 1n;
@@ -328,7 +329,8 @@ export function validateFrontierPayload(input, expectedIdentity = undefined) {
       row.meets.trades !== expectedMeets.trades ||
       row.meets.assurance !== expectedMeets.assurance ||
       row.meets.all !== verdict ||
-      row.meets.stop_unchecked !== true
+      row.meets.stop_unchecked !== true ||
+      row.meets.protective_exits_unchecked !== true
     ) {
       return refused(`/frontier.json rows[${at}].meets does not match its raw cell and run rules.`);
     }

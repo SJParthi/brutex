@@ -5871,7 +5871,7 @@
       >unpriced</span
     >
   {:else if meets.all}
-    <span class="vp vp-pass" title="Every checkable rule met. The stop rule is not checked.">PASS</span>
+    <span class="vp vp-pass" title="Every CHECKABLE rule met. Two rules are not checked here and are not claimed as passed: the stop ceiling (this row carries no worst_mae) and the protective-exit rule (this row carries no exit shape, so a cell with no stop cannot be told from one with a stop).">PASS</span>
   {:else}
     {@const failed = [
       !meets.win_rate && 'win rate',
@@ -5880,7 +5880,7 @@
       !meets.trades && 'trade count',
       !meets.assurance && 'assurance'
     ].filter(Boolean)}
-    <span class="vp vp-fail" title="Fails: {failed.join(', ')}. The stop rule is not checked."
+    <span class="vp vp-fail" title="Fails: {failed.join(', ')}. The stop ceiling and the protective-exit rule are not checked here."
       >FAIL <i>{failed.length}</i></span
     >
   {/if}
