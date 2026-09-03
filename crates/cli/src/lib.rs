@@ -8746,6 +8746,12 @@ fn hold_return_over_drawdown_bp(bars: &[indicators::Candle]) -> Option<i64> {
 /// below zero is not a rate; both fall back to the stated default rather than
 /// producing an unsatisfiable pair, which `assurance_floor_bp` records as the
 /// failure that cannot be told apart from an honest answer.
+#[expect(
+    dead_code,
+    reason = "correct arithmetic for a MEAN/MEAN comparison the engine no longer \
+              makes; it was enforced against a MIN/MAX statistic and was \
+              therefore unsatisfiable. Its tests still bind the derivation."
+)]
 const fn breakeven_rr_bp(win_rate_bp: i64) -> i64 {
     if win_rate_bp <= 0 || win_rate_bp >= 10_000 {
         return 125;
@@ -10212,6 +10218,13 @@ fn rules_banner(rules: Rules, passed: usize, considered: usize) -> String {
 /// It costs one grid rebuild per measured row, which is why the band is bounded
 /// rather than the whole screen: measuring ten thousand rows to print ten is the
 /// memory and time the bounded heap in `rank` exists to avoid.
+#[expect(
+    dead_code,
+    reason = "the band is gone -- `measure_top` now measures every priced row, \
+              because an unmeasured row keys at i64::MIN in the calendar sort \
+              and can never climb. Kept with its doc so the defect it caused is \
+              not rediscovered from scratch."
+)]
 const fn measured_band(top: usize) -> usize {
     const WIDEN: usize = 8;
     const FLOOR: usize = 32;
@@ -10237,7 +10250,34 @@ fn measure_top(
     // screening pass produced, so the cell this re-walks is the cell the row
     // above reports.
     let stop_rungs_again = stop_ladder_ppm(bars);
-    for row in rows.iter_mut().take(measured_band(rules.top)) {
+    // EVERY PRICED ROW, NOT A BAND. The band was the last constant that could
+    // permanently exclude a combination from the reported top ten.
+    //
+    // # Why a prefix is unsound here, not merely narrow
+    //
+    // The calendar re-sort keys an UNMEASURED row at `(i64::MIN, i64::MIN)` and
+    // `Reverse` sinks it below every measured row. And the calendar terms sort
+    // FIRST — weakest grain, then worst day. So a combination steady across all
+    // seven grains but ranked 81st on money was never measured, could never
+    // climb, and the report did not say it had not been asked.
+    //
+    // Because the calendar terms lead, ANY row can in principle be promoted past
+    // the tenth. There is therefore no sound prefix: the smallest correct band
+    // is every row.
+    //
+    // # The cost objection was wrong, and by a large factor
+    //
+    // The removed doc argued "measuring ten thousand rows to print ten is the
+    // memory the bounded heap exists to avoid". It priced the band against
+    // `screen_cap`. The real comparison is against the pass that just ran:
+    //
+    //   this loop            ONE `grid::evaluate` per row
+    //   the priced pass      TWO per candidate -- `[Side::Long, Side::Short]`
+    //
+    // So measuring every priced row is **+50% on the priced phase**, not a
+    // thousandfold. `rows` is already bounded by `priced_cap`; nothing here
+    // widens what was priced, it only stops discarding what was.
+    for row in rows.iter_mut() {
         // THE SIDE THE ROW WAS PRICED AT, NOT THE PROXY, and getting this wrong
         // was worse than opposite — it was cross-wired.
         //
