@@ -7081,23 +7081,54 @@ impl Rules {
     /// A fixed `target` is deliberately NOT required. It is the one exit that
     /// can only truncate a winner, and requiring it alongside a trailing order
     /// would forbid the shape the operator actually asked for.
-    /// Whether the best-case fill total clears `required` hundredths of the
-    /// worst-case one.
+    /// Whether the worst-case fill total is a profit AND the best case is
+    /// within `required_bp` hundredths of it.
     ///
-    /// # Both must be profitable, and that is the whole subtlety
+    /// # The comparison runs the other way from the words, and the source says why
     ///
-    /// A bare `optimistic >= required * pessimistic / 100` is trivially true
-    /// whenever `pessimistic` is negative — `+1252 >= 1.5 × −2095` — so it would
-    /// admit every losing strategy and rule out nothing. Those are the operator's
-    /// own measured figures from a 60-minute run.
+    /// The operator asked for *"our best case fill should be at least minimum
+    /// 1.5 times greater than worst case fills"*, and this first shipped as
+    /// `optimistic >= 150 * pessimistic / 100`. That is the literal reading and
+    /// it is backwards, which `runner::grid::Cell::optimistic`'s own doc
+    /// establishes rather than any opinion here:
     ///
-    /// The rule asks how much of a result is fill ASSUMPTION rather than edge,
-    /// and that question only has an answer once the pessimistic reading is
-    /// already a profit. So a non-positive worst case fails outright.
+    /// > *"the gap between them is the MEASUREMENT ERROR, not an estimate to
+    /// > prefer… Two setups with the same pessimistic total, one with a spread
+    /// > of 200 paisa and one with 8,000, are not equally trustworthy — the
+    /// > second is telling you it rests on a coin flip inside every bar."*
+    ///
+    /// These are not two outcomes. They are one result priced twice: when a
+    /// one-minute bar touches both the stop and the target, the order is
+    /// unknowable, so `pessimistic` resolves it as the stop and `optimistic` as
+    /// the target. `optimistic >= pessimistic` ALWAYS, by construction, and the
+    /// ratio is a measure of how much of the answer the data cannot supply.
+    ///
+    /// So demanding a ratio of at least 1.5 demands at least fifty percent
+    /// measurement error — it admits only the setups that rest on a coin flip,
+    /// and refuses every setup whose two readings agree. Nothing in the workspace
+    /// ranks on `optimistic` for the same reason;
+    /// `no_selector_can_be_moved_by_the_optimistic_figure` holds that as a
+    /// property.
+    ///
+    /// What the operator is protecting against is a total that evaporates under
+    /// adverse fills, and both halves below serve that:
+    ///
+    /// 1. `pessimistic <= 0` refuses outright — a result that loses money under
+    ///    the worst reading has no headroom to measure. This half was right in
+    ///    the first version and is unchanged.
+    /// 2. `optimistic <= required * pessimistic / 100` caps the bracket, so 150
+    ///    now reads "the best case may exceed the worst by at most half". A
+    ///    setup whose readings agree passes with the widest margin, which is the
+    ///    correct direction.
     ///
     /// Multiplied before dividing, and in `i64`: `pessimistic` is paisa and the
     /// products stay far inside the range. Saturating rather than wrapping, so a
     /// pathological total refuses rather than wrapping into a pass.
+    ///
+    /// THIS DEMOTES, IT DOES NOT DELETE. `shown_cell` falls back past `admits`,
+    /// and `screen_cascade` no longer discards the ranking when nothing is
+    /// admitted, so a rung whose every candidate fails this still publishes its
+    /// top ten with `admitted 0 of 10` on its face.
     const fn fills_hold(required_bp: i64, cell: &grid::Cell) -> bool {
         if required_bp <= 0 {
             return true;
@@ -7105,7 +7136,7 @@ impl Rules {
         if cell.pessimistic <= 0 {
             return false;
         }
-        cell.optimistic.saturating_mul(100) >= cell.pessimistic.saturating_mul(required_bp)
+        cell.optimistic.saturating_mul(100) <= cell.pessimistic.saturating_mul(required_bp)
     }
 
     const fn protects(required: bool, cell: &grid::Cell) -> bool {
@@ -9380,9 +9411,32 @@ fn screen_cascade<'a>(
             // coming" when none is. The banner says what did not run, which is
             // true either way.
             let _ = writeln!(out, "{UNVALIDATED}");
+            // THE RANKING SURVIVES THE SKIPPED LADDER. This returned
+            // `selected: None`, and that one word is what emptied the page.
+            //
+            // The optimisation above is real and stays: a search step does not
+            // walk the tier ladder. But the tier ladder answers "what is the
+            // strictest standard anything DID meet" -- it is not what produced
+            // `yours.selected`. `final_selection` had ALREADY chosen the
+            // best-ranked row that traded, by the comment forty lines up, before
+            // this branch was reached. Discarding it threw away a computed answer
+            // to buy nothing.
+            //
+            // MEASURED, on a 60-minute NIFTY run over 2020-01..2026-07:
+            // 11,989,711 combinations, 10,000 retained, 577 closed, all 577
+            // priced through the exit grid, none admitted -- and because of this
+            // line, ZERO frontier rows and zero trade rows. `chosen: None` at the
+            // `audit_bars` call site turns into a ledger row with an all-zero
+            // mask, and the browser is served one empty row it cannot open.
+            //
+            // "Nothing cleared your rules" and "there is nothing to show you" are
+            // different facts. `admitted_any` carries the first one and is
+            // returned unchanged beside this, so no caller loses the bit; the
+            // descent reads `YOUR RULES: MET` out of the TEXT and never looks at
+            // `selected`, so its verdict is untouched by this.
             return ScreenResult {
                 text: out,
-                selected: None,
+                selected: yours.selected,
                 priced: yours.priced,
                 admitted_any: yours.admitted_any,
             };
@@ -10549,6 +10603,17 @@ fn why_refused(cell: &grid::Cell, rules: Rules, steady: bool) -> &'static str {
     // here -- two `Option::is_some` reads against six arithmetic derivations.
     if !Rules::protects(rules.require_protective_exits, cell) {
         "exits"
+    } else if !Rules::fills_hold(rules.min_fill_headroom_bp, cell) {
+        // NAMED, because a rule with no arm here prints `-` -- the same glyph a
+        // PASSING row prints. This function's own comment calls that "the failure
+        // wearing a success's clothes §4 bans, in a single character", and this
+        // rule shipped without an arm for exactly one build.
+        //
+        // Two findings share the label because they are one question: either the
+        // worst-case fill reading is a LOSS, or the two readings disagree by more
+        // than the operator will accept. Both say the total does not survive the
+        // fill assumption.
+        "fills"
     } else if rules.max_mae_ppm > 0 && cell.worst_mae > rules.max_mae_ppm {
         "MAE"
     } else if rules.min_rr_bp > 0 && cell.reward_to_risk_bp() < rules.min_rr_bp {
@@ -20321,16 +20386,31 @@ mod tests {
             measured.pessimistic
         );
 
-        let profitable = runner::grid::Cell {
-            pessimistic: 209_570,
-            optimistic: 125_212,
+        let coin_flip = runner::grid::Cell {
+            pessimistic: 100_000,
+            optimistic: 800_000,
             ..protected_cell(1)
         };
         assert!(
-            !crate::Rules::fills_hold(150, &profitable),
-            "best {} is BELOW worst {}, let alone 1.5x it",
-            profitable.optimistic,
-            profitable.pessimistic
+            !crate::Rules::fills_hold(150, &coin_flip),
+            "a worst case of {} against a best of {} is eight-to-one intra-bar \
+             ambiguity: the answer is a coin flip, not an edge",
+            coin_flip.pessimistic,
+            coin_flip.optimistic
+        );
+
+        // AND THE AGREEING SETUP PASSES, which is the direction that was wrong.
+        // Equal readings mean no selected exit bar was ambiguous at all -- the
+        // most trustworthy result this data can produce -- and the first version
+        // of this rule refused exactly that while admitting `coin_flip` above.
+        let agrees = runner::grid::Cell {
+            pessimistic: 100_000,
+            optimistic: 100_000,
+            ..protected_cell(1)
+        };
+        assert!(
+            crate::Rules::fills_hold(150, &agrees),
+            "two readings that agree exactly is the best case, not the worst"
         );
     }
 
@@ -20353,20 +20433,24 @@ mod tests {
             "30000 is exactly 1.5 x 20000"
         );
 
-        let under = runner::grid::Cell {
+        let narrower = runner::grid::Cell {
             optimistic: 29_999,
             ..at
         };
         assert!(
-            !crate::Rules::fills_hold(150, &under),
-            "one paisa under 1.5x"
+            crate::Rules::fills_hold(150, &narrower),
+            "one paisa NARROWER than the cap is LESS intra-bar ambiguity, so it \
+             passes -- the first version of this rule refused it"
         );
 
-        let over = runner::grid::Cell {
+        let wider = runner::grid::Cell {
             optimistic: 30_001,
             ..at
         };
-        assert!(crate::Rules::fills_hold(150, &over), "one paisa over 1.5x");
+        assert!(
+            !crate::Rules::fills_hold(150, &wider),
+            "one paisa WIDER is more ambiguity than the operator accepts"
+        );
     }
 
     /// Zero drops the rule, matching every other floor in [`Rules`].
