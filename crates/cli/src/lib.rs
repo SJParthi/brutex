@@ -6669,6 +6669,7 @@ fn trade_and_screen<'a>(
         text: screened,
         selected,
         priced,
+        admitted_any: _,
     } = screen_cascade(
         bars,
         column,
@@ -8455,6 +8456,17 @@ struct ScreenSelection<'a> {
 struct ScreenResult<'a> {
     text: String,
     selected: Option<ScreenSelection<'a>>,
+    /// Did ANY row clear every stated rule?
+    ///
+    /// NOT the same question as `selected.is_some()`, and conflating the two
+    /// made the banner lie. `final_selection` now falls back to the best-ranked
+    /// row that traded when nothing passed -- so a run always has a subject, and
+    /// `selected` is almost always `Some`. Switching the "YOUR RULES: MET"
+    /// banner on it printed that headline directly above a table reading "0 of N
+    /// -- NOTHING PASSED".
+    ///
+    /// This answers the question the banner is actually asking.
+    admitted_any: bool,
     /// Cells priced by this exact policy/cap only. Cascade tiers replace this
     /// map; they never merge into it.
     priced: std::collections::HashMap<[u64; 6], (grid::Cell, Direction)>,
@@ -9211,7 +9223,14 @@ fn screen_cascade<'a>(
     // ladder below it is the fallback — the "what IS there" answer — and not a
     // replacement for the question that was asked.
     let yours = screen(bars, column, by_evidence, horizon, rules, recording);
-    if yours.selected.is_none() {
+    // THE BANNER ASKS "did anything PASS", not "is there a subject".
+    //
+    // `final_selection` now falls back to the best-ranked row that traded, so
+    // `selected` is almost always `Some` -- and switching on it printed
+    // "YOUR RULES: MET" directly above a table reading "0 of N, NOTHING
+    // PASSED". `admitted_any` is measured from the rows and answers the
+    // question the headline is actually making.
+    if !yours.admitted_any {
         // A SEARCH STEP STOPS HERE, AND THAT IS THE WHOLE COST.
         //
         // Below this point the cascade walks the generated tier ladder —
@@ -9249,6 +9268,7 @@ fn screen_cascade<'a>(
                 text: out,
                 selected: None,
                 priced: yours.priced,
+                admitted_any: yours.admitted_any,
             };
         }
         let _ = writeln!(
@@ -9282,6 +9302,7 @@ fn screen_cascade<'a>(
             text: out,
             selected: yours.selected,
             priced: yours.priced,
+            admitted_any: yours.admitted_any,
         };
     }
     let _ = writeln!(out);
@@ -9379,6 +9400,7 @@ fn screen_cascade<'a>(
                 text: out,
                 selected: None,
                 priced: final_priced,
+                admitted_any: false,
             };
         }
     }
@@ -9404,6 +9426,7 @@ fn screen_cascade<'a>(
             text: out,
             selected: body.selected,
             priced: body.priced,
+            admitted_any: body.admitted_any,
         };
     }
     let _ = writeln!(
@@ -9431,6 +9454,7 @@ fn screen_cascade<'a>(
         text: out,
         selected: None,
         priced: final_priced,
+        admitted_any: false,
     }
 }
 
@@ -10037,10 +10061,14 @@ fn screen<'a>(
 
     append_consistency(&mut out, &rows, rules.top);
     let selected = final_selection(&rows, rules);
+    // MEASURED FROM THE ROWS, not inferred from `selected`. This is the only
+    // place that can answer it, because it is the only place holding them.
+    let admitted_any = rows.iter().any(|row| row.admitted);
     ScreenResult {
         text: out,
         selected,
         priced,
+        admitted_any,
     }
 }
 
