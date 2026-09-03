@@ -172,11 +172,23 @@ pub async fn logs_json(
         axum::http::header::CONTENT_TYPE,
         "application/json; charset=utf-8",
     )];
-    let Some(dir) = log_dir() else {
+    // THE SAME FALL-THROUGH AS `logs_page`, AND IT MATTERS MORE HERE.
+    //
+    // This is the endpoint a poller reads, so a `503` here is what a live view
+    // would see forever while a sweep wrote thousands of records to the `cli`
+    // half. The server's own sink being absent says nothing about whether
+    // `cli` events exist -- and 2,090 of them existed when this was measured.
+    let cli_dir = crate::server::store_dir().ok().map(|s| cli_half(&s));
+    let (first, second) = match (log_dir(), cli_dir) {
+        (Some(served), cli) => (Some(served), cli),
+        (None, Some(cli)) => (Some(cli), None),
+        (None, None) => (None, None),
+    };
+    let Some(dir) = first else {
         return (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             json,
-            r#"{"error":"logging is not installed in this process, so there is no log to read"}"#
+            r#"{"error":"logging is not installed in this process and no store log directory could be resolved, so there is no log to read"}"#
                 .to_owned(),
         );
     };
@@ -184,15 +196,7 @@ pub async fn logs_json(
     (
         axum::http::StatusCode::OK,
         json,
-        json_over(
-            &dir,
-            crate::server::store_dir()
-                .ok()
-                .map(|s| cli_half(&s))
-                .as_deref(),
-            &asked,
-            sink_health().as_ref(),
-        ),
+        json_over(&dir, second.as_deref(), &asked, sink_health().as_ref()),
     )
 }
 
@@ -479,22 +483,46 @@ fn sink_json(health: Option<&telemetry::Health>) -> String {
 pub async fn logs_page(uri: axum::http::Uri) -> axum::response::Html<String> {
     let raw = uri.query().unwrap_or("");
     let asked = asked(raw);
-    let Some(dir) = log_dir() else {
-        return axum::response::Html(page_shell(
-            &asked,
-            "<p class=\"halt\"><b>No log</b>Logging is not installed in this \
-             process, so there is nothing to read. The server names the reason \
-             on stdout at startup.</p>",
-        ));
-    };
     // THE SECOND HALF IS RESOLVED FROM THE STORE, exactly as `logs_json` does
     // it. Bound to a local rather than written inline so the `Option<PathBuf>`
     // it borrows from plainly outlives the call -- and named `cli_dir` rather
     // than `cli`, which is a crate this one depends on.
     let cli_dir = crate::server::store_dir().ok().map(|s| cli_half(&s));
+    // THE SERVER'S OWN SINK BEING ABSENT IS NOT "NOTHING TO READ".
+    //
+    // This bailed on `log_dir()` alone, BEFORE `cli_dir` was ever consulted --
+    // so a server started without telemetry installed rendered "No log" while
+    // the operator's sweep was writing thousands of records to the `cli` half
+    // beside it. MEASURED, 2026-09-03: `<store>/logs/cli/events.ndjson` held
+    // **2,090 records** from a running sweep and this page showed none of them,
+    // under a sentence saying there was nothing to read.
+    //
+    // That is the same defect `page_over`'s own doc records for 2026-09-01, in
+    // a different place: the page that exists to show `cli` events could not
+    // show them, and said so in words that read as "none were written". §4
+    // bans a fallback that hides a failure; this is its mirror, a refusal that
+    // hides an answer.
+    //
+    // The `cli` half becomes the FIRST half when there is no server half. The
+    // footer names the directory it actually read, so the page still says
+    // exactly where its records came from -- it is one directory rather than
+    // two, and reporting that honestly is the whole difference.
+    let (first, second) = match (log_dir(), cli_dir) {
+        (Some(served), cli) => (Some(served), cli),
+        (None, Some(cli)) => (Some(cli), None),
+        (None, None) => (None, None),
+    };
+    let Some(dir) = first else {
+        return axum::response::Html(page_shell(
+            &asked,
+            "<p class=\"halt\"><b>No log</b>Logging is not installed in this \
+             process and no store log directory could be resolved, so there is \
+             nothing to read. The server names the reason on stdout at startup.</p>",
+        ));
+    };
     axum::response::Html(page_over(
         &dir,
-        cli_dir.as_deref(),
+        second.as_deref(),
         &asked,
         sink_health().as_ref(),
     ))
