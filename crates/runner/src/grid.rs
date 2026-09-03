@@ -41,15 +41,20 @@
 //! session's square-off, never on which variant is being evaluated. They are
 //! computed once per candidate entry, and every variant's exit is then one
 //! table choice and three integer compares. At the shipped four rungs that is
-//! `325 variants x 1,124 signals` — 365,300 lookups against 1,124 path walks,
-//! not 365,300 path walks.
+//! `625 variants x 1,124 signals` — 702,500 lookups against 1,124 path walks,
+//! not 702,500 path walks.
 //!
-//! **This paragraph has now been wrong three times, and each correction is why
+//! **This paragraph has now been wrong FOUR times, and each correction is why
 //! the count lives in exactly one function.** It read `400 variants` and
 //! `450,000`, which was `(rungs+1)^2` at twenty rungs from a two-ladder design —
 //! the trailing ladder had made the nest three deep without the arithmetic
 //! following it. It then read `125` and `140,500`, correct for a three-deep nest
-//! and wrong the moment the arming axis made it four. See [`variants`], which is
+//! and wrong the moment the arming axis made it four. It then read `325` and
+//! `365,300`, which was the same slip a fifth axis later: [`variants`] solves
+//! `(S+1) * [(T+1)(R+1) + T(T+1)/2 * R(R+1)/2]`, and at `DEFAULT_RUNGS = 4` that
+//! is `5 * [25 + 100]` = **625**, not 325. `cli`'s own cost table has carried
+//! 625 at four rungs the whole time, so the two documents disagreed and only the
+//! one beside the arithmetic was right. See [`variants`], which is
 //! the only place the number is computed and which now refuses two families of
 //! cell rather than one.
 //!

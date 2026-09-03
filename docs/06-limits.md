@@ -4700,17 +4700,29 @@ the source arrays with the crate's own hash:
   Total Market names is 7.6 steps, and 8.4 over 5,000 non-members — nothing is
   measurably slow, the constant is real, the number is wrong.
 
-### Floor-relative budgets: four of thirteen crates, was three
+### Floor-relative budgets: thirteen of thirteen crates — CLOSED
 
-`vocab`, `indicators` and `engine` carried one. **`core` now does too** (C-09b,
-D-0173): measured 33.8–36.0 floors against a budget of 110, sized on the worst
-observed run.
+`vocab`, `indicators` and `engine` carried one; `core` joined them (C-09b,
+D-0173) with measured 33.8–36.0 floors against a budget of 110.
 
-**Eight crates remain ratio-only** — `api`, `costs`, `greeks`, `lake`, `pull`,
-`runner`, `store`, `telemetry` — and a ratio cannot see a uniform slowdown, which
-is the regression that passed at 0.98x while running 174x slower. **OPEN**, and
-six of the eight were being edited by a second session at the time of writing, so
-they are not merely undone but currently untouchable.
+**This section read "Eight crates remain ratio-only … OPEN" and that is no longer
+true.** RE-MEASURED 2026-09-03 by counting `fn budget` across every bench:
+`api`, `cli`, `core`, `costs`, `engine`, `greeks`, `indicators`, `lake`, `pull`,
+`runner`, `store`, `telemetry` and `vocab` each define one — **thirteen of
+thirteen**. `crates/store/benches/ratio.rs` carries C-29 at 800 floors, which is
+one of the eight the old text named as missing.
+
+**What is NOT closed, and it is the half that matters.** A budget per CRATE is
+not a budget per OPERATION. Inside `engine`, `support_stays_within_its_budget`
+(C-E-05) is the only row with a floor; C-E-01/02/03/04/06/07/08/09/10/11 remain
+pure ratios. So the 174x-at-0.98x regression this section exists to describe is
+still reachable for ten of eleven engine rows. Worse for two of them:
+**C-E-10 and C-E-11 measure REPLICAS rather than the live path** — C-E-10 builds
+its own `HashSet<u32>` instead of calling `next_level`, and C-E-11 pushes into a
+fresh `Vec<Itemset>` and never touches `drain`. `docs/04-invariants.md:1920` and
+`:1921` carry status `—` and read *"pending rerun after production-shape
+correction"*, which is the honest state of both. **OPEN**, restated at the
+granularity where it is actually open.
 
 ### 37 hot paths have no bench at all
 
@@ -5599,9 +5611,22 @@ where gate 13 lives — the `language-purity` job installs **no toolchain**, on
 purpose, and its own header calls it *"no toolchain, no cache, seconds"*.
 
 Gaining the check means moving gate 13 into a toolchain job or adding a
-fourteenth. Either is a real decision about CI shape and cost, not a tidy-up, so
-it is **recorded here and not taken**. Until it is, this class is unguarded by
-name and the guarantee rests on the measurement above rather than on a gate.
+fourteenth. Either is a real decision about CI shape and cost, not a tidy-up.
+
+**IT WAS TAKEN, and this paragraph said otherwise for longer than it was true.**
+The text above read *"recorded here and not taken. Until it is, this class is
+unguarded by name and the guarantee rests on the measurement above rather than on
+a gate."* **Gate 13a — browser bindings are unreachable on the host graph** is at
+`.github/workflows/ci.yml:7500`, in the `build` job where a toolchain already
+exists, and it runs exactly the `cargo tree --workspace -i <binding>` check this
+section prescribed. D-0486.
+
+So the class IS guarded by name, and the honest residual is smaller and
+different: the gate proves the bindings are unreachable **on the host graph**,
+which is what matters for `cargo build`/`test`/`clippy` — it does not prove
+they are absent from `Cargo.lock`, and they are still in it. §2 bans a vendored
+binding as a DEPENDENCY, and an unreachable lock entry is not one; that
+distinction is the thing the gate encodes rather than a gap it leaves.
 
 ### What was actually wrong, and is now fixed
 
