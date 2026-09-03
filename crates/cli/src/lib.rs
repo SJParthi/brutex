@@ -11018,6 +11018,19 @@ struct RungRow {
     /// The report `one_rung` throws away answered it in six lines. Carrying
     /// those six costs about a thousandth of what the discard comment refuses.
     retention: Option<String>,
+    /// What the validation stack said, lifted out of the discarded report.
+    ///
+    /// **The engine pays for walk-forward, PBO and the bootstrap and shows the
+    /// operator none of them.** `IN_SAMPLE_WARNING` states it outright:
+    /// `range-all` "computes the walk-forward, the PBO and the bootstrap per
+    /// rung and discards the report that carries them". Measured against a real
+    /// 60-minute report, `Bonferroni`, `deflated`, `reality check`, `Sharpe`
+    /// and `slippage` appear zero times.
+    ///
+    /// Those tests are the whole answer to "is this a fluke", and a validated
+    /// run whose verdicts are dropped is strictly worse than an unvalidated
+    /// one: same silence, hours more cost.
+    validation: Option<String>,
 }
 
 /// Exact context shared by one rung's structural progress boundaries.
@@ -11246,6 +11259,7 @@ fn one_rung(
                 // NOTHING TO LIFT: this refuses before the sweep runs, so no
                 // report was built to carry a retention block.
                 retention: None,
+                validation: None,
             };
         }
     };
@@ -11260,6 +11274,7 @@ fn one_rung(
                 // NOTHING TO LIFT: this refuses before the sweep runs, so no
                 // report was built to carry a retention block.
                 retention: None,
+                validation: None,
             };
         }
     };
@@ -11274,6 +11289,7 @@ fn one_rung(
                 // NOTHING TO LIFT: this refuses before the sweep runs, so no
                 // report was built to carry a retention block.
                 retention: None,
+                validation: None,
             };
         }
     };
@@ -11389,6 +11405,7 @@ fn one_rung(
                     missing: Vec::new(),
                     excluded: stored::CalendarExclusion::none(),
                     retention: None,
+                    validation: None,
                 };
             }
         };
@@ -11426,6 +11443,7 @@ fn one_rung(
                     missing: Vec::new(),
                     excluded: stored::CalendarExclusion::none(),
                     retention: None,
+                    validation: None,
                 };
             }
         };
@@ -11476,6 +11494,7 @@ fn one_rung(
     // read this string for a refusal and for a not-recorded sentence; this is
     // the third question it answers and the only one nothing was asking.
     let retention = retention_note(&text);
+    let validation = validation_note(&text);
     let outcome = if let Some(why) = refusal_reason(&text) {
         // `refusal_reason` AND NOT `strip_prefix`, because there are three
         // spellings of a refusal and this arm knew one.
@@ -11555,6 +11574,7 @@ fn one_rung(
         missing,
         excluded,
         retention,
+        validation,
     }
 }
 
@@ -12958,6 +12978,22 @@ fn range_over_inner(
         let silent = row.outcome.as_ref().is_ok_and(|record| record.trades == 0);
         if let (true, Some(note)) = (silent, row.retention.as_ref()) {
             let _ = writeln!(out, "\n  {} PRODUCED NO TRADE. What survived:", row.rung);
+            for line in note.lines() {
+                let _ = writeln!(out, "  {line}");
+            }
+        }
+        // AND THE VALIDATION VERDICTS, FOR EVERY RUNG THAT HAS THEM.
+        //
+        // Not gated on `trades == 0` the way the retention block is: the
+        // retention block answers "why nothing", so it is only interesting when
+        // there IS nothing. These answer "is what you found real", which is the
+        // question a rung that DID trade raises.
+        //
+        // Absent on an unvalidated run, and correctly so -- the `UNVALIDATED`
+        // banner already says the stack did not run, and printing three empty
+        // headings would be a second way of saying the same thing.
+        if let Some(note) = row.validation.as_ref() {
+            let _ = writeln!(out, "\n  {} VALIDATION:", row.rung);
             for line in note.lines() {
                 let _ = writeln!(out, "  {line}");
             }
@@ -14755,6 +14791,55 @@ pub(crate) const NOT_RECORDED: &str = "RESULT NOT RECORDED";
 /// [`not_recorded_reason`], both of which already read this same string at the
 /// same call site. Returns `None` when the block is absent, which is every
 /// pre-sweep refusal.
+/// One named section, lifted out of a report that is about to be discarded.
+///
+/// Every section `runner::audit` renders is a heading on its own line followed
+/// by indented rows and terminated by a blank line, so the block's own shape is
+/// the terminator rather than a line count that would drift if a field were
+/// added.
+fn section_note(report: &str, head: &str) -> Option<String> {
+    let at = report.find(head)?;
+    let rest = report.get(at..)?;
+    Some(
+        rest.find("\n\n")
+            .map_or(rest, |end| rest.get(..end).unwrap_or(rest))
+            .to_owned(),
+    )
+}
+
+/// The validation stack's own verdicts, lifted before the report dies.
+///
+/// # The machinery was built, ran, and was thrown away
+///
+/// `one_rung` discards the long report. That is what hid the retention block,
+/// and it hides something larger: `IN_SAMPLE_WARNING`'s own text says
+/// `range-all` *"computes the walk-forward, the PBO and the bootstrap per rung
+/// **and discards the report that carries them**"*.
+///
+/// So a validated run pays for all three and shows the operator none of them.
+/// MEASURED against the 60-minute report: `Bonferroni`, `deflated`, `reality
+/// check`, `Sharpe` and `slippage` appear ZERO times, and walk-forward, PBO and
+/// bootstrap appear only inside the sentence saying they did not run.
+///
+/// Those are the tests that answer "is this the best of 148 billion draws or a
+/// real edge", which is the operator's own question about a 208-trade result
+/// selected from 11,989,711 combinations. Computing them and dropping them is
+/// worse than not computing them: it costs the time and leaves the same silence.
+///
+/// Returns `None` when the sections are absent, which is every unvalidated run —
+/// there the `UNVALIDATED` banner already says so and a second silence would be
+/// no worse than the first.
+fn validation_note(report: &str) -> Option<String> {
+    let blocks: Vec<String> = ["WALK-FORWARD", "OVERFITTING", "BOOTSTRAP"]
+        .into_iter()
+        .filter_map(|head| section_note(report, head))
+        .collect();
+    if blocks.is_empty() {
+        return None;
+    }
+    Some(blocks.join("\n"))
+}
+
 fn retention_note(report: &str) -> Option<String> {
     const HEAD: &str = "STREAMED RETENTION";
     let at = report.find(HEAD)?;
