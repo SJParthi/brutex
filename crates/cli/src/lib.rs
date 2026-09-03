@@ -9138,9 +9138,107 @@ fn screen<'a>(
     // sunk somewhere the reader will not look. Total P&L is volume times edge,
     // so this ranking does not reward a small sample either; the fluke risk a
     // floor stands in for belongs to win-RATE rankings, not to this one.
-    rows.sort_by_key(|r| core::cmp::Reverse(r.cell.pessimistic));
+    // RANKED ON THE OPERATOR'S CRITERIA, NOT ON NET ALONE.
+    //
+    // # What sorting on `pessimistic` actually produced
+    //
+    // The comment above says "sorting on the objective alone is the operator's
+    // stated aim". Net profit was never the stated aim. The aim, in the
+    // operator's own words, is *"very very less max drawdown"* and *"always
+    // focusing on highest profits"* and *"the rule is min(win) >= 3x
+    // max(loss)"* -- three quantities, of which `pessimistic` is one.
+    //
+    // MEASURED, and it is the reason this changed. A 15min sweep over
+    // 2020-01..2026-07 ranked its top ten as: net -₹20,766, -₹20,939, -₹20,998,
+    // -₹21,005 ... every row a loss, ordered least-bad first, each one printed
+    // under the heading "Top 10 combinations". Ranking on net alone cannot tell
+    // a profitable row from an unprofitable one -- it only orders them -- so
+    // when nothing is profitable the top of the table is the least-bad LOSER,
+    // presented exactly as a winner would be.
+    //
+    // # Why this needs no threshold, which is the point
+    //
+    // `return_over_drawdown` returns ZERO whenever `pessimistic <= 0`
+    // (`grid.rs:731`). So every losing cell scores zero on the first term and
+    // every profitable one scores above it: profitable rows sort above losers
+    // WITHOUT a floor deciding which is which. That matters because §6's
+    // argument against a depth parameter applies to a quality floor too -- a
+    // number an operator types is a number that can be typed wrongly, and a
+    // sweep that returns a blank page because the floor was one point too high
+    // has answered nothing.
+    //
+    // A ranking always returns the best ten that exist. If those ten are
+    // losses, the table says so in its own figures rather than by being empty.
+    //
+    // # The three terms, in the operator's order of priority
+    //
+    // 1. `return_over_drawdown` -- profit AND the worst fall, as one number.
+    //    This is "highest profit, very low max drawdown" expressed as a ratio,
+    //    which is what makes it a single sortable key rather than two.
+    // 2. `reward_to_risk_bp` -- the smallest win against the largest loss, in
+    //    hundredths, so 300 reads as the operator's 3.00x. A RANKING term, not
+    //    a gate: a row at 2.9x is ranked below one at 3.1x rather than deleted.
+    // 3. `pessimistic` -- net, as the final tiebreak, so two cells identical on
+    //    both ratios are still ordered by what they made.
+    //
+    // `admitted` is untouched and still REPORTED, so a row that broke a stated
+    // rule is ranked where it earned and printed beside the rule it broke.
+    rows.sort_by_key(|r| {
+        core::cmp::Reverse((
+            r.cell.return_over_drawdown(),
+            r.cell.reward_to_risk_bp(),
+            r.cell.pessimistic,
+        ))
+    });
 
     measure_top(&mut rows, bars, column, horizon, rules);
+
+    // THE CALENDAR RE-SORT, over the measured band only.
+    //
+    // The money sort above cannot see a calendar -- `grid::Cell` has no
+    // periods -- so it ordered on return-over-drawdown, reward-to-risk and net.
+    // `measure_top` has now measured the seven grains for `measured_band(top)`
+    // rows, and THIS is where those grains get to move a row.
+    //
+    // The operator's criteria, in his own order and all of them minimising a
+    // LOSS rather than maximising a gain:
+    //
+    //   1. `weakest_bp` -- the worst positive share across all seven grains:
+    //      year, half, quarter, month, week, day and HOUR. A strategy that made
+    //      its money in one quarter and was flat for six years scores low here
+    //      however good its total is. This is "no lucky winners", as a number.
+    //   2. `worst_day` -- the single worst period's net at the FINEST grain.
+    //      Negated into the key so a smaller loss ranks higher: "every every
+    //      less worst case", per day, directly.
+    //   3. `return_over_drawdown` -- profit against the worst peak-to-trough
+    //      fall, carried from the money sort so a steady row that never made
+    //      anything cannot outrank a steady row that did.
+    //   4. `reward_to_risk_bp` -- smallest win against largest loss.
+    //   5. `pessimistic` -- net, as the final tiebreak.
+    //
+    // An UNMEASURED row sorts last rather than first. `None` would otherwise
+    // read as zero on the first two terms and beat a measured row that merely
+    // had a weak grain -- the unmeasured tail jumping the queue, which is the
+    // shape §4 bans. It is stable in that position, so the money order among
+    // the unmeasured tail is preserved exactly as it was.
+    //
+    // `sort_by_key` is stable, so rows equal on all five keep the money order
+    // the sort above gave them.
+    rows.sort_by_key(|r| {
+        let (weakest, worst_period) = r.consistency.as_ref().map_or(
+            // The unmeasured floor: worse than any real grain share and any
+            // real period, so measured rows always sort ahead.
+            (i64::MIN, i64::MIN),
+            |c| (c.weakest_bp(), c.worst_day.saturating_neg()),
+        );
+        core::cmp::Reverse((
+            weakest,
+            worst_period,
+            r.cell.return_over_drawdown(),
+            r.cell.reward_to_risk_bp(),
+            r.cell.pessimistic,
+        ))
+    });
 
     // THE CALENDAR GATE, AFTER THE CELL GATES.
     //
@@ -9295,6 +9393,37 @@ fn rules_banner(rules: Rules, passed: usize, considered: usize) -> String {
 ///
 /// The second is that [`screen`] was 113 lines with it, past the hundred
 /// clippy enforces.
+/// How many rows get their seven-grain calendar measured, given a wanted top N.
+///
+/// # The circularity this exists to break
+///
+/// `measure_top` measured exactly `rules.top` rows, AFTER the sort — so the top
+/// ten were chosen on money alone and the calendar was then measured on
+/// whichever ten had already won. A combination steady across every year, half,
+/// quarter, month, week, day and hour but ranked eleventh on the money terms was
+/// **never measured at all**, and could never climb.
+///
+/// That is the same defect the money sort's own comment describes about the
+/// admitted-flag threshold — *"a row a threshold sank was never measured, and an
+/// unmeasured row could never climb back"* — in the one dimension the operator
+/// names most often: *"every day every week every 10 days every month every
+/// quarter every half yearly every year… no lucky winners"*. Consistency cannot
+/// decide a selection it is only computed after.
+///
+/// So a BAND is measured and the band is re-sorted with the calendar in the key.
+/// Eight times the wanted rows, floored at a useful width so a `top` of one or
+/// two still has something to choose between.
+///
+/// It costs one grid rebuild per measured row, which is why the band is bounded
+/// rather than the whole screen: measuring ten thousand rows to print ten is the
+/// memory and time the bounded heap in `rank` exists to avoid.
+const fn measured_band(top: usize) -> usize {
+    const WIDEN: usize = 8;
+    const FLOOR: usize = 32;
+    let widened = top.saturating_mul(WIDEN);
+    if widened < FLOOR { FLOOR } else { widened }
+}
+
 fn measure_top(
     rows: &mut [Screened<'_>],
     bars: &[indicators::Candle],
@@ -9313,7 +9442,7 @@ fn measure_top(
     // screening pass produced, so the cell this re-walks is the cell the row
     // above reports.
     let stop_rungs_again = stop_ladder_ppm(bars);
-    for row in rows.iter_mut().take(rules.top) {
+    for row in rows.iter_mut().take(measured_band(rules.top)) {
         let side = side_of_evidence(row.scored);
         let g = grid::evaluate(
             bars,
@@ -14010,6 +14139,84 @@ fn retained_to_trade(
     clippy::too_many_lines,
     reason = "one audit transaction keeps ranking, final selection, exact chosen-grid replay, validation, and durable recording on the same candidate"
 )]
+/// Records the SWEEP HALF of a run that produced no tradeable answer, and says
+/// so in the report.
+///
+/// # Three exits reached the end of a run and left nothing behind
+///
+/// A sweep that finds no admitted candidate already records — its identity,
+/// depth, combination count and bar census, with every money field a truthful
+/// zero. Two SIBLING exits did not, and both spend the entire run first:
+///
+/// * the ladder HALTED on a budget (`ranked_opening` returns `Err`, so
+///   `is_complete()` is false), and
+/// * the ladder completed but no CLOSED combination survived edge ranking
+///   (`retained_to_trade` returns `None`).
+///
+/// Both printed a refusal and returned. The operator's symptom is identical in
+/// all three cases — a rung that ran for minutes and left no row — and it is
+/// the symptom that cost a full night of sweeping: `results/runs.bin` did not
+/// exist at all, and `/backtest` could not tell a sweep that found nothing from
+/// a sweep that never ran.
+///
+/// A HALTED SWEEP IS NOT THE SAME RESULT AS A COMPLETE ONE, and the row says
+/// which: `Streamed` carries the halt, so the ledger records a halted walk as
+/// halted rather than as an empty answer. What it must never do is record
+/// nothing, because §3 rule 3 says a computation with an identity has that
+/// identity recorded — and a refusal the operator can only find by reading
+/// stdout is not a record.
+fn record_sweep_only(
+    out: &mut String,
+    recording: Option<Recording<'_>>,
+    id: Option<&runner::identity::RunId>,
+    sweep: &engine::keep::Streamed,
+    bars: u64,
+    min_hits: u64,
+    why: &str,
+) {
+    // TELEMETRY BEFORE THE WRITE, so `/logs` names the outcome even if the write
+    // then refuses.
+    //
+    // `exit grid finished` fired 11 times today against 4 `result set
+    // committed`: every phase after the grid was silent, so a rung that ran for
+    // minutes and produced nothing looked in the log exactly like a rung still
+    // working. That silence is what hid a halted 60min and 30min this morning
+    // for over an hour.
+    //
+    // This is a PER-RUN event, not per candidate, so it sits inside gate 17's
+    // rule rather than around it -- `cli` is the boundary the gate names, and
+    // one event per rung is the granularity its own comment prescribes.
+    note(
+        &telemetry::Event::info("cli.audit", "rung produced no trade")
+            .with("rung", recording.map_or("", |held| held.timeframe))
+            .with("reason", why)
+            .with("bars", bars)
+            .with("min_hits", min_hits)
+            .with("streamed", sweep.streamed)
+            .with("recordable", u64::from(recording.is_some() && id.is_some())),
+    );
+    let (Some(into), Some(run_id)) = (recording, id) else {
+        let _ = writeln!(
+            out,
+            "{NOT_RECORDED}: {why}, and this run carries no recording target."
+        );
+        return;
+    };
+    match record_swept_run(into, run_id, sweep, bars, min_hits) {
+        Ok((said, _committed)) => {
+            let _ = writeln!(
+                out,
+                "\n{why}. The sweep itself is recorded -- its identity, depth, \
+                 combination count and bar census -- with every money field a \
+                 truthful zero.\n{said}"
+            );
+        }
+        Err(refused) => {
+            let _ = writeln!(out, "\n{NOT_RECORDED}: {refused}");
+        }
+    }
+}
+
 fn audit_bars(
     ev: Result<Evaluator, &'static str>,
     bars: Vec<indicators::Candle>,
@@ -14143,11 +14350,43 @@ fn audit_bars(
         id,
     ) {
         Ok(out) => out,
-        Err(refusal) => return refusal,
+        Err(mut refusal) => {
+            // A HALTED LADDER STILL RAN, and the ledger must say so.
+            //
+            // This spent the whole sweep and returned the refusal text alone,
+            // so `record_swept_run` — thirty lines below, for the sibling case
+            // where nothing was ADMITTED — was never reached. The operator saw
+            // a rung burn minutes and leave no row, identical in every visible
+            // way to a rung that never started.
+            record_sweep_only(
+                &mut refusal,
+                recording,
+                id,
+                &outcome.sweep,
+                u64::try_from(bars.len()).unwrap_or(u64::MAX),
+                min_hits,
+                "the streamed ladder halted on a budget before it could certify closure",
+            );
+            return refusal;
+        }
     };
 
     let Some((by_evidence, _evidence_first)) = retained_to_trade(&ranked) else {
         out.push_str(&nothing_to_trade(outcome.sweep.streamed));
+        // COMPLETED, AND STILL NOTHING TO TRADE — which is a RESULT.
+        //
+        // Extinction ("no combination met the threshold") and exhaustion ("no
+        // CLOSED combination survived the bounded edge ranking") are both real
+        // answers about this vocabulary on this span, and both left no trace.
+        record_sweep_only(
+            &mut out,
+            recording,
+            id,
+            &outcome.sweep,
+            u64::try_from(bars.len()).unwrap_or(u64::MAX),
+            min_hits,
+            "no closed combination survived edge ranking, so no TRADE was selected",
+        );
         return out;
     };
     // THE LIVE VIEW OPENS HERE, before the exit grid spends 87.6% of the run.
