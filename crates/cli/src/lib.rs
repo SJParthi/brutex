@@ -637,30 +637,39 @@ fn exact_minute_withholding_unsourceable_days(
                     return Err(why);
                 };
                 let day = indicators::ist_day(ts);
+                // EVERY DIAGNOSIS LEADS ITS MESSAGE, because `one_rung` reports
+                // `first_line(why)` and the overlay's own refusal already
+                // contains a newline. Appending the reason put it on line two,
+                // where the report drops it -- so the operator saw the raw
+                // `MissingClosingMinute` and no word of what this loop decided.
                 if dropped.contains(&day) {
                     // The same day twice means withholding it did not remove the
                     // bar that needed it -- a different defect wearing this one's
                     // message, and looping on it would spin.
                     return Err(format!(
-                        "{why} The day {day} was already withheld and the overlay \
-                         still cannot source a close on it, so this is not a \
-                         missing-minute hole. Nothing was swept."
+                        "IST day {day} recurred after being withheld, so this is not \
+                         a missing-minute hole: the overlay still cannot source a \
+                         close on a day whose bars were removed. Nothing was swept. \
+                         Underlying: {why}"
                     ));
                 }
                 dropped.push(day);
                 let (kept, _removed) = crate::minute_gaps::withhold(bars, &[day]);
                 if kept.len() == bars.len() {
                     return Err(format!(
-                        "{why} Withholding day {day} removed no signal bar, so the \
-                         missing minute is not on a day this rung sweeps. Nothing \
-                         was swept."
+                        "withholding IST day {day} removed no signal bar, so the \
+                         minute the overlay wants is not on a day this rung sweeps \
+                         -- the two are counting days differently. Nothing was \
+                         swept. Underlying: {why}"
                     ));
                 }
                 *bars = kept;
                 if bars.is_empty() {
                     return Err(format!(
-                        "{why} Withholding every unsourceable day left no bars at \
-                         all, so there is nothing to sweep."
+                        "withholding every unsourceable day left no bars at all \
+                         after {} day(s), so there is nothing to sweep. \
+                         Underlying: {why}",
+                        dropped.len()
                     ));
                 }
             }
@@ -670,6 +679,98 @@ fn exact_minute_withholding_unsourceable_days(
         "the exact-minute overlay still could not be sourced after withholding \
          {ATTEMPTS} day(s). A span needing more than that is not a span with \
          holes. Nothing was swept."
+    ))
+}
+
+/// Builds the anchored column, WITHHOLDING each day whose close cannot be
+/// sourced.
+///
+/// # Where the refusal actually lives
+///
+/// `MissingClosingMinute` is raised by `overlay_exact_minute_gapfib` inside
+/// [`stored_anchored_column`] — not by `load_exact_minute_context`. The overlay
+/// loads successfully; it is the COLUMN BUILD that finds a signal bar whose
+/// close has no matching stored minute. Two fixes wrapped the load and changed
+/// nothing, because the load had already succeeded.
+///
+/// # What it does
+///
+/// Build; on a refusal that names a minute, withhold that IST day from the
+/// signal bars and rebuild — overlay and daily context included, because both
+/// are keyed to the surviving bars and reusing them would describe a span the
+/// column no longer has. Each pass removes at least one day, so it terminates.
+///
+/// It DECLINES rather than substitutes: the tests forbidding minute
+/// substitution still hold, and a hole still refuses when its day is swept.
+/// What changes is that the day is not swept, and every withheld day is emitted
+/// as telemetry so a smaller sample is never a silent one.
+fn column_withholding_unsourceable_days(
+    root: &std::path::Path,
+    vendor: brutex_core::vendor::Vendor,
+    underlying: &str,
+    span: ((u16, u8), (u16, u8)),
+    bars: &mut Vec<indicators::Candle>,
+    signal_length: i64,
+    // `&str`, NOT `&'static str`. `audit_range_inner` takes its rung from the
+    // command line, so it is borrowed rather than one of `EVERY_RUNG`'s
+    // literals — and this only ever reads it to label an event.
+    rung: &str,
+) -> Result<indicators::column::Column, String> {
+    /// A span needing more than this withheld is a different defect.
+    const ATTEMPTS: usize = 64;
+    let (from, to) = span;
+    let mut dropped: Vec<i64> = Vec::new();
+    for _ in 0..ATTEMPTS {
+        let daily = stored::load_daily_context(root, vendor, underlying, (from, to), bars)?;
+        let exact = stored::load_exact_minute_context(root, vendor, underlying, (from, to), bars)?;
+        match stored_anchored_column(bars, &daily, &exact, signal_length) {
+            Ok(column) => {
+                if !dropped.is_empty() {
+                    note(
+                        &telemetry::Event::info("cli.audit", "exact-minute days withheld")
+                            .with("rung", rung)
+                            .with("days", u64::try_from(dropped.len()).unwrap_or(u64::MAX))
+                            .with("feed", vendor.as_str())
+                            .with("underlying", underlying),
+                    );
+                }
+                return Ok(column);
+            }
+            Err(why) => {
+                let Some(ts) = unsourceable_minute(&why) else {
+                    return Err(why);
+                };
+                let day = indicators::ist_day(ts);
+                if dropped.contains(&day) {
+                    return Err(format!(
+                        "IST day {day} recurred after being withheld, so this is not \
+                         a missing-minute hole. Nothing was swept. Underlying: {why}"
+                    ));
+                }
+                dropped.push(day);
+                let (kept, _removed) = crate::minute_gaps::withhold(bars, &[day]);
+                if kept.len() == bars.len() {
+                    return Err(format!(
+                        "withholding IST day {day} removed no signal bar, so the \
+                         column and this withholding are counting days \
+                         differently. Nothing was swept. Underlying: {why}"
+                    ));
+                }
+                *bars = kept;
+                if bars.is_empty() {
+                    return Err(format!(
+                        "withholding {} unsourceable day(s) left no bars at all, so \
+                         there is nothing to sweep. Underlying: {why}",
+                        dropped.len()
+                    ));
+                }
+            }
+        }
+    }
+    Err(format!(
+        "the anchored column still could not be built after withholding \
+         {ATTEMPTS} day(s): {dropped:?}. A span needing more than that is not a \
+         span with holes. Nothing was swept."
     ))
 }
 
@@ -5090,8 +5191,24 @@ fn audit_range_inner(
         let (kept, _withheld) = crate::minute_gaps::withhold(&span.bars, &holed_days);
         span.bars = kept;
     }
-    // THE OVERLAY IS LOADED FIRST AND MAY WITHHOLD DAYS, so the daily
-    // context is built from the bars that SURVIVED it -- building it first
+    // THE COLUMN BUILD IS WHAT REFUSES, so the withholding wraps THAT.
+    //
+    // `one_rung` guards its own support-derivation build, and this is the
+    // second build on the same span -- one hop later, unguarded, raising the
+    // identical `MissingClosingMinute`. Guarding only the first left the
+    // symptom exactly as it was, which is how a correct fix looked like no fix
+    // at all.
+    let column = column_withholding_unsourceable_days(
+        &root,
+        vendor,
+        underlying,
+        (from, to),
+        &mut span.bars,
+        signal_length,
+        rung,
+    )?;
+    // REBUILT FROM THE SURVIVING BARS. The helper above may have withheld days,
+    // and both of these are keyed to the bars -- reading them from before it ran
     // would describe a span the column no longer has.
     let (exact_minute, unsourceable) = exact_minute_withholding_unsourceable_days(
         &root,
@@ -5101,7 +5218,6 @@ fn audit_range_inner(
         &mut span.bars,
     )?;
     let daily = stored::load_daily_context(&root, vendor, underlying, (from, to), &span.bars)?;
-    let column = stored_anchored_column(&span.bars, &daily, &exact_minute, signal_length)?;
 
     // BOUND ONCE, USED TWICE: by the run identity below and by the
     // `AuditOptions` this function goes on to build.
@@ -10551,7 +10667,7 @@ fn one_rung(
             };
         }
     };
-    let span = match stored::load_span(&root, vendor, underlying, rung, from, to) {
+    let mut span = match stored::load_span(&root, vendor, underlying, rung, from, to) {
         Ok(span) => span,
         Err(why) => {
             return RungRow {
@@ -10658,35 +10774,13 @@ fn one_rung(
     let min_hits = if named_ppm.is_some() {
         statistical
     } else {
-        let daily =
-            match stored::load_daily_context(&root, vendor, underlying, (from, to), &span.bars) {
-                Ok(daily) => daily,
-                Err(why) => {
-                    return RungRow {
-                        rung,
-                        outcome: Err(first_line(why)),
-                        missing: Vec::new(),
-                        excluded: stored::CalendarExclusion::none(),
-                    };
-                }
-            };
-        let exact_minute = match stored::load_exact_minute_context(
-            &root,
-            vendor,
-            underlying,
-            (from, to),
-            &span.bars,
-        ) {
-            Ok(context) => context,
-            Err(why) => {
-                return RungRow {
-                    rung,
-                    outcome: Err(first_line(why)),
-                    missing: Vec::new(),
-                    excluded: stored::CalendarExclusion::none(),
-                };
-            }
-        };
+        // THE DAILY CONTEXT AND THE OVERLAY ARE LOADED INSIDE
+        // `column_withholding_unsourceable_days`, not here.
+        //
+        // Both are keyed to the SURVIVING bars, so a day withheld between
+        // attempts changes both. Loading them once out here and reusing them
+        // across rebuilds would describe a span the column no longer has — and
+        // would pay for a full minute-series load twice besides.
         let signal_length = match stored::rung_length_micros(rung) {
             Ok(length) => length,
             Err(why) => {
@@ -10698,8 +10792,32 @@ fn one_rung(
                 };
             }
         };
-        let column = match stored_anchored_column(&span.bars, &daily, &exact_minute, signal_length)
-        {
+        // THE REFUSAL IS HERE, NOT AT THE LOAD, and that distinction cost two
+        // wrong fixes.
+        //
+        // `MissingClosingMinute` is raised by `overlay_exact_minute_gapfib`
+        // INSIDE `stored_anchored_column` — the overlay LOADS fine and the
+        // column build is what cannot source a signal bar's close. Withholding
+        // around `load_exact_minute_context` therefore changed nothing: that
+        // call had already succeeded.
+        //
+        // MEASURED: one absent minute refused 15min, 10min, 5min, 3min, 2min and
+        // 1min in under half a second each, on every run today. 60min survived
+        // only because no 60-minute bar happened to close on that minute.
+        //
+        // So the day the refusal NAMES is withheld and the column rebuilt. The
+        // overlay and the daily context are rebuilt too, because both are keyed
+        // to the surviving bars — reusing them would describe a span the column
+        // no longer has.
+        let column = match column_withholding_unsourceable_days(
+            &root,
+            vendor,
+            underlying,
+            (from, to),
+            &mut span.bars,
+            signal_length,
+            rung,
+        ) {
             Ok(column) => column,
             Err(why) => {
                 return RungRow {
