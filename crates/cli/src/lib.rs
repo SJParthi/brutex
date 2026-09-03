@@ -2340,6 +2340,28 @@ const SEARCH_CEILING: usize = 500_000;
 const _: () = assert!(SEARCH_CEILING < engine::DEFAULT_CEILING);
 const _: () = assert!(engine::DEFAULT_CEILING / SEARCH_CEILING >= 100);
 
+/// How many times smaller a probe budget is than the sweep budget it estimates.
+///
+/// # The ratio was the rule; the constant was an accident of one machine
+///
+/// [`SEARCH_CEILING`] pinned the probe at 500,000 while the budget it stands in
+/// for is DERIVED — `whole_machine_ceiling()` is 134,217,720 on fourteen cores
+/// and rises with every core. So the "at least a hundred times smaller" the
+/// assertion above pins was, in fact, 268 times smaller here and further on a
+/// larger machine. A probe that does not scale with the thing it estimates
+/// answers a question about a machine nobody owns.
+///
+/// MEASURED: with the fixed constant, `affordable_min_hits` returned support
+/// floors of 23.83%, 28.57% and 44.25% on the operator's own store, and the
+/// only combination clearing a 44% floor was the EMPTY mask — every ledger row
+/// read "No condition bits are set" and traded nothing.
+///
+/// A hundred, so the assertion above and this share state one rule rather than
+/// two. Raising it makes the probe cheaper and its answer more conservative;
+/// lowering it risks the twenty-minute non-finish that put `SEARCH_CEILING`
+/// here in the first place.
+const PROBE_SHARE: usize = 100;
+
 /// The threshold search, rendered.
 #[must_use]
 pub fn auto(sessions: i64) -> String {
@@ -10140,9 +10162,41 @@ fn affordable_min_hits(column: &Column) -> Option<u64> {
     // answer a probe returns is a THRESHOLD, and a threshold found under a
     // smaller budget is conservative in the safe direction: it may sit higher
     // than strictly necessary, which prunes more, never less.
+    // SCALED TO THIS MACHINE, NOT A FIXED 500,000.
+    //
+    // # The measurement that forced this
+    //
+    // `SEARCH_CEILING` is a constant while the ceiling it stands in for is
+    // derived — `whole_machine_ceiling()` is 134,217,720 on a fourteen-core
+    // machine. So the ratio was not "a hundred times smaller", it was 268 times
+    // smaller, and it grows with every core the operator adds. A probe that
+    // does not scale with the thing it estimates is not conservative, it is
+    // wrong by a factor nobody chose.
+    //
+    // The comment above is right that a smaller budget errs high and "prunes
+    // more, never less". MEASURED on the operator's store, that pruning took
+    // everything: the derived thresholds came back at 23.83%, 28.57% and 44.25%
+    // support, and the only combination surviving a 44% floor was the EMPTY
+    // mask — every ledger row read "No condition bits are set on this row" and
+    // "the selected combination opened no position". A floor that admits only
+    // the empty set has not been conservative, it has answered nothing.
+    //
+    // # Why this stays a fraction rather than becoming the whole budget
+    //
+    // The reason the constant exists is unchanged and still measured: handed
+    // `ceiling_from_env()`, one rung over a single year sat at 10.24 GB and
+    // 95.8% of one core and never finished, because `Sweeper::auto` brackets
+    // downward and its low-threshold probes are free to allocate everything.
+    // The ratio is what keeps the probe cheap; the CONSTANT was never the
+    // point. `PROBE_SHARE` holds the ratio the build assertion already pins, so
+    // a bigger machine gets a proportionally bigger probe and the same safety.
+    let probe = whole_machine_ceiling()
+        .checked_div(PROBE_SHARE)
+        .unwrap_or(SEARCH_CEILING)
+        .max(SEARCH_CEILING);
     Sweeper::new(
         Ladder::with_min_hits(1)
-            .with_ceiling(SEARCH_CEILING)
+            .with_ceiling(probe)
             .with_support_lanes(shared_support_lanes()),
     )
     .auto_prepared(column)
