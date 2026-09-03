@@ -7687,7 +7687,7 @@ fn policy_of(
     validate: bool,
     horizon: Horizon,
     fold_rungs: usize,
-) -> [u64; 17] {
+) -> [u64; 18] {
     [
         // Negative is not expected and is not silently folded to zero: the cast
         // is saturating so a negative rule still differs from an absent one.
@@ -7818,6 +7818,32 @@ fn policy_of(
         // identity and the validation computation cannot disagree merely
         // because runner cannot see the CLI's request-local knob store.
         u64::try_from(fold_rungs).unwrap_or(u64::MAX),
+        // THE EIGHTEENTH: the protective-exit rule.
+        //
+        // APPENDED, NOT INSERTED, and the first draft of this got it wrong. It
+        // sat beside the other seven rule terms, where it reads better and
+        // where it shifted every term after it by one position — so
+        // `fold_rungs`, appended as the seventeenth precisely because
+        // "positional identity is append-only", silently became the eighteenth.
+        // `request_local_grid_rungs_reach_the_fold_and_identity_as_one_value`
+        // caught it: it asserts the fold count stays where it was put. Reading
+        // order is not worth a renumbered identity.
+        //
+        // # Why it belongs here at all
+        //
+        // Every other rule term is a floor on a NUMBER. This one decides which
+        // exit SHAPES `best_within` may choose from, so flipping it makes the
+        // same span at the same support select a different cell, walk a
+        // different trade list and report different money — a different
+        // computation, which §3 rule 3 says must have a different identity.
+        //
+        // Left out, the two collided: `ensure_run_record` found the identity
+        // present, compared the deterministic fields, saw them differ, and
+        // REFUSED the new answer while keeping the old. An operator toggling
+        // `BRUTEX_PROTECTED_EXITS` would rerun and receive no row plus a
+        // collision they did not cause. That is the defect D-0294 and D-0305
+        // fixed for the other knobs, in the one added after them.
+        u64::from(rules.require_protective_exits),
     ]
 }
 
@@ -17216,8 +17242,12 @@ mod tests {
         // length first precisely so adding one re-keys.
         assert_eq!(
             start.len(),
-            17,
-            "seventeen choices are folded in. If this moved, `policy_of`'s doc \
+            18,
+            "eighteen choices are folded in — the eighteenth is \
+             `require_protective_exits`, APPENDED after `fold_rungs` rather than \
+             placed beside the other rule terms, because positional identity is \
+             append-only and inserting it there renumbered every term after it. \
+             If this moved, `policy_of`'s doc \
              table and the append-never-insert rule both need reading before the \
              number is changed"
         );
