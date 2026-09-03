@@ -130,8 +130,6 @@ pub mod execution_disposition_v2;
 /// Does each stored coarse rung equal the fold of the stored one-minute bars?
 pub mod fold_audit;
 pub mod frontier;
-/// Days whose one-minute series has a hole, and what withholding them costs.
-pub mod minute_gaps;
 /// Receipt-last, all-rung global single-position replay and publication authority.
 pub mod global_replay;
 /// Selection-V4/Execution-V2 global single-position replay authority.
@@ -147,6 +145,8 @@ mod ledger_all;
 /// The operator surface for the all-rung Step-4 successor route.
 mod ledger_v6;
 pub mod live;
+/// Days whose one-minute series has a hole, and what withholding them costs.
+pub mod minute_gaps;
 /// Complete, fixed-stride candidate populations and their receipt-last commit.
 pub mod population;
 /// Pre-finalization Admission V2 decisions and receipt-last structural audit.
@@ -657,6 +657,16 @@ fn screen_arm(
                         // rather than the trade list. `cli elite` is where an
                         // operator turns it on without typing six numbers.
                         min_ret_over_dd_bp: 0,
+                        // NOT off, unlike the five above, and the difference is
+                        // the one this whole field exists to draw. Those are
+                        // floors on numbers `screen` does not take, so guessing
+                        // one would invent a policy. This is not a floor — it
+                        // says which exit SHAPES may be selected, and its
+                        // off-value silently prefers the cell with no stop
+                        // because `grid::merit` rewards fewer exit orders.
+                        // Reading the knob is what the operator typed; leaving
+                        // it off would be a policy too.
+                        require_protective_exits: Rules::protective_exits_required(),
                         top: n,
                     },
                     // The historical cut. `screen` is the command an operator
@@ -6201,6 +6211,39 @@ pub struct Rules {
     ///
     /// Zero drops the rule, the way [`Self::min_rr_bp`] of zero does.
     pub min_ret_over_dd_bp: i64,
+    /// A variant must place a STOP and at least one TRAILING order to be
+    /// admitted at all.
+    ///
+    /// # The selector was biased AGAINST protection, and it is not a metaphor
+    ///
+    /// [`grid::merit`] returns `5 - claimed`, where `claimed` counts the exit
+    /// orders a cell sets and a TTP counts twice. It is the tie-break inside
+    /// `max_by_key`, which takes the LARGEST — so a cell that sets only a target
+    /// scores 4 and a cell carrying stop, target, TSL and TTP scores 0. Between
+    /// two cells that made the same money the engine was built to prefer the one
+    /// with no protection, and `Grid::best_within`'s own doc states the premise
+    /// plainly: *"the profit-maximising cell is the one with no stop at all"*.
+    ///
+    /// That is a defensible rule for a report that ranks on realised profit. It
+    /// is the wrong rule for an operator who has to hold the position, because
+    /// the cell it prefers has no answer to the trade that does not come back.
+    ///
+    /// **MEASURED.** A sixty-minute run over 2020-01..2026-07 selected
+    /// `-/16/-` — no stop, no trailing stop, no trailing take-profit — and
+    /// **761 of its 801 trades exited on the 15:10 forced close** rather than on
+    /// any exit the strategy chose. The six rules in [`Self::admits`] could not
+    /// have prevented it: not one of them names `stop`, `tsl` or `ttp`.
+    ///
+    /// # Why a rule and not a re-weighting
+    ///
+    /// Lowering `merit`'s simplicity term would change which protected cell
+    /// wins; it would not make protection REQUIRED, because an unprotected cell
+    /// that made more money still outranks on the first term. A floor the
+    /// operator states is a floor, in the same shape as every other field here.
+    ///
+    /// Default is `true`, and `BRUTEX_PROTECTED_EXITS=0` is the only way to
+    /// clear it — an unprotected sweep is a diagnostic, not a strategy.
+    pub require_protective_exits: bool,
     /// How many combinations to report. Ten or twenty-five, the operator's call.
     pub top: usize,
 }
@@ -6284,6 +6327,25 @@ impl Rules {
             && cell.trades >= self.min_trades
             && cell.assurance_bp() >= self.min_assurance_bp
             && cell.return_over_drawdown() >= self.min_ret_over_dd_bp
+            && Self::protects(self.require_protective_exits, cell)
+    }
+
+    /// Whether `cell` carries the protection the operator requires.
+    ///
+    /// A STOP is mandatory because it is the only order that answers the trade
+    /// that does not come back. At least ONE trailing order is mandatory because
+    /// a fixed stop and a fixed target cap the loser and the winner alike, and
+    /// the operator's stated aim is the opposite: *"always tsl tp ttp should
+    /// move ahead to always make the losers minimal and make the winners
+    /// massive"*. Either trailing order satisfies it — a TSL that follows the
+    /// position up, or a TTP that arms and then trails — because both give back
+    /// less than a fixed target does on the trade that keeps running.
+    ///
+    /// A fixed `target` is deliberately NOT required. It is the one exit that
+    /// can only truncate a winner, and requiring it alongside a trailing order
+    /// would forbid the shape the operator actually asked for.
+    const fn protects(required: bool, cell: &grid::Cell) -> bool {
+        !required || (cell.stop.is_some() && (cell.tsl.is_some() || cell.ttp.is_some()))
     }
 }
 
@@ -6375,8 +6437,34 @@ impl Rules {
             min_weakest_bp: at("BRUTEX_MIN_WEAKEST_BP", 0),
             min_trades: u64::try_from(at("BRUTEX_MIN_TRADES", 0)).unwrap_or(0),
             min_ret_over_dd_bp: at("BRUTEX_MIN_RET_OVER_DD_BP", 500),
+            // ON BY DEFAULT, and the only knob here whose default is a rule
+            // rather than a threshold. The others name a number an operator may
+            // reasonably move; this one names a SHAPE, and a run that selects an
+            // exit with no stop is not a weaker answer to the same question but
+            // an answer to a different one. `0` clears it for a diagnostic.
+            require_protective_exits: Self::protective_exits_required(),
             top: usize::try_from(at("BRUTEX_TOP", 25)).unwrap_or(25),
         }
+    }
+
+    /// Whether every admitted variant must carry a stop and a trailing order.
+    ///
+    /// # One source of truth, because the cascade would otherwise undo it
+    ///
+    /// [`Self::operator`] is not the only place a `Rules` is built.
+    /// `screen_cascade` falls through to [`Tier::rules`] whenever the stated
+    /// rules admit nothing, and that function builds a FRESH literal. A tier
+    /// that dropped this flag would quietly restore the unprotected cell at
+    /// exactly the moment the operator's own rules had already refused it —
+    /// the relaxation the ladder exists to offer would silently include
+    /// relaxing the one rule that is not a threshold.
+    ///
+    /// So the knob is read HERE and the two non-`operator` sites call this,
+    /// rather than each deciding for itself. [`Self::BASELINE`] and
+    /// [`Self::elite`] are `const` and cannot; both state `true`.
+    #[must_use]
+    pub fn protective_exits_required() -> bool {
+        Self::stated("BRUTEX_PROTECTED_EXITS").unwrap_or(1) != 0
     }
 
     /// [`Self::operator`] with the two floors DERIVED FROM THE BARS.
@@ -6553,6 +6641,15 @@ impl Rules {
         min_weakest_bp: 0,
         min_trades: 0,
         min_ret_over_dd_bp: 0,
+        // TRUE, and it is NOT the "fourth number nobody typed" the comment
+        // above refuses. That comment is about THRESHOLDS: a win-rate floor an
+        // operator did not choose silently disqualifies rows on a number. This
+        // is a SHAPE, and its zero-value is not a laxer version of the same
+        // question but a different question — "what made the most money" rather
+        // than "what made the most money while capping the loser". A const
+        // cannot read the knob; `BRUTEX_PROTECTED_EXITS=0` clears it on every
+        // path that goes through `Rules::operator`.
+        require_protective_exits: true,
         top: 25,
     };
 
@@ -6651,6 +6748,14 @@ impl Rules {
             // refuse the rare high-conviction setup this profile exists to find.
             min_trades: 0,
             min_ret_over_dd_bp: 500,
+            // THE ELITE PROFILE IS WHERE THIS IS LEAST NEGOTIABLE.
+            //
+            // Every other field here asks the trade list to have been good.
+            // This one asks the strategy to have had an answer prepared for the
+            // trade that was not. A row selected without a stop did not survive
+            // its worst trade — it was rescued by the 15:10 forced close, which
+            // is the exchange's decision and not the strategy's.
+            require_protective_exits: true,
             top,
         }
     }
@@ -7048,6 +7153,18 @@ impl Tier {
             // the defect `BASELINE`'s own comment names. `cli elite` is where
             // the rule is turned on, by an operator who asked for it.
             min_ret_over_dd_bp: 0,
+            // THE TIER LADDER MAY RELAX A THRESHOLD. IT MAY NOT RELAX A SHAPE.
+            //
+            // `screen_cascade` reaches this function precisely when the stated
+            // rules admitted nothing, and every other field here is a softer
+            // number than the operator asked for. That is what a tier is FOR.
+            //
+            // This field is the exception, and dropping it would be the worst
+            // possible moment to: the ladder would answer "your rules found
+            // nothing" by returning the unprotected cell those rules had just
+            // refused, under a banner saying a tier was applied. The operator
+            // would read a relaxed THRESHOLD and receive a relaxed STRATEGY.
+            require_protective_exits: Rules::protective_exits_required(),
             top,
         }
     }
@@ -8624,6 +8741,42 @@ fn consistency_of(
     })
 }
 
+/// The cell a screened row DISPLAYS, in three descending preferences.
+///
+/// # The fallback used to be one step, and it showed the wrong thing
+///
+/// A refused combination is still shown, beside the rule it broke, so an
+/// operator can see how far short it fell. The fallback for that was
+/// `g.best()` — the best cell overall — and [`grid::merit`] makes that the
+/// LEAST protected one, because it returns `5 - claimed` into a `max_by_key`.
+/// So a combination refused for having no stop was displayed as the cell with
+/// no stop, beside the reason `exits`. True, and useless: it answers "your
+/// unprotected variant was refused" when the operator's question is "could
+/// this combination work at all if it placed a stop?"
+///
+/// The middle step answers that. Preferences, in order:
+///
+/// 1. the best cell that satisfies EVERY rule — the row is `admitted`
+/// 2. else the best PROTECTED cell, named by the numeric rule it broke
+/// 3. else the best cell at all, named `exits` — which by then is the honest
+///    reading, because no variant of this combination placed both orders
+///
+/// Returns the cell AND whether it came from step 1, because those two facts
+/// must not be derived separately: a caller that recomputed `admitted` from the
+/// returned cell would be asking "does this cell pass?" of a cell steps 2 and 3
+/// already know does not, and one edit to either side would silently admit it.
+/// One `if` decides both.
+fn shown_cell(g: &grid::Grid, rules: Rules) -> Option<(grid::Cell, bool)> {
+    if let Some(admitted) = g.best_within(|c| rules.admits(c)).copied() {
+        return Some((admitted, true));
+    }
+    let shown = g
+        .best_within(|c| Rules::protects(rules.require_protective_exits, c))
+        .copied()
+        .or_else(|| g.best().copied())?;
+    Some((shown, false))
+}
+
 fn screen<'a>(
     bars: &[indicators::Candle],
     column: &indicators::column::Column,
@@ -8750,8 +8903,7 @@ fn screen<'a>(
             // it broke. Asking `best()` first and judging that was the error: the
             // profit-maximising cell is the one with no stop at all, so every
             // combination failed a stop rule by construction.
-            let within = g.best_within(|c| rules.admits(c)).copied();
-            let cell = within.or_else(|| g.best().copied())?;
+            let (cell, admitted) = shown_cell(&g, rules)?;
             if cell.trades == 0 {
                 return None;
             }
@@ -8763,7 +8915,7 @@ fn screen<'a>(
                 // trade from the one measured.
                 side: direction_of(side),
                 tightest: g.tightest_containment().copied(),
-                admitted: within.is_some(),
+                admitted,
                 names: runner::report::condition_names(&scored.mask).join(" · "),
                 cell,
                 scored,
@@ -8927,7 +9079,9 @@ fn rules_banner(rules: Rules, passed: usize, considered: usize) -> String {
          still reach {}\n    \
          5. at least {} of periods must close POSITIVE at EVERY grain -- year, \
          half, quarter, month, week, day and HOUR\n    \
-         6. report the top {}\n\n  \
+         6. every variant must place a STOP and at least one TRAILING order \
+         (TSL or TTP): {}\n    \
+         7. report the top {}\n\n  \
          {passed} of {} priced combinations satisfy every rule.{}\n",
         ppm_as_percent(rules.max_mae_ppm),
         hundredths_of(rules.min_rr_bp),
@@ -8939,6 +9093,11 @@ fn rules_banner(rules: Rules, passed: usize, considered: usize) -> String {
         },
         bp_as_percent(rules.min_assurance_bp),
         bp_as_percent(rules.min_weakest_bp),
+        if rules.require_protective_exits {
+            "REQUIRED"
+        } else {
+            "off -- unprotected variants may be selected"
+        },
         rules.top,
         considered,
         if passed == 0 {
@@ -9160,7 +9319,14 @@ fn why_refused(cell: &grid::Cell, rules: Rules, steady: bool) -> &'static str {
     // has no such guard, so `worst_mae > 0` is true of every row that ever
     // moved against entry, and EVERY refusal was blamed on a rule that was not
     // running. The same holds for the ratio floor at zero.
-    if rules.max_mae_ppm > 0 && cell.worst_mae > rules.max_mae_ppm {
+    // NAMED FIRST, because it is the only refusal an operator cannot fix by
+    // moving a number. Every arm below says "this variant's RESULTS fell short";
+    // this one says "this variant had no plan for the trade that went against
+    // it", and no threshold change will admit it. It is also the cheapest test
+    // here -- two `Option::is_some` reads against six arithmetic derivations.
+    if !Rules::protects(rules.require_protective_exits, cell) {
+        "exits"
+    } else if rules.max_mae_ppm > 0 && cell.worst_mae > rules.max_mae_ppm {
         "MAE"
     } else if rules.min_rr_bp > 0 && cell.reward_to_risk_bp() < rules.min_rr_bp {
         "R:R"
@@ -17656,6 +17822,10 @@ mod tests {
                 min_weakest_bp: 0,
                 min_trades: 0,
                 min_ret_over_dd_bp: 0,
+                // OFF: this case exercises a different rule, and the cells it
+                // builds carry no exit orders. `protects` is bound by its own
+                // tests below.
+                require_protective_exits: false,
                 top: 25,
             },
             identity,
@@ -18299,8 +18469,12 @@ mod tests {
 
         // The money shape is identical in both cells. ONLY the sample differs,
         // so anything that separates them is separating on evidence alone.
-        let tiny = perfect_cell(20);
-        let ample = perfect_cell(200);
+        // BOTH PROTECTED, so the ONLY difference between them stays the sample
+        // size this test is about. A tier requires a stop and a trailing order,
+        // and bare cells would be refused for that instead — making the test
+        // pass for the wrong reason and stop testing the tier's sample rule.
+        let tiny = protected_cell(20);
+        let ample = protected_cell(200);
 
         assert_eq!(
             tiny.win_rate_bp(),
@@ -18410,6 +18584,9 @@ mod tests {
             min_weakest_bp: 0,
             min_trades: 0,
             min_ret_over_dd_bp: 0,
+            // OFF: this case exercises a different rule. `protects` is bound by
+            // its own tests below.
+            require_protective_exits: false,
             top: 25,
         };
         assert!(
@@ -18428,6 +18605,22 @@ mod tests {
             gross_loss: 0,
             worst_mae: 0,
             ..runner::grid::Cell::default()
+        }
+    }
+
+    /// [`perfect_cell`] carrying the exits `require_protective_exits` demands.
+    ///
+    /// `runner::grid::Cell::default()` places NO exit orders, so a bare
+    /// `perfect_cell` is refused by every profile that turns the rule on —
+    /// correctly, and for a reason unrelated to whatever the calling test is
+    /// about. A test that needs a cell ADMITTED says so by using this one; a
+    /// test about the protective rule itself uses the bare one, so the two
+    /// concerns cannot be confused for each other.
+    fn protected_cell(n: u64) -> runner::grid::Cell {
+        runner::grid::Cell {
+            stop: Some(0),
+            tsl: Some(0),
+            ..perfect_cell(n)
         }
     }
 
@@ -18730,6 +18923,12 @@ mod tests {
             worst_trade: -500,
             pessimistic: 1_000_000,
             max_drawdown: 100_000,
+            // AND IT PLACES ITS EXITS. The `elite` profile requires a stop and
+            // a trailing order, so "satisfies everything" now includes them —
+            // a 40-of-40 record with no stop is a shape this profile refuses,
+            // which its own dedicated test asserts.
+            stop: Some(0),
+            tsl: Some(0),
             ..grid::Cell::default()
         };
         assert!(
@@ -18858,6 +19057,12 @@ mod tests {
             pessimistic: 1_000_000,
             // Gave back 99% of everything it made.
             max_drawdown: 990_000,
+            // PROTECTED, so the only thing separating the two assertions below
+            // is the drawdown rule. Without these the `elite` profile refuses
+            // this cell for its exits and the test proves nothing about
+            // drawdown at all.
+            stop: Some(0),
+            tsl: Some(0),
             ..grid::Cell::default()
         };
 
@@ -18885,6 +19090,10 @@ mod tests {
             worst_trade: -500,
             pessimistic: 1_000_000,
             max_drawdown: 0,
+            // PROTECTED: this test is about a drawdown of zero clearing the
+            // rule, not about exits.
+            stop: Some(0),
+            tsl: Some(0),
             ..grid::Cell::default()
         };
         assert_eq!(flawless.return_over_drawdown(), i64::MAX);
@@ -19671,6 +19880,9 @@ mod tests {
             min_weakest_bp: 9_000,
             min_trades: 50,
             min_ret_over_dd_bp: 0,
+            // OFF here so this case still names the rule it is about. The
+            // protective rule gets its own `why_refused` case below.
+            require_protective_exits: false,
             top: 25,
         };
         // Each cell breaks exactly one rule, so the label is unambiguous.
@@ -19715,6 +19927,98 @@ mod tests {
         );
     }
 
+    /// A variant with no stop is refused however good its numbers are, and the
+    /// refusal is NAMED.
+    ///
+    /// # The run this pins, and why six rules could not have caught it
+    ///
+    /// A sixty-minute sweep of NIFTY over 2020-01..2026-07 selected the exit
+    /// `-/16/-` — no stop, no trailing stop, no trailing take-profit — and
+    /// **761 of its 801 trades exited on the 15:10 forced close**, which is the
+    /// exchange's decision rather than the strategy's. Every rule that existed
+    /// reads the trade LIST; not one reads `stop`, `tsl` or `ttp`, so no
+    /// threshold an operator could have typed would have refused that cell.
+    ///
+    /// `grid::merit` makes it a bias rather than an oversight. It returns
+    /// `5 - claimed`, where `claimed` counts the exit orders a cell sets, and it
+    /// is the tie-break inside `max_by_key` — which takes the LARGEST. Between
+    /// two cells that made the same money the engine was built to prefer the one
+    /// with less protection, and `Grid::best_within`'s own doc states the
+    /// premise: *"the profit-maximising cell is the one with no stop at all"*.
+    ///
+    /// So this rule is checked FIRST in [`why_refused`]: it is the one refusal
+    /// no amount of tuning a number can lift.
+    #[test]
+    fn a_variant_with_no_protective_exit_is_refused_and_named() {
+        // EVERY numeric floor at zero, so nothing here can refuse a row except
+        // the shape rule. A failure below cannot be blamed on a threshold.
+        let lax = crate::Rules {
+            max_mae_ppm: 0,
+            min_rr_bp: 0,
+            min_win_rate_bp: 0,
+            min_assurance_bp: 0,
+            min_weakest_bp: 0,
+            min_trades: 0,
+            min_ret_over_dd_bp: 0,
+            require_protective_exits: true,
+            top: 25,
+        };
+
+        let bare = perfect_cell(60);
+        assert_eq!(bare.stop, None, "the default cell places no stop");
+        assert!(
+            !lax.admits(&bare),
+            "sixty trades, every one a winner, and it is still refused -- \
+             because the rule is about the trade that did NOT come back"
+        );
+        assert_eq!(crate::why_refused(&bare, lax, true), "exits");
+
+        let mut guarded = perfect_cell(60);
+        guarded.stop = Some(0);
+        guarded.tsl = Some(0);
+        assert!(
+            lax.admits(&guarded),
+            "a stop and a trailing stop satisfy it"
+        );
+        assert_eq!(crate::why_refused(&guarded, lax, true), "-");
+
+        // EITHER trailing order satisfies the second half. A TTP arms and then
+        // follows the peak; a TSL follows from entry. Both give back less than
+        // a fixed target does on the trade that keeps running, which is the
+        // whole point of demanding one.
+        let mut armed = perfect_cell(60);
+        armed.stop = Some(0);
+        armed.ttp = Some(runner::grid::Ttp { arm: 0, trail: 0 });
+        assert!(
+            lax.admits(&armed),
+            "a TTP satisfies the trailing half alone"
+        );
+
+        // A STOP AND A TARGET IS NOT ENOUGH, and this is the case the operator
+        // ruled out by name: two FIXED orders cap the loser and the winner
+        // alike, which is the opposite of "minimal losers, massive winners".
+        let mut fixed_only = perfect_cell(60);
+        fixed_only.stop = Some(0);
+        fixed_only.target = Some(0);
+        assert!(!lax.admits(&fixed_only));
+        assert_eq!(crate::why_refused(&fixed_only, lax, true), "exits");
+
+        // A TRAIL WITHOUT A STOP IS NOT ENOUGH EITHER. A trailing stop that
+        // starts at the peak has no floor under the trade that goes against
+        // entry immediately and never makes a peak to trail from.
+        let mut trail_only = perfect_cell(60);
+        trail_only.tsl = Some(0);
+        assert!(!lax.admits(&trail_only));
+
+        // And the knob genuinely clears the rule rather than merely renaming it.
+        let off = crate::Rules {
+            require_protective_exits: false,
+            ..lax
+        };
+        assert!(off.admits(&bare));
+        assert_eq!(crate::why_refused(&bare, off, true), "-");
+    }
+
     /// Confidence and win rate are named SEPARATELY, because they are opposite
     /// findings.
     ///
@@ -19733,6 +20037,9 @@ mod tests {
             min_weakest_bp: 0,
             min_trades: 0,
             min_ret_over_dd_bp: 0,
+            // OFF: this case exercises a different rule. `protects` is bound by
+            // its own tests below.
+            require_protective_exits: false,
             top: 25,
         };
         // 20 of 20: a rate of 100% clears the win-rate rule outright, and a

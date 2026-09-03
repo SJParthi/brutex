@@ -144,7 +144,21 @@ const MAGIC: [u8; 8] = *b"BRUTEXFR";
 /// **UNVERIFIED as a measured bound.** No bench in this workspace
 /// times this, so the shape above is read from the source rather
 /// than measured. `CLAUDE.md` §3 rule 6.
-const VERSION: u32 = 4;
+/// # Version 5 — the protective-exit rule joined the stored rule set
+///
+/// Byte 195, previously the first of five reserved bytes, now carries
+/// `Rules::require_protective_exits`. The rules block exists so nothing
+/// downstream can judge a row by rules other than the ones it was screened
+/// under, and that guarantee is only as complete as the field list: a row that
+/// omitted the rule deciding whether an unstopped variant may be selected did
+/// not describe its own screen.
+///
+/// A version 4 file is REFUSED by `read_header`, not reread under version 5
+/// meanings. Its byte 195 is a zero that means "reserved", and reading it as
+/// `false` would make the row assert a rule was off when the format could not
+/// say — §3 rule 8 forbids exactly that reinterpretation, and §4 forbids the
+/// silent fallback that would hide it.
+const VERSION: u32 = 5;
 
 /// Bytes before the first row.
 ///
@@ -187,8 +201,12 @@ const PAYLOAD_BYTES: usize = STRIDE_BYTES - SEAL_BYTES;
 /// Byte carrying the row direction inside the sealed payload.
 const DIRECTION_AT: usize = 194;
 
-/// Reserved row bytes after [`DIRECTION_AT`], before the stored rule set.
-const ROW_RESERVED: core::ops::Range<usize> = 195..200;
+/// Reserved row bytes after the protective-exit flag, before the stored rule
+/// set.
+///
+/// Four, not five: byte 195 became `Rules::require_protective_exits` at format
+/// version 5. See [`VERSION`].
+const ROW_RESERVED: core::ops::Range<usize> = 196..200;
 
 /// Reserved bytes in the fixed frontier-file header.
 const HEADER_RESERVED: core::ops::Range<usize> = 12..HEADER_BYTES;
@@ -393,15 +411,29 @@ impl Row {
             }],
             &mut at,
         ); // 194   1 -> 195
-        // 195..200 stay zero: five bytes remain reserved after direction used
-        // the first byte of the original six-byte reserve. Covered by the seal;
-        // a sealed non-zero reserve is an unknown schema, not a value to ignore.
+        // BYTE 195 IS NOW `require_protective_exits`, AT FORMAT VERSION 5.
         //
+        // The rules block below records what a run judged by, so that nothing
+        // downstream can judge by others — and a rule missing from it is that
+        // guarantee quietly broken. `require_protective_exits` is the rule that
+        // decides whether a variant with no stop may be selected at all, so a
+        // row that omits it does not say what it was screened for.
+        //
+        // Taken from the reserve at a NEW version rather than reinterpreted at
+        // version 4, which is what `CLAUDE.md` §3 rule 8 forbids: a v4 file has
+        // a zero here meaning "reserved", and reading that as `false` would be
+        // this row asserting a rule was off when the format simply could not
+        // say. `read_header` refuses a version it does not know, loudly, which
+        // is the §4-compliant outcome — v4 frontiers are not silently reread
+        // under v5 meanings.
+        //
+        // 196..200 stay zero: four bytes remain reserved.
+        put(&[u8::from(self.rules.require_protective_exits)], &mut at); // 195   1 -> 196
         // Advanced over EXPLICITLY now that something follows it. While the
         // reserve was the last thing on the row, leaving `at` short of it was
         // the same as skipping it; with the rules after it, a missing advance
-        // would silently write them six bytes early.
-        put(&[0_u8; 5], &mut at); // 195   5 -> 200
+        // would silently write them four bytes early.
+        put(&[0_u8; 4], &mut at); // 196   4 -> 200
         // THE RULES THIS RUN JUDGED BY, so nothing downstream can judge by
         // others. Eight fields in declaration order, which is the order
         // `from_bytes` reads them back in.
@@ -484,7 +516,21 @@ impl Row {
                 ));
             }
         };
-        let reserve = take(5, &mut at);
+        // BYTE 195, THE PROTECTIVE-EXIT RULE. Two values are defined and a third
+        // is refused rather than coerced: a byte this row does not understand
+        // means the row was written by a schema this build does not know, and
+        // reading `2` as `true` would be a guess wearing a value's clothes.
+        let protective_byte = take(1, &mut at).first().copied().unwrap_or(0);
+        let require_protective_exits = match protective_byte {
+            0 => false,
+            1 => true,
+            other => {
+                return Err(format!(
+                    "frontier row protective-exit byte 195 is {other}; only 0=off and 1=required are defined for format version {VERSION}"
+                ));
+            }
+        };
+        let reserve = take(4, &mut at);
         if let Some((offset, byte)) = reserve
             .iter()
             .copied()
@@ -492,7 +538,7 @@ impl Row {
             .find(|(_, byte)| *byte != 0)
         {
             return Err(format!(
-                "frontier row reserved byte {} is {byte}; every byte in 195..200 must be zero for format version {VERSION}",
+                "frontier row reserved byte {} is {byte}; every byte in 196..200 must be zero for format version {VERSION}",
                 ROW_RESERVED.start.saturating_add(offset)
             ));
         }
@@ -505,6 +551,10 @@ impl Row {
             min_weakest_bp: i64::from_le_bytes(take(8, &mut at).try_into().unwrap_or([0; 8])),
             min_ret_over_dd_bp: i64::from_le_bytes(take(8, &mut at).try_into().unwrap_or([0; 8])),
             min_trades: u64::from_le_bytes(take(8, &mut at).try_into().unwrap_or([0; 8])),
+            // READ FROM BYTE 195 ABOVE, not defaulted. See the write side for
+            // why this took a reserved byte at version 5 rather than being
+            // reinterpreted at version 4.
+            require_protective_exits,
             // Saturated back, matching the write. A stored `u64::MAX` means
             // "past what a `usize` holds", which on this target it also is.
             top: usize::try_from(u64::from_le_bytes(

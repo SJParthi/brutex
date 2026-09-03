@@ -235,8 +235,13 @@ pub fn read_month(
     rung: Timeframe,
     ym: YearMonth,
 ) -> Result<Vec<Bar>, String> {
-    let path = StorePath::for_key(vendor, key, rung, ym, FileKind::Bars)
-        .map_err(|why| format!("no store path for {} {}: {why}", rung.as_str(), key.underlying))?;
+    let path = StorePath::for_key(vendor, key, rung, ym, FileKind::Bars).map_err(|why| {
+        format!(
+            "no store path for {} {}: {why}",
+            rung.as_str(),
+            key.underlying
+        )
+    })?;
     // THE STORE'S OWN SYMBOL ID, hashed from the NORMALISED underlying exactly
     // as `stored::load_classified_with_ceiling` does. Hashing the caller's raw
     // string instead opens the right file and is then refused by it, naming two
@@ -374,9 +379,7 @@ mod tests {
     /// counterpart.
     #[test]
     fn a_missing_or_extra_record_is_named_as_absence_not_as_a_field() {
-        let minutes: Vec<Bar> = (0..10)
-            .map(|m| minute_bar(m, 100, 110, 90, 105))
-            .collect();
+        let minutes: Vec<Bar> = (0..10).map(|m| minute_bar(m, 100, 110, 90, 105)).collect();
         let bucket = store_bucket(Timeframe::MINUTE_5).expect("5min has a bucket");
         let full = pull::fold::fold(&minutes, bucket).expect("ten minutes fold");
         assert_eq!(full.len(), 2, "ten minutes make two five-minute buckets");

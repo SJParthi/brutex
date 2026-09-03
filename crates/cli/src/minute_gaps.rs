@@ -218,7 +218,10 @@ pub fn withhold(bars: &[Candle], days: &[i64]) -> (Vec<Candle>, u64) {
 /// different set would leave a signal bar whose closing minute had been removed,
 /// which is the refusal this exists to prevent, arriving by a new route.
 #[must_use]
-pub fn withhold_holed_days(signal: &[Candle], minutes: &[Candle]) -> (Vec<Candle>, Vec<Candle>, GapExclusion) {
+pub fn withhold_holed_days(
+    signal: &[Candle],
+    minutes: &[Candle],
+) -> (Vec<Candle>, Vec<Candle>, GapExclusion) {
     let days = days_with_interior_gaps(minutes);
     if days.is_empty() {
         return (signal.to_vec(), minutes.to_vec(), GapExclusion::none());
@@ -326,7 +329,11 @@ mod tests {
         assert_eq!(excluded.day_numbers(), &[19_001]);
         assert_eq!(excluded.days(), 1);
         assert_eq!(excluded.signal_bars(), 4, "the holed day's signal bars go");
-        assert_eq!(excluded.minute_bars(), 4, "and its minute bars go with them");
+        assert_eq!(
+            excluded.minute_bars(),
+            4,
+            "and its minute bars go with them"
+        );
         assert!(!excluded.is_empty());
 
         for bar in kept_signal.iter().chain(kept_minutes.iter()) {
