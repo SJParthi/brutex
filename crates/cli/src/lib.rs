@@ -315,8 +315,12 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    If NOTHING passes at any support, it prints the
                                    most permissive step it walked, so the answer is
                                    what IS there rather than a blank page.
-                                   MAX_POINTS is still yours: it is the one number
-                                   only you can mean.
+                                   MAX_POINTS is yours when you mean it -- or pass
+                                   ZERO for no ceiling beyond the ladder the bars
+                                   themselves derive, which leaves NO typed number
+                                   in the search at all: support is walked, every
+                                   quality floor is measured off the bars, and the
+                                   stop ladder is a percentile of the span.
        cli descend      VENDOR UNDERLYING RUNG FROM_Y FROM_M TO_Y TO_M
                         CEILING_PPM PER_WEEK
                                    sweep ONE rung at successively LOWER supports,
@@ -332,6 +336,13 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    min_hits comes from its OWN bar count, because
                                    81 months holds 1,671 daily bars and 623,546
                                    one-minute ones. Every rung is recorded.
+                                   Pass the word `auto` instead of a number and
+                                   each rung DERIVES its own threshold from its
+                                   own bars -- the larger of its statistical
+                                   support floor and the deepest threshold this
+                                   machine can finish. Nothing is typed, and
+                                   section 6's argument against a depth parameter
+                                   is the same argument against this one.
        cli ledger-all   VENDOR FROM_Y FROM_M TO_Y TO_M SUPPORT_PPM MAX_POINTS ROOT
                                    the DURABLE all-rung run. Sweeps the span on
                                    all eight rungs and WRITES the ledgers --
@@ -690,10 +701,32 @@ fn elite_arm(
     let rules = (max_points.parse::<i64>(), top.parse::<usize>());
     match (numbers, rules) {
         ((Ok(fy), Ok(fm), Ok(ty), Ok(tm)), (Ok(pts), Ok(n))) => {
-            if pts <= 0 {
+            // ZERO IS "NO CEILING BEYOND THE SWEPT LADDER", NOT A MISTAKE.
+            //
+            // `Rules::admits` already reads `max_mae_ppm == 0` that way — its
+            // clause is `(self.max_mae_ppm == 0 || cell.worst_mae <= ...)` — and
+            // `Levels::forced` is `(rules.max_mae_ppm > 0).then_some(..)`. Zero
+            // is the value that lets the DERIVED stop ladder stand alone, and
+            // this refusal was the only thing preventing an operator asking for
+            // it.
+            //
+            // The effect was that `elite` could not be run without typing an
+            // index-point figure, and that figure was the LAST typed number in
+            // the whole search: support is walked, every quality floor is
+            // measured off the bars by `Rules::derived`, and the stop LADDER is
+            // `range_percentile` of the span. Only the ceiling above it was a
+            // constant, and it was one this verb demanded rather than derived.
+            //
+            // NEGATIVE IS STILL REFUSED, because a negative ceiling is not a
+            // weaker rule but an unsatisfiable one: `worst_mae` is non-negative
+            // by construction, so it would admit nothing while reading as a
+            // relaxation.
+            if pts < 0 {
                 return refuse(
                     out,
-                    "MAX_POINTS must be a whole number of index points, 1 or more",
+                    "MAX_POINTS is a whole number of index points: 1 or more for a \
+                     ceiling, or 0 for no ceiling beyond the ladder the bars derive. \
+                     A negative ceiling is unsatisfiable, not a looser one",
                 );
             }
             if n == 0 {
@@ -1099,10 +1132,14 @@ fn range_all_arm(
         from.1.parse::<u8>(),
         to.0.parse::<u16>(),
         to.1.parse::<u8>(),
-        parse_support_ppm(support_ppm),
+        parse_support_choice(support_ppm),
     ) {
         (Ok(fy), Ok(fm), Ok(ty), Ok(tm), Ok(h)) => {
-            let text = range_all(vendor, underlying, (fy, fm), (ty, tm), Some(h));
+            // `h` IS THE OPTION NOW, not a value wrapped in one. `auto` yields
+            // `None`, which `one_rung` reads as "derive this rung's threshold
+            // from its own bars" -- the path that was live on the HTTP surface
+            // and unreachable from the command line.
+            let text = range_all(vendor, underlying, (fy, fm), (ty, tm), h);
             let refused = carries_refusal(&text);
             out.push_str(&text);
             if refused { MISUSED } else { OK }
@@ -1444,6 +1481,35 @@ fn parse_support_ppm(text: &str) -> Result<u64, &'static str> {
         ),
         Ok(ppm) => Ok(ppm),
     }
+}
+
+/// `SUPPORT_PPM`, or the word `auto` meaning "derive it per rung".
+///
+/// # The derived path existed, was tested, and no CLI verb could reach it
+///
+/// `one_rung` takes `Option<u64>` and its `None` branch derives the threshold
+/// from the rung's own bars — `max(statistical_support_floor(bars), the
+/// threshold `Sweeper::auto` settles on)`. Two floors, both measured, neither
+/// typed. `range_all_arm` passed `Some(h)` unconditionally, so the ONLY caller
+/// that ever reached `None` was `api::sweeprun`, the browser Run button.
+///
+/// For an operator whose standing rule is that no run may originate a request
+/// from the server, that made the derived support unreachable — and every
+/// script written for them therefore typed a number, which is the shape
+/// `CLAUDE.md` §6 refuses: *"a parameter that can be set can be set wrongly and
+/// silently."* A threshold typed too high prunes a rare setup at level one;
+/// typed too low and the frontier explodes. There is no correct value, which is
+/// precisely §6's argument.
+///
+/// `auto` is a WORD rather than a sentinel number because every number in the
+/// range means something: `0` is already refused as "would disable extinction",
+/// and any other value is a real threshold. A magic integer would be a value an
+/// operator could type by accident and never see honoured.
+fn parse_support_choice(text: &str) -> Result<Option<u64>, &'static str> {
+    if text.eq_ignore_ascii_case("auto") {
+        return Ok(None);
+    }
+    parse_support_ppm(text).map(Some)
 }
 /// `min_hits` must be at least one.
 ///
@@ -3777,19 +3843,22 @@ const fn side_of_direction(direction: Direction) -> Side {
 /// `CLAUDE.md` §4: a number whose subject is unstated is a number that cannot be
 /// checked. Every figure in the sections below belongs to this one combination,
 /// and until it was printed the report gave the reader no way to learn which.
-fn traded_line(scored: &runner::rank::Scored) -> String {
+fn traded_line(scored: &runner::rank::Scored, direction: Direction) -> String {
     let mut out = String::with_capacity(256);
     // THE SIDE IS THE FIRST THING, because without it none of the rest is
     // actionable. This function exists on the stated ground that *"a number
     // whose subject is unstated is a number that cannot be checked"*, and it
     // printed hits, n, mean and t with no word about which way the trade goes.
-    // `side_of_evidence` had already decided it two calls up.
+    // THE PRICED DIRECTION, HANDED IN. It read `side_of_evidence(scored)` --
+    // the sign of the raw unexited mean -- while the table below printed
+    // `row.side`, the side the cell was actually priced at, and the P&L under
+    // it came from a walk on that same priced side. Once `screen` began pricing
+    // BOTH sides and keeping the better, those two stopped agreeing: the same
+    // combination could be headlined LONG and tabled SHORT on one page.
     let _ = writeln!(
         out,
         "\nTRADED COMBINATION\n  {} — {}\n  hits {} · n {} · mean {} paisa · t {:.2}",
-        direction_of(side_of_evidence(scored))
-            .as_str()
-            .to_uppercase(),
+        direction.as_str().to_uppercase(),
         runner::report::condition_names(&scored.mask).join(" · "),
         scored.hits,
         scored.edge.n,
@@ -6167,7 +6236,7 @@ struct ChosenTrade<'a> {
 struct TradeScreen<'a> {
     chosen: Option<ChosenTrade<'a>>,
     text: String,
-    priced: std::collections::HashMap<[u64; 6], grid::Cell>,
+    priced: std::collections::HashMap<[u64; 6], (grid::Cell, Direction)>,
 }
 
 fn trade_and_screen<'a>(
@@ -6292,11 +6361,13 @@ fn trade_and_screen<'a>(
 /// without the sample size and the exposure that qualify it.
 fn traded_preamble(
     first: &runner::rank::Scored,
+    // The direction the chosen cell was PRICED at, not the evidence proxy.
+    direction: Direction,
     outcome: &runner::RankedOutcome,
     sessions: usize,
     bars: &[indicators::Candle],
 ) -> String {
-    let mut out = traded_line(first);
+    let mut out = traded_line(first, direction);
     out.push_str(&grid_exposure(outcome, bars));
     out.push_str(&sample_warning(sessions));
     out
@@ -7994,7 +8065,7 @@ struct ScreenResult<'a> {
     selected: Option<ScreenSelection<'a>>,
     /// Cells priced by this exact policy/cap only. Cascade tiers replace this
     /// map; they never merge into it.
-    priced: std::collections::HashMap<[u64; 6], grid::Cell>,
+    priced: std::collections::HashMap<[u64; 6], (grid::Cell, Direction)>,
 }
 
 impl Screened<'_> {
@@ -8884,8 +8955,8 @@ fn screen_cascade<'a>(
 /// Replaces one policy tier's priced cells with the next tier's complete map.
 /// Merging would retain masks the next tier's cap never visited.
 fn replace_priced(
-    current: &mut std::collections::HashMap<[u64; 6], grid::Cell>,
-    next: std::collections::HashMap<[u64; 6], grid::Cell>,
+    current: &mut std::collections::HashMap<[u64; 6], (grid::Cell, Direction)>,
+    next: std::collections::HashMap<[u64; 6], (grid::Cell, Direction)>,
 ) {
     *current = next;
 }
@@ -9288,7 +9359,7 @@ fn screen<'a>(
     // for each; which ones those are is decided after this point.
     let mut priced = std::collections::HashMap::with_capacity(rows.len());
     for row in &rows {
-        priced.insert(row.scored.mask.words(), row.cell);
+        priced.insert(row.scored.mask.words(), (row.cell, row.side));
     }
 
     // THE OBJECTIVE IS THE RANKING, AND A RULE IS NOT THE OBJECTIVE.
@@ -9618,7 +9689,23 @@ fn measure_top(
     // above reports.
     let stop_rungs_again = stop_ladder_ppm(bars);
     for row in rows.iter_mut().take(measured_band(rules.top)) {
-        let side = side_of_evidence(row.scored);
+        // THE SIDE THE ROW WAS PRICED AT, NOT THE PROXY, and getting this wrong
+        // was worse than opposite — it was cross-wired.
+        //
+        // `screen` now prices BOTH sides and keeps the better, so
+        // `side_of_evidence` no longer names the side `row.cell` came from.
+        // Re-deriving it here rebuilt the grid on the OTHER side, and
+        // `consistency_of` then took `row.cell`'s `stop`/`target`/`tsl`/`ttp` —
+        // rung indices into the WINNING side's ladders — and resolved them
+        // against this grid's ladders. Not a mirrored measurement: a meaningless
+        // one.
+        //
+        // And it is not cosmetic. The result drives the calendar re-sort and
+        // then the calendar GATE, which sets `row.steady = false` and
+        // `row.admitted = false`. `final_selection` returns only admitted rows,
+        // so a combination priced and admitted SHORT could be demoted by a LONG
+        // measurement and lose the run to a different candidate.
+        let side = side_of_direction(row.side);
         let g = grid::evaluate(
             bars,
             column,
@@ -11083,9 +11170,19 @@ pub fn screen_range_in_points(
                 end.\n"
             .to_owned();
     }
-    if max_points <= 0 || top == 0 {
-        return "refused: the stop ceiling must be 1 index point or more and \
-                TOP must be 1 row or more.\n"
+    // ZERO IS "NO CEILING BEYOND THE SWEPT LADDER". See `elite_arm` for the
+    // full argument; in short, `Rules::admits` already reads `max_mae_ppm == 0`
+    // as no ceiling and `Levels::forced` already declines to force one, so this
+    // was the second of two refusals standing between the operator and the
+    // derived stop ladder. Both had to go or `elite` still could not be run
+    // without typing an index-point figure.
+    //
+    // NEGATIVE remains refused: `worst_mae` is non-negative by construction, so
+    // a negative ceiling admits nothing while reading as a relaxation.
+    if max_points < 0 || top == 0 {
+        return "refused: the stop ceiling is a whole number of index points — 1 or \
+                more for a ceiling, or 0 for no ceiling beyond the ladder the bars \
+                derive — and TOP must be 1 row or more.\n"
             .to_owned();
     }
     let root = match store_root() {
@@ -13103,7 +13200,7 @@ fn record_frontier(
     // exactly those -- and `Row::of` stores zeros with a `trades` of zero, which
     // is the only value that says "swept, never priced" rather than "priced and
     // it lost nothing".
-    priced: &std::collections::HashMap<[u64; 6], grid::Cell>,
+    priced: &std::collections::HashMap<[u64; 6], (grid::Cell, Direction)>,
 ) -> Result<(String, u64), String> {
     let top = rules.top;
     let kept = by_evidence.len().min(top);
@@ -13122,7 +13219,8 @@ fn record_frontier(
                     id.bytes(),
                     rank,
                     scored,
-                    priced.get(&scored.mask.words()),
+                    priced.get(&scored.mask.words()).map(|(cell, _)| cell),
+                    priced.get(&scored.mask.words()).map(|&(_, side)| side),
                     rules,
                 )
             })
@@ -13585,7 +13683,7 @@ fn publish_ranked(
         .enumerate()
         .map(|(nth, scored)| {
             let rank = u16::try_from(nth.saturating_add(1)).unwrap_or(u16::MAX);
-            crate::frontier::Row::of(identity, rank, scored, None, rules)
+            crate::frontier::Row::of(identity, rank, scored, None, None, rules)
         })
         .collect();
 
@@ -14808,6 +14906,7 @@ fn audit_bars(
     // Evidence rank one is not a winner merely because it was considered first.
     out.push_str(&traded_preamble(
         chosen.scored,
+        chosen.direction,
         &outcome,
         session_index(&bars).len(),
         &bars,
@@ -15268,7 +15367,7 @@ struct Recorded<'a> {
     by_evidence: &'a [&'a runner::rank::Scored],
     /// The rules this run judged by, which travel onto every frontier row.
     rules: Rules,
-    priced: &'a std::collections::HashMap<[u64; 6], grid::Cell>,
+    priced: &'a std::collections::HashMap<[u64; 6], (grid::Cell, Direction)>,
     /// Exact chosen-cell replay rows, already stamped from their execution bars.
     chosen_rows: &'a [grid::TradeRow],
 }
@@ -16613,11 +16712,16 @@ mod tests {
     fn a_later_tier_with_a_smaller_cap_drops_unvisited_earlier_cells() {
         let a = [1, 0, 0, 0, 0, 0];
         let b = [2, 0, 0, 0, 0, 0];
+        // THE MAP CARRIES THE PRICED SIDE BESIDE THE CELL. `screen` prices both
+        // sides and keeps the better, so a cell alone no longer says which
+        // direction its money came from — and `frontier::Row::of` needs that to
+        // stamp a direction byte the money agrees with.
         let mut earlier = std::collections::HashMap::from([
-            (a, grid::Cell::default()),
-            (b, grid::Cell::default()),
+            (a, (grid::Cell::default(), Direction::Long)),
+            (b, (grid::Cell::default(), Direction::Short)),
         ]);
-        let final_tier = std::collections::HashMap::from([(a, grid::Cell::default())]);
+        let final_tier =
+            std::collections::HashMap::from([(a, (grid::Cell::default(), Direction::Long))]);
         super::replace_priced(&mut earlier, final_tier);
         assert!(earlier.contains_key(&a));
         assert!(
@@ -20801,6 +20905,35 @@ mod tests {
     ///
     /// So this rule is checked FIRST in [`why_refused`]: it is the one refusal
     /// no amount of tuning a number can lift.
+    #[test]
+    fn auto_reaches_the_derived_support_and_no_typo_does() {
+        assert_eq!(crate::parse_support_choice("auto"), Ok(None));
+        assert_eq!(crate::parse_support_choice("AUTO"), Ok(None));
+        assert_eq!(crate::parse_support_choice("200000"), Ok(Some(200_000)));
+
+        // EVERY REFUSAL `parse_support_ppm` MAKES IS STILL MADE. `auto` adds one
+        // word; it does not loosen the parser. A typo must refuse rather than
+        // silently derive, because a derived threshold and a typed one are
+        // different runs and the operator has to know which he got.
+        assert!(
+            crate::parse_support_choice("0").is_err(),
+            "zero still refused"
+        );
+        assert!(
+            crate::parse_support_choice("1000001").is_err(),
+            "above 100% still refused"
+        );
+        assert!(
+            crate::parse_support_choice("automatic").is_err(),
+            "a word that merely starts with auto is a typo, not the token"
+        );
+        assert!(
+            crate::parse_support_choice("").is_err(),
+            "an empty argument is not a request to derive"
+        );
+        assert!(crate::parse_support_choice("-1").is_err());
+    }
+
     #[test]
     fn a_variant_with_no_protective_exit_is_refused_and_named() {
         // EVERY numeric floor at zero, so nothing here can refuse a row except

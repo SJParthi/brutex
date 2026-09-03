@@ -608,6 +608,9 @@ impl Row {
         rank: u16,
         scored: &runner::rank::Scored,
         cell: Option<&runner::grid::Cell>,
+        // The side `cell` was PRICED at, carried rather than re-derived. `None`
+        // for an unpriced row, which has no side because it has no trades.
+        direction: Option<Direction>,
         rules: crate::Rules,
     ) -> Self {
         Self {
@@ -636,10 +639,26 @@ impl Row {
             min_win: cell.map_or(0, |c| c.min_win),
             gross_win: cell.map_or(0, |c| c.gross_win),
             gross_loss: cell.map_or(0, |c| c.gross_loss),
-            // FROM THE SAME `Scored` THIS ROW IS. `side_of_evidence` is the one
-            // definition of the rule and it lives at the crate root, so this
-            // cannot drift from what the screen actually traded.
-            direction: crate::direction_of(crate::side_of_evidence(scored)),
+            // THE SIDE THE MONEY ABOVE WAS PRICED AT, handed in beside the cell.
+            //
+            // This read `side_of_evidence(scored)` and its comment claimed that
+            // "cannot drift from what the screen actually traded". It could, the
+            // moment `screen` began pricing BOTH sides and keeping the better:
+            // every money field on this row comes from the winning side's cell,
+            // and the direction byte came from the raw unexited mean. A row
+            // could store SHORT money under a LONG direction.
+            //
+            // This is the PERSISTED surface — `/frontier.json` and the browser
+            // render this byte verbatim — and it contradicted its own sibling in
+            // the same result set, since the detail receipt already stored the
+            // priced direction. Two files, one run, opposite answers.
+            //
+            // Carried rather than derived, so there is no second definition to
+            // drift. An UNPRICED row has no side to name and keeps the evidence
+            // reading: it has no money either, and `trades == 0` is how a reader
+            // tells the two apart.
+            direction: direction
+                .unwrap_or_else(|| crate::direction_of(crate::side_of_evidence(scored))),
             rules,
         }
     }
