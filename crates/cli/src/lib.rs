@@ -2356,11 +2356,36 @@ const _: () = assert!(engine::DEFAULT_CEILING / SEARCH_CEILING >= 100);
 /// only combination clearing a 44% floor was the EMPTY mask — every ledger row
 /// read "No condition bits are set" and traded nothing.
 ///
-/// A hundred, so the assertion above and this share state one rule rather than
-/// two. Raising it makes the probe cheaper and its answer more conservative;
-/// lowering it risks the twenty-minute non-finish that put `SEARCH_CEILING`
-/// here in the first place.
-const PROBE_SHARE: usize = 100;
+/// # EIGHT, and the sibling constant is why it is not a hundred
+///
+/// `runner::PROBE_PAIRS` had this defect first and its doc records the fix:
+///
+/// > *"An audit found the first value — `1 << 22` — sitting **4096× below** the
+/// > budget it tunes for, which rejects thresholds that would comfortably
+/// > finish and **pins the answer near 50% support**."*
+///
+/// It was raised **64×**. The ceiling was left alone with the same defect, and
+/// "pins the answer near 50% support" is a description of the operator's own
+/// ledger: 23.83%, 28.57%, **44.25%**.
+///
+/// A first pass at this used a hundred — 1,342,177 candidates, 2.7× the old
+/// constant. That is the same timidity in a new place: it corrects the SHAPE
+/// while leaving the magnitude wrong, and 2.7× does not move a 44% floor
+/// anywhere useful on a curve where candidate count explodes as support falls.
+///
+/// # Why eight is safe, in bytes rather than in confidence
+///
+/// `engine`'s own figure is ~146 bytes per candidate. Eight gives 16,777,215
+/// candidates ≈ **2.4 GB**. The measurement that put `SEARCH_CEILING` here was
+/// `ceiling_from_env()` — the whole 134,217,720, about 19.6 GB — sitting at
+/// **10.24 GB resident** and never finishing. 2.4 GB is a quarter of what
+/// failed and an eighth of what was asked for, and TIME is separately bounded
+/// by `PROBE_PAIRS`, which is what the 64× raise was for.
+///
+/// Still a fraction, and it must stay one: the reason the probe is not the
+/// sweep is unchanged. `Sweeper::auto` brackets downward, so its low-threshold
+/// probes are free to allocate everything they are allowed.
+const PROBE_SHARE: usize = 8;
 
 /// The threshold search, rendered.
 #[must_use]
