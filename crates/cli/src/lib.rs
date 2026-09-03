@@ -13887,7 +13887,16 @@ fn audit_bars(
                 into,
                 run_id,
                 &outcome.sweep,
-                u64::try_from(trade_bars.len()).unwrap_or(u64::MAX),
+                // THE SIGNAL BARS, NOT THE EXECUTION SERIES, and the first
+                // draft had it wrong. `trade_bars` is the 1-minute execution
+                // stream, so a 60min row recorded `bars: 609722` — the minute
+                // count — beside `timeframe: "60min"`, whose real column is
+                // 11,298. The success path records `bars.len()` (lib.rs:14065),
+                // the signal column the ladder was actually walked over, and
+                // `min_hits` is a fraction OF that column. Recording the
+                // execution length made the two disagree by 54x and turned the
+                // support ratio the browser derives into nonsense.
+                u64::try_from(bars.len()).unwrap_or(u64::MAX),
                 min_hits,
             ) {
                 Ok((said, _committed)) => {
