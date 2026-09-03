@@ -1299,6 +1299,28 @@
       // all wrong for an assembly. `total_count`, `complete`, `periods`,
       // `policy` and `direction` are result-scoped (`periods_scope` is
       // "complete-result" on every page) and carry through unchanged.
+      // `refusal` IS PAGE-SCOPED TOO, and leaving it off the list above is what
+      // refused a COMPLETE list.
+      //
+      // The server sets it on every partial page — "partial page only: page 0
+      // returns rows 0..3 of 3581. Fetch every page and reconcile
+      // `total_count`" — which is an INSTRUCTION to the client, not a failure.
+      // This assembly is that instruction carried out. But the notice survived
+      // into the assembled body, and `validateTradePayload` reads a non-null
+      // `refusal` beside committed metadata as "partial or refused" and drops
+      // the whole payload (web/src/lib/trade-analytics.js:249) — so a run with
+      // 3,581 real trades rendered "The trade analytics payload was refused."
+      //
+      // CLEARED ONLY ON RECONCILIATION, and only for that exact notice. A
+      // refusal saying anything else, or a row count that does not match
+      // `total_count`, carries through untouched. The point is to ANSWER the
+      // server's instruction, never to suppress a refusal — a page that hid a
+      // real one would be the fallback that hides a failure CLAUDE.md §4 bans.
+      const answeredPagination =
+        typeof body?.refusal === 'string' &&
+        body.refusal.startsWith('partial page only:') &&
+        typeof body?.total_count === 'number' &&
+        pagedRows.length === body.total_count;
       const assembled = Array.isArray(body?.trades)
         ? {
             ...body,
@@ -1306,7 +1328,8 @@
             count: pagedRows.length,
             page: 0,
             page_complete: true,
-            next_page: null
+            next_page: null,
+            refusal: answeredPagination ? null : (body?.refusal ?? null)
           }
         : body;
       const checked = validateTradePayload(assembled, expectedRun);
