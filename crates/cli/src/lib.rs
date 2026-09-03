@@ -7316,7 +7316,9 @@ impl Rules {
             require_protective_exits: Self::protective_exits_required(),
             // THE OPERATOR'S OWN 1.50x, and the only stated multiple left in the
             // rule set. Every other floor is measured off the bars or off.
-            min_fill_headroom_bp: at("BRUTEX_MIN_FILL_HEADROOM_BP", 150),
+            // TWO TIMES, raised from 1.5x by the operator: "our best case fills
+            // also should be minimum 2x bigger than worst case fills".
+            min_fill_headroom_bp: at("BRUTEX_MIN_FILL_HEADROOM_BP", 200),
             // THE OPERATOR'S SECOND 1.5x, on the AVERAGE trade rather than the
             // fill readings. Measured 2.26 on the 60min run, so it is a floor a
             // real record can clear -- unlike `min_rr_bp`, which is min/max.
@@ -7428,8 +7430,28 @@ impl Rules {
             return rules;
         };
         if Self::stated("BRUTEX_MIN_WIN_RATE_BP").is_none() {
-            rules.min_win_rate_bp = base_bp;
-            rules.min_assurance_bp = assurance_floor_bp(base_bp);
+            // THE MEASURED RATE MAY RAISE THE FLOOR. IT MAY NOT LOWER IT.
+            //
+            // This was a bare assignment, and that is why nothing on this
+            // machine has ever enforced the operator's fifty percent.
+            // `Rules::operator` sets `min_win_rate_bp` to 5,000 bp — his stated
+            // requirement, in writing, since the profile was written — and this
+            // line REPLACED it with whatever the span's own base rate happened
+            // to be. On the 60-minute NIFTY span that base rate is far below
+            // fifty, so a 26.8% record cleared a floor the operator believes is
+            // set at 50%.
+            //
+            // The derived figure is still doing its job: a series whose base
+            // rate is SIXTY percent should not have a strategy admitted at
+            // fifty-one, because that is worse than the coin the market already
+            // hands you. `max` keeps that and drops the half that silently
+            // relaxed a stated requirement.
+            //
+            // `Self::stated` still wins outright — an operator who types the
+            // knob gets exactly what he typed, high or low, because that is a
+            // decision rather than a default.
+            rules.min_win_rate_bp = base_bp.max(rules.min_win_rate_bp);
+            rules.min_assurance_bp = assurance_floor_bp(rules.min_win_rate_bp);
         }
         if Self::stated("BRUTEX_MIN_RR_BP").is_none() {
             // ZERO, WHICH `Rules::admits` READS AS "NO R:R FLOOR".
@@ -20636,14 +20658,16 @@ mod tests {
     /// refused for its missing stop before this. `3` and `2` are the smallest
     /// pair clearing 1.5x, so this fixture asserts nothing about the boundary —
     /// `the_fill_headroom_boundary_is_inclusive_at_exactly_one_and_a_half` owns
-    /// that.
+    /// that. `4` and `2` are the smallest pair clearing the operator's 2x, which
+    /// he raised from 1.5x -- and this fixture had to move with it, which is the
+    /// point of keeping the pair minimal rather than generous.
     fn protected_cell(n: u64) -> runner::grid::Cell {
         let scale = i64::try_from(n).unwrap_or(1);
         runner::grid::Cell {
             stop: Some(0),
             tsl: Some(0),
             pessimistic: 2 * scale,
-            optimistic: 3 * scale,
+            optimistic: 4 * scale,
             ..perfect_cell(n)
         }
     }
@@ -20780,8 +20804,9 @@ mod tests {
     fn the_operator_profile_carries_the_stated_one_and_a_half_times() {
         assert_eq!(
             crate::Rules::operator().min_fill_headroom_bp,
-            150,
-            "the operator asked for best-case fills at least 1.5x the worst"
+            200,
+            "the operator RAISED this from 1.5x to 2x: \"our best case fills \
+             also should be minimum 2x bigger than worst case fills\""
         );
     }
 
@@ -21083,11 +21108,11 @@ mod tests {
             min_win: 1_500,
             worst_trade: -500,
             pessimistic: 1_000_000,
-            // AND ITS FILLS HOLD, at exactly the 1.5x the operator asked for. The
+            // AND ITS FILLS HOLD, at exactly the 2x the operator asked for. The
             // same reason the exits are here: `Cell::default()` leaves the
             // optimistic total at zero, which fails the fill-headroom rule for a
             // reason that has nothing to do with what this test is about.
-            optimistic: 1_500_000,
+            optimistic: 2_000_000,
             max_drawdown: 100_000,
             // AND IT PLACES ITS EXITS. The `elite` profile requires a stop and
             // a trailing order, so "satisfies everything" now includes them —
@@ -21221,11 +21246,11 @@ mod tests {
             min_win: 1_500,
             worst_trade: -500,
             pessimistic: 1_000_000,
-            // AND ITS FILLS HOLD, at exactly the 1.5x the operator asked for. The
+            // AND ITS FILLS HOLD, at exactly the 2x the operator asked for. The
             // same reason the exits are here: `Cell::default()` leaves the
             // optimistic total at zero, which fails the fill-headroom rule for a
             // reason that has nothing to do with what this test is about.
-            optimistic: 1_500_000,
+            optimistic: 2_000_000,
             // Gave back 99% of everything it made.
             max_drawdown: 990_000,
             // PROTECTED, so the only thing separating the two assertions below
@@ -21260,11 +21285,11 @@ mod tests {
             min_win: 1_500,
             worst_trade: -500,
             pessimistic: 1_000_000,
-            // AND ITS FILLS HOLD, at exactly the 1.5x the operator asked for. The
+            // AND ITS FILLS HOLD, at exactly the 2x the operator asked for. The
             // same reason the exits are here: `Cell::default()` leaves the
             // optimistic total at zero, which fails the fill-headroom rule for a
             // reason that has nothing to do with what this test is about.
-            optimistic: 1_500_000,
+            optimistic: 2_000_000,
             max_drawdown: 0,
             // PROTECTED: this test is about a drawdown of zero clearing the
             // rule, not about exits.
