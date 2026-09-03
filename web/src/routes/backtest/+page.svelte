@@ -1284,10 +1284,31 @@
         };
         return;
       }
-      // The assembled body: every page's rows under the last page's metadata.
-      // `periods` is `periods_scope: "complete-result"` on every page, so it is
-      // the same object each time and taking the last is not a choice.
-      const assembled = Array.isArray(body?.trades) ? { ...body, trades: pagedRows } : body;
+      // The assembled body: every page's rows, with the PAGE-SCOPED metadata
+      // rewritten to describe the assembly rather than the last page.
+      //
+      // Taking `{ ...body }` verbatim shipped a contradiction: `count` is the
+      // LAST page's row count and `trades` is now every page's, so
+      // `validateTradePayload` refused with "count says 98 but the response
+      // carries 1122 trade rows" (web/src/lib/trade-analytics.js:229) — and it
+      // was right to. The drill-in then fell back to rank-level detail, which is
+      // exactly the symptom: a reader clicking one combination saw the run's
+      // ranks instead of that combination's trades.
+      //
+      // `count`, `page`, `page_complete` and `next_page` are all page-scoped and
+      // all wrong for an assembly. `total_count`, `complete`, `periods`,
+      // `policy` and `direction` are result-scoped (`periods_scope` is
+      // "complete-result" on every page) and carry through unchanged.
+      const assembled = Array.isArray(body?.trades)
+        ? {
+            ...body,
+            trades: pagedRows,
+            count: pagedRows.length,
+            page: 0,
+            page_complete: true,
+            next_page: null
+          }
+        : body;
       const checked = validateTradePayload(assembled, expectedRun);
       if (!checked.ok) {
         tradeList = {
