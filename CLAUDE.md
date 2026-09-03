@@ -128,10 +128,16 @@ CI gate 1 enforces this by walking every tracked file. It is not advisory.
    former candidate `seen` set was removed: there is no dedup operation on that
    path to call O(1).
 
-   *Result append* is `Vec::push`. k=1 reserves the offered width and later
-   levels reserve a capped previous-frontier heuristic. Pushes within that
-   reservation allocate nothing; an expanding level can outgrow it, so the
-   unconditional bound is amortised O(1), not worst-case O(1) for every push.
+   *Result append* is `Vec::push` **at k=1 and `Vec::extend` at k≥2, and the
+   difference is the live path rather than a detail.** `engine::drain` hands each
+   support lane its own pre-sized `kept`, pushes into that, and then folds the
+   lanes into `out` with one `extend` per chunk — so the per-candidate `push`
+   happens into a lane-local vector and the result vector is appended in batches.
+   Same amortised class, different operation from the one this rule named for as
+   long as it has existed. k=1 reserves the offered width and later levels
+   reserve a capped previous-frontier heuristic. Appends within that reservation
+   allocate nothing; an expanding level can outgrow it, so the unconditional
+   bound is amortised O(1), not worst-case O(1) for every append.
 
    These qualifications do not widen the rule: they identify where its named
    primitive exists, where injectivity removes the need for one, and where

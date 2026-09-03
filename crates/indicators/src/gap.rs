@@ -237,7 +237,9 @@ impl GapFib {
         tolerance: Tolerance,
         calendar: &Calendar,
     ) -> Result<ConditionMask, crate::Corrupt> {
-        bar.check()?;
+        // `check_evaluable`, not `check`: this module must refuse exactly what
+        // `Evaluator::stepped` refuses or the mask is a mixture of two answers.
+        bar.check_evaluable()?;
 
         let today = crate::ist_day(bar.ts_micros);
         if today != self.day {

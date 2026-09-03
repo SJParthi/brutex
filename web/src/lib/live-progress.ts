@@ -72,9 +72,33 @@ const TARGET = 'cli.audit';
 const START = 'sweep attempt started';
 const SWEEPING = 'rung sweeping';
 const GRID_ENTERED = 'exit grid entered';
+// THE EVENT THE ENGINE EMITS MOST AND THE PAGE READ LEAST. `note_grid_progress`
+// fires ten times per rung across the phase `cli`'s own comment calls "where a
+// multi-hour sweep spends nearly all of its time" -- 87.6% of a measured
+// 48-minute run. This fold discarded every one of them, so `priced` was written
+// only at GRID_FINISHED and sat at 0 for that whole phase: the exact defect
+// `note_grid_progress` was added to fix, still invisible one layer up.
+const GRID_PROGRESS = 'exit grid progress';
 const GRID_FINISHED = 'exit grid finished';
 const RUNG_FINISHED = 'rung finished';
-const LIVE_MESSAGES = new Set([START, SWEEPING, GRID_ENTERED, GRID_FINISHED, RUNG_FINISHED]);
+// VALIDATION BOUNDARIES, so the phase that emitted NOTHING is no longer the
+// phase the page cannot see. Between the exit grid finishing and a row landing
+// sit walk-forward, PBO and a bootstrap fixed at sixteen thousand trade
+// re-walks; measured on the operator's own log, five of eight rungs that
+// finished the grid never reached a committed result and the log could not say
+// where they went. D-0504 gave those stages a boundary; this admits it.
+const VALIDATION_ENTERED = 'validation stage entered';
+const VALIDATION_FINISHED = 'validation stage finished';
+const LIVE_MESSAGES = new Set([
+  START,
+  SWEEPING,
+  GRID_ENTERED,
+  GRID_PROGRESS,
+  GRID_FINISHED,
+  RUNG_FINISHED,
+  VALIDATION_ENTERED,
+  VALIDATION_FINISHED
+]);
 
 const object = (value: unknown): value is JsonObject =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -355,6 +379,38 @@ export function reduceLiveProgress(activeRun: unknown, payload: unknown): LivePr
       held.phase = 'pricing';
       held.candidates = candidates;
       held.validating = validate === 1;
+    } else if (record.message === GRID_PROGRESS) {
+      if (held.phase !== 'pricing') {
+        return refused(`Rung ${rung} reported exit-grid progress out of order.`, context.attempt);
+      }
+      const candidates = requireCount(record.fields, 'candidates');
+      const priced = requireCount(record.fields, 'priced');
+      // THE SAME STRICTNESS THE TWO NEIGHBOURS APPLY, plus monotonicity: a
+      // decile that went BACKWARDS would mean two rungs' records had been
+      // folded into one held state, and a progress bar that can retreat is a
+      // progress bar nobody can read. `priced === held.priced` is allowed --
+      // a decile boundary can repeat a count when nothing was admitted between
+      // them -- but a fall is a refusal.
+      if (
+        candidates === null ||
+        candidates !== held.candidates ||
+        priced === null ||
+        priced > candidates ||
+        priced < held.priced
+      ) {
+        return refused(`Rung ${rung} reported inconsistent exit-grid progress.`, context.attempt);
+      }
+      held.priced = priced;
+    } else if (record.message === VALIDATION_ENTERED || record.message === VALIDATION_FINISHED) {
+      // NO STATE MACHINE HERE ON PURPOSE. These bracket three stages that run
+      // AFTER pricing and before the row lands, and the fold's phases already
+      // describe the sweep rather than the validation. Admitting them keeps the
+      // records in the window `reduceLiveProgress` reads and lets the page show
+      // that a run is alive during the stretch that used to be silent, without
+      // inventing a phase the engine does not report.
+      if (held.phase !== 'priced' && held.phase !== 'pricing') {
+        return refused(`Rung ${rung} reported a validation stage out of order.`, context.attempt);
+      }
     } else if (record.message === GRID_FINISHED) {
       if (held.phase !== 'pricing') {
         return refused(`Rung ${rung} finished the exit grid out of order.`, context.attempt);

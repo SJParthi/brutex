@@ -175,7 +175,24 @@ fn matrix() -> Vec<(&'static str, Candle, Option<Corrupt>)> {
             ),
             None,
         ),
-        ("all prices zero", c(0, 0, 0, 0, 0, 0, i64::MIN), None),
+        // THIS ROW SAID `None` AND THE MEASUREMENT CORRECTED IT, exactly as the
+        // negative-volume row below records the same class of correction.
+        // `5815922c` added the guard because "one all-zero bar moved a
+        // condition's reported profit by 26.7% and refused nothing"; this file
+        // had not changed since 2026-08-12 and still called the bar legal, so
+        // the matrix asserted the defect.
+        //
+        // The row ABOVE stays `None` on purpose and the two are not in tension:
+        // the guard is `== 0`, deliberately not `<= 0`, and `Evaluator::step`'s
+        // own doc argues it — `ohlc_is_sane` refuses a negative bar at the write
+        // boundary (D-0143), so zero is the only case reachable through the
+        // store, and widening it would make `close_the_books`' span-overflow
+        // handling unreachable against §9's coverage floor.
+        (
+            "all prices zero",
+            c(0, 0, 0, 0, 0, 0, i64::MIN),
+            Some(Corrupt::PriceNotPositive),
+        ),
         (
             // This row said `None` — accepted — and the propagation of VWAP's refusals
             // corrected it. A negative volume is corruption on any reading: §7 says zero
@@ -452,16 +469,27 @@ fn a_receding_timestamp_is_refused_and_a_forward_gap_is_not() {
     let cases: Vec<(&str, Vec<Candle>)> = vec![
         ("the same candle twice", vec![sane(0), sane(0)]),
         (
+            // LOW IS 1 AND WAS 0, and the zero was reaching the WRONG GUARD.
+            // `Evaluator::step` refuses a zero price before it reaches the
+            // timestamp clause, so this case returned `PriceNotPositive` and the
+            // assertion below — which is about a RECEDING TIMESTAMP — was
+            // measuring price validation instead. A fixture that trips an
+            // earlier guard tests that guard, whatever its name says.
             "a duplicate timestamp with different prices",
-            vec![sane(0), c(IST_OPEN_UTC_MICROS, 1, 2, 0, 1, 0, i64::MIN)],
+            vec![sane(0), c(IST_OPEN_UTC_MICROS, 1, 2, 1, 1, 0, i64::MIN)],
         ),
         (
             "strictly backwards",
             vec![sane(5), sane(4), sane(3), sane(2)],
         ),
         (
+            // LOW IS 1 AND WAS 0, for the same reason as the case above: a zero
+            // price is refused before the timestamp clause is reached, so this
+            // fixture asserted on `PriceNotPositive` while claiming to be about
+            // a candle far in the future. The far-future timestamp is the whole
+            // point and it is unchanged.
             "one candle far in the past after one far in the future",
-            vec![sane(0), c(i64::MAX / 2, 1, 2, 0, 1, 0, i64::MIN), sane(1)],
+            vec![sane(0), c(i64::MAX / 2, 1, 2, 1, 1, 0, i64::MIN), sane(1)],
         ),
         (
             "a three-year gap",

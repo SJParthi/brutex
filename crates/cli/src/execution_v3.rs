@@ -1513,6 +1513,16 @@ impl PreparedExecutionV3 {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "ONE struct literal, 44 fields named once each in declaration \
+              order. The length is the record's width, not branching: there are \
+              no early returns and the eight `match` arms are per-field \
+              conversions. Splitting it would put fields that must agree with \
+              the on-disk stride into two functions, and the stride is checked \
+              against the writer in one place precisely so it can be READ in one \
+              place"
+)]
 fn parameter_from_population_source(
     receipt: &crate::population_v5::PopulationV5StructuralReceipt,
     facts: &CandidateExecutionParameterFactsV1,

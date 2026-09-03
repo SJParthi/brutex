@@ -3562,6 +3562,18 @@ mod tests {
     /// Every one records a [`Halt`], so none can truncate silently. A fourth exit
     /// has to be argued for here before it can compile.
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "at 101 lines, and every one of them is the accounting this \
+                  test exists to publish: it reads its own shipping region and \
+                  names each early exit together with the budget that licenses \
+                  it. The length IS the enumeration -- splitting it would leave \
+                  half the exits argued in one function and half in another, \
+                  which is precisely the drift the assertion refuses. Placed on \
+                  this function rather than the module so it claims no more than \
+                  it needs. Safe against the scan itself: the region examined is \
+                  `src.split(\"#[cfg(test)]\").next()`, which ends far above here"
+    )]
     fn the_walk_has_exactly_three_early_exits_and_each_is_a_budget() {
         let src = include_str!("lib.rs");
         // Code lines only: this file discusses `break` at length in prose, and
