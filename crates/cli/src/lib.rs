@@ -3276,8 +3276,46 @@ fn rungs_within_cell_budget() -> usize {
     /// budget says — one level is not a grid.
     const FLOOR: usize = 2;
 
+    // THE WHOLE-MACHINE FIGURE, BECAUSE `threads` ALREADY BOUNDS THE
+    // CONCURRENCY AND `derived_ceiling` BOUNDS IT A SECOND TIME.
+    //
+    // This read `derived_ceiling()`, which is `shared_out(whole_machine_ceiling())`
+    // -- already divided by `SWEEPS_SHARING_THIS_MACHINE`. The `checked_div(threads)`
+    // below then divides by the concurrency AGAIN. One concurrency, counted twice,
+    // and the second count is the wrong one: `SharedBy` divides a RETAINED budget
+    // among rungs that each hold a frontier, while a grid is transient and at most
+    // `threads` of them exist at any instant however many rungs were asked for.
+    // This function's own doc says so -- "a grid gets a small fraction of that: one
+    // part in 1,024, SPLIT AGAIN ACROSS THE THREADS EACH HOLDING ONE".
+    //
+    // MEASURED on the reference machine, fourteen cores, `DEFAULT_CEILING` 2^27:
+    //
+    // | rungs asked | budget | rungs solved | cells |
+    // |---|---|---|---|
+    // | 1 | 9,362 | 7 | 6,784 |
+    // | 3 | 3,120 | 5 | 1,566 |
+    // | 8 | 1,170 | 4 | **625** |
+    //
+    // So `range-all` -- the verb that exists to compare rungs -- gave every one of
+    // them the COARSEST grid the ladder can express, and a rung swept alone got a
+    // 10.8x finer one. The doc above states the intent as "seven or eight rungs";
+    // eight-way concurrency delivered four. That is a defect against this
+    // function's own stated design, not a trade it chose.
+    //
+    // AND IT REACHED THE ANSWER, not just the cost. The grid width selects which
+    // `Cell` wins, so `trades`, `pessimistic`, `optimistic`, `worst_trade`,
+    // `max_drawdown` and all five `exit_rungs` moved with the number of rungs the
+    // operator happened to name -- while the run identity folds `ceiling_asked`,
+    // the UNDIVIDED figure. One logical run, three different answers, one key.
+    // §3 rule 5 requires the opposite.
+    //
+    // MEMORY IS NOT THE REASON TO DIVIDE TWICE, because the transient peak is
+    // trivial either way: 6,784 cells at the ~152 bytes `Cell` occupies is 1.03 MB,
+    // and fourteen concurrent grids are 14.4 MB. The retained frontier that
+    // `SharedBy` exists to bound is three orders of magnitude larger and is
+    // untouched here -- `ladder_within` still takes `ceiling_from_env`.
     let threads = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
-    let budget = derived_ceiling()
+    let budget = whole_machine_ceiling()
         .checked_div(GRID_SHARE)
         .and_then(|share| share.checked_div(threads))
         .unwrap_or(0);
@@ -11996,28 +12034,30 @@ impl Drop for SharedBy {
 /// the other function will re-derive differently.
 const REFERENCE_CORES: usize = 14;
 
-fn derived_ceiling() -> usize {
-    // DIVIDED AMONG WHOEVER IS ACTUALLY RUNNING. See
-    // [`SWEEPS_SHARING_THIS_MACHINE`]: the figure above is a MEMORY budget for
-    // the machine, and `range_over` runs eight sweeps at once. Handing each of
-    // them the whole machine claimed 157 GB of 48 -- the guard against swapping
-    // oversubscribing the thing it guards.
-    //
-    // Dividing rather than serialising keeps the parallelism that makes eight
-    // rungs finish in one rung's wall clock; what changes is only how deep each
-    // is allowed to go before it must stop and say so.
-    // A SHARE IS STILL A SEARCH. Eight ways of a machine budget is millions of
-    // candidates, but `shared_out`'s floor keeps a pathological share count from
-    // producing a ceiling that halts before the first level -- which reports
-    // extinction where the truth is that nothing was allowed to run, the same
-    // failure the `max` above refuses.
-    //
-    // EXTRACTED so that `ceiling_from_env` divides identically. It did not: an
-    // explicit `BRUTEX_CEILING` was returned verbatim and multiplied by however
-    // many rungs were running, which is how one `range-all` was SIGKILLed asking
-    // for 157 GB of 48. Two call sites, one rule, and now literally one function.
-    shared_out(whole_machine_ceiling())
-}
+// `derived_ceiling` STOOD HERE, AND THE GRID WAS ITS ONLY CALLER.
+//
+// It was `shared_out(whole_machine_ceiling())` -- identical to
+// [`ceiling_from_env`] below except that it could not see `BRUTEX_CEILING`. Its
+// own closing line claimed "two call sites, one rule, and now literally one
+// function", but the second call site was never taken: `ceiling_from_env`
+// divides `ceiling_asked` directly, and the only other caller was
+// [`rungs_within_cell_budget`], where the division was WRONG -- see the table
+// there. Removing that one use left a function no production path could reach,
+// which `-D warnings` correctly refuses.
+//
+// Its reasoning is not lost, because the reasoning was about the DIVISION and
+// the division lives on in `ceiling_from_env`. Recorded here so the measurement
+// survives the function: handing each of eight concurrent rungs the whole
+// machine claimed **157 GB of 48**, and one `range-all` was SIGKILLed for it.
+// Dividing rather than serialising is what keeps eight rungs finishing in one
+// rung's wall clock; what changes is only how deep each may go before it must
+// halt and say so. `shared_out`'s floor stops a pathological share count from
+// producing a ceiling that halts before the first level -- which would report
+// extinction where the truth is that nothing was allowed to run.
+
+// The test that exercised it now calls [`ceiling_from_env`] instead, which is a
+// strict improvement: it is the figure the ladder is actually given, and it
+// honours the operator's knob where the deleted twin silently ignored it.
 
 /// This machine's whole candidate budget, BEFORE any sharing.
 ///
@@ -13529,6 +13569,89 @@ fn note_grid_finished(
     );
 }
 
+/// One boundary of the validation stack, which emitted NOTHING AT ALL.
+///
+/// # The blind stretch this ends, measured rather than asserted
+///
+/// Between `exit grid finished` and `result set committed` sat 244 lines
+/// carrying three stages -- `both_shapes`, `overfitting_of` and
+/// `bootstrap_family` -- and a grep of that range for `note`, `note_attempt`,
+/// `telemetry::` and `emit` returned **zero hits**. The operator's own log shows
+/// what that cost: since the minute-gap fix landed, **eight** rungs reached
+/// `exit grid finished` and **three** reached `result set committed`. Five runs
+/// ended somewhere in this stretch and the log cannot say where, because the
+/// stretch says nothing.
+///
+/// The cost of the silence is fixed by constants and stated at the call site:
+/// `BOOTSTRAP_DRAWS` (1,000) resamples for each of `BOOTSTRAP_CANDIDATES` (16)
+/// is sixteen thousand full trade re-walks whether the run has forty trades or
+/// forty thousand. A stage that expensive finishing quietly is indistinguishable
+/// from a stage that died.
+///
+/// # It also defeated the liveness detector, which is the second-order harm
+///
+/// `api::sweeprun`'s `STALE_AFTER_MILLIS` is fifteen minutes and its own comment
+/// calibrates that against the GRID -- "the one-minute rung went twenty minutes
+/// silent BEFORE grid progress existed". It says nothing about this stack. So a
+/// healthy run sitting in the bootstrap for longer than fifteen minutes reported
+/// `"in_flight": false` to the console, and a live run looked dead.
+///
+/// # Why it is emitted from `cli` and cannot be emitted one crate deeper
+///
+/// The three stages execute inside `crates/runner`, and CI gate 17 silences
+/// `vocab engine indicators runner` outright -- its rule is not "each call is
+/// cheap" but "the innermost loop calls nothing at all". So the boundary is the
+/// only legal place, which is also the affordable one: two events per stage, six
+/// per rung, against sixteen thousand trade walks.
+///
+/// # Cost
+///
+/// One `telemetry::Event` per boundary. `Event` is a `Copy` struct over a fixed
+/// `[(&str, Value); 12]` array and allocates nothing. Six per rung is not one of
+/// the five per-operation costs `CLAUDE.md` §3 rule 4 bounds -- those run per bar
+/// or per candidate, and this runs per stage.
+fn note_validation_stage(recording: Option<Recording<'_>>, stage: &str, entered: bool) {
+    let rung = recording.map_or("", |held| held.timeframe);
+    let msg = if entered {
+        "validation stage entered"
+    } else {
+        "validation stage finished"
+    };
+    let mut event = telemetry::Event::info("cli.audit", msg)
+        .with("stage", stage)
+        .with("rung", rung);
+    if let Some(held) = recording {
+        event = event
+            .with("feed", held.feed)
+            .with("underlying", held.underlying)
+            .with("from_year", u64::from(held.from.0))
+            .with("from_month", u64::from(held.from.1))
+            .with("to_year", u64::from(held.to.0))
+            .with("to_month", u64::from(held.to.1));
+        if let Some(attempt) = held.attempt {
+            event = event.with("attempt", attempt);
+        }
+    }
+    note_attempt(recording.and_then(|held| held.attempt), &event);
+}
+
+/// Run one validation stage between a matched pair of boundary events.
+///
+/// Takes the closure rather than being two calls, so an early return or a panic
+/// inside the stage cannot leave an `entered` with no `finished` -- the shape
+/// [`SharedBy`] uses for the same reason. A stage that panics still leaves its
+/// `entered` in the log, which is the record an operator needs most.
+fn timed_validation_stage<T>(
+    recording: Option<Recording<'_>>,
+    stage: &str,
+    run: impl FnOnce() -> T,
+) -> T {
+    note_validation_stage(recording, stage, true);
+    let out = run();
+    note_validation_stage(recording, stage, false);
+    out
+}
+
 /// Read every count knob this run will use, and hand back what it could not.
 ///
 /// # Why the reads happen HERE and not where each value is needed
@@ -14019,17 +14142,23 @@ fn audit_bars(
         bars: &bars,
         signal_length_micros: 60_000_000,
     });
+    // INSIDE `validated_if`'s closure, so the boundary is emitted only when the
+    // stage actually runs. Wrapping the call would have logged a walk-forward
+    // for every `BRUTEX_VALIDATE=0` search, which is the opposite of the fault
+    // being fixed: a log that reports work nobody did.
     let (folds, rolling) = validated_if(validate, || {
-        both_shapes(
-            &bars,
-            validation_execution,
-            horizon,
-            chosen.scored,
-            ladder,
-            &fresh,
-            replay,
-            rungs,
-        )
+        timed_validation_stage(recording, "walk-forward", || {
+            both_shapes(
+                &bars,
+                validation_execution,
+                horizon,
+                chosen.scored,
+                ladder,
+                &fresh,
+                replay,
+                rungs,
+            )
+        })
     });
     // PBO, WHICH USED TO BE A `None` FOR A REASON THAT IS NOW FIXED.
     //
@@ -14043,7 +14172,15 @@ fn audit_bars(
     // placement. Unequal score arrays remain a refusal for the complete PBO:
     // they name different candidate families and cannot be repaired by
     // dropping or truncating that fold.
-    let overfit = overfitting_of(&folds);
+    // THE BRANCH CALLS THE SAME FUNCTION BOTH WAYS, and that is deliberate.
+    // `overfitting_of` on a defaulted `Validated` is a walk over no folds, so it
+    // must keep running when validation is off -- returning `None` from the
+    // `else` arm would change the answer, not just the logging.
+    let overfit = if validate {
+        timed_validation_stage(recording, "pbo", || overfitting_of(&folds))
+    } else {
+        overfitting_of(&folds)
+    };
 
     // The three multiple-testing p-values, over one family. See the helper: it
     // runs on the SIGNAL series on purpose, unlike the trade and the grid above.
@@ -14057,8 +14194,14 @@ fn audit_bars(
     // a CONDITION precedes a move and so belong on the rung it was found on.
     // That is true of FREQUENCY and false of a RETURN SERIES, which is what this
     // builds. The argument was right about the sweep and wrong about this.
+    // THE EXPENSIVE ONE, AND THE ONE MOST OFTEN MISTAKEN FOR A HANG: sixteen
+    // thousand full trade re-walks fixed by constants rather than by the data.
     let boot_owned = validate
-        .then(|| bootstrap_family(&trade_bars, &trade_column, &by_evidence, horizon))
+        .then(|| {
+            timed_validation_stage(recording, "bootstrap", || {
+                bootstrap_family(&trade_bars, &trade_column, &by_evidence, horizon)
+            })
+        })
         .flatten();
     let boot = boot_owned
         .as_ref()
@@ -16346,7 +16489,12 @@ mod tests {
         // "a 48 GB machine" -- a static fact about somebody else's hardware
         // deciding how far this ladder may walk before it halts. The derivation
         // scales it by the parallelism of the machine actually running.
-        let derived = crate::derived_ceiling();
+        // INLINED FROM THE DELETED `derived_ceiling`, whose whole body this was.
+        // Written out rather than repointed at `ceiling_from_env` on purpose:
+        // that one reads `BRUTEX_CEILING`, and this assertion is about the
+        // MACHINE derivation. Borrowing the knob-reading path would have made a
+        // test of arithmetic fail on a stray environment value instead.
+        let derived = crate::shared_out(crate::whole_machine_ceiling());
 
         assert!(
             derived > 0,
@@ -16557,6 +16705,49 @@ mod tests {
         assert_eq!(
             alone, 134_217_720,
             "and it is the operator's own figure, undivided"
+        );
+    }
+
+    /// The exit grid's WIDTH must not depend on how many rungs were asked for.
+    ///
+    /// # The regression this pins, and it is the sibling of the one above
+    ///
+    /// The test above pins the ceiling the IDENTITY folds. This pins the ceiling
+    /// the exit grid is SIZED from, and they were one line apart and disagreed:
+    /// `ceiling_asked` was corrected to `whole_machine_ceiling`, while
+    /// `rungs_within_cell_budget` still read `derived_ceiling` -- the divided one.
+    ///
+    /// The grid budget then divided by `threads` a second time, so the same
+    /// concurrency was counted twice. MEASURED on fourteen cores: a rung swept
+    /// alone solved to seven rungs and 6,784 cells; the same rung inside
+    /// `range-all` solved to four and **625**. The grid width selects the winning
+    /// `Cell`, so `trades`, `pessimistic`, `max_drawdown` and every `exit_rung`
+    /// moved with a number the operator typed -- under one identity, because the
+    /// identity reads the undivided figure the test above pins.
+    ///
+    /// `range-all` exists to make rungs COMPARABLE. Sizing their grids from the
+    /// count of them is the one input guaranteed to make them not.
+    #[test]
+    fn the_exit_grid_width_does_not_move_when_sweeps_share_the_machine() {
+        let _guard = crate::knobs::serially();
+
+        let alone = crate::rungs_within_cell_budget();
+        let shared_view = {
+            let _many = crate::SharedBy::these(8);
+            crate::rungs_within_cell_budget()
+        };
+
+        assert_eq!(
+            alone, shared_view,
+            "the exit grid's width must not depend on how many rungs happen to \
+             be in flight -- it selects the winning cell, so a narrower grid is \
+             a different answer to the same question, filed under the same key"
+        );
+        assert!(
+            alone >= 5,
+            "a grid solved from the whole machine reaches the seven-or-eight \
+             rungs this function's own doc states as its intent; anything at or \
+             below four is the divided budget leaking back in, got {alone}"
         );
     }
 
