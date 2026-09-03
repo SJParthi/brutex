@@ -9026,6 +9026,64 @@ fn screen_cascade<'a>(
     // what prevents a mask visited by a broader earlier cap from being stamped
     // later with rules under which it was never priced.
     let mut final_priced = yours.priced;
+    // THE MILDEST TIER IS PROBED FIRST, AND IT IS A PROOF RATHER THAN A GUESS.
+    //
+    // # What the walk cost, measured
+    //
+    // The ladder is built "strictest first" and every tier is a FULL re-screen
+    // of the whole candidate set. On the operator's 60min rung the log shows one
+    // pass every ~20 seconds over 577 candidates -- and since `screen` prices
+    // both sides, each pass is two exit grids per candidate. Walking the whole
+    // ladder is that, times the tier count, on every rung, and it runs ONLY when
+    // nothing has passed -- so the machine spends longest on exactly the spans
+    // that have no answer to find.
+    //
+    // # Why one probe settles it
+    //
+    // Every tier relaxes the same three floors -- `max_points` up, `min_rr_bp`
+    // down, `min_win_rate_bp` down -- and `Rules::admits` is a conjunction of
+    // `>=` and `<=` against those floors. So a cell admitted at tier N is
+    // admitted at every tier milder than N: relaxing a floor can only widen the
+    // admitted set, never narrow it. `tiers` sorts strictest first, so the LAST
+    // entry is the widest set the ladder can offer.
+    //
+    // If the mildest tier admits nothing, no tier admits anything. Walking the
+    // rest cannot find a row; it can only spend the time proving what the last
+    // entry already proved.
+    //
+    // The report is unchanged in the case that matters: when something DOES
+    // pass, the loop below still walks strictest-first and names the first tier
+    // that met, which is the answer an operator wants. This only skips the walk
+    // when the answer is known to be "none".
+    if let Some(mildest) = ladder.last() {
+        let widest = screen(
+            bars,
+            column,
+            by_evidence,
+            horizon,
+            mildest.rules(top, reference),
+            recording,
+        );
+        if widest.selected.is_none() {
+            let _ = writeln!(
+                out,
+                "  every tier UNMET -- the MILDEST tier ({}) admitted nothing, and \
+                 every tier above it is stricter, so none can admit anything. The \
+                 remaining {} tier(s) were not walked: each is a full re-screen and \
+                 the answer is already settled.",
+                mildest.describe(),
+                ladder.len().saturating_sub(1)
+            );
+            replace_priced(&mut final_priced, widest.priced);
+            out.push_str(&widest.text);
+            return ScreenResult {
+                text: out,
+                selected: None,
+                priced: final_priced,
+            };
+        }
+    }
+
     for (rank, tier) in ladder.iter().enumerate() {
         let rules = tier.rules(top, reference);
         let body = screen(bars, column, by_evidence, horizon, rules, recording);

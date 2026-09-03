@@ -714,6 +714,39 @@ impl Trades {
     /// Absorbs blocks another writer has appended since this handle last looked.
     ///
     /// O(rows appended by others), which is zero on the one-writer path.
+    /// Bring a HELD handle up to date, in O(rows appended since it was opened).
+    ///
+    /// # The scan this exists to stop repeating
+    ///
+    /// `open_read_bounded` walks every row to build the identity → block index,
+    /// and `/trades.json` opened a fresh handle on EVERY request — so a request
+    /// for one run's twenty trades rebuilt the index over every trade ever
+    /// recorded. `index_of`'s own comment measured the shape and named the fix:
+    /// *"A `BufReader` does not change the O(rows) walk — only a persisted or
+    /// cached index does that, and it is the right fix."*
+    ///
+    /// The incremental machinery was already here. [`Self::absorb_new_rows`]
+    /// resumes from `self.scanned` rather than rescanning, precisely so a writer
+    /// that appended since this handle opened costs O(delta) — it was simply
+    /// never available to a reader, because a reader never kept its handle.
+    ///
+    /// # Why this is a refresh and not a reopen
+    ///
+    /// A caller holding this across requests sees rows another process appended
+    /// without paying for the ones it already indexed. The bounded-open ceiling
+    /// still applies at open; this only ever moves `scanned` forward, and a file
+    /// that SHRANK is refused rather than reindexed — append-only history was
+    /// replaced, and silently re-walking it would hide that.
+    ///
+    /// # Errors
+    ///
+    /// The same refusals `absorb_new_rows` makes: a shrunken file, a ragged
+    /// tail, an unreadable row, or a duplicate identity whose blocks are not
+    /// contiguous.
+    pub fn refresh(&mut self) -> Result<(), Refusal> {
+        self.absorb_new_rows()
+    }
+
     fn absorb_new_rows(&mut self) -> Result<(), Refusal> {
         self.refuse_integrity_failure_for_write()?;
         let len = self
