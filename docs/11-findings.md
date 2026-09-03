@@ -291,3 +291,66 @@ measured, so it is not yet known whether this is one stray minute or the whole
 bars or to re-pull the day is a decision for the operator, not this ledger. What
 is settled is that the anomaly is real, reproducible, confined to one feed, and
 invisible to every command that shipped before this one.
+
+---
+
+## F-EXITSHAPE-TWO-RULES · two exit-shape rules for one requirement, in one repository
+
+**Severity: `wrong`. COSTS: yes — it can select a shape the operator ruled out by name.**
+
+`crates/cli` and the Step-3 chain disagree about which exit shapes are acceptable,
+and neither rule implies the other.
+
+| path | admits | enforced at |
+|---|---|---|
+| the screen | `{stop AND (tsl OR ttp)}` | `Rules::protects`, `crates/cli/src/lib.rs` |
+| `ledger-all` / Step-3 | `{stop AND target}` | `execution_refusal_bits`, `crates/runner/src/exit_grid_policy.rs:2679-2685` |
+
+`chosen_is_in_bounds` (`exit_grid_policy.rs:2673-2683`) returns `false` unless BOTH
+`stop` and `target` are `Some`, and the refusal bitset stops at
+`FORCED_STOP_MISMATCH = 1 << 5` — there is no trailing bit. Neither
+`execution_refusal_bits` nor `chosen_is_in_bounds` reads `tsl` or `ttp`.
+
+So the Step-3 chain admits, by construction, the exact shape the screen refuses by
+name: a fixed stop and a fixed target, which cap the loser and the winner alike.
+`crates/cli/src/lib.rs`'s own test says so — *"A STOP AND A TARGET IS NOT ENOUGH,
+and this is the case the operator ruled out by name"*.
+
+None of the 39 Step-3 admission gates (`ledger_all.rs:392-428`) is an exit-shape
+gate, and `population.rs:441-474` and `candidate_universe.rs:5482-5511` validate
+exit coordinates while accepting `stop: None`.
+
+### The fix, and why it was NOT applied here
+
+The obvious change — append `MISSING_TRAIL = 1 << 6`, add it to `ALL`, and set it
+in `execution_refusal_bits` when `tsl` and `ttp` are both `None` — was written,
+compiled, and **reverted**.
+
+It breaks a stated contract:
+`validated_canonical_ordinals_name_every_authorizable_cell_exactly_once`
+(`exit_grid_policy.rs:5479`) asserts that every in-bounds canonical cell is
+authorizable, and the canonical grid legitimately produces `stop+target` cells
+with no trail. Making the rule unconditional refuses them, and the only way to
+keep that test green is to weaken it — which is the test that asserts nothing
+`CLAUDE.md` §4 bans, hiding a behavioural change to the institutional path behind
+a green suite.
+
+The correct fix is a POLICY FIELD, not a constant: a new field on
+`ExitGridPolicyV1` threaded through `ExitGridPolicyV1::new` as a parameter rather
+than an environment read — `runner` may make exactly one env read and
+`validate::fold_rungs` (`validate.rs:1567`) already spends it. Callers to update:
+`cli/src/ledger_all.rs:246`, `cli/src/candidate_universe.rs:7191`,
+`cli/src/anchored_search_lineage_v4.rs:1932`,
+`cli/src/execution_disposition_v2.rs:3493`, `cli/src/execution_capability.rs:3239`
+and `:3520`. The policy is versioned and persisted (`EXIT_GRID_POLICY_VERSION_V1`,
+`selector_byte` at `exit_grid_policy.rs:4037`), so it also moves run identity —
+`crates/runner/src/identity.rs` must be read before it lands.
+
+The canonical coordinate space CAN already express a trailing exit:
+`chosen_axes_are_in_bounds` (`:2686-2702`) bounds-checks `tsl` and `ttp.trail`
+against `trail_levels_ppm`. Only the admission rule is missing, not the shape.
+
+Disposition: **OPEN**. Real, reproduced from source, and deliberately not patched
+in a rush. `ledger-all` cannot complete today for an unrelated reason — it needs
+BANKNIFTY data, which the store does not hold — so nothing is currently selecting
+through the weaker rule.
