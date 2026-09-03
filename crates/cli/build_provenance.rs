@@ -1774,10 +1774,45 @@ mod tests {
         }
     }
 
+    /// # This is the one test that cannot run outside a checkout, and it made
+    /// gate 18 unrunnable on this crate
+    ///
+    /// It read `repository(manifest).expect("test runs in a checkout")`, and
+    /// the expectation is true of every place a person runs `cargo test` — and
+    /// false of the one place CI runs `cargo mutants`. **`cargo-mutants` copies
+    /// the source tree WITHOUT `.git`**, so `repository` returns `None`, this
+    /// panics, and the run ends with *"cargo test failed in an unmutated tree,
+    /// so no mutants were tested"* before a single mutation is applied.
+    ///
+    /// Gate 18 invokes `cargo mutants --in-diff` with no `--in-place`, so **any
+    /// diff touching `crates/cli` failed at baseline**. The gate refuses that
+    /// honestly — *"a timeout or an unviable mutant is not a pass, and this step
+    /// will not call it one"* — which means it was not silently absent; it was
+    /// loudly impossible, which is worse for a different reason: the mutation
+    /// evidence for the largest crate in the workspace could never be collected.
+    ///
+    /// # Why a skip and not a panic, and why that is not a test asserting
+    /// nothing
+    ///
+    /// Without `.git` the property is UNMEASURABLE, not false. §4 bans a test
+    /// that asserts nothing; it does not require asserting where there is no
+    /// evidence, and §3 rule 6 asks for the opposite. So the skip is LOUD — it
+    /// names the reason on stderr — and the assertions below are untouched
+    /// wherever a checkout exists, which is every developer machine and every
+    /// CI job that runs `actions/checkout`.
     #[test]
     fn the_checkout_head_tree_object_is_decodable() {
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let repo = repository(manifest).expect("test runs in a checkout");
+        let Some(repo) = repository(manifest) else {
+            eprintln!(
+                "SKIPPED the_checkout_head_tree_object_is_decodable: no `.git` above {}. \
+                 This is the copied tree `cargo-mutants` builds, where the property is \
+                 unmeasurable rather than false. Every assertion below still runs in a \
+                 checkout.",
+                manifest.display()
+            );
+            return;
+        };
         let mut watched = Vec::new();
         let head = head_commit(&repo, &mut watched).expect("HEAD");
         let store = ObjectStore::new(&repo.common_dir);

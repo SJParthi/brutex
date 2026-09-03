@@ -124,6 +124,16 @@ function priced(rung, candidates = 25, count = 20) {
   });
 }
 
+/** @param {string} rung @param {number} [candidates] @param {number} [count] */
+function progress(rung, candidates = 25, count = 10) {
+  return event('exit grid progress', { rung, candidates, priced: count });
+}
+
+/** @param {string} rung @param {string} [stage] */
+function validating(rung, stage = 'bootstrap') {
+  return event('validation stage entered', { rung, stage });
+}
+
 /**
  * @param {string} rung
  * @param {number} [recorded]
@@ -134,6 +144,46 @@ function priced(rung, candidates = 25, count = 20) {
 function finished(rung, recorded = 1, why = '', bars = 10_000, minHits = 500) {
   return event('rung finished', { rung, bars, min_hits: minHits, recorded, why });
 }
+
+test('exit-grid progress advances priced during the phase that used to report zero', () => {
+  // THE PHASE THIS COVERS IS 87.6% OF A MEASURED 48-MINUTE RUN. `priced` was
+  // written only at `exit grid finished`, so for nearly the whole of a
+  // multi-hour sweep the page showed a rung pricing 0 of N — the exact defect
+  // `note_grid_progress` was added to fix, still invisible one layer up because
+  // this fold discarded every one of its records.
+  const records = newestFirst([
+    marker(),
+    sweep('1min'),
+    entered('1min'),
+    progress('1min', 25, 10),
+    progress('1min', 25, 18)
+  ]);
+  const answer = reduceLiveProgress(RUN, envelope(records));
+  assert.equal(answer.phase, 'ready');
+  assert.equal(answer.rungs[0].phase, 'pricing', 'progress must not end the pricing phase');
+  assert.equal(answer.rungs[0].priced, 18, 'the newest decile is the one shown');
+  assert.equal(answer.rungs[0].candidates, 25);
+  assert.equal(answer.rungs[0].done, false);
+});
+
+test('a validation boundary keeps a finished rung alive without inventing a phase', () => {
+  // Between `exit grid finished` and a row landing sit walk-forward, PBO and a
+  // bootstrap fixed at sixteen thousand trade re-walks. MEASURED on the
+  // operator's log: eight rungs reached `exit grid finished` and three reached
+  // a committed result. The boundary says the run is alive in that stretch; it
+  // does not claim a phase the engine does not report.
+  const records = newestFirst([
+    marker(),
+    sweep('1min'),
+    entered('1min'),
+    priced('1min'),
+    validating('1min', 'walk-forward')
+  ]);
+  const answer = reduceLiveProgress(RUN, envelope(records));
+  assert.equal(answer.phase, 'ready');
+  assert.equal(answer.rungs[0].phase, 'priced', 'validation does not move the sweep phase');
+  assert.equal(answer.rungs[0].priced, 20);
+});
 
 test('newest-first, interleaved rungs fold oldest-first without phase regression', () => {
   const records = newestFirst([
@@ -374,7 +424,18 @@ test('the phase machine rejects missing, repeated, regressed, and inconsistent s
     [marker(), sweep('1min'), entered('1min'), priced('1min', 25, 26)],
     [marker(), sweep('1min'), finished('1min')],
     [marker(), sweep('1min'), finished('1min', 0, '')],
-    [marker(), sweep('1min'), entered('1min'), priced('1min'), finished('1min'), priced('1min')]
+    [marker(), sweep('1min'), entered('1min'), priced('1min'), finished('1min'), priced('1min')],
+    // PROGRESS BEFORE THE GRID IS ENTERED has no candidate count to agree with.
+    [marker(), sweep('1min'), progress('1min')],
+    // A DECILE THAT WENT BACKWARDS. A progress bar that can retreat is one
+    // nobody can read, and a fall here means two rungs' records were folded
+    // into one held state.
+    [marker(), sweep('1min'), entered('1min'), progress('1min', 25, 18), progress('1min', 25, 10)],
+    // PROGRESS PAST THE CANDIDATE COUNT, and progress naming a different one.
+    [marker(), sweep('1min'), entered('1min'), progress('1min', 25, 26)],
+    [marker(), sweep('1min'), entered('1min'), progress('1min', 24, 10)],
+    // A VALIDATION BOUNDARY BEFORE THE GRID WAS EVER ENTERED.
+    [marker(), sweep('1min'), validating('1min')]
   ];
   for (const records of cases) {
     const answer = reduceLiveProgress(RUN, envelope(newestFirst(records)));

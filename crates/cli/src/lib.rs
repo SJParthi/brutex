@@ -3269,12 +3269,6 @@ fn rungs_within_cell_budget() -> usize {
     /// A grid is transient per-candidate work rather than retained state, so it
     /// takes a thousandth of the retained budget instead of a share of it.
     const GRID_SHARE: usize = 1_024;
-    /// Past this the quintic makes each further rung absurd, and a bound that
-    /// cannot terminate is not a bound.
-    const SEARCH_LIMIT: usize = 64;
-    /// A ladder always offers a tighter and a looser choice, whatever the
-    /// budget says — one level is not a grid.
-    const FLOOR: usize = 2;
 
     // THE WHOLE-MACHINE FIGURE, BECAUSE `threads` ALREADY BOUNDS THE
     // CONCURRENCY AND `derived_ceiling` BOUNDS IT A SECOND TIME.
@@ -3319,6 +3313,47 @@ fn rungs_within_cell_budget() -> usize {
         .checked_div(GRID_SHARE)
         .and_then(|share| share.checked_div(threads))
         .unwrap_or(0);
+    rungs_within_budget(budget)
+}
+
+/// The widest ladder whose grid fits in `budget` cells.
+///
+/// # Why the budget is a PARAMETER, and it is a mutation-testing result rather
+/// than a preference
+///
+/// This walk lived inside [`rungs_within_cell_budget`], which derives its budget
+/// from `available_parallelism` — so a test could only ever exercise the one
+/// value this machine happens to produce. `cargo mutants` found the consequence:
+/// replacing the `>` below with `==` and with `>=` BOTH SURVIVED.
+///
+/// `==` is the plainer failure. It never fires on a real budget, so the loop
+/// runs to `SEARCH_LIMIT` and answers **64** — and the assertion guarding this
+/// was `>= 5`, which 64 satisfies. The test passed while the function was wrong.
+///
+/// `>=` is the more interesting one: it differs from `>` only when
+/// `variants(n, n, n) == budget` EXACTLY. On fourteen cores the budget is 9,362
+/// and the ladder is 625, 1,566, …, 6,784, 12,393 — none of them 9,362 — so on
+/// this hardware the two are **equivalent mutants** and no assertion about
+/// `rungs_within_cell_budget()` could ever separate them. A stronger assertion
+/// was not the fix; an injectable budget was.
+///
+/// At `budget = 625`, which IS a ladder value, the three spellings diverge: `>`
+/// answers 4, `>=` breaks at once and answers the floor, `==` answers 3. A pure
+/// function taking its input is testable on any machine; one reading the machine
+/// inside itself is testable only on the machine it runs on.
+///
+/// # Cost
+///
+/// A bounded walk of at most `SEARCH_LIMIT - FLOOR` steps, each one `variants`,
+/// which is a handful of multiplies in a `const fn`. Once per run, and none of
+/// the five operations `CLAUDE.md` §3 rule 4 bounds.
+fn rungs_within_budget(budget: usize) -> usize {
+    /// Past this the quintic makes each further rung absurd, and a bound that
+    /// cannot terminate is not a bound.
+    const SEARCH_LIMIT: usize = 64;
+    /// A ladder always offers a tighter and a looser choice, whatever the
+    /// budget says — one level is not a grid.
+    const FLOOR: usize = 2;
 
     let mut best = FLOOR;
     for n in FLOOR..=SEARCH_LIMIT {
@@ -16800,6 +16835,54 @@ mod tests {
             "a grid solved from the whole machine reaches the seven-or-eight \
              rungs this function's own doc states as its intent; anything at or \
              below four is the divided budget leaking back in, got {alone}"
+        );
+    }
+
+    /// The ladder takes the widest rung that FITS, and the boundary is exact.
+    ///
+    /// # Two mutants survived the test above, and this is why it exists
+    ///
+    /// `cargo mutants` replaced the `>` in `rungs_within_budget` with `==` and
+    /// with `>=`, and both lived. `==` never fires on a real budget, so the walk
+    /// runs to `SEARCH_LIMIT` and answers 64 — which the `>= 5` assertion above
+    /// happily accepts. `>=` differs from `>` only when the budget EQUALS a
+    /// ladder value, and on fourteen cores the budget is 9,362 while the ladder
+    /// is 625, 1,566, …, 6,784, 12,393. None of them is 9,362, so on this
+    /// machine the two are equivalent and no assertion about the derived figure
+    /// could ever separate them.
+    ///
+    /// So the budget is injected instead. `variants(n, n, n)` is
+    /// `(n+1) * [(n+1)^2 + (n(n+1)/2)^2]`, giving 54, 208, 625, 1,566 at n = 2,
+    /// 3, 4, 5 — and **625 is a ladder value**, which is the whole point of
+    /// choosing it. There, the three spellings answer 4, the floor, and 3.
+    #[test]
+    fn the_grid_ladder_takes_the_widest_rung_that_fits_and_not_the_next() {
+        assert_eq!(
+            crate::rungs_within_budget(625),
+            4,
+            "a budget EQUAL to a ladder value admits that rung — `>` and not `>=`"
+        );
+        assert_eq!(
+            crate::rungs_within_budget(624),
+            3,
+            "one cell short of the same value refuses it, so the boundary is exact"
+        );
+        assert_eq!(
+            crate::rungs_within_budget(1_566),
+            5,
+            "and the next value up admits the next rung, so 625 is not a fluke"
+        );
+        assert_eq!(
+            crate::rungs_within_budget(0),
+            2,
+            "a budget that admits nothing still walks once: the floor is a \
+             tighter and a looser choice, never zero"
+        );
+        assert_eq!(
+            crate::rungs_within_budget(usize::MAX),
+            64,
+            "and the walk terminates at SEARCH_LIMIT rather than running away — \
+             which is also the answer the `==` mutant gave for EVERY budget"
         );
     }
 
