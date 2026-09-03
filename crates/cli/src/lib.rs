@@ -1092,6 +1092,7 @@ fn screen_arm(
                         // because `grid::merit` rewards fewer exit orders.
                         // Reading the knob is what the operator typed; leaving
                         // it off would be a policy too.
+                        min_fill_headroom_bp: Rules::operator().min_fill_headroom_bp,
                         require_protective_exits: Rules::protective_exits_required(),
                         top: n,
                     },
@@ -1780,8 +1781,8 @@ fn parse_support_ppm(text: &str) -> Result<u64, &'static str> {
 /// # The derived path existed, was tested, and no CLI verb could reach it
 ///
 /// `one_rung` takes `Option<u64>` and its `None` branch derives the threshold
-/// from the rung's own bars — `max(statistical_support_floor(bars), the
-/// threshold `Sweeper::auto` settles on)`. Two floors, both measured, neither
+/// from the rung's own bars: the LARGER of `statistical_support_floor(bars)`
+/// and the threshold [`Sweeper::auto`] settles on. Two floors, both measured, neither
 /// typed. `range_all_arm` passed `Some(h)` unconditionally, so the ONLY caller
 /// that ever reached `None` was `api::sweeprun`, the browser Run button.
 ///
@@ -6953,6 +6954,32 @@ pub struct Rules {
     /// Default is `true`, and `BRUTEX_PROTECTED_EXITS=0` is the only way to
     /// clear it — an unprotected sweep is a diagnostic, not a strategy.
     pub require_protective_exits: bool,
+    /// The BEST-case fill total must be at least this multiple of the
+    /// WORST-case one, in hundredths. `150` reads 1.50x.
+    ///
+    /// # The operator's own number, and the only stated multiple left
+    ///
+    /// Every other floor here is measured off the bars or switched off. This
+    /// one is his: *"our best case fill should be at least minimum 1.5 times
+    /// greater than worst case fills"*. It is stated rather than derived
+    /// because it is a statement about how much of a result may be fill
+    /// assumption — a decision, not a property of NIFTY.
+    ///
+    /// # BOTH figures must be profitable, or the rule is vacuous
+    ///
+    /// `pessimistic` is the total under the ADVERSE reading of both legs and
+    /// `optimistic` under the best. On a real 60-minute run they were
+    /// **−₹2,095.70 and +₹1,252.12** — opposite signs. Read as a bare
+    /// inequality, `1252 >= 1.5 × −2095` is trivially true, so the rule would
+    /// admit every losing strategy and mean nothing.
+    ///
+    /// So it requires a POSITIVE worst case first. A run that loses money when
+    /// the fills go against it has no headroom to measure; the question "how
+    /// much better does the optimistic reading get?" is only meaningful once the
+    /// pessimistic reading is already a profit.
+    ///
+    /// Zero drops the rule, the way [`Self::min_rr_bp`] of zero does.
+    pub min_fill_headroom_bp: i64,
     /// How many combinations to report. Ten or twenty-five, the operator's call.
     pub top: usize,
 }
@@ -7037,6 +7064,7 @@ impl Rules {
             && cell.assurance_bp() >= self.min_assurance_bp
             && cell.return_over_drawdown() >= self.min_ret_over_dd_bp
             && Self::protects(self.require_protective_exits, cell)
+            && Self::fills_hold(self.min_fill_headroom_bp, cell)
     }
 
     /// Whether `cell` carries the protection the operator requires.
@@ -7053,6 +7081,33 @@ impl Rules {
     /// A fixed `target` is deliberately NOT required. It is the one exit that
     /// can only truncate a winner, and requiring it alongside a trailing order
     /// would forbid the shape the operator actually asked for.
+    /// Whether the best-case fill total clears `required` hundredths of the
+    /// worst-case one.
+    ///
+    /// # Both must be profitable, and that is the whole subtlety
+    ///
+    /// A bare `optimistic >= required * pessimistic / 100` is trivially true
+    /// whenever `pessimistic` is negative — `+1252 >= 1.5 × −2095` — so it would
+    /// admit every losing strategy and rule out nothing. Those are the operator's
+    /// own measured figures from a 60-minute run.
+    ///
+    /// The rule asks how much of a result is fill ASSUMPTION rather than edge,
+    /// and that question only has an answer once the pessimistic reading is
+    /// already a profit. So a non-positive worst case fails outright.
+    ///
+    /// Multiplied before dividing, and in `i64`: `pessimistic` is paisa and the
+    /// products stay far inside the range. Saturating rather than wrapping, so a
+    /// pathological total refuses rather than wrapping into a pass.
+    const fn fills_hold(required_bp: i64, cell: &grid::Cell) -> bool {
+        if required_bp <= 0 {
+            return true;
+        }
+        if cell.pessimistic <= 0 {
+            return false;
+        }
+        cell.optimistic.saturating_mul(100) >= cell.pessimistic.saturating_mul(required_bp)
+    }
+
     const fn protects(required: bool, cell: &grid::Cell) -> bool {
         !required || (cell.stop.is_some() && (cell.tsl.is_some() || cell.ttp.is_some()))
     }
@@ -7152,6 +7207,9 @@ impl Rules {
             // exit with no stop is not a weaker answer to the same question but
             // an answer to a different one. `0` clears it for a diagnostic.
             require_protective_exits: Self::protective_exits_required(),
+            // THE OPERATOR'S OWN 1.50x, and the only stated multiple left in the
+            // rule set. Every other floor is measured off the bars or off.
+            min_fill_headroom_bp: at("BRUTEX_MIN_FILL_HEADROOM_BP", 150),
             top: usize::try_from(at("BRUTEX_TOP", 25)).unwrap_or(25),
         }
     }
@@ -7397,6 +7455,7 @@ impl Rules {
         // than "what made the most money while capping the loser". A const
         // cannot read the knob; `BRUTEX_PROTECTED_EXITS=0` clears it on every
         // path that goes through `Rules::operator`.
+        min_fill_headroom_bp: 150,
         require_protective_exits: true,
         top: 25,
     };
@@ -7503,6 +7562,7 @@ impl Rules {
             // trade that was not. A row selected without a stop did not survive
             // its worst trade — it was rescued by the 15:10 forced close, which
             // is the exchange's decision and not the strategy's.
+            min_fill_headroom_bp: 150,
             require_protective_exits: true,
             top,
         }
@@ -7912,6 +7972,7 @@ impl Tier {
             // nothing" by returning the unprotected cell those rules had just
             // refused, under a banner saying a tier was applied. The operator
             // would read a relaxed THRESHOLD and receive a relaxed STRATEGY.
+            min_fill_headroom_bp: Rules::operator().min_fill_headroom_bp,
             require_protective_exits: Rules::protective_exits_required(),
             top,
         }
@@ -8746,11 +8807,17 @@ fn hold_return_over_drawdown_bp(bars: &[indicators::Candle]) -> Option<i64> {
 /// below zero is not a rate; both fall back to the stated default rather than
 /// producing an unsatisfiable pair, which `assurance_floor_bp` records as the
 /// failure that cannot be told apart from an honest answer.
-#[expect(
-    dead_code,
-    reason = "correct arithmetic for a MEAN/MEAN comparison the engine no longer \
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "correct arithmetic for a MEAN/MEAN comparison the engine no longer \
               makes; it was enforced against a MIN/MAX statistic and was \
-              therefore unsatisfiable. Its tests still bind the derivation."
+              therefore unsatisfiable. Its tests still bind the derivation, which is
+              why the expectation is scoped to a non-test build: under
+              `--all-targets` the function IS called and the lint correctly
+              does not fire."
+    )
 )]
 const fn breakeven_rr_bp(win_rate_bp: i64) -> i64 {
     if win_rate_bp <= 0 || win_rate_bp >= 10_000 {
@@ -9275,7 +9342,11 @@ fn screen_cascade<'a>(
     // "YOUR RULES: MET" directly above a table reading "0 of N, NOTHING
     // PASSED". `admitted_any` is measured from the rows and answers the
     // question the headline is actually making.
-    if !yours.admitted_any {
+    // NAMED rather than spelled `!yours.admitted_any`: the two branches below are
+    // long, and a reader who scrolls to the `else` needs to know which case it is
+    // without scrolling back to find a negation.
+    let nothing_passed = !yours.admitted_any;
+    if nothing_passed {
         // A SEARCH STEP STOPS HERE, AND THAT IS THE WHOLE COST.
         //
         // Below this point the cascade walks the generated tier ladder —
@@ -19405,6 +19476,7 @@ mod tests {
                 // OFF: this case exercises a different rule, and the cells it
                 // builds carry no exit orders. `protects` is bound by its own
                 // tests below.
+                min_fill_headroom_bp: 0,
                 require_protective_exits: false,
                 top: 25,
             },
@@ -20166,6 +20238,9 @@ mod tests {
             min_ret_over_dd_bp: 0,
             // OFF: this case exercises a different rule. `protects` is bound by
             // its own tests below.
+            // OFF: this case is about a different rule, and these fixtures carry
+            // no optimistic total. `fills_hold` has its own tests.
+            min_fill_headroom_bp: 0,
             require_protective_exits: false,
             top: 25,
         };
@@ -20196,12 +20271,141 @@ mod tests {
     /// about. A test that needs a cell ADMITTED says so by using this one; a
     /// test about the protective rule itself uses the bare one, so the two
     /// concerns cannot be confused for each other.
+    /// The fills are here for the same reason the exits are.
+    ///
+    /// `Cell::default()` leaves both fill totals at zero, and `fills_hold`
+    /// refuses a non-positive worst case — correctly, since a run that loses
+    /// money under the pessimistic reading has no headroom to measure. A bare
+    /// `perfect_cell` is therefore refused by the operator profile for a reason
+    /// unrelated to whatever the calling test is about, exactly as it was
+    /// refused for its missing stop before this. `3` and `2` are the smallest
+    /// pair clearing 1.5x, so this fixture asserts nothing about the boundary —
+    /// `the_fill_headroom_boundary_is_inclusive_at_exactly_one_and_a_half` owns
+    /// that.
     fn protected_cell(n: u64) -> runner::grid::Cell {
+        let scale = i64::try_from(n).unwrap_or(1);
         runner::grid::Cell {
             stop: Some(0),
             tsl: Some(0),
+            pessimistic: 2 * scale,
+            optimistic: 3 * scale,
             ..perfect_cell(n)
         }
+    }
+
+    /// A losing worst case is REFUSED, not admitted by an inequality that is
+    /// trivially true.
+    ///
+    /// # The measured figures this pins, and why the naive form is worthless
+    ///
+    /// A real 60-minute run reported a worst-case total of −209,570 paisa and a
+    /// best case of +125,212. Those have OPPOSITE SIGNS, so the plain reading of
+    /// "best is at least 1.5x worst" — `125_212 >= 150 * -209_570 / 100` — is
+    /// true, and would be true for every losing run ever swept. A rule that
+    /// cannot refuse the worst measurement on record refuses nothing.
+    ///
+    /// The rule asks how much of a result is FILL ASSUMPTION rather than edge,
+    /// and that ratio only carries meaning once the pessimistic reading is
+    /// already a profit. So the sign test comes first and the two cases below
+    /// are the same arithmetic on either side of it.
+    #[test]
+    fn a_losing_worst_case_fails_the_fill_headroom_rule() {
+        let measured = runner::grid::Cell {
+            pessimistic: -209_570,
+            optimistic: 125_212,
+            ..protected_cell(1)
+        };
+        assert!(
+            !crate::Rules::fills_hold(150, &measured),
+            "a worst case of {} paisa is a LOSS; no best case redeems it",
+            measured.pessimistic
+        );
+
+        let profitable = runner::grid::Cell {
+            pessimistic: 209_570,
+            optimistic: 125_212,
+            ..protected_cell(1)
+        };
+        assert!(
+            !crate::Rules::fills_hold(150, &profitable),
+            "best {} is BELOW worst {}, let alone 1.5x it",
+            profitable.optimistic,
+            profitable.pessimistic
+        );
+    }
+
+    /// Exactly 1.50x passes and one paisa under it fails.
+    ///
+    /// The boundary is the whole rule: `>=` rather than `>` is what makes "at
+    /// least 1.5 times" the operator's own words rather than a strictly greater
+    /// reading he did not ask for. A mutant that flips the comparison, drops the
+    /// `100` scaling, or swaps the two totals moves this boundary and is caught
+    /// here.
+    #[test]
+    fn the_fill_headroom_boundary_is_inclusive_at_exactly_one_and_a_half() {
+        let at = runner::grid::Cell {
+            pessimistic: 20_000,
+            optimistic: 30_000,
+            ..protected_cell(1)
+        };
+        assert!(
+            crate::Rules::fills_hold(150, &at),
+            "30000 is exactly 1.5 x 20000"
+        );
+
+        let under = runner::grid::Cell {
+            optimistic: 29_999,
+            ..at
+        };
+        assert!(
+            !crate::Rules::fills_hold(150, &under),
+            "one paisa under 1.5x"
+        );
+
+        let over = runner::grid::Cell {
+            optimistic: 30_001,
+            ..at
+        };
+        assert!(crate::Rules::fills_hold(150, &over), "one paisa over 1.5x");
+    }
+
+    /// Zero drops the rule, matching every other floor in [`Rules`].
+    ///
+    /// Every numeric floor here reads zero as "not asked for", and the frontier
+    /// row deserialiser depends on it: format version 5 has no byte for this
+    /// field, so a row written before the rule existed reads back zero and is
+    /// judged exactly as it was judged when written. If zero ever started
+    /// meaning "refuse", every stored row would retroactively change verdict —
+    /// which is the in-place mutation §3 rule 8 forbids.
+    #[test]
+    fn a_zero_fill_headroom_admits_even_the_worst_measured_cell() {
+        let measured = runner::grid::Cell {
+            pessimistic: -209_570,
+            optimistic: 125_212,
+            ..protected_cell(1)
+        };
+        assert!(
+            crate::Rules::fills_hold(0, &measured),
+            "zero drops the rule"
+        );
+        assert!(
+            crate::Rules::fills_hold(-1, &measured),
+            "so does a negative"
+        );
+    }
+
+    /// The operator's 1.50x is what `Rules::operator` actually carries.
+    ///
+    /// This is the ONE stated multiple left in the rule set — every other floor
+    /// is measured off the bars or is off — so it is worth an assertion that
+    /// names it rather than leaving it to a construction site nobody rereads.
+    #[test]
+    fn the_operator_profile_carries_the_stated_one_and_a_half_times() {
+        assert_eq!(
+            crate::Rules::operator().min_fill_headroom_bp,
+            150,
+            "the operator asked for best-case fills at least 1.5x the worst"
+        );
     }
 
     /// The support a real run was launched with PRUNES the cadence it wanted.
@@ -20502,6 +20706,11 @@ mod tests {
             min_win: 1_500,
             worst_trade: -500,
             pessimistic: 1_000_000,
+            // AND ITS FILLS HOLD, at exactly the 1.5x the operator asked for. The
+            // same reason the exits are here: `Cell::default()` leaves the
+            // optimistic total at zero, which fails the fill-headroom rule for a
+            // reason that has nothing to do with what this test is about.
+            optimistic: 1_500_000,
             max_drawdown: 100_000,
             // AND IT PLACES ITS EXITS. The `elite` profile requires a stop and
             // a trailing order, so "satisfies everything" now includes them —
@@ -20635,6 +20844,11 @@ mod tests {
             min_win: 1_500,
             worst_trade: -500,
             pessimistic: 1_000_000,
+            // AND ITS FILLS HOLD, at exactly the 1.5x the operator asked for. The
+            // same reason the exits are here: `Cell::default()` leaves the
+            // optimistic total at zero, which fails the fill-headroom rule for a
+            // reason that has nothing to do with what this test is about.
+            optimistic: 1_500_000,
             // Gave back 99% of everything it made.
             max_drawdown: 990_000,
             // PROTECTED, so the only thing separating the two assertions below
@@ -20669,6 +20883,11 @@ mod tests {
             min_win: 1_500,
             worst_trade: -500,
             pessimistic: 1_000_000,
+            // AND ITS FILLS HOLD, at exactly the 1.5x the operator asked for. The
+            // same reason the exits are here: `Cell::default()` leaves the
+            // optimistic total at zero, which fails the fill-headroom rule for a
+            // reason that has nothing to do with what this test is about.
+            optimistic: 1_500_000,
             max_drawdown: 0,
             // PROTECTED: this test is about a drawdown of zero clearing the
             // rule, not about exits.
@@ -21462,6 +21681,9 @@ mod tests {
             min_ret_over_dd_bp: 0,
             // OFF here so this case still names the rule it is about. The
             // protective rule gets its own `why_refused` case below.
+            // OFF: this case is about a different rule, and these fixtures carry
+            // no optimistic total. `fills_hold` has its own tests.
+            min_fill_headroom_bp: 0,
             require_protective_exits: false,
             top: 25,
         };
@@ -21569,6 +21791,10 @@ mod tests {
             min_weakest_bp: 0,
             min_trades: 0,
             min_ret_over_dd_bp: 0,
+            // OFF: this fixture is about the SHAPE rule; its cells carry no
+            // optimistic total, so the headroom rule would refuse on a fact the
+            // case never set. `fills_hold` has its own tests.
+            min_fill_headroom_bp: 0,
             require_protective_exits: true,
             top: 25,
         };
@@ -21648,6 +21874,9 @@ mod tests {
             min_ret_over_dd_bp: 0,
             // OFF: this case exercises a different rule. `protects` is bound by
             // its own tests below.
+            // OFF: this case is about a different rule, and these fixtures carry
+            // no optimistic total. `fills_hold` has its own tests.
+            min_fill_headroom_bp: 0,
             require_protective_exits: false,
             top: 25,
         };

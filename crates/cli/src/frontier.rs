@@ -158,7 +158,7 @@ const MAGIC: [u8; 8] = *b"BRUTEXFR";
 /// `false` would make the row assert a rule was off when the format could not
 /// say — §3 rule 8 forbids exactly that reinterpretation, and §4 forbids the
 /// silent fallback that would hide it.
-const VERSION: u32 = 5;
+const VERSION: u32 = 6;
 
 /// Bytes before the first row.
 ///
@@ -201,11 +201,13 @@ const PAYLOAD_BYTES: usize = STRIDE_BYTES - SEAL_BYTES;
 /// Byte carrying the row direction inside the sealed payload.
 const DIRECTION_AT: usize = 194;
 
-/// Reserved row bytes after the protective-exit flag, before the stored rule
-/// set.
+/// Row bytes carrying `Rules::min_fill_headroom_bp`, after the protective-exit
+/// flag and before the rest of the stored rule set.
 ///
-/// Four, not five: byte 195 became `Rules::require_protective_exits` at format
-/// version 5. See [`VERSION`].
+/// These were reserve through format version 5 -- four bytes, not five, because
+/// byte 195 had already become `Rules::require_protective_exits`. At version 6
+/// they carry the fill-headroom rule as a little-endian `i32`, which is what a
+/// reserve is for. See [`VERSION`].
 const ROW_RESERVED: core::ops::Range<usize> = 196..200;
 
 /// Reserved bytes in the fixed frontier-file header.
@@ -427,13 +429,26 @@ impl Row {
         // is the §4-compliant outcome — v4 frontiers are not silently reread
         // under v5 meanings.
         //
-        // 196..200 stay zero: four bytes remain reserved.
+        // 196..200 IS NO LONGER RESERVE: it carries `min_fill_headroom_bp` at
+        // format version 6. See the `put` below.
         put(&[u8::from(self.rules.require_protective_exits)], &mut at); // 195   1 -> 196
-        // Advanced over EXPLICITLY now that something follows it. While the
-        // reserve was the last thing on the row, leaving `at` short of it was
-        // the same as skipping it; with the rules after it, a missing advance
-        // would silently write them four bytes early.
-        put(&[0_u8; 4], &mut at); // 196   4 -> 200
+        // THE FILL-HEADROOM RULE, in the four bytes reserved for exactly this:
+        // a later rule needing to say what judged the row. i32, not i64, because
+        // that is the space the reserve left and a headroom in hundredths never
+        // approaches two billion. Saturating, so an impossible value clamps to a
+        // refusal rather than wrapping into a pass.
+        //
+        // NOT round-tripping it was the alternative, and it was wrong: the row
+        // stores its rule set so a reader knows what judged it, and a field that
+        // always reads back zero would have every v6 row claim the rule was OFF
+        // while the run had it ON. That is the ledger lying about its own
+        // verdict. `every_field_survives_the_round_trip` caught it.
+        put(
+            &i32::try_from(self.rules.min_fill_headroom_bp)
+                .unwrap_or(i32::MAX)
+                .to_le_bytes(),
+            &mut at,
+        ); // 196   4 -> 200
         // THE RULES THIS RUN JUDGED BY, so nothing downstream can judge by
         // others. Eight fields in declaration order, which is the order
         // `from_bytes` reads them back in.
@@ -530,16 +545,21 @@ impl Row {
                 ));
             }
         };
-        let reserve = take(4, &mut at);
-        if let Some((offset, byte)) = reserve
-            .iter()
-            .copied()
-            .enumerate()
-            .find(|(_, byte)| *byte != 0)
-        {
+        // BYTES 196..200, THE FILL-HEADROOM RULE, which was reserve until format
+        // version 6.
+        //
+        // A NEGATIVE VALUE IS REFUSED, and that is the only corruption check
+        // these four bytes can still carry. While they were reserve, any
+        // non-zero byte proved the row came from a schema this build does not
+        // know. Now they hold a number, so a poked LOW byte is indistinguishable
+        // from a smaller headroom and cannot be caught — but a poked HIGH byte
+        // sets the sign bit, and no writer has ever emitted a negative headroom.
+        // Refusing it keeps half the detection rather than pretending to none.
+        let headroom = i32::from_le_bytes(take(4, &mut at).try_into().unwrap_or([0; 4]));
+        if headroom < 0 {
             return Err(format!(
-                "frontier row reserved byte {} is {byte}; every byte in 196..200 must be zero for format version {VERSION}",
-                ROW_RESERVED.start.saturating_add(offset)
+                "frontier row fill-headroom bytes {}..{} read {headroom}; a headroom is never negative at format version {VERSION}",
+                ROW_RESERVED.start, ROW_RESERVED.end
             ));
         }
 
@@ -550,6 +570,9 @@ impl Row {
             min_assurance_bp: i64::from_le_bytes(take(8, &mut at).try_into().unwrap_or([0; 8])),
             min_weakest_bp: i64::from_le_bytes(take(8, &mut at).try_into().unwrap_or([0; 8])),
             min_ret_over_dd_bp: i64::from_le_bytes(take(8, &mut at).try_into().unwrap_or([0; 8])),
+            // READ FROM BYTES 196..200 ABOVE, not defaulted -- a stored row must
+            // report the rule set that actually judged it.
+            min_fill_headroom_bp: i64::from(headroom),
             min_trades: u64::from_le_bytes(take(8, &mut at).try_into().unwrap_or([0; 8])),
             // READ FROM BYTE 195 ABOVE, not defaulted. See the write side for
             // why this took a reserved byte at version 5 rather than being
@@ -1940,20 +1963,49 @@ mod tests {
     }
 
     /// A seal authenticates bytes, not the meaning of a future schema.
+    ///
+    /// # One poke that used to be caught no longer can be, and that is the cost
+    ///
+    /// While 196..200 were reserve, ANY non-zero byte there proved the row came
+    /// from a schema this build does not know, so both ends of the span were
+    /// detectable. At format version 6 those bytes hold
+    /// `Rules::min_fill_headroom_bp`, and a poked LOW byte is simply a smaller
+    /// headroom — a legal value, indistinguishable from one a writer meant.
+    ///
+    /// The HIGH byte still is: `u8::MAX` there sets the `i32` sign bit, and no
+    /// writer has ever emitted a negative headroom. So the low-byte case is
+    /// gone from this table on purpose rather than by oversight, and the reason
+    /// is recorded here so nobody re-adds it and watches it pass vacuously.
     #[test]
     fn sealed_unknown_direction_and_reserved_row_bytes_are_refused() {
         for (offset, value, named) in [
             (DIRECTION_AT, 2_u8, "direction"),
-            (ROW_RESERVED.start, 1, "reserved"),
-            (ROW_RESERVED.end.saturating_sub(1), u8::MAX, "reserved"),
+            (ROW_RESERVED.end.saturating_sub(1), u8::MAX, "fill-headroom"),
         ] {
             let mut raw = row(7, 3).to_bytes();
             *raw.get_mut(offset).expect("a payload offset") = value;
             reseal(&mut raw);
             let why = Row::from_bytes(&raw).expect_err("unknown schema must refuse");
             assert!(why.contains(named), "offset {offset}: {why}");
-            assert!(why.contains(&offset.to_string()), "offset {offset}: {why}");
         }
+    }
+
+    /// A LOW byte poked inside the fill-headroom span survives, and the row it
+    /// produces reports the poked value rather than the written one.
+    ///
+    /// This is the other half of the sentence above: naming the loss in a
+    /// comment is cheap, so the loss is measured instead. If a later format
+    /// makes the span self-checking again, this test fails and says so.
+    #[test]
+    fn a_poked_low_fill_headroom_byte_is_indistinguishable_from_a_smaller_rule() {
+        let mut raw = row(7, 3).to_bytes();
+        *raw.get_mut(ROW_RESERVED.start).expect("a payload offset") = 1;
+        reseal(&mut raw);
+        let poked = Row::from_bytes(&raw).expect("a legal headroom cannot be refused");
+        assert_eq!(
+            poked.rules.min_fill_headroom_bp, 1,
+            "the poked byte reads back as the rule, undetected"
+        );
     }
 
     /// A sealed invalid row remains indexed so a rerun cannot append around it.
