@@ -13630,7 +13630,11 @@ fn note_grid_finished(
 /// `[(&str, Value); 12]` array and allocates nothing. Six per rung is not one of
 /// the five per-operation costs `CLAUDE.md` §3 rule 4 bounds -- those run per bar
 /// or per candidate, and this runs per stage.
-fn note_validation_stage(recording: Option<Recording<'_>>, stage: &str, entered: bool) {
+fn validation_stage_event<'a>(
+    recording: Option<Recording<'a>>,
+    stage: &'a str,
+    entered: bool,
+) -> telemetry::Event<'a> {
     let rung = recording.map_or("", |held| held.timeframe);
     let msg = if entered {
         "validation stage entered"
@@ -13652,7 +13656,20 @@ fn note_validation_stage(recording: Option<Recording<'_>>, stage: &str, entered:
             event = event.with("attempt", attempt);
         }
     }
-    note_attempt(recording.and_then(|held| held.attempt), &event);
+    event
+}
+
+/// Emit one boundary of the validation stack. See [`validation_stage_event`].
+///
+/// Split from the constructor for the reason every other boundary in this file
+/// is: the SHAPE can then be asserted without a sink, a store or a run, which is
+/// what `every_live_boundary_carries_the_exact_question_inside_the_field_ceiling`
+/// does for all six of them at once.
+fn note_validation_stage(recording: Option<Recording<'_>>, stage: &str, entered: bool) {
+    note_attempt(
+        recording.and_then(|held| held.attempt),
+        &validation_stage_event(recording, stage, entered),
+    );
 }
 
 /// Run one validation stage between a matched pair of boundary events.
@@ -14811,7 +14828,7 @@ mod tests {
     };
     use super::{
         Recording, RungProgress, grid_entered_event, grid_finished_event, rung_finished_event,
-        rung_sweeping_event,
+        rung_sweeping_event, validation_stage_event,
     };
     use super::{cadence_floor_ppm, months_between, support_ladder};
 
@@ -14919,11 +14936,19 @@ mod tests {
             attempt: recording.attempt,
             named_support: true,
         };
+        // SIX, AND THE TWO NEW ONES ARE THE POINT OF D-0504. The validation
+        // stack emitted nothing at all, so the boundaries that now bracket
+        // walk-forward, PBO and the bootstrap must carry the same identity
+        // fields as every other boundary or a `/logs.json?run=<attempt>` query
+        // filters them straight back out — which is the same silence in a
+        // different costume.
         let events = [
             rung_sweeping_event(rung),
             grid_entered_event(Some(recording), 100_000, 25, 50, true),
             grid_finished_event(Some(recording), 20, 25, 200),
             rung_finished_event(rung, true, ""),
+            validation_stage_event(Some(recording), "bootstrap", true),
+            validation_stage_event(Some(recording), "bootstrap", false),
         ];
 
         for event in &events {
@@ -14949,12 +14974,19 @@ mod tests {
                 );
             }
         }
+        // AN EXACT COUNT PER EVENT, not a ceiling, so a field silently added or
+        // dropped is a failure rather than a shrug. The two validation
+        // boundaries carry NINE: `stage`, `rung`, the six span-and-feed terms
+        // and `attempt`. They are smaller than the four above on purpose —
+        // there is no bar count, no support and no priced total to report at a
+        // stage boundary, and inventing one so the numbers matched would be a
+        // field that means nothing.
         assert_eq!(
             events
                 .iter()
                 .map(|event| event.fields().len())
                 .collect::<Vec<_>>(),
-            vec![12, 12, 11, 12]
+            vec![12, 12, 11, 12, 9, 9]
         );
     }
 
