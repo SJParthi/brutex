@@ -7639,7 +7639,28 @@ impl Rules {
             //
             // `BRUTEX_MIN_RR_BP` still installs a real floor for an operator who
             // wants one. Absent it, nothing here is chosen.
-            rules.min_rr_bp = 0;
+            //
+            // AND THE OPERATOR STATED ONE, WHICH IS WHY THE ZERO IS GONE.
+            //
+            // The reasoning above is sound about not INVENTING a line. It is not
+            // a reason to discard a line the operator drew: "the rule is
+            // min(win) >= 3x max(loss), never mean/mean", and `cli elite`'s own
+            // usage text has promised "the smallest win at least 3x the largest
+            // loss" the whole time this field was zero. A usage banner and a
+            // rule set that disagree is the silent policy §6 refuses.
+            //
+            // WHY IT IS SAFE NOW AND WAS NOT BEFORE. This was zeroed because it
+            // was UNSATISFIABLE against a min/max statistic while `admits` was a
+            // hard gate -- an unmeetable floor meant no frontier, no trades and
+            // an unopenable page. `screen_cascade` no longer discards the
+            // ranking and `shown_cell` falls back past `admits`, so the rule now
+            // decides which rows are FLAGGED, never whether there are rows. A
+            // brutal floor is exactly what the operator wants flagged.
+            //
+            // Still the ordering key it was made into: `admits` gates the PASS
+            // mark, and the sort still ranks on it, so a row that misses 3.00
+            // is placed by how close it came rather than discarded.
+            rules.min_rr_bp = 300;
         }
         // THE WEAKEST PERIOD IS HELD TO THE SAME STANDARD AS THE WHOLE.
         //
@@ -12997,6 +13018,25 @@ fn range_over_inner(
             for line in note.lines() {
                 let _ = writeln!(out, "  {line}");
             }
+        } else {
+            // AN ABSENCE THAT NAMES ITSELF.
+            //
+            // Three different things produce `None` here and they were one
+            // silence: the validation stack was switched off, the run took the
+            // no-candidate exit so the stack never ran at all, or the lift found
+            // no heading. A reader cannot tell those apart from nothing, and the
+            // middle one is the exit that has bitten this operator all day.
+            //
+            // `SIGNIFICANCE` and `FINDINGS` are rendered on EVERY run, so their
+            // absence is itself informative: it means the report never reached
+            // the ranking stage.
+            let _ = writeln!(
+                out,
+                "\n  {} VALIDATION: not rendered. Either the stack was off, or \
+                 no candidate was admitted so it never ran. This is an ABSENCE \
+                 OF EVIDENCE, not evidence the run is sound.",
+                row.rung
+            );
         }
     }
     let _ = writeln!(
@@ -14798,13 +14838,45 @@ pub(crate) const NOT_RECORDED: &str = "RESULT NOT RECORDED";
 /// the terminator rather than a line count that would drift if a field were
 /// added.
 fn section_note(report: &str, head: &str) -> Option<String> {
-    let at = report.find(head)?;
+    // THE HEADING MUST OWN ITS LINE, and the first draft did not check.
+    //
+    // `runner::audit` writes, INSIDE the walk-forward block:
+    //   "A fold is ONE DRAW. ... -- see OVERFITTING below."
+    // A bare `report.find("OVERFITTING")` matches that sentence, not the
+    // heading eight lines later, and the old blank-line terminator then ended
+    // the lift immediately after `below.` -- so this returned the literal string
+    // "OVERFITTING below." and nothing else.
+    //
+    // It failed ONLY when validation SUCCEEDED: that sentence is emitted on the
+    // non-refused, non-empty fold path, so a refused walk lifted correctly and a
+    // working one lifted garbage. Exactly inverted from what a reader would
+    // assume from seeing it work once.
+    let at = if report.starts_with(head) {
+        0
+    } else {
+        report.find(&format!("\n{head}\n"))?.saturating_add(1)
+    };
     let rest = report.get(at..)?;
-    Some(
-        rest.find("\n\n")
-            .map_or(rest, |end| rest.get(..end).unwrap_or(rest))
-            .to_owned(),
-    )
+    // TERMINATED BY THE NEXT UNINDENTED LINE, NOT BY A BLANK ONE.
+    //
+    // Every body row goes through `runner::audit::row`, which writes
+    // "  {label}...". Headings are unindented. So indentation is the block's
+    // real shape, and a blank line INSIDE a block is still the block.
+    //
+    // The blank-line terminator truncated all three: WALK-FORWARD lost its
+    // per-fold table, OVERFITTING lost the "NON-AUTHORITATIVE: this is not
+    // CSCV/PBO" disclaimer, and BOOTSTRAP lost the sample count and the
+    // short-sample warning. Dropping a disclaimer while keeping the number it
+    // qualifies is the §4 shape this whole lift exists to close.
+    let body = rest.get(head.len()..)?;
+    let mut end = head.len();
+    for line in body.split_inclusive('\n') {
+        if !line.trim().is_empty() && !line.starts_with(' ') {
+            break;
+        }
+        end = end.saturating_add(line.len());
+    }
+    Some(rest.get(..end)?.trim_end().to_owned())
 }
 
 /// The validation stack's own verdicts, lifted before the report dies.
@@ -14830,7 +14902,43 @@ fn section_note(report: &str, head: &str) -> Option<String> {
 /// there the `UNVALIDATED` banner already says so and a second silence would be
 /// no worse than the first.
 fn validation_note(report: &str) -> Option<String> {
-    let blocks: Vec<String> = ["WALK-FORWARD", "OVERFITTING", "BOOTSTRAP"]
+    // SIX SECTIONS, AND THE FIRST TWO ARE THE ONES THAT ANSWER THE QUESTION.
+    //
+    // `SIGNIFICANCE` carries the Bonferroni bar -- "t required (Bonferroni
+    // 5%)" -- alongside `best t-stat by luck alone`, which is the Bailey &
+    // Lopez de Prado expected maximum: literally "what would the best of N
+    // random draws score". `FINDINGS` then judges every row against that bar.
+    // Those two ARE the operator's question about 148 billion draws, and both
+    // are rendered on EVERY run, validated or not, so even a rung that admits
+    // nothing gets a real number rather than a silence.
+    //
+    // The four after them need `validate=1` AND an admitted candidate.
+    // `WINDOW SHAPE` is rendered outside `render_selected`, so it survives
+    // independently of the others.
+    //
+    // ORDERED cheapest-evidence-first: what the bar is, who cleared it, then
+    // out-of-sample, then overfitting, then the bootstrap family, then decay.
+    // "AUDIT" IS FIRST BECAUSE IT IS THE COST DISCLOSURE.
+    //
+    // `runner::audit` writes, and `one_rung` deletes: "SO EVERY TOTAL BELOW IS
+    // GROSS OF THE SPREAD ... the cost of crossing the spread is measured
+    // nowhere in this run". The range table said only "NO tick is added to
+    // either", which a reader parses as PRECISION rather than as OMISSION.
+    //
+    // There is no honest spread number to substitute: a spot index has no bid
+    // or ask, `costs::scope::is_cost_free(IndexSpot)` is correctly true, and no
+    // charter source gives one -- quoting a figure would be the §3 rule 1
+    // invention. So the disclosure itself is the deliverable.
+    const HEADS: [&str; 7] = [
+        "AUDIT",
+        "SIGNIFICANCE",
+        "FINDINGS",
+        "WALK-FORWARD",
+        "OVERFITTING",
+        "BOOTSTRAP",
+        "WINDOW SHAPE -- did the edge survive on RECENT history too",
+    ];
+    let blocks: Vec<String> = HEADS
         .into_iter()
         .filter_map(|head| section_note(report, head))
         .collect();
@@ -21142,6 +21250,83 @@ mod tests {
         );
     }
 
+    /// A heading in PROSE is not the heading, and a blank line inside a block
+    /// does not end it.
+    ///
+    /// # Both halves of this shipped wrong, and one failed only on success
+    ///
+    /// `runner::audit` writes, inside the walk-forward block, *"see OVERFITTING
+    /// below."* A bare `find` matched that sentence rather than the heading
+    /// eight lines later, and a blank-line terminator then cut the lift right
+    /// after `below.` — so the whole OVERFITTING section rendered as the string
+    /// `"OVERFITTING below."`.
+    ///
+    /// That sentence is emitted only on the non-refused, non-empty fold path.
+    /// So a REFUSED walk lifted correctly and a WORKING one lifted garbage —
+    /// exactly inverted from what anyone would conclude after seeing it work
+    /// once on a run where validation was off.
+    #[test]
+    fn a_section_is_found_by_its_own_line_and_ends_at_the_next_unindented_one() {
+        let report = "\
+HEADER
+  something
+
+WALK-FORWARD
+  folds     8
+  positive  5
+
+  side  train  test
+  long  100    50
+  A fold is ONE DRAW -- see OVERFITTING below.
+
+OVERFITTING
+  PBO       0.42
+
+  NON-AUTHORITATIVE: this is not CSCV/PBO.
+
+TRAILING
+  x         1
+";
+        let walk = crate::section_note(report, "WALK-FORWARD").expect("the block is present");
+        assert!(
+            walk.contains("side  train  test") && walk.contains("long  100"),
+            "the per-fold table sits past a BLANK LINE and must survive:\n{walk}"
+        );
+        assert!(
+            !walk.contains("\nOVERFITTING\n"),
+            "but the block must stop before the next heading:\n{walk}"
+        );
+
+        let over = crate::section_note(report, "OVERFITTING").expect("the block is present");
+        assert!(
+            over.starts_with("OVERFITTING\n  PBO"),
+            "the HEADING must be matched, not the sentence naming it:\n{over}"
+        );
+        assert!(
+            over.contains("NON-AUTHORITATIVE"),
+            "and the disclaimer past the blank line must survive -- keeping the \
+             number and dropping what qualifies it is the §4 shape:\n{over}"
+        );
+        assert!(
+            !over.contains("TRAILING"),
+            "without running into the next section:\n{over}"
+        );
+
+        assert_eq!(
+            crate::section_note(report, "BOOTSTRAP"),
+            None,
+            "a heading that is not present is None, not an empty block"
+        );
+        assert_eq!(
+            crate::section_note("WALK-FORWARD\n  folds  1\n", "WALK-FORWARD")
+                .as_deref()
+                .map(str::trim_end),
+            Some("WALK-FORWARD\n  folds  1"),
+            "a report that OPENS with the heading has no preceding newline to \
+             anchor on, and must still be found"
+        );
+    }
+
     /// A longer hold measures a wider travel, and a hold of one is the old
     /// question exactly.
     ///
@@ -22355,17 +22540,27 @@ mod tests {
             stated.min_win_rate_bp
         );
 
-        // AND THE REWARD-TO-RISK FLOOR FOLLOWS FROM IT rather than standing
-        // beside it. Break-even at win rate p is (1-p)/p, so a HIGHER win rate
-        // demands a LOWER payoff -- the two can no longer disagree because one
-        // is computed from the other.
-        assert!(
-            derived.min_rr_bp < stated.min_rr_bp,
-            "a floor above chance needs less payoff per trade to break even: \
-             derived rr {} vs stated {} (derived win rate {} bp)",
-            derived.min_rr_bp,
-            stated.min_rr_bp,
-            derived.min_win_rate_bp
+        // AND THE REWARD-TO-RISK FLOOR IS THE OPERATOR'S OWN 3x, NOT A
+        // BREAK-EVEN DERIVED FROM THE WIN RATE.
+        //
+        // This asserted `derived.min_rr_bp < stated.min_rr_bp` on the reasoning
+        // that break-even at win rate p is (1-p)/p, so a higher floor demands a
+        // lower payoff. That coupling was removed: `breakeven_rr_bp` computes a
+        // MEAN/MEAN break-even and `min_rr_bp` is enforced against a MIN/MAX
+        // statistic, which made it unsatisfiable. The function survives as dead
+        // code behind an `expect(dead_code)` and this assertion outlived it.
+        //
+        // What replaces it is a number the operator stated in writing --
+        // "min(win) >= 3x max(loss), never mean/mean" -- and which `cli elite`'s
+        // usage text promised while the field was zero. So the floor no longer
+        // FOLLOWS from the win rate; it stands beside it, deliberately, and this
+        // asserts the stated value rather than a relationship to a statistic it
+        // is not measured against.
+        assert_eq!(
+            derived.min_rr_bp, 300,
+            "the operator's own floor is 3.00, and a derived series must not \
+             lower it: derived rr {} vs stated {} (derived win rate {} bp)",
+            derived.min_rr_bp, stated.min_rr_bp, derived.min_win_rate_bp
         );
 
         // AN EXPLICIT KNOB STILL WINS. A derived floor is a better default, not
