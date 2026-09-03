@@ -3175,11 +3175,11 @@ const STOP_FLOOR_POINTS: i64 = 5;
 /// setup only works at fifteen points, because fifteen is no longer offered.
 /// That is the operator's trade to make, which is why it happens only when they
 /// state one — with neither knob set the derived ladder is unchanged.
-fn stop_ladder_ppm(bars: &[indicators::Candle]) -> Vec<i64> {
+fn stop_ladder_ppm(bars: &[indicators::Candle], hold: usize) -> Vec<i64> {
     if let Some(stated) = stated_stop_ppm(bars) {
         return vec![stated];
     }
-    stop_ladder_derived(bars)
+    stop_ladder_derived(bars, hold)
 }
 
 /// The operator's stated stop in ppm, from either knob, resolved ONCE.
@@ -3234,7 +3234,7 @@ fn stated_stop_ppm(bars: &[indicators::Candle]) -> Option<i64> {
 /// Split out of [`stop_ladder_ppm`] so the stated-stop branch above reads as one
 /// line and this keeps its own reasoning. Called directly by the tests that
 /// measure the derivation itself, which must not see a knob.
-fn stop_ladder_derived(bars: &[indicators::Candle]) -> Vec<i64> {
+fn stop_ladder_derived(bars: &[indicators::Candle], hold: usize) -> Vec<i64> {
     let reference = reference_price(bars);
 
     // IN HALVES DERIVED FROM PAISA, NOT FROM ROUNDED POINTS.
@@ -3259,10 +3259,12 @@ fn stop_ladder_derived(bars: &[indicators::Candle]) -> Vec<i64> {
             .checked_div(PAISA_PER_POINT)
             .unwrap_or(0)
     };
-    let cap_halves = range_percentile(bars, 9, 10)
+    // OVER THE HOLD, NOT OVER ONE BAR. See `window_range_percentile` for the
+    // measurement and for the 0-of-283 that made it necessary.
+    let cap_halves = window_range_percentile(bars, hold, 9, 10)
         .map_or_else(|| max_stop_points(bars).saturating_mul(2), halves_of)
         .max(1);
-    let floor_halves = range_percentile(bars, 1, 4)
+    let floor_halves = window_range_percentile(bars, hold, 1, 4)
         .map_or_else(|| stop_floor_points(bars).saturating_mul(2), halves_of)
         .max(1)
         // A floor above its own cap would leave the loop empty. Both come from
@@ -3382,6 +3384,117 @@ fn stop_ladder_derived(bars: &[indicators::Candle]) -> Vec<i64> {
 /// `numerator/denominator` is the fraction of the way through the sorted
 /// ranges. Percentiles rather than multiples of the median, because a multiple
 /// is a figure somebody chose and a percentile is a figure the data reports.
+/// A percentile of how far price travels over a WINDOW of `hold` bars, rather
+/// than inside one bar.
+///
+/// # The measurement the stop ladder was missing, and what it cost
+///
+/// [`range_percentile`] measures one bar's `high - low`. On the one-minute
+/// execution series that is the right question for a one-minute trade and the
+/// wrong one for every other rung — and every rung is priced on that series.
+///
+/// MEASURED, zerodha NIFTY 1min, 2020-01..2026-07, n = 610,046:
+///
+/// | | one bar |
+/// |---|---|
+/// | 25th percentile range | 4.40 points |
+/// | median | 6.40 points |
+/// | 90th percentile | 14.15 points |
+///
+/// So the derived stop ladder ran 4 → 14 points, and **14.0 was the widest stop
+/// the engine could offer a trade held for sixty minutes**. The optimiser asked
+/// for the ceiling rung on 99% of stopped trades: it wanted a wider stop, 283
+/// times, and there was none.
+///
+/// The result is the reason this function exists. On a 484-trade 60-minute run,
+/// 283 trades (58.5%) exited on that stop and **not one of them won** — 0 of
+/// 283, and 0 of 240 on the 30-minute run. The trades that were allowed to run
+/// won 70% of the time, and 83% when held to the square-off. A stop that never
+/// once let a trade close green is not unlucky; it is inside the noise.
+///
+/// # What this measures instead
+///
+/// For each window of `hold` consecutive bars, the full travel
+/// `max(high) - min(low)` — which is exactly the distance price covers while
+/// the position is exposed. A `hold` of 1 degenerates to
+/// [`range_percentile`]'s question, so the one-minute rung is unchanged.
+///
+/// # O(1) amortised per bar
+///
+/// Two monotonic deques, one for the running maximum high and one for the
+/// running minimum low. Each index is pushed once and popped at most once, so
+/// the whole walk is O(bars) with an amortised O(1) step — the bound §3 rule 4
+/// requires. The obvious `windows(hold).map(...)` would be O(bars × hold), which
+/// on the 1-minute series at a 60-bar hold is 36 million comparisons.
+fn window_range_percentile(
+    bars: &[indicators::Candle],
+    hold: usize,
+    numerator: usize,
+    denominator: usize,
+) -> Option<i64> {
+    let hold = hold.max(1);
+    if bars.len() < hold {
+        // A span shorter than one hold has no complete window to measure, and a
+        // partial one would understate the travel. The single-bar question is
+        // the honest fallback rather than a guess at the missing bars.
+        return range_percentile(bars, numerator, denominator);
+    }
+    let mut highs: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+    let mut lows: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+    let mut travels: Vec<i64> =
+        Vec::with_capacity(bars.len().saturating_sub(hold).saturating_add(1));
+    for (at, bar) in bars.iter().enumerate() {
+        // EVICT FROM THE FRONT FIRST: an index that has fallen out of the window
+        // must not decide the extreme of the window that replaced it.
+        let left = at.saturating_add(1).saturating_sub(hold);
+        while highs.front().is_some_and(|&i| i < left) {
+            highs.pop_front();
+        }
+        while lows.front().is_some_and(|&i| i < left) {
+            lows.pop_front();
+        }
+        while highs
+            .back()
+            .and_then(|&i| bars.get(i))
+            .is_some_and(|b| b.high <= bar.high)
+        {
+            highs.pop_back();
+        }
+        while lows
+            .back()
+            .and_then(|&i| bars.get(i))
+            .is_some_and(|b| b.low >= bar.low)
+        {
+            lows.pop_back();
+        }
+        highs.push_back(at);
+        lows.push_back(at);
+        if at.saturating_add(1) >= hold {
+            let hi = highs
+                .front()
+                .and_then(|&i| bars.get(i))
+                .map_or(0, |b| b.high);
+            let lo = lows.front().and_then(|&i| bars.get(i)).map_or(0, |b| b.low);
+            let travel = hi.saturating_sub(lo);
+            if travel > 0 {
+                travels.push(travel);
+            }
+        }
+    }
+    if travels.is_empty() {
+        return None;
+    }
+    travels.sort_unstable();
+    let at = travels
+        .len()
+        .saturating_sub(1)
+        .saturating_mul(numerator)
+        .checked_div(denominator)
+        .unwrap_or(0)
+        .min(travels.len().saturating_sub(1));
+    travels.get(at).copied()
+}
+
 fn range_percentile(
     bars: &[indicators::Candle],
     numerator: usize,
@@ -6695,7 +6808,11 @@ fn trade_and_screen<'a>(
     // rules; replaying with the original rules would silently select another
     // strategy.
     let side = side_of_direction(selected.direction);
-    let stop_rungs = stop_ladder_ppm(bars);
+    // THE HOLD IS THE HORIZON. `horizon` is counted in execution bars, which is
+    // exactly how long the position is exposed, so it is the window the stop must
+    // be able to survive. Passing 1 here is what produced a 14-point ceiling on a
+    // sixty-minute trade.
+    let stop_rungs = stop_ladder_ppm(bars, horizon.as_bars() as usize);
     let exits = grid::evaluate(
         bars,
         column,
@@ -9954,7 +10071,8 @@ fn screen<'a>(
     // reader learns what is REACHABLE before choosing a threshold, so a wrong
     // number in it is worse than no column at all.
     let reference = reference_price(bars);
-    let stop_rungs = stop_ladder_ppm(bars);
+    // SIZED BY THE HOLD. See `window_range_percentile`.
+    let stop_rungs = stop_ladder_ppm(bars, horizon.as_bars() as usize);
 
     // AND SO ARE THESE TWO, WHICH WERE NOT, AND THAT WAS THE EXPENSIVE HALF.
     //
@@ -10500,7 +10618,7 @@ fn measure_top(
     // Rebuilding is deterministic (§3 rule 5) and produces the same grid the
     // screening pass produced, so the cell this re-walks is the cell the row
     // above reports.
-    let stop_rungs_again = stop_ladder_ppm(bars);
+    let stop_rungs_again = stop_ladder_ppm(bars, horizon.as_bars() as usize);
     // EVERY PRICED ROW, NOT A BAND. The band was the last constant that could
     // permanently exclude a combination from the reported top ten.
     //
@@ -17266,10 +17384,10 @@ mod tests {
         let bars = runner::synthetic::sessions(3);
 
         // UNSTATED: the derived ladder, untouched.
-        let derived = crate::stop_ladder_ppm(&bars);
+        let derived = crate::stop_ladder_ppm(&bars, 1);
         assert_eq!(
             derived,
-            crate::stop_ladder_derived(&bars),
+            crate::stop_ladder_derived(&bars, 1),
             "with no stop stated the ladder must be exactly what the bars support"
         );
         assert!(
@@ -17283,7 +17401,7 @@ mod tests {
         // 25,000, which is the operator's own stated ceiling.
         crate::knobs::set("BRUTEX_MAX_MAE_PPM", "2000");
         assert_eq!(
-            crate::stop_ladder_ppm(&bars),
+            crate::stop_ladder_ppm(&bars, 1),
             vec![2_000],
             "a stated stop is a given, so it is the whole ladder -- searching \
              the derived rungs beside it prices stops the operator ruled out \
@@ -17295,7 +17413,7 @@ mod tests {
         // collapse to a zero-point stop would exit every trade instantly.
         crate::knobs::set("BRUTEX_MAX_MAE_PPM", "0");
         assert_eq!(
-            crate::stop_ladder_ppm(&bars),
+            crate::stop_ladder_ppm(&bars, 1),
             derived,
             "zero means unset, not a zero-width stop"
         );
@@ -17326,7 +17444,7 @@ mod tests {
         // THE POINTS KNOB CONVERTS AGAINST THESE BARS.
         crate::knobs::set("BRUTEX_MAX_STOP_POINTS", "50");
         assert_eq!(
-            crate::stop_ladder_ppm(&bars),
+            crate::stop_ladder_ppm(&bars, 1),
             vec![fifty],
             "a stop stated in points is converted at this span's own reference, \
              which is the whole reason the knob exists"
@@ -17336,7 +17454,7 @@ mod tests {
         // thing twice and the units they think in are the ones that survive.
         crate::knobs::set("BRUTEX_MAX_MAE_PPM", "777");
         assert_eq!(
-            crate::stop_ladder_ppm(&bars),
+            crate::stop_ladder_ppm(&bars, 1),
             vec![fifty],
             "points wins over ppm when both are set"
         );
@@ -17344,7 +17462,7 @@ mod tests {
         // ZERO POINTS FALLS THROUGH rather than pinning the ladder at nothing.
         crate::knobs::set("BRUTEX_MAX_STOP_POINTS", "0");
         assert_eq!(
-            crate::stop_ladder_ppm(&bars),
+            crate::stop_ladder_ppm(&bars, 1),
             vec![777],
             "zero points is unset, so the ppm knob underneath it is honoured"
         );
@@ -17371,7 +17489,7 @@ mod tests {
         let horizon = crate::horizon_for(&bars, false);
         crate::knobs::set("BRUTEX_MAX_STOP_POINTS", "50");
 
-        let ladder = crate::stop_ladder_ppm(&bars);
+        let ladder = crate::stop_ladder_ppm(&bars, 1);
         let rules = crate::Rules::derived(&bars, horizon);
         assert_eq!(
             ladder,
@@ -20879,6 +20997,55 @@ mod tests {
         );
     }
 
+    /// A longer hold measures a wider travel, and a hold of one is the old
+    /// question exactly.
+    ///
+    /// # The 0-of-283 this exists to prevent
+    ///
+    /// The stop ladder was built from ONE execution bar's `high - low` while the
+    /// position was held for the whole signal bar. On the one-minute NIFTY
+    /// series that put the ceiling at 14.0 index points for a sixty-minute
+    /// trade, 99% of stopped trades landed on that ceiling rung, and **283 of
+    /// them closed and not one won**. The trades that were allowed to run won
+    /// 70%.
+    ///
+    /// Two properties are asserted because either alone is satisfiable by a
+    /// wrong implementation: a hold of 1 must reproduce `range_percentile`
+    /// (so the one-minute rung is untouched), and a longer hold must measure
+    /// STRICTLY more travel on a series that trends (so the fix actually
+    /// widens the ladder rather than merely changing it).
+    #[test]
+    fn a_longer_hold_measures_a_wider_travel_and_a_hold_of_one_changes_nothing() {
+        let bars = runner::synthetic::sessions(3);
+        assert!(bars.len() > 40, "the fixture must hold several windows");
+
+        assert_eq!(
+            crate::window_range_percentile(&bars, 1, 9, 10),
+            crate::range_percentile(&bars, 9, 10),
+            "a hold of one bar is the single-bar question, unchanged -- the \
+             1-minute rung must not move"
+        );
+
+        let one = crate::window_range_percentile(&bars, 1, 9, 10).expect("a range exists");
+        let sixty = crate::window_range_percentile(&bars, 60, 9, 10).expect("a range exists");
+        assert!(
+            sixty > one,
+            "sixty bars of travel ({sixty}) must exceed one bar's range ({one}); \
+             a window that does not widen is the defect this replaced"
+        );
+
+        // AND A WINDOW LONGER THAN THE SERIES FALLS BACK rather than returning
+        // nothing. A partial window understates the travel, which is the error
+        // this whole function exists to remove, so the single-bar answer is the
+        // honest floor instead.
+        let longer = bars.len().saturating_add(1);
+        assert_eq!(
+            crate::window_range_percentile(&bars, longer, 9, 10),
+            crate::range_percentile(&bars, 9, 10),
+            "a hold longer than the span falls back to the single-bar question"
+        );
+    }
+
     /// The average-payoff floor, at its boundary and at both degenerate ends.
     ///
     /// # This shipped with no test at all, and a mutant survives every way
@@ -21681,7 +21848,7 @@ mod tests {
              distribution, or there is no ladder to walk: floor {floor} cap {cap}"
         );
 
-        let rungs = crate::stop_ladder_derived(&bars);
+        let rungs = crate::stop_ladder_derived(&bars, 1);
         assert!(
             rungs.len() > 1,
             "the stop must VARY: a one-rung ladder is the collapse where the \
@@ -21711,7 +21878,7 @@ mod tests {
             "the reference is paisa off the bars, not an index level: {reference}"
         );
 
-        let rungs = crate::stop_ladder_derived(&bars);
+        let rungs = crate::stop_ladder_derived(&bars, 1);
         let tightest = *rungs.first().expect("a ladder is never empty");
         let widest = *rungs.last().expect("a ladder is never empty");
         assert!(
@@ -22141,7 +22308,7 @@ mod tests {
             panic!("this fixture must rank at least one combination");
         };
         let side = side_of_evidence(scored);
-        let stop_rungs = crate::stop_ladder_derived(&bars);
+        let stop_rungs = crate::stop_ladder_derived(&bars, 1);
         let exits = grid::evaluate(
             &bars,
             &run.column,
