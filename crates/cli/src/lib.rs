@@ -7588,7 +7588,7 @@ impl Rules {
         // than "what made the most money while capping the loser". A const
         // cannot read the knob; `BRUTEX_PROTECTED_EXITS=0` clears it on every
         // path that goes through `Rules::operator`.
-        min_fill_headroom_bp: 150,
+        min_fill_headroom_bp: 200,
         min_avg_rr_bp: 150,
         require_protective_exits: true,
         top: 25,
@@ -7696,7 +7696,7 @@ impl Rules {
             // trade that was not. A row selected without a stop did not survive
             // its worst trade — it was rescued by the 15:10 forced close, which
             // is the exchange's decision and not the strategy's.
-            min_fill_headroom_bp: 150,
+            min_fill_headroom_bp: 200,
             min_avg_rr_bp: 150,
             require_protective_exits: true,
             top,
@@ -8460,7 +8460,7 @@ fn policy_of(
     validate: bool,
     horizon: Horizon,
     fold_rungs: usize,
-) -> [u64; 18] {
+) -> [u64; 20] {
     [
         // Negative is not expected and is not silently folded to zero: the cast
         // is saturating so a negative rule still differs from an absent one.
@@ -8617,6 +8617,27 @@ fn policy_of(
         // collision they did not cause. That is the defect D-0294 and D-0305
         // fixed for the other knobs, in the one added after them.
         u64::from(rules.require_protective_exits),
+        // THE TWO RULES ADDED TODAY, and leaving them out repeated the exact
+        // defect the paragraph above describes -- in the same file, four hours
+        // later, twice.
+        //
+        // `min_fill_headroom_bp` and `min_avg_rr_bp` are both live env knobs and
+        // both are conjuncts of `Rules::admits`, which is the predicate
+        // `shown_cell` hands to `best_within`. So each one selects a DIFFERENT
+        // cell out of the exit grid and therefore a different `pessimistic`, a
+        // different trade list and different `exit_rungs` -- a different
+        // computation under the same identity, which §3 rule 3 forbids.
+        //
+        // The failure is not subtle: `ensure_run_record` finds the identity
+        // present, sees the deterministic fields differ, and REFUSES the new
+        // answer while keeping the old -- telling the operator his inputs were
+        // identical when they were not.
+        //
+        // APPENDED, never inserted. `request_local_grid_rungs_reach_the_fold_and_identity_as_one_value`
+        // caught an inserted term earlier today; the array is positional and a
+        // term added in the middle silently renumbers every one after it.
+        u64::from_ne_bytes(rules.min_fill_headroom_bp.to_ne_bytes()),
+        u64::from_ne_bytes(rules.min_avg_rr_bp.to_ne_bytes()),
     ]
 }
 
@@ -10708,6 +10729,13 @@ fn why_refused(cell: &grid::Cell, rules: Rules, steady: bool) -> &'static str {
     // here -- two `Option::is_some` reads against six arithmetic derivations.
     if !Rules::protects(rules.require_protective_exits, cell) {
         "exits"
+    } else if !Rules::avg_payoff_holds(rules.min_avg_rr_bp, cell) {
+        // THE AVERAGE PAYOFF, named separately from `R:R` because they measure
+        // opposite ends of the same distribution: `R:R` is min(win)/max(loss),
+        // this is mean(win)/mean(loss). MEASURED on one 60-minute run, the two
+        // read 0.0154 and 2.26 on the SAME 256 trades. One label for both would
+        // send the operator to the wrong end of his own record.
+        "avg"
     } else if !Rules::fills_hold(rules.min_fill_headroom_bp, cell) {
         // NAMED, because a rule with no arm here prints `-` -- the same glyph a
         // PASSING row prints. This function's own comment calls that "the failure
@@ -15916,8 +15944,29 @@ fn audit_bars(
         // success path already uses. A failure here is reported and the ledger
         // row is still written -- a run that measured something must never
         // vanish because its detail file refused.
+        // AND THE RECEIPT, WITHOUT WHICH THE ROWS ARE WRITE-ONLY.
+        //
+        // The first draft of this wrote the frontier and the ledger row and no
+        // receipt, which is worse than writing nothing:
+        // `result_set::committed_receipt_bounded` answers a ledger parent with
+        // no receipt as `Err`, not `Ok(None)`, and `api::frontierjson` turns
+        // that straight into a 400. Ten rows on disk, permanently unreadable,
+        // and in the block index so an exact rerun must byte-verify them.
+        //
+        // `record_all_attempt` is the shape to copy: frontier, then trades, then
+        // receipt, then the ledger row as the commit marker. There are no trades
+        // on this path -- nothing was admitted, so nothing was walked -- so the
+        // receipt names ZERO trade rows explicitly rather than leaving a reader
+        // to infer it. That explicitness is the receipt's whole job, per its own
+        // doc: "zero rows are explicit and never inferred from unrelated
+        // totals".
+        //
+        // The direction is the one the ranking chose. It is recorded even with
+        // no trades because the frontier rows each carry their own side, and a
+        // receipt that disagreed with them would be a third statement of a fact
+        // that already has two.
         if let (Some(into), Some(run_id)) = (recording, id) {
-            match record_frontier(into.root, run_id, &by_evidence, rules, &priced) {
+            let prepared = match record_frontier(into.root, run_id, &by_evidence, rules, &priced) {
                 Ok((said, rows)) => {
                     let _ = writeln!(
                         out,
@@ -15925,6 +15974,7 @@ fn audit_bars(
                          Nothing was ADMITTED, which is a verdict about these rows \
                          rather than a reason to withhold them.{said}"
                     );
+                    Some(rows)
                 }
                 Err(why) => {
                     let _ = writeln!(
@@ -15932,6 +15982,23 @@ fn audit_bars(
                         "  the ranked frontier could NOT be prepared: {why}\n  \
                          The ledger row below still records the sweep."
                     );
+                    None
+                }
+            };
+            if let Some(rows) = prepared {
+                match ensure_detail_receipt(into.root, run_id.bytes(), rows, 0, Direction::Long) {
+                    Ok(said) => {
+                        let _ = write!(out, "{said}");
+                    }
+                    Err(why) => {
+                        let _ = writeln!(
+                            out,
+                            "  {NOT_RECORDED}: the frontier rows were prepared but their \
+                             receipt was not: {why}\n  Those rows stay HIDDEN from \
+                             /frontier.json, which is the correct outcome -- a block \
+                             whose cardinality nothing vouches for is not served."
+                        );
+                    }
                 }
             }
             match record_swept_run(
@@ -18827,14 +18894,56 @@ mod tests {
         // length first precisely so adding one re-keys.
         assert_eq!(
             start.len(),
-            18,
-            "eighteen choices are folded in — the eighteenth is \
-             `require_protective_exits`, APPENDED after `fold_rungs` rather than \
-             placed beside the other rule terms, because positional identity is \
-             append-only and inserting it there renumbered every term after it. \
+            20,
+            "twenty choices are folded in. The eighteenth is \
+             `require_protective_exits`; the nineteenth and twentieth are \
+             `min_fill_headroom_bp` and `min_avg_rr_bp`, both APPENDED after it \
+             rather than placed beside the other rule terms, because positional \
+             identity is append-only and inserting one there renumbers every \
+             term after it. \
              If this moved, `policy_of`'s doc \
              table and the append-never-insert rule both need reading before the \
              number is changed"
+        );
+
+        // AND THE TWO NEWEST TERMS, EACH PROVED TO RE-KEY ON ITS OWN.
+        //
+        // This is the assertion the length check cannot make. Both rules landed
+        // today as `Rules` fields WITHOUT identity terms, and the sibling
+        // comment below already says why that is invisible here: a field added
+        // without a term leaves the length unchanged. Two knobs that each pick a
+        // different cell out of the exit grid shared one identity for four
+        // hours, which is the collision `ensure_run_record` reports to the
+        // operator as HIS nondeterminism.
+        assert_ne!(
+            policy_of(
+                &bars,
+                crate::Rules {
+                    min_fill_headroom_bp: base.min_fill_headroom_bp.saturating_add(50),
+                    ..base
+                },
+                lens,
+                true,
+                h,
+                rungs
+            ),
+            start,
+            "the fill-headroom rule selects a different cell, so it must re-key"
+        );
+        assert_ne!(
+            policy_of(
+                &bars,
+                crate::Rules {
+                    min_avg_rr_bp: base.min_avg_rr_bp.saturating_add(50),
+                    ..base
+                },
+                lens,
+                true,
+                h,
+                rungs
+            ),
+            start,
+            "the average-payoff rule selects a different cell, so it must re-key"
         );
 
         // THE LENGTH ALONE IS NOT THE CONTRACT, AND BELIEVING IT WAS COST A
@@ -20768,6 +20877,83 @@ mod tests {
             crate::Rules::fills_hold(150, &over),
             "one paisa over 1.5x clears it"
         );
+    }
+
+    /// The average-payoff floor, at its boundary and at both degenerate ends.
+    ///
+    /// # This shipped with no test at all, and a mutant survives every way
+    ///
+    /// An adversarial pass found `avg_payoff_holds` had zero coverage: a mutant
+    /// flipping `>=` to `>`, dropping the `100`, or swapping `wins` and `losses`
+    /// all survived. It is a conjunct of `Rules::admits`, so any of those
+    /// silently changes which cell `best_within` selects.
+    ///
+    /// The figures are the operator's own, measured on 256 real trades: average
+    /// win ₹40.02 against average loss ₹17.71, a ratio of 2.26. Scaled to whole
+    /// paisa here so the arithmetic is exact rather than nearly exact.
+    #[test]
+    fn the_average_payoff_floor_binds_at_its_boundary_and_at_both_ends() {
+        // 4 wins totalling 600 (avg 150) against 6 losses totalling -600
+        // (avg 100). 150/100 = 1.50 exactly.
+        let at = runner::grid::Cell {
+            trades: 10,
+            wins: 4,
+            gross_win: 600,
+            gross_loss: -600,
+            ..protected_cell(1)
+        };
+        assert!(
+            crate::Rules::avg_payoff_holds(150, &at),
+            "avg win 150 against avg loss 100 is exactly 1.5x, and `at least` \
+             is `>=` -- this is the assertion a `>` mutant fails"
+        );
+        assert!(
+            !crate::Rules::avg_payoff_holds(151, &at),
+            "one hundredth above the ratio must refuse, or the floor is not a floor"
+        );
+
+        // SWAPPING wins AND losses INVERTS THE RATIO to 0.44, which is what a
+        // transposition mutant would compute. Asserted explicitly rather than
+        // trusted to the boundary above, because the boundary alone passes for
+        // a symmetric fixture.
+        let swapped = runner::grid::Cell { wins: 6, ..at };
+        assert!(
+            !crate::Rules::avg_payoff_holds(150, &swapped),
+            "six wins of 100 against four losses of 150 is 0.67x, not 1.5x"
+        );
+
+        // NO WINS REFUSES. A ratio with a zero numerator is not a large ratio,
+        // it is no ratio, and admitting it would pass every strategy that never
+        // won a single trade.
+        let never_won = runner::grid::Cell {
+            trades: 10,
+            wins: 0,
+            gross_win: 0,
+            gross_loss: -600,
+            ..protected_cell(1)
+        };
+        assert!(
+            !crate::Rules::avg_payoff_holds(150, &never_won),
+            "a record with no wins has no payoff ratio to clear a floor with"
+        );
+
+        // NO LOSSES ADMITS, and it is the one record this rule has no reason to
+        // refuse -- the ratio is unbounded.
+        let never_lost = runner::grid::Cell {
+            trades: 10,
+            wins: 10,
+            gross_win: 600,
+            gross_loss: 0,
+            ..protected_cell(1)
+        };
+        assert!(
+            crate::Rules::avg_payoff_holds(150, &never_lost),
+            "a record that never lost clears any finite floor"
+        );
+
+        // ZERO DROPS THE RULE, as every other floor here does, and a stored row
+        // written before the rule existed reads back zero.
+        assert!(crate::Rules::avg_payoff_holds(0, &never_won));
     }
 
     /// Zero drops the rule, matching every other floor in [`Rules`].
