@@ -355,9 +355,14 @@ impl Vwap {
     /// prints — it needs a per-field price near 10^10 — and that is the argument for
     /// leaving it here rather than a proof that it cannot happen.
     pub fn fold(&mut self, bar: &Candle) -> Result<(), Refused> {
-        // One definition, shared with the other eight modules — see `Candle::check`.
+        // One definition, shared with the other eight modules — see
+        // `Candle::check_evaluable`. This said `Candle::check` and the sentence
+        // had stopped being true: the zero-price refusal reached the aggregate
+        // and not the modules, so this one accepted a bar `Evaluator::stepped`
+        // refused. `every_module_refuses_exactly_what_the_evaluator_refuses`
+        // named this module last of the seven.
         // Wrapped rather than re-derived, so a new refusal added there reaches here.
-        bar.check().map_err(Refused::Corrupt)?;
+        bar.check_evaluable().map_err(Refused::Corrupt)?;
         let day = crate::ist_day(bar.ts_micros);
         if day != self.session_day || !self.live {
             self.session_day = day;

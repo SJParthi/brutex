@@ -199,7 +199,9 @@ impl SessionState {
         previous: Option<PreviousSession>,
         tolerance: Tolerance,
     ) -> Result<ConditionMask, crate::Corrupt> {
-        bar.check()?;
+        // `check_evaluable`, not `check`: this module must refuse exactly what
+        // `Evaluator::stepped` refuses or the mask is a mixture of two answers.
+        bar.check_evaluable()?;
         let day = crate::ist_day(bar.ts_micros);
         if day != self.session_day || !self.live {
             self.session_day = day;

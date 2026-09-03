@@ -780,7 +780,9 @@ impl TrendState {
         candle: &Candle,
         tolerance: Tolerance,
     ) -> Result<ConditionMask, crate::Corrupt> {
-        candle.check()?;
+        // `check_evaluable`, not `check`: this module must refuse exactly what
+        // `Evaluator::stepped` refuses or the mask is a mixture of two answers.
+        candle.check_evaluable()?;
         // ONE classification, used for both the mask and the latch — not two calls that
         // happen to agree. A sweep proved that shape unguarded by folding the candle before
         // the advance, and by advancing on `candle.open` while the emit used `candle.close`.

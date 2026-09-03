@@ -299,7 +299,9 @@ impl Patterns {
     /// [`crate::Corrupt`] for a record that is not a bar. It is neither folded nor
     /// emitted for.
     pub fn step(&mut self, bar: &Candle) -> Result<ConditionMask, crate::Corrupt> {
-        bar.check()?;
+        // `check_evaluable`, not `check`: this module must refuse exactly what
+        // `Evaluator::stepped` refuses or the mask is a mixture of two answers.
+        bar.check_evaluable()?;
         let day = crate::ist_day(bar.ts_micros);
         if day != self.session_day {
             // A pattern must not straddle an overnight gap: 15:29 Friday and 09:15
@@ -1598,7 +1600,19 @@ mod tests {
     fn extreme_but_representable_prices_do_not_overflow() {
         let mut p = Patterns::default();
         let wide = i64::MAX / 4;
-        let first = ok(&mut p, &at(0, 0, wide, -wide, wide / 2));
+        // OPEN IS `1` AND WAS `0`, and the ONE is deliberate rather than lazy.
+        // `Candle::check_evaluable` now refuses a zero price, so this bar had to
+        // move off zero — but the BODY is what classifies it, and the assertion
+        // below names the answer: at these extremes the first bar is a spinning
+        // top. An open at `-wide / 2` was tried first and doubled the body
+        // against the same range, which stopped it being one and made this test
+        // fail for a reason it is not about. `1` is the smallest move off zero
+        // and leaves `|open - close|` where it was.
+        //
+        // The range this test actually exercises, `wide` to `-wide`, is
+        // unchanged, and so is the cross-multiplication it is checking for
+        // overflow.
+        let first = ok(&mut p, &at(0, 1, wide, -wide, wide / 2));
         let second = ok(&mut p, &at(1, wide / 2, wide, -wide, -wide / 2));
         let after = p.bits();
 

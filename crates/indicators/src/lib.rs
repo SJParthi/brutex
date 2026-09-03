@@ -459,7 +459,9 @@ impl CurDayFib {
     /// [`Corrupt::HighBelowLow`] for a record whose high is below its low. The
     /// bar is neither emitted for nor folded in.
     pub fn step(&mut self, bar: &Candle, tolerance: Tolerance) -> Result<ConditionMask, Corrupt> {
-        bar.check()?;
+        // `check_evaluable`, not `check`: this module must refuse exactly what
+        // `Evaluator::stepped` refuses or the mask is a mixture of two answers.
+        bar.check_evaluable()?;
         let day = ist_day(bar.ts_micros);
         if day != self.session_day {
             *self = Self {
@@ -1158,11 +1160,33 @@ mod tests {
         assert_eq!(s.bars_folded(), 0, "a refused bar was folded in");
 
         // A wide but representable range must still work, at either price edge.
+        //
+        // OPEN AND CLOSE ARE `-+ i64::MAX / 8` AND WERE BOTH `0`, which this test
+        // never meant. The wide HIGH and LOW are what it is about, and they are
+        // unchanged; the zeros were there only because nothing had cause to
+        // object to one. `Candle::check_evaluable` now refuses a zero price, so
+        // the fixture names an extreme open and close inside the same range
+        // rather than an absent pair.
         let mut t = CurDayFib::new();
-        let _ = ok(&mut t, &bar(0, 0, i64::MAX / 4, -(i64::MAX / 4), 0));
         let _ = ok(
             &mut t,
-            &bar(60_000_000, 0, i64::MAX / 2, -(i64::MAX / 4), 0),
+            &bar(
+                0,
+                -(i64::MAX / 8),
+                i64::MAX / 4,
+                -(i64::MAX / 4),
+                i64::MAX / 8,
+            ),
+        );
+        let _ = ok(
+            &mut t,
+            &bar(
+                60_000_000,
+                -(i64::MAX / 8),
+                i64::MAX / 2,
+                -(i64::MAX / 4),
+                i64::MAX / 8,
+            ),
         );
         let _ = t.bits(0, tol());
         let _ = t.bits(i64::MAX, tol());
@@ -1668,6 +1692,61 @@ impl Candle {
         // Anything checkable from the record alone belongs before the first module runs.
         if self.volume < 0 {
             return Err(Corrupt::NegativeVolume);
+        }
+        Ok(())
+    }
+
+    /// [`Self::check`], plus the zero-price refusal an EVALUATION requires.
+    ///
+    /// # Why this is a second function and not a fifth clause in `check`
+    ///
+    /// `check` answers *"is this record structurally sane"* and its contract
+    /// deliberately admits an all-zero candle —
+    /// `a_defaulted_candle_is_all_zero_and_its_open_interest_is_a_real_zero`
+    /// pins it in those words: *"an all-zero candle is sane: zero range, zero
+    /// volume, prices contained."* Fourteen callers rely on that reading, and
+    /// three fixtures build deliberately extreme bars on top of it. Adding the
+    /// clause there refused all four and would have been a silent narrowing of a
+    /// tested contract.
+    ///
+    /// Evaluation asks a stricter question. `5815922c` added the zero refusal
+    /// because *"one all-zero bar moved a condition's reported profit by 26.7%
+    /// and refused nothing"* — but it wrote it into `Evaluator::stepped`, which
+    /// does not call `check` at all: it INLINES its own `HighBelowLow`,
+    /// `RangeOverflows` and `PriceOutsideRange` clauses. So the seven modules
+    /// that DO call `check` never received it, and `CurDayFib`, `Patterns`,
+    /// `Orb`, `SessionState`, `GapFib`, `TrendState` and `Vwap` each accepted a
+    /// bar the aggregate refused.
+    ///
+    /// `every_module_refuses_exactly_what_the_evaluator_refuses` exists to catch
+    /// exactly that, and its doc prices it: *"a disagreement means a
+    /// partially-evaluated bar: some families emitted, others refused, and the
+    /// mask is a mixture of two answers."* This function is where the two
+    /// readings are reconciled without either losing its own.
+    ///
+    /// # Zero and not `<= 0`
+    ///
+    /// Deliberately the weaker test, and `Evaluator::stepped`'s own doc argues
+    /// it: `ohlc_is_sane` refuses a negative bar at the write boundary (D-0143),
+    /// so zero is the case REACHABLE THROUGH THE STORE and the case that was
+    /// measured. Widening it would make `close_the_books`' span-overflow
+    /// handling unreachable through `step`, which §9's coverage floor turns into
+    /// a cost rather than a preference. This clause matches that one exactly
+    /// rather than restating it differently.
+    ///
+    /// # Errors
+    ///
+    /// Everything [`Self::check`] refuses, then [`Corrupt::PriceNotPositive`]
+    /// for a record any of whose four prices is zero.
+    pub const fn check_evaluable(&self) -> Result<(), Corrupt> {
+        // LAST, so it stays strictly additive: every record refused before is
+        // still refused for the reason it always was, and this catches only what
+        // passed all of `check`.
+        if let Err(why) = self.check() {
+            return Err(why);
+        }
+        if self.open == 0 || self.high == 0 || self.low == 0 || self.close == 0 {
+            return Err(Corrupt::PriceNotPositive);
         }
         Ok(())
     }
