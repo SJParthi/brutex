@@ -10703,6 +10703,19 @@ struct RungRow {
     /// the page saying so, which is exactly the invisible scope change
     /// `CLAUDE.md` §3 rule 2 forbids. D-0502.
     excluded: stored::CalendarExclusion,
+    /// Why this rung produced no trade, lifted out of the discarded report.
+    ///
+    /// **Carried for the third time for the same reason, and this was the gap
+    /// that cost a day.** A 348-second 60-minute run printed `complete yes` and
+    /// `trades 0` and nothing else. `complete` is bound to `halted == 0`, so it
+    /// is truthful about the LADDER and silent about the SCREEN -- and an
+    /// operator reading those two columns cannot tell "the strategy space is
+    /// genuinely empty at this support" from "all 577 priced candidates were
+    /// refused by a rule you can relax". Those demand opposite next actions.
+    ///
+    /// The report `one_rung` throws away answered it in six lines. Carrying
+    /// those six costs about a thousandth of what the discard comment refuses.
+    retention: Option<String>,
 }
 
 /// Exact context shared by one rung's structural progress boundaries.
@@ -10928,6 +10941,9 @@ fn one_rung(
                 outcome: Err(first_line(why)),
                 missing: Vec::new(),
                 excluded: stored::CalendarExclusion::none(),
+                // NOTHING TO LIFT: this refuses before the sweep runs, so no
+                // report was built to carry a retention block.
+                retention: None,
             };
         }
     };
@@ -10939,6 +10955,9 @@ fn one_rung(
                 outcome: Err(first_line(why)),
                 missing: Vec::new(),
                 excluded: stored::CalendarExclusion::none(),
+                // NOTHING TO LIFT: this refuses before the sweep runs, so no
+                // report was built to carry a retention block.
+                retention: None,
             };
         }
     };
@@ -10950,6 +10969,9 @@ fn one_rung(
                 outcome: Err(first_line(why)),
                 missing: Vec::new(),
                 excluded: stored::CalendarExclusion::none(),
+                // NOTHING TO LIFT: this refuses before the sweep runs, so no
+                // report was built to carry a retention block.
+                retention: None,
             };
         }
     };
@@ -11064,6 +11086,7 @@ fn one_rung(
                     outcome: Err(first_line(why)),
                     missing: Vec::new(),
                     excluded: stored::CalendarExclusion::none(),
+                    retention: None,
                 };
             }
         };
@@ -11100,6 +11123,7 @@ fn one_rung(
                     outcome: Err(first_line(why)),
                     missing: Vec::new(),
                     excluded: stored::CalendarExclusion::none(),
+                    retention: None,
                 };
             }
         };
@@ -11146,6 +11170,10 @@ fn one_rung(
     // lines. The row is read back from the store, which is the point of having
     // one.
     let text = audit_range_for_attempt(vendor_word, underlying, rung, from, to, min_hits, attempt);
+    // LIFTED BEFORE `text` GOES OUT OF SCOPE. The two scanners below already
+    // read this string for a refusal and for a not-recorded sentence; this is
+    // the third question it answers and the only one nothing was asking.
+    let retention = retention_note(&text);
     let outcome = if let Some(why) = refusal_reason(&text) {
         // `refusal_reason` AND NOT `strip_prefix`, because there are three
         // spellings of a refusal and this arm knew one.
@@ -11224,6 +11252,7 @@ fn one_rung(
         outcome,
         missing,
         excluded,
+        retention,
     }
 }
 
@@ -12611,14 +12640,37 @@ fn range_over_inner(
             stored::SWEPT_SERIES_CALENDAR_POLICY,
         );
     }
+    // WHY A ROW TRADED NOTHING, for every row that traded nothing.
+    //
+    // `complete` is bound to `halted == 0`, so it is truthful about the LADDER
+    // and silent about the SCREEN. A row reading `complete yes / trades 0` is
+    // therefore two completely different findings wearing one face: the
+    // strategy space is genuinely empty at this support, or every priced
+    // candidate was refused by a rule that can be relaxed. Those demand
+    // opposite next actions and the table gave no way to tell them apart --
+    // measured, on a 348-second run that printed nine numbers and no reason.
+    //
+    // Gated on `trades == 0` because that is the only case where the question
+    // is asked. A rung that traded has its answer in the columns.
+    for row in rows {
+        let silent = row.outcome.as_ref().is_ok_and(|record| record.trades == 0);
+        if let (true, Some(note)) = (silent, row.retention.as_ref()) {
+            let _ = writeln!(out, "\n  {} PRODUCED NO TRADE. What survived:", row.rung);
+            for line in note.lines() {
+                let _ = writeln!(out, "  {line}");
+            }
+        }
+    }
     let _ = writeln!(
         out,
         "\n  `worst` and `best` are the CHOSEN exit variant's total in paisa \
          under PRINTED-extreme and open fills -- both are prices the bar\n  actually printed, and NO tick is added to either. Selection ranks on\n  `worst`.\n  \
          `complete` NO means a budget stopped that rung's ladder short: its \
          depth is partial and its combination count is not comparable with a \
-         complete one.\n  Every row above is a stored record; nothing here was \
-         computed twice."
+         complete one.\n  `complete` YES says the LADDER finished; it says \
+         nothing about the screen, which is why a rung that traded nothing \
+         prints its retention block above.\n  Every row above is a stored \
+         record; nothing here was computed twice."
     );
     out.push_str(IN_SAMPLE_WARNING);
     out
@@ -13963,7 +14015,86 @@ fn record_frontier(
 ) -> Result<(String, u64), String> {
     let top = rules.top;
     let kept = by_evidence.len().min(top);
-    let rows: Vec<frontier::Row> = by_evidence
+    // RANKED THE WAY THE REPORT RANKS, not the way the sweep did.
+    //
+    // # These were two different top tens wearing one name
+    //
+    // `by_evidence` is `ranked.closed_top` -- the SWEEP's ordering, under
+    // `Lens::Payoff` or `Lens::Detectability`. The report's table is sorted on
+    // the operator's own money criteria, `(return_over_drawdown,
+    // reward_to_risk_bp, pessimistic)`, over every priced row. Taking the first
+    // ten of `by_evidence` therefore wrote evidence-ranks 1..10 into
+    // `frontier.bin` while the terminal showed a different ten, and a
+    // combination the report put at rank 1 could be evidence-rank 4,213 and
+    // ABSENT FROM THE FILE ENTIRELY. The operator asked for "the precise top
+    // 10" and was shown two answers to that question with nothing saying they
+    // differed.
+    //
+    // Worse than merely different: `screen_cap` means most swept combinations
+    // are never priced, so an evidence-ranked row that no screen touched is
+    // written by `Row::of` with a `trades` of zero and every money field zero.
+    // The old order filled the page with those by construction.
+    //
+    // So: priced rows first, ordered by the report's keys; unpriced rows after
+    // them in their original evidence order, which is the only ordering they
+    // have. Stable, so ties keep evidence order -- the sweep's answer is the
+    // tie-break rather than being overwritten by it.
+    //
+    // Consistency is NOT a key here even though the report re-sorts on it. It
+    // is measured in `measure_top` over the report's own rows and is not in
+    // hand at this call site; using the money keys alone is the closest
+    // faithful ordering rather than a second invented one.
+    let mut ordered: Vec<&&runner::rank::Scored> = by_evidence.iter().collect();
+    ordered.sort_by_key(|scored| {
+        priced.get(&scored.mask.words()).map_or(
+            // UNPRICED SORTS LAST, and `i64::MIN` is what says so. A zeroed row
+            // is not a row that lost nothing; it is a row nothing measured.
+            (true, core::cmp::Reverse((i64::MIN, i64::MIN, i64::MIN))),
+            |(cell, _)| {
+                (
+                    false,
+                    core::cmp::Reverse((
+                        cell.return_over_drawdown(),
+                        cell.reward_to_risk_bp(),
+                        cell.pessimistic,
+                    )),
+                )
+            },
+        )
+    });
+    // ONE ROW PER RESULT, and this is what a "top ten" was actually returning.
+    //
+    // MEASURED, on the first 60-minute run that published a frontier at all:
+    // ranks 1-6 were byte-identical -- hits 535, n 385, trades 316, wins 79,
+    // pessimistic -66,555 -- and ranks 7-10 were byte-identical to each other.
+    // Ten rows, TWO distinct results. The operator asked for the top ten of
+    // eleven million combinations and got two answers copied five times.
+    //
+    // Closure cannot remove these and is not failing. It drops a mask when an
+    // immediate SUPERSET has identical support; these are SIBLINGS -- different
+    // conditions at the same level that happen to fire on the same bars. Nothing
+    // upstream compares them to each other.
+    //
+    // Keyed on the fields that make a result a result, not on the mask: two
+    // masks naming different conditions that produced the same trades, the same
+    // wins and the same totals are one finding, and the first is the one the
+    // sweep ranked highest. UNPRICED rows are never folded together -- they have
+    // no result yet, so identical zeros mean "not measured", not "the same".
+    let mut seen: std::collections::HashSet<(u64, u64, i64, i64, i64, i64)> =
+        std::collections::HashSet::with_capacity(ordered.len());
+    ordered.retain(|scored| {
+        priced.get(&scored.mask.words()).is_none_or(|(cell, _)| {
+            seen.insert((
+                cell.trades,
+                cell.wins,
+                cell.pessimistic,
+                cell.max_drawdown,
+                cell.gross_win,
+                cell.gross_loss,
+            ))
+        })
+    });
+    let rows: Vec<frontier::Row> = ordered
         .iter()
         .take(top)
         .enumerate()
@@ -14297,6 +14428,46 @@ pub(crate) const NOT_RECORDED: &str = "RESULT NOT RECORDED";
 ///
 /// `None` when the report carries no such sentence, which is the ordinary case
 /// and the only one in which a row read back by key is this run's row.
+/// The retention block and the no-trade sentence, lifted out of a report that
+/// is about to be discarded.
+///
+/// # Six lines, and they are the six the operator needs
+///
+/// `one_rung` throws the whole report away, justifying it on volume: "nine of
+/// them is six thousand lines". True of the report; false of this. The block
+/// names how many combinations were considered, how many the edge ranker kept,
+/// how many were CLOSED, and whether closure was decided everywhere -- which is
+/// the difference between a sweep that found nothing and a screen that refused
+/// everything.
+///
+/// Scans rather than parses, in the same idiom as [`refusal_reason`] and
+/// [`not_recorded_reason`], both of which already read this same string at the
+/// same call site. Returns `None` when the block is absent, which is every
+/// pre-sweep refusal.
+fn retention_note(report: &str) -> Option<String> {
+    const HEAD: &str = "STREAMED RETENTION";
+    let at = report.find(HEAD)?;
+    let rest = report.get(at..)?;
+    // TO THE FIRST BLANK LINE. The block is head plus five indented lines and
+    // `streaming_note` ends it with "\n\n", so the terminator is the block's own
+    // shape rather than a line count that would drift if a field were added.
+    let block = rest
+        .find("\n\n")
+        .map_or(rest, |end| rest.get(..end).unwrap_or(rest));
+    let mut note = block.to_owned();
+    // AND THE SENTENCE, when the run took the no-candidate exit. The block says
+    // WHAT survived; this says why none of it traded. Without the pair a reader
+    // sees 577 closed candidates and still cannot tell what happened to them.
+    if let Some(tail) = report
+        .find("no final screened candidate was admitted")
+        .and_then(|said| report.get(said..))
+    {
+        note.push_str("\n  ");
+        note.push_str(tail.split('\n').next().unwrap_or(tail));
+    }
+    Some(note)
+}
+
 fn not_recorded_reason(report: &str) -> Option<String> {
     let at = report.find(NOT_RECORDED)?;
     let rest = report[at + NOT_RECORDED.len()..].trim_start_matches([':', ' ']);
