@@ -3945,6 +3945,16 @@ impl PreparedPopulationStatisticsV2 {
 /// Refuses a zero family, a foreign Pre-Admission binding, noncanonical
 /// order/layout, arithmetic or allocation failure, or a statistical family
 /// that cannot produce exact finite-resample evidence.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the longest in this crate at 191, and it is a refusal chain \
+              followed by one construction: five distinct refusals — zero \
+              family, foreign Pre-Admission binding, noncanonical ordering and \
+              the rest — each naming what disagreed, then the statistics record \
+              built field by field. Extracting the refusals would collapse five \
+              reasons into one helper's error, which §4 forbids; extracting the \
+              construction would separate fields that must agree with the stride"
+)]
 pub(crate) fn prepare_single_family_statistics_v3(
     observations: &CandidateFamilyObservationsV1,
     pre_admission: &PreAdmissionDataReopenAuditV1,

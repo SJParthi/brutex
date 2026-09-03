@@ -1299,6 +1299,14 @@ fn project_execution_source(
     Ok((snapshot, rows))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one projection, and its length IS its exhaustiveness: fourteen \
+              match arms cover every variant of the source once, so a new \
+              variant is a compile error here rather than a silently unprojected \
+              row. Splitting the match would let one half stay exhaustive while \
+              the other quietly grew a catch-all"
+)]
 fn project_execution_row(
     source: &PopulationV5ExecutionDispositionSourceV1,
     durable: &ExecutionV3SuccessorDisposition,

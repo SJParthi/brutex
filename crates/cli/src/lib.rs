@@ -130,8 +130,6 @@ pub mod execution_disposition_v2;
 /// Does each stored coarse rung equal the fold of the stored one-minute bars?
 pub mod fold_audit;
 pub mod frontier;
-/// Days whose one-minute series has a hole, and what withholding them costs.
-pub mod minute_gaps;
 /// Receipt-last, all-rung global single-position replay and publication authority.
 pub mod global_replay;
 /// Selection-V4/Execution-V2 global single-position replay authority.
@@ -147,6 +145,8 @@ mod ledger_all;
 /// The operator surface for the all-rung Step-4 successor route.
 mod ledger_v6;
 pub mod live;
+/// Days whose one-minute series has a hole, and what withholding them costs.
+pub mod minute_gaps;
 /// Complete, fixed-stride candidate populations and their receipt-last commit.
 pub mod population;
 /// Pre-finalization Admission V2 decisions and receipt-last structural audit.
@@ -10982,6 +10982,16 @@ fn range_opening(
     out
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one table, rendered once. The body is a single report: the two \
+              argument refusals, the provenance banner, the all-refused guard, \
+              the column header, the per-rung row and the named missing months. \
+              Splitting it would put the header in one function and the row that \
+              must match it in another, which is the defect `the_generated_and_\
+              stored_banners_make_opposite_claims` exists to catch — a format \
+              string and its columns have to be readable together or they drift"
+)]
 fn range_over_inner(
     vendor_word: &str,
     underlying: &str,
@@ -11339,6 +11349,16 @@ pub struct Policy {
 }
 
 /// [`screen_range`]'s work, with its refusals unrendered.
+#[expect(
+    clippy::too_many_lines,
+    reason = "an unbroken chain of preconditions, each of which REFUSES. Rung, \
+              commit stamp, span, withheld holed days, daily context, exact \
+              minutes, column, ladder and horizon are established in one order \
+              and every step's `?` carries a reason naming what could not be \
+              read. Extracting a middle section would hide which precondition \
+              failed behind a helper's own error, and §4 requires the reason to \
+              reach the operator rather than be summarised on the way"
+)]
 fn screen_range_inner(
     vendor_word: &str,
     underlying: &str,

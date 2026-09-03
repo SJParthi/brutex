@@ -1606,6 +1606,14 @@ impl PreparedExecutionV4 {
         Ok((prepared, receipt, selection_families, population_rows))
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "an unbroken refusal chain: every check returns its OWN \
+                  `ExecutionV4Refusal` naming what disagreed and with what. \
+                  Extracting a middle section would collapse several distinct \
+                  refusals behind one helper's error, and §4 requires the reason \
+                  to reach the operator rather than be summarised on the way"
+    )]
     fn validate(&self, bounds: ExecutionV4Bounds) -> Result<(), ExecutionV4Refusal> {
         for (name, value) in [
             ("Population V6 identity", self.population_id),
@@ -1719,6 +1727,14 @@ impl PreparedExecutionV4 {
         Ok(())
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one expected-value record built field by field, 30 of them, so \
+                  a test comparing against a production commit can see every \
+                  slot it asserts on in a single place. A fixture split across \
+                  helpers is one whose disagreement names the helper instead of \
+                  the field"
+    )]
     fn expected_completion(
         &self,
         block_sequence: u64,
@@ -1851,6 +1867,13 @@ impl PreparedExecutionV4 {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "ONE struct literal, 48 fields named once each in declaration \
+              order. The length is the V4 record's width, not branching. \
+              Splitting it would separate fields that must agree with the \
+              on-disk stride from the one place they can be read together"
+)]
 fn parameter_from_population_source(
     receipt: PopulationV6StructuralReceipt,
     source: &PopulationV6SourceProjectionV1,
@@ -6396,6 +6419,16 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "named on THIS test rather than added to the module block \
+                  above, whose own comment states the rule: an annotation that \
+                  claims more than it needs is a claim nobody checked. The \
+                  all-extinct block is one scenario — build, commit, read back, \
+                  and assert every terminal and every nonzero empty authority — \
+                  and a scenario cut in half asserts on state its own first half \
+                  established"
+    )]
     fn all_extinct_block_retains_terminals_and_nonzero_empty_authorities() {
         let root = TestRoot::new("all-extinct");
         let prepared = with_family_topology(prepared(75), [false, false]);

@@ -235,12 +235,27 @@ pub fn read_month(
     rung: Timeframe,
     ym: YearMonth,
 ) -> Result<Vec<Bar>, String> {
-    let path = StorePath::for_key(vendor, key, rung, ym, FileKind::Bars)
-        .map_err(|why| format!("no store path for {} {}: {why}", rung.as_str(), key.underlying))?;
+    let path = StorePath::for_key(vendor, key, rung, ym, FileKind::Bars).map_err(|why| {
+        format!(
+            "no store path for {} {}: {why}",
+            rung.as_str(),
+            key.underlying
+        )
+    })?;
     // THE STORE'S OWN SYMBOL ID, hashed from the NORMALISED underlying exactly
     // as `stored::load_classified_with_ceiling` does. Hashing the caller's raw
     // string instead opens the right file and is then refused by it, naming two
     // numbers that mean nothing to a reader.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the id IS the low 32 bits of the FNV-1a hash — `pull::ingest` \
+                  writes it that way at its own `as u32`, and the header compares \
+                  what it was handed against what it finds. Widening or checking \
+                  here would compute a different number and every file would \
+                  refuse to open with a mismatch that named nothing real. Copied \
+                  verbatim from `stored::load_classified_with_ceiling`, which the \
+                  comment above already names as the form this must match."
+    )]
     let symbol_id = brutex_core::universe::fnv1a(key.underlying.as_str()) as u32;
     let file = BarFile::open_existing(root, path, symbol_id)
         .map_err(|why| format!("{} {} could not be read: {why}", rung.as_str(), ym))?;
@@ -282,6 +297,16 @@ pub fn audit_month(
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "the exception every test module in this workspace takes — a test \
+              that cannot panic cannot fail. `.expect` panics inside core, which \
+              llvm-cov does not instrument, so no dead region is left behind, and \
+              every index below is into a fixture this module built itself. \
+              `clippy::panic` is deliberately NOT listed: nothing here uses the \
+              macro, and an unfulfilled expectation is itself an error"
+)]
 mod tests {
     use super::*;
 
@@ -374,9 +399,7 @@ mod tests {
     /// counterpart.
     #[test]
     fn a_missing_or_extra_record_is_named_as_absence_not_as_a_field() {
-        let minutes: Vec<Bar> = (0..10)
-            .map(|m| minute_bar(m, 100, 110, 90, 105))
-            .collect();
+        let minutes: Vec<Bar> = (0..10).map(|m| minute_bar(m, 100, 110, 90, 105)).collect();
         let bucket = store_bucket(Timeframe::MINUTE_5).expect("5min has a bucket");
         let full = pull::fold::fold(&minutes, bucket).expect("ten minutes fold");
         assert_eq!(full.len(), 2, "ten minutes make two five-minute buckets");
