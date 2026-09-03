@@ -158,7 +158,7 @@ const MAGIC: [u8; 8] = *b"BRUTEXFR";
 /// `false` would make the row assert a rule was off when the format could not
 /// say — §3 rule 8 forbids exactly that reinterpretation, and §4 forbids the
 /// silent fallback that would hide it.
-const VERSION: u32 = 6;
+const VERSION: u32 = 7;
 
 /// Bytes before the first row.
 ///
@@ -181,10 +181,10 @@ const _: () = assert!(HEADER_BYTES as u64 == HEADER);
 /// 144, and the last eight are the seal. The layout is in [`Row::to_bytes`], and
 /// `the_stride_is_exactly_what_the_writer_writes` asserts this constant against
 /// what that function actually fills rather than against a hand count.
-pub const STRIDE: u64 = 272;
+pub const STRIDE: u64 = 280;
 
 /// [`STRIDE`] as a `usize`. Same reason as [`HEADER_BYTES`].
-pub const STRIDE_BYTES: usize = 272;
+pub const STRIDE_BYTES: usize = 280;
 
 const _: () = assert!(STRIDE_BYTES as u64 == STRIDE);
 
@@ -468,6 +468,19 @@ impl Row {
                 .to_le_bytes(),
             &mut at,
         ); // 256   8 -> ends at 264
+        // THE AVERAGE-PAYOFF FLOOR, and the row grew by eight bytes to carry it.
+        //
+        // Format version 7. The row was full: 264 bytes of payload and an
+        // eight-byte seal, with no reserve left after `min_fill_headroom_bp`
+        // took the last four at version 6.
+        //
+        // NOT STORING IT WAS THE CHEAP OPTION AND IT IS THE ONE §4 BANS. The row
+        // carries its rule set so `api::frontierjson` judges each row against
+        // THE RUN THAT WROTE IT rather than against `Rules::operator()`. A field
+        // that always read back zero would make the page compute its PASS pill
+        // without this rule -- a row shown as meeting a policy it was never
+        // measured against.
+        put(&self.rules.min_avg_rr_bp.to_le_bytes(), &mut at); // 264   8 -> 272
         let seal = seal_of(&out);
         out[PAYLOAD_BYTES..].copy_from_slice(&seal);
         out
@@ -584,6 +597,11 @@ impl Row {
                 take(8, &mut at).try_into().unwrap_or([0; 8]),
             ))
             .unwrap_or(usize::MAX),
+            // READ FROM 264..272, added at format version 7. Last in the struct
+            // literal and last on the row, which is the order `to_bytes` writes
+            // them in -- the two lists must stay in step or every field after
+            // the divergence reads its neighbour's value.
+            min_avg_rr_bp: i64::from_le_bytes(take(8, &mut at).try_into().unwrap_or([0; 8])),
         };
 
         Ok(Self {
@@ -1898,11 +1916,20 @@ mod tests {
         let v2_added = 6 * 8;
         //  gross_win, gross_loss -- without which avg_win and avg_loss are zero
         let v3_added = 2 * 8;
-        //  THE EIGHT `Rules` FIELDS, so a reader judges these rows by the rules
-        //  the run that wrote them applied and not by whatever the environment
-        //  says at request time. `top` is written as a `u64` because a `usize`
-        //  is not a width the disk can carry.
-        let v4_added = 8 * 8;
+        //  THE `Rules` FIELDS WRITTEN AS `i64`, so a reader judges these rows by
+        //  the rules the run that wrote them applied and not by whatever the
+        //  environment says at request time. `top` is written as a `u64` because
+        //  a `usize` is not a width the disk can carry.
+        //
+        //  NINE at format version 7, not eight: `min_avg_rr_bp` was appended and
+        //  `STRIDE` moved 272 -> 280 in the same edit. This line is the reason
+        //  that edit cannot be made halfway -- it failed on the next
+        //  `cargo test`, exactly as the `gross_win`/`gross_loss` history above
+        //  records it failing before.
+        //
+        //  `min_fill_headroom_bp` is NOT among these: it is an `i32` in the four
+        //  bytes counted by the `+ 6` below, which were reserve until version 6.
+        let v4_added = 9 * 8;
         assert_eq!(
             v1 + v2_added + v3_added + 6 + v4_added + SEAL_BYTES,
             STRIDE_BYTES,

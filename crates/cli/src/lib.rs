@@ -1093,6 +1093,7 @@ fn screen_arm(
                         // Reading the knob is what the operator typed; leaving
                         // it off would be a policy too.
                         min_fill_headroom_bp: Rules::operator().min_fill_headroom_bp,
+                        min_avg_rr_bp: Rules::operator().min_avg_rr_bp,
                         require_protective_exits: Rules::protective_exits_required(),
                         top: n,
                     },
@@ -6980,6 +6981,10 @@ pub struct Rules {
     ///
     /// Zero drops the rule, the way [`Self::min_rr_bp`] of zero does.
     pub min_fill_headroom_bp: i64,
+    /// Floor on `avg_win : avg_loss`, in hundredths. The operator's second
+    /// 1.5x, and it measures a different thing from `min_rr_bp`. See
+    /// [`Rules::avg_payoff_holds`].
+    pub min_avg_rr_bp: i64,
     /// How many combinations to report. Ten or twenty-five, the operator's call.
     pub top: usize,
 }
@@ -7065,6 +7070,7 @@ impl Rules {
             && cell.return_over_drawdown() >= self.min_ret_over_dd_bp
             && Self::protects(self.require_protective_exits, cell)
             && Self::fills_hold(self.min_fill_headroom_bp, cell)
+            && Self::avg_payoff_holds(self.min_avg_rr_bp, cell)
     }
 
     /// Whether `cell` carries the protection the operator requires.
@@ -7152,6 +7158,61 @@ impl Rules {
             return false;
         }
         cell.optimistic.saturating_mul(100) >= cell.pessimistic.saturating_mul(required_bp)
+    }
+
+    /// Whether the AVERAGE win clears `required_bp` hundredths of the average
+    /// loss.
+    ///
+    /// # Why this exists beside `reward_to_risk_bp`, which measures something else
+    ///
+    /// The figure the page calls `R:R` is `min(win) / max(loss)` — the SMALLEST
+    /// winner against the LARGEST loser. That is the operator's standing rule
+    /// and it is deliberately brutal: one 55-paisa scratch win and one ₹59.65
+    /// loss put it at 0.009, no matter how good the rest of the record is.
+    ///
+    /// MEASURED, on 256 real trades of a 60-minute NIFTY run:
+    ///
+    /// | | smallest | largest | AVERAGE |
+    /// |---|---|---|---|
+    /// | win | ₹0.75 | ₹256.50 | **₹40.02** |
+    /// | loss | ₹0.20 | ₹48.85 | **₹17.71** |
+    ///
+    /// `min/max` reads 0.0154. `avg/avg` reads **2.26**. Both are true and they
+    /// answer different questions: the first asks "can the worst single loss be
+    /// paid for by the worst single win", the second asks "does the typical
+    /// trade pay". A record can clear one and fail the other, so reporting only
+    /// one hides a real property — which is why the operator asked for a floor
+    /// on the average as well.
+    ///
+    /// # No division, and the two degenerate cases are opposite
+    ///
+    /// Cross-multiplied so nothing is divided and nothing rounds:
+    /// `avg_win/avg_loss >= r/100` becomes
+    /// `gross_win * losses * 100 >= |gross_loss| * wins * r`.
+    ///
+    /// No wins at all REFUSES: a ratio with a zero numerator is not a large
+    /// ratio, it is no ratio, and admitting it would pass every strategy that
+    /// never won. No losses at all ADMITS: the ratio is unbounded, and that is
+    /// the one record this rule has no reason to refuse.
+    fn avg_payoff_holds(required_bp: i64, cell: &grid::Cell) -> bool {
+        if required_bp <= 0 {
+            return true;
+        }
+        if cell.wins == 0 {
+            return false;
+        }
+        let losses = cell.trades.saturating_sub(cell.wins);
+        if losses == 0 {
+            return true;
+        }
+        let (Ok(wins), Ok(losses)) = (i64::try_from(cell.wins), i64::try_from(losses)) else {
+            return false;
+        };
+        // `gross_loss` is stored negative. Taken absolute here rather than at
+        // the call site so a future caller cannot pass the sign in by mistake.
+        let lost = cell.gross_loss.saturating_abs();
+        cell.gross_win.saturating_mul(losses).saturating_mul(100)
+            >= lost.saturating_mul(wins).saturating_mul(required_bp)
     }
 
     const fn protects(required: bool, cell: &grid::Cell) -> bool {
@@ -7256,6 +7317,10 @@ impl Rules {
             // THE OPERATOR'S OWN 1.50x, and the only stated multiple left in the
             // rule set. Every other floor is measured off the bars or off.
             min_fill_headroom_bp: at("BRUTEX_MIN_FILL_HEADROOM_BP", 150),
+            // THE OPERATOR'S SECOND 1.5x, on the AVERAGE trade rather than the
+            // fill readings. Measured 2.26 on the 60min run, so it is a floor a
+            // real record can clear -- unlike `min_rr_bp`, which is min/max.
+            min_avg_rr_bp: at("BRUTEX_MIN_AVG_RR_BP", 150),
             top: usize::try_from(at("BRUTEX_TOP", 25)).unwrap_or(25),
         }
     }
@@ -7502,6 +7567,7 @@ impl Rules {
         // cannot read the knob; `BRUTEX_PROTECTED_EXITS=0` clears it on every
         // path that goes through `Rules::operator`.
         min_fill_headroom_bp: 150,
+        min_avg_rr_bp: 150,
         require_protective_exits: true,
         top: 25,
     };
@@ -7609,6 +7675,7 @@ impl Rules {
             // its worst trade — it was rescued by the 15:10 forced close, which
             // is the exchange's decision and not the strategy's.
             min_fill_headroom_bp: 150,
+            min_avg_rr_bp: 150,
             require_protective_exits: true,
             top,
         }
@@ -8019,6 +8086,7 @@ impl Tier {
             // refused, under a banner saying a tier was applied. The operator
             // would read a relaxed THRESHOLD and receive a relaxed STRATEGY.
             min_fill_headroom_bp: Rules::operator().min_fill_headroom_bp,
+            min_avg_rr_bp: Rules::operator().min_avg_rr_bp,
             require_protective_exits: Rules::protective_exits_required(),
             top,
         }
@@ -19762,6 +19830,7 @@ mod tests {
                 // builds carry no exit orders. `protects` is bound by its own
                 // tests below.
                 min_fill_headroom_bp: 0,
+                min_avg_rr_bp: 0,
                 require_protective_exits: false,
                 top: 25,
             },
@@ -20526,6 +20595,7 @@ mod tests {
             // OFF: this case is about a different rule, and these fixtures carry
             // no optimistic total. `fills_hold` has its own tests.
             min_fill_headroom_bp: 0,
+            min_avg_rr_bp: 0,
             require_protective_exits: false,
             top: 25,
         };
@@ -21991,6 +22061,7 @@ mod tests {
             // OFF: this case is about a different rule, and these fixtures carry
             // no optimistic total. `fills_hold` has its own tests.
             min_fill_headroom_bp: 0,
+            min_avg_rr_bp: 0,
             require_protective_exits: false,
             top: 25,
         };
@@ -22102,6 +22173,7 @@ mod tests {
             // optimistic total, so the headroom rule would refuse on a fact the
             // case never set. `fills_hold` has its own tests.
             min_fill_headroom_bp: 0,
+            min_avg_rr_bp: 0,
             require_protective_exits: true,
             top: 25,
         };
@@ -22184,6 +22256,7 @@ mod tests {
             // OFF: this case is about a different rule, and these fixtures carry
             // no optimistic total. `fills_hold` has its own tests.
             min_fill_headroom_bp: 0,
+            min_avg_rr_bp: 0,
             require_protective_exits: false,
             top: 25,
         };
