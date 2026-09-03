@@ -1916,6 +1916,55 @@ mod candle {
         assert_eq!(d.range(), Some(0), "an all-zero candle has a zero range");
     }
 
+    /// ANY ONE of the four prices at zero refuses, not only all four together.
+    ///
+    /// # The three surviving mutants this kills, and why they survived
+    ///
+    /// `check_evaluable`'s guard is a four-way `||`. Mutation testing replaced
+    /// each `||` with `&&` in turn and **three of the three survived**, because
+    /// every test that reached the clause used the ALL-ZERO candle — and
+    /// `open == 0 && high == 0 && low == 0 && close == 0` is true of that bar
+    /// too. A guard that fires on one zero and a guard that fires only on four
+    /// are different refusals, and nothing here could tell them apart.
+    ///
+    /// # Each fixture isolates ONE zero, and `check` must still accept it
+    ///
+    /// The point is to reach `check_evaluable`'s own clause rather than trip an
+    /// earlier one, so every bar below passes all four of `check`: `high >= low`,
+    /// the range is representable, `open` and `close` are inside `[low, high]`,
+    /// and `volume` is not negative. That is why the non-zero prices go NEGATIVE
+    /// where they have to — an `open` of zero with a positive `low` is
+    /// `PriceOutsideRange`, which would prove nothing about this guard.
+    ///
+    /// Negative prices are legal to `check` by construction (D-0143 refuses them
+    /// at the write boundary instead), which is exactly what makes them usable
+    /// as the non-zero half of these fixtures.
+    #[test]
+    fn one_zero_price_is_enough_to_refuse_an_evaluable_candle() {
+        for (name, candle) in [
+            // open alone: `low` is negative so a zero open stays inside the range.
+            ("open", Candle::new(0, 0, 100, -10, 50, 0, OI_NULL)),
+            // high alone: every price is at or below zero, so `high == 0` is the
+            // only zero and `low` is far from it.
+            ("high", Candle::new(0, -50, 0, -100, -50, 0, OI_NULL)),
+            // low alone, with a positive body above it.
+            ("low", Candle::new(0, 50, 100, 0, 50, 0, OI_NULL)),
+            // close alone.
+            ("close", Candle::new(0, 50, 100, -10, 0, 0, OI_NULL)),
+        ] {
+            assert_eq!(
+                candle.check(),
+                Ok(()),
+                "{name}: the fixture must reach the zero clause, not an earlier one"
+            );
+            assert_eq!(
+                candle.check_evaluable(),
+                Err(Corrupt::PriceNotPositive),
+                "{name}: a single zero price must refuse evaluation on its own"
+            );
+        }
+    }
+
     /// The weekday map, checked against dates a reader can verify.
     ///
     /// 1970-01-01 was a Thursday, which is what makes `day % 7 == 0` Thursday.
