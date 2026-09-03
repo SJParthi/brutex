@@ -32249,3 +32249,128 @@ re-run by this entry: the filter is one `position` call over a nine-element
 compile-time array per decoded record, which is a constant multiplier on a loader
 already O(records), and it is none of the five operations §3 rule 4 bounds.
 UNVERIFIED as a measured bound — no bench in this workspace times it. §3 rule 6.
+
+## D-0503
+
+**The exit grid's width is sized from the WHOLE machine, because `threads`
+already bounds how many grids exist at once and `SharedBy` was bounding it a
+second time.**
+
+`rungs_within_cell_budget` read `derived_ceiling()`, which is
+`shared_out(whole_machine_ceiling())` — already divided by
+`SWEEPS_SHARING_THIS_MACHINE` — and then divided by `threads` again. One
+concurrency, counted twice, and the second count was the wrong one: `SharedBy`
+divides a RETAINED budget among rungs that each hold a frontier, while a grid is
+transient and at most `threads` of them exist at any instant however many rungs
+were asked for. The function's own doc already said so — *"a grid gets a small
+fraction of that: one part in 1,024, SPLIT AGAIN ACROSS THE THREADS EACH HOLDING
+ONE"*.
+
+MEASURED on the reference machine, fourteen cores, `DEFAULT_CEILING` 2^27:
+
+```
+rungs asked | budget | rungs solved | cells per combination
+1           |  9,362 | 7            | 6,784
+3           |  3,120 | 5            | 1,566
+8           |  1,170 | 4            |   625
+```
+
+So `range-all` — the verb that exists to make rungs COMPARABLE — gave every one
+of them the coarsest grid the ladder can express, while the same rung swept alone
+got a 10.8x finer one. The doc states the intent as "seven or eight rungs";
+eight-way concurrency delivered four.
+
+**It reached the ANSWER, not only the cost.** The grid width selects the winning
+`Cell`, so `trades`, `pessimistic`, `optimistic`, `worst_trade`, `max_drawdown`
+and all five `exit_rungs` moved with a number the operator happened to type —
+while the run identity folds `ceiling_asked`, the UNDIVIDED figure, so all three
+answers filed under one key. §3 rule 5 requires the opposite, and D-0501's own
+correction of `ceiling_asked` is the same fix one line away.
+
+Memory is not the reason to divide twice: 6,784 cells at the ~152 bytes a `Cell`
+occupies is 1.03 MB, and fourteen concurrent grids are 14.4 MB. The retained
+frontier `SharedBy` exists to bound is three orders larger and is untouched —
+`ladder_within` still takes `ceiling_from_env`.
+
+`derived_ceiling` is deleted rather than left: the compiler proved the grid was
+its ONLY caller. Its closing line claimed "two call sites, one rule", but
+`ceiling_from_env` divides `ceiling_asked` directly and never took the second.
+Its 157-GB-of-48 measurement is preserved in a comment at the deletion site.
+
+Pinned by `the_exit_grid_width_does_not_move_when_sweeps_share_the_machine`,
+the sibling of D-0501's identity test.
+
+## D-0504
+
+**The validation stack emits a stage boundary, because between the exit grid
+finishing and a row landing it emitted nothing at all.**
+
+`crates/cli/src/lib.rs` carried 244 lines between `exit grid finished` and
+`result set committed` holding `both_shapes`, `overfitting_of` and
+`bootstrap_family`. A grep of that range for `note`, `note_attempt`,
+`telemetry::` and `emit` returned zero hits.
+
+MEASURED, from the operator's own `events.ndjson` on 2026-09-03: since the
+minute-gap fix landed, **42** rung sweeps started, **28** reached the exit grid,
+**8** finished it and **3** committed a result. Five runs ended inside that
+stretch and the log cannot say where, because the stretch says nothing. Observed
+live while this entry was written: a healthy run sat **eight minutes** with no
+event at 705% CPU, and only `ps` could distinguish it from a hang.
+
+**It also defeated the liveness detector,** which is the second-order harm.
+`api::sweeprun`'s `STALE_AFTER_MILLIS` is fifteen minutes and its own comment
+calibrates that against the GRID — *"the one-minute rung went twenty minutes
+silent BEFORE grid progress existed"* — and says nothing about this stack. A
+healthy run in the bootstrap for longer than fifteen minutes reported
+`"in_flight": false`, so a live run looked dead.
+
+**Emitted from `cli` and not one crate deeper, because gate 17 silences `vocab
+engine indicators runner` outright** — its rule is not "each call is cheap" but
+"the innermost loop calls nothing at all". The boundary is therefore the only
+legal place, and it is also the affordable one: two events per stage, six per
+rung, against the sixteen thousand full trade re-walks `BOOTSTRAP_DRAWS` x
+`BOOTSTRAP_CANDIDATES` fixes by constant.
+
+`timed_validation_stage` takes the closure rather than being two calls, so an
+early return or a panic cannot leave an `entered` with no `finished` — the shape
+`SharedBy` uses for the same reason. The emitters sit INSIDE `validated_if`'s
+closure, so a `BRUTEX_VALIDATE=0` search logs no walk-forward it did not run.
+
+## D-0505
+
+**`Candle::check_evaluable` exists because a fifth clause in `check` would have
+narrowed a tested contract.**
+
+D-0143's successor `5815922c` added `Corrupt::PriceNotPositive` because *"one
+all-zero bar moved a condition's reported profit by 26.7% and refused nothing"*.
+It was written into `Evaluator::stepped`, **which does not call `Candle::check`**
+— it inlines its own `HighBelowLow`, `RangeOverflows` and `PriceOutsideRange`
+clauses. So the seven modules that DO call `check` never received it, and
+`CurDayFib`, `Patterns`, `Orb`, `SessionState`, `GapFib`, `TrendState` and `Vwap`
+each accepted a bar the aggregate refused.
+`every_module_refuses_exactly_what_the_evaluator_refuses` prices that in its own
+doc: *"a partially-evaluated bar: some families emitted, others refused, and the
+mask is a mixture of two answers."*
+
+**Adding the clause to `check` was tried first and was wrong.** It refused four
+tests, one of which is the contract:
+`a_defaulted_candle_is_all_zero_and_its_open_interest_is_a_real_zero` asserts in
+those words that *"an all-zero candle is sane: zero range, zero volume, prices
+contained"*. Fourteen callers read `check` that way and three fixtures build
+deliberately extreme bars on it.
+
+So the two questions take two predicates. `check` still answers *"is this record
+structurally sane"*. `check_evaluable` answers *"may this record be EVALUATED"* —
+`check` plus the zero refusal, placed LAST so it stays strictly additive. The
+seven modules take the stricter one; every other caller is untouched.
+
+Zero and not `<= 0`, matching `Evaluator::stepped`'s own argument exactly rather
+than restating it: `ohlc_is_sane` refuses a negative bar at the write boundary
+(D-0143), so zero is the case reachable through the store and the case that was
+measured, and widening it would make `close_the_books`' span-overflow handling
+unreachable through `step` against §9's coverage floor.
+
+`Vwap` was the last of the seven to surface because it maps through
+`Refused::Corrupt(..)` rather than returning `Corrupt`, so it does not appear in
+a grep for `check()?`. Its own comment claimed *"One definition, shared with the
+other eight modules"* — a sentence that had quietly stopped being true.
