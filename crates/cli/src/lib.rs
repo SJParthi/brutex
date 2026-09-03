@@ -263,6 +263,13 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    and the refusal surface. Exits non-zero on any
                                    failure. Nothing is pulled, nothing is written
                                    to the bar store.
+       cli fold-audit   VENDOR UNDERLYING FROM_Y FROM_M TO_Y TO_M
+                                   does each stored COARSE rung equal the fold of
+                                   the stored minutes? The seven coarse rungs are
+                                   never pulled -- they are folded at ingest, so a
+                                   dirty minute month yields coarse bars built out
+                                   of gaps that no other check can see. Exits
+                                   non-zero on any disagreement. Reads only.
        cli top          [VENDOR UNDERLYING]
                                    the ranked TOP COMBINATIONS of the best
                                    complete recorded run, read back from the
@@ -378,6 +385,169 @@ cannot bypass that proof; when set it must exactly equal clean HEAD.
 /// Exits [`FAILED`] and not [`MISUSED`] on a failing check: the ARGUMENTS were
 /// understood and the ENGINE did not hold, which are different facts and a
 /// script distinguishing them is the point of having two codes.
+/// The `fold-audit` arm: does each stored coarse rung equal the fold of the
+/// stored minutes?
+///
+/// # Why this needed a verb at all
+///
+/// [`crate::fold_audit`] shipped complete, tested, and reachable from nothing.
+/// Its dispatch table had no arm, `api::sweeprun`'s `EVERY_COMMAND` did not
+/// list it, and no other module named `audit_month`. It was the ONLY detector
+/// in this workspace for a corruption that is on disk now — `cli verify`
+/// checks span monotonicity, determinism, suffix independence and the ledger
+/// round trip, and not one of those looks across rungs — and it could not be
+/// run.
+///
+/// The module doc carries the measurement: zerodha NIFTY, the 12:40
+/// five-minute bucket of 2023-06-14, folded from ONE minute instead of five
+/// because 12:41..12:47 are missing. High understated, low overstated, close
+/// taken from a different minute, printed range **4.6x too narrow**, and
+/// byte-indistinguishable from a correct record.
+///
+/// A REFUSAL IS A FAILURE and so is a disagreement, for the reason
+/// [`verify_arm`] gives about its own exit code: a caller writing
+/// `cli fold-audit ... && deploy` must not deploy on a corrupt store.
+fn fold_audit_arm(
+    out: &mut String,
+    vendor: &str,
+    underlying: &str,
+    from: (&str, &str),
+    to: (&str, &str),
+) -> u8 {
+    let parsed = (
+        from.0.parse::<u16>(),
+        from.1.parse::<u8>(),
+        to.0.parse::<u16>(),
+        to.1.parse::<u8>(),
+    );
+    let (Ok(fy), Ok(fm), Ok(ty), Ok(tm)) = parsed else {
+        return refuse(out, "FROM_Y FROM_M TO_Y TO_M must all be whole numbers");
+    };
+    let report = fold_audit_range(vendor, underlying, (fy, fm), (ty, tm));
+    let failed = report.contains("DISAGREES") || carries_refusal(&report);
+    out.push_str(&report);
+    if failed { FAILED } else { OK }
+}
+
+/// [`fold_audit_arm`]'s report, over a span of instrument-months.
+///
+/// One month is the unit [`crate::fold_audit::audit_month`] offers, and a span
+/// is what an operator actually holds — the corruption this finds came from a
+/// dirty minute pull, and a pull covers months rather than one.
+///
+/// A month whose MINUTE file cannot be read is named and skipped rather than
+/// ending the walk: the one-minute file is the authority here, so its absence
+/// is a finding about that month and says nothing about the next one.
+#[must_use]
+fn fold_audit_range(vendor_word: &str, underlying: &str, from: (u16, u8), to: (u16, u8)) -> String {
+    let vendor = match parse_vendor(vendor_word) {
+        Ok(vendor) => vendor,
+        Err(why) => return format!("refused: {why}\n"),
+    };
+    let key = match stored::swept_index(underlying) {
+        Ok(key) => key,
+        Err(why) => return format!("refused: {why}\n"),
+    };
+    let root = match store_root() {
+        Ok(root) => root,
+        Err(why) => return format!("refused: {why}\n"),
+    };
+    let months = match stored::months_between(from, to) {
+        Ok(months) => months,
+        Err(why) => return format!("refused: {why}\n"),
+    };
+
+    let mut out = String::from(
+        "FOLD AUDIT -- does each stored coarse rung equal the fold of the stored minutes?\n\n  \
+         The seven coarse rungs are NEVER pulled. `pull::ingest::derive_all` folds\n  \
+         them from the one-minute file at ingest, so a dirty minute month produces\n  \
+         coarse bars built out of gaps that are byte-indistinguishable from whole\n  \
+         ones. Nothing else in this workspace looks across rungs.\n\n",
+    );
+    let _ = writeln!(
+        out,
+        "  feed {vendor_word} · {underlying} · {}-{:02}..{}-{:02} · {} months\n",
+        from.0,
+        from.1,
+        to.0,
+        to.1,
+        months.len()
+    );
+
+    let mut unreadable = 0_u64;
+    let mut agreeing = 0_u64;
+    let mut disagreeing = 0_u64;
+
+    for (year, month) in months {
+        // NAMED, NOT UNWRAPPED. `months_between` already refused a month
+        // outside 1..=12, so this cannot fire today -- but a constructor that
+        // returns a `Result` is entitled to change its mind, and a month this
+        // walk silently skipped would be a gap in an audit whose whole job is
+        // finding gaps.
+        let ym = match store::path::YearMonth::new(year, month) {
+            Ok(ym) => ym,
+            Err(why) => {
+                unreadable = unreadable.saturating_add(1);
+                let _ = writeln!(out, "  {year}-{month:02}  NOT A MONTH -- {why}");
+                continue;
+            }
+        };
+        let verdicts = match fold_audit::audit_month(&root, vendor, &key, ym) {
+            Ok(verdicts) => verdicts,
+            Err(why) => {
+                unreadable = unreadable.saturating_add(1);
+                let _ = writeln!(out, "  {year}-{month:02}  MINUTE FILE UNREADABLE -- {why}");
+                continue;
+            }
+        };
+        for verdict in verdicts {
+            match verdict {
+                Ok(v) if v.agrees() => agreeing = agreeing.saturating_add(1),
+                Ok(v) => {
+                    disagreeing = disagreeing.saturating_add(1);
+                    let _ = writeln!(
+                        out,
+                        "  {year}-{month:02}  {:>5}  DISAGREES  stored {} bars, folded {} bars, \
+                         {} named disagreement(s){}",
+                        v.rung,
+                        v.stored_bars,
+                        v.folded_bars,
+                        v.disagreements.len(),
+                        if v.elided == 0 {
+                            String::new()
+                        } else {
+                            format!(", {} more not named", v.elided)
+                        }
+                    );
+                    for d in &v.disagreements {
+                        let _ = writeln!(
+                            out,
+                            "           record {} ts {} field {} -- stored {}, folded {}",
+                            d.at, d.ts_micros, d.field, d.stored, d.folded
+                        );
+                    }
+                }
+                Err(why) => {
+                    unreadable = unreadable.saturating_add(1);
+                    let _ = writeln!(out, "  {year}-{month:02}  RUNG UNREADABLE -- {why}");
+                }
+            }
+        }
+    }
+
+    let _ = writeln!(
+        out,
+        "\n  {agreeing} rung-month(s) agree, {disagreeing} DISAGREE, {unreadable} unreadable.{}",
+        if disagreeing == 0 && unreadable == 0 {
+            "\n  Every stored coarse bar equals the fold of the stored minutes."
+        } else {
+            "\n  A DISAGREEING rung holds bars the minute series does not support. \
+             Re-fold that month rather than sweeping it."
+        }
+    );
+    out
+}
+
 fn verify_arm(out: &mut String, feed: &str, underlying: &str) -> u8 {
     let report = verify(feed, underlying);
     // A REFUSAL IS A FAILURE. This tested `contains("FAIL")` alone, and a
@@ -1144,6 +1314,7 @@ pub fn run(args: &[String], out: &mut String) -> u8 {
             descend_arm(out, v, u, r, (fy, fm), (ty, tm), sup, pw)
         }
         ["verify", feed, underlying] => verify_arm(out, feed, underlying),
+        ["fold-audit", v, u, fy, fm, ty, tm] => fold_audit_arm(out, v, u, (fy, fm), (ty, tm)),
         ["auto-stored", v, u, r, fy, fm, ty, tm] => auto_stored_arm(out, v, u, r, (fy, fm, ty, tm)),
         ["top"] => top_arm(out, None),
         ["top", feed, underlying] => top_arm(out, Some((feed, underlying))),
@@ -1199,7 +1370,7 @@ fn unmatched(word: &str, given: usize) -> String {
 /// So it is written down, and `every_command_is_listed_in_both_places` asserts
 /// the list, the dispatch and the usage all name the same set. The duplication
 /// is real; the test is what makes it safe.
-const COMMANDS: [&str; 17] = [
+const COMMANDS: [&str; 18] = [
     "audit",
     "audit-range",
     "audit-stored",
@@ -1207,6 +1378,7 @@ const COMMANDS: [&str; 17] = [
     "auto-stored",
     "descend",
     "elite",
+    "fold-audit",
     "ledger-all",
     "ledger-v6",
     "range-all",

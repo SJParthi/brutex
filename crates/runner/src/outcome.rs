@@ -1119,9 +1119,28 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
     // here rather than at the parse keeps an explicit count VERBATIM -- asking
     // for a whole session over a short fixture is a legitimate question, and
     // answering a different one quietly would be its own defect.
+    // `bars_len`, NOT `measured()`. Both bound the queue; only one is free.
+    //
+    // `Forward::measured` is `self.ret.iter().filter(..).count()` -- a full pass
+    // over one `Option<i64>` per bar. It sat in this prologue, and `edge` is
+    // called once per FREQUENT ITEMSET from `rank::top_of`. On the run this
+    // file's own `rank` doc cites -- 17.8 million survivors against a
+    // 91,874-bar column -- that is a second complete walk of the column in
+    // front of a main loop that already walks it once, to size a queue that
+    // holds fifteen entries at the default horizon. The ranking pass paid
+    // roughly double the bar visits it needed.
+    //
+    // `bars_len` is a `usize` field read, and it is not a looser bound in any
+    // way that matters: `recent` holds at most one entry per bar in the window,
+    // and `measured() <= bars_len` always -- the difference is only the refused
+    // and tail slots, which the queue could not have held either.
+    //
+    // Nothing measured this. `crates/runner/benches/ratio.rs` has no row
+    // covering `edge` or the ranking pass, and `rank::rank`'s own doc says so.
+    // The change is argued from the shape, not from a timing. §3 rule 6.
     let mut recent: std::collections::VecDeque<(usize, f64)> =
         std::collections::VecDeque::with_capacity(
-            horizon_bars.min(forward.measured().saturating_add(1)),
+            horizon_bars.min(forward.bars_len.saturating_add(1)),
         );
     // Uncentered, because the mean is not known until the walk ends. The three
     // together reconstruct the centered weighted cross-sum exactly:

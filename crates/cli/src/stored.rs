@@ -1817,7 +1817,7 @@ fn clipped(word: &str) -> String {
 /// never per candidate, so it is not one of the five operations `CLAUDE.md` §3
 /// rule 4 bounds. Buying that with a predictable shape — one clip, both
 /// sentences, no way for them to drift — is the better trade.
-fn swept_index(underlying: &str) -> Result<InstrumentKey, Refusal> {
+pub(crate) fn swept_index(underlying: &str) -> Result<InstrumentKey, Refusal> {
     let named = clipped(underlying);
     let key = InstrumentKey::index(Exchange::Nse, underlying)
         .map_err(|why| format!("`{named}` is not an index this engine sweeps: {why}"))?;
@@ -2172,7 +2172,7 @@ const MAX_CALENDAR_RECEIPT_DAYS_V1: usize = MAX_SPAN_MONTHS * 31;
 ///
 /// Bounded twice over: by [`MAX_SPAN_MONTHS`] before the walk starts, and by
 /// `next_month` refusing past 9999-12 inside it.
-fn months_between(from: (u16, u8), to: (u16, u8)) -> Result<Vec<(u16, u8)>, Refusal> {
+pub(crate) fn months_between(from: (u16, u8), to: (u16, u8)) -> Result<Vec<(u16, u8)>, Refusal> {
     // THE ENDPOINTS ARE MONTHS, AND THAT IS CHECKED HERE RATHER THAN DISCOVERED.
     //
     // `MONTH` parses as `u8`, so 13 through 255 arrive intact. Without this

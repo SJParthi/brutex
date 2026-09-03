@@ -246,6 +246,16 @@ pub fn read_month(
     // as `stored::load_classified_with_ceiling` does. Hashing the caller's raw
     // string instead opens the right file and is then refused by it, naming two
     // numbers that mean nothing to a reader.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the id IS the low 32 bits of the FNV-1a hash — `pull::ingest` \
+                  writes it that way at its own `as u32`, and the header compares \
+                  what it was handed against what it finds. This must compute the \
+                  IDENTICAL number to `stored::load_classified_with_ceiling`, \
+                  which carries this same expect: an audit that hashed \
+                  differently would open no file and refuse with a mismatch \
+                  naming two numbers that mean nothing to a reader."
+    )]
     let symbol_id = brutex_core::universe::fnv1a(key.underlying.as_str()) as u32;
     let file = BarFile::open_existing(root, path, symbol_id)
         .map_err(|why| format!("{} {} could not be read: {why}", rung.as_str(), ym))?;
@@ -287,6 +297,15 @@ pub fn audit_month(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "fold fixtures build exact bar arrays and index them by hand — a \
+              mis-indexed fixture must fail loudly here rather than silently \
+              assert against the wrong bucket"
+)]
 mod tests {
     use super::*;
 

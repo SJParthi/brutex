@@ -95,3 +95,4 @@ logs/
 /server.log
 **/.env
 **/*.log
+seq-run/
