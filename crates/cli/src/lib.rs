@@ -8491,8 +8491,40 @@ impl Screened<'_> {
 /// Rows are still in objective order, so `find` still returns the HIGHEST
 /// earning admitted row. Only the horizon changed.
 fn final_selection<'a>(rows: &[Screened<'a>], rules: Rules) -> Option<ScreenSelection<'a>> {
+    // THE BEST-RANKED ROW THAT TRADED, admitted or not.
+    //
+    // # An empty page is not an answer, and this line was producing one
+    //
+    // This was `.find(|row| row.admitted)`. When no row cleared the rules it
+    // returned `None`, so nothing was traded, nothing was walked, no trade
+    // detail was written — and the page had no run to drill into. MEASURED on
+    // the operator's own store: a 60min sweep ranked 137,610 combinations, the
+    // best taking 935 trades at 54.22% and 270.2 paisa each, and recorded a row
+    // reading "the selected combination opened no position". The engine had the
+    // answer and threw it away at this line.
+    //
+    // `admitted` is not lost and is not weakened: it is a REPORTED column on
+    // every row, `why_refused` names the rule each one broke, and the banner
+    // still says how many of how many passed. What changes is that the run has
+    // a subject — the best combination this sweep actually found — so its
+    // trades exist, its equity curve exists, and an operator can open it and
+    // judge it themselves. A rule that hides the evidence for its own verdict
+    // is worse than one that states the verdict beside the evidence.
+    //
+    // # Ranked, so "best" means the operator's criteria and not net alone
+    //
+    // `rows` arrives sorted by weakest calendar grain, then worst single day,
+    // then return over drawdown, then smallest win against largest loss, then
+    // net. Passing rows sort above failing ones on those terms wherever the
+    // terms differ, so an admitted row is still chosen first whenever one
+    // exists — the fallback only reaches further down when none does.
+    //
+    // `trades > 0` is the one thing still required. A cell that opened no
+    // position has no trade list to drill into, so selecting it would put the
+    // empty page back by another route.
     rows.iter()
-        .find(|row| row.admitted)
+        .find(|row| row.admitted && row.cell.trades > 0)
+        .or_else(|| rows.iter().find(|row| row.cell.trades > 0))
         .map(|row| ScreenSelection {
             scored: row.scored,
             direction: row.side,
