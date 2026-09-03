@@ -9071,7 +9071,15 @@ fn screen<'a>(
         .take(priced_cap)
         .enumerate()
         .filter_map(|(rank, scored)| {
-            let side = side_of_evidence(scored);
+            // `side_of_evidence` IS DELIBERATELY NOT CALLED HERE ANY MORE.
+            //
+            // It answered "which way did the raw forward mean point", and that
+            // question is now settled by pricing, below. It remains the right
+            // answer for callers that must name a side WITHOUT running a grid --
+            // the live view and the statistical floor both do -- so the function
+            // stays; only this call site, the one that had a grid available and
+            // used the proxy anyway, is gone.
+            //
             // THE OPERATOR'S OWN STOP IS TRIED, NOT MERELY USED AS A FILTER.
             //
             // `max_mae_ppm` was a post-hoc test: build the grid from quantiles of
@@ -9091,7 +9099,48 @@ fn screen<'a>(
             // that could pair with a derived stop can pair with this one, and a
             // combination that is mediocre on its own quantiles but strong under the
             // operator's stop can now be found rather than filtered out unseen.
-            let g = grid::evaluate_over(bars, column, &scored.mask, horizon, side, levels, &facts);
+            // BOTH SIDES ARE PRICED, AND THE BETTER ONE IS KEPT.
+            //
+            // # A proxy chose the side, and the other side was never measured
+            //
+            // `side_of_evidence` reads `Edge::mean_paisa` -- documented as "mean
+            // forward move in paisa", a raw move over a fixed horizon with NO
+            // stop, NO target and NO trail. That unexited number picked the
+            // side, and the exit grid -- the thing that actually decides whether
+            // a combination makes money -- was then run on that side ALONE. The
+            // other side was never priced, so it could never win.
+            //
+            // The two are not mirrors of each other, which is why the proxy can
+            // be wrong. A long's stop sits below entry and its target above; a
+            // short's are reflected. The price path's adverse and favourable
+            // excursions are NOT symmetric about entry, so the same bars under
+            // the same ladder produce different fills, different stop-outs and a
+            // different best cell on each side. A combination with a slightly
+            // positive raw mean can be markedly better SHORT once a stop and a
+            // trailing take-profit are applied -- the sharp adverse spike that
+            // stops a long out is what a short's trailing exit harvests.
+            //
+            // This is the shape `Cell::return_over_drawdown`'s own doc names:
+            // "the same defect as the one that recorded a proxy as the maximum".
+            //
+            // # What it costs, stated rather than hidden
+            //
+            // Two grids per candidate instead of one. The exit grid is the
+            // dominant cost of a run, so this roughly DOUBLES the priced phase.
+            // That is the price of not deciding the answer with a statistic that
+            // does not know exits exist, and `screen_cap`/`BRUTEX_SCREEN_BUDGET_MS`
+            // still bound how many candidates are priced at all.
+            //
+            // # Which side wins
+            //
+            // The same key the rows are ranked by, so the winning side is the one
+            // that would rank higher -- picking on net here and ranking on
+            // drawdown later would be two answers to one question.
+            let priced = [Side::Long, Side::Short].map(|s| {
+                let g = grid::evaluate_over(bars, column, &scored.mask, horizon, s, levels, &facts);
+                let shown = shown_cell(&g, rules);
+                (s, g, shown)
+            });
             // TICKED HERE AND NOT AT THE END OF THE ARM, because the arm has four
             // `?` exits below it and a candidate that priced and was then discarded
             // still cost the grid evaluation this line is measuring.
@@ -9101,10 +9150,23 @@ fn screen<'a>(
             // it broke. Asking `best()` first and judging that was the error: the
             // profit-maximising cell is the one with no stop at all, so every
             // combination failed a stop rule by construction.
-            let (cell, admitted) = shown_cell(&g, rules)?;
-            if cell.trades == 0 {
-                return None;
-            }
+            //
+            // An ADMITTED side beats an unadmitted one outright, before any
+            // money is compared: a side that broke a stated rule is not a better
+            // answer than one that did not, however much it made.
+            let best = priced
+                .into_iter()
+                .filter_map(|(s, g, shown)| shown.map(|(cell, admitted)| (s, g, cell, admitted)))
+                .filter(|&(_, _, cell, _)| cell.trades > 0)
+                .max_by_key(|&(_, _, cell, admitted)| {
+                    (
+                        admitted,
+                        cell.return_over_drawdown(),
+                        cell.reward_to_risk_bp(),
+                        cell.pessimistic,
+                    )
+                });
+            let (side, g, cell, admitted) = best?;
             Some(Screened {
                 rank: rank.saturating_add(1),
                 // THE SIDE THE CELL WAS PRICED WITH, not a second reading of
