@@ -7084,13 +7084,19 @@ impl Rules {
     /// Whether the worst-case fill total is a profit AND the best case is
     /// within `required_bp` hundredths of it.
     ///
-    /// # The comparison runs the other way from the words, and the source says why
+    /// # The operator's own words, reaffirmed after the objection below
     ///
-    /// The operator asked for *"our best case fill should be at least minimum
-    /// 1.5 times greater than worst case fills"*, and this first shipped as
-    /// `optimistic >= 150 * pessimistic / 100`. That is the literal reading and
-    /// it is backwards, which `runner::grid::Cell::optimistic`'s own doc
-    /// establishes rather than any opinion here:
+    /// This is `optimistic >= 150 * pessimistic / 100`: *"our best case fill
+    /// should be at least minimum 1.5 times greater than worst case fills"*.
+    ///
+    /// IT WAS BRIEFLY INVERTED TO `<=` AND THE ARGUMENT FOR THAT IS KEPT HERE,
+    /// because it is the reading a future editor will arrive at independently
+    /// and it should not have to be rediscovered. The operator was shown it and
+    /// restated the requirement, which settles it — but the trade-off is real
+    /// and is recorded rather than buried.
+    ///
+    /// What made the objection worth raising: `runner::grid::Cell::optimistic`'s
+    /// own doc says
     ///
     /// > *"the gap between them is the MEASUREMENT ERROR, not an estimate to
     /// > prefer… Two setups with the same pessimistic total, one with a spread
@@ -7103,23 +7109,32 @@ impl Rules {
     /// the target. `optimistic >= pessimistic` ALWAYS, by construction, and the
     /// ratio is a measure of how much of the answer the data cannot supply.
     ///
-    /// So demanding a ratio of at least 1.5 demands at least fifty percent
-    /// measurement error — it admits only the setups that rest on a coin flip,
-    /// and refuses every setup whose two readings agree. Nothing in the workspace
-    /// ranks on `optimistic` for the same reason;
-    /// `no_selector_can_be_moved_by_the_optimistic_figure` holds that as a
-    /// property.
+    /// So a `>=` ratio of 1.5 asks for at least fifty percent measurement
+    /// error, and a setup whose two readings agree exactly is refused. Nothing
+    /// in the workspace ranks on `optimistic` for that reason;
+    /// `no_selector_can_be_moved_by_the_optimistic_figure` holds it as a
+    /// property. **That is the cost of this rule, and it is stated so that a row
+    /// it admits is read for what it is: a total with room between its two fill
+    /// readings, which is what the operator asked to see.**
     ///
-    /// What the operator is protecting against is a total that evaporates under
-    /// adverse fills, and both halves below serve that:
+    /// WHAT MAKES IT SAFE TO SAY YES TO. When this first shipped, `admits` was a
+    /// HARD GATE — `screen_cascade` returned `selected: None` the moment nothing
+    /// was admitted, so a rule nothing could satisfy meant no frontier, no
+    /// trades, and a page the operator could not open. That is fixed
+    /// independently: the cascade now keeps the ranking it already computed. So
+    /// the direction of this rule decides which rows are FLAGGED, not whether
+    /// there are rows.
     ///
-    /// 1. `pessimistic <= 0` refuses outright — a result that loses money under
-    ///    the worst reading has no headroom to measure. This half was right in
-    ///    the first version and is unchanged.
-    /// 2. `optimistic <= required * pessimistic / 100` caps the bracket, so 150
-    ///    now reads "the best case may exceed the worst by at most half". A
-    ///    setup whose readings agree passes with the widest margin, which is the
-    ///    correct direction.
+    /// The two halves:
+    ///
+    /// 1. `pessimistic <= 0` refuses outright, and this half is not the
+    ///    operator's ratio — it is what stops the ratio being a no-op. With a
+    ///    negative worst case, `optimistic >= 1.5 * pessimistic` is trivially
+    ///    true for every losing strategy ever swept (`+1252 >= 1.5 × −2095`),
+    ///    so the rule would refuse nothing at all. The operator asked for a rule
+    ///    that bites.
+    /// 2. `optimistic >= required * pessimistic / 100` is the requirement as
+    ///    stated: the best case must clear the worst by half again.
     ///
     /// Multiplied before dividing, and in `i64`: `pessimistic` is paisa and the
     /// products stay far inside the range. Saturating rather than wrapping, so a
@@ -7136,7 +7151,7 @@ impl Rules {
         if cell.pessimistic <= 0 {
             return false;
         }
-        cell.optimistic.saturating_mul(100) <= cell.pessimistic.saturating_mul(required_bp)
+        cell.optimistic.saturating_mul(100) >= cell.pessimistic.saturating_mul(required_bp)
     }
 
     const fn protects(required: bool, cell: &grid::Cell) -> bool {
@@ -20557,31 +20572,34 @@ mod tests {
             measured.pessimistic
         );
 
-        let coin_flip = runner::grid::Cell {
+        // AND THE DIRECTION THE OPERATOR ASKED FOR, stated as a pair so the
+        // trade-off is on the record rather than in a comment.
+        //
+        // Room between the two readings PASSES; readings that agree exactly are
+        // refused, because a best case equal to the worst does not clear it by
+        // half again. That consequence was put to the operator and the
+        // requirement was restated, so these two assertions are the decision.
+        let room = runner::grid::Cell {
             pessimistic: 100_000,
             optimistic: 800_000,
             ..protected_cell(1)
         };
         assert!(
-            !crate::Rules::fills_hold(150, &coin_flip),
-            "a worst case of {} against a best of {} is eight-to-one intra-bar \
-             ambiguity: the answer is a coin flip, not an edge",
-            coin_flip.pessimistic,
-            coin_flip.optimistic
+            crate::Rules::fills_hold(150, &room),
+            "a best of {} against a worst of {} clears 1.5x with room to spare",
+            room.optimistic,
+            room.pessimistic
         );
 
-        // AND THE AGREEING SETUP PASSES, which is the direction that was wrong.
-        // Equal readings mean no selected exit bar was ambiguous at all -- the
-        // most trustworthy result this data can produce -- and the first version
-        // of this rule refused exactly that while admitting `coin_flip` above.
         let agrees = runner::grid::Cell {
             pessimistic: 100_000,
             optimistic: 100_000,
             ..protected_cell(1)
         };
         assert!(
-            crate::Rules::fills_hold(150, &agrees),
-            "two readings that agree exactly is the best case, not the worst"
+            !crate::Rules::fills_hold(150, &agrees),
+            "two readings that agree exactly are 1.0x, which is under the \
+             operator's 1.5x floor"
         );
     }
 
@@ -20604,23 +20622,23 @@ mod tests {
             "30000 is exactly 1.5 x 20000"
         );
 
-        let narrower = runner::grid::Cell {
+        let under = runner::grid::Cell {
             optimistic: 29_999,
             ..at
         };
         assert!(
-            crate::Rules::fills_hold(150, &narrower),
-            "one paisa NARROWER than the cap is LESS intra-bar ambiguity, so it \
-             passes -- the first version of this rule refused it"
+            !crate::Rules::fills_hold(150, &under),
+            "one paisa under 1.5x is under the floor; `at least` is `>=`, and \
+             this is the assertion that pins which comparison is meant"
         );
 
-        let wider = runner::grid::Cell {
+        let over = runner::grid::Cell {
             optimistic: 30_001,
             ..at
         };
         assert!(
-            !crate::Rules::fills_hold(150, &wider),
-            "one paisa WIDER is more ambiguity than the operator accepts"
+            crate::Rules::fills_hold(150, &over),
+            "one paisa over 1.5x clears it"
         );
     }
 
