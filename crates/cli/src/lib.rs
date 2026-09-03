@@ -13856,10 +13856,58 @@ fn audit_bars(
     };
     let Some(chosen) = chosen else {
         let _ = writeln!(out, "{screened}");
-        let _ = writeln!(
-            out,
-            "{NOT_RECORDED}: no final screened candidate was admitted, so no selected ledger/detail result exists."
-        );
+        // ══ A SWEEP THAT ADMITTED NOTHING STILL MEASURED SOMETHING ══
+        //
+        // This path used to write no ledger row at all, and it is the path an
+        // honest run takes most often: the ladder completed, every combination
+        // was counted against every bar, and not one cleared the operator's
+        // rules. That is a RESULT -- "this vocabulary, this instrument, this
+        // support, no admitted setup" -- and §3 rule 3 says a computation with
+        // an identity must have that identity recorded.
+        //
+        // MEASURED, and it is why this was found: after a full night of
+        // sweeping, `results/runs.bin` DID NOT EXIST. Not one row, from any
+        // rung, on any run -- because every completed rung reached exactly here
+        // and evaporated. `/backtest` correctly reported `total: 0`, and an
+        // operator could not tell a sweep that found nothing from a sweep that
+        // never ran.
+        //
+        // `record_swept_run` already writes precisely this shape -- the sweep
+        // half with `None` for the chosen cell, so every money field is a
+        // truthful zero and `mask_words` is `[0; 6]`, which `frontier.rs` reads
+        // as the unpriced marker. It existed for `sweep-stored` and `sweep-all`
+        // and was unreachable from `audit-range`, `screen` and `range-all` --
+        // the three verbs an operator actually runs over a span.
+        //
+        // The row is written BEFORE the report is returned, so a reader who
+        // sees `NOT_RECORDED` in the text still finds the run in the ledger,
+        // marked by its zero trade count rather than absent.
+        if let (Some(into), Some(run_id)) = (recording, id) {
+            match record_swept_run(
+                into,
+                run_id,
+                &outcome.sweep,
+                u64::try_from(trade_bars.len()).unwrap_or(u64::MAX),
+                min_hits,
+            ) {
+                Ok((said, _committed)) => {
+                    let _ = writeln!(
+                        out,
+                        "\nno final screened candidate was admitted, so no TRADE was selected. \
+                         The sweep itself is recorded -- its identity, depth, combination count \
+                         and bar census -- with every money field a truthful zero.\n{said}"
+                    );
+                }
+                Err(why) => {
+                    let _ = writeln!(out, "\n{NOT_RECORDED}: {why}");
+                }
+            }
+        } else {
+            let _ = writeln!(
+                out,
+                "{NOT_RECORDED}: no final screened candidate was admitted, and this run carries no recording target."
+            );
+        }
         out.push_str(&live.map_or_else(String::new, crate::live::Live::finish));
         return out;
     };
