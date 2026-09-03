@@ -7263,7 +7263,46 @@ impl Rules {
             rules.min_assurance_bp = assurance_floor_bp(base_bp);
         }
         if Self::stated("BRUTEX_MIN_RR_BP").is_none() {
-            rules.min_rr_bp = breakeven_rr_bp(rules.min_win_rate_bp);
+            // ZERO, WHICH `Rules::admits` READS AS "NO R:R FLOOR".
+            //
+            // This was `breakeven_rr_bp(rules.min_win_rate_bp)`, and the two
+            // sides of that comparison are DIFFERENT STATISTICS.
+            //
+            // `breakeven_rr_bp` computes `(1−p)/p` — the expectancy break-even
+            // for MEAN win against MEAN loss. `admits` compares it against
+            // `Cell::reward_to_risk_bp`, which is `min_win / worst_loss`: the
+            // SMALLEST win against the LARGEST loss, which is the operator's
+            // own rule stated verbatim.
+            //
+            // Since `min_win <= mean_win` and `worst_loss >= mean_loss`, the
+            // statistic is ALWAYS at or below the floor. It was not strict, it
+            // was unsatisfiable.
+            //
+            // MEASURED on the committed 60min run, read back from
+            // `/frontier.json`:
+            //
+            //     min_win 55 paisa · worst_trade −5965  →  ratio 0
+            //     min_rr_bp = breakeven_rr_bp(5183)     =  116
+            //     admitted 0 of 10
+            //
+            // Every "0 of N kept" on every rung all day traces to this line
+            // rather than to the market.
+            //
+            // # And it is NOT replaced with a number
+            //
+            // The obvious repair is `300` — the operator's own 3.00x. It is
+            // still a constant, and §6's argument holds: a floor that can be set
+            // can be set wrongly, and one point too high answers nothing.
+            //
+            // `reward_to_risk_bp` is already RANKING TERM FOUR. Rows sort by
+            // weakest calendar grain, worst single day, return over drawdown,
+            // then this, then net — so the row with the better smallest-win to
+            // largest-loss ranks above the worse one WITHOUT the engine deciding
+            // where the operator's line is. The rule is honoured as an ordering.
+            //
+            // `BRUTEX_MIN_RR_BP` still installs a real floor for an operator who
+            // wants one. Absent it, nothing here is chosen.
+            rules.min_rr_bp = 0;
         }
         // THE WEAKEST PERIOD IS HELD TO THE SAME STANDARD AS THE WHOLE.
         //
