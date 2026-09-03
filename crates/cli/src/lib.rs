@@ -2196,8 +2196,31 @@ fn auto_stored_inner(
     })?;
     let vendor = parse_vendor(vendor_word)?;
     let root = store_root()?;
-    let span = stored::load_span(&root, vendor, underlying, rung, from, to)?;
+    let mut span = stored::load_span(&root, vendor, underlying, rung, from, to)?;
     let signal_length = stored::rung_length_micros(rung)?;
+    // WITHHELD HERE TOO, AND LEAVING IT OUT MADE THE OTHER TWO USELESS.
+    //
+    // `audit_range_inner` and `screen_range_inner` withhold days whose
+    // one-minute series has a hole; this door did not, so `auto-stored` — the
+    // verb that BISECTS for a rung's affordable threshold, and therefore the
+    // one an operator runs FIRST — still died on `MissingClosingMinute`. Fixing
+    // the two sweep doors and not the door that sizes them left the operator
+    // unable to find the threshold the sweep needed.
+    //
+    // The 1min stream is loaded here rather than taken from an execution slice
+    // because this function has none: it sizes ONE rung and never opens the
+    // execution series. One extra span read on a sizing run is the right trade
+    // against a refusal that stops the run dead. See `crate::minute_gaps` for
+    // what is withheld and why it is measured rather than listed.
+    let minute_stream =
+        stored::load_span(&root, vendor, underlying, EXECUTION_RUNG, from, to).map(|s| s.bars);
+    if let Ok(minutes) = minute_stream {
+        let holed_days = crate::minute_gaps::days_with_interior_gaps(&minutes);
+        if !holed_days.is_empty() {
+            let (kept, _withheld) = crate::minute_gaps::withhold(&span.bars, &holed_days);
+            span.bars = kept;
+        }
+    }
     let daily = stored::load_daily_context(&root, vendor, underlying, (from, to), &span.bars)?;
     let exact_minute =
         stored::load_exact_minute_context(&root, vendor, underlying, (from, to), &span.bars)?;
