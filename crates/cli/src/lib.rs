@@ -577,6 +577,119 @@ fn verify_arm(out: &mut String, feed: &str, underlying: &str) -> u8 {
     out.push_str(&report);
     if failed { FAILED } else { OK }
 }
+/// Loads the exact-minute overlay, WITHHOLDING each day it cannot source.
+///
+/// # One missing minute killed seven of eight timeframes
+///
+/// The overlay refuses `MissingClosingMinute` when no stored 1-minute bar ends
+/// at a signal bar's close, and that refusal ends the run. MEASURED on the
+/// operator's store: a single absent minute — 2020-02-13 10:32 IST, one of
+/// 609,722 — refused `15min`, `10min`, `5min`, `3min`, `2min` and `1min`, each
+/// in under half a second, on every run all day. `60min` was the only rung that
+/// ever recorded, and it survived only because no 60-minute bar happened to
+/// close on that minute.
+///
+/// [`crate::minute_gaps::days_with_interior_gaps`] was written for this and
+/// GUESSES: it walks the minute series looking for a step wider than a minute.
+/// The overlay does not need "a day with a gap somewhere" — it needs, for each
+/// signal bar, the exact minute its close lands on. Those are different
+/// questions, and the gap walk answered the wrong one: the day survived its
+/// filter and the overlay refused it anyway.
+///
+/// # Asking the thing that knows
+///
+/// The refusal names `expected_ts_micros` — the precise minute it wanted. So
+/// this withholds THAT day and retries. Each pass removes at least one day, so
+/// the loop is bounded by the number of days in the span; `ATTEMPTS` bounds it
+/// again far below that, because a span that needs hundreds of days withheld is
+/// not a span with holes, it is a span with a different defect, and grinding
+/// through it one day at a time would hide that.
+///
+/// # This DECLINES to answer; it does not substitute
+///
+/// The four tests that forbid minute substitution still hold — a hole still
+/// refuses when its day is swept. What changes is that the day is not swept.
+/// Substituting a neighbouring minute would answer the question with the wrong
+/// bar; withholding declines to answer it, and the caller is handed the list so
+/// the report can say which days were dropped and why. §4: degrade loudly.
+fn exact_minute_withholding_unsourceable_days(
+    root: &std::path::Path,
+    vendor: brutex_core::vendor::Vendor,
+    underlying: &str,
+    span: ((u16, u8), (u16, u8)),
+    bars: &mut Vec<indicators::Candle>,
+) -> Result<(stored::ExactMinuteContext, Vec<i64>), String> {
+    /// A span needing more than this withheld is a different defect.
+    const ATTEMPTS: usize = 64;
+    let (from, to) = span;
+    let mut dropped: Vec<i64> = Vec::new();
+    for _ in 0..ATTEMPTS {
+        match stored::load_exact_minute_context(root, vendor, underlying, (from, to), bars) {
+            Ok(context) => return Ok((context, dropped)),
+            Err(why) => {
+                // THE TIMESTAMP THE REFUSAL ALREADY CARRIES. Read from the
+                // rendered refusal rather than a typed field because
+                // `load_exact_minute_context` returns a `String` and widening
+                // that signature reaches every caller; the marker is the
+                // variant's own field name, which is part of the message this
+                // function exists to answer.
+                let Some(ts) = unsourceable_minute(&why) else {
+                    return Err(why);
+                };
+                let day = indicators::ist_day(ts);
+                if dropped.contains(&day) {
+                    // The same day twice means withholding it did not remove the
+                    // bar that needed it -- a different defect wearing this one's
+                    // message, and looping on it would spin.
+                    return Err(format!(
+                        "{why} The day {day} was already withheld and the overlay \
+                         still cannot source a close on it, so this is not a \
+                         missing-minute hole. Nothing was swept."
+                    ));
+                }
+                dropped.push(day);
+                let (kept, _removed) = crate::minute_gaps::withhold(bars, &[day]);
+                if kept.len() == bars.len() {
+                    return Err(format!(
+                        "{why} Withholding day {day} removed no signal bar, so the \
+                         missing minute is not on a day this rung sweeps. Nothing \
+                         was swept."
+                    ));
+                }
+                *bars = kept;
+                if bars.is_empty() {
+                    return Err(format!(
+                        "{why} Withholding every unsourceable day left no bars at \
+                         all, so there is nothing to sweep."
+                    ));
+                }
+            }
+        }
+    }
+    Err(format!(
+        "the exact-minute overlay still could not be sourced after withholding \
+         {ATTEMPTS} day(s). A span needing more than that is not a span with \
+         holes. Nothing was swept."
+    ))
+}
+
+/// The minute an overlay refusal says it could not source, if it says one.
+///
+/// Matches the `MissingClosingMinute` field name rather than the whole Debug
+/// shape: the surrounding text is a caller's prose and has already changed
+/// once, while the field name is the variant's own and changing it is a source
+/// edit this function's test would catch.
+fn unsourceable_minute(refusal: &str) -> Option<i64> {
+    let at = refusal.find("expected_ts_micros:")?;
+    let rest = refusal.get(at.saturating_add("expected_ts_micros:".len())..)?;
+    let digits: String = rest
+        .trim_start()
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse::<i64>().ok()
+}
+
 /// The `results` arm, lifted out of [`run`] for the reason [`audit_range_arm`]
 /// gives.
 ///
@@ -4977,9 +5090,17 @@ fn audit_range_inner(
         let (kept, _withheld) = crate::minute_gaps::withhold(&span.bars, &holed_days);
         span.bars = kept;
     }
+    // THE OVERLAY IS LOADED FIRST AND MAY WITHHOLD DAYS, so the daily
+    // context is built from the bars that SURVIVED it -- building it first
+    // would describe a span the column no longer has.
+    let (exact_minute, unsourceable) = exact_minute_withholding_unsourceable_days(
+        &root,
+        vendor,
+        underlying,
+        (from, to),
+        &mut span.bars,
+    )?;
     let daily = stored::load_daily_context(&root, vendor, underlying, (from, to), &span.bars)?;
-    let exact_minute =
-        stored::load_exact_minute_context(&root, vendor, underlying, (from, to), &span.bars)?;
     let column = stored_anchored_column(&span.bars, &daily, &exact_minute, signal_length)?;
 
     // BOUND ONCE, USED TWICE: by the run identity below and by the
@@ -5053,6 +5174,36 @@ fn audit_range_inner(
     });
 
     let mut header = span_banner(&span, underlying, from, to, commit);
+    // WITHHELD DAYS ARE NAMED, NOT COUNTED AND DROPPED.
+    //
+    // A sweep whose sample is smaller than the operator asked for must say so
+    // AND say which days, or the row's bar census silently describes a
+    // different span from the one requested. §4: degrade loudly and name the
+    // reason, never both silently.
+    if !unsourceable.is_empty() {
+        let _ = writeln!(
+            header,
+            "  EXACT-MINUTE HOLES  {} day(s) withheld -- no stored 1min bar ended \
+             at a signal bar's close on them, so those days were DECLINED rather \
+             than answered with a neighbouring minute. IST days: {}",
+            unsourceable.len(),
+            unsourceable
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        note(
+            &telemetry::Event::info("cli.audit", "exact-minute days withheld")
+                .with("rung", rung)
+                .with(
+                    "days",
+                    u64::try_from(unsourceable.len()).unwrap_or(u64::MAX),
+                )
+                .with("feed", vendor.as_str())
+                .with("underlying", underlying),
+        );
+    }
     header.push_str(&daily_reference_note(&daily, &exact_minute));
     Ok(audit_bars(
         evaluator(),
