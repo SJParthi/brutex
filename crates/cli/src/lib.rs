@@ -8950,8 +8950,21 @@ struct Screened<'a> {
     /// what it cost. A rule tighter than this cannot be met by any exit, so it
     /// tells an operator whether their number is reachable before guessing again.
     tightest: Option<grid::Cell>,
-    /// The conditions, by name.
-    names: String,
+    // THE CONDITION NAMES ARE NOT A FIELD, AND THEY WERE.
+    //
+    // `names: String` was built inside the per-candidate `par_iter` closure as
+    // `condition_names(&scored.mask).join(" · ")` -- a `Vec<String>`, one
+    // `to_owned` per set bit, and a joined `String`, so k+2 heap allocations
+    // for EVERY priced candidate. Measured against its readers: exactly one,
+    // inside `for row in rows.iter().take(rules.top)`.
+    //
+    // At the cap this session used that is 200,000 rows allocating so that ten
+    // could be printed. The mask is already on the row as `row.scored.mask`, so
+    // the string is derivable at the render site for the rows that need it and
+    // costs nothing for the rows that do not.
+    //
+    // This is the allocation-in-the-innermost-loop that gate 17 forbids one
+    // crate deeper, in the one crate the gate does not cover.
     /// Whether every rule held.
     admitted: bool,
     /// How the chosen variant held up across every calendar grain.
@@ -10412,7 +10425,6 @@ fn screen<'a>(
                 side: direction_of(side),
                 tightest: g.tightest_containment().copied(),
                 admitted,
-                names: runner::report::condition_names(&scored.mask).join(" · "),
                 cell,
                 scored,
                 consistency: None,
@@ -10665,7 +10677,8 @@ fn screen<'a>(
             } else {
                 why_refused(&row.cell, rules, row.steady())
             },
-            row.names
+            // BUILT HERE, FOR THE ROWS THAT ARE PRINTED. See `Screened`.
+            runner::report::condition_names(&row.scored.mask).join(" · ")
         );
     }
     let _ = writeln!(out);
@@ -10848,6 +10861,33 @@ fn measure_top(
     // screening pass produced, so the cell this re-walks is the cell the row
     // above reports.
     let stop_rungs_again = stop_ladder_ppm(bars, horizon.as_bars() as usize);
+    // THE OTHER THREE INVARIANTS, HOISTED BESIDE THE ONE THAT ALREADY WAS.
+    //
+    // `stop_rungs_again` above was lifted out of the loop and these three were
+    // left inside it, so the hoist looked done and was a quarter done. None of
+    // them reads `row`:
+    //
+    //   `grid_rungs(bars)`      -> `reference_price` (2 scans) + `grid_step_ppm`
+    //                              + `max_stop_points`: 3 B-sized `Vec`s, 3 sorts
+    //   `grid_step_ppm(..)`     -> `window_range_percentile` + `range_percentile`:
+    //                              2 more B-sized `Vec`s, 2 more sorts
+    //   `SliceFacts::of(..)`    -> a `HashMap` sized B, plus three B-sized `Vec`s,
+    //                              rebuilt inside `grid::evaluate`
+    //
+    // That is roughly thirteen B-sized allocations, a B-entry hash build and
+    // five O(B log B) sorts PER ROW. At 617,921 bars over `measured_band(10)`
+    // = 80 rows it is ~5 GB allocated and freed and ~99M hash inserts in one
+    // single-threaded loop -- which is the hour-long stall this pass showed
+    // before the band bounded it, still present per row afterwards.
+    //
+    // `evaluate_over` exists for exactly this and takes the facts already
+    // built. This is the FOURTH site of one defect: `screen`, `cap_for_budget`
+    // and `validate.rs` each fixed it, each left a comment saying so, and this
+    // one sits six hundred lines below `screen` in the same file with `bars`
+    // and `column` in scope.
+    let rungs_again = grid_rungs(bars);
+    let step_ppm_again = grid_step_ppm(bars, horizon.as_bars() as usize);
+    let facts_again = runner::trade::SliceFacts::of(bars, column);
     // EVERY PRICED ROW, NOT A BAND. The band was the last constant that could
     // permanently exclude a combination from the reported top ten.
     //
@@ -10917,19 +10957,20 @@ fn measure_top(
         // so a combination priced and admitted SHORT could be demoted by a LONG
         // measurement and lose the run to a different candidate.
         let side = side_of_direction(row.side);
-        let g = grid::evaluate(
+        let g = grid::evaluate_over(
             bars,
             column,
             &row.scored.mask,
             horizon,
             side,
             grid::Levels {
-                rungs: grid_rungs(bars),
-                step_ppm: Some(grid_step_ppm(bars, horizon.as_bars() as usize)),
+                rungs: rungs_again,
+                step_ppm: Some(step_ppm_again),
                 forced: (rules.max_mae_ppm > 0).then_some(rules.max_mae_ppm),
                 ratios: true,
                 stops_ppm: &stop_rungs_again,
             },
+            &facts_again,
         );
         row.consistency = consistency_of(bars, column, row.scored, horizon, side, &g, &row.cell);
     }
@@ -17374,12 +17415,11 @@ fn record_all_attempt(
 mod tests {
     use super::{
         COMMANDS, MIN_AUDIT_SESSIONS, MISUSED, OK, PROVENANCE, STORED_PROVENANCE, UNVALIDATED,
-        calendar_terms,
-        USAGE, Vendor, audit_run, audit_run_within, audit_stored, auto, auto_with, direction_of,
-        evaluator_from, existing_store_root, grid_rungs, knobs_checked, log_dir_from, month_banner,
-        nothing_to_trade, overfitting_of, parse_min_hits, parse_sessions, parse_vendor, policy_of,
-        root_from, run, sample_warning, side_of_evidence, streaming_note, support_from_knob, sweep,
-        sweep_stored, sweep_with, validates,
+        USAGE, Vendor, audit_run, audit_run_within, audit_stored, auto, auto_with, calendar_terms,
+        direction_of, evaluator_from, existing_store_root, grid_rungs, knobs_checked, log_dir_from,
+        month_banner, nothing_to_trade, overfitting_of, parse_min_hits, parse_sessions,
+        parse_vendor, policy_of, root_from, run, sample_warning, side_of_evidence, streaming_note,
+        support_from_knob, sweep, sweep_stored, sweep_with, validates,
     };
     use super::{Consistency, Horizon, consistency_of, evaluator, grid, grid_step_ppm, ladder_for};
     use super::{Direction, Side};
@@ -18415,7 +18455,6 @@ mod tests {
                     ..grid::Cell::default()
                 },
                 tightest: None,
-                names: "A".to_owned(),
                 admitted: false,
                 consistency: None,
                 steady: true,
@@ -18430,7 +18469,6 @@ mod tests {
                     ..grid::Cell::default()
                 },
                 tightest: None,
-                names: "B".to_owned(),
                 admitted: true,
                 consistency: None,
                 steady: true,
