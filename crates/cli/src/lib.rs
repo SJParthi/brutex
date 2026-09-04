@@ -3583,7 +3583,11 @@ fn window_range_percentile(
     if travels.is_empty() {
         return None;
     }
-    travels.sort_unstable();
+    // ONE INDEX IS READ, SO ONE INDEX IS PLACED. `select_nth_unstable` puts the
+    // element that belongs at `at` there and partitions around it in O(n),
+    // where a full sort orders every other position for nothing. The workspace
+    // already does exactly this in `outcome::forward` and `single_far_target`.
+    // `at` is computed first because it depends only on the length.
     let at = travels
         .len()
         .saturating_sub(1)
@@ -3591,7 +3595,8 @@ fn window_range_percentile(
         .checked_div(denominator)
         .unwrap_or(0)
         .min(travels.len().saturating_sub(1));
-    travels.get(at).copied()
+    let (_, &mut nth, _) = travels.select_nth_unstable(at);
+    Some(nth)
 }
 
 fn range_percentile(
@@ -3607,9 +3612,11 @@ fn range_percentile(
     if ranges.is_empty() {
         return None;
     }
-    ranges.sort_unstable();
     // `len - 1` so the last percentile addresses the last element rather than
     // one past it; the `min` is belt and braces for a caller passing n > d.
+    //
+    // `select_nth_unstable` rather than a full sort, for the reason
+    // `window_range_percentile` gives above: one index is read.
     let at = ranges
         .len()
         .saturating_sub(1)
@@ -3617,7 +3624,8 @@ fn range_percentile(
         .checked_div(denominator)
         .unwrap_or(0)
         .min(ranges.len().saturating_sub(1));
-    ranges.get(at).copied()
+    let (_, &mut nth, _) = ranges.select_nth_unstable(at);
+    Some(nth)
 }
 
 /// [`range_percentile`] rounded to whole index points.
@@ -3716,8 +3724,12 @@ fn grid_step_ppm(bars: &[indicators::Candle], hold: usize) -> i64 {
         // here would stop a report that has other things to say.
         return 1;
     }
-    ranges.sort_unstable();
-    let median = ranges.get(ranges.len() / 2).copied().unwrap_or(1);
+    // THE MEDIAN IS ONE INDEX, so it is placed rather than the whole vector
+    // ordered -- same argument as `window_range_percentile` and
+    // `range_percentile` above. `is_empty` was refused before this point, so
+    // `len / 2` is always in range and `select_nth_unstable` cannot panic.
+    let middle = ranges.len() / 2;
+    let (_, &mut median, _) = ranges.select_nth_unstable(middle);
     // THE DIVISOR IS THE ONE CHOSEN FIGURE HERE, AND IT IS NO LONGER BAKED.
     //
     // Everything above this line is measured: each bar's range as a fraction of

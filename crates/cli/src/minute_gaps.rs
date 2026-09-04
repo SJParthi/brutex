@@ -190,18 +190,38 @@ pub fn days_with_interior_gaps(minutes: &[Candle]) -> Vec<i64> {
 
 /// Remove every bar falling on one of `days`, counting what went.
 ///
-/// Returns the kept bars and the number removed. `days` is expected ascending
-/// and short — twelve on the operator's whole 6.5-year span — so membership is
-/// a linear scan over a handful of `i64`, not a set.
+/// Returns the kept bars and the number removed.
+///
+/// # The membership test is a SET, and it was a slice scan
+///
+/// This read `days.contains(&ist_day(bar.ts_micros))` inside `for bar in bars`,
+/// justified by a measurement: *"twelve on the operator's whole 6.5-year span,
+/// so membership is a linear scan over a handful of `i64`, not a set."*
+///
+/// Twelve is what the operator's store happens to hold, not a bound.
+/// [`days_with_interior_gaps`] caps nothing — it appends a day for every
+/// interior hole it finds — so a feed with a hole in most sessions yields a
+/// `days` proportional to the span and the loop becomes `O(bars × days)`. On a
+/// 609,722-bar minute series a three-hundred-day list is 1.8 × 10⁸ compares,
+/// and nothing anywhere refuses that list.
+///
+/// A measurement is not a bound, and a comment saying "expected short" is not
+/// an argument that it must be. The set costs one allocation of the same
+/// handful of `i64` and removes the multiplication entirely, so the O(1)
+/// membership holds however many days are handed in.
+///
+/// `days` is still expected ascending; nothing here needs that, and nothing
+/// here breaks if it is not.
 #[must_use]
 pub fn withhold(bars: &[Candle], days: &[i64]) -> (Vec<Candle>, u64) {
     if days.is_empty() {
         return (bars.to_vec(), 0);
     }
+    let withheld: std::collections::HashSet<i64> = days.iter().copied().collect();
     let mut kept: Vec<Candle> = Vec::with_capacity(bars.len());
     let mut removed = 0_u64;
     for bar in bars {
-        if days.contains(&indicators::ist_day(bar.ts_micros)) {
+        if withheld.contains(&indicators::ist_day(bar.ts_micros)) {
             removed = removed.saturating_add(1);
         } else {
             kept.push(*bar);

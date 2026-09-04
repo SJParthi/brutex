@@ -97,8 +97,22 @@ type DayRuns = Vec<(i64, Vec<(u16, u16)>)>;
 /// A named alias because the bare type is four levels deep and appears in both
 /// the field and the accessor, where clippy is right that a reader has to parse
 /// it twice to learn it is a map.
+/// # The cached value is an `Arc`, and it was a `Calendar`
+///
+/// [`cached`] returned `calendar.clone()` **while still holding the mutex**, so
+/// every hit copied the whole calendar — a `Vec` of every day in the span — and
+/// serialised every other request behind that copy.
+///
+/// That is the defect `d55937d6` fixed for the census cache one file over, in
+/// its words: *"the census cache handed out a whole-store memcpy on every hit,
+/// under the mutex."* The fix there was `Arc::clone`; the same cache one door
+/// along kept the memcpy. A hit is now a refcount bump, and the lock is held
+/// for a pointer copy rather than an allocation.
 pub type Cache = std::sync::Mutex<
-    std::collections::HashMap<(Vendor, String, String, String), (std::time::SystemTime, Calendar)>,
+    std::collections::HashMap<
+        (Vendor, String, String, String),
+        (std::time::SystemTime, std::sync::Arc<Calendar>),
+    >,
 >;
 
 /// Bars a full NSE equity session holds.
@@ -604,7 +618,7 @@ pub fn cached(
     segment: &str,
     symbol: &str,
     months: &[YearMonth],
-) -> Calendar {
+) -> std::sync::Arc<Calendar> {
     let stamp = manifest_stamp(store_root, vendor);
     // THE KEY IS THE WHOLE PATH THIS DERIVATION READS, NOT JUST THE NAME.
     //
@@ -633,16 +647,18 @@ pub fn cached(
         if let Some((at, calendar)) = held.get(&key)
             && *at == now
         {
-            return calendar.clone();
+            // A REFCOUNT BUMP, NOT A COPY. See [`Cache`].
+            return std::sync::Arc::clone(calendar);
         }
     }
 
     let (calendar, _report) = derive(store_root, vendor, exchange, segment, symbol, months);
+    let calendar = std::sync::Arc::new(calendar);
     if let Some(now) = stamp {
         let mut held = site_calendars
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        held.insert(key, (now, calendar.clone()));
+        held.insert(key, (now, std::sync::Arc::clone(&calendar)));
     }
     calendar
 }

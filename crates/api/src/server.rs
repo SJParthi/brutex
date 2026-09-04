@@ -2677,7 +2677,11 @@ fn peer_calendar(site: &Loaded, asked: &Addressed) -> PeerCalendar {
             if calendar.sessions() > 0 {
                 readings.push((
                     format!("{}:{}", vendor_census.vendor.as_str(), symbol.as_str()),
-                    calendar,
+                    // CLONED HERE, NOT UNDER THE CACHE'S MUTEX. `cached` now
+                    // hands back an `Arc` so a hit costs a refcount bump; the
+                    // copy a reading genuinely needs happens on this thread
+                    // with no lock held. See `calendar_of::Cache`.
+                    (*calendar).clone(),
                 ));
             }
         }
@@ -27532,7 +27536,9 @@ async fn calendar_json(
             // calendar; counting that as agreement would let a feed's absence
             // close the exchange.
             if calendar.sessions() > 0 {
-                readings.push((symbol.as_str().to_owned(), calendar));
+                // Cloned off the `Arc` here rather than inside the cache's
+                // lock -- see `calendar_of::Cache`.
+                readings.push((symbol.as_str().to_owned(), (*calendar).clone()));
             }
         }
         let (exchange, clashes) = crate::calendar_of::agree(&readings);
