@@ -3264,12 +3264,46 @@ fn stop_ladder_derived(bars: &[indicators::Candle], hold: usize) -> Vec<i64> {
     let cap_halves = window_range_percentile(bars, hold, 9, 10)
         .map_or_else(|| max_stop_points(bars).saturating_mul(2), halves_of)
         .max(1);
-    let floor_halves = window_range_percentile(bars, hold, 1, 4)
+    // THE FLOOR STAYS ON ONE BAR. THE CAP SCALES WITH THE HOLD. THEY ARE
+    // DIFFERENT QUESTIONS AND ONE EDIT TREATED THEM AS ONE.
+    //
+    // # Measured: raising the floor with the cap cost the fine rungs money
+    //
+    // The cap must scale with the hold -- an hour-long trade has to survive an
+    // hour of movement, and a 14-point ceiling on a 60-minute hold produced 283
+    // stop-outs of which NOT ONE won. That half is right and is unchanged.
+    //
+    // The floor is a different constraint entirely. `stop_floor_points`' own doc
+    // gives the reason and it is about the ENTRY BAR: "a level closer than a
+    // typical bar's own range is hit by the entry bar itself". That is a
+    // property of one bar, at any hold. Scaling it by the window lifted the
+    // tightest available stop from 4.0 points to 20.5 at a 15-bar hold and 44.0
+    // at 60 -- so a combination that only works with a tight stop stopped
+    // existing in the search space, at every rung.
+    //
+    // MEASURED, same span, same support, before and after that one edit:
+    //
+    //   60min  worst -1462.35 -> +572.90   best +2041.69 -> +2740.27   BETTER
+    //   30min  worst -2222.75 ->  -114.10  best +1497.07 -> +4144.78   BETTER
+    //   15min  worst -9135.05 -> -10649.40 best +1163.51 ->  +737.49   WORSE
+    //
+    // 15min lost 1,514 rupees on the harsh reading and 37% of its best case.
+    // The coarse rungs gained from the cap; the fine rung lost more to the
+    // floor than it gained. `excursion.rs:138` had already recorded this exact
+    // shape -- "a combination that works ONLY with a tight stop could not be
+    // found, however many of them the sweep produced".
+    //
+    // So: cap from the WINDOW travel, floor from ONE BAR, which is what each
+    // one is a statement about.
+    let floor_halves = range_percentile(bars, 1, 4)
         .map_or_else(|| stop_floor_points(bars).saturating_mul(2), halves_of)
         .max(1)
-        // A floor above its own cap would leave the loop empty. Both come from
-        // one sorted distribution so this cannot fire on real bars; it is the
-        // guard that makes that argument checkable rather than assumed.
+        // A floor above its own cap would leave the loop empty. These now come
+        // from two different distributions rather than one sorted one, so this
+        // guard is load-bearing: a quiet single bar against a violent window
+        // cannot invert them, but a violent single bar inside a calm window
+        // could, and a one-rung ladder is the collapse this whole function has
+        // arrived at by three separate routes already.
         .min(cap_halves);
 
     // THE STEP IS THE SPAN OVER THE RUNG COUNT, AND BOTH COME FROM THE BARS.
