@@ -336,6 +336,27 @@ pub struct Forward {
     /// `bars.len() − H`, so the tail is absent by construction rather than by a
     /// sentinel a caller could mistake for a measurement.
     ret: Vec<Option<i64>>,
+    /// How far price ran AGAINST the entry close over `[i+1, exit]`, in paisa,
+    /// non-negative. `None` exactly where `ret` is `None`.
+    ///
+    /// # Why the ranking stage needed this
+    ///
+    /// `Edge` carried `n`, `mean_paisa`, `wins`, `win_sum` and `losses` -- the
+    /// NET move and nothing about the path. So every stage that ranks on
+    /// `Edge` was blind to how far a trade goes against you before it works,
+    /// which is the single property that decides whether a stop helps or
+    /// kills it. A combination that is ordinary on the mean can be the best
+    /// once a tight stop is attached, and it was being cut before the exit
+    /// grid ever saw it.
+    ///
+    /// MEASURED consequences of that blindness, both in one day: a 15-minute
+    /// rung earning 23%% of its own physics expectation while 30-minute earned
+    /// 92%%, and a walk-forward that must price EVERY candidate because no
+    /// cheap rank predicts the grid -- six and a half hours, never committed.
+    adverse: Vec<Option<i64>>,
+    /// How far price ran IN FAVOUR of the entry close over `[i+1, exit]`, in
+    /// paisa, non-negative. `None` exactly where `ret` is `None`.
+    favourable: Vec<Option<i64>>,
     /// `true` at `i` when the outcome is absent because a BAR WAS REFUSED,
     /// rather than because `i` is in the tail.
     ///
@@ -376,6 +397,21 @@ impl Forward {
     #[must_use]
     pub fn at(&self, i: usize) -> Option<i64> {
         self.ret.get(i).copied().flatten()
+    }
+
+    /// How far price ran AGAINST the entry over `[i+1, exit]`, in paisa.
+    ///
+    /// `None` exactly where [`Self::at`] is `None`, so an excursion can never
+    /// be read for an outcome that does not exist.
+    #[must_use]
+    pub fn adverse_at(&self, i: usize) -> Option<i64> {
+        self.adverse.get(i).copied().flatten()
+    }
+
+    /// How far price ran IN FAVOUR of the entry over `[i+1, exit]`, in paisa.
+    #[must_use]
+    pub fn favourable_at(&self, i: usize) -> Option<i64> {
+        self.favourable.get(i).copied().flatten()
     }
 
     /// How many bars have an outcome at all.
@@ -436,6 +472,90 @@ impl Forward {
     }
 }
 
+/// Range maximum and minimum over any `[lo, hi]` in O(1), built once.
+///
+/// # Why a sparse table and not a sliding deque
+///
+/// The excursion window is `[entry + 1, exit]`, and `exit` is the EARLIER of the
+/// horizon and that day's forced close -- so its width varies per entry. A
+/// monotonic deque answers a fixed-width sliding window; it cannot answer a
+/// variable one without either re-walking (Θ(h) per query) or widening the
+/// window past the real exit, which would report an excursion the position was
+/// never exposed to. `CLAUDE.md` §3 rule 1 forbids the second and §3 rule 4
+/// forbids the first.
+///
+/// A sparse table answers any range in O(1) from two overlapping power-of-two
+/// blocks, because max and min are idempotent -- overlapping twice is harmless.
+/// Build is O(n log n) once per `forward`, which is per RUN, not per candidate
+/// and not per bar.
+struct RangeExtremes {
+    /// `levels[k][i]` is the extreme over `[i, i + 2^k)`. Level 0 is the bars
+    /// themselves.
+    highs: Vec<Vec<i64>>,
+    lows: Vec<Vec<i64>>,
+}
+
+impl RangeExtremes {
+    fn of(bars: &[Candle]) -> Self {
+        let n = bars.len();
+        let mut highs: Vec<Vec<i64>> = vec![bars.iter().map(|b| b.high).collect()];
+        let mut lows: Vec<Vec<i64>> = vec![bars.iter().map(|b| b.low).collect()];
+        let mut width = 1_usize;
+        while width.saturating_mul(2) <= n {
+            let prev = highs.len().saturating_sub(1);
+            let span = n.saturating_sub(width.saturating_mul(2)).saturating_add(1);
+            let mut nh: Vec<i64> = Vec::with_capacity(span);
+            let mut nl: Vec<i64> = Vec::with_capacity(span);
+            for i in 0..span {
+                let (a, b) = (i, i.saturating_add(width));
+                let hi = highs
+                    .get(prev)
+                    .map_or(i64::MIN, |row| row.get(a).copied().unwrap_or(i64::MIN))
+                    .max(
+                        highs
+                            .get(prev)
+                            .map_or(i64::MIN, |row| row.get(b).copied().unwrap_or(i64::MIN)),
+                    );
+                let lo = lows
+                    .get(prev)
+                    .map_or(i64::MAX, |row| row.get(a).copied().unwrap_or(i64::MAX))
+                    .min(
+                        lows.get(prev)
+                            .map_or(i64::MAX, |row| row.get(b).copied().unwrap_or(i64::MAX)),
+                    );
+                nh.push(hi);
+                nl.push(lo);
+            }
+            highs.push(nh);
+            lows.push(nl);
+            width = width.saturating_mul(2);
+        }
+        Self { highs, lows }
+    }
+
+    /// The highest high and lowest low over `[lo, hi]` inclusive, or `None` when
+    /// the range is empty or out of bounds.
+    fn over(&self, lo: usize, hi: usize) -> Option<(i64, i64)> {
+        if hi < lo {
+            return None;
+        }
+        let len = hi.saturating_sub(lo).saturating_add(1);
+        // The largest k with 2^k <= len. `usize::BITS - leading_zeros` is that
+        // exponent plus one, so one subtraction gives it without a float log.
+        let k = usize::BITS
+            .saturating_sub(len.leading_zeros())
+            .saturating_sub(1) as usize;
+        let width = 1_usize.checked_shl(u32::try_from(k).ok()?)?;
+        let second = hi.checked_sub(width)?.saturating_add(1);
+        let hr = self.highs.get(k)?;
+        let lr = self.lows.get(k)?;
+        Some((
+            (*hr.get(lo)?).max(*hr.get(second)?),
+            (*lr.get(lo)?).min(*lr.get(second)?),
+        ))
+    }
+}
+
 /// Close-to-close forward returns over `horizon`.
 ///
 /// **The measure is a stated assumption**, recorded in `docs/05-decisions.md`:
@@ -452,6 +572,9 @@ impl Forward {
 pub fn forward(bars: &[Candle], column: &Column, horizon: Horizon) -> Forward {
     let h = horizon.as_bars() as usize;
     let facts = crate::trade::SliceFacts::of(bars, column);
+    // EXCURSIONS, BUILT ONCE. See `RangeExtremes` for why this is a sparse table
+    // and `Forward::adverse` for why the ranking stage needed it at all.
+    let extremes = RangeExtremes::of(bars);
 
     // PASS THREE: the return, from entry to the earlier of the horizon and the
     // forced close.
@@ -460,10 +583,17 @@ pub fn forward(bars: &[Candle], column: &Column, horizon: Horizon) -> Forward {
     // reason `ret` is: gate 11 rule 3 asks every collection on this path to be
     // sized once rather than grown.
     let mut refused: Vec<bool> = Vec::with_capacity(bars.len());
+    // THE TWO EXCURSION LANES, parallel to `ret`. `None` exactly where `ret` is
+    // `None`, so a caller cannot read an excursion for an outcome that does not
+    // exist -- the same discipline `refused` already keeps.
+    let mut adverse: Vec<Option<i64>> = Vec::with_capacity(bars.len());
+    let mut favourable: Vec<Option<i64>> = Vec::with_capacity(bars.len());
     for i in 0..bars.len() {
         if !facts.accepts(i) {
             ret.push(None);
             refused.push(true);
+            adverse.push(None);
+            favourable.push(None);
             continue;
         }
         // NO ENTRY ON A FORCED-EXIT BAR. At the square-off the position is being
@@ -474,11 +604,15 @@ pub fn forward(bars: &[Candle], column: &Column, horizon: Horizon) -> Forward {
         let Some(square_off) = facts.exits().get(i).copied().flatten() else {
             ret.push(None);
             refused.push(false);
+            adverse.push(None);
+            favourable.push(None);
             continue;
         };
         let Some(start) = bars.get(i).map(|bar| bar.ts_micros) else {
             ret.push(None);
             refused.push(true);
+            adverse.push(None);
+            favourable.push(None);
             continue;
         };
         let span = i64::try_from(h).unwrap_or(i64::MAX);
@@ -509,17 +643,23 @@ pub fn forward(bars: &[Candle], column: &Column, horizon: Horizon) -> Forward {
             let Some(want) = facts.at_timestamp(deadline) else {
                 ret.push(None);
                 refused.push(true);
+                adverse.push(None);
+                favourable.push(None);
                 continue;
             };
             want
         } else {
             ret.push(None);
             refused.push(false);
+            adverse.push(None);
+            favourable.push(None);
             continue;
         };
         if exit <= i {
             ret.push(None);
             refused.push(false);
+            adverse.push(None);
+            favourable.push(None);
             continue;
         }
         // A BAR THIS RUN ALREADY REFUSED MAY NOT PRICE AN EXIT.
@@ -564,6 +704,8 @@ pub fn forward(bars: &[Candle], column: &Column, horizon: Horizon) -> Forward {
         if !facts.path_accepts(i, exit) {
             ret.push(None);
             refused.push(true);
+            adverse.push(None);
+            favourable.push(None);
             continue;
         }
         let Some((later, now)) = bars
@@ -573,10 +715,39 @@ pub fn forward(bars: &[Candle], column: &Column, horizon: Horizon) -> Forward {
         else {
             ret.push(None);
             refused.push(true);
+            adverse.push(None);
+            favourable.push(None);
             continue;
         };
         ret.push(Some(later.saturating_sub(now)));
         refused.push(false);
+        // THE EXCURSIONS OVER THE BARS THIS POSITION IS ACTUALLY EXPOSED TO.
+        //
+        // `[i + 1, exit]`, not `[i, i + h]`: the entry bar's own range is before
+        // the position exists, and `exit` is the earlier of the horizon and the
+        // forced close, so a trade squared off at 15:10 is not charged with the
+        // rest of the hour it never held.
+        //
+        // Both are measured from the ENTRY CLOSE, which is what `ret` is
+        // measured from -- so `adverse`, `favourable` and `ret` are three
+        // readings of one position and can be compared without a conversion.
+        //
+        // Non-negative by construction: the range over `[i+1, exit]` includes
+        // the exit bar, whose high is at least its close and whose low is at
+        // most its close. A degenerate range yields `None` rather than a zero,
+        // because "no bars were held" and "the price never moved" are different
+        // facts.
+        let (up, down) =
+            extremes
+                .over(i.saturating_add(1), exit)
+                .map_or((None, None), |(high, low)| {
+                    (
+                        Some(high.saturating_sub(now).max(0)),
+                        Some(now.saturating_sub(low).max(0)),
+                    )
+                });
+        favourable.push(up);
+        adverse.push(down);
     }
 
     Forward {
@@ -584,6 +755,8 @@ pub fn forward(bars: &[Candle], column: &Column, horizon: Horizon) -> Forward {
         bars_len: bars.len(),
         ret,
         refused,
+        adverse,
+        favourable,
     }
 }
 
@@ -672,6 +845,24 @@ pub struct Edge {
     pub wins: u64,
     /// Sum of the strictly positive forward moves, in paisa.
     pub win_sum: f64,
+    /// Sum of how far price ran AGAINST each hit, in paisa. Non-negative.
+    ///
+    /// # The property every ranking stage was blind to
+    ///
+    /// `Edge` measured the NET move and nothing about the path, so a rank
+    /// built on it cannot tell a combination that goes straight to its target
+    /// from one that dips five points first. Those need opposite stops, and
+    /// the second is invisible to a mean.
+    ///
+    /// Divided by [`Self::n`] this is the average adverse excursion -- the
+    /// smallest stop that would have survived the typical hit.
+    pub adverse_sum: f64,
+    /// Sum of how far price ran IN FAVOUR of each hit, in paisa. Non-negative.
+    ///
+    /// Against [`Self::adverse_sum`] this is the reward-to-risk the PATH
+    /// offered, before any exit is chosen -- which is what a cheap rank needs
+    /// to predict what the exit grid will find.
+    pub favourable_sum: f64,
     /// Observations whose forward move was **strictly negative**.
     ///
     /// **This is not `n - wins`, and the difference is the flats.** It was
@@ -1059,6 +1250,16 @@ fn long_run_sum_squares(m2: f64, mean: f64, cross_a: f64, cross_b: f64, cross_c:
 ///
 /// UNVERIFIED as a measured figure: no bench row covers this yet.
 #[must_use]
+#[expect(
+    clippy::too_many_lines,
+    reason = "ONE FOLD over the column, and the length is comment rather than \
+              control flow: the body is a single loop with no branching to lift \
+              out, and every paragraph in it records a defect this function \
+              already had -- the overlap correction, the refused-bar guard, the \
+              split sum, and now the path sums. Splitting it would put the \
+              accumulation in one function and the only place that can check the \
+              accumulators agree in another."
+)]
 pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
     let mut n: u64 = 0;
     let mut mismatched: u64 = 0;
@@ -1070,6 +1271,9 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
     // The two sides of the distribution, kept apart -- see `Edge::payoff_bp`
     // for why the funnel needs them and `|t|` cannot supply them.
     let mut sides = Sides::default();
+    // THE PATH SUMS. See `Edge::adverse_sum`.
+    let mut adverse_sum = 0.0_f64;
+    let mut favourable_sum = 0.0_f64;
 
     // THE OVERLAP CORRECTION, AND WHY THE t BELOW IS MEANINGLESS WITHOUT IT.
     //
@@ -1230,6 +1434,36 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
         // combinations are worth asking that question about.
         sides.observe(x);
 
+        // AND THE PATH, WHICH `sides` CANNOT SEE.
+        //
+        // The comment above is right that splitting the sum lets the cut see a
+        // small-losers-large-winners shape. It still only sees NET moves. Two
+        // combinations with identical win and loss sums can have completely
+        // different paths -- one going straight to its exit, the other dipping
+        // five points first -- and they need opposite stops.
+        //
+        // These two sums are that difference, and they are the reason this
+        // struct gained fields at all: every stage that ranks on `Edge` was
+        // choosing which combinations reach the exit grid while blind to the
+        // one property that decides whether a stop helps them.
+        // `f64::from` on an `i32`, which is LOSSLESS -- no `as` and no precision
+        // lint to silence. An excursion is a price DIFFERENCE over one horizon,
+        // so it is bounded by the instrument's own range and cannot approach
+        // two billion paisa; a value that somehow did is dropped rather than
+        // truncated into a plausible number.
+        if let Some(down) = forward
+            .adverse_at(source)
+            .and_then(|v| i32::try_from(v).ok())
+        {
+            adverse_sum += f64::from(down);
+        }
+        if let Some(up) = forward
+            .favourable_at(source)
+            .and_then(|v| i32::try_from(v).ok())
+        {
+            favourable_sum += f64::from(up);
+        }
+
         // EVERY EARLIER HIT WHOSE WINDOW STILL TOUCHES THIS ONE.
         //
         // `sources` is strictly increasing, so the front of the queue is the
@@ -1273,6 +1507,8 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
         // terms rather than being handed a zero that looks measured.
         wins: sides.wins,
         win_sum: sides.win_sum,
+        adverse_sum,
+        favourable_sum,
         losses: sides.losses,
         loss_sum: sides.loss_sum,
         t,
