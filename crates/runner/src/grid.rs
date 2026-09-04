@@ -2092,48 +2092,47 @@ fn evaluate_timed(
     } else {
         Vec::new()
     };
-    // THE WHOLE RATIO LADDER, AND `thin_to_budget` DECIDES HOW MANY SURVIVE.
+    // ONE FAR TARGET, AND THE FALLBACK LADDER ONLY WHEN THERE IS NONE.
     //
-    // # A single far target was tried, and it is the defect this reverts
+    // # This comment argued the opposite of the line below it
     //
-    // `variants` is `(S+1)·[(T+1)(R+1) + T(T+1)/2 · R(R+1)/2]`: quadratic in
-    // targets and in trails at once. Collapsing the target ladder to one rung
-    // -- `ratio_set.last()` -- cut the cell count 3.8x and bought a richer
-    // trail axis, on the reasoning that the target is a far backstop and the
-    // TRAIL does the work.
+    // It was headed *"A single far target was tried, and it is the defect this
+    // reverts"* and ran forty-two lines making the case for the budgeted
+    // ladder -- directly above `single_far_target`. The revert it described
+    // happened; the restore two commits later changed the expression and left
+    // the prose. An audit found it before any reader did.
     //
-    // That reasoning is defensible and the rung it chose is not. `.last()` is
-    // the CEILING of `derived_ratios`, and that ceiling is
-    // `favourable.iter().max() · 100 / tightest_stop` -- a MAXIMUM over a
-    // fat-tailed sample. Two things follow, and both were measured:
+    // Recording that rather than quietly deleting it, because it is the exact
+    // failure this session spent the day chasing in other people's code: a
+    // comment that keeps arguing for what the line underneath it stopped
+    // doing. Six of the eight defects found today had that shape, and this one
+    // was written while finding them.
     //
-    // 1. It DIVERGES with sample size. A max over fat tails grows without
-    //    bound as bars accumulate, so every extra month pushed the target
-    //    further away. A derived parameter that gets worse with more data is
-    //    measuring the sample, not the signal.
+    // # What is actually here
     //
-    // 2. It is worse the FASTER the rung, because short windows have fatter
-    //    tails relative to their typical move. Measured on zerodha NIFTY
-    //    2020-01..2026-07, cap 200,000, one target vs the budgeted ladder:
+    // `variants` is `(S+1)·[(T+1)(R+1) + T(T+1)/2 · R(R+1)/2]` -- quadratic in
+    // targets and trails MULTIPLIED -- so the target axis is most of the grid
+    // and removing it is what buys a rich trail axis. That is the operator's
+    // stated structure: one wide backstop, and the TRAIL does the work.
+    //
+    // The shape was never the defect. `ratio_set.last()` was: it is
+    // `favourable.iter().max() · 100 / tightest_stop`, a MAXIMUM over a
+    // fat-tailed sample, so it DIVERGED as bars accumulated and grew most
+    // unreachable on the fast rungs whose tails are fattest. Measured on
+    // zerodha NIFTY 2020-01..2026-07 at cap 200,000, nothing reached the
+    // target and every trade ran to a stop instead:
     //
     //      rung    win rate   net (worst-fill)
-    //      60min     50.96%   +568.55     target sometimes reachable
+    //      60min     50.96%   +568.55     sometimes reachable
     //      30min     45.19%    +38.80     rarely
     //      15min      ---    -5617.40     effectively never
     //
-    //    Nothing exits at target, so every trade runs to a stop or gives the
-    //    trail its slack back, and the win rate falls with the rung.
+    // [`single_far_target`] keeps the shape and replaces the statistic with a
+    // quantile, which converges instead. Its own doc carries the argument.
     //
-    // # Why handing the full ladder over is the fix rather than a new count
-    //
-    // `thin_to_budget` already solves the quadratic for the largest target
-    // count the 24,000-cell budget allows, and keeps them with
-    // `step_by(stride)` from index 0 -- a SPREAD from the nearest rung upward,
-    // not the far end. The near rungs are the ones an ordinary trade reaches,
-    // and they are exactly what `.last()` threw away.
-    //
-    // So the count stays derived from the budget and the ladder stays derived
-    // from this combination's own excursions. Nothing here is typed.
+    // The `unwrap_or_else` arm is reached only when NOTHING ran favourable, at
+    // which point there is no level to derive and the older ladder is the
+    // honest fallback rather than an invented number.
     let targets = single_far_target(&favourable).unwrap_or_else(|| {
         if ratio_set.is_empty() {
             ladder_of(&favourable)

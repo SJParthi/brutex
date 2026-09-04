@@ -3965,7 +3965,26 @@ const _GRID_COST_TABLE: () = ();
 /// what the assertion was protecting.
 fn grid_variants(bars: &[indicators::Candle]) -> u64 {
     let n = grid_rungs(bars);
-    u64::try_from(grid::variants(n, n, n)).unwrap_or(u64::MAX)
+    // ONE TARGET, BECAUSE THAT IS WHAT THE GRID BUILDS.
+    //
+    // This was `variants(n, n, n)` -- the square shape -- and stopped being
+    // true when `grid::single_far_target` collapsed the target axis to a single
+    // rung. The two figures are far apart, not marginally: at seven rungs
+    // `variants(7,7,7)` is 6,784 and `variants(8,1,7)` is 396, so every count
+    // derived from this was overstating the search by about seventeen times.
+    //
+    // It matters because this feeds `grid_exposure` and the multiple-testing
+    // bar. Overstating the trial count makes the Bonferroni bar HARDER, so the
+    // error was conservative rather than flattering -- but a number that
+    // describes a grid the engine does not build is wrong in the direction
+    // nobody checks, and the whole point of that block is to name a real count.
+    //
+    // The stop ladder emits up to `rungs + 1` levels, so `S = n + 1` while the
+    // trail ladder carries `n`. `single_far_target` returns `None` only when
+    // nothing ran favourable, and a combination with no favourable excursion
+    // has no grid worth counting, so one target is the honest general case.
+    let stops = n.saturating_add(1);
+    u64::try_from(grid::variants(stops, 1, n)).unwrap_or(u64::MAX)
 }
 
 /// How many rungs each exit ladder carries — the REACH, in half-points.
@@ -13298,17 +13317,26 @@ fn range_over_inner(
 ///
 /// **Selection and reporting use the same bars.** `screen` evaluates the grid
 /// over `bars`, picks the best cell, and reports that cell's own totals -- one
-/// slice, no split. **The grid is not small**: the width table in this file
-/// records 12,393 cells per combination at the eight-rung default. **And the
-/// ladders are fitted too** -- `grid.rs` places the stop and target rungs on the
-/// distribution of the very trades they are then measured against.
+/// slice, no split. **The grid is not small.** **And the ladders are fitted
+/// too** -- `grid.rs` places the stop and target rungs on the distribution of
+/// the very trades they are then measured against.
 ///
-/// Naming the count matters more than the adjective. "In sample" is a phrase an
-/// operator can nod past; "the best of 12,393 variants, chosen and scored on
-/// one slice" is a number they can weigh.
+/// Naming the count matters more than the adjective: "in sample" is a phrase an
+/// operator can nod past, and a number is one they can weigh. So this POINTS AT
+/// the count rather than stating one.
+///
+/// It stated `~12,393`, which was `variants(8,8,8)` -- the square shape, from
+/// the width table in this file. `grid::single_far_target` collapsed the target
+/// axis to one rung and the shipped grid became `variants(8,1,7)` = 396, so the
+/// banner overstated its own search by about thirty-one times. A hardcoded
+/// count in a `const` cannot track a width the run derives at runtime, and the
+/// GRID EXPOSURE block already prints the real figure from [`grid_variants`].
+/// Two places naming one number is how they diverge; one naming it and one
+/// pointing at it cannot.
 const IN_SAMPLE_WARNING: &str = "\n  \
-    IN SAMPLE. `worst` and `best` are the best of ~12,393 exit variants per\n  \
-    combination, and the variant was CHOSEN on the same bars it is SCORED on.\n  \
+    IN SAMPLE. `worst` and `best` are the best of EVERY exit variant this run\n  \
+    priced -- the GRID EXPOSURE block below names the count -- and the variant\n  \
+    was CHOSEN on the same bars it is SCORED on.\n  \
     The stop and target ladders are placed on those same trades' own\n  \
     excursions. No out-of-sample split separates the choosing from the\n  \
     reporting, and no multiple-comparison correction reaches this table --\n  \
