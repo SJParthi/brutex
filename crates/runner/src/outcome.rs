@@ -1063,6 +1063,61 @@ impl Edge {
         clamped
     }
 
+    /// What the PATH offered, in hundredths: mean favourable excursion over
+    /// mean adverse excursion. `300` reads 3.00.
+    ///
+    /// # The question [`Self::payoff_bp`] cannot answer
+    ///
+    /// `payoff_bp` is mean win over mean loss on the NET move, so it sees
+    /// where a trade ended and nothing about how it got there. Two
+    /// combinations with identical win and loss sums can have opposite paths:
+    /// one runs straight to its exit, the other dips five points first. The
+    /// first works with a tight stop and the second is destroyed by one, and
+    /// `payoff_bp` ranks them identically.
+    ///
+    /// This ratio is the reward-to-risk the price action ITSELF offered,
+    /// before any stop or target is chosen. It is what a cheap rank needs in
+    /// order to predict what the exit grid will find -- which is the whole
+    /// reason the excursion lanes exist.
+    ///
+    /// # It is not a substitute for the grid
+    ///
+    /// It has no stop, no target and no ordering WITHIN the bar, so it cannot
+    /// say what a stop would have done -- only which combinations are worth
+    /// asking. Same disclaimer `payoff_bp` carries, for the same reason.
+    ///
+    /// Zero adverse excursion is `i64::MAX`, not an error: a combination whose
+    /// hits never traded below their entry is the best possible shape for a
+    /// stop, and it is a fact about the sample rather than a promise.
+    #[must_use]
+    pub fn path_ratio_bp(&self) -> i64 {
+        const UNBOUNDED: f64 = 9.0e18;
+        if self.n == 0 {
+            return 0;
+        }
+        if self.adverse_sum <= 0.0 {
+            // Never went against the entry at all. `favourable_sum` of zero as
+            // well means nothing moved either way, which is no ratio rather
+            // than an infinite one.
+            return if self.favourable_sum > 0.0 {
+                i64::MAX
+            } else {
+                0
+            };
+        }
+        let ratio = self.favourable_sum / self.adverse_sum * 100.0;
+        if !ratio.is_finite() || ratio >= UNBOUNDED {
+            return i64::MAX;
+        }
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "bounded by UNBOUNDED above and by zero below, so the cast \
+                      is in range on every path that reaches it."
+        )]
+        let clamped = ratio.max(0.0) as i64;
+        clamped
+    }
+
     /// [`Self::mean_paisa`] in THOUSANDTHS, as an integer.
     #[must_use]
     pub fn mean_milli_paisa(&self) -> i64 {

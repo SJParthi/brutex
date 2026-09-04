@@ -569,6 +569,7 @@ fn render_findings_at(
         match lens {
             crate::rank::Lens::Detectability => "best by |t|",
             crate::rank::Lens::Payoff => "best by payoff, then |t|",
+            crate::rank::Lens::Path => "best by favourable/adverse excursion, then |t|",
         },
     );
     row(

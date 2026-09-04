@@ -8754,6 +8754,11 @@ fn policy_of(
         match lens {
             runner::rank::Lens::Detectability => 0,
             runner::rank::Lens::Payoff => 1,
+            // APPENDED AS 2, never renumbering the two above. A lens decides
+            // WHICH combinations reach the exit grid, so it decides the answer
+            // -- §3 rule 3 wants a different identity, and reusing 0 or 1 would
+            // collide a path-ranked run with a payoff-ranked one.
+            runner::rank::Lens::Path => 2,
         },
         // The screen and both validation shapes receive this one caller-resolved
         // value. Keeping it in the historical third position preserves every

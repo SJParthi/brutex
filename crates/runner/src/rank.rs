@@ -208,6 +208,7 @@ pub struct Accumulator {
 enum Held {
     Detectability(Heap<Marked<Scored>>),
     Payoff(Heap<Marked<ByPayoff>>),
+    Path(Heap<Marked<ByPath>>),
 }
 
 impl Accumulator {
@@ -217,6 +218,7 @@ impl Accumulator {
         let held = match lens {
             Lens::Detectability => Held::Detectability(Heap::with_capacity(keep)),
             Lens::Payoff => Held::Payoff(Heap::with_capacity(keep)),
+            Lens::Path => Held::Path(Heap::with_capacity(keep)),
         };
         Self {
             keep,
@@ -270,6 +272,15 @@ impl Accumulator {
                 &redundant,
                 closure_known,
             ),
+            Held::Path(heap) => offer_part::<ByPath>(
+                heap,
+                &level.frequent,
+                column,
+                forward,
+                self.keep,
+                &redundant,
+                closure_known,
+            ),
             Held::Payoff(heap) => offer_part::<ByPayoff>(
                 heap,
                 &level.frequent,
@@ -288,6 +299,7 @@ impl Accumulator {
         let (top, closed_top) = match self.held {
             Held::Detectability(heap) => ordered(heap),
             Held::Payoff(heap) => ordered(heap),
+            Held::Path(heap) => ordered(heap),
         };
         Ranked {
             top,
@@ -356,6 +368,27 @@ pub enum Lens {
     /// everything. Falling through to `|t|` puts the better-evidenced of two
     /// equal payoffs first, and the significance bar downstream still applies.
     Payoff,
+    /// Rank by [`crate::outcome::Edge::path_ratio_bp`], ties broken by `|t|`.
+    ///
+    /// # The question the other two cannot ask
+    ///
+    /// Both lenses above read the NET move. `Detectability` asks how reliably
+    /// it differs from zero; `Payoff` asks how big the wins are against the
+    /// losses. Neither sees the PATH, so neither can tell a combination that
+    /// runs straight to its exit from one that dips five points first. Those
+    /// need opposite stops, and this cut decides which combinations ever meet
+    /// an exit grid at all.
+    ///
+    /// MEASURED consequence of that blindness: a 15-minute NIFTY rung earning
+    /// 23%% of its own sqrt-of-time expectation while the 30-minute rung earned
+    /// 92%% on the same span. The combinations that close the gap are ordinary
+    /// on a mean and excellent with a tight stop, and they were cut here.
+    ///
+    /// Same tie-break as [`Self::Payoff`] and for the same reason: a path
+    /// ratio is [`i64::MAX`] on any sample that never traded against its
+    /// entry, so two hits with two clean runs would otherwise outrank
+    /// everything. `|t|` puts the better-evidenced of two equal ratios first.
+    Path,
 }
 
 /// One combination, ordered by payoff first and evidence second.
@@ -401,6 +434,40 @@ impl Ranked1 for Scored {
 }
 
 impl Ranked1 for ByPayoff {
+    fn wrap(scored: Scored) -> Self {
+        Self(scored)
+    }
+    fn unwrap(self) -> Scored {
+        self.0
+    }
+}
+
+/// One combination, ordered by what its PATH offered and evidence second.
+///
+/// Mirrors [`ByPayoff`] exactly, on [`crate::outcome::Edge::path_ratio_bp`]
+/// instead of `payoff_bp`. The tie-break through `Scored` is the same and for
+/// the same reason: the ratio is [`i64::MAX`] on any sample that never traded
+/// against its entry, so evidence has to break those ties or two lucky hits
+/// outrank a thousand.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ByPath(Scored);
+
+impl Eq for ByPath {}
+
+impl PartialOrd for ByPath {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ByPath {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let (mine, theirs) = (self.0.edge.path_ratio_bp(), other.0.edge.path_ratio_bp());
+        mine.cmp(&theirs).then_with(|| self.0.cmp(&other.0))
+    }
+}
+
+impl Ranked1 for ByPath {
     fn wrap(scored: Scored) -> Self {
         Self(scored)
     }
