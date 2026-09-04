@@ -10531,9 +10531,30 @@ fn screen<'a>(
     //      year, half, quarter, month, week, day and HOUR. A strategy that made
     //      its money in one quarter and was flat for six years scores low here
     //      however good its total is. This is "no lucky winners", as a number.
-    //   2. `worst_day` -- the single worst period's net at the FINEST grain.
-    //      Negated into the key so a smaller loss ranks higher: "every every
-    //      less worst case", per day, directly.
+    //   2. `worst_day` -- the single worst period's net at the FINEST grain,
+    //      carried in RAW and not negated: "every every less worst case", per
+    //      day, directly.
+    //
+    //      IT WAS NEGATED, AND THAT INVERTED THE RULE IT STATES. The key is
+    //      wrapped in `Reverse`, so the tuple sorts DESCENDING and a larger
+    //      term ranks higher. `worst_day` is a net and is negative for a losing
+    //      period, so `saturating_neg` turned the deepest loss into the largest
+    //      positive number:
+    //
+    //        worst_day  -10000 (deep loss)  ->  +10000  ->  ranked FIRST
+    //        worst_day     -100 (mild)      ->    +100  ->  ranked second
+    //        worst_day    +5000 (never lost)->   -5000  ->  ranked LAST
+    //
+    //      The comment promised "a smaller loss ranks higher" and the code
+    //      delivered the exact reverse, on the term that breaks ties for the
+    //      operator's own consistency rule. Raw is what the stated rule needs:
+    //      a period that never lost carries the largest net and leads.
+    //
+    //      This term bites often rather than rarely. `weakest_bp` above it is a
+    //      SHARE -- positive buckets over total buckets -- so on any grain with
+    //      few buckets it takes one of a handful of values and ties are the
+    //      common case, not the exception. Whenever it ties, this term decided,
+    //      and it decided backwards.
     //   3. `return_over_drawdown` -- profit against the worst peak-to-trough
     //      fall, carried from the money sort so a steady row that never made
     //      anything cannot outrank a steady row that did.
@@ -10553,7 +10574,7 @@ fn screen<'a>(
             // The unmeasured floor: worse than any real grain share and any
             // real period, so measured rows always sort ahead.
             (i64::MIN, i64::MIN),
-            |c| (c.weakest_bp(), c.worst_day.saturating_neg()),
+            calendar_terms,
         );
         core::cmp::Reverse((
             // PASS LEADS. A row that cleared the operator's stated policy ranks
@@ -10725,6 +10746,29 @@ fn rules_banner(rules: Rules, passed: usize, considered: usize) -> String {
         }
     );
     out
+}
+
+/// The two calendar terms of the cross-combination sort key, for a row that
+/// WAS measured.
+///
+/// # Why this is a named function and not the closure it replaced
+///
+/// It was `|c| (c.weakest_bp(), c.worst_day.saturating_neg())` inline, and the
+/// negation inverted the rule the surrounding comment states. Nothing caught it
+/// because nothing could: the closure is an argument to `sort_by_key` inside a
+/// four-hundred-line function that needs a built frontier, a column and priced
+/// cells to reach. A mutant flipping the sign there survives every test in the
+/// workspace.
+///
+/// Named, it is three lines with a fixture of two integers, and
+/// `a_row_that_never_lost_a_day_outranks_one_that_lost_heavily` fails the build
+/// if the sign comes back.
+///
+/// Both terms are carried RAW because the caller wraps the key in `Reverse`:
+/// the tuple sorts descending, so a larger term ranks higher, and for both a
+/// grain share and a period's net "larger" already means "better".
+fn calendar_terms(c: &Consistency) -> (i64, i64) {
+    (c.weakest_bp(), c.worst_day)
 }
 
 /// Measure consistency for the rows that will actually be printed.
@@ -16346,6 +16390,28 @@ fn audit_bars(
             return refusal;
         }
     };
+    // THE UNVALIDATED BANNER, ON THE PAGE THAT CARRIES THE HEADLINE NUMBER.
+    //
+    // MEASURED: `UNVALIDATED` was emitted from `screen` alone — two sites, both
+    // in that function. `audit_bars` renders the report an operator actually
+    // reads for a `range-rung` sweep, prints `trades`, `worst`, `best` and
+    // `ret/DD`, and never said the stack had been skipped. Every result this
+    // session was produced this way, at `BRUTEX_VALIDATE=0`, and nothing on the
+    // page said so.
+    //
+    // `CLAUDE.md` §5 states the rule for the two provenance banners and the
+    // argument transfers exactly: a page over unvalidated candidates is
+    // byte-identical in shape to one over validated findings, so the banner is
+    // the only thing separating them. §4 bans the failure wearing a success's
+    // clothes, and a headline P&L with no validation and no banner IS that page.
+    //
+    // ABOVE the figures rather than beside the walk-forward section: a reader
+    // who stops at the summary line never reaches that section, which is
+    // precisely the reader this protects. `validated_if` fixes what the section
+    // SAYS; this fixes whether the reader gets there at all.
+    if !validate {
+        let _ = writeln!(out, "{UNVALIDATED}");
+    }
 
     let Some((by_evidence, _evidence_first)) = retained_to_trade(&ranked) else {
         out.push_str(&nothing_to_trade(outcome.sweep.streamed));
@@ -16793,28 +16859,56 @@ fn overfitting_of(folds: &runner::validate::Validated) -> Option<runner::pbo::Pb
     Some(runner::pbo::probability_of_overfitting(&placements))
 }
 
-/// [`both_shapes`], or a pair of empty walks when validation is off.
+/// [`both_shapes`], or a pair of REFUSED walks when validation is off.
 ///
 /// A one-line wrapper so `audit_bars` stays inside its line budget, and so the
 /// reason for the branch sits beside the branch rather than inside a caller
 /// already carrying a dozen other concerns.
 ///
-/// `Validated::default()` is an EMPTY walk, not a failed one. `audit::render`
-/// prints an explicit absence for an unsupplied stage rather than a zero, so a
-/// page made this way says which question it did not ask.
-/// Run both validation shapes only when the caller requested validation.
+/// # A bare `Validated::default()` made a switched-off walk read as a short span
+///
+/// This returned `Validated::default()` — folds empty, `refused` NONE. That is
+/// the shape a span too short to split produces, and `audit::walk_forward`
+/// renders it, verbatim:
+///
+/// ```text
+///   folds  -  the slice was too short to split, so nothing was validated
+/// ```
+///
+/// MEASURED on the operator's own 60-minute run over 79 complete months: the
+/// slice was ample and nothing about it was short. `BRUTEX_VALIDATE=0` had
+/// turned the walk off, and the report blamed the data. A reader chasing that
+/// line looks for more bars, which cannot ever fix it.
+///
+/// [`validate::Validated::refused`] exists precisely for this and its own doc
+/// says so — *"A slice too short to split produces no folds, and so does a
+/// refusal. Both rendered as the same blank table."* The renderer has carried
+/// the REFUSED arm since that field landed; this door simply never set it, so
+/// the one branch that is always a refusal took the short-span arm instead.
+///
+/// Naming the variable is what makes the line actionable: §4 bans a fallback
+/// that hides a failure, and "nothing was validated" over data that could have
+/// been validated is exactly that failure wearing a data problem's clothes.
 fn validated_if(
     validate: bool,
     run: impl FnOnce() -> (runner::validate::Validated, runner::validate::Validated),
 ) -> (runner::validate::Validated, runner::validate::Validated) {
     if validate {
-        run()
-    } else {
-        (
-            runner::validate::Validated::default(),
-            runner::validate::Validated::default(),
-        )
+        return run();
     }
+    let declined = || runner::validate::Validated {
+        refused: Some(
+            "BRUTEX_VALIDATE=0 turned the validation stack OFF for this run. The \
+             data was not the reason and a longer span will not change it. \
+             Walk-forward, PBO and the bootstrap did not run, so every figure \
+             below is IN SAMPLE: it is the best of the whole search scored on \
+             the same bars that chose it. Unset BRUTEX_VALIDATE to price it out \
+             of sample."
+                .to_owned(),
+        ),
+        ..runner::validate::Validated::default()
+    };
+    (declined(), declined())
 }
 
 #[expect(
@@ -17280,6 +17374,7 @@ fn record_all_attempt(
 mod tests {
     use super::{
         COMMANDS, MIN_AUDIT_SESSIONS, MISUSED, OK, PROVENANCE, STORED_PROVENANCE, UNVALIDATED,
+        calendar_terms,
         USAGE, Vendor, audit_run, audit_run_within, audit_stored, auto, auto_with, direction_of,
         evaluator_from, existing_store_root, grid_rungs, knobs_checked, log_dir_from, month_banner,
         nothing_to_trade, overfitting_of, parse_min_hits, parse_sessions, parse_vendor, policy_of,
@@ -19640,6 +19735,50 @@ mod tests {
         assert_ne!(
             start[5], 0,
             "a ceiling folded in as zero is a knob hashed as an absence"
+        );
+    }
+
+    /// THE WORST DAY RANKS A SMALLER LOSS HIGHER, WHICH IS WHAT THE RULE SAYS.
+    ///
+    /// `calendar_terms` feeds a key the caller wraps in `Reverse`, so the tuple
+    /// sorts DESCENDING and a larger term ranks first. `worst_day` is a net:
+    /// negative where some period lost, positive where none did. Carried raw,
+    /// "ranked first" and "lost least" are the same statement.
+    ///
+    /// IT WAS `worst_day.saturating_neg()`, and that inverted the rule its own
+    /// comment stated -- a deep loss of -10,000 became +10,000 and led the list
+    /// while a row that never had a losing period sorted last. The term breaks
+    /// ties on `weakest_bp`, which is a SHARE over a handful of buckets and
+    /// therefore ties constantly, so the inverted term decided the order often
+    /// rather than rarely.
+    ///
+    /// Asserted through the real function on real `Consistency` values, not on
+    /// a hand-built tuple: the defect was the mapping from a row to its terms,
+    /// so a test that builds the tuple itself would restate the bug rather than
+    /// catch it.
+    #[test]
+    fn a_row_that_never_lost_a_day_outranks_one_that_lost_heavily() {
+        let row = |worst_day: i64| Consistency {
+            shares_bp: [5_000; crate::stability::GRAINS.len()],
+            worst_day,
+            years: 6,
+        };
+        let (deep, mild, unscathed) = (row(-10_000), row(-100), row(5_000));
+        assert_eq!(
+            calendar_terms(&deep).0,
+            calendar_terms(&unscathed).0,
+            "the fixture must tie on the leading term, or the second one is \
+             never consulted and this proves nothing"
+        );
+
+        let key = |c: &Consistency| core::cmp::Reverse(calendar_terms(c));
+        let mut ordered = [key(&deep), key(&mild), key(&unscathed)];
+        ordered.sort_unstable();
+        assert_eq!(
+            ordered,
+            [key(&unscathed), key(&mild), key(&deep)],
+            "a row with no losing period must lead, then the mild loss, then \
+             the deep one -- a negation here reverses all three"
         );
     }
 
