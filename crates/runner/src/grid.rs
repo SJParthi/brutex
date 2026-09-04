@@ -2036,10 +2036,47 @@ fn evaluate_timed(
     } else {
         Vec::new()
     };
+    // ONE TARGET, MANY TRAILS -- THE OPERATOR'S OWN STRUCTURE.
+    //
+    // # Why a single target is a shape rather than a saving
+    //
+    // `variants` is `(S+1)·[(T+1)(R+1) + T(T+1)/2 · R(R+1)/2]`. The second term
+    // is two triangular sums MULTIPLIED, so the cell count is quadratic in the
+    // target count and quadratic in the trail count at once. Fourteen targets
+    // against eight trails is `105 × 36 = 3,780` cells per stop, and 97% of
+    // every stop's cells are that one product.
+    //
+    // Setting the target ladder to a single far rung collapses the first half
+    // of that product to 1, which frees the trail axis to get RICHER rather
+    // than poorer. MEASURED against the shipped shape, which `thin_to_budget`
+    // already trims to about fourteen stops by six targets by eight trails:
+    //
+    //   14 x 6 targets x  8 trails = 12,285 cells   (today)
+    //   14 x 1 target  x 20 trails =  3,220 cells   3.8x fewer, 2.5x the trails
+    //
+    // # Why this is the right TRADING shape, not only the cheap one
+    //
+    // Fourteen targets against eight trails is the engine trying every pairing
+    // of two guesses about where a move ends -- 112 opinions on a question that
+    // needs one rule: ride it until it turns. The operator states it directly:
+    // the target is a far backstop and the TRAIL does the work.
+    //
+    // The single rung is the CEILING of the derived ratio ladder, not a typed
+    // number: the furthest target this combination's own favourable excursions
+    // actually support. A signal that never ran more than three points gets a
+    // three-point backstop.
+    //
+    // And it lowers the multiple-testing bar as a side effect. Every variant is
+    // a comparison chosen and scored on the same bars, so 3,220 of them is far
+    // less curve-fitting room than 12,285 -- the Bonferroni bar a real edge has
+    // to clear scales with how many things were tried.
     let targets = if ratio_set.is_empty() {
         ladder_of(&favourable)
     } else {
-        ratio_targets(stops.rungs(), &ratio_set).unwrap_or_else(|| ladder_of(&favourable))
+        let single = ratio_set.last().map_or_else(Vec::new, |&far| vec![far]);
+        ratio_targets(stops.rungs(), &single)
+            .or_else(|| ratio_targets(stops.rungs(), &ratio_set))
+            .unwrap_or_else(|| ladder_of(&favourable))
     };
     // THINNED TO WHAT THE CELL COUNT CAN AFFORD, AND THIS IS THE WALL EVERY
     // OTHER BOUND MISSED.

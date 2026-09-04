@@ -3325,22 +3325,87 @@ fn stop_ladder_derived(bars: &[indicators::Candle], hold: usize) -> Vec<i64> {
     // tight series, and a zero step is an infinite loop rather than a fine
     // ladder.
     let rungs = i64::try_from(grid_rungs(bars).max(1)).unwrap_or(1);
-    let step_halves = cap_halves
-        .saturating_sub(floor_halves)
-        .checked_div(rungs)
-        .unwrap_or(1)
-        .max(1);
+
+    // GEOMETRIC, NOT LINEAR, AND THIS IS THE THIRD FIX TO THIS LADDER.
+    //
+    // # A fixed rung count over a variable span cannot serve two rungs at once
+    //
+    // The first defect was a span too NARROW: 4 -> 14 points on a sixty-minute
+    // hold, which produced 283 stop-outs of which not one won. Widening the cap
+    // fixed it. The second was the floor rising with the cap, which deleted
+    // every tight rung. Restoring the floor fixed that. Both were linear, and
+    // MEASURED across three rungs the linear ladder cannot satisfy them
+    // together:
+    //
+    //   60min  floor fix changed nothing (+-1.8%)  -- its ceiling dominates
+    //   30min  floor fix COST 528 paisa worst, 1,298 best -- the span widened,
+    //          the step went 4.99 -> 6.84 points, and it lost the resolution it
+    //          was using in the 30-100 zone
+    //   15min  floor fix GAINED 2,984 paisa worst and 2.46x best -- it needed
+    //          the tight rungs the old floor had deleted
+    //
+    // One rung wanted the tight end, another wanted resolution in the middle,
+    // and a linear step over a fixed count can only give one.
+    //
+    // # Why geometric is the right shape rather than a compromise
+    //
+    // A stop's usefulness is LOGARITHMIC, not linear. The difference between 4
+    // and 11 points is the difference between two strategies; between 93 and
+    // 100 it is noise. A linear ladder spends equal resolution on both, so on a
+    // wide span it starves the tight end -- exactly where the fine rungs live.
+    //
+    // MEASURED on the 15-minute rung, whose span is 4.4 -> 66.7 points over 14
+    // rungs: linear gives THREE rungs below 15 points, geometric gives SIX. The
+    // sqrt-of-time test says a 15-minute trade should earn about half a
+    // 60-minute one per trade; it earns 23% of that, 4.3x short, while 30min
+    // lands at 92% of the same expectation. The gap is resolution the ladder
+    // never offered.
+    //
+    // # Integers only, per §7
+    //
+    // The ratio is carried in PERMILLE and found by bisection: the largest `r`
+    // with `floor * (r/1000)^rungs <= cap`. No float, no root, no price ever
+    // leaves `i64`. The search is over a fixed 1000..=8000 range and runs once
+    // per sweep, so it is O(log range) against a run that prices millions of
+    // cells -- nowhere near §3 rule 4's per-operation bound.
+    let ratio_permille = {
+        let (mut lo, mut hi) = (1_001_i64, 8_000_i64);
+        while lo < hi {
+            let mid = lo.saturating_add(hi).saturating_add(1) / 2;
+            let mut reach = floor_halves;
+            for _ in 0..rungs {
+                reach = reach.saturating_mul(mid) / 1_000;
+                if reach >= cap_halves {
+                    break;
+                }
+            }
+            if reach <= cap_halves {
+                lo = mid;
+            } else {
+                hi = mid.saturating_sub(1);
+            }
+        }
+        lo
+    };
 
     let mut out: Vec<i64> = Vec::with_capacity(16);
     let mut halves = floor_halves;
-    while halves <= cap_halves {
+    let mut emitted = 0_i64;
+    while halves <= cap_halves && emitted <= rungs {
         // `points_to_ppm_at` takes whole points, so the halves are converted by
         // taking the ppm of a whole point and halving it -- exact in integers.
         let ppm = points_to_ppm_at(halves, reference) / 2;
         if ppm > 0 {
             out.push(ppm);
         }
-        halves = halves.saturating_add(step_halves);
+        // AT LEAST ONE HALF PER STEP. Near the floor the ratio can round to no
+        // change at all -- 8 halves at 1.15x is 9.2, which truncates to 9, but 4
+        // halves at 1.05x is 4.2 and truncates back to 4. Without the floor of
+        // one this loop never advances, which is the infinite ladder the linear
+        // `.max(1)` was guarding against by the same reasoning.
+        let next = halves.saturating_mul(ratio_permille) / 1_000;
+        halves = next.max(halves.saturating_add(1));
+        emitted = emitted.saturating_add(1);
     }
     // A cap below the floor leaves nothing; one rung at the floor is still a
     // ladder and refusing here would drop the whole grid for a quiet
@@ -10693,13 +10758,22 @@ fn rules_banner(rules: Rules, passed: usize, considered: usize) -> String {
 /// It costs one grid rebuild per measured row, which is why the band is bounded
 /// rather than the whole screen: measuring ten thousand rows to print ten is the
 /// memory and time the bounded heap in `rank` exists to avoid.
-#[expect(
-    dead_code,
-    reason = "the band is gone -- `measure_top` now measures every priced row, \
-              because an unmeasured row keys at i64::MIN in the calendar sort \
-              and can never climb. Kept with its doc so the defect it caused is \
-              not rediscovered from scratch."
-)]
+///
+/// # It was removed once, and the removal cost three hours
+///
+/// The band was dropped so every displayed row carried real consistency
+/// figures -- an unmeasured row keys at `i64::MIN` in the calendar sort and can
+/// never climb, so leaving it unmeasured hides it. That was correct and free
+/// while ~800 rows reached `measure_top`.
+///
+/// At `BRUTEX_SCREEN_CAP=200000` about 16,000 do. MEASURED: a 15-minute run
+/// spent two hours in the parallel pricing phase and then over an hour in this
+/// single-threaded loop, and was killed before it committed anything.
+///
+/// Both facts are true, so the band is back and it is `top * 8`: eight times
+/// what is printed, which is enough for the calendar gate to demote a measured
+/// row and still have a measured replacement, and independent of how wide the
+/// search was.
 const fn measured_band(top: usize) -> usize {
     const WIDEN: usize = 8;
     const FLOOR: usize = 32;
@@ -10752,7 +10826,31 @@ fn measure_top(
     // So measuring every priced row is **+50% on the priced phase**, not a
     // thousandfold. `rows` is already bounded by `priced_cap`; nothing here
     // widens what was priced, it only stops discarding what was.
-    for row in rows.iter_mut() {
+    // BOUNDED BY WHAT CAN BE PRINTED, NOT BY WHAT WAS PRICED.
+    //
+    // # This ran unbounded for three hours and produced nothing
+    //
+    // The bound was removed so every DISPLAYED row would carry real consistency
+    // figures rather than an unmeasured hole. That was correct and free while
+    // `screen_cap` was 10,000 and ~800 rows reached here.
+    //
+    // At `BRUTEX_SCREEN_CAP=200000` about 16,000 do, and this loop rebuilds the
+    // WHOLE exit grid per row and walks every trade across seven calendar
+    // grains -- single-threaded, with no telemetry, so it cannot even be
+    // watched. MEASURED: a 15-minute run spent 2 hours in the parallel pricing
+    // phase at 1,290% CPU and then over an hour here at 100%, and was killed
+    // before it committed.
+    //
+    // THE GENERAL RULE THIS ENFORCES: anything that runs PER PRICED ROW must be
+    // bounded by the OUTPUT size, never by the search width. Widening the cap
+    // multiplies every downstream per-row cost by the same factor, and the
+    // validation stack and this loop have both been caught by it in one day.
+    //
+    // `measured_band(top)` is `top * 8`, floored at 32 -- eight times what will
+    // be printed, so the calendar gate below can demote a measured row and the
+    // one that replaces it is measured too. At `top = 10` that is 80 rows
+    // whatever the cap.
+    for row in rows.iter_mut().take(measured_band(rules.top)) {
         // THE SIDE THE ROW WAS PRICED AT, NOT THE PROXY, and getting this wrong
         // was worse than opposite — it was cross-wired.
         //
