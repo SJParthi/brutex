@@ -2036,47 +2036,52 @@ fn evaluate_timed(
     } else {
         Vec::new()
     };
-    // ONE TARGET, MANY TRAILS -- THE OPERATOR'S OWN STRUCTURE.
+    // THE WHOLE RATIO LADDER, AND `thin_to_budget` DECIDES HOW MANY SURVIVE.
     //
-    // # Why a single target is a shape rather than a saving
+    // # A single far target was tried, and it is the defect this reverts
     //
-    // `variants` is `(S+1)·[(T+1)(R+1) + T(T+1)/2 · R(R+1)/2]`. The second term
-    // is two triangular sums MULTIPLIED, so the cell count is quadratic in the
-    // target count and quadratic in the trail count at once. Fourteen targets
-    // against eight trails is `105 × 36 = 3,780` cells per stop, and 97% of
-    // every stop's cells are that one product.
+    // `variants` is `(S+1)·[(T+1)(R+1) + T(T+1)/2 · R(R+1)/2]`: quadratic in
+    // targets and in trails at once. Collapsing the target ladder to one rung
+    // -- `ratio_set.last()` -- cut the cell count 3.8x and bought a richer
+    // trail axis, on the reasoning that the target is a far backstop and the
+    // TRAIL does the work.
     //
-    // Setting the target ladder to a single far rung collapses the first half
-    // of that product to 1, which frees the trail axis to get RICHER rather
-    // than poorer. MEASURED against the shipped shape, which `thin_to_budget`
-    // already trims to about fourteen stops by six targets by eight trails:
+    // That reasoning is defensible and the rung it chose is not. `.last()` is
+    // the CEILING of `derived_ratios`, and that ceiling is
+    // `favourable.iter().max() · 100 / tightest_stop` -- a MAXIMUM over a
+    // fat-tailed sample. Two things follow, and both were measured:
     //
-    //   14 x 6 targets x  8 trails = 12,285 cells   (today)
-    //   14 x 1 target  x 20 trails =  3,220 cells   3.8x fewer, 2.5x the trails
+    // 1. It DIVERGES with sample size. A max over fat tails grows without
+    //    bound as bars accumulate, so every extra month pushed the target
+    //    further away. A derived parameter that gets worse with more data is
+    //    measuring the sample, not the signal.
     //
-    // # Why this is the right TRADING shape, not only the cheap one
+    // 2. It is worse the FASTER the rung, because short windows have fatter
+    //    tails relative to their typical move. Measured on zerodha NIFTY
+    //    2020-01..2026-07, cap 200,000, one target vs the budgeted ladder:
     //
-    // Fourteen targets against eight trails is the engine trying every pairing
-    // of two guesses about where a move ends -- 112 opinions on a question that
-    // needs one rule: ride it until it turns. The operator states it directly:
-    // the target is a far backstop and the TRAIL does the work.
+    //      rung    win rate   net (worst-fill)
+    //      60min     50.96%   +568.55     target sometimes reachable
+    //      30min     45.19%    +38.80     rarely
+    //      15min      ---    -5617.40     effectively never
     //
-    // The single rung is the CEILING of the derived ratio ladder, not a typed
-    // number: the furthest target this combination's own favourable excursions
-    // actually support. A signal that never ran more than three points gets a
-    // three-point backstop.
+    //    Nothing exits at target, so every trade runs to a stop or gives the
+    //    trail its slack back, and the win rate falls with the rung.
     //
-    // And it lowers the multiple-testing bar as a side effect. Every variant is
-    // a comparison chosen and scored on the same bars, so 3,220 of them is far
-    // less curve-fitting room than 12,285 -- the Bonferroni bar a real edge has
-    // to clear scales with how many things were tried.
+    // # Why handing the full ladder over is the fix rather than a new count
+    //
+    // `thin_to_budget` already solves the quadratic for the largest target
+    // count the 24,000-cell budget allows, and keeps them with
+    // `step_by(stride)` from index 0 -- a SPREAD from the nearest rung upward,
+    // not the far end. The near rungs are the ones an ordinary trade reaches,
+    // and they are exactly what `.last()` threw away.
+    //
+    // So the count stays derived from the budget and the ladder stays derived
+    // from this combination's own excursions. Nothing here is typed.
     let targets = if ratio_set.is_empty() {
         ladder_of(&favourable)
     } else {
-        let single = ratio_set.last().map_or_else(Vec::new, |&far| vec![far]);
-        ratio_targets(stops.rungs(), &single)
-            .or_else(|| ratio_targets(stops.rungs(), &ratio_set))
-            .unwrap_or_else(|| ladder_of(&favourable))
+        ratio_targets(stops.rungs(), &ratio_set).unwrap_or_else(|| ladder_of(&favourable))
     };
     // THINNED TO WHAT THE CELL COUNT CAN AFFORD, AND THIS IS THE WALL EVERY
     // OTHER BOUND MISSED.
