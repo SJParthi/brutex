@@ -2402,6 +2402,32 @@ fn walk_forward_exact_grid_v4(
             .try_reserve(closed.kept.len().saturating_mul(2))
             .map_err(|_| AnchoredSearchValidationRefusalV4::PopulationOverflow)?;
         let mut population_cells = 0_u64;
+        // THE DATA DIGEST IS A FACT ABOUT THE TWO SLICES, NOT ABOUT A CANDIDATE.
+        //
+        // `data_digest_with_execution(train, Some(trade_train))` stood inside
+        // the loop below, which runs once per candidate PER SIDE. Neither
+        // argument varies: `train` and `trade_train` are the fold's own slices
+        // and are fixed for the whole loop. Only `mask` and `direction` change,
+        // and neither reaches this call.
+        //
+        // It is not a cheap invariant. It is two full BLAKE3 passes over every
+        // bar of both slices, so at the ~10,575 closed candidates this stage
+        // reaches it was ~42,300 whole-slice hashes where one pair suffices --
+        // and that is per fold, over eight folds.
+        //
+        // This is the same defect, in the same shape, that `screen`,
+        // `cap_for_budget`, the V3 fold loop and `cli::measure_top` each fixed:
+        // a whole-slice structure rebuilt inside a candidate loop. The gate
+        // written to catch it --
+        // `the_out_of_sample_pass_hoists_the_slice_facts_out_of_its_candidate_loop`
+        // -- anchors on a literal source string from the V3 path, so it cannot
+        // see this one. The hoist is made here; widening that gate to reach V4
+        // is a separate change and is noted rather than smuggled in.
+        //
+        // `ExecutionRunV1::new` below recomputes the identical digest to check
+        // it, which is deliberate -- it is the attestation, not a duplicate --
+        // and is left alone.
+        let train_data_digest = data_digest_with_execution(train, Some(trade_train));
         for item in &closed.kept {
             for (side, resolved) in [(Direction::Long, &long), (Direction::Short, &short)] {
                 hash_mask_for_admission_v2(&mut population_hasher, item.mask);
@@ -2413,7 +2439,7 @@ fn walk_forward_exact_grid_v4(
                     instrument: execution.instrument(),
                     timeframe,
                     params,
-                    data_digest: data_digest_with_execution(train, Some(trade_train)),
+                    data_digest: train_data_digest,
                     commit: execution.commit(),
                     feed: execution.feed(),
                 };
@@ -7047,6 +7073,70 @@ mod tests {
             "nothing inside the candidate loop may build slice facts: they are a \
              function of the bars and the column, and rebuilding them per \
              candidate is the O(C x B) term this hoist removed"
+        );
+    }
+
+    /// The V4 population loop must not re-hash its own slices per candidate.
+    ///
+    /// # Why the sibling gate above could not see this one
+    ///
+    /// That gate anchors on a literal from the V3 out-of-sample pass, so its
+    /// scan never reaches the V4 population loop -- and V4 carried the same
+    /// defect in a different shape for as long as it has existed. A gate that
+    /// names one call site protects one call site; that is the lesson its own
+    /// doc records about `trade.rs` guarding `walk_core` and missing
+    /// `levelled`, and it repeated one door further along.
+    ///
+    /// MEASURED: `data_digest_with_execution(train, Some(trade_train))` stood
+    /// inside `for item in &closed.kept` × `[Long, Short]`. Both arguments are
+    /// the fold's own slices and neither varies with the candidate, so at the
+    /// ~10,575 closed candidates this stage reaches it was ~42,300 whole-slice
+    /// BLAKE3 passes per fold, over eight folds, for one distinct answer.
+    ///
+    /// Source-shape rather than timing, for the reason the sibling gives: the
+    /// rebuilt digest is byte-identical to the hoisted one, so no behavioural
+    /// test can tell them apart, and a timing test on a loaded machine measures
+    /// the machine.
+    #[test]
+    fn the_population_loop_hoists_its_data_digest_out_of_the_candidate_loop() {
+        let source = include_str!("validate.rs");
+        let anchor =
+            "let train_data_digest = data_digest_with_execution(train, Some(trade_train));";
+        let at = source.find(anchor).expect(
+            "the V4 population pass must build its data digest ONCE, before the \
+             candidate loop",
+        );
+        let rest = source.get(at..).unwrap_or_default();
+        let end = rest
+            .find("if population_cells != expected_population")
+            .expect("the hoisted digest must be followed by the population loop and its check");
+        let body = rest.get(..end).unwrap_or_default();
+
+        assert!(
+            body.len() > 500,
+            "the scan found a {}-byte body, so the anchors moved and this test \
+             would pass over nothing",
+            body.len()
+        );
+        assert!(
+            body.contains("for item in &closed.kept {"),
+            "the scanned region must actually contain the candidate loop, or \
+             this gate is looking at the wrong code"
+        );
+        assert!(
+            body.contains("data_digest: train_data_digest,"),
+            "the loop must consume the hoisted digest rather than its own"
+        );
+        // PAST THE ANCHOR, because `body` opens WITH the hoisted call and a
+        // check over the whole region would match that and prove nothing --
+        // the same slicing the sibling gate needs and for the same reason.
+        let inner = body.get(anchor.len()..).unwrap_or_default();
+        assert!(
+            !inner.contains("data_digest_with_execution("),
+            "nothing inside the candidate loop may hash the slices: the digest \
+             is a function of `train` and `trade_train`, both fixed for the \
+             whole loop, and recomputing it per candidate per side is the \
+             O(C x 2 x B) term this hoist removed"
         );
     }
 }
