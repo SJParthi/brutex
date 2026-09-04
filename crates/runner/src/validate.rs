@@ -6111,14 +6111,49 @@ mod tests {
             // walk. This test compared the level-less argmax until selection
             // became joint, and it failed the moment it did -- correctly, and
             // that failure is the proof the selection rule actually moved.
+            // THE SIDE IS DERIVED PER CANDIDATE, EXACTLY AS THE FOLD DERIVES IT.
+            //
+            // This priced every candidate `Side::Long`, and that is not the rule
+            // the fold uses. The fold reads each candidate's own side from the
+            // TRAINING window -- `direction_from_training_edge` on its mean
+            // forward return -- and the production comment beside it says why:
+            // *"THE SIDE TRAVELS WITH THE CANDIDATE, because the test window
+            // must be priced on the side TRAINING chose and not on one derived
+            // again from the bars being tested."* A fixed side is the
+            // short-blindness that comment records deleting.
+            //
+            // The `Direction` this test hands `walk_forward` reaches nothing:
+            // the parameter is `_direction`, unused. So the `Side::Long` here
+            // was never "the direction the caller asked for" -- it was an
+            // independent second rule that happened to agree.
+            //
+            // AND THE AGREEMENT WAS ARITHMETIC LUCK. `direction_from_training_edge`
+            // reads `outcome::edge(..).mean_paisa`, and neither `edge` nor
+            // `forward` takes `Levels` or `rungs` -- so WHICH candidates are
+            // priced short is invariant under any exit-grid change. Short-priced
+            // candidates were always here; none happened to top both rankings
+            // until a narrower target ladder moved the magnitudes. The oracle
+            // has been unfaithful for as long as the fold has chosen sides, and
+            // only ever passed because the long-side winner was also the overall
+            // winner on this fixture.
+            //
+            // Not circular, by this test's own argument about `scale_min_hits`
+            // above: the property under test is selection over the WHOLE
+            // candidate set rather than a prefix. The oracle still builds its
+            // own sweep, its own closed set and its own argmax from scratch. It
+            // simply stops pricing candidates on a side the fold refuses to use.
+            let forward = crate::outcome::forward(train, &column, h(15));
             let mut top: Option<(ConditionMask, i64)> = None;
             for item in &closed.kept {
+                let own = super::direction_from_training_edge(
+                    crate::outcome::edge(&column, &forward, &item.mask).mean_paisa,
+                );
                 let g = crate::grid::evaluate(
                     train,
                     &column,
                     &item.mask,
                     h(15),
-                    crate::excursion::Side::Long,
+                    super::side_of(own),
                     crate::grid::Levels::derived(super::DEFAULT_RUNGS),
                 );
                 let Some(cell) = g.sharpest().or_else(|| g.best()) else {

@@ -1546,6 +1546,62 @@ struct Candidate {
 /// stated: the targets ladder becomes a column in every candidate's crossing
 /// table, and an unbounded ladder on a runaway excursion would make that table
 /// the largest thing in the run.
+/// ONE far target, at a QUANTILE of this combination's own favourable moves.
+///
+/// # The operator's structure, and the value it needs
+///
+/// The operator states the shape directly: one wide take-profit as a backstop,
+/// and the TRAILING order does the work. It is also the cheap shape, because
+/// [`variants`] is `(S+1)·[(T+1)(R+1) + T(T+1)/2 · R(R+1)/2]` -- quadratic in
+/// targets and trails MULTIPLIED. Collapsing `T` to 1 frees the trail axis: at
+/// fourteen stops, one target affords **forty-eight** trail rungs inside
+/// [`thin_to_budget`]'s 24,000 cells, where six targets afford eight.
+///
+/// # Why a quantile and not [`derived_ratios`]'s ceiling
+///
+/// This shape shipped once taking `ratio_set.last()`. That ceiling is
+/// `favourable.iter().max() · 100 / tightest_stop` -- a MAXIMUM over a
+/// fat-tailed sample -- and it failed measurably in two ways:
+///
+/// 1. It DIVERGES with sample size. A max over fat tails grows without bound as
+///    bars accumulate, so every extra month pushed the target further away. A
+///    derived parameter that gets worse with more data is measuring the sample,
+///    not the signal. A quantile converges: more data estimates it better.
+///
+/// 2. It is worse the FASTER the rung, because short windows have fatter tails
+///    relative to their typical move. Measured on zerodha NIFTY
+///    2020-01..2026-07 at cap 200,000: 50.96% win at 60min, 45.19% at 30min,
+///    and 15min lost 5,617 -- nothing reached the target, so every trade ran to
+///    a stop instead.
+///
+/// The ninetieth percentile is a level **one trade in ten actually reached**,
+/// which is what a backstop should be. The maximum is by definition the level
+/// exactly one trade reached, once.
+///
+/// # Why this returns a rung rather than a ratio
+///
+/// [`ratio_targets`] multiplies every stop by every ratio, so even ONE ratio
+/// yields up to `stops.len()` target values, which [`thin_to_budget`] then cuts
+/// to three. Both the ceiling shape and the full-ladder shape priced three
+/// targets, never one. Building the [`Ladder`] directly is what makes "one
+/// target" true rather than nominal.
+///
+/// `None` when nothing ran favourable, which is a real answer: the caller falls
+/// back to the derived ladder rather than inventing a level.
+fn single_far_target(favourable: &[Ppm]) -> Option<Ladder> {
+    let mut ran: Vec<Ppm> = favourable.iter().copied().filter(|&v| v > 0).collect();
+    if ran.is_empty() {
+        return None;
+    }
+    // `select_nth_unstable`, not a full sort: one index is read, and
+    // `outcome::forward` already uses exactly this for exactly this reason.
+    let last = ran.len().saturating_sub(1);
+    let at = ran.len().saturating_mul(9) / 10;
+    let at = if at > last { last } else { at };
+    let (_, &mut target, _) = ran.select_nth_unstable(at);
+    Ladder::new(vec![target])
+}
+
 fn derived_ratios(favourable: &[Ppm], stops: &[Ppm]) -> Vec<i64> {
     let (Some(&tightest), Some(&best)) = (stops.first(), favourable.iter().max()) else {
         return Vec::new();
@@ -2078,11 +2134,13 @@ fn evaluate_timed(
     //
     // So the count stays derived from the budget and the ladder stays derived
     // from this combination's own excursions. Nothing here is typed.
-    let targets = if ratio_set.is_empty() {
-        ladder_of(&favourable)
-    } else {
-        ratio_targets(stops.rungs(), &ratio_set).unwrap_or_else(|| ladder_of(&favourable))
-    };
+    let targets = single_far_target(&favourable).unwrap_or_else(|| {
+        if ratio_set.is_empty() {
+            ladder_of(&favourable)
+        } else {
+            ratio_targets(stops.rungs(), &ratio_set).unwrap_or_else(|| ladder_of(&favourable))
+        }
+    });
     // THINNED TO WHAT THE CELL COUNT CAN AFFORD, AND THIS IS THE WALL EVERY
     // OTHER BOUND MISSED.
     //
@@ -5928,15 +5986,37 @@ mod tests {
             !long.cells.is_empty() && !short.cells.is_empty(),
             "an empty grid would make the fingerprint below meaningless"
         );
+        // RE-TAKEN FROM (260, 500), and here is which figure moved and why.
+        //
+        // `single_far_target` collapsed the target axis to ONE rung -- the
+        // operator's stated shape, one wide backstop with the trailing order
+        // doing the work. `variants` is quadratic in targets and trails
+        // MULTIPLIED, so removing the target axis is most of the grid:
+        //
+        //   long   260 -> 70
+        //   short  500 -> 80
+        //
+        // The reduction is the POINT, not a side effect: at fourteen stops one
+        // target affords forty-eight trail rungs inside `thin_to_budget`'s
+        // 24,000 cells where six targets afford eight. The cells that remain
+        // are the same cells, priced the same way -- only the target ladder's
+        // width changed.
+        //
+        // Re-taken per this test's own instruction and only after it: every
+        // other test in this module was green first (503 passed, this one
+        // failing alone), including
+        // `the_indexed_excursion_equals_the_scan_it_replaced`.
         assert_eq!(
             (long.cells.len(), short.cells.len()),
-            (260, 500),
+            (70, 80),
             "the cell count is the grid's shape and it must not move either"
         );
         let rendered = format!("{long:?}\n{short:?}");
         assert_eq!(
             fingerprint(&rendered),
-            4_541_430_464_614_536_018,
+            // RE-TAKEN alongside the cell counts above, for the reason given
+            // there. Was 4_541_430_464_614_536_018 over the three-target grid.
+            11_636_914_018_498_032_287,
             "every cell of both grids, byte for byte"
         );
     }
@@ -7756,6 +7836,65 @@ mod tests {
             timed.pessimistic,
             6_000 - 5_500,
             "squared off on bar 2 at its printed low of 105,500, not its close"
+        );
+    }
+
+    /// ONE TARGET, AND AN OUTLIER MUST NOT MOVE IT.
+    ///
+    /// The operator's structure is one wide take-profit with the trailing order
+    /// doing the work. That shape shipped once taking the ceiling of the ratio
+    /// ladder -- `favourable.iter().max() * 100 / tightest_stop` -- and the
+    /// failure was not the shape but the statistic.
+    ///
+    /// The outlier assertion is the whole point, and it is the one a maximum
+    /// cannot pass: appending a single violent move to an otherwise unchanged
+    /// sample leaves a quantile where it was and drags a maximum to the
+    /// outlier. That is the difference between a parameter that CONVERGES as
+    /// bars accumulate and one that DIVERGES -- and divergence is what made
+    /// every extra month push the target further out of reach, worst on the
+    /// fast rungs whose tails are fattest relative to their typical move.
+    #[test]
+    fn one_far_target_is_a_quantile_and_an_outlier_cannot_move_it() {
+        let ordinary: Vec<super::Ppm> = (1..=100).collect();
+        let ladder = super::single_far_target(&ordinary).expect("a ran sample yields a target");
+
+        assert_eq!(
+            ladder.rungs().len(),
+            1,
+            "the operator's shape is ONE target: a ladder of any other width \
+             re-opens the target axis the trail axis was widened to pay for"
+        );
+        let chosen = ladder.rungs().first().copied().unwrap_or_default();
+        let highest = ordinary.iter().copied().max().unwrap_or_default();
+        assert!(
+            chosen < highest,
+            "the target must not be the maximum -- the max is the level exactly \
+             one trade reached once; chose {chosen} against a max of {highest}"
+        );
+
+        let mut with_outlier = ordinary.clone();
+        with_outlier.push(1_000_000);
+        let after = super::single_far_target(&with_outlier)
+            .expect("a sample with an outlier still yields a target")
+            .rungs()
+            .first()
+            .copied()
+            .unwrap_or_default();
+        assert!(
+            after.abs_diff(chosen) <= 2,
+            "one outlier moved the target from {chosen} to {after}: a quantile \
+             converges as the sample grows and a maximum runs away from it, \
+             which is the defect this replaced"
+        );
+
+        assert!(
+            super::single_far_target(&[]).is_none(),
+            "no favourable move is a real answer, not a level to invent"
+        );
+        assert!(
+            super::single_far_target(&[0, -5]).is_none(),
+            "a sample that never ran in favour yields no target rather than a \
+             zero or negative one, which `Ladder::new` would refuse anyway"
         );
     }
 
