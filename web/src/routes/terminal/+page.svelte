@@ -554,7 +554,10 @@
     <span class="closed" title="This terminal reads a store of historical bars. There is no live session and there is no tick stream — every figure on this page is a bar that was pulled and filed.">
       <span class="cdot"></span> Store only
     </span>
-    <a class="back" href="/">Console</a>
+    <!-- `/markets` AND NOT `/`. The root redirects here, so a Console link
+         pointing at it would send the reader back to this page — a button that
+         appears to leave and does not. -->
+    <a class="back" href="/markets">Console</a>
   </header>
 
   <!-- THE INDEX STRIP. Whatever indices this store holds, and no more. -->

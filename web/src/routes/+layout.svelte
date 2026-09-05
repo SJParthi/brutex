@@ -70,7 +70,11 @@
   });
 
   const NAV = [
-    { href: '/', label: 'Markets' },
+    // `/markets`, NOT `/`. The root now redirects to `/terminal` — see
+    // `routes/+page.js` — so this console moved to a path of its own rather
+    // than being displaced by it. `git mv` carried its history; the file is the
+    // same 4,235 lines it was.
+    { href: '/markets', label: 'Markets' },
     { href: '/ingest', label: 'Ingest' },
     { href: '/autopilot', label: 'Autopilot' },
     { href: '/db', label: 'DB' },
