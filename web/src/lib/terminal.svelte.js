@@ -58,7 +58,7 @@ import { parseKey } from '$lib/instrument.js';
    09:59 UTC, and a machine west of Greenwich would file the whole afternoon
    session under the previous date. `$lib/dates.js` owns the `Asia/Kolkata`
    clock; see `istDay` there for why a second spelling of it is forbidden. */
-import { istDay } from '$lib/dates.js';
+import { istDay, istClock } from '$lib/dates.js';
 
 /**
  * The tab strip — THREE ASSET CLASSES, AND DELIBERATELY NOT THE SOURCE
@@ -479,14 +479,35 @@ const months = new Map();
  * @param {string} month @param {string} day `YYYY-MM-DD`, or `''` for the month's last bar
  * @returns {Promise<Quote>}
  */
-export async function quoteOn(feed, key, timeframe, month, day) {
+export async function quoteOn(feed, key, timeframe, month, day, time = '') {
   if (!day) return quote(feed, key, timeframe, month);
   const { bars, why } = await monthBars(feed, key, timeframe, month);
   if (why) return nothing(key, why);
+
+  /* THE LAST MATCH WINS, WHICH IS WHAT MAKES THIS A CLOSE.
+     Bars arrive ascending, so folding forward and keeping the last one whose
+     IST date matches leaves that day's FINAL bar — the day's close at this
+     timeframe. With a minute named as well, the match is exact and there is at
+     most one, so "last" and "only" coincide. */
   let found = null;
+  let onDay = 0;
   for (const bar of bars) {
     if (typeof bar.t !== 'number') continue;
-    if (istDay(bar.t * 1000) === day) found = bar;
+    const ms = bar.t * 1000;
+    if (istDay(ms) !== day) continue;
+    onDay += 1;
+    if (!time || istClock(ms) === time) found = bar;
+  }
+
+  if (!found && onDay > 0) {
+    // THE DAY IS HELD AND THE MINUTE IS NOT. A different absence from the one
+    // below, and the count is what tells them apart for the reader.
+    return nothing(
+      key,
+      `The store holds ${onDay} ${timeframe} bars for this series on ${day}, ` +
+        `and none of them is stamped ${time}. The day was read and that minute ` +
+        `is not in it.`
+    );
   }
   if (!found) {
     return nothing(
@@ -508,8 +529,38 @@ export async function quoteOn(feed, key, timeframe, month, day) {
  * @param {string} day `YYYY-MM-DD`, or `''`
  * @returns {Promise<Quote[]>}
  */
-export function quotesOn(feed, rows, day) {
-  return pooled(rows, IN_FLIGHT, (r) => quoteOn(feed, r.key, r.timeframe, r.month, day));
+export function quotesOn(feed, rows, day, time = '') {
+  return pooled(rows, IN_FLIGHT, (r) => quoteOn(feed, r.key, r.timeframe, r.month, day, time));
+}
+
+/**
+ * The minutes this series is stamped with on one day, ascending, as `HH:MM`.
+ *
+ * Folded out of bars already fetched and cached by `monthBars`, so this costs a
+ * Map probe and a pass over an array bounded by `DAY_BUDGET`.
+ *
+ * A `1day` series returns ONE minute, and that is not a defect to hide: a
+ * timeframe with one bar a day has one time, and the caller can see from the
+ * length that there is nothing to choose between. Deciding here that one is the
+ * same as none would be this module guessing at presentation.
+ *
+ * @param {string} feed @param {string} key @param {string} timeframe
+ * @param {string} month @param {string} day `YYYY-MM-DD`
+ * @returns {Promise<string[]>}
+ */
+export async function timesOn(feed, key, timeframe, month, day) {
+  if (!day) return [];
+  const { bars } = await monthBars(feed, key, timeframe, month);
+  /** @type {Set<string>} */
+  const times = new Set();
+  for (const bar of bars) {
+    if (typeof bar.t !== 'number') continue;
+    const ms = bar.t * 1000;
+    if (istDay(ms) !== day) continue;
+    const c = istClock(ms);
+    if (c) times.add(c);
+  }
+  return [...times].sort();
 }
 
 /**

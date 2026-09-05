@@ -189,6 +189,30 @@ export function istDay(d) {
 }
 
 /**
+ * A wall-clock minute in IST, as `HH:MM` — THE KEY FORM, like `istDay`.
+ *
+ * `timeLabel` below renders a day AND a minute for a human to read; this is the
+ * minute alone, in the fixed-width 24-hour form that sorts as a plain string
+ * and can be a `Map` key. `09:15` and `15:29` are the session's own boundaries
+ * and they sort correctly as text precisely because the hour is zero-padded.
+ *
+ * `istFields` configures `h23`, so midnight is `00` and not `24`.
+ *
+ * The same unit trap `istDay` documents applies here and is worse, because it
+ * is silent: seconds fed in as milliseconds land in 1970 with a plausible-
+ * looking clock time, and every bar in a session would collapse onto the same
+ * handful of minutes. Multiply at the call site.
+ *
+ * @param {Date | number | string | null | undefined} d milliseconds, a Date, or an ISO string
+ * @returns {string} `HH:MM`, or `''` when there is no instant to read
+ */
+export function istClock(d) {
+  const f = istFields(d);
+  if (f === null) return '';
+  return `${f.hh}:${f.mm}`;
+}
+
+/**
  * A calendar day in IST. `02 Sep 2024`.
  *
  * Accepts a `Date`, epoch milliseconds, or anything `Date.parse` accepts —

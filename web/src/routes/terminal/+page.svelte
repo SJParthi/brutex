@@ -47,7 +47,14 @@
 
   import { feeds, loadFeeds } from '$lib/feeds.svelte.js';
   import { store, syncStore } from '$lib/store.svelte.js';
-  import { tabsFrom, quotesOn, daysIn, forgetQuotes, DAY_BUDGET } from '$lib/terminal.svelte.js';
+  import {
+    tabsFrom,
+    quotesOn,
+    daysIn,
+    timesOn,
+    forgetQuotes,
+    DAY_BUDGET
+  } from '$lib/terminal.svelte.js';
   import { parseKey } from '$lib/instrument.js';
   import { group, rupee } from '$lib/money.js';
   import { monthLabel, dayLabel } from '$lib/dates.js';
@@ -305,6 +312,41 @@
     };
   });
 
+  /** The chosen minute, `HH:MM` in IST, or `''` for the day's last bar. */
+  let time = $state('');
+  /* THE MINUTE DOES NOT SURVIVE A CHANGE OF DAY, and clearing the day clears it
+     too — a time with no date is a minute of nothing. */
+  $effect(() => {
+    void day;
+    time = '';
+  });
+
+  /** The minutes the visible rows are stamped with on the chosen day. */
+  let times = $state(/** @type {string[]} */ ([]));
+
+  $effect(() => {
+    const feed = store.feed;
+    const want = rows;
+    const tf = timeframe;
+    const mo = month;
+    const on = day;
+    if (!feed || !tf || !mo || !on || !dayCapable || want.length === 0) {
+      times = [];
+      return;
+    }
+    let live = true;
+    /* THE UNION AGAIN, for the reason the day list gives: two instruments need
+       not be stamped with the same minutes, and a series that halted at noon
+       would erase the afternoon from a picker built on it alone. */
+    Promise.all(want.map((key) => timesOn(feed, key, tf, mo, on))).then((lists) => {
+      if (!live) return;
+      times = [...new Set(lists.flat())].sort();
+    });
+    return () => {
+      live = false;
+    };
+  });
+
   /** key -> Quote, filled as the pool answers. */
   let quotes = $state(new Map());
 
@@ -314,12 +356,14 @@
     const tf = timeframe;
     const mo = month;
     const on = day;
+    const at = time;
     if (!feed || !tf || !mo || want.length === 0) return;
     let live = true;
     quotesOn(
       feed,
       want.map((key) => ({ key, timeframe: tf, month: mo })),
-      on
+      on,
+      at
     ).then((answers) => {
       if (!live) return;
       const next = new Map(quotes);
@@ -732,6 +776,27 @@
             >
               <option value="">Month</option>
               {#each days as d (d)}<option value={d}>{dayLabel(d)}</option>{/each}
+            </select>
+          </label>
+          <!-- THE MINUTE. Only meaningful once a day is chosen, and only
+               offers a choice when the timeframe puts more than one bar in a
+               day: `1day` yields exactly one, and a picker with one option is
+               a control that cannot be used. It says which of those it is
+               rather than greying out for an unstated reason. -->
+          <label class="tctl">
+            <span>Time</span>
+            <select
+              class="pill"
+              bind:value={time}
+              disabled={!day || times.length < 2}
+              title={!day
+                ? 'Choose a date first — a time with no date is a minute of nothing.'
+                : times.length < 2
+                  ? `At ${timeframe} a day holds ${times.length === 1 ? 'one bar' : 'no bars'}, so there is no minute to choose between. A finer timeframe puts more bars in the day.`
+                  : 'The bar stamped at this minute. “Close” is the day’s last bar.'}
+            >
+              <option value="">Close</option>
+              {#each times as t (t)}<option value={t}>{t}</option>{/each}
             </select>
           </label>
           <label class="tctl">
