@@ -47,10 +47,10 @@
 
   import { feeds, loadFeeds } from '$lib/feeds.svelte.js';
   import { store, syncStore } from '$lib/store.svelte.js';
-  import { tabsFrom, quotesFor, forgetQuotes } from '$lib/terminal.svelte.js';
+  import { tabsFrom, quotesOn, daysIn, forgetQuotes, DAY_BUDGET } from '$lib/terminal.svelte.js';
   import { parseKey } from '$lib/instrument.js';
   import { group, rupee } from '$lib/money.js';
-  import { monthLabel } from '$lib/dates.js';
+  import { monthLabel, dayLabel } from '$lib/dates.js';
 
   /* ==================================================================
      THE FEED, AND THE CENSUS UNDER IT
@@ -243,6 +243,68 @@
     return store.byCell.has(`${key}|${timeframe}|${month}`);
   }
 
+  /** How many bars the census says this cell holds. O(1) — one Map probe.
+      @param {string} key @returns {number} */
+  const cellBars = (key) => store.byCell.get(`${key}|${timeframe}|${month}`) ?? 0;
+
+  /* WHETHER A DAY CAN BE ASKED FOR AT ALL, DECIDED BEFORE ANYTHING IS FETCHED.
+     ------------------------------------------------------------------------
+     `/bars/window.json` takes a MONTH and has no day parameter, so answering
+     "what did this do on the 12th" means reading the month and looking. There
+     is no seek to a day, and multiplying a bars-per-day guess by a day index
+     would be arithmetic on an assumption — section 3 rule 1.
+
+     Reading a month costs what the month holds, and that spans three orders of
+     magnitude: ~21 bars at `1day`, ~150 at `60min`, ~8,000 at `1min`. The
+     census already carries that count per cell, so the decision is a Map probe
+     and the fetch never starts on the wrong side of it.
+
+     `heaviest` is carried so the refusal can NAME the number. A control that
+     simply greys out teaches nothing; one that says "9,187 bars, over a budget
+     of 512" tells the operator to coarsen the timeframe. */
+  const heaviest = $derived(rows.reduce((most, key) => Math.max(most, cellBars(key)), 0));
+  const dayCapable = $derived(rows.length > 0 && heaviest > 0 && heaviest <= DAY_BUDGET);
+
+  /** The chosen day, `YYYY-MM-DD`, or `''` for the month's last bar. */
+  let day = $state('');
+  /* A DAY DOES NOT SURVIVE A CHANGE OF WINDOW. Every one of these changes which
+     bars exist, and a date carried into a month that has no such day would
+     empty the grid and blame the store for it. */
+  $effect(() => {
+    void activeTab;
+    void year;
+    void month;
+    void timeframe;
+    void segment;
+    day = '';
+  });
+
+  /** The days the visible rows actually traded, ascending. */
+  let days = $state(/** @type {string[]} */ ([]));
+
+  $effect(() => {
+    const feed = store.feed;
+    const want = rows;
+    const tf = timeframe;
+    const mo = month;
+    if (!feed || !tf || !mo || !dayCapable || want.length === 0) {
+      days = [];
+      return;
+    }
+    let live = true;
+    /* THE UNION ACROSS THE VISIBLE ROWS, not one row's calendar. Instruments do
+       not all trade the same days — a halt, a listing, a suspension — and
+       taking the first row's days as the month's would hide every day the
+       others traded and it did not. */
+    Promise.all(want.map((key) => daysIn(feed, key, tf, mo))).then((lists) => {
+      if (!live) return;
+      days = [...new Set(lists.flat())].sort();
+    });
+    return () => {
+      live = false;
+    };
+  });
+
   /** key -> Quote, filled as the pool answers. */
   let quotes = $state(new Map());
 
@@ -251,11 +313,13 @@
     const want = [...new Set([...rows, ...indices])];
     const tf = timeframe;
     const mo = month;
+    const on = day;
     if (!feed || !tf || !mo || want.length === 0) return;
     let live = true;
-    quotesFor(
+    quotesOn(
       feed,
-      want.map((key) => ({ key, timeframe: tf, month: mo }))
+      want.map((key) => ({ key, timeframe: tf, month: mo })),
+      on
     ).then((answers) => {
       if (!live) return;
       const next = new Map(quotes);
@@ -650,6 +714,24 @@
             <span>Month</span>
             <select class="pill" bind:value={month}>
               {#each monthsInYear as m (m)}<option value={m}>{monthLabel(m)}</option>{/each}
+            </select>
+          </label>
+          <!-- THE DAY. Present only when the census says the month can be read
+               within budget, and carrying the reason when it cannot — a control
+               that greys out silently teaches nothing, while one that names the
+               bar count tells the operator to coarsen the timeframe. -->
+          <label class="tctl">
+            <span>Date</span>
+            <select
+              class="pill"
+              bind:value={day}
+              disabled={!dayCapable || days.length === 0}
+              title={dayCapable
+                ? 'The last bar on the chosen day. “Month” is the month’s last bar.'
+                : `A day needs the month read, and the heaviest visible series holds ${heaviest.toLocaleString('en-IN')} ${timeframe} bars against a budget of ${DAY_BUDGET.toLocaleString('en-IN')}. Choose a coarser timeframe to pick a date.`}
+            >
+              <option value="">Month</option>
+              {#each days as d (d)}<option value={d}>{dayLabel(d)}</option>{/each}
             </select>
           </label>
           <label class="tctl">

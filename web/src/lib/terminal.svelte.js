@@ -54,6 +54,11 @@
 import { ask } from '$lib/ask.js';
 import { pooled, IN_FLIGHT } from '$lib/pooled.js';
 import { parseKey } from '$lib/instrument.js';
+/* THE EXCHANGE'S DAY, NOT THE BROWSER'S. A bar timestamped 15:29 IST is
+   09:59 UTC, and a machine west of Greenwich would file the whole afternoon
+   session under the previous date. `$lib/dates.js` owns the `Asia/Kolkata`
+   clock; see `istDay` there for why a second spelling of it is forbidden. */
+import { istDay } from '$lib/dates.js';
 
 /**
  * The tab strip — THREE ASSET CLASSES, AND DELIBERATELY NOT THE SOURCE
@@ -368,6 +373,166 @@ export function quote(feed, key, timeframe, month) {
  */
 export function quotesFor(feed, rows) {
   return pooled(rows, IN_FLIGHT, (r) => quote(feed, r.key, r.timeframe, r.month));
+}
+
+/**
+ * How many bars this page will read to answer a question about ONE DAY.
+ *
+ * # Why there is a budget at all, and why the census decides before the fetch
+ *
+ * `/bars/window.json` takes a MONTH range and has no day parameter. So the only
+ * honest way to answer "what did this instrument do on the 12th" is to read the
+ * month and look — there is no seek to a day, and inventing one by multiplying
+ * a bars-per-day guess by a day index would be arithmetic on an assumption,
+ * which section 3 rule 1 forbids.
+ *
+ * Reading a month costs what the month holds, and that varies by three orders
+ * of magnitude: a `1day` month is about 21 bars, a `60min` month about 150, a
+ * `1min` month about 8,000. Measured elsewhere in this tree at roughly 81 bytes
+ * per bar, seventeen visible rows of `1min` is about 11 MB to fill one screen.
+ *
+ * The census already carries `rows` per instrument-month-timeframe, so the cost
+ * is KNOWN BEFORE ANYTHING IS FETCHED and the check is one Map probe — see
+ * `store.byCell`. 512 admits every timeframe from `1day` down to about `5min`
+ * and refuses the two finest, and the refusal is shown with the count so the
+ * reader can see which side of the line they are on rather than finding a
+ * control mysteriously disabled.
+ */
+export const DAY_BUDGET = 512;
+
+/**
+ * Every bar the store holds for one (feed, key, timeframe, month), ascending.
+ *
+ * CACHED ON THE PROMISE, like `quote`, and for the same reason: seventeen rows
+ * asking for the same series in one frame make one request.
+ *
+ * `limit` is the budget rather than the month's true count, so a caller that
+ * ignores the census guard still cannot pull an unbounded body. `dir=asc` so
+ * the array is in time order and the LAST match for a day is that day's close
+ * without a second sort.
+ *
+ * @param {string} feed @param {string} key @param {string} timeframe @param {string} month
+ * @returns {Promise<{bars: any[], why: string|null}>}
+ */
+export function monthBars(feed, key, timeframe, month) {
+  const id = `bars|${quoteKey(feed, key, timeframe, month)}`;
+  const held = months.get(id);
+  if (held) return held;
+
+  const run = (async () => {
+    const parts = seriesParams(key);
+    if (!parts) return { bars: [], why: `${key} is not a series key this store can name.` };
+    const q = new URLSearchParams({
+      feed,
+      exchange: parts.exchange,
+      segment: parts.segment,
+      symbol: parts.symbol,
+      contract: parts.contract,
+      timeframe,
+      from: month,
+      to: month,
+      sort: 'ts',
+      dir: 'asc',
+      offset: '0',
+      limit: String(DAY_BUDGET)
+    });
+    try {
+      const res = await ask(`/bars/window.json?${q}`);
+      const body = await res.json().catch(() => null);
+      if (!body || !Array.isArray(body.bars)) {
+        return {
+          bars: [],
+          why:
+            body?.error ??
+            `/bars/window.json answered HTTP ${res.status} with no window for ${month}.`
+        };
+      }
+      return { bars: body.bars, why: null };
+    } catch (error) {
+      const e = /** @type {any} */ (error);
+      return { bars: [], why: String(e && e.message ? e.message : e) };
+    }
+  })();
+
+  months.set(id, run);
+  return run;
+}
+
+/** @type {Map<string, Promise<{bars: any[], why: string|null}>>} */
+const months = new Map();
+
+/**
+ * The quote for one series AS OF one day, or the month's last when no day is
+ * chosen.
+ *
+ * The empty `day` takes the cheap path — `limit=1`, one bar on the wire — so
+ * the default view costs exactly what it did before days existed. A named day
+ * reads the month and picks the LAST bar whose IST calendar date matches, which
+ * is that day's close at this timeframe.
+ *
+ * A day the series did not trade is an ABSENCE WITH A REASON, not an empty row:
+ * the month was read, the day was looked for, and it is not there. That is a
+ * different fact from "the store holds no bars for this month", and both are
+ * different from "nobody asked".
+ *
+ * @param {string} feed @param {string} key @param {string} timeframe
+ * @param {string} month @param {string} day `YYYY-MM-DD`, or `''` for the month's last bar
+ * @returns {Promise<Quote>}
+ */
+export async function quoteOn(feed, key, timeframe, month, day) {
+  if (!day) return quote(feed, key, timeframe, month);
+  const { bars, why } = await monthBars(feed, key, timeframe, month);
+  if (why) return nothing(key, why);
+  let found = null;
+  for (const bar of bars) {
+    if (typeof bar.t !== 'number') continue;
+    if (istDay(bar.t * 1000) === day) found = bar;
+  }
+  if (!found) {
+    return nothing(
+      key,
+      `The store holds ${bars.length} ${timeframe} bars for this series in ` +
+        `${month}, and none of them fall on ${day}. The month was read and the ` +
+        `day is not in it — this series did not trade that day, or its bars ` +
+        `were never pulled.`
+    );
+  }
+  return fromBar(key, found);
+}
+
+/**
+ * Quotes for the rows on screen, as of one day.
+ *
+ * @param {string} feed
+ * @param {{key: string, timeframe: string, month: string}[]} rows
+ * @param {string} day `YYYY-MM-DD`, or `''`
+ * @returns {Promise<Quote[]>}
+ */
+export function quotesOn(feed, rows, day) {
+  return pooled(rows, IN_FLIGHT, (r) => quoteOn(feed, r.key, r.timeframe, r.month, day));
+}
+
+/**
+ * The days this series actually traded in the month, ascending, as `YYYY-MM-DD`.
+ *
+ * Derived from bars that have already been fetched and cached, so asking again
+ * costs a Map probe and a fold over an array that is bounded by `DAY_BUDGET`.
+ * Every day it returns has at least one bar behind it — the picker cannot offer
+ * a weekend, a holiday, or a day nobody pulled.
+ *
+ * @param {string} feed @param {string} key @param {string} timeframe @param {string} month
+ * @returns {Promise<string[]>}
+ */
+export async function daysIn(feed, key, timeframe, month) {
+  const { bars } = await monthBars(feed, key, timeframe, month);
+  /** @type {Set<string>} */
+  const days = new Set();
+  for (const bar of bars) {
+    if (typeof bar.t !== 'number') continue;
+    const d = istDay(bar.t * 1000);
+    if (d) days.add(d);
+  }
+  return [...days].sort();
 }
 
 /**
