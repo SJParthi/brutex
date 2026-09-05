@@ -128,9 +128,16 @@ export function tabsFrom(keys) {
     const p = parseKey(key);
     // A KEY THAT WILL NOT PARSE IS DROPPED FROM THE TABS AND COUNTED NOWHERE.
     // It cannot be filed under a segment it never named, and filing it under a
-    // guess is the invention section 3 rule 1 forbids. `parseKey` already
-    // carries the `why`; the page surfaces those separately so a store with
-    // unreadable keys does not look like a store with fewer instruments.
+    // guess is the invention section 3 rule 1 forbids.
+    //
+    // THIS COMMENT USED TO SAY "the page surfaces those separately", AND NO
+    // PAGE DOES. `tabsFrom` has one caller and it renders no parse refusal
+    // anywhere, so an unreadable census key vanishes from every count on the
+    // terminal and the store looks smaller than it is — precisely the outcome
+    // the sentence claimed was prevented. A comment that describes a safeguard
+    // nobody built is worse than no comment: it stops the next reader looking.
+    // `parseKey` does carry the `why`; surfacing it is work this page has not
+    // done, and saying so is the honest state until it does.
     if (!p.underlying || !p.segment || !p.kind) continue;
     if (!bySegment.has(p.segment)) bySegment.set(p.segment, []);
     (bySegment.get(p.segment) ?? []).push(key);
@@ -355,25 +362,12 @@ export function quote(feed, key, timeframe, month) {
   return run;
 }
 
-/**
- * Quotes for the rows a reader can currently see.
- *
- * THE INCREMENT IS THE VIEWPORT AND THIS IS THE FUNCTION THAT MAKES IT ONE. A
- * caller hands it the visible slice; it fetches at `IN_FLIGHT` outstanding and
- * resolves in the order given, so the caller can index the answers straight
- * against the rows it drew.
- *
- * Already-cached series cost nothing but a Map probe, so re-asking on every
- * scroll frame is cheap and correct: the pool only ever carries the rows that
- * newly came into view.
- *
- * @param {string} feed
- * @param {{key: string, timeframe: string, month: string}[]} rows
- * @returns {Promise<Quote[]>}
- */
-export function quotesFor(feed, rows) {
-  return pooled(rows, IN_FLIGHT, (r) => quote(feed, r.key, r.timeframe, r.month));
-}
+/* `quotesFor` WAS REMOVED. It was exported, had no importer anywhere in
+   `web/src` or `web/tests`, and was superseded by `quotesOn` the day the day
+   and time pickers landed — `quotesOn` with an empty `day` takes the identical
+   cheap path. The one comment that named it pointed a reader at the wrong
+   function for the live mechanism. Two spellings of one job, one of them
+   unreachable. */
 
 /**
  * How many bars this page will read to answer a question about ONE DAY.
@@ -393,10 +387,25 @@ export function quotesFor(feed, rows) {
  *
  * The census already carries `rows` per instrument-month-timeframe, so the cost
  * is KNOWN BEFORE ANYTHING IS FETCHED and the check is one Map probe — see
- * `store.byCell`. 512 admits every timeframe from `1day` down to about `5min`
- * and refuses the two finest, and the refusal is shown with the count so the
- * reader can see which side of the line they are on rather than finding a
- * control mysteriously disabled.
+ * `store.byCell`.
+ *
+ * WHERE 512 ACTUALLY FALLS, counted rather than guessed. This paragraph used to
+ * claim it admitted "down to about `5min`" and refused "the two finest", and
+ * both halves were wrong — by a factor of three on the rung and by three on the
+ * count. Against the measured figures above (a `1day` month ~21 bars, `60min`
+ * ~150, `1min` ~8,000) and `docs/06-limits.md`, which records a real
+ * `15min` month at 475 bars:
+ *
+ *   admitted   1day ~21 · 60min ~150 · 30min ~275 · 15min 475 (measured)
+ *   refused    10min ~750 · 5min ~1,425 · 3min · 2min · 1min ~7,125
+ *
+ * So it admits four rungs and refuses five, and `5min` is on the refused side
+ * rather than the admitted one. A reader following the old sentence would have
+ * expected day selection to work at `5min`, where it never can, and anyone
+ * re-tuning this constant would have started from a number wrong by 3x.
+ *
+ * The refusal is shown with the count so the reader can see which side of the
+ * line they are on rather than finding a control mysteriously disabled.
  */
 export const DAY_BUDGET = 512;
 
@@ -412,7 +421,12 @@ export const DAY_BUDGET = 512;
  * without a second sort.
  *
  * @param {string} feed @param {string} key @param {string} timeframe @param {string} month
- * @returns {Promise<{bars: any[], why: string|null}>}
+ * @returns {Promise<{bars: any[], why: string|null, faults: string|null, total: number}>}
+ *          `faults` is the server's word when a record in the month would not
+ *          read (it answers 206 for that), and `total` is the month's real bar
+ *          count against `bars`, which is only the page this budget asked for.
+ *          Both are carried because dropping them collapses three different
+ *          absences into one wrong sentence downstream.
  */
 export function monthBars(feed, key, timeframe, month) {
   const id = `bars|${quoteKey(feed, key, timeframe, month)}`;
@@ -421,7 +435,14 @@ export function monthBars(feed, key, timeframe, month) {
 
   const run = (async () => {
     const parts = seriesParams(key);
-    if (!parts) return { bars: [], why: `${key} is not a series key this store can name.` };
+    if (!parts) {
+      return {
+        bars: [],
+        why: `${key} is not a series key this store can name.`,
+        faults: null,
+        total: 0
+      };
+    }
     const q = new URLSearchParams({
       feed,
       exchange: parts.exchange,
@@ -444,13 +465,36 @@ export function monthBars(feed, key, timeframe, month) {
           bars: [],
           why:
             body?.error ??
-            `/bars/window.json answered HTTP ${res.status} with no window for ${month}.`
+            `/bars/window.json answered HTTP ${res.status} with no window for ${month}.`,
+          faults: null,
+          total: 0
         };
       }
-      return { bars: body.bars, why: null };
+      /* `faults` AND `total` TRAVEL WITH THE BARS, because dropping them turns
+         two different absences into one wrong sentence.
+         ---------------------------------------------------------------------
+         `faults` is non-null when a record in the month would not read, and the
+         server answers 206 for it. Discarding it made a DAMAGED month
+         indistinguishable from a complete one, so `quoteOn` went on to state
+         that the series did not trade that day — converting "part of this month
+         is unreadable" into a factual claim about the market. The single-bar
+         path in this same module reads `faults` and says exactly why: a reader
+         must be able to tell those apart.
+
+         `total` is the month's real bar count. `bars` is the server's page,
+         capped at `DAY_BUDGET` by the `limit` this function pins, so reporting
+         `bars.length` as the store's holding states the budget as if it were
+         the month — and then concludes a day is absent when it is merely past
+         the truncation point. */
+      return {
+        bars: body.bars,
+        why: null,
+        faults: typeof body.faults === 'string' ? body.faults : null,
+        total: typeof body.total === 'number' ? body.total : body.bars.length
+      };
     } catch (error) {
       const e = /** @type {any} */ (error);
-      return { bars: [], why: String(e && e.message ? e.message : e) };
+      return { bars: [], why: String(e && e.message ? e.message : e), faults: null, total: 0 };
     }
   })();
 
@@ -458,7 +502,7 @@ export function monthBars(feed, key, timeframe, month) {
   return run;
 }
 
-/** @type {Map<string, Promise<{bars: any[], why: string|null}>>} */
+/** @type {Map<string, Promise<{bars: any[], why: string|null, faults: string|null, total: number}>>} */
 const months = new Map();
 
 /**
@@ -473,15 +517,20 @@ const months = new Map();
  * A day the series did not trade is an ABSENCE WITH A REASON, not an empty row:
  * the month was read, the day was looked for, and it is not there. That is a
  * different fact from "the store holds no bars for this month", and both are
- * different from "nobody asked".
+ * different from "nobody asked" — and different again from the two this
+ * function now separates below: a month whose records partly would not read,
+ * and a month longer than the budget that was read only as far as the cap.
  *
  * @param {string} feed @param {string} key @param {string} timeframe
  * @param {string} month @param {string} day `YYYY-MM-DD`, or `''` for the month's last bar
+ * @param {string} [time] `HH:MM` in IST, or `''` for the day's last bar. Named
+ *        here because the code branches on it and a doc that omits a parameter
+ *        the function reads describes a different function.
  * @returns {Promise<Quote>}
  */
 export async function quoteOn(feed, key, timeframe, month, day, time = '') {
   if (!day) return quote(feed, key, timeframe, month);
-  const { bars, why } = await monthBars(feed, key, timeframe, month);
+  const { bars, why, faults, total } = await monthBars(feed, key, timeframe, month);
   if (why) return nothing(key, why);
 
   /* THE LAST MATCH WINS, WHICH IS WHAT MAKES THIS A CLOSE.
@@ -510,11 +559,33 @@ export async function quoteOn(feed, key, timeframe, month, day, time = '') {
     );
   }
   if (!found) {
+    /* THREE REASONS A DAY IS NOT HERE, AND THEY ARE NOT INTERCHANGEABLE.
+       This said one thing — "this series did not trade that day" — for all
+       three, which is a claim about the MARKET made from a fact about the read.
+       A damaged record and a truncated page are facts about this request. */
+    if (faults) {
+      return nothing(
+        key,
+        `The store holds ${month} for this series, but a record in it would ` +
+          `not read: ${faults}. ${day} may be inside the damaged part, so ` +
+          `whether this series traded that day is not something this read can say.`
+      );
+    }
+    if (total > bars.length) {
+      return nothing(
+        key,
+        `${month} holds ${total.toLocaleString('en-IN')} ${timeframe} bars for ` +
+          `this series and only the first ${bars.length.toLocaleString('en-IN')} ` +
+          `were read — the budget stops at ${DAY_BUDGET.toLocaleString('en-IN')}. ` +
+          `${day} is past that cut, so its absence here is this page's limit and ` +
+          `not the store's. A coarser timeframe puts the whole month inside the budget.`
+      );
+    }
     return nothing(
       key,
       `The store holds ${bars.length} ${timeframe} bars for this series in ` +
-        `${month}, and none of them fall on ${day}. The month was read and the ` +
-        `day is not in it — this series did not trade that day, or its bars ` +
+        `${month}, and none of them fall on ${day}. The month was read whole and ` +
+        `the day is not in it — this series did not trade that day, or its bars ` +
         `were never pulled.`
     );
   }
@@ -546,11 +617,14 @@ export function quotesOn(feed, rows, day, time = '') {
  *
  * @param {string} feed @param {string} key @param {string} timeframe
  * @param {string} month @param {string} day `YYYY-MM-DD`
- * @returns {Promise<string[]>}
+ * @returns {Promise<{times: string[], why: string|null}>} `why` is the reason
+ *          the month could not be read, so an empty list and a failed read are
+ *          not the same answer.
  */
 export async function timesOn(feed, key, timeframe, month, day) {
-  if (!day) return [];
-  const { bars } = await monthBars(feed, key, timeframe, month);
+  if (!day) return { times: [], why: null };
+  // The `why` travels for the reason `daysIn` states directly above.
+  const { bars, why } = await monthBars(feed, key, timeframe, month);
   /** @type {Set<string>} */
   const times = new Set();
   for (const bar of bars) {
@@ -560,7 +634,7 @@ export async function timesOn(feed, key, timeframe, month, day) {
     const c = istClock(ms);
     if (c) times.add(c);
   }
-  return [...times].sort();
+  return { times: [...times].sort(), why };
 }
 
 /**
@@ -572,10 +646,18 @@ export async function timesOn(feed, key, timeframe, month, day) {
  * a weekend, a holiday, or a day nobody pulled.
  *
  * @param {string} feed @param {string} key @param {string} timeframe @param {string} month
- * @returns {Promise<string[]>}
+ * @returns {Promise<{days: string[], why: string|null}>} `why` is the reason
+ *          the month could not be read, so an empty list and a failed read are
+ *          not the same answer.
  */
 export async function daysIn(feed, key, timeframe, month) {
-  const { bars } = await monthBars(feed, key, timeframe, month);
+  /* THE `why` IS CARRIED OUT, NOT DESTRUCTURED AWAY.
+     Discarding it turned a FAILED month read into an empty list, and an empty
+     list is what the caller uses to disable the Date picker. So a transport
+     error, a refused parameter or a damaged month all produced a control that
+     was silently unavailable with no reason attached — the shape section 4
+     bans, reached by dropping a value this module already had in hand. */
+  const { bars, why } = await monthBars(feed, key, timeframe, month);
   /** @type {Set<string>} */
   const days = new Set();
   for (const bar of bars) {
@@ -583,7 +665,7 @@ export async function daysIn(feed, key, timeframe, month) {
     const d = istDay(bar.t * 1000);
     if (d) days.add(d);
   }
-  return [...days].sort();
+  return { days: [...days].sort(), why };
 }
 
 /**

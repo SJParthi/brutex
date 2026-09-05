@@ -33,7 +33,7 @@
    *   * THE INCREMENT IS THE VIEWPORT. A price exists only in a bar file, one
    *     request per series, so a grid of 215 instruments would be 215
    *     requests. Quotes are fetched for the rows on screen and cached; see
-   *     `quotesFor`.
+   *     `quotesOn`.
    *
    * # The columns this store cannot fill, and why they are still drawn
    *
@@ -382,8 +382,24 @@
     let base = matching;
     if (rule?.keep) {
       const keep = rule.keep;
+      /* A VALUE THAT IS NOT KNOWN YET DOES NOT FAIL THE FILTER.
+         ---------------------------------------------------------------------
+         This read `typeof v === 'number' && keep(v)`, which treats "no quote
+         yet" as "does not pass" — and quotes are cleared on every change of
+         feed, timeframe, month, date or time. So with a filtering chip lit,
+         changing the month emptied the grid outright for the length of the
+         refetch, and the empty state then announced "The store holds no series
+         matching all three" about a store that demonstrably held them.
+         MEASURED: Options, `Price Gainers`, three held contracts — 3 rows, then
+         0 rows and that sentence, then 3 rows again.
+
+         Unknown is not false. It is the same rule the dashes keep in the grid
+         and the same one `sortValue` keeps for ordering, where null sorts last
+         rather than as zero. A row with no value yet is CARRIED, renders its
+         pending dot, and is filtered on the next pass once its quote lands. */
       base = base.filter((k) => {
         const v = sortValue(k, rule.by);
+        if (v === null) return true;
         return typeof v === 'number' && keep(v);
       });
     }
@@ -471,6 +487,8 @@
 
   /** The days the visible rows actually traded, ascending. */
   let days = $state(/** @type {string[]} */ ([]));
+  /** Why the month could not be read, when that is why `days` is empty. */
+  let daysWhy = $state(/** @type {string|null} */ (null));
 
   $effect(() => {
     const feed = store.feed;
@@ -479,6 +497,7 @@
     const mo = month;
     if (!feed || !tf || !mo || !dayCapable || want.length === 0) {
       days = [];
+      daysWhy = null;
       return;
     }
     let live = true;
@@ -486,13 +505,35 @@
        not all trade the same days — a halt, a listing, a suspension — and
        taking the first row's days as the month's would hide every day the
        others traded and it did not. */
-    Promise.all(want.map((key) => daysIn(feed, key, tf, mo))).then((lists) => {
+    Promise.all(want.map((key) => daysIn(feed, key, tf, mo))).then((answers) => {
       if (!live) return;
-      days = [...new Set(lists.flat())].sort();
+      days = [...new Set(answers.flatMap((a) => a.days))].sort();
+      /* A FAILED READ IS NOT AN EMPTY MONTH. `daysIn` now carries the reason
+         the month could not be read, and without it a transport error looked
+         exactly like a month that holds no days — a silently disabled Date
+         picker with nothing to explain it. */
+      daysWhy = answers.find((a) => a.why)?.why ?? null;
     });
     return () => {
       live = false;
     };
+  });
+
+  /* A CHOSEN DAY MUST STILL BE ON OFFER, AND NOTHING CHECKED.
+     ------------------------------------------------------------------------
+     `day` was cleared only when the tab, year, month, timeframe or segment
+     changed. The option list is a fold over the VISIBLE rows, so it also moves
+     when the rows do — a chip filter, a sort, a segment narrowing, or the pager
+     — and none of those clears the day. The control then rendered BLANK, with
+     the picked date absent from its own list, while that same date was still
+     being applied to every quote on the page: a filter in force that the
+     control no longer showed.
+     Clearing is right rather than keeping: the day came from a list that no
+     longer contains it, so there is nothing to re-select. `days.length > 0`
+     guards the transient window where the list has not been folded yet, which
+     would otherwise clear a perfectly good day on every refetch. */
+  $effect(() => {
+    if (day && days.length > 0 && !days.includes(day)) day = '';
   });
 
   /** The chosen minute, `HH:MM` in IST, or `''` for the day's last bar. */
@@ -506,6 +547,12 @@
 
   /** The minutes the visible rows are stamped with on the chosen day. */
   let times = $state(/** @type {string[]} */ ([]));
+
+  /* The same re-validation for the minute, for the same reason: its list is a
+     fold over the same moving set of rows. */
+  $effect(() => {
+    if (time && times.length > 0 && !times.includes(time)) time = '';
+  });
 
   $effect(() => {
     const feed = store.feed;
@@ -521,9 +568,9 @@
     /* THE UNION AGAIN, for the reason the day list gives: two instruments need
        not be stamped with the same minutes, and a series that halted at noon
        would erase the afternoon from a picker built on it alone. */
-    Promise.all(want.map((key) => timesOn(feed, key, tf, mo, on))).then((lists) => {
+    Promise.all(want.map((key) => timesOn(feed, key, tf, mo, on))).then((answers) => {
       if (!live) return;
-      times = [...new Set(lists.flat())].sort();
+      times = [...new Set(answers.flatMap((a) => a.times))].sort();
     });
     return () => {
       live = false;
@@ -869,7 +916,21 @@
       @param {Quote|undefined} quote @returns {number|null} */
   function absMove(quote) {
     if (!quote || quote.close === null || quote.chg === null) return null;
+    /* -10000 BASIS POINTS IS -100%, AND THE DIVISOR IS EXACTLY ZERO THERE.
+       `close / (1 + chg / 10_000)` is a division by zero at that one input,
+       giving ±Infinity — or NaN when the close is also 0 — and the result
+       flowed on to `rupee`, which answers a non-safe-integer with an em dash.
+       So the cell rendered a plain dash carrying the DERIVATION tooltip, which
+       reads as "the store has no change here" when the truth is that the
+       previous close was zero and the move cannot be reconstructed from a
+       ratio at all.
+       It is not hypothetical on this data: a contract that fell to nothing is
+       exactly the `-100.00 %` row the source terminal prints all over its
+       Futures tab, and section 3 rule 1 forbids answering it with a number
+       nobody computed. `null` here reaches the named-absence branch instead. */
+    if (quote.chg === -10_000) return null;
     const before = quote.close / (1 + quote.chg / 10_000);
+    if (!Number.isFinite(before)) return null;
     return quote.close - before;
   }
 
@@ -887,26 +948,36 @@
       if (v === null) {
         return { text: '—', why: quote.chgWhy ?? 'No change was recorded for this bar.', dir: 0 };
       }
-      /* THE FIGURE IS DERIVED AND SAYS SO ON HOVER.
-         `chg` is INTEGER basis points and `close` is a paisa integer; the
-         previous close is reconstructed from their ratio, so the reconstruction
-         is quantised to about `close / 10000` paisa. On a ₹52,265 contract that
-         is roughly five paise of slack, and this cell prints to the paisa — the
-         last digit is arithmetic, not measurement.
-         It is not rounded away, because a reader comparing this against the
-         percentage beside it should see a figure consistent with it. It is
-         LABELLED instead: the number stands, and hovering says what it is. */
+      /* THE FIGURE IS DERIVED AND SAYS SO ON HOVER — AND THE SLACK IS FAR
+         LARGER THAN THIS COMMENT FIRST CLAIMED.
+         ---------------------------------------------------------------------
+         `chg` is INTEGER basis points and `close` is a PAISA integer, so the
+         reconstruction is quantised to about `close / 10000` — and that
+         quotient is in PAISA, not rupees. This block used to read "roughly five
+         paise of slack" for a ₹52,265 contract. The arithmetic is
+         5,226,500 / 10,000 = 522.65 paisa, which is ₹5.23: the estimate was
+         wrong by a factor of a hundred, and the sentence that followed it —
+         "the last digit is arithmetic" — understated the reach by two more
+         places. On that price the RUPEES are uncertain, not the paise.
+
+         So the note now states the slack in the same units it renders, and says
+         which digits it reaches. The figure is still not rounded away: a reader
+         comparing it against the percentage beside it should see a number
+         consistent with that percentage, and rounding to the honest precision
+         would break the correspondence. It is LABELLED instead. */
+      const slackPaisa = Math.max(1, Math.round((quote.close ?? 0) / 10_000));
       return {
         text: rupee(Math.round(v)),
         dir: Math.sign(v),
         why:
           'Derived, not measured. The wire carries the close and the change as ' +
           'integer basis points, not the previous close, so this move is ' +
-          'reconstructed from the two. The ratio is whole basis points, which ' +
-          'leaves about ' +
-          rupee(Math.max(1, Math.round((quote.close ?? 0) / 10000))) +
-          ' of slack on this price — the last digit is arithmetic rather than a ' +
-          'reading. The Change % beside it is the figure the store actually holds.'
+          'reconstructed from the two. Whole basis points leave about ' +
+          rupee(slackPaisa) +
+          ' of slack on this price, so the figure is uncertain from its ' +
+          (slackPaisa >= 100 ? 'rupees' : 'paise') +
+          ' down — it is shown at full precision only to stay consistent with ' +
+          'the Change % beside it, which is the figure the store actually holds.'
       };
     }
     if (col.src === 'chg') {
@@ -1062,10 +1133,29 @@
          subtraction: every column right of `Name` gains a third of the window,
          which is the width the source terminal's own captures were measured at.
          ============================================================ -->
-    <main class="tgrid">
+    <!-- A `div`, NOT A SECOND `main`. The root layout renders
+         `<main class="main" id="main">` OUTSIDE the block that stands the
+         console bar down, so it is present on this route too — and this element
+         sat inside it, giving the document two nested `main` landmarks. A
+         screen reader's landmark list then offers two "main"s for one page and
+         the skip link's target is the outer one, which is not the grid. No
+         other route in this app emits a `main` of its own. The class carries
+         all the styling; the tag carried only the defect. -->
+    <div class="tgrid">
       <div class="ttabs">
         {#each tabs as t (t.id)}
-          <button class="ttab" class:on={t.id === activeTab} onclick={() => (activeTab = t.id)}>
+          <!-- `aria-pressed` CARRIES THE STATE THE GREEN PILL CARRIES.
+               Which tab is active lived only in a CSS class, so assistive
+               technology was read three identical buttons with no indication
+               which one the grid below belongs to. These are toggle buttons
+               rather than a tablist: the grid is not a labelled tabpanel and
+               claiming that relationship would be a second untruth. -->
+          <button
+            class="ttab"
+            class:on={t.id === activeTab}
+            aria-pressed={t.id === activeTab}
+            onclick={() => (activeTab = t.id)}
+          >
             {t.label}
           </button>
         {/each}
@@ -1078,9 +1168,12 @@
                looks live is the failure section 4 names; one that refuses and
                names the missing field is a fact the reader can act on. -->
           {#each chips as c, i (c)}
+            <!-- The lit chip FILTERS rows out of the grid and reorders the
+                 rest, and that state was visible only as a colour. -->
             <button
               class="chip"
               class:on={i === chipIndex}
+              aria-pressed={i === chipIndex}
               disabled={!CHIP_RULES[c] || !canSortByQuote}
               title={CHIP_RULES[c]
                 ? canSortByQuote
@@ -1151,8 +1244,12 @@
               bind:value={day}
               disabled={!dayCapable || days.length === 0}
               title={dayCapable
-                ? 'The last bar on the chosen day. “Month” is the month’s last bar.'
-                : `A day needs the month read, and the heaviest visible series holds ${heaviest.toLocaleString('en-IN')} ${timeframe} bars against a budget of ${DAY_BUDGET.toLocaleString('en-IN')}. Choose a coarser timeframe to pick a date.`}
+                ? daysWhy
+                  ? `The month could not be read, so no day can be offered: ${daysWhy}`
+                  : 'The last bar on the chosen day. “Month” is the month’s last bar.'
+                : rows.length === 0
+                  ? 'There are no rows in view, so there is no month to read for a date. This is not a budget refusal — the grid is empty.'
+                  : `A day needs the month read, and the heaviest visible series holds ${heaviest.toLocaleString('en-IN')} ${timeframe} bars against a budget of ${DAY_BUDGET.toLocaleString('en-IN')}. Choose a coarser timeframe to pick a date.`}
             >
               <option value="">Month</option>
               {#each days as d (d)}<option value={d}>{dayLabel(d)}</option>{/each}
@@ -1199,11 +1296,29 @@
         {#if tab?.why}
           <p class="tnote wide">{tab.why}</p>
         {:else if rows.length === 0}
-          <p class="tnote wide">
-            Nothing to show for {tab?.label} at {timeframe || 'no timeframe'} in
-            {month ? monthLabel(month) : 'no month'}. The store holds no series
-            matching all three.
-          </p>
+          <!-- TWO EMPTIES, AND THEY ARE NOT THE SAME FACT.
+               `rows` is post-chip-filter; the old sentence asserted an absence
+               in the STORE, which is a fact about `matching`. The two cannot
+               coincide on the filtered path: a chip's rule only applies while
+               `canSortByQuote`, which requires `totalRows > 0`, so whenever a
+               chip empties the grid the store provably holds matching series
+               and the claim was false.
+               The page already draws this distinction for the pager —
+               "`sorted.length` AND NOT `totalRows`" — and did not draw it here. -->
+          {#if totalRows === 0}
+            <p class="tnote wide">
+              Nothing to show for {tab?.label} at {timeframe || 'no timeframe'} in
+              {month ? monthLabel(month) : 'no month'}. The store holds no series
+              matching all three.
+            </p>
+          {:else}
+            <p class="tnote wide">
+              {totalRows.toLocaleString('en-IN')}
+              {tab?.label.toLowerCase()} series match this window, and none of them passes
+              <strong>{activeChip}</strong>. That is the filter's answer, not the store's —
+              clear the chip to see them.
+            </p>
+          {/if}
         {:else}
           <table>
             <thead>
@@ -1225,12 +1340,26 @@
                      checkboxes feed an order ticket; this page has no ticket to
                      feed. It returns the day something reads it. -->
                 {#each columns as c (c.h)}
-                  <!-- A SORTABLE HEADER IS A CONTROL AND IS REACHABLE AS ONE.
-                       `tabindex` and the key handler only appear when the
-                       column can actually be sorted, so a keyboard lands on
-                       nothing that does not respond. `aria-sort` carries the
-                       direction to a screen reader, which the ▲▼ glyph alone
-                       does not. -->
+                  <!-- A SORTABLE HEADER IS A BUTTON INSIDE A `th`, NOT A `th`
+                       WEARING A TABINDEX.
+                       It used to be the latter: click and key handlers and
+                       `tabindex="0"` on the cell itself. That is reachable by
+                       Tab and it does respond — but its role stays
+                       `columnheader`, so it appears in no screen-reader
+                       controls rotor, and a reader listing what can be operated
+                       on this page is told the grid has nothing. This is the
+                       pattern `aria-sort` was designed to sit beside: the CELL
+                       carries the sort state, the BUTTON is the control that
+                       changes it, and the browser supplies the keyboard
+                       behaviour that was hand-rolled before.
+
+                       THE BUTTON IS ALWAYS RENDERED AND DISABLED WHEN THE
+                       COLUMN CANNOT SORT, rather than branching. One spelling
+                       of the header's content, so a marker added to it cannot
+                       appear in one branch and not the other — and `disabled`
+                       states the fact directly: not focusable, not clickable,
+                       and announced as unavailable rather than as a plain
+                       heading that mysteriously does nothing. -->
                   <th
                     class={c.align}
                     class:sortable={sortableCol(c)}
@@ -1240,25 +1369,22 @@
                         ? 'ascending'
                         : 'descending'
                       : undefined}
-                    tabindex={sortableCol(c) ? 0 : undefined}
                     title={c.src === null
                       ? c.why
                       : sortableCol(c)
                         ? `Sort by ${c.h}`
                         : `Sorting by ${c.h} needs a price for every matching row, and this view holds ${totalRows.toLocaleString('en-IN')} of them against a budget of ${SORT_BUDGET.toLocaleString('en-IN')}. Narrow the segment, or sort by Name, which needs no price.`}
-                    onclick={() => sortableCol(c) && toggleSort(c.src)}
-                    onkeydown={(e) => {
-                      if (!sortableCol(c)) return;
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault();
-                        toggleSort(c.src);
-                      }
-                    }}
-                    >{c.h}{#if c.src === null}<span class="nosrc" aria-hidden="true">*</span
-                      >{/if}{#if sortKey !== '' && sortKey === c.src}<span
-                        class="sortmark"
-                        aria-hidden="true">{sortDir === 'asc' ? '▲' : '▼'}</span
-                      >{/if}</th
+                    ><button
+                      type="button"
+                      class="sortbtn"
+                      disabled={!sortableCol(c)}
+                      onclick={() => toggleSort(c.src)}
+                      >{c.h}{#if c.src === null}<span class="nosrc" aria-hidden="true">*</span
+                        >{/if}{#if sortKey !== '' && sortKey === c.src}<span
+                          class="sortmark"
+                          aria-hidden="true">{sortDir === 'asc' ? '▲' : '▼'}</span
+                        >{/if}</button
+                    ></th
                   >
                 {/each}
               </tr>
@@ -1337,7 +1463,7 @@
           <span><span class="nosrc" aria-hidden="true">*</span> no source in a bar store</span>
         {/if}
       </footer>
-    </main>
+    </div>
   </div>
 </div>
 
@@ -1405,6 +1531,53 @@
   }
 
   /* ---- top bar ---- */
+  /* SELECTED TEXT, DECLARED HERE BECAUSE THE GLOBAL ONE IS UNREADABLE ON THIS
+     PAGE.
+     ------------------------------------------------------------------------
+     `theme.css:500` sets `::selection { background: var(--acc-soft); color:
+     var(--ink-hi) }`, and this page redefines neither token — it redefines
+     eleven, and those two are not among them. So the console's values apply,
+     and under the LIGHT ramp `--ink-hi` resolves to #000814 while `--acc-soft`
+     is a 10%-alpha teal that composites over #121212 to about #121d1f.
+     Selected text then renders near-black on near-black at roughly 1.17:1:
+     invisible.
+
+     The light ramp is reachable here. `app.html` ships `data-theme="dark"`, but
+     the layout defaults the mode to `auto` when storage is empty and then
+     REMOVES the attribute, handing the decision to `prefers-color-scheme` — the
+     same path the `color-scheme: dark` block above was written for. That
+     declaration cannot help: its own comment says it exists for surfaces CSS
+     cannot reach, and this is an explicit CSS colour, not a platform paint.
+
+     Nine classes were renamed to dodge exactly this shape, and `thead th` and
+     `tbody td` were reset because an element selector has no name to change.
+     `::selection` is the same kind of global and was the one that was missed. */
+  .term ::selection {
+    background: var(--pill);
+    color: var(--ink);
+  }
+
+  /* SCROLLBARS, FOR THE SAME REASON AND FROM THE SAME PLACE.
+     `theme.css:506` sets `scrollbar-color: var(--n7) transparent` on the
+     universal selector and paints `::-webkit-scrollbar-thumb` with `--n7` too.
+     Under the light ramp `--n7` is #c7cfdd — a pale grey thumb on this page's
+     black panels — and an explicit `scrollbar-color` OVERRIDES the
+     `color-scheme: dark` above it, so that declaration cannot correct this
+     either. Three surfaces here scroll: the table panel, the chip row and the
+     index strip. */
+  .term *,
+  .term {
+    scrollbar-color: var(--line) transparent;
+  }
+  .term ::-webkit-scrollbar-thumb {
+    background: var(--line);
+    background-clip: content-box;
+  }
+  .term ::-webkit-scrollbar-thumb:hover {
+    background: #3a3a3a;
+    background-clip: content-box;
+  }
+
   .tbar {
     display: flex;
     align-items: center;
@@ -1537,6 +1710,16 @@
   .c-n {
     color: var(--dim);
   }
+  /* `.c-v` HAD NO RULE ANYWHERE — not here, not in `theme.css`, not in the
+     built bundle — while its three siblings all did. The index level was
+     therefore the one value in the strip whose appearance was an accident of
+     inheritance rather than a decision, and it read at the same weight as the
+     dim label beside it. In the source terminal the level is the emphasis of
+     the cell; stated, so it stays that way. */
+  .c-v {
+    color: var(--ink);
+    font-weight: 600;
+  }
   .c-w {
     color: var(--dim);
   }
@@ -1639,7 +1822,21 @@
   /* A REFUSED CHIP READS AS REFUSED BEFORE IT IS CLICKED. Dimmer text, a
      dashed edge and the default cursor, so the difference between "this ranks"
      and "this store cannot rank this" is visible rather than discovered. */
-  .chip:disabled {
+  /* `.chip.on:disabled` IS LISTED TOO, AND IT IS THE WHOLE POINT.
+     `.chip:disabled` and `.chip.on` are both specificity (0,2,0), so the later
+     one wins — and `.chip.on` is later. A chip that was BOTH lit and disabled
+     therefore painted accent green with an accent border, reading as the live
+     ranking chip while refusing every click.
+
+     MEASURED with 300 instruments, past the 250 budget: `Intraday Movers` came
+     back `disabled: true` and `#06B878`, while the six chips beside it were
+     correctly `#5A5A5A` and dashed. So the one chip an operator would look at
+     to learn the ranking was the one lying about it.
+
+     (0,3,0) settles it in both directions rather than relying on source order,
+     which the next edit to this block would silently change. */
+  .chip:disabled,
+  .chip.on:disabled {
     color: #5a5a5a;
     border-style: dashed;
     border-color: #2a2a2a;
@@ -1804,8 +2001,15 @@
   /* THE NAME CELL CARRIES THE LEFT INSET THE SELECTION COLUMN USED TO. With
      that column gone the first thing in a row is the instrument, and it would
      otherwise sit flush against the panel edge. */
+  /* The Name column's left inset. A SORTABLE header carries its padding on the
+     button instead — `th.sortable` zeroes the cell's — so the inset is applied
+     there too, or the one column that is both left-aligned and sortable would
+     lose it. */
   th.left,
   .nm {
+    padding-left: 14px;
+  }
+  th.left .sortbtn {
     padding-left: 14px;
   }
   /* `.right` IS EMITTED ON EVERY NUMERIC COLUMN AND HAD NO RULE. The default
@@ -1827,9 +2031,41 @@
      The cursor and the hover are the affordance; a column with no source, or
      one whose set is too large to quote, keeps the default cursor and stays
      dim, so the difference is visible before the click rather than after it. */
+  /* EVERY header cell now holds a button, sortable or not, so the padding moves
+     to the button on all of them — not only the sortable ones — or the columns
+     would sit at two different insets. */
+  thead th {
+    padding: 0;
+  }
   th.sortable {
     cursor: pointer;
     user-select: none;
+  }
+  .sortbtn:disabled {
+    cursor: default;
+  }
+  /* THE BUTTON IS THE WHOLE CELL, so the click target is what it looks like and
+     the measured column geometry is unchanged: the padding that used to sit on
+     the `th` moves here, and `inherit` keeps the alignment the column asked
+     for rather than a button's centred default. */
+  .sortbtn {
+    all: unset;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    width: 100%;
+    height: 100%;
+    padding: 0 10px;
+    box-sizing: border-box;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  th.left .sortbtn {
+    justify-content: flex-start;
+  }
+  .sortbtn:focus-visible {
+    outline: 2px solid var(--acc);
+    outline-offset: -2px;
   }
   th.sortable:hover {
     color: var(--ink);
@@ -1837,10 +2073,8 @@
   th.sorted {
     color: var(--ink);
   }
-  th.sortable:focus-visible {
-    outline: 2px solid var(--acc);
-    outline-offset: -2px;
-  }
+  /* The focus ring moved to `.sortbtn`: the cell is no longer the control, so
+     focusing it is not a state that can occur. */
   /* THE MARK DOES NOT MOVE THE COLUMN. Absolutely the same problem the
      no-source asterisk had: an inline glyph appearing on click would widen its
      header and shift every column right of it, so the grid would twitch each
