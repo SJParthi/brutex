@@ -155,6 +155,40 @@ export function istMonth(d) {
 }
 
 /**
+ * A calendar day in IST, as `YYYY-MM-DD` — THE KEY FORM, NOT A LABEL.
+ *
+ * # This is the one function in this file that is not presentation, and it says so
+ *
+ * The header above forbids reformatting a key and is right: `Jan 2020` is not a
+ * month any store has heard of. This returns the opposite — the raw ISO form
+ * that IS a key, safe for `Map` keys, `Set` membership, sorting and
+ * `<input type="date">`, because `YYYY-MM-DD` is fixed-width and
+ * most-significant-first.
+ *
+ * It lives here for the reason `istMonth` gives directly below: the
+ * `Asia/Kolkata` clock is configured once in this module, and a second spelling
+ * of "which IST day is this instant" is a second answer the day one of them is
+ * edited. A bar filed under the browser's local day instead of the exchange's
+ * is off by one for every bar after 18:30 UTC, which is most of a session.
+ *
+ * # The unit trap
+ *
+ * `istFields` reads MILLISECONDS. `/bars/window.json` writes `t` in SECONDS —
+ * `bar.ts_micros / 1_000_000` on the Rust side. A caller handing this a bar
+ * timestamp unmultiplied gets 1970 for every row, which sorts and groups
+ * perfectly and is uniformly wrong. Multiply at the call site; this function
+ * cannot tell the two apart and must not guess.
+ *
+ * @param {Date | number | string | null | undefined} d milliseconds, a Date, or an ISO string
+ * @returns {string} `YYYY-MM-DD`, or `''` when there is no instant to read
+ */
+export function istDay(d) {
+  const f = istFields(d);
+  if (f === null) return '';
+  return `${f.y}-${String(f.mo).padStart(2, '0')}-${String(f.day).padStart(2, '0')}`;
+}
+
+/**
  * A calendar day in IST. `02 Sep 2024`.
  *
  * Accepts a `Date`, epoch milliseconds, or anything `Date.parse` accepts —

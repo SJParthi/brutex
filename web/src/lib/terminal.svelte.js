@@ -217,6 +217,40 @@ const inflight = new Map();
  * @property {string|null} why    why this quote holds nothing at all
  */
 
+/**
+ * ONE BAR AS A QUOTE — the single mapping from the wire's row to this page's.
+ *
+ * Extracted so the two fetch paths cannot disagree about what a bar means. The
+ * cheap path asks for `limit=1` and reads the month's last bar; the day path
+ * reads a whole month and picks a bar out of it. Two copies of this mapping
+ * would drift the first time a field is added, and the drift would be invisible
+ * — both paths would render, and only one would be right.
+ *
+ * @param {string} key
+ * @param {any} bar
+ * @returns {Quote}
+ */
+function fromBar(key, bar) {
+  return {
+    key,
+    close: typeof bar.c === 'number' ? bar.c : null,
+    open: typeof bar.o === 'number' ? bar.o : null,
+    high: typeof bar.h === 'number' ? bar.h : null,
+    low: typeof bar.l === 'number' ? bar.l : null,
+    volume: typeof bar.v === 'number' ? bar.v : null,
+    // NULL IS THE WIRE'S OWN WORD HERE, not a coercion. The server writes
+    // `null` when the record carries `OI_NULL`, and `CLAUDE.md` section 7 says
+    // the sentinel means absent while zero means zero. Reading a missing open
+    // interest as `0` is the single defect most visible in the captures this
+    // page recreates.
+    oi: typeof bar.oi === 'number' ? bar.oi : null,
+    chg: typeof bar.chg === 'number' ? bar.chg : null,
+    chgWhy: typeof bar.chg_why === 'string' ? bar.chg_why : null,
+    at: typeof bar.t === 'number' ? bar.t : null,
+    why: null
+  };
+}
+
 /** A quote that answers nothing, and says which reason. @param {string} key @param {string} why */
 const nothing = (key, why) => ({
   key,
@@ -305,24 +339,7 @@ export function quote(feed, key, timeframe, month) {
             : `The store holds no ${timeframe} bars for this series in ${month}.`
         );
       }
-      return {
-        key,
-        close: typeof bar.c === 'number' ? bar.c : null,
-        open: typeof bar.o === 'number' ? bar.o : null,
-        high: typeof bar.h === 'number' ? bar.h : null,
-        low: typeof bar.l === 'number' ? bar.l : null,
-        volume: typeof bar.v === 'number' ? bar.v : null,
-        // NULL IS THE WIRE'S OWN WORD HERE, not a coercion. The server writes
-        // `null` when the record carries `OI_NULL`, and `CLAUDE.md` section 7
-        // says the sentinel means absent while zero means zero. Reading a
-        // missing open interest as `0` is the single defect most visible in the
-        // captures this page recreates.
-        oi: typeof bar.oi === 'number' ? bar.oi : null,
-        chg: typeof bar.chg === 'number' ? bar.chg : null,
-        chgWhy: typeof bar.chg_why === 'string' ? bar.chg_why : null,
-        at: typeof bar.t === 'number' ? bar.t : null,
-        why: null
-      };
+      return fromBar(key, bar);
     } catch (error) {
       const e = /** @type {any} */ (error);
       return nothing(key, String(e && e.message ? e.message : e));

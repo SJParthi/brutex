@@ -18,7 +18,7 @@
    * optional:
    *
    *   * NOTHING IS HARDCODED. There is no list of instruments in this file, no
-   *     list of months, no list of exchanges. The rail, the strip, the tabs and
+   *     list of months, no list of exchanges. The strip, the tabs and
    *     the grid are all folds over `/store.json`'s census, so the day a symbol
    *     is pulled is the day it appears here, and no edit to this file is part
    *     of that.
@@ -89,9 +89,6 @@
   let activeTab = $state('stocks');
   const tab = $derived(tabs.find((t) => t.id === activeTab) ?? tabs[0]);
 
-  /** The rail's free-text filter, and the row it has selected. */
-  let filter = $state('');
-  let picked = $state('');
 
   /* ==================================================================
      THE TIMEFRAME AND THE MONTH — the two axes a bar file is filed under.
@@ -227,26 +224,17 @@
   const rows = $derived(matching.slice(0, shown));
   const totalRows = $derived(matching.length);
 
-  /* THE RAIL IS A SECOND CONSUMER OF QUOTES AND WAS NOT ASKING FOR ANY.
-     Measured in the browser: with the Index tab open, ADANIENT and BAJAJ-AUTO
-     sat in the rail showing an em dash — the same glyph this page uses for "the
-     store has nothing" — while the store held bars for both. The reader cannot
-     tell "absent" from "not requested", which is the failure section 4 bans
-     arrived at by omission rather than by a wrong number.
+  /* THE POOL ASKS FOR THE GRID'S PAGE **AND THE INDEX STRIP**.
+     The strip is the second consumer of quotes, and dropping the rail's head
+     from this union dropped the strip with it: on the Options tab the indices
+     are not in `rows`, so BANKNIFTY and NIFTY rendered their names with no
+     level and no move beside them — MEASURED in the browser, and visible as
+     two bare labels in a strip whose whole purpose is to carry numbers.
 
-     Two halves to the fix. The rail's own visible head is quoted here, joined
-     to the grid's rows so an instrument in both costs one request; and the
-     rows past that head render a dash that SAYS it was never asked for. A
-     bounded head rather than the whole rail, because the rail lists everything
-     held and the engine surface is 215 instruments. */
-  const railKeys = $derived(
-    keys.filter((k) => labelOf(k).toLowerCase().includes(filter.toLowerCase()))
-  );
-  const railQuoted = $derived(new Set(railKeys.slice(0, PAGE)));
-
-  /** The union the quote pool actually asks for: the grid's page and the
-      rail's head, deduplicated, in a stable order. */
-  const wanted = $derived([...new Set([...rows, ...railQuoted])]);
+     Deduplicated, so an index that is also a grid row on the Stocks or Index
+     view costs one request rather than two; and `indices` is at most six, so
+     the union is bounded by the page size plus six however large the store
+     grows. */
 
   /** Whether this instrument has a cell at the chosen (timeframe, month). O(1).
       @param {string} key @returns {boolean} */
@@ -260,7 +248,7 @@
 
   $effect(() => {
     const feed = store.feed;
-    const want = wanted;
+    const want = [...new Set([...rows, ...indices])];
     const tf = timeframe;
     const mo = month;
     if (!feed || !tf || !mo || want.length === 0) return;
@@ -587,88 +575,17 @@
   </div>
 
   <div class="body">
-    <!-- ============================================================
-         THE RAIL. A watchlist of what the store holds, not a watchlist
-         somebody curated — there is no per-user list in this product and
-         inventing one would be inventing a preference.
+    <!-- ============================================================ THE GRID
+         THE WATCHLIST RAIL WAS REMOVED, ON THE OPERATOR'S INSTRUCTION, AND THE
+         GRID TOOK ITS 396px.
+
+         It listed every instrument the store held, with its last close and its
+         move — which is what the grid already is, one tab at a time. Two
+         surfaces answering one question, and the narrower of them had to
+         explain in a paragraph why it was empty. The removal is not only
+         subtraction: every column right of `Name` gains a third of the window,
+         which is the width the source terminal's own captures were measured at.
          ============================================================ -->
-    <aside class="rail">
-      <div class="tsearch">
-        <input type="search" placeholder="Filter held instruments" bind:value={filter} />
-      </div>
-
-      <div class="wl">
-        <div class="wl-h">
-          <span class="wl-t">Held · {feeds.active ?? 'no feed'}</span>
-          <span class="wl-c">{keys.length}</span>
-        </div>
-
-        <div class="wl-tabs">
-          {#each timeframes as r (r)}
-            <button class="wl-tab" class:on={r === timeframe} onclick={() => (timeframe = r)}>{r}</button>
-          {/each}
-        </div>
-
-        <div class="wl-list">
-          {#if store.state === 'error'}
-            <p class="tnote bad">The census could not be read. {store.error}</p>
-          {:else if store.state !== 'ready'}
-            <p class="tnote">Reading /store.json…</p>
-          {:else if keys.length === 0}
-            <p class="tnote">
-              This feed’s store holds nothing. Nothing has been pulled into it —
-              which is a different fact from a market with nothing to show.
-            </p>
-          {:else}
-            {#each railKeys as key (key)}
-              {@const q = quotes.get(key)}
-              {@const p = parseKey(key)}
-              <button
-                class="wl-row"
-                class:on={key === picked}
-                onclick={() => (picked = key)}
-              >
-                <span class="wl-name">
-                  {labelOf(key)}
-                  <span class="wl-ex">{p.exchange} · {p.segment}</span>
-                </span>
-                <span class="wl-num">
-                  {#if q?.close != null}
-                    <span class="wl-ltp">{rupee(q.close)}</span>
-                    {#if q.chg != null}
-                      <span class="wl-chg" class:up={q.chg > 0} class:down={q.chg < 0}>
-                        {pctText(q.chg)}
-                      </span>
-                    {/if}
-                  {:else if q?.why}
-                    <!-- A REAL ABSENCE: the store was asked and holds nothing. -->
-                    <span class="wl-ltp dim" title={q.why}>—</span>
-                  {:else if railQuoted.has(key)}
-                    <!-- Asked for, not yet answered. -->
-                    <span class="wl-ltp dim">·</span>
-                  {:else}
-                    <!-- NEVER ASKED, AND THE GLYPH SAYS SO. An em dash here
-                         would be the same mark this page uses for "the store
-                         holds nothing", and the two facts are not the same. -->
-                    <span
-                      class="wl-ltp dim"
-                      title="No quote was requested for this row. A price is one request per series, so the terminal reads only the grid’s current page and the first {PAGE} rows of this rail. Filter to this instrument, or open its tab, to have it read."
-                      >⋯</span
-                    >
-                  {/if}
-                </span>
-              </button>
-            {/each}
-          {/if}
-        </div>
-      </div>
-
-      <div class="wl-f">
-        <span>Name</span><span>LTP</span><span>LTP %</span>
-      </div>
-    </aside>
-
-    <!-- ============================================================ THE GRID -->
     <main class="tgrid">
       <div class="ttabs">
         {#each tabs as t (t.id)}
@@ -855,7 +772,6 @@
     --h-bar: 57px;
     --h-strip: 42px;
     --h-row: 42px;
-    --w-rail: 396px;
 
     /* DARK UNCONDITIONALLY, AND IT HAS TO SAY SO ITSELF.
        `theme.css` puts `color-scheme: light` on the bare `:root` and flips it
@@ -919,14 +835,12 @@
   .tick-c.up,
   .c-c.up,
   .c-a.up,
-  .wl-chg.up,
   td.up {
     color: var(--up);
   }
   .tick-c.down,
   .c-c.down,
   .c-a.down,
-  .wl-chg.down,
   td.down {
     color: var(--down);
   }
@@ -1029,121 +943,20 @@
     color: var(--dim);
   }
 
-  /* ---- body split ---- */
+  /* ---- body ----
+     ONE COLUMN. It was `var(--w-rail) minmax(0, 1fr)` while the watchlist rail
+     stood on the left; with the rail gone the grid is the only child and takes
+     the window. `minmax(0, 1fr)` and not `1fr`, for the reason `.tgrid` states
+     at length below: a `fr` track still floors at its item's automatic minimum,
+     and this column holds a table that is deliberately wider than the screen. */
   .body {
     display: grid;
-    grid-template-columns: var(--w-rail) minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr);
     min-height: 0;
   }
 
-  /* ---- rail ---- */
-  .rail {
-    display: grid;
-    grid-template-rows: auto 1fr auto;
-    min-height: 0;
-    padding: 12px;
-    gap: 10px;
-  }
-  .tsearch input {
-    width: 100%;
-    height: 40px;
-    background: var(--field);
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    color: var(--ink);
-    padding: 0 12px;
-    font: inherit;
-  }
-  .tsearch input::placeholder {
-    color: var(--dim);
-  }
-  .wl {
-    display: grid;
-    grid-template-rows: auto auto 1fr;
-    min-height: 0;
-    background: var(--panel);
-    border-radius: 8px;
-    overflow: hidden;
-  }
-  .wl-h {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 11px 13px;
-    font-size: 13px;
-  }
-  .wl-c {
-    color: var(--dim);
-  }
-  .wl-tabs {
-    display: flex;
-    gap: 6px;
-    padding: 0 13px 10px;
-    flex-wrap: wrap;
-  }
-  .wl-tab {
-    background: var(--ground);
-    border: 1px solid var(--line);
-    border-radius: 4px;
-    color: var(--dim);
-    font: inherit;
-    font-size: 11px;
-    padding: 3px 7px;
-    cursor: pointer;
-  }
-  .wl-tab.on {
-    color: var(--acc);
-    border-color: var(--acc);
-  }
-  .wl-list {
-    overflow-y: auto;
-    min-height: 0;
-  }
-  .wl-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    width: 100%;
-    background: none;
-    border: 0;
-    border-top: 1px solid var(--line);
-    color: inherit;
-    font: inherit;
-    text-align: left;
-    padding: 9px 13px;
-    cursor: pointer;
-  }
-  .wl-row:hover,
-  .wl-row.on {
-    background: var(--head);
-  }
-  .wl-name {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-  .wl-ex {
-    font-size: 11px;
-    color: var(--dim);
-  }
-  .wl-num {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-end;
-    gap: 2px;
-  }
-  .wl-chg {
-    font-size: 11px;
-  }
   .dim {
     color: var(--dim);
-  }
-  .wl-f {
-    display: flex;
-    gap: 18px;
-    font-size: 11px;
-    color: var(--dim);
-    padding: 4px 4px 0;
   }
 
   /* ---- grid ---- */
@@ -1163,7 +976,12 @@
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto auto 1fr auto;
     min-height: 0;
-    padding: 12px 12px 0 0;
+    /* A LEFT INSET OF ITS OWN, WHICH THE RAIL USED TO PROVIDE. This read
+       `12px 12px 0 0` — no left padding — because a 396px watchlist stood
+       there. With the rail gone the grid starts at the window edge, and a
+       table flush against the glass reads as clipped rather than as wide. */
+    padding: 12px;
+    padding-bottom: 0;
     gap: 0;
   }
   .ttabs {
@@ -1278,6 +1096,19 @@
     font-size: 13px;
     padding: 6px 26px 6px 10px;
     cursor: pointer;
+    /* A `<select>` SIZES TO ITS WIDEST OPTION, WHICH IS NOT A LAYOUT DECISION.
+       MEASURED at 1714px: the Feed control came out 221px wide beside siblings
+       of 65, 68, 71 and 98, because one option reads "Global Datafeeds ·
+       unavailable". The row then reads as lopsided — the widest control is the
+       one whose value is shortest — and the eye takes that as misalignment
+       rather than as a long word.
+
+       A floor and a ceiling: the floor keeps `2026` and `All` from collapsing
+       into stubs so the five read as one set, and the ceiling stops the longest
+       option deciding the row. The full text stays in the option itself and in
+       its `title`, so nothing is lost — only the box stops growing. */
+    min-width: 78px;
+    max-width: 150px;
   }
   .pill:hover {
     border-color: #3a3a3a;
@@ -1358,9 +1189,18 @@
     padding-left: 13px;
     text-align: left;
   }
+  /* THE NO-SOURCE MARK COSTS AS LITTLE WIDTH AS IT CAN.
+     It is this page's addition, not the source terminal's, and it sat inline at
+     full size on three of nine headers — `Spot Price*`, `OI Change*`, `OI
+     Change %*` — widening exactly those columns and pushing every column right
+     of them out of step with the captures. Superscripted at 9px it still reads
+     as a footnote mark and stops moving the grid. */
   .nosrc {
     color: var(--dim);
-    margin-left: 3px;
+    margin-left: 2px;
+    font-size: 9px;
+    vertical-align: super;
+    line-height: 0;
   }
   .more {
     display: block;
@@ -1415,34 +1255,13 @@
   }
 
   /* ---- narrow windows ---------------------------------------------------
-     THE RAIL IS A FIXED 396px, WHICH IS HALF AN 800px WINDOW.
+     THE TWO STEPS THAT SHRANK AND THEN HID THE RAIL ARE GONE WITH IT.
 
-     The captures this page was measured from were taken at ~1714 CSS px, and
-     every width in it is that screen's. That is the right basis and it leaves
-     one failure the basis cannot see: an operator who puts this window on half
-     a monitor gets a 396px watchlist beside a 400px grid, and the grid is the
-     page. Measured at 800px before these rules: the four pickers were pushed
-     off the right edge with `Month` truncated mid-word.
-
-     Two steps rather than a continuous shrink, because the rail's content has
-     a floor — an instrument name, its exchange, its price and its move — and
-     below roughly 260px those start wrapping into each other. So it narrows
-     once, and then it goes, and the grid takes the whole width. It is not
-     hidden behind a toggle: a control that has to be found is worse at 700px
-     than a rail that is honestly absent, and every instrument in it is also a
-     row in the grid. */
-  @media (max-width: 1280px) {
-    .term {
-      --w-rail: 300px;
-    }
-  }
+     What remains is the one thing a narrow window still needs: the grid's own
+     left inset, which the rail used to provide. The table itself does not need
+     a breakpoint — it is wider than the screen by design at every width, and
+     `.panel` scrolls it inside its own box rather than scrolling the page. */
   @media (max-width: 900px) {
-    .body {
-      grid-template-columns: minmax(0, 1fr);
-    }
-    .rail {
-      display: none;
-    }
     .tgrid {
       padding-left: 12px;
     }
