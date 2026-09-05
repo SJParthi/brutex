@@ -266,10 +266,11 @@
       { h: 'OI Change %', src: null, why: NO_SRC.oichg, align: 'right' },
       { h: 'Volume', src: 'volume', align: 'right', kind: 'int' }
     ],
+    /* FUTURES CARRIES NO `Premium` AND NO `Spot Price` IN ITS BASE SET. Both
+       are inserted by `columnsFor` below, and only under the two chips that
+       show them. See the note there — this was measured wrong the first time. */
     futures: [
       { h: 'Name', src: 'name', align: 'left' },
-      { h: 'Premium', src: null, why: NO_SRC.premium, align: 'right' },
-      { h: 'Spot Price', src: null, why: NO_SRC.spot, align: 'right' },
       { h: 'LTP', src: 'close', align: 'right', kind: 'price' },
       { h: 'Change', src: 'chgAbs', align: 'right', kind: 'signed' },
       { h: 'Change %', src: 'chg', align: 'right', kind: 'pct' },
@@ -284,7 +285,44 @@
   COLUMNS.etfs = COLUMNS.stocks;
   COLUMNS.bonds = COLUMNS.stocks;
 
-  const columns = $derived(COLUMNS[activeTab] ?? COLUMNS.stocks);
+  /**
+   * THE COLUMN SET IS A FUNCTION OF THE TAB **AND THE CHIP**, NOT THE TAB ALONE.
+   *
+   * This was wrong on first build and the correction came from measuring the
+   * source captures rather than from reading them: on Futures, the `Premium`
+   * chip shows `Premium` and `Spot Price`, the `Discount` chip shows `Discount`
+   * and `Spot Price`, and the other five chips — Top Volume, OI Gainers, OI
+   * Losers, Price Gainers, Price Losers — show NEITHER. The frozen Name-column
+   * divider was measured at x 725.5 under `Premium`, 740.5 under `Top Volume`
+   * and 782 under `Price Losers`, so the whole grid reflows when the chip
+   * changes. A table built with one fixed schema per tab is wrong on Futures,
+   * and it is wrong invisibly — it renders a plausible grid with two columns
+   * that should not be there.
+   *
+   * Only Futures varies today. The function exists rather than a second table
+   * so that the next tab found to vary is one branch, not a second mechanism.
+   *
+   * @param {string} tab @param {string|null} chip @returns {Col[]}
+   */
+  function columnsFor(tab, chip) {
+    const base = COLUMNS[tab] ?? COLUMNS.stocks;
+    if (tab !== 'futures') return base;
+    /** @type {Col[]} */
+    let extra = [];
+    if (chip === 'Premium') {
+      extra = [
+        { h: 'Premium', src: null, why: NO_SRC.premium, align: 'right' },
+        { h: 'Spot Price', src: null, why: NO_SRC.spot, align: 'right' }
+      ];
+    } else if (chip === 'Discount') {
+      extra = [
+        { h: 'Discount', src: null, why: NO_SRC.premium, align: 'right' },
+        { h: 'Spot Price', src: null, why: NO_SRC.spot, align: 'right' }
+      ];
+    }
+    // AFTER `Name`, WHICH IS ALWAYS FIRST AND ALWAYS FROZEN.
+    return [base[0], ...extra, ...base.slice(1)];
+  }
 
   /* THE CHIP ROW IS PER TAB, and the chip sets genuinely differ between them
      in the terminal this recreates — Options ranks by open interest, Futures by
@@ -304,6 +342,23 @@
     bonds: []
   };
   const chips = $derived(CHIPS[activeTab] ?? []);
+
+  /* THE CHIP IS SELECTABLE, BECAUSE IT CHANGES THE GRID.
+     It was drawn lit-but-inert on first build, which was defensible only while
+     the column set depended on the tab alone. It does not: see `columnsFor`.
+     A chip that reflows the table cannot be decoration.
+     The selection resets with the tab, because a chip belongs to its tab —
+     `Highest OI` has no meaning on Stocks and index 4 on one strip names a
+     different filter on the next. */
+  let chipIndex = $state(0);
+  $effect(() => {
+    void activeTab;
+    chipIndex = 0;
+  });
+  /** @type {string|null} */
+  const activeChip = $derived(chips[chipIndex] ?? null);
+
+  const columns = $derived(columnsFor(activeTab, activeChip));
 
   /* ==================================================================
      RENDERING ONE CELL
@@ -559,7 +614,9 @@
       <div class="chiprow">
         <div class="chips">
           {#each chips as c, i (c)}
-            <button class="chip" class:on={i === 0}>{c}</button>
+            <button class="chip" class:on={i === chipIndex} onclick={() => (chipIndex = i)}
+              >{c}</button
+            >
           {/each}
         </div>
         <div class="ctrls">
@@ -1002,7 +1059,7 @@
     font-size: 13px;
     padding: 7px 14px;
     white-space: nowrap;
-    cursor: default;
+    cursor: pointer;
   }
   .chip.on {
     color: var(--acc);
