@@ -2182,6 +2182,23 @@ pub fn walk_forward_projected_prepared_anchored_search_v4(
     Ok(opaque)
 }
 
+/// One (candidate, side) priced by the V4 population pass, before it is
+/// digested.
+///
+/// The pricing runs in parallel and the digest runs in order, so this is what
+/// crosses between them: everything the sequential pass needs to hash and to
+/// build a [`PendingCandidateV4`], and nothing that borrows -- the validated
+/// grid is re-derived from `evaluated` on the sequential side, because
+/// `validate_evaluation` borrows and a borrow cannot cross the thread boundary.
+struct EvaluatedPairV4 {
+    mask: ConditionMask,
+    side: Direction,
+    resolution_digest: [u8; 32],
+    evaluated: crate::exit_grid_policy::EvaluatedExitGridV1,
+    evaluated_cells: u64,
+    selected: Option<SelectedExitV1>,
+}
+
 #[derive(Clone, Debug)]
 struct PendingCandidateV4 {
     mask: ConditionMask,
@@ -2428,37 +2445,97 @@ fn walk_forward_exact_grid_v4(
         // it, which is deliberate -- it is the attestation, not a duplicate --
         // and is left alone.
         let train_data_digest = data_digest_with_execution(train, Some(trade_train));
-        for item in &closed.kept {
-            for (side, resolved) in [(Direction::Long, &long), (Direction::Short, &short)] {
-                hash_mask_for_admission_v2(&mut population_hasher, item.mask);
-                population_hasher.update(&[direction_tag_v2(side)]);
-                population_hasher.update(&resolved.digest());
-                let run = Run {
-                    mask: item.mask,
-                    direction: run_direction_v4(side),
-                    instrument: execution.instrument(),
-                    timeframe,
-                    params,
-                    data_digest: train_data_digest,
-                    commit: execution.commit(),
-                    feed: execution.feed(),
+        // THE POPULATION IS PRICED IN PARALLEL AND DIGESTED IN ORDER.
+        //
+        // This was one serial `for` over every closed candidate, both sides,
+        // on a machine with fourteen cores -- while every other phase of the
+        // run drove all of them. MEASURED on the operator's 60-minute rung: the
+        // exit grid priced 9,297 candidates in ~500 s at 1,260% CPU, and this
+        // loop then spent over five hours on 10,575 × 2 with no event emitted,
+        // because it ran on one core and gate 17 forbids telemetry here.
+        //
+        // The digest is why it was serial, and the digest is what this keeps.
+        // `population_hasher` is one BLAKE3 stream fed candidate by candidate,
+        // Long then Short, mask then side then resolution then evaluation then
+        // every cell in ordinal order. Its bytes are the run's population
+        // identity and must not move. So the work that costs -- the run, the
+        // attested grid, the cell-count check, the selection -- is done in
+        // parallel into a vector that an INDEXED `collect` returns in candidate
+        // order, and the hashing that must be sequential walks that vector in
+        // the same (candidate, side) order the loop used. Same bytes, same
+        // order, same digest.
+        //
+        // `validate_evaluation` borrows the evaluated grid, so it cannot cross
+        // the thread boundary. It stays in the sequential pass, which is where
+        // the hashing that needs it lives anyway. It is O(cells), not O(bars).
+        //
+        // REFUSALS STAY DETERMINISTIC. Rayon's `collect` into a `Result` stops
+        // at SOME failure, not the first in order, and two candidates refusing
+        // for different reasons would then report a different reason run to
+        // run -- a §3 rule 5 breach on the failure path. Every result is kept
+        // and the first error in (candidate, side) order is the one raised,
+        // which is the error the serial loop raised.
+        let evaluate_one = |mask: ConditionMask,
+                            side: Direction,
+                            resolved: &ResolvedExitGridV1|
+         -> Result<EvaluatedPairV4, AnchoredSearchValidationRefusalV4> {
+            let run = Run {
+                mask,
+                direction: run_direction_v4(side),
+                instrument: execution.instrument(),
+                timeframe,
+                params,
+                data_digest: train_data_digest,
+                commit: execution.commit(),
+                feed: execution.feed(),
+            };
+            let execution_run = ExecutionRunV1::new(&run, train, Some(trade_train))?;
+            let evaluated = resolved.evaluate_training_grid_attested(
+                train_series,
+                &projected_train,
+                horizon,
+                execution_run,
+            )?;
+            let evaluated_cells = stable_u64_v4(evaluated.grid().cells.len())?;
+            if evaluated_cells != resolved.cell_count() {
+                return Err(AnchoredSearchValidationRefusalV4::GridPairMismatch(
+                    "evaluated cell population differs from its resolution",
+                ));
+            }
+            let selected = resolved.select(&evaluated)?;
+            Ok(EvaluatedPairV4 {
+                mask,
+                side,
+                resolution_digest: resolved.digest(),
+                evaluated,
+                evaluated_cells,
+                selected,
+            })
+        };
+        let priced: Vec<[Result<EvaluatedPairV4, AnchoredSearchValidationRefusalV4>; 2]> = closed
+            .kept
+            .par_iter()
+            .map(|item| {
+                [
+                    evaluate_one(item.mask, Direction::Long, &long),
+                    evaluate_one(item.mask, Direction::Short, &short),
+                ]
+            })
+            .collect();
+
+        for [long_priced, short_priced] in priced {
+            for outcome in [long_priced, short_priced] {
+                let pair = outcome?;
+                hash_mask_for_admission_v2(&mut population_hasher, pair.mask);
+                population_hasher.update(&[direction_tag_v2(pair.side)]);
+                population_hasher.update(&pair.resolution_digest);
+                let resolved = match pair.side {
+                    Direction::Long => &long,
+                    Direction::Short => &short,
                 };
-                let execution_run = ExecutionRunV1::new(&run, train, Some(trade_train))?;
-                let evaluated = resolved.evaluate_training_grid_attested(
-                    train_series,
-                    &projected_train,
-                    horizon,
-                    execution_run,
-                )?;
-                let validated = resolved.validate_evaluation(&evaluated)?;
+                let validated = resolved.validate_evaluation(&pair.evaluated)?;
                 population_hasher.update(&validated.evaluation_digest());
-                let evaluated_cells = stable_u64_v4(evaluated.grid().cells.len())?;
-                if evaluated_cells != resolved.cell_count() {
-                    return Err(AnchoredSearchValidationRefusalV4::GridPairMismatch(
-                        "evaluated cell population differs from its resolution",
-                    ));
-                }
-                for ordinal in 0..evaluated.grid().cells.len() {
+                for ordinal in 0..pair.evaluated.grid().cells.len() {
                     let cell = validated.cell(ordinal).ok_or(
                         AnchoredSearchValidationRefusalV4::GridPairMismatch(
                             "validated grid lost one canonical cell",
@@ -2468,13 +2545,13 @@ fn walk_forward_exact_grid_v4(
                     hash_cell_v4(&mut population_hasher, cell);
                 }
                 population_cells = population_cells
-                    .checked_add(evaluated_cells)
+                    .checked_add(pair.evaluated_cells)
                     .ok_or(AnchoredSearchValidationRefusalV4::PopulationOverflow)?;
-                if let Some(selected) = resolved.select(&evaluated)? {
+                if let Some(selected) = pair.selected {
                     pending.push(PendingCandidateV4 {
-                        mask: item.mask,
-                        side,
-                        resolution_digest: resolved.digest(),
+                        mask: pair.mask,
+                        side: pair.side,
+                        resolution_digest: pair.resolution_digest,
                         evaluation_digest: validated.evaluation_digest(),
                         training_cell_digest: digest_cell_v4(selected.training_cell()),
                         in_sample_pessimistic: selected.training_cell().pessimistic,
@@ -7153,10 +7230,15 @@ mod tests {
              would pass over nothing",
             body.len()
         );
+        // THE LOOP IS A `par_iter` NOW. It was a serial `for item in
+        // &closed.kept` and this gate anchored on that text; the loop was
+        // parallelised and the gate refused, which is the gate working. The
+        // per-candidate work is `evaluate_one(item.mask, ..)` on both sides,
+        // and that call is what proves the scanned region is the loop.
         assert!(
-            body.contains("for item in &closed.kept {"),
-            "the scanned region must actually contain the candidate loop, or \
-             this gate is looking at the wrong code"
+            body.contains(".par_iter()") && body.contains("evaluate_one(item.mask"),
+            "the scanned region must actually contain the parallel candidate \
+             loop, or this gate is looking at the wrong code"
         );
         assert!(
             body.contains("data_digest: train_data_digest,"),
