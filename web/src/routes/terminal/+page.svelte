@@ -960,6 +960,17 @@
      The selection resets with the tab, because a chip belongs to its tab —
      `Highest OI` has no meaning on Stocks and index 4 on one strip names a
      different filter on the next. */
+  /* -1 MEANS NO CHIP, AND IT IS REACHABLE — WHICH IT WAS NOT.
+     The click handler only ever assigned `chipIndex = i`, so clicking the lit
+     chip re-selected it and there was no way back to an unfiltered grid. That
+     mattered because a chip FILTERS as well as ranks: an operator one click
+     from `none of them passes Intraday Movers` was told to "clear the chip"
+     by the empty state below, and no control on this page could do it. The
+     only real escapes were to pick a different chip — still a chip — or to
+     widen the set past `SORT_BUDGET` so the rule is dropped, which is not
+     clearing anything.
+     `chips[-1]` is `undefined`, so `activeChip` falls to `null`, `activeRule`
+     to `null`, and the filter is skipped. No branch needed a new case. */
   let chipIndex = $state(0);
   /* THE TAB OPENS ON A CHIP THAT CAN ACTUALLY RANK, not on index 0.
      Futures leads with `Premium`, which needs a join this store does not make,
@@ -1165,11 +1176,34 @@
         <span class="tick-n">{labelOf(indices[0])}</span>
         {#if lead?.close != null}
           <span class="tick-v">{rupee(lead.close)}</span>
+          <!-- AN ABSENT CHANGE GETS THE SAME DASH THE STRIP GIVES IT. Neither
+               `if` here had an `:else`, so a known level beside an unknown
+               change printed the level and nothing after it — the `chgWhy` was
+               on the quote and never rendered. -->
           {#if lead.chg != null}
             <span class="tick-c" class:up={lead.chg > 0} class:down={lead.chg < 0}>
               {pctText(lead.chg)}
             </span>
+          {:else}
+            <span class="tick-w" title={lead.chgWhy ?? 'No change was computed for this bar.'}
+              >—</span
+            >
           {/if}
+        {:else if lead?.why}
+          <!-- THE HEADER OBEYS THE SAME RULE AS EVERY CELL BELOW IT.
+               This branch did not exist: when the quote carried a `why` — every
+               named refusal `quote` and `quoteOn` produce — the bar showed the
+               instrument's name and silently omitted the number, reporting an
+               absence with neither a marker nor a reason. The strip thirty lines
+               down, rendering THE SAME quote, has always shown both. So the two
+               surfaces disagreed about one value, and the more prominent of them
+               was the one saying nothing.
+               It contradicted this page's own stated rule — "every cell here is
+               either a number that was read or a reason it was not" — at the
+               one place a reader looks first. -->
+          <span class="tick-w" title={lead.why}>—</span>
+        {:else}
+          <span class="tick-w" title="Nothing has been asked for this index yet.">·</span>
         {/if}
       </span>
     {/if}
@@ -1302,7 +1336,9 @@
                   ? `Rank by ${c.toLowerCase()}.`
                   : `Ranking needs a price for every matching row, and this view holds ${totalRows.toLocaleString('en-IN')} against a budget of ${SORT_BUDGET.toLocaleString('en-IN')}.`
                 : CHIP_WHY[c]}
-              onclick={() => CHIP_RULES[c] && canSortByQuote && (chipIndex = i)}>{c}</button
+              onclick={() =>
+                CHIP_RULES[c] && canSortByQuote && (chipIndex = chipIndex === i ? -1 : i)}
+              >{c}</button
             >
           {/each}
         </div>
@@ -1442,9 +1478,12 @@
           {:else}
             <p class="tnote wide">
               {totalRows.toLocaleString('en-IN')}
+              <!-- The instruction names the control that performs it. It used to
+                   say "clear the chip" while no control on the page could, which
+                   left the operator's only real move a guess. -->
               {tab?.label.toLowerCase()} series match this window, and none of them passes
               <strong>{activeChip}</strong>. That is the filter's answer, not the store's —
-              clear the chip to see them.
+              click <strong>{activeChip}</strong> again to clear it and see them.
             </p>
           {/if}
         {:else}
@@ -1746,6 +1785,13 @@
   .tick-v {
     font-size: 15px;
     font-weight: 600;
+  }
+  /* The header's absence marker, stated rather than inherited — the mistake
+     `.c-v` made. `--faint` sits one step below `--dim` so a dash reads as LESS
+     than a figure that was read, which is the whole distinction it draws. */
+  .tick-w {
+    font-size: 15px;
+    color: var(--faint);
   }
   .tick-c.up,
   .c-c.up,
