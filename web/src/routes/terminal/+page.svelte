@@ -227,7 +227,60 @@
   /** @param {string} key */
   const inChosenSegment = (key) => segment === 'All' || parseKey(key).segment === segment;
 
-  const matching = $derived((tab?.keys ?? []).filter(inChosenSegment).filter(holdsChosenCell));
+  /* THE EXPIRY, WHICH ONLY TWO TABS HAVE.
+     ------------------------------------------------------------------------
+     The source puts a `September ▾` beside the segment picker on Futures and
+     Options and omits it on Stocks — a cash equity has no expiry to choose.
+     Its capture opens it to September · October · November, three consecutive
+     contract months.
+
+     DERIVED FROM THE STORE, NOT FROM A CALENDAR. Listing the next three months
+     would offer expiries no contract in this store has, and picking one would
+     empty the grid while the picker insisted the expiry existed. The list is
+     the set of expiries actually present on the tab's own keys, so every option
+     has at least one contract behind it — the same rule the Date picker keeps
+     about days.
+
+     GROUPED TO THE MONTH, because that is the unit the source names and the
+     unit a contract series is identified by. `2026-09` sorts chronologically as
+     a plain string for the reason `$lib/dates.js` opens with, and is rendered
+     through `monthLabel` at the render site and nowhere else. */
+  const expiries = $derived(
+    [
+      ...new Set(
+        (tab?.keys ?? [])
+          .map((k) => parseKey(k).expiry)
+          .filter((e) => typeof e === 'string' && /^\d{4}-\d{2}/.test(e))
+          .map((e) => String(e).slice(0, 7))
+      )
+    ].sort()
+  );
+  /** Cash equities have no expiry; the control is absent rather than empty. */
+  const hasExpiry = $derived(activeTab === 'futures' || activeTab === 'options');
+  let expiry = $state('');
+  /** @param {string} key */
+  const inChosenExpiry = (key) => {
+    if (!expiry) return true;
+    const e = parseKey(key).expiry;
+    return typeof e === 'string' && e.slice(0, 7) === expiry;
+  };
+
+  /* A CHOSEN EXPIRY DOES NOT SURVIVE THE TAB OR THE FEED THAT OFFERED IT, for
+     the reason every other clamp on this page exists: an expiry no longer on
+     offer filters the grid to nothing while the control still displays it, and
+     the empty state then blames the store for the page's own stale value. */
+  $effect(() => {
+    void activeTab;
+    void store.feed;
+    expiry = '';
+  });
+  $effect(() => {
+    if (expiry && expiries.length > 0 && !expiries.includes(expiry)) expiry = '';
+  });
+
+  const matching = $derived(
+    (tab?.keys ?? []).filter(inChosenSegment).filter(inChosenExpiry).filter(holdsChosenCell)
+  );
   const totalRows = $derived(matching.length);
 
   /* ==================================================================
@@ -935,6 +988,40 @@
   };
   const chips = $derived(CHIPS[activeTab] ?? []);
 
+  /** THE ACTION BAR, PER TAB — the captures' sets, plus one deliberate
+      divergence that is stated rather than smuggled.
+      ------------------------------------------------------------------------
+      The source hangs `Option Chain · Snapshot · Chart` under Options,
+      `Snapshot · Chart` under Futures, and NOTHING under Stocks. Copying that
+      exactly is what the first version did, and it produced a page where the
+      only button that works could never be pressed: `Option Chain` and `Chart`
+      are dark because this repository has neither feature, so `Snapshot` is the
+      whole live bar — and it appeared on precisely the two tabs this store
+      holds no contracts for, while Stocks, the tab with all the data and all
+      the checkboxes, had no bar at all. Seventeen rows selectable and nothing
+      to do with a selection is the inert control §4 bans, arrived at by being
+      faithful.
+      So Stocks gets `Snapshot` and only that. It is not in the capture; the
+      alternative was a selection column that selects for nobody. The two dark
+      buttons stay tab-accurate.
+      @type {Record<string, string[]>} */
+  const BAR = {
+    stocks: ['Snapshot'],
+    futures: ['Snapshot', 'Chart'],
+    options: ['Option Chain', 'Snapshot', 'Chart']
+  };
+
+  /** WHY THE OTHER TWO ARE DARK. Neither is a missing button; both are features
+      this repository does not have, and saying which is the difference between
+      a control that is off and one that is broken.
+      @type {Record<string, string>} */
+  const BAR_WHY = {
+    'Option Chain':
+      'An option chain is every strike of one expiry laid out around the underlying’s level, with calls and puts facing each other. It needs the whole expiry’s contracts joined to the underlying’s series, and this store files each contract’s bars on their own — the same join that leaves Spot Price and Premium without a source in the grid above.',
+    Chart:
+      'This page renders no chart. brutex draws one on /backtest, against a run’s own execution series, and it is not a price chart of an arbitrary instrument — pointing this button there would open something that does not show what was clicked.'
+  };
+
   /* ==================================================================
      WHAT A CHIP ACTUALLY DOES, AND WHICH ONES THIS STORE CAN DO AT ALL
      ------------------------------------------------------------------
@@ -1038,6 +1125,86 @@
      `chips[-1]` is `undefined`, so `activeChip` falls to `null`, `activeRule`
      to `null`, and the filter is skipped. No branch needed a new case. */
   let chipIndex = $state(0);
+
+  /* ROW SELECTION — a plain object used as a set, and the shape is the point.
+     ------------------------------------------------------------------------
+     An array with `includes` would be O(n) per row and O(n²) to paint a grid,
+     which is the scan `CLAUDE.md` §3 rule 4 refuses on the engine side and has
+     no business here either at 250 rows. A key on an object is one hash probe,
+     and Svelte 5 deep-proxies `$state` objects so adding or deleting a property
+     is reactive without a `SvelteSet` import.
+
+     THE SELECTION IS NOT DECORATION. The source's checkboxes feed its watchlist
+     and comparison tools, neither of which exists here — a checkbox that
+     selects nothing anybody can act on is exactly the inert control §4 bans. It
+     is wired to `Snapshot` in the bar below, which copies what is ticked. */
+  let picked = $state(/** @type {Record<string, true>} */ ({}));
+  const pickedKeys = $derived(Object.keys(picked));
+  const pickedCount = $derived(pickedKeys.length);
+  /** Every row ON SCREEN is ticked — the header box's state, and it answers for
+      the rendered page rather than the whole matching set, because that is what
+      the box can actually toggle. */
+  const allPicked = $derived(rows.length > 0 && rows.every((k) => picked[k]));
+  /** @param {string} key */
+  function togglePick(key) {
+    if (picked[key]) delete picked[key];
+    else picked[key] = true;
+  }
+  function toggleAll() {
+    if (allPicked) for (const k of rows) delete picked[k];
+    else for (const k of rows) picked[k] = true;
+  }
+
+  /* A SELECTION DOES NOT SURVIVE THE SET IT WAS MADE IN. Changing tab, feed,
+     timeframe or month replaces the instruments on offer, and a key ticked
+     under the old window would keep counting toward `Snapshot` while being
+     invisible and unreachable — a hidden selection acting on a copy. */
+  $effect(() => {
+    void activeTab;
+    void store.feed;
+    void timeframe;
+    void month;
+    picked = {};
+  });
+
+  /** What the bar last did, so an action that succeeded or failed says which
+      instead of appearing to do nothing. Cleared by the next action. */
+  let barSaid = $state('');
+
+  /* SNAPSHOT — the one button in the source's bottom bar that maps to something
+     this page can actually do. It copies the ticked rows, or the whole rendered
+     page when nothing is ticked, as tab-separated text: the headers as the
+     source writes them, then one line per row, using the SAME `cellOf` the grid
+     paints so the copy cannot disagree with the screen. A dash stays a dash —
+     an absence copied as an empty cell would read as a zero in a spreadsheet. */
+  async function snapshot() {
+    const cols = columns;
+    const take = pickedCount > 0 ? rows.filter((k) => picked[k]) : rows;
+    if (take.length === 0) {
+      barSaid = 'Nothing to copy — the grid is empty.';
+      return;
+    }
+    const lines = [cols.map((c) => c.h).join('\t')];
+    for (const key of take) {
+      const q = quotes.get(key);
+      lines.push(
+        cols
+          .map((c) => (c.src === 'name' ? labelOf(key) : cellOf(q, c).text || '—'))
+          .join('\t')
+      );
+    }
+    const text = lines.join('\n');
+    try {
+      await navigator.clipboard.writeText(text);
+      barSaid = `Copied ${take.length} ${take.length === 1 ? 'row' : 'rows'} to the clipboard.`;
+    } catch (err) {
+      /* NAMED, NOT SWALLOWED. The clipboard is refusable — a permission, a
+         non-secure origin, a browser that wants a user gesture it did not see —
+         and a copy button that silently does nothing is indistinguishable from
+         one that worked. */
+      barSaid = `The clipboard refused the copy: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  }
 
   /* THE INDEX STRIP COLLAPSES, which is the `^` the source draws under it.
      A backtesting operator scrolling a long grid wants the vertical space, and
@@ -1686,6 +1853,27 @@
               {#each times as t (t)}<option value={t}>{t}</option>{/each}
             </select>
           </label>
+          <!-- THE EXPIRY, on the two tabs that have one. Every option is an
+               expiry some contract on this tab actually carries, so the picker
+               cannot offer a month the store has never filed. When the store
+               holds no contracts at all it says that rather than sitting empty
+               and disabled with nothing to explain it. -->
+          {#if hasExpiry}
+            <label class="tctl">
+              <span>Expiry</span>
+              <select
+                class="pill"
+                bind:value={expiry}
+                disabled={expiries.length === 0}
+                title={expiries.length === 0
+                  ? `The store holds no ${tab?.label.toLowerCase()} contracts for this feed, so there is no expiry to choose. This is an empty store, not a refused control.`
+                  : 'Show only contracts expiring in this month. “All” keeps every expiry.'}
+              >
+                <option value="">All</option>
+                {#each expiries as e (e)}<option value={e}>{monthLabel(e)}</option>{/each}
+              </select>
+            </label>
+          {/if}
           <label class="tctl">
             <span>Segment</span>
             <select class="pill" bind:value={segment}>
@@ -1751,7 +1939,31 @@
                      something — and both are wrong while nothing selects
                      anything. The source terminal has the column because its
                      checkboxes feed an order ticket; this page has no ticket to
-                     feed. It returns the day something reads it. -->
+                     feed. It returns the day something reads it.
+
+                     THAT DAY IS THIS ONE, and the condition the paragraph above
+                     set is the condition that has been met rather than waived:
+                     `Snapshot` in the bar below the grid copies what is ticked.
+                     The column is back with BOTH defects fixed — it drives a
+                     real action, and every box carries an accessible name, the
+                     header's saying what it toggles and each row's naming its
+                     own instrument, so the seventeen anonymous "checkbox, not
+                     checked" that failed WCAG 4.1.2 cannot recur. -->
+                <th class="pick">
+                  <input
+                    type="checkbox"
+                    checked={allPicked}
+                    indeterminate={pickedCount > 0 && !allPicked}
+                    disabled={rows.length === 0}
+                    aria-label={allPicked
+                      ? 'Clear the selection on every row shown'
+                      : 'Select every row shown'}
+                    title={allPicked
+                      ? 'Clear the selection on every row shown'
+                      : 'Select every row shown'}
+                    onchange={toggleAll}
+                  />
+                </th>
                 {#each columns as c (c.h)}
                   <!-- A SORTABLE HEADER IS A BUTTON INSIDE A `th`, NOT A `th`
                        WEARING A TABINDEX.
@@ -1816,6 +2028,19 @@
                            only once, at the start, and never repeated. With
                            `scope="row"` every cell in the row is associated
                            with its instrument. -->
+                      <td class="pick">
+                        <!-- NAMED BY THE INSTRUMENT IT SELECTS. `labelOf` is
+                             the same text the row's own header cell shows, so
+                             a reader hears "NIFTY 29 SEP 25000 CALL, checkbox"
+                             rather than the anonymous box this column was
+                             removed for. -->
+                        <input
+                          type="checkbox"
+                          checked={!!picked[key]}
+                          aria-label={`Select ${labelOf(key)}`}
+                          onchange={() => togglePick(key)}
+                        />
+                      </td>
                       <th scope="row" class="nm">{labelOf(key)}</th>
                     {:else}
                       {@const cell = cellOf(q, c)}
@@ -1861,6 +2086,40 @@
           {/if}
         {/if}
       </div>
+
+      <!-- ===================================================== THE ACTION BAR
+           The source hangs `Option Chain · Snapshot · Chart` under the Options
+           grid and `Snapshot · Chart` under Futures, and hangs nothing under
+           Stocks. Same three, same two, same none — and each is either wired to
+           something real or disabled with the reason it is not, which is the
+           only honest way to draw a button whose feature does not exist here.
+           A bar of three live-looking buttons where one works is the failure
+           wearing a success's clothes that section 4 names. -->
+      {#if BAR[activeTab]?.length}
+        <div class="abar">
+          {#each BAR[activeTab] as b (b)}
+            {#if b === 'Snapshot'}
+              <button
+                class="abtn"
+                type="button"
+                disabled={rows.length === 0}
+                title={pickedCount > 0
+                  ? `Copy the ${pickedCount} selected ${pickedCount === 1 ? 'row' : 'rows'} as tab-separated text.`
+                  : 'Copy every row shown as tab-separated text. Tick rows to copy only those.'}
+                onclick={snapshot}
+                >Snapshot{#if pickedCount > 0}<span class="acount">{pickedCount}</span>{/if}</button
+              >
+            {:else}
+              <button class="abtn" type="button" disabled title={BAR_WHY[b]}>{b}</button>
+            {/if}
+          {/each}
+          {#if barSaid}
+            <!-- `aria-live`, so the outcome reaches a reader who cannot see the
+                 bar change. `polite`: a copy is not an interruption. -->
+            <span class="asaid" aria-live="polite">{barSaid}</span>
+          {/if}
+        </div>
+      {/if}
 
       <!-- `bnote` AND `bkey` ARE GONE. Both were emitted with no rule in this
            file and none in `theme.css`, so they styled nothing and named
@@ -2736,6 +2995,72 @@
   tbody tr:hover th {
     background: var(--head);
   }
+  /* THE ACTION BAR. Left-aligned under the grid, as the source hangs it. */
+  .abar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 14px 0 4px;
+  }
+  .abtn {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    background: var(--head);
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    color: var(--ink);
+    font: inherit;
+    font-size: 13px;
+    padding: 8px 15px;
+    cursor: pointer;
+  }
+  .abtn:hover:not(:disabled) {
+    border-color: #3a3a3a;
+  }
+  /* Dashed and dim, the same vocabulary a refused chip uses — so "this store
+     cannot do that" reads identically wherever the page has to say it. */
+  .abtn:disabled {
+    color: var(--faint);
+    border-style: dashed;
+    border-color: #2a2a2a;
+    cursor: default;
+  }
+  .acount {
+    background: var(--pill);
+    border: 1px solid var(--edge);
+    border-radius: 999px;
+    color: var(--acc);
+    font-size: 11px;
+    line-height: 1;
+    padding: 3px 7px;
+  }
+  .asaid {
+    font-size: 12px;
+    color: var(--dim);
+  }
+
+  /* THE SELECTION COLUMN. Fixed width so the Name column starts at the same x
+     on every row whatever the box is doing, and `accent-color` so the tick uses
+     the page's own green instead of the platform blue that is the one colour
+     nothing else here wears. */
+  .pick {
+    width: 34px;
+    padding: 0 0 0 12px;
+    vertical-align: middle;
+  }
+  .pick input {
+    accent-color: var(--acc);
+    width: 13px;
+    height: 13px;
+    margin: 0;
+    cursor: pointer;
+  }
+  .pick input:disabled {
+    cursor: default;
+    opacity: 0.4;
+  }
   .nm {
     color: var(--ink);
     border-right: 1px solid var(--line);
@@ -2751,11 +3076,14 @@
      Measured on the source: the divider is continuous at #222222 across the
      header/body boundary — scanned unbroken for 161 device px spanning both.
 
-     `:first-child` rather than `.left`, because the divider belongs to the
-     first COLUMN and not to an alignment that a later column could also ask
-     for. (0,1,2) clears the `thead th` block's (0,0,2) without depending on
-     source order. */
-  thead th:first-child {
+     THE SELECTOR MOVED WHEN THE SELECTION COLUMN CAME BACK. It was
+     `:first-child`, which was the Name cell right up until a checkbox `th` was
+     inserted ahead of it — after which the rule drew the divider down the wrong
+     side of the checkbox and the Name header lost it again, reopening exactly
+     the gap it was written to close. It is pinned to `.nm`'s own header
+     position now, which is the second cell, and `.pick` is excluded from the
+     divider it never had in the source either. */
+  thead th:nth-child(2) {
     border-right: 1px solid var(--line);
   }
   /* THE NAME CELL CARRIES THE LEFT INSET THE SELECTION COLUMN USED TO. With
