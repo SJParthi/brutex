@@ -789,7 +789,7 @@
    * prose note, and no token any row can carry. Measured on the running server:
    *
    *     {"target":"swept","universe":null,"matched":2,
-   *      "note":"NSE-NIFTY and NSE-BANKNIFTY — the only two swept"}
+   *      "note":"NSE-NIFTY, NSE-BANKNIFTY and the F&O underlyings this feed lists — the sweep surface, D-0506"}
    *
    * The names are in that NOTE, as English. Parsing them out of a sentence
    * would be the invention §3 rule 1 forbids, so they are written here instead

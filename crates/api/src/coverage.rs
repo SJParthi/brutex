@@ -27,8 +27,8 @@
 //!   recounted here, and the number on the control is the array the request is
 //!   built from rather than a tally kept beside it.
 //! * **`master`** — [`SpotTarget::Swept`] and [`SpotTarget::Indices`]. Neither
-//!   is a published list: the first is the engine surface (`CLAUDE.md` §1, two
-//!   `(exchange, symbol)` pairs) and the second is whatever a vendor's master
+//!   is a published list: the first is the engine surface (`CLAUDE.md` §1: two index
+//!   pairs and, since D-0506, the F&O cash equities) and the second is whatever a vendor's master
 //!   calls an index series, which NSE publishes no file for. There is no
 //!   denominator to be a fraction of, so [`Covered::published`] is `None` and
 //!   the count is a fold over the merged universe with the feed's own id
@@ -815,28 +815,56 @@ mod tests {
     }
 
     #[test]
-    fn the_swept_pair_is_counted_per_feed_like_everything_else() {
+    fn the_swept_surface_is_counted_per_feed_like_everything_else() {
         // `Swept` is `is_sweepable`, not a bit test, and it is the one target
-        // whose membership is decided by a table in `core`. It still gets a
-        // per-feed answer, because the engine surface being two instruments
-        // does not mean a given broker lists both.
+        // whose membership is decided by two tables in `core`: the index pair
+        // and, since D-0506, `FNO_INDEX`. It still gets a per-feed answer,
+        // because the engine surface naming a paper does not mean a given
+        // broker lists it.
+        //
+        // The fixture, read through `is_sweepable`. `by_key` is keyed by
+        // `InstrumentKey`, so a paper's two tickers are two keys and the ISIN
+        // is an attribute of the entry, not part of its identity:
+        //   NIFTY, BANKNIFTY  — the index pair, swept as before;
+        //   RELIANCE, TCS, HDFCBANK, INFY — F&O underlyings, swept by D-0506;
+        //   TCS-BE            — a ticker, not an F&O underlying; NOT swept;
+        //   INDIAVIX          — reference only; NOT swept.
+        // Groww lists every swept key except INFY. Dhan lists every swept key
+        // except BANKNIFTY — its HDFCBANK row carries another company's ISIN,
+        // which is a conflict on the SAME key and does not unlist the id.
         let (_, coverage) = built();
         let groww = coverage
             .of(Vendor::Groww, SpotTarget::Swept)
             .expect("Groww publishes a master");
-        assert_eq!(groww.matched, 2, "Groww lists both swept series");
-        assert_eq!(groww.lacks, 0);
+        assert_eq!(
+            groww.matched, 5,
+            "Groww lists both indices and three of the four F&O underlyings"
+        );
+        assert_eq!(groww.lacks, 1);
+        assert_eq!(
+            groww
+                .unresolved
+                .iter()
+                .map(|u| u.symbol.as_str())
+                .collect::<Vec<_>>(),
+            vec!["INFY"],
+            "the F&O underlying only Dhan lists is named, not counted"
+        );
         let dhan = coverage
             .of(Vendor::Dhan, SpotTarget::Swept)
             .expect("Dhan publishes a master");
-        assert_eq!(dhan.matched, 1, "Dhan lists NIFTY and not BANKNIFTY");
+        assert_eq!(
+            dhan.matched, 5,
+            "Dhan lists NIFTY and all four F&O underlyings, and not BANKNIFTY"
+        );
+        assert_eq!(dhan.lacks, 1);
         assert_eq!(
             dhan.unresolved
                 .iter()
                 .map(|u| u.symbol.as_str())
                 .collect::<Vec<_>>(),
             vec!["BANKNIFTY"],
-            "so a swept run on this feed is one instrument, and it says which is missing"
+            "so a swept run on this feed is five instruments, and it says which is missing"
         );
     }
 
@@ -940,7 +968,7 @@ mod tests {
             "{json}"
         );
         assert!(
-            json.contains(r#""target":"swept","label":"Swept indices","note":"NSE-NIFTY and NSE-BANKNIFTY — the only two swept","universe":null"#),
+            json.contains(r#""target":"swept","label":"Swept surface","note":"NSE-NIFTY, NSE-BANKNIFTY and the F&O underlyings this feed lists — the sweep surface, D-0506","universe":null"#),
             "the engine surface is not a universe bit and does not claim to be: {json}"
         );
         assert!(

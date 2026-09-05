@@ -7,13 +7,21 @@ because a prohibition survives a rewrite better than a goal does.
 
 ## 1. Scope lock
 
-**The engine sweeps exactly two instruments, both on NSE.** Narrowed from
-three by D-0017: `BSE-SENSEX` is no longer swept and BSE is no longer pulled.
+**The engine sweeps two shapes, both on NSE.** Narrowed from three
+instruments by D-0017 (`BSE-SENSEX` is no longer swept and BSE is no longer
+pulled), then widened by D-0506 to the cash equities of the F&O universe.
 
-| Symbol | Exchange | Segment |
-|---|---|---|
-| `NSE-NIFTY` | NSE | INDEX |
-| `NSE-BANKNIFTY` | NSE | INDEX |
+| Symbol | Exchange | Segment | Since |
+|---|---|---|---|
+| `NSE-NIFTY` | NSE | INDEX | — |
+| `NSE-BANKNIFTY` | NSE | INDEX | — |
+| the 213 F&O underlyings, e.g. `NSE-HINDALCO` | NSE | CASH | D-0506 |
+
+The third row is not a list here and must not become one: the names are
+`core::universe::FNO_UNDERLYINGS`, derived from NSE's own F&O list with an
+ISIN beside each, and `InstrumentKey::is_sweepable` probes that index in O(1).
+The cash equity is the stock's own price series — what the spot level is for an
+index. It does not expire.
 
 `NSE-INDIAVIX` is **reference only** — stored, stamped onto observable trades
 as `vix_at_entry` / `vix_at_exit`, and never in the condition vocabulary, the
@@ -451,9 +459,11 @@ exchange published rather than one this repository composed.
 serves, and whether a vendor's "index series" set is a subset of these 148, is
 the cross-check the resolver exists to perform and has not performed. The count
 above is what the exchange publishes, not what is reachable. Nothing here
-widens `CLAUDE.md` §1: the sweep surface is still `NSE-NIFTY` and
-`NSE-BANKNIFTY`, and every one of the other 146 would be **stored, never
-swept**.
+widened `CLAUDE.md` §1 at the time it was written: the sweep surface was
+`NSE-NIFTY` and `NSE-BANKNIFTY`, and every one of the other 146 was **stored,
+never swept**. D-0506 has since widened the surface to the cash equities of the
+213 F&O underlyings; the 146 here are index constituents, a different question,
+and this paragraph is left as the record it was.
 
 ### 4b. Option-greek facts, measured from a live chain
 

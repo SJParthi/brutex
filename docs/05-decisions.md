@@ -32374,3 +32374,77 @@ unreachable through `step` against §9's coverage floor.
 `Refused::Corrupt(..)` rather than returning `Corrupt`, so it does not appear in
 a grep for `check()?`. Its own comment claimed *"One definition, shared with the
 other eight modules"* — a sentence that had quietly stopped being true.
+
+## D-0506
+
+**The sweep surface widens from two spot indices to two indices plus the cash
+equities of the 213 F&O underlyings, because the operator's objective — the
+rare, massive winner — lives in single stocks and is averaged away in an index.**
+
+The surface was `NSE-NIFTY` and `NSE-BANKNIFTY`, fixed by D-0017 and enforced
+at one gate: `InstrumentKey::is_sweepable` in `core`, which every stored-sweep
+door reaches through `cli::stored::swept_index`. A stock could be stored and
+never swept, and `InstrumentError::NotSweepable` said so by name.
+
+The operator's stated objective is not a strategy that trades often or wins
+often. It is a setup that fires seldom, loses tiny when it loses, and pays
+enormously when it pays — expectancy from asymmetry, with win rate irrelevant.
+Measured on NIFTY 60-minute across 79 months: the best combination had a profit
+factor of 1.08 and a drawdown 1.05 times its net. Not that profile. And the
+reason is structural: an index averages fifty stocks, so the 10–20% single-day
+moves the profile needs cancel out before the engine ever sees them. They exist
+in the constituents.
+
+**What is added.** `is_sweepable` accepts a second shape: an NSE `Segment::Cash`
+key of `Kind::Equity` whose symbol is in `core::universe::FNO_INDEX`. That is the
+existing compile-time open-addressed index over `FNO_UNDERLYINGS`, with a
+test-pinned worst case of six probes on a hit and eleven on a miss — no list is
+copied and none is scanned. `InstrumentKey::cash` is the constructor;
+`swept_index` tries the index shape by name and then the cash shape, and its
+refusal names the surface as it now is.
+
+**What is deliberately not added.** Futures and options contracts, on any
+underlying. They expire, and `docs/00-charter.md` §7 records that NSE reuses
+instrument tokens across an expiry boundary — a contract is a moving target and
+a sweep over one would stitch two instruments into one series. Cash equities
+outside the F&O universe are not added either: the 213 are the liquid names, and
+liquidity is what makes a tight stop fillable. BSE stays out under D-0017.
+
+**Two consequences, and neither is optional.** A stock CAN be bought, unlike an
+index level, so its costs are real — equity STT is 0.025% on every sell — and
+the cost model this repository carries with zero production callers becomes
+necessary rather than optional before any stock result is ranked. And 213
+instruments multiply the search by 213: an in-sample result across the pool is
+the largest of roughly 2.5 billion trials, and means nothing until validated
+out of sample. Both are recorded here so the first stock result cannot be read
+without them.
+
+**Tests.** `the_sweep_surface_is_the_two_indices_and_the_fno_cash_equities`
+replaces `an_equity_is_storable_and_not_sweepable`, whose HINDALCO fixture is
+an F&O member and whose assertion this entry flips. Every fixture checks its own
+premise against `FNO_INDEX` first. It pins: a member equity accepted, an
+outsider refused, a contract on a member refused, a member on BSE refused, both
+indices unchanged, India VIX still reference-only.
+`require_sweepable_accepts_both_indices_and_fno_equities_and_refuses_the_rest`
+replaces a test that was named for three and tested one.
+
+**The `swept` pull target follows the surface, and its copy now says so.**
+`api::ingest::SpotTarget::Swept` is defined as `is_sweepable` and nothing else,
+so this entry widens what that target names without touching it: on a feed
+whose master lists the F&O underlyings, a `target=swept` receipt now counts
+them beside the index pair. The label read *Swept indices* and the note read
+*the only two swept*, and both became false the moment the table above was
+edited — a label over 215 names that says "indices" is the answer-shaped
+mistake §4 bans. They now read *Swept surface* and *NSE-NIFTY, NSE-BANKNIFTY
+and the F&O underlyings this feed lists — the sweep surface, D-0506*; the
+`fno` target's note no longer claims the set is never swept. Five tests that
+pinned the two-instrument receipt (`coverage`, `ingest`, `server` ×3) now pin
+the widened one, each deriving its count from the fixture through
+`FNO_INDEX` in a comment beside the literal. The four historical comments that
+quote the old label as the label of a past incident are left quoting it.
+
+**What this entry does not do.** It does not pull a bar. The store holds NIFTY
+only; the 213 cash series are the operator's to pull, from the console, never
+from a session. And it does not build the cross-sectional sweep the objective
+needs — one combination ranked over trades pooled across every stored stock —
+which is a new sweep mode and the subject of the next entry.

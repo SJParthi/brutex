@@ -2044,11 +2044,27 @@ mod tests {
     }
 
     #[test]
-    fn an_equity_decodes_and_is_stored_not_swept() {
+    fn an_equity_decodes_and_sweeps_iff_it_is_an_fno_underlying() {
+        // Was `an_equity_decodes_and_is_stored_not_swept`, pinning D-0018.
+        // D-0506 widened the surface to the F&O cash equities, so a decoded
+        // equity's sweepability is now the one table lookup, and this test
+        // says so from both sides of it.
         let got = groww(row("NSE", "CASH", "RELIANCE", "EQ", "", "")).expect("ok");
         let key = kept(got).expect("kept");
         assert_eq!(key.kind, Kind::Equity);
-        assert!(!key.is_sweepable(), "D-0018: stored, not swept");
+        assert!(
+            crate::universe::FNO_INDEX.contains("RELIANCE"),
+            "RELIANCE is an F&O underlying, or this fixture is wrong"
+        );
+        assert!(key.is_sweepable(), "D-0506: an F&O underlying is swept");
+
+        // A well-formed symbol the F&O list does not hold decodes the same way
+        // and stays stored-only. The fixture checks its own premise.
+        assert!(!crate::universe::FNO_INDEX.contains("ZZQXNOTFNO"));
+        let got = groww(row("NSE", "CASH", "ZZQXNOTFNO", "EQ", "", "")).expect("ok");
+        let key = kept(got).expect("kept");
+        assert_eq!(key.kind, Kind::Equity);
+        assert!(!key.is_sweepable(), "D-0018 still holds off the F&O list");
     }
 
     #[test]

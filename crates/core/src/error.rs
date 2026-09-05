@@ -57,13 +57,14 @@ impl std::error::Error for PriceError {}
 pub enum InstrumentError {
     /// The exchange segment of the identifier was not recognised.
     UnknownExchange,
-    /// The symbol is not one of the two the engine sweeps.
+    /// The instrument is not one the engine sweeps.
     ///
-    /// This is not a parse failure. The symbol may be perfectly valid and
-    /// stored — futures, options and single stocks all are — but
-    /// `docs/00-charter.md` section 1 fixes the swept set at exactly two,
-    /// and widening it requires a decision-ledger entry rather than a caller
-    /// passing a different string.
+    /// This is not a parse failure. The instrument may be perfectly valid and
+    /// stored — futures and options contracts are, and so is any cash equity
+    /// — but `docs/00-charter.md` section 1 fixes the swept surface at two
+    /// shapes: the NSE spot indices NIFTY and BANKNIFTY, and the NSE cash
+    /// equities of the 213 F&O underlyings (D-0506). Widening it requires a
+    /// decision-ledger entry rather than a caller passing a different string.
     NotSweepable,
     /// The identifier was empty or malformed.
     Malformed,

@@ -4329,7 +4329,7 @@ mod tests {
     #[test]
     fn a_receipt_states_what_the_server_read_and_that_nothing_ran() {
         let facts = [
-            ("Target", "Swept indices".to_owned()),
+            ("Target", "Swept surface".to_owned()),
             ("toDate on the wire", "2022-02-09".to_owned()),
         ];
         let html = receipt_page(&Receipt {
@@ -4344,7 +4344,7 @@ mod tests {
         assert!(html.contains("NOT STARTED"));
         assert!(html.contains("Spot pull"));
         assert!(html.contains("there is no HTTP transport"));
-        assert!(html.contains("<th>Target</th><td>Swept indices</td>"));
+        assert!(html.contains("<th>Target</th><td>Swept surface</td>"));
         assert!(html.contains("2022-02-09"));
         assert!(html.contains("Nothing here was written to the store"));
         assert!(html.contains("href=\"/pull\""), "a way back: {html}");

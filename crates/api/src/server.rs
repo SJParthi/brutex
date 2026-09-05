@@ -17742,7 +17742,7 @@ mod tests {
             // only one target exercised, the `==` selecting its member count
             // could be a `!=` and nothing would notice.
             for (slug, label) in [
-                ("swept", "Swept indices"),
+                ("swept", "Swept surface"),
                 ("indices", "Reference indices"),
                 ("equities", "NIFTY Total Market equities"),
             ] {
@@ -17752,7 +17752,9 @@ mod tests {
             }
             // The fixture has one index and one Total Market constituent, and
             // the receipt states each target's own population — so the three
-            // answers are not interchangeable.
+            // answers are not interchangeable. The constituent is RELIANCE,
+            // which is an F&O underlying, so since D-0506 it is swept too:
+            // the swept count is two, not one.
             let swept = post(
                 addr,
                 "/pull/spot",
@@ -17760,15 +17762,15 @@ mod tests {
             )
             .await;
             assert!(
-                swept.contains("<th>Instruments covered</th><td>1 in the merged universe</td>"),
-                "the swept count is the swept count: {swept}"
+                swept.contains("<th>Instruments covered</th><td>2 in the merged universe</td>"),
+                "the swept count is the swept count -- the index and the F&O equity: {swept}"
             );
             // AND THE SECOND NUMBER, WHICH IS THE ONE THE RUN OBEYS. The line
             // above is the union of what both masters name; this run reaches
             // one feed, and D-0120 put that on the receipt beside it.
             assert!(
                 swept.contains(
-                    "<th>This feed can name</th><td>1 — every name this target holds, by Dhan id</td>"
+                    "<th>This feed can name</th><td>2 — every name this target holds, by Dhan id</td>"
                 ),
                 "the receipt says what THIS feed reaches, not what the universe holds: {swept}"
             );
@@ -18008,7 +18010,7 @@ mod tests {
         // The counts are the real ones from the loaded universe: the fixture
         // has NIFTY (an index, and swept) and RELIANCE (Total Market).
         assert!(html.contains("1 instrument(s)"), "{html}");
-        assert!(html.contains("Swept indices"), "{html}");
+        assert!(html.contains("Swept surface"), "{html}");
         assert!(html.contains("NIFTY Total Market equities"), "{html}");
 
         // NOT A FABRICATED PROGRESS BAR, AND NOT A FABRICATED ABSENCE EITHER.
@@ -18614,11 +18616,13 @@ mod tests {
     /// number and refuses the difference by name — `docs/06-limits.md` §63 —
     /// so this is a prediction of the outcome and not of the request count.
     const TARGET_RECEIPTS: [(&str, &str, usize, &str); ingest::SpotTarget::ALL.len()] = [
+        // TWO since D-0506: the fixture's one constituent is RELIANCE, an F&O
+        // underlying, and the surface now sweeps those beside the index.
         (
             "swept",
-            "Swept indices",
-            1,
-            "1 — every name this target holds, by Dhan id",
+            "Swept surface",
+            2,
+            "2 — every name this target holds, by Dhan id",
         ),
         (
             "indices",
@@ -18719,12 +18723,15 @@ mod tests {
         let built = site("targetcounts", &dir);
         // RELIANCE is in all four published tiers as well as the Total Market,
         // so the four counters D-0105 appended are 1 each and the fixture
-        // proves them without gaining a row. The two numbers that are NOT one
-        // are the ones a mutant would have to move.
+        // proves them without gaining a row. RELIANCE is also an F&O
+        // underlying, so since D-0506 it is SWEPT: the first counter is two,
+        // the index and the equity. The numbers that are NOT one are the ones
+        // a mutant would have to move.
         assert_eq!(
             built.universe().targets,
-            [1, 2, 1, 1, 1, 1, 1, 2, 3],
-            "one swept, two index series, one Total Market constituent, \
+            [2, 2, 1, 1, 1, 1, 1, 2, 3],
+            "two swept (NIFTY and the F&O equity RELIANCE), two index series, \
+             one Total Market constituent, \
              RELIANCE once in each of the 500, 200, 100 and 50, TWO F&O \
              underlyings (NIFTY and RELIANCE, not INDIAVIX) and all three \
              tracked"
@@ -22529,9 +22536,11 @@ mod tests {
         let built = site("reachtext", &dir);
 
         // EVERY NAME — no fraction, because there is nothing missing to be a
-        // fraction of, and "1 of 1" invites the reader to look for the zero.
+        // fraction of, and "2 of 2" invites the reader to look for the zero.
+        // Two since D-0506: the fixture's RELIANCE is an F&O underlying and
+        // is swept beside the index.
         let whole = reach_text(ingest::SpotTarget::Swept, pull::vendor::Feed::Groww, &built);
-        assert_eq!(whole, "1 — every name this target holds, by Groww id");
+        assert_eq!(whole, "2 — every name this target holds, by Groww id");
 
         // SHORT: both numbers, the first names, the remainder, and the route
         // that carries the rest.

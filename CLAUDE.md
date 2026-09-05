@@ -11,8 +11,12 @@ A brute-force backtesting engine for Indian spot indices. It sweeps
 combinations of boolean market conditions over historical 1-minute bars and
 ranks what survives.
 
-**Engine surface — exactly two instruments, NSE only:**
-`NSE-NIFTY`, `NSE-BANKNIFTY`.
+**Engine surface — two shapes, NSE only:**
+
+1. The two spot indices `NSE-NIFTY` and `NSE-BANKNIFTY`.
+2. The **cash equities of the 213 F&O underlyings** — the stock's own price
+   series, the same thing the spot level is for an index. Widened by D-0506.
+   The list is `core::universe::FNO_UNDERLYINGS` and nothing else names it.
 
 BSE and MCX are not swept and not pulled. Narrowed from three
 instruments by D-0017. Existing BSE data already on disk is not deleted --
@@ -22,7 +26,19 @@ append-only history applies to the store as well.
 observable trades, but it never enters the condition vocabulary, never enters
 ranking, and never enters run identity.
 
-Futures, options and single stocks may be **stored**. They are never swept.
+Futures and options **contracts** may be **stored**. They are never swept: they
+expire, and NSE reuses instrument tokens across an expiry boundary, so a
+contract is a moving target. Single stocks outside the F&O universe may be
+stored and are never swept.
+
+**Why the equities were added, and what it changes.** The operator's stated
+objective is the rare, massive winner — a setup that fires seldom, loses tiny
+when it loses, and pays enormously when it pays. Those moves exist in single
+stocks and are averaged away in an index. Two consequences follow and neither
+is optional: a stock CAN be bought, so its costs are real and must be charged
+before ranking, not after; and 213 instruments multiply the search by 213, so
+an in-sample result across the pool is the largest of billions and means
+nothing until it is validated out of sample.
 
 ---
 

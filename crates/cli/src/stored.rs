@@ -1795,44 +1795,74 @@ fn clipped(word: &str) -> String {
     out
 }
 
-/// One of the exact two spot indices this engine is allowed to sweep.
+/// One instrument this engine is allowed to sweep: a spot index, or -- since
+/// D-0506 -- an F&O cash equity.
 ///
 /// Constructing an [`InstrumentKey`] proves only that the identifier is a
-/// well-formed, storable NSE index. Reference indices and other valid symbols
-/// can therefore have real files in the store without belonging to the sweep
-/// surface. Every stored-sweep entry door comes through this helper so the
-/// authoritative allow-list remains [`InstrumentKey::SWEPT`], not a second
-/// string list in the CLI or API.
+/// well-formed, storable NSE symbol. Reference indices, contracts and stocks
+/// outside the F&O universe can therefore have real files in the store without
+/// belonging to the sweep surface. Every stored-sweep entry door comes through
+/// this helper so the authoritative allow-list remains
+/// [`InstrumentKey::is_sweepable`] -- [`InstrumentKey::SWEPT`] for the indices
+/// and `FNO_INDEX` for the equities -- not a second string list in the CLI or
+/// API.
 ///
-/// Both refusals name the word through [`clipped`] rather than interpolating it
-/// raw. The first arm is the one an unbounded argument actually reaches —
-/// `Symbol::new` refuses anything past its capacity, so a 10,000-character word
-/// fails there — and the second is clipped for the same reason rather than
-/// because it can grow: two refusal sites for one field must not disagree about
-/// how much of it they will print, which is why they share one value rather than
-/// each calling the cut.
+/// # How one word resolves to one of two shapes
+///
+/// The two indices are tried first, by name. A word that is not one of them is
+/// tried as a cash equity. Both keys are built and both are checked, so the
+/// refusal a reader sees names the surface as it actually is rather than
+/// "not an index".
+///
+/// Every refusal is ONE SENTENCE, whatever the word did wrong. A malformed
+/// word, a well-formed word off the surface and a contract are three causes
+/// and one refusal: *`X` is not an instrument this engine sweeps: <cause>. The
+/// sweep surface is …*. `an_enormous_instrument_word_is_clipped_out_of_its_own_refusal`
+/// pins that a typo and a 10,000-character word are refused by the same
+/// sentence, which is what lets an operator grep a log for one phrase.
+///
+/// The word is named through [`clipped`] rather than interpolated raw. The
+/// malformed arm is the one an unbounded argument actually reaches —
+/// `Symbol::new` refuses anything past its capacity — and the others are
+/// clipped for the same reason rather than because they can grow: three
+/// refusal sites for one field must not disagree about how much of it they
+/// will print, which is why they share one value rather than each calling the
+/// cut.
 ///
 /// That value is built EAGERLY, on the success path too. It is at most 67 bytes
 /// and this function runs once per instrument-month load, never per bar and
 /// never per candidate, so it is not one of the five operations `CLAUDE.md` §3
-/// rule 4 bounds. Buying that with a predictable shape — one clip, both
-/// sentences, no way for them to drift — is the better trade.
+/// rule 4 bounds. Buying that with a predictable shape — one clip, one
+/// sentence, no way for them to drift — is the better trade.
 pub(crate) fn swept_index(underlying: &str) -> Result<InstrumentKey, Refusal> {
     let named = clipped(underlying);
-    let key = InstrumentKey::index(Exchange::Nse, underlying)
-        .map_err(|why| format!("`{named}` is not an index this engine sweeps: {why}"))?;
-    key.require_sweepable().map_err(|why| {
-        let allowed = InstrumentKey::SWEPT
+    let refuse = |why: String| {
+        let indices = InstrumentKey::SWEPT
             .iter()
             .map(|(_, symbol)| *symbol)
             .collect::<Vec<_>>()
             .join(", ");
         format!(
             "`{named}` is not an instrument this engine sweeps: {why}. \
-             The exact sweep surface is {allowed}. Nothing was read."
+             The sweep surface is the NSE spot indices {indices} and the NSE \
+             cash equities of the 213 F&O underlyings (D-0506). Nothing was read."
         )
-    })?;
-    Ok(key)
+    };
+    // THE INDEX FIRST, BY NAME. NIFTY and BANKNIFTY are indices and nothing
+    // else; a word that is one of them never reaches the equity arm.
+    let as_index =
+        InstrumentKey::index(Exchange::Nse, underlying).map_err(|why| refuse(why.to_string()))?;
+    if as_index.is_sweepable() {
+        return Ok(as_index);
+    }
+    // THEN THE CASH EQUITY. Same word, the stock's own price series. Sweepable
+    // only when the symbol is one of the 213 F&O underlyings.
+    let as_cash =
+        InstrumentKey::cash(Exchange::Nse, underlying).map_err(|why| refuse(why.to_string()))?;
+    as_cash
+        .require_sweepable()
+        .map_err(|why| refuse(why.to_string()))?;
+    Ok(as_cash)
 }
 
 /// One instrument-month of real bars, or the reason there are none.
@@ -3257,7 +3287,7 @@ mod tests {
             .expect_err("nothing that long is an instrument");
 
         assert!(
-            why.contains("is not an index this engine sweeps"),
+            why.contains("is not an instrument this engine sweeps"),
             "it is still refused by the same named sentence as any typo: {why}"
         );
         assert!(
@@ -3718,7 +3748,7 @@ mod tests {
                 (2026, 1)
             )
             .expect_err("not an index")
-            .contains("is not an index this engine sweeps"),
+            .contains("is not an instrument this engine sweeps"),
             "a path-shaped name is refused as an instrument, not walked"
         );
     }

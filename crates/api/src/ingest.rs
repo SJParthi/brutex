@@ -208,8 +208,8 @@ impl SpotTarget {
     ///
     /// The run built its instrument list from `catalog::tracked` alone — every
     /// member of `TOTAL_MARKET` or `INDEX`, 765 names — and never consulted the
-    /// target the operator chose. Selecting *Swept indices*, which the page
-    /// labels "NSE-NIFTY and NSE-BANKNIFTY, the only two swept" beside a
+    /// target the operator chose. Selecting *Swept surface*, which the page
+    /// labels "NSE-NIFTY, NSE-BANKNIFTY and the F&O underlyings this feed lists" beside a
     /// counter reading **2**, still swept all 765 and began at `360ONE`. The
     /// label, the counter and the run were three different answers to one
     /// question.
@@ -371,7 +371,7 @@ impl SpotTarget {
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Swept => "Swept indices",
+            Self::Swept => "Swept surface",
             Self::Indices => "Reference indices",
             Self::Equities => "NIFTY Total Market equities",
             Self::Nifty500 => "NIFTY 500 equities",
@@ -391,7 +391,9 @@ impl SpotTarget {
     #[must_use]
     pub const fn note(self) -> &'static str {
         match self {
-            Self::Swept => "NSE-NIFTY and NSE-BANKNIFTY — the only two swept",
+            Self::Swept => {
+                "NSE-NIFTY, NSE-BANKNIFTY and the F&O underlyings this feed lists — the sweep surface, D-0506"
+            }
             Self::Indices => "stored and stamped onto trades; never swept",
             Self::Equities => "stored, never swept",
             // EVERY TIER SAYS "never swept" IN THE SAME BREATH AS ITS COUNT.
@@ -412,7 +414,9 @@ impl SpotTarget {
             // never swept" is true of the SET but reads as "this set excludes
             // the swept pair", which is false. So they say what `Indices`
             // says: the pull stores them, and the sweep surface is unchanged.
-            Self::Fno => "the 213 F&O underlyings — stored; the sweep surface is never swept",
+            Self::Fno => {
+                "the 213 F&O underlyings — stored, and swept as cash equities since D-0506"
+            }
             Self::Everything => {
                 "every tracked series and constituent — stored; the sweep surface \
                  is unchanged and never swept"
@@ -2421,8 +2425,8 @@ mod tests {
         for (target, label, note) in [
             (
                 SpotTarget::Swept,
-                "Swept indices",
-                "NSE-NIFTY and NSE-BANKNIFTY — the only two swept",
+                "Swept surface",
+                "NSE-NIFTY, NSE-BANKNIFTY and the F&O underlyings this feed lists — the sweep surface, D-0506",
             ),
             (
                 SpotTarget::Indices,
@@ -2459,12 +2463,22 @@ mod tests {
             assert_eq!(target.label(), label);
             assert_eq!(target.note(), note);
         }
-        // EVERY SET BUT THE FIRST SAYS "never swept" IN THE TEXT THE FORM SHOWS.
-        // `CLAUDE.md` §1 is enforced by `is_sweepable`, but an operator reads
-        // the note, and a row that offered 500 instruments without that phrase
-        // is the row that gets mistaken for a widened engine surface.
+        // EVERY SET OFF THE SURFACE SAYS "never swept" IN THE TEXT THE FORM
+        // SHOWS. `CLAUDE.md` §1 is enforced by `is_sweepable`, but an operator
+        // reads the note, and a row that offered 500 instruments without that
+        // phrase is the row that gets mistaken for a widened engine surface.
+        // Two rows ARE the surface and say the opposite: `Swept` by definition,
+        // and `Fno` since D-0506 widened the surface to its 213 cash equities.
+        // The tiers stay "never swept" as SETS even though they overlap the
+        // F&O list — the tier decides nothing, `FNO_INDEX` does.
         for target in SpotTarget::ALL {
-            if target == SpotTarget::Swept {
+            if matches!(target, SpotTarget::Swept | SpotTarget::Fno) {
+                assert!(
+                    !target.note().contains("never swept"),
+                    "{} is on the surface and must not disclaim it: {}",
+                    target.slug(),
+                    target.note()
+                );
                 continue;
             }
             assert!(
@@ -2474,8 +2488,8 @@ mod tests {
                 target.note()
             );
         }
-        // Only the two swept indices are swept; every other set is stored, and
-        // each names ONE bit rather than sharing one.
+        // Every set names ONE universe bit rather than sharing one. `Swept`
+        // keeps the index bit: its membership is `is_sweepable`, not the bit.
         assert_eq!(SpotTarget::Swept.universe(), Universe::INDEX);
         assert_eq!(SpotTarget::Indices.universe(), Universe::INDEX);
         assert_eq!(SpotTarget::Equities.universe(), Universe::TOTAL_MARKET);
@@ -2646,8 +2660,15 @@ mod tests {
     /// Driven over every member of all four tiers — 850 keys — because "no
     /// constituent is sweepable" is a claim about the whole set and a
     /// spot-check of one name is a claim about one name.
+    ///
+    /// Was `a_nifty_tier_target_stores_and_never_sweeps`, asserting every tier
+    /// member is NOT sweepable. D-0506 widened the surface to the F&O cash
+    /// equities, and the tiers overlap that set heavily -- RELIANCE is in all
+    /// four tiers and is an F&O underlying. So the claim is now conditional,
+    /// and the test says which condition: a tier member sweeps exactly when
+    /// `FNO_INDEX` holds it, and the tier itself decides nothing.
     #[test]
-    fn a_nifty_tier_target_stores_and_never_sweeps() {
+    fn a_nifty_tier_target_stores_and_sweeps_exactly_its_fno_members() {
         for target in [
             SpotTarget::Nifty500,
             SpotTarget::Nifty200,
@@ -2657,17 +2678,20 @@ mod tests {
             let members = target.members().expect("a published tier has a list");
             for name in members {
                 let key = equity(name);
-                assert!(
-                    !key.is_sweepable(),
-                    "{name} is stored by {}, and the engine sweeps NSE-NIFTY and \
-                     NSE-BANKNIFTY only",
+                assert_eq!(
+                    key.is_sweepable(),
+                    universe::FNO_INDEX.contains(name),
+                    "{name} is stored by {}; it sweeps if and only if it is one of the \
+                     213 F&O underlyings (D-0506), and its tier membership decides nothing",
                     target.slug()
                 );
-                // And the swept target does not name it either: the two sets
-                // share a word in the label and no member at all.
-                assert!(
-                    !SpotTarget::Swept.names(&key, universe::of_equity(name)),
-                    "{name} is not on the engine surface"
+                // And the swept TARGET agrees with the surface, name by name:
+                // it is `is_sweepable` and nothing else, so a tier member is
+                // named by it exactly when `FNO_INDEX` holds the member.
+                assert_eq!(
+                    SpotTarget::Swept.names(&key, universe::of_equity(name)),
+                    universe::FNO_INDEX.contains(name),
+                    "{name}: the swept target names exactly the engine surface"
                 );
             }
         }
