@@ -57,7 +57,7 @@
   } from '$lib/terminal.svelte.js';
   import { parseKey, strikeExact } from '$lib/instrument.js';
   import { group, rupee } from '$lib/money.js';
-  import { monthLabel, dayLabel } from '$lib/dates.js';
+  import { monthLabel, dayLabel, MON } from '$lib/dates.js';
 
   /* ==================================================================
      THE FEED, AND THE CENSUS UNDER IT
@@ -468,8 +468,29 @@
      `heaviest` is carried so the refusal can NAME the number. A control that
      simply greys out teaches nothing; one that says "9,187 bars, over a budget
      of 512" tells the operator to coarsen the timeframe. */
-  const heaviest = $derived(rows.reduce((most, key) => Math.max(most, cellBars(key)), 0));
-  const dayCapable = $derived(rows.length > 0 && heaviest > 0 && heaviest <= DAY_BUDGET);
+  /* THE DAY SCOPE IS FOLDED OVER `matching`, NOT OVER `rows`, AND THAT IS A
+     CORRECTNESS FIX RATHER THAN A TIDY-UP.
+     ------------------------------------------------------------------------
+     `rows` comes from `sorted`, `sorted` reads `quotes`, and the quotes-
+     clearing effect depends on `day`. So folding the day list over `rows` made
+     the LIST depend on the SELECTION: choosing a date emptied the quote map,
+     which flattened the ranking to census order, which changed which
+     seventeen instruments were visible, which refolded `days` over a different
+     set — and the clamp below then cleared the date that had just been picked.
+     Nothing restored it when the quotes landed a round trip later.
+
+     The same loop moved `heaviest` and `dayCapable`, so a transient flip could
+     disable the Date control while the day it no longer showed was still being
+     applied to every quote on the page.
+
+     `matching` is the tab's keys filtered by segment and by the chosen cell.
+     It reads no quote, so it cannot move because of a selection — the list is
+     a property of the WINDOW, which is what a date picker's options should be.
+     Capped at the page size for the same reason the grid is: this is a fold
+     that costs one month read per key. */
+  const dayScope = $derived(matching.slice(0, PAGE));
+  const heaviest = $derived(dayScope.reduce((most, key) => Math.max(most, cellBars(key)), 0));
+  const dayCapable = $derived(dayScope.length > 0 && heaviest > 0 && heaviest <= DAY_BUDGET);
 
   /** The chosen day, `YYYY-MM-DD`, or `''` for the month's last bar. */
   let day = $state('');
@@ -487,20 +508,40 @@
 
   /** The days the visible rows actually traded, ascending. */
   let days = $state(/** @type {string[]} */ ([]));
-  /** Why the month could not be read, when that is why `days` is empty. */
+  /** The reason at least one series in view could not be read. */
   let daysWhy = $state(/** @type {string|null} */ (null));
+  /** How many of the series in view failed to read, against how many were asked.
+      `daysWhy` alone cannot say whether the list below it is EMPTY or merely
+      SHORT, and those want opposite sentences. */
+  let daysFailed = $state(0);
+  let daysAsked = $state(0);
 
   $effect(() => {
     const feed = store.feed;
-    const want = rows;
+    const want = dayScope;
     const tf = timeframe;
     const mo = month;
     if (!feed || !tf || !mo || !dayCapable || want.length === 0) {
       days = [];
       daysWhy = null;
+      daysFailed = 0;
+      daysAsked = 0;
       return;
     }
     let live = true;
+    /* CLEARED BEFORE THE READ, NOT AFTER IT.
+       This list survived until the new answers landed, so between changing the
+       month and the fetch resolving the picker went on offering the PREVIOUS
+       month's days — dates that are not in the month now selected. Picking one
+       in that window asks for a day the month does not contain and gets the
+       absence message for it, which blames the store for a list this page had
+       already replaced. An empty list for the width of a fetch is a control
+       that is briefly not ready; a wrong list is one that is confidently
+       wrong. */
+    days = [];
+    daysWhy = null;
+    daysFailed = 0;
+    daysAsked = 0;
     /* THE UNION ACROSS THE VISIBLE ROWS, not one row's calendar. Instruments do
        not all trade the same days — a halt, a listing, a suspension — and
        taking the first row's days as the month's would hide every day the
@@ -511,7 +552,16 @@
       /* A FAILED READ IS NOT AN EMPTY MONTH. `daysIn` now carries the reason
          the month could not be read, and without it a transport error looked
          exactly like a month that holds no days — a silently disabled Date
-         picker with nothing to explain it. */
+         picker with nothing to explain it.
+         THE COUNT TRAVELS WITH IT, and that is the correction. `days` is a
+         UNION across the rows in view and this was `find` — a "some row
+         failed" test — so one bad series out of forty set a reason beside a
+         list that was populated from the other thirty-nine. The tooltip then
+         said no day could be offered while the picker was offering days. The
+         two reducers disagreed; the counts let the render site tell an empty
+         list from a short one. */
+      daysFailed = answers.filter((a) => a.why).length;
+      daysAsked = answers.length;
       daysWhy = answers.find((a) => a.why)?.why ?? null;
     });
     return () => {
@@ -533,7 +583,19 @@
      guards the transient window where the list has not been folded yet, which
      would otherwise clear a perfectly good day on every refetch. */
   $effect(() => {
-    if (day && days.length > 0 && !days.includes(day)) day = '';
+    if (!day) return;
+    /* THE CASE THE GUARD USED TO EXCLUDE. When `dayCapable` goes false the days
+       effect sets `days = []`, and the old `days.length > 0` guard then BLOCKED
+       the clear — so the chosen day stayed in force against every quote on the
+       page while the Date control sat disabled and empty. That is exactly the
+       "a filter in force that the control no longer shows" defect this clamp
+       was added to prevent, reached through the clamp's own guard.
+       A window that cannot answer a day at all must not keep applying one. */
+    if (!dayCapable) {
+      day = '';
+      return;
+    }
+    if (days.length > 0 && !days.includes(day)) day = '';
   });
 
   /** The chosen minute, `HH:MM` in IST, or `''` for the day's last bar. */
@@ -547,30 +609,59 @@
 
   /** The minutes the visible rows are stamped with on the chosen day. */
   let times = $state(/** @type {string[]} */ ([]));
+  /** The reason at least one series in view could not be read. */
+  let timesWhy = $state(/** @type {string|null} */ (null));
+  /** The same two counts, for the same reason the day list states. */
+  let timesFailed = $state(0);
+  let timesAsked = $state(0);
 
   /* The same re-validation for the minute, for the same reason: its list is a
      fold over the same moving set of rows. */
   $effect(() => {
-    if (time && times.length > 0 && !times.includes(time)) time = '';
+    if (!time) return;
+    // The same case, for the same reason: a minute cannot outlive the day it
+    // belongs to, nor a window that can no longer read one.
+    if (!day || !dayCapable) {
+      time = '';
+      return;
+    }
+    if (times.length > 0 && !times.includes(time)) time = '';
   });
 
   $effect(() => {
     const feed = store.feed;
-    const want = rows;
+    const want = dayScope;
     const tf = timeframe;
     const mo = month;
     const on = day;
     if (!feed || !tf || !mo || !on || !dayCapable || want.length === 0) {
       times = [];
+      timesWhy = null;
+      timesFailed = 0;
+      timesAsked = 0;
       return;
     }
     let live = true;
+    // Cleared before the read, for the reason the day list states — a stale
+    // minute list is worse here, because minutes look alike across days and
+    // nothing on screen would show it belonged to the previous one.
+    times = [];
+    timesWhy = null;
+    timesFailed = 0;
+    timesAsked = 0;
     /* THE UNION AGAIN, for the reason the day list gives: two instruments need
        not be stamped with the same minutes, and a series that halted at noon
        would erase the afternoon from a picker built on it alone. */
     Promise.all(want.map((key) => timesOn(feed, key, tf, mo, on))).then((answers) => {
       if (!live) return;
       times = [...new Set(answers.flatMap((a) => a.times))].sort();
+      /* THE `why` IS KEPT HERE TOO. `timesOn` returns it for exactly this
+         purpose and this caller was throwing it away, so a failed month read
+         disabled the Time picker with the words "a day holds one bar" —
+         a statement about the timeframe, made when nothing had been read. */
+      timesFailed = answers.filter((a) => a.why).length;
+      timesAsked = answers.length;
+      timesWhy = answers.find((a) => a.why)?.why ?? null;
     });
     return () => {
       live = false;
@@ -1010,10 +1101,37 @@
 
   /** The display name for a key — the underlying, plus a contract tail.
       @param {string} key @returns {string} */
+  /** THE EXPIRY AS THE SOURCE WRITES IT: `29 SEP`, not `2026-09-29`.
+     Measured off the captures — an option reads `NIFTY 29 SEP 25000 CALL` and a
+     future reads `RELIANCE SEP FUT`, so a future carries the month alone and an
+     option carries the day with it. This page was printing the raw ISO key,
+     which is the KEY form: right for a Map and wrong for a human, and the one
+     thing `$lib/dates.js` opens by warning about.
+     Parsed from the string rather than through a Date: an expiry is a calendar
+     day, not an instant, so putting it through a timezone would be inventing a
+     conversion it does not need.
+     @param {string|null} iso @returns {string} */
+  function expiryLabel(iso) {
+    const m = String(iso ?? '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return String(iso ?? '');
+    const mon = MON[Number(m[2]) - 1];
+    return mon ? `${m[3]} ${mon.toUpperCase()}` : String(iso);
+  }
+
+  /** The expiry month alone, which is how the source names a future.
+      @param {string|null} iso @returns {string} */
+  function expiryMonth(iso) {
+    const label = expiryLabel(iso);
+    const parts = label.split(' ');
+    return parts.length === 2 ? parts[1] : label;
+  }
+
+  /** The display name for a key — the underlying, plus a contract tail.
+      @param {string} key @returns {string} */
   function labelOf(key) {
     const p = parseKey(key);
     if (!p.underlying) return key;
-    if (p.kind === 'future') return `${p.underlying} ${p.expiry} FUT`;
+    if (p.kind === 'future') return `${p.underlying} ${expiryMonth(p.expiry)} FUT`;
     if (p.kind === 'option') {
       /* `strikeExact`, NOT `Math.round(strike / 100)`.
          The strike is a PAISA INTEGER and the rounded form printed a strike
@@ -1024,7 +1142,11 @@
          exact rendering and keeps the paise only when they are non-zero, so
          whole strikes stay short. `CLAUDE.md` §7: prices are paisa integers,
          never a float. */
-      return `${p.underlying} ${p.expiry} ${strikeExact(p.strike)} ${p.side}`;
+      /* `CALL` and `PUT`, not `CE` and `PE`. The store files the exchange's own
+         two-letter side and the source terminal spells it out; both name the
+         same thing, and the one a human reads is the spelled one. */
+      const side = p.side === 'CE' ? 'CALL' : p.side === 'PE' ? 'PUT' : (p.side ?? '');
+      return `${p.underlying} ${expiryLabel(p.expiry)} ${strikeExact(p.strike)} ${side}`;
     }
     return p.underlying;
   }
@@ -1245,7 +1367,9 @@
               disabled={!dayCapable || days.length === 0}
               title={dayCapable
                 ? daysWhy
-                  ? `The month could not be read, so no day can be offered: ${daysWhy}`
+                  ? days.length === 0
+                    ? `No day can be offered — every series in view failed to read: ${daysWhy}`
+                    : `${daysFailed} of ${daysAsked} series in view could not be read, so this list may be short a day they traded: ${daysWhy}`
                   : 'The last bar on the chosen day. “Month” is the month’s last bar.'
                 : rows.length === 0
                   ? 'There are no rows in view, so there is no month to read for a date. This is not a budget refusal — the grid is empty.'
@@ -1268,9 +1392,13 @@
               disabled={!day || times.length < 2}
               title={!day
                 ? 'Choose a date first — a time with no date is a minute of nothing.'
-                : times.length < 2
-                  ? `At ${timeframe} a day holds ${times.length === 1 ? 'one bar' : 'no bars'}, so there is no minute to choose between. A finer timeframe puts more bars in the day.`
-                  : 'The bar stamped at this minute. “Close” is the day’s last bar.'}
+                : timesWhy
+                  ? times.length === 0
+                    ? `No minute can be offered — every series in view failed to read: ${timesWhy}`
+                    : `${timesFailed} of ${timesAsked} series in view could not be read, so this list may be short a minute they are stamped with: ${timesWhy}`
+                  : times.length < 2
+                    ? `At ${timeframe} a day holds ${times.length === 1 ? 'one bar' : 'no bars'}, so there is no minute to choose between. A finer timeframe puts more bars in the day.`
+                    : 'The bar stamped at this minute. “Close” is the day’s last bar.'}
             >
               <option value="">Close</option>
               {#each times as t (t)}<option value={t}>{t}</option>{/each}
@@ -1492,6 +1620,10 @@
     --pill: #1b2c27;
     --ink: #dadada;
     --dim: #8e8e8e;
+    /* One step below `--dim`, for a declined answer. Not sampled from the
+       source — the source never declines — so it is this page's own value,
+       chosen to sit below the number colour without vanishing on #121212. */
+    --faint: #5a5a5a;
     --up: #5da81e;
     --down: #e15858;
     --acc: #06b878;
@@ -1716,9 +1848,15 @@
      inheritance rather than a decision, and it read at the same weight as the
      dim label beside it. In the source terminal the level is the emphasis of
      the cell; stated, so it stays that way. */
+  /* MEASURED, AND IT IS NOT WHAT THE FIRST VERSION OF THIS RULE CLAIMED.
+     That rule set the index level to `--ink` at weight 600 and said the source
+     makes the level the emphasis of the cell. Sampling the capture: the strip's
+     value reads #8E8E8E — the same `--dim` as its label. The source does NOT
+     emphasise the level here; it is the top-bar ticker that carries the bright
+     one. The rule stays only to state that deliberately, rather than leaving
+     the strip's most important figure styled by inheritance. */
   .c-v {
-    color: var(--ink);
-    font-weight: 600;
+    color: var(--dim);
   }
   .c-w {
     color: var(--dim);
@@ -1740,8 +1878,15 @@
     min-height: 0;
   }
 
+  /* AN ABSENCE IS FAINTER THAN A VALUE, not the same weight as one.
+     Numbers now render at `--dim` to match the source, which is the colour the
+     dashes used — so an em dash and a real figure would have been
+     indistinguishable, and this page's whole argument is that they are
+     different facts. `--faint` sits one step below, so a dash reads as LESS
+     than a number rather than as another one. The source has no dashes to
+     match here; it never declines to answer. */
   .dim {
-    color: var(--dim);
+    color: var(--faint);
   }
 
   /* ---- grid ---- */
@@ -2005,6 +2150,16 @@
     border-bottom: 0;
     text-align: right;
     white-space: nowrap;
+    /* NUMBERS ARE DIM; THE NAME IS INK. MEASURED OFF THE SOURCE CAPTURE, and
+       the opposite of what this page shipped.
+       ---------------------------------------------------------------------
+       Sampling the Options capture: the instrument name reads #DADADA, and the
+       LTP and Open Interest values both read #8E8E8E. The original palette
+       pass sampled the NAME and generalised it to the row, so every figure in
+       this grid was a shade too bright and the name lost the emphasis the
+       source gives it. The source spends its brightest ink on WHICH
+       instrument, and renders the numbers quietly. */
+    color: var(--dim);
   }
   /* The hover is declared here rather than inherited for the third time: the
      console's own `tbody tr:hover td` resolves to ITS token, which is a

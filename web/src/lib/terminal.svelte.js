@@ -540,22 +540,50 @@ export async function quoteOn(feed, key, timeframe, month, day, time = '') {
      most one, so "last" and "only" coincide. */
   let found = null;
   let onDay = 0;
+  /* THE LATEST DAY THIS READ ACTUALLY REACHED, folded in the same pass.
+     The truncation branch below used to assert that a missing day was "past
+     the cut" without ever checking, so a day sitting well INSIDE the part that
+     was read — genuinely absent, a holiday or an unpulled day — was told the
+     page's budget had hidden it. That is a wrong reason stated confidently,
+     which reads as an answer. Taken as a MAXIMUM rather than as the last
+     element, so the claim does not rest on the ascending order the comment
+     above merely asserts. */
+  let reached = '';
   for (const bar of bars) {
     if (typeof bar.t !== 'number') continue;
     const ms = bar.t * 1000;
-    if (istDay(ms) !== day) continue;
+    const d = istDay(ms);
+    if (d > reached) reached = d;
+    if (d !== day) continue;
     onDay += 1;
     if (!time || istClock(ms) === time) found = bar;
   }
 
+  /* WHAT THIS READ COULD NOT SEE, in the words the branches below share.
+     Both of them describe a day, and both were written as though the month had
+     arrived whole — but `monthBars` reports two ways it may not have, and
+     neither branch consulted them before asserting. */
+  const partial = faults
+    ? ` A record in ${month} would not read (${faults}), so this day may be ` +
+      `held only in part.`
+    : total > bars.length
+      ? ` Only the first ${bars.length.toLocaleString('en-IN')} of ` +
+        `${total.toLocaleString('en-IN')} bars in ${month} were read — the ` +
+        `budget stops at ${DAY_BUDGET.toLocaleString('en-IN')} — so this day ` +
+        `may be held only in part.`
+      : '';
+
   if (!found && onDay > 0) {
-    // THE DAY IS HELD AND THE MINUTE IS NOT. A different absence from the one
-    // below, and the count is what tells them apart for the reader.
+    /* THE DAY IS HELD AND THE MINUTE IS NOT. A different absence from the ones
+       below, and the count is what tells them apart for the reader.
+       The closing sentence is now EARNED rather than assumed: it claims the day
+       was read whole only when neither a damaged record nor the budget cut
+       stands between this read and the rest of the month. */
     return nothing(
       key,
       `The store holds ${onDay} ${timeframe} bars for this series on ${day}, ` +
-        `and none of them is stamped ${time}. The day was read and that minute ` +
-        `is not in it.`
+        `and none of the ones read is stamped ${time}.` +
+        (partial || ` The day was read whole and that minute is not in it.`)
     );
   }
   if (!found) {
@@ -572,13 +600,32 @@ export async function quoteOn(feed, key, timeframe, month, day, time = '') {
       );
     }
     if (total > bars.length) {
+      const cut =
+        `${month} holds ${total.toLocaleString('en-IN')} ${timeframe} bars for ` +
+        `this series and only the first ${bars.length.toLocaleString('en-IN')} ` +
+        `were read — the budget stops at ${DAY_BUDGET.toLocaleString('en-IN')}. `;
+      /* WHICH SIDE OF THE CUT THE DAY IS ON, ASKED RATHER THAN ASSUMED.
+         Past what the read reached, the budget is the honest reason. At or
+         before it, the day sits inside the part that WAS read and is absent
+         from it, so blaming the budget would name the wrong cause — and the
+         wrong cause sends the operator to change the timeframe, which would
+         not bring the day back. */
+      if (reached && day > reached) {
+        return nothing(
+          key,
+          cut +
+            `${day} is past ${reached}, the last day this read reached, so its ` +
+            `absence here is this page's limit and not the store's. A coarser ` +
+            `timeframe puts the whole month inside the budget.`
+        );
+      }
       return nothing(
         key,
-        `${month} holds ${total.toLocaleString('en-IN')} ${timeframe} bars for ` +
-          `this series and only the first ${bars.length.toLocaleString('en-IN')} ` +
-          `were read — the budget stops at ${DAY_BUDGET.toLocaleString('en-IN')}. ` +
-          `${day} is past that cut, so its absence here is this page's limit and ` +
-          `not the store's. A coarser timeframe puts the whole month inside the budget.`
+        cut +
+          `${day} is not past ${reached || 'the start of the month'}, so it lies ` +
+          `inside the part that was read and has no bars there — this series did ` +
+          `not trade that day, or its bars were never pulled. The cut is real but ` +
+          `it is not what is hiding this day.`
       );
     }
     return nothing(
