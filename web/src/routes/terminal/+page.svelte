@@ -1048,6 +1048,53 @@
     return quote.close - before;
   }
 
+  /** THE DERIVED ABSOLUTE MOVE, AS A RENDERED CELL — one spelling, three
+      surfaces.
+      ------------------------------------------------------------------------
+      This was inline in `cellOf` and so belonged to the GRID alone, which is
+      why the strip and the lead ticker showed a percentage with no rupee move
+      beside it while the source terminal shows both everywhere it shows either.
+      Lifting it out is what lets those two render the same figure with the same
+      disclosure rather than a second, quieter version of this arithmetic.
+
+      THE FIGURE IS DERIVED AND SAYS SO ON HOVER — AND THE SLACK IS FAR LARGER
+      THAN THIS COMMENT FIRST CLAIMED. `chg` is INTEGER basis points and `close`
+      is a PAISA integer, so the reconstruction is quantised to about
+      `close / 10000` — and that quotient is in PAISA, not rupees. This block
+      used to read "roughly five paise of slack" for a ₹52,265 contract. The
+      arithmetic is 5,226,500 / 10,000 = 522.65 paisa, which is ₹5.23: the
+      estimate was wrong by a factor of a hundred, and the sentence that followed
+      it — "the last digit is arithmetic" — understated the reach by two more
+      places. On that price the RUPEES are uncertain, not the paise.
+
+      So the note states the slack in the same units it renders, and says which
+      digits it reaches. The figure is still not rounded away: a reader comparing
+      it against the percentage beside it should see a number consistent with
+      that percentage, and rounding to the honest precision would break the
+      correspondence. It is LABELLED instead.
+      @param {Quote} quote
+      @returns {{text: string, why: string|null, dir: number}} */
+  function absCell(quote) {
+    const v = absMove(quote);
+    if (v === null) {
+      return { text: '—', why: quote.chgWhy ?? 'No change was recorded for this bar.', dir: 0 };
+    }
+    const slackPaisa = Math.max(1, Math.round((quote.close ?? 0) / 10_000));
+    return {
+      text: rupee(Math.round(v)),
+      dir: Math.sign(v),
+      why:
+        'Derived, not measured. The wire carries the close and the change as ' +
+        'integer basis points, not the previous close, so this move is ' +
+        'reconstructed from the two. Whole basis points leave about ' +
+        rupee(slackPaisa) +
+        ' of slack on this price, so the figure is uncertain from its ' +
+        (slackPaisa >= 100 ? 'rupees' : 'paise') +
+        ' down — it is shown at full precision only to stay consistent with ' +
+        'the change percentage beside it, which is the figure the store holds.'
+    };
+  }
+
   /** One rendered cell: its text, its direction for colour, and the reason it
       is a dash when it is one.
       @param {Quote|undefined} quote @param {Col} col
@@ -1057,43 +1104,7 @@
     if (!quote) return { text: '', why: null, dir: 0, pending: true };
     if (quote.why) return { text: '—', why: quote.why, dir: 0 };
 
-    if (col.src === 'chgAbs') {
-      const v = absMove(quote);
-      if (v === null) {
-        return { text: '—', why: quote.chgWhy ?? 'No change was recorded for this bar.', dir: 0 };
-      }
-      /* THE FIGURE IS DERIVED AND SAYS SO ON HOVER — AND THE SLACK IS FAR
-         LARGER THAN THIS COMMENT FIRST CLAIMED.
-         ---------------------------------------------------------------------
-         `chg` is INTEGER basis points and `close` is a PAISA integer, so the
-         reconstruction is quantised to about `close / 10000` — and that
-         quotient is in PAISA, not rupees. This block used to read "roughly five
-         paise of slack" for a ₹52,265 contract. The arithmetic is
-         5,226,500 / 10,000 = 522.65 paisa, which is ₹5.23: the estimate was
-         wrong by a factor of a hundred, and the sentence that followed it —
-         "the last digit is arithmetic" — understated the reach by two more
-         places. On that price the RUPEES are uncertain, not the paise.
-
-         So the note now states the slack in the same units it renders, and says
-         which digits it reaches. The figure is still not rounded away: a reader
-         comparing it against the percentage beside it should see a number
-         consistent with that percentage, and rounding to the honest precision
-         would break the correspondence. It is LABELLED instead. */
-      const slackPaisa = Math.max(1, Math.round((quote.close ?? 0) / 10_000));
-      return {
-        text: rupee(Math.round(v)),
-        dir: Math.sign(v),
-        why:
-          'Derived, not measured. The wire carries the close and the change as ' +
-          'integer basis points, not the previous close, so this move is ' +
-          'reconstructed from the two. Whole basis points leave about ' +
-          rupee(slackPaisa) +
-          ' of slack on this price, so the figure is uncertain from its ' +
-          (slackPaisa >= 100 ? 'rupees' : 'paise') +
-          ' down — it is shown at full precision only to stay consistent with ' +
-          'the Change % beside it, which is the figure the store actually holds.'
-      };
-    }
+    if (col.src === 'chgAbs') return absCell(quote);
     if (col.src === 'chg') {
       if (quote.chg === null) {
         return { text: '—', why: quote.chgWhy ?? 'No change was recorded for this bar.', dir: 0 };
@@ -1193,8 +1204,16 @@
                change printed the level and nothing after it — the `chgWhy` was
                on the quote and never rendered. -->
           {#if lead.chg != null}
+            <!-- Same three terms as the strip and the same derived figure. -->
+            {@const move = absCell(lead)}
+            <span
+              class="tick-m"
+              class:up={move.dir > 0}
+              class:down={move.dir < 0}
+              title={move.why}>{move.text}</span
+            >
             <span class="tick-c" class:up={lead.chg > 0} class:down={lead.chg < 0}>
-              {pctText(lead.chg)}
+              ({pctText(lead.chg).replace(' %', '%')})
             </span>
           {:else}
             <span class="tick-w" title={lead.chgWhy ?? 'No change was computed for this bar.'}
@@ -1263,8 +1282,23 @@
           {#if q?.close != null}
             <span class="c-v">{rupee(q.close)}</span>
             {#if q.chg != null}
+              <!-- THE RUPEE MOVE, WHICH THIS STRIP DID NOT SHOW.
+                   The source writes `72,880.90  -170.95 (-0.23%)` — the level,
+                   the absolute move, then the ratio in parentheses. This strip
+                   showed the level and the ratio and dropped the middle term,
+                   so the one figure that answers "how much" was missing from
+                   the surface an operator reads first.
+                   It is the SAME `absCell` the grid's Change column uses, which
+                   is the point of lifting it out: two spellings of a derived
+                   figure are two answers the day one of them is edited, and
+                   this one carries the same hover note saying it is
+                   reconstructed rather than measured. -->
+              {@const move = absCell(q)}
+              <span class="c-m" class:up={move.dir > 0} class:down={move.dir < 0} title={move.why}>
+                {move.text}
+              </span>
               <span class="c-c" class:up={q.chg > 0} class:down={q.chg < 0}>
-                {pctText(q.chg)}
+                ({pctText(q.chg).replace(' %', '%')})
               </span>
               <!-- THREE STATES, BECAUSE UNCHANGED IS ONE OF THEM. This read
                    `chg >= 0 ? '↗' : '↘'`, so an index that closed exactly
@@ -1805,14 +1839,27 @@
     font-size: 15px;
     color: var(--faint);
   }
+  /* `.c-m` and `.tick-m` ARE ON BOTH LISTS, which is the whole reason they are
+     declared rather than left to inherit — a move carries a direction exactly
+     as the ratio beside it does, and an uncoloured rupee figure next to a green
+     percentage reads as two facts about different things. `--dim` is the
+     neutral, matching the label and the level, so an unchanged bar stays quiet. */
+  .c-m,
+  .tick-m {
+    color: var(--dim);
+  }
   .tick-c.up,
+  .tick-m.up,
   .c-c.up,
+  .c-m.up,
   .c-a.up,
   td.up {
     color: var(--up);
   }
   .tick-c.down,
+  .tick-m.down,
   .c-c.down,
+  .c-m.down,
   .c-a.down,
   td.down {
     color: var(--down);
