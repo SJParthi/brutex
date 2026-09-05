@@ -355,16 +355,41 @@ impl ExecutionRunV1 {
         series: ExecutionSeriesV1<'_>,
         side: crate::excursion::Side,
     ) -> Result<(), ExitGridErrorV1> {
-        if self.instrument != *series.instrument() {
+        self.require_matches_terms(
+            series.instrument(),
+            hash(series.feed().as_bytes()),
+            hash(series.commit().as_bytes()),
+            crate::identity::data_digest(series.bars()),
+            side,
+        )
+    }
+
+    /// The five run-identity checks, in their fixed order, against series
+    /// terms the caller has already digested.
+    ///
+    /// [`Self::require_matches`] digests the series here and now, which is one
+    /// BLAKE3 pass over every execution bar. An attested door has already
+    /// proved those digests equal to its resolution's own, so it passes the
+    /// resolution's copies instead and pays no pass. Both callers reach one
+    /// list of checks; there is no second copy to drift.
+    fn require_matches_terms(
+        self,
+        instrument: &InstrumentKey,
+        feed_digest: [u8; 32],
+        commit_digest: [u8; 32],
+        execution_digest: [u8; 32],
+        side: crate::excursion::Side,
+    ) -> Result<(), ExitGridErrorV1> {
+        if self.instrument != *instrument {
             return Err(ExitGridErrorV1::RunIdentityMismatch("instrument"));
         }
-        if self.feed_digest != hash(series.feed().as_bytes()) {
+        if self.feed_digest != feed_digest {
             return Err(ExitGridErrorV1::RunIdentityMismatch("feed"));
         }
-        if self.commit_digest != hash(series.commit().as_bytes()) {
+        if self.commit_digest != commit_digest {
             return Err(ExitGridErrorV1::RunIdentityMismatch("commit"));
         }
-        if self.execution_digest != crate::identity::data_digest(series.bars()) {
+        if self.execution_digest != execution_digest {
             return Err(ExitGridErrorV1::RunIdentityMismatch("execution data"));
         }
         let expected = match side {
@@ -987,7 +1012,39 @@ impl ResolvedLaddersV1 {
     }
 }
 
-/// One complete grid produced by [`ResolvedExitGridV1::evaluate_training_grid`].
+/// One TRAINING series and column, attested against one resolution, once.
+///
+/// Everything [`ResolvedExitGridV1::evaluate_training_grid_attested`] checks
+/// before it prices a candidate is a fact about the resolution, the series and
+/// the column -- the run is not consulted. Those checks read every bar and every
+/// column row: the minute-grid walk, the BLAKE3 over the training bytes, the
+/// acceptance census, the source coordinates, the arithmetic envelope and the
+/// column digest. A caller pricing many runs against one slice therefore
+/// attests the slice once through [`ResolvedExitGridV1::attest_training`],
+/// keeps this token, and hands it to
+/// [`ResolvedExitGridV1::evaluate_with_attested`] per run.
+///
+/// The token holds borrows and fixed-size data only, so it is `Sync` and one
+/// of them can be shared across a parallel candidate loop. Its fields are
+/// private and it carries the digest of the resolution that minted it, so it
+/// cannot be built by hand and cannot be spent on another resolution.
+///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace times the
+/// attestation it hoists, so the saving is read from the source rather than
+/// measured. `CLAUDE.md` §3 rule 6.
+#[derive(Clone, Copy, Debug)]
+pub struct AttestedTrainingV1<'a> {
+    resolution_digest: [u8; 32],
+    bars: &'a [Candle],
+    column: &'a indicators::column::Column,
+    horizon: Horizon,
+    column_digest: [u8; 32],
+    evaluation_spec: EvaluationSpecToken,
+}
+
+/// One complete grid produced by
+/// [`ResolvedExitGridV1::evaluate_training_grid_attested`] or, over an
+/// [`AttestedTrainingV1`], by [`ResolvedExitGridV1::evaluate_with_attested`].
 ///
 /// Fields are private so a caller cannot attach an arbitrary public [`Grid`] to
 /// a resolution and pass it to selection. Persistence will require its own
@@ -1827,12 +1884,117 @@ impl ResolvedExitGridV1 {
         self.policy_digest == self.policy.digest() && self.digest == digest_resolved(self)
     }
 
+    /// Attests one TRAINING series and column against this resolution, once.
+    ///
+    /// Every check here is a fact about `self`, `series` and `column`; none of
+    /// them reads a run. The returned [`AttestedTrainingV1`] carries what the
+    /// per-run door needs -- the borrowed bars and column, the column digest
+    /// and the evaluator identity -- so a caller pricing many candidates over
+    /// one slice reads the slice once and not once per candidate.
+    ///
+    /// The check order is the one [`Self::evaluate_training_grid_attested`]
+    /// has always used, with the run's own checks deferred to
+    /// [`Self::evaluate_with_attested`].
+    ///
+    /// # Errors
+    ///
+    /// Refuses a torn resolution, unsupported cost model, a series whose
+    /// instrument, feed, commit or calendar differ from the resolution's,
+    /// non-one-minute or changed TRAINING bytes, a column with no evaluator
+    /// identity, incomplete acceptance, out-of-range or non-increasing source
+    /// coordinates, and a slice whose arithmetic envelope a grid accumulator
+    /// could overflow.
+    pub fn attest_training<'a>(
+        &self,
+        series: ExecutionSeriesV1<'a>,
+        column: &'a indicators::column::Column,
+        horizon: Horizon,
+    ) -> Result<AttestedTrainingV1<'a>, ExitGridErrorV1> {
+        self.require_runtime_integrity()?;
+        self.require_matching_series(series)?;
+        let bars = series.bars();
+        validate_execution_bars(bars)?;
+        let count = u64::try_from(bars.len())
+            .map_err(|_| ExitGridErrorV1::ArithmeticOverflow("training replay bar count"))?;
+        if count != self.training_bars || crate::identity::data_digest(bars) != self.training_digest
+        {
+            return Err(ExitGridErrorV1::TrainingSeriesMismatch);
+        }
+        let evaluation_spec = column
+            .evaluation_spec_token()
+            .ok_or(ExitGridErrorV1::MissingEvaluationSpec)?;
+        require_complete_acceptance(column, bars.len())?;
+        validate_column_sources(column, bars.len(), 0)?;
+        validate_arithmetic_envelope(bars, self)?;
+        let column_digest = digest_column(column);
+        Ok(AttestedTrainingV1 {
+            resolution_digest: self.digest,
+            bars,
+            column,
+            horizon,
+            column_digest,
+            evaluation_spec,
+        })
+    }
+
+    /// Prices one run's complete TRAINING grid over an already-attested slice.
+    ///
+    /// This is the per-candidate half of [`Self::evaluate_training_grid_attested`]
+    /// and produces the same [`EvaluatedExitGridV1`], field for field. The
+    /// run's five identity terms are checked against this resolution's own
+    /// copies -- which the attestation proved equal to the series' -- so no
+    /// bar is re-read and no byte is re-hashed here; what remains is the grid.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a token minted by another resolution, a run whose instrument,
+    /// feed, commit, execution bytes or direction differ from the attested
+    /// series and this side, invalid exact ladders, and any mismatch between
+    /// the resolved cell count and the enumerated coordinate population.
+    pub fn evaluate_with_attested(
+        &self,
+        attested: &AttestedTrainingV1<'_>,
+        run: ExecutionRunV1,
+    ) -> Result<EvaluatedExitGridV1, ExitGridErrorV1> {
+        if attested.resolution_digest != self.digest {
+            return Err(ExitGridErrorV1::EvaluationResolutionMismatch);
+        }
+        run.require_matches_terms(
+            &self.instrument,
+            self.feed_digest,
+            self.commit_digest,
+            self.training_digest,
+            self.side(),
+        )?;
+        let grid = crate::grid::evaluate_resolved_policy_v1(
+            attested.bars,
+            attested.column,
+            &run.mask,
+            attested.horizon,
+            self.side(),
+            self,
+        )?;
+        Ok(EvaluatedExitGridV1 {
+            resolution_digest: self.digest,
+            run_id: run.run_id,
+            mask: run.mask,
+            horizon: attested.horizon,
+            column_digest: attested.column_digest,
+            evaluation_spec: attested.evaluation_spec,
+            side: self.side(),
+            grid,
+        })
+    }
+
     /// Enumerates the complete TRAINING grid over these exact resolved rungs.
     ///
-    /// This is the production constructor [`Self::select`] requires. It checks
-    /// that `bars` are the exact TRAINING bytes bound by this resolution, then
-    /// uses one cached crossing table per candidate and O(1) ratio admission in
-    /// [`crate::grid`]. No candidate-local ladder is derived a second time.
+    /// This is the production constructor [`Self::select`] requires, and it is
+    /// [`Self::attest_training`] followed by [`Self::evaluate_with_attested`]:
+    /// it checks that `bars` are the exact TRAINING bytes bound by this
+    /// resolution, then uses one cached crossing table per candidate and O(1)
+    /// ratio admission in [`crate::grid`]. No candidate-local ladder is derived
+    /// a second time. A caller with many runs over one slice should attest
+    /// once and use the per-run door directly.
     ///
     /// **UNVERIFIED as a measured bound.** No bench in this workspace
     /// times this, so the shape above is read from the source rather
@@ -1850,42 +2012,8 @@ impl ResolvedExitGridV1 {
         horizon: Horizon,
         run: ExecutionRunV1,
     ) -> Result<EvaluatedExitGridV1, ExitGridErrorV1> {
-        self.require_runtime_integrity()?;
-        self.require_matching_series(series)?;
-        run.require_matches(series, self.side())?;
-        let bars = series.bars();
-        validate_execution_bars(bars)?;
-        let count = u64::try_from(bars.len())
-            .map_err(|_| ExitGridErrorV1::ArithmeticOverflow("training replay bar count"))?;
-        if count != self.training_bars || crate::identity::data_digest(bars) != self.training_digest
-        {
-            return Err(ExitGridErrorV1::TrainingSeriesMismatch);
-        }
-        let evaluation_spec = column
-            .evaluation_spec_token()
-            .ok_or(ExitGridErrorV1::MissingEvaluationSpec)?;
-        require_complete_acceptance(column, bars.len())?;
-        validate_column_sources(column, bars.len(), 0)?;
-        validate_arithmetic_envelope(bars, self)?;
-        let column_digest = digest_column(column);
-        let grid = crate::grid::evaluate_resolved_policy_v1(
-            bars,
-            column,
-            &run.mask,
-            horizon,
-            self.side(),
-            self,
-        )?;
-        Ok(EvaluatedExitGridV1 {
-            resolution_digest: self.digest,
-            run_id: run.run_id,
-            mask: run.mask,
-            horizon,
-            column_digest,
-            evaluation_spec,
-            side: self.side(),
-            grid,
-        })
+        let attested = self.attest_training(series, column, horizon)?;
+        self.evaluate_with_attested(&attested, run)
     }
 
     /// Unit-test shorthand over the visibly synthetic source identity.
@@ -2921,7 +3049,8 @@ pub enum ExitGridErrorV1 {
         /// Side the caller asked to price.
         offered: crate::excursion::Side,
     },
-    /// An evaluated-grid capability belongs to another resolution or side.
+    /// An evaluated-grid or attested-training capability belongs to another
+    /// resolution or side.
     EvaluationResolutionMismatch,
     /// The opaque selected capability was changed or belongs elsewhere.
     SelectionDigestMismatch,
@@ -5941,6 +6070,145 @@ mod tests {
                 Horizon::DEFAULT,
                 crate::excursion::Side::Short,
             ),
+            Err(ExitGridErrorV1::RunIdentityMismatch("direction"))
+        );
+    }
+
+    /// The attested door is the single-shot door split in two, and the split
+    /// changes nothing a caller can observe: the same bytes come out, and a
+    /// token can be spent only on the resolution that minted it.
+    ///
+    /// The point of the split is the V4 population loop in `validate.rs`,
+    /// which prices every closed candidate on both sides against ONE training
+    /// slice per fold and was re-attesting that slice once per candidate per
+    /// side. The token is what lets that loop attest once and share the result
+    /// across its rayon threads, so its `Sync` bound is pinned here too.
+    #[test]
+    fn an_attested_training_token_prices_the_same_grid_and_binds_its_resolution() {
+        fn require_sync<T: Sync>(_: &T) {}
+
+        let input = bars(100);
+        let instrument = nifty();
+        let resolved = policy()
+            .resolve(&instrument, &input)
+            .unwrap_or_else(|_| unreachable_resolved());
+        let column = test_column(&input);
+        let series =
+            ExecutionSeriesV1::new(&instrument, "test-feed", "test-commit", [0xA5; 32], &input)
+                .expect("the synthetic series is well formed");
+        let run = test_execution_run(&instrument, &ConditionMask::ZERO, resolved.side(), &input)
+            .expect("the synthetic run seals");
+
+        let attested = resolved
+            .attest_training(series, &column, Horizon::DEFAULT)
+            .expect("the exact training slice attests");
+        require_sync(&attested);
+
+        // SAME DOOR, SAME BYTES.
+        let split = resolved.evaluate_with_attested(&attested, run);
+        let whole =
+            resolved.evaluate_training_grid_attested(series, &column, Horizon::DEFAULT, run);
+        assert!(split.is_ok());
+        assert_eq!(split, whole, "attest-then-evaluate is the single-shot door");
+
+        // THE TOKEN CANNOT BE SPENT ON ANOTHER RESOLUTION. One changed bar
+        // re-keys the training digest and therefore the resolution digest.
+        let mut changed = input.clone();
+        if let Some(bar) = changed.first_mut() {
+            bar.volume = bar.volume.saturating_add(1);
+        }
+        let other = policy()
+            .resolve(&instrument, &changed)
+            .unwrap_or_else(|_| unreachable_resolved());
+        assert_ne!(other.digest(), resolved.digest());
+        assert_eq!(
+            other.evaluate_with_attested(&attested, run),
+            Err(ExitGridErrorV1::EvaluationResolutionMismatch)
+        );
+    }
+
+    /// Every run-identity refusal still fires from the per-run door, in the
+    /// fixed order `require_matches` has always used, although the door
+    /// compares the run against the resolution's own terms rather than
+    /// re-hashing the series: the attestation proved the two equal.
+    #[test]
+    fn the_per_run_door_refuses_every_foreign_run_term_in_the_fixed_order() {
+        let input = bars(100);
+        let instrument = nifty();
+        let resolved = policy()
+            .resolve(&instrument, &input)
+            .unwrap_or_else(|_| unreachable_resolved());
+        let column = test_column(&input);
+        let series =
+            ExecutionSeriesV1::new(&instrument, "test-feed", "test-commit", [0xA5; 32], &input)
+                .expect("the synthetic series is well formed");
+        let attested = resolved
+            .attest_training(series, &column, Horizon::DEFAULT)
+            .expect("the exact training slice attests");
+        let mut changed = input.clone();
+        if let Some(bar) = changed.first_mut() {
+            bar.volume = bar.volume.saturating_add(1);
+        }
+
+        let foreign_instrument =
+            test_execution_run(&bank_nifty(), &ConditionMask::ZERO, resolved.side(), &input)
+                .expect("a BANKNIFTY run seals");
+        assert_eq!(
+            resolved.evaluate_with_attested(&attested, foreign_instrument),
+            Err(ExitGridErrorV1::RunIdentityMismatch("instrument"))
+        );
+        let foreign_feed = test_execution_run_for_feed(
+            &instrument,
+            &ConditionMask::ZERO,
+            resolved.side(),
+            &input,
+            "other-feed",
+        )
+        .expect("an other-feed run seals");
+        assert_eq!(
+            resolved.evaluate_with_attested(&attested, foreign_feed),
+            Err(ExitGridErrorV1::RunIdentityMismatch("feed"))
+        );
+        let foreign_commit = ExecutionRunV1::new(
+            &crate::identity::Run {
+                mask: ConditionMask::ZERO,
+                direction: Direction::Long,
+                instrument: &instrument,
+                timeframe: "1min",
+                params: crate::identity::Params {
+                    min_hits: 1,
+                    ceiling: 1,
+                    pair_budget: 1,
+                    policy: 0,
+                },
+                data_digest: crate::identity::data_digest(&input),
+                commit: "other-commit",
+                feed: "test-feed",
+            },
+            &input,
+            None,
+        )
+        .expect("an other-commit run seals");
+        assert_eq!(
+            resolved.evaluate_with_attested(&attested, foreign_commit),
+            Err(ExitGridErrorV1::RunIdentityMismatch("commit"))
+        );
+        let foreign_bytes =
+            test_execution_run(&instrument, &ConditionMask::ZERO, resolved.side(), &changed)
+                .expect("a run over the changed bytes seals");
+        assert_eq!(
+            resolved.evaluate_with_attested(&attested, foreign_bytes),
+            Err(ExitGridErrorV1::RunIdentityMismatch("execution data"))
+        );
+        let foreign_side = test_execution_run(
+            &instrument,
+            &ConditionMask::ZERO,
+            crate::excursion::Side::Short,
+            &input,
+        )
+        .expect("a short run seals");
+        assert_eq!(
+            resolved.evaluate_with_attested(&attested, foreign_side),
             Err(ExitGridErrorV1::RunIdentityMismatch("direction"))
         );
     }

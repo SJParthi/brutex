@@ -51,8 +51,8 @@ use rayon::prelude::*;
 use vocab::ConditionMask;
 
 use crate::exit_grid_policy::{
-    ExecutionRunV1, ExecutionSeriesV1, ExitGridErrorV1, OosExecutionSeriesV1, ResolvedExitGridV1,
-    SelectedExitV1, column_digest_v1,
+    AttestedTrainingV1, ExecutionRunV1, ExecutionSeriesV1, ExitGridErrorV1, OosExecutionSeriesV1,
+    ResolvedExitGridV1, SelectedExitV1, column_digest_v1,
 };
 use crate::identity::{Params, Run, data_digest, data_digest_with_execution};
 use crate::outcome::Horizon;
@@ -2445,6 +2445,21 @@ fn walk_forward_exact_grid_v4(
         // it, which is deliberate -- it is the attestation, not a duplicate --
         // and is left alone.
         let train_data_digest = data_digest_with_execution(train, Some(trade_train));
+        // THE TRAINING SLICE IS ATTESTED ONCE PER SIDE, NOT ONCE PER CANDIDATE.
+        //
+        // `evaluate_training_grid_attested` re-attested `train_series` and
+        // `projected_train` on every call: the minute-grid walk, a BLAKE3 over
+        // every training bar, the acceptance census, the source coordinates,
+        // the arithmetic envelope and a BLAKE3 over every column row -- none of
+        // which reads the candidate. At ~10,575 closed candidates × 2 sides that
+        // was ~21,150 whole-slice attestations per fold for two distinct
+        // answers, one per side. Same shape as the digest hoist above, one door
+        // further along. The per-run door checks the run's five identity terms
+        // against the resolution's own copies, which the attestation proved
+        // equal to the series', so nothing inside the loop reads a bar it does
+        // not price.
+        let long_attested = long.attest_training(train_series, &projected_train, horizon)?;
+        let short_attested = short.attest_training(train_series, &projected_train, horizon)?;
         // THE POPULATION IS PRICED IN PARALLEL AND DIGESTED IN ORDER.
         //
         // This was one serial `for` over every closed candidate, both sides,
@@ -2477,7 +2492,8 @@ fn walk_forward_exact_grid_v4(
         // which is the error the serial loop raised.
         let evaluate_one = |mask: ConditionMask,
                             side: Direction,
-                            resolved: &ResolvedExitGridV1|
+                            resolved: &ResolvedExitGridV1,
+                            attested: &AttestedTrainingV1<'_>|
          -> Result<EvaluatedPairV4, AnchoredSearchValidationRefusalV4> {
             let run = Run {
                 mask,
@@ -2490,12 +2506,7 @@ fn walk_forward_exact_grid_v4(
                 feed: execution.feed(),
             };
             let execution_run = ExecutionRunV1::new(&run, train, Some(trade_train))?;
-            let evaluated = resolved.evaluate_training_grid_attested(
-                train_series,
-                &projected_train,
-                horizon,
-                execution_run,
-            )?;
+            let evaluated = resolved.evaluate_with_attested(attested, execution_run)?;
             let evaluated_cells = stable_u64_v4(evaluated.grid().cells.len())?;
             if evaluated_cells != resolved.cell_count() {
                 return Err(AnchoredSearchValidationRefusalV4::GridPairMismatch(
@@ -2517,8 +2528,8 @@ fn walk_forward_exact_grid_v4(
             .par_iter()
             .map(|item| {
                 [
-                    evaluate_one(item.mask, Direction::Long, &long),
-                    evaluate_one(item.mask, Direction::Short, &short),
+                    evaluate_one(item.mask, Direction::Long, &long, &long_attested),
+                    evaluate_one(item.mask, Direction::Short, &short, &short_attested),
                 ]
             })
             .collect();
@@ -7254,6 +7265,54 @@ mod tests {
              is a function of `train` and `trade_train`, both fixed for the \
              whole loop, and recomputing it per candidate per side is the \
              O(C x 2 x B) term this hoist removed"
+        );
+    }
+
+    /// The V4 population loop attests its training slice once per side, not
+    /// once per candidate.
+    ///
+    /// Same defect class as the two gates above, one door further along:
+    /// `evaluate_training_grid_attested` re-attests the series and column on
+    /// every call -- two BLAKE3 passes over the bars, one over the column, and
+    /// four linear walks -- and it stood inside `evaluate_one`, so at ~10,575
+    /// closed candidates × 2 sides it was ~21,150 whole-slice attestations per
+    /// fold for two distinct answers. Source-shape rather than timing, for the
+    /// reason both siblings give: the re-attested grid is byte-identical to the
+    /// hoisted one, so no behavioural test can tell them apart.
+    #[test]
+    fn the_population_loop_attests_its_training_slice_once_per_side() {
+        let source = include_str!("validate.rs");
+        let anchor =
+            "let train_data_digest = data_digest_with_execution(train, Some(trade_train));";
+        let at = source
+            .find(anchor)
+            .expect("the V4 population pass must still hoist its data digest");
+        let rest = source.get(at..).unwrap_or_default();
+        let end = rest
+            .find("if population_cells != expected_population")
+            .expect("the hoisted digest must be followed by the population loop and its check");
+        let body = rest.get(..end).unwrap_or_default();
+        let loop_at = body
+            .find("let evaluate_one = |")
+            .expect("the per-candidate closure must be inside the scanned region");
+        let hoisted = body.get(..loop_at).unwrap_or_default();
+        let inner = body.get(loop_at..).unwrap_or_default();
+
+        assert!(
+            hoisted.contains("long.attest_training(") && hoisted.contains("short.attest_training("),
+            "both sides must attest the training slice BEFORE the candidate closure is defined"
+        );
+        assert!(
+            inner.contains(".par_iter()") && inner.contains("evaluate_with_attested("),
+            "the parallel loop must price each candidate through the per-run door"
+        );
+        assert!(
+            !inner.contains("attest_training(")
+                && !inner.contains("evaluate_training_grid_attested("),
+            "nothing inside the candidate loop may re-attest the slice: the attestation is a \
+             function of the resolution, the series and the column, all fixed for the whole \
+             loop, and repeating it per candidate per side is the whole-slice term this hoist \
+             removed"
         );
     }
 }
