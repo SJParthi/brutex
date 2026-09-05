@@ -32521,3 +32521,14 @@ Invariant SC-07.
 **Not decided here.** Whether the VWAP positions carry any edge on equities.
 They are live; nothing has been swept over them yet, because no equity bar is
 in the store.
+
+**Measured, after the commit.** `sweep-stored zerodha NIFTY 60min 2026 7 5`
+under the `ac270964` binary and under `ebd8bc95` (this entry's commit): 403
+lines each, and `diff` reports exactly two differing lines — the banner's
+`built at <commit>` and the ledger row number (14, then 15, because the second
+run appended after the first). Every bar count, every kept combination and
+every exit-grid cell is byte-identical. The two run identities differ, as they
+must — `commit` is a term of the identity (§3 rule 3) and the two binaries
+carry different ones — so the identity line was excluded from the diff by
+name. The index arm is `Absent` and the output proves it changed nothing for
+NIFTY.
