@@ -112,16 +112,52 @@
     return Number(m[1]) * (m[2] === 'day' ? 1440 : 1);
   }
 
+  /* THE YEAR IS A PICKER OF ITS OWN, AND IT IS FIRST, BECAUSE THIS IS A STORE
+     OF HISTORY RATHER THAN A LIVE SESSION.
+     --------------------------------------------------------------------
+     The terminal this recreates has one month picker and needs no more: a
+     live book only ever offers the near expiries, so `September / October /
+     November` is the whole axis. This store is the opposite shape. It holds
+     every month that has ever been pulled — 2020 through 2026 on a filled
+     store, which is roughly eighty entries — and eighty options in one flat
+     `<select>` is a list nobody can aim at.
+
+     Splitting it turns one 80-item list into a 7-item list and a 12-item one,
+     and the split is free because the census already carries the month key in
+     `YYYY-MM`: the year is a prefix, not a second fact to store or derive.
+
+     Both lists are DERIVED FROM THE CENSUS and never enumerated. A year with
+     nothing pulled in it does not appear, so the picker cannot offer a window
+     the store has no answer for — the defect `/db` recorded when a hardcoded
+     span threw away 40 of 121 months and reported no hole while doing it. */
+  const years = $derived([...new Set(months.map((m) => m.slice(0, 4)))].sort());
+
+  let year = $state('');
   let rung = $state('');
   let month = $state('');
+  let segment = $state('All');
+
+  /** The months the census holds INSIDE the chosen year, ascending. */
+  const monthsInYear = $derived(months.filter((m) => m.startsWith(`${year}-`)));
+
   /* THE PICKERS FOLLOW THE STORE RATHER THAN LEADING IT. When the census
      lands, or the feed changes under a chosen value, the current choice may no
-     longer exist. Falling back to the newest month and the coarsest rung the
-     store holds is a choice this page can defend; keeping a value the store
-     does not have would render an empty grid that reads as "no data" when it
-     means "you asked for a month nobody pulled". */
+     longer exist. Falling back to the newest year, the newest month within it
+     and the coarsest rung the store holds is a choice this page can defend;
+     keeping a value the store does not have would render an empty grid that
+     reads as "no data" when it means "you asked for a month nobody pulled".
+
+     The year clamps FIRST and the month clamps against `monthsInYear`, so
+     changing the year cannot leave a month from the previous one selected —
+     which would query a (rung, month) cell the year picker says is not in
+     view. Two effects rather than one, because they answer to different
+     inputs and collapsing them would re-run the year clamp on every month
+     change. */
   $effect(() => {
-    if (!months.includes(month)) month = months[months.length - 1] ?? '';
+    if (!years.includes(year)) year = years[years.length - 1] ?? '';
+  });
+  $effect(() => {
+    if (!monthsInYear.includes(month)) month = monthsInYear[monthsInYear.length - 1] ?? '';
   });
   $effect(() => {
     if (!rungs.includes(rung)) rung = rungs[rungs.length - 1] ?? '';
@@ -139,13 +175,46 @@
   let shown = $state(PAGE);
   $effect(() => {
     void activeTab;
+    void year;
     void month;
     void rung;
+    void segment;
     shown = PAGE;
   });
 
-  const rows = $derived((tab?.keys ?? []).filter(holdsChosenCell).slice(0, shown));
-  const totalRows = $derived((tab?.keys ?? []).filter(holdsChosenCell).length);
+  /* THE SEGMENTS PRESENT IN THIS TAB, AND ONLY THOSE.
+     Derived from the parsed keys the tab already holds, so the picker offers
+     `CASH` on a store that holds equities and does not on one that does not.
+     `All` is prepended rather than stored, because "no filter" is not a
+     segment and a store with one segment must not look like a choice.
+
+     It is a SECOND axis to the tab, not a duplicate of it. Tabs cut by KIND —
+     spot, future, option — and this cuts by the exchange segment a series is
+     filed under. They coincide on Stocks (CASH) and Index (INDEX) and come
+     apart on `Live`, which holds everything, and that is the tab where this
+     picker earns its place. */
+  const segments = $derived(
+    [
+      ...new Set(
+        (tab?.keys ?? []).map((k) => parseKey(k).segment).filter((s) => typeof s === 'string')
+      )
+    ].sort()
+  );
+
+  /* A SEGMENT THE NEW TAB DOES NOT HAVE IS NOT CARRIED INTO IT. Leaving `FNO`
+     selected on a tab holding only `INDEX` would empty the grid and blame the
+     store for it. */
+  $effect(() => {
+    void activeTab;
+    if (segment !== 'All' && !segments.includes(segment)) segment = 'All';
+  });
+
+  /** @param {string} key */
+  const inChosenSegment = (key) => segment === 'All' || parseKey(key).segment === segment;
+
+  const matching = $derived((tab?.keys ?? []).filter(inChosenSegment).filter(holdsChosenCell));
+  const rows = $derived(matching.slice(0, shown));
+  const totalRows = $derived(matching.length);
 
   /* THE RAIL IS A SECOND CONSUMER OF QUOTES AND WAS NOT ASKING FOR ANY.
      Measured in the browser: with the Index tab open, ADANIENT and BAJAJ-AUTO
@@ -619,13 +688,39 @@
             >
           {/each}
         </div>
+        <!-- THE WINDOW, WIDEST FIRST: year, then month, then segment, then
+             rung. The order is the order the answers depend on each other —
+             the month list is the chosen year's, and the segment list is the
+             chosen tab's — so reading left to right is reading the query being
+             narrowed. Each is labelled, because four bare pills side by side
+             name nothing: `2026`, `Sep 2026`, `CASH` and `1day` are four
+             different KINDS of value and only the last two are self-evident. -->
         <div class="ctrls">
-          <select class="pill" bind:value={month}>
-            {#each months as m (m)}<option value={m}>{monthLabel(m)}</option>{/each}
-          </select>
-          <select class="pill" bind:value={rung}>
-            {#each rungs as r (r)}<option value={r}>{r}</option>{/each}
-          </select>
+          <label class="tctl">
+            <span>Year</span>
+            <select class="pill" bind:value={year}>
+              {#each years as y (y)}<option value={y}>{y}</option>{/each}
+            </select>
+          </label>
+          <label class="tctl">
+            <span>Month</span>
+            <select class="pill" bind:value={month}>
+              {#each monthsInYear as m (m)}<option value={m}>{monthLabel(m)}</option>{/each}
+            </select>
+          </label>
+          <label class="tctl">
+            <span>Segment</span>
+            <select class="pill" bind:value={segment}>
+              <option value="All">All</option>
+              {#each segments as s (s)}<option value={s}>{s}</option>{/each}
+            </select>
+          </label>
+          <label class="tctl">
+            <span>Rung</span>
+            <select class="pill" bind:value={rung}>
+              {#each rungs as r (r)}<option value={r}>{r}</option>{/each}
+            </select>
+          </label>
         </div>
       </div>
 
@@ -734,6 +829,22 @@
     --h-strip: 42px;
     --h-row: 42px;
     --w-rail: 396px;
+
+    /* DARK UNCONDITIONALLY, AND IT HAS TO SAY SO ITSELF.
+       `theme.css` puts `color-scheme: light` on the bare `:root` and flips it
+       only inside its dark blocks, so on a machine set to light with the
+       console's toggle on `auto` the whole document resolves to light. That is
+       right for the console and wrong here: this page has no light variant —
+       every surface above is a measured near-black — and `color-scheme` is
+       what the PLATFORM reads to paint the things CSS cannot reach.
+
+       MEASURED before this line: the four `<select>` pickers rendered as white
+       rounded boxes on a pure-black terminal while their computed
+       `background` was #121212, their `border` #242424 and their `outline`
+       `none`. Nothing in the cascade was white; the OS was painting the
+       control. `appearance: none` suppresses the fill and not the ring, and it
+       does nothing at all for the open option list or the scrollbars. */
+    color-scheme: dark;
 
     position: absolute;
     inset: 0;
@@ -1068,16 +1179,64 @@
   .ctrls {
     margin-left: auto;
     display: flex;
-    gap: 8px;
+    gap: 10px;
+    align-items: center;
   }
+  /* The label sits ABOVE its control rather than beside it: four side-by-side
+     pairs would eat the width the chip row needs, and the chip row is the
+     thing that scrolls. */
+  /* `tctl`, NOT `ctl` — AND THIS ONE GOT THROUGH THE AUDIT THAT WAS RUN TO
+     CATCH EXACTLY IT. `theme.css:2166` gives `.ctl` a `--bg-2` fill and a
+     `--line-hard` border, which in the light ramp is a WHITE box with a light
+     rule. Four of them appeared around the pickers on a pure-black terminal.
+
+     The audit that renamed nine other colliding classes was run BEFORE this
+     control existed, so it could not have seen it. That is the actual lesson
+     and it is not "audit once": every class added to this page after the fact
+     has to be checked against `theme.css` again, because the collision is a
+     property of the NAME and names are added one at a time. Prefixing new
+     names on sight is the cheaper habit. */
+  .tctl {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .tctl > span {
+    font-size: 10px;
+    color: var(--dim);
+    letter-spacing: 0.02em;
+  }
+  /* `appearance: none` IS NOT COSMETIC HERE. A bare `<select>` on macOS paints
+     the platform's own control -- a light rounded box with a blue-tinted
+     gradient and its own caret -- and it ignores `background` and `border`
+     while doing it. MEASURED on the running page: four light pills sitting in
+     a pure-black terminal, the single most obviously wrong thing on it. The
+     caret has to be redrawn for the same reason: switching the appearance off
+     removes the platform's, and a dropdown with no caret does not read as one.
+     Drawn as a data URI rather than a pseudo-element because a `<select>` has
+     no `::after` to hang one on. */
   .pill {
-    background: var(--panel);
+    appearance: none;
+    -webkit-appearance: none;
+    background: var(--panel)
+      url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="10" height="6" viewBox="0 0 10 6"><path d="M1 1l4 4 4-4" fill="none" stroke="%238E8E8E" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>')
+      no-repeat right 9px center;
     border: 1px solid var(--line);
     border-radius: 6px;
     color: var(--ink);
     font: inherit;
     font-size: 13px;
-    padding: 6px 10px;
+    padding: 6px 26px 6px 10px;
+    cursor: pointer;
+  }
+  .pill:hover {
+    border-color: #3a3a3a;
+  }
+  /* The OPEN menu is the platform's and cannot be styled, so the options are
+     told to paint dark rather than left to inherit a white list. */
+  .pill option {
+    background: var(--panel);
+    color: var(--ink);
   }
   .panel {
     background: var(--panel);

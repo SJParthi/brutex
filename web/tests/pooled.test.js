@@ -26,7 +26,8 @@ import assert from 'node:assert/strict';
 
 import { pooled, IN_FLIGHT } from '../src/lib/pooled.js';
 
-/** Resolves after `ms`, so a job can be made to finish out of turn. */
+/** Resolves after `ms`, so a job can be made to finish out of turn.
+    @param {number} ms @returns {Promise<void>} */
 const after = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 test('results are in the order of `items`, not the order they finished', async () => {
@@ -57,6 +58,7 @@ test('at most `limit` jobs are outstanding at any moment', async () => {
 });
 
 test('every item is visited exactly once, and the pool drains', async () => {
+  /** @type {string[]} */
   const seen = [];
   const out = await pooled(['a', 'b', 'c', 'd', 'e'], 2, async (item) => {
     seen.push(item);
