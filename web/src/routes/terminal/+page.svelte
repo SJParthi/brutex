@@ -345,6 +345,28 @@
      leaves the order untouched and reads no quote at all. */
   const sortActive = $derived(sortKey === 'name' || (sortKey !== '' && canSortByQuote));
 
+  /* DOES THIS VIEW QUOTE THE WHOLE MATCHING SET, OR ONLY THE ROWS ON SCREEN?
+     ------------------------------------------------------------------------
+     A quote-backed sort widens the fetch to the whole matching set, because
+     ordering rows by a value means having the value for every row — otherwise
+     the sort ranks the page against itself and labels the result with the
+     column's name. A ranking chip widens it for the same reason. `Name` does
+     NOT: that ordering reads no quote at all. Neither does an unaffordable set,
+     which is why `sortableCol` refuses those headers rather than letting the
+     click through to a fetch nobody bounded.
+
+     ONE SPELLING, BECAUSE THERE WERE TWO AND THEY DISAGREED. The fetch tested
+     `sortKey !== '' && sortKey !== 'name'`; the pager caption tested
+     `sortKey !== ''` and so counted a Name sort as widening. Sorting by Name
+     therefore fetched only the rows on screen while the caption underneath
+     announced "every matching row is quoted, because the order depends on it"
+     — a claim about cost, made about an ordering that reads no quote, and one
+     the reader has no way to check. The predicate lives here now and both
+     sites read it. */
+  const quotesWidened = $derived(
+    canSortByQuote && ((sortKey !== '' && sortKey !== 'name') || chipRule() !== null)
+  );
+
   /* AND THE INDICATOR DOES NOT OUTLIVE ITS SORT. If the matching set grows past
      the budget — a wider segment, a fuller month — a ▼ left on a column the
      page is no longer ordering by would claim an order that is not there. */
@@ -703,17 +725,7 @@
 
   $effect(() => {
     const feed = store.feed;
-    /* A QUOTE-BACKED SORT WIDENS THE FETCH TO THE WHOLE MATCHING SET, because
-       ordering rows by a value means having the value for every row. Without
-       this the sort would rank the page against itself and label the result
-       with the column's name. `Name` does not widen it — that ordering needs
-       no quote at all — and neither does an unaffordable set, which is why
-       `sortableCol` refuses those headers rather than letting the click
-       through to a fetch nobody bounded. */
-    const byQuote = sortKey !== '' && sortKey !== 'name';
-    const byChip = chipRule() !== null;
-    const needsAll = canSortByQuote && (byQuote || byChip);
-    const want = [...new Set([...(needsAll ? matching : rows), ...indices])];
+    const want = [...new Set([...(quotesWidened ? matching : rows), ...indices])];
     const tf = timeframe;
     const mo = month;
     const on = day;
@@ -1606,7 +1618,7 @@
                    is running is a claim about cost that the reader cannot
                    check. -->
               Show {Math.min(PAGE, sorted.length - rows.length)} more · {rows.length} of {sorted.length}
-              {#if canSortByQuote && (sortKey !== '' || chipRule() !== null)}
+              {#if quotesWidened}
                 — every matching row is quoted, because the order depends on it
               {:else}
                 — quotes are fetched only for rows on screen
