@@ -345,6 +345,28 @@
      leaves the order untouched and reads no quote at all. */
   const sortActive = $derived(sortKey === 'name' || (sortKey !== '' && canSortByQuote));
 
+  /* GAINERS OR LOSERS — the Stocks tab's own filter, and it is BINARY because
+     the source's is.
+     ------------------------------------------------------------------------
+     Both Stocks captures show `Gainers ●—○ Losers` at the right of the chip row
+     with one side always chosen; there is no neutral position, so the tab shows
+     one half of the movers and the operator undoes that in one click.
+
+     It FILTERS BY QUOTE, so it costs exactly what a ranking chip costs and is
+     gated by the same budget: below `SORT_BUDGET` it applies and widens the
+     fetch to the whole matching set; above it the control is disabled and names
+     the reason rather than filtering against prices it does not hold.
+
+     Stocks only — neither the Futures nor the Options capture carries it; they
+     put the expiry picker in that space instead.
+
+     DECLARED HERE, above `quotesWidened`, because that derived reads `moverTab`
+     and a `$derived` referencing a later `$derived` is a temporal-dead-zone
+     error rather than a hoisting convenience. */
+  let mover = $state(/** @type {'gainers'|'losers'} */ ('gainers'));
+  const moverTab = $derived(activeTab === 'stocks');
+  const moverActive = $derived(moverTab && canSortByQuote);
+
   /* DOES THIS VIEW QUOTE THE WHOLE MATCHING SET, OR ONLY THE ROWS ON SCREEN?
      ------------------------------------------------------------------------
      A quote-backed sort widens the fetch to the whole matching set, because
@@ -364,7 +386,8 @@
      the reader has no way to check. The predicate lives here now and both
      sites read it. */
   const quotesWidened = $derived(
-    canSortByQuote && ((sortKey !== '' && sortKey !== 'name') || chipRule() !== null)
+    canSortByQuote &&
+      ((sortKey !== '' && sortKey !== 'name') || chipRule() !== null || moverTab)
   );
 
   /* AND THE INDICATOR DOES NOT OUTLIVE ITS SORT. If the matching set grows past
@@ -423,6 +446,25 @@
         const v = sortValue(k, rule.by);
         if (v === null) return true;
         return typeof v === 'number' && keep(v);
+      });
+    }
+
+    /* THE GAINERS/LOSERS SWITCH, filtering on the same terms as the chip above.
+       An unknown change is CARRIED, not dropped — the paragraph above gives the
+       reason and it applies here identically: quotes are cleared on every change
+       of feed, timeframe, month, date or time, so treating "no quote yet" as
+       "not a gainer" would empty the grid for the length of every refetch and
+       then blame the store for it.
+       Zero is neither: a bar that closed exactly where the previous one closed
+       has not gained and has not lost, and `chg` is integer basis points so zero
+       also covers a real move under half a basis point. It is excluded from both
+       sides rather than assigned to one. */
+    if (moverActive) {
+      base = base.filter((k) => {
+        const v = sortValue(k, 'chg');
+        if (v === null) return true;
+        if (typeof v !== 'number') return false;
+        return mover === 'gainers' ? v > 0 : v < 0;
       });
     }
 
@@ -767,7 +809,8 @@
   const NO_SRC = {
     spot: 'A spot price is the underlying’s level at this bar. This store files a contract’s own bars and does not join them to the underlying’s series, so nothing here has read one.',
     oichg: 'Open-interest change needs the previous bar’s open interest. `/bars/window.json` carries a change field for price and none for OI, so this was never measured.',
-    value: 'Turnover in crore is price times quantity summed over the session. A bar file carries volume and close but not per-trade value, and multiplying the two would be an estimate presented as a measurement.'
+    value: 'Turnover in crore is price times quantity summed over the session. A bar file carries volume and close but not per-trade value, and multiplying the two would be an estimate presented as a measurement.',
+    premium: 'Premium is the contract’s price less the underlying’s level at the same bar. It needs both series joined, and this store files a contract’s own bars without that join — the same reason Spot Price beside it has no source. The two chips that rank by it are refused for exactly this.'
   };
 
   /**
@@ -814,8 +857,19 @@
     /* FUTURES CARRIES NO `Premium` AND NO `Spot Price` IN ITS BASE SET. Both
        are inserted by `columnsFor` below, and only under the two chips that
        show them. See the note there — this was measured wrong the first time. */
+    /* `Premium` AND `Spot Price` WERE MISSING FROM THIS ROW, and the capture is
+       what says so: the source's Futures grid reads Name · Premium · Spot Price
+       · LTP · Change · Change % · Open Interest · OI Change · OI Change % ·
+       Volume, and this table jumped from the name straight to the LTP. Both are
+       sourceless here for one reason — neither can be had without joining the
+       contract to its underlying — which is the same reason `Premium` and
+       `Discount` are the two refused chips on this tab. Stating them as columns
+       with that reason on hover is what makes the refusal legible; omitting the
+       columns hid a gap the source terminal shows plainly. */
     futures: [
       { h: 'Name', src: 'name', align: 'left' },
+      { h: 'Premium', src: null, why: NO_SRC.premium, align: 'right' },
+      { h: 'Spot Price', src: null, why: NO_SRC.spot, align: 'right' },
       { h: 'LTP', src: 'close', align: 'right', kind: 'price' },
       { h: 'Change', src: 'chgAbs', align: 'right' },
       { h: 'Change %', src: 'chg', align: 'right' },
@@ -984,6 +1038,59 @@
      `chips[-1]` is `undefined`, so `activeChip` falls to `null`, `activeRule`
      to `null`, and the filter is skipped. No branch needed a new case. */
   let chipIndex = $state(0);
+
+  /* THE INDEX STRIP COLLAPSES, which is the `^` the source draws under it.
+     A backtesting operator scrolling a long grid wants the vertical space, and
+     the strip is the least urgent thing on the page once a window is chosen. */
+  let stripOpen = $state(true);
+
+  /** The chip row's scroller, so the `‹ ›` buttons have something to drive. */
+  let chipRail = $state(/** @type {HTMLElement|null} */ (null));
+
+  /* RE-MEASURED WHEN THE CHIPS CHANGE, not only when they are scrolled.
+     Each tab carries its own seven chips at its own widths, and the mover
+     switch appears on exactly one tab — so both the travel and whether there is
+     any travel at all change on a tab switch, with no scroll event to announce
+     it. Without this the arrows keep the previous tab's enabled state. */
+  $effect(() => {
+    void chips;
+    void moverTab;
+    void chipRail;
+    measureRail();
+  });
+  /** How far the rail is scrolled, and how far it can go. Held as state so the
+      arrows can disable themselves at the end they cannot travel — an arrow
+      that clicks and does nothing is the inert control section 4 names. */
+  let railAt = $state(0);
+  let railMax = $state(0);
+  function measureRail() {
+    if (!chipRail) return;
+    railAt = chipRail.scrollLeft;
+    railMax = Math.max(0, chipRail.scrollWidth - chipRail.clientWidth);
+  }
+
+  /** How far a `‹`/`›` press travels: most of a screenful, keeping a chip of
+      overlap so the reader can see where they came from.
+
+      ASSIGNS `scrollLeft` RATHER THAN CALLING `scrollBy({behavior:'smooth'})`,
+      and that is a correction rather than a preference. MEASURED: `scrollBy`
+      with `behavior:'instant'` moved the rail 150px and the identical call with
+      `behavior:'smooth'` moved it ZERO — so the arrows fired their handler,
+      reported no error, and did nothing. A control whose only motion path can be
+      silently unavailable is not a control.
+
+      And the fix does not survive a `scroll-behavior: smooth` in the CSS, which
+      is how it was broken a second time: that property governs the assignment
+      below as well as the scroll methods, so declaring it sent this line back
+      through the path that had just been measured failing. `.chips` deliberately
+      declares none.
+      @param {number} dir `-1` for left, `1` for right */
+  function railBy(dir) {
+    if (!chipRail) return;
+    const step = Math.max(160, chipRail.clientWidth * 0.8);
+    chipRail.scrollLeft = Math.max(0, Math.min(railMax, chipRail.scrollLeft + dir * step));
+    measureRail();
+  }
   /* THE TAB OPENS ON A CHIP THAT CAN ACTUALLY RANK, not on index 0.
      Futures leads with `Premium`, which needs a join this store does not make,
      so opening there would light a chip that orders nothing and leave the
@@ -1259,7 +1366,7 @@
   </header>
 
   <!-- THE INDEX STRIP. Whatever indices this store holds, and no more. -->
-  <div class="tstrip">
+  <div class="tstrip" class:shut={!stripOpen}>
     {#if indices.length === 0}
       <!-- THE MESSAGE MUST NOT CLAIM MORE THAN WAS ASKED. It substituted "any
            timeframe" and "any month" when either was unset, turning "I have not
@@ -1323,6 +1430,25 @@
     {/if}
   </div>
 
+  <!-- THE STRIP'S OWN HANDLE — the `^` the source centres on the strip's lower
+       edge. It is a real control here rather than an ornament: the grid is the
+       page and a backtesting operator scrolling 208 rows wants the 40px back,
+       while the index levels are the least urgent thing once a window is
+       chosen. `aria-expanded` states which way it will go, so it does not rely
+       on the reader inferring direction from a glyph. -->
+  <div class="striptab">
+    <button
+      type="button"
+      class="stripbtn"
+      aria-expanded={stripOpen}
+      title={stripOpen ? 'Hide the index strip' : 'Show the index strip'}
+      onclick={() => (stripOpen = !stripOpen)}
+    >
+      <span aria-hidden="true">{stripOpen ? '⌃' : '⌄'}</span>
+      <span class="vh">{stripOpen ? 'Hide the index strip' : 'Show the index strip'}</span>
+    </button>
+  </div>
+
   <div class="body">
     <!-- ============================================================ THE GRID
          THE WATCHLIST RAIL WAS REMOVED, ON THE OPERATOR'S INSTRUCTION, AND THE
@@ -1364,7 +1490,7 @@
       </div>
 
       <div class="chiprow">
-        <div class="chips">
+        <div class="chips" bind:this={chipRail} onscroll={measureRail}>
           <!-- A CHIP THIS STORE CANNOT RANK IS DISABLED AND SAYS WHY, rather
                than lighting up and ordering nothing. An inert control that
                looks live is the failure section 4 names; one that refuses and
@@ -1388,6 +1514,80 @@
             >
           {/each}
         </div>
+        <!-- THE `‹ ›` PAIR THE SOURCE DRAWS BESIDE THE CHIPS.
+             The row already scrolled — `overflow-x: auto` on `.chips` — but a
+             trackpad swipe is the only way to drive it, and on a mouse there is
+             no affordance at all that the seventh chip exists. The source shows
+             both arrows unconditionally, so these do too; each disables itself
+             at the end it cannot travel, which is the honest version of an
+             arrow that would otherwise click and do nothing. -->
+        <!-- NOT `aria-hidden`, which is where this started. Two focusable
+             buttons inside an `aria-hidden` container is the one combination
+             the attribute must never wrap: the control stays in the tab order
+             and is announced as nothing. They carry real labels instead, and
+             the glyph is what is hidden. -->
+        <div class="rail">
+          <button
+            class="railbtn"
+            type="button"
+            aria-label="Scroll the ranking chips left"
+            title="Scroll the chips left"
+            disabled={railAt <= 0}
+            onclick={() => railBy(-1)}><span aria-hidden="true">‹</span></button
+          >
+          <button
+            class="railbtn"
+            type="button"
+            aria-label="Scroll the ranking chips right"
+            title="Scroll the chips right"
+            disabled={railAt >= railMax}
+            onclick={() => railBy(1)}><span aria-hidden="true">›</span></button
+          >
+        </div>
+        {#if moverTab}
+          <!-- GAINERS / LOSERS. A radiogroup rather than two buttons: the two
+               are mutually exclusive and always one of them is chosen, which is
+               exactly what a radiogroup announces and what a pair of toggles
+               would not. Disabled together when the set is past the budget,
+               carrying the reason, because filtering by change means holding a
+               change for every matching row. -->
+          <div
+            class="mover"
+            role="radiogroup"
+            aria-label="Show gainers or losers"
+            title={canSortByQuote
+              ? 'Filters the grid to rows that rose, or to rows that fell. A bar that closed unchanged is in neither.'
+              : `Filtering by change needs a price for every matching row, and this view holds ${totalRows.toLocaleString('en-IN')} against a budget of ${SORT_BUDGET.toLocaleString('en-IN')}. Narrow the segment to use this.`}
+          >
+            <button
+              type="button"
+              class="mlabel"
+              class:on={mover === 'gainers'}
+              role="radio"
+              aria-checked={mover === 'gainers'}
+              disabled={!canSortByQuote}
+              onclick={() => (mover = 'gainers')}>Gainers</button
+            >
+            <button
+              type="button"
+              class="mtrack"
+              class:right={mover === 'losers'}
+              aria-hidden="true"
+              tabindex="-1"
+              disabled={!canSortByQuote}
+              onclick={() => (mover = mover === 'gainers' ? 'losers' : 'gainers')}
+            ><span class="mknob"></span></button>
+            <button
+              type="button"
+              class="mlabel"
+              class:on={mover === 'losers'}
+              role="radio"
+              aria-checked={mover === 'losers'}
+              disabled={!canSortByQuote}
+              onclick={() => (mover = 'losers')}>Losers</button
+            >
+          </div>
+        {/if}
         <!-- THE WINDOW, WIDEST FIRST: year, then month, then segment, then
              timeframe. The order is the order the answers depend on each other —
              the month list is the chosen year's, and the segment list is the
@@ -2089,6 +2289,148 @@
     background: var(--pill);
     color: var(--acc);
   }
+  /* Read by a screen reader, never painted. The chevron and the switch both
+     carry a glyph for the eye and a sentence for everything else. */
+  .vh {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  /* THE STRIP, SHUT. Height and padding to nothing rather than `display: none`,
+     so the collapse is a movement the eye can follow to the handle that caused
+     it — the page's own rule that motion carries meaning. `visibility` stops
+     the collapsed content taking focus while it is folded away. */
+  .tstrip.shut {
+    height: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    border-bottom-color: transparent;
+    overflow: hidden;
+    visibility: hidden;
+  }
+  .tstrip {
+    transition:
+      height 140ms ease,
+      padding 140ms ease;
+  }
+  .striptab {
+    display: flex;
+    justify-content: center;
+    background: var(--ground);
+    /* Pulled up onto the strip's own edge, exactly as the source hangs it. */
+    margin-top: -1px;
+  }
+  .stripbtn {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-top: 0;
+    border-radius: 0 0 7px 7px;
+    color: var(--dim);
+    font: inherit;
+    font-size: 11px;
+    line-height: 1;
+    padding: 3px 20px 4px;
+    cursor: pointer;
+  }
+  .stripbtn:hover {
+    color: var(--ink);
+    border-color: #3a3a3a;
+  }
+
+  /* THE CHIP RAIL'S ARROWS. Sized to the chips they sit beside rather than to
+     the text inside them, so the three controls share one baseline. */
+  .rail {
+    display: flex;
+    gap: 4px;
+    flex: 0 0 auto;
+  }
+  .railbtn {
+    background: var(--ground);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    color: var(--dim);
+    font: inherit;
+    font-size: 15px;
+    line-height: 1;
+    padding: 5px 9px 7px;
+    cursor: pointer;
+  }
+  .railbtn:hover:not(:disabled) {
+    color: var(--ink);
+    border-color: #3a3a3a;
+  }
+  /* At the end it cannot travel. Dimmer and inert, matching the vocabulary a
+     refused chip already uses, so "nothing that way" reads the same everywhere. */
+  .railbtn:disabled {
+    color: var(--faint);
+    border-color: #2a2a2a;
+    cursor: default;
+  }
+
+  /* GAINERS ⟷ LOSERS. The lit side takes the accent and the other stays dim,
+     which is the same two-state vocabulary the tabs and chips already use, so
+     a third spelling of "this one is chosen" is not introduced. */
+  .mover {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 0 0 auto;
+    margin-left: 14px;
+  }
+  .mlabel {
+    background: none;
+    border: 0;
+    color: var(--dim);
+    font: inherit;
+    font-size: 13px;
+    padding: 0;
+    cursor: pointer;
+  }
+  .mlabel.on {
+    color: var(--acc);
+    font-weight: 600;
+  }
+  .mlabel:disabled,
+  .mtrack:disabled {
+    color: var(--faint);
+    cursor: default;
+  }
+  /* The track is a 30x16 pill with an 11px knob that travels 13px — measured
+     off the capture's switch rather than chosen. */
+  .mtrack {
+    position: relative;
+    width: 30px;
+    height: 16px;
+    border-radius: 999px;
+    border: 1px solid var(--edge);
+    background: var(--pill);
+    padding: 0;
+    cursor: pointer;
+  }
+  .mknob {
+    position: absolute;
+    top: 1px;
+    left: 2px;
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    background: var(--acc);
+    transition: transform 120ms ease;
+  }
+  .mtrack.right .mknob {
+    transform: translateX(13px);
+  }
+  .mtrack:disabled .mknob {
+    background: var(--faint);
+  }
+
   .chiprow {
     display: flex;
     align-items: center;
@@ -2099,12 +2441,46 @@
        automatic minimum is its content, and that is what was widening the
        grid before the column above was pinned. */
     min-width: 0;
+    /* IT WRAPS, AND IT HAS TO SINCE THE ROW GAINED TWO CONTROLS.
+       -----------------------------------------------------------------------
+       `.ctrls` is deliberately unshrinkable (its own rule says so, and the
+       seven pickers need their width), so `.chips` was the only item that could
+       yield — and with `.rail` at 57px and `.mover` at 134px added beside it,
+       yielding took it to ZERO. Measured at an 854px row: chips 0 · rail 57 ·
+       mover 134 · ctrls 738, which is 929 of content in 854 of space. Every
+       chip was still in the DOM and none of them was on screen.
+       Wrapping puts the pickers on their own line when the four cannot share
+       one, instead of silently deleting the control the line exists for. Above
+       about 1200px nothing wraps and the row reads exactly as the capture. */
+    flex-wrap: wrap;
+    row-gap: 14px;
   }
   .chips {
     display: flex;
     gap: 8px;
     overflow-x: auto;
     min-width: 0;
+    /* GROWS INTO THE SPARE WIDTH, and carries a basis so it is not the item the
+       browser chooses to collapse. The basis is a floor for the wrap decision,
+       not a minimum width — `min-width: 0` still lets it scroll internally once
+       it is the narrowest it will get. */
+    flex: 1 1 260px;
+    /* The scrollbar is the arrows' job now; a visible track under seven chips
+       is 15px of chrome the source does not draw. */
+    scrollbar-width: none;
+    /* NO `scroll-behavior: smooth` HERE, AND THAT IS THE POINT.
+       It was added on the reasoning that the animation would be "asked for in
+       CSS and depended on nowhere", since `railBy` assigns `scrollLeft` rather
+       than calling `scrollBy`. That reasoning is wrong: `scroll-behavior`
+       governs the PROPERTY ASSIGNMENT too, not just the scroll methods, so it
+       routed the direct assignment straight back through the same smooth path
+       that had already been measured doing nothing — the arrows went dead a
+       second time, for the same reason, one line after the comment explaining
+       why they must not. The rail jumps. A control that moves is worth more
+       than one that glides in the browsers where gliding happens to work. */
+  }
+  .chips::-webkit-scrollbar {
+    display: none;
   }
   /* #8E8E8E on #000000 with a #242424 edge, all three measured. The border was
      already right; the text was `--ink` for the reason `.ttab` states. */
