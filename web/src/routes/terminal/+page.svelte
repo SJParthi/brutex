@@ -94,22 +94,30 @@
   let picked = $state('');
 
   /* ==================================================================
-     THE RUNG AND THE MONTH — the two axes a bar file is filed under.
+     THE TIMEFRAME AND THE MONTH — the two axes a bar file is filed under.
+     --------------------------------------------------------------------
+     `timeframe` AND NOT `rung`, THROUGHOUT. The engine calls these rungs and
+     is right to — `EVERY_RUNG` is its own vocabulary for the ladder it sweeps.
+     This page is not the engine. It reads `/store.json`, whose rows carry a
+     field literally named `timeframe`, and it asks `/bars/window.json` with a
+     parameter literally named `timeframe`. A page that renders `Rung` above a
+     control bound to `timeframe` is carrying two words for one fact, and the
+     operator is the one who has to hold both.
      Both are derived from the census, so the pickers can only ever offer
      something the store actually holds. A hardcoded default here is the
      defect `/db` recorded: a fixed span threw away 40 of 121 months and
      reported no hole while doing it.
      ================================================================== */
-  const rungs = $derived(
+  const timeframes = $derived(
     [...new Set(store.readable.map((c) => c.timeframe))].sort(
-      (a, b) => rungOrder(a) - rungOrder(b)
+      (a, b) => timeframeOrder(a) - timeframeOrder(b)
     )
   );
   const months = $derived([...store.byMonth.keys()].sort());
 
-  /** Rung order by duration, so `2min` sorts before `10min` and not after it.
+  /** Timeframe order by duration, so `2min` sorts before `10min`, not after it.
       @param {string} t @returns {number} */
-  function rungOrder(t) {
+  function timeframeOrder(t) {
     const m = String(t).match(/^(\d+)(min|day)$/);
     if (!m) return Number.MAX_SAFE_INTEGER;
     return Number(m[1]) * (m[2] === 'day' ? 1440 : 1);
@@ -136,7 +144,7 @@
   const years = $derived([...new Set(months.map((m) => m.slice(0, 4)))].sort());
 
   let year = $state('');
-  let rung = $state('');
+  let timeframe = $state('');
   let month = $state('');
   let segment = $state('All');
 
@@ -146,13 +154,13 @@
   /* THE PICKERS FOLLOW THE STORE RATHER THAN LEADING IT. When the census
      lands, or the feed changes under a chosen value, the current choice may no
      longer exist. Falling back to the newest year, the newest month within it
-     and the coarsest rung the store holds is a choice this page can defend;
+     and the coarsest timeframe the store holds is a choice this page can defend;
      keeping a value the store does not have would render an empty grid that
      reads as "no data" when it means "you asked for a month nobody pulled".
 
      The year clamps FIRST and the month clamps against `monthsInYear`, so
      changing the year cannot leave a month from the previous one selected —
-     which would query a (rung, month) cell the year picker says is not in
+     which would query a (timeframe, month) cell the year picker says is not in
      view. Two effects rather than one, because they answer to different
      inputs and collapsing them would re-run the year clamp on every month
      change. */
@@ -163,7 +171,7 @@
     if (!monthsInYear.includes(month)) month = monthsInYear[monthsInYear.length - 1] ?? '';
   });
   $effect(() => {
-    if (!rungs.includes(rung)) rung = rungs[rungs.length - 1] ?? '';
+    if (!timeframes.includes(timeframe)) timeframe = timeframes[timeframes.length - 1] ?? '';
   });
 
   /* ==================================================================
@@ -180,7 +188,7 @@
     void activeTab;
     void year;
     void month;
-    void rung;
+    void timeframe;
     void segment;
     shown = PAGE;
   });
@@ -240,11 +248,11 @@
       rail's head, deduplicated, in a stable order. */
   const wanted = $derived([...new Set([...rows, ...railQuoted])]);
 
-  /** Whether this instrument has a cell at the chosen (rung, month). O(1).
+  /** Whether this instrument has a cell at the chosen (timeframe, month). O(1).
       @param {string} key @returns {boolean} */
   function holdsChosenCell(key) {
-    if (!rung || !month) return false;
-    return store.byCell.has(`${key}|${rung}|${month}`);
+    if (!timeframe || !month) return false;
+    return store.byCell.has(`${key}|${timeframe}|${month}`);
   }
 
   /** key -> Quote, filled as the pool answers. */
@@ -253,7 +261,7 @@
   $effect(() => {
     const feed = store.feed;
     const want = wanted;
-    const tf = rung;
+    const tf = timeframe;
     const mo = month;
     if (!feed || !tf || !mo || want.length === 0) return;
     let live = true;
@@ -551,7 +559,7 @@
   <div class="tstrip">
     {#if indices.length === 0}
       <span class="tstrip-empty">
-        No index series is held for this feed at {rung || 'any rung'} in {month || 'any month'}.
+        No index series is held for this feed at {timeframe || 'any timeframe'} in {month || 'any month'}.
       </span>
     {:else}
       {#each indices as key (key)}
@@ -596,8 +604,8 @@
         </div>
 
         <div class="wl-tabs">
-          {#each rungs as r (r)}
-            <button class="wl-tab" class:on={r === rung} onclick={() => (rung = r)}>{r}</button>
+          {#each timeframes as r (r)}
+            <button class="wl-tab" class:on={r === timeframe} onclick={() => (timeframe = r)}>{r}</button>
           {/each}
         </div>
 
@@ -679,13 +687,42 @@
           {/each}
         </div>
         <!-- THE WINDOW, WIDEST FIRST: year, then month, then segment, then
-             rung. The order is the order the answers depend on each other —
+             timeframe. The order is the order the answers depend on each other —
              the month list is the chosen year's, and the segment list is the
              chosen tab's — so reading left to right is reading the query being
              narrowed. Each is labelled, because four bare pills side by side
              name nothing: `2026`, `Sep 2026`, `CASH` and `1day` are four
              different KINDS of value and only the last two are self-evident. -->
         <div class="ctrls">
+          <!-- THE FEED, AND THIS PAGE HAD NONE — A DEAD END THIS PAGE CREATED.
+               `+layout.svelte`'s FEED_OWNED comment states the rule it broke:
+               "ZERO controls is the other, and it is worse: a page that shows
+               one feed's answer and offers no way to change it is a dead end,
+               and the operator's only move is the browser's back button." That
+               is exactly what standing the console bar down did here — the bar
+               carried the only picker, and this page replaced the bar without
+               replacing the control.
+
+               So it joins FEED_OWNED's list in substance: the feed is the FIRST
+               control of this row because it is the first rung of the cascade,
+               and everything to its right is that feed's answer. The census,
+               the years, the months, the segments and the timeframes are all
+               folds over the store OF THE CHOSEN FEED.
+
+               AN UNAVAILABLE FEED IS NAMED, NOT HIDDEN — the same reason the
+               bar used a listbox rather than a native `<select>`: an option has
+               to carry the server's REASON when a feed cannot be used, and a
+               feed dropped from the list reads as a feed that does not exist. -->
+          <label class="tctl">
+            <span>Feed</span>
+            <select class="pill" bind:value={feeds.active}>
+              {#each feeds.all as f (f.wire)}
+                <option value={f.wire} disabled={!f.ready} title={f.why ?? undefined}>
+                  {f.display}{f.ready ? '' : ' · unavailable'}
+                </option>
+              {/each}
+            </select>
+          </label>
           <label class="tctl">
             <span>Year</span>
             <select class="pill" bind:value={year}>
@@ -706,9 +743,9 @@
             </select>
           </label>
           <label class="tctl">
-            <span>Rung</span>
-            <select class="pill" bind:value={rung}>
-              {#each rungs as r (r)}<option value={r}>{r}</option>{/each}
+            <span>Timeframe</span>
+            <select class="pill" bind:value={timeframe}>
+              {#each timeframes as r (r)}<option value={r}>{r}</option>{/each}
             </select>
           </label>
         </div>
@@ -719,7 +756,7 @@
           <p class="tnote wide">{tab.why}</p>
         {:else if rows.length === 0}
           <p class="tnote wide">
-            Nothing to show for {tab?.label} at {rung || 'no rung'} in
+            Nothing to show for {tab?.label} at {timeframe || 'no timeframe'} in
             {month ? monthLabel(month) : 'no month'}. The store holds no series
             matching all three.
           </p>
