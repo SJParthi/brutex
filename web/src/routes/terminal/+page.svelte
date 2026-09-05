@@ -47,7 +47,7 @@
 
   import { feeds, loadFeeds } from '$lib/feeds.svelte.js';
   import { store, syncStore } from '$lib/store.svelte.js';
-  import { tabsFrom, quotesFor, forgetQuotes, TABS } from '$lib/terminal.svelte.js';
+  import { tabsFrom, quotesFor, forgetQuotes } from '$lib/terminal.svelte.js';
   import { parseKey } from '$lib/instrument.js';
   import { group, rupee } from '$lib/money.js';
   import { monthLabel } from '$lib/dates.js';

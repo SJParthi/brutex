@@ -138,6 +138,32 @@
     // beside it and NO page -- so nothing on the server can shadow this path
     // and a click, a reload and a bookmark all render the same application.
     { href: '/backtest', label: 'Backtest' },
+    // THE TERMINAL, AND IT SHIPPED UNREACHABLE -- THE DEFECT THE ENTRY BELOW
+    // IS A 26-LINE ESSAY ABOUT, REPEATED IMMEDIATELY UNDERNEATH IT.
+    //
+    // `/terminal` was added with its route, its data layer, its build output
+    // and an entry in BARE saying this bar stands down for it -- and no entry
+    // HERE. Measured before this line existed: the only occurrences of the
+    // string `/terminal` in `web/src` were inside `terminal.svelte.js`'s own
+    // doc comment and BARE's array. Nothing linked to it, so it was reachable
+    // only by typing the URL, which is the exact state `/logs` was in and the
+    // exact sentence the comment below already wrote: a surface that exists
+    // and cannot be reached is the same as absent.
+    //
+    // The BARE comment made it worse by ASSERTING the opposite -- "does not
+    // make the page unreachable, `/terminal` is a link like any other" -- a
+    // claim about a link that did not exist. This entry is what makes that
+    // sentence true rather than a plan.
+    //
+    // NO `reload`. `src/routes/terminal/` IS a Svelte route and
+    // `crates/api/src/server.rs` registers no page on that path, so a click, a
+    // reload and a bookmark all render this application -- the arrangement
+    // `/backtest` documents above, and deliberately not `/audit`'s.
+    {
+      href: '/terminal',
+      label: 'Terminal',
+      why: 'The markets terminal — every instrument this feed holds, its last close, its move and its volume, in the dense grid a broker uses. It draws its own chrome, so this bar stands down on it; the Console link at its top right is the way back.'
+    },
     // THE LOG, REACHABLE BY CLICKING RATHER THAN BY KNOWING THE URL.
     //
     // `crates/api/src/logs.rs` is a complete bounded reader -- 1,717 lines,
