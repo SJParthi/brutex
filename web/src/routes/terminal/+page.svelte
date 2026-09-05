@@ -355,13 +355,53 @@
     }
   });
 
+  /* THE ACTIVE CHIP'S RANKING, read through a hoisted function rather than a
+     binding. `CHIP_RULES` and `activeChip` are declared further down beside the
+     chip row they belong to; a function defers the read until this derivation
+     actually runs, which is after the whole script body has evaluated. Moving
+     110 lines to satisfy declaration order would be the larger change and would
+     put the chip's rules a screen away from the chips. */
+  function chipRule() {
+    return (activeChip && CHIP_RULES[activeChip]) || null;
+  }
+
+  /* THE CHIP FILTERS AND ORDERS; A CLICKED COLUMN ONLY ORDERS.
+     ------------------------------------------------------------------------
+     `Price Gainers` means two things — keep the ones that rose, put the biggest
+     first — and only the first survives a column click. So a chip's FILTER is
+     always applied and its ORDER is the default that an explicit sort replaces.
+     Clicking `Volume` while `Price Gainers` is lit answers "the biggest volume
+     AMONG the gainers", which is the question both controls together ask.
+
+     A chip that ranks needs a value for every matching row, exactly as a
+     column sort does, so it is gated on the same budget. Over it, the chip
+     falls back to naming nothing rather than ranking the page against itself. */
   const sorted = $derived.by(() => {
-    if (!sortActive) return matching;
-    const on = sortKey;
-    const sign = sortDir === 'asc' ? 1 : -1;
-    return [...matching].sort((a, b) => {
-      const va = sortValue(a, on);
-      const vb = sortValue(b, on);
+    const rule = canSortByQuote ? chipRule() : null;
+
+    let base = matching;
+    if (rule?.keep) {
+      const keep = rule.keep;
+      base = base.filter((k) => {
+        const v = sortValue(k, rule.by);
+        return typeof v === 'number' && keep(v);
+      });
+    }
+
+    const on = sortActive ? sortKey : rule ? rule.by : '';
+    if (!on) return base;
+
+    /* MAGNITUDE, NOT DIRECTION, when the chip asks for movers — and only then.
+       An explicit column click always means the signed value, because the
+       column shows the sign. */
+    const useAbs = !sortActive && rule?.abs === true;
+    const sign = (sortActive ? sortDir : (rule?.dir ?? 'desc')) === 'asc' ? 1 : -1;
+
+    return [...base].sort((a, b) => {
+      let va = sortValue(a, on);
+      let vb = sortValue(b, on);
+      if (useAbs && typeof va === 'number') va = Math.abs(va);
+      if (useAbs && typeof vb === 'number') vb = Math.abs(vb);
       if (va === null && vb === null) return 0;
       if (va === null) return 1;
       if (vb === null) return -1;
@@ -502,8 +542,10 @@
        no quote at all — and neither does an unaffordable set, which is why
        `sortableCol` refuses those headers rather than letting the click
        through to a fetch nobody bounded. */
-    const quoteSort = sortKey !== '' && sortKey !== 'name' && canSortByQuote;
-    const want = [...new Set([...(quoteSort ? matching : rows), ...indices])];
+    const byQuote = sortKey !== '' && sortKey !== 'name';
+    const byChip = chipRule() !== null;
+    const needsAll = canSortByQuote && (byQuote || byChip);
+    const want = [...new Set([...(needsAll ? matching : rows), ...indices])];
     const tf = timeframe;
     const mo = month;
     const on = day;
@@ -654,6 +696,90 @@
   };
   const chips = $derived(CHIPS[activeTab] ?? []);
 
+  /* ==================================================================
+     WHAT A CHIP ACTUALLY DOES, AND WHICH ONES THIS STORE CAN DO AT ALL
+     ------------------------------------------------------------------
+     A chip is a RANKING: a filter and an order, applied to the matching set.
+     `Price Gainers` is "the ones that rose, biggest first" — two operations,
+     not a label.
+
+     A quote carries `close`, `open`, `high`, `low`, `volume`, `oi` and `chg`.
+     Six of the source terminal's chips fall straight out of those. The rest
+     need something a bar file does not hold, and each is refused BY NAME
+     rather than left inert:
+
+       OI Gainers / OI Losers  need the CHANGE in open interest.
+         `/bars/window.json` carries a change field for price and none for OI,
+         so there is no second reading to difference against.
+
+       Top Value / By Value    need turnover, which is price times quantity
+         summed over the session. `close × volume` is a plausible-looking
+         estimate and is not the same number — the `Value (Cr.)` column already
+         refuses it for the same reason, and a chip that ranked on it would
+         order the grid by a figure nobody measured.
+
+       Premium / Discount      need the underlying's bar joined to the
+         contract's at the same timestamp. This store files a contract's own
+         series and makes no such join.
+
+       Extreme Openings        need the gap: this bar's open against the
+         PREVIOUS bar's close. A single bar cannot answer it.
+
+       Breakouts               need a range over a trailing window, which is an
+         indicator. `crates/indicators` owns those, and computing one here
+         would be a second implementation of something the engine already has.
+
+       Outperformers           need a benchmark join — each equity's move
+         against the index's over the same window.
+
+       MTF                     is vendor metadata about margin eligibility. No
+         bar carries it and no endpoint here serves it.
+
+     `abs` ranks by the SIZE of the move regardless of direction, which is what
+     "movers" means and what separates it from "gainers".
+     ================================================================== */
+
+  /**
+   * @typedef {object} ChipRule
+   * @property {string} by     the Quote field, or `chg` for the move
+   * @property {'asc'|'desc'} dir
+   * @property {boolean} [abs] rank by magnitude, ignoring sign
+   * @property {(v: number) => boolean} [keep] which rows the chip admits
+   */
+
+  /** @type {Record<string, ChipRule>} */
+  const CHIP_RULES = {
+    'Highest OI': { by: 'oi', dir: 'desc' },
+    'Top Volume': { by: 'volume', dir: 'desc' },
+    'Price Gainers': { by: 'chg', dir: 'desc', keep: (v) => v > 0 },
+    'Price Losers': { by: 'chg', dir: 'asc', keep: (v) => v < 0 },
+    'Intraday Movers': { by: 'chg', dir: 'desc', abs: true },
+    'Price Movers': { by: 'chg', dir: 'desc', abs: true }
+  };
+
+  /** @type {Record<string, string>} */
+  const CHIP_WHY = {
+    'OI Gainers':
+      'Ranking by a rise in open interest needs the CHANGE in open interest. /bars/window.json carries a change field for price and none for OI, so there is no second reading to difference against.',
+    'OI Losers':
+      'Ranking by a fall in open interest needs the CHANGE in open interest, and no endpoint here serves one — the same absence the OI Change column reports.',
+    'Top Value':
+      'Value is turnover: price times quantity, summed over the session. A bar carries close and volume but not per-trade value, and multiplying the two is an estimate rather than a measurement. The Value (Cr.) column refuses it for the same reason.',
+    'By Value':
+      'Value is turnover: price times quantity, summed over the session. A bar carries close and volume but not per-trade value, and ranking on their product would order this grid by a figure nobody measured.',
+    Premium:
+      'A future’s premium is its price minus its underlying’s at the same timestamp. This store files a contract’s own series and makes no join to the underlying, so there is nothing to rank.',
+    Discount:
+      'A future’s discount is its underlying’s price minus its own at the same timestamp. That join does not exist in this store.',
+    'Extreme Openings':
+      'An opening gap is this bar’s open against the PREVIOUS bar’s close. One bar cannot answer it, and /bars/window.json returns the window asked for rather than the bar before it.',
+    Breakouts:
+      'A breakout is a close against a trailing range, which is an indicator. crates/indicators owns those, and computing one in the browser would be a second implementation of something the engine already holds.',
+    Outperformers:
+      'Outperformance is an instrument’s move against a benchmark’s over the same window. This page reads each series independently and makes no benchmark join.',
+    MTF: 'Margin trading eligibility is vendor metadata about an instrument, not a property of its bars. No endpoint here serves it.'
+  };
+
   /* THE CHIP IS SELECTABLE, BECAUSE IT CHANGES THE GRID.
      It was drawn lit-but-inert on first build, which was defensible only while
      the column set depended on the tab alone. It does not: see `columnsFor`.
@@ -662,9 +788,17 @@
      `Highest OI` has no meaning on Stocks and index 4 on one strip names a
      different filter on the next. */
   let chipIndex = $state(0);
+  /* THE TAB OPENS ON A CHIP THAT CAN ACTUALLY RANK, not on index 0.
+     Futures leads with `Premium`, which needs a join this store does not make,
+     so opening there would light a chip that orders nothing and leave the
+     reader to wonder whether the ranking was applied. The first chip carrying a
+     rule is the one that opens; if a tab has none, index 0 stands and the
+     refusal on it explains itself. */
   $effect(() => {
     void activeTab;
-    chipIndex = 0;
+    const list = CHIPS[activeTab] ?? [];
+    const first = list.findIndex((c) => CHIP_RULES[c]);
+    chipIndex = first === -1 ? 0 : first;
   });
   /** @type {string|null} */
   const activeChip = $derived(chips[chipIndex] ?? null);
@@ -856,9 +990,21 @@
 
       <div class="chiprow">
         <div class="chips">
+          <!-- A CHIP THIS STORE CANNOT RANK IS DISABLED AND SAYS WHY, rather
+               than lighting up and ordering nothing. An inert control that
+               looks live is the failure section 4 names; one that refuses and
+               names the missing field is a fact the reader can act on. -->
           {#each chips as c, i (c)}
-            <button class="chip" class:on={i === chipIndex} onclick={() => (chipIndex = i)}
-              >{c}</button
+            <button
+              class="chip"
+              class:on={i === chipIndex}
+              disabled={!CHIP_RULES[c]}
+              title={CHIP_RULES[c]
+                ? canSortByQuote
+                  ? `Rank by ${c.toLowerCase()}.`
+                  : `Ranking needs a price for every matching row, and this view holds ${totalRows.toLocaleString('en-IN')} against a budget of ${SORT_BUDGET.toLocaleString('en-IN')}.`
+                : CHIP_WHY[c]}
+              onclick={() => CHIP_RULES[c] && (chipIndex = i)}>{c}</button
             >
           {/each}
         </div>
@@ -1043,9 +1189,15 @@
             </tbody>
           </table>
 
-          {#if totalRows > rows.length}
+          {#if sorted.length > rows.length}
+            <!-- `sorted.length` AND NOT `totalRows`. A chip that filters —
+                 `Price Gainers` keeps only the ones that rose — makes the set
+                 on screen smaller than the set that matched, and a pager
+                 counting the unfiltered total would promise rows the filter has
+                 already removed. `totalRows` remains what the BUDGET is
+                 measured against, which is a different question. -->
             <button class="more" onclick={() => (shown += PAGE)}>
-              Show {Math.min(PAGE, totalRows - rows.length)} more · {rows.length} of {totalRows}
+              Show {Math.min(PAGE, sorted.length - rows.length)} more · {rows.length} of {sorted.length}
               — quotes are fetched only for rows on screen
             </button>
           {/if}
@@ -1361,6 +1513,15 @@
     padding: 7px 14px;
     white-space: nowrap;
     cursor: pointer;
+  }
+  /* A REFUSED CHIP READS AS REFUSED BEFORE IT IS CLICKED. Dimmer text, a
+     dashed edge and the default cursor, so the difference between "this ranks"
+     and "this store cannot rank this" is visible rather than discovered. */
+  .chip:disabled {
+    color: #5a5a5a;
+    border-style: dashed;
+    border-color: #2a2a2a;
+    cursor: default;
   }
   .chip.on {
     color: var(--acc);
