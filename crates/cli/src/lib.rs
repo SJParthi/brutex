@@ -10441,8 +10441,8 @@ fn screen<'a>(
                 .max_by_key(|&(_, _, cell, admitted)| {
                     (
                         admitted,
-                        cell.return_over_drawdown(),
-                        cell.reward_to_risk_bp(),
+                        ranked(cell.return_over_drawdown()),
+                        ranked(cell.reward_to_risk_bp()),
                         cell.pessimistic,
                     )
                 });
@@ -10550,13 +10550,7 @@ fn screen<'a>(
     //
     // `admitted` is untouched and still REPORTED, so a row that broke a stated
     // rule is ranked where it earned and printed beside the rule it broke.
-    rows.sort_by_key(|r| {
-        core::cmp::Reverse((
-            r.cell.return_over_drawdown(),
-            r.cell.reward_to_risk_bp(),
-            r.cell.pessimistic,
-        ))
-    });
+    rows.sort_by_key(|r| money_key(&r.cell));
 
     measure_top(&mut rows, bars, column, horizon, rules);
 
@@ -10640,8 +10634,8 @@ fn screen<'a>(
             r.admitted,
             weakest,
             worst_period,
-            r.cell.return_over_drawdown(),
-            r.cell.reward_to_risk_bp(),
+            ranked(r.cell.return_over_drawdown()),
+            ranked(r.cell.reward_to_risk_bp()),
             r.cell.pessimistic,
         ))
     });
@@ -10790,6 +10784,62 @@ fn rules_banner(rules: Rules, passed: usize, considered: usize) -> String {
         }
     );
     out
+}
+
+/// A ratio's RANKING reading: an unbounded sentinel ranks LAST, not first.
+///
+/// # The metric is right; the reading of it as a sort term was not
+///
+/// [`grid::Cell::return_over_drawdown`] answers [`i64::MAX`] when the total is
+/// positive and the drawdown is zero, and [`grid::Cell::reward_to_risk_bp`]
+/// answers it when no trade lost. Both are the correct RATIO -- there is no
+/// finite quotient for a division by nothing -- and both were read raw as the
+/// leading terms of four ranking keys: the side chooser inside `screen`, the
+/// money sort, the calendar re-sort and `record_frontier`'s rank. A cell that
+/// never lost therefore scored `(i64::MAX, i64::MAX, ..)` and outranked every
+/// cell that had actually been tested.
+///
+/// A cell that never lost is UNTESTED, not best: nothing in it says what a
+/// loser costs. `Grid::by_reward_to_risk`'s own doc names exactly this trap and
+/// refuses to default its trade floor because of it -- and that selector has
+/// no production caller, so the rule it states bound nothing the operator reads.
+///
+/// # Demoted, not floored
+///
+/// The sentinel becomes [`i64::MIN`] rather than the key gaining a trade floor,
+/// because any assurance-derived floor lands on exactly the case that bites:
+/// `Rules::elite`'s floor is `assurance_floor_bp(8_000)` = 6,500 and the 95%
+/// lower bound on eight of eight is 6,755, so eight perfect trades CLEAR it --
+/// `trades_needed_for(10_000, 6_500, ..)` is 8. A floor would restate the
+/// defect with a number beside it; demotion needs none.
+///
+/// Only the RANKING reading changes. `Rules::admits` still reads the raw
+/// sentinel and still passes a never-lost cell on a drawdown floor; `inf`,
+/// `no DD` and `null` still render it; the two methods are untouched.
+const fn ranked(ratio: i64) -> i64 {
+    if ratio == i64::MAX { i64::MIN } else { ratio }
+}
+
+/// The money terms of the screen's sort, as the key `sort_by_key` takes.
+///
+/// # Why this is a named function and not the closure it replaced
+///
+/// The reason `calendar_terms` gives. Inline, the key sat inside `screen`,
+/// which needs bars, a column and priced cells to reach, so no test could hand
+/// it two cells and read the order back -- and the sentinel defect `ranked`
+/// describes survived every test in the workspace while it was there. Named,
+/// `an_untested_cell_that_never_lost_ranks_behind_a_tested_one` fails the build
+/// if either ratio is ever read raw here again.
+///
+/// The three terms in the operator's order -- return over drawdown, reward to
+/// risk, net -- are argued one by one in the comment above the sort in
+/// `screen`. `Reverse` so a larger term ranks first, exactly as before.
+const fn money_key(cell: &grid::Cell) -> core::cmp::Reverse<(i64, i64, i64)> {
+    core::cmp::Reverse((
+        ranked(cell.return_over_drawdown()),
+        ranked(cell.reward_to_risk_bp()),
+        cell.pessimistic,
+    ))
 }
 
 /// The two calendar terms of the cross-combination sort key, for a row that
@@ -14703,8 +14753,8 @@ fn record_frontier(
                     false,
                     core::cmp::Reverse((
                         rules.admits(cell),
-                        cell.return_over_drawdown(),
-                        cell.reward_to_risk_bp(),
+                        ranked(cell.return_over_drawdown()),
+                        ranked(cell.reward_to_risk_bp()),
                         cell.pessimistic,
                     )),
                 )
@@ -19858,6 +19908,99 @@ mod tests {
             "a row with no losing period must lead, then the mild loss, then \
              the deep one -- a negation here reverses all three"
         );
+    }
+
+    /// AN UNTESTED CELL THAT NEVER LOST RANKS BEHIND A TESTED ONE.
+    ///
+    /// `return_over_drawdown` and `reward_to_risk_bp` both answer `i64::MAX`
+    /// for a cell with no losing trade -- the right ratio, and read raw as a
+    /// sort term it put eight perfect trades above two hundred tested ones on
+    /// the money sort, the side chooser, the calendar re-sort and the
+    /// frontier's rank. `ranked` is the one reading every key now takes.
+    ///
+    /// Through `money_key`, the production key, on `Screened` rows rather than
+    /// a hand-built tuple: the defect was the mapping from a cell to its terms,
+    /// so a test that built the tuple itself would restate it.
+    #[test]
+    fn an_untested_cell_that_never_lost_ranks_behind_a_tested_one() {
+        use runner::rank::Scored;
+
+        let scored = Scored {
+            #[expect(
+                clippy::default_trait_access,
+                reason = "the named mask type belongs to runner's private dependency graph"
+            )]
+            mask: Default::default(),
+            hits: 300,
+            edge: runner::outcome::Edge::default(),
+        };
+        // Eight of eight, nothing given back, nothing lost: both ratios are the
+        // sentinel. And it CLEARS THE ASSURANCE FLOOR, which is why demotion is
+        // the fix rather than a trade count -- `elite`'s floor is 6,500 and the
+        // 95% lower bound on eight of eight is 6,755.
+        let flawless = grid::Cell {
+            trades: 8,
+            wins: 8,
+            pessimistic: 80_000,
+            min_win: 10_000,
+            worst_trade: 0,
+            max_drawdown: 0,
+            ..grid::Cell::default()
+        };
+        // Two hundred and eight trades, a real worst loser, a real drawdown --
+        // and MORE money than the flawless eight.
+        let tested = grid::Cell {
+            trades: 208,
+            wins: 140,
+            pessimistic: 250_000,
+            min_win: 1_500,
+            worst_trade: -4_000,
+            max_drawdown: 30_000,
+            ..grid::Cell::default()
+        };
+        assert_eq!(
+            flawless.return_over_drawdown(),
+            i64::MAX,
+            "nothing given back"
+        );
+        assert_eq!(flawless.reward_to_risk_bp(), i64::MAX, "nothing lost");
+        assert!(
+            flawless.assurance_bp() >= crate::Rules::elite(400, 25).min_assurance_bp,
+            "the fixture must clear the assurance floor, or a trade floor would \
+             have done and this proves nothing"
+        );
+        assert!(
+            tested.return_over_drawdown() < flawless.return_over_drawdown()
+                && tested.reward_to_risk_bp() < flawless.reward_to_risk_bp(),
+            "the raw ratios must favour the untested cell, or the sort below \
+             cannot tell a demotion from no change"
+        );
+
+        // THE UNTESTED CELL FIRST, so a key that collapsed both rows to one value
+        // would leave it there under the stable sort and fail below.
+        let row = |cell: grid::Cell| super::Screened {
+            side: Direction::Long,
+            scored: &scored,
+            rank: 1,
+            cell,
+            tightest: None,
+            admitted: true,
+            consistency: None,
+            steady: true,
+        };
+        let mut rows = [row(flawless), row(tested)];
+        rows.sort_by_key(|r| super::money_key(&r.cell));
+        assert_eq!(
+            rows.iter().map(|r| r.cell.trades).collect::<Vec<_>>(),
+            [208, 8],
+            "the tested cell must lead: a cell that never lost is untested, not best"
+        );
+
+        // THE READING ITSELF, at both arms. `==` to `!=`, `i64::MAX` to `i64::MIN`
+        // and a swapped arm each move one of these.
+        assert_eq!(super::ranked(i64::MAX), i64::MIN, "the sentinel ranks last");
+        assert_eq!(super::ranked(5), 5, "a finite ratio is carried unchanged");
+        assert_eq!(super::ranked(0), 0, "and so is a losing cell's zero");
     }
 
     /// AN UNVALIDATED PAGE SAYS SO, AND THE SWITCH THAT MAKES ONE IS EXPLICIT.
