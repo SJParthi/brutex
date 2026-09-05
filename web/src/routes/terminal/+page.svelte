@@ -2095,9 +2095,40 @@
   .pill {
     appearance: none;
     -webkit-appearance: none;
-    background: var(--panel)
-      url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="10" height="6" viewBox="0 0 10 6"><path d="M1 1l4 4 4-4" fill="none" stroke="%238E8E8E" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>')
-      no-repeat right 9px center;
+    /* THE CHEVRON IS A FILLED AMBER TRIANGLE, AND BOTH HALVES OF THAT WERE
+       WRONG HERE.
+       ------------------------------------------------------------------------
+       This drew a STROKED grey caret — two 1.4px strokes meeting at a point, in
+       #8E8E8E. Rasterising the source's control and reading the pixels row by
+       row gives a solid wedge instead:
+
+           ##############      y 634   14 device px
+           ##############      y 635
+           ##############      y 636
+            ############       y 637
+             ##########        y 638
+              ########         y 639
+               ######          y 640
+                ####           y 641
+
+       — contiguous on every row, so filled and not stroked; 13-14 device px
+       across and 8 tall, which is 7 x 4 in CSS pixels at this capture's 2x.
+
+       And it is ORANGE. #EA9324, which I did not believe from one sample and
+       so scanned the whole picker band for: exactly two runs of that colour
+       exist, x 3220-3232 and x 3351-3363, one under each of the two pickers,
+       65 pixels each. It is the only warm colour anywhere in this chrome, which
+       is presumably the point — the pickers are the one control that changes
+       what every other surface is showing.
+
+       The ground is `--head` (#181818), not `--panel` (#121212): measured as
+       the run this pill's own box paints, x 3060-3385 on its centre row.
+
+       Offset 11px rather than 9px — the triangle's right edge clears the pill's
+       by 22 device px. */
+    background: var(--head)
+      url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="7" height="4" viewBox="0 0 7 4"><path d="M0 0h7L3.5 4z" fill="%23EA9324"/></svg>')
+      no-repeat right 11px center;
     border: 1px solid var(--line);
     border-radius: 6px;
     color: var(--ink);
