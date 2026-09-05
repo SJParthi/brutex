@@ -28,11 +28,12 @@
 //! synthetic bars there is no instrument to name and naming one would be an
 //! invention `CLAUDE.md` §3 rule 1 forbids. A stored load has them all.
 
-use brutex_core::instrument::{Exchange, InstrumentKey};
+use brutex_core::instrument::{Exchange, InstrumentKey, Kind};
 use brutex_core::vendor::Vendor;
 use indicators::Candle;
 use indicators::anchored::{DailyEligibility, DailyReference};
 use indicators::evaluator::CHARTER_NON_REGULAR_IST_DAYS;
+use indicators::vwap::Availability;
 use pull::calendar::{DayKind, MAX_WINDOWS, Session};
 use std::path::Path;
 use store::file::{BarFile, StoreError};
@@ -1865,6 +1866,43 @@ pub(crate) fn swept_index(underlying: &str) -> Result<InstrumentKey, Refusal> {
     Ok(as_cash)
 }
 
+/// Whether VWAP can be computed on this instrument's bars: decided by WHAT
+/// the instrument is, never by reading its bars.
+///
+/// # Why the kind and not the slice
+///
+/// `vwap::availability_of` answers the same question by scanning the whole
+/// slice for a non-zero volume, so a mask at bar 0 would depend on bar N —
+/// look-ahead, which `CLAUDE.md` §3 rule 7 forbids outright. That is why every
+/// stored path pinned [`Availability::Absent`] until D-0507, and why the 20
+/// VWAP positions were dead on every production run. The kind is a static
+/// attribute of the key: an index level has no traded volume by definition and
+/// a cash equity always does, so the verdict is known before the first bar
+/// and is the same at bar 0 as at bar N.
+///
+/// # Why an index stays `Absent`
+///
+/// NIFTY's stored daily bars do carry non-zero volume (`vwap`'s module
+/// documentation measured 1,237 of 1,239), so a slice scan would say
+/// `Present` for an index. It is still `Absent` here, on purpose: an index is
+/// not traded, its "volume" is a vendor's aggregate of constituents, and every
+/// ledger row this repository has ever written for NIFTY was computed with
+/// `Absent`. Flipping it would change the identity of every rerun without a
+/// vocabulary change — §3 rule 5 — for a number that means nothing on an
+/// index.
+///
+/// A contract never reaches this function: [`swept_index`] refuses it first.
+/// The arm is `Absent` rather than unreachable so that a key built some other
+/// way still gets a verdict rather than a panic.
+///
+/// O(1): one `match` on a `Copy` discriminant. No bar is read.
+pub(crate) const fn vwap_availability(key: &InstrumentKey) -> Availability {
+    match key.kind {
+        Kind::Equity => Availability::Present,
+        Kind::Index | Kind::Future { .. } | Kind::Option { .. } => Availability::Absent,
+    }
+}
+
 /// One instrument-month of real bars, or the reason there are none.
 ///
 /// # Errors
@@ -3273,6 +3311,62 @@ mod tests {
             .expect("the store is correct and the caller only typed a case");
         assert_eq!(loaded.bars.len(), 3, "mixed case reads the same month");
         assert_eq!(loaded.key.underlying.as_str(), "NIFTY");
+    }
+
+    /// **The VWAP verdict is the KIND, and no bar is read to reach it.**
+    ///
+    /// D-0507. Every production path pinned `Absent` before this, so the 20
+    /// VWAP positions were dead on every run. The verdict now comes from the
+    /// key: an equity is `Present`, an index is `Absent` -- unchanged, so every
+    /// NIFTY identity ever written stays byte-identical -- and a contract,
+    /// which `swept_index` refuses before this is asked, is `Absent` rather
+    /// than a panic. The function takes no bars, which is the whole of the
+    /// look-ahead argument: there is nothing it could read ahead into.
+    #[test]
+    fn vwap_availability_is_decided_by_the_kind_and_reads_no_bar() {
+        use brutex_core::instrument::{Expiry, OptionSide, Segment};
+        use brutex_core::symbol::Symbol;
+
+        for (_, symbol) in InstrumentKey::SWEPT {
+            let index = InstrumentKey::index(Exchange::Nse, symbol).expect("a swept index");
+            assert_eq!(
+                vwap_availability(&index),
+                Availability::Absent,
+                "{symbol}: an index level is not traded; its verdict is unchanged by D-0507"
+            );
+        }
+        let vix = InstrumentKey::index(Exchange::Nse, "INDIAVIX").expect("reference index");
+        assert_eq!(vwap_availability(&vix), Availability::Absent);
+
+        for symbol in ["RELIANCE", "HINDALCO", "TCS"] {
+            let cash = InstrumentKey::cash(Exchange::Nse, symbol).expect("an F&O cash equity");
+            assert_eq!(
+                vwap_availability(&cash),
+                Availability::Present,
+                "{symbol}: a cash equity always carries traded volume"
+            );
+        }
+
+        // A contract is refused upstream; here it is a verdict, not a panic.
+        let expiry = Expiry::new(2026, 9, 30).expect("a month-end expiry");
+        let future = InstrumentKey {
+            exchange: Exchange::Nse,
+            segment: Segment::Fno,
+            underlying: Symbol::new("NIFTY").expect("valid"),
+            kind: Kind::Future { expiry },
+        };
+        assert_eq!(vwap_availability(&future), Availability::Absent);
+        let option = InstrumentKey {
+            exchange: Exchange::Nse,
+            segment: Segment::Fno,
+            underlying: Symbol::new("NIFTY").expect("valid"),
+            kind: Kind::Option {
+                expiry,
+                strike: brutex_core::price::Paisa::from_raw(2_500_000),
+                side: OptionSide::Call,
+            },
+        };
+        assert_eq!(vwap_availability(&option), Availability::Absent);
     }
 
     /// **An unbounded argument is cut before it reaches the refusal.**

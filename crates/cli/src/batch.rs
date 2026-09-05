@@ -462,21 +462,27 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
             };
         }
     };
-    let column =
-        match crate::stored_anchored_column(&loaded.bars, &daily, &exact_minute, signal_length) {
-            Ok(column) => column,
-            Err(why) => {
-                return Row {
-                    label,
-                    bars: 0,
-                    depth: 0,
-                    kept: 0,
-                    completed: false,
-                    identity: None,
-                    refused: Some(why),
-                };
-            }
-        };
+    let availability = crate::stored::vwap_availability(&loaded.key);
+    let column = match crate::stored_anchored_column(
+        &loaded.bars,
+        &daily,
+        &exact_minute,
+        signal_length,
+        availability,
+    ) {
+        Ok(column) => column,
+        Err(why) => {
+            return Row {
+                label,
+                bars: 0,
+                depth: 0,
+                kept: 0,
+                completed: false,
+                identity: None,
+                refused: Some(why),
+            };
+        }
+    };
     let digest = match crate::stored_anchored_digest(&loaded.bars, &exact_minute, &daily) {
         Ok(digest) => digest,
         Err(why) => {

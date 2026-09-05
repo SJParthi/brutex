@@ -32448,3 +32448,76 @@ only; the 213 cash series are the operator's to pull, from the console, never
 from a session. And it does not build the cross-sectional sweep the objective
 needs — one combination ranked over trades pooled across every stored stock —
 which is a new sweep mode and the subject of the next entry.
+
+## D-0507
+
+**VWAP availability is decided by the instrument's KIND, never by reading
+its bars — and with that, the 20 VWAP positions are live on equities for the
+first time.**
+
+**What was true.** `indicators::vwap::Availability` is decided once per run,
+before the first bar, and `Absent` makes every VWAP position false for the
+whole run. Every production path in `cli` pinned `Absent`: `evaluator_from`,
+`stored_anchored_column`, and by inheritance every sweep, audit, screen,
+verify and walk-forward fold that reads the store. The stated reason was
+correct as far as it went — `vwap::availability_of` scans the WHOLE slice for
+a non-zero volume, so deriving the verdict from the bars would make a mask at
+bar 0 depend on bar N, which §3 rule 7 forbids. The consequence was that
+positions 52–53, 143–152 and 190–197 were dead on every real run this
+repository has made, and the operator's question *"vwap can be used right?"*
+had the answer *no, and nothing said so*.
+
+**What this decides.** `cli::stored::vwap_availability(&InstrumentKey)` is one
+`match` on `key.kind`: `Equity → Present`, everything else `→ Absent`. The kind
+is a static attribute known before the first bar, so the verdict is the same
+at bar 0 as at bar N and no look-ahead is possible: the function takes no
+bars. O(1), a discriminant compare.
+
+**Why an index stays `Absent`, deliberately.** NIFTY's stored daily bars carry
+non-zero volume (`vwap`'s module documentation measured 1,237 of 1,239), so a
+slice scan would say `Present` for an index. It is `Absent` here on two
+grounds. An index level is not traded; its "volume" is a vendor's aggregate of
+constituent turnover and a VWAP over it prices nothing anyone can buy. And
+every ledger row this repository has written for NIFTY was computed with
+`Absent`; flipping it would change the output of every rerun with no
+vocabulary change, which §3 rule 5 forbids. The claim that NIFTY output is
+byte-identical before and after is argued from the arm, and is measured in the
+commit that follows this entry: one `sweep-stored zerodha NIFTY 60min 2026 7`
+under the previous binary and under this one, diffed.
+
+**Where the verdict now flows.** `evaluator_stored(availability)` beside the
+synthetic `evaluator()`; `stored_anchored_column` takes it as a parameter;
+`StoredReplay` carries it so every walk-forward fold's column is built with
+the same verdict as the whole span; `audit_bars` reads it off the caller's
+evaluator through the new `Evaluator::availability()` getter and builds the
+per-fold copies to match — before this the folds were built from the
+synthetic `evaluator()` and would have swept a different vocabulary from the
+span they validate; `verify`'s two determinism evaluators; `batch`; and
+`column_withholding_unsourceable_days`, once outside its retry loop. Eleven
+sites, and `the_stored_paths_take_the_vwap_verdict_from_the_key_and_never_pin_it`
+counts the literals that remain.
+
+**What stays `Absent`, and why each is right.** The synthetic evaluator:
+generated bars name no instrument and carry no volume. `base_win_rate_bp`:
+its column is read only to know which bars the evaluator REFUSED, and a
+zero-volume bar under `Present` contributes nothing and is not a refusal, so
+the verdict cannot change that answer. The Step-3 ledger chain modules
+(`ledger_all`, `ledger_v6`, `step3_orchestrator`, `global_replay`,
+`candidate_universe`) still construct their evaluators with `Absent`
+directly: that chain is index-only until BANKNIFTY data exists (D-0226 and
+its successors), so the pin is currently correct there and is recorded as a
+seam to close when the chain admits an equity, not as done.
+
+**Tests.** `cli::stored::vwap_availability_is_decided_by_the_kind_and_reads_no_bar`
+— both swept indices and India VIX `Absent`, three F&O equities `Present`, a
+future and an option `Absent` rather than a panic.
+`indicators::evaluator::availability_is_the_verdict_the_evaluator_was_built_with`
+— the getter and `spec()` read one field, both values.
+`cli::the_stored_paths_take_the_vwap_verdict_from_the_key_and_never_pin_it` —
+exactly two `Availability::Absent` literals remain in `lib.rs` production
+code, each named, and every `stored_anchored_column(` call passes a verdict.
+Invariant SC-07.
+
+**Not decided here.** Whether the VWAP positions carry any edge on equities.
+They are live; nothing has been swept over them yet, because no equity bar is
+in the store.

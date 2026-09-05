@@ -720,10 +720,13 @@ fn column_withholding_unsourceable_days(
     const ATTEMPTS: usize = 64;
     let (from, to) = span;
     let mut dropped: Vec<i64> = Vec::new();
+    // ONCE, outside the retry loop: the verdict is a property of the key and
+    // does not change when a day is withheld.
+    let availability = stored::vwap_availability(&stored::swept_index(underlying)?);
     for _ in 0..ATTEMPTS {
         let daily = stored::load_daily_context(root, vendor, underlying, (from, to), bars)?;
         let exact = stored::load_exact_minute_context(root, vendor, underlying, (from, to), bars)?;
-        match stored_anchored_column(bars, &daily, &exact, signal_length) {
+        match stored_anchored_column(bars, &daily, &exact, signal_length, availability) {
             Ok(column) => {
                 if !dropped.is_empty() {
                     note(
@@ -1836,17 +1839,42 @@ fn evaluator() -> Result<Evaluator, &'static str> {
 /// work around with a comment. `None` is the shape a future widening of the
 /// tolerance table could produce, and this is where it is answered.
 fn evaluator_from(widths: Option<Widths>) -> Result<Evaluator, &'static str> {
+    // ABSENT, because this is the SYNTHETIC evaluator: `runner::synthetic`
+    // bars are generated, name no instrument, and carry no traded volume. The
+    // stored paths go through [`evaluator_stored`] and take the verdict from
+    // the instrument's kind instead.
+    evaluator_with(widths, Availability::Absent)
+}
+
+/// The evaluator for a STORED instrument, with the VWAP verdict its kind
+/// decides.
+///
+/// Until D-0507 every stored path pinned `Absent` here, on the reasoning that
+/// `vwap::availability_of` reads the whole slice and a mask at bar 0 must not
+/// depend on bar N. That reasoning was right about the slice and wrong about
+/// the alternative: [`stored::vwap_availability`] answers from the KEY, which
+/// is known before the first bar, so an equity's 20 VWAP positions are live
+/// without any look-ahead and an index's stay `Absent` exactly as before.
+fn evaluator_stored(availability: Availability) -> Result<Evaluator, &'static str> {
+    evaluator_with(Widths::pinned().ok(), availability)
+}
+
+/// The one constructor both doors share.
+///
+/// # Why the widths are a parameter rather than a read
+///
+/// The same reason `api::autopilot::stays_paused_from` takes its value instead
+/// of fetching it: `Widths::pinned()` reads two pinned constants and cannot fail
+/// in this build, so a function that called it inline would carry a refusal arm
+/// no test could enter — and `CLAUDE.md` §9's coverage floor is not something to
+/// work around with a comment. `None` is the shape a future widening of the
+/// tolerance table could produce, and this is where it is answered.
+fn evaluator_with(
+    widths: Option<Widths>,
+    availability: Availability,
+) -> Result<Evaluator, &'static str> {
     let widths = widths.ok_or("the pinned tolerances are not valid")?;
-    Ok(Evaluator::new(
-        widths,
-        // ABSENT, AND THE CALLER MAY NOT DERIVE IT. `vwap::availability_of`
-        // reads the WHOLE slice, so a mask at bar 0 would depend on bar N --
-        // look-ahead, which §3 rule 7 forbids outright. `runner` refuses to
-        // compute it for exactly this reason and takes the verdict from its
-        // caller; this crate declares it absent rather than inventing one.
-        Availability::Absent,
-        Thresholds::CLASSICAL,
-    ))
+    Ok(Evaluator::new(widths, availability, Thresholds::CLASSICAL))
 }
 
 /// Build a stored signal column from causal daily and exact-minute evidence.
@@ -1861,12 +1889,16 @@ fn stored_anchored_column(
     daily: &stored::DailyContext,
     exact_minute: &stored::ExactMinuteContext,
     signal_length_micros: i64,
+    // FROM THE KEY, NEVER FROM THE SLICE. See `stored::vwap_availability`:
+    // an equity's VWAP positions are live, an index's are `Absent`, and no
+    // bar is read to decide it. D-0507.
+    availability: Availability,
 ) -> Result<Column, String> {
     let widths =
         Widths::pinned().map_err(|why| format!("the pinned tolerances are not valid: {why}"))?;
     let mut evaluator = AnchoredEvaluator::new(
         widths,
-        Availability::Absent,
+        availability,
         Thresholds::CLASSICAL,
         &daily.references,
     )
@@ -2419,7 +2451,14 @@ fn sweep_stored_inner(
         ((year, month), (year, month)),
         &loaded.bars,
     )?;
-    let column = stored_anchored_column(&loaded.bars, &daily, &exact_minute, signal_length)?;
+    let availability = stored::vwap_availability(&loaded.key);
+    let column = stored_anchored_column(
+        &loaded.bars,
+        &daily,
+        &exact_minute,
+        signal_length,
+        availability,
+    )?;
 
     // THE FILE WAS OPENED AND THIS IS WHERE AN OPERATOR LEARNS IT. The question
     // after a sweep that found nothing is "did it even read my month?", and
@@ -2813,7 +2852,14 @@ fn auto_stored_inner(
     let daily = stored::load_daily_context(&root, vendor, underlying, (from, to), &span.bars)?;
     let exact_minute =
         stored::load_exact_minute_context(&root, vendor, underlying, (from, to), &span.bars)?;
-    let column = stored_anchored_column(&span.bars, &daily, &exact_minute, signal_length)?;
+    let availability = stored::vwap_availability(&span.key);
+    let column = stored_anchored_column(
+        &span.bars,
+        &daily,
+        &exact_minute,
+        signal_length,
+        availability,
+    )?;
 
     note(
         &telemetry::Event::info("cli.auto", "threshold search over stored bars")
@@ -4820,7 +4866,14 @@ fn audit_stored_inner(
         ((year, month), (year, month)),
         &loaded.bars,
     )?;
-    let column = stored_anchored_column(&loaded.bars, &daily, &exact_minute, signal_length)?;
+    let availability = stored::vwap_availability(&loaded.key);
+    let column = stored_anchored_column(
+        &loaded.bars,
+        &daily,
+        &exact_minute,
+        signal_length,
+        availability,
+    )?;
 
     // THE FILE WAS OPENED AND THIS IS WHERE AN OPERATOR LEARNS IT.
     //
@@ -4928,7 +4981,7 @@ fn audit_stored_inner(
     // 2,000 ppm never did on a span whose reference is not 25,000.
     let derived_rules = Rules::derived(&loaded.bars, horizon_for(&loaded.bars, false));
     let report = audit_bars(
-        evaluator(),
+        evaluator_stored(availability),
         loaded.bars,
         &header,
         min_hits,
@@ -4939,6 +4992,7 @@ fn audit_stored_inner(
                 daily: &daily,
                 exact_minute: &exact_minute,
                 signal_length_micros: signal_length,
+                availability,
             }),
             execution,
             native_minute_execution: loaded.timeframe == EXECUTION_RUNG,
@@ -5595,8 +5649,9 @@ fn audit_range_inner(
         );
     }
     header.push_str(&daily_reference_note(&daily, &exact_minute));
+    let availability = stored::vwap_availability(&span.key);
     Ok(audit_bars(
-        evaluator(),
+        evaluator_stored(availability),
         span.bars,
         &header,
         min_hits,
@@ -5607,6 +5662,7 @@ fn audit_range_inner(
                 daily: &daily,
                 exact_minute: &exact_minute,
                 signal_length_micros: signal_length,
+                availability,
             }),
             execution,
             native_minute_execution: span.timeframe == EXECUTION_RUNG,
@@ -6079,7 +6135,7 @@ pub fn verify(vendor_word: &str, underlying: &str) -> String {
             Ok(ladder) => ladder,
             Err(why) => return format!("refused: {why}\n"),
         };
-        let mut first_evaluator = match evaluator() {
+        let mut first_evaluator = match evaluator_stored(stored::vwap_availability(&span.key)) {
             Ok(evaluator) => evaluator,
             Err(why) => return format!("refused: {why}\n"),
         };
@@ -6110,7 +6166,7 @@ pub fn verify(vendor_word: &str, underlying: &str) -> String {
     if let Ok(span) = &span {
         let whole: Vec<indicators::Candle> = span.bars.iter().take(900).copied().collect();
         let prefix: Vec<indicators::Candle> = whole.iter().take(600).copied().collect();
-        let mut ev_a = match evaluator() {
+        let mut ev_a = match evaluator_stored(stored::vwap_availability(&span.key)) {
             Ok(ev) => ev,
             Err(why) => return format!("refused: {why}\n"),
         };
@@ -13654,7 +13710,14 @@ fn screen_range_inner(
     let daily = stored::load_daily_context(&root, vendor, underlying, (from, to), &span.bars)?;
     let exact_minute =
         stored::load_exact_minute_context(&root, vendor, underlying, (from, to), &span.bars)?;
-    let column = stored_anchored_column(&span.bars, &daily, &exact_minute, signal_length)?;
+    let availability = stored::vwap_availability(&span.key);
+    let column = stored_anchored_column(
+        &span.bars,
+        &daily,
+        &exact_minute,
+        signal_length,
+        availability,
+    )?;
 
     let ladder = ladder_for(min_hits)?;
     let horizon = horizon_for(&span.bars, rung != EXECUTION_RUNG);
@@ -13678,7 +13741,7 @@ fn screen_range_inner(
     let mut header = span_banner(&span, underlying, from, to, commit);
     header.push_str(&daily_reference_note(&daily, &exact_minute));
     Ok(audit_bars(
-        evaluator(),
+        evaluator_stored(availability),
         span.bars,
         &header,
         min_hits,
@@ -13689,6 +13752,7 @@ fn screen_range_inner(
                 daily: &daily,
                 exact_minute: &exact_minute,
                 signal_length_micros: signal_length,
+                availability,
             }),
             execution,
             native_minute_execution: span.timeframe == EXECUTION_RUNG,
@@ -13907,6 +13971,9 @@ struct StoredReplay<'a> {
     daily: &'a stored::DailyContext,
     exact_minute: &'a stored::ExactMinuteContext,
     signal_length_micros: i64,
+    /// The instrument's VWAP verdict, carried so that every fold's column is
+    /// built with the same one the whole-span column was. D-0507.
+    availability: Availability,
 }
 
 /// The series a position is actually opened and closed on.
@@ -16452,6 +16519,13 @@ fn audit_bars(
         ceiling,
         validate,
     } = opts;
+    // THE VERDICT THE CALLER'S EVALUATOR CARRIES, read before `prepare_audit`
+    // consumes it, so the per-fold copies below are built to the same one. An
+    // `Err` here is refused by `prepare_audit` a few lines down; the `Absent`
+    // it maps to is never used to build anything.
+    let availability = ev
+        .as_ref()
+        .map_or(Availability::Absent, Evaluator::availability);
     let PreparedAudit {
         horizon,
         rungs,
@@ -16838,7 +16912,12 @@ fn audit_bars(
     // (1,744 bytes, `docs/10-shared-core.md`), so one built here and copied per
     // fold is the same value a rebuild would produce, without a fallible call
     // inside a closure that has no way to report a refusal.
-    let fresh = match evaluator() {
+    //
+    // BUILT TO THE CALLER'S VERDICT, not the synthetic one. `evaluator()` here
+    // gave every fold `Absent` even when the whole-span evaluator was
+    // `Present`, so on an equity the folds would have swept a different
+    // vocabulary from the span they validate. D-0507.
+    let fresh = match evaluator_stored(availability) {
         Ok(e) => e,
         Err(why) => return format!("refused: {why}\n"),
     };
@@ -17151,6 +17230,7 @@ fn both_shapes(
                 replay.daily,
                 replay.exact_minute,
                 replay.signal_length_micros,
+                replay.availability,
             )
         };
         let anchored = runner::validate::walk_forward_projected_prepared_with_rungs(
@@ -17957,6 +18037,49 @@ mod tests {
         let mut out = String::new();
         assert_eq!(run(&argv(&["auto", "0"]), &mut out), MISUSED);
         assert!(out.contains("SESSIONS is outside"), "named:\n{out}");
+    }
+
+    /// **The stored paths take the VWAP verdict from the key, and never pin
+    /// it.**
+    ///
+    /// D-0507. Before it, every production `Availability::Absent` in this file
+    /// was a stored path declaring that VWAP could never be computed, and the
+    /// 20 positions were dead on every real run. Two literals remain and each
+    /// is named: the SYNTHETIC evaluator, whose generated bars carry no
+    /// volume, and the `map_or` fallback in `audit_bars` that an `Err`
+    /// evaluator reaches only on its way to being refused. A third would be a
+    /// stored path pinning the verdict again, and this fails on it.
+    #[test]
+    fn the_stored_paths_take_the_vwap_verdict_from_the_key_and_never_pin_it() {
+        let source = include_str!("lib.rs");
+        let production = source
+            .split("\nmod tests {")
+            .next()
+            .expect("the file has a test module");
+        assert_eq!(
+            production.matches("Availability::Absent").count(),
+            2,
+            "two named `Absent` literals in production -- the synthetic \
+             evaluator and audit_bars' Err fallback -- and no third: a stored \
+             path must take `stored::vwap_availability(&key)`"
+        );
+        // And every stored column is built from a verdict, not a literal: the
+        // definition names the parameter and every call passes one.
+        let mut calls = 0;
+        for (at, _) in production.match_indices("stored_anchored_column(") {
+            let after = &production[at..];
+            let close = after.find(')').expect("a call closes");
+            let args = &after[..close];
+            assert!(
+                args.contains("availability"),
+                "a stored column built without the key's verdict: {args}"
+            );
+            calls += 1;
+        }
+        assert!(
+            calls >= 7,
+            "the definition and six stored doors, at least; found {calls}"
+        );
     }
 
     /// The wrong NUMBER of words is a misuse too, not a partial match.

@@ -557,6 +557,19 @@ impl Evaluator {
         }
     }
 
+    /// The VWAP verdict this evaluator was built with.
+    ///
+    /// Read by a caller that must build a SECOND evaluator to match the first
+    /// -- one fresh copy per walk-forward fold -- so that the two agree on
+    /// whether the 20 VWAP positions can be true at all. Two evaluators over
+    /// one series with different verdicts would make a mask mean two things
+    /// within one run, which is the per-bar defect `vwap`'s module
+    /// documentation exists to refuse.
+    #[must_use]
+    pub const fn availability(&self) -> Availability {
+        self.vwap.availability()
+    }
+
     /// A fresh evaluator.
     ///
     /// `availability` is the VWAP verdict for the **whole run**, decided by the
@@ -1350,6 +1363,24 @@ mod tests {
     const IST_OPEN_UTC_MICROS: i64 = (555 - 330) * 60 * 1_000_000;
     const DAY_MICROS: i64 = 24 * 60 * 60 * 1_000_000;
     const MINUTE_MICROS: i64 = 60 * 1_000_000;
+
+    /// **The evaluator reports the verdict it was built with, and only that.**
+    ///
+    /// A caller building one fresh evaluator per walk-forward fold reads this
+    /// to match the whole-span one. Both values are pinned, so a getter that
+    /// returned a constant would fail on one of them.
+    #[test]
+    fn availability_is_the_verdict_the_evaluator_was_built_with() {
+        for verdict in [Availability::Present, Availability::Absent] {
+            let evaluator = Evaluator::new(widths(), verdict, Thresholds::default());
+            assert_eq!(evaluator.availability(), verdict);
+            assert_eq!(
+                evaluator.spec().availability,
+                verdict,
+                "the getter and the reprojection spec read the same field"
+            );
+        }
+    }
 
     fn widths() -> Widths {
         Widths::pinned().expect("both pinned widths are valid")
