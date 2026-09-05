@@ -56,10 +56,11 @@ import { pooled, IN_FLIGHT } from '$lib/pooled.js';
 import { parseKey } from '$lib/instrument.js';
 
 /**
- * The tab strip, in the source terminal's own order.
+ * The tab strip — THREE ASSET CLASSES, AND DELIBERATELY NOT THE SOURCE
+ * TERMINAL'S EIGHT.
  *
  * THE LABELS ARE DESIGN AND THE CONTENTS ARE NOT. This array is the one part of
- * the terminal that is copied rather than derived, because it is a picture of a
+ * the terminal that is chosen rather than derived, because it is a picture of a
  * tab strip and a tab strip is a fixed list of words. What goes UNDER each tab
  * is decided entirely by `tabsFrom` below, against the store, at run time.
  *
@@ -67,48 +68,34 @@ import { parseKey } from '$lib/instrument.js';
  *
  *   'segment' — rows are census keys whose parsed `segment` matches.
  *   'kind'    — rows are census keys whose parsed `kind` matches.
- *   'none'    — this store has no path to this asset class AT ALL, and the tab
- *               says so rather than rendering an empty grid that reads as "the
- *               market is quiet today".
  *
- * The three `'none'` tabs are not an oversight and must not be quietly filled
- * later: `CLAUDE.md` section 1 narrows the engine to NSE, so MCX commodities
- * are not pulled, and BSE is not swept. ETFs and bonds have no segment in this
- * store's path grammar. Naming them costs one row of this table and saves a
- * reader the conclusion that the data is merely missing today.
+ * # Why five tabs were removed rather than drawn empty
+ *
+ * The source terminal offers Live, Options, Stocks, Commodity, Futures, ETFs,
+ * Bonds and Index. Five of those can never hold anything here and were drawn
+ * carrying an explanation instead:
+ *
+ *   Commodity — MCX, and `CLAUDE.md` section 1 narrows the engine to NSE.
+ *   ETFs, Bonds — no segment in this store's path grammar; there is no shelf
+ *                 for them to be missing from.
+ *   Live — a merge of the other tabs, which is a fourth view of three sets.
+ *   Index — the two spot indices, which the strip along the top already shows.
+ *
+ * A tab that exists only to say why it is empty is a tab an operator opens
+ * once. Three tabs that are always about something the store can actually hold
+ * is the surface this console needs, and it is the operator's own instruction.
+ *
+ * WHAT THE REMOVAL COSTS, STATED SO IT IS NOT DISCOVERED: there is no longer a
+ * GRID view of `NSE-INDEX-NIFTY` or `NSE-INDEX-BANKNIFTY`. They remain on the
+ * index strip, which is a different surface with a different shape — a level
+ * and a move, not a row of columns. If an index grid is wanted, Index returns
+ * as a fourth entry here and nothing else changes.
  */
 export const TABS = [
-  { id: 'live', label: 'Live', sourced: 'all', match: null },
-  { id: 'options', label: 'Options', sourced: 'kind', match: 'option' },
   { id: 'stocks', label: 'Stocks', sourced: 'segment', match: 'CASH' },
-  { id: 'commodity', label: 'Commodity', sourced: 'none', match: null },
   { id: 'futures', label: 'Futures', sourced: 'kind', match: 'future' },
-  { id: 'etfs', label: 'ETFs', sourced: 'none', match: null },
-  { id: 'bonds', label: 'Bonds', sourced: 'none', match: null },
-  { id: 'index', label: 'Index', sourced: 'segment', match: 'INDEX' }
+  { id: 'options', label: 'Options', sourced: 'kind', match: 'option' }
 ];
-
-/**
- * Why a tab can hold nothing, in the words the tab will print.
- *
- * ONE SENTENCE PER REASON, and each names the DECISION rather than the symptom.
- * "No data" is what the source terminal effectively says by rendering zeros;
- * these say which rule produced the absence, so a reader can tell a scope
- * boundary from an empty store from a pull that has not run.
- */
-export const NO_SOURCE = {
-  commodity:
-    'Commodities are MCX, and this store is NSE only — the engine surface was ' +
-    'narrowed to NSE by decision D-0017, so no commodity bar has ever been ' +
-    'pulled or filed. This is a scope boundary, not a gap in today’s data.',
-  etfs:
-    'ETFs have no segment in this store’s path grammar: a series is filed under ' +
-    'INDEX, CASH or a contract tail, and an ETF is none of those. Nothing has ' +
-    'been lost — there is no shelf for it to have been lost from.',
-  bonds:
-    'Bonds have no segment in this store’s path grammar, for the same reason ' +
-    'ETFs do not. No bond series can be named, so none can be counted missing.'
-};
 
 /**
  * Which asset classes this feed's store can actually fill, right now.
@@ -132,13 +119,6 @@ export function tabsFrom(keys) {
   const bySegment = new Map();
   /** @type {Map<string, string[]>} */
   const byKind = new Map();
-  /* ANNOTATED, BECAUSE AN EMPTY LITERAL INFERS `never[]` AND THEN WIDENS TO
-     `any[]` THE MOMENT IT IS PUSHED TO. `$lib/store.svelte.js` records the same
-     lesson on its own `$state` seeds: the annotation is load-bearing, not
-     decoration. */
-  /** @type {string[]} */
-  const readable = [];
-
   for (const key of keys) {
     const p = parseKey(key);
     // A KEY THAT WILL NOT PARSE IS DROPPED FROM THE TABS AND COUNTED NOWHERE.
@@ -147,7 +127,6 @@ export function tabsFrom(keys) {
     // carries the `why`; the page surfaces those separately so a store with
     // unreadable keys does not look like a store with fewer instruments.
     if (!p.underlying || !p.segment || !p.kind) continue;
-    readable.push(key);
     if (!bySegment.has(p.segment)) bySegment.set(p.segment, []);
     (bySegment.get(p.segment) ?? []).push(key);
     if (!byKind.has(p.kind)) byKind.set(p.kind, []);
@@ -155,17 +134,6 @@ export function tabsFrom(keys) {
   }
 
   return TABS.map((tab) => {
-    if (tab.sourced === 'none') {
-      return {
-        id: tab.id,
-        label: tab.label,
-        keys: [],
-        why: NO_SOURCE[/** @type {keyof typeof NO_SOURCE} */ (tab.id)] ?? null
-      };
-    }
-    if (tab.sourced === 'all') {
-      return { id: tab.id, label: tab.label, keys: readable, why: null };
-    }
     const from = tab.sourced === 'segment' ? bySegment : byKind;
     const found = from.get(/** @type {string} */ (tab.match)) ?? [];
     return {

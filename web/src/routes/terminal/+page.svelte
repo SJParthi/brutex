@@ -83,7 +83,10 @@
   /** The tab strip, with each tab's rows decided by the store. */
   const tabs = $derived(tabsFrom(keys));
 
-  let activeTab = $state('index');
+  /* STOCKS OPENS, because it is the tab the engine surface is ABOUT: section 1
+     names the 213 F&O cash equities as the thing being swept, and a future or
+     an option is stored and never swept. */
+  let activeTab = $state('stocks');
   const tab = $derived(tabs.find((t) => t.id === activeTab) ?? tabs[0]);
 
   /** The rail's free-text filter, and the row it has selected. */
@@ -309,13 +312,6 @@
 
   /** @type {Record<string, Col[]>} */
   const COLUMNS = {
-    index: [
-      { h: 'Name', src: 'name', align: 'left' },
-      { h: 'LTP', src: 'close', align: 'right', kind: 'price' },
-      { h: 'Change', src: 'chgAbs', align: 'right', kind: 'signed' },
-      { h: 'Change %', src: 'chg', align: 'right', kind: 'pct' },
-      { h: 'Volume', src: 'volume', align: 'right', kind: 'int' }
-    ],
     stocks: [
       { h: 'Name', src: 'name', align: 'left' },
       { h: 'LTP', src: 'close', align: 'right', kind: 'price' },
@@ -349,10 +345,6 @@
       { h: 'Volume', src: 'volume', align: 'right', kind: 'int' }
     ]
   };
-  COLUMNS.live = COLUMNS.stocks;
-  COLUMNS.commodity = COLUMNS.stocks;
-  COLUMNS.etfs = COLUMNS.stocks;
-  COLUMNS.bonds = COLUMNS.stocks;
 
   /**
    * THE COLUMN SET IS A FUNCTION OF THE TAB **AND THE CHIP**, NOT THE TAB ALONE.
@@ -401,14 +393,9 @@
      whose ordering this page actually applies. */
   /** @type {Record<string, string[]>} */
   const CHIPS = {
-    index: ['Price Gainers', 'Price Losers', 'Top Volume'],
     stocks: ['Intraday Movers', 'Outperformers', 'MTF', 'Extreme Openings', 'Price Movers', 'Breakouts', 'By Value'],
-    options: ['Highest OI', 'OI Gainers', 'OI Losers', 'Top Volume', 'Top Value', 'Price Gainers', 'Price Losers'],
     futures: ['Premium', 'Discount', 'Top Volume', 'OI Gainers', 'OI Losers', 'Price Gainers', 'Price Losers'],
-    live: ['Price Gainers', 'Price Losers', 'Top Volume'],
-    commodity: [],
-    etfs: [],
-    bonds: []
+    options: ['Highest OI', 'OI Gainers', 'OI Losers', 'Top Volume', 'Top Value', 'Price Gainers', 'Price Losers']
   };
   const chips = $derived(CHIPS[activeTab] ?? []);
 
@@ -1125,6 +1112,18 @@
   /* ---- grid ---- */
   .tgrid {
     display: grid;
+    /* `minmax(0, 1fr)` AND NOT AN IMPLIED AUTO COLUMN. With only rows declared
+       this grid took one AUTO column, which sizes to its widest content — the
+       chip row — and grew past its container, pushing the pickers off the
+       right edge and scrolling the whole document sideways. MEASURED at 800px:
+       the controls ended at x 1139 inside a grid that ended at 828.
+
+       `1fr` alone is not the fix; a `fr` track still floors at the item's
+       automatic minimum. `minmax(0, 1fr)` is what states the floor is zero,
+       which is what lets the column be the container and hands the overflow to
+       the chip row, where `overflow-x: auto` deals with it. `theme.css`
+       records the identical lesson on `.shell`. */
+    grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto auto 1fr auto;
     min-height: 0;
     padding: 12px 12px 0 0;
@@ -1157,6 +1156,11 @@
     align-items: center;
     gap: 12px;
     margin: 16px 0 25px;
+    /* The row itself must be allowed to be narrower than its content, or the
+       `overflow-x: auto` on `.chips` below never engages — a flex item's
+       automatic minimum is its content, and that is what was widening the
+       grid before the column above was pinned. */
+    min-width: 0;
   }
   .chips {
     display: flex;
@@ -1184,6 +1188,12 @@
     display: flex;
     gap: 10px;
     align-items: center;
+    /* NOT SHRINKABLE. The chip row beside this is the thing that yields — it
+       is a list and a list can scroll. These four are the window the grid is
+       showing, and a picker sliced off the right edge answers "which month am
+       I looking at" with silence. MEASURED at an 800px viewport: `Year` was
+       half-drawn and `Month` was a truncated word. */
+    flex: none;
   }
   /* The label sits ABOVE its control rather than beside it: four side-by-side
      pairs would eat the width the chip row needs, and the chip row is the
@@ -1365,6 +1375,40 @@
   }
   .bbar code {
     color: var(--ink);
+  }
+
+  /* ---- narrow windows ---------------------------------------------------
+     THE RAIL IS A FIXED 396px, WHICH IS HALF AN 800px WINDOW.
+
+     The captures this page was measured from were taken at ~1714 CSS px, and
+     every width in it is that screen's. That is the right basis and it leaves
+     one failure the basis cannot see: an operator who puts this window on half
+     a monitor gets a 396px watchlist beside a 400px grid, and the grid is the
+     page. Measured at 800px before these rules: the four pickers were pushed
+     off the right edge with `Month` truncated mid-word.
+
+     Two steps rather than a continuous shrink, because the rail's content has
+     a floor — an instrument name, its exchange, its price and its move — and
+     below roughly 260px those start wrapping into each other. So it narrows
+     once, and then it goes, and the grid takes the whole width. It is not
+     hidden behind a toggle: a control that has to be found is worse at 700px
+     than a rail that is honestly absent, and every instrument in it is also a
+     row in the grid. */
+  @media (max-width: 1280px) {
+    .term {
+      --w-rail: 300px;
+    }
+  }
+  @media (max-width: 900px) {
+    .body {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .rail {
+      display: none;
+    }
+    .tgrid {
+      padding-left: 12px;
+    }
   }
 
   /* MOTION IS ABSENT ON PURPOSE. Nothing on this page moves on its own, so
