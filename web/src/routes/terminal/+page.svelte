@@ -434,15 +434,15 @@
   </header>
 
   <!-- THE INDEX STRIP. Whatever indices this store holds, and no more. -->
-  <div class="strip">
+  <div class="tstrip">
     {#if indices.length === 0}
-      <span class="strip-empty">
+      <span class="tstrip-empty">
         No index series is held for this feed at {rung || 'any rung'} in {month || 'any month'}.
       </span>
     {:else}
       {#each indices as key (key)}
         {@const q = quotes.get(key)}
-        <span class="cell">
+        <span class="tcell">
           <span class="c-n">{labelOf(key)}</span>
           {#if q?.close != null}
             <span class="c-v">{rupee(q.close)}</span>
@@ -471,7 +471,7 @@
          inventing one would be inventing a preference.
          ============================================================ -->
     <aside class="rail">
-      <div class="search">
+      <div class="tsearch">
         <input type="search" placeholder="Filter held instruments" bind:value={filter} />
       </div>
 
@@ -489,11 +489,11 @@
 
         <div class="wl-list">
           {#if store.state === 'error'}
-            <p class="note bad">The census could not be read. {store.error}</p>
+            <p class="tnote bad">The census could not be read. {store.error}</p>
           {:else if store.state !== 'ready'}
-            <p class="note">Reading /store.json…</p>
+            <p class="tnote">Reading /store.json…</p>
           {:else if keys.length === 0}
-            <p class="note">
+            <p class="tnote">
               This feed’s store holds nothing. Nothing has been pulled into it —
               which is a different fact from a market with nothing to show.
             </p>
@@ -547,10 +547,10 @@
     </aside>
 
     <!-- ============================================================ THE GRID -->
-    <main class="grid">
-      <div class="tabs">
+    <main class="tgrid">
+      <div class="ttabs">
         {#each tabs as t (t.id)}
-          <button class="tab" class:on={t.id === activeTab} onclick={() => (activeTab = t.id)}>
+          <button class="ttab" class:on={t.id === activeTab} onclick={() => (activeTab = t.id)}>
             {t.label}
           </button>
         {/each}
@@ -574,9 +574,9 @@
 
       <div class="panel">
         {#if tab?.why}
-          <p class="note wide">{tab.why}</p>
+          <p class="tnote wide">{tab.why}</p>
         {:else if rows.length === 0}
-          <p class="note wide">
+          <p class="tnote wide">
             Nothing to show for {tab?.label} at {rung || 'no rung'} in
             {month ? monthLabel(month) : 'no month'}. The store holds no series
             matching all three.
@@ -788,7 +788,26 @@
   }
 
   /* ---- index strip ---- */
-  .strip {
+  /* ---- index strip ----
+     EVERY CLASS BELOW THAT COLLIDES WITH `theme.css` CARRIES A `t` PREFIX, AND
+     THE PREFIX IS THE FIX RATHER THAN A STYLE CHOICE.
+
+     Scoped styles raise specificity, so a property this page DECLARES always
+     wins. A property it does not declare is inherited from the console's rule
+     of the same name, and that is where the damage was. Measured against
+     `theme.css`: `.search` (894) would have put a border, a background and
+     padding on the WRAPPER around the input, boxing it twice; `.tabs` (1354)
+     would have drawn a hairline under the tab group; `.grid` (962) would have
+     made this column a second scroll container with `overflow: auto`.
+
+     Nine of this page's names collided — cell, down, grid, search, strip, tab,
+     tabs, tick, up. Renaming beats resetting: a reset has to enumerate every
+     property the other rule happens to set today and silently rots when one is
+     added to it, while a name the console does not use cannot collide at all.
+     `up` and `down` keep their names deliberately: the only thing the console
+     sets on them is `color`, this page declares `color` on every element that
+     carries them, and the two vocabularies genuinely mean the same thing. */
+  .tstrip {
     display: flex;
     align-items: center;
     gap: 56px;
@@ -798,7 +817,7 @@
     overflow-x: auto;
     white-space: nowrap;
   }
-  .cell {
+  .tcell {
     display: inline-flex;
     align-items: baseline;
     gap: 10px;
@@ -810,7 +829,7 @@
   .c-w {
     color: var(--dim);
   }
-  .strip-empty {
+  .tstrip-empty {
     font-size: 13px;
     color: var(--dim);
   }
@@ -830,7 +849,7 @@
     padding: 12px;
     gap: 10px;
   }
-  .search input {
+  .tsearch input {
     width: 100%;
     height: 40px;
     background: var(--field);
@@ -840,7 +859,7 @@
     padding: 0 12px;
     font: inherit;
   }
-  .search input::placeholder {
+  .tsearch input::placeholder {
     color: var(--dim);
   }
   .wl {
@@ -933,14 +952,14 @@
   }
 
   /* ---- grid ---- */
-  .grid {
+  .tgrid {
     display: grid;
     grid-template-rows: auto auto 1fr auto;
     min-height: 0;
     padding: 12px 12px 0 0;
     gap: 0;
   }
-  .tabs {
+  .ttabs {
     display: flex;
     gap: 2px;
     background: var(--panel);
@@ -948,7 +967,7 @@
     padding: 4px;
     align-self: start;
   }
-  .tab {
+  .ttab {
     background: none;
     border: 0;
     color: var(--ink);
@@ -958,7 +977,7 @@
     border-radius: 6px;
     cursor: pointer;
   }
-  .tab.on {
+  .ttab.on {
     background: var(--pill);
     color: var(--acc);
   }
@@ -1092,17 +1111,29 @@
   .more:hover {
     color: var(--ink);
   }
-  .note {
+  /* NAMED `tnote` AND NOT `note`, BECAUSE `note` IS ALREADY TAKEN AND NOT BY
+     THIS PAGE. `theme.css:2198` gives the bare `.note` class the console's
+     monospace face, its `--warn` colour, `display: flex` and a `::before`
+     carrying a `▲` glyph. MEASURED on the served build: every empty state on
+     this page rendered in monospace with a warning triangle in front of it —
+     the console's caution note wearing the terminal's colours, on sentences
+     that are not cautions.
+
+     Renamed rather than overridden. Fighting a global with four resets leaves
+     the next reader wondering which rule wins; a name the console does not use
+     cannot collide at all. The same reasoning the `thead th` block above did
+     NOT get to use, because an element selector has no name to change. */
+  .tnote {
     color: var(--dim);
     font-size: 13px;
     padding: 14px;
     margin: 0;
     line-height: 1.5;
   }
-  .note.bad {
+  .tnote.bad {
     color: var(--down);
   }
-  .note.wide {
+  .tnote.wide {
     max-width: 62ch;
   }
   .bbar {
