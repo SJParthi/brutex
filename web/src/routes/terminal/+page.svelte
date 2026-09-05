@@ -55,7 +55,7 @@
     forgetQuotes,
     DAY_BUDGET
   } from '$lib/terminal.svelte.js';
-  import { parseKey } from '$lib/instrument.js';
+  import { parseKey, strikeExact } from '$lib/instrument.js';
   import { group, rupee } from '$lib/money.js';
   import { monthLabel, dayLabel } from '$lib/dates.js';
 
@@ -533,6 +533,36 @@
   /** key -> Quote, filled as the pool answers. */
   let quotes = $state(new Map());
 
+  /* THE MAP IS KEYED BY INSTRUMENT; THE ANSWER IS KEYED BY THE WINDOW.
+     ------------------------------------------------------------------------
+     `quotes` maps an instrument key to a Quote, but the Quote in it was
+     fetched for a particular (feed, timeframe, month, day, time) — five things
+     this key does not carry. `$lib/terminal.svelte.js` keys its own cache on
+     four of them and says why: "the four things that change the answer, and no
+     more". This map drops all of them.
+
+     Nothing cleared it. An `$effect` runs AFTER the DOM updates, so changing
+     the month repainted the grid from the OLD map first and only then fired
+     the fetch — seventeen rows at six outstanding is several round trips, and
+     up to 250 when a sort or a chip widens it. For that whole window every
+     LTP, Change, Change %, Volume and Open Interest on screen was a real
+     measurement from a DIFFERENT window, sitting under controls naming the new
+     one. Not a stale number: a true number filed under the wrong heading,
+     which is worse because nothing about it looks wrong.
+
+     Clearing on a window change is what makes `cellOf`'s `pending` branch
+     reachable. It already renders `·` for "asked, not yet answered" and was
+     unreachable for any instrument fetched once, because the old value was
+     always there to render instead. */
+  $effect(() => {
+    void store.feed;
+    void timeframe;
+    void month;
+    void day;
+    void time;
+    quotes = new Map();
+  });
+
   $effect(() => {
     const feed = store.feed;
     /* A QUOTE-BACKED SORT WIDENS THE FETCH TO THE WHOLE MATCHING SET, because
@@ -586,7 +616,6 @@
      ================================================================== */
   const NO_SRC = {
     spot: 'A spot price is the underlying’s level at this bar. This store files a contract’s own bars and does not join them to the underlying’s series, so nothing here has read one.',
-    premium: 'Premium is a future’s price minus its underlying’s. It needs the underlying’s bar for the same timestamp, which is a join this store does not make.',
     oichg: 'Open-interest change needs the previous bar’s open interest. `/bars/window.json` carries a change field for price and none for OI, so this was never measured.',
     value: 'Turnover in crore is price times quantity summed over the session. A bar file carries volume and close but not per-trade value, and multiplying the two would be an estimate presented as a measurement.'
   };
@@ -603,7 +632,11 @@
    * @property {string} h        the header, exactly as the source terminal writes it
    * @property {string|null} src the quote field, `'name'`, or `null` for no source
    * @property {'left'|'right'} align
-   * @property {string} [kind]   how to format: `price`, `int`, `signed`, `pct`
+   * @property {string} [kind]   how to format: `price` or `int`. `chgAbs` and
+   *           `chg` carry their own formatting in `cellOf` and return before
+   *           `kind` is read, so they declare none — two values that named a
+   *           format nobody consulted were removed rather than left to imply
+   *           a switch that does not exist.
    * @property {string} [why]    why there is no source, shown on hover
    */
 
@@ -612,8 +645,8 @@
     stocks: [
       { h: 'Name', src: 'name', align: 'left' },
       { h: 'LTP', src: 'close', align: 'right', kind: 'price' },
-      { h: 'Change', src: 'chgAbs', align: 'right', kind: 'signed' },
-      { h: 'Change %', src: 'chg', align: 'right', kind: 'pct' },
+      { h: 'Change', src: 'chgAbs', align: 'right' },
+      { h: 'Change %', src: 'chg', align: 'right' },
       { h: 'Value (Cr.)', src: null, why: NO_SRC.value, align: 'right' },
       { h: 'Volume', src: 'volume', align: 'right', kind: 'int' }
     ],
@@ -621,8 +654,8 @@
       { h: 'Name', src: 'name', align: 'left' },
       { h: 'Spot Price', src: null, why: NO_SRC.spot, align: 'right' },
       { h: 'LTP', src: 'close', align: 'right', kind: 'price' },
-      { h: 'Change', src: 'chgAbs', align: 'right', kind: 'signed' },
-      { h: 'Change %', src: 'chg', align: 'right', kind: 'pct' },
+      { h: 'Change', src: 'chgAbs', align: 'right' },
+      { h: 'Change %', src: 'chg', align: 'right' },
       { h: 'Open Interest', src: 'oi', align: 'right', kind: 'int' },
       { h: 'OI Change', src: null, why: NO_SRC.oichg, align: 'right' },
       { h: 'OI Change %', src: null, why: NO_SRC.oichg, align: 'right' },
@@ -634,8 +667,8 @@
     futures: [
       { h: 'Name', src: 'name', align: 'left' },
       { h: 'LTP', src: 'close', align: 'right', kind: 'price' },
-      { h: 'Change', src: 'chgAbs', align: 'right', kind: 'signed' },
-      { h: 'Change %', src: 'chg', align: 'right', kind: 'pct' },
+      { h: 'Change', src: 'chgAbs', align: 'right' },
+      { h: 'Change %', src: 'chg', align: 'right' },
       { h: 'Open Interest', src: 'oi', align: 'right', kind: 'int' },
       { h: 'OI Change', src: null, why: NO_SRC.oichg, align: 'right' },
       { h: 'OI Change %', src: null, why: NO_SRC.oichg, align: 'right' },
@@ -663,23 +696,25 @@
    * @param {string} tab @param {string|null} chip @returns {Col[]}
    */
   function columnsFor(tab, chip) {
-    const base = COLUMNS[tab] ?? COLUMNS.stocks;
-    if (tab !== 'futures') return base;
-    /** @type {Col[]} */
-    let extra = [];
-    if (chip === 'Premium') {
-      extra = [
-        { h: 'Premium', src: null, why: NO_SRC.premium, align: 'right' },
-        { h: 'Spot Price', src: null, why: NO_SRC.spot, align: 'right' }
-      ];
-    } else if (chip === 'Discount') {
-      extra = [
-        { h: 'Discount', src: null, why: NO_SRC.premium, align: 'right' },
-        { h: 'Spot Price', src: null, why: NO_SRC.spot, align: 'right' }
-      ];
-    }
-    // AFTER `Name`, WHICH IS ALWAYS FIRST AND ALWAYS FROZEN.
-    return [base[0], ...extra, ...base.slice(1)];
+    /* THE PER-CHIP BRANCHES ARE GONE, BECAUSE THEY BECAME UNREACHABLE.
+       -----------------------------------------------------------------------
+       This function existed for one measured fact: on Futures the source
+       terminal shows `Premium` and `Spot Price` under the `Premium` chip,
+       `Discount` and `Spot Price` under `Discount`, and neither under the other
+       five. That is still true of the source terminal.
+
+       It is no longer reachable here. Both chips need the underlying's bar
+       joined to the contract's, a join this store does not make, so both carry
+       a refusal instead of a rule and are rendered DISABLED — `chip` can never
+       arrive as `Premium` or `Discount`. The branches were two column sets that
+       could not be selected and a comment describing behaviour the page no
+       longer had.
+
+       The shape stays: a function of (tab, chip) rather than a lookup on tab,
+       because the fact it encoded is real and returns the day the join does.
+       `CHIP_WHY.Premium` and `CHIP_WHY.Discount` carry what is missing. */
+    void chip;
+    return COLUMNS[tab] ?? COLUMNS.stocks;
   }
 
   /* THE CHIP ROW IS PER TAB, and the chip sets genuinely differ between them
@@ -852,7 +887,27 @@
       if (v === null) {
         return { text: '—', why: quote.chgWhy ?? 'No change was recorded for this bar.', dir: 0 };
       }
-      return { text: rupee(Math.round(v)), dir: Math.sign(v), why: null };
+      /* THE FIGURE IS DERIVED AND SAYS SO ON HOVER.
+         `chg` is INTEGER basis points and `close` is a paisa integer; the
+         previous close is reconstructed from their ratio, so the reconstruction
+         is quantised to about `close / 10000` paisa. On a ₹52,265 contract that
+         is roughly five paise of slack, and this cell prints to the paisa — the
+         last digit is arithmetic, not measurement.
+         It is not rounded away, because a reader comparing this against the
+         percentage beside it should see a figure consistent with it. It is
+         LABELLED instead: the number stands, and hovering says what it is. */
+      return {
+        text: rupee(Math.round(v)),
+        dir: Math.sign(v),
+        why:
+          'Derived, not measured. The wire carries the close and the change as ' +
+          'integer basis points, not the previous close, so this move is ' +
+          'reconstructed from the two. The ratio is whole basis points, which ' +
+          'leaves about ' +
+          rupee(Math.max(1, Math.round((quote.close ?? 0) / 10000))) +
+          ' of slack on this price — the last digit is arithmetic rather than a ' +
+          'reading. The Change % beside it is the figure the store actually holds.'
+      };
     }
     if (col.src === 'chg') {
       if (quote.chg === null) {
@@ -889,7 +944,16 @@
     if (!p.underlying) return key;
     if (p.kind === 'future') return `${p.underlying} ${p.expiry} FUT`;
     if (p.kind === 'option') {
-      return `${p.underlying} ${p.expiry} ${Math.round((p.strike ?? 0) / 100)} ${p.side}`;
+      /* `strikeExact`, NOT `Math.round(strike / 100)`.
+         The strike is a PAISA INTEGER and the rounded form printed a strike
+         that was never listed: a 2,462.50 strike rendered as `2463`, and any
+         two strikes inside the same rupee collapsed onto one label — two rows
+         with the same name and different prices, which reads as a duplicate
+         rather than as two contracts. `$lib/instrument.js` already owns the
+         exact rendering and keeps the paise only when they are non-zero, so
+         whole strikes stay short. `CLAUDE.md` §7: prices are paisa integers,
+         never a float. */
+      return `${p.underlying} ${p.expiry} ${strikeExact(p.strike)} ${p.side}`;
     }
     return p.underlying;
   }
@@ -939,8 +1003,18 @@
   <!-- THE INDEX STRIP. Whatever indices this store holds, and no more. -->
   <div class="tstrip">
     {#if indices.length === 0}
+      <!-- THE MESSAGE MUST NOT CLAIM MORE THAN WAS ASKED. It substituted "any
+           timeframe" and "any month" when either was unset, turning "I have not
+           asked yet" into "this feed holds no index series at ANY timeframe in
+           ANY month" — a sweeping absence across the whole store, asserted from
+           a query that was never run. The window is either named or the
+           sentence says the window is not chosen yet. -->
       <span class="tstrip-empty">
-        No index series is held for this feed at {timeframe || 'any timeframe'} in {month || 'any month'}.
+        {#if !timeframe || !month}
+          No window is chosen yet, so no index has been read.
+        {:else}
+          No index series is held for this feed at {timeframe} in {monthLabel(month)}.
+        {/if}
       </span>
     {:else}
       {#each indices as key (key)}
@@ -953,8 +1027,17 @@
               <span class="c-c" class:up={q.chg > 0} class:down={q.chg < 0}>
                 {pctText(q.chg)}
               </span>
+              <!-- THREE STATES, BECAUSE UNCHANGED IS ONE OF THEM. This read
+                   `chg >= 0 ? '↗' : '↘'`, so an index that closed exactly
+                   where it opened drew a RISING arrow — while the colour
+                   classes on the same span, testing `> 0` and `< 0`, correctly
+                   showed neutral. The glyph and the colour disagreed about the
+                   same number, and the glyph was the one that was wrong.
+                   `chg` is INTEGER basis points, so `0` also covers a real move
+                   smaller than half a basis point; `→` claims no direction
+                   rather than inventing one. -->
               <span class="c-a" class:up={q.chg > 0} class:down={q.chg < 0}>
-                {q.chg >= 0 ? '↗' : '↘'}
+                {q.chg > 0 ? '↗' : q.chg < 0 ? '↘' : '→'}
               </span>
             {/if}
           {:else if q?.why}
@@ -998,13 +1081,13 @@
             <button
               class="chip"
               class:on={i === chipIndex}
-              disabled={!CHIP_RULES[c]}
+              disabled={!CHIP_RULES[c] || !canSortByQuote}
               title={CHIP_RULES[c]
                 ? canSortByQuote
                   ? `Rank by ${c.toLowerCase()}.`
                   : `Ranking needs a price for every matching row, and this view holds ${totalRows.toLocaleString('en-IN')} against a budget of ${SORT_BUDGET.toLocaleString('en-IN')}.`
                 : CHIP_WHY[c]}
-              onclick={() => CHIP_RULES[c] && (chipIndex = i)}>{c}</button
+              onclick={() => CHIP_RULES[c] && canSortByQuote && (chipIndex = i)}>{c}</button
             >
           {/each}
         </div>
@@ -1125,7 +1208,22 @@
           <table>
             <thead>
               <tr>
-                <th class="cb"><input type="checkbox" disabled /></th>
+                <!-- THE SELECTION COLUMN IS GONE, AND IT WAS THE ONE CONTROL
+                     ON THIS PAGE THAT DID NOTHING.
+                     Nothing in the file ever read a checkbox's state, so it was
+                     inert — the shape section 4 bans and the shape this page's
+                     own comments refuse everywhere else. It was also the only
+                     control here with NO accessible name: the input had no
+                     label, no aria-label and no title, and the header that
+                     would have supplied one held a control and no text, so a
+                     screen reader read the grid as seventeen consecutive
+                     "checkbox, not checked" with nothing to tell them apart.
+                     WCAG 4.1.2, Level A.
+                     Two fixes were available — name it, or make it do
+                     something — and both are wrong while nothing selects
+                     anything. The source terminal has the column because its
+                     checkboxes feed an order ticket; this page has no ticket to
+                     feed. It returns the day something reads it. -->
                 {#each columns as c (c.h)}
                   <!-- A SORTABLE HEADER IS A CONTROL AND IS REACHABLE AS ONE.
                        `tabindex` and the key handler only appear when the
@@ -1156,8 +1254,10 @@
                         toggleSort(c.src);
                       }
                     }}
-                    >{c.h}{#if c.src === null}<span class="nosrc">*</span>{/if}{#if sortKey !== '' && sortKey === c.src}<span
-                        class="sortmark">{sortDir === 'asc' ? '▲' : '▼'}</span
+                    >{c.h}{#if c.src === null}<span class="nosrc" aria-hidden="true">*</span
+                      >{/if}{#if sortKey !== '' && sortKey === c.src}<span
+                        class="sortmark"
+                        aria-hidden="true">{sortDir === 'asc' ? '▲' : '▼'}</span
                       >{/if}</th
                   >
                 {/each}
@@ -1167,10 +1267,17 @@
               {#each rows as key (key)}
                 {@const q = quotes.get(key)}
                 <tr>
-                  <td class="cb"><input type="checkbox" /></td>
                   {#each columns as c (c.h)}
                     {#if c.src === 'name'}
-                      <td class="nm">{labelOf(key)}</td>
+                      <!-- A ROW HEADER, NOT A PLAIN CELL. The table had column
+                           headers and no row headers, so no number was
+                           programmatically tied to the instrument it belongs
+                           to: a screen reader moving across a row announced
+                           "793.05, -1.27, -0.16 %" with the instrument named
+                           only once, at the start, and never repeated. With
+                           `scope="row"` every cell in the row is associated
+                           with its instrument. -->
+                      <th scope="row" class="nm">{labelOf(key)}</th>
                     {:else}
                       {@const cell = cellOf(q, c)}
                       <td
@@ -1197,21 +1304,37 @@
                  already removed. `totalRows` remains what the BUDGET is
                  measured against, which is a different question. -->
             <button class="more" onclick={() => (shown += PAGE)}>
+              <!-- THE SENTENCE HAS TO FOLLOW THE FETCH IT DESCRIBES. It read
+                   "quotes are fetched only for rows on screen" unconditionally,
+                   and that stopped being true the moment a sort or a ranking
+                   chip widened the fetch to the whole matching set — which is
+                   exactly when this pager is most likely to be visible. A
+                   caption that describes the cheap path while the expensive one
+                   is running is a claim about cost that the reader cannot
+                   check. -->
               Show {Math.min(PAGE, sorted.length - rows.length)} more · {rows.length} of {sorted.length}
-              — quotes are fetched only for rows on screen
+              {#if canSortByQuote && (sortKey !== '' || chipRule() !== null)}
+                — every matching row is quoted, because the order depends on it
+              {:else}
+                — quotes are fetched only for rows on screen
+              {/if}
             </button>
           {/if}
         {/if}
       </div>
 
+      <!-- `bnote` AND `bkey` ARE GONE. Both were emitted with no rule in this
+           file and none in `theme.css`, so they styled nothing and named
+           nothing — a hook is only a hook if something holds it. The two spans
+           inherit `.bbar` exactly as they did with the classes on them. -->
       <footer class="bbar">
-        <span class="bnote">
+        <span>
           Every figure is read from this store through <code>/store.json</code> and
           <code>/bars/window.json</code>. A dash is an absence with a reason on hover,
           never a zero.
         </span>
         {#if columns.some((c) => c.src === null)}
-          <span class="bkey"><span class="nosrc">*</span> no source in a bar store</span>
+          <span><span class="nosrc" aria-hidden="true">*</span> no source in a bar store</span>
         {/if}
       </footer>
     </main>
@@ -1239,7 +1362,6 @@
     --bar: #0f0f0f;
     --panel: #121212;
     --head: #181818;
-    --field: #1b1b1b;
     --line: #242424;
     --pill: #1b2c27;
     --ink: #dadada;
@@ -1647,12 +1769,18 @@
     border-bottom: 0;
   }
   thead th.left,
-  td.nm {
+  .nm {
     text-align: left;
   }
-  tbody td {
+  /* `tbody th` JOINS `tbody td` HERE, because the instrument cell became a row
+     header for accessibility and a `th` in a body row otherwise takes the user
+     agent's own bold, centred defaults — and matches none of the rules below,
+     which are all written for `td`. */
+  tbody td,
+  tbody th {
     height: var(--h-row);
     padding: 0 10px;
+    font-weight: 400;
     border-top: 1px solid var(--line);
     /* THE SAME RESET, FOR THE SAME REASON. `theme.css`'s `tbody td` carries a
        BOTTOM rule; this grid separates rows with a TOP one, and leaving the
@@ -1665,18 +1793,29 @@
   /* The hover is declared here rather than inherited for the third time: the
      console's own `tbody tr:hover td` resolves to ITS token, which is a
      different colour on a page that does not use its ramp. */
-  tbody tr:hover td {
+  tbody tr:hover td,
+  tbody tr:hover th {
     background: var(--head);
   }
-  td.nm {
+  .nm {
     color: var(--ink);
     border-right: 1px solid var(--line);
   }
-  th.cb,
-  td.cb {
-    width: 44px;
-    padding-left: 13px;
-    text-align: left;
+  /* THE NAME CELL CARRIES THE LEFT INSET THE SELECTION COLUMN USED TO. With
+     that column gone the first thing in a row is the instrument, and it would
+     otherwise sit flush against the panel edge. */
+  th.left,
+  .nm {
+    padding-left: 14px;
+  }
+  /* `.right` IS EMITTED ON EVERY NUMERIC COLUMN AND HAD NO RULE. The default
+     `text-align: right` on `thead th` and `tbody td` made it look correct, so
+     the binding was right by accident rather than by declaration — and the
+     first time that default changed, twenty-four columns would have moved with
+     nothing naming them. Stated, so the binding means something. */
+  th.right,
+  td.right {
+    text-align: right;
   }
   /* THE NO-SOURCE MARK COSTS AS LITTLE WIDTH AS IT CAN.
      It is this page's addition, not the source terminal's, and it sat inline at
@@ -1755,9 +1894,6 @@
     margin: 0;
     line-height: 1.5;
   }
-  .tnote.bad {
-    color: var(--down);
-  }
   .tnote.wide {
     max-width: 62ch;
   }
@@ -1774,17 +1910,19 @@
   }
 
   /* ---- narrow windows ---------------------------------------------------
-     THE TWO STEPS THAT SHRANK AND THEN HID THE RAIL ARE GONE WITH IT.
+     THERE IS NO BREAKPOINT, AND THE ONE THAT WAS HERE DID NOTHING.
 
-     What remains is the one thing a narrow window still needs: the grid's own
-     left inset, which the rail used to provide. The table itself does not need
-     a breakpoint — it is wider than the screen by design at every width, and
-     `.panel` scrolls it inside its own box rather than scrolling the page. */
-  @media (max-width: 900px) {
-    .tgrid {
-      padding-left: 12px;
-    }
-  }
+     It set `.tgrid { padding-left: 12px }` below 900px — the exact value the
+     base rule already applies since the grid gained a left inset of its own,
+     so the whole block was inert while its comment told the reader it was
+     doing something. An inert rule that claims to be load-bearing is worse
+     than no rule.
+
+     The layout genuinely does not need one now the rail is gone: the grid is a
+     single `minmax(0, 1fr)` column, the chip row scrolls inside itself, the
+     pickers refuse to shrink, and `.panel` scrolls the table inside its own
+     box rather than scrolling the page. Verified at 1714, 1280, 1024, 900 and
+     760: controls inside the grid at every one. */
 
   /* MOTION IS ABSENT ON PURPOSE. Nothing on this page moves on its own, so
      there is no `prefers-reduced-motion` block to write: a terminal that

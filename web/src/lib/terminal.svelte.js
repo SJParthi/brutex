@@ -598,4 +598,14 @@ export async function daysIn(feed, key, timeframe, month) {
  */
 export function forgetQuotes() {
   inflight.clear();
+  /* AND THE MONTH CACHE, WHICH THIS FUNCTION USED TO LEAVE STANDING.
+     `inflight` holds single-bar reads; `months` holds whole-month reads and is
+     what the day path, the Date picker and the Time picker are all served
+     from. Clearing only the first meant that after a pull the terminal went on
+     serving PRE-PULL bars for every day-scoped reading, and did so
+     permanently: `months` has no generation in its key and no expiry, so once
+     a month was read it was frozen for the life of the tab.
+     That is precisely the staleness the paragraph above says this function
+     exists to prevent, and it was true of exactly half the caches. */
+  months.clear();
 }
