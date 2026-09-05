@@ -228,8 +228,151 @@
   const inChosenSegment = (key) => segment === 'All' || parseKey(key).segment === segment;
 
   const matching = $derived((tab?.keys ?? []).filter(inChosenSegment).filter(holdsChosenCell));
-  const rows = $derived(matching.slice(0, shown));
   const totalRows = $derived(matching.length);
+
+  /* ==================================================================
+     SORTING, AND THE ONE THING THAT MAKES IT DIFFERENT FROM DHAN'S
+     ------------------------------------------------------------------
+     The source terminal sorts a table it already holds — it is fed by a
+     stream, so every row's price is in hand before anybody clicks a header.
+     This page is not. A price is ONE REQUEST PER INSTRUMENT and the grid
+     deliberately asks only for the rows on screen.
+
+     So the two kinds of column are genuinely different:
+
+       `Name` needs no quote. It sorts instantly, over the whole matching
+       set, and is always exact.
+
+       `LTP`, `Change`, `Change %`, `Open Interest` and `Volume` need every
+       matching row QUOTED before they can be ordered. Sorting only what
+       happens to be loaded would put "the highest volume among the first
+       seventeen" under a heading that says Volume — a wrong answer wearing a
+       right one's shape, which is the defect this page exists to avoid.
+
+     Therefore a quote-backed sort widens the fetch to the whole matching set,
+     and the set is bounded. 250 covers the engine surface — 213 F&O equities
+     plus the indices — and refuses anything pathological rather than firing
+     an unbounded number of requests at a click. The quotes are cached per
+     (feed, key, timeframe, month), so the cost is paid once per window and
+     every later sort of the same window is free.
+
+     THE SORT ITSELF IS O(n log n) OVER A BOUNDED n, and that is not the O(1)
+     rule's subject: `CLAUDE.md` §3 rule 4 governs the sweep's per-bar
+     operations — bar lookup, condition lookup, mask evaluation, duplicate
+     rejection, result append. This is a browser reordering at most 250
+     strings after a human clicked something.
+     ================================================================== */
+  const SORT_BUDGET = 250;
+
+  /** The column being sorted on: `'name'`, a Quote field, or `''` for none. */
+  let sortKey = $state('');
+  /** @type {'asc'|'desc'} */
+  let sortDir = $state('desc');
+
+  /* A SORT DOES NOT SURVIVE A CHANGE OF TAB. The columns differ between tabs,
+     so a key sorted on Futures may not exist on Stocks, and a sort indicator
+     pointing at a column that is no longer drawn is a control with no subject. */
+  $effect(() => {
+    void activeTab;
+    sortKey = '';
+    sortDir = 'desc';
+  });
+
+  /** Whether a quote-backed sort can be afforded for the current matching set. */
+  const canSortByQuote = $derived(totalRows > 0 && totalRows <= SORT_BUDGET);
+
+  /** Whether this column can be sorted at all. @param {Col} c */
+  function sortableCol(c) {
+    if (c.src === null) return false; // no source, nothing to order by
+    if (c.src === 'name') return true; // free, always exact
+    return canSortByQuote;
+  }
+
+  /**
+   * Click a header: sort by it, or flip the direction if it is already the one.
+   *
+   * FIRST CLICK ON A NUMBER SORTS DESCENDING, on a name ASCENDING. That is what
+   * the source terminal does and it is what the question means: "top by volume"
+   * wants the largest first, "sort by name" wants A before Z.
+   *
+   * @param {string|null} key
+   */
+  function toggleSort(key) {
+    if (key === null) return;
+    if (sortKey === key) {
+      sortDir = sortDir === 'desc' ? 'asc' : 'desc';
+      return;
+    }
+    sortKey = key;
+    sortDir = key === 'name' ? 'asc' : 'desc';
+  }
+
+  /** The value a row sorts by, or null when it has none. @param {string} key @param {string} on */
+  function sortValue(key, on) {
+    if (on === 'name') return labelOf(key);
+    const q = quotes.get(key);
+    if (!q) return null;
+    if (on === 'chgAbs') return absMove(q);
+    /* READ THROUGH `any` FOR THE SAME REASON `cellOf` DOES: the field name
+       comes from the column table, so the lookup is a fact about that table
+       rather than about the wire. */
+    const v = /** @type {Record<string, number|null>} */ (/** @type {unknown} */ (q))[on];
+    return typeof v === 'number' ? v : null;
+  }
+
+  /* A ROW WITH NO VALUE SORTS LAST IN BOTH DIRECTIONS, and never as zero.
+     Treating an absent price as 0 would float every unquoted instrument to the
+     top of an ascending sort and bury it in a descending one — the same
+     zero-for-absent lie the dashes in the grid exist to refuse. */
+  /* A SORT THAT CANNOT BE AFFORDED IS NOT APPLIED, AND THAT IS A CORRECTNESS
+     RULE BEFORE IT IS A COST ONE.
+     ------------------------------------------------------------------------
+     Ordering by a quote field means READING `quotes`. `rows` comes from this
+     sort, and the fetch effect depends on `rows` and assigns `quotes` a fresh
+     Map. So while a quote sort is applied without the widened fetch, the graph
+     closes on itself: sorted → rows → effect → quotes → sorted, forever.
+
+     MEASURED, not theorised: with a quote column sorted and the matching set
+     pushed to 300 — past the 250 budget — the page stopped responding
+     entirely, and every later call into it timed out.
+
+     It never fired while the sort was affordable, because the effect reads
+     `matching` in that case and `matching` does not depend on the sort. Only
+     the over-budget path completes the cycle, which is why it survived every
+     earlier test: that path had never been walked.
+
+     So the gate is here rather than only on the header: an unaffordable sort
+     leaves the order untouched and reads no quote at all. */
+  const sortActive = $derived(sortKey === 'name' || (sortKey !== '' && canSortByQuote));
+
+  /* AND THE INDICATOR DOES NOT OUTLIVE ITS SORT. If the matching set grows past
+     the budget — a wider segment, a fuller month — a ▼ left on a column the
+     page is no longer ordering by would claim an order that is not there. */
+  $effect(() => {
+    if (sortKey !== '' && sortKey !== 'name' && !canSortByQuote) {
+      sortKey = '';
+      sortDir = 'desc';
+    }
+  });
+
+  const sorted = $derived.by(() => {
+    if (!sortActive) return matching;
+    const on = sortKey;
+    const sign = sortDir === 'asc' ? 1 : -1;
+    return [...matching].sort((a, b) => {
+      const va = sortValue(a, on);
+      const vb = sortValue(b, on);
+      if (va === null && vb === null) return 0;
+      if (va === null) return 1;
+      if (vb === null) return -1;
+      if (typeof va === 'string' || typeof vb === 'string') {
+        return sign * String(va).localeCompare(String(vb));
+      }
+      return sign * (va - vb);
+    });
+  });
+
+  const rows = $derived(sorted.slice(0, shown));
 
   /* THE POOL ASKS FOR THE GRID'S PAGE **AND THE INDEX STRIP**.
      The strip is the second consumer of quotes, and dropping the rail's head
@@ -352,7 +495,15 @@
 
   $effect(() => {
     const feed = store.feed;
-    const want = [...new Set([...rows, ...indices])];
+    /* A QUOTE-BACKED SORT WIDENS THE FETCH TO THE WHOLE MATCHING SET, because
+       ordering rows by a value means having the value for every row. Without
+       this the sort would rank the page against itself and label the result
+       with the column's name. `Name` does not widen it — that ordering needs
+       no quote at all — and neither does an unaffordable set, which is why
+       `sortableCol` refuses those headers rather than letting the click
+       through to a fetch nobody bounded. */
+    const quoteSort = sortKey !== '' && sortKey !== 'name' && canSortByQuote;
+    const want = [...new Set([...(quoteSort ? matching : rows), ...indices])];
     const tf = timeframe;
     const mo = month;
     const on = day;
@@ -830,8 +981,38 @@
               <tr>
                 <th class="cb"><input type="checkbox" disabled /></th>
                 {#each columns as c (c.h)}
-                  <th class={c.align} title={c.src === null ? c.why : undefined}
-                    >{c.h}{#if c.src === null}<span class="nosrc">*</span>{/if}</th
+                  <!-- A SORTABLE HEADER IS A CONTROL AND IS REACHABLE AS ONE.
+                       `tabindex` and the key handler only appear when the
+                       column can actually be sorted, so a keyboard lands on
+                       nothing that does not respond. `aria-sort` carries the
+                       direction to a screen reader, which the ▲▼ glyph alone
+                       does not. -->
+                  <th
+                    class={c.align}
+                    class:sortable={sortableCol(c)}
+                    class:sorted={sortKey !== '' && sortKey === c.src}
+                    aria-sort={sortKey !== '' && sortKey === c.src
+                      ? sortDir === 'asc'
+                        ? 'ascending'
+                        : 'descending'
+                      : undefined}
+                    tabindex={sortableCol(c) ? 0 : undefined}
+                    title={c.src === null
+                      ? c.why
+                      : sortableCol(c)
+                        ? `Sort by ${c.h}`
+                        : `Sorting by ${c.h} needs a price for every matching row, and this view holds ${totalRows.toLocaleString('en-IN')} of them against a budget of ${SORT_BUDGET.toLocaleString('en-IN')}. Narrow the segment, or sort by Name, which needs no price.`}
+                    onclick={() => sortableCol(c) && toggleSort(c.src)}
+                    onkeydown={(e) => {
+                      if (!sortableCol(c)) return;
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        toggleSort(c.src);
+                      }
+                    }}
+                    >{c.h}{#if c.src === null}<span class="nosrc">*</span>{/if}{#if sortKey !== '' && sortKey === c.src}<span
+                        class="sortmark">{sortDir === 'asc' ? '▲' : '▼'}</span
+                      >{/if}</th
                   >
                 {/each}
               </tr>
@@ -1342,6 +1523,36 @@
      Change %*` — widening exactly those columns and pushing every column right
      of them out of step with the captures. Superscripted at 9px it still reads
      as a footnote mark and stops moving the grid. */
+  /* A HEADER THAT SORTS LOOKS LIKE ONE ONLY WHEN IT CAN.
+     The cursor and the hover are the affordance; a column with no source, or
+     one whose set is too large to quote, keeps the default cursor and stays
+     dim, so the difference is visible before the click rather than after it. */
+  th.sortable {
+    cursor: pointer;
+    user-select: none;
+  }
+  th.sortable:hover {
+    color: var(--ink);
+  }
+  th.sorted {
+    color: var(--ink);
+  }
+  th.sortable:focus-visible {
+    outline: 2px solid var(--acc);
+    outline-offset: -2px;
+  }
+  /* THE MARK DOES NOT MOVE THE COLUMN. Absolutely the same problem the
+     no-source asterisk had: an inline glyph appearing on click would widen its
+     header and shift every column right of it, so the grid would twitch each
+     time the sort changed. Reserved space, not added space. */
+  .sortmark {
+    display: inline-block;
+    width: 0;
+    margin-left: 4px;
+    font-size: 8px;
+    color: var(--acc);
+    vertical-align: middle;
+  }
   .nosrc {
     color: var(--dim);
     margin-left: 2px;

@@ -38,6 +38,7 @@
    * extrapolations as extrapolations.
    */
   import { feeds } from '$lib/feeds.svelte.js';
+  import { cashIdentityFor } from '$lib/cash-identity.js';
   import Picker from '$lib/Picker.svelte';
   import { catalogue } from '$lib/index.svelte.js';
   import { MON, dayLabel, monthLabel, stampLabel } from '$lib/dates.js';
@@ -1888,6 +1889,7 @@
    */
   const notReadyFeeds = $derived(feeds.all.filter((f) => f.ready !== true));
   let feedTuck = $state(false);
+  let zerodhaSymbolMapping = $state(false);
   // Same promotion rule as the universe drawer, for the same reason: forcing it
   // open whenever the selection was inside meant it was open whenever an
   // operator had selected a not-ready feed, which is exactly when the menu most
@@ -2789,6 +2791,7 @@
        here would have sent N identical requests for the scope feed and
        reported them as N different ones. */
     p.set('vendor', vendor ?? feeds.active ?? '');
+    p.set('cash_identity', cashIdentityFor(vendor ?? feeds.active, zerodhaSymbolMapping));
     p.set('from', a);
     p.set('to', b);
     p.set('granularity', dir);
@@ -8306,6 +8309,14 @@
                   {/if}
                 </div>
 
+                {#if feedsChosen.includes('zerodha') || feeds.active === 'zerodha'}
+                  <div class="field">
+                    <span class="lab">Zerodha cash identity</span>
+                    <label><input type="checkbox" bind:checked={zerodhaSymbolMapping} />
+                      Use exact native exchange, symbol and instrument type</label>
+                    <span class="note quiet wrap full">Opt-in only. NOT ISIN-verified. Ambiguous matches are refused. Current-master mapping does not prove historical renames or membership.</span>
+                  </div>
+                {/if}
                 {#if isFolderFeed}
                   <div class="field" class:bad={showProblems && problemFor.has('folder')}>
                     <span class="lab">Folder</span>
