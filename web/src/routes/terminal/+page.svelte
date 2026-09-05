@@ -1945,7 +1945,23 @@
     color: var(--dim);
     font-weight: 400;
     height: var(--h-row);
-    padding: 0 10px;
+    /* ZERO, BECAUSE THE BUTTON INSIDE CARRIES THE INSET. This read `0 10px`
+       while a SECOND `thead th` block further down — identical selector, so it
+       simply won — set `padding: 0`. Two rules for one property, and the loser
+       was the one carrying the explanation. Consolidated here. */
+    padding: 0;
+    /* THE CELL'S OWN STRUT IS COLLAPSED, because it no longer carries text —
+       all the header's content moved into the button, which sets its own
+       line-height.
+       IT IS NOT WHY THE HEADER MEASURES 42.5px, and an earlier version of this
+       comment said it was. Measured: with the strut collapsed the row still
+       reports 42.5, and it still does with the cell at `height: auto` or the
+       button shrunk to 41px — so the content is not driving it at all. The
+       half pixel is half of the 1px border this row COLLAPSES with the first
+       body row: removing that row's `border-top` drops the header to exactly
+       42. The painted rhythm is 42px throughout; `getBoundingClientRect`
+       attributes a shared edge to both sides. Nothing to correct. */
+    line-height: 0;
     text-align: right;
     white-space: nowrap;
     z-index: 1;
@@ -1965,7 +1981,10 @@
     letter-spacing: normal;
     border-bottom: 0;
   }
-  thead th.left,
+  /* `.nm` ALONE. `thead th.left` was listed here and is now inert: a header's
+     text lives inside a flex button, which positions it with
+     `justify-content`, so `text-align` on the cell reaches nothing. The body
+     cell holds its text directly and still needs this. */
   .nm {
     text-align: left;
   }
@@ -2001,11 +2020,18 @@
   /* THE NAME CELL CARRIES THE LEFT INSET THE SELECTION COLUMN USED TO. With
      that column gone the first thing in a row is the instrument, and it would
      otherwise sit flush against the panel edge. */
-  /* The Name column's left inset. A SORTABLE header carries its padding on the
-     button instead — `th.sortable` zeroes the cell's — so the inset is applied
-     there too, or the one column that is both left-aligned and sortable would
-     lose it. */
-  th.left,
+  /* THE NAME COLUMN'S LEFT INSET IS APPLIED ONCE, ON WHICHEVER ELEMENT ACTUALLY
+     HOLDS THE TEXT.
+     ------------------------------------------------------------------------
+     This listed `th.left` alongside `.nm`, and that survived the move of header
+     padding onto the button — where it became a DOUBLE inset. `thead th` sets
+     `padding: 0` at specificity (0,0,2) and `th.left` sets `padding-left: 14px`
+     at (0,1,1), so the class wins and the header cell KEEPS its 14px; the
+     button inside then adds its own. MEASURED: the header label sat at x 40
+     while its column's cells sat at 26 — the one column whose alignment is
+     most visible, out by exactly one inset.
+     Body cells hold their text directly and take it from `.nm`. Header cells
+     hold a button and take it from the button. Neither takes it twice. */
   .nm {
     padding-left: 14px;
   }
@@ -2017,7 +2043,10 @@
      the binding was right by accident rather than by declaration — and the
      first time that default changed, twenty-four columns would have moved with
      nothing naming them. Stated, so the binding means something. */
-  th.right,
+  /* `td.right` ONLY. `th.right` was listed and is inert for the same reason
+     `thead th.left` is: the header's text is inside a flex button. The
+     button's own `justify-content: flex-end` is what right-aligns a header,
+     and `.sortbtn` declares it. */
   td.right {
     text-align: right;
   }
@@ -2031,12 +2060,6 @@
      The cursor and the hover are the affordance; a column with no source, or
      one whose set is too large to quote, keeps the default cursor and stays
      dim, so the difference is visible before the click rather than after it. */
-  /* EVERY header cell now holds a button, sortable or not, so the padding moves
-     to the button on all of them — not only the sortable ones — or the columns
-     would sit at two different insets. */
-  thead th {
-    padding: 0;
-  }
   th.sortable {
     cursor: pointer;
     user-select: none;
@@ -2048,20 +2071,35 @@
      the measured column geometry is unchanged: the padding that used to sit on
      the `th` moves here, and `inherit` keeps the alignment the column asked
      for rather than a button's centred default. */
+  /* `display: block` AND `text-align`, NOT FLEX.
+     Flex was the obvious way to fill the cell, and it blockified the header's
+     children: `.nosrc { vertical-align: super }` became inert, so the
+     no-source asterisk stopped being a superscript in the headers while
+     staying one in the footer legend — the same mark, two shapes, in the two
+     places a reader compares. `vertical-align` only has meaning between inline
+     boxes, so the button stays an inline formatting context and gets its
+     vertical centring from `line-height` instead of `align-items`. */
   .sortbtn {
     all: unset;
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    width: 100%;
-    height: 100%;
-    padding: 0 10px;
+    display: block;
     box-sizing: border-box;
+    width: 100%;
+    /* THE ROW HEIGHT, PINNED — not `100%`. A `th`'s height is a MINIMUM, so a
+       `100%` child cannot constrain it, and the superscripted no-source mark
+       raises its inline box far enough to extend the line box: the header row
+       measured 43px against the 42px every other row holds. `overflow: hidden`
+       keeps the raised glyph from pushing the box back out; at 9px inside 42
+       there is nothing to clip. */
+    height: var(--h-row);
+    line-height: var(--h-row);
+    overflow: hidden;
+    padding: 0 10px;
+    text-align: right;
     cursor: pointer;
     white-space: nowrap;
   }
   th.left .sortbtn {
-    justify-content: flex-start;
+    text-align: left;
   }
   .sortbtn:focus-visible {
     outline: 2px solid var(--acc);
