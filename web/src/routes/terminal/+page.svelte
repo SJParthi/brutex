@@ -1627,6 +1627,14 @@
     --up: #5da81e;
     --down: #e15858;
     --acc: #06b878;
+    /* The accent AS AN EDGE rather than as ink — measured #0C4A30 on the lit
+       chip's border. A separate token because it is a separate decision: a
+       border painted in the text's own green reads as a second label. */
+    --edge: #0c4a30;
+    /* The strip's vertical rule, measured at its brightest point. It is drawn
+       as a gradient, so this is the value at the middle of the line and not a
+       flat fill — see `.tcell + .tcell::before`. */
+    --rule: #5d5d5d;
 
     /* Geometry, in the CSS pixels it was measured in. */
     --h-bar: 57px;
@@ -1756,8 +1764,10 @@
     gap: 22px;
     margin-left: 26px;
   }
+  /* #8E8E8E measured on `Home`, against #0F0F0F. Same correction as `.ttab`
+     directly below, and for the same reason. */
   .tnav a {
-    color: var(--ink);
+    color: var(--dim);
     text-decoration: none;
     font-size: 15px;
     padding: 18px 0;
@@ -1826,7 +1836,9 @@
   .tstrip {
     display: flex;
     align-items: center;
-    gap: 56px;
+    /* 66px, not 56px: measured 33 CSS px of clearance on each side of the rule
+       that now sits in this gap. At 56px the rule would crowd both neighbours. */
+    gap: 66px;
     padding: 0 33px;
     background: var(--panel);
     border-bottom: 1px solid var(--line);
@@ -1838,6 +1850,37 @@
     align-items: baseline;
     gap: 10px;
     font-size: 13px;
+    position: relative;
+  }
+  /* THE RULE BETWEEN STRIP ITEMS, WHICH THIS STRIP DID NOT HAVE.
+     ------------------------------------------------------------------------
+     The source separates its six index cells with five vertical rules and this
+     page separated them with whitespace alone, so `Nifty Next 50 72,880.90`
+     ran into `Nifty Bank 57,369.65` as one undifferentiated line of numbers —
+     the reading problem the rules exist to solve.
+
+     IT IS A GRADIENT, NOT A LINE, and that is measured rather than styled to
+     taste. Scanning the separator column top to bottom: #141414 at its top
+     edge, brightening through #292929 · #3F3F3F · #515151 to #5D5D5D at the
+     middle, then symmetrically back down to #141414. A flat 1px rule in the
+     peak colour would be markedly heavier than the source at both ends.
+
+     Extent, in the CSS pixels of the 2x capture: the run is 47 device px tall
+     inside an 80 device px band — 23.5 against 40 — and each side clears 33
+     CSS px to the neighbouring text, which is what sets the 66px gap above.
+
+     `::before` on the SECOND cell of each pair rather than `::after` on the
+     first, so the strip cannot end with a trailing rule against its own
+     padding. */
+  .tcell + .tcell::before {
+    content: '';
+    position: absolute;
+    left: -33px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 1px;
+    height: 24px;
+    background: linear-gradient(to bottom, transparent, var(--rule), transparent);
   }
   .c-n {
     color: var(--dim);
@@ -1922,10 +1965,15 @@
     padding: 4px;
     align-self: start;
   }
+  /* MEASURED OFF THE CAPTURE: an unselected tab is #8E8E8E, not #DADADA.
+     `--ink` is the brightest ink on the page and it was spent here, on the six
+     tabs the operator is NOT looking at — which flattened the one distinction
+     the strip exists to draw. The source spends `--ink` only on the instrument
+     name in the grid and keeps every secondary label at `--dim`. */
   .ttab {
     background: none;
     border: 0;
-    color: var(--ink);
+    color: var(--dim);
     font: inherit;
     font-size: 14px;
     padding: 8px 18px;
@@ -1953,11 +2001,13 @@
     overflow-x: auto;
     min-width: 0;
   }
+  /* #8E8E8E on #000000 with a #242424 edge, all three measured. The border was
+     already right; the text was `--ink` for the reason `.ttab` states. */
   .chip {
     background: var(--ground);
     border: 1px solid var(--line);
     border-radius: 6px;
-    color: var(--ink);
+    color: var(--dim);
     font: inherit;
     font-size: 13px;
     padding: 7px 14px;
@@ -1987,9 +2037,15 @@
     border-color: #2a2a2a;
     cursor: default;
   }
+  /* THE LIT CHIP'S TEXT AND ITS EDGE ARE NOT THE SAME GREEN.
+     Both were `--acc`, which drew a chip ringed in full #06B878 — brighter
+     than the source and loud enough to compete with the value column it is
+     meant to be ranking. Measured on `Highest OI`: the text is #06B878 and the
+     border is #0C4A30, a green dark enough to read as an edge rather than as a
+     second piece of ink. */
   .chip.on {
     color: var(--acc);
-    border-color: var(--acc);
+    border-color: var(--edge);
   }
   .ctrls {
     margin-left: auto;
@@ -2170,6 +2226,24 @@
   }
   .nm {
     color: var(--ink);
+    border-right: 1px solid var(--line);
+  }
+  /* AND THE HEADER CELL ABOVE IT, WHICH THE DIVIDER USED TO STOP SHORT OF.
+     ------------------------------------------------------------------------
+     `.nm` is on the body's `th[scope=row]` only — the header cell is rendered
+     with `class={c.align}`, so it takes `left` and never `nm`, and the rule
+     above could not reach it. The divider therefore began one row BELOW the
+     header, leaving `Name` and `Spot Price` sharing an unbroken strip of
+     header while every row under them was divided.
+
+     Measured on the source: the divider is continuous at #222222 across the
+     header/body boundary — scanned unbroken for 161 device px spanning both.
+
+     `:first-child` rather than `.left`, because the divider belongs to the
+     first COLUMN and not to an alignment that a later column could also ask
+     for. (0,1,2) clears the `thead th` block's (0,0,2) without depending on
+     source order. */
+  thead th:first-child {
     border-right: 1px solid var(--line);
   }
   /* THE NAME CELL CARRIES THE LEFT INSET THE SELECTION COLUMN USED TO. With
