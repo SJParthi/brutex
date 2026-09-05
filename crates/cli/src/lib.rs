@@ -16137,6 +16137,71 @@ fn timed_validation_stage<T>(
     out
 }
 
+/// One walk-forward fold has finished. See [`note_validation_fold`].
+///
+/// Split from the emitter for the reason [`validation_stage_event`] is: the
+/// SHAPE can be asserted without a sink, a store or a run, which is what
+/// `a_finished_fold_names_its_shape_ordinal_and_counts` does.
+fn validation_fold_event(
+    recording: Option<Recording<'_>>,
+    progress: runner::validate::FoldProgress,
+) -> telemetry::Event<'_> {
+    let rung = recording.map_or("", |held| held.timeframe);
+    let mut event = telemetry::Event::info("cli.audit", "validation fold finished")
+        .with("rung", rung)
+        .with("shape", progress.shape.label())
+        .with("fold", progress.fold)
+        .with("of", progress.of)
+        .with("train_bars", progress.train_bars)
+        .with("test_bars", progress.test_bars)
+        .with("candidates", progress.candidates)
+        .with("decided", progress.decided);
+    if let Some(held) = recording {
+        event = event
+            .with("feed", held.feed)
+            .with("underlying", held.underlying);
+    }
+    event
+}
+
+/// Says which fold the walk-forward just finished, once per fold per shape.
+///
+/// # Why this exists, measured rather than argued
+///
+/// [`validation_stage_event`] brackets the whole walk-forward with one
+/// `entered` and one `finished`, and between them there was nothing. MEASURED
+/// on the operator's own 60-minute `range-rung`: `validation stage entered`,
+/// then 5h33m of silence, and the log could not say whether the walk was on
+/// fold 1 or fold 8 of either shape. A stage that long with no line inside it
+/// is indistinguishable from one that hung -- the defect
+/// [`note_grid_progress`] closed for the grid, one stage later.
+///
+/// # Why it is emitted from `cli` and cannot be emitted one crate deeper
+///
+/// The fold loop is `runner::validate::walk_forward_core`, and CI gate 17
+/// silences `vocab engine indicators runner` outright. So `runner` hands each
+/// finished fold UP as a plain [`runner::validate::FoldProgress`] through the
+/// hook [`both_shapes`] passes it, and this is the hook's other end -- the
+/// division [`GridProgress::tick`] already makes, minus the counter.
+///
+/// # Cost
+///
+/// One call per fold, on the outer thread, after the fold's two `par_iter`s
+/// have joined: no atomic, no stride, nothing per candidate or per bar. Two
+/// shapes of eight folds is sixteen events a rung, against the two that used
+/// to be the whole record. Routed through [`note_attempt`] rather than
+/// [`note`], as every other `cli.audit` boundary is, so a browser-launched run
+/// keeps these lines under its own `run` key and `/logs.json?run=` shows them.
+fn note_validation_fold(
+    recording: Option<Recording<'_>>,
+    progress: runner::validate::FoldProgress,
+) {
+    note_attempt(
+        recording.and_then(|held| held.attempt),
+        &validation_fold_event(recording, progress),
+    );
+}
+
 /// Read every count knob this run will use, and hand back what it could not.
 ///
 /// # Why the reads happen HERE and not where each value is needed
@@ -16858,6 +16923,7 @@ fn audit_bars(
                 &fresh,
                 replay,
                 rungs,
+                &|progress| note_validation_fold(recording, progress),
             )
         })
     });
@@ -17044,7 +17110,7 @@ fn validated_if(
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "signal/execution, chosen evidence, exact replay context, and resolved grid width are independent safety inputs"
+    reason = "signal/execution, chosen evidence, exact replay context, and resolved grid width are independent safety inputs, and the fold hook is the only way a fold can be seen while the walk runs"
 )]
 fn both_shapes(
     bars: &[indicators::Candle],
@@ -17059,6 +17125,7 @@ fn both_shapes(
     fresh: &Evaluator,
     replay: Option<StoredReplay<'_>>,
     rungs: usize,
+    on_fold: &(dyn Fn(runner::validate::FoldProgress) + Sync),
 ) -> (runner::validate::Validated, runner::validate::Validated) {
     let splits = walk_forward_splits(bars.len());
     // A FALLBACK NOW, NOT THE PRICING SIDE, and that is the whole of the
@@ -17096,6 +17163,7 @@ fn both_shapes(
             &mut builder,
             runner::split::Shape::Anchored,
             rungs,
+            on_fold,
         );
         let rolling = runner::validate::walk_forward_projected_prepared_with_rungs(
             bars,
@@ -17107,6 +17175,7 @@ fn both_shapes(
             &mut builder,
             runner::split::Shape::Rolling,
             rungs,
+            on_fold,
         );
         (anchored, rolling)
     } else {
@@ -17120,6 +17189,7 @@ fn both_shapes(
             &mut || *fresh,
             runner::split::Shape::Anchored,
             rungs,
+            on_fold,
         );
         let rolling = runner::validate::walk_forward_projected_with_rungs(
             bars,
@@ -17131,6 +17201,7 @@ fn both_shapes(
             &mut || *fresh,
             runner::split::Shape::Rolling,
             rungs,
+            on_fold,
         );
         (anchored, rolling)
     }
@@ -17679,6 +17750,80 @@ mod tests {
                 .map(|event| event.fields().len())
                 .collect::<Vec<_>>(),
             vec![12, 12, 11, 12, 9, 9]
+        );
+    }
+
+    /// The fold line carries what the operator could not read for 5h33m:
+    /// which shape, which fold of how many, and how heavy it was.
+    ///
+    /// Ten fields exactly, and a terminal run with no recording still names
+    /// the fold -- `rung` is then empty rather than absent, the same shape
+    /// [`note_grid_progress`] gives it.
+    #[test]
+    fn a_finished_fold_names_its_shape_ordinal_and_counts() {
+        let recording = Recording {
+            root: std::path::Path::new("."),
+            feed: "zerodha",
+            underlying: "NIFTY",
+            timeframe: "15min",
+            from: (2024, 1),
+            to: (2024, 12),
+            attempt: Some(41),
+            months_asked: 12,
+            months_found: 12,
+        };
+        let progress = runner::validate::FoldProgress {
+            shape: runner::split::Shape::Rolling,
+            fold: 3,
+            of: 8,
+            train_bars: 12_000,
+            test_bars: 1_500,
+            candidates: 10_575,
+            decided: true,
+        };
+
+        let event = super::validation_fold_event(Some(recording), progress);
+        assert_eq!(event.target(), "cli.audit");
+        assert_eq!(event.message(), "validation fold finished");
+        assert_eq!(event.dropped_fields(), 0);
+        for (name, value) in [
+            ("rung", telemetry::Value::Str("15min")),
+            ("shape", telemetry::Value::Str("rolling")),
+            ("fold", telemetry::Value::Uint(3)),
+            ("of", telemetry::Value::Uint(8)),
+            ("train_bars", telemetry::Value::Uint(12_000)),
+            ("test_bars", telemetry::Value::Uint(1_500)),
+            ("candidates", telemetry::Value::Uint(10_575)),
+            ("decided", telemetry::Value::Bool(true)),
+            ("feed", telemetry::Value::Str("zerodha")),
+            ("underlying", telemetry::Value::Str("NIFTY")),
+        ] {
+            assert!(
+                event
+                    .fields()
+                    .iter()
+                    .any(|&(field_name, field_value)| field_name == name && field_value == value),
+                "{} omitted {name}={value:?}",
+                event.message()
+            );
+        }
+        assert_eq!(
+            event.fields().len(),
+            10,
+            "ten, exactly: a field silently added or dropped is a failure"
+        );
+
+        let bare = super::validation_fold_event(None, progress);
+        assert_eq!(
+            bare.fields().len(),
+            8,
+            "no feed and no underlying without a recording, and nothing invented"
+        );
+        assert!(
+            bare.fields().iter().any(|&(field_name, field_value)| {
+                field_name == "rung" && field_value == telemetry::Value::Str("")
+            }),
+            "a terminal run names an empty rung rather than omitting it"
         );
     }
 

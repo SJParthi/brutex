@@ -290,6 +290,48 @@ pub struct ExecutionSeries<'a> {
     pub signal_length_micros: i64,
 }
 
+/// One finished walk-forward fold, handed up to the caller's progress hook.
+///
+/// # Why a hook and not an event
+///
+/// CI gate 17 silences this crate outright: the fold loop lives in
+/// `walk_forward_core` and the crate that may speak sits one arrow above it.
+/// So the loop hands each finished fold UP as this plain value and the caller
+/// decides what to do with it. `cli` turns it into one line per fold; a test
+/// turns it into a `Vec`; every other caller passes `&|_| {}`.
+///
+/// # Why it fires AFTER the fold is pushed
+///
+/// So that "fold 3 of 8 finished" is already true at the moment it is read:
+/// the fold's result is in `Validated::folds` when the hook runs. A fold that
+/// never ran -- an out-of-range window, or a walk that refused part way -- is
+/// never reported, because nothing finished.
+///
+/// # Cost
+///
+/// One call per fold, on the outer thread, after both of the fold's candidate
+/// loops have joined. Never inside a `par_iter`, never per candidate, never
+/// per bar. Two shapes of eight folds is sixteen calls a rung.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FoldProgress {
+    /// The window shape this fold belongs to, so a reader can tell the
+    /// anchored walk's last fold from the rolling walk's first.
+    pub shape: Shape,
+    /// One-based ordinal of the fold that just finished: `fold 3 of 8`.
+    pub fold: usize,
+    /// How many windows the shape produced for this span.
+    pub of: usize,
+    /// Bars in the fold's training window.
+    pub train_bars: usize,
+    /// Bars in the fold's test window.
+    pub test_bars: usize,
+    /// Distinct closed candidates the training sweep produced, every one of
+    /// which the fold priced.
+    pub candidates: usize,
+    /// Whether the fold chose a candidate at all.
+    pub decided: bool,
+}
+
 /// A whole walk-forward.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Validated {
@@ -1879,6 +1921,9 @@ pub fn walk_forward_shaped_with_rungs(
         rungs,
         None,
         None,
+        // The one-series door has no operator behind it: `cli` validates
+        // through the projected doors below, which carry a real hook.
+        &|_| {},
     )
 }
 
@@ -1891,6 +1936,10 @@ pub fn walk_forward_shaped_with_rungs(
 /// training execution prefix stops before the first test instant, while the
 /// test prefix stops at its last priceable horizon, so neither half can read an
 /// execution observation belonging only to the other.
+///
+/// `on_fold` hears each finished fold once, on the calling thread, as a
+/// [`FoldProgress`]; that type says why this crate cannot report a fold itself.
+/// A caller with nothing to say passes `&|_| {}`.
 #[must_use]
 #[expect(
     clippy::too_many_arguments,
@@ -1908,6 +1957,7 @@ pub fn walk_forward_projected_with_rungs(
     evaluator: &mut impl FnMut() -> Evaluator,
     shape: Shape,
     rungs: usize,
+    on_fold: &(dyn Fn(FoldProgress) + Sync),
 ) -> Validated {
     let mut builder = |slice: &[Candle]| Ok(Column::build(slice, &mut evaluator()));
     walk_forward_core(
@@ -1921,6 +1971,7 @@ pub fn walk_forward_projected_with_rungs(
         rungs,
         Some(execution),
         None,
+        on_fold,
     )
 }
 
@@ -1931,6 +1982,10 @@ pub fn walk_forward_projected_with_rungs(
 /// builder is called on each fold's exact signal slice/prefix and may refuse;
 /// that reason is returned in [`Validated::refused`] without falling back to an
 /// ordinary evaluator.
+///
+/// `on_fold` hears each finished fold once, on the calling thread, as a
+/// [`FoldProgress`]; that type says why this crate cannot report a fold itself.
+/// A caller with nothing to say passes `&|_| {}`.
 #[must_use]
 #[expect(
     clippy::too_many_arguments,
@@ -1946,6 +2001,7 @@ pub fn walk_forward_projected_prepared_with_rungs(
     builder: &mut impl FnMut(&[Candle]) -> Result<Column, String>,
     shape: Shape,
     rungs: usize,
+    on_fold: &(dyn Fn(FoldProgress) + Sync),
 ) -> Validated {
     walk_forward_core(
         signal,
@@ -1958,6 +2014,7 @@ pub fn walk_forward_projected_prepared_with_rungs(
         rungs,
         Some(execution),
         None,
+        on_fold,
     )
 }
 
@@ -2013,6 +2070,7 @@ pub fn walk_forward_projected_prepared_anchored_admission_v2(
         resolved_rungs,
         Some(execution),
         Some(AnchoredCapture::AdmissionV2(&mut capture)),
+        &|_| {},
     );
     capture.finish(validated)
 }
@@ -2065,6 +2123,7 @@ pub fn walk_forward_projected_prepared_anchored_search_v3(
         rungs,
         Some(execution),
         Some(AnchoredCapture::SearchV3(&mut capture)),
+        &|_| {},
     );
     capture.finish(validated)
 }
@@ -4209,6 +4268,7 @@ fn walk_forward_core(
     rungs: usize,
     execution: Option<ExecutionSeries<'_>>,
     mut admission_capture: Option<AnchoredCapture<'_>>,
+    on_fold: &(dyn Fn(FoldProgress) + Sync),
 ) -> Validated {
     // ONE-SERIES AND TWO-SERIES MODES SHARE THE FOLD, NOT THE ASSUMPTION.
     //
@@ -4252,11 +4312,12 @@ fn walk_forward_core(
     let mut training_execution_cursor = MonotonicExecutionPrefix::default();
     let mut oos_execution_cursor = MonotonicExecutionPrefix::default();
 
-    for (index, fold) in shape
-        .folds(bars.len(), horizon, splits)
-        .into_iter()
-        .enumerate()
-    {
+    // BOUND FIRST, because the hook at the foot of the loop reports
+    // `fold N of M`, and M is the number of windows the shape produced -- not
+    // the number that survived, which is known only when the walk ends.
+    let windows = shape.folds(bars.len(), horizon, splits);
+    let of = windows.len();
+    for (index, fold) in windows.into_iter().enumerate() {
         // THE FOLD'S OWN RANGE, not a prefix. See the doc block above: taking
         // `..end` made every rolling fold anchored.
         let Some(train) = bars.get(fold.train.0.clone()) else {
@@ -4899,6 +4960,19 @@ fn walk_forward_core(
             return out;
         }
         out.folds.push(visible);
+        // AFTER THE PUSH, so what the hook says is already true when it is
+        // read; and outside both `par_iter`s above, so it is one call on this
+        // thread per fold and nothing per candidate. `FoldProgress` says why
+        // this is a hook and not an event.
+        on_fold(FoldProgress {
+            shape,
+            fold: index.saturating_add(1),
+            of,
+            train_bars: train.len(),
+            test_bars: fold.test.len(),
+            candidates: closed.kept.len(),
+            decided: chosen.is_some(),
+        });
     }
     out
 }
@@ -5365,6 +5439,7 @@ mod tests {
             &mut evaluator,
             Shape::Anchored,
             DEFAULT_RUNGS,
+            &|_| {},
         );
         assert!(refused.folds.is_empty());
         assert!(
@@ -5397,6 +5472,7 @@ mod tests {
             },
             Shape::Anchored,
             DEFAULT_RUNGS,
+            &|_| {},
         );
         assert_eq!(called, 1, "the first refused fold stops the walk");
         assert!(refused.folds.is_empty());
@@ -5404,6 +5480,84 @@ mod tests {
             refused.refused.as_deref(),
             Some("stored daily/minute replay evidence refused this fold")
         );
+    }
+
+    /// Every finished fold is reported once, in order, with its own counts --
+    /// and a walk that refuses reports nothing, because nothing finished.
+    ///
+    /// # Why only the hook's own trace can prove this
+    ///
+    /// The hook changes no byte of [`Validated`]. A mutant that drops the call,
+    /// counts folds from zero, or reports the wrong window is invisible to
+    /// every test that reads the result, so the trace is compared field by
+    /// field against the folds that came back. Rolling rather than anchored,
+    /// because the rolling shape is the one whose `train_bars` is NOT its end
+    /// index, so a hook reporting the wrong number would show here.
+    #[test]
+    fn every_finished_fold_is_reported_once_in_order_with_its_own_counts() {
+        let bars = crate::synthetic::sessions(12);
+        let seen = std::sync::Mutex::new(Vec::new());
+        let rolling = walk_forward_projected_with_rungs(
+            &bars,
+            ExecutionSeries {
+                bars: &bars,
+                signal_length_micros: 60_000_000,
+            },
+            h(15),
+            3,
+            Direction::Long,
+            &sweeper(),
+            &mut evaluator,
+            Shape::Rolling,
+            DEFAULT_RUNGS,
+            &|progress| seen.lock().expect("no fold panicked").push(progress),
+        );
+        let seen = seen.into_inner().expect("no fold panicked");
+
+        assert_eq!(rolling.refused, None, "the fixture walks to the end");
+        assert_eq!(rolling.folds.len(), 3, "three splits, three folds");
+        assert_eq!(
+            seen.len(),
+            rolling.folds.len(),
+            "one call per finished fold, and none for anything else"
+        );
+        for (progress, fold) in seen.iter().zip(&rolling.folds) {
+            assert_eq!(progress.shape, Shape::Rolling);
+            assert_eq!(
+                progress.fold,
+                fold.index.saturating_add(1),
+                "one-based, so the last line reads `fold 3 of 3` and not `2 of 3`"
+            );
+            assert_eq!(progress.of, 3);
+            assert_eq!(progress.train_bars, fold.train_bars);
+            assert_eq!(progress.test_bars, fold.test_bars);
+            assert_eq!(u64::try_from(progress.candidates), Ok(fold.considered));
+            assert_eq!(progress.decided, fold.chosen.is_some());
+        }
+
+        // A REFUSED WALK FINISHES NO FOLD, so the hook never speaks: a line
+        // saying a fold finished on a walk that ran none would be the fallback
+        // that hides a failure.
+        let silent = std::sync::atomic::AtomicUsize::new(0);
+        let refused = walk_forward_projected_prepared_with_rungs(
+            &bars,
+            ExecutionSeries {
+                bars: &bars,
+                signal_length_micros: 60_000_000,
+            },
+            h(15),
+            3,
+            Direction::Long,
+            &sweeper(),
+            &mut |_| Err("refused before any fold could finish".to_owned()),
+            Shape::Anchored,
+            DEFAULT_RUNGS,
+            &|_| {
+                silent.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            },
+        );
+        assert!(refused.folds.is_empty());
+        assert_eq!(silent.load(std::sync::atomic::Ordering::Relaxed), 0);
     }
 
     /// Fold ranges stay in signal-index space. Only after the training column
