@@ -385,6 +385,13 @@ mod tests {
     /// error, while an `open` that fails IS the error and leaves the slot for
     /// the next call to judge.
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "five facts about ONE cache's accumulated state: each later call is \
+                  only meaningful because of what the earlier calls left in the slot, \
+                  so splitting them would test five fresh caches and none of the \
+                  carry-over this exists to pin"
+    )]
     fn a_cached_handle_opens_once_refreshes_after_and_reopens_on_refusal() {
         let cache: Cached<u32> = Cached::new();
         let root = std::path::Path::new("/one-root");
