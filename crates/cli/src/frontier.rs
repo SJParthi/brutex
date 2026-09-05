@@ -1117,6 +1117,27 @@ impl Frontier {
         self.len()
     }
 
+    /// Bring an open handle up to date with rows another writer appended.
+    ///
+    /// O(rows appended since this handle last scanned), which is the property
+    /// that lets a long-lived handle answer requests without walking the file:
+    /// the first open is O(rows), every refresh after it is O(delta). `Trades`
+    /// has carried this door for as long as it has had `absorb_new_rows`;
+    /// this one was private, so `api` could only reopen -- O(rows) per request.
+    ///
+    /// A caller holding a cached handle answers any refusal by dropping the
+    /// handle and opening fresh, which is the one O(rows) path a cache should
+    /// ever take.
+    ///
+    /// # Errors
+    ///
+    /// The same refusals `absorb_new_rows` makes: a shrunken file, a ragged
+    /// tail, an unreadable row, or a duplicate identity whose blocks are not
+    /// contiguous.
+    pub fn refresh(&mut self) -> Result<(), Refusal> {
+        self.absorb_new_rows()
+    }
+
     /// Absorbs whole rows appended since this handle opened.
     ///
     /// O(rows appended by other writers), which is zero on the ordinary

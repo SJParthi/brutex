@@ -147,22 +147,25 @@ fn respond(
         );
     }
 
-    // OPENED FRESH AND READ-ONLY AFTER THE RECEIPT, AND THAT ORDER IS THE POINT.
+    // REFRESHED READ-ONLY AFTER THE RECEIPT, AND THAT ORDER IS STILL THE POINT.
     // A GET that creates its own empty file answers "no trades" by MAKING that
-    // true, which is the failure §4 bans. `of_run_against_receipt` reconciles
-    // this newly indexed child against the one snapshot above and never opens
-    // the receipt sidecar again.
-    let mut file =
-        match cli::trades::Trades::open_read_bounded(&root, crate::detail::MAX_SCAN_BYTES) {
-            Ok(file) => file,
-            Err(why) => {
-                return missing_file_response(&root, &identity, receipt, page, json, &why);
-            }
-        };
-
-    let rows = match file.of_run_against_receipt(&identity, receipt) {
-        Ok(rows) => rows,
-        Err(why) => return refuse(json, &why),
+    // true, which is the failure §4 bans -- so the opener is `open_read_bounded`
+    // and nothing else. `of_run_against_receipt` reconciles the child against
+    // the one snapshot above and never opens the receipt sidecar again.
+    //
+    // This OPENED FRESH here, which walked every trade row ever written and
+    // verified every seal on every request. `detail::TRADES` holds one handle
+    // for the process and `refresh` absorbs only what was appended since --
+    // see `detail::Cached` for why the receipt-then-child guarantee survives.
+    let rows = match crate::detail::TRADES.with(
+        &root,
+        || cli::trades::Trades::open_read_bounded(&root, crate::detail::MAX_SCAN_BYTES),
+        cli::trades::Trades::refresh,
+        |file| file.of_run_against_receipt(&identity, receipt),
+    ) {
+        Ok(Ok(rows)) => rows,
+        Ok(Err(why)) => return refuse(json, &why),
+        Err(why) => return missing_file_response(&root, &identity, receipt, page, json, &why),
     };
     let Some(receipt) = receipt else {
         return absent_response(

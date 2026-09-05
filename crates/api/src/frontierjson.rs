@@ -163,16 +163,21 @@ fn respond(
     }
 
     // READ-ONLY, so a GET on a store that has never been swept cannot answer
-    // "no combinations" by creating the file that makes it true.
-    let mut file =
-        match cli::frontier::Frontier::open_read_bounded(&root, crate::detail::MAX_SCAN_BYTES) {
-            Ok(file) => file,
-            Err(why) => return missing_file_response(&root, &identity, receipt, page, json, &why),
-        };
-
-    let (rows, partial) = match file.of_run_against_receipt(&identity, receipt) {
-        Ok(pair) => pair,
-        Err(why) => return refuse(json, &why),
+    // "no combinations" by creating the file that makes it true -- the opener
+    // is `open_read_bounded` and nothing else.
+    //
+    // Held for the process and REFRESHED per request rather than opened fresh:
+    // a fresh open walked every frontier row ever written to return ten. See
+    // `detail::Cached` for the ordering argument and the refusal path.
+    let (rows, partial) = match crate::detail::FRONTIER.with(
+        &root,
+        || cli::frontier::Frontier::open_read_bounded(&root, crate::detail::MAX_SCAN_BYTES),
+        cli::frontier::Frontier::refresh,
+        |file| file.of_run_against_receipt(&identity, receipt),
+    ) {
+        Ok(Ok(pair)) => pair,
+        Ok(Err(why)) => return refuse(json, &why),
+        Err(why) => return missing_file_response(&root, &identity, receipt, page, json, &why),
     };
     if receipt.is_none() {
         return absent_response(

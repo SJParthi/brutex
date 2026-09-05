@@ -254,6 +254,117 @@ pub(crate) async fn hold_every_slot() -> Result<HeldSlots, &'static str> {
     })
 }
 
+/// One long-lived read handle on a results file, refreshed per request.
+///
+/// # Why a cached handle, and what it changes
+///
+/// Every results file -- `runs.bin`, `frontier.bin`, `chosen-trades.bin`,
+/// `detail-sets.bin` -- builds its identity index by walking the whole file at
+/// `open`. The probe on an open handle is then one hash hit. But this crate
+/// opened FRESH on every request, so one `/trades.json` walked every trade row
+/// ever written and verified every seal to return one run's rows: O(8,145)
+/// today for at most 256, with a hard refusal at [`MAX_SCAN_BYTES`] that lands
+/// near 666 runs at the current density.
+///
+/// `Trades::refresh` and `Frontier::refresh` absorb only the rows appended
+/// since the handle last scanned -- O(delta), zero when nothing was written.
+/// Holding the handle here makes the first request O(rows) and every one after
+/// it O(delta): the end-to-end lookup finally has the cost its probe always had.
+///
+/// # The ordering guarantee is kept, and this is why `refresh` runs per request
+///
+/// Both handlers snapshot the committed receipt BEFORE touching the child, and
+/// the writer syncs children before it writes the receipt. So a receipt seen at
+/// T0 proves its rows were durable before T0, and a refresh at any T1 >= T0
+/// absorbs them. The order "receipt, then child" was the whole argument for
+/// opening fresh; refreshing after the receipt is the same argument with the
+/// walk removed.
+///
+/// # Any refusal from `refresh` drops the handle
+///
+/// A shrunken file, a torn tail, a duplicate identity, a file moved aside on a
+/// format-version bump -- each is a reason the handle no longer describes what
+/// is on disk. The answer is one fresh `open`, which is the single O(rows) path
+/// a cache should ever take, and the refusal that caused it is never swallowed:
+/// if the reopen also fails, that error is the response.
+///
+/// A root that differs from the cached one is treated the same way. There is
+/// one store root per process, so this is a guard against a future caller
+/// rather than a branch that runs today.
+///
+/// # What this does NOT change
+///
+/// [`preflight`] still refuses a file over [`MAX_SCAN_BYTES`] before any
+/// handle is touched. That wall bounded a FRESH index, which no longer happens
+/// on a warm cache, so it is now stricter than it needs to be -- but lifting it
+/// is a separate decision about what an unbounded results file should cost,
+/// and this change does not make it.
+pub struct Cached<T> {
+    inner: std::sync::Mutex<Option<(std::path::PathBuf, T)>>,
+}
+
+impl<T> Cached<T> {
+    /// An empty slot. `const` so it can back a `static`.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            inner: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Run `f` against a handle on `root`, refreshing a cached one or opening
+    /// a fresh one.
+    ///
+    /// `Err` is an `open` failure and nothing else: a `refresh` failure is
+    /// answered by reopening, and `f`'s own result is returned inside `Ok`
+    /// untouched, so a caller keeps every refusal it could already make.
+    ///
+    /// # Errors
+    ///
+    /// Whatever `open` returns, when no usable handle exists and one could not
+    /// be opened.
+    pub fn with<R>(
+        &self,
+        root: &std::path::Path,
+        open: impl FnOnce() -> Result<T, String>,
+        refresh: impl FnOnce(&mut T) -> Result<(), String>,
+        f: impl FnOnce(&mut T) -> R,
+    ) -> Result<R, String> {
+        // READ THROUGH A POISONED LOCK, for the reason `calendar_of` gives: a
+        // panic while holding it means some other request died, and the handle
+        // is still a handle. Refusing to look would make one panicked request
+        // cost every later one the walk this exists to remove.
+        let mut held = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((at, handle)) = held.as_mut()
+            && at.as_path() == root
+            && refresh(handle).is_ok()
+        {
+            return Ok(f(handle));
+        }
+        // Absent, a different root, or a refresh that refused: open fresh. The
+        // slot is overwritten rather than cleared first, so a failed `open`
+        // leaves whatever was there -- which the next request refreshes and
+        // judges again on its own terms.
+        let (_, handle) = held.insert((root.to_path_buf(), open()?));
+        Ok(f(handle))
+    }
+}
+
+impl<T> Default for Cached<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The process's one read handle on `chosen-trades.bin`. See [`Cached`].
+pub static TRADES: Cached<cli::trades::Trades> = Cached::new();
+
+/// The process's one read handle on `frontier.bin`. See [`Cached`].
+pub static FRONTIER: Cached<cli::frontier::Frontier> = Cached::new();
+
 #[cfg(test)]
 #[allow(
     clippy::expect_used,
@@ -262,7 +373,134 @@ pub(crate) async fn hold_every_slot() -> Result<HeldSlots, &'static str> {
     reason = "tests fail through assertions"
 )]
 mod tests {
-    use super::{MAX_PAGE_ROWS, MAX_QUERY_BYTES, MAX_SCAN_BYTES, Page, preflight, run, window};
+    use super::{
+        Cached, MAX_PAGE_ROWS, MAX_QUERY_BYTES, MAX_SCAN_BYTES, Page, preflight, run, window,
+    };
+
+    /// A CACHED HANDLE IS OPENED ONCE, REFRESHED AFTER, AND REOPENED ON A REFUSAL.
+    ///
+    /// Three facts, each a counter: `open` runs on the first call and not the
+    /// second; `refresh` runs on the second and not the first; and a refresh
+    /// that refuses is answered by exactly one more `open` and never by an
+    /// error, while an `open` that fails IS the error and leaves the slot for
+    /// the next call to judge.
+    #[test]
+    fn a_cached_handle_opens_once_refreshes_after_and_reopens_on_refusal() {
+        let cache: Cached<u32> = Cached::new();
+        let root = std::path::Path::new("/one-root");
+        let mut opens = 0_u32;
+        let mut refreshes = 0_u32;
+
+        let first = cache.with(
+            root,
+            || {
+                opens += 1;
+                Ok(7)
+            },
+            |_| {
+                refreshes += 1;
+                Ok(())
+            },
+            |h| *h,
+        );
+        assert_eq!(
+            first,
+            Ok(7),
+            "the first call opens and hands the handle through"
+        );
+        assert_eq!((opens, refreshes), (1, 0), "opened once, refreshed never");
+
+        let second = cache.with(
+            root,
+            || {
+                opens += 1;
+                Ok(99)
+            },
+            |_| {
+                refreshes += 1;
+                Ok(())
+            },
+            |h| *h,
+        );
+        assert_eq!(second, Ok(7), "the second call reuses the handle it opened");
+        assert_eq!((opens, refreshes), (1, 1), "refreshed once, NOT reopened");
+
+        let after_refusal = cache.with(
+            root,
+            || {
+                opens += 1;
+                Ok(11)
+            },
+            |_| {
+                refreshes += 1;
+                Err("the file shrank".to_owned())
+            },
+            |h| *h,
+        );
+        assert_eq!(
+            after_refusal,
+            Ok(11),
+            "a refresh that refuses is answered by one fresh open, not an error"
+        );
+        assert_eq!((opens, refreshes), (2, 2));
+
+        let other_root = cache.with(
+            std::path::Path::new("/another-root"),
+            || {
+                opens += 1;
+                Ok(13)
+            },
+            |_| {
+                refreshes += 1;
+                Ok(())
+            },
+            |h| *h,
+        );
+        assert_eq!(other_root, Ok(13), "a different root is a different handle");
+        assert_eq!(
+            (opens, refreshes),
+            (3, 2),
+            "reopened without refreshing the other root"
+        );
+
+        let failed_open = cache.with(
+            std::path::Path::new("/a-third-root"),
+            || {
+                opens += 1;
+                Err("no such file".to_owned())
+            },
+            |_| {
+                refreshes += 1;
+                Ok(())
+            },
+            |h| *h,
+        );
+        assert_eq!(
+            failed_open,
+            Err("no such file".to_owned()),
+            "an open that fails is the error, verbatim"
+        );
+        assert_eq!((opens, refreshes), (4, 2));
+
+        let still_previous = cache.with(
+            std::path::Path::new("/another-root"),
+            || {
+                opens += 1;
+                Ok(0)
+            },
+            |_| {
+                refreshes += 1;
+                Ok(())
+            },
+            |h| *h,
+        );
+        assert_eq!(
+            still_previous,
+            Ok(13),
+            "a failed open left the prior handle in place for the next request to judge"
+        );
+        assert_eq!((opens, refreshes), (4, 3));
+    }
 
     #[test]
     fn pagination_refuses_malformed_zero_and_over_limit_values() {
