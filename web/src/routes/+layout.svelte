@@ -267,6 +267,38 @@
   const feedInBar = $derived(!FEED_OWNED.some(current));
 
   /* ====================================================================
+     A ROUTE THAT CARRIES ITS OWN CHROME, AND THEREFORE MUST NOT WEAR THIS ONE
+     --------------------------------------------------------------------
+     Same rule as FEED_OWNED above, one level up: one control per value per
+     route, and a SECOND copy breaks it exactly as surely as none. FEED_OWNED
+     yields a single picker; this yields the whole bar.
+
+     `/terminal` is a broker terminal recreated in full — its own brand, its
+     own primary navigation, its own index strip across the top. Drawing this
+     console's header above it would put two navigations for two different
+     products in one window, stacked, and the page would be a terminal wearing
+     somebody else's hat. There is no arrangement of the two that is not a
+     defect: the bar names routes the terminal does not have, and the terminal
+     names sections the bar cannot reach.
+
+     WHAT THIS DOES NOT DO. It does not remove the route from the nav, and it
+     does not make the page unreachable — `/terminal` is a link like any other
+     and every other page keeps the bar it always had. A route joins this list
+     only when it draws a complete top-level chrome of its own, which is a far
+     higher bar than "wants more room", and the count stays at one in both
+     directions.
+
+     `.shell` is `grid-template-rows: var(--topbar-h) 1fr`, so dropping the
+     header without dropping its ROW would leave a 46px band of page
+     background above the terminal — the bar's ghost, and worse than the bar.
+     `class:bare` collapses the grid to the single row; see `theme.css`.
+
+     Prefix-matched with `current()`, for the same reason the nav and
+     FEED_OWNED are. ==================================================== */
+  const BARE = ['/terminal'];
+  const bare = $derived(BARE.some(current));
+
+  /* ====================================================================
      THEME
      --------------------------------------------------------------------
      Three states, and the third one is the point: `auto` REMOVES the
@@ -776,7 +808,8 @@
 
 <a class="skip" href="#main">Skip to content</a>
 
-<div class="shell">
+<div class="shell" class:bare>
+  {#if !bare}
   <header class="topbar">
     <span class="brand">bru<b>tex</b></span>
 
@@ -990,6 +1023,7 @@
       <span class="progress" aria-hidden="true"><i></i></span>
     {/if}
   </header>
+  {/if}
 
   <main class="main" id="main" tabindex="-1">
     {@render children()}

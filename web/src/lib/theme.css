@@ -642,6 +642,21 @@ body {
   grid-template-rows: var(--topbar-h) 1fr;
   height: 100dvh;
 }
+/* A ROUTE THAT DRAWS ITS OWN TOP-LEVEL CHROME GETS THE WHOLE VIEWPORT.
+
+   The header row is declared above as a FIXED track, so a route that declines
+   to render the header still pays for it: `var(--topbar-h)` of page
+   background sits at the top of the window, above the page, looking like a
+   bar that failed to paint rather than one deliberately absent. That is the
+   silent-failure shape section 4 bans, arrived at through CSS.
+
+   One row, so there is nothing to leave behind. The rule is a modifier on
+   `.shell` and not a second class because the grid is the fact being changed
+   and `.shell` is what owns it; see `BARE` in `routes/+layout.svelte` for
+   which routes qualify and why the list is deliberately hard to join. */
+.shell.bare {
+  grid-template-rows: 1fr;
+}
 .topbar {
   position: relative; /* the pull progress bar hangs off its bottom edge */
   display: flex;
