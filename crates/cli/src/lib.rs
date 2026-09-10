@@ -13028,29 +13028,72 @@ fn descent_bar_count(
 /// which is 352 round trips, and weighed 38,503,239 combinations. The floor was
 /// never a statistic; it was the cap.
 ///
-/// # Why here, and why it is not a new policy
+/// # It asks the search, and does not reason about it -- D-0592
 ///
-/// [`crate::knobs::sizing_rate`] ALREADY refuses this pair on the TYPED path --
-/// its filter is `*value > 5_000` for exactly this reason. Nothing guarded the
-/// DERIVED path, which is the one an operator reaches without typing anything:
-/// [`Rules::derived`] takes `base_bp.max(rules.min_win_rate_bp)` and
-/// [`Rules::operator`] holds the stated 5,000. So the rule an operator wrote
-/// down was the rule that silently emptied his search.
+/// **This shipped once testing `min_assurance_bp >= min_win_rate_bp`, and that
+/// proxy was wrong in BOTH directions.** [`assurance_floor_bp`] returns
+/// `CHANCE.saturating_add(rate) / 2` above chance -- strictly BELOW the rate --
+/// so the proxy is arithmetically just `rate <= 5_000`, and an adversarial audit
+/// measured what that leaves open on the shipped bound at this ceiling:
+///
+/// ```text
+///   rate 5000 bound 5000 -> 5000 trades (CAP) -> 434140 ppm   refused
+///   rate 5001 bound 5000 -> 5000 trades (CAP) -> 434140 ppm   NOT refused
+///   rate 5272 bound 5136 -> 5000 trades (CAP) -> 434140 ppm   NOT refused
+///   rate 5273 bound 5136 -> 4982 trades       -> 432577 ppm   first real answer
+///   rate 6000 bound 5500 ->  352 trades       ->  30563 ppm
+///   rate    0 bound    0 ->    1 trade                        WRONGLY refused
+/// ```
+///
+/// So the very number the fix existed to eliminate, 434140 ppm, was still
+/// produced across a 272-basis-point band -- and the old refusal text told the
+/// operator to "set `BRUTEX_MIN_WIN_RATE_BP` above 5000", which lands INSIDE that
+/// band and reproduces it exactly. At the other end the proxy refused
+/// `BRUTEX_MIN_WIN_RATE_BP=0`, which [`Rules::stated`] admits deliberately
+/// ("a floor of zero drops its rule, which is a real choice an operator makes")
+/// and which [`runner::grid::trades_needed_for`] satisfies in ONE round trip via
+/// its `assurance_bp <= 0` arm.
+///
+/// Asking the search directly closes both at once and needs no reasoning to stay
+/// correct: if a future edit changes the bound, the rounding in `Cell::at_rate`
+/// or the ceiling, this still asks the only question that matters.
+///
+/// A note the previous version got wrong: [`crate::knobs::sizing_rate`] does NOT
+/// already refuse this pair. Its filter is `*value > 5_000`, which ADMITS 5001,
+/// and it guards a different knob on a different path
+/// ([`statistical_support_floor`]) that has no such check at all.
+///
+/// # What is still open
+///
+/// This guards the `elite` descent only. [`statistical_support_floor`] -- reached
+/// by `crates/api/src/sweeprun.rs` and the browser's Run button -- can still
+/// price the cap, because `statistical_floor_ppm` returns a bare `u64` that no
+/// caller can tell from a measurement. The durable fix is for that function to
+/// return the exhaustion rather than a number; until it does, this call site is
+/// the only protected one.
 ///
 /// `CLAUDE.md` §4 bans a fallback that hides a failure -- degrade loudly and
 /// name the reason, or refuse. A cap reported as a floor is both at once.
 ///
 /// Pinned by `an_unsatisfiable_confidence_pair_refuses_rather_than_pricing_the_cap`.
 fn unsatisfiable_confidence_pair(rules: &Rules) -> Option<String> {
-    (rules.min_assurance_bp >= rules.min_win_rate_bp).then(|| {
+    let needed = runner::grid::trades_needed_for(
+        rules.min_win_rate_bp,
+        rules.min_assurance_bp,
+        TRADES_SEARCH_CEILING,
+    );
+    (needed >= TRADES_SEARCH_CEILING).then(|| {
         format!(
-            "refused: a stated win rate of {} bp carries a {} bp confidence bound, and a 95% \
-             lower bound cannot reach the rate it is a bound on. No sample size satisfies that \
-             pair, so the support floor would be the {TRADES_SEARCH_CEILING}-round-trip search \
-             cap rather than a statistic, and every rare setup would be pruned before it was \
-             priced. A rate at or below chance carries no evidence on its own -- the \
-             discriminating half of the rule is the reward-to-risk leg. Set \
-             BRUTEX_MIN_WIN_RATE_BP above 5000 and run this again.\n",
+            "refused: a stated win rate of {} bp carries a {} bp confidence bound, and no sample \
+             size up to {TRADES_SEARCH_CEILING} round trips reaches that bound -- the search for \
+             one exhausted. The support floor would therefore be the search cap rather than a \
+             statistic, and every rare setup would be pruned before it was priced. The bound is \
+             derived as the midpoint between chance and the stated rate, so a rate AT chance \
+             makes it equal to the rate (never reachable) and a rate just above chance leaves a \
+             gap too narrow for any sample this ceiling allows. A rate at or below chance also \
+             carries no evidence on its own -- the discriminating half of the rule is the \
+             reward-to-risk leg. Raise BRUTEX_MIN_WIN_RATE_BP well clear of 5000, or set it to 0 \
+             to drop the win-rate rule entirely, and run this again.\n",
             rules.min_win_rate_bp, rules.min_assurance_bp
         )
     })
@@ -23044,31 +23087,86 @@ mod tests {
     /// who cannot act on a refusal is reading a crash with better manners.
     #[test]
     fn an_unsatisfiable_confidence_pair_refuses_rather_than_pricing_the_cap() {
-        for rate in [6_000_i64, 7_500, 8_000, 9_500] {
+        use crate::TRADES_SEARCH_CEILING;
+
+        // THE PROPERTY, AND NOT A PROXY FOR IT.
+        //
+        // This test previously asserted the proxy `bound >= rate`, and the proxy
+        // was wrong in both directions -- see the function's own doc and D-0592.
+        // What must hold is that the guard fires exactly when the SEARCH for a
+        // sample size exhausts, so a future change to `assurance_floor_bp`, to
+        // `Cell::at_rate`'s round-up, or to the ceiling is caught here rather
+        // than in an operator's report. The rates are curated rather than swept:
+        // each one costs up to `TRADES_SEARCH_CEILING` Wilson evaluations, and a
+        // full 0..=10_000 sweep is fifty million of them.
+        for rate in [
+            0_i64, 1, 2_065, 2_066, 4_999, 5_000, 5_001, 5_100, 5_200, 5_272, 5_273, 5_300, 6_000,
+            7_500, 8_000, 9_500, 9_999, 10_000,
+        ] {
             let rules = crate::Rules::elite(1, 1).with_win_rate(rate);
-            assert!(
-                crate::unsatisfiable_confidence_pair(&rules).is_none(),
-                "{rate}bp against its derived {}bp bound is satisfiable and must \
-                 descend, not refuse",
+            let needed = runner::grid::trades_needed_for(
+                rules.min_win_rate_bp,
+                rules.min_assurance_bp,
+                TRADES_SEARCH_CEILING,
+            );
+            assert_eq!(
+                crate::unsatisfiable_confidence_pair(&rules).is_some(),
+                needed >= TRADES_SEARCH_CEILING,
+                "at {rate}bp the bound is {}bp and the search needs {needed} \
+                 round trips; the guard must agree with the search itself",
                 rules.min_assurance_bp
             );
         }
+
+        // THE BAND THE OLD PROXY LEFT OPEN, PINNED AS VALUES.
+        //
+        // The clause above proves the guard agrees with the search, which a
+        // reader could satisfy by mirroring the implementation. These are the
+        // measured facts the agreement has to produce: every rate from chance up
+        // to the crossover exhausts the ceiling and must refuse, and the first
+        // rate past it must descend. If `assurance_floor_bp`, the Wilson bound
+        // or the ceiling moves, THIS goes red instead of an operator's report.
+        for (rate, must_refuse) in [
+            (5_000_i64, true),
+            (5_001, true),
+            (5_100, true),
+            (5_272, true),
+            (5_273, false),
+            (6_000, false),
+        ] {
+            let rules = crate::Rules::elite(1, 1).with_win_rate(rate);
+            assert_eq!(
+                crate::unsatisfiable_confidence_pair(&rules).is_some(),
+                must_refuse,
+                "at {rate}bp against a {}bp bound the guard must {}",
+                rules.min_assurance_bp,
+                if must_refuse { "refuse" } else { "descend" }
+            );
+        }
+
+        // ZERO IS A SUPPORTED CHOICE AND MUST DESCEND.
+        //
+        // `Rules::stated` admits zero deliberately -- "a floor of zero drops its
+        // rule, which is a real choice an operator makes" -- and
+        // `trades_needed_for` satisfies it in ONE round trip through its
+        // `assurance_bp <= 0` arm. The proxy this replaced refused it.
+        let off = crate::Rules::elite(1, 1).with_win_rate(0);
+        assert!(
+            crate::unsatisfiable_confidence_pair(&off).is_none(),
+            "BRUTEX_MIN_WIN_RATE_BP=0 drops the win-rate rule and is satisfied \
+             by one round trip; refusing it takes away a documented choice"
+        );
 
         // The operator's own stated rule, which is the pair that reaches this
         // through `Rules::derived` without anyone typing a knob.
         let stated = crate::Rules::elite(1, 1).with_win_rate(5_000);
         assert_eq!(
             stated.min_assurance_bp, stated.min_win_rate_bp,
-            "at chance the bound equals the rate -- that equality IS the defect"
+            "at chance the bound equals the rate, and no sample reaches it"
         );
         let why = crate::unsatisfiable_confidence_pair(&stated)
             .expect("(5000, 5000) is satisfied by no sample size and must refuse");
-        for needle in [
-            "refused:",
-            "BRUTEX_MIN_WIN_RATE_BP",
-            "reward-to-risk",
-            "5000",
-        ] {
+        for needle in ["refused:", "BRUTEX_MIN_WIN_RATE_BP", "reward-to-risk"] {
             assert!(
                 why.contains(needle),
                 "the refusal must contain {needle:?} so an operator can act on \
@@ -23076,12 +23174,15 @@ mod tests {
             );
         }
 
-        // A bound BELOW the rate is the satisfiable shape, at the boundary.
-        let mut edge = stated;
-        edge.min_assurance_bp = 4_999;
+        // THE REMEDY MUST NOT NAME THE BROKEN BAND.
+        //
+        // The refusal used to end "Set BRUTEX_MIN_WIN_RATE_BP above 5000", and
+        // 5001 obeys that verbatim while reproducing the identical cap. An
+        // instruction that recreates the defect is worse than none.
         assert!(
-            crate::unsatisfiable_confidence_pair(&edge).is_none(),
-            "one basis point below the rate is satisfiable and must not refuse"
+            !why.contains("above 5000"),
+            "the refusal must not send the operator to 5001, which still \
+             exhausts the search:\n{why}"
         );
     }
 

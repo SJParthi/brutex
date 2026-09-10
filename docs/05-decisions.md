@@ -35210,3 +35210,65 @@ exactly as before, pinned in both directions by
 sibling test `the_support_floor_is_twenty_nine_trades_and_a_fifty_percent_rule_is_untestable`
 already recorded that the caller could not tell the ceiling from a real answer;
 this is the half that closes it.
+
+### D-0592 — D-0591's guard tested a proxy, and the proxy was wrong both ways — 2026-09-10
+
+D-0591 refused an unsatisfiable confidence pair by testing
+`min_assurance_bp >= min_win_rate_bp`. That is a PROXY for "no sample size
+satisfies this pair", and an adversarial audit of 82 agents measured it wrong in
+both directions on the shipped bound.
+
+`assurance_floor_bp` returns `CHANCE.saturating_add(rate) / 2` above chance,
+which is strictly BELOW the rate, so the proxy is arithmetically just
+`rate <= 5_000`. Measured against the repository's own `trades_needed_for`,
+`Cell::at_rate` and `Cell::assurance_bp` at `TRADES_SEARCH_CEILING` = 5,000:
+
+    rate 5000 bound 5000 -> 5000 trades (CAP) -> 434140 ppm   refused
+    rate 5001 bound 5000 -> 5000 trades (CAP) -> 434140 ppm   NOT refused
+    rate 5100 bound 5050 -> 5000 trades (CAP) -> 434140 ppm   NOT refused
+    rate 5272 bound 5136 -> 5000 trades (CAP) -> 434140 ppm   NOT refused
+    rate 5273 bound 5136 -> 4982 trades       -> 432577 ppm   first real answer
+    rate    0 bound    0 ->    1 trade                        WRONGLY refused
+
+So 434140 ppm — the exact number D-0591 exists to eliminate — was still produced,
+silently, across a 272-basis-point band. Worse, D-0591's refusal text ended
+"Set BRUTEX_MIN_WIN_RATE_BP above 5000 and run this again", and 5001 obeys that
+instruction verbatim while reproducing the identical cap. An instruction that
+recreates the defect is worse than no instruction.
+
+At the other end the proxy refused `BRUTEX_MIN_WIN_RATE_BP=0`. `Rules::stated`
+admits zero deliberately — "a floor of zero drops its rule, which is a real
+choice an operator makes" — and `trades_needed_for` satisfies it in ONE round
+trip through its `assurance_bp <= 0` arm. D-0591 took away a supported
+configuration and gave a reason that is false for it.
+
+D-0591 also justified itself by saying `knobs::sizing_rate` "already refuses this
+pair on the typed path". It does not. Its filter is `*value > 5_000`, which
+ADMITS 5001, and it guards a different knob feeding `statistical_support_floor`,
+which carries no such check.
+
+The guard now asks the search rather than reasoning about it:
+
+    let needed = trades_needed_for(min_win_rate_bp, min_assurance_bp, TRADES_SEARCH_CEILING);
+    if needed >= TRADES_SEARCH_CEILING { refuse }
+
+That closes both directions at once and stays correct if the bound, the round-up
+in `Cell::at_rate` or the ceiling ever changes, because it asks the only question
+that matters. The pinning test was rewritten accordingly: it asserts the guard
+agrees with `trades_needed_for` across eighteen rates, pins the measured band as
+values, pins that zero descends, and pins that the refusal never again contains
+the string "above 5000". Its previous boundary assertion — that `(5000, 4999)`
+is satisfiable and must not refuse — was itself false and had pinned the hole
+open; `(5000, 4999)` needs the full 5,000-trade ceiling.
+
+**What is NOT fixed, stated plainly.** `statistical_support_floor`, reached by
+`crates/api/src/sweeprun.rs` and therefore by the browser's Run button, can still
+price the cap. `statistical_floor_ppm` returns a bare `u64` that no caller can
+distinguish from a measurement, and the durable fix is for it to return the
+exhaustion instead. This entry does not do that, and the `elite` descent remains
+the only protected call site. Invariant SF-15 carries the same caveat.
+
+Co-authored measurement: the band figures were produced by an independent
+re-implementation of the shipped Wilson bound that reproduces all five rows of
+`the_support_floor_is_twenty_nine_trades_and_a_fifty_percent_rule_is_untestable`
+exactly, and were then confirmed against the real code by the rewritten test.
