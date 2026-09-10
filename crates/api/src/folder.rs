@@ -542,7 +542,7 @@ mod tests {
             shape_of(Feed::TrueData, "INDEX"),
             Ok(Columns::TrueDataIndex)
         );
-        assert_eq!(shape_of(Feed::TrueData, "FNO"), Ok(Columns::TrueDataIndex));
+        assert_eq!(shape_of(Feed::TrueData, "FNO"), Ok(Columns::TrueDataFno));
     }
 
     /// TWO MEASURED LAYOUTS AND NO SEGMENT REFUSES, AND IT NAMES BOTH.

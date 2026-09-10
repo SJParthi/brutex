@@ -399,8 +399,9 @@ fn json_of(
         }
         let _ = write!(
             out,
-            r#"{{"seq":{},"run":{},"ts":{},"level":{},"target":{},"message":{},"cut":{},"dropped_fields":{}"#,
+            r#"{{"seq":{},"run":{},"run_key":"{}","ts":{},"level":{},"target":{},"message":{},"cut":{},"dropped_fields":{}"#,
             record.seq,
+            record.run,
             record.run,
             record.at_unix_millis,
             render::json_string(record.level.label()),
@@ -410,8 +411,19 @@ fn json_of(
             record.dropped_fields,
         );
         out.push_str(",\"fields\":{");
+        // The durable invocation namespace exceeds JavaScript's safe integer
+        // range. Derive aliases from typed Rust values, before JSON can round
+        // them. Preserve an explicitly supplied alias so a strict consumer can
+        // reject contradictions; never emit a duplicate object key.
+        let exact_attempt = record
+            .field("attempt")
+            .and_then(telemetry::OwnedValue::as_u64)
+            .filter(|_| record.field("attempt_key").is_none());
+        if let Some(attempt) = exact_attempt {
+            let _ = write!(out, r#""attempt_key":"{attempt}""#);
+        }
         for (n, (key, value)) in record.fields.iter().enumerate() {
-            if n > 0 {
+            if n > 0 || exact_attempt.is_some() {
                 out.push(',');
             }
             let _ = write!(out, "{}:{}", render::json_string(key), value_json(value));
@@ -1743,6 +1755,59 @@ mod tests {
             // A hand-built walk has no holes by construction.
             missing: Some(0),
         }
+    }
+
+    #[test]
+    fn durable_invocation_aliases_keep_every_u64_bit_before_json_parsing() {
+        let id = cli::operation_audit::ID_BASE + 1;
+        let mut record = rec(1, telemetry::Level::Info, &[]);
+        record.run = id;
+        record
+            .fields
+            .push(("attempt".to_owned(), telemetry::OwnedValue::Uint(id)));
+        let json = json_of(
+            &walk(vec![record.clone()]),
+            &asked("limit=10"),
+            None,
+            (std::path::Path::new("/private-test"), None),
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("complete JSON");
+        let first = parsed
+            .get("records")
+            .and_then(|rows| rows.get(0))
+            .expect("record");
+        assert_eq!(
+            first.get("run_key").and_then(serde_json::Value::as_str),
+            Some(id.to_string().as_str())
+        );
+        assert_eq!(
+            first.get("run").and_then(serde_json::Value::as_u64),
+            Some(id)
+        );
+        assert_eq!(
+            first
+                .get("fields")
+                .and_then(|fields| fields.get("attempt_key"))
+                .and_then(serde_json::Value::as_str),
+            Some(id.to_string().as_str())
+        );
+
+        record.fields.push((
+            "attempt_key".to_owned(),
+            telemetry::OwnedValue::Str("41".to_owned()),
+        ));
+        let json = json_of(
+            &walk(vec![record]),
+            &asked("limit=10"),
+            None,
+            (std::path::Path::new("/private-test"), None),
+        );
+        assert_eq!(
+            json.matches("\"attempt_key\"").count(),
+            1,
+            "the supplied contradictory alias is not overwritten or duplicated"
+        );
+        assert!(json.contains("\"attempt_key\":\"41\""));
     }
 
     /// **THE JSON IS WELL-FORMED, NOT MERELY CONTAINING THE RIGHT WORDS.**

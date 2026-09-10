@@ -272,6 +272,24 @@ impl Patterns {
         self.depth
     }
 
+    /// Pattern predicates whose complete same-session lookback is present.
+    pub(crate) fn known(&self) -> ConditionMask {
+        let mut known = ConditionMask::ZERO;
+        for position in positions() {
+            let required = match position {
+                153 | 154 | 171..=175 | 204 | 205 | 224..=227 => 1,
+                155..=162 | 169 | 170 | 202 | 203 | 206..=212 | 228 | 229 => 2,
+                163..=168 | 198 | 199 | 213..=215 | 217 | 221 | 230..=234 => 3,
+                200 | 201 | 220 => 4,
+                _ => 5,
+            };
+            if self.depth >= required {
+                known = known.with_bit(u32::from(position));
+            }
+        }
+        known
+    }
+
     /// Candle `n` back from the newest. `0` is the newest.
     ///
     /// The newest bar is always the LAST slot — [`Self::step`] shifts the ring
@@ -1600,20 +1618,14 @@ mod tests {
     fn extreme_but_representable_prices_do_not_overflow() {
         let mut p = Patterns::default();
         let wide = i64::MAX / 4;
-        // OPEN IS `1` AND WAS `0`, and the ONE is deliberate rather than lazy.
-        // `Candle::check_evaluable` now refuses a zero price, so this bar had to
-        // move off zero — but the BODY is what classifies it, and the assertion
-        // below names the answer: at these extremes the first bar is a spinning
-        // top. An open at `-wide / 2` was tried first and doubled the body
-        // against the same range, which stopped it being one and made this test
-        // fail for a reason it is not about. `1` is the smallest move off zero
-        // and leaves `|open - close|` where it was.
-        //
-        // The range this test actually exercises, `wide` to `-wide`, is
-        // unchanged, and so is the cross-multiplication it is checking for
-        // overflow.
-        let first = ok(&mut p, &at(0, 1, wide, -wide, wide / 2));
-        let second = ok(&mut p, &at(1, wide / 2, wide, -wide, -wide / 2));
+        // Translate the original signed-price shape upward by wide+1. Every
+        // wick, range and body remains identical, but all prices are positive.
+        let shift = wide + 1;
+        let first = ok(&mut p, &at(0, shift + 1, shift + wide, 1, shift + wide / 2));
+        let second = ok(
+            &mut p,
+            &at(1, shift + wide / 2, shift + wide, 1, shift - wide / 2),
+        );
         let after = p.bits();
 
         // The three results used to be `let _ =`, which asserted nothing. An audit was
@@ -2638,6 +2650,54 @@ mod exemplars {
                 "position {index} has no exemplar, so nothing proves it can fire",
             );
         }
+    }
+
+    #[test]
+    fn every_named_exemplar_survives_price_translation_and_session_reset() {
+        let mut checked = 0;
+        for case in CASES {
+            let original = fold(case.bars);
+            for shift in [10_000, i64::MAX / 2] {
+                let shifted: Vec<_> = case
+                    .bars
+                    .iter()
+                    .map(|&(open, high, low, close)| {
+                        (open + shift, high + shift, low + shift, close + shift)
+                    })
+                    .collect();
+                assert_eq!(
+                    fold(&shifted),
+                    original,
+                    "{} changed under a positive price translation",
+                    case.name
+                );
+            }
+            let mut detector = Patterns::default();
+            for minute in 0..5 {
+                detector
+                    .step(&at(minute, (100, 110, 90, 105)))
+                    .expect("unrelated prior session");
+            }
+            assert_eq!(
+                detector.known().popcount(),
+                62,
+                "five bars certify all pattern lookbacks"
+            );
+            let mut last = ConditionMask::ZERO;
+            for (minute, ohlc) in (0_i64..).zip(case.bars) {
+                let mut candle = at(minute, *ohlc);
+                candle.ts_micros += 86_400_000_000;
+                last = detector.step(&candle).expect("next-session exemplar");
+                assert_eq!(last.union(&detector.known()), detector.known());
+            }
+            assert_eq!(
+                last, original,
+                "{} borrowed an unrelated previous session",
+                case.name
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 62);
     }
 
     /// A long-legged doji whose body sits away from the middle is not a rickshaw

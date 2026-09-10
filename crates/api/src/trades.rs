@@ -30,11 +30,11 @@
 //!
 //! After its indexes exist, one hash probe finds the run's block and reading it
 //! is linear in the selected rows, which are the answer itself. This HTTP path
-//! reads/indexes the ledger and receipts once to obtain one canonical commit
-//! snapshot, then opens afresh and indexes all trade rows before reconciling
-//! that exact receipt's count and direction. Request setup is therefore
-//! O(total trades + total runs + total receipts), not O(1); only each in-memory
-//! identity probe is O(1). D-0404 and limits §98 name that bound rather than
+//! refreshes cached ledger and receipt indexes to obtain one canonical commit
+//! snapshot, then refreshes its cached child index before reconciling
+//! that exact receipt's count and direction. Cold setup is O(history); warm
+//! refresh is O(new records), plus O(selected rows). Only each in-memory
+//! identity probe is O(1). D-0404 and limits §98 name the cold bound rather than
 //! turning local lookup shape into a latency claim. The HTTP boundary makes
 //! those linear terms finite: each indexed file is at most 64 MiB, one verified
 //! result at most 4,096 rows, one response page at most 256 rows and encoded
@@ -123,11 +123,7 @@ fn respond(
     // after `open_read` would let metadata from one instant label a block index
     // built at another; a commit that races this request is either wholly in
     // this snapshot or wholly left for the next request.
-    let receipt = match cli::result_set::committed_receipt_bounded(
-        &root,
-        &identity,
-        crate::detail::MAX_SCAN_BYTES,
-    ) {
+    let receipt = match crate::detail::committed_receipt(&root, &identity) {
         Ok(receipt) => receipt,
         Err(why) => return refuse(json, &why),
     };
@@ -157,7 +153,7 @@ fn respond(
     // verified every seal on every request. `detail::TRADES` holds one handle
     // for the process and `refresh` absorbs only what was appended since --
     // see `detail::Cached` for why the receipt-then-child guarantee survives.
-    let rows = match crate::detail::TRADES.with(
+    let rows = match crate::detail::TRADES.with_verified(
         &root,
         || cli::trades::Trades::open_read_bounded(&root, crate::detail::MAX_SCAN_BYTES),
         cli::trades::Trades::refresh,
@@ -710,12 +706,12 @@ mod tests {
             .and_then(|(_, after)| after.split_once("fn append_periods(").map(|(body, _)| body))
             .expect("respond body");
         assert_eq!(
-            respond.matches("committed_receipt_bounded(").count(),
+            respond.matches("crate::detail::committed_receipt(").count(),
             1,
             "one request owns one canonical receipt snapshot"
         );
         let receipt = respond
-            .find("committed_receipt_bounded(")
+            .find("crate::detail::committed_receipt(")
             .expect("canonical receipt read");
         let child = respond
             .find("Trades::open_read_bounded")

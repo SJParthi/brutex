@@ -9,17 +9,17 @@
 //! | Vendor | Segment | Columns | Header | Date |
 //! |---|---|---|---|---|
 //! | `TrueData` | index | **5** | none | `YYYYMMDD` |
-//! | `TrueData` | futures | **9** | none | `YYYYMMDD` |
+//! | `TrueData` | plain F&O | **5** | none | `YYYYMMDD` |
+//! | `TrueData` | futures with bid/ask | **9** | none | `YYYYMMDD` |
 //! | GDFL | options, futures | **10** | present | **`DD/MM/YYYY`** |
 //!
 //! Two things in that table are the whole reason this module exists.
 //!
-//! **The column count varies by segment inside one vendor.** `TrueData` emits
-//! five columns for an index and nine for a future, in the same archive on the
-//! same day. An index has no volume and no open interest, so those fields are
-//! *structurally absent* rather than zero. A single per-vendor layout would
-//! mis-parse one of the two, and the failure is silent: a price column read as
-//! a volume yields a plausible number.
+//! **The layout is selected explicitly by segment and product.** `TrueData`
+//! plain F&O and index rows both have five fields; the bid/ask product has
+//! nine. F&O volume and open interest remain real counts even when the row
+//! has no bid/ask fields. Field count validates the selected layout and never
+//! selects a different product on a caller's behalf.
 //!
 //! **GDFL dates are `DD/MM/YYYY`.** `01/07/2025` is 1 July, not 7 January.
 //! Reading it the other way shifts every bar by months and produces a file that
@@ -69,6 +69,12 @@ pub enum Columns {
     /// GDFL's layout for both options and futures. `LTQ` is `0` on most rows:
     /// those are **quote** updates, not trades.
     Gdfl,
+    /// Plain `TrueData` F&O: `date, time, price, volume, open_interest`.
+    /// Five fields, no header, no bid/ask columns. The observed row and vendor
+    /// confirmation are recorded beside `vendor::TRUEDATA_FNO`:
+    /// `20221003,09:15:01,0.95,1,518600`.
+    /// Selected explicitly; [`Self::TrueDataFutures`] remains nine-field only.
+    TrueDataFno,
 }
 
 impl Columns {
@@ -76,7 +82,7 @@ impl Columns {
     #[must_use]
     pub const fn count(self) -> usize {
         match self {
-            Self::TrueDataIndex => 5,
+            Self::TrueDataIndex | Self::TrueDataFno => 5,
             Self::TrueDataFutures => 9,
             Self::Gdfl => 10,
         }
@@ -92,7 +98,9 @@ impl Columns {
     #[must_use]
     pub const fn date_format(self) -> DateFormat {
         match self {
-            Self::TrueDataIndex | Self::TrueDataFutures => DateFormat::CompactYmd,
+            Self::TrueDataIndex | Self::TrueDataFutures | Self::TrueDataFno => {
+                DateFormat::CompactYmd
+            }
             Self::Gdfl => DateFormat::SlashedDmy,
         }
     }
@@ -108,7 +116,7 @@ impl Columns {
     /// `i64::MIN`.
     const fn offsets(self) -> Offsets {
         match self {
-            Self::TrueDataIndex | Self::TrueDataFutures => Offsets {
+            Self::TrueDataIndex | Self::TrueDataFutures | Self::TrueDataFno => Offsets {
                 date: 0,
                 time: 1,
                 price: 2,
@@ -209,8 +217,8 @@ impl core::fmt::Display for CsvError {
             Self::FieldCount { line, got, want } => write!(
                 f,
                 "line {line}: {got} fields, expected {want}. The column layout \
-                 is declared per (vendor, segment) because one vendor emits \
-                 five for an index and nine for a future."
+                 must match the declared vendor, segment and product; plain \
+                 TrueData F&O has five fields and its bid/ask product has nine."
             ),
             Self::DateMalformed {
                 line,
@@ -429,10 +437,9 @@ struct Tally {
 ///
 /// The three layouts this module knows are five-without-header,
 /// nine-without-header and ten-with-header, so those two numbers name which
-/// one was applied. A `TrueData` futures file decoded under the index layout
-/// is the failure the module doc opens with — a price column read as a volume
-/// yields a plausible number — and it is now visible on the line rather than
-/// only in the bars weeks later.
+/// physical shape was applied. Five fields alone do not identify a segment:
+/// index and plain F&O share that physical shape. The caller supplies the
+/// segment and product; the decoder does not infer them from row values.
 fn note_decoded(columns: Columns, tally: Tally, rows: usize) {
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::debug("pull.csv", "file decoded")
@@ -765,6 +772,80 @@ fn decode_rows(body: &str, columns: Columns, tally: &mut Tally) -> Result<Vec<Ra
               keep panics out of the crate rather than out of its tests"
 )]
 mod tests {
+    #[test]
+    fn plain_fno_reads_price_volume_and_open_interest_without_bidask_fields() {
+        let columns = Columns::TrueDataFno;
+        assert_eq!(columns.count(), 5);
+        assert!(!columns.has_header());
+        assert_eq!(columns.date_format(), DateFormat::CompactYmd);
+        assert_ne!(columns, Columns::TrueDataIndex);
+        let rows = decode("20221003,09:15:01,0.95,1,518600\n", columns).unwrap();
+        let day = crate::session::Day::new(2022, 10, 3).unwrap();
+        assert_eq!(
+            rows,
+            vec![RawRow {
+                timestamp: i64::from(day.days_from_epoch()) * 86_400
+                    - crate::session::IST_OFFSET_SECS
+                    + 9 * 3600
+                    + 15 * 60
+                    + 1,
+                open: 95,
+                high: 95,
+                low: 95,
+                close: 95,
+                volume: 1,
+                open_interest: Some(518_600),
+            }]
+        );
+        let zero = decode("20221003,09:15:01,0.95,0,0\n", columns).unwrap();
+        assert_eq!(zero[0].volume, 0);
+        assert_eq!(zero[0].open_interest, Some(0));
+    }
+
+    #[test]
+    fn plain_fno_and_bidask_require_their_exact_declared_field_counts() {
+        let five = "20221003,09:15:01,0.95,1,518600\n";
+        let nine = "20221003,09:15:01,0.95,1,518600,0.90,2,1.00,3\n";
+        assert_eq!(Columns::TrueDataFutures.count(), 9);
+        assert!(decode(nine, Columns::TrueDataFutures).is_ok());
+        for (body, columns, got, want) in [
+            (five, Columns::TrueDataFutures, 5, 9),
+            (nine, Columns::TrueDataFno, 9, 5),
+            ("20221003,09:15:01,0.95,1\n", Columns::TrueDataFno, 4, 5),
+            (
+                "20221003,09:15:01,0.95,1,518600,\n",
+                Columns::TrueDataFno,
+                6,
+                5,
+            ),
+        ] {
+            assert_eq!(
+                decode(body, columns),
+                Err(CsvError::FieldCount { line: 1, got, want })
+            );
+        }
+        assert_eq!(
+            decode(&format!("{five}{nine}"), Columns::TrueDataFno),
+            Err(CsvError::FieldCount {
+                line: 2,
+                got: 9,
+                want: 5
+            })
+        );
+    }
+
+    #[test]
+    fn a_malformed_plain_fno_row_refuses_the_whole_file_at_its_line() {
+        let body = "20221003,09:15:01,0.95,1,518600\n20221003,09:15:02,not-a-price,1,518600\n";
+        assert_eq!(
+            decode(body, Columns::TrueDataFno),
+            Err(CsvError::PriceMalformed {
+                line: 2,
+                got: "not-a-price".to_owned(),
+            })
+        );
+    }
+
     use super::*;
 
     /// The same date, in each of the four renderings a descriptor can declare.
@@ -1121,7 +1202,7 @@ mod tests {
         let dmy = rendered(2022, 10, 3, DateFormat::SlashedDmy);
         match columns {
             // date, time, price, volume, open_interest.
-            Columns::TrueDataIndex => (
+            Columns::TrueDataIndex | Columns::TrueDataFno => (
                 format!("{ymd},09:15:01,38445.65,{volume},{open_interest}\n"),
                 1,
             ),
@@ -1159,6 +1240,7 @@ mod tests {
         for columns in [
             Columns::TrueDataIndex,
             Columns::TrueDataFutures,
+            Columns::TrueDataFno,
             Columns::Gdfl,
         ] {
             // THE FIXTURE FIRST, in each layout. If this did not decode, what

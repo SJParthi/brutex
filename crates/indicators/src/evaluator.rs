@@ -672,6 +672,23 @@ impl Evaluator {
     /// each re-deriving the same refusal is seven chances to disagree about what a
     /// bar is, and a partially-evaluated bar is worse than a refused one.
     pub fn step(&mut self, bar: &Candle) -> Result<ConditionMask, Corrupt> {
+        // Truth-only callers do not consume the availability projection.
+        // Keep the same transactional fold and avoid computing a discarded
+        // mask; Column and Boolean callers still use the full step_known path.
+        let (next, mask) = self.stepped(bar)?;
+        *self = next;
+        Ok(mask)
+    }
+
+    /// Evaluate one bar and certify the conditions with a sound Boolean answer.
+    ///
+    /// Every emitted truth is known. Additional false answers are certified only
+    /// for families whose inputs were available at the actual emission boundary.
+    /// Uncertified conditions remain unknown, never implicitly false.
+    ///
+    /// # Errors
+    /// The same refusals as [`Self::step`], with no state change on refusal.
+    pub fn step_known(&mut self, bar: &Candle) -> Result<(ConditionMask, ConditionMask), Corrupt> {
         // COMMIT ON SUCCESS, and the `?` is what enforces it.
         //
         // `stepped` takes `self` BY VALUE and hands back a new evaluator beside the
@@ -700,8 +717,67 @@ impl Evaluator {
         // bytes by the const assertion above -- a 1,664-byte memcpy per bar against a
         // fold that already costs ~320 ns.
         let (next, mask) = self.stepped(bar)?;
+        let known = self.known_after(&next, mask, bar);
         *self = next;
-        Ok(mask)
+        Ok((mask, known))
+    }
+
+    fn known_after(&self, next: &Self, truth: ConditionMask, bar: &Candle) -> ConditionMask {
+        let mut known = truth.union(&next.patterns.known());
+        // The four clock predicates need only this accepted bar's timestamp,
+        // not a prior bar or an anchor. Outside their declared windows all four
+        // are false; that is distinct from an unavailable market reference.
+        for position in [30, 31, 44, 45, 46, 47, 365, 366, 367, 368, 369] {
+            known = known.with_bit(position);
+        }
+        if self.day == next.day && self.seeded {
+            known = known.with_bit(276).with_bit(277);
+        }
+        if next.trend.structure_in_force().is_some() {
+            known = known.with_bit(278).with_bit(279);
+        }
+        known = known.union(&self.trend.known(self.widths.fib));
+        if let Some(levels) = next.yesterday.as_ref() {
+            known = known.union(&crate::daily::known(levels, self.widths.pivot));
+            known = known.union(&crate::fib::prev_day_known(levels, self.widths.fib));
+        }
+        known = known.union(&next.prev5.known(self.widths.fib));
+        known = known.union(&next.vwap.known(self.widths.fib));
+        known = known.union(&next.orb.known(self.widths.fib));
+        known = known.union(&self.session.known_after(
+            &next.session,
+            bar,
+            next.previous,
+            self.widths.fib,
+        ));
+        if self.day == next.day {
+            known = known.union(&self.curday.known(self.widths.fib));
+            known = known.union(&self.gap.known(self.widths.fib));
+        }
+        known = self.crossings_known(next, known);
+        // A cold, absent or overflowing reference still cannot satisfy NOT.
+        known
+    }
+
+    /// Crossing absence is decidable only against a remembered same-session
+    /// side and a currently usable two-sided reference. A known touch or band
+    /// interior is a non-event; a missing level is not a non-event. Read the
+    /// old memory so this bar cannot supply its own previous side.
+    fn crossings_known(&self, next: &Self, mut known: ConditionMask) -> ConditionMask {
+        if self.day != next.day {
+            return known;
+        }
+        for (level, prior) in vocab::table::CROSSINGS.iter().zip(self.last_side) {
+            if prior != Side::Unknown
+                && known.get(u32::from(level.above))
+                && known.get(u32::from(level.below))
+            {
+                for position in [level.up, level.down, level.first, level.second, level.later] {
+                    known = known.with_bit(u32::from(position));
+                }
+            }
+        }
+        known
     }
 
     /// [`Self::step`]'s whole body, on a value that is thrown away if it refuses.
@@ -751,29 +827,13 @@ impl Evaluator {
         // record refused before is refused for the reason it always was, and
         // this catches only what previously passed all four.
         //
-        // # Why ZERO and not `<= 0`, which is the weaker test and the honest one
-        //
-        // `<= 0` is the guard this wants to be, and it costs a real branch. A
-        // session's span cannot overflow `i64` once every price is positive —
-        // `high <= i64::MAX` and `low >= 1` bound it at `i64::MAX - 1` — so
-        // `close_the_books`' span-overflow handling becomes unreachable through
-        // `step`, along with the three tests that reach it by opening a session
-        // at `-i64::MAX/2`. Trading a defensive branch for a wider guard is not
-        // obviously the better deal, and CLAUDE.md §9's coverage floor makes it
-        // a cost rather than a preference.
-        //
-        // Zero is the case that is REACHABLE THROUGH THE STORE and the case that
-        // was measured. `ohlc_is_sane` refuses a negative bar at the write
-        // boundary (D-0143) and accepts an all-zero one; its own doc says so.
-        //
-        // **The residual, stated rather than papered over:** an ordered
-        // all-negative record handed to this crate DIRECTLY — never through a
-        // store file — still passes every clause here. It is refused at the
-        // write boundary, which per `Corrupt::RangeOverflows`' own reasoning is
-        // not a guarantee this crate may assume. Closing it needs the span
-        // arithmetic to stop depending on negatives being representable, and
-        // that is a change to `close_the_books`, not to this guard.
-        if bar.open == 0 || bar.high == 0 || bar.low == 0 || bar.close == 0 {
+        // Direct library callers cannot inherit the store's positive-price
+        // guarantee. Keep their refusal aligned with Candle::check_evaluable;
+        // an unrepresentable derived pivot ladder remains independently tested
+        // with positive extreme prices, without admitting corrupt negative bars.
+        // The earlier containment checks make low the minimum of all four
+        // prices. This one sign check is exactly equivalent to checking each.
+        if bar.low <= 0 {
             return Err(Corrupt::PriceNotPositive);
         }
         // Ordering, and it was also missing. The rollover below triggers on
@@ -1399,6 +1459,55 @@ mod tests {
         Evaluator::new(widths(), Availability::Present, Thresholds::CLASSICAL)
     }
 
+    /// Exhaust all fixed crossing owners and availability prerequisites,
+    /// including a previously emitted truth that must never lose its known bit.
+    #[test]
+    fn crossing_known_requires_both_current_sides_and_a_prior_side_in_the_same_session() {
+        for level in vocab::table::CROSSINGS {
+            let owned = [level.up, level.down, level.first, level.second, level.later];
+            for prior in [Side::Unknown, Side::Above, Side::Below] {
+                for same_day in [false, true] {
+                    for above in [false, true] {
+                        for below in [false, true] {
+                            for emitted in [false, true] {
+                                let mut before = fresh();
+                                before.day = 30_000;
+                                before.last_side.fill(prior);
+                                let mut after = before;
+                                after.day = if same_day { 30_000 } else { 30_001 };
+                                let mut input = ConditionMask::default().with_bit(30);
+                                if above {
+                                    input = input.with_bit(u32::from(level.above));
+                                }
+                                if below {
+                                    input = input.with_bit(u32::from(level.below));
+                                }
+                                if emitted {
+                                    input = input.with_bit(u32::from(level.up));
+                                }
+                                let output = before.crossings_known(&after, input);
+                                let available =
+                                    same_day && prior != Side::Unknown && above && below;
+                                let expected = if available {
+                                    owned
+                                        .into_iter()
+                                        .fold(input, |mask, bit| mask.with_bit(u32::from(bit)))
+                                } else {
+                                    input
+                                };
+                                assert_eq!(
+                                    output, expected,
+                                    "level{} prior{prior:?} same_day{same_day} above{above} below{below} emitted{emitted}",
+                                    level.above
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// The durable evaluator identity is a complete record, not a hand-picked
     /// subset of the choices that happened to differ in one fixture.
     #[test]
@@ -1543,6 +1652,37 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn truth_only_fold_can_handoff_to_known_without_state_or_refusal_drift() {
+        let mut truth_only = fresh_with_volume();
+        let mut full = truth_only;
+        for day in 30_000..30_008 {
+            for (index, mut bar) in session(day, 375).into_iter().enumerate() {
+                bar.volume = 100;
+                if index % 41 == 0 {
+                    let mut corrupt = bar;
+                    corrupt.low = corrupt.high + 1;
+                    assert_eq!(truth_only.step(&corrupt), Err(Corrupt::HighBelowLow));
+                    assert_eq!(full.step_known(&corrupt), Err(Corrupt::HighBelowLow));
+                }
+                let expected = full.step_known(&bar).expect("valid finite volume walk");
+                assert_eq!(truth_only.step(&bar), Ok(expected.0));
+                if index % 31 == 0 {
+                    let mut resumed = truth_only;
+                    let mut uninterrupted = full;
+                    let mut next = bar;
+                    next.ts_micros += MINUTE_MICROS;
+                    assert_eq!(
+                        resumed.step_known(&next),
+                        uninterrupted.step_known(&next),
+                        "switching APIs cannot lose future availability"
+                    );
+                }
+            }
+        }
+        assert!(truth_only.warmed_up() && full.warmed_up());
     }
 
     /// The evaluator's reach is exactly the union of its modules'.
@@ -2260,20 +2400,11 @@ mod tests {
         );
     }
 
-    /// A completed session whose own span leaves `i64` leaves `yesterday` **absent**
-    /// rather than half-updated.
-    ///
-    /// Every bar is checked for `high - low` fitting `i64`, and that is not the same
-    /// question as the **session's** span fitting: the running high and the running low
-    /// come from two different bars, so two zero-range bars at opposite ends of the
-    /// type make a session wider than the type. `DailyLevels` refuses such a session,
-    /// and `close_the_books` then keeps the answer it had rather than writing half of a
-    /// new one — stale-and-consistent beats fresh-and-partial. Both halves are
-    /// asserted: `Prev5` does count the session, because it keeps only a pair of
-    /// extremes, and the pivot ladder is not installed.
+    /// A completed positive-price session whose derived pivot ladder leaves
+    /// `i64` leaves `yesterday` absent. The session still enters Prev5's extreme
+    /// ring; a missing pivot ladder cannot erase a completed observation.
     #[test]
     fn a_session_wider_than_the_type_leaves_yesterday_absent() {
-        const HALF: i64 = i64::MAX / 2;
         let day = 21_400_i64;
         let flat = |ts: i64, price: i64| Candle {
             ts_micros: ts,
@@ -2288,13 +2419,12 @@ mod tests {
 
         let mut e = fresh();
         let _ = e
-            .step(&flat(session_open(day), -HALF - 2))
-            .expect("a zero-range bar at the bottom of the type is a real bar");
+            .step(&flat(session_open(day), 1))
+            .expect("a positive one-paisa candle is evaluable");
         let _ = e
-            .step(&flat(session_open(day) + MINUTE_MICROS, HALF + 2))
-            .expect("a zero-range bar at the top of the type is a real bar");
-        // The session now spans (HALF + 2) - (-HALF - 2), which is i64::MAX + 3, while
-        // each of its two bars has a range of zero.
+            .step(&flat(session_open(day) + MINUTE_MICROS, i64::MAX))
+            .expect("a positive maximum-price candle is evaluable");
+        // The span fits, while extrapolated resistance/support rungs do not.
         let mask = e
             .step(&flat(session_open(day + 1), 2_500_000))
             .expect("a sane bar the next day");
@@ -2306,7 +2436,7 @@ mod tests {
         );
         assert!(
             !e.has_yesterday(),
-            "a pivot ladder was built from a span that does not fit i64"
+            "a pivot ladder was built despite derived levels leaving i64"
         );
         for p in crate::daily::positions() {
             assert!(
@@ -2330,9 +2460,9 @@ mod tests {
     /// yesterday.
     ///
     /// Day one is ordinary, so a real ladder is installed and the premise below is not
-    /// vacuous. Day two carries two zero-range bars at opposite ends of the type: each is
-    /// legal on its own — `Candle::check` bounds `high - low` WITHIN a bar — while the
-    /// session's extremes come from two different bars and their span does not fit `i64`.
+    /// vacuous. Day two carries two positive zero-range bars at 1 and `i64::MAX`.
+    /// Each is evaluable; the completed session's derived pivot extensions do
+    /// not fit `i64`, so its daily ladder must be discarded.
     ///
     /// # What each assertion is for
     ///
@@ -2342,7 +2472,6 @@ mod tests {
     /// asserted; it is written by the same unconditional statement as the push.
     #[test]
     fn an_unusable_session_clears_the_pivot_anchor_instead_of_leaving_it_stale() {
-        const HALF: i64 = i64::MAX / 2;
         let session_open = |d: i64| d * DAY_MICROS + IST_OPEN_UTC_MICROS;
         let flat = |ts: i64, price: i64| Candle {
             ts_micros: ts,
@@ -2376,11 +2505,11 @@ mod tests {
 
         // Day two is now made unusable, after it has already begun.
         let _ = e
-            .step(&flat(session_open(31_001) + MINUTE_MICROS, -HALF - 2))
-            .expect("a zero-range bar at the bottom of the type is a real bar");
+            .step(&flat(session_open(31_001) + MINUTE_MICROS, 1))
+            .expect("a positive zero-range bar at one paisa is evaluable");
         let _ = e
-            .step(&flat(session_open(31_001) + 2 * MINUTE_MICROS, HALF + 2))
-            .expect("a zero-range bar at the top of the type is a real bar");
+            .step(&flat(session_open(31_001) + 2 * MINUTE_MICROS, i64::MAX))
+            .expect("a positive zero-range bar at the top of the type is evaluable");
 
         // Day three's first bar closes day two's books.
         let mask = e
@@ -3379,9 +3508,8 @@ mod tests {
     #[test]
     fn warmed_up_is_false_when_the_pivot_ladder_is_absent_despite_five_sessions() {
         let mut e = Evaluator::new(widths(), Availability::Absent, Thresholds::CLASSICAL);
-        // A session whose own span leaves i64: two zero-range bars at opposite ends. Each bar
-        // is legal — `Candle::check` bounds `high - low` WITHIN a bar — but the session's
-        // extremes come from two different bars, so `DailyLevels` refuses it.
+        // Two positive extreme bars make the derived pivot ladder leave i64,
+        // while each candle and the session's price span remain representable.
         // 2 extreme bars to make the session unusable, then 40 ordinary ones so the 200-period
         // EMA warms. Both halves are load-bearing: WITHOUT the ordinary bars this test passed
         // for the wrong reason — 10 candles leaves the trend unwarmed, so `warmed_up` returned
@@ -3390,8 +3518,8 @@ mod tests {
         for day in 27_000..=27_005 {
             for m in 0..42_i64 {
                 let price = match m {
-                    0 => i64::MIN / 2,
-                    1 => i64::MAX / 2,
+                    0 => 1,
+                    1 => i64::MAX,
                     _ => 2_500_000 + (m % 17) * 400,
                 };
                 let bar = Candle {

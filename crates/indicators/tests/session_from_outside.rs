@@ -23,11 +23,11 @@
               standard library and leaves no such region behind."
 )]
 
-use indicators::Candle;
 use indicators::evaluator::{Evaluator, Widths};
 use indicators::pattern::Thresholds;
 use indicators::session::{DayWindows, PreviousSession, SessionState, ShapeLimits};
 use indicators::vwap::Availability;
+use indicators::{Candle, Corrupt};
 use vocab::{ConditionMask, Tolerance};
 
 const DAY_MICROS: i64 = 24 * 60 * 60 * 1_000_000;
@@ -266,30 +266,42 @@ fn the_gap_midpoint_band_is_the_pinned_width_of_the_gap() {
 /// A gap wider than `i64` drops the band rather than wrapping.
 ///
 /// The gap is taken in `i128`, because `today_open - prev_close` for two `i64` prices
-/// need not fit an `i64`, and `set_near` needs it back as an `i64` base. Yesterday
-/// closing at the top of the type and today opening at the bottom is exactly that
-/// state: the positions decided before the width check still stand, and the band is
-/// absent. Wrapping would hand `vocab` a band computed from a negative width.
+/// need not fit an `i64`, and `set_near` needs it back as an `i64` base. The
+/// explicit low-level previous reference is signed; today's evaluated bar is
+/// positive. Negative current candles must refuse before touching state.
 #[test]
 fn a_gap_wider_than_the_type_drops_the_band() {
     let prev = PreviousSession {
-        high: i64::MAX,
-        low: 0,
-        close: i64::MAX,
+        high: 0,
+        low: i64::MIN,
+        close: i64::MIN,
     };
     let mut state = SessionState::default();
+    assert_eq!(
+        state.step(
+            &at(0, i64::MIN, i64::MIN, i64::MIN, i64::MIN),
+            Some(prev),
+            tol()
+        ),
+        Err(Corrupt::PriceNotPositive)
+    );
+    assert_eq!(
+        state.day_open(),
+        None,
+        "the refused negative candle must not seed the session"
+    );
     let mask = step(
         &mut state,
-        &at(0, i64::MIN, i64::MIN, i64::MIN, i64::MIN),
+        &at(0, i64::MAX, i64::MAX, i64::MAX, i64::MAX),
         Some(prev),
     );
     assert!(
-        mask.get(49),
-        "an open below yesterday's close is a gap down at any width"
+        mask.get(48),
+        "an open above the previous reference close is a gap up at any width"
     );
     assert!(
-        mask.get(67),
-        "the close sits below that gap's midpoint and was not reported"
+        mask.get(66),
+        "the close sits above that gap's midpoint and was not reported"
     );
     assert!(
         !mask.get(68),
@@ -297,29 +309,22 @@ fn a_gap_wider_than_the_type_drops_the_band() {
     );
 }
 
-/// A completed session wider than `i64` leaves the pivot ladder **absent** rather than
-/// half-built, and an ordinary session still produces one.
-///
-/// Each bar is checked for `high - low` fitting `i64`; the **session's** span is a
-/// different question, because the running high and the running low come from two
-/// different bars. Two zero-range bars at opposite ends of the type make a session
-/// wider than the type, `DailyLevels` refuses it, and the evaluator keeps the answer it
-/// had — stale-and-consistent over fresh-and-partial. The contrasting half matters as
-/// much: without it this would pass on an evaluator that never installs yesterday at
-/// all.
+/// A completed positive-price session whose derived pivot extensions leave
+/// `i64` leaves the pivot ladder absent; an ordinary session still produces one.
+/// The legacy test name predates the positive-price admission rule. Its original
+/// purpose remains: a completed but unusable ladder cannot be half-installed.
 #[test]
 fn a_completed_session_wider_than_the_type_leaves_yesterday_absent() {
-    const HALF: i64 = i64::MAX / 2;
     let open = DAY * DAY_MICROS + IST_OPEN_UTC_MICROS;
 
     let mut wide = Evaluator::new(widths(), Availability::Absent, Thresholds::CLASSICAL);
     let _ = wide
-        .step(&flat(open, -HALF - 2))
-        .expect("a zero-range bar at the bottom of the type is a real bar");
+        .step(&flat(open, 1))
+        .expect("a positive one-paisa candle is evaluable");
     let _ = wide
-        .step(&flat(open + MINUTE_MICROS, HALF + 2))
-        .expect("a zero-range bar at the top of the type is a real bar");
-    // The session now spans i64::MAX + 3, while each of its two bars spans zero.
+        .step(&flat(open + MINUTE_MICROS, i64::MAX))
+        .expect("a positive maximum-price candle is evaluable");
+    // The session span fits, while derived extensions leave the price type.
     let _ = wide
         .step(&flat(open + DAY_MICROS, 2_500_000))
         .expect("a sane bar the next day");
@@ -330,7 +335,7 @@ fn a_completed_session_wider_than_the_type_leaves_yesterday_absent() {
     );
     assert!(
         !wide.has_yesterday(),
-        "a pivot ladder was built from a span that does not fit i64"
+        "a pivot ladder was built despite derived levels leaving i64"
     );
 
     let mut ordinary = Evaluator::new(widths(), Availability::Absent, Thresholds::CLASSICAL);

@@ -4929,7 +4929,7 @@ fn pbo_from_counts(
     Ok(value)
 }
 
-fn cscv_placement(
+pub(crate) fn cscv_placement(
     train_scores: &[i64],
     test_scores: &[i64],
 ) -> Result<(bool, bool), PopulationStatisticsV2Refusal> {
@@ -4979,7 +4979,7 @@ fn cscv_placement(
     Ok((doubled_rank > doubled_last, true))
 }
 
-fn wilson_lower_bits(wins: u64, trades: u64) -> u64 {
+pub(crate) fn wilson_lower_bits(wins: u64, trades: u64) -> u64 {
     if trades == 0 {
         return 0.0_f64.to_bits();
     }

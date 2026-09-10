@@ -543,6 +543,41 @@ pub fn bits(levels: &DailyLevels, close: i64, tolerance: Tolerance) -> Condition
     bits_with(levels, close, tolerance, CprWidth::CLASSICAL)
 }
 
+/// Availability of the exact same level plan used by [`bits`].
+pub(crate) fn known(levels: &DailyLevels, tolerance: Tolerance) -> ConditionMask {
+    let mut known = ConditionMask::ZERO;
+    for (level, relation) in plan(levels) {
+        let index = match relation {
+            Rel::Near(index) => {
+                let probe = vocab::table::set_near(
+                    known,
+                    index,
+                    tolerance,
+                    level,
+                    level,
+                    levels.band_half().saturating_mul(2),
+                );
+                if let Ok(probe) = probe {
+                    known = probe;
+                }
+                continue;
+            }
+            Rel::Above(index)
+            | Rel::Below(index)
+            | Rel::AboveBare(index)
+            | Rel::BelowBare(index)
+            | Rel::InsideCpr(index) => index,
+        };
+        known = known.with_bit(u32::from(index));
+    }
+    if levels.cpr_class(CprWidth::CLASSICAL).is_some() {
+        for index in [63, 274, 275] {
+            known = known.with_bit(index);
+        }
+    }
+    known
+}
+
 /// [`bits`], with the CPR-width cuts supplied rather than taken from the declared set.
 ///
 /// Present so a caller can record which cuts a run used. The cuts are UNVERIFIED

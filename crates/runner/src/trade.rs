@@ -16,7 +16,8 @@
 //!
 //! # The execution model, stated by the operator and enforced here
 //!
-//! 1. **Everything is intraday.** Entry from 09:15 IST, and the position is
+//! 1. **Everything is intraday.** Entry requires accepted same-day execution;
+//!    calendar admission belongs to the stored-input boundary. The position is
 //!    squared off at the fixed 15:10 IST policy deadline, long or short,
 //!    whether or not the horizon has run out. With left-labelled bars, only the
 //!    accepted unique 15:09 row can price it. Nothing is ever held overnight.
@@ -368,9 +369,9 @@ pub struct SliceFacts {
     /// The authoritative one-minute cadence for fill-sourced execution, or the
     /// measured native rung cadence for a signal-sourced compatibility walk.
     step_micros: i64,
-    /// The exact evaluator verdict captured on the column for this execution
-    /// slice. An [`Arc`] clone shares the one bitmap; it does not allocate one
-    /// per candidate.
+    /// The evaluator verdict plus exact whole-minute execution coordinates.
+    /// A valid slice shares the column's bitmap through an [`Arc`] clone. An
+    /// off-grid slice creates one stricter bitmap here, never per candidate.
     accepted: Option<std::sync::Arc<[bool]>>,
     /// Prefix count of refused bars. This is derived from (not a second copy
     /// of) `accepted` and makes "does this whole path contain a hole?" one
@@ -395,7 +396,23 @@ impl SliceFacts {
     pub fn of(bars: &[Candle], column: &Column) -> Self {
         let accepted = column
             .acceptance()
-            .filter(|verdict| verdict.len() == bars.len());
+            .filter(|verdict| verdict.len() == bars.len())
+            .map(|verdict| {
+                if bars
+                    .iter()
+                    .all(|bar| bar.ts_micros.rem_euclid(EXECUTION_MINUTE_MICROS) == 0)
+                {
+                    verdict
+                } else {
+                    verdict
+                        .iter()
+                        .zip(bars)
+                        .map(|(accepted, bar)| {
+                            *accepted && bar.ts_micros.rem_euclid(EXECUTION_MINUTE_MICROS) == 0
+                        })
+                        .collect()
+                }
+            });
         let step_micros = match column.sourced() {
             indicators::column::Sourced::Fill => EXECUTION_MINUTE_MICROS,
             indicators::column::Sourced::Signal => {
@@ -447,7 +464,8 @@ impl SliceFacts {
         self.step_micros
     }
 
-    /// Did the evaluator accept bar `index` on this exact execution slice?
+    /// Did the evaluator accept this exact row, with a whole-minute execution
+    /// timestamp? An off-grid row cannot enter, exit, or price an interior path.
     #[must_use]
     pub fn accepts(&self, index: usize) -> bool {
         self.accepted
@@ -525,7 +543,47 @@ pub fn walk_over(
     direction: Direction,
     facts: &SliceFacts,
 ) -> Trades {
-    walk_core(bars, column, mask, horizon, direction, facts.exits(), facts)
+    walk_core(
+        bars,
+        column,
+        |bits, _| bits.hits(mask),
+        horizon,
+        direction,
+        facts.exits(),
+        facts,
+    )
+}
+
+/// Price definite expression signals through the same entry, occupancy and
+/// exit state machine as the mask walk. Unknown is never a trade signal.
+///
+/// # Errors
+/// Refuses misaligned truth/availability/source columns before walking trades.
+pub fn walk_expression_over(
+    bars: &[Candle],
+    column: &Column,
+    expression: &crate::expression::Expression,
+    horizon: Horizon,
+    direction: Direction,
+    facts: &SliceFacts,
+) -> Result<Trades, String> {
+    if column.bits().len() != column.known().len() || column.bits().len() != column.sources().len()
+    {
+        return Err("expression pricing column alignment mismatch".to_owned());
+    }
+    Ok(walk_core(
+        bars,
+        column,
+        |bits, index| {
+            column.known().get(index).is_some_and(|known| {
+                expression.evaluate(*bits, *known) == crate::expression::Truth::True
+            })
+        },
+        horizon,
+        direction,
+        facts.exits(),
+        facts,
+    ))
 }
 
 /// [`walk`], over a square-off table the caller already built.
@@ -560,6 +618,9 @@ pub fn walk_over(
 /// It is kept so every existing caller compiles unchanged. **A per-candidate
 /// loop must move to [`walk_over`]**, which takes both facts and allocates
 /// nothing; [`SliceFacts`] carries the measurement and the caller list.
+/// A supplied boundary must match those exact slice facts for each entry.
+/// Missing or mismatched entries refuse the signal as `too_late` (or
+/// `while_open` if already occupied); the table is never silently substituted.
 #[must_use]
 pub fn walk_with(
     bars: &[Candle],
@@ -581,7 +642,7 @@ pub fn walk_with(
     walk_core(
         bars,
         column,
-        mask,
+        |bits, _| bits.hits(mask),
         horizon,
         direction,
         exits,
@@ -603,7 +664,7 @@ pub fn walk_with(
 fn walk_core(
     bars: &[Candle],
     column: &Column,
-    mask: &ConditionMask,
+    mut fires: impl FnMut(&ConditionMask, usize) -> bool,
     horizon: Horizon,
     direction: Direction,
     exits: &[Option<SquareOff>],
@@ -616,8 +677,8 @@ fn walk_core(
     // and a new fill is eligible only strictly after it.
     let mut open_until: Option<usize> = None;
 
-    for (bits, &signal) in column.bits().iter().zip(column.sources()) {
-        if !bits.hits(mask) {
+    for (index, (bits, &signal)) in column.bits().iter().zip(column.sources()).enumerate() {
+        if !fires(bits, index) {
             continue;
         }
         out.signals = out.signals.saturating_add(1);
@@ -738,6 +799,26 @@ fn walk_core(
             }
             continue;
         };
+        // A compatibility caller can retain a table from a different slice
+        // or clock policy. It cannot authorize a later or foreign-day exit.
+        // Compare the fixed-size fields, then check the ACTUAL supplied bars.
+        // Public `_over` callers may reuse foreign `SliceFacts`, in which case
+        // comparing two values from that same cache cannot prove the clock.
+        if !facts
+            .exits()
+            .get(entry)
+            .copied()
+            .flatten()
+            .is_some_and(|expected| forced.bar == expected.bar && forced.real == expected.real)
+            || !actual_square_off(bars, entry, forced, step_micros)
+        {
+            if blocked {
+                out.while_open = out.while_open.saturating_add(1);
+            } else {
+                out.too_late = out.too_late.saturating_add(1);
+            }
+            continue;
+        }
 
         // RULE 1b. AND THAT SESSION MUST BE THE SIGNAL'S OWN.
         //
@@ -758,9 +839,10 @@ fn walk_core(
         // This is the same defect class as the forward-return gap fixed
         // earlier: the square-off bounds the EXIT, and nothing bounded the
         // entry to the same day.
-        let same_session = bars.get(signal).zip(bars.get(entry)).is_some_and(|(s, e)| {
-            indicators::ist_day(s.ts_micros) == indicators::ist_day(e.ts_micros)
-        });
+        let same_session = bars
+            .get(signal)
+            .zip(bars.get(entry))
+            .is_some_and(|(s, e)| actual_ist_day(s.ts_micros) == actual_ist_day(e.ts_micros));
         if !same_session {
             if blocked {
                 out.while_open = out.while_open.saturating_add(1);
@@ -1170,8 +1252,52 @@ fn horizon_bar(
     let start = bars.get(entry)?.ts_micros;
     let span = i64::try_from(h).unwrap_or(i64::MAX);
     let deadline = start.saturating_add(step_micros.saturating_mul(span));
-    facts.at_timestamp(deadline)
+    facts
+        .at_timestamp(deadline)
+        .filter(|&index| bars.get(index).is_some_and(|bar| bar.ts_micros == deadline))
 }
+
+/// Cached geometry is not authority for another slice. Validate both actual
+/// interval endpoints against the shared clock using a fixed number of reads.
+/// A truncated boundary may bound an earlier horizon, but only the exact
+/// one-minute interval ending at the deadline can supply a forced fill.
+fn actual_square_off(bars: &[Candle], entry: usize, forced: SquareOff, step: i64) -> bool {
+    let Some((entry_bar, exit_bar)) = bars.get(entry).zip(bars.get(forced.bar)) else {
+        return false;
+    };
+    let start = entry_bar.ts_micros;
+    let end = exit_bar.ts_micros;
+    let day = actual_ist_day(start);
+    let Ok(deadline) = i64::try_from(
+        day * 86_400_000_000
+            + i128::from(crate::outcome::FORCED_EXIT_MINUTE) * i128::from(EXECUTION_MINUTE_MICROS)
+            - i128::from(indicators::IST_OFFSET_MICROS),
+    ) else {
+        return false;
+    };
+    step > 0
+        && forced.bar >= entry
+        && end >= start
+        && actual_ist_day(end) == day
+        && start.rem_euclid(EXECUTION_MINUTE_MICROS) == 0
+        && end.rem_euclid(EXECUTION_MINUTE_MICROS) == 0
+        && start
+            .checked_add(step)
+            .is_some_and(|close| close <= deadline)
+        && end.checked_add(step).is_some_and(|close| close <= deadline)
+        && (!forced.real
+            || (step == EXECUTION_MINUTE_MICROS
+                && end.checked_add(EXECUTION_MINUTE_MICROS) == Some(deadline)))
+}
+
+/// Wide arithmetic preserves the civil day at both signed timestamp extremes.
+fn actual_ist_day(stamp: i64) -> i128 {
+    (i128::from(stamp) + i128::from(indicators::IST_OFFSET_MICROS)).div_euclid(86_400_000_000)
+}
+
+#[cfg(test)]
+#[path = "trade_clock_tests.rs"]
+mod clock_contract_tests;
 
 /// For each bar, where a position opened on it is squared off — and whether
 /// that square-off is a fact about the session or about the file.
@@ -1240,6 +1366,42 @@ fn forced_exits_with_step(
 mod tests {
     use super::{Trades, walk};
     use crate::outcome::{FORCED_EXIT_MINUTE, Horizon, SessionBounds};
+
+    #[test]
+    fn compatibility_boundaries_cannot_change_day_or_invent_or_hide_a_real_square_off() {
+        let (bars, column) = swept();
+        let facts = super::SliceFacts::of(&bars, &column);
+        for mode in 0..3 {
+            let mut supplied = facts.exits().to_vec();
+            for entry in &mut supplied {
+                if let Some(boundary) = entry {
+                    match mode {
+                        0 => boundary.bar = boundary.bar.saturating_add(375),
+                        1 => boundary.real = !boundary.real,
+                        _ => *entry = None,
+                    }
+                }
+            }
+            for direction in [Direction::Long, Direction::Short] {
+                let refused = super::walk_with(
+                    &bars,
+                    &column,
+                    &ConditionMask::ZERO,
+                    h(1000),
+                    direction,
+                    Some(&supplied),
+                );
+                assert!(refused.signals > 0 && refused.reconciles());
+                assert_eq!(refused.too_late, refused.signals);
+                assert!(refused.trades.is_empty());
+                assert!(refused.eligible.is_empty());
+                assert!(
+                    refused.occupancy.is_empty(),
+                    "no position opens under an unverified boundary"
+                );
+            }
+        }
+    }
 
     /// THE POLICY IS FIXED 15:10 AND ONLY THE 15:09 INTERVAL CAN PRICE IT.
     /// Regular and extended fixtures contain that record; a short Muhurat

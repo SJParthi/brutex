@@ -929,6 +929,7 @@ version = "0.1.0"
 dependencies = [
  "core",
  "costs",
+ "flate2",
  "greeks",
  "hmac",
  "reqwest",

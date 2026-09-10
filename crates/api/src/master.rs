@@ -48,11 +48,9 @@ pub struct Loaded {
     /// because the constant happens to be small on today's universe. The index
     /// costs one `usize` per listing and is built once at startup.
     ///
-    /// A duplicate key keeps the FIRST listing and is counted in
-    /// [`Self::duplicate_keys`] rather than silently overwriting: two rows that
-    /// reduce to one key is a fact about the vendor's file, and picking one in
-    /// silence is how the wrong `securityId` would reach a request.
-    by_key: HashMap<InstrumentKey, usize>,
+    /// Conflicting duplicates retain every assertion in `kept` and mark the
+    /// key unresolved. Identical duplicates may share one listing.
+    by_key: HashMap<InstrumentKey, Option<usize>>,
     /// How many rows reduced to a key another row already held.
     pub duplicate_keys: usize,
     /// Rows declined, counted by reason.
@@ -100,6 +98,23 @@ pub struct Loaded {
 }
 
 impl Loaded {
+    /// Retains conflicting evidence while refusing ambiguous key lookups.
+    fn keep(&mut self, listing: Listing) {
+        match self.by_key.entry(listing.key) {
+            std::collections::hash_map::Entry::Occupied(mut slot) => {
+                self.duplicate_keys += 1;
+                if slot.get().and_then(|at| self.kept.get(at)) != Some(&listing) {
+                    slot.insert(None);
+                    self.kept.push(listing);
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(Some(self.kept.len()));
+                self.kept.push(listing);
+            }
+        }
+    }
+
     /// The listing under a key, in one probe.
     ///
     /// This is the whole point of [`Self::by_key`]. Before it existed the only
@@ -108,7 +123,11 @@ impl Loaded {
     /// `InstrumentKey` was designed to answer in one step.
     #[must_use]
     pub fn listing(&self, key: &InstrumentKey) -> Option<&Listing> {
-        self.by_key.get(key).and_then(|at| self.kept.get(*at))
+        self.by_key
+            .get(key)
+            .copied()
+            .flatten()
+            .and_then(|at| self.kept.get(at))
     }
 
     /// The vendor's own id for an instrument, in one probe.
@@ -409,18 +428,7 @@ pub fn load(path: &std::path::Path, vendor: Vendor) -> Result<Loaded, String> {
             option_side: cols.option_side.map_or("", get),
         };
         match decode_master_row(vendor, row) {
-            Ok(Decoded::Keep(l)) => {
-                // The index is built as rows arrive rather than in a second
-                // pass, so `kept` and `by_key` cannot disagree about what is
-                // present.
-                match out.by_key.entry(l.key) {
-                    std::collections::hash_map::Entry::Occupied(_) => out.duplicate_keys += 1,
-                    std::collections::hash_map::Entry::Vacant(slot) => {
-                        slot.insert(out.kept.len());
-                        out.kept.push(l);
-                    }
-                }
-            }
+            Ok(Decoded::Keep(l)) => out.keep(l),
             // The reason text belongs to the Skip variant, in the crate that
             // owns it. A `match` here would need a wildcard -- Skip is
             // `#[non_exhaustive]` -- and a wildcard silently files every
@@ -708,6 +716,60 @@ mod tests {
         assert!(got.kept[0].key.is_sweepable());
         assert_eq!(got.kept[0].isin, None, "an index has no ISIN");
         assert!(got.errors.is_empty());
+    }
+
+    #[test]
+    fn duplicate_conflicting_assertions_survive_loading_and_refuse_lookup() {
+        let header = "segment,exchange,instrument_type,groww_symbol,trading_symbol,series,isin,expiry_date,strike_price,underlying_symbol\n";
+        let first = "CASH,NSE,EQ,one,RELIANCE,EQ,INE002A01018,,,\n";
+        for (case, second) in [
+            ("id", "CASH,NSE,EQ,two,RELIANCE,EQ,INE002A01018,,,\n"),
+            ("isin", "CASH,NSE,EQ,one,RELIANCE,EQ,INE009A01021,,,\n"),
+        ] {
+            for reverse in [false, true] {
+                let body = if reverse {
+                    format!("{header}{second}{first}{first}")
+                } else {
+                    format!("{header}{first}{second}{first}")
+                };
+                let loaded = load(
+                    &tmp(&format!("duplicate-{case}-{reverse}"), &body),
+                    Vendor::Groww,
+                )
+                .expect("loads");
+                assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+                assert_eq!(loaded.duplicate_keys, 2);
+                assert!(
+                    loaded
+                        .kept
+                        .iter()
+                        .any(|l| l.isin == Isin::new("INE002A01018").ok())
+                );
+                assert!(loaded.kept.len() >= 2);
+                assert_eq!(loaded.listing(&loaded.kept[0].key), None);
+                assert_eq!(loaded.vendor_id(&loaded.kept[0].key), None);
+                let merged = crate::merge::merge(&[crate::merge::Source {
+                    vendor: Vendor::Groww,
+                    kept: loaded.kept,
+                    declined: loaded.declined,
+                }]);
+                assert_eq!(merged.assertions.len(), 2);
+                assert!(
+                    merged
+                        .by_key
+                        .values()
+                        .all(|e| e.ids[Vendor::Groww as usize].is_none())
+                );
+            }
+        }
+        let loaded = load(
+            &tmp("duplicate-identical", &format!("{header}{first}{first}")),
+            Vendor::Groww,
+        )
+        .expect("loads");
+        assert_eq!(loaded.kept.len(), 1);
+        assert_eq!(loaded.duplicate_keys, 1);
+        assert!(loaded.vendor_id(&loaded.kept[0].key).is_some());
     }
 
     #[test]

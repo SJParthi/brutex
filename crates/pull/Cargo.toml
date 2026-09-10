@@ -131,6 +131,8 @@ serde_json = { workspace = true }
 # D-0051 and D-0071.
 hmac = { workspace = true }
 sha2 = { workspace = true }
+# Dated NSE MII security masters are gzip CSVs; pure-Rust default backend.
+flate2 = { workspace = true }
 # TOTP is HMAC-SHA1 (RFC 6238 default). Declared in the workspace manifest
 # since before this crate needed it; `crates/pull/src/totp.rs` is the first
 # and only user.

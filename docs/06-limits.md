@@ -8061,3 +8061,319 @@ throughput, million-customer capacity, operator/database/dashboard publication,
 physical ENOSPC/power-loss/hot-unplug behavior, coverage, mutation or complete
 workspace gates. No universal O(1) time, space, uniqueness, deduplication,
 mapping or latency guarantee is claimed.
+
+### §171 — `cli pool` bounds the pooled drawdown; it does not compute it, and it persists no pooled row
+
+D-0509 pools one candidate's exit-grid cells across every instrument it fired
+on. Let I be the instruments on the surface, U the union of `(mask, side)`
+pairs their frontier rows name, and T the trades a cell holds.
+
+Trades, wins, the pessimistic net, gross wins and gross losses ADD across
+instruments and are exact. The worst trade and the smallest win are exact
+minima. The drawdown is NOT pooled: a pooled drawdown is a property of the
+merged, time-ordered sequence of every instrument's trades, and
+`runner::grid::Cell` carries per-cell aggregates, not per-trade P&L. The
+column the report prints as `dd>=` is the LARGEST single-instrument drawdown
+among the cells pooled — a lower bound on the pooled figure. It can only be
+made exact by exposing each cell's trade sequence from the grid, which is a
+change inside the pricing loop and is not made. Every report labels the
+column as a bound.
+
+Cost: pass 1 is I screens in parallel, each what `range-rung` costs on that
+instrument; pass 2 is I × U grid evaluations, each O(cells × T) for that
+instrument and candidate; the fold is one pass over I × U cells. The union is
+one expected-O(1) `HashSet` insert per frontier row, not worst-case O(1).
+None of this is a rule-4 primitive, and none of it is constant in I or U.
+
+Persistence: the I pass-1 runs write their own ledger rows and frontier
+blocks under their own identities. The pooled table is rendered and not
+written, because a pooled row has no instrument to name in a nine-term
+identity; a pool ledger keyed by a digest over member identities is a later
+entry. A reader who wants the pooled figures again re-runs the verb, which is
+deterministic (§3 rule 5), rather than reading them back.
+
+## Dated cash-session acquisition limits (D-0519)
+
+Reading/hashing/decompressing a security master is O(bytes); exact identity
+tables retain O(instruments) state with expected-O(1), not worst-case-O(1),
+hash lookup. Observed-date collection is O(rows) expected plus sorting the
+distinct dates. Cached source evidence is revalidated at the instrument
+boundary, not inside each bar or grid evaluation. Disk and network latency
+are not constant-time guarantees.
+
+The baked calendar ends on 2026-08-21. The observed-date master acquisition
+path does not extend it: filtered source can be stored after that boundary,
+but completeness remains UNVERIFIED and derived output is withheld. A dated
+CAS flag also cannot prove absence of a special pre-open or exceptional halt.
+The coordinator still retries non-clean HTTP-200 receipts; an unattended
+acquisition must not mistake repeated calendar/derivation proof failures for
+repairable transport failures or claim an idle stop proves coverage.
+
+### Recovery-audit follow-up — 2026-09-06
+
+The bounded calendar extension described in the charter supersedes the older
+August-21 bound above: its current last date is September 4. It still does not
+automatically extend to future dates. Stored cash gap reports now consume the
+same per-date session clock as ingestion, validating local master receipts.
+This metadata work is O(master bytes), and a full source-grid audit is
+O(stored rows + civil minutes + reported gaps), not O(1) total time or space.
+The timestamp-validity preflight is one additional O(rows) pass with constant
+auxiliary state. Full-month source reads and metadata checks are not put in the
+per-bar lookup or append path.
+
+The gap endpoint's complete month bounds can include unknown dates outside a
+requested acquisition's partial first/last month; these remain unmeasured.
+Cash listing/suspension/renaming intervals are not proved by current ISIN
+matching. Consequently the expected-gap list must not be blindly converted to
+an unlimited retry queue or a provider-defect certificate. Incomplete/corrupt
+metadata conservatively withholds that month's post-CAS denominator. The
+provider's unchanged incomplete response still cannot be repaired by a UI
+status change, a retry checkpoint, or a storage revision alone.
+
+Retry-cycle receipt checkpoints retain O(legs) atomic state and perform one
+constant-cost checkpoint read/write per leg. Scheduling a pass is O(legs),
+and an actual acquisition still costs O(returned rows and request bytes).
+They avoid re-requesting clean legs during repairs, not all duplicate vendor
+requests. They do not survive process restart, nor narrow a failed basket leg
+to a particular symbol/window. An identical HTTP-200 PARTIAL response remains
+retryable up to the existing 400-pass run ceiling. Do not use that loop as a
+claim of automatic source-gap repair; narrow known unresolved source gaps and
+retain their evidence explicitly. No worst-case constant network/disk latency,
+whole-crate coverage or complete mutation-test guarantee has been measured.
+
+### Evidence-scoped recovery limits — 2026-09-06
+
+The explicit `/pull/recovery` path does not use the preceding whole-leg
+400-pass loop. Its durable maximum is three coordinator attempts for each
+exact observed-gap day across overlapping plans. Shared reservation identity
+is independent of unrelated selected members. A completed request with repeated incomplete source data
+remains unresolved. Credentials still require the authorized external refresh
+mechanism; this repository neither mints tokens nor guarantees unattended
+authentication forever.
+
+Missing all source evidence on a historical stock day remains UNVERIFIED, not
+automatically retryable or prelisting. Current listing metadata can conflict
+with older observations, and a present ISIN is not a historical symbol/token
+mapping. Only independently sourced inactivity may exempt its exact interval.
+The current FORCEMOT proof is not generalized to other symbols.
+
+Audits read source records and days, recovery replay reads journal records, and
+indexes occupy space proportional to work units. Individual fixed-stride
+appends and expected/amortized hash operations do not promise worst-case O(1)
+latency. The 100,000-unit and 50,000-source-record/month bounds refuse loudly.
+The latest-100-event page is not the entire status inventory or a guarantee of
+an active write's completed sync. Original sources and ordinary pull audit
+receipts remain separate from recovery state. No backtest readiness or complete
+pull is inferred from the recovery controller finishing.
+
+## Historical sweep follow-through: explicit bounds (D-0523)
+
+The new known mask costs 48 bytes per retained bar in addition to truth.
+Expression V1 caps text at 4,096 bytes, parser nesting below 32 and programs at
+1,151 instructions; serialized decoding/evaluation is bounded independently of
+the text parser. Parsing/canonicalization is setup work, not an unbounded O(1)
+algorithm. Expression output is 56 bytes per row plus fixed header/footer.
+
+Attempt finalization verifies all acknowledged child rows and therefore costs
+O(saved rows), with one fixed row buffer. The existing engine reporter cannot
+interrupt a walk: a failed evidence append is remembered, prevents completion
+and subsequent automatic probes, and returns when the current walk returns.
+It is not an immediate cancellation guarantee.
+
+Cold Results/Receipts opens remain O(history); warm refresh is O(delta) with
+expected hash cost. Top selection uses an ordered map. Live census still
+measures a bounded directory; decoded unchanged files are reused. Four admitted
+blocking tasks, 64 MiB file ceilings, 256-row pages and 4,096-row selected-result
+caps bound specified dashboard work; they are not constant I/O deadlines or
+unlimited growth. Details are in `docs/16-sweep-evidence.md` and
+`docs/18-sweep-dashboard.md`.
+
+No whole-workspace O(1) total space/time, full OS allocation recovery, permanent
+lossless telemetry retention, million-user capacity, or unmeasured full
+coverage/mutation certificate is asserted. The exact remaining institutional,
+replay, expression-enumeration and deployment boundaries are compared in
+`docs/14-sweep-readiness-20260906.md`.
+
+### Resumable searches and priced evidence (D-0524)
+
+The new AND continuation retains frontier and depth history, proportional to
+the survivors retained. Persisting and reauthenticating that history is not a
+constant-space or constant-time operation. Engine limits are part of the exact
+checkpoint policy; increasing a work allowance cannot silently reinterpret an
+already terminal resource halt as an unfinished or extinct search.
+
+Expression enumeration covers the existing fixed 1,151-instruction language,
+not arbitrary unbounded expressions or ordered temporal sequences. Its cursor
+is fixed at 3,086 bytes, and each saved CLI state is 3,246 bytes. Candidate/node
+budgets control one invocation, not semantic depth. A checkpoint transition
+replays at most 4,096 grammar nodes, while verifying the complete linked history
+still costs O(checkpoints + saved child rows). Canonical syntax removes sibling
+ordering duplicates; it does not decide all Boolean algebra equivalences.
+
+The common journal admits at most one million reservations/history links.
+Cold AND checkpoint payloads admit 64 MiB; expression checkpoint envelopes
+admit 8 KiB. Candidate/trade readers admit 64 MiB per specified cold input and
+256 rows per page. Pricing captures the actual selected exit cell for both
+directions of evaluated candidates. It does not save every possible exit cell,
+skipped candidate, bootstrap sample or validation fold as a separate trace.
+Finite history and page ceilings refuse explicitly; they never certify a
+larger requested sweep as complete.
+
+Selection V6 uses fixed 16 KiB records and a CLI ceiling of 64 GiB per file.
+Global Replay V4 consumes eight actual 0..25 prefixes and uses fixed 1 KiB
+records. Its chronological sorting and retained candidate buffers grow with
+the offered replay work. Empty selections may yield a zero-stream schedule;
+that path does not load or attest the requested OOS market coverage.
+
+The final isolated expression-cursor mutation run caught 115 of 120 mutations;
+five were unviable and none survived or timed out. Coverage remains 193/197
+lines and 67/70 branches. This is one module's dated evidence, not the required
+100% touched-crate coverage or a whole-workspace no-survivor certificate.
+
+### Strict historical admission and publication (D-0525)
+
+Cold checksum admission is O(source bytes) with a fixed block buffer. Receipt
+and role-manifest widths are fixed at 512 bytes, but retained receipt files and
+history grow with distinct sources and runs. Warm reads verify the exact fixed
+format block from the retained source handle before decoding a row. Shared
+locks and generation checks bind the observed snapshot; they are not a promise
+that an uncooperative external writer or failing storage can never change it.
+
+`MAX_BYTES` bounds each source data file plus CRC sidecar. `MAX_RECORDS` bounds
+aggregate raw records across the four native or five coarse unique sources
+before their allocations. Converted/joined/copied vectors require additional
+memory, so neither argument is a total RAM-byte or elapsed-time ceiling. The
+six logical roles may share a physical source. These are resource budgets,
+not a maximum strategy depth. Whole enumeration and persistent history cannot
+be O(1) in both time and space.
+
+The common stored-month finalizer and all four priced-audit publication branches
+seal acknowledged depth/ranked children before invoking the parent writer;
+strict source and priced capture checks apply at their respective boundaries.
+A parent I/O failure
+leaves completed computation evidence and an explicit command error, not a
+successful parent. Completion describes the checked input snapshot. No
+postterminal source check can retroactively change that terminal meaning.
+
+Read-open flags are verified for macOS and Linux x86_64/aarch64; unsupported
+targets refuse. Final symlinks/FIFOs and observed writer locks refuse, while
+intermediate directory components remain inside the trusted-root assumption.
+Nonblocking lock/pipe handling does not bound filesystem or fsync latency.
+The current 8 TB external disk is disconnected and supplies no runtime budget.
+
+The finite qualification successor in D-0544 uses one predeclared eight-timeframe
+allocation. Its family-wide bootstrap hypotheses include all declared program,
+direction, exit and instrument coordinates for each timeframe, including zeros.
+Other catalogs and later grammar batches are outside this finite correction.
+Bootstrap validity still depends on the shared resampling assumptions. Neither
+a small-case oracle nor finite allocation proves distribution-free financial
+significance or profitable future trading.
+
+Later validation partitions complete civil intervals chosen before pricing,
+using fixed original training exits. It is not expanding-prefix retraining.
+Empty actual windows refuse; calendar periods cannot be invented to satisfy a
+fold floor. Reader verification reconstructs exact source-derived classifications,
+matrix hashes, mappings, selected-coordinate links, folds and policy comparisons.
+It does not rerun every bootstrap sample on each dashboard request or turn
+historical saved receipts into a fresh raw-source capability. Serialized read
+admission counts retained ancestors; it is not a total allocator/RAM guarantee.
+# Search-wide qualification observation — D-0549
+
+The new declared-search allowance bounds the sum of assigned testing shares,
+not the number of grammar combinations, elapsed search time, stored evidence,
+or probability of future trading loss. It requires valid underlying testing
+evidence; the saved bootstrap method retains its stated statistical assumptions.
+Costs remain excluded. Changing the research declaration or opening another
+research project is not covered by the original declaration's error budget.
+
+History authentication and selected-batch decoding have separate external byte
+and replay-node ceilings. The producer reserves planned plus terminal journal
+capacity before pricing. A cold reader charges every declared replay allowance,
+even when actual work ended sooner; this conservative work admission is not a
+wall-clock latency measurement. Complete history and one selected batch must fit.
+Reaching the immutable admitted capacity refuses further work while preserving
+evidence. It does not declare the grammar complete or promise that increasing a
+different search's bounds continues the old statistical scope.
+
+Search detail retains parent, campaign and child guards. Observed serialized
+ancestry bytes include all three, but exclude allocator and runtime overhead.
+Verification is point-in-time: an external process may remove evidence later,
+in which case the next observation refuses. No finite set of tests establishes
+all filesystems, all races, constant disk latency, total O(1) enumeration or
+100% correctness for every possible input.
+
+## Versioned search correction and release evidence — D-0553/D-0554
+
+V2 applies four constant-width probability caps to the original39-field policy.
+That arithmetic is bounded. Full-rung recomputation, ancestor authentication,
+coverage-file census and emitted mutation census grow with their inputs. The
+read limits bound physical work; they do not make it constant for every input.
+
+V1 remains readable with its original arithmetic. Its historical White/SPA
+ceilings may exceed the shared search alpha, and the UI identifies this rule.
+Old results are not upgraded or treated as new V2 admissions. The V2 repair
+enforces the stated comparison contract; it does not establish statistical
+calibration, profitability or all possible exception coverage.
+
+A stage's matching hashes and seven ordinary passed checks do not prove
+whole-crate100% line/branch coverage or zero surviving module mutations. Strict
+release admission requires their complete raw receipts separately. Unknown or
+missing recovery history also blocks a safe handoff even if code tests pass.
+Neither condition is repaired by deleting old evidence or inventing a passing
+receipt. Dependency compiler probes and foreign-binding restrictions remain
+separate from `cargo deny`'s license/advisory result.
+
+## Current sweep integration limits — 2026-09-08
+
+The 2026-09-08 native dependency census identifies active compiler-probe build
+scripts, including libc. The tracked source boundary and cargo-deny policy do
+not establish compliance with the literal transitive no-process build-script
+rule. No bounded compliant replacement was established; copying libc's foreign
+bindings would violate the separate vendoring rule. This is an unresolved
+policy/build constraint, not a licence to stamp a release as compliant.
+
+The surviving recovery STOP record is Queued/clear, not a durable stop. The
+original accepted 34,440-window request can be reproduced from its authentic
+saved form, but its missing per-plan work states cannot be reconstructed. This
+supersedes interpreting the missing journal alone as proof that all sweeps are
+invalid. Recovery restart/handoff requires valid recovery history or an explicit
+successor; each selected sweep independently requires valid source OHLCV.
+
+Boolean research applies exact shared error allocation to its common policy,
+but does not grant legacy Selection V6/global execution authority. Fixed-training
+later windows are not a separate terminal untouched holdout, cross-study data
+reuse is not globally budgeted, and explicit market-regime/portfolio acceptance
+partitions were not established. Cost-excluded cash returns and current-snapshot
+membership remain labelled. A finite bootstrap budget can be too coarse for a
+later batch's error allocation; increasing search scope cannot silently relax
+that arithmetic. A strongest-0.1% target must not relabel failing settings as
+profitable candidates or claim a percentile before its population is defined.
+
+Fixed-stride append and exact lookup have bounded record work. Durable storage,
+full validation, total search, full history, device latency and recovery scans
+are not constant-total-time or constant-total-space operations. New invocation
+history stores only bounded public labels and state, not every inner-loop event.
+
+## Native single-stop research limits — D-0581 through D-0583
+
+The new policy removes the exit-grid multiplier for its index-only workflow.
+P programs produce2P direction settings per selected timeframe and16P across
+all eight. Each setting retains two fill readings of the same path; training
+and later periods are also separately measured. This count excludes syntax
+work, source preparation, held execution minutes and statistical resampling.
+It is not a full-population count or a measured runtime estimate.
+
+Selected timeframes can be evaluated concurrently under a bounded CPU worker
+count. Source columns, candidate observations and statistical buffers still
+consume memory proportional to admitted work. Native execution is proportional
+to signal rows and held minutes; complete output retention grows with results.
+Cold readers authenticate, decode and reconcile full admitted ancestors before
+fixed-index pages can reuse them. Filesystem time and fsync latency have no O(1)
+wall-clock guarantee. Exact hash-based duplicate rejection is not a mathematical
+worst-case constant-time guarantee for an unbounded population.
+
+A displayed configuration-ready state certifies only parsed configuration.
+It cannot certify the source files before the audited worker loads them. A
+saved qualification is also separate from a completed grammar or a guarantee
+that future weeks will satisfy the desired3-wins/2-losses pattern. A proposed
+chronological split does not erase earlier research on the same data.

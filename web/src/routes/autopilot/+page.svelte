@@ -36,13 +36,11 @@
    * THE CLAIM AND ITS EVIDENCE ARE ONE ELEMENT
    * ---------------------------------------------------------------------------
    *
-   * `verdict` is the ONLY place on this page that produces a verdict, and it is
-   * handed measured numbers rather than a sentence. No branch in it reaches the
-   * word "Complete" without `counted === true`, a valid span, a denominator and
-   * two pairs of numbers that are equal. The beam then REFUSES to render a
-   * claim whose evidence list is empty — the claim and the numbers under it are
-   * built in one pass and live in one element, so "The store is complete" over
-   * an unread or empty store is not a thing this page knows how to draw.
+   * `verdict` displays scoped stored observations beside their evidence.
+   * The current API supplies an instrument count, not an exact membership
+   * list or expected sessions. No aggregate count can certify completion.
+   * A reported `complete` remains a report, even if stored counts are larger
+   * than the reported instrument count multiplied by the target months.
    *
    * That is not hypothetical. With the instrument masters missing, the process
    * reports `complete` and the store holds nothing: both a run that fetched
@@ -55,9 +53,8 @@
    * ---------------------------------------------------------------------------
    *
    * `/autopilot.json` is a route the served binary either has or does not have.
-   * When it does not, this page says exactly that, names what is therefore
-   * unknown, and STILL renders the measured coverage — because the census is
-   * true either way. What it must never do is render a calm empty panel: a
+   * When it does not, this page says exactly that and withholds target coverage
+   * because its feed, timeframe and date window cannot be established. A
    * missing autopilot and an idle autopilot look identical in a blank, and
    * `CLAUDE.md` §4 bans a fallback that hides a failure.
    *
@@ -88,6 +85,7 @@
   // ceiling; see `$lib/ask.js` for why the wrapper exists rather than a signal
   // threaded through every call site.
   import { ask } from '$lib/ask.js';
+  import { watchVisible } from '$lib/page-requests.js';
   import { untrack } from 'svelte';
 
   /* ======================================================================
@@ -185,20 +183,23 @@
   /** @typedef {{ ok: true, months: string[] } | SpanRefusal} SpanResult */
 
   /**
-   * One month of the ladder, as `rowOf` measures it. `expBars`, `cellPct` and
-   * `barPct` are null WHEN THERE IS NO DENOMINATOR, which is not the same
-   * fact as zero and is why none of them is typed `number`.
+   * One target month. Stored presence is not target membership or completeness.
    *
    * @typedef {{
    *   key: string,
    *   cells: number,
    *   bars: number,
-   *   per: number | null,
-   *   expBars: number | null,
-   *   cellPct: number | null,
-   *   barPct: number | null
+   *   unknownCells: number,
+   *   unmeasuredBars: number
    * }} Rung
    */
+
+  /** @typedef {Pick<Target, 'feed' | 'timeframe' | 'from' | 'to'>} CoverageTarget */
+  /** @typedef {Pick<typeof store, 'state' | 'error' | 'at' | 'feed' | 'readable'>} CensusInput */
+  /** @typedef {{ kind: 'ok' | 'broken' | 'probing' | 'unscoped', why: string | null,
+   * at: number | null, feed: string | null, months: Map<string, Omit<Rung, 'key'>>,
+   * cells: number, bars: number, unknownCells: number, unmeasuredBars: number,
+   * duplicates: number }} TargetCensus */
 
   /** One answer behind a dial: its key, its face, and why it is that answer. */
   /** @typedef {{ k: string, n: string, y: string, off?: boolean }} DialOption */
@@ -240,7 +241,7 @@
 
   /** The live state. Small payload, so a short period is cheap. */
   const TICK_MS = 2000;
-  /** The census. ~400 KB on a real store — polled slowly, on purpose. */
+  /** The census size depends on the store. Read on the shared slow clock. */
   const CENSUS_MS = 30000;
   /** One route for stop and resume, and the only one that answers a sentence. */
   const CONTROL = '/autopilot/control';
@@ -314,12 +315,35 @@
   const DKEY = /^(\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
 
   /**
-   * `YYYY-MM` -> `Apr 2024`. Anything else comes back null, never a guess.
+   * The API publishes civil-day bounds; the coverage table groups those days
+   * by their stored month. Validate a whole date before projecting it, so an
+   * impossible day or a timestamp cannot become a plausible month silently.
+   * The raw target stays unchanged for day-order checks and inspection.
+   * @param {unknown} value
+   * @returns {string | null}
+   */
+  function monthKey(value) {
+    if (typeof value !== 'string') return null;
+    if (value.length === 7 && MKEY.test(value)) return value;
+    if (value.length !== 10) return null;
+    const d = DKEY.exec(value);
+    if (!d) return null;
+    const year = Number(d[1]);
+    if (year === 0) return null;
+    const month = Number(d[2]);
+    const day = Number(d[3]);
+    const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+    const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    return day <= days[month - 1] ? value.slice(0, 7) : null;
+  }
+
+  /**
+   * A valid month key or civil date -> `Apr 2024`; invalid input is null.
    * @param {unknown} k
    */
   function monthLabel(k) {
-    const m = typeof k === 'string' ? MKEY.exec(k) : null;
-    return m ? `${MON[+m[2] - 1]} ${m[1]}` : null;
+    const key = monthKey(k);
+    return key ? `${MON[Number(key.slice(5)) - 1]} ${key.slice(0, 4)}` : null;
   }
   /**
    * `YYYY-MM-DD` -> `11 Aug 2026`.
@@ -389,9 +413,9 @@
      every `y > ty` comparison false, and the loop ran to its 1,200 ceiling —
      1,200 rows of months the payload never named, in one unreadable block.
 
-     This validates BOTH endpoints against the store's own key form, names
-     which endpoint failed and prints what it carried, and returns rows only
-     when it can. There is no path from a bad target to a row.
+     Both endpoints accept the API's civil dates or the legacy month keys.
+     Validation precedes month projection; failures retain the original value.
+     There is no path from a bad target to a row.
      ====================================================================== */
 
   /** Fifty years. A target wider than this is a typo, not a backfill. */
@@ -400,7 +424,7 @@
   /**
    * `null` IS ONE OF THE INPUTS, not an accident of the signature. `target.from`
    * is `string | null` after the reader, and the whole job of this function is
-   * to say which endpoint was not a month key — so it has to be reachable with
+   * to say which endpoint was not a date or month key — so it must be reachable with
    * the value that is not one.
    *
    * The declared return type is what makes `if (!sp.ok) return …` narrow at
@@ -413,34 +437,34 @@
    * @returns {SpanResult}
    */
   function span(from, to) {
-    const f = typeof from === 'string' ? MKEY.exec(from) : null;
+    const f = monthKey(from);
     if (!f)
       return {
         ok: false,
         field: 'target.from',
         raw: from,
-        why: 'the store writes one file per month and keys it YYYY-MM. This is not that.'
+        why: 'expected a valid calendar date (YYYY-MM-DD) or month key (YYYY-MM).'
       };
-    const t = typeof to === 'string' ? MKEY.exec(to) : null;
+    const t = monthKey(to);
     if (!t)
       return {
         ok: false,
         field: 'target.to',
         raw: to,
-        why: 'the store writes one file per month and keys it YYYY-MM. This is not that.'
+        why: 'expected a valid calendar date (YYYY-MM-DD) or month key (YYYY-MM).'
       };
-    // BOTH ARE STRINGS HERE, PROVEN BY THE TWO GUARDS ABOVE: `MKEY` only ever
-    // matches when the value handed to it was a string, so a non-null `f` and
-    // `t` is that proof. The checker cannot carry a narrowing backwards from
-    // the match to the value that produced it, so it is stated instead.
-    if (cmp(/** @type {string} */ (from), /** @type {string} */ (to)) > 0)
+    // Projecting first must not hide reversed days inside the same month.
+    // A legacy month endpoint denotes its whole month, so compare exact days
+    // only when both endpoints carry them.
+    if (cmp(f, t) > 0 || (from?.length === 10 && to?.length === 10 && cmp(from, to) > 0))
       return {
         ok: false,
         field: 'target.from … target.to',
         raw: `${from} → ${to}`,
         why: 'the span ends before it begins. The backfill runs oldest first, so the order is not a preference.'
       };
-    const n = (+t[1] - +f[1]) * 12 + (+t[2] - +f[2]) + 1;
+    const n = (Number(t.slice(0, 4)) - Number(f.slice(0, 4))) * 12
+      + Number(t.slice(5)) - Number(f.slice(5)) + 1;
     if (n > MAX_SPAN)
       return {
         ok: false,
@@ -449,10 +473,10 @@
         why: `that is ${inrs(n)} month files. The ladder is not drawn for a span this wide — read the number, not ${inrs(n)} rows.`
       };
     const out = [];
-    let y = +f[1];
-    let m = +f[2];
+    let y = Number(f.slice(0, 4));
+    let m = Number(f.slice(5));
     for (let i = 0; i < n; i += 1) {
-      out.push(`${y}-${String(m).padStart(2, '0')}`);
+      out.push(`${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}`);
       m += 1;
       if (m > 12) {
         m = 1;
@@ -462,38 +486,10 @@
     return { ok: true, months: out };
   }
 
-  /* ======================================================================
-     THE SECOND AXIS, AND WHY IT IS NOT FILLED IN
-
-     A month is held on two axes: the instrument-months in it (cells), and the
-     bars inside those cells. The first has a denominator — `target.instruments`
-     travels on the payload. The second does not: NO ROUTE ON THIS SERVER
-     STATES HOW MANY SESSIONS A MONTH HAS, and a session count cannot be
-     derived in a browser without inventing a holiday calendar, which
-     `CLAUDE.md` §3 rule 1 forbids.
-
-     So bars are COUNTED and never DIVIDED. `expectedBars` returns null with a
-     name for its refusal, every fraction built from it is null, and no
-     sentence on this page calls a span finished on the strength of the axis
-     that is measured while the other is not. The day a route states a month's
-     sessions, this function is the one place that changes.
-     ====================================================================== */
-
+  // Neither the target payload nor the store census supplies expected session
+  // counts. An exchange calendar must not be invented from observed bars.
   const BARS_NO_DENOM =
-    'no route states how many sessions a month holds, so bars are counted here and never divided — a fraction needs both numbers';
-  /**
-   * THE PARAMETERS ARE DECLARED AND UNREAD, ON PURPOSE. Both callers already
-   * hand it the month and the instrument count, because those are the two
-   * numbers the answer would be built from the day a route states a month's
-   * sessions. Dropping them from the signature to match the empty body would
-   * make this function look like a constant instead of a MISSING MEASUREMENT,
-   * and every call site would have to be edited back when the route arrives.
-   *
-   * @param {string} month
-   * @param {number | null} per
-   * @returns {number | null}
-   */
-  const expectedBars = (month, per) => null;
+    'expected trading sessions are not supplied by the target or census; bar completeness is unverified';
 
   /* ======================================================================
      THE CONTRACT READER
@@ -575,6 +571,8 @@
     for (const k of /** @type {('from' | 'to' | 'instruments')[]} */ (['from', 'to', 'instruments'])) {
       if (target[k] === null) return { ok: false, why: `no \`target.${k}\`` };
     }
+    if (!Number.isSafeInteger(target.instruments) || /** @type {number} */ (target.instruments) < 0)
+      return { ok: false, why: '`target.instruments` must be an exact non-negative integer' };
 
     // `now` is null when nothing is in flight, and that is a legal answer —
     // but only for a state that is not running. A "running" autopilot with
@@ -746,10 +744,12 @@
     link = next;
   }
 
-  async function tick() {
+  /** @param {import('$lib/page-requests.js').ReadTicket} ticket */
+  async function tick(ticket) {
     const t0 = performance.now();
     try {
-      const r = await ask('/autopilot.json', { cache: 'no-store' });
+      const r = await ask('/autopilot.json', { cache: 'no-store', signal: ticket.signal });
+      if (!ticket.current()) return;
       const ms = Math.round(performance.now() - t0);
       if (r.status === 404) {
         setLink({
@@ -774,6 +774,7 @@
         );
       }
       const parsed = readState(await r.json());
+      if (!ticket.current()) return;
       if (!parsed.ok) {
         setLink({
           kind: 'broken',
@@ -786,6 +787,7 @@
       adopt(parsed.value);
       setLink({ kind: 'ok', why: null, at: Date.now(), ms });
     } catch (e) {
+      if (!ticket.current()) return;
       // A CAUGHT VALUE IS `unknown`, AND THIS LINE ALREADY KNEW THAT. Both
       // throws above are `Error`s, but a rejected `fetch` can settle with
       // anything at all, which is why the reason is read off the value with
@@ -802,18 +804,15 @@
     }
   }
 
-  $effect(() => {
-    tick();
-    const id = setInterval(tick, TICK_MS);
-    // A hidden tab is a tab nobody is reading. Polling it is a request per two
-    // seconds spent on a screen that is not on screen.
-    const wake = () => document.visibilityState === 'visible' && tick();
-    document.addEventListener('visibilitychange', wake);
-    return () => {
-      clearInterval(id);
-      document.removeEventListener('visibilitychange', wake);
-    };
-  });
+  // The delay starts after a read completes. Hidden pages abort their read;
+  // a late response cannot publish or restart a poll after navigation.
+  $effect(() => watchVisible(tick, TICK_MS, {
+    visible: () => document.visibilityState === 'visible',
+    listen: (wake) => {
+      document.addEventListener('visibilitychange', wake);
+      return () => document.removeEventListener('visibilitychange', wake);
+    }
+  }));
 
   // ONE SECOND, ALWAYS. Three readings on this page are durations rather than
   // values — the cell in flight, how long this tab has watched, and how stale
@@ -845,7 +844,13 @@
   // feed picker per product, in `+layout.svelte`, and no second one here. The
   // autopilot's OWN target wins when it names one, because a fraction of a
   // target has to be counted out of the store that target is being written to.
-  const wire = $derived(ap?.target?.feed ?? feeds.active);
+  // Primitive scope values stay equal across status polls. The 2-second
+  // status reader must not refold an unchanged census for a new target object.
+  const targetFeed = $derived(ap?.target?.feed ?? null);
+  const targetTimeframe = $derived(ap?.target?.timeframe ?? null);
+  const targetFrom = $derived(ap?.target?.from ?? null);
+  const targetTo = $derived(ap?.target?.to ?? null);
+  const wire = $derived(targetFeed ?? feeds.active);
 
   /* THE FETCH, THE FOLD AND THE TIMER ARE ALL SHARED NOW.
      ----------------------------------------------------------------------
@@ -854,9 +859,8 @@
      a pull, once per feed change on `/db` and `/`. Nothing reconciled them, so
      two surfaces could hold two totals for one disk and each was right about
      its own snapshot. `$lib/store.svelte.js` reads it ONCE per (feed,
-     generation) and folds `byMonth` in the same pass that builds every other
-     page's shape, so the per-month totals below are the SAME numbers `/db` is
-     showing rather than a second opinion about them.
+     generation). This page projects that same readable census onto the target
+     feed, timeframe and window; all-timeframe totals are not target coverage.
 
      `watchStore` is the thirty seconds, held rather than owned: the shared poll
      runs at the finest period any holder asked for, and every subscriber sees
@@ -864,25 +868,95 @@
   $effect(() => syncStore(wire));
   $effect(() => watchStore(CENSUS_MS));
 
+  /** @param {string} key */
+  function monthLastDay(key) {
+    for (const day of ['31', '30', '29', '28']) {
+      const value = `${key}-${day}`;
+      if (monthKey(value)) return value;
+    }
+    return null;
+  }
+
+  /** Census timestamps are exact microseconds; no unit guessing or rollover.
+   * @param {number | null} micros @returns {string | null} */
+  function censusDay(micros) {
+    if (micros === null || !Number.isSafeInteger(micros) || micros < 0) return null;
+    return new Date(Math.floor(micros / 1000) + 19800000).toISOString().slice(0, 10);
+  }
+
+  /** One O(readable rows) projection per census or scope change. Distinct
+   * instrument-months are counted once after filtering the exact target rung.
+   * Partial-month bar counts are withheld unless both stored endpoints lie
+   * inside the target days. No bar file or vendor request is made here.
+   * @param {CensusInput} snapshot @param {CoverageTarget} target
+   * @param {string | null} askedFeed @returns {TargetCensus} */
+  function foldTargetCensus(snapshot, target, askedFeed) {
+    /** @type {TargetCensus} */
+    const out = { kind: 'probing', why: null, at: null, feed: null, months: new Map(),
+      cells: 0, bars: 0, unknownCells: 0, unmeasuredBars: 0, duplicates: 0 };
+    if (snapshot.state === 'error') return { ...out, kind: 'broken', why: snapshot.error };
+    if (!target.feed || !target.timeframe)
+      return { ...out, kind: 'unscoped', why: 'The reported target must name a feed and timeframe before stored coverage can be compared.' };
+    if (snapshot.state !== 'ready' || snapshot.feed !== askedFeed) return out;
+    if (snapshot.feed !== target.feed)
+      return { ...out, kind: 'unscoped', why: 'The stored census and the reported target name different feeds.' };
+    const sp = span(target.from, target.to);
+    if (!sp.ok) return { ...out, kind: 'unscoped', why: `${sp.field}: ${sp.why}` };
+    const from = /** @type {string} */ (target.from);
+    const to = /** @type {string} */ (target.to);
+    const firstDay = from.length === 7 ? `${from}-01` : from;
+    const lastDay = to.length === 7 ? monthLastDay(to) : to;
+    if (!lastDay) return { ...out, kind: 'unscoped', why: 'The final month has no valid calendar boundary.' };
+    const wholeMonths = new Set();
+    for (const key of sp.months) {
+      out.months.set(key, { cells: 0, bars: 0, unknownCells: 0, unmeasuredBars: 0 });
+      const end = monthLastDay(key);
+      if (`${key}-01` >= firstDay && end !== null && end <= lastDay) wholeMonths.add(key);
+    }
+    /** @type {Map<string, Map<string, import('$lib/store.svelte.js').StoreCell>>} */
+    const seen = new Map();
+    for (const cell of snapshot.readable) {
+      const month = out.months.get(cell.month);
+      if (!month || cell.timeframe !== target.timeframe || cell.rows === 0) continue;
+      let instruments = seen.get(cell.month);
+      if (!instruments) { instruments = new Map(); seen.set(cell.month, instruments); }
+      const prior = instruments.get(cell.instrument);
+      if (prior) {
+        if (prior.rows !== cell.rows || prior.first !== cell.first || prior.last !== cell.last)
+          return { ...out, kind: 'broken', why: `Conflicting census entries for ${cell.instrument}, ${cell.timeframe}, ${cell.month}; counts are withheld.` };
+        out.duplicates += 1;
+        continue;
+      }
+      instruments.set(cell.instrument, cell);
+      if (!Number.isSafeInteger(cell.rows) || cell.rows < 0)
+        return { ...out, kind: 'broken', why: 'A stored bar count is not an exact non-negative integer.' };
+      const first = censusDay(cell.first), last = censusDay(cell.last);
+      if ((first !== null && first.slice(0, 7) !== cell.month) || (last !== null && last.slice(0, 7) !== cell.month)
+        || (first !== null && last !== null && (first > last || /** @type {number} */ (cell.first) > /** @type {number} */ (cell.last))))
+        return { ...out, kind: 'broken', why: `Stored timestamps contradict the census month for ${cell.instrument}, ${cell.month}.` };
+      if (wholeMonths.has(cell.month) || (first !== null && last !== null && first >= firstDay && last <= lastDay)) {
+        month.cells += 1; month.bars += cell.rows;
+        out.cells += 1; out.bars += cell.rows;
+        if (!Number.isSafeInteger(out.bars))
+          return { ...out, kind: 'broken', why: 'The scoped bar total exceeds exact browser integer precision.' };
+        continue;
+      }
+      if (first !== null && last !== null && (last < firstDay || first > lastDay)) continue;
+      // At least one real stored endpoint inside the window proves presence;
+      // endpoints bracketing the window do not prove any bar exists inside it.
+      if ((first !== null && first >= firstDay && first <= lastDay) || (last !== null && last >= firstDay && last <= lastDay)) {
+        month.cells += 1; out.cells += 1;
+      } else { month.unknownCells += 1; out.unknownCells += 1; }
+      month.unmeasuredBars += 1; out.unmeasuredBars += 1;
+    }
+    return { ...out, kind: 'ok', at: snapshot.at, feed: snapshot.feed };
+  }
+
   const census = $derived.by(() => {
-    if (store.state === 'error')
-      return { kind: 'broken', why: store.error, at: null, feed: null, months: new Map(), cells: 0, bars: 0 };
-    // THE FEED STAMP IS THE GATE, NOT DECORATION. A reading that answered for
-    // another feed is not this page's census however recently it landed — and
-    // that includes the instant between the target moving and the effect that
-    // re-reads for it, which would otherwise draw one feed's fill under the
-    // other feed's name with every number in it really counted.
-    if (store.state === 'ready' && store.feed !== null && store.feed === wire)
-      return {
-        kind: 'ok',
-        why: null,
-        at: store.at,
-        feed: store.feed,
-        months: store.byMonth,
-        cells: store.cells,
-        bars: store.bars
-      };
-    return { kind: 'probing', why: null, at: 0, feed: null, months: new Map(), cells: 0, bars: 0 };
+    const snapshot = { state: store.state, error: store.error, at: store.at, feed: store.feed, readable: store.readable };
+    const target = { feed: targetFeed, timeframe: targetTimeframe, from: targetFrom, to: targetTo };
+    const askedFeed = wire;
+    return untrack(() => foldTargetCensus(snapshot, target, askedFeed));
   });
 
   /* THE TRAIL STILL SAYS WHAT MOVED. The note used to be written by the reader;
@@ -913,11 +987,11 @@
       notedRead = reads;
       if (first) {
         note(
-          `the census was read for ${feedName(store.feed)} — ${inrs(store.cells)} instrument-months, ${inrs(store.bars)} bars.`
+          `the whole-store census was read for ${feedName(store.feed)} — ${inrs(store.cells)} instrument-timeframe-month records and ${inrs(store.bars)} bars, across all stored dates and timeframes.`
         );
       } else if (store.cells !== notedCells || store.bars !== notedBars) {
         note(
-          `the store gained ${inrs(store.cells - notedCells)} instrument-month(s) and ${inrs(store.bars - notedBars)} bar(s) for ${feedName(store.feed)}.`
+          `the whole-store census changed by ${inrs(store.cells - notedCells)} instrument-timeframe-month record(s) and ${inrs(store.bars - notedBars)} bar(s) for ${feedName(store.feed)}, across all stored dates and timeframes.`
         );
       }
       notedFeed = store.feed;
@@ -948,7 +1022,9 @@
   const notCounted = $derived(
     census.kind === 'broken'
       ? `/store.json could not be read — ${census.why}`
-      : !feeds.active
+      : census.kind === 'unscoped'
+        ? census.why ?? 'The reported target scope is unavailable.'
+      : !wire
         ? 'no feed is chosen, so no census has been asked for — choose one in the top bar'
         : 'reading /store.json…'
   );
@@ -990,107 +1066,28 @@
     return { ok: true, refuse: null, months: [...census.months.keys()].sort(cmp), framed: false };
   });
 
-  const per = $derived(
-    scope.same && typeof ap?.target?.instruments === 'number' ? ap.target.instruments : null
-  );
-
   /**
-   * One month's reading: what is held, and what it is held against.
+   * One month's scoped stored observations. A count cannot identify which
+   * instruments belong to the target, so it is never used as a denominator.
    * @param {string} key
    * @returns {Rung}
    */
   function rowOf(key) {
-    const h = census.months.get(key) ?? { cells: 0, bars: 0 };
-    const exp = expectedBars(key, per);
-    return {
-      key,
-      cells: h.cells,
-      bars: h.bars,
-      per,
-      expBars: exp,
-      cellPct: per === null || per <= 0 ? null : Math.min(100, (h.cells / per) * 100),
-      barPct: exp === null || exp <= 0 ? null : Math.min(100, (h.bars / exp) * 100)
-    };
+    const h = census.months.get(key) ?? { cells: 0, bars: 0, unknownCells: 0, unmeasuredBars: 0 };
+    return { key, ...h };
   }
 
   const rows = $derived(ladder.ok ? ladder.months.map((k) => rowOf(k)) : []);
 
-  /** Cells against the whole span, when there is a denominator for them. */
-  const cellsTarget = $derived(per === null || !ladder.ok ? null : per * ladder.months.length);
-  /** Bars against the whole span. Null, and named — see `expectedBars`. */
-  const barsTarget = $derived.by(() => {
-    if (per === null || !ladder.ok) return null;
-    let sum = 0;
-    for (const k of ladder.months) {
-      const e = expectedBars(k, per);
-      if (e === null) return null;
-      sum += e;
-    }
-    return sum;
-  });
-
-  /**
-   * THE CONTRADICTION TEST — ONE FUNCTION, BOTH AXES, read by the beam, the
-   * deck and the watch bay, so no panel can render the completeness claim
-   * calmly while another calls it a contradiction.
-   *
-   * It tests CELLS AND BARS. Testing cells alone is the same defect it exists
-   * to catch: a span whose every cell is present and whose bars are short is
-   * exactly the case that reads finished, and a test that stops at the coarse
-   * axis passes it. Returns null only when no axis it can measure disagrees.
-   */
-  const contradicted = $derived.by(() => {
-    if (!ap || ap.state !== 'complete' || !counted || !ladder.ok) return null;
-    if (cellsTarget === null) return null;
-    const out = cellsTarget - census.cells;
-    const barsOut = barsTarget === null ? 0 : barsTarget - census.bars;
-    if (out <= 0 && barsOut <= 0) return null;
-    return {
-      axis: out > 0 ? 'cells' : 'bars',
-      target: cellsTarget,
-      held: census.cells,
-      out: Math.max(0, out),
-      barsExp: barsTarget,
-      barsHeld: census.bars,
-      barsOut: Math.max(0, barsOut)
-    };
-  });
-
-  /**
-   * MAY THE WORD "COMPLETE" BE PRINTED — one function, and every sentence that
-   * would say a rerun fetches nothing reads it.
-   *
-   * Both axes must be MEASURED and satisfied. Today the bar axis is never
-   * measured (see `expectedBars`), so `ok` is false whatever the store holds,
-   * and the page names the axis it cannot certify rather than rounding the
-   * unmeasured one up to done. That is the defect this page exists to refuse,
-   * applied to itself.
-   */
-  const certified = $derived.by(() => {
-    if (!counted) return { ok: false, why: notCounted };
-    if (!ladder.ok) return { ok: false, why: 'the reported target is not a span' };
-    if (cellsTarget === null || cellsTarget <= 0) {
-      return { ok: false, why: scope.same ? 'the target names no instrument count' : scope.why };
-    }
-    if (census.cells < cellsTarget) {
-      return { ok: false, why: `${inrs(cellsTarget - census.cells)} instrument-months are outstanding` };
-    }
-    if (barsTarget === null) return { ok: false, why: BARS_NO_DENOM };
-    if (census.bars < barsTarget) {
-      return { ok: false, why: `${inrs(barsTarget - census.bars)} bars are outstanding` };
-    }
-    return { ok: true, why: null };
-  });
+  const MEMBERSHIP_UNKNOWN = 'The target reports an instrument count but no exact instrument list. Stored records cannot prove that every target instrument is present, so a completion percentage is unavailable.';
 
   /** What one rung is, as one word. The tape, the buckets and the filter read
       the same call, so a row cannot be counted as one thing and drawn as
       another.
       @param {Rung} r */
   function classOf(r) {
-    if (r.cells <= 0 && r.bars <= 0) return 'none';
-    if (r.per === null) return 'nod';
-    if (r.cells >= r.per) return r.expBars !== null && r.bars < r.expBars ? 'short' : 'full';
-    return 'part';
+    if (r.cells > 0) return 'nod';
+    return r.unknownCells > 0 ? 'part' : 'none';
   }
 
   /**
@@ -1101,11 +1098,39 @@
    * is a claim the census did not support.
    */
   const buckets = $derived.by(() => {
-    const b = { full: 0, short: 0, part: 0, none: 0, nod: 0 };
+    const b = { part: 0, none: 0, nod: 0 };
     for (const r of rows) b[classOf(r)] += 1;
     return b;
   });
-  const bucketSum = $derived(buckets.full + buckets.short + buckets.part + buckets.none + buckets.nod);
+  const bucketSum = $derived(buckets.part + buckets.none + buckets.nod);
+
+  /** The headline uses the same scoped fold as its month rows, never a global
+   * total or the reported count as a proof of target membership.
+   * @param {Target} target @param {TargetCensus} reading @param {Rung[]} months
+   * @param {ApState} state @returns {Verdict} */
+  function targetCoverageVerdict(target, reading, months, state) {
+    const present = months.filter((r) => r.cells > 0).length;
+    const empty = months.filter((r) => r.cells === 0 && r.unknownCells === 0).length;
+    const uncertain = months.length - present - empty;
+    /** @type {Fact[]} */
+    const facts = [
+      { k: 'distinct stored instrument-months', v: inrs(reading.cells), s: 'mea' },
+      { k: 'bars confirmed inside the target dates', v: inrs(reading.bars), s: 'mea' },
+      { k: 'months with records · no records · overlap unknown', v: `${inrs(present)} · ${inrs(empty)} · ${inrs(uncertain)}`, s: 'mea' },
+      { k: 'target timeframe', v: target.timeframe, s: 'rep' },
+      { k: 'reported instrument count (membership unverified)', v: inrs(target.instruments), s: 'rep' },
+      { k: 'reported state', v: state, s: 'rep' }
+    ];
+    if (reading.unmeasuredBars) facts.push({ k: 'boundary files with unmeasured in-range bar counts', v: inrs(reading.unmeasuredBars), s: 'mea' });
+    if (reading.unknownCells) facts.push({ k: 'boundary files whose date overlap is unverified', v: inrs(reading.unknownCells), s: 'mea' });
+    if (reading.duplicates) facts.push({ k: 'duplicate census entries counted once', v: inrs(reading.duplicates), s: 'mea' });
+    return {
+      tone: state === 'halted' ? 'bad' : empty > 0 ? 'warn' : 'unknown',
+      claim: `${inrs(reading.cells)} distinct stored instrument-months at ${target.timeframe} — ${inrs(empty)} months have no stored records in the target window.`,
+      sub: `${target.from} to ${target.to}. ${MEMBERSHIP_UNKNOWN}${reading.unmeasuredBars ? ` Exact bar counts for ${inrs(reading.unmeasuredBars)} boundary files are unmeasured; their whole-file totals are excluded.` : ''}`,
+      facts
+    };
+  }
 
   /* ======================================================================
      THE CLAIM, AND WHY IT CANNOT BE MADE WITHOUT THE EVIDENCE
@@ -1173,7 +1198,7 @@
       return {
         tone: 'unknown',
         claim: 'How much is held cannot be stated.',
-        sub: `${ap.state} is a claim about what the process is doing, not evidence of what the store holds. The /store.json read has not answered, so no fraction of it is drawn.`,
+        sub: `${notCounted} The reported state “${ap.state}” does not establish stored target coverage.`,
         facts: [
           { k: 'reported state', v: ap.state, s: 'rep' },
           { k: 'the census', v: notCounted, s: 'mea' }
@@ -1194,107 +1219,7 @@
       };
     }
 
-    const held = census.cells;
-    const out = cellsTarget === null ? null : Math.max(0, cellsTarget - held);
-    const b = buckets;
-
-    /** @type {Fact[]} */
-    const facts = [];
-    facts.push({
-      k: 'instrument-months held',
-      v: inrs(held) + (cellsTarget === null ? '' : ` of ${inrs(cellsTarget)}`),
-      s: 'mea'
-    });
-    if (out !== null) facts.push({ k: 'outstanding', v: inrs(out), s: 'mea' });
-    facts.push({
-      k: 'bars held',
-      v: inrs(census.bars) + (barsTarget === null ? '' : ` of ${inrs(barsTarget)}`),
-      s: 'mea'
-    });
-    const parts = [
-      ['every cell held', b.full],
-      ['partial', b.part],
-      ['empty', b.none]
-    ];
-    if (b.short) parts.push(['bars short', b.short]);
-    if (b.nod) parts.push(['no denominator', b.nod]);
-    facts.push({
-      k: `months: ${parts.map((x) => x[0]).join(' · ')}`,
-      v: parts.map((x) => inrs(x[1])).join(' · '),
-      s: 'mea'
-    });
-    facts.push({ k: 'census read', v: `${istTime(census.at) ?? '—'} IST`, s: 'mea' });
-    facts.push({ k: 'reported state', v: ap.state, s: 'rep' });
-
-    // A CONTRADICTION IS A FIRST-CLASS STATE, and `contradicted` is the only
-    // thing that decides one — the deck and the watch bay read the same call.
-    const con = contradicted;
-    if (con && con.axis === 'cells') {
-      return {
-        tone: 'bad',
-        claim:
-          held === 0
-            ? 'The autopilot reports COMPLETE and the store is empty.'
-            : `The autopilot reports COMPLETE and the store is ${inrs(con.out)} instrument-months short.`,
-        sub: `Both cannot be true. A process that has fetched everything and one whose instrument masters never loaded look identical from inside: both find nothing missing. Check the masters, then the journal at ${ap.journal ?? JOURNAL}.`,
-        facts
-      };
-    }
-    if (con) {
-      return {
-        tone: 'bad',
-        claim: `The autopilot reports COMPLETE and the store is ${inrs(con.barsOut)} bars short.`,
-        sub: 'Every instrument-month exists and the sessions inside them do not. Counting cells alone is how a backfill reads finished over a store that is not.',
-        facts
-      };
-    }
-
-    if (certified.ok) {
-      return {
-        tone: 'good',
-        claim: 'Complete — the span is held, and these are the numbers that say so.',
-        sub: `All ${inrs(ladder.months.length)} month files from ${monthLabel(ap.target.from)} to ${monthLabel(ap.target.to)} hold every one of the ${inrs(per)} instruments and every session inside them. A rerun fetches nothing.`,
-        facts
-      };
-    }
-
-    if (cellsTarget !== null && cellsTarget > 0 && held >= cellsTarget) {
-      // EVERY CELL, AND THE BARS INSIDE THEM DIVIDED BY NOTHING. The tone is
-      // grey and not green: the coarse axis is satisfied and the fine one is
-      // unmeasured, which is a different fact from finished.
-      return {
-        tone: 'unknown',
-        claim: `All ${inrs(cellsTarget)} instrument-months in the span are held — and this page will not call it finished.`,
-        sub: `Every month file from ${monthLabel(ap.target.from)} to ${monthLabel(ap.target.to)} holds all ${inrs(per)} instruments. Whether the bars inside them are complete is the second axis, and ${BARS_NO_DENOM}. Counting cells alone is how a backfill reads done at 62% of the bars.`,
-        facts
-      };
-    }
-
-    if (held === 0) {
-      return {
-        tone: 'warn',
-        claim: `The store holds nothing for ${feedName(census.feed) ?? 'this feed'} yet.`,
-        sub: '/store.json answered with no rows — the state before the first month lands, which is a different fact from a census that has not been read.',
-        facts
-      };
-    }
-
-    if (cellsTarget === null) {
-      return {
-        tone: 'unknown',
-        claim: `${inrs(held)} instrument-months are held, against nothing.`,
-        sub: 'The reported target names no instrument count, so this is a count and not a fraction.',
-        facts
-      };
-    }
-
-    const pct = Math.round((held / cellsTarget) * 100);
-    return {
-      tone: ap.state === 'halted' ? 'bad' : ap.state === 'running' ? 'good' : 'warn',
-      claim: `${inrs(held)} of ${inrs(cellsTarget)} instrument-months are held — ${pct}% of the target span.`,
-      sub: `${ap.why ? `${ap.why.charAt(0).toUpperCase()}${ap.why.slice(1)}. ` : ''}${inrs(out)} outstanding; the ladder says which months they are in.`,
-      facts
-    };
+    return targetCoverageVerdict(ap.target, census, rows, ap.state);
   });
 
   /**
@@ -1486,8 +1411,8 @@
   /** @type {DialOption[]} */
   const SHOW = [
     { k: 'all', n: 'every month', y: 'the whole target span, gaps included' },
-    { k: 'gap', n: 'only the gaps', y: 'anything a rerun would still have to touch' },
-    { k: 'done', n: 'only cells held', y: 'every instrument-month the target names is present' },
+    { k: 'gap', n: 'without confirmed records', y: 'empty months or boundary months whose date overlap is unknown' },
+    { k: 'done', n: 'with stored records', y: 'at least one distinct stored instrument has a record in the target window; completeness is unverified' },
     // OFFERED AND DEAD, WITH THE REASON ON ITS FACE. Dropping the row would say
     // the question cannot be asked; drawing it live would promise a filter that
     // can never match. CLAUDE.md §4: name the reason on the control it is about.
@@ -1503,9 +1428,9 @@
   const shown = $derived(
     rows.filter((r) => {
       const c = classOf(r);
-      if (show === 'gap') return c !== 'full';
-      if (show === 'done') return c === 'full';
-      if (show === 'short') return c === 'short';
+      if (show === 'gap') return c !== 'nod';
+      if (show === 'done') return c === 'nod';
+      if (show === 'short') return false;
       return true;
     })
   );
@@ -1804,13 +1729,13 @@
              ordinary function call it cannot see through. -->
         <div
           class="g-v"
-          class:up={ap !== null && !contradicted && (ap.state === 'running' || ap.state === 'complete')}
-          class:am={ap !== null && !contradicted && (ap.state === 'waiting' || ap.state === 'paused')}
-          class:cy={ap !== null && !contradicted && ap.state === 'starting'}
-          class:dn={ap !== null && (Boolean(contradicted) || ap.state === 'halted')}
+          class:up={ap?.state === 'running'}
+          class:am={ap !== null && (ap.state === 'waiting' || ap.state === 'paused' || ap.state === 'complete')}
+          class:cy={ap?.state === 'starting'}
+          class:dn={ap?.state === 'halted'}
         >
           {#if ap}
-            <span>{contradicted ? 'complete?' : ap.state}</span>
+            <span>{ap.state === 'complete' ? 'reported done' : ap.state}</span>
           {:else}
             <span class="unk" title={link.why ?? 'the first read has not landed'}
               >{link.kind === 'probing' ? 'reading…' : 'unknown'}</span
@@ -1824,9 +1749,7 @@
                 ? 'GET /autopilot.json answered 404'
                 : link.kind === 'broken'
                   ? 'the payload did not match the contract'
-                  : 'the first read has not landed'}{:else if contradicted}{contradicted.axis === 'cells'
-                ? `${inrs(contradicted.out)} instrument-months short — read the beam`
-                : `${inrs(contradicted.barsOut)} bars short — read the beam`}{:else}{SAYS[ap.state] ??
+                  : 'the first read has not landed'}{:else}{SAYS[ap.state] ??
                 ap.state}{/if}</em
           >
         </div>
@@ -1855,7 +1778,7 @@
 
       <!-- 3 — INSTRUMENT-MONTHS HELD. Measured, or not drawn. -->
       <div class="gauge">
-        <span class="g-k">Instrument-months held</span>
+        <span class="g-k">Distinct stored instrument-months</span>
         <div class="g-v" class:am={!counted}>
           {#if counted}{@render N(census.cells)}{:else}{@render N(null, notCounted)}{/if}
         </div>
@@ -1871,16 +1794,15 @@
                subtraction, so the `?? 0` states the coercion the expression
                was relying on and computes the identical number. -->
           <em
-            >{#if counted}{cellsTarget === null
-                ? `no denominator — ${scope.same ? 'the target names no instrument count' : 'a different feed'}`
-                : `of ${inrs(cellsTarget)}`} · read {ago(now - (census.at ?? 0))}{:else}{notCounted}{/if}</em
+            title={MEMBERSHIP_UNKNOWN}
+            >{#if counted}{targetTimeframe} · target dates only · membership unverified · read {ago(now - (census.at ?? 0))}{:else}{notCounted}{/if}</em
           >
         </div>
       </div>
 
-      <!-- 4 — BARS STORED. Counted, and divided by nothing — see `expectedBars`. -->
+      <!-- 4 — Confirmed in-window bars; boundary-file counts may be unmeasured. -->
       <div class="gauge">
-        <span class="g-k">Bars stored</span>
+        <span class="g-k">Bars confirmed inside target dates</span>
         <div class="g-v" class:am={!counted}>
           {#if counted}{@render N(census.bars)}{:else}{@render N(null, notCounted)}{/if}
         </div>
@@ -1888,7 +1810,7 @@
           {@render src('mea')}
           <em title={counted ? BARS_NO_DENOM : undefined}
             >{#if counted}{feedName(census.feed) ?? 'no feed'} · {ap?.target?.timeframe ??
-              'timeframe not stated'} · no denominator{:else}{notCounted}{/if}</em
+              'timeframe not stated'}{census.unmeasuredBars ? ` · ${inrs(census.unmeasuredBars)} boundary-file counts unmeasured` : ' · completeness unverified'}{:else}{notCounted}{/if}</em
           >
         </div>
       </div>
@@ -1968,12 +1890,9 @@
           {:else if !ap.now}
             <div class="void">
               <b>Nothing is in flight.</b>
-              {#if contradicted}{contradicted.axis === 'cells'
-                  ? `Nothing is being attempted, and the store is ${inrs(contradicted.out)} instrument-months short of the span. A rerun has work to do.`
-                  : `Nothing is being attempted, and the store is ${inrs(contradicted.barsOut)} bars short of the span — every cell exists, the sessions inside them do not. A rerun has work to do.`}{:else if ap.why}{ap.why}{:else if ap.state ===
-                  'complete' && certified.ok}Nothing left to ask for, and the census agrees on both axes — the
-                numbers are in the beam. A rerun fetches nothing.{:else if ap.state === 'complete'}The autopilot
-                reports the span is done. This page does not repeat that as fact: {certified.why}.{:else}The
+              {#if ap.state === 'complete'}The autopilot reports that its work is done.
+                Stored target coverage is unverified: {MEMBERSHIP_UNKNOWN}
+                {#if ap.why}<p>{ap.why}</p>{/if}{:else if ap.why}{ap.why}{:else}The
                 autopilot reported state “{ap.state}” and no current cell.{/if}
             </div>
           {:else}
@@ -2072,9 +1991,8 @@
             <div class="bay-note"><span class="chip am">different question</span> {scope.why}</div>
           {:else if !counted}
             <div class="void">
-              <b>The census has not answered.</b>
-              Withheld rather than painted as a span of zeroes — an unread
-              month and an empty month are different facts.
+              <b>Target coverage is unavailable.</b>
+              {notCounted} Counts are withheld while the scope is unverified.
             </div>
           {:else if !ladder.ok}
             <!-- NO ROWS. The ladder this replaces walked a guarded loop and
@@ -2082,7 +2000,7 @@
                  refusal names the field, prints the raw value it carried, and
                  stops. There is no path from a bad target to a row. -->
             <div class="refuse" role="alert">
-              <b>The ladder is not drawn: {ladder.refuse.field} is not a month key.</b>
+              <b>The coverage table cannot show this date range: {ladder.refuse.field}.</b>
               <div>
                 /autopilot.json reported <code>{JSON.stringify(ladder.refuse.raw)}</code> — {ladder.refuse.why}
               </div>
@@ -2129,54 +2047,26 @@
                     {/if}
                   </div>
 
-                  <!-- THE BAR IS DRAWN ON THE AXIS THAT HAS A DENOMINATOR, and
-                       hatched when even that one is missing: drawing it full
-                       over nothing is the 100%-over-nothing this page exists to
-                       refuse. The tick is the second axis, and it appears only
-                       if something ever measures it. -->
-                  <div
-                    class="rung-bar"
-                    class:nod={r.cellPct === null}
-                    title={r.per === null
-                      ? 'no denominator — the target does not name a comparable instrument count for this census'
-                      : `${inrs(r.cells)} of ${inrs(r.per)} instrument-months · ${inrs(r.bars)} bars — ${BARS_NO_DENOM}`}
-                  >
-                    <i
-                      class:full={k === 'full'}
-                      class:short={k === 'short'}
-                      style="width:{r.cellPct === null ? 0 : Math.round(r.cellPct * 10) / 10}%"
-                    ></i>
-                    {#if r.barPct !== null}
-                      <span
-                        class="rung-tick"
-                        style="left:calc({Math.round(r.barPct * 10) / 10}% - 1px)"
-                        title="bars held {Math.round(r.barPct)}%"
-                      ></span>
-                    {/if}
-                  </div>
+                  <!-- Hatching means the completion denominator is unknown,
+                       even when the number of stored records is large. -->
+                  <div class="rung-bar nod" title={MEMBERSHIP_UNKNOWN}></div>
 
-                  <div class="rung-n" title="instrument-months held in this month file">
-                    {@render N(r.cells, 'not measured')}{r.per === null ? ' cells' : ` / ${inrs(r.per)}`}
+                  <div class="rung-n" title="Distinct stored instruments with a record inside the target dates; {inrs(r.unknownCells)} boundary-file overlaps are unknown.">
+                    {@render N(r.cells, 'not measured')} records{r.unknownCells ? ` + ${inrs(r.unknownCells)} unknown` : ''}
                   </div>
-                  <div class="rung-n" title="bars held in this month file — {BARS_NO_DENOM}">
-                    {@render N(r.bars, 'not measured')}
+                  <div class="rung-n" title="Bars confirmed inside target dates; {inrs(r.unmeasuredBars)} boundary-file counts are unmeasured. {BARS_NO_DENOM}">
+                    {r.unmeasuredBars ? '≥ ' : ''}{@render N(r.bars, 'not measured')}
                   </div>
                   <div class="rung-x">{openRung === r.key ? '▾' : '▸'}</div>
 
                   {#if openRung === r.key}
                     <div class="rung-why">
-                      <b>{monthLabel(r.key) ?? r.key}</b> — {#if r.per === null}there is no denominator to
-                        compare this against: {scope.same
-                          ? 'the reported target names no instrument count.'
-                          : `the census is ${feedName(census.feed)} and the target is ${feedName(ap?.target?.feed)}.`}{:else if k === 'full'}all
-                        {inrs(r.per)} instrument-months exist, holding {inrs(r.bars)} bars. Whether that is every
-                        session no route states, so this month is held and not certified.{:else if k === 'short'}all
-                        {inrs(r.per)} instrument-months exist, holding {inrs(r.bars)} of {inrs(r.expBars)} bars.
-                        Counting cells alone would call this month done.{:else if k === 'none'}nothing is held.
-                        The store appends and cannot prepend, so this month must be fetched before any later month
-                        sharing its file.{:else}{inrs(r.cells)} of {inrs(r.per)} instrument-months, holding {inrs(
-                          r.bars
-                        )} bars. {inrs(r.per - r.cells)} instruments have nothing in this month at all.{/if}
+                      <b>{monthLabel(r.key) ?? r.key}</b> — {inrs(r.cells)} distinct stored instruments
+                      have records inside the target dates at {targetTimeframe}; {inrs(r.bars)} bars are confirmed.
+                      {#if r.unknownCells}{inrs(r.unknownCells)} boundary-file overlaps are unknown.{/if}
+                      {#if r.unmeasuredBars}Exact in-range bar counts for {inrs(r.unmeasuredBars)} boundary files
+                        cannot be read from the census, so their whole-file totals are excluded.{/if}
+                      {MEMBERSHIP_UNKNOWN}
                     </div>
                   {/if}
                 </div>
@@ -2187,19 +2077,11 @@
                  so — or says MISMATCH, because a partition that does not add up
                  is a tidy number hiding a month nobody accounted for. -->
             <div class="tape-foot">
-              <div class="bkt" title="every instrument-month the target names is present in that month file">
-                <i class="full"></i><b class="mono">{inrs(buckets.full)}</b>every cell held
+              <div class="bkt" title={MEMBERSHIP_UNKNOWN}>
+                <i class="nod"></i><b class="mono">{inrs(buckets.nod)}</b>with records
               </div>
-              {#if buckets.short}
-                <div class="bkt"><i class="short"></i><b class="mono">{inrs(buckets.short)}</b>bars short</div>
-              {/if}
-              <div class="bkt"><i class="part"></i><b class="mono">{inrs(buckets.part)}</b>partial</div>
-              <div class="bkt"><i class="none"></i><b class="mono">{inrs(buckets.none)}</b>empty</div>
-              {#if buckets.nod}
-                <div class="bkt" title={scope.why ?? 'the target names no instrument count'}>
-                  <i class="nod"></i><b class="mono">{inrs(buckets.nod)}</b>no denominator
-                </div>
-              {/if}
+              <div class="bkt"><i class="part"></i><b class="mono">{inrs(buckets.part)}</b>overlap unknown</div>
+              <div class="bkt"><i class="none"></i><b class="mono">{inrs(buckets.none)}</b>no records</div>
               <span class="tot" class:bad={bucketSum !== rows.length}
                 >{bucketSum === rows.length
                   ? `of ${inrs(rows.length)} ${ladder.framed ? 'months in the target span' : 'months the store holds'}`
@@ -2216,13 +2098,10 @@
             {/if}
 
             <div class="bay-note">
-              {@render src('mea')} Fill is instrument-months held, read from /store.json and never from the autopilot;
-              bars are counted beside it because {BARS_NO_DENOM}. Oldest at the top, because a later month written
-              first permanently blocks the earlier days in that same file.{#if !ap?.target}
-                <b>The target span is not known here</b> — only the months the store already holds are listed,
-                so a month missing from this list may be a gap or may be outside the target.{/if}
-              <a class="link" href="/audit">Audit</a> draws the same census as a year-by-month grid; this ladder answers
-              what the autopilot is working on and what is next.
+              {@render src('mea')} Counts use the reported feed, timeframe and date window only. Each stored
+              instrument is counted once per month. Other timeframes and dates cannot fill an empty month here.
+              The hatched area means completion is unverified. {MEMBERSHIP_UNKNOWN}
+              <a class="link" href="/audit">Audit</a> shows the separate store inventory.
             </div>
           {/if}
         </section>
@@ -2927,35 +2806,8 @@
     background: var(--well);
     box-shadow: inset 0 0 0 1px var(--line-soft);
   }
-  .rung-bar i {
-    position: absolute;
-    left: 0;
-    top: 0;
-    bottom: 0;
-    border-radius: var(--r-full);
-    background: var(--acc);
-  }
-  .rung-bar i.full {
-    background: var(--up);
-  }
-  .rung-bar i.short {
-    background: var(--warn);
-  }
   .rung-bar.nod {
     background-image: repeating-linear-gradient(135deg, var(--line) 0 3px, transparent 3px 8px);
-  }
-  /* THE SECOND AXIS. Bars held is a different measurement from instrument-months
-     held, and a month can be 774/774 on the first while the second is at 62%.
-     The fill is the axis with a denominator; this tick is where the other one
-     sits, so when they disagree the disagreement is on screen. */
-  .rung-tick {
-    position: absolute;
-    top: -4px;
-    bottom: -4px;
-    width: 2px;
-    background: var(--ink);
-    border-radius: 2px;
-    box-shadow: 0 0 0 1px var(--panel);
   }
   .rung-n {
     font-family: var(--mono);
@@ -3023,12 +2875,6 @@
     font-variant-numeric: tabular-nums;
     color: var(--ink);
     font-weight: var(--w-bold);
-  }
-  .bkt i.full {
-    background: var(--up);
-  }
-  .bkt i.short {
-    background: var(--warn);
   }
   .bkt i.part {
     background: var(--acc);

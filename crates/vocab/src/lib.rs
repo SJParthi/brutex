@@ -41,6 +41,10 @@
 #![forbid(unsafe_code)]
 
 pub mod error;
+/// Versioned, bounded AND/OR/NOT expressions with explicit unknown values.
+pub mod expression;
+/// Resumable exhaustive enumeration of the fixed expression wire language.
+pub mod expression_search;
 /// Which condition positions say something another position already said.
 pub mod implication;
 pub mod mask;

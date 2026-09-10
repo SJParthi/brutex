@@ -462,27 +462,6 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
             };
         }
     };
-    let availability = crate::stored::vwap_availability(&loaded.key);
-    let column = match crate::stored_anchored_column(
-        &loaded.bars,
-        &daily,
-        &exact_minute,
-        signal_length,
-        availability,
-    ) {
-        Ok(column) => column,
-        Err(why) => {
-            return Row {
-                label,
-                bars: 0,
-                depth: 0,
-                kept: 0,
-                completed: false,
-                identity: None,
-                refused: Some(why),
-            };
-        }
-    };
     let digest = match crate::stored_anchored_digest(&loaded.bars, &exact_minute, &daily) {
         Ok(digest) => digest,
         Err(why) => {
@@ -524,7 +503,6 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
     let ladder = Ladder::with_min_hits(min_hits)
         .with_ceiling(BATCH_CEILING)
         .with_support_lanes(crate::shared_support_lanes());
-    let outcome = Sweeper::new(ladder).run_prepared_streamed(&column);
 
     // THE IDENTITY THIS REPORT'S BANNER HAS ALWAYS PROMISED.
     //
@@ -556,6 +534,51 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
         feed: loaded.vendor.as_str(),
     });
 
+    let attempt = match crate::sweep_evidence::begin(
+        root,
+        id.bytes(),
+        crate::sweep_evidence::Operation::Sweep,
+    ) {
+        Ok(attempt) => attempt,
+        Err(why) => {
+            return Row {
+                label,
+                bars: 0,
+                depth: 0,
+                kept: 0,
+                completed: false,
+                identity: Some(id.hex()),
+                refused: Some(why),
+            };
+        }
+    };
+    let availability = crate::stored::vwap_availability(&loaded.key);
+    let column = match crate::stored_anchored_column(
+        &loaded.bars,
+        &daily,
+        &exact_minute,
+        signal_length,
+        availability,
+    ) {
+        Ok(column) => column,
+        Err(why) => {
+            return Row {
+                label,
+                bars: 0,
+                depth: 0,
+                kept: 0,
+                completed: false,
+                identity: Some(id.hex()),
+                refused: Some(why),
+            };
+        }
+    };
+    let outcome = Sweeper::new(ladder).run_prepared_streamed_reporting(
+        &column,
+        &mut |level, admitted, pairs| {
+            let _ = attempt.level(crate::sweep_evidence::DepthRow::of(level, admitted, pairs));
+        },
+    );
     let kept = usize::try_from(
         outcome
             .sweep
@@ -566,7 +589,7 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
     )
     .unwrap_or(usize::MAX);
     let depth = outcome.sweep.depth();
-    let completed = outcome.sweep.completed();
+    let completed = outcome.is_complete();
 
     // ONE EVENT PER INSTRUMENT-MONTH, which is this module's own stated
     // granularity: "reporting BETWEEN instrument-months, never inside one".
@@ -601,27 +624,37 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
     // row in an append-only file, which cannot be corrected later. `Streamed`
     // has the real count, is the same walk by `engine`'s own test, and retains
     // less -- which matters most here, where months run in parallel.
-    let filed = crate::record_swept_run(
-        crate::Recording {
-            root,
-            feed: loaded.vendor.as_str(),
-            underlying: held.symbol.as_str(),
-            timeframe: held.timeframe.as_str(),
-            from: (held.month.year(), held.month.month()),
-            to: (held.month.year(), held.month.month()),
-            attempt: None,
-            months_asked: 1,
-            months_found: 1,
-        },
-        &id,
-        &outcome.sweep,
-        outcome.census.swept,
-        min_hits,
-    );
+    let filed = attempt.check().and_then(|()| {
+        crate::record_swept_run(
+            crate::Recording {
+                root,
+                feed: loaded.vendor.as_str(),
+                underlying: held.symbol.as_str(),
+                timeframe: held.timeframe.as_str(),
+                from: (held.month.year(), held.month.month()),
+                to: (held.month.year(), held.month.month()),
+                attempt: None,
+                months_asked: 1,
+                months_found: 1,
+            },
+            &id,
+            &outcome.sweep,
+            outcome.census.swept,
+            min_hits,
+        )
+    });
     // A MONTH THAT SWEPT AND COULD NOT BE FILED IS A FACT THIS REPORT SHOWS.
     // `refused` is the field that already exists for it, and the sweep's own
     // numbers stay in the row beside the reason -- the walk happened.
-    let refused = filed.err().map(|why| format!("not recorded: {why}"));
+    let refused = filed
+        .and_then(|_| {
+            attempt.finish(crate::sweep_completion(
+                completed,
+                outcome.sweep.halted.as_ref(),
+            ))
+        })
+        .err()
+        .map(|why| format!("not recorded: {why}"));
 
     Row {
         label,

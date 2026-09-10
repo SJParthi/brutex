@@ -242,7 +242,7 @@ impl Params {
     }
 }
 
-/// A run's identity: 32 bytes of BLAKE3 over the eight terms.
+/// A run's identity: 32 bytes of BLAKE3 over the nine terms.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RunId([u8; OUT_LEN]);
 
@@ -417,11 +417,16 @@ pub fn data_digest_with_execution(
 /// This is an append-only byte vocabulary.  A committed bar-file record is not
 /// automatically a checksum-scrubbed record: the store's ordinary read door
 /// deliberately does not perform the O(file) scrub pass.  The only state this
-/// build can therefore attest at the CLI boundary is [`Self::UnverifiedNoReceipt`].
+/// ordinary read boundary can attest is [`Self::UnverifiedNoReceipt`]. A strict
+/// retained source may instead bind its complete persisted receipt authority.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReferenceIntegrity {
     /// No independently persisted scrub receipt was supplied for these bytes.
     UnverifiedNoReceipt,
+    /// Exact versioned checksum-admission receipt and physical-policy digest.
+    /// This is identity metadata; possession of this value alone is not stored
+    /// source authority. The caller must retain and reauthenticate its sources.
+    ChecksumReceiptV1([u8; 32]),
 }
 
 impl ReferenceIntegrity {
@@ -430,6 +435,7 @@ impl ReferenceIntegrity {
     pub const fn byte(self) -> u8 {
         match self {
             Self::UnverifiedNoReceipt => 0,
+            Self::ChecksumReceiptV1(_) => 1,
         }
     }
 }
@@ -536,6 +542,8 @@ pub fn data_digest_with_daily_reference(
     const MINUTE_INTEGRITY: u8 = 10;
     /// Appended. Ten tags existed before it and none of them moves.
     const SWEPT_SERIES_CALENDAR_POLICY: u8 = 11;
+    const DAILY_CHECKSUM_RECEIPT_V1: u8 = 12;
+    const MINUTE_CHECKSUM_RECEIPT_V1: u8 = 13;
 
     if reference.daily_bars.len() != reference.eligibility.len() {
         return Err(DailyBindingRefusal::EligibilityLengthMismatch {
@@ -600,6 +608,16 @@ pub fn data_digest_with_daily_reference(
         SWEPT_SERIES_CALENDAR_POLICY,
         &reference.swept_series_calendar_policy.to_le_bytes(),
     );
+    // Append only for the new evidence state: historical byte-zero callers
+    // retain their exact encoding. Full digests are never reduced to flags.
+    for (tag, integrity) in [
+        (DAILY_CHECKSUM_RECEIPT_V1, reference.daily_integrity),
+        (MINUTE_CHECKSUM_RECEIPT_V1, reference.minute_integrity),
+    ] {
+        if let ReferenceIntegrity::ChecksumReceiptV1(receipt) = integrity {
+            term(&mut hasher, tag, &receipt);
+        }
+    }
     Ok(hasher.finalize())
 }
 
@@ -623,10 +641,31 @@ fn term(hasher: &mut Hasher, tag: u8, bytes: &[u8]) {
 
 /// The identity of a run, per `CLAUDE.md` §3 rule 3.
 ///
-/// Eight terms, each tagged and length-prefixed, hashed in the order the rule
+/// Nine terms, each tagged and length-prefixed, hashed in the order the rule
 /// names them.
 #[must_use]
 pub fn identity(run: &Run<'_>) -> RunId {
+    identity_inner(run, None)
+}
+
+/// Extend only the parameter term with the complete versioned expression.
+/// Legacy AND identities retain their exact previous bytes.
+pub(crate) fn identity_with_expression(
+    run: &Run<'_>,
+    expression: &vocab::expression::Expression,
+) -> RunId {
+    identity_inner(run, Some((b"BTXEXPR1", &expression.encode())))
+}
+
+/// Bind the complete initial grammar cursor in the existing parameter term.
+pub(crate) fn identity_with_expression_search(
+    run: &Run<'_>,
+    cursor: &vocab::expression_search::Cursor,
+) -> RunId {
+    identity_inner(run, Some((b"BTXEXS01", &cursor.initial_descriptor())))
+}
+
+fn identity_inner(run: &Run<'_>, extension: Option<(&[u8; 8], &[u8])>) -> RunId {
     let mut hasher = Hasher::new();
 
     // 1. mask — fixed width, one little-endian word per mask word.
@@ -718,7 +757,22 @@ pub fn identity(run: &Run<'_>) -> RunId {
     ]) {
         slot.copy_from_slice(&value.to_le_bytes());
     }
-    term(&mut hasher, tag::PARAMS, &params);
+    if let Some((domain, descriptor)) = extension {
+        // The domain and fixed full descriptor are part of params, never a
+        // truncated hash folded into the legacy u64 policy field.
+        hasher.update(&[tag::PARAMS]);
+        // Both private callers have fixed descriptors smaller than 4 KiB.
+        hasher.update(
+            &u32::try_from(40 + descriptor.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
+        hasher.update(&params);
+        hasher.update(domain);
+        hasher.update(descriptor);
+    } else {
+        term(&mut hasher, tag::PARAMS, &params);
+    }
 
     // 6. data_digest
     term(&mut hasher, tag::DATA_DIGEST, &run.data_digest);
@@ -1021,6 +1075,43 @@ mod tests {
             minute_integrity: ReferenceIntegrity::UnverifiedNoReceipt,
             swept_series_calendar_policy: 1,
         }
+    }
+
+    #[test]
+    fn checksum_receipt_identity_binds_every_bit_and_keeps_unknown_distinct() {
+        let bars = synthetic::sessions(1);
+        let daily = bars.get(..2).expect("two generated fixture bars");
+        let eligibility = [1, 1];
+        let legacy = daily_binding(daily, &eligibility, &[]);
+        let ordinary = data_digest_with_daily_reference(&bars, &bars, legacy).expect("ordinary");
+        let mut strict = legacy;
+        strict.daily_integrity = ReferenceIntegrity::ChecksumReceiptV1([0; 32]);
+        strict.minute_integrity = ReferenceIntegrity::ChecksumReceiptV1([0; 32]);
+        let bound = data_digest_with_daily_reference(&bars, &bars, strict).expect("strict");
+        assert_ne!(ordinary, bound);
+        assert_eq!(ReferenceIntegrity::UnverifiedNoReceipt.byte(), 0);
+        assert_eq!(strict.daily_integrity.byte(), 1);
+        for bit in 0..256 {
+            let mut receipt = [0; 32];
+            *receipt
+                .get_mut(bit / 8)
+                .expect("bit belongs to 256-bit receipt") = 1 << (bit % 8);
+            let mut daily_change = strict;
+            daily_change.daily_integrity = ReferenceIntegrity::ChecksumReceiptV1(receipt);
+            let mut minute_change = strict;
+            minute_change.minute_integrity = ReferenceIntegrity::ChecksumReceiptV1(receipt);
+            let daily_id =
+                data_digest_with_daily_reference(&bars, &bars, daily_change).expect("daily");
+            let minute_id =
+                data_digest_with_daily_reference(&bars, &bars, minute_change).expect("minute");
+            assert_ne!(bound, daily_id, "daily bit {bit}");
+            assert_ne!(bound, minute_id, "minute bit {bit}");
+            assert_ne!(daily_id, minute_id, "receipt role {bit}");
+        }
+        assert_eq!(
+            ordinary,
+            data_digest_with_daily_reference(&bars, &bars, legacy).expect("unchanged")
+        );
     }
 
     #[test]

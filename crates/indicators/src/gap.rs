@@ -262,6 +262,25 @@ impl GapFib {
         Ok(bits)
     }
 
+    /// Pair the emitted truth with availability from the same pre-fold leg.
+    /// A session rollover invalidates the old leg before the first emission;
+    /// the current session's third contribution establishes a leg only for the
+    /// following bar. The existing truth-only path stays unchanged.
+    pub(crate) fn step_known(
+        &mut self,
+        bar: &Candle,
+        tolerance: Tolerance,
+        calendar: &Calendar,
+    ) -> Result<(ConditionMask, ConditionMask), crate::Corrupt> {
+        let known = if self.day == crate::ist_day(bar.ts_micros) {
+            self.known(tolerance)
+        } else {
+            ConditionMask::ZERO
+        };
+        self.step(bar, tolerance, calendar)
+            .map(|truth| (truth, known.union(&truth)))
+    }
+
     /// Hand the finished session's last 3-minute candle forward and reset.
     ///
     /// # Why this takes a verdict
@@ -437,6 +456,29 @@ impl GapFib {
             }
         }
         mask
+    }
+
+    /// Availability of each representable rung of the established gap leg.
+    /// The zero-distance probe checks the same base and tolerance contract as
+    /// truth emission; missing legs and unrepresentable levels stay Unknown.
+    pub(crate) fn known(&self, tolerance: Tolerance) -> ConditionMask {
+        let mut known = ConditionMask::ZERO;
+        let Some(leg) = self.leg else {
+            return known;
+        };
+        let Some(range) = leg.length() else {
+            return known;
+        };
+        for (index, p) in Self::positions().into_iter().zip(GAP_RUNGS) {
+            if let Some(level) = leg.level(p)
+                && tolerance.covers(level, level, range)
+                && let Ok(next) =
+                    vocab::table::set_near(known, index, tolerance, level, level, range)
+            {
+                known = next;
+            }
+        }
+        known
     }
 
     /// Every position this module can set.
@@ -985,13 +1027,22 @@ mod tests {
         const HI: i64 = 9_200_000_000_000_000_000;
         const LO: i64 = -9_200_000_000_000_000_000;
 
-        let mut g = GapFib::new();
-        for m in 0..3 {
-            let _ = ok(&mut g, &at(30_700, m, LO, LO, LO));
-        }
-        for m in 0..3 {
-            let _ = ok(&mut g, &at(30_701, m, HI, HI, HI));
-        }
+        // A checked production fold now rejects the negative price before it
+        // can form this span. Preserve the overflow guard's low-level evidence
+        // by explicitly constructing its reference, rather than weakening the
+        // positive-price boundary to make the old fixture enter production.
+        let mut g = GapFib {
+            leg: Some(GapLeg {
+                direction: Direction::Up,
+                x1: LO,
+                x2: HI,
+            }),
+            ..GapFib::new()
+        };
+        assert_eq!(
+            g.step(&at(30_700, 0, LO, LO, LO), tol(), &Calendar::all_regular()),
+            Err(crate::Corrupt::PriceNotPositive)
+        );
         let leg = g
             .leg()
             .expect("today's first-3 high cleared yesterday's last-3 high");
@@ -1006,29 +1057,29 @@ mod tests {
         );
         // A close on `X2` is rung 0 of this ladder at any length, which is why it is the
         // close that shows a saturated length firing a bit.
-        let mask = ok(&mut g, &at(30_701, 3, HI, HI, HI));
+        let mask = g.bits(HI, tol());
         assert_eq!(
             mask,
             ConditionMask::ZERO,
             "a leg whose length leaves i64 decided a rung on today's opening extreme"
         );
 
-        // And a gap spanning half as much — 9.2e18, which DOES fit — fires rung 0 on the
+        // A positive gap spanning almost 9.2e18, which DOES fit, fires rung 0 on the
         // same close from the same code, so the empty mask above is the length leaving
         // the type and not a ladder that never emits at this magnitude.
         let mut fits = GapFib::new();
         for m in 0..3 {
-            let _ = ok(&mut fits, &at(30_800, m, LO / 2, LO / 2, LO / 2));
+            let _ = ok(&mut fits, &at(30_800, m, 1, 1, 1));
         }
         for m in 0..3 {
-            let _ = ok(&mut fits, &at(30_801, m, HI / 2, HI / 2, HI / 2));
+            let _ = ok(&mut fits, &at(30_801, m, HI, HI, HI));
         }
         assert_eq!(
             fits.leg().map(|leg| leg.length()),
-            Some(Some(HI / 2 - LO / 2)),
+            Some(Some(HI - 1)),
             "a representable 9.2e18 gap did not report its own length"
         );
-        let mask = ok(&mut fits, &at(30_801, 3, HI / 2, HI / 2, HI / 2));
+        let mask = ok(&mut fits, &at(30_801, 3, HI, HI, HI));
         assert!(
             mask.get(u32::from(GAP_FIRST)),
             "a representable gap did not fire rung 0 on a close sitting exactly on X2"

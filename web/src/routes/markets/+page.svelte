@@ -107,6 +107,9 @@
    * page-level style block is a second theme the toggle cannot reach.
    */
   import { catalogue, loadCatalogue, search } from '$lib/index.svelte.js';
+  import { pooled, IN_FLIGHT } from '$lib/pooled.js';
+  import { createPageRequests } from '$lib/page-requests.js';
+  import { onDestroy } from 'svelte';
   import { feeds } from '$lib/feeds.svelte.js';
   import { monthLabel, stampLabel } from '$lib/dates.js';
   // `group`, `rupee` AND THE LOCALE ITSELF LIVE IN `$lib/money.js` so a test can
@@ -983,7 +986,8 @@
 
   /** @type {Bar[]} */
   let rawBars = $state([]);
-  let barsToken = 0;
+  const chartRequests = createPageRequests();
+  onDestroy(() => chartRequests.dispose());
   // A RETRY HAS TO CHANGE SOMETHING. Re-assigning `range` to the value it
   // already holds is not a re-read — the effect's dependencies are unchanged
   // and nothing runs, so the button would look like a control and be furniture.
@@ -994,9 +998,10 @@
    * @param {string} month
    * @param {string} feed
    * @param {string} rung
+   * @param {AbortSignal} signal
    * @returns {Promise<{ bars: Bar[], faults: string | null }>}
    */
-  async function readMonth(row, month, feed, rung) {
+  async function readMonth(row, month, feed, rung, signal) {
     // A HALF-KNOWN PLACE IS NOT A PLACE, and this is the same refusal
     // `$lib/place.js` states in those words. The three parts below are the
     // store path — the path IS the index — and a row that cannot name one of
@@ -1020,7 +1025,7 @@
       timeframe: rung,
       month
     });
-    const r = await ask(`/bars.json?${q}`);
+    const r = await ask(`/bars.json?${q}`, { signal });
     let body = null;
     try {
       body = await r.json();
@@ -1041,7 +1046,7 @@
     const rung = base;
     const months = wantMonths;
     void barsRetry; // READ, NOT USED — it is what makes "Retry the read" a read
-    const mine = ++barsToken;
+    chartRequests.cancel();
 
     if (!row || !feed || !rung || months.length === 0) {
       barsLoading = false;
@@ -1052,21 +1057,24 @@
     }
     barsLoading = true;
     barsError = null;
-    Promise.all(months.map((m) => readMonth(row, m, feed, rung)))
-      .then((parts) => {
-        if (mine !== barsToken) return; // a newer selection won; drop this answer
+    void chartRequests.run(async (ticket) => {
+      try {
+        const parts = await pooled(months, IN_FLIGHT,
+          (m) => readMonth(row, m, feed, rung, ticket.signal), ticket.signal);
+        if (!ticket.current()) return;
         rawBars = parts.flatMap((p) => p.bars).sort((a, b) => cmp(a.t, b.t));
         barsFaults = parts.map((p) => p.faults).filter(Boolean).join('; ') || null;
         barsError = null;
         barsLoading = false;
-      })
-      .catch((why) => {
-        if (mine !== barsToken) return;
+      } catch (why) {
+        if (!ticket.current()) return;
         rawBars = [];
         barsFaults = null;
-        barsError = String(why?.message ?? why);
+        barsError = String(why instanceof Error ? why.message : why);
         barsLoading = false;
-      });
+      }
+    });
+    return () => chartRequests.cancel();
   });
 
   /* ---- aggregation -----------------------------------------------------
@@ -1521,7 +1529,7 @@
      RE-READS. Both are GETs this page already makes; neither is a pull.
      ====================================================================== */
   const rereadMaster = () => {
-    if (feeds.active) loadCatalogue(feeds.active);
+    if (feeds.active) loadCatalogue(feeds.active, true);
   };
   // A GENERATION BUMP, NOT A PRIVATE FETCH. Every page subscribed to the shared
   // census re-reads off the same answer, so this press cannot leave one surface

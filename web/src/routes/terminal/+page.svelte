@@ -827,19 +827,26 @@
     const at = time;
     if (!feed || !tf || !mo || want.length === 0) return;
     let live = true;
+    const controller = new AbortController();
     quotesOn(
       feed,
       want.map((key) => ({ key, timeframe: tf, month: mo })),
       on,
-      at
+      at,
+      controller.signal
     ).then((answers) => {
       if (!live) return;
       const next = new Map(quotes);
       for (const q of answers) next.set(q.key, q);
       quotes = next;
+    }).catch((error) => {
+      // Cancelling this view stops queued work, while another view may still
+      // be awaiting an already-started cached read. Only cancellation is quiet.
+      if (!controller.signal.aborted) throw error;
     });
     return () => {
       live = false;
+      controller.abort();
     };
   });
 
@@ -1219,11 +1226,62 @@
      switch appears on exactly one tab — so both the travel and whether there is
      any travel at all change on a tab switch, with no scroll event to announce
      it. Without this the arrows keep the previous tab's enabled state. */
+  /* AND ON THE NEXT FRAME, AND ON A RESIZE — BECAUSE `.twin` MADE THE RAIL'S
+     WIDTH DEPEND ON DATA THAT HAS NOT ARRIVED YET.
+     -------------------------------------------------------------------------
+     The two dependencies above are both synchronous, and while seven pickers
+     held this row that was enough: `.ctrls` was 739px from first paint to last,
+     so the rail's width never moved except on a tab switch.
+
+     The summary button is not that. Its width IS its value — `Zerodha · Sep
+     2026 · 1day` — and every term of that arrives asynchronously. MEASURED on a
+     fresh load at 1120px: the button settles at 200px, `.chips` drops to 655
+     against the 774 the seven chips need, and 119px of rail is unreachable
+     while BOTH arrows sit disabled. The effect had already run and measured a
+     rail that was, at that instant, whole. `railBy`'s own comment refuses
+     exactly this: an arrow that clicks and does nothing.
+
+     So `windowTerms` joins the dependency list — it is the thing whose change
+     resizes the button — and the reading is repeated on the next frame, after
+     the browser has laid the new text out.
+
+     WHAT IS PROVEN HERE AND WHAT IS NOT, because the two are not the same and
+     saying otherwise would be the claimed measurement CLAUDE.md section 3 rule
+     6 forbids.
+
+     PROVEN: the dependency list and the frame. A fresh load at 1120px now
+     leaves the left arrow disabled at position 0 and the right arrow ENABLED
+     over its 119px of travel, and a tab round trip keeps it. That path is what
+     fixed the defect above and it was watched fixing it.
+
+     NOT PROVEN: `resize`. The first attempt at this was a `ResizeObserver` on
+     `.chips`, and it fired ZERO times in the browser this page is verified in
+     — not on the size change and not even the initial callback `observe()` is
+     specified to deliver. The `resize` listener below fares no better here:
+     measured across an emulated 1120 -> 1440, `innerWidth` moved and the event
+     fired zero times. Both are correct in a real browser and neither can be
+     exercised in this one, so the listener stays — a real window resize is a
+     real event — and this paragraph is the honest label on it.
+
+     It is the trap `railBy` records one comment down, where
+     `scrollBy({behavior:'smooth'})` moved the rail 150px one way and zero the
+     other while reporting success both times. The rule that came out of it
+     holds here: do not hang the only affordance on a mechanism that can be
+     silently unavailable. The frame and the dependencies are the path that
+     does not depend on an event arriving. */
   $effect(() => {
     void chips;
     void moverTab;
-    void chipRail;
+    void windowTerms;
+    if (!chipRail) return;
     measureRail();
+    const frame = requestAnimationFrame(measureRail);
+    const onResize = () => measureRail();
+    addEventListener('resize', onResize);
+    return () => {
+      cancelAnimationFrame(frame);
+      removeEventListener('resize', onResize);
+    };
   });
   /** How far the rail is scrolled, and how far it can go. Held as state so the
       arrows can disable themselves at the end they cannot travel — an arrow
@@ -1458,6 +1516,85 @@
     }
     return p.underlying;
   }
+
+  /* THE WINDOW IS ONE CONTROL NOW, AND THE MEASUREMENT IS WHY.
+     ------------------------------------------------------------------------
+     Seven pickers at `flex: none` came to 739px, and `.chips` is the only item
+     on the row that can yield. MEASURED on the running page, Stocks tab, where
+     the seven chips need 774px:
+
+         viewport 1280 -> chips  276    64% of the rail hidden, 2 chips drawn
+         viewport 1440 -> chips  436    44% hidden
+         viewport 1920 -> chips  916    whole
+
+     So the rail was only whole at 1920. The `.chiprow` rule below said "above
+     about 1200px nothing wraps and the row reads exactly as the capture", and
+     that was true about WRAPPING and false about the capture: the source draws
+     all seven chips at once and this page drew two.
+
+     THE SOURCE CANNOT SETTLE IT, because it does not have this problem.
+     `web.dhan.co` puts seven chips beside TWO pickers — `September` and `All`
+     — with about 500px of empty row between them. Dhan is live, so it has no
+     feed, no year, no month, no date, no minute and no timeframe to choose;
+     the five extra controls are brutex's, they are the stored window, and they
+     are not optional. Copying the capture here is not available.
+
+     So the window collapses behind one button, and the trade is the honest one
+     for this page: the window is chosen once a session and the chips are
+     pressed all session. What the button must NOT do is hide a narrowing —
+     `Sep 2026` printed while a date, a minute and a segment are set is the
+     fallback that conceals its own state, which section 4 bans. It shows every
+     term that is not at its default, so the summary lengthens exactly when the
+     view gets narrower. */
+  let windowOpen = $state(false);
+
+  /** The panel and its button, for the outside-click test below. */
+  let windowBox = $state(/** @type {HTMLElement | null} */ (null));
+
+  /** The chosen feed's display name, falling back to the wire name while the
+      list is still loading — never blank, which would read as "no feed". */
+  const feedLabel = $derived(
+    feeds.all.find((f) => f.wire === feeds.active)?.display ?? feeds.active ?? '—'
+  );
+
+  /** Every term of the window that is not at its default, in cascade order.
+      Feed, date and timeframe are always present because they always hold a
+      value; the middle three appear only once they narrow something. */
+  const windowTerms = $derived(
+    [
+      feedLabel,
+      day ? dayLabel(day) : monthLabel(month),
+      time || null,
+      hasExpiry && expiry ? `${monthLabel(expiry)} expiry` : null,
+      segment !== 'All' ? segment : null,
+      timeframe
+    ].filter(Boolean)
+  );
+
+  /* ESCAPE AND AN OUTSIDE CLICK, NOT ONE OR THE OTHER. Escape is the keyboard's
+     way out and a click elsewhere is the mouse's; a panel that honours only one
+     of them is a panel half this console's operators have to hunt to close.
+     `pointerdown` rather than `click`, so the dismissal lands before a control
+     underneath the panel takes the press. */
+  $effect(() => {
+    if (!windowOpen) return;
+    /** @param {KeyboardEvent} e */
+    const onKey = (e) => {
+      if (e.key === 'Escape') windowOpen = false;
+    };
+    /** @param {PointerEvent} e */
+    const onDown = (e) => {
+      if (windowBox && e.target instanceof Node && !windowBox.contains(e.target)) {
+        windowOpen = false;
+      }
+    };
+    addEventListener('keydown', onKey);
+    addEventListener('pointerdown', onDown);
+    return () => {
+      removeEventListener('keydown', onKey);
+      removeEventListener('pointerdown', onDown);
+    };
+  });
 </script>
 
 <!-- ====================================================================
@@ -1755,138 +1892,171 @@
             >
           </div>
         {/if}
-        <!-- THE WINDOW, WIDEST FIRST: year, then month, then segment, then
-             timeframe. The order is the order the answers depend on each other —
-             the month list is the chosen year's, and the segment list is the
-             chosen tab's — so reading left to right is reading the query being
-             narrowed. Each is labelled, because four bare pills side by side
-             name nothing: `2026`, `Sep 2026`, `CASH` and `1day` are four
-             different KINDS of value and only the last two are self-evident. -->
-        <div class="ctrls">
-          <!-- THE FEED, AND THIS PAGE HAD NONE — A DEAD END THIS PAGE CREATED.
-               `+layout.svelte`'s FEED_OWNED comment states the rule it broke:
-               "ZERO controls is the other, and it is worse: a page that shows
-               one feed's answer and offers no way to change it is a dead end,
-               and the operator's only move is the browser's back button." That
-               is exactly what standing the console bar down did here — the bar
-               carried the only picker, and this page replaced the bar without
-               replacing the control.
-
-               So it joins FEED_OWNED's list in substance: the feed is the FIRST
-               control of this row because it is the first rung of the cascade,
-               and everything to its right is that feed's answer. The census,
-               the years, the months, the segments and the timeframes are all
-               folds over the store OF THE CHOSEN FEED.
-
-               AN UNAVAILABLE FEED IS NAMED, NOT HIDDEN — the same reason the
-               bar used a listbox rather than a native `<select>`: an option has
-               to carry the server's REASON when a feed cannot be used, and a
-               feed dropped from the list reads as a feed that does not exist. -->
-          <label class="tctl">
-            <span>Feed</span>
-            <select class="pill" bind:value={feeds.active}>
-              {#each feeds.all as f (f.wire)}
-                <option value={f.wire} disabled={!f.ready} title={f.why ?? undefined}>
-                  {f.display}{f.ready ? '' : ' · unavailable'}
-                </option>
-              {/each}
-            </select>
-          </label>
-          <label class="tctl">
-            <span>Year</span>
-            <select class="pill" bind:value={year}>
-              {#each years as y (y)}<option value={y}>{y}</option>{/each}
-            </select>
-          </label>
-          <label class="tctl">
-            <span>Month</span>
-            <select class="pill" bind:value={month}>
-              {#each monthsInYear as m (m)}<option value={m}>{monthLabel(m)}</option>{/each}
-            </select>
-          </label>
-          <!-- THE DAY. Present only when the census says the month can be read
-               within budget, and carrying the reason when it cannot — a control
-               that greys out silently teaches nothing, while one that names the
-               bar count tells the operator to coarsen the timeframe. -->
-          <label class="tctl">
-            <span>Date</span>
-            <select
-              class="pill"
-              bind:value={day}
-              disabled={!dayCapable || days.length === 0}
-              title={dayCapable
-                ? daysWhy
-                  ? days.length === 0
-                    ? `No day can be offered — every series in view failed to read: ${daysWhy}`
-                    : `${daysFailed} of ${daysAsked} series in view could not be read, so this list may be short a day they traded: ${daysWhy}`
-                  : 'The last bar on the chosen day. “Month” is the month’s last bar.'
-                : rows.length === 0
-                  ? 'There are no rows in view, so there is no month to read for a date. This is not a budget refusal — the grid is empty.'
-                  : `A day needs the month read, and the heaviest visible series holds ${heaviest.toLocaleString('en-IN')} ${timeframe} bars against a budget of ${DAY_BUDGET.toLocaleString('en-IN')}. Choose a coarser timeframe to pick a date.`}
+        <!-- THE WINDOW, BEHIND ONE BUTTON THAT READS IT BACK.
+             The script's `windowOpen` comment carries the measurement that put
+             it here; what matters at this line is that the BUTTON IS THE VALUE,
+             not the name of a control. `Window ▾` would be a label the operator
+             has to open to interrogate, on the one control whose current answer
+             every other surface on this page is showing. -->
+        <div class="twin" bind:this={windowBox}>
+          <div class="tctl">
+            <span id="twinlabel">Window</span>
+            <button
+              type="button"
+              class="pill twinbtn"
+              aria-expanded={windowOpen}
+              aria-controls="twinpanel"
+              aria-labelledby="twinlabel twinvalue"
+              title={windowOpen
+                ? 'Close the window picker.'
+                : `Choose the window this grid is read over. Showing ${windowTerms.join(' · ')}.`}
+              onclick={() => (windowOpen = !windowOpen)}
+              ><span id="twinvalue">{windowTerms.join(' · ')}</span></button
             >
-              <option value="">Month</option>
-              {#each days as d (d)}<option value={d}>{dayLabel(d)}</option>{/each}
-            </select>
-          </label>
-          <!-- THE MINUTE. Only meaningful once a day is chosen, and only
-               offers a choice when the timeframe puts more than one bar in a
-               day: `1day` yields exactly one, and a picker with one option is
-               a control that cannot be used. It says which of those it is
-               rather than greying out for an unstated reason. -->
-          <label class="tctl">
-            <span>Time</span>
-            <select
-              class="pill"
-              bind:value={time}
-              disabled={!day || times.length < 2}
-              title={!day
-                ? 'Choose a date first — a time with no date is a minute of nothing.'
-                : timesWhy
-                  ? times.length === 0
-                    ? `No minute can be offered — every series in view failed to read: ${timesWhy}`
-                    : `${timesFailed} of ${timesAsked} series in view could not be read, so this list may be short a minute they are stamped with: ${timesWhy}`
-                  : times.length < 2
-                    ? `At ${timeframe} a day holds ${times.length === 1 ? 'one bar' : 'no bars'}, so there is no minute to choose between. A finer timeframe puts more bars in the day.`
-                    : 'The bar stamped at this minute. “Close” is the day’s last bar.'}
-            >
-              <option value="">Close</option>
-              {#each times as t (t)}<option value={t}>{t}</option>{/each}
-            </select>
-          </label>
-          <!-- THE EXPIRY, on the two tabs that have one. Every option is an
-               expiry some contract on this tab actually carries, so the picker
-               cannot offer a month the store has never filed. When the store
-               holds no contracts at all it says that rather than sitting empty
-               and disabled with nothing to explain it. -->
-          {#if hasExpiry}
-            <label class="tctl">
-              <span>Expiry</span>
-              <select
-                class="pill"
-                bind:value={expiry}
-                disabled={expiries.length === 0}
-                title={expiries.length === 0
-                  ? `The store holds no ${tab?.label.toLowerCase()} contracts for this feed, so there is no expiry to choose. This is an empty store, not a refused control.`
-                  : 'Show only contracts expiring in this month. “All” keeps every expiry.'}
-              >
-                <option value="">All</option>
-                {#each expiries as e (e)}<option value={e}>{monthLabel(e)}</option>{/each}
-              </select>
-            </label>
+          </div>
+          <!-- THE PANEL IS ABSENT WHEN CLOSED, not hidden. Eight `<select>`
+               elements left in the DOM behind `display: none` stay out of the
+               tab order but remain in the accessibility tree's reckoning on
+               some browsers, and there is nothing to gain by keeping them: the
+               values live in state, not in the markup. -->
+          {#if windowOpen}
+            <div class="twinpanel" id="twinpanel">
+              <!-- WIDEST FIRST: feed, year, month, then the narrowing three,
+                   then timeframe. The order is the order the answers depend on
+                   each other — the month list is the chosen year's, and the
+                   segment list is the chosen tab's — so reading down the panel
+                   is reading the query being narrowed. Each is labelled,
+                   because bare pills side by side name nothing: `2026`,
+                   `Sep 2026`, `CASH` and `1day` are four different KINDS of
+                   value and only the last two are self-evident. -->
+              <div class="ctrls">
+              <!-- THE FEED, AND THIS PAGE HAD NONE — A DEAD END THIS PAGE CREATED.
+                   `+layout.svelte`'s FEED_OWNED comment states the rule it broke:
+                   "ZERO controls is the other, and it is worse: a page that shows
+                   one feed's answer and offers no way to change it is a dead end,
+                   and the operator's only move is the browser's back button." That
+                   is exactly what standing the console bar down did here — the bar
+                   carried the only picker, and this page replaced the bar without
+                   replacing the control.
+
+                   So it joins FEED_OWNED's list in substance: the feed is the FIRST
+                   control of this row because it is the first rung of the cascade,
+                   and everything to its right is that feed's answer. The census,
+                   the years, the months, the segments and the timeframes are all
+                   folds over the store OF THE CHOSEN FEED.
+
+                   AN UNAVAILABLE FEED IS NAMED, NOT HIDDEN — the same reason the
+                   bar used a listbox rather than a native `<select>`: an option has
+                   to carry the server's REASON when a feed cannot be used, and a
+                   feed dropped from the list reads as a feed that does not exist. -->
+              <label class="tctl">
+                <span>Feed</span>
+                <select class="pill" bind:value={feeds.active}>
+                  {#each feeds.all as f (f.wire)}
+                    <option value={f.wire} disabled={!f.ready} title={f.why ?? undefined}>
+                      {f.display}{f.ready ? '' : ' · unavailable'}
+                    </option>
+                  {/each}
+                </select>
+              </label>
+              <label class="tctl">
+                <span>Year</span>
+                <select class="pill" bind:value={year}>
+                  {#each years as y (y)}<option value={y}>{y}</option>{/each}
+                </select>
+              </label>
+              <label class="tctl">
+                <span>Month</span>
+                <select class="pill" bind:value={month}>
+                  {#each monthsInYear as m (m)}<option value={m}>{monthLabel(m)}</option>{/each}
+                </select>
+              </label>
+              <!-- THE DAY. Present only when the census says the month can be read
+                   within budget, and carrying the reason when it cannot — a control
+                   that greys out silently teaches nothing, while one that names the
+                   bar count tells the operator to coarsen the timeframe. -->
+              <label class="tctl">
+                <span>Date</span>
+                <select
+                  class="pill"
+                  bind:value={day}
+                  disabled={!dayCapable || days.length === 0}
+                  title={dayCapable
+                    ? daysWhy
+                      ? days.length === 0
+                        ? `No day can be offered — every series in view failed to read: ${daysWhy}`
+                        : `${daysFailed} of ${daysAsked} series in view could not be read, so this list may be short a day they traded: ${daysWhy}`
+                      : 'The last bar on the chosen day. “Month” is the month’s last bar.'
+                    : rows.length === 0
+                      ? 'There are no rows in view, so there is no month to read for a date. This is not a budget refusal — the grid is empty.'
+                      : `A day needs the month read, and the heaviest visible series holds ${heaviest.toLocaleString('en-IN')} ${timeframe} bars against a budget of ${DAY_BUDGET.toLocaleString('en-IN')}. Choose a coarser timeframe to pick a date.`}
+                >
+                  <option value="">Month</option>
+                  {#each days as d (d)}<option value={d}>{dayLabel(d)}</option>{/each}
+                </select>
+              </label>
+              <!-- THE MINUTE. Only meaningful once a day is chosen, and only
+                   offers a choice when the timeframe puts more than one bar in a
+                   day: `1day` yields exactly one, and a picker with one option is
+                   a control that cannot be used. It says which of those it is
+                   rather than greying out for an unstated reason. -->
+              <label class="tctl">
+                <span>Time</span>
+                <select
+                  class="pill"
+                  bind:value={time}
+                  disabled={!day || times.length < 2}
+                  title={!day
+                    ? 'Choose a date first — a time with no date is a minute of nothing.'
+                    : timesWhy
+                      ? times.length === 0
+                        ? `No minute can be offered — every series in view failed to read: ${timesWhy}`
+                        : `${timesFailed} of ${timesAsked} series in view could not be read, so this list may be short a minute they are stamped with: ${timesWhy}`
+                      : times.length < 2
+                        ? `At ${timeframe} a day holds ${times.length === 1 ? 'one bar' : 'no bars'}, so there is no minute to choose between. A finer timeframe puts more bars in the day.`
+                        : 'The bar stamped at this minute. “Close” is the day’s last bar.'}
+                >
+                  <option value="">Close</option>
+                  {#each times as t (t)}<option value={t}>{t}</option>{/each}
+                </select>
+              </label>
+              <!-- THE EXPIRY, on the two tabs that have one. Every option is an
+                   expiry some contract on this tab actually carries, so the picker
+                   cannot offer a month the store has never filed. When the store
+                   holds no contracts at all it says that rather than sitting empty
+                   and disabled with nothing to explain it. -->
+              {#if hasExpiry}
+                <label class="tctl">
+                  <span>Expiry</span>
+                  <select
+                    class="pill"
+                    bind:value={expiry}
+                    disabled={expiries.length === 0}
+                    title={expiries.length === 0
+                      ? `The store holds no ${tab?.label.toLowerCase()} contracts for this feed, so there is no expiry to choose. This is an empty store, not a refused control.`
+                      : 'Show only contracts expiring in this month. “All” keeps every expiry.'}
+                  >
+                    <option value="">All</option>
+                    {#each expiries as e (e)}<option value={e}>{monthLabel(e)}</option>{/each}
+                  </select>
+                </label>
+              {/if}
+              <label class="tctl">
+                <span>Segment</span>
+                <select class="pill" bind:value={segment}>
+                  <option value="All">All</option>
+                  {#each segments as s (s)}<option value={s}>{s}</option>{/each}
+                </select>
+              </label>
+              <label class="tctl">
+                <span>Timeframe</span>
+                <select class="pill" bind:value={timeframe}>
+                  {#each timeframes as r (r)}<option value={r}>{r}</option>{/each}
+                </select>
+              </label>
+              </div>
+            </div>
           {/if}
-          <label class="tctl">
-            <span>Segment</span>
-            <select class="pill" bind:value={segment}>
-              <option value="All">All</option>
-              {#each segments as s (s)}<option value={s}>{s}</option>{/each}
-            </select>
-          </label>
-          <label class="tctl">
-            <span>Timeframe</span>
-            <select class="pill" bind:value={timeframe}>
-              {#each timeframes as r (r)}<option value={r}>{r}</option>{/each}
-            </select>
-          </label>
         </div>
       </div>
 
@@ -2700,17 +2870,28 @@
        automatic minimum is its content, and that is what was widening the
        grid before the column above was pinned. */
     min-width: 0;
-    /* IT WRAPS, AND IT HAS TO SINCE THE ROW GAINED TWO CONTROLS.
+    /* IT STILL WRAPS, AND THE REASON IS SMALLER THAN IT WAS.
        -----------------------------------------------------------------------
-       `.ctrls` is deliberately unshrinkable (its own rule says so, and the
-       seven pickers need their width), so `.chips` was the only item that could
-       yield — and with `.rail` at 57px and `.mover` at 134px added beside it,
-       yielding took it to ZERO. Measured at an 854px row: chips 0 · rail 57 ·
-       mover 134 · ctrls 738, which is 929 of content in 854 of space. Every
-       chip was still in the DOM and none of them was on screen.
-       Wrapping puts the pickers on their own line when the four cannot share
-       one, instead of silently deleting the control the line exists for. Above
-       about 1200px nothing wraps and the row reads exactly as the capture. */
+       THE HISTORY, KEPT because it is the measurement that moved the pickers.
+       `.ctrls` was seven unshrinkable pickers on this row, so `.chips` was the
+       only item that could yield — and with `.rail` at 57px and `.mover` at
+       134px beside it, yielding took it to ZERO. Measured at an 854px row:
+       chips 0 · rail 57 · mover 134 · ctrls 738, which is 929 of content in 854
+       of space. Every chip was in the DOM and none was on screen.
+
+       Wrapping was the first answer and it was not enough. Measured again on
+       the running page, Stocks, chips needing 774: at 1280 they got 276 and
+       two of seven were drawn; at 1440, 436. Nothing wrapped at either width —
+       wrapping only rescues the row once `.chips` has already been squeezed
+       past its 260px basis, so between about 1200px and 1900px the rail was
+       merely narrow, which is the range an operator actually works in. The
+       sentence that stood here said the row "reads exactly as the capture"
+       above 1200px; the capture draws seven chips and this drew two.
+
+       `.twin` replaced the 739px of pickers with one ~180px button, which is
+       what fixed it — the chips now have 858px at 1280 against the 774 they
+       need. The wrap stays for the widths below that, where a button, arrows
+       and a movers switch can still outgrow the line. */
     flex-wrap: wrap;
     row-gap: 14px;
   }
@@ -2787,17 +2968,96 @@
     color: var(--acc);
     border-color: var(--edge);
   }
-  .ctrls {
+  /* THE ROW'S RIGHT-HAND ITEM IS THE SUMMARY BUTTON NOW, and it is still
+     unshrinkable for the reason the pickers were: it is the window the grid is
+     being read over, and a window sliced off the right edge answers "which
+     month am I looking at" with silence. The difference is the size of the
+     claim — one button of about 180px rather than 739px of pickers, which is
+     what gives `.chips` its width back. */
+  .twin {
     margin-left: auto;
-    display: flex;
-    gap: 10px;
-    align-items: center;
-    /* NOT SHRINKABLE. The chip row beside this is the thing that yields — it
-       is a list and a list can scroll. These four are the window the grid is
-       showing, and a picker sliced off the right edge answers "which month am
-       I looking at" with silence. MEASURED at an 800px viewport: `Year` was
-       half-drawn and `Month` was a truncated word. */
     flex: none;
+    /* The panel hangs off this box, and the outside-click test measures
+       against it, so the two have to be the same element. */
+    position: relative;
+  }
+  /* THE BUTTON IS A `.pill` AND WEARS ITS CHEVRON, because it opens a list of
+     choices exactly as the eight `<select>`s inside it do. A second visual
+     idiom for the same act would say the two are different kinds of control. */
+  /* `.pill.twinbtn`, NOT `.twinbtn`, AND THE FILE HAS ALREADY PAID FOR THIS
+     ONCE. `.pill`'s `max-width: 150px` and a bare `.twinbtn`'s `max-width:
+     none` are both specificity (0,1,0), so the later rule wins — and `.pill` is
+     later. MEASURED on the running page: the button came out 150px against 172
+     of text and printed `Zerodha · Sep 2026 · 1da`, which is a window sliced
+     off at the right edge, the exact failure the rule above this one exists to
+     prevent.
+     `.chip.on:disabled` records the same lesson in this stylesheet at (0,2,0),
+     and prescribes this remedy in as many words: settle it by specificity
+     rather than by source order, "which the next edit to this block would
+     silently change". */
+  .pill.twinbtn {
+    text-align: left;
+    /* Past `.pill`'s 150px ceiling, and deliberately: that ceiling exists to
+       stop one long OPTION deciding a row's layout, which is not what is
+       happening here — this button's width is its VALUE. It still ends. The
+       longest this can get is a fully narrowed window,
+       `Zerodha · 15 Sep 2026 · 09:20 · CASH · 1min`. */
+    max-width: none;
+    white-space: nowrap;
+  }
+  .pill.twinbtn[aria-expanded='true'] {
+    border-color: var(--edge);
+    color: var(--acc);
+  }
+  /* ABOVE THE GRID, WHICH IS THE ONE THING THIS PANEL MUST OUTRANK.
+     The table below sets no stacking context of its own, so a bare `absolute`
+     box was painted UNDER the first header row — the panel opened and the
+     operator saw a two-pixel sliver of it. */
+  .twinpanel {
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    z-index: 20;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 16px;
+    /* The panel has to read as floating above the page rather than as another
+       band of it, and on a pure-black terminal a border alone does not do it —
+       there is no lighter ground behind it for an edge to separate from. */
+    box-shadow: 0 12px 32px rgb(0 0 0 / 70%);
+  }
+  /* TWO COLUMNS, NOT EIGHT. In the row this was a single line of pickers and
+     the width was the constraint; in a panel the constraint is gone and a
+     single file of eight would be a 400px-tall drop. Two keeps the cascade
+     readable left-to-right, top-to-bottom and the panel about as tall as it
+     is wide. */
+  /* THE COLUMNS ARE 150px, NOT `1fr`, AND THE FIRST ATTEMPT SHOWS WHY.
+     `repeat(2, minmax(0, 1fr))` inside a panel that sizes to its own content is
+     circular — the track asks the box how wide it is and the box asks the
+     track. It resolves, and it resolves SMALL: measured on the running page,
+     the feed picker printed `Zerodl` and the month `Sep 2(`, which is the
+     window truncated inside the control that exists to state it.
+
+     150px is `.pill`'s own ceiling, reused rather than picked again. That
+     number was measured for the row and it carries here unchanged, because it
+     was never about the row — it is the width at which these values read and
+     the longest option stops deciding the layout. The panel then sizes itself:
+     150 + 150 + 14 of gap + 32 of padding = 346. */
+  .ctrls {
+    display: grid;
+    grid-template-columns: repeat(2, 150px);
+    gap: 14px;
+  }
+  /* A PICKER FILLS ITS CELL, so the eight edges line up in two columns. The
+     78px floor and 150px ceiling were the ROW's answer to the same question
+     and the track answers it here; leaving them on would let a short value
+     like `All` sit narrow and break the column it is in. The full text stays
+     in the option and in the `title`, exactly as it did on the row. */
+  .ctrls .pill {
+    min-width: 0;
+    max-width: none;
+    width: 100%;
   }
   /* The label sits ABOVE its control rather than beside it: four side-by-side
      pairs would eat the width the chip row needs, and the chip row is the

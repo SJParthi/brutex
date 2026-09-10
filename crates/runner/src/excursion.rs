@@ -913,15 +913,16 @@ impl Extremes {
 /// cases, because they are prices and mean something without an entry.
 fn admit(
     out: &mut Crossings,
-    extremes: &mut Extremes,
+    path: &mut PathAdmission,
     bar: &Candle,
     verdict: (Option<&[bool]>, usize),
     priced: bool,
 ) -> bool {
     let (accepted, index) = verdict;
-    let refused = accepted.is_some_and(|seen| !seen.get(index).copied().unwrap_or(false))
+    let refused = (accepted.is_some() && !path.clock.accepts(bar.ts_micros))
+        || accepted.is_some_and(|seen| !seen.get(index).copied().unwrap_or(false))
         || bar.check().is_err();
-    extremes.record(out, bar, !refused);
+    path.extremes.record(out, bar, !refused);
     if !priced {
         return false;
     }
@@ -931,6 +932,54 @@ fn admit(
     }
     true
 }
+
+/// The running facts a bar updates together at the admission boundary.
+struct PathAdmission {
+    extremes: Extremes,
+    clock: ActualClock,
+}
+
+impl PathAdmission {
+    fn new(bars: &[Candle], from: usize, to: usize) -> Self {
+        Self {
+            extremes: Extremes::new(),
+            clock: ActualClock::new(bars, from, to),
+        }
+    }
+}
+
+/// A cached acceptance bitmap cannot attest timestamps in another slice.
+/// Checked pricing paths must stay inside their actual timed endpoints and
+/// advance through whole-minute records. Cadence completeness remains the
+/// separate `SliceFacts::path_accepts` contract; this guard is clock geometry.
+struct ActualClock {
+    bounds: Option<(i64, i64)>,
+    previous: Option<i64>,
+}
+
+impl ActualClock {
+    fn new(bars: &[Candle], from: usize, to: usize) -> Self {
+        Self {
+            bounds: bars
+                .get(from)
+                .zip(bars.get(to))
+                .map(|(first, last)| (first.ts_micros, last.ts_micros)),
+            previous: None,
+        }
+    }
+
+    fn accepts(&mut self, stamp: i64) -> bool {
+        let previous = self.previous.replace(stamp);
+        self.bounds
+            .is_some_and(|(first, last)| first <= stamp && stamp <= last)
+            && stamp.rem_euclid(60_000_000) == 0
+            && previous.is_none_or(|prior| prior < stamp)
+    }
+}
+
+#[cfg(test)]
+#[path = "excursion_clock_tests.rs"]
+mod clock_contract_tests;
 
 fn crossings_with(
     bars: &[Candle],
@@ -969,7 +1018,7 @@ fn crossings_with(
     // series of prices that never needed an entry to mean something.
     let priced = entry > 0;
     reserve_prefix(&mut out, bars, from, to);
-    let mut extremes = Extremes::new();
+    let mut admission = PathAdmission::new(bars, from, to);
 
     // Cursors into the three ladders. All only advance: once a rung is crossed
     // it stays crossed, because MAE, MFE and the trailing give-back are all
@@ -1008,7 +1057,7 @@ fn crossings_with(
         };
         // A BAR THE ENGINE REFUSED MAY NOT MOVE A RUNNING MAXIMUM, and a
         // non-positive entry may move nothing but the extremes. See [`admit`].
-        if !admit(&mut out, &mut extremes, bar, (accepted, index), priced) {
+        if !admit(&mut out, &mut admission, bar, (accepted, index), priced) {
             continue;
         }
         out.last = offset;

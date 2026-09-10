@@ -586,6 +586,14 @@ into a guarantee about this dataset.
 
 ---
 
+## 4f. Research policy explanation sources — reviewed 2026-09-07
+
+| Method or interpretation | Primary source | Boundary |
+|---|---|---|
+| Wilson intervals incorporate sample size when estimating a binomial proportion | [NIST confidence intervals](https://www.itl.nist.gov/div898/handbook/prc/section2/prc241.htm) | Does not establish independent trading outcomes or choose a minimum sample size for this repository. |
+| White's Reality Check addresses data snooping; Hansen's SPA uses studentization and a sample-dependent null distribution | [White (2000)](https://users.ssc.wisc.edu/~behansen/718/White2000.pdf), [Hansen (2005), primary publisher abstract](https://www.tandfonline.com/doi/abs/10.1198/073500105000000063) | These methods motivate complete-population evidence. Their assumptions remain material; they do not select this repository's acceptance thresholds. |
+| P-values do not measure the probability a hypothesis is true; decisions should not rest solely on a threshold | [American Statistical Association statement](https://www.amstat.org/asa/files/pdfs/p-valuestatement.pdf) | The delegated37-field profile contains explicit research choices. No cited source prescribes its5%p-value cutoff,20%PBO limit, sample floors or loss caps. See [the explanation](22-research-policy.md). |
+
 ## 5. Run identity
 
 ```
@@ -614,3 +622,147 @@ when a level produces nothing. Rank the survivors, persist a bounded top set,
 and record the identity.
 
 Nothing about that paragraph has a tunable depth.
+
+## 7. Dated regular-session completeness — verified 2026-09-05
+
+The NSE [CAS session rules](https://www.nseindia.com/static/products-services/closing-auction-session)
+distinguish derivatives (continuous through 15:40), non-CAS cash (through
+15:30), and CAS-eligible cash (continuous trading ends 15:15, followed by
+auction phases). The dated derivatives schedule already recorded in
+`pull::vendor` applies the extension from 2026-08-03, also confirmed by
+[Zerodha's dated implementation notice](https://zerodha.com/z-connect/general/everything-you-need-to-know-about-closing-auction-session-cas).
+Opening-stamped
+one-minute derivatives bars therefore end at 15:29 before the change and
+15:39 afterward on regular trading days. These are expected session bounds,
+not proof of vendor coverage. Exceptional sessions retain their own calendar
+classification. Generic cash venue hours do not prove per-instrument CAS
+eligibility; treating auction observations as continuous candles remains
+UNVERIFIED and must not be represented as resolved.
+
+## 8. Zerodha identity evidence — verified 2026-09-05
+
+The [Kite instruments specification](https://kite.trade/docs/connect/v3/market-quotes/)
+lists twelve CSV columns, without ISIN. It recommends exchange plus trading
+symbol as a storage key and warns that derivative numeric tokens may be reused
+after expiry. A valid parsed token therefore does not establish the
+vendor-specific cash ISIN proof required by D-0511. Refreshing the same schema
+does not supply that proof. This is a local assurance-policy limitation, not a
+claim that the vendor's historical API cannot serve cash candles.
+
+D-0517 keeps the two assertions separate: the exact Zerodha NSE cash token,
+and the exchange ISIN corroborated by an exact, unambiguous ISIN-bearing
+independent master listing. That cross-check is current-snapshot evidence;
+it does not claim that Zerodha supplied the ISIN or prove historical symbol
+changes or historical F&O membership. No ISIN is synthesized in its crawl.
+
+## 9. Dated cash closing-auction eligibility — verified 2026-09-06
+
+[NSE/CMTR/73845](https://nsearchives.nseindia.com/content/circulars/CMTR73845.zip)
+(22 April 2026), Annexure A, names the MII CSV column
+`ElgbltyClsgAuctnSsn`: 0 is not eligible and 1 is eligible, effective
+3 August 2026. The circular payload is a ZIP, not a PDF at the same basename.
+[NSE/CMTR/74466](https://nsearchives.nseindia.com/content/circulars/CMTR74466.zip)
+(29 May 2026), page 6, directs members to the dated
+`NSE_CM_security_ddmmyyyy.csv.gz` files. The file date, not its `UpdDt` cell,
+binds this evidence to a trading date.
+
+All 25 weekday masters from 2026-08-03 through 2026-09-04 were retrieved from
+NSE archives, with HTTP 200 and valid gzip streams. Actual endpoint examples:
+[3 August](https://nsearchives.nseindia.com//content/cm/NSE_CM_security_03082026.csv.gz)
+and [4 September](https://nsearchives.nseindia.com//content/cm/NSE_CM_security_04092026.csv.gz).
+Both contain exact EQ entries HINDALCO/INE038A01020 with flag 1 and
+20MICRONS/INE144J01027 with flag 0. Runtime joins must check date, series,
+symbol and ISIN; missing rows must never become flag 0.
+
+This verifies the scheduled continuous close (15:15 eligible, 15:30
+ineligible), not that every scheduled minute traded. Circular 74466 §A
+also names scheme-of-arrangement special-preopen and circuit-halt exceptions.
+Their occurrence remains UNVERIFIED; gaps or exceptional sessions must stay
+visible, with no fabricated bars. Auction execution-report absence does not
+establish non-eligibility. The cash policy does not change index hours or the
+separately cited derivatives schedule.
+
+### FORCEMOT NSE interruption — verified 2026-09-06
+
+[NSE circular CML58560](https://archives.nseindia.com/content/circulars/CML58560.pdf)
+withdraws FORCEMOT (INE451A01017) from the permitted-to-trade category with
+effect from 2023-10-26, after the close on 2023-10-25. The company's
+[filing including NSE circular CML60618](https://www.forcemotors.com/wp-content/uploads/2025/02/Announcement-under-Regulation-30-for-Listing-on-NSE.pdf)
+admits the same symbol and ISIN as an EQ listing from 2024-02-14. The missing
+November 2023, December 2023 and January 2024 daily files therefore overlap
+a documented NSE trading interruption, not evidence that another identical
+vendor retry will produce bars. Acquisition may request the two available
+periods separately, retaining this interval as explicitly not applicable to
+NSE trading. No BSE substitution or synthetic bars is authorized. This dated
+evidence is not yet wired into general instrument-calendar classification;
+the whole-window application prerequisite still refuses the interior holes.
+
+## Calendar extension evidence reviewed 2026-09-06
+
+Primary capital-market trading-holiday authority:
+[NSE/CMTR/71775, 12 December 2025](https://nsearchives.nseindia.com/content/circulars/CMTR71775.pdf).
+Its trading-holiday list has no holiday in 2026-08-22 through 2026-09-04.
+Do not substitute settlement-holiday tables: those answer a different question.
+The regular equity trading-week and hours rule is published at
+[NSE market timings](https://www.nseindia.com/resources/exchange-communication-holidays/).
+This evidence is used only for the bounded measured interval, not a perpetual
+weekday fallback or permission to infer future special sessions.
+
+Local Zerodha NIFTY and BANKNIFTY minute records were independently read for
+August 22 through September 4. Each index has 3,750 unique minute-aligned
+records across ten dates: August 24–28, August 31, September 1–4. Every date
+has exactly 375 records spanning 09:15–15:29 IST. Four read-only response
+snapshots are retained in the local audit calendar-extension directory.
+This corroborates the regular index windows for this interval only. It does
+not prove broker history universally complete, independently sourced feeds,
+historical stock identity, or stock-specific cash-auction eligibility; the
+existing dated eligibility authority remains necessary for cash stocks.
+
+## Historical circuit-breaker evidence boundary — 2026-09-06
+
+[Zerodha's contemporaneous March 13, 2020 bulletin](https://zerodha.com/marketintel/bulletin/249418/trading-halted-at-the-exchange)
+reports a market halt followed by a pre-open session. Its 09:26 publication
+timestamp is not proof of the exact halt's start minute. The general
+[NSE circuit-breaker rule](https://www.nse.in/products-services/equity-market-circuit-breakers)
+describes a 45-minute halt plus 15-minute reopening auction for a 10% trigger
+before 13:00. A rule is not a dated event log.
+
+Exact historical source-minute windows on March 13 and March 23, 2020 remain
+**UNVERIFIED** in this reconciliation. The ABB stored-grid audit names gaps on
+those dates under the existing regular-day model; this does not establish
+provider fault. Do not infer precise exchange windows from one stock's missing
+timestamps, or count every such absence as a minute the provider must supply.
+No calendar override is made from publication timestamps or news summaries.
+
+## VWAP applicability evidence — reviewed 2026-09-06
+
+[NSE Clearing's equity-derivatives settlement mechanism](https://www.nseclearing.in/clearing-settlement/equity-derivatives/settlement-mechanism)
+explicitly uses a futures contract's volume-weighted traded price. This
+establishes that futures VWAP is applicable to contract trades; it does not
+authorize futures sweeps here or prescribe this engine's session indicator.
+[NSE capital-market circular CMTR5588](https://nsearchives.nseindia.com/content/circulars/cmtr5588.htm),
+dated 2004-11-10, gives traded-value divided by traded-quantity VWAP for a
+cash security. Only that arithmetic/applicability is cited; its historical
+tax rates and settlement rules are not adopted as current rules.
+
+The engine's OHLCV typical-price approximation, sigma conventions and
+spot-index abstention remain the explicit implementation choices in D-0507
+and D-0526, not exchange certifications of the engine's calculated values.
+Prices and traded volumes must belong to the same stock or exact contract;
+no constituent-volume or futures-volume replacement grants a spot index VWAP.
+
+## Finite qualification statistical sources — reviewed 2026-09-07
+
+[Romano and Wolf, Efficient Computation of Adjusted p-Values for
+Resampling-Based Stepdown Multiple Testing](https://www.econ.uzh.ch/apps/workingpapers/wp/econwp219.pdf)
+provides the strict-exceedance plus-one probability and monotone stepdown
+construction used by the shared procedure. Its validity conditions depend on
+the testing and resampling setting. It does not establish universal validity
+for financial return sequences or certify this implementation.
+
+[Tian and Ramdas, Online control of the familywise error rate](https://arxiv.org/html/1910.04900)
+discusses the distinction between fixed and sequential testing families and
+allocation of testing levels. This implementation adopts a finite, predeclared
+eight-timeframe scope, not an unbounded online acceptance guarantee. Equal
+allocation and the zero-conservative wrapper are explicit repository choices
+in D-0542 and D-0544; resampling assumptions remain necessary.

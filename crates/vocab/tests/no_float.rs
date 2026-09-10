@@ -29,9 +29,14 @@ use std::collections::BTreeSet;
 
 /// Every source file in the crate, by hand because `include_str!` takes a
 /// literal, and closed against `lib.rs` and the directory below.
-const SOURCES: [(&str, &str); 6] = [
+const SOURCES: [(&str, &str); 8] = [
     ("lib.rs", include_str!("../src/lib.rs")),
     ("error.rs", include_str!("../src/error.rs")),
+    ("expression.rs", include_str!("../src/expression.rs")),
+    (
+        "expression_search.rs",
+        include_str!("../src/expression_search.rs"),
+    ),
     ("implication.rs", include_str!("../src/implication.rs")),
     ("mask.rs", include_str!("../src/mask.rs")),
     ("table.rs", include_str!("../src/table.rs")),
@@ -41,7 +46,16 @@ const SOURCES: [(&str, &str); 6] = [
 /// Every test file, held to the same rule. A float that only appears in a test
 /// is still a float in this crate, and a test is where one would arrive first:
 /// it is the natural place to reach for `0.618` rather than `618`.
-const TEST_SOURCES: [(&str, &str); 4] = [
+const TEST_SOURCES: [(&str, &str); 7] = [
+    ("tests/expression.rs", include_str!("expression.rs")),
+    (
+        "tests/expression_search.rs",
+        include_str!("expression_search.rs"),
+    ),
+    (
+        "tests/expression_search_readiness.rs",
+        include_str!("expression_search_readiness.rs"),
+    ),
     ("tests/mask.rs", include_str!("mask.rs")),
     ("tests/no_float.rs", include_str!("no_float.rs")),
     ("tests/table.rs", include_str!("table.rs")),

@@ -196,8 +196,8 @@ pub enum Prepared {
 /// filesystem mutation; they are not authentication against an actor able to
 /// forge filesystem metadata.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct FileGeneration {
-    len: u64,
+pub(crate) struct FileGeneration {
+    pub(crate) len: u64,
     platform: PlatformGeneration,
 }
 
@@ -233,6 +233,7 @@ pub struct Receipts {
     seen: std::collections::HashMap<[u8; 32], Receipt>,
     scanned: u64,
     generation: FileGeneration,
+    max_bytes: Option<u64>,
 }
 
 impl Receipts {
@@ -252,6 +253,12 @@ impl Receipts {
         let path = Self::path(root);
         let file = File::open(&path)
             .map_err(|why| format!("{} could not be opened: {why}", path.display()))?;
+        file.lock_shared().map_err(|why| {
+            format!(
+                "{} could not be locked for validation: {why}",
+                path.display()
+            )
+        })?;
         Self::from_file(file, path, None)
     }
 
@@ -269,6 +276,12 @@ impl Receipts {
         let path = Self::path(root);
         let file = File::open(&path)
             .map_err(|why| format!("{} could not be opened: {why}", path.display()))?;
+        file.lock_shared().map_err(|why| {
+            format!(
+                "{} could not be locked for validation: {why}",
+                path.display()
+            )
+        })?;
         Self::from_file(file, path, Some(max_bytes))
     }
 
@@ -290,6 +303,12 @@ impl Receipts {
             .truncate(false)
             .open(&path)
             .map_err(|why| format!("{} could not be opened: {why}", path.display()))?;
+        file.lock().map_err(|why| {
+            format!(
+                "{} could not be locked for validation: {why}",
+                path.display()
+            )
+        })?;
         if file
             .metadata()
             .map_err(|why| format!("{} could not be measured: {why}", path.display()))?
@@ -338,12 +357,19 @@ impl Receipts {
                 generation.len
             ));
         }
+        file.unlock().map_err(|why| {
+            format!(
+                "{} could not release its validation lock: {why}",
+                path.display()
+            )
+        })?;
         Ok(Self {
             file,
             path,
             seen,
             scanned: at,
             generation,
+            max_bytes,
         })
     }
 
@@ -351,6 +377,23 @@ impl Receipts {
     #[must_use]
     pub fn of_identity(&self, identity: &[u8; 32]) -> Option<Receipt> {
         self.seen.get(identity).copied()
+    }
+
+    /// Refresh only newly appended receipts under a shared lock.
+    ///
+    /// # Errors
+    /// Refuses a changed generation, malformed receipt, exceeded read bound or
+    /// I/O error. The initial read limit remains active for the handle's life.
+    pub fn refresh(&mut self) -> Result<(), Refusal> {
+        self.file
+            .lock_shared()
+            .map_err(|why| format!("the receipt file could not be locked: {why}"))?;
+        let refreshed = self.absorb_new();
+        let released = self
+            .file
+            .unlock()
+            .map_err(|why| format!("the receipt file could not be unlocked: {why}"));
+        refreshed.and(released)
     }
 
     /// Appends and syncs one receipt, or verifies the exact existing receipt.
@@ -435,6 +478,13 @@ impl Receipts {
     fn absorb_new(&mut self) -> Result<(), Refusal> {
         let observed = file_generation(&self.file, &self.path)?;
         let len = observed.len;
+        if self.max_bytes.is_some_and(|bound| len > bound) {
+            return Err(format!(
+                "{} grew to {len} bytes beyond this receipt reader's {:?}-byte bound; no new receipt was indexed",
+                self.path.display(),
+                self.max_bytes
+            ));
+        }
         if len < self.scanned {
             return Err(format!(
                 "{} shrank from the already validated byte {} to {len}. An append-only receipt file may never lose bytes, so this stale handle will not reuse cached identities or append",
@@ -494,7 +544,7 @@ impl Receipts {
     }
 }
 
-fn file_generation(file: &File, path: &Path) -> Result<FileGeneration, Refusal> {
+pub(crate) fn file_generation(file: &File, path: &Path) -> Result<FileGeneration, Refusal> {
     let held = file
         .metadata()
         .map_err(|why| format!("{} open file could not be measured: {why}", path.display()))?;
@@ -615,7 +665,7 @@ fn platform_generation(
 }
 
 #[cfg(any(unix, windows))]
-fn require_generation_unchanged(
+pub(crate) fn require_generation_unchanged(
     expected: FileGeneration,
     observed: FileGeneration,
     path: &Path,
@@ -631,7 +681,7 @@ fn require_generation_unchanged(
 }
 
 #[cfg(not(any(unix, windows)))]
-fn require_generation_unchanged(
+pub(crate) fn require_generation_unchanged(
     _expected: FileGeneration,
     observed: FileGeneration,
     path: &Path,
@@ -657,6 +707,87 @@ fn require_generation_unchanged(
 /// whose receipt is absent.
 pub fn committed_receipt(root: &Path, identity: &[u8; 32]) -> Result<Option<Receipt>, Refusal> {
     committed_receipt_with_limit(root, identity, None)
+}
+
+/// Refreshable, bounded parent-ledger and receipt snapshot for detail readers.
+///
+/// Initial admission reads the existing history once. Subsequent refreshes
+/// validate file generations and index appended rows only. A receipt is never
+/// returned without a currently readable, seal-verified ledger parent.
+#[derive(Debug)]
+pub struct CommittedParents {
+    root: PathBuf,
+    max_bytes: u64,
+    ledger: Option<crate::results::Results>,
+    receipts: Option<Receipts>,
+    valid: bool,
+}
+
+impl CommittedParents {
+    /// Admit both existing parent files under the same per-file byte ceiling.
+    /// Missing files stay absent; this reader creates no path.
+    ///
+    /// # Errors
+    /// Refuses malformed, changed, inaccessible or over-limit parent evidence.
+    pub fn open_read_bounded(root: &Path, max_bytes: u64) -> Result<Self, Refusal> {
+        let mut reader = Self {
+            root: root.to_path_buf(),
+            max_bytes,
+            ledger: None,
+            receipts: None,
+            valid: false,
+        };
+        reader.refresh()?;
+        Ok(reader)
+    }
+
+    /// Refresh the ledger first, then its receipt sidecar, before child reads.
+    ///
+    /// # Errors
+    /// Refuses generation changes, corruption, exceeded limits and I/O errors.
+    pub fn refresh(&mut self) -> Result<(), Refusal> {
+        self.valid = false;
+        if let Some(ledger) = &mut self.ledger {
+            ledger.refresh()?;
+        } else if crate::results::Results::path(&self.root)
+            .try_exists()
+            .map_err(|why| format!("ledger path cannot be inspected: {why}"))?
+        {
+            self.ledger = Some(crate::results::Results::open_read_bounded(
+                &self.root,
+                self.max_bytes,
+            )?);
+        }
+        if let Some(receipts) = &mut self.receipts {
+            receipts.refresh()?;
+        } else if Receipts::path(&self.root)
+            .try_exists()
+            .map_err(|why| format!("receipt path cannot be inspected: {why}"))?
+        {
+            self.receipts = Some(Receipts::open_read_bounded(&self.root, self.max_bytes)?);
+        }
+        self.valid = true;
+        Ok(())
+    }
+
+    /// Return owned receipt evidence from the last successful parent refresh.
+    ///
+    /// # Errors
+    /// Refuses a corrupt parent or committed row lacking a sealed receipt.
+    pub fn receipt(&mut self, identity: &[u8; 32]) -> Result<Option<Receipt>, Refusal> {
+        if !self.valid {
+            return Err("parent evidence has not passed its latest refresh; cached receipts are unavailable".to_owned());
+        }
+        let Some(ledger) = &mut self.ledger else {
+            return Ok(None);
+        };
+        if ledger.of_identity(identity)?.is_none() {
+            return Ok(None);
+        }
+        self.receipts.as_ref().and_then(|receipts| receipts.of_identity(identity)).map(Some).ok_or_else(|| format!(
+            "run {} has a results-ledger parent but no validated detail receipt; its children are not exposed", identity_hex(identity)
+        ))
+    }
 }
 
 /// The committed-receipt read gate with a hard ceiling on each parent file.

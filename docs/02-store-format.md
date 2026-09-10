@@ -1412,3 +1412,436 @@ construction, split derivation, locking and sync remain input/filesystem
 dependent. D-0476, CO-01..CO-03 and limits §157 define the semantic and honest
 complexity boundary; D-0473/limits §155 still govern physical-volume identity
 and hot unplug.
+
+## Dated NSE cash-session cache (D-0519)
+
+Runtime `session-masters/NSE_CM_security_ddmmyyyy.csv.gz` retains the exact
+compressed exchange response. Its `.receipt` sibling is the publication
+marker, UTF-8 lines in this exact order:
+
+```text
+brutex-nse-cash-session-v1
+date=YYYY-MM-DD
+source=<exact dated NSE source URL>
+compressed_bytes=<decimal length>
+sha256=<lowercase SHA-256 of compressed bytes>
+```
+
+The limits are 4 MiB compressed, 32 MiB expanded, and 1 KiB receipt. A dated
+advisory lock serializes cooperating installations. Payload, receipt and
+directory are synced; an interrupted or conflicting pair refuses rather than
+being overwritten. The receipt binds acquisition provenance, not an exchange
+signature or an independently embedded trade date. No candle format changes.
+
+## Explicit bar repair V1 (not transparently promoted)
+
+`crates/store/REPAIR.md` specifies the additive revision protocol and exact
+144-byte completion receipt. Original V2 bar geometry is unchanged. Revisions
+live below `bar-revisions-v1/<ordinal>/` with their own bar/CRC/lock pair,
+create-once `.reserved-v1` marker, and completion-last `.repair-v1` receipt.
+Ordinary readers and census paths still select the original data. Missing or
+torn revision completion never falls back silently. Publication is the explicit
+exception to leaf-only month locks: original shared then revision writer,
+nonblocking; there is no reverse acquisition. No live pair is renamed or replaced.
+
+## Evidence-scoped recovery journal V1
+
+Separate files under `audit/recovery-v1/`; no candle or ordinary audit format
+changes. Each record is 1,024 bytes, little-endian:
+
+| Byte offset | Length | Field |
+|---|---|---|
+| 0 | 4 | Magic `BXRJ` |
+| 4 | 2 | Version 1 |
+| 6 | 1 | Queued 0, InFlight 1, Verified 2, Unverified 3, Exhausted 4, Blocked 5, NotApplicable 6 |
+| 7 | 1 | Zero |
+| 8 | 32 | Domain-separated work identity |
+| 40 / 44 | 4 each | Reserved attempts / unchanged attempts |
+| 48 / 56 | 8 each | Actually committed source rows / diagnostics |
+| 64 / 66 | 2 each | HTTP status / UTF-8 request-body length |
+| 68 | 12 | Zero |
+| 80 | 768 | Exact body, 1–768 bytes, then zero padding |
+| 848 / 856 | 8 each | Missing / unverified coverage quantities |
+| 864 | 156 | Zero |
+| 1020 | 4 | CRC-32C over bytes 0..1020 |
+
+Missing/unverified quantities are source days on 1day units and minutes on 1min
+units; diagnostics are not mixed into either quantity. An existing work key
+cannot bind a different body. A lifetime advisory writer lock protects each
+file. Append syncs before publishing the in-memory index; uncertain I/O poisons
+that handle. Reopen validates and syncs surviving records, retaining an
+interrupted reservation. Corrupt/torn files refuse without truncation.
+
+`<plan-id>.bin` stores month scans, exact-day retry children and evidence
+notes. The all-zero key, body `plan-seeded-v1`, seals plan creation. Its
+Verified state means reconciliation finished, NOT that all source data exists.
+`active.bin` stores activation pointers, with the activation ordinal in
+attempts; highest ordinal selects the most recently activated plan, not
+first-seen order. Pointer body is the lowercase plan identity and must agree
+with its key. File and containing-directory sync precede vendor work.
+
+`attempts.bin` uses the same V1 record layout as an authoritative shared
+exact-day attempt index across overlapping plans. Reservations sync there before
+the per-plan event mirror. `<plan-id>.stop.bin` records explicit stop/clear
+intent separately, so acknowledging a stop never waits for ownership of the
+active plan writer. These companions do not reinterpret existing record fields.
+
+The STOP companion has exactly one key, the plan identity, and immutable body
+`recovery-stop-v1:<lowercase-plan-id>`. `Blocked` means stopped; `Queued` means
+an explicitly requested clear. All numeric quantities and HTTP status are zero.
+Repeated same-state writes are idempotent; clear appends history rather than
+deleting it. An empty existing companion, foreign key, other state, conflicting
+body, corruption or unavailable store refuses; it never grants permission to
+resume. The record and newly created directory ancestry are synced before a
+STOP is acknowledged. A normal pull with no recovery owner touches no STOP file.
+
+Full open validates the entire journal. The bounded status tail validates only
+the requested suffix and physical extent; it is not a prefix audit or a
+guarantee that an active writer has completed its sync. A new incompatible
+layout requires a new version, never reinterpretation of this V1 stride.
+
+## Sweep attempt and explicit expression evidence (D-0523)
+
+The successor protocols in D-0524 add immutable checkpoint journals and full
+canonical cursor states ([AND](20-sweep-resume.md),
+[expression](22-expression-search.md)), exact selected-cell candidate/trade
+catalogs with distinct AND and expression namespaces
+([V1 contract](19-candidate-trades.md)), and separate fixed Selection V6 /
+Global Replay V4 records ([contract](21-institutional-sweep.md)). Their widths,
+domains, locking and completion ordering are specified in those documents.
+Legacy versions and meanings are unchanged; a new reader may not interpret
+an older authority as its successor merely because fields look similar.
+
+New evidence lives beside existing historical formats; no existing stride,
+condition position or ledger version is reinterpreted. The exact schemas,
+magic values, identities, directory layout, seals and publication ordering are
+specified in [Sweep evidence V1](16-sweep-evidence.md) and
+[Expression evidence V1](17-expression-evidence.md).
+
+Expression V1 uses a 3,457-byte fixed program descriptor, a 3,497-byte header,
+56-byte source-row records and a 64-byte counts/file-seal footer. Each row has
+24 data bytes plus a 32-byte header/ordinal-bound BLAKE3 seal. The file is
+published without replacement before terminal completion is recorded.
+
+Sweep lifecycle records distinguish preparation, orchestration, actual probes,
+audits and expressions. A start with no terminal record is not completion or
+proof that a process is alive. Terminal records must agree with acknowledged
+child contents/cardinalities and identities. Missing, replaced, torn, foreign
+or corrupt required evidence refuses; it is never represented as successful
+zero rows. Integrity scans are linear in saved rows even though records have a
+fixed stride and bounded per-row processing.
+
+## Separate checksum admission V1 (D-0525)
+
+The ordinary bar format and legacy run identities remain unchanged. A cold
+audit produces Evidence256 (`BRCAS001`): thirteen little-endian u64 format and
+extent fields, four 32-byte digests (raw header, committed records, exact CRC
+sidecar, entire data file), and sixteen reserved zero bytes. Signed timestamp
+fields retain their two's-complement bits.
+
+The separately keyed Receipt512 (`BRHCRC01`) contains version 1 at byte 8,
+source identity at 16, receipt identity at 48, Evidence256 at 80, reserved zero
+bytes from 336 to 480, and a separately domain-bound completion seal at 480.
+Publication appends an exact existing prefix only: payload sync precedes the
+seal, then file and parent directory sync precede acknowledgment. Completed
+identical receipts are verified and reused read-only. A typed reader retains
+shared receipt and source locks; visible bytes under an exclusive publisher
+lock do not establish durability.
+
+Strict stored sweeps also retain a separate fixed 512-byte six-role input
+manifest in `audited-inputs-v1/`. Ordered roles are signal, execution, prior
+daily, current daily, prior minute and current minute. Exact role receipt IDs
+extend the executed data digest under a new domain before the existing nine-term
+run identity is formed. See [the full byte and admission contract](24-checksum-admission.md)
+for fields, domains, locks, physical caps and failure semantics.
+
+Sweep lifecycle operation 10 is `checksum-audit`. It attests input integrity
+only; completion is neither a completed sweep nor a pricing/admission result.
+
+## Additive strict range input links (D-0526)
+
+`audited-spans-v1/` stores 512-byte `BRHSP001` nodes: version at8, preceding
+node identity at16, ordinal at48, year at56, month at64, six ordered 40-byte
+role/receipt pairs at72, reserved zeros at312..480 and completion seal at480.
+Every field uses the existing little-endian/32-byte digest conventions.
+The chronological chain's final identity binds all required months and extends
+the exact executed digest under a distinct span domain. The same retained
+receipt publication/locking protocol applies; existing monthly bytes do not
+change. [The admission contract](24-checksum-admission.md) gives the exact
+domains, zero-predecessor rule and actual strict audit/pricing handoff.
+
+## Boolean catalog successor records (D-0536–D-0537)
+
+The separate `boolean-candidates-v1`, `boolean-statistics-v1` and
+`boolean-admission-v1` namespaces preserve full expression and cash-family
+identity without reinterpreting legacy records. They share the112-byte
+`BRBLCM01` body-completion protocol. Statistics use512-byte records and research
+admission uses a512-byte header plus1024-byte candidate rows; its448-byte
+`BRAPRO01` comparison grants no legacy authority. The
+[catalog storage contract](27-boolean-catalog-research.md#storage-domains)
+records the layout, actual grid descriptors, publication order and strict
+observation boundary. Lifecycle operations11,12 and13 name these three stages.
+
+## Incremental Boolean campaign and later evidence — D-0539 through D-0541
+
+`boolean-campaign-v1/<identity>/<sequence>/payload` retains the existing
+immutable Journal envelope, seal and separately synced completion marker.
+The `BRBCAM01` payload has a256-byte header: magic8, campaign identity32,
+preparation descriptor32, ordered-program digest32, then seven u64 fields
+(program count, family count, first YYYYMM, last YYYYMM, one-minute horizon,
+aggregate state, predecessor sequence), predecessor seal32 and64 zero bytes.
+The initial predecessor sequence is `u64::MAX` with a zero seal.
+
+Exactly eight canonical timeframe rows follow. Each uses1168+192F bytes for
+F families: state u64, statistics identity/pin64, admission identity/pin64,
+reason byte length u64, fixed1024-byte zero-padded UTF-8 reason area, then F
+records of ResearchFamily128 + expected candidate identity32 + completion pin32.
+Paired zero stage identity/pins mean absent; zero candidate pin means its
+completion was not acknowledged. State0 is waiting,1 running,2 paused,3
+refused,4 completed. Total Journal payload envelope stays within the smaller
+of the configured byte ceiling and2MiB; reserved sequence must remain below1024.
+No existing records are deleted, rotated or reinterpreted.
+
+`boolean-oos-v1` shares the112-byte `BRBLCM01` completion receipt but uses a
+new232-byte `BRBOOS01` body header. It stores the later identity, original
+candidate identity/pin, later source identity, later execution digest, first
+and last actual timestamps, execution record count, four civil-month bounds
+and nested-body length. The nested candidate-shaped body carries the same
+original family, programs, resolved training grids and full coordinate order,
+with later observations. Lifecycle operation14 is `boolean-oos`. Its cold
+reader authenticates both complete bodies and their exact original/later
+links, and grants no source or institutional selection capability.
+
+`boolean-grammar-v1` uses the same Journal container with a48-byte caller
+envelope: `BRBGPN01` plan magic, predecessor sequence u64 (zero initially),
+predecessor seal32. The enclosed `BRBGBP01` batch is64 bytes plus two
+`CURSOR_BYTES` descriptors and N fixed `ENCODED_LEN` programs. Its six u64
+fields are work before, work after, programs before, program allowance, node
+allowance and program count; one exhaustion byte and seven zero bytes follow.
+`BRBGDN01` completion records use112 bytes: magic8, exact plan sequence8,
+plan seal32, campaign identity32 and campaign snapshot pin32. Both campaign
+fields are zero only for a batch with no programs. No completed child is
+inferred from a work reservation or elapsed time.
+
+### Fixed-training qualification successors (D-0542–D-0544)
+
+`BRBQPL01` is a new1,024-byte plan header plus16 bytes per declared later civil
+window. It binds the complete original/later campaign descriptors, catalog,
+scope, policy, bootstrap procedure, physical limits and finite allocation.
+Eight ordered original-catalog digests and eight ordered later-source digests
+bind each rung independently, so a valid child cannot be relabelled as a
+different timeframe in either production or saved-result observation.
+Each window is two signed64-bit IST civil-day numbers. Decoding validates the
+deterministically derived complete partition and returns observation metadata;
+it does not construct a live plan from saved bytes.
+
+`BRXFVL01` is a separate320-byte fixed-training projection header plus64 bytes
+per window. It carries seven full32-byte source/selection identities, ordinal,
+fold counts, aggregate return, execution-refusal bits, requested date interval
+and original last training day. Each fold retains exact interval, actual session
+count, trades, wins, pessimistic integer return and reserved zero padding.
+The optional projection never changes `boolean-oos-v1` identity or body bytes.
+
+`boolean-qualification-v1` uses the existing112-byte receipt-last completion
+envelope. `BRBQLF01` has a1,024-byte header, complete canonical plan bytes,
+128-byte original-linked later-family records, and1,024-byte coordinate rows.
+Each coordinate also reserves the complete320+64F fold section for F declared
+windows. An explicit absence tag requires that entire section to be zero.
+All coordinates are retained. The row records original/later identities,
+family/coordinate offsets, the448-byte common policy projection and exact
+zero-conservative/shared statistical facts. Unrounded statistics and exact
+fractions remain stored; conservative ppm comparisons are derived observations.
+Operation15 is `boolean-qualification`; prior operation numbers are unchanged.
+
+`boolean-qualified-campaign-v1` uses the acknowledged Journal container.
+Its `BRQCAM01` payload is9,200 bytes:112-byte header and eight1,136-byte slots.
+The header binds campaign identity, descriptor and predecessor sequence/pin.
+Each slot retains its unit identity, started flag, qualification identity/pin,
+reason length and a1,024-byte zero-padded UTF-8 reason. A retry cannot change
+completed slots or skip the durable start transition. Restore reconciles all
+acknowledged records while charging reservation-only holes to sequence capacity.
+No old format, discriminator, condition bit or receipt is rewritten in place.
+
+### Search-wide qualification journal (D-0549)
+
+`boolean-qualified-search-v1` uses the same acknowledged, sealed Journal
+container in its own namespace. `BRBQSS01` declares `144 + CURSOR_BYTES` bytes:
+magic8, two source digests32 each, policy32, the exact initial cursor, then five
+u64 values (program allowance, node allowance, source-byte admission,
+record/replay admission and alpha ppm). The search identity hashes this entire
+declaration.
+
+`BRBQSR01` has a2,520-byte header, the complete declaration, an exact `BRBGBP01`
+batch and optional original `BRBQPL01` qualification plan. Header positions are
+magic0, predecessor sequence8, predecessor seal16, ordinal48, phase56, batch
+length64, plan length72 and reason length80. Campaign identity/pin occupy88/120.
+Eight168-byte rung summaries start at152; each holds child identity32, child
+pin32, coordinate count8, four status counts8 each, projection hash32 and
+allocation hash32. Reason UTF-8 starts at1496 and has a1,024-byte zero-padded
+region. Phase0 means reserved,1 complete and2 refused. Unused child fields and
+summaries must be exactly zero. A node-only batch has no qualification plan or
+invented result links.
+
+The predecessor chain must include every acknowledged record. A reservation
+binds the exact declaration, ordinal, before/after cursor, work counters and
+qualification plan. A retry cannot alter that binding. A Complete permits only
+the exact next reserved batch; exhaustion is taken from the grammar cursor,
+never a work limit. History admission charges payloads, journal envelopes and
+retained indexes, and each decoded batch's declared node allowance. Detail reads
+reserve one additional batch replay. Stored program-capacity claims are checked
+against the external byte bound before allocation. Original qualification rows
+are not mutated; their separately derived search projection is448 canonical
+bytes per coordinate and its complete order is hashed into the rung summary.
+
+### Shared probability ceilings, additive search V2 (D-0553)
+
+`BRBQSS02` and `BRBQSR02` retain the exact V1 declaration and record strides,
+offsets and envelope namespace. Their magic selects `SharedCeilingsV2`:
+the original policy's four family-probability ceilings are each capped at the
+declared alpha before the complete projection is evaluated. The rule changes
+the declaration's bytes and therefore its search identity. V2 full-rung
+projection hashing uses `brutex-search-wide-projection-v2\0`; V1 keeps its
+original `brutex-search-wide-projection-v1\0` domain and original arithmetic.
+
+Both record and enclosed declaration must name the same known version. A
+history transition cannot change the rule. No extra mutable field or optional
+fallback controls interpretation. Older V1 records are decoded, recomputed and
+rendered with the original policy and guard, including any original rejection
+partitions. They are explicitly historical observations, not V2 decisions.
+New writer reservations use V2. Original qualification/catalog bodies remain
+unchanged and the new format never rewrites old acknowledged history.
+
+## Outer invocation journal V1 — 2026-09-08
+
+This append-only format is separate from strategy identities and result files.
+The configured store contains `audit/invocations-v1/index.bin`, one immutable
+start per invocation, and one `<exact-id>.bin` journal per ID. IDs are
+`(1 << 63) + ordinal`, where ordinals start at one. Every record is 256 bytes:
+
+| Bytes | Field |
+|---|---|
+| 0..8 | Magic `BXOPAU01` |
+| 8..16 | Exact u64 invocation ID |
+| 16..24 | Wall-clock milliseconds; zero means unavailable |
+| 24..32 | Elapsed microseconds in the owning process |
+| 32..40 | Completed structural boundaries, with no invented total |
+| 40, 41 | Phase and origin codes |
+| 42..44 | HTTP status, zero when unavailable/not applicable |
+| 44..46 | Public ASCII label length |
+| 46..48 | Reserved zero |
+| 48..144 | Bounded public label and zero padding |
+| 144..252 | Reserved zero |
+| 252..256 | CRC32C of the preceding bytes |
+
+Integer fields are little-endian. Phase codes are start=0, progress=1,
+completed=2, refused=3, failed=4 and cancelled=5. Origin codes are CLI=1,
+browser task=2 and HTTP request=3. Start/progress without a terminal are
+unconfirmed. The index and journal starts must agree. A bounded exact read
+checks the indexed start plus the journal's first/last records; it does not
+claim to rescan every intermediate CRC. Unknown formats, padding, corruption,
+torn tails and inconsistent ancestry refuse. No repair truncates history.
+
+## Native index consistency and single-stop evidence — D-0579/D-0582
+
+All namespaces below retain a zero-byte `owner.lock` and immutable body bytes.
+The existing112-byte `BRBLCM01` completion envelope is published last: magic8,
+artifact identity32, payload digest32, byte length8, envelope digest32.
+Integer fields are little-endian. Existing records are never reinterpreted.
+
+| Namespace / body magic | Fixed layout | Variable sections |
+|---|---|---|
+| `index-consistency-v1` / `BRICST01` | Header152: magic8, parent32, parent pin32, policy72, count8. Coordinate1824: binding176, full/training/later evaluations536 each, five counts8 each. | Full, training and later week arrays at144 bytes/week, then observed sessions at32 bytes/session. The final count retains the training-session prefix. |
+| `index-stop-candidates-v1` / `BRISCT01` | Header128: magic8, identity32, native policy80, count8. Candidate metadata3929: three digests96, family128, direction/rung/day bounds32, full expression3457, truth32, metrics160, three counts24. | Per candidate: events112, trades168, then periods96. Complete program-long/short pairs are mandatory. |
+| `index-stop-qualification-v1` / `BRISQF01` | Header990 binds both candidate ancestors, native/daily/institutional policies, numerical procedure, allocation and bounds. | CSCV splits64 each; each candidate row688 is followed by its fixed later folds64 each. Row688 retains four digests128, policy projection448, Wilson source bits8, twelve Romano values96 and fold count8. |
+
+Qualification cold-open replays numerical comparisons against its exact native
+parents, verifies all mandatory daily assessments, and admits the aggregate
+ancestor bytes under both the recorded and current read bounds. Read-only
+decoders cannot mint a native execution capability. Once admitted, direct
+indexed pages retain publication leases over the four distinct artifacts;
+they do not nest another same-file lock/unlock inside a held lease.
+
+Operation16 is `index-consistency`,17 is `index-stop`, and18 is
+`index-stop-qualification`. All prior discriminators retain their old meaning.
+
+`index-stop-search-v1` uses the shared96-byte-overhead acknowledged Journal
+container. Its declaration magic is `BRISSD01`: length-framed exact index/feed,
+physical-rung mask, four civil-day bounds, initial canonical grammar cursor,
+three policy digests, fifteen fixed numeric admissions/procedure values, and
+each selected rung's original/later native source digests. Its full hash is
+the search identity.
+
+Its `BRISCP01` payload starts with magic8, eight flag bytes, previous sequence8,
+previous pin32, five u64 counters/lengths, a complete grammar cursor, eight
+identity/pin pairs64 each, then the declaration and optional canonical batch.
+Flags retain pending, exhausted, scope and predecessor presence; padding is
+zero. The fixed extent is608 + CURSOR_BYTES. A complete nonempty batch carries
+exactly the selected qualification links. A node-only batch carries none.
+Ancestry covers every acknowledged checkpoint and retains exact program/node
+limits. Missing or changed child evidence refuses recovery.
+
+Serialized history and replay budgets are checked before acknowledgment. The
+common immutable body writer refuses differing or incomplete prior bytes;
+this is not an automatic repair for a torn artifact. Already successful child
+artifacts can be reused, but an incomplete conflicting artifact is preserved
+and reported. No reader turns a partial write into a completion receipt.
+
+## Original single-stop source companions — D-0585
+
+The immutable body/completion container remains unchanged. Two additive
+namespaces retain new source provenance:
+
+| Namespace / magic | Bound contents |
+|---|---|
+| `index-stop-source-context-v1` / `BRISSC01` | Original native source and loader/calendar versions, build, vocabulary names, input limits, source-day bounds, excluded sessions, eligibility and the exact separately stored signal/execution/exact-minute/daily OHLCV roles. Candles use seven little-endian i64 fields (56 bytes); an explicit alias records a shared signal/execution role instead of a duplicate array. |
+| `index-stop-catalog-context-v1` / `BRISCL01` | Fixed 136-byte body: magic8 followed by catalog identity32, catalog completion32, source-context identity32 and source-context completion32. |
+
+The source decoder walks and admits all length/count extents before allocating
+arrays. Unknown versions, tails, malformed ordering and absent required role
+evidence refuse. The original names are part of the immutable source identity.
+The relation cannot attach a foreign source to an otherwise correctly sealed
+catalog: inspection must reconstruct every native source/run identity and the
+new catalog identity before exposing metadata or candles.
+
+New catalog identity domain `brutex-index-stop-catalog-v2\0` binds the legacy
+catalog identity to the source-context identity and completion. This changes
+the identity domain, not any `BRISCT01` or `BRISQF01` record stride. Legacy
+catalogs lacking a companion retain their old table semantics and explicitly
+refuse original-source inspection.
+
+The additive search declaration `BRISSD02` is magic8, original V1 body length8,
+that exact `BRISSD01` body, the fixed canonical institutional policy, and one
+training/later source-context pair per selected physical rung. Each context
+is identity32 plus completion32. The hash of the complete outer declaration
+is the new search identity. V1 decoding is retained without rewriting old bytes.
+
+Cumulative ranking stores no replacement result file. It verifies the exact
+acknowledged checkpoint prefix and retains each family's original completion
+pins. Paging does not mutate a checkpoint or add a second ordering authority
+to persistent candidate/qualification records.
+
+## Original single-stop VIX reference companion — D-0587
+
+`index-stop-vix-reference-v1` uses the existing immutable body, zero-byte owner
+and 112-byte completion container. All integer fields are little-endian. The
+body is additive; no original candidate, source or qualification stride changes.
+
+| Part | Layout |
+|---|---|
+| Header, 200 bytes | `BRISVX01` magic8, lookup identity32, publication identity32, catalog identity32, catalog completion32, reference-policy digest32, then feed discriminator, setting count, trade count and reference-month count as four u64 words. |
+| Setting, 80 bytes each | Original run32, original source32, first trade offset8, trade count8. Extents are contiguous in the original setting order, including zero-trade settings. |
+| Month, 72 bytes plus reason | Year8, month8, validated-snapshot flag8, original row count8, snapshot digest32, reason byte length8, then bounded UTF-8 diagnostic bytes. A validated month has no reason; an unavailable month has no row count or snapshot digest. |
+| Trade annotation, 240 bytes each | Original local ordinal8, run32, original native trade digest32, entry/exit-bar/exit-from/exit-until timestamps32, month index8, then two 64-byte stamps. Each stamp is state8 and seven i64 candle fields56. Absent and unavailable states require zero payload padding. |
+
+The body order is header, settings, months and their reasons, then annotations.
+`brutex-index-stop-vix-reference-lookup-v1\0` binds catalog identity and pin.
+`brutex-index-stop-vix-publication-v1\0` hashes the body except its own
+32-byte publication field. The ordinary completion envelope authenticates the
+complete resulting body under the lookup identity.
+
+The reader checks every saved setting and original trade digest/interval
+against the exact catalog before serving pages. Unknown states, contradictory
+month availability, disagreement between repeated references to the same minute,
+foreign extents, tails and insufficient whole-publication admission refuse.
+The independent reference pins never become a source/run,
+search, qualification or ranking identity.

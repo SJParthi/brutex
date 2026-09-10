@@ -29,9 +29,9 @@
    * the exact total height, so the scrollbar is honest at any row count and no
    * rounding accumulates down the list.
    *
-   * **O(1) per keystroke.** The filter is a prefix probe into a Map, built once
-   * per dataset, exactly as `web/typeahead.js` does it. Never a scan of the
-   * universe, and never a request per character.
+   * **Indexed filtering.** A prefix Map is built once per dataset in yielding
+   * chunks. Longer text and membership filters inspect only the chosen prefix
+   * bucket; that bucket can be large. No request is made per character.
    *
    * **The two percentage columns are LIVE, and most of their cells are still a
    * dash.** They used to be refused outright, because `/store.json` carried no
@@ -48,7 +48,7 @@
    * and name the reason.
    */
   import { untrack } from 'svelte';
-  import { feeds } from '$lib/feeds.svelte.js';
+  import { feeds, selectFeed } from '$lib/feeds.svelte.js';
   import Picker from '$lib/Picker.svelte';
   import DayField from '$lib/DayField.svelte';
   /* THE FEED'S OWN MASTER, ALREADY ON HAND. `+layout.svelte` calls
@@ -87,6 +87,9 @@
   // against a store in exactly the right state. `web/tests/completeness.test.js`
   // drives them under `node --test`.
   import { denominators, denomKey, isSole, rollUpMonths } from '$lib/completeness.js';
+  import { databasePreparation, instrumentMemo } from '$lib/database-preparation.js';
+  import { readDatabasePage } from '$lib/database-pages.js';
+  import { pooled as readPool } from '$lib/pooled.js';
   import { basisPoints, bpsText, dirOf } from '$lib/bps.js';
   import { exact } from '$lib/money.js';
   // A REQUEST THAT CANNOT END IS A SPINNER THAT LIES. `ask` is `fetch` with a
@@ -161,14 +164,17 @@
      fields off a row and derives its own denominators, so it takes the array
      and not the census's normalised view of it. */
   const rows = $derived(store.feed === feeds.active ? store.rows : []);
-  const error = $derived(store.error);
+  /** @type {{input:StoreRow[]|null,body:{rows:DecoRow[],observed:ReturnType<typeof denominators>,prefix:Map<string,DecoRow[]>}|null,why:string|null}} */
+  let prepared = $state.raw({ input: null, body: null, why: null });
+  const preparing = $derived(rows.length > 0 && (prepared.input !== rows || (!prepared.body && !prepared.why)));
+  const error = $derived(store.error ?? (prepared.input === rows ? prepared.why : null));
   /* A READING THIS FEED HAS NOT ANSWERED FOR YET IS STILL "IN FLIGHT", even in
      the instant between the selection moving and the effect that re-reads it.
      Without the second clause that instant renders as a finished read of an
      empty store — "Nothing stored for Groww" over a store nobody has asked
      about — which is a claim about the disk, not a state of the page. */
   const loading = $derived(
-    store.state === 'reading' ||
+    preparing || store.state === 'reading' ||
       (feeds.active != null && store.state !== 'error' && store.feed !== feeds.active)
   );
   /* WHEN THIS FEED'S STORE LAST ANSWERED — 0 when it never has. `store.lastOk`
@@ -834,7 +840,7 @@
     // bars) beside a 1day row (19) judges every daily row ~8,231 short — 0.23%
     // complete for a month that is actually full. Correct today only because
     // the store happens to hold one rung; that is not a property to rely on.
-    return denominators(rows).fullest;
+    return prepared.input === rows ? prepared.body?.observed.fullest ?? new Map() : new Map();
   });
 
   /**
@@ -855,7 +861,7 @@
    * many-instruments case was fixed by the D-0089-era rewrite; this is the
    * few-rows case it left behind.
    */
-  const monthSupport = $derived(denominators(rows).support);
+  const monthSupport = $derived(prepared.input === rows ? prepared.body?.observed.support ?? new Map() : new Map());
 
   /**
    * The denominator key for one row: its month AND its rung.
@@ -1038,27 +1044,25 @@
      count and the completeness ratio are attached to the row here, in one
      pass, and the sort compares plain numbers.
      ====================================================================== */
-  const deco = $derived.by(() =>
-    rows.map((r) => {
-      const short = shortBy(r);
+  /** @param {StoreRow} r @param {ReturnType<typeof denominators>} observed
+   * @param {ReturnType<typeof instrumentDescription>} meta */
+  function decorateRow(r, observed, meta) {
+      const denom = observed.fullest.get(fullestKey(r)) ?? r.rows;
+      const short = Math.max(0, denom - r.rows);
       // THE CONTRACT IS PARSED ONCE PER ROW PER DATASET, here, beside every
       // other derived per-row number — never inside the chain, the counts, the
       // ladder or the row filter. Those run per paint and per keystroke; this
       // runs when the store is re-read. Same rule `short` and `days` follow.
-      const ct = contractOf(r.instrument);
+      const ct = meta.ct;
       // THE EXPIRY IS PARSED IN THE SAME PASS AND FOR THE SAME REASON. It is
       // read by the gate, which runs on every keystroke, every scroll frame
       // and every click; parsing it there would put a regex match on the hot
       // path for a value that changes only when the store is re-read.
-      const ex = expiryOf(r.instrument);
-      const denom = monthFull.get(fullestKey(r)) ?? r.rows;
+      const ex = meta.ex;
       // ITS OWN DENOMINATOR, OR A REAL ONE. See `soleDenom` and `SOLE_WHY`.
-      const sole = soleDenom(r);
-      const cut = r.instrument.lastIndexOf('-');
-      const parts = r.instrument.split('-');
+      const sole = isSole(observed.support, r);
       // ONCE PER ROW AT READ TIME, for the reason the line above `expiryOf`
       // gives: this is hoisted off the hot path deliberately.
-      const parsed = parseKey(r.instrument);
       // HOISTED, the way `sessions()` above already does it. `barsPerSession`
       // was called TWICE in each of the two expressions below — once to guard
       // and once to divide — so the guard narrowed nothing the checker could
@@ -1090,15 +1094,15 @@
            The underlying is already named once, at the top of the page, by the
            Instrument rung. Repeating it per row buys nothing and costs the
            strike. */
-        head: contractHead(parsed, cut, r.instrument),
+        head: meta.head,
         // `sym` IS THE TAIL AND IS NOT THE NAME. On a spot key the two agree;
         // on `NSE-FNO-BANKNIFTY-2026-07-28-4810000-PE` this is `PE`. It stays
         // because the table and the index have always displayed and probed it,
         // and `underlying` beside it is what an INSTRUMENT actually is.
-        sym: contractSym(parsed, cut, r.instrument),
+        sym: meta.sym,
         // THE NAME A HUMAN USES, and the key the Instrument rung groups by.
         // Parsed once per row at store-read time, never per keystroke.
-        underlying: parsed.underlying ?? r.instrument,
+        underlying: meta.underlying,
         // WHICH SEGMENT RUNG THIS ROW BELONGS TO — spot, futures or options.
         // `kind` below is the key's own second token and cannot answer it:
         // FNO covers futures and options alike, and only the tail separates
@@ -1109,10 +1113,10 @@
         // is how two readers come to disagree about one row -- svelte-check
         // caught it as three duplicate keys, which is the cheap version of that
         // lesson.
-        segRung: segmentOf(parsed),
-        kind: parts.length > 1 ? parts[1] : '—',
+        segRung: meta.segRung,
+        kind: meta.kind,
         short,
-        days: sessions(r),
+        days: per === null ? null : r.rows / per,
         lost: per === null ? null : short / per,
         // NULL, NOT 100.00%. A ratio against itself is 1 for every row that
         // ever existed; `pctText` draws the dash and every meter beside it is
@@ -1179,8 +1183,40 @@
                   ? 'near'
                   : 'gap'
       };
-    })
-  );
+  }
+
+  /** @param {string} name */
+  function instrumentDescription(name) {
+    const parsed = parseKey(name), cut = name.lastIndexOf('-'), parts = name.split('-');
+    return {
+      ct: contractOf(name), ex: expiryOf(name),
+      head: contractHead(parsed, cut, name), sym: contractSym(parsed, cut, name),
+      underlying: parsed.underlying ?? name, segRung: segmentOf(parsed),
+      kind: parts.length > 1 ? parts[1] : '—'
+    };
+  }
+
+  /** @typedef {ReturnType<typeof decorateRow>} DecoRow */
+  const deco = $derived(prepared.input === rows ? prepared.body?.rows ?? [] : []);
+
+  $effect(() => {
+    const input = rows;
+    const controller = new AbortController();
+    prepared = { input, body: null, why: null };
+    if (input.length > 0) {
+      const describe = instrumentMemo(instrumentDescription);
+      // Preparation starts after a yield and stays outside reactive dependency
+      // tracking. Publish only one complete immutable snapshot for this input.
+      void databasePreparation.read(input, (row, observed) => decorateRow(row, observed, describe(row.instrument)), {
+        signal: controller.signal, tokens: row => [row.instrument, row.sym, row.underlying, row.month]
+      }).then(body => {
+        if (!controller.signal.aborted) prepared = { input, body, why: null };
+      }).catch(why => {
+        if (!controller.signal.aborted) prepared = { input, body: null, why: `Database view preparation failed: ${String(why)}` };
+      });
+    }
+    return () => controller.abort();
+  });
 
   /**
    * ONE DECORATED CENSUS ROW — the shape everything below this line walks.
@@ -1193,7 +1229,7 @@
    * element type off the expression that produces it cannot drift, because
    * there is nothing to keep in step.
    *
-   * @typedef {(typeof deco)[number]} DecoRow
+   * `DecoRow` is inferred directly from the unchanged per-row decoration.
    */
 
   /* ======================================================================
@@ -1623,12 +1659,10 @@
   /* ======================================================================
      THE PREFIX INDEX — one Map probe per keystroke
      ----------------------------------------------------------------------
-     Same shape as `web/typeahead.js`, for the same reason: the universe is
-     bounded, so index it once and probe it forever. Every 1..4-character
-     prefix of the full instrument, of its symbol, and of its month maps to the
-     rows carrying it. Typing up to four characters is ONE Map probe; beyond
-     four it is a filter over one bucket, which is bounded by the largest
-     4-prefix bucket and never by the store.
+     Every 1..4-character prefix of the full instrument, displayed symbol,
+     underlying and month maps to its rows. The complete store index is built
+     in yielding chunks once per census. Longer text and selected membership
+     intersect a bucket; broad prefixes may still include the whole store.
      ====================================================================== */
   const MAX_PREFIX = 4;
 
@@ -1648,59 +1682,29 @@
      `NSE-INDEX-NIFTY` is a real question. What it is not allowed to be is the
      key anything is COMPARED by — `picked` below resolves back to the store's
      own `instrument` spelling, never to what was typed. */
-  const index = $derived.by(() => {
-    /* THE BUCKET TYPE IS DECLARED, AND IT IS THE ONE ANNOTATION THE WHOLE
-       DOWNSTREAM CHAIN HANGS ON. A bare `new Map()` is `Map<any, any>`, so
-       `index.get(typed)` is `any`, so `textMatched` is `any`, and `segmented`,
-       `timeframed`, `windowed`, `scoped`, `matched` and every reducer and
-       comparator over them are `any` in turn — thirty-odd
-       `Parameter 'r' implicitly has an 'any' type` reports, every one of them
-       raised at a callback that is not where the shape was lost. It is lost
-       here, and it is answered here. */
-    /** @type {Map<string, DecoRow[]>} */
-    const by = new Map();
-    for (const it of universed) {
-      /** @type {Set<string>} */
-      const seen = new Set();
-      // `it.underlying` IS IN HERE AND IT IS THE ONE THAT MAKES A CONTRACT
-      // REACHABLE BY NAME. Without it the only tokens a contract row offers
-      // are its full key -- which starts `NSE-` -- and `it.sym`, which for
-      // an option is `CE` or `PE`. Typing BANKNIFTY found the spot series
-      // and none of its twenty-six contracts.
-      for (const raw of [it.instrument, it.sym, it.underlying, it.month]) {
-        const token = raw.toUpperCase();
-        for (let n = 1; n <= Math.min(MAX_PREFIX, token.length); n += 1) {
-          const k = token.slice(0, n);
-          if (seen.has(k)) continue;
-          seen.add(k);
-          let bucket = by.get(k);
-          if (!bucket) by.set(k, (bucket = []));
-          bucket.push(it);
-        }
-      }
-    }
-    return by;
-  });
+  // All prefix buckets are prepared in the same cancellable chunks as the
+  // rows. Membership changes intersect a bucket rather than rebuilding the
+  // whole index; no synchronous multi-million-reference build follows publish.
+  const index = $derived(prepared.input === rows ? prepared.body?.prefix ?? new Map() : new Map());
 
   const typed = $derived(filter.trim().toUpperCase());
 
   const textMatched = $derived.by(() => {
-    /* `universed`, NOT `deco`. The two coarser rungs above are already applied
-       to the index this probes, so an empty text box has to fall through to
-       the same set the index was built from — falling back to the whole store
-       would make typing WIDEN the selection. */
+    // Empty text uses the selected universe. Nonempty text intersects its
+    // saved full-store bucket with the same membership, never widening scope.
     if (!typed) return universed;
-    if (typed.length <= MAX_PREFIX) return index.get(typed) ?? [];
+    /** @type {DecoRow[]} */
     const seed = index.get(typed.slice(0, MAX_PREFIX)) ?? [];
+    if (typed.length <= MAX_PREFIX && universeNames === null) return seed;
     /* THE SAME NORMALISATION AS THE INDEX ABOVE, for the same reason: past four
        characters this is the probe, and a bucket cut one way cannot be filtered
        the other. */
     return seed.filter(
-      (r) =>
-        r.instrument.toUpperCase().startsWith(typed) ||
+      (r) => (universeNames === null || universeNames.has(r.underlying)) &&
+        (typed.length <= MAX_PREFIX || r.instrument.toUpperCase().startsWith(typed) ||
         r.sym.toUpperCase().startsWith(typed) ||
         r.underlying.toUpperCase().startsWith(typed) ||
-        r.month.toUpperCase().startsWith(typed)
+        r.month.toUpperCase().startsWith(typed))
     );
   });
 
@@ -3171,9 +3175,9 @@
       key: 'bars',
       label: 'Bars',
       sub: 'the stored values, one row per bar',
-      showing: 'one row per BAR, read from /bars.json',
+      showing: 'Stored candles, one row at a time, shown in pages',
       title:
-        'What the store CONTAINS. One row per stored bar, off /bars.json - one request per instrument-month, so the read budget decides how many files are opened. Prices are the store’s own paisa integers.'
+        'Inspect saved candle prices and volume for your selected instrument and dates. Each page reads only the requested rows, and prices come from the saved data.'
     }
   ];
   // OPENS ON THE DATA, NOT ON THE INVENTORY.
@@ -3949,6 +3953,12 @@
    * bearing on which file a reader opens first.
    */
   const barPlan = $derived.by(() => {
+    // Default pickers settle after a census arrives. Until their initial
+    // instrument, segment and rung fields settle, planning every series sorts
+    // the entire census and may open unrelated files before those effects run.
+    if (view !== 'bars' || !filter || !kind || !timeframe) {
+      return { all: [], read: [], held: 0 };
+    }
     /* MONTHS THE WINDOW CANNOT CONTAIN ARE NOT READ AT ALL.
 
        A day window forces the exact-plan fallback — the note below says why —
@@ -4321,7 +4331,7 @@
      flagged. Same semantics; one of them provable. */
   const barPlanKeys = $derived.by(() => {
     const files = pagePlan.files.map((/** @type {any} */ r) => r.key).join('\n');
-    if (pageExact) return files;
+    if (pageExact && timeNarrows) return files;
     return `${files} ${page}|${pageSize}|${barSortKey}|${barDesc}`;
   });
 
@@ -4344,7 +4354,7 @@
   const barCache = new Map();
   let barCacheStamp = '';
   /** @type {{ loading: boolean, error: string | null, files: any[] }} */
-  let barState = $state({ loading: false, error: null, files: [] });
+  let barState = $state.raw({ loading: false, error: null, files: [] });
   let barToken = 0;
 
   /* ---------------------------------------------------------------------
@@ -4399,24 +4409,11 @@
    * @param {T[]} items
    * @param {number} limit
    * @param {(item: T) => Promise<R>} job
+   * @param {AbortSignal} [signal]
    * @returns {Promise<R[]>}
    */
-  async function pooled(items, limit, job) {
-    /** @type {R[]} */
-    const out = new Array(items.length);
-    let next = 0;
-    const worker = async () => {
-      for (;;) {
-        const i = next;
-        next += 1;
-        if (i >= items.length) return;
-        out[i] = await job(/** @type {T} */ (items[i]));
-      }
-    };
-    await Promise.all(
-      Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, worker)
-    );
-    return out;
+  async function pooled(items, limit, job, signal) {
+    return readPool(items, limit, job, signal);
   }
 
   /**
@@ -4442,18 +4439,22 @@
    *
    * @param {string} feed
    * @param {any} r
+   * @param {AbortSignal} signal
    * @returns {Promise<any>}
    */
-  function readBarFile(feed, r) {
+  function readBarFile(feed, r, signal) {
     const hit = barCache.get(r.key);
-    if (hit) return Promise.resolve(hit);
-    const inflight = fetchBarFile(feed, r).then((out) => {
-      if (out && out.error === null) barCache.set(r.key, out);
+    if (hit && !hit.signal?.aborted) return hit.promise ?? Promise.resolve(hit);
+    /** @type {{signal:AbortSignal,promise:Promise<any>|null}} */
+    const inflight = { signal, promise: null };
+    inflight.promise = fetchBarFile(feed, r, signal).then((out) => {
+      if (barCache.get(r.key) !== inflight) return out;
+      if (!signal.aborted && out && out.error === null) barCache.set(r.key, out);
       else barCache.delete(r.key);
       return out;
     });
     barCache.set(r.key, inflight);
-    return inflight;
+    return inflight.promise;
   }
 
   /**
@@ -4465,8 +4466,9 @@
    *
    * @param {string} feed
    * @param {any} r
+   * @param {AbortSignal} signal
    */
-  async function fetchBarFile(feed, r) {
+  async function fetchBarFile(feed, r, signal) {
     /* EXCHANGE-SEGMENT-SYMBOL, AND THE SYMBOL KEEPS ITS OWN HYPHENS. The
        store's series name is `Exchange-Segment-Symbol`, and a symbol is
        legally `ABB-III` or `NIFTY-2026-08-27-2500000-CE`. Only the FIRST
@@ -4528,7 +4530,8 @@
       ...(toDay ? { to: toDay } : {})
     });
     try {
-      const res = await ask(`/bars.json?${q}`);
+      signal.throwIfAborted();
+      const res = await ask(`/bars.json?${q}`, { signal });
       let body = null;
       try {
         body = await res.json();
@@ -4603,8 +4606,9 @@
      @param {string} feed
      @param {any[]} plan every matched instrument-month, for the series it names
      @param {number} offset @param {number} limit
+     @param {AbortSignal} signal
      @returns {Promise<any[]>} one synthetic file, in `barState.files` shape */
-  async function readWindow(feed, plan, offset, limit) {
+  async function readWindow(feed, plan, offset, limit, signal) {
     if (plan.length === 0) return [];
     /* THE SERIES IS ONE PER CALL AND THE PLAN MAY NAME SEVERAL. Grouped by the
        instrument key the census carries, so each series asks once for its own
@@ -4645,7 +4649,7 @@
         extremes: '1'
       });
       try {
-        const res = await ask(`/bars/window.json?${q}`);
+        const res = await ask(`/bars/window.json?${q}`, { signal });
         const body = await res.json();
         if (!res.ok && !body?.bars) {
           return { key: `${first.key}|window`, row: first, bars: [], faults: null,
@@ -4668,7 +4672,7 @@
         return { key: `${first.key}|window`, row: first, bars: [], faults: null,
                  error: String(w && w.message ? w.message : w) };
       }
-    });
+    }, signal);
     return out.filter(Boolean);
   }
 
@@ -4680,7 +4684,7 @@
     /* THE CACHE IS KEYED ON THE FEED AND THE NONCE. Refresh means "read the
        store again", and a cache that survived it would answer the re-read
        out of the copy the re-read was asked to replace. */
-    const stampNow = `${feed ?? ''} ${nonce}`;
+    const stampNow = `${feed ?? ''} ${nonce} ${fromDay}|${toDay}`;
     if (barCacheStamp !== stampNow) {
       barCache.clear();
       barCacheStamp = stampNow;
@@ -4693,6 +4697,9 @@
     const exact = untrack(() => pagePlan.exact);
     const first = untrack(() => (pageNow - 1) * pageSize);
     const take = untrack(() => pageSize);
+    const base = untrack(() => pagePlan.base);
+    const bounded = exact && !untrack(() => timeNarrows);
+    const controller = new AbortController();
     const mine = ++barToken;
     let dead = false;
     barState = { loading: true, error: null, files: untrack(() => barState.files) };
@@ -4711,9 +4718,11 @@
        throw the difference away — which drew an empty grid under a full
        pager. */
     const canWindow = !exact && !untrack(() => dayNarrows) && WINDOW_SORTS.has(barSortKey);
-    (canWindow
-      ? readWindow(feed, want, first, take)
-      : pooled(want, IN_FLIGHT, (/** @type {any} */ r) => readBarFile(feed, r))
+    (bounded
+      ? readDatabasePage(feed, want, first, take, base, barDesc, controller.signal)
+      : canWindow
+      ? readWindow(feed, want, first, take, controller.signal)
+      : pooled(want, IN_FLIGHT, (/** @type {any} */ r) => readBarFile(feed, r, controller.signal), controller.signal)
     )
       .then((files) => {
         if (dead || mine !== barToken) return;
@@ -4729,7 +4738,7 @@
           files: []
         };
       });
-    return () => (dead = true);
+    return () => { dead = true; controller.abort(); };
   });
 
   /** Files that answered with a refusal rather than with bars. */
@@ -5345,7 +5354,8 @@
     windowSaid !== null || dayWindowNarrows
       ? []
       : barState.files.filter(
-          (/** @type {any} */ f) => f.error === null && f.bars.length !== f.row.rows
+          (/** @type {any} */ f) => f.error === null &&
+            (f.paged ? f.held !== f.row.rows : f.bars.length !== f.row.rows)
         )
   );
 
@@ -5360,7 +5370,7 @@
        the window route, so it comes back as a full read that still needs
        slicing. Keying on `!exact` there would pin the grid to page one for
        every column the endpoint cannot order by. */
-    if (windowSaid !== null) return barSorted.slice(0, pageSize);
+    if (windowSaid !== null || barState.files.some((f) => f.paged)) return barSorted.slice(0, pageSize);
     const first = (pageNow - 1) * pageSize;
     const start = Math.max(0, first - pagePlan.base);
     return barSorted.slice(start, start + pageSize);
@@ -6446,7 +6456,7 @@
    * offered member when the store holds none of them — which is honest: the
    * table is empty because the store is.
    */
-  /* `rows.length > 0` IS THE GUARD, AND `segmentRows.length > 0` WAS NOT ONE.
+  /* `deco.length > 0` IS THE GUARD, AND `segmentRows.length > 0` WAS NOT ONE.
      `segmentRows` is `SEG_VIEW.map(...)` — always exactly three rows, whatever
      the store holds — so that test is a constant, not a gate, and this effect
      fired on the very first tick. At mount `feeds.active` is still null and
@@ -6462,18 +6472,21 @@
      becomes visible the day the store holds a settled contract and no spot row
      for the selection.
 
-     Waiting for `rows` is what makes `why` mean "read, and this segment is
-     empty" rather than "nothing read yet" — the two states the fallback could
-     not tell apart. */
+     Waiting for the complete decorated census is what makes `why` mean
+     "read, and this segment is empty" rather than "still preparing". Raw rows
+     arrive before that asynchronous work finishes; they cannot seed a picker
+     whose held counts come from the prepared snapshot. The instrument must
+     also settle first: a segment held by another instrument is not evidence
+     that the selected one has it. */
   $effect(() => {
-    if (kind === '' && rows.length > 0 && segmentRows.length > 0) {
+    if (kind === '' && deco.length > 0 && filter !== '' && segmentRows.length > 0) {
       const held = segmentRows.find((s) => s.why === undefined);
       kind = (held ?? segmentRows[0]).key;
     }
   });
 
   $effect(() => {
-    if (filter === '' && instrumentOffered.length > 0) {
+    if (filter === '' && deco.length > 0 && instrumentOffered.length > 0) {
       const held = instrumentOffered.find((r) => r.months > 0);
       filter = (held ?? instrumentOffered[0]).key;
     }
@@ -6499,7 +6512,7 @@
    * it rather than this quietly moving him.
    */
   $effect(() => {
-    if (timeframe === '' && tfAll.length > 0) timeframe = tfAll[0][0];
+    if (timeframe === '' && filter !== '' && kind !== '' && tfAll.length > 0) timeframe = tfAll[0][0];
   });
 
   const stranded = $derived.by(() => {
@@ -7473,9 +7486,12 @@
   const SKELETON = Array.from({ length: 24 }, (_, i) => i);
 </script>
 
+<svelte:head><title>Database · brutex</title></svelte:head>
+
 <svelte:window onkeydown={onWindowKey} onpointerdown={onWindowDown} />
 
 <div class="pane db">
+  {#if store.busy}<p class="inline-note" role="status">{store.busy}</p>{/if}
   <!-- THE PANE HEAD IS GONE FROM THIS PAGE, ON THE OPERATORS CALL. It carried
        DB-Zerodha (already the lit nav tab plus the BROKER FEED picker), the
        as-of read stamp, and Refresh — a CONVENIENCE not a capability, since a
@@ -7523,14 +7539,17 @@
         <div class="alt">
           <span class="lbl">Rows exist under</span>
           {#each elsewhere as e (e.feed.wire)}
-            <button class="utab" onclick={() => (feeds.active = e.feed.wire)}>
+            <button class="utab" onclick={() => selectFeed(e.feed.wire)}>
               {e.feed.display}
             </button>
           {/each}
         </div>
       {/if}
     </div>
-  {:else if loading && rows.length === 0}
+  {:else if loading && (rows.length === 0 || preparing)}
+    {#if preparing}
+      <p class="inline-note" role="status">Preparing the database view for {fmt(rows.length)} stored month rows… Totals appear after the complete snapshot is ready.</p>
+    {/if}
     <!-- SKELETONS, SHAPED LIKE WHAT IS COMING. A spinner claims "something is
          happening"; a skeleton claims "a summary, a month band and a table go
          here", which is the useful half of the claim.
@@ -7633,7 +7652,7 @@
         <div class="alt">
           <span class="lbl">Rows exist under</span>
           {#each elsewhere as e (e.feed.wire)}
-            <button class="utab" onclick={() => (feeds.active = e.feed.wire)}>
+            <button class="utab" onclick={() => selectFeed(e.feed.wire)}>
               {e.feed.display}
             </button>
           {/each}
@@ -9807,10 +9826,10 @@
             {/if}
             {#each barDisagree as f (f.key)}
               <p class="bnote warn">
-                <b>{f.row.instrument} {f.row.month} {f.row.timeframe}</b> — the file returned {fmt(
-                  f.bars.length
+                <b>{f.row.instrument} {f.row.month} {f.row.timeframe}</b> — the file reports {fmt(
+                  f.paged ? f.held : f.bars.length
                 )} bar(s) and the census manifest claims {fmt(f.row.rows)}. The grid shows what the
-                FILE returned; the difference is a fact about the store, not a rendering choice.
+                FILE returned; its recorded total differs from the census.
               </p>
             {/each}
             {#each barFaults as f (f.key)}
@@ -10129,7 +10148,7 @@
       selected={new Set([feeds.active])}
       onchange={(/** @type {Set<string>} */ sel) => {
         const next = [...sel][0];
-        if (next) feeds.active = next;
+        if (next) selectFeed(next);
       }}
     />
     <!-- THE STATES BEFORE A STORE ANSWERS ARE NAMED RATHER THAN COUNTED: a

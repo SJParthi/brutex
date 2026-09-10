@@ -57,9 +57,11 @@
 //! is the price of a boundary that does not depend on the bar count per session,
 //! and paying it knowingly is different from paying it by accident.
 //!
-//! `warmed_up` is monotone, so the emitted column is a contiguous suffix of the
-//! offered bars less any refusals inside it —
-//! [`crate::column::tests::the_column_is_a_suffix_and_never_reorders`].
+//! Warmth can be lost when a completed session's derived daily ladder is
+//! unusable. Admission therefore requires both pre-step and post-step warmth.
+//! The ordinary usable-session fixture remains a suffix, as checked by
+//! [`crate::column::tests::the_column_is_a_suffix_and_never_reorders`]; that
+//! fixture is not a monotonicity proof for arbitrary price extremes.
 //!
 //! # Nothing is dropped silently
 //!
@@ -166,15 +168,26 @@ impl EvaluationSpecToken {
 /// first install every daily record strictly before this bar, so its method
 /// returns the warmth observed at that exact boundary alongside the mask.
 trait ColumnEvaluation {
-    fn step_with_warmth(&mut self, bar: &Candle) -> Result<(ConditionMask, bool), Corrupt>;
+    fn step_with_warmth(
+        &mut self,
+        bar: &Candle,
+    ) -> Result<(ConditionMask, ConditionMask, bool), Corrupt>;
 
     fn replay_spec(&self) -> Option<EvaluationSpec>;
 }
 
 impl ColumnEvaluation for Evaluator {
-    fn step_with_warmth(&mut self, bar: &Candle) -> Result<(ConditionMask, bool), Corrupt> {
+    fn step_with_warmth(
+        &mut self,
+        bar: &Candle,
+    ) -> Result<(ConditionMask, ConditionMask, bool), Corrupt> {
         let warm = self.warmed_up();
-        self.step(bar).map(|mask| (mask, warm))
+        let (mask, known) = self.step_known(bar)?;
+        // The pre-step verdict keeps a bar that only finishes the trend seed
+        // out of the column. The post-step verdict is independently necessary:
+        // rollover can discard an unusable completed session's daily ladder,
+        // making a previously warm evaluator cold before this mask is emitted.
+        Ok((mask, known, warm && self.warmed_up()))
     }
 
     fn replay_spec(&self) -> Option<EvaluationSpec> {
@@ -183,7 +196,10 @@ impl ColumnEvaluation for Evaluator {
 }
 
 impl ColumnEvaluation for AnchoredEvaluator<'_> {
-    fn step_with_warmth(&mut self, bar: &Candle) -> Result<(ConditionMask, bool), Corrupt> {
+    fn step_with_warmth(
+        &mut self,
+        bar: &Candle,
+    ) -> Result<(ConditionMask, ConditionMask, bool), Corrupt> {
         AnchoredEvaluator::step_with_warmth(self, bar)
     }
 
@@ -325,6 +341,7 @@ fn acceptance_of(bars: &[Candle], evaluator: &mut Evaluator) -> (Vec<bool>, Cens
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Column {
     bits: Vec<ConditionMask>,
+    known: Vec<ConditionMask>,
     /// The caller-slice index each entry in `bits` came from.
     ///
     /// Parallel to `bits`, and the ONLY honest way to map a column position
@@ -532,6 +549,7 @@ impl Column {
     fn build_from<E: ColumnEvaluation>(bars: &[Candle], evaluator: &mut E) -> Self {
         let spec = evaluator.replay_spec();
         let mut bits = Vec::with_capacity(bars.len());
+        let mut known = Vec::with_capacity(bars.len());
         let mut census = Census::default();
         let mut first_swept = None;
         let mut source: Vec<usize> = Vec::with_capacity(bars.len());
@@ -541,13 +559,14 @@ impl Column {
             census.offered = census.offered.saturating_add(1);
 
             match evaluator.step_with_warmth(bar) {
-                Ok((mask, warm)) => {
+                Ok((mask, available, warm)) => {
                     accepted.push(true);
                     if warm {
                         if first_swept.is_none() {
                             first_swept = Some(index);
                         }
                         bits.push(mask);
+                        known.push(available);
                         source.push(index);
                         census.swept = census.swept.saturating_add(1);
                     } else {
@@ -565,6 +584,7 @@ impl Column {
 
         Self {
             bits,
+            known,
             source,
             // THE BAR WHOSE CLOSE CARRIED THE MASK. A position opens on the
             // next one -- see `Sourced` for what happens when a reader
@@ -586,14 +606,14 @@ impl Column {
     /// Fallibly duplicates this exact column without rebuilding evaluator
     /// state or silently accepting an allocation abort.
     ///
-    /// Both owned vectors reserve their complete final capacity before any
-    /// element is copied. The accepted-bar bitmap is already immutable shared
+    /// Each owned vector reserves its complete final capacity before its
+    /// elements are copied. The accepted-bar bitmap is already immutable shared
     /// storage, so duplicating its [`Arc`] does not allocate or change bytes.
     /// Every remaining field is copied exactly.
     ///
     /// # Errors
     ///
-    /// Returns the allocator's [`std::collections::TryReserveError`] if either
+    /// Returns the allocator's [`std::collections::TryReserveError`] if any
     /// owned vector cannot reserve its full final capacity. No partial column
     /// escapes.
     pub fn try_clone_exact(&self) -> Result<Self, std::collections::TryReserveError> {
@@ -601,12 +621,17 @@ impl Column {
         bits.try_reserve_exact(self.bits.len())?;
         bits.extend_from_slice(&self.bits);
 
+        let mut known = Vec::new();
+        known.try_reserve_exact(self.known.len())?;
+        known.extend_from_slice(&self.known);
+
         let mut source = Vec::new();
         source.try_reserve_exact(self.source.len())?;
         source.extend_from_slice(&self.source);
 
         Ok(Self {
             bits,
+            known,
             source,
             sourced: self.sourced,
             census: self.census,
@@ -668,9 +693,15 @@ impl Column {
     /// One pass over the column, one compare and at most one 384-bit store per
     /// row. Called once per fold, never per bar of a sweep.
     pub fn clear_before(&mut self, from: usize) {
-        for (bits, &source) in self.bits.iter_mut().zip(self.source.iter()) {
+        for ((bits, known), &source) in self
+            .bits
+            .iter_mut()
+            .zip(self.known.iter_mut())
+            .zip(self.source.iter())
+        {
             if source < from {
                 *bits = ConditionMask::ZERO;
+                *known = ConditionMask::ZERO;
             }
         }
     }
@@ -681,22 +712,57 @@ impl Column {
     /// causal exact-minute bridge in [`crate::anchored`].  Clearing before the
     /// union is load-bearing: an anchored coarse evaluator still folds every
     /// other signal-local family, but none of its locally-derived `GapFib` bits
-    /// may survive into a stored run.
-    pub(crate) fn replace_gapfib(&mut self, exact: &[ConditionMask]) -> bool {
+    /// may survive into a stored run. Each pair carries exact-minute truth and
+    /// availability from the same emission boundary, including known false.
+    pub(crate) fn replace_gapfib(&mut self, exact: &[(ConditionMask, ConditionMask)]) -> bool {
+        self.replace_exact_positions(exact, &crate::gap::GapFib::positions().into_iter())
+    }
+
+    /// Replace the two minute-anchored families together, leaving all other
+    /// signal-timeframe truth and known bits byte-for-byte unchanged.
+    pub(crate) fn replace_orb_and_gapfib(
+        &mut self,
+        exact: &[(ConditionMask, ConditionMask)],
+    ) -> bool {
+        self.replace_exact_positions(
+            exact,
+            &crate::orb::positions()
+                .into_iter()
+                .chain(crate::gap::GapFib::positions()),
+        )
+    }
+
+    /// Both callers supply fixed vocabulary families: 11 or 31 positions.
+    fn replace_exact_positions(
+        &mut self,
+        exact: &[(ConditionMask, ConditionMask)],
+        positions: &(impl Iterator<Item = u16> + Clone),
+    ) -> bool {
         if exact.len() != self.bits.len() {
             return false;
         }
-        for (mask, evidence) in self.bits.iter_mut().zip(exact.iter()) {
+        for ((mask, known), evidence) in self
+            .bits
+            .iter_mut()
+            .zip(self.known.iter_mut())
+            .zip(exact.iter())
+        {
             let mut without_local = *mask;
             let mut only_exact = ConditionMask::ZERO;
-            for position in crate::gap::GapFib::positions() {
+            let mut only_known = ConditionMask::ZERO;
+            for position in (*positions).clone() {
                 let position = u32::from(position);
                 without_local = without_local.without_bit(position);
-                if evidence.get(position) {
+                *known = known.without_bit(position);
+                if evidence.0.get(position) {
                     only_exact = only_exact.with_bit(position);
+                }
+                if evidence.1.get(position) {
+                    only_known = only_known.with_bit(position);
                 }
             }
             *mask = without_local.union(&only_exact);
+            *known = known.union(&only_known).union(&only_exact);
         }
         true
     }
@@ -805,10 +871,13 @@ impl Column {
             return None;
         }
         let mut bits = Vec::with_capacity(self.bits.len());
+        let mut known = Vec::with_capacity(self.known.len());
         let mut source = Vec::with_capacity(self.source.len());
         let mut dropped: u64 = 0;
         let mut collided: u64 = 0;
-        for (&mask, &target) in self.bits.iter().zip(onto.iter()) {
+        for ((&mask, &available), &target) in
+            self.bits.iter().zip(self.known.iter()).zip(onto.iter())
+        {
             match target {
                 None => dropped = dropped.saturating_add(1),
                 // ONE FILL BAR, ONE ROW. A SECOND SIGNAL ON IT IS NOT A SECOND
@@ -845,6 +914,7 @@ impl Column {
                 }
                 Some(index) => {
                     bits.push(mask);
+                    known.push(available);
                     source.push(index);
                 }
             }
@@ -866,6 +936,7 @@ impl Column {
         Some((
             Self {
                 bits,
+                known,
                 source,
                 // `onto` HOLDS FILL BARS, not signal bars: `align::onto_execution`
                 // returns the first execution bar stamped at or after the
@@ -941,6 +1012,18 @@ impl Column {
     #[must_use]
     pub fn bits(&self) -> &[ConditionMask] {
         &self.bits
+    }
+
+    /// Conditions with a sound Boolean answer, parallel to [`Self::bits`].
+    ///
+    /// Emitted truths and explicitly available false answers are certified.
+    /// Every other condition remains unknown, including missing reference
+    /// families; callers must never turn that absence into false. Exact-minute
+    /// ORB and `GapFib` overlays carry availability from the same minute-close
+    /// state as their truth, including valid false answers.
+    #[must_use]
+    pub fn known(&self) -> &[ConditionMask] {
+        &self.known
     }
 
     /// Signals refused because an earlier signal already owns the execution bar
@@ -1349,22 +1432,87 @@ pub(super) mod tests {
         for position in crate::gap::GapFib::positions() {
             *first = first.with_bit(u32::from(position));
         }
-        let mut exact = vec![ConditionMask::ZERO; column.bits.len()];
+        let first_known = column
+            .known
+            .first_mut()
+            .expect("the availability row exists");
+        *first_known = first_known.with_bit(3);
+        for position in crate::gap::GapFib::positions() {
+            *first_known = first_known.with_bit(u32::from(position));
+        }
+        let mut exact = vec![(ConditionMask::ZERO, ConditionMask::ZERO); column.bits.len()];
         let first_exact = exact.first_mut().expect("the parallel row exists");
-        *first_exact = first_exact.with_bit(142);
+        first_exact.0 = first_exact.0.with_bit(142);
+        first_exact.1 = first_exact.1.with_bit(141).with_bit(142);
         assert!(column.replace_gapfib(&exact));
         let replaced = *column.bits.first().expect("the replaced row exists");
+        let available = *column
+            .known
+            .first()
+            .expect("the replaced availability exists");
         assert!(replaced.get(3), "an unrelated signal-local bit was erased");
+        assert!(available.get(3), "unrelated availability was erased");
         for position in 132_u32..=141 {
             assert!(
                 !replaced.get(position),
                 "local GapFib position {position} survived the replacement"
+            );
+            assert_eq!(
+                available.get(position),
+                position == 141,
+                "only exact-minute availability can survive replacement"
             );
         }
         assert!(
             replaced.get(142),
             "the exact-minute overlay bit was not copied"
         );
+        assert!(available.get(142), "the exact-minute truth must be known");
+    }
+
+    #[test]
+    fn combined_replacement_clears_all_thirty_one_positions_and_preserves_every_other_bit() {
+        let mut column = Column::build(&warm_run(), &mut evaluator(Availability::Absent));
+        assert!(!column.is_empty(), "warm fixture must reach replacement");
+        let all = (0..ConditionMask::BITS)
+            .fold(ConditionMask::ZERO, ConditionMask::with_bit)
+            .without_bit(2);
+        column.bits.fill(all);
+        column.known.fill(all);
+        let original = column.clone();
+        assert!(!column.replace_orb_and_gapfib(&[]));
+        assert_eq!(column, original, "bad parallel length is transactional");
+        let exact = vec![
+            (
+                ConditionMask::ZERO.with_bit(86).with_bit(142).with_bit(2),
+                ConditionMask::ZERO.with_bit(86).with_bit(90).with_bit(140),
+            );
+            column.len()
+        ];
+        assert!(column.replace_orb_and_gapfib(&exact));
+        for (truth, known) in column.bits.iter().zip(&column.known) {
+            for bit in 0..ConditionMask::BITS {
+                let replaced = (86..106).contains(&bit) || (132..143).contains(&bit);
+                assert_eq!(
+                    truth.get(bit),
+                    (!replaced && bit != 2) || matches!(bit, 86 | 142)
+                );
+                assert_eq!(
+                    known.get(bit),
+                    (!replaced && bit != 2) || matches!(bit, 86 | 90 | 140 | 142)
+                );
+            }
+        }
+        let empty = vec![(ConditionMask::ZERO, ConditionMask::ZERO); column.len()];
+        assert!(column.replace_orb_and_gapfib(&empty));
+        for (truth, known) in column.bits.iter().zip(&column.known) {
+            for bit in 86..106 {
+                assert!(!truth.get(bit) && !known.get(bit));
+            }
+            for bit in 132..143 {
+                assert!(!truth.get(bit) && !known.get(bit));
+            }
+        }
     }
 
     #[test]
@@ -1421,7 +1569,7 @@ pub(super) mod tests {
 
     #[test]
     fn the_column_is_a_suffix_and_never_reorders() {
-        // `warmed_up` is monotone, so the swept bars are a contiguous tail. Prove
+        // This ordinary fixture keeps usable anchors, so its bars form a tail. Prove
         // it by rebuilding the same masks by hand and comparing position for
         // position.
         let bars = warm_run();

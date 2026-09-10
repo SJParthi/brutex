@@ -137,7 +137,7 @@ fn matrix() -> Vec<(&'static str, Candle, Option<Corrupt>)> {
         (
             "four-price doji at the bottom of i64",
             c(0, i64::MIN, i64::MIN, i64::MIN, i64::MIN, 0, i64::MIN),
-            None,
+            Some(Corrupt::PriceNotPositive),
         ),
         (
             // This row said `None` — accepted — and that was the defect. A design
@@ -173,7 +173,7 @@ fn matrix() -> Vec<(&'static str, Candle, Option<Corrupt>)> {
                 0,
                 i64::MIN,
             ),
-            None,
+            Some(Corrupt::PriceNotPositive),
         ),
         // THIS ROW SAID `None` AND THE MEASUREMENT CORRECTED IT, exactly as the
         // negative-volume row below records the same class of correction.
@@ -182,12 +182,9 @@ fn matrix() -> Vec<(&'static str, Candle, Option<Corrupt>)> {
         // had not changed since 2026-08-12 and still called the bar legal, so
         // the matrix asserted the defect.
         //
-        // The row ABOVE stays `None` on purpose and the two are not in tension:
-        // the guard is `== 0`, deliberately not `<= 0`, and `Evaluator::step`'s
-        // own doc argues it — `ohlc_is_sane` refuses a negative bar at the write
-        // boundary (D-0143), so zero is the only case reachable through the
-        // store, and widening it would make `close_the_books`' span-overflow
-        // handling unreachable against §9's coverage floor.
+        // Direct callers now have the same positive-price protection as the
+        // stored path. The signed arithmetic guards remain covered through
+        // explicit low-level references and positive derived-level overflow.
         (
             "all prices zero",
             c(0, 0, 0, 0, 0, 0, i64::MIN),
@@ -617,15 +614,23 @@ fn daily_levels_at_the_edges_of_the_type() {
 fn the_whole_matrix_as_one_series_emits_only_live_bits() {
     let mut e = Evaluator::new(widths(), Availability::Absent, Thresholds::CLASSICAL);
     let mut accepted = 0_u32;
+    let mut expected_accepted = 0_u32;
     // Restamped forward, because the evaluator now refuses a receding timestamp and the
     // matrix deliberately holds several of the same. The PRICES are what this test is
     // about; ordering has its own test above.
     // Counted in `i64` by the zip rather than converted from a `usize` index: the
     // `i64::try_from` this used to do cannot fail on a table of this size, and an arm no
     // input can take is a region no test can reach.
-    for ((name, mut candle, _), step) in matrix().into_iter().zip(0_i64..) {
+    for ((name, mut candle, expected), step) in matrix().into_iter().zip(0_i64..) {
         candle.ts_micros = IST_OPEN_UTC_MICROS + step * MINUTE;
-        if let Ok(mask) = e.step(&candle) {
+        expected_accepted += u32::from(expected.is_none());
+        let evaluated = e.step(&candle);
+        assert_eq!(
+            evaluated.is_ok(),
+            expected.is_none(),
+            "{name}: series admission differs from the independent matrix"
+        );
+        if let Ok(mask) = evaluated {
             accepted = accepted.saturating_add(1);
             assert_eq!(
                 vocab::table::only_live(mask),
@@ -647,7 +652,14 @@ fn the_whole_matrix_as_one_series_emits_only_live_bits() {
             }
         }
     }
-    assert!(accepted > 15, "only {accepted} of the matrix was accepted");
+    assert!(
+        expected_accepted > 0,
+        "the acceptance matrix must not be vacuous"
+    );
+    assert_eq!(
+        accepted, expected_accepted,
+        "every expected legal candle must be counted exactly"
+    );
 }
 
 /// Two runs over the matrix agree exactly — §3 rule 5, on the worst input available.

@@ -1372,6 +1372,12 @@ const _: () = assert!(EPOCH_DAY.days_from_epoch() == 0);
 
 /// 2026-08-03 — the day NSE's session change took effect.
 const AUG_3_2026: Day = day_const(2026, 8, 3);
+/// From this date cash imports need per-instrument auction-phase eligibility.
+/// This is not a claim that every cash share participates in CAS.
+#[must_use]
+pub fn cash_auction_eligibility_required(day: Day) -> bool {
+    day >= AUG_3_2026
+}
 const _: () =
     assert!(AUG_3_2026.year() == 2026 && AUG_3_2026.month() == 8 && AUG_3_2026.day() == 3);
 
@@ -4920,10 +4926,9 @@ const TRUEDATA_INDEX: ColumnLayout = ColumnLayout {
 /// derivative row from an index row, and `i64::MIN` is the open-interest null —
 /// so an ignored column is not "zero", it is *never written*.
 ///
-/// The physical shape is unchanged, which is why both layouts name
-/// [`Columns::TrueDataIndex`]: five fields, no header, `YYYYMMDD`. [`Columns`]
-/// is what a row LOOKS like and [`ColumnLayout`] is what its columns MEAN, and
-/// this pair is the reason those are two types.
+/// The physical shape is five fields, no header, `YYYYMMDD`. The explicit
+/// [`Columns::TrueDataFno`] name distinguishes this product from index rows
+/// and the nine-field bid/ask product; it does not infer listing class.
 ///
 /// # Why this one and not the nine-column one
 ///
@@ -4951,7 +4956,7 @@ const TRUEDATA_FNO: ColumnLayout = ColumnLayout {
         Column::Volume,
         Column::OpenInterest,
     ],
-    shape: Columns::TrueDataIndex,
+    shape: Columns::TrueDataFno,
 };
 
 const TRUE_DATA: Descriptor = Descriptor {
@@ -7642,11 +7647,10 @@ mod tests {
             .expect("the plain F&O layout was measured");
         assert_eq!(fno.segment, Segment::Fno);
         assert_eq!(fno.columns.len(), 5, "five fields, as the index");
-        assert_eq!(
-            fno.shape, index.shape,
-            "one PHYSICAL shape, two MEANINGS — which is why Columns and \
-             ColumnLayout are two types"
-        );
+        assert_eq!(fno.shape, Columns::TrueDataFno);
+        assert_eq!(index.shape, Columns::TrueDataIndex);
+        assert_eq!(fno.shape.count(), index.shape.count());
+        assert_ne!(fno.shape, Columns::TrueDataFutures);
         assert!(
             fno.columns.contains(&Column::Volume) && fno.columns.contains(&Column::OpenInterest),
             "the trailing pair is what distinguishes a contract row from an \

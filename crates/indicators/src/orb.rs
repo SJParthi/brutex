@@ -312,6 +312,34 @@ impl Orb {
         }
         mask
     }
+
+    /// Availability of the same frozen window references used by [`Self::bits`].
+    /// Exact comparisons remain meaningful for a zero-width window; near
+    /// comparisons require a positive span and the matching tolerance family.
+    ///
+    /// Reading this after [`Self::step`] preserves the emission boundary: windows
+    /// close before emission, and the subsequent fold changes only still-forming
+    /// windows, which remain unavailable here.
+    pub(crate) fn known(&self, tolerance: Tolerance) -> ConditionMask {
+        let mut known = ConditionMask::ZERO;
+        for offset in 0..WINDOW_COUNT {
+            let Some((high, low)) = self.extremes(usize::from(offset)) else {
+                continue;
+            };
+            let Some(range) = high.checked_sub(low) else {
+                continue;
+            };
+            let base = ORB_FIRST + offset * RELATIONS_PER_WINDOW;
+            for position in [base, base + 1, base + 2] {
+                known = set(known, position);
+            }
+            // A probe at the anchor has zero distance. Its near bit is set iff
+            // the actual vocabulary/tolerance/span contract can be evaluated.
+            known = near(known, base + 3, tolerance, high, high, range);
+            known = near(known, base + 4, tolerance, low, low, range);
+        }
+        known
+    }
 }
 
 /// Set a plain position, ignoring a refusal.
@@ -794,18 +822,30 @@ mod tests {
         // at this magnitude and the empty mask is not a fixture that never fires.
         const INSIDE_BOTH_BANDS: i64 = HI - 80_000_000_000_000_000;
 
-        let mut o = Orb::new();
-        assert!(ok(&mut o, &at(0, HI, HI, HI)).is_empty());
-        assert!(ok(&mut o, &at(1, LO, LO, LO)).is_empty());
-        let mask = ok(
-            &mut o,
-            &at(
-                5,
-                OUTSIDE_THE_SATURATED_BAND,
-                OUTSIDE_THE_SATURATED_BAND,
-                OUTSIDE_THE_SATURATED_BAND,
-            ),
+        // Positive checked candles cannot create a span wider than i64. Keep
+        // the low-level arithmetic guard exercised with an explicit oversized
+        // reference, and independently verify the production sign refusal.
+        let mut o = Orb {
+            windows: [
+                Window {
+                    high: HI,
+                    low: LO,
+                    seeded: true,
+                    closed: true,
+                },
+                Window::new(),
+                Window::new(),
+                Window::new(),
+            ],
+            ..Orb::new()
+        };
+        let before = o;
+        assert_eq!(
+            o.step(&at(1, LO, LO, LO), tol()),
+            Err(crate::Corrupt::PriceNotPositive)
         );
+        assert_eq!(o, before, "a refused candle must not change the window");
+        let mask = o.bits(OUTSIDE_THE_SATURATED_BAND, tol());
         assert_eq!(
             o.extremes(0),
             Some((HI, LO)),
@@ -822,11 +862,11 @@ mod tests {
             );
         }
 
-        // And a window spanning half as much — 9.2e18, which DOES fit — bands from the
+        // A positive window spanning almost 9.2e18, which DOES fit, bands from the
         // same code at the same magnitude, so the empty masks above are the span leaving
         // the type and not a scale this family cannot measure at.
         let mut fits = Orb::new();
-        let (hi, lo) = (HI / 2, LO / 2);
+        let (hi, lo) = (HI, 1);
         let near_high = hi - 80_000_000_000_000_000;
         assert!(ok(&mut fits, &at(0, hi, hi, hi)).is_empty());
         assert!(ok(&mut fits, &at(1, lo, lo, lo)).is_empty());

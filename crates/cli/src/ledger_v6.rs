@@ -2,9 +2,11 @@
 //!
 //! # What this is, next to `ledger-all`
 //!
-//! Both verbs run the same phase one -- one Candidate/Pre-Admission commit per
-//! family per rung, which is where the sweep actually happens -- and then take
-//! different successor routes over the same committed candidates:
+//! Both verbs share the Candidate pricing kernel. V6 additionally requires
+//! strict checksum receipts and physical input limits, binds that authority in
+//! its run identity, and retains genuine empty-family V2 evidence. Its strict
+//! candidates therefore do not collide with ordinary `ledger-all` candidates.
+//! The successor routes are version-separated:
 //!
 //! | | `ledger-all` | `ledger-v6` |
 //! |---|---|---|
@@ -13,7 +15,7 @@
 //! | finalization | **V3** | **V4** |
 //! | population | **V5** | **V6** |
 //! | execution | **V3** | **V4** |
-//! | selection | **V5** | none yet |
+//! | selection | **V5** | **V6** |
 //!
 //! They are not two implementations of one thing. V6 carries a fact V5 cannot
 //! express: **which families were naturally extinct.** A family whose ladder
@@ -23,18 +25,17 @@
 //! each shape. That is why both routes exist and why this verb is not a flag on
 //! the other one.
 //!
-//! # Why it stops at Execution V4
-//!
-//! There is no Selection V6. `selection_v5` is the newest selector in the tree
-//! and it consumes an Execution **V3** authority, so the V6 route terminates at
-//! its Execution V4 commit rather than being wired into a selector that cannot
-//! read it. Saying so here is cheaper than a caller discovering it: the ledgers
-//! this verb writes are complete and durable, and ranking them is Step 5.
+//! Selection V6 consumes the exact Execution V4 capability and retains both
+//! terminal family envelopes. It applies the shared ranking and stores actual
+//! Top-25/Top-10 prefixes. Chronological portfolio replay is a later authority;
+//! a per-rung selection does not itself prove that selected trades never overlap.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+use crate::selection_v6::{SelectionV6Bounds, commit_stored_selection_v6};
 use runner::outcome::Horizon;
+use runner::topn::{RankingPolicyV1, Weights};
 
 use indicators::evaluator::Widths;
 use indicators::pattern::Thresholds;
@@ -51,8 +52,8 @@ use crate::execution_v4::{
 use crate::ledger_all::{
     BLOCK_RECORDS, BOOTSTRAP_BLOCK, BOOTSTRAP_DRAWS, BOOTSTRAP_SEED, CEILING_BYTES,
     CEILING_RECORDS, LEDGER_RUNGS, LEDGER_TARGET, LedgerAllRequest, admission_policy,
-    build_sweepers, candidate_bounds, exit_policy, render_gate_census, run_finished_event,
-    run_refused_event, run_started_event, rung_refused_event,
+    candidate_bounds, exit_policy, render_gate_census, run_finished_event, run_refused_event,
+    run_started_event, rung_refused_event,
 };
 use crate::population_admission_v4::PopulationAdmissionV4Bounds;
 use crate::population_finalization_v4::PopulationFinalizationV4Bounds;
@@ -62,7 +63,7 @@ use crate::population_statistics_v3::PopulationStatisticsV3Bounds;
 use crate::population_v6::PopulationV6Bounds;
 use crate::step3_orchestrator::{
     StoredCandidatePreAdmissionRequestV1, StoredPopulationV6RouteV1,
-    commit_stored_candidate_pre_admission_authority_v1, commit_stored_population_v6_route,
+    commit_stored_population_v6_route, commit_strict_candidate_pre_admission_authority_v1,
 };
 
 /// The two charter families, in the order every V6 successor requires them.
@@ -108,7 +109,8 @@ const ROUTE_STAGE: &str = "population-v6-route";
 // IT IS STILL NOT A LOOP GATE 17 IS ABOUT. Sixteen iterations, fixed by
 // `LEDGER_RUNGS` and `ROUTE_FAMILIES`, both compile-time constants -- the count
 // does not move with bars, candidates or grid cells. A whole `ledger-v6` run
-// emits forty-three events over what may be eighty months of data.
+// adds one selection event per successful rung; telemetry stays at structural
+// boundaries over what may be eighty months of data.
 
 /// One rung's route opening, before its two families are committed.
 fn rung_started_event(rung: &str, index: usize) -> telemetry::Event<'_> {
@@ -184,6 +186,7 @@ struct RungRoots {
     finalization: PathBuf,
     population: PathBuf,
     execution: PathBuf,
+    selection: PathBuf,
 }
 
 impl RungRoots {
@@ -195,8 +198,8 @@ impl RungRoots {
     /// every one to exist already, so creating them is what makes the verb
     /// runnable rather than a list of `mkdir` instructions.
     fn create(root: &Path, rung: &str) -> Result<Self, String> {
-        let mut made = Vec::with_capacity(ROUTE_STAGES.len() + 1);
-        for stage in ROUTE_STAGES.into_iter().chain(std::iter::once("execution")) {
+        let mut made = Vec::with_capacity(ROUTE_STAGES.len() + 2);
+        for stage in ROUTE_STAGES.into_iter().chain(["execution", "selection"]) {
             let path = root.join(stage).join(rung);
             std::fs::create_dir_all(&path)
                 .map_err(|why| format!("cannot create {}: {why}", path.display()))?;
@@ -210,9 +213,10 @@ impl RungRoots {
             finalization,
             population,
             execution,
-        ]: [PathBuf; 7] = made
+            selection,
+        ]: [PathBuf; 8] = made
             .try_into()
-            .map_err(|_| format!("{rung} did not lay out seven stage roots"))?;
+            .map_err(|_| format!("{rung} did not lay out eight stage roots"))?;
         Ok(Self {
             observation,
             statistics,
@@ -221,6 +225,7 @@ impl RungRoots {
             finalization,
             population,
             execution,
+            selection,
         })
     }
 }
@@ -230,7 +235,7 @@ impl RungRoots {
 /// # What it writes
 ///
 /// Per rung, beneath `request.root`: `observation/`, `statistics/`,
-/// `lineage/`, `admission/`, `finalization/`, `population/` and `execution/`
+/// `lineage/`, `admission/`, `finalization/`, `population/`, `execution/` and `selection/`
 /// ledgers, each reauthenticated before the next stage reads it. The Candidate,
 /// Base Evidence and Pre-Admission ledgers are written under the STORE root, as
 /// they are for `ledger-all` -- the two verbs share those, and a second run
@@ -241,7 +246,7 @@ pub(crate) fn ledger_v6(request: &LedgerAllRequest<'_>) -> String {
     let _ = writeln!(
         out,
         "\nLEDGER-V6  {} {:04}-{:02}..{:04}-{:02}  support {} ppm  stop ceiling {} points\n\
-         Statistics V3 / Admission V4 / Finalization V4 / Population V6 / Execution V4.",
+         Statistics V3 / Admission V4 / Finalization V4 / Population V6 / Execution V4 / Selection V6.",
         request.vendor,
         request.from.0,
         request.from.1,
@@ -257,10 +262,11 @@ pub(crate) fn ledger_v6(request: &LedgerAllRequest<'_>) -> String {
     crate::note(&run_started_event(LEDGER_V6_VERB, request));
 
     match run_route(request, &mut out) {
-        Ok(rungs) => {
+        Ok(selections) => {
+            let rungs = selections.len();
             let _ = writeln!(
                 out,
-                "\nCOMMITTED. {rungs} of {} rungs wrote a complete Execution V4 authority.",
+                "\nCOMMITTED. {rungs} of {} rungs produced a complete Selection V6 authority (written or reused).",
                 LEDGER_RUNGS.len()
             );
             crate::note(&run_finished_event(LEDGER_V6_VERB, rungs));
@@ -280,33 +286,46 @@ pub(crate) fn ledger_v6(request: &LedgerAllRequest<'_>) -> String {
 /// Names the rung and the stage that refused. There is no arm that continues
 /// past one: a partially committed rung reported as a success would be the
 /// failure wearing a success's clothes `CLAUDE.md` §4 bans.
-fn run_route(request: &LedgerAllRequest<'_>, out: &mut String) -> Result<usize, String> {
+fn run_route(
+    request: &LedgerAllRequest<'_>,
+    out: &mut String,
+) -> Result<Vec<crate::selection_v6::CommittedStoredSelectionV6>, String> {
     let vendor = crate::parse_vendor(request.vendor)?;
-    let source_root = crate::store_root().map_err(|why| format!("stored source root: {why}"))?;
-
-    let sweepers = build_sweepers(&source_root, vendor, request, LEDGER_V6_VERB)?;
+    // Policy depends only on the request and its explicit knobs. Resolve it
+    // before sizing loads all eight market spans, so unavailable data cannot
+    // hide the complete worksheet for a run whose policy is already missing.
     let (admission, active_gates) = admission_policy(request, LEDGER_V6_VERB)?;
     render_gate_census(out, &active_gates);
+    let strict = strict_configuration(out)?;
+    let source_root = crate::store_root().map_err(|why| format!("stored source root: {why}"))?;
 
     let long_exit = exit_policy(runner::excursion::Side::Long)?;
     let short_exit = exit_policy(runner::excursion::Side::Short)?;
     let widths = Widths::pinned().map_err(|why| format!("pinned tolerances: {why}"))?;
     let bounds = candidate_bounds()?;
 
-    let mut committed = 0_usize;
-    for (index, (rung, sweeper)) in LEDGER_RUNGS.into_iter().zip(sweepers.iter()).enumerate() {
+    let mut committed = Vec::with_capacity(8);
+    for (index, rung) in LEDGER_RUNGS.into_iter().enumerate() {
+        let (sweeper, sizing_inputs) = crate::step3_orchestrator::strict::size_sweeper(
+            &source_root,
+            vendor,
+            request,
+            rung,
+            bounds,
+            &strict,
+        )?;
         crate::note(&rung_started_event(rung, index));
         let roots = RungRoots::create(request.root, rung).inspect_err(|why| {
             crate::note(&rung_refused_event(LEDGER_V6_VERB, ROUTE_STAGE, rung, why));
         })?;
 
-        // PHASE ONE, PER FAMILY. Identical to what `ledger-all` runs, and
-        // deliberately so: the candidate ledger is keyed by universe identity
-        // and its append is idempotent, so running both verbs over one span
-        // sweeps once and the second reuses.
+        // The shared Candidate kernel keeps ordinary pricing semantics.
+        // Strict identities additionally bind exact receipts and physical
+        // limits; only repeated strict requests reuse the same authority.
         let mut families = Vec::with_capacity(ROUTE_FAMILIES.len());
         for underlying in ROUTE_FAMILIES {
-            let committed_family = commit_stored_candidate_pre_admission_authority_v1(
+            sizing_inputs.require_current()?;
+            let committed_family = commit_strict_candidate_pre_admission_authority_v1(
                 StoredCandidatePreAdmissionRequestV1 {
                     root: source_root.as_path(),
                     vendor,
@@ -314,7 +333,7 @@ fn run_route(request: &LedgerAllRequest<'_>, out: &mut String) -> Result<usize, 
                     rung_name: rung,
                     from: request.from,
                     to: request.to,
-                    sweeper,
+                    sweeper: &sweeper,
                     horizon: Horizon::DEFAULT,
                     widths,
                     // ABSENT, and this caller may not derive it --
@@ -326,6 +345,7 @@ fn run_route(request: &LedgerAllRequest<'_>, out: &mut String) -> Result<usize, 
                     short_exit_policy: &short_exit,
                     bounds,
                 },
+                &strict,
             )
             .map_err(|why| {
                 let refusal = format!("v6 {rung} {underlying} refused: {why}");
@@ -358,53 +378,97 @@ fn run_route(request: &LedgerAllRequest<'_>, out: &mut String) -> Result<usize, 
             refusal
         })?;
 
-        committed = committed.saturating_add(1);
-        if committed == 1 {
+        let (execution, summary) = committed_route;
+        sizing_inputs.require_current()?;
+        let selection =
+            render_selection(rung, &roots.selection, execution, out).inspect_err(|why| {
+                crate::note(&rung_refused_event(
+                    LEDGER_V6_VERB,
+                    "selection-v6",
+                    rung,
+                    why,
+                ));
+            })?;
+        sizing_inputs.require_current()?;
+        committed.push(selection);
+        if committed.len() == 1 {
             let _ = writeln!(
                 out,
                 "\n  {:<6}  {:>9}  {:>7}  {:>9}  {:>9}  {:>9}  {:>9}",
                 "rung", "decisions", "cands", "NIFTY", "BANKNIFTY", "draws/seed", "block"
             );
         }
-        let (_execution, summary) = committed_route;
-        // HOISTED SO IT IS COMPUTED ONCE AND USED TWICE -- the terminal row
-        // below and the event beneath it name the same block. A second
-        // `short_id` call solely to fill a log field would be the value
-        // computed only to be logged that this file refuses.
-        let admission_short = short_id(&summary.admission_block);
-        let _ = writeln!(
-            out,
-            "  {:<6}  {:>9}  {:>7}  {:>9}  {:>9}  {:>4}/{:<4}  {:>9}\n         \
-             NIFTY {} · BANKNIFTY {}",
-            rung,
-            summary.decisions,
-            summary.candidate_count,
-            summary.nifty_candidates,
-            summary.banknifty_candidates,
-            summary.draws,
-            summary.seed,
-            summary.block_length,
-            summary.nifty_terminal,
-            summary.banknifty_terminal,
-        );
-        // THE IDENTITIES, SHORTENED BUT NOT INVENTED. A durable ledger whose
-        // report names no block leaves the operator no way to find the rows it
-        // describes; sixteen hex characters locate one by prefix and still fit
-        // a terminal line. `ordered` is the one to watch across reruns -- §3
-        // rule 5's idempotence means it must not move.
-        let _ = writeln!(
-            out,
-            "         admission {}  statistics {}  ordered {}\n         \
-             universes  NIFTY {}  BANKNIFTY {}",
-            admission_short,
-            short_id(&summary.statistics_authority),
-            short_id(&summary.ordered_candidates),
-            short_id(&summary.nifty_universe),
-            short_id(&summary.banknifty_universe),
-        );
-        crate::note(&route_committed_event(rung, &summary, &admission_short));
+        render_route_summary(rung, &summary, out);
     }
     Ok(committed)
+}
+
+fn strict_configuration(
+    out: &mut String,
+) -> Result<crate::audited_range_command::StrictConfig, String> {
+    let strict =
+        crate::audited_range_command::StrictConfig::from_env().map_err(|why| why.to_string())?;
+    crate::audited_range_command::validate_runtime(&[]).map_err(|why| why.to_string())?;
+    crate::commit_stamp()
+        .ok_or("strict institutional route requires a verified clean build before source sizing")?;
+    out.push_str("\nSTRICT CHECKSUM INPUTS V1: all signal, daily and exact-minute source receipts are retained through terminal publication; physical bounds are explicit.\n");
+    Ok(strict)
+}
+
+fn render_route_summary(
+    rung: &str,
+    summary: &crate::step3_orchestrator::StoredPopulationV6SummaryV1,
+    out: &mut String,
+) {
+    // HOISTED SO IT IS COMPUTED ONCE AND USED TWICE -- the terminal row
+    // below and the event beneath it name the same block. A second
+    // `short_id` call solely to fill a log field would be the value
+    // computed only to be logged that this file refuses.
+    let admission_short = short_id(&summary.admission_block);
+    let _ = writeln!(
+        out,
+        "  {:<6}  {:>9}  {:>7}  {:>9}  {:>9}  {:>4}/{:<4}  {:>9}\n         \
+             NIFTY {} · BANKNIFTY {}",
+        rung,
+        summary.decisions,
+        summary.candidate_count,
+        summary.nifty_candidates,
+        summary.banknifty_candidates,
+        summary.draws,
+        summary.seed,
+        summary.block_length,
+        summary.nifty_terminal,
+        summary.banknifty_terminal,
+    );
+    // THE IDENTITIES, SHORTENED BUT NOT INVENTED. A durable ledger whose
+    // report names no block leaves the operator no way to find the rows it
+    // describes; sixteen hex characters locate one by prefix and still fit
+    // a terminal line. `ordered` is the one to watch across reruns -- §3
+    // rule 5's idempotence means it must not move.
+    let _ = writeln!(
+        out,
+        "         admission {}  statistics {}  ordered {}\n         \
+             universes  NIFTY {}  BANKNIFTY {}",
+        admission_short,
+        short_id(&summary.statistics_authority),
+        short_id(&summary.ordered_candidates),
+        short_id(&summary.nifty_universe),
+        short_id(&summary.banknifty_universe),
+    );
+    crate::note(&route_committed_event(rung, summary, &admission_short));
+}
+
+#[cfg(test)]
+pub(crate) fn strict_fixture_selection(
+    root: &Path,
+    nifty: impl Into<crate::step3_orchestrator::family_v6::StoredFamilyV6>,
+    banknifty: impl Into<crate::step3_orchestrator::family_v6::StoredFamilyV6>,
+    policy: &runner::admission::AdmissionPolicyV1,
+) -> Result<crate::selection_v6::CommittedStoredSelectionV6, String> {
+    let roots = RungRoots::create(root, "1min")?;
+    let (execution, _) =
+        commit_stored_population_v6_route(nifty, banknifty, &route_for("1min", &roots, policy)?)?;
+    render_selection("1min", &roots.selection, execution, &mut String::new())
 }
 
 /// One rung's six roots and six sets of ceilings, assembled.
@@ -482,6 +546,172 @@ fn short_id(id: &[u8; 32]) -> String {
         let _ = write!(hex, "{byte:02x}");
     }
     hex
+}
+
+fn selection_bounds() -> Result<SelectionV6Bounds, String> {
+    SelectionV6Bounds::new(
+        CEILING_BYTES / crate::selection_v6::SELECTION_V6_BLOCK_BYTES as u64,
+        CEILING_BYTES,
+    )
+}
+
+fn render_selection(
+    rung: &str,
+    root: &Path,
+    execution: crate::execution_v4::CommittedStoredExecutionV4,
+    out: &mut String,
+) -> Result<crate::selection_v6::CommittedStoredSelectionV6, String> {
+    let policy = RankingPolicyV1::new(Weights::equal())
+        .map_err(|why| format!("Selection V6 ranking policy: {why:?}"))?;
+    let mut selected = commit_stored_selection_v6(root, selection_bounds()?, execution, policy)?;
+    let top = selected.top_twenty_five()?;
+    let ten = selected.top_ten()?;
+    if !top.starts_with(&ten) || ten.len() != top.len().min(10) {
+        return Err("Selection V6 Top-10 differs from the actual Top-25 prefix".to_owned());
+    }
+    let identity = short_id(&selected.identity());
+    let action = if selected.was_written() {
+        "written"
+    } else {
+        "reused"
+    };
+    let _ = writeln!(
+        out,
+        "\n  {rung} Selection V6 {identity} {action}: {} actual Top-25 rows; {} actual Top-10 rows",
+        top.len(),
+        ten.len()
+    );
+    for winner in &top {
+        let _ = writeln!(
+            out,
+            "    {} {:>2} {} {:?} score {} strategy {} disposition {} exit {}",
+            if winner.rank < 10 { "Top10" } else { "Top25" },
+            winner.rank + 1,
+            winner.family,
+            winner.ranked.candidate.direction,
+            winner.ranked.score,
+            short_id(&winner.ranked.candidate.strategy_digest.bytes()),
+            short_id(&winner.disposition_id),
+            short_id(&winner.selected_exit_digest)
+        );
+    }
+    crate::note(&selection_committed_event(
+        rung,
+        &identity,
+        selected.was_written(),
+        [top.len(), ten.len()],
+    ));
+    Ok(selected)
+}
+
+/// Explicit later-period replay command; ordinary `ledger-v6` keeps its args.
+pub(crate) fn ledger_v6_replay(
+    request: &LedgerAllRequest<'_>,
+    oos_from: (u16, u8),
+    oos_to: (u16, u8),
+) -> String {
+    let mut out = String::from(crate::STORED_PROVENANCE);
+    let _ = writeln!(
+        out,
+        "GLOBAL REPLAY V4 — actual Selection V6 prefixes, OOS {}-{:02} through {}-{:02}",
+        oos_from.0, oos_from.1, oos_to.0, oos_to.1
+    );
+    crate::note(&run_started_event("ledger-v6-replay", request));
+    match replay_route(request, oos_from, oos_to, &mut out) {
+        Ok(audit) => {
+            if audit.witnesses == 0 {
+                out.push_str("\nNo strategies were selected. This is a complete zero-stream schedule; no OOS market bars or VIX references were loaded, so it does not attest market-data coverage for the requested period.\n");
+            }
+            let _ = writeln!(
+                out,
+                "\nCOMMITTED. Global Replay V4 {}: {} selected streams; {} offered entries; {} globally admitted; {} priced money rows; {} admitted without a price.\nPessimistic {} paisa; optimistic {} paisa. Chronological replay is evidence, not profitability or live execution assurance.",
+                short_id(&audit.replay_id),
+                audit.witnesses,
+                audit.counters.offered,
+                audit.counters.admitted,
+                audit.money_rows,
+                audit.admitted_pricing_refused,
+                audit.pessimistic_paisa,
+                audit.optimistic_paisa
+            );
+            crate::note(&run_finished_event("ledger-v6-replay", 8));
+        }
+        Err(why) => {
+            let _ = writeln!(out, "\nrefused: {why}");
+            crate::note(&run_refused_event("ledger-v6-replay", &why));
+        }
+    }
+    out
+}
+
+fn replay_route(
+    request: &LedgerAllRequest<'_>,
+    from: (u16, u8),
+    to: (u16, u8),
+    out: &mut String,
+) -> Result<crate::global_replay_v4::GlobalReplayV4Audit, String> {
+    if from <= request.to {
+        return Err(
+            "Global Replay V4 OOS civil span must begin strictly after the training month span"
+                .to_owned(),
+        );
+    }
+    let loads = candidate_bounds()?;
+    let oos = crate::stored_post_training_oos::StoredPostTrainingOosRequestV1::new(
+        from,
+        to,
+        loads.signal_records,
+        loads.minute_records,
+        loads.daily_records,
+    )?;
+    let selected: [_; 8] = run_route(request, out)?
+        .try_into()
+        .map_err(|_| "Global Replay V4 requires all eight canonical Selection V6 authorities")?;
+    let selected = crate::all_rung_selection_v6::AllRungSelectionV6::new(selected)?;
+    let root = request.root.join("global-replay-v4");
+    std::fs::create_dir_all(&root).map_err(|why| why.to_string())?;
+    let bounds = crate::global_replay_v4::GlobalReplayV4Bounds::new(
+        CEILING_BYTES / crate::global_replay_v4::GLOBAL_REPLAY_V4_RECORD_BYTES,
+        CEILING_BYTES,
+    )?;
+    let replay = crate::global_replay_v4::commit_stored_global_replay_v4(
+        &root,
+        bounds,
+        selected,
+        oos,
+        &crate::store_root()?,
+    )?;
+    let audit = replay.audit()?;
+    let identity = short_id(&audit.publication_id);
+    crate::note(
+        &telemetry::Event::info(LEDGER_TARGET, "global replay committed")
+            .with("verb", "ledger-v6-replay")
+            .with("stage", "global-replay-v4")
+            .with("publication", identity.as_str())
+            .with("written", replay.was_written())
+            .with("witnesses", audit.witnesses)
+            .with("entries", audit.candidates)
+            .with("admitted", audit.counters.admitted)
+            .with("money_rows", audit.money_rows),
+    );
+    Ok(audit)
+}
+
+fn selection_committed_event<'a>(
+    rung: &'a str,
+    identity: &'a str,
+    written: bool,
+    counts: [usize; 2],
+) -> telemetry::Event<'a> {
+    let [top25, top10] = counts;
+    telemetry::Event::info(LEDGER_TARGET, "selection committed")
+        .with("verb", LEDGER_V6_VERB)
+        .with("stage", "selection-v6")
+        .with("rung", rung)
+        .with("selection", identity)
+        .with("written", written)
+        .with("top25", top25)
+        .with("top10", top10)
 }
 
 /// Search V4 lineage ceilings, sized against the record's own strides.
@@ -717,6 +947,78 @@ mod tests {
         );
     }
 
+    fn assert_missing_policy_precedes_market_sizing(replay: bool) {
+        let _serial = crate::knobs::serially();
+        crate::knobs::clear_all();
+        let root = std::env::temp_dir().join(format!(
+            "brutex-ledger-v6-policy-preflight-{}-{replay}",
+            std::process::id()
+        ));
+        assert!(!root.exists(), "preflight has no output tree to reuse");
+        let request = crate::ledger_all::LedgerAllRequest {
+            vendor: "dhan",
+            from: (2024, 1),
+            to: (2024, 1),
+            support_ppm: 200_000,
+            max_points: 50,
+            root: &root,
+        };
+        let from = mark();
+        let report = if replay {
+            super::ledger_v6_replay(&request, (2024, 2), (2024, 2))
+        } else {
+            super::ledger_v6(&request)
+        };
+        assert!(
+            report.contains("37 of 39 admission gates have no value"),
+            "{report}"
+        );
+        for field in runner::admission::AdmissionFieldV1::ALL {
+            if !matches!(
+                field,
+                runner::admission::AdmissionFieldV1::MaxWorstTradeLossPaisa
+                    | runner::admission::AdmissionFieldV1::MinWorstRewardRiskPpm
+            ) {
+                let knob = format!("BRUTEX_ADMIT_{}=", field.name().to_ascii_uppercase());
+                assert!(report.contains(&knob), "worksheet omitted {knob}: {report}");
+            }
+        }
+        assert!(!report.contains("COMMITTED."), "{report}");
+        assert!(
+            !root.exists(),
+            "a refused policy must not create authority roots"
+        );
+        assert!(landed(from, "admission gates unset").iter().any(|record| {
+            says(record, "verb", LEDGER_V6_VERB)
+                && counts(record, "missing", 37)
+                && counts(record, "gates", 39)
+        }));
+        assert!(
+            !landed(from, "rung support sized").iter().any(|record| says(
+                record,
+                "verb",
+                LEDGER_V6_VERB
+            )),
+            "no sizing may run"
+        );
+        assert!(
+            !landed(from, "rung refused")
+                .iter()
+                .any(|record| says(record, "verb", LEDGER_V6_VERB)),
+            "no sizing may refuse first"
+        );
+    }
+
+    #[test]
+    fn missing_policy_refuses_before_ledger_v6_market_sizing() {
+        assert_missing_policy_precedes_market_sizing(false);
+    }
+
+    #[test]
+    fn missing_policy_refuses_before_ledger_v6_replay_market_sizing() {
+        assert_missing_policy_precedes_market_sizing(true);
+    }
+
     /// The family order is the one every V6 successor demands.
     ///
     /// `produce_evaluated_population_statistics_v3` refuses anything but NIFTY
@@ -727,9 +1029,9 @@ mod tests {
         assert_eq!(ROUTE_FAMILIES, ["NIFTY", "BANKNIFTY"]);
     }
 
-    /// Each rung lays out seven distinct roots, none aliasing another.
+    /// Each rung lays out eight distinct roots, none aliasing another.
     #[test]
-    fn a_rung_lays_out_seven_disjoint_stage_roots() {
+    fn a_rung_lays_out_eight_disjoint_stage_roots() {
         // Named for this process, for the reason gate 23 clause C gives: the
         // test creates and removes the tree, so a fixed name lets two
         // concurrent runs delete each other's fixtures.
@@ -746,12 +1048,17 @@ mod tests {
             roots.finalization,
             roots.population,
             roots.execution,
+            roots.selection,
         ];
         let count = every.len();
         every.sort_unstable();
         every.dedup();
         assert_eq!(count, every.len(), "two stage roots resolved to one path");
-        assert_eq!(count, ROUTE_STAGES.len() + 1, "six stages plus execution");
+        assert_eq!(
+            count,
+            ROUTE_STAGES.len() + 2,
+            "six stages plus execution and selection"
+        );
         for path in &every {
             assert!(path.is_dir(), "{} was not created", path.display());
         }
@@ -769,5 +1076,32 @@ mod tests {
     fn the_derived_ceilings_are_accepted_by_their_own_ledgers() {
         lineage_bounds("1min").expect("lineage ceilings are self-consistent");
         execution_v4_bounds("1min").expect("Execution V4 ceilings are self-consistent");
+        super::selection_bounds().expect("Selection V6 ceilings are self-consistent");
+    }
+
+    #[test]
+    fn selection_event_retains_actual_empty_and_short_prefix_counts() {
+        for (written, top25, top10) in [(true, 0, 0), (false, 7, 7), (true, 25, 10)] {
+            let event = super::selection_committed_event(
+                "5min",
+                "exact-selection",
+                written,
+                [top25, top10],
+            );
+            assert_eq!(event.dropped_fields(), 0);
+            assert_eq!(event.target(), "cli.ledger");
+            assert_eq!(
+                event.fields(),
+                [
+                    ("verb", telemetry::Value::Str("ledger-v6")),
+                    ("stage", telemetry::Value::Str("selection-v6")),
+                    ("rung", telemetry::Value::Str("5min")),
+                    ("selection", telemetry::Value::Str("exact-selection")),
+                    ("written", telemetry::Value::Bool(written)),
+                    ("top25", telemetry::Value::Uint(top25 as u64)),
+                    ("top10", telemetry::Value::Uint(top10 as u64)),
+                ]
+            );
+        }
     }
 }

@@ -24,7 +24,7 @@
 //!
 //! # Cost
 //!
-//! Twenty-five predicates over the current bar, two prior bars, the day's running
+//! Twenty-five predicates over the current bar, three prior bars, the day's running
 //! extremes and yesterday's close. Fixed state, no allocation, no division on the
 //! deciding path.
 
@@ -184,6 +184,70 @@ impl SessionState {
     #[must_use]
     pub const fn day_open(&self) -> Option<i64> {
         if self.live { Some(self.day_open) } else { None }
+    }
+
+    /// Availability for the accepted bar between the pre-step `self` and the
+    /// post-step `next`. The caller supplies the completed-session reference
+    /// installed by that same transition, including on session rollover.
+    ///
+    /// Only the 19 reference-dependent positions are returned here. Current-bar
+    /// direction and clock positions are known from any accepted candle and are
+    /// already certified by the evaluator. The prior-three ring must come from
+    /// BEFORE the step; running day descriptions must include the current bar.
+    pub(crate) fn known_after(
+        &self,
+        next: &Self,
+        bar: &Candle,
+        previous: Option<PreviousSession>,
+        tolerance: Tolerance,
+    ) -> ConditionMask {
+        let mut known = ConditionMask::ZERO;
+        if bar.high > bar.low {
+            for bit in 32..=36 {
+                known = set(known, bit);
+            }
+        }
+        if self.live
+            && self.session_day == next.session_day
+            && self.prior.iter().all(Option::is_some)
+        {
+            for bit in 37..=39 {
+                known = set(known, bit);
+            }
+        }
+        let (Some(day_open), Some((day_high, day_low))) = (next.day_open(), next.day_extremes())
+        else {
+            return known;
+        };
+        for bit in [40, 41] {
+            known = set(known, bit);
+        }
+        if day_high > day_low {
+            for bit in [42, 43] {
+                known = set(known, bit);
+            }
+        }
+        let Some(previous) = previous else {
+            return known;
+        };
+        for bit in 48..=51 {
+            known = set(known, bit);
+        }
+        if day_open != previous.close {
+            for bit in [66, 67] {
+                known = set(known, bit);
+            }
+            let gap = (i128::from(day_open) - i128::from(previous.close)).abs();
+            if let Ok(gap) = i64::try_from(gap) {
+                // Testing the existing Near predicate at its own anchor proves
+                // that its range and tolerance admit either a true or false
+                // answer. This uses exactly the truth path's band validation.
+                let mid = previous.close.midpoint(day_open);
+                known =
+                    vocab::table::set_near(known, 68, tolerance, mid, mid, gap).unwrap_or(known);
+            }
+        }
+        known
     }
 
     /// **Fold, then emit** — see the module documentation for why this family is
@@ -464,6 +528,68 @@ pub const fn positions() -> [u16; 25] {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_known_owns_exactly_the_19_new_positions() {
+        let previous = PreviousSession {
+            high: 120,
+            low: 80,
+            close: 90,
+        };
+        let mut before = SessionState::default();
+        for minute in 0..3 {
+            ok(&mut before, &at(minute, 100, 110, 90, 105), Some(previous));
+        }
+        let current = at(3, 100, 110, 90, 100);
+        let mut after = before;
+        ok(&mut after, &current, Some(previous));
+        let known = before.known_after(&after, &current, Some(previous), tol());
+        let owned = [
+            32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 48, 49, 50, 51, 66, 67, 68,
+        ];
+        for position in 0..384 {
+            assert_eq!(
+                known.get(position),
+                owned.contains(&position),
+                "owner bit{position}"
+            );
+        }
+    }
+
+    #[test]
+    fn session_known_cold_state_never_invents_day_extremes_or_an_open() {
+        let cold = SessionState::default();
+        let current = at(0, 100, 110, 90, 100);
+        let known = cold.known_after(&cold, &current, None, tol());
+        for position in positions() {
+            assert_eq!(
+                known.get(u32::from(position)),
+                (32..=36).contains(&position)
+            );
+        }
+    }
+
+    #[test]
+    fn session_known_retains_exact_gap_sides_when_only_the_band_width_overflows() {
+        // Internal raw-reference defense. Such a negative previous close is not
+        // admitted by the public evaluator's positive-price market boundary.
+        let previous = PreviousSession {
+            high: 0,
+            low: i64::MIN,
+            close: i64::MIN,
+        };
+        let before = SessionState::default();
+        let mut after = before;
+        let current = at(0, i64::MAX, i64::MAX, i64::MAX, i64::MAX);
+        let truth = ok(&mut after, &current, Some(previous));
+        let known = before.known_after(&after, &current, Some(previous), tol());
+        assert!(truth.get(66) && !truth.get(67));
+        assert!(known.get(66) && known.get(67));
+        assert!(
+            !truth.get(68) && !known.get(68),
+            "an unrepresentable band stays unavailable"
+        );
+    }
 
     fn tol() -> Tolerance {
         vocab::tolerance::pinned_fib().expect("the fib width is pinned")

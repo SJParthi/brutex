@@ -162,7 +162,10 @@ test('the ledger loader revokes every stale success, failure, catch, and teardow
   );
   assert.match(ledger, /validateLedgerPayload\(body\)/);
   const initial = between(page, '$effect(() =>', 'STARTING A SWEEP FROM HERE');
-  assert.match(initial, /return \(\) => \{\s*ledgerSeq \+= 1;/);
+  assert.match(initial, /return \(\) => \{\s*cancelLedger\(\);/);
+  const cancel = between(page, 'function cancelLedger()', 'async function fetchLedger()');
+  assert.match(cancel, /ledgerSeq \+= 1;/);
+  assert.match(cancel, /ledgerAbort\?\.abort\(\);/);
 });
 
 test('frontier board slots are comparison questions and expose their context', () => {

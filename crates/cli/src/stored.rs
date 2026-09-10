@@ -130,7 +130,7 @@ impl CalendarExclusion {
     }
 
     /// Fold another load's removals into this one.
-    fn absorb(&mut self, other: Self) {
+    pub(crate) fn absorb(&mut self, other: Self) {
         for (mine, theirs) in self.removed.iter_mut().zip(other.removed) {
             *mine |= theirs;
         }
@@ -2057,16 +2057,35 @@ fn load_classified_with_ceiling(
             "{underlying} {rung_name} {year}-{month:02} declares {n} committed records, exceeding the {remaining}-record remainder of the explicit span ceiling before allocation. Nothing was read"
         )));
     }
+    decode_loaded(vendor, key, timeframe, (year, month), n, |index| {
+        file.read_record(index).map_err(|why| why.to_string())
+    })
+    .map_err(LoadFailure::Refused)
+}
+
+/// One shared row conversion and charter-calendar filter for ordinary and
+/// strictly checksum-admitted readers. The callback chooses the held source.
+pub(crate) fn decode_loaded(
+    vendor: Vendor,
+    key: InstrumentKey,
+    timeframe: Timeframe,
+    when: (u16, u8),
+    n: u64,
+    mut read: impl FnMut(u64) -> Result<store::format::Bar, String>,
+) -> Result<Loaded, Refusal> {
+    let underlying = key.underlying.as_str();
+    let rung_name = timeframe.as_str();
+    let (year, month) = when;
     let capacity = usize::try_from(n).map_err(|_| {
-        LoadFailure::Refused(format!(
+        format!(
             "{underlying} {rung_name} {year}-{month:02} declares {n} committed records, which cannot fit this machine's address space. Nothing was allocated"
-        ))
+        )
     })?;
     let mut bars = Vec::new();
     bars.try_reserve_exact(capacity).map_err(|why| {
-        LoadFailure::Refused(format!(
+        format!(
             "{underlying} {rung_name} {year}-{month:02} could not reserve space for its {n} committed records: {why}. Nothing was read"
-        ))
+        )
     })?;
     // THE CHARTER'S NON-REGULAR SESSIONS ARE WITHHELD HERE, IN ONE PLACE.
     //
@@ -2091,15 +2110,12 @@ fn load_classified_with_ceiling(
     let filtered = timeframe != Timeframe::DAY_1;
     let mut excluded = CalendarExclusion::none();
     for i in 0..n {
-        let bar = file.read_record(i).map_err(|why| {
-            LoadFailure::Refused(format!("record {i} of {n} could not be read: {why}"))
-        })?;
+        let bar = read(i).map_err(|why| format!("record {i} of {n} could not be read: {why}"))?;
         if filtered && excluded.excludes(bar.ts_micros) {
             // CHECKED, THEN DROPPED. Never dropped unchecked -- see
             // `refuse_uncalendared_withheld_bar` for the measured defect that
             // would otherwise vanish here.
-            refuse_uncalendared_withheld_bar(i, bar.ts_micros, timeframe.secs())
-                .map_err(LoadFailure::Refused)?;
+            refuse_uncalendared_withheld_bar(i, bar.ts_micros, timeframe.secs())?;
             continue;
         }
         bars.push(Candle {
@@ -2585,7 +2601,7 @@ fn load_span_with_optional_bound(
 }
 
 /// The calendar month immediately before `at`.
-fn previous_month(at: (u16, u8)) -> Result<(u16, u8), Refusal> {
+pub(crate) fn previous_month(at: (u16, u8)) -> Result<(u16, u8), Refusal> {
     let (year, month) = at;
     if !(1..=12).contains(&month) {
         return Err(format!("{year}-{month:02} is not a month"));
@@ -2625,7 +2641,10 @@ fn daily_eligibility_of(day: i64) -> Result<DailyEligibility, Refusal> {
 }
 
 /// Turn a complete stored one-day span into explicit causal reference records.
-fn daily_context_from_span(daily: Span, signal: &[Candle]) -> Result<DailyContext, Refusal> {
+pub(crate) fn daily_context_from_span(
+    daily: Span,
+    signal: &[Candle],
+) -> Result<DailyContext, Refusal> {
     let Some(first_signal) = signal.first() else {
         return Err(
             "the signal span is empty, so no previous-day reference can be selected".to_owned(),
@@ -2874,7 +2893,7 @@ pub fn load_daily_context_bounded(
 }
 
 /// Validate a complete stored one-minute span as `GapFib` context.
-fn exact_minute_context_from_span(
+pub(crate) fn exact_minute_context_from_span(
     minute: Span,
     signal: &[Candle],
 ) -> Result<ExactMinuteContext, Refusal> {

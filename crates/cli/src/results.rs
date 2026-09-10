@@ -568,6 +568,9 @@ pub fn read_field(raw: &[u8; 16]) -> String {
 #[derive(Debug)]
 pub struct Results {
     file: File,
+    path: PathBuf,
+    generation: crate::result_set::FileGeneration,
+    max_bytes: Option<u64>,
     /// The version the FILE carries, which may be older than this build writes.
     ///
     /// Version 2 is readable and NOT appendable -- see [`STRIDE_V2`]. Held on
@@ -683,6 +686,50 @@ fn write_fresh_header(file: &mut File, path: &Path) -> Result<(), Refusal> {
     Ok(())
 }
 
+fn open_result_file(path: &Path, writable: bool) -> Result<(File, bool), Refusal> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(writable)
+        .create(writable)
+        .truncate(false)
+        .open(path)
+        .map_err(|why| {
+            if why.kind() == std::io::ErrorKind::NotFound {
+                format!(
+                    "{} does not exist yet. No run has been recorded — this \
+                     is not an error, and nothing was created.",
+                    path.display()
+                )
+            } else {
+                format!("{} could not be opened: {why}", path.display())
+            }
+        })?;
+    // Initial header validation, indexing and its generation snapshot are one
+    // read transaction. Cooperative appenders must not change the length in
+    // between those steps; a writer also owns fresh-header creation exclusively.
+    let regular = file
+        .metadata()
+        .map_err(|why| format!("{} could not be classified: {why}", path.display()))?
+        .is_file();
+    if regular {
+        let locked = if writable {
+            file.lock()
+        } else {
+            file.lock_shared()
+        };
+        locked.map_err(|why| {
+            format!(
+                "{} could not be locked while opening: {why}",
+                path.display()
+            )
+        })?;
+    }
+    // A device such as /dev/null still reaches write_fresh_header's specific
+    // non-retained-bytes refusal. Its unsupported advisory lock is not evidence
+    // that a header was stored, and must not hide that existing diagnosis.
+    Ok((file, regular))
+}
+
 fn enforce_read_limit(path: &Path, len: u64, max_bytes: Option<u64>) -> Result<(), Refusal> {
     if let Some(max_bytes) = max_bytes
         && len > max_bytes
@@ -693,6 +740,46 @@ fn enforce_read_limit(path: &Path, len: u64, max_bytes: Option<u64>) -> Result<(
         ));
     }
     Ok(())
+}
+
+fn release_initial_lock(file: &File, path: &Path, locked: bool) -> Result<(), Refusal> {
+    if locked {
+        file.unlock().map_err(|why| {
+            format!(
+                "{} could not release its initial validation lock: {why}",
+                path.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// One bounded process cache: retain only the most recently used root. Its
+/// index grows with that ledger; changing roots releases it. A failed refresh
+/// or operation invalidates the handle and is returned without a hidden retry.
+pub(crate) fn with_shared_writer<T>(
+    root: &Path,
+    operation: impl FnOnce(&mut Results) -> Result<T, Refusal>,
+) -> Result<T, Refusal> {
+    type CachedWriter = Option<(PathBuf, Results)>;
+    static WRITER: std::sync::OnceLock<std::sync::Mutex<CachedWriter>> = std::sync::OnceLock::new();
+    let mut held = WRITER
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .map_err(|_| {
+            "the shared results writer is poisoned; no publication was attempted".to_owned()
+        })?;
+    if held.as_ref().is_none_or(|(path, _)| path != root) {
+        *held = Some((root.to_path_buf(), Results::open(root)?));
+    }
+    let Some((_, writer)) = held.as_mut() else {
+        return Err("the shared results writer was not initialized".to_owned());
+    };
+    let result = writer.refresh().and_then(|()| operation(writer));
+    if result.is_err() {
+        *held = None;
+    }
+    result
 }
 
 impl Results {
@@ -754,23 +841,7 @@ impl Results {
                 .map_err(|why| format!("the results directory could not be made: {why}"))?;
         }
         let path = Self::path(root);
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(writable)
-            .create(writable)
-            .truncate(false)
-            .open(&path)
-            .map_err(|why| {
-                if why.kind() == std::io::ErrorKind::NotFound {
-                    format!(
-                        "{} does not exist yet. No run has been recorded — this \
-                         is not an error, and nothing was created.",
-                        path.display()
-                    )
-                } else {
-                    format!("{} could not be opened: {why}", path.display())
-                }
-            })?;
+        let (mut file, locked) = open_result_file(&path, writable)?;
 
         let len = file
             .metadata()
@@ -912,8 +983,18 @@ impl Results {
             }
             at = at.saturating_add(stride);
         }
+        let generation = crate::result_set::file_generation(&file, &path)?;
+        if generation.len != at {
+            return Err(
+                "the results ledger changed length while its index was being built".to_owned(),
+            );
+        }
+        release_initial_lock(&file, &path, locked)?;
         Ok(Self {
             file,
+            path,
+            generation,
+            max_bytes,
             seen,
             scanned: at,
             version,
@@ -1263,6 +1344,7 @@ impl Results {
         })?;
         self.seen.insert(record.identity, at);
         self.scanned = at.saturating_add(STRIDE);
+        self.generation = crate::result_set::file_generation(&self.file, &self.path)?;
         Ok(at.saturating_sub(HEADER) / STRIDE)
     }
 
@@ -1274,33 +1356,69 @@ impl Results {
     /// common path of one writer — the `while` does not execute and this is a
     /// length check. It is never per bar and never per candidate.
     ///
-    /// A part-record at the tail is left alone rather than refused here:
-    /// `Results::open` already refuses one, and a writer that finds a torn tail
-    /// mid-run should say so through the same message rather than a second one
-    /// worded differently.
+    /// Revalidate the tail while holding the append lock: another writer can
+    /// die after this handle opens. A partial tail is preserved and refused
+    /// before the next record can be written at a misaligned offset. Damaged
+    /// whole rows retain their stride but contribute no identity, matching
+    /// `Results::open`.
     fn absorb_new_records(&mut self) -> Result<(), Refusal> {
-        let len = self
-            .file
-            .metadata()
-            .map_err(|why| format!("the results file could not be measured: {why}"))?
-            .len();
-        while self.scanned.saturating_add(STRIDE) <= len {
-            let mut raw = [0_u8; STRIDE_BYTES];
+        let observed = crate::result_set::file_generation(&self.file, &self.path)?;
+        let len = observed.len;
+        enforce_read_limit(&self.path, len, self.max_bytes)?;
+        if len < self.scanned {
+            return Err(format!(
+                "the results file shrank from at least {} bytes to {len} while this handle was open. Append-only history was changed; no record was appended",
+                self.scanned,
+            ));
+        }
+        let stride = stride_of(self.version);
+        let orphan = len.saturating_sub(HEADER) % stride;
+        if orphan != 0 {
+            return Err(format!(
+                "the results file ends with {orphan} bytes that are not a whole record: {} complete records precede the interrupted tail. No record was appended and no existing byte was changed",
+                len.saturating_sub(HEADER) / stride,
+            ));
+        }
+        if len == self.scanned {
+            crate::result_set::require_generation_unchanged(self.generation, observed, &self.path)?;
+            return Ok(());
+        }
+        while self.scanned.saturating_add(stride) <= len {
             let at = self.scanned;
-            self.file
-                .seek(SeekFrom::Start(at))
-                .and_then(|_| self.file.read_exact(&mut raw))
-                .map_err(|why| format!("record at byte {at} could not be read: {why}"))?;
-            // A record another process wrote is absorbed for its IDENTITY only.
-            // Its seal is not checked here: this is a duplicate test, and a
-            // damaged record is refused by `read` at the moment someone tries to
-            // use its numbers. Refusing an append because an unrelated row went
-            // bad would stop a run for a reason that has nothing to do with it.
-            self.seen
-                .insert(Record::from_bytes(&raw).identity, self.scanned);
-            self.scanned = at.saturating_add(STRIDE);
+            let (raw, sealed) = read_at(&mut self.file, at, self.version)?;
+            // An unsealed identity is not evidence of an existing run. Keep
+            // the row's address, but never let corrupted bytes block an exact
+            // rerun. `read` still names the bad seal when that row is requested.
+            if sealed {
+                self.seen
+                    .insert(Record::from_bytes(&raw).identity, self.scanned);
+            }
+            self.scanned = at.saturating_add(stride);
+        }
+        self.generation = crate::result_set::file_generation(&self.file, &self.path)?;
+        if self.generation.len != self.scanned {
+            return Err("the results ledger changed length while refreshing its index".to_owned());
         }
         Ok(())
+    }
+
+    /// Refresh the validated index from appended rows under a shared file lock.
+    ///
+    /// O(new rows), with constant metadata checks when unchanged. Replacement,
+    /// shrinkage, same-length mutation and over-limit growth are refusals.
+    ///
+    /// # Errors
+    /// Refuses changed generation, malformed tail, locking or I/O failures.
+    pub fn refresh(&mut self) -> Result<(), Refusal> {
+        self.file
+            .lock_shared()
+            .map_err(|why| format!("the results file could not be locked: {why}"))?;
+        let refreshed = self.absorb_new_records();
+        let released = self
+            .file
+            .unlock()
+            .map_err(|why| format!("the results file could not be unlocked: {why}"));
+        refreshed.and(released)
     }
 
     /// Reads record `index`. **O(1)** — `HEADER + index · STRIDE`, one seek.
@@ -1743,6 +1861,118 @@ mod tests {
         }
     }
 
+    #[test]
+    fn an_open_writer_refuses_a_later_torn_tail_without_changing_any_byte() {
+        use std::io::Write as _;
+        for orphan in [1_usize, 7, 100, STRIDE_BYTES - 1] {
+            let r = root(&format!("live-torn-{orphan}"));
+            let mut store = Results::open(&r).expect("opens before the interrupted writer");
+            store.append(&record(1)).expect("the first row commits");
+            let path = Results::path(&r);
+            let mut interrupted = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .expect("the other writer opens");
+            interrupted
+                .write_all(&record(2).to_bytes())
+                .expect("one unseen whole row lands");
+            interrupted
+                .write_all(&vec![0_u8; orphan])
+                .expect("the following row is torn");
+            drop(interrupted);
+            let before = std::fs::read(&path).expect("the interrupted evidence reads");
+
+            for _ in 0..2 {
+                let why = store
+                    .append(&record(3))
+                    .expect_err("the open handle must refuse");
+                assert!(why.contains(&format!("{orphan} bytes")), "{why}");
+                assert!(why.contains("2 complete records"), "{why}");
+                assert_eq!(std::fs::read(&path).expect("still readable"), before);
+                assert!(!store.holds(&record(3).identity));
+            }
+            assert_eq!(store.read(0).expect("the first row survives"), record(1));
+            assert_eq!(
+                store.read(1).expect("the second whole row survives"),
+                record(2)
+            );
+        }
+    }
+
+    #[test]
+    fn an_open_writer_does_not_index_corrupted_catchup_identities() {
+        use std::io::Write as _;
+        let r = root("live-corrupt-identity");
+        let mut store = Results::open(&r).expect("opens before the damaged row");
+        store.append(&record(1)).expect("the first row commits");
+        let path = Results::path(&r);
+        let mut damaged = record(2).to_bytes();
+        *damaged.get_mut(40).expect("inside the sealed payload") ^= 1;
+        let mut other = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("the other writer opens");
+        other.write_all(&damaged).expect("the damaged row lands");
+        other
+            .write_all(&record(3).to_bytes())
+            .expect("a later valid row lands");
+        drop(other);
+
+        assert_eq!(
+            store
+                .append(&record(2))
+                .expect("the corrupt ID cannot block a run"),
+            3
+        );
+        assert_eq!(store.len().expect("all whole strides remain"), 4);
+        assert_eq!(store.read(0).expect("first valid row"), record(1));
+        assert!(
+            store
+                .read(1)
+                .expect_err("damage remains explicit")
+                .contains("seal")
+        );
+        assert_eq!(store.read(2).expect("later valid row"), record(3));
+        assert_eq!(store.read(3).expect("new valid row"), record(2));
+        store
+            .append(&record(3))
+            .expect_err("a sealed caught-up ID still deduplicates");
+        let mut reopened = Results::open(&r).expect("the file reopens");
+        assert_eq!(reopened.index_of_identity(&record(2).identity), Some(3));
+        assert_eq!(
+            reopened
+                .of_identity(&record(2).identity)
+                .expect("identity reads"),
+            Some(record(2))
+        );
+        let bytes = std::fs::read(&path).expect("all rows read as bytes");
+        assert_eq!(
+            bytes.get(HEADER_BYTES + STRIDE_BYTES..HEADER_BYTES + 2 * STRIDE_BYTES),
+            Some(damaged.as_slice())
+        );
+    }
+
+    #[test]
+    fn an_open_writer_refuses_a_shrunken_ledger_without_reusing_its_stale_index() {
+        let r = root("live-shrunken");
+        let mut store = Results::open(&r).expect("opens");
+        store.append(&record(1)).expect("one row commits");
+        let path = Results::path(&r);
+        for len in [HEADER, 0] {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .expect("the external writer opens")
+                .set_len(len)
+                .expect("the external writer truncates history");
+            let why = store
+                .append(&record(2))
+                .expect_err("history shrinkage refuses");
+            assert!(why.contains("shrank"), "{why}");
+            assert_eq!(std::fs::metadata(&path).expect("measurable").len(), len);
+        }
+    }
+
     /// The refusal is about the REMAINDER, so a whole number of records opens.
     ///
     /// Without this row the check above would pass just as well if `open`
@@ -1977,6 +2207,57 @@ mod tests {
                 .expect("every row verifies its seal, so no write was interleaved");
             assert!(ids.insert(rec.identity), "row {i} is a duplicate identity");
         }
+    }
+
+    #[test]
+    fn shared_writer_refreshes_external_appends_before_duplicate_rejection() {
+        let root = root("shared-refresh");
+        super::with_shared_writer(&root, |writer| writer.append(&record(41)))
+            .expect("first publication");
+        Results::open(&root)
+            .expect("external writer")
+            .append(&record(42))
+            .expect("independent append");
+        let before = std::fs::read(Results::path(&root)).expect("original bytes");
+        super::with_shared_writer(&root, |writer| writer.append(&record(42)))
+            .expect_err("external identity is already known after refresh");
+        assert_eq!(
+            std::fs::read(Results::path(&root)).expect("retained bytes"),
+            before
+        );
+        assert_eq!(
+            Results::open_read(&root)
+                .expect("reader")
+                .len()
+                .expect("rows"),
+            2
+        );
+    }
+
+    #[test]
+    fn shared_writer_changes_roots_without_reusing_another_roots_identity_index() {
+        let first = root("shared-first");
+        let second = root("shared-second");
+        for selected in [&first, &second] {
+            super::with_shared_writer(selected, |writer| writer.append(&record(43)))
+                .expect("the same identity belongs independently to each root");
+        }
+        super::with_shared_writer(&first, |writer| writer.append(&record(44)))
+            .expect("returning to first root refreshes its own index");
+        assert_eq!(
+            Results::open_read(&first)
+                .expect("first")
+                .len()
+                .expect("rows"),
+            2
+        );
+        assert_eq!(
+            Results::open_read(&second)
+                .expect("second")
+                .len()
+                .expect("rows"),
+            1
+        );
     }
 
     /// A PATH THAT ACCEPTS BYTES AND DOES NOT KEEP THEM IS REFUSED.

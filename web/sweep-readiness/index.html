@@ -1,0 +1,1014 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Brutex · Sweep readiness</title>
+  <style>
+    :root { color-scheme: light; --ink:#173146; --muted:#536a7a; --blue:#174e86; --paper:#f2f7fa; --line:#d3e1e9; --white:#fff; --pass:#136453; --fail:#a33043; --amber:#805214; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--paper); color:var(--ink); font:16px/1.55 "Avenir Next",Avenir,"Segoe UI",sans-serif; }
+    button,input,select { font:inherit; }
+    a { color:var(--blue); text-underline-offset:3px; }
+    button,a,input,select,summary { outline-offset:5px; }
+    :focus-visible { outline:3px solid #317db9; }
+    header { padding:22px max(24px,calc((100vw - 1420px)/2)); background:var(--white); border-bottom:1px solid var(--line); display:flex; align-items:center; justify-content:space-between; gap:24px; }
+    .brand { font-size:23px; font-weight:750; letter-spacing:-1px; }
+    .brand span { color:var(--muted); font-size:15px; font-weight:500; letter-spacing:0; margin-left:18px; }
+    .date { color:var(--muted); font-size:14px; }
+    main { max-width:1468px; padding:36px 24px 80px; margin:auto; }
+    .intro { display:grid; grid-template-columns:1.35fr 1fr; gap:64px; align-items:start; margin-bottom:32px; }
+    h1 { font-size:clamp(32px,3.5vw,52px); font-weight:650; line-height:1.13; letter-spacing:-1.7px; margin:8px 0 20px; max-width:680px; }
+    h2 { font-size:23px; letter-spacing:-.5px; margin:0 0 8px; }
+    p { max-width:76ch; margin:10px 0; }
+    .muted { color:var(--muted); }
+    .verdict { border-left:5px solid var(--fail); padding:15px 24px; background:var(--white); }
+    .verdict strong { display:block; font-size:22px; color:var(--fail); }
+    .verdict p { font-size:15px; }
+    .decision { margin:30px 0 36px; }
+    .decision td:first-child { width:20%; min-width:185px; }
+    .decision td:nth-child(2) { width:38%; min-width:280px; }
+    .decision td:nth-child(3) { width:42%; min-width:280px; background:#fffaf1; }
+    .evidence-links { display:flex; gap:8px 16px; flex-wrap:wrap; margin-top:10px; }
+    .path { display:grid; grid-template-columns:repeat(5,1fr); background:var(--blue); color:white; border-radius:12px; overflow:hidden; margin:30px 0 36px; }
+    .stage { padding:20px 22px; border-right:1px solid #ffffff30; }
+    .stage:last-child { border:0; }
+    .stage b { display:block; font-size:18px; font-weight:600; }
+    .stage small { display:block; font-size:13px; color:#dceaf5; margin-top:8px; }
+    .stage .mark { font-size:12px; color:#fff; display:inline-block; padding:2px 7px; background:#ffffff20; border-radius:4px; margin-top:8px; }
+    .section-bar { display:flex; justify-content:space-between; align-items:end; gap:18px; margin-bottom:18px; }
+    .controls { display:flex; gap:10px; flex-wrap:wrap; margin:16px 0; align-items:center; }
+    .search { flex:1; min-width:220px; }
+    input,select { background:white; color:var(--ink); border:1px solid #b7cad7; border-radius:7px; padding:10px 13px; }
+    input { width:100%; }
+    button { border:1px solid #b7cad7; border-radius:7px; padding:10px 15px; color:var(--ink); background:white; cursor:pointer; }
+    button[aria-pressed="true"] { background:var(--blue); color:white; border-color:var(--blue); }
+    .table-scroll { overflow:auto; border:1px solid var(--line); border-radius:10px; background:white; }
+    table { width:100%; border-collapse:collapse; text-align:left; }
+    th { background:#e6eff5; font-size:13px; font-weight:650; padding:13px 18px; white-space:nowrap; }
+    td { padding:18px; vertical-align:top; border-top:1px solid var(--line); font-size:14px; }
+    td:first-child { min-width:185px; width:19%; }
+    td:nth-child(2) { min-width:128px; width:12%; }
+    td:nth-child(3) { min-width:235px; width:30%; }
+    td:nth-child(4) { min-width:250px; }
+    td strong { font-size:15px; display:block; margin-bottom:5px; }
+    td small { display:block; color:var(--muted); font-size:12px; }
+    .badge { display:inline-block; font-size:12px; font-weight:650; border-radius:5px; padding:4px 8px; white-space:nowrap; }
+    .supported,.fixed { color:var(--pass); background:#e1f2ec; }
+    .limited { color:var(--amber); background:#fff1d9; }
+    .open { color:var(--fail); background:#fbe6eb; }
+    .unverified { color:#536274; background:#e9edf2; }
+    details { margin-top:8px; }
+    summary { cursor:pointer; color:var(--blue); font-size:13px; }
+    details p { font-size:13px; color:var(--muted); }
+    code { font-size:.88em; overflow-wrap:anywhere; }
+    .checks { margin-top:42px; }
+    .check-list { display:grid; grid-template-columns:repeat(2,1fr); border-top:1px solid var(--line); background:white; }
+    .check { padding:15px 18px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; gap:16px; }
+    .check a { display:block; font-size:12px; }
+    .notice { font-size:13px; color:var(--muted); padding:12px 0; }
+    .math { margin-top:40px; display:grid; grid-template-columns:1fr 1fr; gap:38px; padding:28px; background:#e3eef5; border-radius:12px; }
+    .math input { accent-color:var(--blue); padding:0; }
+    .expression { font-size:28px; font-weight:600; line-height:1.3; margin:15px 0; overflow-wrap:anywhere; }
+    .next { margin-top:38px; padding-top:22px; border-top:1px solid var(--line); }
+    .next li { margin:10px 0; max-width:100ch; }
+    footer { margin-top:40px; font-size:13px; color:var(--muted); }
+    @media(max-width:900px) { .intro { grid-template-columns:1fr; gap:20px; } .path { grid-template-columns:1fr 1fr; } .stage { border-bottom:1px solid #ffffff30; } .math,.check-list { grid-template-columns:1fr; } header { align-items:start; } .brand span { display:block; margin:0; } .date { text-align:right; } }
+    @media print { body { background:white; } main { padding:0; } .controls,.math input,button { display:none; } .table-scroll { overflow:visible; border:0; } td { min-width:0!important; padding:10px; } .path { background:#e6eff5; color:var(--ink); } .stage small,.stage .mark { color:var(--ink); } details { display:block; } .intro { gap:20px; } .check-list { grid-template-columns:1fr 1fr; } }
+  </style>
+</head>
+<body>
+<header><div class="brand">brutex <span>Historical sweep readiness</span></div><div class="date">Integration review · 8 September 2026<br>Saved evidence • not a live monitor</div></header>
+<main>
+  <div class="intro">
+    <div><h1>Research is working.<br>Full launch has blockers.</h1><p class="muted">See what is built, what the tests demonstrate and what remains before the complete historical campaign can start. Every result below has a stated boundary.</p></div>
+    <aside class="verdict"><strong>Complete campaign: not cleared</strong><p>Saved real-data trades can be inspected. The new search launch connection is implemented and tested; configuration, complete verification and campaign admission remain separate requirements.</p><p><a href="../policy-guide/index.html">Understand the 37 base research settings</a> in the searchable plain-language guide. Saved qualification also retains the later-period settings.</p><p><b>No invented percentage:</b> a passing finite test does not prove every market history, constant total work, profitability or capacity for millions of users.</p></aside>
+  </div>
+  <section aria-labelledby="current-title"><h2 id="current-title">Latest integration: what works and what remains</h2><p class="muted">8 September review of the Backtest tester, durable history, failures and combined verification. Verified means the stated finite checks passed; it does not mean the complete campaign is cleared. <a href="../../docs/31-backtest-integration-20260908.md">Read the exact source and evidence record</a>.</p><div class="controls"><label class="search">Find a current check<input id="current-search" type="search" placeholder="Try VWAP, trades, cancellation or speed"></label><label>Status<select id="current-status"><option value="">All statuses</option><option>Verified</option><option>Limited</option><option>In progress</option><option>Not cleared</option></select></label><span id="current-count" class="muted" aria-live="polite"></span></div><div class="table-scroll"><table><thead><tr><th scope="col">Area</th><th scope="col">Status</th><th scope="col">Working evidence</th><th scope="col">Extreme cases checked</th><th scope="col">Limit before full clearance</th></tr></thead><tbody id="current-review"></tbody></table></div></section>
+  <section class="decision" aria-labelledby="decision-title"><h2 id="decision-title">Earlier baseline · 6 September 2026</h2><p class="muted">Historical measurements remain available for comparison. Service observations here are dated and may be superseded by the current integration review above.</p><div class="table-scroll"><table><thead><tr><th scope="col">Area</th><th scope="col">What has been demonstrated</th><th scope="col">What still needs to happen</th></tr></thead><tbody id="overview"></tbody></table></div></section>
+  <div class="path" aria-label="The sweep pipeline">
+    <div class="stage"><b>Conditions</b><small>370 allocated positions<br>328 live conditions</small><span class="mark">One vocabulary</span></div>
+    <div class="stage"><b>Masks</b><small>6 × 64-bit words<br>Separate truth and availability</small><span class="mark">Unknown stays explicit</span></div>
+    <div class="stage"><b>Combinations</b><small>AND sweep; AND / OR / NOT search<br>Extinction, bounded pause or refusal</small><span class="mark">Saved continuation</span></div>
+    <div class="stage"><b>Saved evidence</b><small>Identity → attempt → levels<br>Verified terminal records</small><span class="mark">Explicit failures</span></div>
+    <div class="stage"><b>Drill down</b><small>Run → priced candidate → trades<br>Exact capture and page checks</small><span class="mark">No-cell outcomes stay visible</span></div>
+  </div>
+  <div class="section-bar"><div><h2>Your requirements, compared with the evidence</h2><p class="muted">Status describes this reviewed implementation. Open each evidence note for its scope.</p></div><button id="print">Print comparison</button></div>
+  <div class="controls">
+    <label class="search"><span class="visually-hidden" hidden>Search the comparison</span><input id="search" type="search" aria-label="Search the comparison" placeholder="Find masks, crashes, logging, O(1)…"></label>
+    <label><select id="category" aria-label="Choose area"><option value="">Every area</option><option>Core logic</option><option>Storage & identity</option><option>Dashboard</option><option>Institutional filters</option><option>Complexity</option><option>Verification</option></select></label>
+    <button id="blockers" aria-pressed="false">Only gaps and limits</button>
+    <span id="count" class="muted" aria-live="polite"></span>
+  </div>
+  <div class="table-scroll"><table><thead><tr><th scope="col">What you asked for</th><th scope="col">Status</th><th scope="col">What is implemented</th><th scope="col">What the evidence means</th></tr></thead><tbody id="rows"></tbody></table></div>
+  <p id="empty" hidden>No matching rows. Clear the search or choose another area.</p>
+  <section class="checks"><h2>Saved verification results</h2><p class="muted">These results come from actual local commands. The Rust verifier saves a separate log for each check and keeps every run in its own evidence directory.</p><p><b>Required assurance gates remain open:</b> full touched-crate coverage and mutation closure are not established. A saved pass does not certify subsequent edits or the active service.</p><div id="run-note" class="notice"></div><div id="checks" class="check-list"></div><p class="notice">These automated checks do not replace coverage, mutation testing, measured benchmarks or the source review. Read the <a href="../../docs/14-sweep-readiness-20260906.md">detailed report</a>, <a href="../../docs/15-indicator-readiness.md">all 62 candle patterns</a>, <a href="../../docs/17-expression-evidence.md">expression evidence</a> and <a href="../../docs/18-sweep-dashboard.md">dashboard contracts</a>. <a href="README.md">Repeat the checks</a>. Evidence links open local files and require this checkout and its saved artifacts.</p></section>
+  <section class="math"><div><h2>One fast operation.<br>A growing number of answers.</h2><p>Testing a single six-word mask against one bar takes fixed work. Testing many masks against many bars repeats that work. Saving more distinct answers also requires more storage.</p><p><a href="https://doc.rust-lang.org/std/collections/index.html#performance">Rust’s collection guarantees</a> distinguish expected and amortised costs from strict worst-case bounds.</p></div><div><label for="bits">Illustrative independent conditions: <b id="bit-count">20</b></label><input id="bits" type="range" min="1" max="60" value="20"><div class="expression" id="combinations"></div><p class="muted">Theoretical non-empty subsets: 2ⁿ − 1, before pruning. This is a mathematical illustration, not a measured runtime or a count promised by the production sweep.</p></div></section>
+  <section class="next"><h2>Before the full campaign starts</h2><p>Close the remaining work in the table above, then verify the exact configured build against its real stored inputs. Candidate trade capture and Selection V6 already exist; their presence alone does not clear input integrity, policy, verification or deployment requirements.</p><p>Ordered event sequences would need a separately defined search language. The current Boolean grammar describes conditions on a bar.</p></section>
+  <footer>Review scope: the sweep path named in this task. Existing work in other areas was preserved. No real market data was modified, no trading order was placed, and no profit assurance is offered.</footer>
+</main>
+<script src="evidence.js"></script>
+<script>
+const entries = [
+  [
+    "Core logic",
+    "Intraday only, fixed 3:10 PM exit",
+    "fixed",
+    "Shared minute execution uses an exact 15:10 IST deadline. Actual clock checks reject sub-minute offsets, foreign caches and late/foreign-day records inside a grid path before they can supply an exit",
+    "Missing required execution evidence refuses affected trades. Open/PrintedExtreme remains the recorded OHLCV fill rule; no invented tick or exact 15:10 price. Seven original deadline regressions and four cached-facts regressions in the runner suite.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    [
+      {
+        "href": "../../docs/../target/sweep-audit-20260906/fixed-deadline-public-tests.log",
+        "label": "Seven original deadline regressions"
+      },
+      {
+        "href": "../../docs/../target/sweep-audit-20260906/foreign-slice-deadline-runner-tests.log",
+        "label": "four cached-facts regressions in the runner suite"
+      }
+    ]
+  ],
+  [
+    "Core logic",
+    "One vocabulary",
+    "supported",
+    "One Rust table: 370 allocated positions, 328 live, 3 retired, 39 void; all six words are used",
+    "384 fixed positions; append-only identities. VIX remains reference-only.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    []
+  ],
+  [
+    "Core logic",
+    "Every indicator owner",
+    "supported",
+    "All 328 live positions mapped to their emitters; every one of the 62 candle-pattern bits has a named exemplar",
+    "Full family and pattern table. Pattern conventions remain reproducible conventions where the source labels them UNVERIFIED.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    [
+      {
+        "href": "../../docs/15-indicator-readiness.md",
+        "label": "Full family and pattern table"
+      }
+    ]
+  ],
+  [
+    "Core logic",
+    "Complete VWAP mapping",
+    "fixed",
+    "All 20 existing positions have aligned truth/known masks, including false bands and near predicates; NOT preserves unavailable references",
+    "Enabled for eligible cash stocks, absent for spot indices; futures remain storage-only. Zero-volume, two-contributor, zero-sigma, session and integer boundaries are explicit. All 20 positions and real-row evidence.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    [
+      {
+        "href": "../../docs/26-vwap-mapping.md",
+        "label": "All 20 positions and real-row evidence"
+      }
+    ]
+  ],
+  [
+    "Core logic",
+    "Opening ranges on coarse timeframes",
+    "fixed",
+    "Stored opening ranges use the exact one-minute stream and the signal candle's exact final minute, alongside the existing gap overlay",
+    "A 60-minute high or a straddling 2/3-minute candle no longer defines the opening 5-minute range. Missing exact closing-minute or mismatched-close evidence refuses; opening windows use observed minutes, without certifying every internal minute. Family and boundary evidence.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    [
+      {
+        "href": "../../docs/15-indicator-readiness.md",
+        "label": "Family and boundary evidence"
+      }
+    ]
+  ],
+  [
+    "Core logic",
+    "Extreme candle inputs",
+    "fixed",
+    "Positive-price boundary, structural refusal precedence and transactional state preservation; cold rollover cannot admit a newly unready mask",
+    "Finite shape, engulfing, translation, session-reset and integer-boundary tests. Not every possible price history.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    []
+  ],
+  [
+    "Core logic",
+    "Missing data and NOT",
+    "limited",
+    "Truth is stored alongside a separate known mask; unknown is never negated into a signal. Session/history, swing/break and crossing repairs complete the previously missing family availability paths",
+    "Known false uses the same causal references as truth. Missing prior history, opposite swing, real gap, valid tolerance or same-session crossing memory still remains Unknown. Availability table names the exact boundaries and finite proofs.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    [
+      {
+        "href": "../../docs/15-indicator-readiness.md",
+        "label": "Availability table"
+      }
+    ]
+  ],
+  [
+    "Core logic",
+    "AND combinations",
+    "supported",
+    "Existing Apriori joins, exact subset pruning, documented implication pruning and extinction-driven depth remain shared",
+    "Unordered combinations, not ordered event permutations. Always-true/false and nonlive singletons retain their existing exclusion semantics.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    []
+  ],
+  [
+    "Core logic",
+    "Independent search oracle",
+    "supported",
+    "378 finite cases, 11 live positions spanning all six words, more than 10,000 survivors compared and depth 10 reached",
+    "An independent finite oracle, not a proof over all market data.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    []
+  ],
+  [
+    "Core logic",
+    "Impossible worker requests",
+    "fixed",
+    "usize::MAX is treated as a scheduling upper bound and safely limited to available parallelism",
+    "Same answer as one worker. Scheduling is not part of strategy meaning.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    []
+  ],
+  [
+    "Core logic",
+    "Allocation and worker failure",
+    "limited",
+    "Fallible engine input copies/reservations; explicit Memory/Workers halts",
+    "Indicator column and some standard-library allocations remain infallible; OS overcommit is not universally catchable.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    []
+  ],
+  [
+    "Core logic",
+    "AND / OR / NOT expressions",
+    "supported",
+    "Shared parser, three-valued evaluator and resumable canonical grammar enumeration, including nested operators and repeated leaves",
+    "Fixed V1 language with 1,151 instructions; finite syntax uniqueness, not algebraic Boolean equivalence or ordered event sequences. Candidate/node budgets pause and never claim exhaustion. Search contract.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    [
+      {
+        "href": "../../docs/22-expression-search.md",
+        "label": "Search contract"
+      }
+    ]
+  ],
+  [
+    "Core logic",
+    "Resume an AND sweep",
+    "fixed",
+    "The ordinary stored sweep persists each completed level and resumes through the shared engine/ranking path; restored survivors cannot contain explicitly excluded bits or impossible nonhalted pair counts",
+    "Same exact input and policy required; actual resource halts and their outer-row pair-budget overshoot remain unchanged. Checkpoint history grows with retained survivors. Resume contract.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    [
+      {
+        "href": "../../docs/20-sweep-resume.md",
+        "label": "Resume contract"
+      }
+    ]
+  ],
+  [
+    "Core logic",
+    "Price Boolean strategies",
+    "supported",
+    "The priced stored command runs the shared minute execution and exit grid, retaining both directions' selected-cell trades for each evaluated expression",
+    "Actual grid controls and complete cell rules bind identity; unknown predicates cannot enter. Support and cell-rule results are distinct from institutional admission.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    []
+  ],
+  [
+    "Verification",
+    "Exact exit-grid setting",
+    "unverified",
+    "The shared stored policy now honors the declared percentile resolution; absent and explicit five retain the original policy. Each directional grid is already bound into the source/search identity",
+    "Invalid resolution and grids exceeding the fixed cell admission refuse. Grid size is separate from risk thresholds and capture budgets. A smaller verification grid cannot clear a refused larger declaration. Runtime contract.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    [
+      {
+        "href": "../../docs/30-search-wide-qualification.md",
+        "label": "Runtime contract"
+      }
+    ]
+  ],
+  [
+    "Verification",
+    "No ignored legacy controls",
+    "unverified",
+    "Explicit Boolean preparation rejects legacy range controls that it does not use, before reading policy or market sources. The positional horizon and admission profile remain the actual authorities",
+    "Ordinary range controls remain supported on their own path. Names are reported without exposing values or private paths. Settings and failure contract.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    [
+      {
+        "href": "../../docs/30-search-wide-qualification.md",
+        "label": "Settings and failure contract"
+      }
+    ]
+  ],
+  [
+    "Storage & identity",
+    "Resume Boolean search",
+    "fixed",
+    "Saved cursor, counters, full child expressions and exact receipts are reauthenticated; each semantic transition is replayed",
+    "Full cold history verification is real work. Corrupt latest state, false exhaustion and lost priced children refuse; no silent older-state fallback.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    []
+  ],
+  [
+    "Dashboard",
+    "All eight timeframes together",
+    "supported",
+    "A durable Rust campaign records each expected family, complete candidate catalog, statistics and training-admission receipt across all eight intraday rungs. Same-request restart validates saved children before skipping completed work; the dashboard follows acknowledged progress automatically",
+    "A complete campaign records computation, not a passing strategy. Family workers share explicit physical allowances; timeframes run sequentially. Overview checks fixed receipts while detail routes authenticate saved bodies. Campaign contract.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    [
+      {
+        "href": "../../docs/28-incremental-boolean-campaign.md",
+        "label": "Campaign contract"
+      }
+    ]
+  ],
+  [
+    "Core logic",
+    "Grammar to complete exit grids",
+    "supported",
+    "Binary AND/OR/NOT batches feed the full catalog across all eight timeframes without narrowing the grammar to the text parser. The next batch waits for the exact prior campaign; node/program allowances pause without claiming exhaustion",
+    "Retained history and source guards are checked before completion. Cold recovery and whole grammar work grow with inputs. Each batch/timeframe has its own statistical population; no global multiple-testing correction is claimed. Grammar contract.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    [
+      {
+        "href": "../../docs/28-incremental-boolean-campaign.md",
+        "label": "Grammar contract"
+      }
+    ]
+  ],
+  [
+    "Institutional filters",
+    "Frozen exits on later history",
+    "limited",
+    "A separate later-period command retains every original program, direction and exit coordinate, including zero outcomes. Later prices replay training exits without selecting new levels. Pinned browser pages compare both periods and expose later trades and sessions",
+    "Strictly later sessions and the 15:10 IST deadline are enforced. This is observed later research, not anchored-fold acceptance, institutional successor selection or live trading authority. Its production routes have not been activated. Later comparison contract.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    [
+      {
+        "href": "../../docs/28-incremental-boolean-campaign.md",
+        "label": "Later comparison contract"
+      }
+    ]
+  ],
+  [
+    "Core logic",
+    "Every live condition in one expression",
+    "supported",
+    "V1 supports 1,151 instructions, enough for all 384 possible signed leaves; current 328 live bits fit together using numeric IDs",
+    "Source text limited to 4,096 bytes and parser nesting below 32; exceeding a bound refuses.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    []
+  ],
+  [
+    "Storage & identity",
+    "Full identity",
+    "fixed",
+    "Program bytes extend the existing params term; stored search/preparation/probe identities precede their computation",
+    "Clean verified commit provenance still required. A dirty build cannot launch a recorded market run.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    []
+  ],
+  [
+    "Storage & identity",
+    "Monthly audit policy",
+    "fixed",
+    "Monthly audit uses the shared full policy identity and actual minute execution floor; actual execution bytes are bound separately",
+    "No invented cost or policy thresholds; no VIX identity term.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    []
+  ],
+  [
+    "Storage & identity",
+    "Automatic threshold search",
+    "fixed",
+    "Shared algorithm, durable outer orchestration and exact per-probe identities, depth evidence and terminal states",
+    "A failed/no-affordable search must refuse rather than silently fall back to a statistical threshold.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    []
+  ],
+  [
+    "Storage & identity",
+    "Save the search evidence",
+    "fixed",
+    "Append-only starts, exact per-depth accounting, retained signal rankings, durable frontier/cursor continuation and explicit terminal records",
+    "Final verification is O(saved rows); retained history and sync costs are explicit. No per-event hot-loop logging claim. Lifecycle and checkpoints.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    [
+      {
+        "href": "../../docs/16-sweep-evidence.md",
+        "label": "Lifecycle"
+      },
+      {
+        "href": "../../docs/22-expression-search.md",
+        "label": "checkpoints"
+      }
+    ]
+  ],
+  [
+    "Storage & identity",
+    "Successful completion is earned",
+    "fixed",
+    "A terminal seal must agree with acknowledged child counts, identities, contents and generations; stored-month and priced-audit paths seal children before parent publication",
+    "Lost, replaced, torn or failed evidence cannot become a completed empty result. A failed parent append has an explicit report and nonzero command status. Completion attests the checked snapshot; unclean process death leaves an uncompleted attempt.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    []
+  ],
+  [
+    "Storage & identity",
+    "Concurrent result writers",
+    "fixed",
+    "Initial header/index/generation reads are locked; catch-up refuses partial tails/shrink and does not trust bad row seals",
+    "Initial open is O(history), refresh O(delta); lock/fsync latency is not constant. No destructive tail repair.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    []
+  ],
+  [
+    "Storage & identity",
+    "Incremental saved lookups",
+    "limited",
+    "Reused parent/writer indexes, validated refresh and bounded child reads; cached top selection uses the canonical renderer",
+    "Expected hash cost; ordered selection maps have logarithmic lookup. Cold history reads remain real work.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    []
+  ],
+  [
+    "Storage & identity",
+    "Busy and malformed evidence files",
+    "fixed",
+    "Candidate/search readers refuse conflicting file locks; a common Rust open rejects final symlinks and FIFO paths without waiting for a peer",
+    "Verified native open flags apply to macOS and Linux x86_64/aarch64. Intermediate directories still require a trusted root; disk/device latency is not bounded by advisory locks.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    []
+  ],
+  [
+    "Storage & identity",
+    "Independent checksum receipts",
+    "limited",
+    "Separate strict audit command, retained source/receipt locks and six-role manifest bind full source/header/sidecar digests to the common stored sweep kernel",
+    "Opt-in checksum integrity, not legacy ReferenceIntegrity, calendar completeness, vendor accuracy or institutional admission. Whole-file audit is linear; physical record caps are not a total memory guarantee. Contract; actual integration and activation are recorded separately.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    [
+      {
+        "href": "../../docs/24-checksum-admission.md",
+        "label": "Contract"
+      }
+    ]
+  ],
+  [
+    "Storage & identity",
+    "Strict multi-month pricing",
+    "fixed",
+    "CLI and explicit API audit-audited-range command share the checked adapter, retained six-role receipts, exact minute execution and pricing/publication kernel; browser batches call that explicit adapter",
+    "API paths are server-owned; missing/invalid physical configuration refuses before claiming a slot. V6 additionally retains its own typed source and ledger authority. Cold audits are linear; no shortened range or missing-minute substitution. Contract.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    [
+      {
+        "href": "../../docs/24-checksum-admission.md",
+        "label": "Contract"
+      }
+    ]
+  ],
+  [
+    "Dashboard",
+    "Receipt-checked batch dashboard",
+    "fixed",
+    "The page queues selected symbols across the server's canonical intraday rungs and shows each request, exact attempt and saved report. Exact-attempt polling keeps its retained result visible despite unrelated CLI activity; unknown or failed status stops subsequent jobs",
+    "Up to 4,096 page-owned jobs, executed sequentially. Closing the page stops future launches; an accepted server job continues. Restart/replaced status remains Unknown. No ambiguous POST retry or durable aggregate batch/resume claim. Thirteen focused and 345 full frontend tests pass.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    []
+  ],
+  [
+    "Dashboard",
+    "Complete frontier pages",
+    "fixed",
+    "Both browser consumers reconcile all pages before publishing a result",
+    "256 rows/page, 4,096 rows/run, at most 16 pages. A failed later page does not publish a prefix.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    []
+  ],
+  [
+    "Dashboard",
+    "Saved depth drill-down",
+    "fixed",
+    "/sweep-evidence.json plus selected-run comparison and level table",
+    "Exact identity and attempt on every page; legacy missing evidence is not reconstructed or called zero.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    []
+  ],
+  [
+    "Dashboard",
+    "Saved Boolean progress",
+    "supported",
+    "Read-only snapshot pages show recorded counters, bounded verified grammar links and each exact expression child's own trade action",
+    "Writer observation is instantaneous. Page verification does not reconstruct market inputs or certify unread older history; expired/spliced continuations refuse.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    []
+  ],
+  [
+    "Dashboard",
+    "Exact browser values",
+    "supported",
+    "Saved sweep-evidence counters/statistic bits and six-word masks use exact decimal strings",
+    "BigInt/strict decimal validation preserves those values. Legacy numeric endpoints retain their own precision guards and limits; this does not claim every browser field is a decimal string.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    []
+  ],
+  [
+    "Dashboard",
+    "Reliable activity status",
+    "fixed",
+    "Whole-command start/finish, separate preparation/attempt events, bounded external observation and explicit unknown states",
+    "Latest observed command is not a census of all parallel jobs. Unreadable/stale evidence is not proof of idle or completion.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    []
+  ],
+  [
+    "Institutional filters",
+    "Five historical filters",
+    "limited",
+    "Visible label is 5 rules pass, using stored applied thresholds",
+    "It does not prove the remaining admission predicates, period consistency or institutional authority.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    []
+  ],
+  [
+    "Institutional filters",
+    "Institutional architecture",
+    "limited",
+    "ledger-v6 reaches authenticated Selection V6 for the two indices; ledger-v6-replay continues all eight retained selections through exact later OOS witnesses and Global Replay V4",
+    "Boolean candidate captures do not grant V6 authority; mapping a program to its referenced AND bits would change its meaning. Institutional cash-stock expansion is also separate. Terminal prefixes may contain 0..25 winners and zero-stream replay does not prove market coverage. Contract.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    [
+      {
+        "href": "../../docs/21-institutional-sweep.md",
+        "label": "Contract"
+      }
+    ]
+  ],
+  [
+    "Institutional filters",
+    "Genuine zero-strategy institutional families",
+    "fixed",
+    "Typed evaluated/extinct families retain actual completed search, Candidate, Base, Pre-Admission V2 and source evidence. Both evaluated, either mixed and all-extinct outcomes now pass through actual Statistics V3 to Selection V6",
+    "No fabricated zero-row V1 or depth-one result. Fresh ledger/source rechecks remain required after projection and through later OOS. Counted partial input refusals remain visible; completion is not an all-market-data certificate. Eight strict integration tests.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    [
+      {
+        "href": "../../docs/../target/sweep-audit-20260906/strict-v6-final-tests.log",
+        "label": "Eight strict integration tests"
+      }
+    ]
+  ],
+  [
+    "Institutional filters",
+    "Institutional run configuration",
+    "limited",
+    "One runtime profile supplies all 37 delegated research settings; both authority routes validate and report all 39 configured rules before market loading. Existing explicit overrides remain visible and malformed values refuse",
+    "A configured rule is not a passing strategy. The profile is assistant-selected research policy, not external certification, and has not been activated in the live service. Plain-language settings and source profile.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    [
+      {
+        "href": "../../docs/22-research-policy.md",
+        "label": "Plain-language settings and source profile"
+      }
+    ]
+  ],
+  [
+    "Dashboard",
+    "Every candidate's exact trades",
+    "fixed",
+    "Each retained candidate actually priced in each visited screen pass has both directions' exact selected-cell trades or an explicit no-cell outcome; the browser exposes saved signals, refusal counts and exact selected exit settings",
+    "A summary cannot certify unopened trade evidence. No-cell pricing is distinct from not being priced. Actual caps and tiers are shown; skipped candidates, calibration, validation grids and all exit cells are not claimed captured. Contract.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    [
+      {
+        "href": "../../docs/19-candidate-trades.md",
+        "label": "Contract"
+      }
+    ]
+  ],
+  [
+    "Dashboard",
+    "Permanent observability",
+    "limited",
+    "Durable attempt/result protocols plus boundary telemetry and drop-health reporting",
+    "Telemetry rotates and is not a permanent per-event fsync archive. Inner-loop logging is deliberately excluded.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    []
+  ],
+  [
+    "Verification",
+    "Rust-only backend",
+    "supported",
+    "Engine, vocabulary, store, CLI, API and verifier are Rust; browser work stays under web/",
+    "Path and dependency gates are executable. Whole machine/toolchain independence must not be inferred solely from file extensions.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    []
+  ],
+  [
+    "Verification",
+    "Current MacBook planning",
+    "supported",
+    "Verified M4 Pro, 14 CPU cores and 48 GiB memory; parallel verification workers are shared across agents and the existing service",
+    "Current internal free space is rechecked. The operator's additional 8 TB drive is disconnected and contributes no present capacity. Hardware baseline.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    [
+      {
+        "href": "../../docs/25-macbook-runtime-budget.md",
+        "label": "Hardware baseline"
+      }
+    ]
+  ],
+  [
+    "Dashboard",
+    "Live backend routes",
+    "open",
+    "Earlier clean 33ecdfba backend activated; candidate/search endpoints answer with explicit missing/refused evidence instead of fabricated results",
+    "Later 502d42dc and current repairs are not active. Observed acquisition continues, scheduler is paused, health is DEGRADED with master/universe identity notes, and no production result ledger is present. This is a dated observation, not continuous monitoring.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    []
+  ],
+  [
+    "Verification",
+    "Customer-scale assurance",
+    "unverified",
+    "Bounded operator-facing API and readable comparison surfaces",
+    "No million-user load, public-service security or latency SLA has been demonstrated.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    []
+  ],
+  [
+    "Institutional filters",
+    "Conservative zero-return statistics",
+    "supported",
+    "A separate Rust procedure keeps every zero-return coordinate with exact probability one and retains negative variable series in the shared comparison. An independent1,152-family oracle and exact allocation boundary tests pass",
+    "Nonzero constant series refuse. The shared bootstrap assumptions remain; this is not universal statistical validity. Successor contract.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    [
+      {
+        "href": "../../docs/29-fixed-training-qualification.md",
+        "label": "Successor contract"
+      }
+    ]
+  ],
+  [
+    "Institutional filters",
+    "Finite testing budget",
+    "supported",
+    "The new qualification plan declares all eight timeframe shares before later pricing; interrupted and failed slots retain their original allocation",
+    "Covers the declared finite catalog only. Other catalogs and grammar batches are separate families. Unreachable draw resolution is reported rather than increased after outcomes. Scope and limits.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    [
+      {
+        "href": "../../docs/29-fixed-training-qualification.md",
+        "label": "Scope and limits"
+      }
+    ]
+  ],
+  [
+    "Institutional filters",
+    "Later institutional qualification",
+    "limited",
+    "New wiring joins original selected exits, complete later windows, zero-inclusive family statistics and every common policy field in a separately versioned saved comparison",
+    "Combined integration and release checks must pass on the final source. These are fixed-training later windows, not expanding-prefix retraining or Selection V6 authority. Production activation remains separate. Detailed comparison.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    [
+      {
+        "href": "../../docs/29-fixed-training-qualification.md",
+        "label": "Detailed comparison"
+      }
+    ]
+  ],
+  [
+    "Verification",
+    "One allowance across grammar batches",
+    "unverified",
+    "A separately versioned declared search saves each batch before pricing, keeps its exact ordinal and allowance through failures, and projects all eight saved qualification results under a countable shared testing budget",
+    "New source requires its own final checks. This covers one immutable declaration, retains bootstrap assumptions and cannot certify arbitrary other research projects. Whole-history bytes and replay work are explicitly bounded. Plain-language comparison.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    [
+      {
+        "href": "../../docs/30-search-wide-qualification.md",
+        "label": "Plain-language comparison"
+      }
+    ]
+  ],
+  [
+    "Verification",
+    "Exact shared probability limits",
+    "unverified",
+    "V2 caps four family probability ceilings, retains all35 other policy fields, and exposes original/effective values with exact row-policy binding. A writer-valid White/SPA counterexample is V1 admitted and V2 rejected",
+    "V1 retains its historical arithmetic and is labelled explicitly. New version markers bind identity; no old history is rewritten. This is comparison correctness, not a demonstrated global statistical-calibration guarantee. Versioned contract.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    [
+      {
+        "href": "../../docs/30-search-wide-qualification.md",
+        "label": "Versioned contract"
+      }
+    ]
+  ],
+  [
+    "Verification",
+    "Mandatory release evidence",
+    "unverified",
+    "Strict deployment admission now requires exact-source raw whole-crate line/branch counts and complete module mutation outcomes, with physical limits and explicit compiler-invalid evidence",
+    "The retained85-artifact stage passes its artifact check but actually refuses missing mandatory evidence with exit3 before live observation. No activation is inferred from ordinary green checks. Gate contract.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    [
+      {
+        "href": "../../docs/30-search-wide-qualification.md",
+        "label": "Gate contract"
+      }
+    ]
+  ],
+  [
+    "Verification",
+    "Missing recovery plan",
+    "unverified",
+    "The actual missing-active-plan handler regression returns503 and visible unavailability while preserving exact pointer, STOP and attempt files and claiming no run slot",
+    "The live pointer's original plan was not found by the scoped read-only search. Attempts cannot reconstruct its durable scope. History remains intact and safe handoff is blocked.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    []
+  ],
+  [
+    "Verification",
+    "Dependency process probes",
+    "unverified",
+    "Isolated pinned Rust prototypes demonstrate that compiler probes can be removed while preserving selected compiler/functional behavior",
+    "The full vendor approach conflicts with the explicit no-vendored-binding rule for system ABI packages. No shared dependency patch or rule exception was introduced. Native and optional-platform evidence remain separate. Measured alternatives and limits.",
+    "The reviewed contract and its named evidence define this scope. Saved check results apply to their recorded source; they do not attest later edits or the running service.",
+    [
+      {
+        "href": "../../docs/../target/sweep-audit-20260906/dependency-purity-20260907/remediation-matrix.md",
+        "label": "Measured alternatives and limits"
+      }
+    ]
+  ],
+  [
+    "Complexity",
+    "O(1) total exhaustive work and history",
+    "limited",
+    "Fixed per-item operations and explicit memory/page bounds are implemented.",
+    "Whole search can grow combinatorially. B bars and R stored rows require O(B) and O(R) work/space; hashes are expected O(1), not worst-case latency promises.",
+    "The detailed report separates measured per-operation regressions from total search, cold reads, refresh, durability and retained history.",
+    []
+  ],
+  [
+    "Verification",
+    "Full release assurance",
+    "unverified",
+    "Functional checks, finite adversarial oracles and isolated builds provide scoped evidence.",
+    "100% coverage, whole-module mutation closure and full institutional market execution/configuration remain separate release conditions. Bounded historical executions and live backend route activation have their own measured report; visual verification remains separate.",
+    "A green subset never overrides a missing or red required gate.",
+    []
+  ]
+];
+const overview = [
+  [
+    "Intraday and 3:10 PM exit",
+    "Priced paths use the fixed 15:10 IST deadline. Eleven public regressions cover off-grid timestamps, missing exact boundary minutes, foreign caches and late interior grid records; five selected faults tested the earlier clock/table defenses",
+    "The recorded fill model remains Open/PrintedExtreme on the final permitted one-minute interval. OHLCV cannot establish a tick-exact price at 15:10."
+  ],
+  [
+    "Indicators and patterns",
+    "All328 live conditions have owners and an explicit availability path; all62 patterns have named examples. Session, trend and crossing repairs plus truth-only handoff now pass455 indicator tests and38 scoped mutations",
+    "Missing references remain Unknown. Pattern conventions, complete touched-crate coverage and input completeness retain their documented limits."
+  ],
+  [
+    "Opening ranges across timeframes",
+    "Independent generated oracle: 846 signal rows across all eight timeframes. Separate clean174435aa actual-data oracle: all6,173 saved2/3-minute expression rows matched, with192 differences from the reconstructed coarse calculation",
+    "Generated fixtures and actual-data evidence are separate scopes. A single60-minute month refused for insufficient warm-up. The bridge uses observed minutes and does not certify complete exchange-calendar coverage."
+  ],
+  [
+    "Combination search",
+    "AND search, nested AND/OR/NOT evaluation, finite independent oracles and restart paths exist. Binary grammar batches connect to complete eight-timeframe campaigns; D-0549 adds one exact testing allowance across a declared search",
+    "The fixed Boolean grammar is not an ordered-event language or exhaustive semantic Boolean deduplication. The new path needs final source-stamped producer/observer and combined verification; old per-batch results are unchanged."
+  ],
+  [
+    "Real historical execution",
+    "Clean build 174435aa: 18 strict range cases plus 18 retries passed, covering both indices across all eight intraday rungs and two cash-stock cases",
+    "Recorded checkpoint from 6 September 2026, using high minimum support; it does not establish full low-support search, subsequent-source verification or institutional approval. All 18 cases and exact result reuse."
+  ],
+  [
+    "Saved trade drill-down",
+    "Earlier clean-library probe: 64 saved candidate manifests and 40,257 trade rows were reconciled across 352 API pages",
+    "Historical bounded real-data check from 6 September 2026, saved probe log. A summary or completed search cannot certify an unopened candidate page or later source edits."
+  ],
+  [
+    "Strict input integration",
+    "CLI, explicit API, receipt-checked browser batch and institutional V6 loaders now use retained strict source receipts; V6 retains guards through empty families and later OOS",
+    "The API still needs explicit server-owned receipt location and physical limits; the live job has not been configured or replaced. Browser batches are page-owned queues, not a durable aggregate server authority."
+  ],
+  [
+    "Empty and mixed institutional results",
+    "Eight strict integration tests pass, including both families evaluated, either family naturally extinct and both naturally extinct, through genuine Selection V6 and later evidence rechecking",
+    "Generated stored fixtures prove wiring and refusal behavior, not approval of production policy or real-market admission. Zero strategies requires completed measured search and cannot be substituted for missing input."
+  ],
+  [
+    "Institutional admission",
+    "Selection V6 and later replay paths are built for the two indices. On 7 September, a complete 37-value research profile and automatic validation were added under the operator's delegation",
+    "The profile is not yet activated in the service. New Boolean/cash catalog evidence does not grant Selection V6 authority; successor integration and release verification remain separate."
+  ],
+  [
+    "Verification",
+    "Named finite tests and faults are recorded below; the saved check panel records the latest combined run with exit codes, source checkpoints and exact logs",
+    "Test passes apply to their recorded source. Required full touched-crate line/branch coverage and whole-module mutation closure remain incomplete; saved green checks do not supply missing policy or activation."
+  ],
+  [
+    "Active service",
+    "Earlier 33ecdfba backend is responsive; data acquisition continues; automatic sweeps are paused",
+    "Latest repairs are not activated. Health reports DEGRADED with master/universe identity notes; production results ledger is absent."
+  ],
+  [
+    "Speed and scale",
+    "Fixed-width operations and finite host benchmarks have been measured",
+    "Whole search, saved history, storage latency and millions of customers have no O(1) or load guarantee."
+  ]
+];
+const currentReview = [
+  [
+    "Existing Backtest strategy tester",
+    "Verified",
+    "A selected saved search setting opens training/later totals, entry and exit rules, trades, trading days and every saved policy check in the existing page",
+    "Wrong setting, source, checkpoint, child completion, direction, period, refreshed parent and stale responses are refused or cancelled",
+    "The current inspection services do not enable a production sweep. The later period is part of selection, not an untouched final test."
+  ],
+  [
+    "Launch AND, OR and NOT from Backtest",
+    "Limited",
+    "The declared-search mode and audited Rust bridge passed the fresh native gates. All 603 frontend tests, type checking and the production build passed; the matching browser displays the eight-timeframe launch controls and named missing configuration",
+    "Exact IDs, all selected symbols, wholly later dates, changed policy, repeated submission, reload, edited controls and a resumed search with the same ID",
+    "The private viewer deliberately disables work and has no campaign receipt configuration. A private empty-input dispatch recorded refusal; that is not a historical sweep. No full sweep is cleared."
+  ],
+  [
+    "Malformed launch requests",
+    "Verified",
+    "The frozen D public parser passed 10,340 cases: nine exact accepted declarations and 10,331 refusals, with no unexpected outcomes or panics",
+    "All 153 pairs of the 18 fields, each with 64 malformed-value combinations; duplicate and escaped keys, bad spans, aliases, unknown controls, numeric boundaries and requests up to 65,536 bytes",
+    "Pairwise cases do not exhaust higher-order combinations. An early refusal can mask another invalid field; parser success does not establish data admission or worker completion."
+  ],
+  [
+    "Busy-page loading and status recovery",
+    "Verified",
+    "The actual page recovered from an injected first 429 on each results/status read and then displayed unmodified native responses; the busy notice was visible and cleared after recovery",
+    "Bounded retries, server minimum delays, repeated overload, generic evidence refusals, cancellation, late replies and 13 malformed status shapes on each of the two readers",
+    "Only GET reads retry. Unknown submissions are never reposted. HTTP success alone cannot establish idle state or complete work. These are finite transport checks, not a production latency benchmark."
+  ],
+  [
+    "Actual saved RELIANCE observations",
+    "Verified",
+    "Browser inspection of setting 480 shows 1,395 training trades and 1,947 later trades; pessimistic totals are minus INR 1,593.40 and minus INR 1,865.40 per unit",
+    "Real saved observations remain visible even when required acceptance evidence is refused",
+    "These are observations across a particular setting, before costs. They are not unique market executions across every setting, account returns or an approved strategy."
+  ],
+  [
+    "Exact page retries",
+    "Verified",
+    "A failed nonzero page retains its complete original request when retried",
+    "Both periods, trades and sessions, offset 32 and offsets above JavaScript's exact-number limit",
+    "Each request loads at most 32 rows. An unopened page is not certified by a summary."
+  ],
+  [
+    "Missing data and recorded zero",
+    "Verified",
+    "A recorded zero remains a valid zero; a failed read has no replacement result body",
+    "Missing facts, malformed pages, invalid joins, aborted loads, zero trades and unknown VWAP inputs",
+    "Absence of evidence never becomes a zero or an admitted outcome."
+  ],
+  [
+    "Protection against incorrect indicator names",
+    "Verified",
+    "Names appear only when both saved exit grids match the loaded vocabulary build",
+    "Missing, null, sparse and foreign grids; NOT of an unavailable VWAP condition",
+    "On the verification page, older settings retain numeric conditions because their vocabulary does not match. A current vocabulary cannot rename an older result."
+  ],
+  [
+    "Durable command and request history",
+    "Verified",
+    "Separate append-only records for CLI commands, browser tasks and selected HTTP reads/controls; the exact saved HTTP outcome survived an actual private-server restart",
+    "Busy index, corrupt bytes, torn writes, repeated terminals, missing terminal, panic, cancellation and reopen",
+    "Fixed-size records still require storage barriers. Completion of an HTTP response or command does not mean a full search completed."
+  ],
+  [
+    "Exact invocation IDs",
+    "Verified",
+    "IDs are preserved as decimal strings in live progress, polling, links and history pages",
+    "Adjacent IDs above 2 to the power 53, legacy low IDs, overflow, invalid cursors, duplicate or unordered records",
+    "The bounded reader verifies the index and first/last record; it does not claim to audit all middle progress records."
+  ],
+  [
+    "Safeguards when recovery history is missing",
+    "Verified",
+    "A missing activated journal cannot be silently recreated; separate prepared successors preserve the original scope and shared retry budget",
+    "Missing/replaced path, torn journal, repeated preparation, wrong predecessor or generation, restarted process",
+    "The original missing file has not been recovered. A successor does not reconstruct its completion. Selected sweep data validity is a separate check."
+  ],
+  [
+    "Safe recovery preparation",
+    "Verified",
+    "61 recovery tests plus the authentic 34,440-window identity check passed; production recovery files stayed unchanged",
+    "Preparation cannot activate a worker, clear STOP, reset attempts, read bars or contact a vendor",
+    "No live successor was prepared or activated during this verification."
+  ],
+  [
+    "Intraday execution",
+    "Limited",
+    "Shared execution uses real stored OHLCV, integer prices and the fixed 15:10 IST exit rule; the current workspace rerun includes its clock and foreign-slice tests",
+    "Missing deadline minute, coarse signals, off-grid timestamps, next-day and foreign-cache data",
+    "OHLCV gives the recorded final one-minute interval, not a tick-exact fill. No synthetic historical result is substituted."
+  ],
+  [
+    "AND, OR, NOT and candle conditions",
+    "Limited",
+    "The retained engine and expression tests cover truth/availability, exhaustive small-space oracles, bounded continuation and candle exemplars",
+    "Unknown negation, empty frontier, invalid bit positions, resumed searches and worker limits",
+    "Boolean conditions on a bar are not an ordered-event language. Finite test oracles do not enumerate every possible market history."
+  ],
+  [
+    "Institutional comparison",
+    "Limited",
+    "Saved settings retain all 39 common policy values and 44 individual check outcomes, with shared search-wide probability limits",
+    "Empty families, small samples, concentration, missing statistics, refused evidence and later-period exit retuning",
+    "Boolean/cash research does not have the separate Selection V6/global execution authority. No global cross-study testing budget or untouched final holdout is established."
+  ],
+  [
+    "Strongest 0.1 percent of setups",
+    "Not cleared",
+    "The requested target is retained as a selection objective; failed candidates are not promoted to fill a ranking",
+    "A best-ranked loser, a tiny lucky sample or an empty admitted set cannot establish a profitable edge",
+    "Complete-search percentile ranking and consistently profitable performance are not demonstrated. Costs remain excluded as requested."
+  ],
+  [
+    "Automatic comparison and repeatable checks",
+    "Verified",
+    "This table is generated from this dated report. The Rust verifier now runs the entire frontend test glob and production build as well as workspace gates",
+    "New frontend regression files cannot be silently left out by a hand-picked test list; missing report fields refuse generation",
+    "Regeneration projects recorded evidence. It does not turn a dated review into continuous deployment monitoring or full coverage."
+  ],
+  [
+    "Rust boundary",
+    "Limited",
+    "The D extension audit passed 542 tracked/nonignored paths outside web, including 478 Rust files; all selected API and CLI source files match the shared workspace",
+    "Wrong extensions and paths outside the frontend exception are refused",
+    "Selected transitive build scripts still launch compiler probes. The literal no-external-process build-script requirement remains unmet; no conflicting dependency patch was installed."
+  ],
+  [
+    "Current functional verification",
+    "Verified",
+    "Candidate D passed formatting, strict workspace Clippy, dependency-policy checks and 5,212 tests across 99 targets; 11 tests were ignored. The final frontend passed 603 tests, type checking and its production build",
+    "Combined checks include launch admission, status, durable boundaries and the existing engine, execution and store suites; nested child test counts are excluded",
+    "Ignored tests are not passes. Functional success does not clear the full coverage, mutation, dependency-rule or activation conditions."
+  ],
+  [
+    "Full coverage and mutation closure",
+    "Not cleared",
+    "The superseded C instrumented run was stopped after its ladder test exceeded an hour; available diagnostic profiles are retained. All 10 selected audit mutations were caught after two boundary-test repairs",
+    "Reserved IDs, final-page cursors, duplicate terminals, page bounds, ordering and dispatch",
+    "C coverage is incomplete and cannot certify D. Only 10 of 249 audit-module mutations were exercised; the 46,386-workspace census is enumeration only. Full touched-crate line/branch and mutation closure remain unmet."
+  ],
+  [
+    "Speed, memory and customer scale",
+    "Limited",
+    "Fixed masks, finite pages and allocation limits reduce repeated work; jobs share the current 14-core, 48-GiB MacBook",
+    "Resource ceilings, overload, interrupted work and storage failures remain visible; instrumented ranking activity was sampled directly",
+    "Two test threads do not cap internal pools to two CPUs. Total search, retained history, disk latency and millions of customers have no O(1) guarantee. The disconnected 8-TB disk adds no current capacity."
+  ]
+];
+const labels={supported:'Supported',fixed:'Fix added',limited:'Limited',open:'Open gap',unverified:'Not established'};
+const currentClasses={'Verified':'supported','Limited':'limited','In progress':'unverified','Not cleared':'open'};
+function renderCurrentReview(){const query=document.getElementById('current-search').value.trim().toLowerCase(),status=document.getElementById('current-status').value,rows=currentReview.filter(row=>(!status||row[1]===status)&&(!query||row.join(' ').toLowerCase().includes(query))),body=document.getElementById('current-review');body.replaceChildren();for(const row of rows){const tr=document.createElement('tr');for(const [index,value] of row.entries()){const cell=document.createElement(index===0?'th':'td');if(index===0)cell.scope='row';if(index===1){const badge=document.createElement('span');badge.className='badge '+currentClasses[value];badge.textContent=value;cell.append(badge);}else cell.textContent=value;tr.append(cell);}body.append(tr);}document.getElementById('current-count').textContent=`${rows.length} of ${currentReview.length} areas`;}
+document.getElementById('current-search').addEventListener('input',renderCurrentReview);document.getElementById('current-status').addEventListener('change',renderCurrentReview);renderCurrentReview();
+const tbody=document.getElementById('rows');
+for(const row of overview){const tr=document.createElement('tr');for(const [index,value] of row.entries()){const cell=document.createElement(index===0?'th':'td');if(index===0)cell.scope='row';cell.textContent=value;tr.append(cell);}document.getElementById('overview').append(tr);}
+let gapsOnly=false;
+function render(){
+  const query=document.getElementById('search').value.toLowerCase();
+  const category=document.getElementById('category').value;
+  const shown=entries.filter(row=>(!category||row[0]===category)&&(!gapsOnly||['open','limited','unverified'].includes(row[2]))&&row.join(' ').toLowerCase().includes(query));
+  tbody.replaceChildren();
+  for(const row of shown){
+    const tr=document.createElement('tr');
+    const area=document.createElement('td');const name=document.createElement('strong');name.textContent=row[1];const sub=document.createElement('small');sub.textContent=row[0];area.append(name,sub);
+    const status=document.createElement('td');const badge=document.createElement('span');badge.className='badge '+row[2];badge.textContent=labels[row[2]];status.append(badge);
+    const actual=document.createElement('td');actual.textContent=row[3];
+    const evidence=document.createElement('td');evidence.textContent=row[4];const details=document.createElement('details');const summary=document.createElement('summary');summary.textContent='Evidence and scope';const note=document.createElement('p');note.textContent=row[5];details.append(summary,note);const links=document.createElement('div');links.className='evidence-links';for(const reference of row[6]??[]){const link=document.createElement('a');link.href=reference.href;link.textContent=reference.label;links.append(link);}details.append(links);evidence.append(details);tr.append(area,status,actual,evidence);tbody.append(tr);
+  }
+  document.getElementById('count').textContent=`${shown.length} of ${entries.length} areas`;
+  document.getElementById('empty').hidden=shown.length!==0;
+}
+document.getElementById('search').addEventListener('input',render);
+document.getElementById('category').addEventListener('change',render);
+document.getElementById('blockers').addEventListener('click',event=>{gapsOnly=!gapsOnly;event.currentTarget.setAttribute('aria-pressed',String(gapsOnly));render()});
+document.getElementById('print').addEventListener('click',()=>window.print());
+function updateMath(){const n=BigInt(document.getElementById('bits').value);document.getElementById('bit-count').textContent=n.toString();document.getElementById('combinations').textContent=((1n<<n)-1n).toLocaleString()+' possible subsets';}
+document.getElementById('bits').addEventListener('input',updateMath);updateMath();render();
+const evidence=window.BRUTEX_AUDIT_CHECKS;
+document.getElementById('run-note').textContent=evidence?`Saved run ${evidence.run}. ${evidence.run.startsWith('focused-')?'Focused subset only; workspace checks excluded. ':''}${evidence.complete?'Recorded check sequence finished.':'Recorded check sequence is incomplete.'} ${evidence.stable?'No source difference was detected during its sampled checkpoints.':'Source differences were detected during the run.'} Present source freshness and deployed-binary identity are not checked by this page. Change detector: ${evidence.fingerprint}.`:'No saved check results found. Run the verifier; do not infer a pass from this empty state.';
+for(const check of evidence?.checks??[]){const row=document.createElement('div');row.className='check';const label=document.createElement('div');label.textContent=check.name;const link=document.createElement('a');link.textContent=`Read saved log (${check.seconds}s)`;link.href=check.log;label.append(link);const result=document.createElement('span');result.className='badge '+(check.passed?'supported':'open');result.textContent=check.passed?'Passed in this run':'Failed in this run';row.append(label,result);document.getElementById('checks').append(row);}
+</script>
+</body>
+</html>

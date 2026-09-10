@@ -575,6 +575,33 @@ impl CurDayFib {
         mask
     }
 
+    /// Availability of each representable rung in this exact anchor snapshot.
+    /// The evaluator reads the previous state only within the same session:
+    /// folding the current bar first could establish, reverse or erase its leg.
+    pub(crate) fn known(&self, tolerance: Tolerance) -> ConditionMask {
+        let mut known = ConditionMask::ZERO;
+        let range = self.range();
+        // `range` is zero before the first fold; a positive range proves both
+        // a live anchor and a usable scale for this near-only family.
+        if range <= 0 {
+            return known;
+        }
+        let anchor = match self.leg {
+            Leg::Up => self.hi,
+            Leg::Down => self.lo,
+            Leg::Undetermined => return known,
+        };
+        for (offset, numerator) in CURDAY_RUNGS.into_iter().enumerate() {
+            let Some(level) = self.rung_level(anchor, numerator, range) else {
+                continue;
+            };
+            let index = CURDAY_FIRST + u16::try_from(offset).unwrap_or(u16::MAX);
+            known = vocab::table::set_near(known, index, tolerance, level, level, range)
+                .unwrap_or(known);
+        }
+        known
+    }
+
     /// The rung's price level, materialised exactly once.
     ///
     /// `None` while the leg is undetermined, or if the level leaves `i64`.
@@ -1159,35 +1186,22 @@ mod tests {
         );
         assert_eq!(s.bars_folded(), 0, "a refused bar was folded in");
 
-        // A wide but representable range must still work, at either price edge.
-        //
-        // OPEN AND CLOSE ARE `-+ i64::MAX / 8` AND WERE BOTH `0`, which this test
-        // never meant. The wide HIGH and LOW are what it is about, and they are
-        // unchanged; the zeros were there only because nothing had cause to
-        // object to one. `Candle::check_evaluable` now refuses a zero price, so
-        // the fixture names an extreme open and close inside the same range
-        // rather than an absent pair.
+        // A very wide positive representable range must still fold correctly.
+        // Negative input is corruption; the low-level query below still probes
+        // both signed query extremes without admitting a negative candle.
         let mut t = CurDayFib::new();
-        let _ = ok(
-            &mut t,
-            &bar(
-                0,
-                -(i64::MAX / 8),
-                i64::MAX / 4,
-                -(i64::MAX / 4),
-                i64::MAX / 8,
-            ),
-        );
+        let _ = ok(&mut t, &bar(0, i64::MAX / 8, i64::MAX / 2, 1, i64::MAX / 4));
         let _ = ok(
             &mut t,
             &bar(
                 60_000_000,
-                -(i64::MAX / 8),
-                i64::MAX / 2,
-                -(i64::MAX / 4),
                 i64::MAX / 8,
+                (i64::MAX / 4) * 3,
+                1,
+                i64::MAX / 4,
             ),
         );
+        assert_eq!(t.range(), (i64::MAX / 4) * 3 - 1);
         let _ = t.bits(0, tol());
         let _ = t.bits(i64::MAX, tol());
         let _ = t.bits(i64::MIN, tol());
@@ -1696,7 +1710,7 @@ impl Candle {
         Ok(())
     }
 
-    /// [`Self::check`], plus the zero-price refusal an EVALUATION requires.
+    /// [`Self::check`], plus the positive-price requirement of an evaluation.
     ///
     /// # Why this is a second function and not a fifth clause in `check`
     ///
@@ -1724,20 +1738,14 @@ impl Candle {
     /// mask is a mixture of two answers."* This function is where the two
     /// readings are reconciled without either losing its own.
     ///
-    /// # Zero and not `<= 0`
-    ///
-    /// Deliberately the weaker test, and `Evaluator::stepped`'s own doc argues
-    /// it: `ohlc_is_sane` refuses a negative bar at the write boundary (D-0143),
-    /// so zero is the case REACHABLE THROUGH THE STORE and the case that was
-    /// measured. Widening it would make `close_the_books`' span-overflow
-    /// handling unreachable through `step`, which §9's coverage floor turns into
-    /// a cost rather than a preference. This clause matches that one exactly
-    /// rather than restating it differently.
+    /// Direct callers receive the same protection as stored-data callers.
+    /// Structurally ordered negative prices remain representable by `check`,
+    /// but cannot enter any production indicator fold.
     ///
     /// # Errors
     ///
     /// Everything [`Self::check`] refuses, then [`Corrupt::PriceNotPositive`]
-    /// for a record any of whose four prices is zero.
+    /// for a record any of whose four prices is nonpositive.
     pub const fn check_evaluable(&self) -> Result<(), Corrupt> {
         // LAST, so it stays strictly additive: every record refused before is
         // still refused for the reason it always was, and this catches only what
@@ -1745,7 +1753,10 @@ impl Candle {
         if let Err(why) = self.check() {
             return Err(why);
         }
-        if self.open == 0 || self.high == 0 || self.low == 0 || self.close == 0 {
+        // Containment above proves low <= open, close <= high and low <= high.
+        // Therefore all four prices are positive exactly when low is positive;
+        // repeating the other sign comparisons adds no distinct refusal case.
+        if self.low <= 0 {
             return Err(Corrupt::PriceNotPositive);
         }
         Ok(())
@@ -1918,14 +1929,16 @@ mod candle {
 
     /// ANY ONE of the four prices at zero refuses, not only all four together.
     ///
-    /// # The three surviving mutants this kills, and why they survived
+    /// # Historical zero-only guard and the current positive-price contract
     ///
-    /// `check_evaluable`'s guard is a four-way `||`. Mutation testing replaced
+    /// `check_evaluable` formerly used a four-way zero-only `||`. Mutation testing replaced
     /// each `||` with `&&` in turn and **three of the three survived**, because
     /// every test that reached the clause used the ALL-ZERO candle — and
     /// `open == 0 && high == 0 && low == 0 && close == 0` is true of that bar
     /// too. A guard that fires on one zero and a guard that fires only on four
-    /// are different refusals, and nothing here could tell them apart.
+    /// are different refusals, and nothing here could tell them apart. The
+    /// current check refuses any nonpositive low after containment proves it is
+    /// the minimum price; the fixtures still pin each zero-price case.
     ///
     /// # Each fixture isolates ONE zero, and `check` must still accept it
     ///

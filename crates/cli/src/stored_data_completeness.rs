@@ -94,6 +94,9 @@ pub fn daily_reference_policy_digest_v1(reference: DailyReferenceBinding<'_>) ->
         hasher.update(&day.to_le_bytes());
     }
     hasher.update(&reference.swept_series_calendar_policy.to_le_bytes());
+    // Integrity kind belongs to the shared cohort policy (encoded above).
+    // Actual per-family receipt bytes belong to the composite data digest;
+    // placing them here would make NIFTY/BANKNIFTY policies incomparable.
     hasher.finalize()
 }
 
@@ -1539,6 +1542,36 @@ mod tests {
             )
             .expect("canonical stored-data completeness preparation")
         }
+    }
+
+    #[test]
+    fn strict_receipt_content_changes_data_identity_but_not_shared_cohort_policy() {
+        let fixture = fixture();
+        let ordinary = fixture.reference();
+        let mut first = ordinary;
+        first.daily_integrity = ReferenceIntegrity::ChecksumReceiptV1([17; 32]);
+        first.minute_integrity = ReferenceIntegrity::ChecksumReceiptV1([29; 32]);
+        let mut second = first;
+        second.daily_integrity = ReferenceIntegrity::ChecksumReceiptV1([23; 32]);
+        second.minute_integrity = ReferenceIntegrity::ChecksumReceiptV1([31; 32]);
+        assert_eq!(
+            daily_reference_policy_digest_v1(first),
+            daily_reference_policy_digest_v1(second)
+        );
+        assert_ne!(
+            daily_reference_policy_digest_v1(ordinary),
+            daily_reference_policy_digest_v1(first)
+        );
+        let digest = |reference| {
+            runner::identity::data_digest_with_daily_reference(
+                &fixture.signal,
+                &fixture.minute_context,
+                reference,
+            )
+            .expect("exact fixture streams")
+        };
+        assert_ne!(digest(first), digest(second));
+        assert_ne!(digest(ordinary), digest(first));
     }
 
     fn span() -> RequestedSpanIdentityV1 {

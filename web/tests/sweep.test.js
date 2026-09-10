@@ -76,10 +76,10 @@ test('every payload the route can send lands in exactly one phase', () => {
 	];
 	const phases = payloads.map((p) => sweepOutcome(p).phase);
 
-	assert.deepEqual(phases, ['idle', 'running', 'done', 'failed', 'done']);
+	assert.deepEqual(phases, ['idle', 'running', 'done', 'failed', 'unknown']);
 	for (const phase of phases) {
 		assert.ok(
-			['idle', 'running', 'done', 'failed'].includes(phase),
+			['idle', 'running', 'done', 'failed', 'unknown'].includes(phase),
 			`${phase} is not a state this page renders`
 		);
 	}
@@ -91,6 +91,19 @@ test('an empty refusal string is not a refusal', () => {
 	// no reason in it, which is worse than the green one it replaced.
 	const state = sweepOutcome({ in_flight: false, report: REPORT, refusal: '' });
 	assert.equal(state.phase, 'done');
+});
+
+test('missing, stale and unreadable lifecycle evidence is unknown, never a completed sweep', () => {
+  for (const run of [
+    { in_flight: false, status: 'unknown', why: 'log cannot be read' },
+    { in_flight: false, report: null, refusal: null },
+    { in_flight: /** @type {any} */ ('false'), report: REPORT },
+    { in_flight: false, status: 'unknown', report: REPORT, why: 'stale activity' }
+  ]) {
+    const outcome = sweepOutcome(run);
+    assert.equal(outcome.phase, 'unknown');
+    assert.ok(outcome.why.length > 0);
+  }
 });
 
 // ---- the pre-flight check on the ledger ------------------------------------

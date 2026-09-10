@@ -3508,6 +3508,32 @@ pub(crate) struct CommittedStoredExecutionV4 {
 }
 
 impl CommittedStoredExecutionV4 {
+    /// Retains the durable V4/Population join around a later stored replay.
+    pub(crate) fn selected_stored_oos_witnesses(
+        &mut self,
+        request: crate::stored_post_training_oos::StoredPostTrainingOosRequestV1,
+        strategies: &[[u8; 32]],
+        max_candidates: u64,
+        observer: &mut crate::stored_post_training_oos::StoredOosObserverV1<'_>,
+    ) -> Result<Vec<crate::stored_post_training_oos::StoredPostTrainingOosWitnessV1>, String> {
+        let before = self.selection_v6_source()?;
+        let witnesses = self.source.selected_stored_oos_witnesses(
+            request,
+            strategies,
+            max_candidates,
+            observer,
+        )?;
+        let after = self.selection_v6_source()?;
+        if before.execution() != after.execution()
+            || before.population() != after.population()
+            || before.families() != after.families()
+            || before.rows() != after.rows()
+        {
+            return Err("Execution V4 source changed during stored OOS replay".to_owned());
+        }
+        Ok(witnesses)
+    }
+
     #[must_use]
     pub(crate) const fn was_written(&self) -> bool {
         self.execution.was_written()

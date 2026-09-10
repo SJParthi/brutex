@@ -18,26 +18,22 @@
 //! author's own words, *"the authoritative CLI surface will construct explicit
 //! Search V4 bounds in Step 4"*. This module is that surface.
 //!
-//! # The policy is the operator's, not this file's
+//! # Explicit research policy and its provenance
 //!
-//! The chain needs three policy objects, and a census of the workspace found
-//! that **every construction of all three lives inside a `#[cfg(test)]`
-//! module** -- twenty-five `AdmissionPolicyV1`, fourteen `ExitGridPolicyV1`,
-//! every `RankingPolicyV1`. There is no production policy anywhere to reuse,
-//! and `AdmissionPolicyDraftV1` alone carries thirty-nine gates that decide
-//! what the engine is willing to trade.
-//!
-//! Copying a fixture's numbers into an operator verb would be the invention
-//! `CLAUDE.md` §3 rule 1 forbids, dressed as wiring. So this module takes the
-//! rule of construction instead:
+//! The operator delegated the 37 previously unresolved thresholds. The runtime
+//! profile in `config/intraday-research-v1.toml` supplies documented research
+//! choices; `docs/22-research-policy.md` separates those choices from published
+//! statistical methods. It is not an externally certified trading policy.
 //!
 //! * A gate whose value the operator has **stated** is set, and
 //!   [`ActiveGate`] records the sentence it came from.
 //! * A gate whose value is **derived from this run's own arguments** is set,
 //!   and the derivation is named.
-//! * Every other gate is read from `BRUTEX_ADMIT_<GATE>`, and when one is unset
-//!   the run refuses with [`unset_gate_worksheet`] -- every missing gate at
-//!   once, each beside the variable that would answer it.
+//! * A server-selected `BRUTEX_ADMISSION_POLICY_FILE` supplies all 37 remaining
+//!   fields in one bounded read, with an exact file digest in the report.
+//! * Explicit `BRUTEX_ADMIT_<GATE>` overrides keep their existing precedence
+//!   and visible provenance. Missing fields still produce the complete worksheet;
+//!   an invalid selected file or override cannot silently fall back.
 //!
 //! # There is no "off"
 //!
@@ -50,10 +46,10 @@
 //! thirty-seven `None` believing they were off, could never have constructed a
 //! policy at all.
 //!
-//! Two gates have values today: the `MAX_POINTS` ceiling and the stated
-//! three-times reward-to-risk floor. The other thirty-seven are questions only
-//! the operator can answer, and until they do this verb refuses rather than
-//! guessing -- which is what §3 rule 6 asks of a bound that cannot be met.
+//! The profile is explicitly selected for a run. No selector preserves the
+//! original knob-only behavior; the presence of a shipped file does not silently
+//! change an existing invocation. `policy-check` explains all 39 resolved values
+//! without reading market data or inheriting gate overrides.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -94,6 +90,10 @@ use crate::selection_v5::SelectionV5Bounds;
 use crate::step3_orchestrator::StoredCandidatePreAdmissionBoundsV1;
 use crate::stored::StoredSpanLoadBoundV1;
 
+#[cfg(test)]
+#[path = "ledger_exit_policy_tests.rs"]
+mod exit_policy_tests;
+
 /// The eight intraday rungs this verb commits, tightest first.
 ///
 /// Eight and not nine: `1day` is stored and never swept, so it is not a rung of
@@ -125,9 +125,9 @@ const PAISA_PER_POINT: u64 = 100;
 /// number to be traceable, and a threshold printed without its source is
 /// indistinguishable from one somebody guessed.
 pub(crate) struct ActiveGate {
-    name: &'static str,
-    value: String,
-    because: &'static str,
+    pub(crate) name: &'static str,
+    pub(crate) value: String,
+    because: String,
 }
 
 /// Everything `ledger-all` needs that the operator names on the command line.
@@ -216,38 +216,57 @@ const STATED_REWARD_RISK_PPM: u64 = 3_000_000;
 
 /// How many exit cells one side may price.
 ///
-/// Sixteen thousand against the five-step ladder's 1,089, so the guard bounds a
-/// runaway rather than the ladder written beside it.
+/// The default five-step ladder fits this fixed guard. A requested resolution
+/// that produces too many actual cells refuses; its axes are never truncated.
 const EXIT_CELL_CEILING: u64 = 16_384;
 
-/// Builds the exit-grid policy for one side from the operator's stated ceiling.
+/// Builds one side's exit policy with the explicitly requested grid resolution.
 ///
 /// # What is stated and what is shape
 ///
-/// The 50-point ceiling and the 3x ratio floor are the operator's, and they go
-/// in verbatim. The LADDER -- five percentile steps on each of stop, target and
-/// trail -- is not a threshold but a resolution: it decides how finely the grid
-/// is searched, not what passes. Five steps on three axes is 125 cells, well
-/// inside `max_cells`, and the number is printed in the gate census so it is
-/// visible rather than buried.
+/// The 3x ratio floor is unchanged. `BRUTEX_GRID_RUNGS` controls the number of
+/// percentile steps on each stop, target and trail axis; it changes resolution,
+/// not the admission thresholds. Absence retains the original five-step policy
+/// byte for byte. An explicit value must satisfy the shared strict runtime
+/// bounds, and the resolved grid must still fit the fixed cell ceiling.
 ///
 /// # Errors
 ///
-/// Refuses if the percentile ladder, ratio limits or the policy itself reject
-/// the values -- each of which names which term it objected to.
+/// Refuses an invalid runtime resolution or unusable ladder, ratio or policy.
 pub(crate) fn exit_policy(side: Side) -> Result<ExitGridPolicyV1, String> {
-    let mut ladder = Vec::with_capacity(5);
-    for step in 1..=5_u32 {
+    let raw = crate::knobs::var("BRUTEX_GRID_RUNGS");
+    exit_policy_with(side, raw.as_deref())
+}
+
+fn exit_policy_with(side: Side, raw: Option<&str>) -> Result<ExitGridPolicyV1, String> {
+    let steps = match raw {
+        None => 5_u32,
+        Some(raw) => {
+            if !crate::audited_range_command::request_value("BRUTEX_GRID_RUNGS", raw) {
+                return Err("BRUTEX_GRID_RUNGS refused by strict runtime bounds".to_owned());
+            }
+            raw.trim()
+                .parse::<u32>()
+                .map_err(|why| format!("BRUTEX_GRID_RUNGS percentile width refused: {why}"))?
+        }
+    };
+    let count = usize::try_from(steps)
+        .map_err(|why| format!("BRUTEX_GRID_RUNGS machine width refused: {why}"))?;
+    let mut ladder = Vec::new();
+    ladder
+        .try_reserve_exact(count)
+        .map_err(|why| format!("exit ladder allocation refused: {why}"))?;
+    for step in 1..=steps {
         ladder.push(
-            RationalPercentileV1::new(step, 5)
-                .map_err(|why| format!("exit ladder step {step}/5 refused: {why:?}"))?,
+            RationalPercentileV1::new(step, steps)
+                .map_err(|why| format!("exit ladder step {step}/{steps} refused: {why:?}"))?,
         );
     }
     ExitGridPolicyV1::new(
         ExecutionResolutionV1::OneMinuteOhlcv,
         RangeResolutionV1::PpmCeiling,
         side,
-        RungPlanV1::new(ladder.clone(), ladder.clone(), ladder, 5)
+        RungPlanV1::new(ladder.clone(), ladder.clone(), ladder, count)
             .map_err(|why| format!("exit rung plan refused: {why:?}"))?,
         // The UPPER ratio bound is left at the widest the type allows. A ceiling
         // on reward-to-risk would discard the best cells in the grid, and no
@@ -260,7 +279,7 @@ pub(crate) fn exit_policy(side: Side) -> Result<ExitGridPolicyV1, String> {
         // `CellLimitExceeded { needed: 1089, max: 1000 }` -- which is a policy
         // silently trimmed by a resource bound, exactly backwards. Sized so the
         // five-step ladder fits with room, and a ladder that outgrows THIS
-        // should raise it deliberately rather than lose cells to it.
+        // refuses explicitly rather than losing cells to it.
         EXIT_CELL_CEILING,
         ExitGridSelectorV1::GuaranteedFloor,
         printed_ohlcv_cost_model_id_v1(),
@@ -282,13 +301,20 @@ pub(crate) fn exit_policy(side: Side) -> Result<ExitGridPolicyV1, String> {
 struct GateResolver {
     missing: Vec<&'static str>,
     active: Vec<ActiveGate>,
+    profile: Option<crate::research_policy::ResearchPolicy>,
+    read_knobs: bool,
 }
 
 impl GateResolver {
-    const fn new() -> Self {
+    const fn new(
+        profile: Option<crate::research_policy::ResearchPolicy>,
+        read_knobs: bool,
+    ) -> Self {
         Self {
             missing: Vec::new(),
             active: Vec::new(),
+            profile,
+            read_knobs,
         }
     }
 
@@ -307,12 +333,16 @@ impl GateResolver {
         name: &'static str,
         stated: Option<(T, &'static str)>,
     ) -> Option<T> {
-        if let Some(raw) = crate::knobs::var(&Self::knob_of(name)) {
+        if let Some(raw) = self
+            .read_knobs
+            .then(|| crate::knobs::var(&Self::knob_of(name)))
+            .flatten()
+        {
             if let Ok(parsed) = raw.trim().parse::<T>() {
                 self.active.push(ActiveGate {
                     name,
                     value: parsed.to_string(),
-                    because: "set by its BRUTEX_ADMIT_ knob",
+                    because: "set by its BRUTEX_ADMIT_ knob".to_owned(),
                 });
                 return Some(parsed);
             }
@@ -324,6 +354,20 @@ impl GateResolver {
             self.missing.push(name);
             return None;
         }
+        if let Some(profile) = self.profile.as_ref()
+            && let Some(raw) = profile.value(name)
+        {
+            if let Ok(parsed) = raw.parse::<T>() {
+                self.active.push(ActiveGate {
+                    name,
+                    value: parsed.to_string(),
+                    because: profile.provenance().to_owned(),
+                });
+                return Some(parsed);
+            }
+            self.missing.push(name);
+            return None;
+        }
         let Some((value, because)) = stated else {
             self.missing.push(name);
             return None;
@@ -331,7 +375,7 @@ impl GateResolver {
         self.active.push(ActiveGate {
             name,
             value: value.to_string(),
-            because,
+            because: because.to_owned(),
         });
         Some(value)
     }
@@ -344,13 +388,10 @@ impl GateResolver {
 /// `AdmissionPolicyDraftV1`'s fields are `Option`, which reads like "off when
 /// `None`". They are not: `AdmissionPolicyV1::new` calls `required` on all
 /// thirty-nine and refuses an absent one by name. There is no partial policy
-/// and no gate that can be left unanswered -- a run needs all thirty-nine
-/// numbers, and thirty-seven of them are nowhere in this repository, its
-/// documents or its decision ledger.
-///
-/// So this reads each from `BRUTEX_ADMIT_<GATE>` and, when any is unset,
-/// refuses with the whole worksheet rather than the first name the runner
-/// happened to check.
+/// and no gate that can be left unanswered. The selected runtime research file
+/// supplies the37 delegated values; existing explicit knob overrides take
+/// precedence. Without a selected file, all unresolved fields are still named
+/// together rather than silently assigned defaults.
 ///
 /// `verb` is stamped on the two events this resolution emits -- one per run,
 /// never one per gate -- so that a log filtered to `cli.ledger` says which verb
@@ -367,8 +408,28 @@ pub(crate) fn admission_policy(
         .max_points
         .checked_mul(PAISA_PER_POINT)
         .ok_or_else(|| format!("MAX_POINTS {} overflows paisa", request.max_points))?;
+    let profile =
+        crate::research_policy::ResearchPolicy::from_env(max_loss_paisa).inspect_err(|why| {
+            crate::note(&stage_refused_event(verb, "research-policy", why));
+        })?;
+    if let Some(profile) = profile.as_ref() {
+        // A valid override cannot redeem an out-of-domain selected profile.
+        resolve_policy(request, "policy-file-check", Some(profile.clone()), false)?;
+    }
+    resolve_policy(request, verb, profile, true)
+}
 
-    let mut r = GateResolver::new();
+pub(crate) fn resolve_policy(
+    request: &LedgerAllRequest<'_>,
+    verb: &str,
+    profile: Option<crate::research_policy::ResearchPolicy>,
+    read_knobs: bool,
+) -> Result<(AdmissionPolicyV1, Vec<ActiveGate>), String> {
+    let max_loss_paisa = request
+        .max_points
+        .checked_mul(PAISA_PER_POINT)
+        .ok_or_else(|| format!("MAX_POINTS {} overflows paisa", request.max_points))?;
+    let mut r = GateResolver::new(profile, read_knobs);
     let draft = AdmissionPolicyDraftV1 {
         // THE TWO THE OPERATOR HAS STATED. Both carry the sentence they came
         // from, so a reader of the report can check the number against the rule
@@ -387,8 +448,9 @@ pub(crate) fn admission_policy(
                 "stated rule: smallest win at least three times the largest loss",
             )),
         ),
-        // AND THE THIRTY-SEVEN NOBODY HAS. Each is read from its own knob and
-        // named in the refusal when it is not set.
+        // The 37 delegated research fields come from an explicitly selected
+        // runtime file or a named override. No file selected retains the
+        // original complete worksheet refusal; a bad file cannot disappear.
         min_support_hits: r.gate("min_support_hits", None),
         min_independent_sessions: r.gate("min_independent_sessions", None),
         min_trades: r.gate("min_trades", None),
@@ -461,12 +523,12 @@ fn unset_gate_worksheet(resolver: &GateResolver) -> String {
         ALL_GATES.len()
     );
     why.push_str(
-        "\nThese are thresholds that decide what this engine is willing to trade. Not one\n\
-         of them is named in this repository, in docs/, or in the decision ledger -- every\n\
-         construction of an admission policy in the workspace is a test fixture. Choosing\n\
-         them here would be inventing a trading policy and printing it as though somebody\n\
-         had decided it.\n\n\
-         Set each as an environment variable and run again:\n\n",
+        "\nThese thresholds decide whether historical research qualifies. One complete\n\
+         profile is provided in config/intraday-research-v1.toml under the operator's\n\
+         delegated research choices. Select it with BRUTEX_ADMISSION_POLICY_FILE, or\n\
+         use an edited complete file. cli policy-check FILE MAX_POINTS explains it.\n\
+         A profile is not a guarantee of trading performance.\n\n\
+         Individual environment overrides remain available:\n\n",
     );
     for name in &resolver.missing {
         let _ = writeln!(why, "  {}=", GateResolver::knob_of(name));
@@ -543,7 +605,7 @@ const ALL_GATES: [&str; 39] = [
 pub(crate) fn render_gate_census(out: &mut String, active: &[ActiveGate]) {
     let _ = writeln!(
         out,
-        "\nADMISSION GATES -- all {} applied, and where each value came from",
+        "\nADMISSION GATES -- all {} configured, and where each value came from; this is not a candidate verdict",
         ALL_GATES.len()
     );
     for gate in active {
@@ -807,12 +869,12 @@ pub(crate) fn ledger_all(request: &LedgerAllRequest<'_>) -> String {
 /// wearing a success's clothes that `CLAUDE.md` §4 bans outright.
 fn run_chain(request: &LedgerAllRequest<'_>, out: &mut String) -> Result<usize, String> {
     let vendor = crate::parse_vendor(request.vendor)?;
+    let (admission, active_gates) = admission_policy(request, LEDGER_ALL_VERB)?;
+    render_gate_census(out, &active_gates);
     let source_root = crate::store_root().map_err(|why| format!("stored source root: {why}"))?;
     let tree = LedgerTree::create(request.root)?;
 
     let sweepers = build_sweepers(&source_root, vendor, request, LEDGER_ALL_VERB)?;
-    let (admission, active_gates) = admission_policy(request, LEDGER_ALL_VERB)?;
-    render_gate_census(out, &active_gates);
 
     let ranking = RankingPolicyV1::new(Weights::equal())
         .map_err(|why| format!("ranking policy refused: {why:?}"))?;
@@ -1414,6 +1476,49 @@ pub(crate) mod tests {
     /// Whether an integer field on a landed record carries exactly `want`.
     pub(crate) fn counts(record: &telemetry::Record, key: &str, want: u64) -> bool {
         record.field(key).and_then(telemetry::OwnedValue::as_u64) == Some(want)
+    }
+
+    #[test]
+    fn missing_policy_refuses_before_legacy_ledger_market_sizing_or_output_creation() {
+        let _serial = crate::knobs::serially();
+        crate::knobs::clear_all();
+        let root = std::env::temp_dir().join(format!(
+            "brutex-ledger-all-policy-preflight-{}",
+            std::process::id()
+        ));
+        assert!(!root.exists());
+        let request = LedgerAllRequest {
+            vendor: "dhan",
+            from: (2024, 1),
+            to: (2024, 1),
+            support_ppm: 200_000,
+            max_points: 50,
+            root: &root,
+        };
+        let from = mark();
+        let report = super::ledger_all(&request);
+        assert!(
+            report.contains("37 of 39 admission gates have no value"),
+            "{report}"
+        );
+        assert!(
+            !root.exists(),
+            "invalid policy cannot create an authority tree"
+        );
+        assert!(!report.contains("COMMITTED."), "{report}");
+        assert!(landed(from, "admission gates unset").iter().any(|record| {
+            says(record, "verb", LEDGER_ALL_VERB)
+                && counts(record, "missing", 37)
+                && counts(record, "gates", 39)
+        }));
+        for message in ["rung support sized", "rung refused"] {
+            assert!(
+                !landed(from, message)
+                    .iter()
+                    .any(|record| says(record, "verb", LEDGER_ALL_VERB)),
+                "market sizing was reached despite a missing policy"
+            );
+        }
     }
 
     /// A request that refuses before it can touch the store.

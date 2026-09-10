@@ -50,6 +50,11 @@
 //! times this, so the shape above is read from the source rather
 //! than measured. `CLAUDE.md` §3 rule 6.
 
+#[path = "research_admission_projection.rs"]
+pub mod research_projection;
+#[path = "research_admission_projection_codec.rs"]
+pub mod research_projection_codec;
+
 /// Comparison-projection denominator for bounded rates and probabilities.
 ///
 /// This denominator is not the durable representation of a statistical value.
@@ -2552,7 +2557,15 @@ fn decode_evidence(bytes: &[u8]) -> Result<AdmissionEvidenceV1, AdmissionCanonic
         EVIDENCE_DOMAIN_V1,
         EVIDENCE_PAYLOAD_LEN_V1,
     )?;
-    let values = AdmissionEvidenceValuesV1 {
+    let values = read_evidence_values(&mut reader)?;
+    reader.finish();
+    AdmissionEvidenceV1::new(values).map_err(AdmissionCanonicalRefusalV1::Evidence)
+}
+
+fn read_evidence_values(
+    reader: &mut CanonicalReader<'_>,
+) -> Result<AdmissionEvidenceValuesV1, AdmissionCanonicalRefusalV1> {
+    Ok(AdmissionEvidenceValuesV1 {
         support_hits: reader.read_observed_u64()?,
         independent_sessions: reader.read_observed_u64()?,
         trades: reader.read_observed_u64()?,
@@ -2597,9 +2610,7 @@ fn decode_evidence(bytes: &[u8]) -> Result<AdmissionEvidenceV1, AdmissionCanonic
         white_reality_decision: reader.read_hypothesis_decision()?,
         romano_wolf_decision: reader.read_hypothesis_decision()?,
         full_precision_statistics_complete: reader.read_completeness()?,
-    };
-    reader.finish();
-    AdmissionEvidenceV1::new(values).map_err(AdmissionCanonicalRefusalV1::Evidence)
+    })
 }
 
 fn decode_reason_bits(
@@ -6405,6 +6416,167 @@ mod tests {
     fn constructible_evidence() -> AdmissionEvidenceV1 {
         AdmissionEvidenceV1::new(constructible_values())
             .expect("explicitly non-authoritative PBO states are valid V1 evidence")
+    }
+
+    #[test]
+    fn research_projection_reuses_every_comparison_without_minting_legacy_evidence() {
+        let policy = policy();
+        let original = constructible_values();
+        let projection = policy
+            .evaluate_research_projection(original)
+            .expect("valid projection");
+        assert_eq!(projection.values(), original);
+        assert_eq!(
+            projection.verdict(),
+            policy.evaluate(&constructible_evidence())
+        );
+        assert_eq!(projection.policy_digest(), policy.digest());
+        assert_eq!(&projection.canonical_bytes()[..8], b"BRAPRO01");
+        assert!(AdmissionEvidenceV1::from_canonical_bytes(&projection.canonical_bytes()).is_err());
+        for reason in AdmissionReasonV1::ALL {
+            let mut missing = passing_values();
+            set_unmeasured(&mut missing, reason);
+            if matches!(
+                reason,
+                AdmissionReasonV1::Trades
+                    | AdmissionReasonV1::WinningTrades
+                    | AdmissionReasonV1::LosingTrades
+            ) {
+                missing.win_rate_ppm = ObservedU64V1::Unmeasured;
+                missing.losing_trade_rate_ppm = ObservedU64V1::Unmeasured;
+            }
+            let actual = policy
+                .evaluate_research_projection(missing)
+                .expect("missing is explicit");
+            assert_eq!(
+                actual.verdict(),
+                policy.evaluate(&evidence(&missing)),
+                "{reason:?}"
+            );
+            assert!(actual.verdict().unmeasured().contains(reason));
+        }
+        let complete = passing_values();
+        assert!(AdmissionEvidenceV1::new(complete).is_err());
+        let actual = policy
+            .evaluate_research_projection(complete)
+            .expect("successor arithmetic");
+        assert_eq!(actual.verdict(), policy.evaluate(&evidence(&complete)));
+        assert_ne!(actual.canonical_bytes(), projection.canonical_bytes());
+        let mut malformed = complete;
+        malformed.pbo_ppm = ObservedU64V1::Measured(PPM + 1);
+        assert!(policy.evaluate_research_projection(malformed).is_err());
+        malformed = complete;
+        malformed.winning_trades = ObservedU64V1::Measured(u64::MAX);
+        assert!(policy.evaluate_research_projection(malformed).is_err());
+    }
+
+    #[test]
+    fn research_projection_authenticates_statistics_and_serializes_all_verdict_states() {
+        use super::research_projection::{hypothesis_decision, wilson_ppm};
+
+        for (wins, trades) in [(0, 0), (0, 100), (1, 1), (50, 100), (100, 100)] {
+            let (bits, ppm) = canonical_wilson_projection_v2(wins, trades);
+            assert_eq!(wilson_ppm(wins, trades, bits), Some(ppm));
+            assert_eq!(wilson_ppm(wins, trades, bits ^ 1), None);
+        }
+        assert_eq!(wilson_ppm(1, 0, 0), None);
+        assert_eq!(wilson_ppm(u64::MAX, 1, 0), None);
+        for (numerator, denominator, expected) in [
+            (0, 1, HypothesisDecisionV1::RejectedNull),
+            (1, 20, HypothesisDecisionV1::RejectedNull),
+            // Same floor ppm as 1/20, but strictly above the exact threshold.
+            (5_000_001, 100_000_000, HypothesisDecisionV1::DidNotReject),
+            (1, 1, HypothesisDecisionV1::DidNotReject),
+        ] {
+            let probability = AdmissionExactProbabilityV2::new(numerator, denominator)
+                .expect("valid generated exact fraction");
+            assert_eq!(hypothesis_decision(probability), expected);
+        }
+        let mut failed = passing_values();
+        failed.support_hits = ObservedU64V1::Measured(99);
+        let mut missing = passing_values();
+        missing.support_hits = ObservedU64V1::Unmeasured;
+        let mut refused = passing_values();
+        refused.support_hits = ObservedU64V1::Refused;
+        for (values, status) in [
+            (passing_values(), 0),
+            (failed, 1),
+            (missing, 2),
+            (refused, 3),
+        ] {
+            let projection = policy()
+                .evaluate_research_projection(values)
+                .expect("valid generated evidence");
+            let bytes = projection.canonical_bytes();
+            assert_eq!(bytes.len(), 448);
+            assert_eq!(&bytes[8..40], &policy().digest());
+            assert_eq!(bytes[412], status);
+            assert_eq!(&bytes[413..], &[0; 35]);
+            let expected = projection.verdict();
+            for (offset, bits) in [
+                (380, expected.reasons()),
+                (388, expected.failed()),
+                (396, expected.unmeasured()),
+                (404, expected.refused()),
+            ] {
+                assert_eq!(
+                    bytes.get(offset..offset + 8),
+                    Some(bits.bits().to_le_bytes().as_slice())
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn research_projection_cold_codec_preserves_legacy_domains_and_refuses_foreign_bytes() {
+        let policy = policy();
+        let evidence = constructible_evidence();
+        let legacy = evidence.canonical_bytes();
+        assert_eq!(
+            AdmissionEvidenceV1::from_canonical_bytes(&legacy)
+                .expect("legacy evidence still decodes")
+                .canonical_bytes(),
+            legacy
+        );
+        let projection = policy
+            .evaluate_research_projection(passing_values())
+            .expect("valid research arithmetic");
+        let bytes = projection.canonical_bytes();
+        assert_eq!(
+            super::research_projection_codec::decode(&policy, &bytes),
+            Ok(projection)
+        );
+        assert!(AdmissionEvidenceV1::from_canonical_bytes(&bytes).is_err());
+        assert!(super::research_projection_codec::decode(&policy, &legacy).is_err());
+        for end in 0..bytes.len() {
+            assert!(
+                super::research_projection_codec::decode(
+                    &policy,
+                    bytes.get(..end).expect("bounded prefix")
+                )
+                .is_err()
+            );
+        }
+        for position in [0, 7, 8, 39, 40, 380, 388, 396, 404, 412, 413, 447] {
+            let mut changed = bytes;
+            *changed.get_mut(position).expect("fixed byte") ^= 128;
+            assert!(super::research_projection_codec::decode(&policy, &changed).is_err());
+        }
+        // Valid measured tags still must obey the shared count domain: a
+        // positive independent-session subset cannot have zero support hits.
+        let mut impossible_counts = bytes;
+        impossible_counts
+            .get_mut(41..49)
+            .expect("support payload")
+            .copy_from_slice(&0_u64.to_le_bytes());
+        assert!(
+            super::research_projection_codec::decode(&policy, &impossible_counts)
+                .expect_err("subset exceeds total")
+                .contains("SupportSessions")
+        );
+        let mut extra = bytes.to_vec();
+        extra.push(0);
+        assert!(super::research_projection_codec::decode(&policy, &extra).is_err());
     }
 
     fn evidence(values: &AdmissionEvidenceValuesV1) -> AdmissionEvidenceV1 {

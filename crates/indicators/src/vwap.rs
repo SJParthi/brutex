@@ -2,22 +2,25 @@
 //!
 //! **20 vocabulary positions**: 52–53, 143–152 and 190–197.
 //!
-//! # The abstention is decided ONCE PER RUN, never per bar
+//! # Instrument eligibility is decided before reading bars
 //!
-//! This is the rule that matters most here, and getting it wrong is subtle enough
-//! that an audit named it before the module existed.
+//! [`Vwap::for_slice`] receives the caller's volume policy. A spot-index run
+//! uses [`Availability::Absent`], even if its vendor supplies constituent-volume
+//! aggregates. Eligible cash-stock runs use [`Availability::Present`] and their
+//! own observed OHLCV. A futures contract also has its own traded volume, but
+//! the CLI's separate sweep-scope gate excludes contracts.
 //!
-//! A spot index has no traded volume, so on a slice where `volume` is identically
-//! zero VWAP is a division by zero and every position must be false. The tempting
-//! implementation checks `cumulative_volume == 0` per bar and returns nothing —
-//! and it is **wrong**, because a slice whose first hour carries zero volume and
-//! whose second hour does not would make bit 52 mean "below VWAP" in the morning
-//! and "no opinion" at the open, silently, within one run.
+//! Eligibility never changes after scanning later bars. Reference readiness
+//! does change causally: a present-volume run needs two contributing bars in
+//! the current session before these predicates can be evaluated. Zero-volume
+//! bars do not contribute. Unavailable predicates have zero truth bits and
+//! zero known bits, so NOT cannot turn missing volume into a signal. Once
+//! references exist, exact comparisons are known; near predicates additionally
+//! need positive dispersion and the correct tolerance family.
 //!
-//! So the decision is taken before the first bar: [`Vwap::for_slice`] is handed
-//! the verdict, and [`Availability::Absent`] makes every one of the 20 positions
-//! false for the whole run. `docs/03-vocabulary.md` §4 is the authority — a bit
-//! that cannot be evaluated evaluates false, and it never evaluates to "probably".
+//! This is an OHLCV typical-price VWAP, not a reconstruction of trade-by-trade
+//! VWAP: each observed bar contributes `(high + low + close) / 3`, weighted
+//! by its own volume. No ticks or replacement volume are introduced.
 //!
 //! # It is measured, and the measurement went the other way
 //!
@@ -87,16 +90,16 @@
 use crate::Candle;
 use vocab::{ConditionMask, Tolerance};
 
-/// Whether this run's slice carries traded volume at all.
+/// Whether the caller permits this instrument's own traded-volume reference.
 ///
 /// Decided once, before the first bar, and never revisited. See the module
 /// documentation for why per-bar is wrong.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Availability {
-    /// The slice carries volume. VWAP is computable.
+    /// Eligible volume source; session readiness still requires contributing bars.
     Present,
-    /// The slice carries no volume anywhere. Every VWAP position is false for the
-    /// whole run, and the reason is recorded rather than inferred.
+    /// Volume reference disabled. Every VWAP position stays false and unknown
+    /// for the whole run, regardless of the numerical volume supplied in bars.
     Absent,
 }
 
@@ -169,8 +172,9 @@ const ACC_CEILING: i128 = 10_i128.pow(34);
 /// Making it genuinely flat is possible and was rejected: dropping the
 /// convergence exit would run all 128 iterations every time, paying the worst
 /// case on every call to buy a flatness no caller needs. VWAP abstains entirely
-/// on spot indices, which carry no volume, so this function does not execute at
-/// all on the data the engine actually sweeps.
+/// on spot indices, so this function does not execute on those runs. Eligible
+/// cash-stock sweeps do execute it; their per-bar cost includes this bounded,
+/// operand-dependent work.
 #[must_use]
 pub fn isqrt_i128(v: i128) -> i128 {
     isqrt_i128_counted(v).0
@@ -483,11 +487,9 @@ impl Vwap {
             // cannot be expressed on the price scale emits **nothing** rather than a
             // saturated level, because a saturated level is a comparison against a
             // number the market never printed.
-            let Ok(offset) = i64::try_from(multiple * i128::from(sigma)) else {
+            let Some((upper, lower)) = band_levels(vwap, sigma, *multiple) else {
                 continue;
             };
-            let upper = vwap.saturating_add(offset);
-            let lower = vwap.saturating_sub(offset);
             if close > upper {
                 mask = set(mask, above);
             }
@@ -502,6 +504,39 @@ impl Vwap {
         }
         mask
     }
+
+    /// Which of the same 20 predicates can be evaluated, including false ones.
+    /// Near availability uses the same vocabulary check and sigma scale as truth.
+    /// Zero sigma leaves exact comparisons known and near comparisons unknown.
+    pub(crate) fn known(&self, tolerance: Tolerance) -> ConditionMask {
+        let mut known = ConditionMask::ZERO;
+        let (Some(vwap), Some(sigma)) = (self.value(), self.sigma()) else {
+            return known;
+        };
+        for position in [52, 53, 143, 144] {
+            known = known.with_bit(position);
+        }
+        known = near(known, 145, tolerance, vwap, vwap, sigma);
+        for (multiple, (above, below, near_up, near_down, inside)) in
+            BAND_SIGMA.iter().zip(BAND_POSITIONS)
+        {
+            let Some((upper, lower)) = band_levels(vwap, sigma, *multiple) else {
+                continue;
+            };
+            for position in [above, below, inside] {
+                known = known.with_bit(u32::from(position));
+            }
+            known = near(known, near_up, tolerance, upper, upper, sigma);
+            known = near(known, near_down, tolerance, lower, lower, sigma);
+        }
+        known
+    }
+}
+
+/// Truth and availability share exactly the same representable band bounds.
+fn band_levels(vwap: i64, sigma: i64, multiple: i128) -> Option<(i64, i64)> {
+    let offset = i64::try_from(multiple.checked_mul(i128::from(sigma))?).ok()?;
+    Some((vwap.checked_add(offset)?, vwap.checked_sub(offset)?))
 }
 
 /// `(above, below, near_upper, near_lower, inside)` for each entry of
@@ -670,6 +705,86 @@ mod tests {
             p2v,
             contributing: MIN_FOR_SIGMA,
         }
+    }
+
+    #[test]
+    fn all_twenty_known_positions_follow_their_actual_reference_and_tolerance() {
+        let mut v = Vwap::for_slice(Availability::Present);
+        assert_eq!(v.known(tol()), ConditionMask::ZERO);
+        v.fold(&at(0, 200, 1)).expect("first generated observation");
+        assert_eq!(v.known(tol()), ConditionMask::ZERO);
+        v.fold(&at(1, 300, 1))
+            .expect("second generated observation");
+        assert_eq!(v.value(), Some(250));
+        assert_eq!(v.sigma(), Some(50));
+        let all = positions()
+            .into_iter()
+            .fold(ConditionMask::ZERO, |mask, bit| {
+                mask.with_bit(u32::from(bit))
+            });
+        assert_eq!(v.known(tol()), all);
+        let near_bits = [145, 150, 151, 190, 191, 195, 196];
+        let wrong = vocab::tolerance::pinned_pivot().expect("other tolerance family");
+        for bit in positions().map(u32::from) {
+            assert_eq!(v.known(wrong).get(bit), !near_bits.contains(&bit));
+        }
+        let mut observed_true = ConditionMask::ZERO;
+        let mut observed_false = ConditionMask::ZERO;
+        for close in 1..=450 {
+            let truth = v.bits(close, tol());
+            for bit in positions().map(u32::from) {
+                if truth.get(bit) {
+                    observed_true = observed_true.with_bit(bit);
+                } else {
+                    observed_false = observed_false.with_bit(bit);
+                }
+            }
+        }
+        assert_eq!(
+            observed_true, all,
+            "every mapped predicate must be reachable"
+        );
+        assert_eq!(observed_false, all, "every mapped predicate can be false");
+        v.availability = Availability::Absent;
+        assert_eq!(v.known(tol()), ConditionMask::ZERO);
+    }
+
+    #[test]
+    fn zero_dispersion_knows_exact_comparisons_but_cannot_certify_near_false() {
+        let mut v = Vwap::for_slice(Availability::Present);
+        v.fold(&at(0, 100, 1)).expect("first generated observation");
+        v.fold(&at(1, 100, 1))
+            .expect("second generated observation");
+        let near_bits = [145, 150, 151, 190, 191, 195, 196];
+        let known = v.known(tol());
+        assert_eq!(known.popcount(), 13);
+        for bit in positions().map(u32::from) {
+            assert_eq!(known.get(bit), !near_bits.contains(&bit));
+        }
+    }
+
+    #[test]
+    fn unrepresentable_band_levels_cannot_be_truth_or_known_false() {
+        assert_eq!(
+            band_levels(i64::MAX - 1, 1, 1),
+            Some((i64::MAX, i64::MAX - 2))
+        );
+        assert_eq!(band_levels(i64::MAX, 1, 1), None);
+        assert_eq!(
+            band_levels(i64::MIN + 1, 1, 1),
+            Some((i64::MIN + 2, i64::MIN))
+        );
+        assert_eq!(band_levels(i64::MIN, 1, 1), None);
+        assert_eq!(band_levels(0, i64::MAX, 2), None);
+        assert_eq!(band_levels(0, 2, i128::MAX), None);
+        // Private hostile state, outside the production accumulator ceiling:
+        // first two bands fit, the third offset does not.
+        let v = primed(0, 3, 1, 10_i128.pow(38));
+        for bit in [193, 194, 195, 196, 197] {
+            assert!(!v.bits(1, tol()).get(bit));
+            assert!(!v.known(tol()).get(bit));
+        }
+        assert!(v.known(tol()).get(146) && v.known(tol()).get(148));
     }
 
     fn at(minute: i64, price: i64, volume: i64) -> Candle {

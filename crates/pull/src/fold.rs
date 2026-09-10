@@ -719,6 +719,262 @@ pub fn fold_from_bars(bars: &[Bar], bucket: Bucket, source: Bucket) -> Result<Ve
     fold(bars, bucket)
 }
 
+/// Fold minute candles only when every scheduled minute in a bucket exists.
+/// The fixed persisted grid is retained, including scheduled closing stubs.
+/// Missing buckets are omitted and named; no prices or store bytes are repaired.
+/// Exceptional sessions are withheld: their timetable is known, but this
+/// persisted grid cannot attest their alignment without a format decision.
+/// Entirely absent civil days are not checked: input bars alone do not prove
+/// request coverage. Gap checks reset at each observed IST day and inspect only
+/// that day's scheduled windows, never the elapsed span between observations.
+/// A later observed IST day closes the previous day's tail check at its known
+/// session close. The final input day's unobserved tail remains unchecked:
+/// there is no request endpoint here to distinguish a gap from a partial read.
+///
+/// # Errors
+/// Returns the ordinary fold refusal for unordered input or incompatible widths.
+pub fn complete_minutes(
+    bars: &[Bar],
+    bucket: Bucket,
+) -> Result<(Vec<Bar>, Vec<String>), FoldError> {
+    complete_minutes_for_venue(bars, bucket, crate::vendor::Venue::NseIndex)
+}
+
+/// Venue-aware minute completeness on the fixed store grid. Regular trading
+/// days use the venue's dated continuous hours; exceptional calendar sessions
+/// remain withheld. Cash uses the existing venue schedule, without inferring
+/// per-instrument closing-auction eligibility. See [`complete_minutes`] for
+/// the limits on unobserved days and final tails.
+///
+/// # Errors
+/// Returns the ordinary fold refusal for unordered input or incompatible widths.
+pub fn complete_minutes_for_venue(
+    bars: &[Bar],
+    bucket: Bucket,
+    venue: crate::vendor::Venue,
+) -> Result<(Vec<Bar>, Vec<String>), FoldError> {
+    complete_minutes_with_cash_schedule(bars, bucket, venue, None)
+}
+
+/// Complete continuous-minute buckets using dated per-security CAS evidence.
+/// Missing evidence withholds the affected day; auction rows never complete a
+/// continuous bucket.
+///
+/// # Errors
+/// Returns the same order/width/overflow refusals as `complete_minutes`.
+pub fn complete_minutes_with_cash_schedule(
+    bars: &[Bar],
+    bucket: Bucket,
+    venue: crate::vendor::Venue,
+    cash_schedule: Option<&crate::cash_auction::Schedule>,
+) -> Result<(Vec<Bar>, Vec<String>), FoldError> {
+    complete_minutes_with_calendar(
+        bars,
+        bucket,
+        venue,
+        cash_schedule,
+        crate::calendar::Runtime::default(),
+    )
+}
+
+/// Audit derived buckets with the same runtime calendar as request coverage.
+/// Observed calendars cannot authorize a session or erase a static unknown.
+///
+/// # Errors
+/// Returns the same order/width/overflow refusals as `complete_minutes`.
+pub fn complete_minutes_with_calendar(
+    bars: &[Bar],
+    bucket: Bucket,
+    venue: crate::vendor::Venue,
+    cash_schedule: Option<&crate::cash_auction::Schedule>,
+    runtime: crate::calendar::Runtime<'_>,
+) -> Result<(Vec<Bar>, Vec<String>), FoldError> {
+    const MINUTE: i64 = 60_000_000;
+    const DAY: i64 = 86_400_000_000;
+    const OFFSET: i64 = crate::session::IST_OFFSET_SECS * 1_000_000;
+    let candidates = fold_from_bars(bars, bucket, Bucket::MINUTE)?;
+    let mut complete = Vec::with_capacity(candidates.len());
+    let mut diagnostics = Vec::new();
+    let mut cursor = 0;
+    let mut previous_end: Option<i64> = None;
+    let mut previous_day: Option<i64> = None;
+    let mut previous_tail: Option<(i64, i64)> = None;
+    for bar in candidates {
+        let start = bar.ts_micros;
+        let end = start
+            .checked_add(i64::from(bucket.secs()) * 1_000_000)
+            .ok_or(FoldError::AnchorOverflow { ts_micros: start })?;
+        let day = start
+            .checked_add(OFFSET)
+            .ok_or(FoldError::AnchorOverflow { ts_micros: start })?
+            .div_euclid(DAY);
+        let midnight = day
+            .checked_mul(DAY)
+            .and_then(|t| t.checked_sub(OFFSET))
+            .ok_or(FoldError::AnchorOverflow { ts_micros: start })?;
+        let calendar = runtime.kind_of(day);
+        let exceptional = matches!(calendar, crate::calendar::DayKind::Open(s) if s != crate::calendar::Session::full());
+        let session = match minute_session(day, calendar, venue, cash_schedule) {
+            Ok(session) => session,
+            Err(why) => {
+                diagnostics.push(format!("bucket {start}: {why}; withheld"));
+                crate::calendar::DayKind::Unmeasured
+            }
+        };
+        // Flush only the last observed day's scheduled tail before resetting.
+        // No candidate exists for an entirely absent closing bucket, and no
+        // timetable or request coverage is inferred for intervening days.
+        if previous_day != Some(day)
+            && let Some((missing, close)) = previous_tail
+            && missing < close
+        {
+            let expected = (i128::from(close) - i128::from(missing)) / i128::from(MINUTE);
+            diagnostics.push(format!("bucket range [{missing}, {close}): absent: observed 0, scheduled {expected}; observed-day tail withheld; historical gap refill requires a versioned store repair"));
+        }
+        if calendar == crate::calendar::DayKind::Unmeasured && previous_day != Some(day) {
+            diagnostics.push(format!(
+                "day {day}: UNVERIFIED: {}; derived buckets withheld",
+                runtime.unverified_reason(day)
+            ));
+        }
+        // Entirely absent buckets never become fold candidates. Name those
+        // between observed buckets too; do not treat session breaks as gaps.
+        let first_open = match session {
+            crate::calendar::DayKind::Open(_) if !exceptional => Some(
+                midnight
+                    .checked_add(i64::from(crate::calendar::OPEN_MINUTE) * MINUTE)
+                    .ok_or(FoldError::AnchorOverflow { ts_micros: start })?,
+            ),
+            _ => None,
+        };
+        let gap_start = if previous_day == Some(day) {
+            previous_end
+        } else {
+            first_open
+        };
+        if let Some(missing) = gap_start.filter(|missing| *missing < start) {
+            let expected = scheduled_minutes(session, midnight, missing, start);
+            if expected > 0 {
+                diagnostics.push(format!("bucket range [{missing}, {start}): absent: observed 0, scheduled {expected}; withheld; historical gap refill requires a versioned store repair"));
+            }
+        }
+        previous_end = Some(end);
+        previous_day = Some(day);
+        previous_tail = match first_open {
+            Some(open) => Some((
+                end.max(open),
+                open.checked_add(session_minutes(session) * MINUTE)
+                    .ok_or(FoldError::AnchorOverflow { ts_micros: start })?,
+            )),
+            None => None,
+        };
+        let mut count = 0_i64;
+        let mut valid = true;
+        let mut previous = None;
+        while let Some(source) = bars.get(cursor).filter(|source| source.ts_micros < end) {
+            let minute = u16::try_from(
+                (i128::from(source.ts_micros) - i128::from(midnight))
+                    .div_euclid(i128::from(MINUTE)),
+            )
+            .ok();
+            valid &= source.ts_micros.rem_euclid(MINUTE) == 0
+                && previous != Some(source.ts_micros)
+                && matches!((session, minute), (crate::calendar::DayKind::Open(s), Some(m)) if s.expects(m));
+            previous = Some(source.ts_micros);
+            count += 1;
+            cursor += 1;
+        }
+        let expected = scheduled_minutes(session, midnight, start, end);
+        if exceptional {
+            diagnostics.push(format!("bucket {start}: exceptional session {session:?} withheld; fixed stored grid cannot attest session alignment; versioned store architecture required"));
+        } else if valid && expected > 0 && i128::from(count) == expected {
+            complete.push(bar);
+        } else {
+            diagnostics.push(format!("bucket {start}: incomplete or invalid minute coverage: observed {count}, scheduled {expected}, calendar {session:?}; withheld; historical gap refill requires a versioned store repair"));
+        }
+    }
+    Ok((complete, diagnostics))
+}
+
+fn session_minutes(session: crate::calendar::DayKind) -> i64 {
+    match session {
+        crate::calendar::DayKind::Open(s) => i64::from(s.bars()),
+        _ => 0,
+    }
+}
+
+/// The calendar decides which days are regular; the venue decides their hours.
+pub(crate) fn minute_session(
+    day: i64,
+    calendar: crate::calendar::DayKind,
+    venue: crate::vendor::Venue,
+    cash_schedule: Option<&crate::cash_auction::Schedule>,
+) -> Result<crate::calendar::DayKind, String> {
+    use crate::calendar::{DayKind, Session, Window};
+    if calendar != DayKind::Open(Session::full()) {
+        return Ok(calendar);
+    }
+    let day = u32::try_from(day)
+        .map_err(|why| why.to_string())
+        .and_then(|day| crate::session::Day::from_days(day).map_err(|why| why.to_string()))?;
+    let hours = venue.hours_on(day).map_err(|why| why.to_string())?;
+    if hours.kind() != crate::vendor::SessionKind::Continuous
+        || hours.open_minute() != u32::from(crate::calendar::OPEN_MINUTE)
+    {
+        return Err(format!(
+            "{venue}: session hours cannot attest the fixed stored grid"
+        ));
+    }
+    let from = u16::try_from(hours.open_minute()).map_err(|why| why.to_string())?;
+    let close = if venue == crate::vendor::Venue::NseCash
+        && crate::vendor::cash_auction_eligibility_required(day)
+    {
+        u32::from(
+            cash_schedule
+                .ok_or_else(|| {
+                    format!("cash session UNVERIFIED on {day}: dated eligibility required")
+                })?
+                .close(day)?,
+        )
+    } else {
+        hours.close_minute()
+    };
+    let to = close
+        .checked_sub(1)
+        .and_then(|last| u16::try_from(last).ok())
+        .ok_or_else(|| format!("{venue}: invalid exclusive session close"))?;
+    Ok(DayKind::Open(Session {
+        windows: [Window { from, to }, Window { from: 0, to: 0 }],
+        count: 1,
+    }))
+}
+
+/// At most `MAX_WINDOWS` intersections, independent of the timestamp span.
+/// Wide intermediates keep boundary arithmetic exact at either i64 extreme.
+fn scheduled_minutes(
+    session: crate::calendar::DayKind,
+    midnight: i64,
+    start: i64,
+    end: i64,
+) -> i128 {
+    const MINUTE: i128 = 60_000_000;
+    match session {
+        crate::calendar::DayKind::Open(s) => s
+            .windows
+            .iter()
+            .take(usize::from(s.count))
+            .map(|w| {
+                let from =
+                    (i128::from(midnight) + i128::from(w.from) * MINUTE).max(i128::from(start));
+                let to =
+                    (i128::from(midnight) + (i128::from(w.to) + 1) * MINUTE).min(i128::from(end));
+                (to - from).max(0) / MINUTE
+            })
+            .sum(),
+        _ => 0,
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::indexing_slicing,

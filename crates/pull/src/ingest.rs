@@ -126,6 +126,8 @@
 //! measurement, however sound it is.
 
 use std::fs;
+#[path = "request_minutes.rs"]
+mod request_minutes;
 use std::io::{ErrorKind, Write as _};
 use std::path::{Path, PathBuf};
 
@@ -305,6 +307,10 @@ impl Ingested {
 /// `api::render::View` earlier in this codebase, for the same reason.
 #[derive(Debug, Clone, Copy)]
 pub struct Plan<'a> {
+    /// Runtime schedule authority, shared by request audit and derivation.
+    pub calendar: crate::calendar::Runtime<'a>,
+    /// Per-security dated continuous close; never inferred from today's basket.
+    pub cash_schedule: Option<&'a crate::cash_auction::Schedule>,
     /// Which column layout the files carry.
     pub columns: Columns,
     /// The window and the rung, passed straight to the filter.
@@ -883,6 +889,7 @@ fn from_members_inner(members: &[Member], store_root: &Path, plan: Plan<'_>) -> 
                     note_derived_shortfall(member, &short);
                     done.failures.push(short);
                 }
+                done.failures.extend(landed.failures);
                 for held in landed.entries {
                     match count(&mut census, held) {
                         Ok(changed) => {
@@ -1044,12 +1051,103 @@ pub fn from_window(
     store_root: &Path,
     plan: Plan<'_>,
 ) -> Ingested {
+    // This door receives vendor candles. Archive members bypass it and retain
+    // all legitimate snapshots, including identical rows within one second.
+    let mut rows = Vec::with_capacity(raw.rows.len());
+    let mut seen = std::collections::HashMap::with_capacity(raw.rows.len());
+    let mut duplicates = 0;
+    for row in &raw.rows {
+        if !broker_stamp_on_grid(row.timestamp, plan.encoding, plan.request.granularity) {
+            return Ingested {
+                members: 1,
+                rows_read: raw.rows.len(),
+                failures: vec![Failure {
+                    instrument: instrument.to_owned(),
+                    why: format!(
+                        "off-grid broker candle at {} ({:?}) for {}; refused before fold or append",
+                        row.timestamp,
+                        plan.encoding,
+                        plan.request.granularity.label()
+                    ),
+                }],
+                ..Ingested::default()
+            };
+        }
+        if let Some(previous) = seen.insert(row.timestamp, *row) {
+            if previous != *row {
+                return Ingested {
+                    members: 1,
+                    rows_read: raw.rows.len(),
+                    failures: vec![Failure {
+                        instrument: instrument.to_owned(),
+                        why: format!(
+                            "conflicting vendor candles at {}; refused before append",
+                            row.timestamp
+                        ),
+                    }],
+                    ..Ingested::default()
+                };
+            }
+            duplicates += 1;
+        } else {
+            rows.push(*row);
+        }
+    }
     let member = Member {
         path: std::path::PathBuf::from(origin),
         instrument: instrument.to_owned(),
-        rows: raw.rows.clone(),
+        rows,
     };
-    from_members(std::slice::from_ref(&member), store_root, plan)
+    let mut done = from_members(std::slice::from_ref(&member), store_root, plan);
+    for why in request_minutes::audit(&member.rows, plan) {
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::warn("pull.request_minutes", "request minute coverage incomplete")
+                .with("instrument", telemetry::Value::Str(instrument))
+                .with("reason", telemetry::Value::Str(&why)),
+        );
+        done.failures.push(Failure {
+            instrument: instrument.to_owned(),
+            why,
+        });
+    }
+    done.rows_read += duplicates;
+    done.rows_folded += duplicates;
+    if duplicates > 0 {
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::warn(
+                "pull.duplicate",
+                "identical vendor candles deduplicated; volume counted once",
+            )
+            .with("instrument", telemetry::Value::Str(instrument))
+            .with("duplicates", telemetry::Value::Uint(duplicates as u64)),
+        );
+    }
+    done
+}
+
+/// Broker candles must already start on the requested grid. Archive snapshots
+/// never enter this check. Work in milliseconds so subsecond offsets cannot be
+/// hidden by the later epoch-millisecond conversion; no input stamp is changed.
+fn broker_stamp_on_grid(
+    timestamp: i64,
+    encoding: TimestampEncoding,
+    granularity: crate::vendor::Granularity,
+) -> bool {
+    let crate::vendor::Grid::Intraday(seconds) = granularity.grid() else {
+        return true;
+    };
+    let offset = i128::from(crate::session::IST_OFFSET_SECS) * 1_000;
+    let utc_millis = match encoding {
+        TimestampEncoding::EpochMillisUtc => i128::from(timestamp),
+        TimestampEncoding::EpochSecondsUtc | TimestampEncoding::IsoDateTimeOffset => {
+            i128::from(timestamp) * 1_000
+        }
+        TimestampEncoding::IstDateTimeText | TimestampEncoding::IsoDateTimeText => {
+            i128::from(timestamp) * 1_000 - offset
+        }
+    };
+    let open = i128::from(Timeframe::OPEN_MINUTES_PAST_IST_MIDNIGHT) * 60_000;
+    (utc_millis + offset - open).rem_euclid(i128::from(seconds) * 1_000) == 0
 }
 
 /// Records one written month in the census, through the same lock and install
@@ -1414,6 +1512,8 @@ fn name_the_origin(done: &mut Ingested, origin: &str) {
 
 /// What one member put on disk, and the counter row that describes it.
 struct Landed {
+    /// Bucket refusals accompany safe appends and must reach the receipt.
+    failures: Vec<Failure>,
     /// Bars the member offered to the store.
     bars: usize,
     /// Bars actually WRITTEN — zero when the month already held this batch.
@@ -1572,6 +1672,7 @@ fn month_closes(file: &BarFile, header: &Header, batch: &[Bar]) -> Result<Closes
 /// looking correct on the one anybody tests.
 fn nothing_landed(census: DropCensus, folded: usize, outside_session: u32) -> Landed {
     Landed {
+        failures: Vec::new(),
         committed: 0,
         bars: 0,
         folded,
@@ -1598,7 +1699,9 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
     let raw = fetch::RawWindow {
         rows: member.rows.clone(),
     };
-    let mut landed = fetch::land(&raw, request, encoding, scale).map_err(|why| why.to_string())?;
+    let mut landed =
+        fetch::land_with_cash_schedule(&raw, request, encoding, scale, plan.cash_schedule)
+            .map_err(|why| why.to_string())?;
     // Bound once so the three returns below cannot disagree. See the field.
     let outside_session = landed.outside_session;
     if landed.bars.is_empty() {
@@ -1657,6 +1760,7 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
     let mut entries = Vec::new();
     let mut committed = 0usize;
     let mut months_written = 0usize;
+    let mut failures = Vec::new();
     for (ym, slice) in &by_month {
         let parts = PathParts {
             vendor,
@@ -1699,13 +1803,15 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
         //
         // Per month, because `DeriveInto::month` names one file and the
         // derived rungs of January must not land in February's.
-        derive_all(
+        failures.extend(derive_all(
             slice,
             &member.instrument,
             store_root,
             symbol_id,
             timeframe,
             DeriveInto {
+                calendar: plan.calendar,
+                cash_schedule: plan.cash_schedule,
                 // THE CONTRACT THE BARS WERE FILED UNDER, which is what
                 // `derive_all` reads its option/future line off. Leaving this
                 // `None` would file an option's derived rungs in the
@@ -1718,7 +1824,7 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
                 month: *ym,
             },
             &mut entries,
-        );
+        ));
     }
 
     // PER MONTH ON BOTH SIDES. `entries` now holds one bars entry per month
@@ -1735,6 +1841,7 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
     let derived_expected =
         derived_count_in(plan.contract, timeframe).saturating_mul(months_written);
     Ok(Landed {
+        failures,
         bars: landed.bars.len(),
         // WRITTEN, AS DISTINCT FROM OFFERED. See `Ingested::bars_stored`.
         committed,
@@ -1878,6 +1985,67 @@ struct Identity {
     symbol_id: u32,
 }
 
+/// Actual committed cash-minute dates in the given source months. This is the
+/// same identity/path/header check used by derivation, and reads no other rung
+/// or instrument. Missing files contribute no dates; corrupt files refuse.
+/// No calendar dates are synthesized and no file is created or changed.
+///
+/// # Errors
+/// Refuses invalid identity, unreadable source records or a timestamp outside
+/// its addressed month. O(committed source rows), once per affected month.
+pub fn committed_cash_days(
+    root: &Path,
+    vendor: Vendor,
+    instrument: &str,
+    months: &[store::path::YearMonth],
+) -> Result<Vec<crate::session::Day>, String> {
+    let identity = identify(instrument, "NSE", "CASH")?;
+    let mut months = months.to_vec();
+    months.sort_unstable();
+    months.dedup();
+    let mut days = std::collections::BTreeSet::new();
+    for month in months {
+        let path = StorePath::new(PathParts {
+            vendor,
+            exchange: "NSE",
+            segment: "CASH",
+            symbol: identity.symbol.as_str(),
+            contract: None,
+            timeframe: Timeframe::MINUTE_1,
+            month,
+            file: FileKind::Bars,
+        })
+        .map_err(|why| why.to_string())?;
+        let file = match BarFile::open_existing(root, path, identity.symbol_id) {
+            Ok(file) => file,
+            Err(store::file::StoreError::Missing { .. }) => continue,
+            Err(why) => {
+                return Err(format!(
+                    "{instrument} {month}: committed cash source: {why}"
+                ));
+            }
+        };
+        for index in 0..file.header().n_valid {
+            let row = file
+                .read_record(index)
+                .map_err(|why| format!("{instrument} {month}: {why}"))?;
+            let day =
+                crate::session::IstMoment::from_epoch_secs(row.ts_micros.div_euclid(1_000_000))
+                    .map_err(|why| why.to_string())?
+                    .day();
+            if day.year_month().map_err(|why| why.to_string())? != month {
+                return Err(format!(
+                    "{instrument} {month}: committed source timestamp belongs to {day}"
+                ));
+            }
+            if crate::vendor::cash_auction_eligibility_required(day) {
+                days.insert(day);
+            }
+        }
+    }
+    Ok(days.into_iter().collect())
+}
+
 /// Parses a member's symbol and venue, and derives the id the store stamps.
 ///
 /// # Why this happens BEFORE a bar file is opened
@@ -1926,7 +2094,9 @@ fn identify(instrument: &str, exchange: &str, segment: &str) -> Result<Identity,
 /// the same kind of rule as its line ceiling and six of these travel together
 /// everywhere they go.
 #[derive(Clone, Copy)]
-struct DeriveInto {
+struct DeriveInto<'a> {
+    calendar: crate::calendar::Runtime<'a>,
+    cash_schedule: Option<&'a crate::cash_auction::Schedule>,
     /// The contract these bars belong to, or `None` for spot.
     contract: Option<brutex_core::instrument::Contract>,
     vendor: Vendor,
@@ -1978,9 +2148,10 @@ fn derive_all(
     store_root: &Path,
     symbol_id: u32,
     source: Timeframe,
-    into: DeriveInto,
+    into: DeriveInto<'_>,
     entries: &mut Vec<Held>,
-) {
+) -> Vec<Failure> {
+    let mut failures = Vec::new();
     // DERIVED RUNGS ARE FOR THE UNDERLYING SPOT, AND ONLY FOR IT.
     //
     // The operator's rule, 15 Aug 2026: the internal timeframes "should be
@@ -2012,8 +2183,46 @@ fn derive_all(
     // — the same reason `api::ladder::Leg` exists. The suffix is the test:
     // `-FUT` for a future, a strike and a side for an option.
     if into.contract.is_some_and(|c| c.is_option()) {
-        return;
+        return failures;
     }
+    // Resume from the committed source month, not just this request's suffix.
+    // This is O(month rows) once per batch; record reads remain positional.
+    let history = if source == Timeframe::MINUTE_1 {
+        let read = || -> Result<Vec<Bar>, String> {
+            let path = StorePath::new(PathParts {
+                vendor: into.vendor,
+                exchange: into.exchange.as_str(),
+                segment: into.segment.as_str(),
+                symbol: into.symbol.as_str(),
+                contract: into.contract,
+                timeframe: source,
+                month: into.month,
+                file: FileKind::Bars,
+            })
+            .map_err(|why| why.to_string())?;
+            let file = BarFile::open_existing(store_root, path, symbol_id)
+                .map_err(|why| why.to_string())?;
+            (0..file.header().n_valid)
+                .map(|i| file.read_record(i).map_err(|why| why.to_string()))
+                .collect()
+        };
+        match read() {
+            Ok(bars) => Some(bars),
+            Err(why) => {
+                for rung in derived_from(source) {
+                    note_not_derived(instrument, rung, &why);
+                }
+                failures.push(Failure {
+                    instrument: instrument.to_owned(),
+                    why,
+                });
+                return failures;
+            }
+        }
+    } else {
+        None
+    };
+    let source_bars = history.as_deref().unwrap_or(source_bars);
     for rung in derived_from(source) {
         let parts = PathParts {
             vendor: into.vendor,
@@ -2055,11 +2264,32 @@ fn derive_all(
             timeframe: rung,
             month: into.month,
         };
-        match derive(source_bars, rung, store_root, symbol_id, parts, key) {
-            Ok(held) => entries.push(held),
-            Err(why) => note_not_derived(instrument, rung, &why),
+        match derive(
+            source_bars,
+            source,
+            rung,
+            store_root,
+            symbol_id,
+            parts,
+            (key, into.cash_schedule, into.calendar),
+        ) {
+            Ok((held, diagnostics)) => {
+                entries.push(held);
+                failures.extend(diagnostics.into_iter().map(|why| Failure {
+                    instrument: instrument.to_owned(),
+                    why: format!("{}: {why}", rung.as_str()),
+                }));
+            }
+            Err(why) => {
+                note_not_derived(instrument, rung, &why);
+                failures.push(Failure {
+                    instrument: instrument.to_owned(),
+                    why: format!("{}: {why}", rung.as_str()),
+                });
+            }
         }
     }
+    failures
 }
 
 /// Folds a member's bars to the rung being filed under, in place, and answers
@@ -2205,23 +2435,138 @@ fn derived_from(source: Timeframe) -> impl Iterator<Item = Timeframe> {
 /// and none of them fails the minute bars that are already committed.
 fn derive(
     minutes: &[store::format::Bar],
+    source: Timeframe,
     rung: Timeframe,
     store_root: &Path,
     symbol_id: u32,
     parts: PathParts<'_>,
-    key: EntryKey,
-) -> Result<Held, String> {
+    context: (
+        EntryKey,
+        Option<&crate::cash_auction::Schedule>,
+        crate::calendar::Runtime<'_>,
+    ),
+) -> Result<(Held, Vec<String>), String> {
+    let (key, cash_schedule, calendar) = context;
+    // A coarse source cannot prove that every underlying minute existed.
+    // Keep the paid-for source, but never publish an unchecked derived copy.
+    if source != Timeframe::MINUTE_1 {
+        return Err(format!(
+            "{} source cannot attest minute completeness for {}; derived output withheld; ingest one-minute source bars",
+            source.as_str(),
+            rung.as_str()
+        ));
+    }
     let bucket = crate::fold::Bucket::of_secs(rung.secs())
         .ok_or("a timeframe of zero seconds has no bucket to fold into")?;
-    let bars = crate::fold::fold(minutes, bucket).map_err(|why| why.to_string())?;
+    let exchange = Exchange::parse(parts.exchange).map_err(|why| why.to_string())?;
+    let segment = Segment::parse(parts.segment).map_err(|why| why.to_string())?;
+    let venue = crate::vendor::Venue::for_segment(exchange, segment).ok_or_else(|| {
+        format!(
+            "no verified minute-completeness venue for {}/{}",
+            parts.exchange, parts.segment
+        )
+    })?;
+    let (mut bars, mut diagnostics) = crate::fold::complete_minutes_with_calendar(
+        minutes,
+        bucket,
+        venue,
+        cash_schedule,
+        calendar,
+    )
+    .map_err(|why| why.to_string())?;
+    for why in &mut diagnostics {
+        // The fold knows source coverage, not whether a complete candidate is
+        // missing behind a stored tail. Classify store remedies below instead.
+        if let Some(coverage) =
+            why.strip_suffix("; historical gap refill requires a versioned store repair")
+        {
+            *why = format!(
+                "{coverage}; restore complete minute source and verified schedule evidence before retrying derivation"
+            );
+        }
+        note_not_derived(parts.symbol, rung, why);
+    }
+    let historical = reconcile_derived(&mut bars, store_root, symbol_id, parts).map_err(|why| {
+        if diagnostics.is_empty() {
+            why
+        } else {
+            format!("{why}; {}", diagnostics.join("; "))
+        }
+    })?;
+    diagnostics.extend(historical);
     if bars.is_empty() {
-        return Err(format!("{} folded to no bars", rung.as_str()));
+        return Err(format!(
+            "{} folded to no complete bars: {}",
+            rung.as_str(),
+            diagnostics.join("; ")
+        ));
     }
     // ONLY THE CENSUS ROW. A derived rung's committed count is not reported
     // separately — the receipt's `derived` line already says how many rungs
     // landed, and a second number for the same fact would be a second thing to
     // keep in step.
-    write_and_count(&bars, store_root, symbol_id, parts, key).map(|(held, _)| held)
+    write_and_count(&bars, store_root, symbol_id, parts, key).map(|(held, _)| (held, diagnostics))
+}
+
+/// Compare historical derived bytes at the monthly boundary, O(source + held).
+/// History is never replaced. Missing evidence and byte conflicts both refuse
+/// the rung, but only a complete-source comparison proves a conflict. Unfillable holes
+/// produce failures while complete buckets after the tail may still append.
+fn reconcile_derived(
+    bars: &mut Vec<Bar>,
+    root: &Path,
+    symbol_id: u32,
+    parts: PathParts<'_>,
+) -> Result<Vec<String>, String> {
+    let mut diagnostics = Vec::new();
+    let path = StorePath::new(parts).map_err(|why| why.to_string())?;
+    if !path
+        .to_path_buf(root)
+        .try_exists()
+        .map_err(|why| why.to_string())?
+    {
+        return Ok(diagnostics);
+    }
+    let file = BarFile::open_existing(root, path, symbol_id).map_err(|why| why.to_string())?;
+    let mut candidates = bars.iter().peekable();
+    let mut last = None;
+    for index in 0..file.header().n_valid {
+        let held = file.read_record(index).map_err(|why| why.to_string())?;
+        while let Some(candidate) = candidates.peek().filter(|b| b.ts_micros < held.ts_micros) {
+            let why = format!(
+                "historical derived gap at {}: complete source candidate is absent from stored history behind the tail; cannot be refilled append-only; versioned gapfill required; bytes preserved",
+                candidate.ts_micros
+            );
+            note_not_derived(parts.symbol, parts.timeframe, &why);
+            diagnostics.push(why);
+            candidates.next();
+        }
+        let matching = candidates
+            .peek()
+            .is_some_and(|b| b.ts_micros == held.ts_micros);
+        if !matching {
+            return Err(format!(
+                "historical derived evidence incomplete at {}: no complete source candidate for stored bar; restore complete minute source and verified schedule evidence before retrying derivation; rung refused; bytes preserved, not repaired",
+                held.ts_micros
+            ));
+        }
+        if candidates.peek().is_some_and(|b| **b != held) {
+            return Err(format!(
+                "historical derived conflict at {}: stored bar differs from complete source; rung refused; bytes preserved, not repaired; explicit versioned correction required",
+                held.ts_micros
+            ));
+        }
+        candidates.next();
+        last = Some(held);
+    }
+    if let Some(last) = last {
+        bars.retain(|bar| bar.ts_micros > last.ts_micros);
+        // Re-offer an actual stored record to refresh the census on a no-op.
+        if bars.is_empty() {
+            bars.push(last);
+        }
+    }
+    Ok(diagnostics)
 }
 
 /// Appends `bars` under `parts` and answers the census row for what the FILE

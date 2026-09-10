@@ -171,6 +171,7 @@ fn read_of(n: usize) -> Read {
                     .map(|x| (Vendor::Groww, x)),
                 conflict: None,
                 universe: u,
+                ..Entry::default()
             },
         );
     }
@@ -184,6 +185,7 @@ fn read_of(n: usize) -> Read {
                 brutex_core::vendor::Vendor::Groww,
                 brutex_core::vendor::Vendor::Dhan,
             ],
+            ..Merged::default()
         },
         Vec::new(),
         // unread: every vendor's master was read, by construction.

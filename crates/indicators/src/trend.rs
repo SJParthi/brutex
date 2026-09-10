@@ -844,6 +844,51 @@ impl TrendState {
         self.emit(close, tolerance).0
     }
 
+    /// Certify references at the same pre-fold boundary as [`Self::emit`].
+    /// Each swing-near answer requires its own confirmed, representable band.
+    /// All four structure events are decidable once both swing latches exist;
+    /// requiring both keeps an absent opposite reference from becoming false.
+    /// A missing prior direction is valid here: the classifier defines the first
+    /// break as `BoS`, so it never needs an invented preceding structure.
+    pub(crate) fn known(&self, tolerance: Tolerance) -> ConditionMask {
+        let mut known = ConditionMask::ZERO;
+        let fast = self.fast.warm() && self.fast.value().is_some();
+        let slow = self.slow.warm() && self.slow.value().is_some();
+        if fast {
+            known = known.with_bit(0).with_bit(1);
+        }
+        if slow {
+            known = known.with_bit(2).with_bit(3);
+        }
+        if fast && slow {
+            known = known.with_bit(4).with_bit(5);
+        }
+        if self.supertrend.warm() && self.supertrend.stop().is_some() {
+            known = known.with_bit(64).with_bit(65);
+        }
+        let high = self.swings.swing_high();
+        let low = self.swings.swing_low();
+        for (swing, index) in [(high, 72), (low, 73)] {
+            if let Some(swing) = swing {
+                known = vocab::table::set_near(
+                    known,
+                    index,
+                    tolerance,
+                    swing.price,
+                    swing.price,
+                    swing.window_span,
+                )
+                .unwrap_or(known);
+            }
+        }
+        if high.is_some() && low.is_some() {
+            for position in [56, 57, 58, 59] {
+                known = known.with_bit(position);
+            }
+        }
+        known
+    }
+
     /// The mask, **and the classification it was built from**.
     ///
     /// # Why this exists rather than two `classify` calls

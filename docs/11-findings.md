@@ -354,3 +354,299 @@ Disposition: **OPEN**. Real, reproduced from source, and deliberately not patche
 in a rush. `ledger-all` cannot complete today for an unrelated reason — it needs
 BANKNIFTY data, which the store does not hold — so nothing is currently selecting
 through the weaker rule.
+
+## Historical cash-gap totals are not source-defect totals — 2026-09-06
+
+Disposition: **OPEN / exact historical session evidence incomplete**.
+
+The live full-span ABB stored-minute audit (2019-12 through September 2026)
+reported 900 calendar-expected absences with no unreadable records, invalid
+timestamps, missing files or metadata errors. Among its longest runs were
+March 13 and March 23, 2020. A contemporaneous first-party halt bulletin and
+the general circuit-breaker rule are recorded in `docs/00-charter.md`, but
+the exact dated minute windows have not been proved. Current cash listings
+also do not establish each stock's historical trading lifetime.
+
+Consequently a full-span gap total must stay a diagnostic under the implemented
+calendar, not a claim that all listed minutes are broker omissions or a queue
+for unlimited retries. The deployed page already names that evidence boundary.
+No stored candle or calendar bit has been changed to make the diagnostic
+disappear. Closing this finding requires dated event/listing evidence, a
+shared-clock implementation and regressions; it is not closed by a green
+software test run or an unchanged vendor replay.
+
+## Sweep-readiness adversarial review — 2026-09-06
+
+Scope: vocabulary, condition masks, evaluation, combination enumeration,
+runner/CLI publication and the sweep dashboard. Detailed evidence and closure
+criteria: `docs/14-sweep-readiness-20260906.md`; locked repair choices: D-0521.
+This entry does not recount unrelated concurrent ingest/recovery work.
+
+| Finding | Disposition | Evidence |
+|---|---|---|
+| A regular column admitted a newly cold mask when rollover daily levels overflowed | FIXED in this task | New positive-price overflow regression failed before the pre/post warmth check, passed after; 3 changed-code mutants caught |
+| An open results writer appended after an interrupted partial tail, misaligning the next row; catch-up indexed unsealed identities | FIXED in this task | Four partial-tail lengths, corrupt/valid adjacent rows and shrink regressions; 27 module tests; 7 exact-source module mutants caught |
+| Both browser frontier consumers treated the first 256-row page as the complete result | FIXED IN SOURCE; deployment not certified | Complete bounded page assembly; 60 related frontend tests, zero type-check errors |
+| Maximum public support-lane count panics before a named halt on two bars/two bits | OPEN, reproduced | `web/sweep-readiness/probes/support_lanes.rs`; this is a defect-reproduction probe, not a passing product invariant |
+| Auxiliary/infallible allocations bypass the advertised memory-refusal path | OPEN, source-confirmed | Engine next-level construction, grouped joins, worker and output buffers; actual allocator exhaustion not forced |
+| Not every stored command records identity before computation or persists displayed candidate detail | OPEN, source-confirmed | `sweep_stored_inner`, `auto_stored_inner`, `record_swept_run` |
+| Fresh CLI publication and API parent receipt reads scan accumulated history | OPEN complexity gap | `ensure_run_record`, `committed_receipt_with_limit`, Results/Receipts open paths |
+| Completed browser slot can hide later CLI execution; recent terminal events can look running; unreadable external event tail can look idle | OPEN monitoring gap | `api::sweeprun::run_json` and `elsewhere_over` |
+| Every candidate trade trace, per-level persisted counters and durable Apriori continuation are absent | OPEN capability gaps | Chosen-only trade format, ledger summary fields, empty live-progress reopen |
+
+No generic OR/NOT or ordered-expression search, permanent lossless telemetry,
+constant total sweep work/space, collision-free general hashing or fixed
+filesystem latency is certified by this review. The existing support limits
+and loopback scope remain explicit. Historical ledger OPEN rows are not a
+machine-verified count of current defects.
+
+### Follow-through on the 2026-09-06 sweep review (D-0523)
+
+This is an append-only status update, not removal of earlier findings. Changes
+are confined to the historical sweep and its required evidence/dashboard path.
+The dated comparison is `docs/14-sweep-readiness-20260906.md`; final check logs
+remain separate from source-review claims.
+
+| Finding | Current disposition and proof boundary |
+|---|---|
+| Maximum worker request panicked before a named halt; several engine allocations bypassed reservation guards | Scheduling clamp, fallible setup/frontier paths and named Memory/Workers refusal implemented; finite tests/benchmarks passed. OS overcommit and all workspace allocations remain outside that assurance. |
+| False and unavailable predicates were indistinguishable for NOT | Separate aligned known masks and three-valued expression semantics implemented; conservative false-availability limits remain explicit. |
+| Stored sweep/auto identities and evidence were absent or recorded too late | Durable preparation/search/orchestration/probe starts, levels, retained signal rows and typed terminals wired; source-order and refusal tests added. |
+| Monthly policy and separately loaded execution evidence were incompletely bound | Shared full policy parameters and separately domain-bound actual execution digest implemented; identity sensitivity tests added. The execution snapshot race was source-derived, not claimed as a reproduced production event. |
+| Initial generation measurement raced cooperating result writers | Cold Results/Receipts scans now hold the appropriate file lock until generation capture, releasing before returning. Twenty repeated eight-writer tests passed; device diagnostics retained. |
+| Acknowledged rows removed before finish could be sealed as a completed empty attempt | Independent review reproduced the code path; acknowledged counts/content tracking and terminal verification added, with deletion/truncation/replacement matrices. |
+| Automatic search with no affordable answer still fell back silently | Explicit refusal replaces the `Ok(None)` statistical-floor fallback; ordinary successful search algorithm retained. |
+| A batch preparation refusal dropped its already-recorded identity | The refusal retains that identity for evidence lookup. |
+| Expression second-pass callbacks could receive an accidentally modified later row | New header/ordinal-bound per-row seals and revalidation before each callback; deliberate interleaved-write regression. Hashes do not authenticate against an actor who can rewrite data and all seals. |
+| Latest attempt events, read-only commands, clipped fields or browser timestamps distorted sweep status | Bounded exact command-marker selection, canonical command classification, explicit unknown states and active-CLI precedence added with adversarial fixtures. |
+| Parent caches and live census did repeated work on request workers | Validated incremental caches and bounded offloading implemented. Cold scans, delta processing and file limits remain visible. |
+| “PASS” visually overstated five historical checks | Label now says “5 rules pass”; missing admission/validation authority and exact-candidate replay are named in the comparison. |
+
+Still open: full required coverage and whole-module mutation closure; actual
+clean-provenance historical execution and new-route deployment; approved
+institutional policy values; compatible Selection V6; arbitrary priced-candidate
+trade authority; exhaustive Boolean/ordered-sequence search; durable Apriori
+resume; complete recoverable allocation and permanent telemetry guarantees.
+Their absence is not hidden by the passing finite tests.
+
+### Outstanding capability implementation and new attacks (D-0524)
+
+This append-only entry updates the earlier capability gaps. It preserves the
+earlier findings and separates source completion from verification/deployment.
+
+| Finding or gap | Current disposition and evidence |
+|---|---|
+| No durable Apriori continuation | Shared engine continuation and immutable stored checkpoints implemented; five stored-helper tests pass, including restored depth history, evidence failure and final corruption. |
+| Only explicitly supplied Boolean expressions could be evaluated | Canonical fixed-language AND/OR/NOT cursor and resumable stored search implemented; finite independent grammar oracle and final 120-mutation run with 115 caught, five unviable, no survivors/timeouts. |
+| Arbitrary actually priced candidates lost their own selected-cell trades | Typed catalogs now retain both directions and explicit no-cell outcomes for every candidate actually evaluated in each visited screen pass; twelve storage integration tests passed. Actual caps remain visible. |
+| Boolean pricing was absent | Shared trade/grid kernels now accept definite-expression truth and materialize/reconcile exact selected cells. Three runner pricing tests and priced CLI restart regression passed. |
+| A validly sealed cursor could falsely claim early exhaustion or skip a candidate | Independent review exposed missing semantic linkage. Replaying each bounded transition now verifies exact cursor, node count and emitted candidate; forged-state regressions passed. |
+| A dangling owner lock symlink could create its foreign target before refusal | Owner creation is exclusive and existing-file reopening cannot create; no-follow and generation checks retained. Dedicated regression asserts the target stays absent. |
+| Execution V4 had no compatible final selection route | New Selection V6 consumes opaque retained execution authority, including real terminal 0/2/4 parameter cases and actual winner prefixes; 12 scoped tests passed. |
+| Selection V6 had no chronological later-period replay | Separate Global Replay V4, exact stored OOS capability forwarding and common occupancy scheduling implemented; genuine nonempty witness regression exposed and corrected a valid equal-coordinate refusal. |
+| Replay could start expensive later-period computation before its identity was saved | New fallible stage observers save plan, input-fold and exact execution identities before their respective computations; newer tests/gates must establish the revised source's result. |
+
+Still not certified: approved institutional policy, full touched-crate coverage
+and mutation closure, current clean-provenance historical execution, deployed
+new routes and customer-scale capacity. Fixed operations do not make total
+enumeration, durable histories or filesystem latency O(1).
+
+### Clean historical execution checkpoint
+
+The later clean source snapshot at
+`33ecdfba5285d4943816415edf20ddb1d06cf36a` ran bounded real index searches.
+Two expression searches resumed from eight to sixteen candidates, and separate
+strict readers reconciled all 64 trade files and 31,279 trades. A real AND
+search completed at frontier extinction and reused its checkpoint/parent on
+repeat. This closes the ordinary bounded historical execution gap for that
+exact snapshot; it does not close the full institutional policy, independent
+scrub receipt, coverage, deployment or customer-scale gaps. Evidence and exact
+limits are recorded in `docs/23-historical-sweep-verification.md`.
+
+### Strict input and final-publication audit (D-0525)
+
+| Concrete finding | Repair and finite evidence |
+|---|---|
+| Stored-month and four priced-audit branches could append a parent before the final sweep-evidence child audit refused damaged depth/ranked data | The shared finalizer authenticates and seals children before parent publication, with exact capture confirmation for priced outcomes. Deletion/corruption, final-guard and parent-failure regressions exercise publication boundaries. Actual test runs are recorded separately. |
+| Complete receipt bytes could be visible before the publisher finished syncing | Typed receipt readers require and retain a shared publication lock. An exclusive publisher causes explicit refusal; read-only reuse preserves identical concurrent audits. |
+| Ordinary checksum inspection did not provide retained authority tying all context rows to the inspected bytes | Separate cold-audit receipts and a six-role manifest now feed a strict stored wrapper through exact retained handles and the common calendar/sweep kernel. Existing ordinary behavior and identities remain distinct. |
+| FIFO or final symlink evidence paths could block a read or point to unintended data | Verified native nonblocking/no-follow open flags plus regular-file and generation checks now cover required read paths. Bounded child-process tests exercise pipe cases; unsupported targets refuse. |
+| Restored AND states could retain excluded bits or exceed a nonhalting pair budget | Decoder checks now reject those states while preserving genuine named halts and actual outer-row overshoots. The resume module reached 540/540 lines and 134/134 branches; reconciled current mutations are 213 caught and 20 unviable. |
+| The coarse execution report described every missing exact minute as the session's final bars | Wording now identifies the missing exact same-day execution minute; an internal-gap test proves the distinction. |
+| Loading eight institutional ledger sizing spans could hide missing policy behind a data error and spend work before that inevitable refusal | Both ledger routes now resolve and report the existing full policy immediately after vendor validation. Successful policy/identity semantics are unchanged; two new preflight tests passed within the nine-test ledger suite. |
+| A completed pricing report containing `RESULT NOT RECORDED` could still receive a successful command exit | The common command classifier recognizes the exact permanent-publication failure marker, including a bare marker or its colon-delimited reason. Negative prose/prefix examples remain valid reports. A stored-dispatch regression checks the nonzero status. |
+| Concurrent new checksum test fixtures could add their real append events to the existing process-global telemetry census | The new tests join the existing test sink mutex. Production logging and the exact seven-site census assertion remain unchanged. This was test interference, not unexpected writes by the read-only production audit. |
+
+These findings do not authorize a full production run. Required data completion,
+approved institutional policy, wider coverage/mutation closure and current
+binary activation remain independently visible gates.
+
+### Continued sweep-boundary attacks (D-0529–D-0532)
+
+| Concrete finding | Repair and evidence boundary |
+|---|---|
+|110 session/trend/crossing positions had incomplete false-answer availability | Shared causal known-mask paths, independent all-position/NOT/Column tests;38 selected mutations including the truth-only optimization caught. Missing-reference abstentions remain explicit. |
+| Truth-only callers computed and discarded availability, exceeding the existing performance budget | Same transactional fold without the unused projection;455 indicator tests pass. Unchanged benchmark budget passes at958 floors, after an archived2202-floor failure. |
+| Off-minute OHLCV could shift the forced deadline to15:10:30 | Exact minute admission and checked civil-day15:10 deadline; one-microsecond/half-minute, missing-boundary, timestamp-extreme and projection tests. |
+| Public compatibility trade walk trusted a supplied later/foreign exit table | Canonical boundary equality before path opening; malformed tables produce counted refusal. Five selected clock/table defense mutations caught. |
+| Institutional loaders did not retain strict source receipts through every successor | Shared strict range admission, independent role ceilings, full receipt-bound computation identity and retained guards through Selection/OOS; source replacement and ledger mutation regressions. |
+| First strict cohort digest incorrectly mixed per-instrument receipt data into shared policy | Shared policy binds integrity kind; each computation separately binds full actual receipt data. Original pair-refusal logs retained. |
+| Real first-level extinction could not pass positive-depth guards or mandatory nonempty V1 Pre-Admission | Correct zero nonempty-depth reconciliation plus a separate opaque empty stored family using V2 evidence. Genuine completed empty, mixed and evaluated family routes are tested separately from no-data/refused runs. |
+| A browser batch could not correlate acceptance with an exact eventual command token | Decimal u64 acceptance/status keys and explicit browser origin; strict serial queue checks exact context and stops on ambiguous responses.12 focused browser tests and344 frontend tests pass. |
+
+The current source is not a declaration of full production readiness. The37
+approved financial values, Boolean-to-institutional authority, institutional
+cash expansion, full coverage/mutation closure and current deployment remain
+separate requirements. All market checks are bounded and source-specific.
+
+### Final independent boundary review (D-0533)
+
+| Concrete finding | Repair and evidence boundary |
+|---|---|
+| Public cached-facts APIs could compare a foreign exit table to the same foreign facts and price actual15:20 | Common actual execution-clock and horizon checks. The true pre-fix assertion failure is retained in `foreign-slice-deadline-before.log`; focused and full verification are recorded separately. |
+| An unrelated active/unknown CLI command could indefinitely hide a completed exact browser job from the global status view | Canonical exact-attempt selector and no substitution for missing/replaced slots. Sixteen focused API tests, thirteen receipt-batch tests and345 full frontend tests passed; typecheck and production frontend build passed. |
+
+These repairs do not activate the current source or waive the outstanding
+institutional configuration and full coverage/mutation gates.
+
+### Parallel verification finding (D-0534)
+
+Frozen V9 had four strict range failures because concurrent test-only knob
+writers installed an invalid grid-rung value while those tests read it without
+the shared test guard. Isolated frozen-binary replay passed. The correction
+adds the existing shared guard to those test readers; production strict
+validation is unchanged. V9 retained six other green gates and an unchanged
+source fingerprint. A later complete workspace run is required to clear it.
+
+### Delegated policy and explanation (D-0535)
+
+The previous refusal said the37 values did not exist and only the operator
+could choose them. After explicit delegation, continuing to request a manual
+worksheet would preserve a configuration blocker unnecessarily. A single
+documented runtime research profile now supplies all37 values; a Rust command
+explains all39 configured checks. Its file and override failures remain strict.
+Published methods do not certify the chosen thresholds or market results.
+
+An independent review also found that the preflight census said all39 gates
+were “applied” before data configuration or strategy evidence was checked. It
+now says **configured**, explicitly not a candidate verdict. Raw-file digest
+provenance appears in the report; it must not be described as independently
+persisted raw-file provenance in the admission database. Canonical admission
+records bind resolved numeric policy values when those records are actually
+produced.
+
+### Clock verification closure, 2026-09-07
+
+The public deadline suite detected55 of63 scoped clock mutants and missed8.
+Nine new finite internal boundary assertions detect the remaining8; replay
+caught all63 with no survivors, unviable mutants or timeouts. Fresh exact-binary
+coverage reports show100% measured line/region/available-branch counters for the
+selected functions and their closures with empty diagnostics. No new production
+clock defect or behavior change was claimed. Whole-runner coverage and broader
+release verification remain separate gates.
+
+### Full-program capture and saved observation (D-0536–D-0538)
+
+| Concrete finding | Repair and evidence boundary |
+|---|---|
+| A leaf mask cannot preserve OR/NOT meaning or full cash instrument identity | New complete-program research families use the shared execution/grid kernels and separate versioned identities; old two-index formats remain distinct. |
+| An all-Unknown empty grid could be compared only through selected zero fields | Reconcile the entire recomputed canonical empty cell, preserving all refusal and evidence fields. |
+| Charging twice the maximum allowed output size as actual statistics memory made equal memory/output caps refuse every request | Charge actual admitted fixed-width publication buffers plus numeric work, with checked arithmetic and a same-cap regression. This excludes retained candidate buffers and is not a process-memory claim. |
+| A cached reader holding a lifetime publication lock would prevent an identical rerun indefinitely | Hold the shared lease during authentication and each complete page only; explicitly refuse active publishers and changed owners. |
+| Validly resealed count/link fields could allocate before complete source-coordinate reconciliation | Sum the actual linked source coordinates before allocation and require exact equality with the saved manifest. |
+| A saved Romano–Wolf row needed linkage to the preceding cumulative adjusted numerator | Require the exact cumulative recurrence, retaining constant-population unavailability instead of inventing probabilities. |
+| An individual family could be saved before a later cohort/statistics refusal without an accessible report identity | Print each returned family identity and completion pin before evaluating whole-cohort completion; a successful family never implies successful statistics. |
+
+Linked producer/reader tests pass on generated stored fixtures. Current whole
+workspace verification, retained real-OHLCV execution of the new route, complete
+coverage/mutation closure and live activation remain separately reported.
+
+The subsequent independent review found that the CLI multiplied its record
+ceiling by bootstrap draws only after candidate capture. That knowable overflow
+now refuses during preflight, before catalog or market access. Whole-cohort
+collection also checks each successful capability against its requested family.
+The first combined verification was deliberately stopped after formatting to
+include this correction; its partial evidence is not a release clearance.
+
+The next stable combined check exposed a stale command-status expectation:
+`policy-check` performs configuration validation and correctly cannot establish
+sweep activity, but the independent test's explicit non-sweep list omitted it.
+Add it to that list without weakening the exact classification assertion.
+Clippy also required the statistics plan to be borrowed at the final stage.
+The V12 failures remain saved and require another complete check.
+
+A bounded real40-session, three-family, five-expression run refused all three
+families at the declared capture limits. The old diagnostic combined byte and
+trade exhaustion without saying which applied. It now reports the exact
+program, side, cell and both required/remaining capacities. All36 inspected
+source data/checksum files stayed byte-identical; no candidate, statistics or
+admission completion was claimed for this refused attempt.
+
+### Qualification final-child reconciliation — 2026-09-07
+
+An independent review found that deleting an earlier qualification body or
+completion while later timeframes were running could leave a fresh campaign
+announcing all eight completions. Restart correctly refused the same missing
+child, revealing unequal fresh and resumed verification. D-0545 makes the final
+publication boundary reauthenticate every previous child and then all eight
+children afterward. A named error preserves history without claiming current
+complete evidence. The first combined verification snapshot predates this fix;
+it is retained as provisional evidence and cannot clear the successor.
+
+### Declared search continuation and observer hardening — 2026-09-07
+
+| Reproduced or independently reviewed gap | Resolution and evidence boundary |
+|---|---|
+| Individually qualified finite batches do not account for repeated search-wide testing | D-0549 assigns a fixed countable allowance to every immutable batch/timeframe and saves a separately corrected complete projection. Underlying statistical assumptions remain. |
+| A small saved search record could declare a program reservation larger than the caller's independent byte allowance | Admit complete program capacity before Batch decoding and test refusal before a deliberately corrupted cursor is replayed. |
+| Returning only a qualification child dropped the parent search and campaign guards between opening a detail and paging it | Retain both ancestors through the detail lifetime and recheck before and after paging/rendering. The generated integration removes actual parent history to verify refusal. |
+| A source check before lengthy prior-child reconciliation left a later publication gap | Repeat raw source checks immediately before and after parent Complete acknowledgment. External changes after verification remain possible and refuse on re-observation. |
+| Failure while writing the terminal audit could hide the original work error | Preserve both errors, distinguish retained Complete from a recorded refusal and never claim a failed audit was saved. Two actual-journal settlement tests exercise the distinction. |
+| Frontend outcome summation accepted an undeclared negative fifth field that could offset inflated displayed counts | Require exactly the four named counts and their exact sum, plus phase/batch-count conservation. Retain the failing reproduction and subsequent frontend regressions. |
+| Reserved search progress did not expose the already planned campaign address | Derive the prospective address from the acknowledged Plan and link to independently verified per-timeframe progress; the address alone grants no completion claim. |
+
+The first generated search recovery fixture legitimately refused its one-month
+later60-minute input for insufficient warm-up. Extend the generated period to
+two complete months without changing the production warm-up requirement; the
+refusal log remains. Generated fault fixtures do not establish historical results.
+Fresh real-data, combined source-stability, coverage, mutation and activation
+evidence remain separate gates.
+
+### Declared exit-grid resolution was accepted but ignored — 2026-09-07
+
+A bounded real search with the default five-level grid stopped in the first
+timeframe at RELIANCE's declared trade-capture limit. The refusal named the
+exact program, direction, exit cell and required/remaining byte and record
+capacities, and all302 inspected source files stayed unchanged. While planning
+a separate smaller verification grid, inspection found that the shared
+`ledger_all::exit_policy` always constructed five levels despite accepting
+`BRUTEX_GRID_RUNGS` in strict runtime validation.
+
+D-0551 connects that existing setting to the exact shared policy construction.
+Independent public-policy and source-descriptor checks retain default-five
+identity, distinguish either changed directional grid, and preserve risk fields.
+The original capacity refusal remains evidence of the original declaration.
+A different grid/budget must receive its own source-bound search identity; it
+cannot be represented as completion or a transparent retry of that failure.
+
+### Nested failure and unsupported-control fidelity — 2026-09-07
+
+Independent review found that qualification's `journal.refuse(...)?` could
+replace an original pricing/source error with its terminal-publication error.
+The outer search then received only the replacement. D-0552 preserves both
+causes and the distinction between recorded refusal, unconfirmed publication
+and subsequent failure after an acknowledged completion.
+
+The same review found that Boolean preparation validated scalar spellings of
+legacy screen controls that it never consumed. D-0552 refuses these explicitly
+supplied unsupported settings before source preparation. Only the supported
+grid resolution from that legacy group is consumed; this is separate from
+the39-field admission profile. Ordinary range-screen settings are unchanged.
+
+The first isolated mutation baseline stopped before any mutation: two
+concurrent publication tests received an identical timestamp nonce and one
+fixture creation failed with `File exists`. A contextual native replay located
+the failure at the fixture root, separate from the deliberately injected
+journal-publication collision. The test-only fixture now uses a checked
+monotonic suffix with its PID/timestamp. Preserve the failed baseline and
+diagnostic replay; they are not counted as caught production mutants.

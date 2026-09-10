@@ -47,16 +47,26 @@ pub mod autopilot;
 /// The engine had a page for what it INGESTED and none for what it FOUND.
 pub mod backtest;
 pub mod bars;
+pub mod booleancampaignjson;
+pub mod booleanevidencejson;
+pub mod booleanjson;
+/// Validated launch and configuration evidence for declared Boolean research.
+pub mod booleanlaunch;
+pub mod booleanoosjson;
+pub mod booleansearchjson;
 pub mod calendar;
 /// The trading calendar READ OFF THE STORE, so the browser and `pull` stop
 /// holding two copies of one fact that nothing checks.
 pub mod calendar_of;
+/// Exact candidate-side trade pages with immutable capture authority.
+pub mod candidatejson;
 pub mod catalog;
 pub mod census;
 pub mod constituents;
 pub mod coverage;
 /// The shared blocking-work, concurrency and byte/row/page bounds for result details.
 pub mod detail;
+pub mod expressionsearchjson;
 pub mod folder;
 /// EVERY TRADE ONE RUN TOOK -- the file that turns seventy-six padlocks
 /// into figures. `runs.bin` records totals; this records the round trips
@@ -65,6 +75,18 @@ pub mod folder;
 /// them by the operator's own weights rather than by a score baked in here.
 pub mod frontierjson;
 pub mod indexmap;
+/// Authenticated original entry names and archived candle windows.
+pub mod indexstopcandlesjson;
+/// Bounded read-only native single-stop candidate comparisons.
+pub mod indexstopjson;
+/// Source-free launch configuration for the Backtest single-stop workflow.
+pub mod indexstoplaunch;
+/// Exact native qualification and daily/week comparison pages.
+pub mod indexstopqualificationjson;
+/// Globally ordered comparisons within an exact acknowledged search prefix.
+pub mod indexstoprankingjson;
+/// Exact saved VIX reference stamps, separate from strategy and qualification evidence.
+pub mod indexstopvixjson;
 pub mod ingest;
 pub mod ladder;
 /// WHAT A RUN HAS FOUND SO FAR, while it is still running. `cli::live` shipped a
@@ -81,13 +103,19 @@ pub mod master;
 /// path, so this also answers whether a restart is required. D-0308.
 pub mod mastersrun;
 pub mod merge;
+pub mod operation_audit;
 pub mod pullrun;
+pub(crate) mod recovery;
+pub(crate) mod recovery_control;
+pub(crate) mod recovery_journal;
 pub mod render;
 pub mod server;
+pub mod sweepevidence;
 /// A SWEEP STARTED FROM THE BROWSER -- the half of the console that was
 /// missing, because a page that reports on work it cannot start needs a
 /// terminal beside it to be useful.
 pub mod sweeprun;
+pub mod topjson;
 pub mod trades;
 /// THE SCRUB, over a whole vendor -- the only thing entitled to say a store
 /// is verified rather than merely counted.

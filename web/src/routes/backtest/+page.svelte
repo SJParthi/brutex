@@ -37,12 +37,10 @@
    * which is the invention `CLAUDE.md` §3 rule 1 bans. What IS drawn is those
    * four scalars to one scale, which is a real comparison.
    *
-   * **No per-level ladder breakdown.** The record holds `depth` and
-   * `combinations` as two scalars, so "where did the frequent frontier empty"
-   * cannot be answered from this file. It is drawn as a NAMED GAP with the
-   * reason, because a missing drill-down that says why is information and a
-   * missing drill-down that is simply absent is a page that looks finished and
-   * is not.
+   * **Per-level evidence is a separate versioned contract.** The selected run
+   * loads `/sweep-evidence.json`, pins every page to one durable attempt, and
+   * verifies every depth's accounting. Older ledgers cannot reconstruct this
+   * evidence and are explicitly shown as missing.
    *
    * **The winning mask WAS that gap and is not any more.** This paragraph said
    * "which conditions won" could not be answered either, because the record
@@ -81,11 +79,18 @@
    * contradict.
    */
   import { untrack, tick } from 'svelte';
-  import { feeds } from '$lib/feeds.svelte.js';
+  import { page as routePage } from '$app/state';
+  import { feeds, selectFeed } from '$lib/feeds.svelte.js';
+  import { readStoreCensus } from '$lib/store.svelte.js';
   /* RENAMED ON IMPORT. This page's Run control owns a state object called
      `ask` — what the operator is asking the sweep for — and the fetch helper
      is a different thing entirely. One name for one value. */
   import { ask as ask_ } from '$lib/ask.js';
+  import { fetchWithBusyRetry } from '../../../saved-backtest/requests.js';
+  import { createPageRequests } from '$lib/page-requests.js';
+  import { sweepAdmission, sweepLaunchStop, sweepSubmission } from '$lib/sweep-admission.js';
+  import { settleComparison } from '$lib/bounded-comparison.js';
+  import { runtimeInspection } from '$lib/runtime-inspection.svelte.js';
   /* THE PRODUCT'S OWN MONTH, AND THE PRODUCT'S OWN MENU.
      This page drew its span as two bare `YYYY-MM` text boxes while `/db` used
      `$lib/DayField.svelte` and `/ingest` used `$lib/Picker.svelte`, so the one
@@ -96,6 +101,23 @@
      so `Picker` in single-choice mode is the control `/ingest` already proved,
      and `DayField` -- which is day-granular -- is not. */
   import Picker from '$lib/Picker.svelte';
+  import SweepEvidence from '$lib/SweepEvidence.svelte';
+  import ExpressionSearch from '$lib/ExpressionSearch.svelte';
+  import BooleanCatalog from '$lib/BooleanCatalog.svelte';
+  import BooleanEvidence from '$lib/BooleanEvidence.svelte';
+  import BooleanCampaign from '$lib/BooleanCampaign.svelte';
+  import QualifiedCampaign from '$lib/QualifiedCampaign.svelte';
+  import BooleanQualifiedSearch from '$lib/BooleanQualifiedSearch.svelte';
+  import IndexStopResults from '$lib/IndexStopResults.svelte';
+  import IndexStopLaunch from '$lib/IndexStopLaunch.svelte';
+  import IndexStopQualification from '$lib/IndexStopQualification.svelte';
+  import { INDEX_STOP_COMMAND } from '$lib/index-stop-launch.js';
+  import BooleanLaunch from '$lib/BooleanLaunch.svelte';
+  import { BOOLEAN_SEARCH_COMMAND } from '$lib/boolean-launch.js';
+  import InvocationAudit from '$lib/InvocationAudit.svelte';
+  import BooleanLater from '$lib/BooleanLater.svelte';
+  import ReceiptBatch from '$lib/ReceiptBatch.svelte';
+  import { STRICT_KNOBS } from '$lib/receipt-batch.js';
   import { placeIn } from '$lib/place.js';
   import { monthLabel } from '$lib/dates.js';
   import { rupee, group, exact } from '$lib/money.js';
@@ -109,10 +131,11 @@
     validateRunForComputation
   } from '$lib/comparison.js';
   import { validateFrontierPayload } from '$lib/frontier-analytics.js';
+  import { fetchCompleteFrontier } from '$lib/frontier-pages.js';
   import { decodeMaskWords } from '$lib/mask.js';
   import { impliedConditions } from '$lib/condition-groups.js';
   import { createRequestGate } from '$lib/request-gate.js';
-  import { reduceLiveProgress } from '$lib/live-progress';
+  import { liveAttemptKey, reduceLiveProgress } from '$lib/live-progress';
   import {
     TIME_GRAINS,
     equityMaxDrawdown,
@@ -141,6 +164,8 @@
   let load = $state({ phase: 'loading', body: null, why: '' });
   /** Generation of the only ledger response still allowed to publish. */
   let ledgerSeq = 0;
+  /** @type {AbortController | null} */
+  let ledgerAbort = null;
 
   /** How many runs to ask for. The server clamps; this is what we request. */
   const LIMIT = 500;
@@ -163,6 +188,7 @@
    * @type {{ phase: 'idle'|'ready'|'failed', version: number, bits: Map<number, {name: string, live: boolean}>, why: string }}
    */
   let vocab = $state({ phase: 'idle', version: 0, bits: new Map(), why: '' });
+  let vocabCommit = $state('');
 
   /**
    * The ranked combinations of the finished sweep — the thing the whole engine
@@ -527,6 +553,23 @@
    * `screen_cap` is `DEFAULT: usize = 10_000`, `top` is `at("BRUTEX_TOP", 25)`,
    * and `validate` is `raw.is_none_or(|v| v.trim() != "0")` — unset means ON.
    */
+  // The normal workflow searches the full Boolean language. Legacy AND-only
+  // and receipt workflows remain explicit advanced tools, not a prerequisite.
+  let sweepMode = $state('boolean');
+  let booleanTimeframes = $state(/** @type {string[]} */ ([]));
+  let receiptBusy = $state(false);
+  let booleanBusy = $state(false);
+  let indexStopBusy = $state(false);
+  let launchedSearchIdentity = $state('');
+  let launchedSearchRevision = $state(0);
+  let initialBooleanRun = $state.raw(/** @type {any} */ (null));
+  let initialIndexStopRun = $state.raw(/** @type {any} */ (null));
+  /** A new allowance can keep its saved search ID while its results advance.
+   * @param {string} identity */
+  function handoffBooleanSearch(identity) {
+    launchedSearchIdentity = identity;
+    launchedSearchRevision += 1;
+  }
   /**
    * `keyof typeof engine` AND NOT A REPEATED LIST OF NAMES. The knobs and the
    * state they write are declared side by side and nothing checked that they
@@ -538,80 +581,72 @@
    * rather than an `any` — which is what both `engine[k.key]` sites had been
    * falling back to.
    *
-   * @type {{ key: keyof typeof engine, label: string, fallback?: string, note?: string }[]}
+   * @type {{ key: keyof typeof engine, label: string, note?: string }[]}
    */
   const KNOB_FIELDS = [
     {
       key: 'support_ppm',
-      label: 'support floor (ppm of this rung’s bars)',
-      fallback: 'an affordability probe picks it — landed near 220,000 (22%)',
-      note: 'The single biggest lever. 100000 is 10%, 50000 is 5%. Anything below the floor is never enumerated at all, so this decides what CAN be found, not just how long it takes.'
+      label: 'minimum condition frequency (ppm)',
+      note: 'Search breadth: 100000 means 10% of this timeframe’s bars. Combinations below the chosen frequency are excluded.'
     },
     {
       key: 'screen_cap',
-      label: 'combinations priced against the exit grid',
-      fallback: '10,000',
-      note: 'Of the ~430,000 enumerated per rung, this many get the 625-variant stop/target/trail grid. Cost scales with it.'
+      label: 'maximum combinations to price',
+      note: 'Resource limit: how many screened combinations receive stop, target and trailing-exit comparisons.'
     },
+    { key: 'screen_budget_ms', label: 'pricing screen budget (milliseconds)', note: 'Optional positive whole milliseconds. The server validates the budget; blank leaves the setting to the server.' },
+    { key: 'horizon_bars', label: 'exit horizon (bars or rung)', note: 'Optional positive bar count or “rung”. The fixed 15:10 IST forced exit still applies.' },
     {
       key: 'top',
-      label: 'combinations recorded to disk',
-      fallback: '25',
-      note: 'What the top-10 board below can rank. At 25 your eleven criteria only re-order a set the exit grid already picked.'
+      label: 'maximum combinations to save',
+      note: 'Results: limits the retained combinations available for later ranking and inspection.'
     },
     {
       key: 'validate',
-      label: 'walk-forward, PBO and bootstrap',
-      fallback: 'ON — unset means true',
-      note: 'The expensive half. Off gives CANDIDATES, and the report says so in its own banner. On, with a high screen cap, is what does not finish.'
+      label: 'statistical validation',
+      note: 'Evidence filters: walk-forward comparisons, overfitting analysis and resampling checks. Disabling validation produces unvalidated candidates.'
     },
     {
       key: 'ceiling',
-      label: 'candidate ceiling',
-      fallback: 'derived from this machine’s memory',
-      note: 'Roughly the bytes you can spare divided by 146, and divided again among the rungs in flight.'
+      label: 'candidate memory limit',
+      note: 'Resource limit: bounds the candidate pool. Available memory and concurrent work constrain the server’s accepted value.'
     },
     {
       key: 'grid_rungs',
-      label: 'exit grid rungs',
-      fallback: 'derived from the bar ranges',
-      note: 'How many stop / target / trail levels the grid holds. Variants grow QUADRATICALLY in this.'
+      label: 'number of exit levels',
+      note: 'Execution exits: controls the stop, target and trailing levels to compare. More levels require more comparisons.'
     },
     {
       key: 'grid_resolution',
-      label: 'exit grid spacing',
-      fallback: '20',
-      note: 'The median bar range divided by this sets the ladder spacing.'
+      label: 'exit level spacing divisor',
+      note: 'Execution exits: divides the median bar range to determine the spacing between exit levels.'
     },
     {
       key: 'sizing_rate_bp',
-      label: 'sizing rate (bp)',
-      fallback: '7,500',
-      note: 'Must sit above the 5,000 bp coin-flip line and below 10,000.'
+      label: 'sizing rate (basis points)',
+      note: '100 basis points means 1%. The server requires a value above 5000 and below 10000.'
     },
     // MEASURED WRONG BY A FACTOR OF A HUNDRED. `Rules::operator` is
     // `at("BRUTEX_MIN_RR_BP", 125)` and 125 hundredths IS 1.25x -- the label
     // said "12,500 (1.25x)", so an operator reading it and typing 12,500 to
     // "keep the default" would have demanded a 125x reward-to-risk and screened
     // out everything. A placeholder is a claim about the server.
-    { key: 'min_rr_bp', label: 'minimum reward:risk (bp)', fallback: '125 (1.25×)', note: '' },
-    { key: 'min_win_rate_bp', label: 'minimum win rate (bp)', fallback: '5,000 (50%)', note: '' },
-    { key: 'min_trades', label: 'minimum trades', fallback: '0', note: '' },
+    { key: 'min_rr_bp', label: 'minimum reward:risk (hundredths)', note: '125 means a 1.25× reward-to-risk ratio.' },
+    { key: 'min_win_rate_bp', label: 'minimum win rate (basis points)', note: '5000 means a 50% win rate.' },
+    { key: 'min_trades', label: 'minimum trades' },
     // `0` CLAIMED THE RULE WAS OFF. It is `at("BRUTEX_MIN_RET_OVER_DD_BP", 500)`
     // -- a live 5x floor -- so the form told the operator a rule was disabled
     // while it was filtering every cell they got back.
     {
       key: 'min_ret_over_dd_bp',
-      label: 'minimum return over drawdown (bp)',
-      fallback: '500 (5×)',
-      note: ''
+      label: 'minimum return over drawdown (hundredths)',
+      note: '500 means a return-to-drawdown ratio of 5×.'
     },
-    { key: 'min_weakest_bp', label: 'minimum weakest fold (bp)', fallback: '0', note: '' },
+    { key: 'min_weakest_bp', label: 'minimum share of profitable periods (basis points)', note: '5000 means at least 50% of periods finish positive, checked at the weakest calendar grouping.' },
     {
       key: 'max_mae_ppm',
       label: 'maximum adverse excursion (ppm)',
-      fallback: '0, which drops the rule',
-      note: 'The only rule where zero means OFF rather than a floor of zero — it is a `<=` test, so a literal zero would admit nothing.'
+      note: 'Limits the worst price move against an entry. An explicit zero disables this filter; blank leaves the choice to the server.'
     }
   ];
 
@@ -619,6 +654,8 @@
   let engine = $state({
     support_ppm: '',
     screen_cap: '',
+    screen_budget_ms: '',
+    horizon_bars: '',
     top: '',
     validate: '',
     ceiling: '',
@@ -632,6 +669,8 @@
     min_weakest_bp: '',
     max_mae_ppm: ''
   });
+  const visibleKnobFields = $derived(sweepMode === 'receipt'
+    ? KNOB_FIELDS.filter(field => STRICT_KNOBS.includes(field.key)) : KNOB_FIELDS);
 
   /**
    * Only the knobs the operator actually filled in.
@@ -645,7 +684,7 @@
   const engineKnobs = $derived.by(() => {
     /** @type {Record<string, string>} */
     const out = {};
-    for (const { key } of KNOB_FIELDS) {
+    for (const { key } of visibleKnobFields) {
       const typed = String(engine[key] ?? '').trim();
       if (typed !== '') out[key] = typed;
     }
@@ -664,18 +703,8 @@
     }
     combos = { phase: 'loading', rows: [], rules: null, why: '' };
     try {
-      const response = await ask_(`/frontier.json?identity=${encodeURIComponent(identity)}`);
-      const body = await response.json();
+      const body = await fetchCompleteFrontier(identity, ask_);
       if (!comboGate.admits(ticket, openRun?.identity)) return;
-      if (!response.ok) {
-        combos = {
-          phase: 'failed',
-          rows: [],
-          rules: null,
-          why: body.refusal ?? `/frontier.json answered ${response.status}`
-        };
-        return;
-      }
       const checked = validateFrontierPayload(body, identity);
       if (!checked.ok) {
         combos = {
@@ -1013,6 +1042,9 @@
     // scope becomes empty.
     boardSeq += 1;
     const mine = boardSeq;
+    boardAbort?.abort();
+    const controller = new AbortController();
+    boardAbort = controller;
     // O(1) PER ROW AND ONE PASS. A Map keyed by the WHOLE comparison question
     // plus rung keeps the newest comparable answer. Keying only by rung made a
     // newer BANKNIFTY 5min run erase NIFTY 5min, and made feed/span/support
@@ -1039,35 +1071,17 @@
     // a correct one.
     board = { phase: 'loading', groups: [], why: '' };
 
-    // FETCHED IN PARALLEL because the eight are independent: eight sequential
-    // round trips would make the board eight times slower for no reason.
-    //
-    // `allSettled` AND NOT `all`. `Promise.all` rejects on the FIRST failure and
-    // discards every sibling result, so one rung answering 502 replaced all
-    // eight tables with a single sentence naming one URL. A rung that fails now
-    // fails alone and says so in its own section.
+    // Two complete-frontier readers at a time, with each group's own refusal.
+    // Closing/replacing the comparison cancels queued and in-flight requests.
     const selected = [...newest.values()];
-    const settled = await Promise.allSettled(
-      selected.map(async (run) => {
+    let settled;
+    try {
+      settled = await settleComparison(selected, 2, async (run) => {
         const question = comparisonQuestionKey(run);
         const key = `${question}\u001f${run.timeframe}`;
-        const response = await ask_(`/frontier.json?identity=${encodeURIComponent(run.identity)}`);
-        // `ok` IS CHECKED BEFORE THE BODY IS PARSED. Reading `.json()` first
-        // turned a clean 502 with an HTML body into `Unexpected token '<'`,
-        // which names the parser instead of the failure.
-        if (!response.ok && response.status !== 200) {
-          return {
-            key,
-            question,
-            rung: run.timeframe,
-            run,
-            rows: [],
-            rules: null,
-            admitted: 0,
-            why: `/frontier.json answered ${response.status} for ${run.timeframe}`
-          };
-        }
-        const body = await response.json();
+        const body = await fetchCompleteFrontier(run.identity, (url) =>
+          ask_(url, { signal: controller.signal })
+        );
         const checked = validateFrontierPayload(body, run.identity);
         if (!checked.ok) {
           return {
@@ -1091,8 +1105,12 @@
           admitted: checked.admitted,
           why: checked.why
         };
-      })
-    );
+      }, controller.signal);
+    } catch (why) {
+      if (mine !== boardSeq || controller.signal.aborted) return;
+      board = { phase: 'failed', groups: [], why: String(why) };
+      return;
+    }
     if (mine !== boardSeq) return; // a newer board started; this answer is stale
 
     const groups = settled.map((s, i) =>
@@ -1139,6 +1157,9 @@
    * renders it — writing it must not invalidate anything.
    */
   let boardSeq = 0;
+  let comparisonRequested = $state(false);
+  /** @type {AbortController | null} */
+  let boardAbort = null;
 
   const board10 = $derived.by(() =>
     board.groups.map((g) => {
@@ -1186,7 +1207,13 @@
     // The board is a ranking surface. It receives the same exact-signal,
     // sealed, whole-span, non-halted, priced-result admission as the headline,
     // never merely every structurally parseable ledger row.
-    void fetchBoard(rankableRuns);
+    if (comparisonRequested) void fetchBoard(rankableRuns);
+    else {
+      boardSeq += 1;
+      boardAbort?.abort();
+      board = { phase: 'idle', groups: [], why: '' };
+    }
+    return () => { boardSeq += 1; boardAbort?.abort(); };
   });
 
   /** @param {string|undefined} identity */
@@ -1883,7 +1910,7 @@
   /** @param {any} run */
   function liveRunKey(run) {
     return JSON.stringify([
-      run?.attempt,
+      liveAttemptKey(run),
       run?.kind,
       run?.feed,
       run?.underlying,
@@ -1919,27 +1946,37 @@
    */
   async function fetchLive(run) {
     const seq = ++liveSeq;
-    if (!Number.isSafeInteger(run?.attempt) || run.attempt <= 0) {
+    const attempt = liveAttemptKey(run);
+    if (run?.where === 'cli') {
+      publishLive(seq, run, {
+        phase: 'failed',
+        attempt,
+        rungs: [],
+        why: 'This is the latest external command lifecycle. Legacy rung events do not carry its exact token, so no rung progress is inferred. Saved per-run depth evidence is available when an identity is selected.'
+      });
+      return;
+    }
+    if (attempt === null) {
       publishLive(seq, run, {
         phase: 'failed',
         attempt: null,
         rungs: [],
-        why: 'The status endpoint supplied no positive safe attempt token, so no log event can be bound to this run.'
+        why: 'The status endpoint supplied no exact canonical attempt token, so no log event can be bound to this run.'
       });
       return;
     }
     try {
       const response = await ask_(
-        `/logs.json?limit=200&run=${encodeURIComponent(String(run.attempt))}`,
+        `/logs.json?limit=200&run=${encodeURIComponent(attempt)}`,
         { cache: 'no-store' }
       );
       if (seq !== liveSeq || liveRunKey(sweep.run) !== liveRunKey(run)) return;
       if (!response.ok) {
         publishLive(seq, run, {
           phase: 'failed',
-          attempt: run.attempt,
+          attempt,
           rungs: [],
-          why: `/logs.json answered ${response.status} for exact attempt ${run.attempt}.`
+          why: `/logs.json answered ${response.status} for exact attempt ${attempt}.`
         });
         return;
       }
@@ -1949,7 +1986,7 @@
     } catch (why) {
       publishLive(seq, run, {
         phase: 'failed',
-        attempt: Number.isSafeInteger(run?.attempt) ? run.attempt : null,
+        attempt,
         rungs: [],
         why: `The event feed could not be read: ${why instanceof Error ? why.message : String(why)}`
       });
@@ -2030,6 +2067,7 @@
   }
 
   async function fetchVocab() {
+    vocabCommit = '';
     try {
       const response = await ask_('/vocab.json');
       if (!response.ok) {
@@ -2062,6 +2100,7 @@
         return;
       }
       vocab = { phase: 'ready', version: checked.version, bits: checked.bits, why: '' };
+      vocabCommit = typeof body.commit_digest === 'string' && /^[0-9a-f]{64}$/.test(body.commit_digest) ? body.commit_digest : '';
     } catch (why) {
       vocab = {
         phase: 'failed',
@@ -2113,8 +2152,8 @@
           why:
             body.refusal ??
             `/engine/top.json answered ${response.status}. The ranked ` +
-              `combinations were written to the store either way — this page ` +
-              `could not read them back. A 404 means the running binary is ` +
+              `evidence could not be read; this response does not establish ` +
+              `whether it committed. A 404 means the running binary is ` +
               `older than this page.`
         };
         return;
@@ -2129,11 +2168,26 @@
     }
   }
 
+  function cancelLedger() {
+    ledgerSeq += 1;
+    ledgerAbort?.abort();
+    ledgerAbort = null;
+  }
+
   async function fetchLedger() {
     const seq = ++ledgerSeq;
-    load.phase = 'loading';
+    ledgerAbort?.abort();
+    const request = new AbortController();
+    ledgerAbort = request;
+    load = { phase: 'loading', body: null, why: '' };
     try {
-      const response = await ask_(`/backtest.json?limit=${LIMIT}`, { cache: 'no-store' });
+      const response = await fetchWithBusyRetry(`/backtest.json?limit=${LIMIT}`, {
+        signal: request.signal,
+        onBusy: ({ status, delayMs }) => {
+          if (seq !== ledgerSeq) return;
+          load.why = `The server is busy (${status}). Retrying the results read in ${(delayMs / 1000).toFixed(1)} s.`;
+        }
+      }, ask_);
       if (seq !== ledgerSeq) return;
       if (!response.ok && response.status !== 503) {
         // A NON-503 FAILURE IS THE SERVER, NOT THE CONFIGURATION. 503 still
@@ -2159,12 +2213,10 @@
           body: null,
           why:
             response.status === 404
-              ? `/backtest.json is not a route on the running server, which means the API ` +
-                `process was started before this route existed. RESTART THE API — the ` +
-                `binary on disk already has it. Nothing is wrong with the store, the ` +
-                `ledger or this page: the front end is served off disk and updates on ` +
-                `every build, while the binary only changes when it is restarted, so this ` +
-                `page can be hours newer than the server answering it.`
+              ? `This server answered 404 for /backtest.json. The selected server or viewer ` +
+                `does not provide the ordinary sweep ledger at this address. Check the app ` +
+                `address and configured result store. This response alone does not establish ` +
+                `whether results exist, which binary is running, or whether a restart will help.`
               : `/backtest.json answered ${response.status}. That is the API refusing the ` +
                 `request itself, not the ledger being empty — the two are different facts ` +
                 `and only one of them is fixable by sweeping something.`
@@ -2186,7 +2238,7 @@
       if (seq !== ledgerSeq) return;
       load = { phase: 'ready', body: checked.body, why: '' };
     } catch (error) {
-      if (seq !== ledgerSeq) return;
+      if (seq !== ledgerSeq || request.signal.aborted) return;
       load = {
         phase: 'failed',
         body: null,
@@ -2195,6 +2247,8 @@
             ? error.message
             : 'The request for /backtest.json failed and threw a value that is not an Error.'
       };
+    } finally {
+      if (ledgerAbort === request) ledgerAbort = null;
     }
   }
 
@@ -2206,10 +2260,10 @@
     untrack(() => fetchVocab());
     // AND WHETHER ONE IS ALREADY RUNNING. See `adoptRunning`: without this the
     // in-flight view survived exactly one browser reload, which is none.
-    untrack(() => adoptRunning());
+    untrack(() => statusRequests.run(adoptRunning));
     // Component teardown (or a future effect reset) revokes every pending read.
     return () => {
-      ledgerSeq += 1;
+      cancelLedger();
     };
   });
 
@@ -2238,10 +2292,13 @@
    * is on disk or it is not seeded at all.
    */
   let ask = $state({ from: '', to: '' });
-  /** @type {{ phase: 'idle'|'starting'|'running'|'done'|'failed', run: any, why: string }} */
+  /** @type {{ phase: 'idle'|'starting'|'running'|'done'|'failed'|'unknown', run: any, why: string }} */
   let sweep = $state({ phase: 'idle', run: null, why: '' });
-  /** @type {ReturnType<typeof setTimeout> | null} */
-  let pollAt = null;
+  let launchAdmission = $state({ available: false, why: 'Checking the current store execution lease…' });
+  let unconfirmedSubmission = $state(false);
+  let submittedAttempt = $state('');
+  const launchStop = $derived(sweepLaunchStop(sweep, launchAdmission, unconfirmedSubmission));
+  const statusRequests = createPageRequests();
 
   /**
    * `YYYY-MM` as the two numbers the route wants, or null.
@@ -2279,42 +2336,118 @@
    */
   let adoptWhy = $state('');
 
-  async function adoptRunning() {
+  /** Only an explicit null means that the server observed no job.
+   * @param {any} body */
+  function observedRunning(body) {
+    if (body === null || typeof body !== 'object' || Array.isArray(body) ||
+        !Object.hasOwn(body, 'running') ||
+        (body.running !== null && (typeof body.running !== 'object' || Array.isArray(body.running)))) {
+      throw new Error('The status response must contain a running object or explicit null. Execution state is unknown.');
+    }
+    launchAdmission = sweepAdmission(body);
+    return body.running;
+  }
+
+  /** Boolean commands have their own journal and exact-attempt observer.
+   * Reloading must not turn their status into an ordinary ledger completion.
+   * @param {any} running */
+  function adoptBoolean(running) {
+    if (running?.command !== BOOLEAN_SEARCH_COMMAND) return false;
+    statusRequests.cancel();
+    invalidateLive();
+    if (booleanBusy) return true;
+    sweep = { phase: 'idle', run: null, why: '' };
+    adoptWhy = '';
+    booleanBusy = true;
+    sweepMode = 'boolean';
+    initialBooleanRun = running;
+    return true;
+  }
+
+  /** Single-stop index work uses its own exact-attempt observer and receipts.
+   * @param {any} running */
+  function adoptIndexStop(running) {
+    if (running?.command !== INDEX_STOP_COMMAND) return false;
+    statusRequests.cancel();
+    invalidateLive();
+    if (indexStopBusy) return true;
+    sweep = { phase: 'idle', run: null, why: '' };
+    adoptWhy = '';
+    indexStopBusy = true;
+    sweepMode = 'boolean';
+    initialIndexStopRun = running;
+    return true;
+  }
+
+  /** @param {import('$lib/page-requests.js').ReadTicket} ticket */
+  async function adoptRunning(ticket) {
     try {
-      const response = await ask_('/backtest/run.json', { cache: 'no-store' });
+      const response = await ask_('/backtest/run.json', { cache: 'no-store', signal: ticket.signal });
+      if (!ticket.current()) return;
       if (!response.ok) {
+        launchAdmission = { available: false, why: 'The execution status could not be read. Rechecking before another launch.' };
         adoptWhy =
           `/backtest/run.json answered ${response.status}, so this page cannot say whether a ` +
-          `sweep is running. The idle console below is what this build shows when it could not ` +
-          `ask — not a claim that nothing is in flight.`;
+          `sweep is running. Execution state is unknown; retrying.`;
+        sweep = { phase: 'unknown', run: null, why: adoptWhy };
+        statusRequests.schedule(pollSweep, 2000);
         return;
       }
       const body = await response.json();
-      const next = sweepOutcome(body.running);
-      if (next.phase !== 'running') return;
+      if (!ticket.current()) return;
+      const running = observedRunning(body);
+      if (adoptIndexStop(running) || adoptBoolean(running)) return;
+      const next = sweepOutcome(running);
+      if (next.phase === 'unknown') {
+        sweep = next;
+        statusRequests.schedule(pollSweep, 2000);
+        return;
+      }
+      adoptWhy = '';
+      if (next.phase !== 'running') {
+        sweep = { phase: 'idle', run: null, why: '' };
+        return;
+      }
       invalidateLive(liveRunKey(sweep.run) !== liveRunKey(next.run));
       sweep = next;
       // THE EVENT FEED ON THE SAME TICK, exactly as `pollSweep` does it: the
       // status payload carries no progress and the rungs live in the log.
       fetchLive(next.run);
-      pollAt = setTimeout(pollSweep, 2000);
+      statusRequests.schedule(pollSweep, 2000);
     } catch (error) {
+      if (!ticket.current()) return;
       // NAMED, NOT SWALLOWED. A page that could not ask is not a page with no
       // run, and rendering the idle state over a live sweep is the fallback
       // that hides a failure §4 bans.
       adoptWhy =
         `Could not ask whether a sweep is already running: ` +
         `${error instanceof Error ? error.message : String(error)}`;
+      sweep = { phase: 'unknown', run: null, why: adoptWhy };
+      launchAdmission = { available: false, why: adoptWhy };
+      statusRequests.schedule(pollSweep, 2000);
     }
   }
-  async function pollSweep() {
+  /** @param {import('$lib/page-requests.js').ReadTicket} ticket */
+  async function pollSweep(ticket) {
     try {
-      const response = await ask_(`/backtest/run.json`, { cache: 'no-store' });
+      const response = await ask_(submittedAttempt ? `/backtest/run.json?attempt=${submittedAttempt}` : '/backtest/run.json', { cache: 'no-store', signal: ticket.signal });
+      if (!ticket.current()) return;
       if (!response.ok) {
+        launchAdmission = { available: false, why: 'The execution status could not be read. Rechecking before another launch.' };
         invalidateLive();
+        sweep = { phase: 'unknown', run: sweep.run, why: `/backtest/run.json answered ${response.status}; execution state is unknown. Retrying.` };
+        statusRequests.schedule(pollSweep, 2000);
         return;
       }
       const body = await response.json();
+      if (!ticket.current()) return;
+      const running = observedRunning(body);
+      if (unconfirmedSubmission) {
+        sweep = { phase: 'unknown', run: null, why: 'The previous launch response is unconfirmed. A different or absent global status cannot prove its outcome; no duplicate request will be sent.' };
+        statusRequests.schedule(pollSweep, 2000);
+        return;
+      }
+      if (adoptIndexStop(running) || adoptBoolean(running)) return;
       // ENDED IS NOT FINISHED, AND THIS TESTED ONLY THAT IT HAD ENDED.
       //
       // The branch was `if (run.in_flight) … else done`, which is two readings
@@ -2324,8 +2457,14 @@
       // ledger that gained no row. `sweepOutcome` is total over the payload and
       // is proved in `web/tests/sweep.test.js`; see its module comment. It also
       // absorbs the `no run at all` case this function used to answer inline.
-      const next = sweepOutcome(body.running);
+      const next = sweepOutcome(running);
       sweep = next;
+      if (next.phase === 'unknown') {
+        invalidateLive();
+        statusRequests.schedule(pollSweep, 2000);
+        return;
+      }
+      adoptWhy = '';
       if (next.phase === 'running') {
         // AND THE EVENT FEED, on the same tick. `next` carries no progress —
         // see `live` — so this is where the page learns which rungs have
@@ -2336,7 +2475,7 @@
         // itself. They answer different questions and neither is awaited, so a
         // slow read of one cannot hold up the other.
         fetchLiveTop();
-        pollAt = setTimeout(pollSweep, 2000);
+        statusRequests.schedule(pollSweep, 2000);
         return;
       }
       // DONE IS A COMPLETE REPORT, NOT A PROMISE THAT EVERY RUNG APPENDED.
@@ -2365,17 +2504,27 @@
       } else {
         invalidateLive();
       }
+      if (submittedAttempt) {
+        submittedAttempt = '';
+        statusRequests.schedule(adoptRunning, 0);
+      }
     } catch (error) {
+      if (!ticket.current()) return;
       invalidateLive();
       sweep = {
-        phase: 'failed',
+        phase: 'unknown',
         run: null,
         why: error instanceof Error ? error.message : String(error)
       };
+      launchAdmission = { available: false, why: sweep.why };
+      statusRequests.schedule(pollSweep, 2000);
     }
   }
 
   async function startSweep() {
+    if (!runtimeInspection.value.canSweep) return;
+    if (receiptBusy || booleanBusy || indexStopBusy || indexWorkflow || sweepMode !== 'ordinary') return;
+    if (launchStop) return;
     // WHICH COMMAND THIS TAB PRESSED, before anything can be asked about it.
     // `/backtest/run.json` carries `kind` and is the authority, but it arrives
     // one poll later — and on a refusal raised HERE it never arrives at all.
@@ -2392,6 +2541,10 @@
       };
       return;
     }
+    statusRequests.cancel();
+    unconfirmedSubmission = true;
+    submittedAttempt = '';
+    launchAdmission = { available: false, why: 'Waiting for the launch response.' };
     sweep = { phase: 'starting', run: null, why: '' };
     try {
       const response = await ask_('/backtest/run', {
@@ -2404,14 +2557,8 @@
           from_month: from.month,
           to_year: to.year,
           to_month: to.month,
-          // SENT AHEAD OF BEING HONOURED, DELIBERATELY. `sweeprun::Asked`
-          // parses `feed`, `underlying`, `from_*` and `to_*` and ignores
-          // anything else, so these two are inert on today's server — and
-          // the page says so under the button rather than letting the
-          // operator believe a selection travelled that did not. The moment
-          // the route reads them, it reads them from a client that has been
-          // sending them all along.
-          underlyings: [...pickedSymbols],
+          // Ordinary batch accepts one instrument and the selected rungs.
+          // Receipt mode owns its own serial instrument × rung requests.
           rungs: [...pickedRungs],
           // THE ENGINE'S OWN KNOBS, FROM THIS FORM.
           //
@@ -2433,24 +2580,51 @@
           ...engineKnobs
         })
       });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok || body.accepted !== true) {
-        sweep = {
-          phase: 'failed',
-          run: null,
-          why: body.refusal ?? `The server answered ${response.status} and gave no reason.`
-        };
-        return;
-      }
-      sweep = { phase: 'running', run: null, why: '' };
-      pollAt = setTimeout(pollSweep, 1200);
+      applySweepSubmission(response.status, await response.json().catch(() => null));
     } catch (error) {
       sweep = {
-        phase: 'failed',
+        phase: 'unknown',
         run: null,
-        why: error instanceof Error ? error.message : String(error)
+        why: `The launch response was lost: ${error instanceof Error ? error.message : String(error)}. It may have started; no duplicate request will be sent.`
       };
+      statusRequests.schedule(pollSweep, 2000);
     }
+  }
+
+  /** @param {number} status @param {any} body */
+  function applySweepSubmission(status, body) {
+    const outcome = sweepSubmission(status, body);
+    unconfirmedSubmission = !outcome.confirmed;
+    submittedAttempt = outcome.attempt;
+    sweep = { phase: /** @type {'running'|'failed'|'unknown'} */ (outcome.phase), run: null, why: outcome.why };
+    statusRequests.schedule(outcome.phase === 'failed' ? adoptRunning : pollSweep, 1200);
+  }
+
+  /** Child observers own their outcomes; a fresh lease read only restores
+   * admission after a reloaded child finishes. It never re-adopts that same
+   * completed Boolean attempt and cannot cause another execution.
+   * @param {import('$lib/page-requests.js').ReadTicket} ticket */
+  async function refreshCurrentAdmission(ticket) {
+    try {
+      const response = await ask_('/backtest/run.json', { cache: 'no-store', signal: ticket.signal });
+      if (!ticket.current()) return;
+      if (!response.ok) throw new Error(`The execution check answered ${response.status}.`);
+      const body = await response.json();
+      if (!ticket.current()) return;
+      observedRunning(body);
+      if (!launchAdmission.available) statusRequests.schedule(refreshCurrentAdmission, 2000);
+    } catch (error) {
+      if (!ticket.current()) return;
+      launchAdmission = { available: false, why: error instanceof Error ? error.message : String(error) };
+      statusRequests.schedule(refreshCurrentAdmission, 2000);
+    }
+  }
+
+  /** @param {'boolean'|'receipt'|'index-stop'} child @param {boolean} busy */
+  function setResearchBusy(child, busy) {
+    const wasBusy = child === 'boolean' ? booleanBusy : child === 'index-stop' ? indexStopBusy : receiptBusy;
+    if (child === 'boolean') booleanBusy = busy; else if (child === 'index-stop') indexStopBusy = busy; else receiptBusy = busy;
+    if (wasBusy && !busy) statusRequests.schedule(refreshCurrentAdmission, 0);
   }
 
   /* ====================================================================
@@ -2594,7 +2768,7 @@
    * to the same append-only ledger". A button that can only earn a 409 is not a
    * button, so neither is left pressable.
    */
-  const inFlight = $derived(sweep.phase === 'starting' || sweep.phase === 'running');
+  const inFlight = $derived(receiptBusy || booleanBusy || indexStopBusy || sweep.phase === 'starting' || sweep.phase === 'running');
 
   /**
    * Start a descent: one rung, the threshold walked down from a ceiling stated
@@ -2614,6 +2788,9 @@
    * exactly the failure §4 bans. The note under the button says so instead.
    */
   async function startDescent() {
+    if (!runtimeInspection.value.canSweep) return;
+    if (receiptBusy || booleanBusy || indexStopBusy || indexWorkflow) return;
+    if (launchStop) return;
     pressed = 'descent';
     invalidateLive(true);
     const from = months(ask.from);
@@ -2658,6 +2835,10 @@
       };
       return;
     }
+    statusRequests.cancel();
+    unconfirmedSubmission = true;
+    submittedAttempt = '';
+    launchAdmission = { available: false, why: 'Waiting for the launch response.' };
     sweep = { phase: 'starting', run: null, why: '' };
     try {
       const response = await ask_('/backtest/descend', {
@@ -2679,34 +2860,21 @@
           top: listRows
         })
       });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok || body.accepted !== true) {
-        // THE SERVER'S OWN SENTENCE, NEVER A PARAPHRASE. A refusal here names
-        // the rung it will not sweep, or the span that runs backwards, or that
-        // a run is already in the slot — 400, 409 and 503 all arrive this way,
-        // and each says what to do about it.
-        sweep = {
-          phase: 'failed',
-          run: null,
-          why: body.refusal ?? `The server answered ${response.status} and gave no reason.`
-        };
-        return;
-      }
-      sweep = { phase: 'running', run: null, why: '' };
-      pollAt = setTimeout(pollSweep, 1200);
+      applySweepSubmission(response.status, await response.json().catch(() => null));
     } catch (error) {
       sweep = {
-        phase: 'failed',
+        phase: 'unknown',
         run: null,
-        why: error instanceof Error ? error.message : String(error)
+        why: `The launch response was lost: ${error instanceof Error ? error.message : String(error)}. It may have started; no duplicate request will be sent.`
       };
+      statusRequests.schedule(pollSweep, 2000);
     }
   }
 
   // A POLL MUST NOT OUTLIVE THE PAGE. Without this a navigation away leaves a
   // timer firing against a component that is gone.
   $effect(() => () => {
-    if (pollAt !== null) clearTimeout(pollAt);
+    statusRequests.dispose();
     invalidateLive();
   });
 
@@ -3086,6 +3254,8 @@
    * question.
    */
   const sweepSymbol = $derived([...pickedSymbols][0] ?? '');
+  const indexWorkflow = $derived(pickedSymbols.size === 0 || [...pickedSymbols].some(symbol =>
+    ['NIFTY', 'BANKNIFTY', 'NSE-NIFTY', 'NSE-BANKNIFTY'].includes(symbol)));
 
   /**
    * Toggle one key in a chosen set.
@@ -3115,6 +3285,8 @@
     return next;
   }
 
+  const catalogGate = createRequestGate();
+
   /**
    * Fold the census into one entry per instrument, with its rungs and its
    * real month bounds.
@@ -3125,16 +3297,17 @@
    * @param {string} feed
    */
   async function loadCatalog(feed) {
+    const ticket = catalogGate.begin(feed);
+    sweptSurface = null;
     if (!feed) {
       catalog = { phase: 'idle', why: '', held: [] };
       return;
     }
     catalog = { phase: 'loading', why: '', held: [] };
+    untrack(() => loadSurface(feed, ticket));
     try {
-      const response = await ask_(`/store.json?feed=${encodeURIComponent(feed)}`, {
-        cache: 'no-store',
-        ms: 30_000
-      });
+      const response = await readStoreCensus(feed);
+      if (!catalogGate.admits(ticket, activeFeed)) return;
       if (!response.ok) {
         catalog = {
           phase: 'failed',
@@ -3146,7 +3319,7 @@
         };
         return;
       }
-      const rows = await response.json();
+      const rows = response.body;
       /** @type {Map<string, { leaf: string, full: string, months: Set<string>, from: string, to: string, rungs: Map<string, Rung> }>} */
       const byLeaf = new Map();
       for (const row of rows ?? []) {
@@ -3176,10 +3349,6 @@
         if (month < r.from) r.from = month;
         if (month > r.to) r.to = month;
       }
-      // The surface, best effort and never blocking the catalog: a form that
-      // cannot say which two are swept is worse than one that cannot say it
-      // YET, and neither is a reason to withhold the span.
-      untrack(() => loadSurface(feed));
       const held = [...byLeaf.values()]
         .map((h) => ({
           leaf: h.leaf,
@@ -3220,6 +3389,7 @@
         .sort((a, b) => b.months - a.months || a.leaf.localeCompare(b.leaf));
       catalog = { phase: 'ready', why: '', held };
     } catch (error) {
+      if (!catalogGate.admits(ticket, activeFeed)) return;
       catalog = {
         phase: 'failed',
         why:
@@ -3234,18 +3404,21 @@
    * Read the swept target off `/universes.json` and keep its own words.
    *
    * @param {string} feed
+   * @param {{identity:string|undefined}} ticket
    */
-  async function loadSurface(feed) {
+  async function loadSurface(feed, ticket) {
     try {
       const response = await ask_(`/universes.json?feed=${encodeURIComponent(feed)}`, {
         cache: 'no-store',
         ms: 15_000
       });
+      if (!catalogGate.admits(ticket, activeFeed)) return;
       if (!response.ok) {
         sweptSurface = null;
         return;
       }
       const body = await response.json();
+      if (!catalogGate.admits(ticket, activeFeed)) return;
       const target = (body?.targets ?? []).find(
         (/** @type {{ target?: string } | null | undefined} */ t) => t?.target === 'swept'
       );
@@ -3257,6 +3430,7 @@
           }
         : null;
     } catch {
+      if (!catalogGate.admits(ticket, activeFeed)) return;
       // An absent surface costs the SENTENCE and nothing else. The span, the
       // rungs and the run all still work, and the route still refuses what it
       // will not sweep.
@@ -3266,11 +3440,19 @@
 
   /** The entry for whatever instrument is selected, or null. O(1) per read. */
   const heldNow = $derived(catalog.held.find((h) => h.leaf === sweepSymbol) ?? null);
+  // Searchable timeframes come from validated launch metadata. Their source
+  // data is checked by the server; a separately stored coarser file is not a
+  // prerequisite asserted by this picker.
+  const launchRungs = $derived(sweepMode === 'boolean' && booleanTimeframes.length
+    ? booleanTimeframes.map((name) => heldNow?.rungs.find((r) => r.name === name)
+      ?? { name, months: 0, from: '', to: '' })
+    : heldNow?.rungs ?? []);
 
   /** Re-read the census whenever the feed changes. One request per feed. */
   $effect(() => {
     const feed = activeFeed;
     untrack(() => loadCatalog(feed));
+    return () => catalogGate.invalidate();
   });
 
   /**
@@ -3291,6 +3473,7 @@
        dependencies here is what makes a switch re-seed. */
     const symbol = sweepSymbol;
     const touched = spanTouched;
+    const supportedTimeframes = sweepMode === 'boolean' ? booleanTimeframes : [];
     untrack(() => {
       if (!symbolTouched && !catalog.held.some((h) => h.leaf === symbol)) {
         // THE NEWEST RUN'S INSTRUMENT FIRST, when the store still holds it.
@@ -3307,10 +3490,8 @@
         ask.from = held.from;
         ask.to = held.to;
       }
-      // EVERY RUNG THE INSTRUMENT HOLDS, until the operator says otherwise.
-      // The run route sweeps them all today, so an empty or stale selection
-      // would show fewer than the run covers -- which is the one direction
-      // this control must never be wrong in.
+      // Default to every server-supported search timeframe, until the operator
+      // chooses a subset. A later metadata reply must not erase that choice.
       //
       // `!rungsTouched` IS WHAT MAKES "until he says otherwise" TRUE. Keyed on
       // `size === 0` alone, this could not tell a stale selection from a
@@ -3318,8 +3499,9 @@
       // next edit to `from` or `to` refilled all eight rungs behind him. The
       // argument above is about STALENESS; clearing is a decision, and the
       // latch is the only thing that separates the two.
-      if (held && !rungsTouched && pickedRungs.size === 0) {
-        pickedRungs = new Set(held.rungs.map((r) => r.name));
+      if (held && !rungsTouched) {
+        if (supportedTimeframes.length) pickedRungs = new Set(supportedTimeframes);
+        else if (pickedRungs.size === 0) pickedRungs = new Set(held.rungs.map((r) => r.name));
       }
     });
   });
@@ -3481,6 +3663,8 @@
    * looked exactly like one that was broken.
    */
   const descentStop = $derived.by(() => {
+    if (!runtimeInspection.value.canSweep) return 'inspection';
+    if (launchStop) return 'execution';
     if (blocked !== null) return 'ledger';
     if (!activeFeed) return 'feed';
     if (catalog.phase !== 'ready') return 'census';
@@ -5815,7 +5999,7 @@
      a different claim about what won. -->
 <!-- ══ ONE SELECTED CELL, ONE DURABLE DETAIL STREAM ══
      D-0414 replaced the legacy level-less `trades.bin` policy. The current
-     child replays the exact finally admitted grid cell, including its own
+     child replays the exact finally selected grid cell, including its own
      stop/target/trailing exits and exclusivity, and refuses unless its full
      Cell plus independently folded count/sums/worst/max-drawdown reconcile.
      The policy and selected direction live in the sealed receipt even when the
@@ -5823,7 +6007,7 @@
 {#snippet chosenGridTradeNote()}
   <p class="tt-warnnote">
     <b>Exact chosen-grid rows.</b> The sealed <code>{tradeList.policy ?? 'chosen-grid-v1'}</code>
-    detail replays the finally admitted <b>{tradeList.direction ?? 'selected'}</b> cell, including
+    detail replays the finally selected <b>{tradeList.direction ?? 'selected'}</b> cell, including
     its stop, target, trailing exits, and one-position-at-a-time exclusivity. Its rows are published
     only after their count, both P&amp;L sums, worst trade, max drawdown, and complete grid cell
     reconcile with the headline result.
@@ -5871,7 +6055,7 @@
       >unpriced</span
     >
   {:else if meets.all}
-    <span class="vp vp-pass" title="Every CHECKABLE rule met. Two rules are not checked here and are not claimed as passed: the stop ceiling (this row carries no worst_mae) and the protective-exit rule (this row carries no exit shape, so a cell with no stop cannot be told from one with a stop).">PASS</span>
+    <span class="vp vp-pass" title="Five historical rules met. This verdict does not prove worst adverse excursion, protective exits, fill headroom, average payoff, period consistency or institutional admission.">5 rules pass</span>
   {:else}
     {@const failed = [
       !meets.win_rate && 'win rate',
@@ -5880,7 +6064,7 @@
       !meets.trades && 'trade count',
       !meets.assurance && 'assurance'
     ].filter(Boolean)}
-    <span class="vp vp-fail" title="Fails: {failed.join(', ')}. The stop ceiling and the protective-exit rule are not checked here."
+    <span class="vp vp-fail" title="Fails: {failed.join(', ')}. This is only the five-rule historical verdict."
       >FAIL <i>{failed.length}</i></span
     >
   {/if}
@@ -6196,6 +6380,18 @@
     </button>
   </header>
 
+  {#if runtimeInspection.value.mode === 'read-only-main-app'}
+    <aside class="inspection-results">
+      <b>Saved research results</b>
+      <p>Saved verification trades are kept separately from the ordinary sweep ledger below. An empty ledger does not mean those saved trades are missing.</p>
+      {#if runtimeInspection.value.savedResultsUrl}
+        <a class="btn" href={runtimeInspection.value.savedResultsUrl} data-sveltekit-reload>Open saved research results</a>
+      {:else}
+        <p>This server has not supplied a saved-results link.</p>
+      {/if}
+    </aside>
+  {/if}
+
   <!-- ================================================================
        RUN ONE FROM HERE.
        The console reported on work it could not cause until this; the
@@ -6210,6 +6406,24 @@
        gap between two boxes says they are separate things, and every
        section here is a different view of ONE run. -->
   <div class="bt-shell">
+  <InvocationAudit />
+  <ExpressionSearch vocabulary={vocab} />
+  <BooleanCatalog />
+  <BooleanEvidence initialIdentity={routePage.url.searchParams.get('boolean_qualification')??''} initialModel={routePage.url.searchParams.has('boolean_qualification')?'qualification':'statistics'} initialCompletion={routePage.url.searchParams.get('completion')} autoLoad={routePage.url.searchParams.has('boolean_qualification')} />
+  <BooleanCampaign initialIdentity={routePage.url.searchParams.get('boolean_campaign')??''} autoLoad={routePage.url.searchParams.has('boolean_campaign')} />
+  <QualifiedCampaign initialIdentity={routePage.url.searchParams.get('boolean_qualified_campaign')??''} autoLoad={routePage.url.searchParams.has('boolean_qualified_campaign')} />
+  <div id="saved-boolean-research">
+    <BooleanQualifiedSearch initialIdentity={launchedSearchIdentity || routePage.url.searchParams.get('boolean_qualified_search') || ''} refreshKey={launchedSearchRevision} autoLoad={!!launchedSearchIdentity || routePage.url.searchParams.has('boolean_qualified_search')} vocabulary={{...vocab,commitDigest:vocabCommit}} />
+  </div>
+  <BooleanLater />
+  {#if routePage.url.searchParams.has('index_stop')}
+    <IndexStopResults initialIdentity={routePage.url.searchParams.get('index_stop')??''} initialCompletion={routePage.url.searchParams.get('completion')??''} autoLoad={true} />
+  {/if}
+
+  {#if routePage.url.searchParams.has('index_stop_qualification')}
+    <div id="index-stop-qualification"><IndexStopQualification initialIdentity={routePage.url.searchParams.get('index_stop_qualification')??''} initialCompletion={routePage.url.searchParams.get('completion')??''} autoLoad={true}/></div>
+  {/if}
+
   <section class="runbar">
     <!-- WHICH OF THE TWO BARS HOLDS THE SLOT. There are two commands below
          this line now and one `Progress` slot on the server for both, so "a
@@ -6295,7 +6509,7 @@
              the scope for the whole product from a control that never meant
              to. Clearing the feed is the top bar's job, deliberately. */
           const next = [...sel][0];
-          if (next) feeds.active = next;
+          if (next) selectFeed(next);
         }}
       />
     </div>
@@ -6327,7 +6541,7 @@
           summary={pickedSymbols.size === 1
             ? ([...pickedSymbols][0] ?? '—')
             : `${exact(pickedSymbols.size)} of ${exact(catalog.held.length)}`}
-          title="Every spot index this feed holds on disk. Pick one or several; the run route takes one at a time today."
+          title="Choose one or several stored instruments. The brute-force sweep uses every selected eligible instrument. Advanced tools describe their own narrower scope."
           rows={catalog.held.map((h) => ({
             key: h.leaf,
             name: h.leaf,
@@ -6364,22 +6578,26 @@
       {#if heldNow}
         <Picker
           label="timeframes"
-          summary={pickedRungs.size === heldNow.rungs.length
-            ? `all ${exact(heldNow.rungs.length)}`
-            : `${exact(pickedRungs.size)} of ${exact(heldNow.rungs.length)}`}
-          title="Every timeframe this instrument holds on disk. Execution is always one-minute, whichever are picked."
-          rows={heldNow.rungs.map((r) => ({
+          summary={pickedRungs.size === launchRungs.length
+            ? `all ${exact(launchRungs.length)}`
+            : `${exact(pickedRungs.size)} of ${exact(launchRungs.length)}`}
+          title="Choose one or several signal timeframes. Every selected timeframe is recorded in the sweep request; trade execution uses one-minute OHLCV."
+          rows={launchRungs.map((r) => ({
             key: r.name,
             name: r.name,
             detail:
-              r.months < heldNow.months
+              sweepMode === 'boolean' && !heldNow.rungs.some((held) => held.name === r.name)
+                ? 'Source checked before launch'
+                : r.months < heldNow.months
                 ? `${exact(r.months)} months · ${exact(heldNow.months - r.months)} short`
                 : `${exact(r.months)} months`,
             why:
-              r.months < heldNow.months
+              sweepMode === 'boolean'
+                ? 'The server checks the real stored source and refuses missing evidence before the sweep.'
+                : r.months < heldNow.months
                 ? 'fewer months on disk than the instrument holds, so a sweep here is a shorter sample rather than a corrected one.'
                 : undefined,
-            title: `${monthLabel(r.from)} – ${monthLabel(r.to)}`
+            title: r.from && r.to ? `${monthLabel(r.from)} – ${monthLabel(r.to)}` : 'Requested timeframe; source evidence is checked by the server.'
           }))}
           selected={pickedRungs}
           onchange={(/** @type {Set<string>} */ next) => {
@@ -6419,7 +6637,7 @@
          months on disk, labelled the way `$lib/dates.js` labels every other
          month in the product. -->
     <div class="runf">
-      <span>from</span>
+      <span>{sweepMode === 'boolean' ? 'training from' : 'from'}</span>
       {#if heldNow}
         <Picker
           single
@@ -6442,7 +6660,7 @@
       {/if}
     </div>
     <div class="runf">
-      <span>to</span>
+      <span>{sweepMode === 'boolean' ? 'training to' : 'to'}</span>
       {#if heldNow}
         <Picker
           single
@@ -6511,6 +6729,56 @@
          Blank means ABSENCE, and the stated fallback is what the server will
          then decide. Pre-filling would put fourteen terms into the run identity
          the operator never chose. -->
+    {#if sweepMode === 'boolean'}
+      <p class="research-mode-help" id="sweep-scope-summary">
+        <b>This run will test:</b> every selected eligible instrument
+        ({pickedSymbols.size ? [...pickedSymbols].join(', ') : 'choose an instrument'}) on
+        {pickedRungs.size ? [...pickedRungs].join(' · ') : 'your selected timeframes'}.
+        It searches conditions together, as alternatives, and as exclusions (AND / OR / NOT),
+        then compares fixed settings on the later period below. Real stored OHLCV only;
+        <b>intraday trading with forced exit at 15:10 IST.</b>
+        Saved batches show progress. Reaching a work allowance does not mean every combination is exhausted.
+      </p>
+    {/if}
+    <IndexStopLaunch active={sweepMode === 'boolean' && indexWorkflow} feed={activeFeed} symbols={[...pickedSymbols]}
+      rungs={[...pickedRungs]} from={ask.from} to={ask.to} initialRun={initialIndexStopRun}
+      blockedReason={!runtimeInspection.value.canSweep ? runtimeInspection.value.why
+        : receiptBusy || booleanBusy ? 'Another research run is active.' : launchStop}
+      onbusy={(/** @type {boolean} */ busy) => setResearchBusy('index-stop', busy)}
+      onTimeframes={(/** @type {string[]} */ values) => { booleanTimeframes = values; }}
+    />
+    <div class="receipt-mode" hidden={(sweepMode !== 'boolean' || indexWorkflow) && !(initialBooleanRun && booleanBusy)}>
+      {#if indexWorkflow && initialBooleanRun && booleanBusy}<p>Observing an earlier grid workflow. A new index sweep uses the single candle-stop Run sweep above.</p>{/if}
+      <BooleanLaunch active={sweepMode === 'boolean' && !indexWorkflow} feed={activeFeed} symbols={[...pickedSymbols]}
+        rungs={[...pickedRungs]} from={ask.from} to={ask.to} initialRun={initialBooleanRun}
+        blockedReason={!runtimeInspection.value.canSweep ? runtimeInspection.value.why
+          : receiptBusy || indexStopBusy ? 'Another research run is active.' : launchStop}
+        onbusy={(/** @type {boolean} */ busy) => setResearchBusy('boolean', busy)}
+        onTimeframes={(/** @type {string[]} */ values) => { booleanTimeframes = values; }}
+        onSearch={handoffBooleanSearch}
+      />
+    </div>
+    <details class="research-mode-guide" open={sweepMode !== 'boolean'}>
+      <summary>Advanced tools: AND-only sweeps and receipt checks</summary>
+      <p>The normal brute-force sweep above searches AND, OR and NOT. These tools retain the narrower
+        workflows for existing research and saved ordinary results.</p>
+      {#if indexWorkflow}<p>NIFTY and BANKNIFTY use the single candle-stop Run sweep above. Earlier saved AND results remain inspectable below.</p>{/if}
+      <div class="advanced-run-tools" aria-label="Advanced sweep tools">
+        <button class="btn ghost" disabled={inFlight} aria-pressed={sweepMode === 'boolean'}
+          onclick={() => { sweepMode = 'boolean'; }}>Return to brute-force sweep</button>
+        <button class="btn ghost" disabled={inFlight || indexWorkflow} aria-pressed={sweepMode === 'ordinary'}
+          onclick={() => { sweepMode = 'ordinary'; }}>AND-only sweep</button>
+        <button class="btn ghost" disabled={inFlight || indexWorkflow} aria-pressed={sweepMode === 'receipt'}
+          onclick={() => { sweepMode = 'receipt'; }}>Receipt-checked AND batch</button>
+      </div>
+      {#if sweepMode === 'ordinary'}
+        <p><b>Advanced AND-only sweep:</b> uses the first selected instrument and selected timeframes.
+          All required conditions must hold together. It does not search OR or NOT.</p>
+      {:else if sweepMode === 'receipt'}
+        <p><b>Advanced receipt-checked AND batch:</b> checks source evidence, then records a separate
+          outcome for every selected instrument and timeframe. It does not search OR or NOT.</p>
+      {/if}
+    {#if sweepMode !== 'boolean'}
     <details class="eng">
       <summary class="eng-sum">
         Engine settings
@@ -6522,8 +6790,13 @@
           {/if}
         </span>
       </summary>
+      <p class="eng-foot">
+        Search breadth controls which combinations are considered. Execution exits control how trades
+        close. Evidence filters decide which results qualify. Resource limits bound the work retained
+        and priced. Leave a field blank to use the server’s configuration; the page does not assume its value.
+      </p>
       <div class="eng-grid">
-        {#each KNOB_FIELDS as k (k.key)}
+        {#each visibleKnobFields as k (k.key)}
           <label class="eng-row">
             <span class="eng-lab">{k.label}</span>
             <input
@@ -6531,29 +6804,44 @@
               name={`engine-${k.key}`}
               type="text"
               inputmode="numeric"
-              placeholder={k.fallback}
+              placeholder="Leave to the server"
               bind:value={engine[k.key]}
               aria-label={k.label}
+              disabled={receiptBusy}
             />
-            {#if k.note}<span class="eng-note">{k.note}</span>{/if}
+            {#if k.note && sweepMode === 'ordinary'}<span class="eng-note">{k.note}</span>{/if}
           </label>
         {/each}
       </div>
       <p class="eng-foot">
-        These reach the engine as its own <code>BRUTEX_*</code> names and are written to the audit
-        trail before the run starts, under <code>api.sweep · knobs set for this run</code>. They also
-        enter the run identity, so two runs at different settings are two runs and never overwrite
-        each other. <b>The store root and the log directory are deliberately not settable here</b> —
-        a request that could move them would make every provenance banner on this page a claim about
-        a directory nobody chose.
+        {#if sweepMode === 'receipt'}
+          Receipt-checked mode validates each setting and refuses invalid values. Support percentages and
+          sizing-rate overrides belong to ordinary mode and are not sent here. Minimum hits is explicit below.
+        {/if}
+        Submitted settings are saved in the audit trail and run identity, so results from different
+        settings remain distinguishable.
       </p>
     </details>
+    {/if}
 
+    <div class="receipt-mode" hidden={sweepMode !== 'receipt'}>
+      <ReceiptBatch
+        feed={activeFeed} symbols={[...pickedSymbols]} rungs={[...pickedRungs]}
+        supportedRungs={signalRungSet ? [...signalRungSet] : []}
+        from={ask.from} to={ask.to} knobs={engineKnobs}
+        blockedReason={!runtimeInspection.value.canSweep ? runtimeInspection.value.why
+          : blocked ? 'This ledger cannot accept a result. Resolve the ledger refusal before starting.'
+          : indexWorkflow ? 'NIFTY and BANKNIFTY use the single candle-stop Run sweep above.'
+          : booleanBusy || indexStopBusy ? 'Another research run is active.' : launchStop}
+        onbusy={(/** @type {boolean} */ busy) => setResearchBusy('receipt', busy)}
+        oncomplete={() => { void fetchLedger(); }}
+      />
+    </div>
+    {#if sweepMode === 'ordinary'}
     <button
       class="btn run"
       onclick={startSweep}
-      disabled={sweep.phase === 'starting' ||
-        sweep.phase === 'running' ||
+      disabled={!runtimeInspection.value.canSweep || indexWorkflow || receiptBusy || booleanBusy || indexStopBusy || !!launchStop ||
         !activeFeed ||
         blocked !== null ||
         pickedSymbols.size === 0 ||
@@ -6565,11 +6853,16 @@
            rungs, it runs a brute force -- over whatever is selected above.
            The label says the ACTION now, and the count lives beside the
            chips where it can be checked against them. -->
-      {#if sweep.phase === 'starting'}Starting…{:else if sweep.phase === 'running'}Sweeping…{:else}Run
-        brute force{/if}
+      {#if sweep.phase === 'starting'}Starting…{:else if sweep.phase === 'running'}Sweeping…{:else}Run AND sweep{/if}
     </button>
     <span class="runbar-n">
-      {#if blocked}
+      {#if !runtimeInspection.value.canSweep}
+        {runtimeInspection.value.why}
+      {:else if receiptBusy || booleanBusy || indexStopBusy}
+        Another research run is active. Wait for its recorded outcome.
+      {:else if launchStop}
+        <b class="warnish">Run is unavailable:</b> {launchStop}
+      {:else if blocked}
         this ledger cannot take a result — see the note above the table
       {:else if !activeFeed}
         choose a feed first — a run is stamped with the feed its bars came from
@@ -6591,23 +6884,14 @@
         <b>{activeFeed}</b> has no bars on disk, so there is nothing to sweep. Pull a month first —
         this page never defaults a span it cannot read.
       {:else}
-        <!-- WHAT THE PRESS WILL ACTUALLY DO, not what the controls express.
-             The selection above is real and the route is not there yet:
-             `sweeprun::Asked` carries ONE `underlying` and no rung field at
-             all, so a press sweeps the first selected instrument over every
-             intraday rung whatever the chips say.
-
-             Saying so is the whole point. A control that quietly does
-             something other than what it shows is the failure §4 bans, and
-             the fix while the gap exists is a sentence, not a disabled
-             control -- the selection still travels in the request, so the
-             day the route reads it nothing here has to change. -->
-        this press sweeps <b>{sweepSymbol || '—'}</b> on <b>{activeFeed}</b>, every intraday
-        timeframe, at a support each timeframe <b>derives from its own bars</b> —
-        no fixed percentage is sent or held.
-        {#if pickedSymbols.size > 1 || (heldNow && pickedRungs.size < heldNow.rungs.length)}
-          <b class="warnish">The rest of the selection is not sent yet</b> — the run route takes one
-          instrument and no timeframe list.
+        Ordinary mode sweeps <b>{sweepSymbol || '—'}</b> on <b>{activeFeed}</b>, on the
+        <b>{pickedRungs.size} selected intraday timeframes</b>, with each timeframe’s support
+        derived by the server unless an ordinary override is supplied.
+        <b>Forced exit is 15:10 IST.</b> Daily bars are reference context only.
+        This mode does not require the strict input checksum receipts.
+        {#if pickedSymbols.size > 1}
+          <b class="warnish">Only the first selected instrument runs in ordinary mode.</b>
+          Receipt-checked mode queues every selected instrument and timeframe.
         {/if}
         <!-- THE SPAN GUARD MOVED HERE WHEN THE COVERAGE SECTION WENT.
              It is the one thing in that section an operator acts on, and it
@@ -6634,6 +6918,8 @@
         {/if}
       {/if}
     </span>
+    {/if}
+    </details>
   </section>
 
   <!-- ================================================================
@@ -6655,6 +6941,8 @@
        each is the point — and they take the SAME slot, so only one can be in
        flight. The label says which is running.
        ================================================================ -->
+  <details class="research-mode-guide">
+  <summary>Advanced: descend an AND-only timeframe</summary>
   <section class="runbar">
     <span class="runbar-k">
       Descend one rung
@@ -6760,13 +7048,19 @@
     <button
       class="btn run"
       onclick={startDescent}
-      disabled={inFlight || descentStop !== null}
+      disabled={!runtimeInspection.value.canSweep || indexWorkflow || inFlight || descentStop !== null}
     >
       {#if pressed === 'descent' && sweep.phase === 'starting'}Starting…{:else if pressed === 'descent' && sweep.phase === 'running'}Descending…{:else}Descend{/if}
     </button>
 
     <span class="runbar-n">
-      {#if descentStop === 'ledger'}
+      {#if indexWorkflow}
+        NIFTY and BANKNIFTY use the single candle-stop Run sweep above. The earlier AND grid remains readable.
+      {:else if descentStop === 'inspection'}
+        {runtimeInspection.value.why}
+      {:else if descentStop === 'execution'}
+        <b class="warnish">Descend is unavailable:</b> {launchStop}
+      {:else if descentStop === 'ledger'}
         this ledger cannot take a result — see the note above the table
       {:else if descentStop === 'feed'}
         choose a feed first — a descent is stamped with the feed its bars came from
@@ -6802,7 +7096,7 @@
       {/if}
     </span>
   </section>
-
+  </details>
 
   {#if blocked}
     <!-- ==============================================================
@@ -7155,6 +7449,15 @@
         {top.why}
       </p>
     {/if}
+  {:else if sweep.phase === 'unknown'}
+    <div class="panel bt-note">
+      <h2>{!launchStop && sweep.run?.where === 'cli' ? 'Historical execution outcome is unconfirmed' : 'Execution state is unknown'}</h2>
+      <p>{sweep.why}</p>
+      {#if !launchStop && sweep.run?.where === 'cli'}
+        <p><b>The execution slot is free.</b> The requested sweep must still pass its input checks, and the server checks the slot again before starting. This does not mark the older command completed.</p>
+      {/if}
+      <p>The monitor will retry. A silent, stale or unreadable log is never counted as a completed sweep.</p>
+    </div>
   {:else if sweep.phase === 'failed'}
     <!-- WHICH COMMAND WAS REFUSED, and this is the arm where the payload most
          often cannot say: a malformed month, a dead fetch and a 409 from the
@@ -7180,7 +7483,7 @@
          ============================================================== -->
     <div class="panel wait">
       <span class="spin" aria-hidden="true"></span>
-      <p>Reading the results ledger at a computed offset. This is one seek per run, not a scan.</p>
+      <p aria-live="polite">{load.why || 'Reading saved sweep results…'}</p>
     </div>
   {:else if load.phase === 'failed'}
     <!-- ==============================================================
@@ -7202,10 +7505,18 @@
     >
       <h2>
         {refusal.includes('not an error')
-          ? 'Nothing has been swept yet'
+          ? 'Ordinary sweep ledger has no rows'
           : 'The ledger could not be read'}
       </h2>
       <p>{refusal}</p>
+      {#if refusal.includes('not an error')}
+        <p>
+          This describes the ordinary <code>results/runs.bin</code> ledger at this server's
+          configured store. Boolean research is saved separately; this response does not say
+          whether that research exists. Open an exact saved search in the
+          <a href="#saved-boolean-research">saved Boolean research panel</a>.
+        </p>
+      {/if}
       {#if ledger?.path}
         <p class="path"><span class="bt-lab">file</span> <code>{ledger.path}</code></p>
       {/if}
@@ -7397,11 +7708,12 @@
            and sends the operator to change a picker that will not help. -->
       {#if allRuns.length === 0}
         <div class="panel bt-note">
-          <h2>Nothing has been swept yet</h2>
+          <h2>Ordinary sweep ledger has no rows</h2>
           <p>
-            The results ledger exists and is readable — it is simply empty. It is written by
-            <code>cli</code> when a sweep completes, not by this server, so the way to fill it is
-            to run one:
+            The ordinary <code>results/runs.bin</code> ledger at this server's configured store
+            is readable and empty. Boolean research is saved separately; an empty ordinary ledger
+            does not mean there are no saved research results. Open an exact saved search in the
+            <a href="#saved-boolean-research">saved Boolean research panel</a>.
           </p>
           <!-- THE EXAMPLE WAS `cli range-all zerodha NIFTY 2019 12 2026 8 500`,
                and every argument in it was a literal. A copyable command that
@@ -7412,18 +7724,18 @@
                page says that rather than printing a command it cannot stand
                behind. -->
           {#if activeFeed && heldNow && askedMonths !== null}
+            <p>To create a new ordinary sweep record, the available store census gives this command:</p>
             <pre class="cmd">{sweepCommand}</pre>
           {:else}
             <p class="inline-note">
-              The command that fills this ledger names a feed, an instrument and a span. This page
+              A new ordinary sweep command names a feed, an instrument and a span. This page
               cannot print one until the census says what is on disk — see the note in the sweep bar
               above.
             </p>
           {/if}
           <p>
-            Every run that finishes appends one record here and appears on this page on the next
-            read. <b>This is not an error</b> — an empty ledger and an unreadable one are different
-            facts, and this is the first.
+            Successfully saved ordinary sweep records appear here on the next read.
+            <b>This is not an error</b> — this ledger is empty, rather than unreadable.
           </p>
           {#if ledger?.path}
             <p class="path"><span class="bt-lab">file</span> <code>{ledger.path}</code></p>
@@ -7971,8 +8283,11 @@
       <section class="block rise">
         <div class="bh-row">
           <h2 class="bh">Preview: top {topShown} within each stored prefix</h2>
+          <button class="btn ghost" aria-expanded={comparisonRequested} onclick={() => (comparisonRequested = !comparisonRequested)}>
+            {comparisonRequested ? 'Close comparison' : 'Load saved prefix comparison'}
+          </button>
           <span class="count">
-            {#if board.phase === 'loading'}reading…{:else}{exact(board10.length)} comparable question/timeframe groups{/if}
+            {#if !comparisonRequested}Not requested{:else if board.phase === 'loading'}reading…{:else}{exact(board10.length)} comparable question/timeframe groups{/if}
           </span>
         </div>
 
@@ -7984,6 +8299,7 @@
           rows omitted before the exit grid remain unknown—not losers.
         </p>
 
+        {#if comparisonRequested}
         <div class="wrow">
           <label class="wlab">
             show top
@@ -8107,7 +8423,7 @@
                 drawdown outranks every real one.
                 <b>This ordering is complete only within those {exact(g.priced)} priced rows.</b>
                 {#if g.rules}
-                  <b>{exact(g.admittedShown)} of {exact(g.top.length)} shown meet your rules</b>
+                  <b>{exact(g.admittedShown)} of {exact(g.top.length)} shown meet the five displayed rules</b>
                   — win rate ≥ {(g.rules.min_win_rate_bp / 100).toFixed(0)}%, reward:risk ≥
                   {(g.rules.min_rr_bp / 100).toFixed(2)}×, return over drawdown ≥
                   {(g.rules.min_ret_over_dd_bp / 100).toFixed(2)}×.
@@ -8125,6 +8441,9 @@
           <p class="inline-note">
             No completed run is in view, so there is nothing to rank yet.
           </p>
+        {/if}
+        {:else}
+          <p class="inline-note">Load this comparison to read each run's complete saved frontier. At most two groups are read at once; the results ledger loads separately.</p>
         {/if}
       </section>
 
@@ -8273,6 +8592,8 @@
             <h2 class="bh">{openRun.underlying} · {openRun.timeframe} · {span(openRun)}</h2>
             <button class="btn ghost sm" onclick={closeDrill}>Close</button>
           </div>
+
+          <SweepEvidence identity={openRun.identity} vocabulary={vocab} />
 
           {#if tradeList.phase === 'failed'}
             <p class="inline-note bad" role="alert">
@@ -10226,6 +10547,16 @@
 </div>
 
 <style>
+  .inspection-results {
+    padding: 16px 20px;
+    margin-bottom: 16px;
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--acc);
+    border-radius: 8px;
+    background: var(--panel);
+  }
+  .inspection-results p { margin: 8px 0 12px; color: var(--ink-2); }
+  .receipt-mode { width: 100%; }
   /* ==================================================================
      Tokens come from `$lib/theme.css`. Nothing here declares a colour
      literal, so both themes follow the console's own palette.
@@ -15840,6 +16171,7 @@
      Run button would bury the button, and the common case is leaving every one
      of them to the server. */
   .eng {
+    grid-column: 1 / -1;
     margin: 0.5rem 0 0.75rem;
     border: 1px solid var(--n6);
     border-radius: 8px;
@@ -15865,7 +16197,7 @@
   }
   .eng-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
     gap: 0.7rem 1rem;
     padding: 0.25rem 0.75rem 0.75rem;
   }
@@ -15909,6 +16241,28 @@
     line-height: 1.5;
     color: var(--n9);
   }
+  .research-mode-help, .research-mode-guide, .receipt-mode {
+    grid-column: 1 / -1;
+    min-width: 0;
+  }
+  .research-mode-help {
+    margin: 12px 0 0;
+    font-size: var(--fs-xs);
+    line-height: 1.55;
+    color: var(--n9);
+  }
+  .research-mode-guide {
+    margin-top: 10px;
+    padding: 12px;
+    border: 1px solid var(--n6);
+    border-radius: 8px;
+    background: var(--n1);
+    font-size: var(--fs-xs);
+    line-height: 1.55;
+  }
+  .research-mode-guide summary { cursor: pointer; font-weight: 600; }
+  .research-mode-guide p { margin: 12px 0 0; color: var(--n9); }
+  .advanced-run-tools { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
   @media (max-width: 520px) {
     .term .bt-chart {
       height: clamp(260px, 50svh, 420px);

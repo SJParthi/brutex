@@ -2900,8 +2900,8 @@ fn validate_v2_reconciliation(
             value.extinction_complete, value.closure_complete
         ));
     }
-    if value.extinction_depth == 0 {
-        return Err("pre-admission V2 extinction depth is zero".to_owned());
+    if value.extinction_depth == 0 && value.frequent_itemsets != 0 {
+        return Err("pre-admission V2 zero nonempty depth carries frequent itemsets".to_owned());
     }
     if value.unknown_closure_itemsets != 0 {
         return Err(format!(
@@ -4701,6 +4701,9 @@ mod tests {
         missing.push(no_closure);
         let mut no_depth = value;
         no_depth.candidate_reconciliation.extinction_depth = 0;
+        no_depth.candidate_reconciliation.frequent_itemsets = 1;
+        no_depth.candidate_reconciliation.redundant_itemsets = 1;
+        no_depth.candidate_reconciliation.sweep_trials += 1;
         missing.push(no_depth);
         let mut unknown = value;
         unknown.candidate_reconciliation.unknown_closure_itemsets = 1;
@@ -4739,6 +4742,36 @@ mod tests {
                 "resealed missing-extinction flag refuses",
             )?
             .contains("natural extinction")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn v2_initial_empty_frontier_preserves_zero_depth_and_v1_refusal() -> TestResult {
+        let mut value = zero_fixture_v2(190)?;
+        value.candidate_reconciliation.extinction_depth = 0;
+        value.core.authority_id = derive_authority_id_v2(&value);
+        let encoded = must(value.record(RecordKindV2::Data), "zero-depth V2 encodes")?;
+        assert_eq!(
+            PreAdmissionDataV2::decode(&encoded),
+            Ok((RecordKindV2::Data, value))
+        );
+        assert!(
+            value.core.validate().is_err(),
+            "V1 still cannot encode an empty family"
+        );
+        let produced = ProducedPreAdmissionDataV2 { value };
+        let root = test_dir()?;
+        let first = produced.append_and_reopen(root.path(), bounds_v2(4)?)?;
+        let second = produced.append_and_reopen(root.path(), bounds_v2(4)?)?;
+        assert_eq!(first.audit(), second.audit());
+        assert_eq!(
+            first
+                .audit()
+                .value()
+                .candidate_reconciliation()
+                .extinction_depth,
+            0
         );
         Ok(())
     }

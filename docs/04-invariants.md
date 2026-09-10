@@ -2874,6 +2874,7 @@ These rows are about its replacement.
 | SF-12 | **The floor is never zero, at any bar count including zero.** The property is unchanged and its subject moved: it used to be that the constant could never be zero, and it is now that the derivation never is. A span the store could not fill must not become a threshold of zero | `api::sweeprun::a_support_threshold_of_zero_cannot_be_asked_for_at_all` | ✓ |
 | SF-13 | **`None` is the absence of a threshold, not a magic zero.** `support_ppm` reaches the wire as `null` on a derived run and the banner prints `DERIVED per rung from its own bars`. There is no single number to report because nine rungs derive nine floors, and a figure printed without its provenance invites comparing two runs that measured different things | `Progress::to_json`'s `None` arm; `cli::range_all`'s banner | ✓ |
 | SF-14 | **The stop ceiling and the listing bound cannot move the floor.** `statistical_floor_ppm` reads the win rate and the assurance and nothing else, so a caller made to supply a risk ceiling in order to learn a statistical floor would set it carefully for no effect | `cli::statistical_support_floor` passes `1` for both, with the reason | ✓ |
+| SF-15 | **A floor that no sample size can support is refused, never reported as one.** `assurance_floor_bp` returns the caller's figure unchanged at or below chance, so `Rules::derived` — which takes `base_bp.max(Rules::operator's 5_000)` — yields the pair `(5_000, 5_000)` on any series whose own base rate is below chance. A 95% lower bound cannot reach the rate it bounds, so `grid::trades_needed_for` exhausts and returns `TRADES_SEARCH_CEILING`, which `statistical_floor_ppm` then prices as a floor. **Measured, zerodha NIFTY 60min 2020-01..2026-08: `floor 434140 ppm ... about 4999 round trip(s)`, ONE descent rung, nothing passed — the cap wearing a statistic's clothes, and every rare setup pruned before it was priced.** The same span with a satisfiable pair descends four rungs to 30563 ppm (352 round trips) and weighs 38,503,239 combinations to extinction at depth 19. `knobs::sizing_rate` already refused this pair on the TYPED path via `*value > 5_000`; this is the same guard on the DERIVED path, which is the one an operator reaches without typing anything. §4 bans a fallback that hides a failure — D-0591 | `cli::tests::an_unsatisfiable_confidence_pair_refuses_rather_than_pricing_the_cap` (satisfiable pairs at 6,000/7,500/8,000/9,500 must NOT refuse; the refusal must name the knob and the reward-to-risk leg; one basis point below the rate is satisfiable); sibling `cli::tests::the_support_floor_is_twenty_nine_trades_and_a_fifty_percent_rule_is_untestable` pins the exhaustion it closes | ✓ |
 
 **No minimum was invented to replace it.** The floor is not a trade count
 somebody chose; it is the point below which a number stops meaning anything —
@@ -3848,6 +3849,7 @@ exists to refuse. The group is out of numeric order and correct.
 | SC-04 | **The swept-series calendar policy reaches the run identity appended, never inserted, and reaches the daily-reference policy identity too.** Tag 11 of `data_digest_with_daily_reference` sits after all ten existing tags; `daily_reference_policy_digest_v1` hashes it after the excluded-day list. Binding the VERSION rather than only its consequence re-keys even a span holding none of the four days | `runner::identity::data_digest_with_daily_reference`; `cli::stored_data_completeness::daily_reference_policy_digest_v1` | Static implementation; focused Cargo proof pending |
 | SC-05 | **The withholding is stated wherever the sample size is stated.** `span_banner` names the withheld days as dates and counts their bars beside `MONTHS MISSING FROM THIS SPAN`; `daily_reference_note` carries the exact 1min stream's withheld days; a span emptied entirely by the calendar refuses with its own sentence rather than the absent-months one | `cli::span_banner`; `cli::daily_reference_note`; `cli::stored::empty_span_refusal` | Static implementation; focused Cargo proof pending |
 | SC-07 | **The VWAP verdict of a stored run is the instrument's KIND, decided before the first bar, and no production stored path pins it.** `vwap_availability` takes a key and no bars, so there is nothing to look ahead into; an equity is `Present`, an index — including both swept indices and India VIX — is `Absent` exactly as every NIFTY row was ever computed, and a contract is `Absent` rather than a panic. Exactly two `Availability::Absent` literals remain in `cli/src/lib.rs` production code, both named (the synthetic evaluator; `audit_bars`' `Err` fallback), and every `stored_anchored_column(` call passes a verdict. The per-fold evaluators are built to the caller's verdict through `Evaluator::availability()`, so a fold never sweeps a different vocabulary from the span it validates. D-0507 | `cli::stored::tests::vwap_availability_is_decided_by_the_kind_and_reads_no_bar`; `cli::tests::the_stored_paths_take_the_vwap_verdict_from_the_key_and_never_pin_it`; `indicators::evaluator::tests::availability_is_the_verdict_the_evaluator_was_built_with` | Cargo test |
+| SC-08 | **`cli pool` pools what adds and bounds what does not, prices every candidate on exactly the column the screen would build, and fabricates no row.** The surface it screens is `swept_index` over the catalog — a stored equity off the F&O list, a reference index and any other rung are skipped without a second list. Trades, wins, net, gross win and gross loss are sums across instruments; the worst trade and the smallest win are minima; the drawdown column is the LARGEST single-instrument drawdown, a lower bound, and is labelled `dd>=`. A refused instrument contributes to no candidate and is named; a candidate that fired nowhere is dropped, never ranked as a zero-trade winner. `price_all` names the same loaders and checks as `screen_range_inner` in the same order, so a pooled cell is the cell `range-rung` would show. Ratios are in hundredths, as the grid's are, so the tail rule compares directly with `Rules::min_rr_bp`. A pooled rank whose candidate index is missing is refused in the report, not indexed. The pooled table is not written to the store, and the report says so. D-0509 | `cli::pool::tests::the_surface_is_the_swept_index_and_not_everything_stored`; `cli::pool::tests::the_fold_adds_totals_and_takes_the_extremes`; `cli::pool::tests::refusals_and_unfired_candidates_are_never_folded_in`; `cli::pool::tests::the_ranking_leads_with_the_rule_and_the_drawdown`; `cli::pool::tests::ratios_render_as_multiples_and_the_sentinel_as_words`; `cli::pool::tests::the_pool_prepares_a_span_exactly_as_the_screen_does`; `cli::pool::tests::a_missing_pooled_candidate_is_reported_not_indexed`; `cli::tests::every_command_is_listed_in_both_places` | Cargo test |
 
 These rows do not prove the full eight-rung sweep over the real store, and they
 do not re-measure the bench gate. All four `pull::calendar::IRREGULAR` entries
@@ -3878,3 +3880,1092 @@ machine-dependent by design — a narrower machine solves to fewer rungs, which 
 the intent and not a regression. VS-02 and XG-02 are static implementations whose
 consequences are argued in `docs/05-decisions.md` rather than asserted by tests of
 their own.
+
+## Cash-stock research preparation (2026-09-05)
+
+| Invariant | Focused proof | Boundary |
+|---|---|---|
+| Requested history starts 2020-01-01 and ends on the previous IST calendar date; UTC midnight does not choose the day | `research::tests::yesterday_uses_ist_midnight_not_the_utc_date`; `year_and_leap_month_rollovers_are_exact` | Planner API; legacy range commands unchanged |
+| Today and pre-start timestamps are excluded with microsecond precision; clipping preserves order and is idempotent | `microsecond_boundaries_exclude_today_and_pre_2020_data`; `clipping_preserves_order_and_is_idempotent` | Signal/execution input helper, not automatic warm-up handling |
+| Requested final date changes identity fields even when a holiday adds no bars | `a_new_day_changes_identity_words_even_without_new_bars` | Fields supplied for future run identity, not a persisted run receipt |
+| Empty/partial inventory is never presented as complete or as a sweep | `empty_inventory_is_not_reported_as_ready_or_as_a_search`; `inventory_deduplicates_paths_and_separates_feed_segment_and_month` | File-path census only, not verified record coverage |
+| An F&O index underlying is never relabelled as a research cash stock | `cash_inventory_never_relabels_an_index_as_a_stock` | Existing F&O/total-market snapshot intersection, not historical membership |
+| SL+TP / SL+TTP omit unrequested exit shapes before pricing and match the corresponding legacy cells | `grid::exit_family_tests` (enumeration, ratio admission, saturation, synthetic long/short equivalence, empty input) | Opt-in runner APIs; CLI selection and causal calibration not integrated |
+
+Focused tests do not establish the section 9 full-workspace, coverage, mutation,
+real-data completeness or 24-hour throughput requirements.
+
+## Instrument and ingest repair (2026-09-05, D-0510)
+
+| Invariant | Regression proof | Boundary |
+|---|---|---|
+| Conflicting duplicate identities never choose a vendor ID | `duplicate_conflicting_assertions_survive_loading_and_refuse_lookup` | Master parsing and merged lookup |
+| Crawl ISIN evidence belongs to the selected vendor | `crawl_rows_never_borrow_another_vendors_isin` | No vendor network calls in the test |
+| Damaged or missing feed cannot replace a previous usable snapshot | `master_reload_preserves_snapshot_on_a_damaged_or_missing_feed` | Reload transaction, not external file restoration |
+| Application refreshes serialize before fetching | `refresh_requests_wait_before_starting_the_next_fetch` | Process-local transaction |
+| A resumed incomplete bucket equals one-shot complete input | `resumed_partial_bucket_matches_one_shot_bytes` | Appendable source suffix, not insertion into sealed history |
+| Repeated broker candles never double volume | `broker_duplicates_do_not_double_volume_and_conflicts_are_refused` | Archive snapshot aggregation remains distinct |
+
+See `docs/12-ingest-audit.md` for pending full-gate verification and limitations.
+
+## Pull readiness (2026-09-05, D-0511)
+
+| Invariant | Regression proof | Boundary |
+|---|---|---|
+| A requested published basket never silently shrinks | `mapping_preflight_never_silently_shrinks_the_requested_basket` | Static membership snapshot, not historical membership |
+| Unresolved selected identities refuse before network work | `mapping_preflight_refuses_before_any_instrument_is_attempted` | Zero attempted instruments; no vendor access in test |
+| A ticker alone is insufficient cash identity evidence | `mapping_preflight_accepts_only_the_selected_verified_cash_identity` | Vendor ID must match exchange ISIN join |
+| The current ID cannot borrow an older snapshot's join | `mapping_preflight_rechecks_the_current_snapshot_and_vendor` | ID and listing resolved together; stored prior data unchanged |
+| Index IDs do not require a cash-share ISIN | `mapping_preflight_indices_need_ids_but_never_a_stock_isin` | Still requires selected vendor's ID |
+| Missing closing buckets on an earlier observed day are reported | `an_absent_closing_bucket_is_named_before_the_next_observed_day` | Eight intraday widths; absent intervening days not inferred |
+| A final unknown endpoint is not invented | `a_final_days_absent_tail_has_no_proven_request_endpoint` | Full request-span attestation remains separate |
+# Dated derived-session bounds (D-0512)
+
+| Invariant | Proof |
+|---|---|
+| Regular derivatives minutes follow the dated exclusive close; cash/index are not extended | `pull/tests/anchor.rs::regular_venue_minutes_follow_the_dated_close_exclusively` |
+| Venue hours never override exceptional calendar classification | `pull/tests/anchor.rs::venue_hours_do_not_override_an_exceptional_calendar_session` |
+| Futures ingestion preserves the complete 375/385-minute volume across all eight stored intraday widths | `pull/tests/derive.rs::future_derived_files_preserve_the_dated_regular_session` |
+
+## Explicit archive product and missing identity evidence (D-0513)
+
+| Invariant | Proof |
+|---|---|
+| Plain FNO preserves price, volume, OI and zeros without inventing bid/ask | `csv::tests::plain_fno_reads_price_volume_and_open_interest_without_bidask_fields` |
+| Five-field and nine-field products reject each other's widths, including mixed files | `csv::tests::plain_fno_and_bidask_require_their_exact_declared_field_counts` |
+| A malformed plain FNO row names the failing line | `csv::tests::a_malformed_plain_fno_row_refuses_the_whole_file_at_its_line` |
+| Zerodha's cash token can exist while required identity evidence is absent | `server::tests::mapping_preflight_zerodha_cash_names_missing_evidence_not_missing_id` |
+
+## Explicit Zerodha mapping and cash-session gate (D-0514)
+
+| Invariant | Proof |
+|---|---|
+| Strict default; reject invalid, repeated and wrong-vendor alternatives | `ingest::tests::cash_identity_requires_explicit_valid_vendor_scoped_choice` |
+| Native duplicate rows are idempotent; vendors remain independent | `merge::tests::native_ids_accept_duplicates_and_keep_vendors_separate` |
+| Conflicting forward/reverse identities refuse regardless of row order | `merge::tests::native_conflicts_in_either_direction_stay_refused_under_permutation` |
+| No substitution of a confirmed unsuffixed alias | `merge::tests::native_lookup_never_uses_the_confirmed_unsuffixed_alias` |
+| New mode can resolve the real-shaped Zerodha fixture without claiming ISIN | `server::tests::mapping_preflight_zerodha_cash_names_missing_evidence_not_missing_id` |
+| Cash session gate includes the effective day and excludes index-only requests | `server::tests::cash_session_preflight_preserves_the_effective_date_and_instrument_scope` |
+| Native mapping assurance survives the audit source-length bound | `server::tests::native_policy_assurance_survives_the_bounded_audit_source` |
+
+## One-minute derivation boundary (D-0515)
+
+| Invariant | Proof |
+|---|---|
+| Coarse source remains stored but cannot publish unverified derivatives | `coarse_source_is_stored_but_cannot_publish_unverified_derivatives` |
+| Shifted broker minutes refuse before any write without changing input | `broker_candles_shifted_thirty_seconds_refuse_before_any_write` |
+| Broker within-minute duplicates cannot be rounded into volume; archive snapshots remain distinct inputs | `an_extra_broker_timestamp_inside_a_minute_refuses_but_archive_seconds_survive` |
+| Requested width and subsecond precision are checked at the broker boundary | `broker_grid_uses_requested_width_and_preserves_millisecond_precision` |
+| Daily source timestamps do not inherit the intraday grid | `daily_broker_sources_do_not_require_the_intraday_opening_grid` |
+
+## Requested spot-minute coverage (D-0516)
+
+| Invariant | Proof |
+|---|---|
+| Missing month-end tails and entire trading days are named without weekend gaps | `request_minutes_report_month_end_absent_days_and_final_tail_without_weekend_gaps` |
+| Opening/interior gaps are grouped; empty regular-day requests are not complete | `request_minutes_aggregate_opening_and_interior_gaps_and_report_empty_requests` |
+| Closed days are skipped; exceptional/unmeasured sessions remain unverified | `request_minutes_skip_closed_days_but_name_unverified_sessions` |
+| Unordered rows and derivative requests are not mis-certified | `request_minutes_do_not_attest_unordered_rows_or_derivative_requests` |
+| Cash eligibility is not inferred from a generic venue schedule | `request_minutes_cash_requires_instrument_eligibility_after_session_change` |
+| Daily cash requests are exempt from the intraday CAS guard | `server::tests::cash_session_preflight_preserves_the_effective_date_and_instrument_scope` |
+| Coverage warnings reach a telemetry file | `emit_sites::every_emit_site_in_this_crate_reaches_a_file` |
+| Catalogue coverage is not described as pull readiness or permission to silently shrink a basket | `coverage::tests::the_notes_name_only_the_targets_a_feed_is_short_of` |
+
+## Separate native-token/ISIN evidence and basket completion (D-0517)
+
+| Invariant | Proof |
+|---|---|
+| Cross-check is explicit and Zerodha-only; invalid and repeated choices refuse | `ingest::tests::cash_identity_requires_explicit_valid_vendor_scoped_choice` |
+| Successful cross-check does not fabricate a Zerodha ISIN | `server::tests::cross_checked_identity_retains_both_sources_without_inventing_a_vendor_isin` |
+| Missing, wrong, ambiguous or changed independent evidence refuses | `server::tests::cross_checked_identity_refuses_absent_wrong_or_ambiguous_independent_evidence` |
+| ISIN evidence cannot substitute for the exact native token | `server::tests::cross_checked_identity_still_requires_the_exact_zerodha_native_key` |
+| Policy assurance survives the fixed audit source bound | `server::tests::native_policy_assurance_survives_the_bounded_audit_source` |
+| A partial basket retains successful writes but never reports STORED | `server::tests::a_partial_broker_basket_cannot_render_or_record_as_stored` |
+| An interrupted basket cannot certify completion | `server::tests::an_interrupted_broker_basket_keeps_writes_but_fails_completion` |
+| Browser never infers a relaxed choice from a truthy value or another vendor | `web/tests/cash-identity.test.js` |
+| Spot receipts name the selected identity policy and actual timeframe; wire-date captions follow that feed's timeframe-specific range semantics | `server::tests::spot_receipt_names_the_selected_policy_and_rung_not_dhan_wire_dates` |
+
+## Pull coordinator completion (D-0518)
+
+| Invariant | Proof (`pullrun::tests`) |
+|---|---|
+| Healthy siblings cannot erase a dead feed | `a_dead_feed_remains_incomplete_after_healthy_feeds_finish` |
+| A permanent preflight refusal does not loop through identical retries | `permanent_422_stops_after_one_response_without_retrying` |
+| Idle/empty is not full coverage | `empty_receipts_end_idle_retries_without_claiming_coverage` |
+| Interrupted and skipped legs are not completed attempts | `operator_stop_counts_the_returned_leg_and_leaves_the_rest_unattempted` |
+| Retry counters describe actual rescheduling | `retries_count_rescheduled_feeds_and_reset_pass_counters` |
+| A terminal cause replaces an earlier transient error | `a_terminal_refusal_replaces_an_earlier_transient_cause_and_stays_halted` |
+| A panicking chain is attributed to the correct feed after a sibling halts | `a_panicking_chain_keeps_its_feed_index_after_a_sibling_halts` |
+
+## Dated cash continuous-session boundary (D-0519)
+
+| Invariant | Proof |
+|---|---|
+| Eligible/ineligible cash minute landing, gap auditing and all seven derived rungs share one dated close; replay adds no duplicate source candles | `dated_cash_close_filters_auction_and_derives_the_same_continuous_session` |
+| Missing dated evidence is never interpreted as an ordinary cash session | `request_minutes_cash_requires_instrument_eligibility_after_session_change`, `dated_cash_close_filters_auction_and_derives_the_same_continuous_session` |
+| Eligibility alone cannot certify an unmeasured calendar: filtered source persists, derived output is withheld, replay commits no duplicates | `eligibility_does_not_certify_an_unmeasured_calendar_but_source_is_preserved` |
+| Only observed in-window CAS dates are requested, once each, under the descriptor's timestamp encoding | `server::tests::observed_eligibility_dates_are_windowed_deduplicated_and_encoding_aware` |
+| Dated eligibility verification and resolved counts reach the telemetry sink | `server::tests::dated_cash_session_evidence_is_logged_with_resolved_counts` |
+| All 208 current cash identities match every supplied dated NSE master, without alias substitution | `cash_auction::tests::actual_dated_masters_match_every_current_fno_cash_identity` (explicit local-fixture test; 25 dates) |
+| A later metadata refusal cannot erase earlier fetched chunk writes; all refused rows remain counted and replay commits no duplicate source candles | `server::tests::missing_later_cash_evidence_preserves_earlier_chunks_and_counts_refused_rows` |
+
+## Optional archive discovery (D-0520)
+
+`render::disabled_archive_suggestions_never_enter_the_filesystem_discovery`
+proves the disabled branch does not invoke discovery and the enabled branch
+still returns the discovered list. The broker-only process can therefore
+avoid optional Downloads access without changing broker/data permissions.
+
+## Zerodha form defaults and unknown denominators — 2026-09-06
+
+Frontend tests in `web/tests/cash-identity.test.js` pin the cross-checked form
+default, preserve strict handling for unknown choices and other vendors, and
+check that the form wires the default and renders an unknown expected count
+as `unverified`. These tests do not certify vendor history or browser runtime
+coverage. Backend request identity rules remain unchanged.
+
+`web/tests/row-pull.test.js` verifies that a row retry contains exactly one
+member, preserves all other request fields, encodes special symbol characters,
+and rejects an empty symbol. This narrows requests, not historical gap repair.
+
+## Explicit revision and runtime-calendar proofs — 2026-09-06
+
+The ten tests in `crates/store/tests/repair.rs` cover original-byte preservation,
+existing readers, exact retries, rejected corrections at an existing ordinal,
+source-generation mismatch, missing original timestamps, invalid rows, bounded
+inputs, source locks, corrupt evidence, incomplete publication, damaged receipts
+and competing publishers. See `crates/store/REPAIR.md` for the exact test-to-rule
+table and remaining production-promotion and physical-fault limits. These tests
+do not establish power-loss guarantees, 100% coverage or a live-store migration.
+
+`calendar::runtime_tests::observations_preserve_every_static_answer_and_both_unknown_bounds`
+proves observed dates cannot override static schedules or turn unknown bounds
+into certified sessions, including extreme day values.
+`calendar::runtime_tests::unknown_observed_lengths_and_empty_calendars_carry_no_authority`
+proves missing observation coverage and unmeasured lengths stay unverified.
+
+### Bounded calendar extension through 2026-09-04
+
+`calendar::tests::bounded_extension_has_exactly_ten_open_and_four_closed_dates`,
+`extension_preserves_every_original_bit_and_exception`, and
+`extension_matches_both_measured_index_minute_grids` pin the finite extension
+without changing historical bits. The source is recorded in the charter.
+`server::tests::production_ingestion_attests_only_the_bounded_calendar_extension`
+checks the production boundary. The cash-session cache test
+`observed_unknown_sep11_loads_flag_without_attesting_a_session` checks that
+acquiring eligibility metadata still cannot attest an unknown trading date.
+
+### Partial-month cash replay context
+
+`server::tests::cash_partial_month_replay_loads_committed_dates_outside_request`
+checks that earlier stored source dates receive their own verified eligibility
+when a later suffix is replayed, without adding unobserved dates or changing
+original bar bytes. `cash_partial_month_replay_refuses_missing_or_corrupt_earlier_receipt`
+checks that warm memory cannot hide damaged or missing saved evidence and that
+no bar or derived file is written on that refusal.
+
+`server::tests::several_diagnostics_for_one_instrument_are_not_failed_member_counts`
+pins the receipt distinction between members read and failure diagnostics:
+multiple coverage reports for one stock cannot be labelled multiple failed
+members. It also keeps the request's unclean verdict and named reasons.
+
+Pull derivation tests `incomplete_historical_source_requires_evidence_before_a_store_remedy`,
+`unverified_historical_schedule_requires_evidence_and_preserves_bytes`, and
+`absent_buckets_and_observed_day_tails_require_source_evidence_first` distinguish
+incomplete evidence from confirmed stored-byte conflicts. A source gap is not
+presented as something a storage revision alone can fix. Complete historical
+candidate gaps still require explicit versioned gapfill; all original bytes
+and refusal behavior remain protected by the derive regressions.
+
+Autopilot tests `paused_idle_status_scopes_the_pause_to_the_automatic_scheduler`,
+`paused_active_status_keeps_direct_pull_progress_visible`, and
+`pull_activity_transitions_preserve_the_scheduler_phase` pin independent pull
+activity without resuming or altering the automatic scheduler.
+
+## Stored-minute recovery audit hardening — 2026-09-06
+
+| Invariant | Regression |
+|---|---|
+| Cash gap audits use the exact date's verified continuous-session close; a previous day's flag is never carried forward | `pull::gaps::tests::cash_auction_flags_are_dated_and_missing_metadata_is_not_a_clean_day` |
+| An explicit non-CAS flag retains the 15:15–15:29 obligation, including an entirely absent source day | `pull::gaps::tests::cash_ineligible_tail_and_entire_absent_day_remain_expected_gaps` |
+| Old exceptional sessions retain their windows; a dated master cannot extend the calendar, and extreme day values terminate safely | `pull::gaps::tests::cash_audit_preserves_pre_change_sessions_and_never_promotes_unknown_days` |
+| Off-grid, duplicate and backward timestamps cannot certify minute coverage or create spurious later holes | `pull::gaps::tests::stored_minute_audit_rejects_off_grid_duplicate_and_backward_timestamps` |
+| The gap endpoint validates local master receipts and exact identity, reports missing/corrupt evidence, never fetches it on GET, and preserves original bars | `api::server::tests::cash_gap_page_uses_receipted_local_flags_and_refuses_missing_or_corrupt_evidence` |
+| A daily/coarse candle is not minute-source evidence | `api::server::tests::minute_gap_route_refuses_daily_or_coarse_rows_as_minute_evidence` |
+| A missing file and an empty file retain the same independently known calendar obligation | `api::server::tests::absent_minute_file_retains_calendar_obligation_like_an_empty_file` |
+| Committed off-grid records reach an explicit invalid-input field, not a green completeness result | `api::server::tests::committed_off_grid_minutes_do_not_certify_the_gap_page` |
+
+These are source-grid checks, not historical listing-membership proofs or
+evidence that a provider can supply every expected minute. The complete test,
+coverage and mutation status must be reported separately.
+
+### Retry-cycle receipt checkpoints
+
+The `api::pullrun::tests` regressions below drive the production coordinator
+through synthetic responses, without a vendor connection or credentials.
+
+| Invariant | Regression |
+|---|---|
+| Only owed legs repeat while clean receipts remain checkpointed | `retry_passes_only_request_owed_legs_including_successes_after_a_failure` |
+| Failed prerequisite rungs defer dependent minutes/seconds and FNO legs | `failed_daily_and_minute_rungs_defer_dependents_until_their_retry_succeeds` |
+| Healthy feeds do not refresh while another feed is repairing | `healthy_feeds_wait_until_all_retrying_feeds_recover_before_a_fresh_pass` |
+| Credential and permanent refusals stay halted after earlier progress | `terminal_refusals_after_checkpointed_progress_never_resurrect_a_feed` |
+| Operator stops preserve completed receipts and count only attempts actually entered | `a_stop_during_retry_counts_only_the_returned_request_and_preserves_checkpoints`, `stop_before_a_queued_retry_starts_does_not_count_it_as_attempted` |
+| An empty label cannot hide a request that panicked after entry | `a_panicking_request_with_an_empty_label_is_attempted_not_skipped` |
+| A partial repair pass is not a fresh full no-growth observation | `a_growing_failed_pass_recovers_only_owed_legs_then_requires_full_idle_passes` |
+| Empty responses checkpoint the request, not historical coverage | `empty_receipts_are_checkpointed_during_repairs_and_reasked_on_full_passes` |
+| A non-clean partial receipt remains unresolved, not success | `identical_partial_receipts_keep_the_full_failed_leg_owed_without_growth` |
+
+These checkpoints are per live retry cycle, not durable restart checkpoints
+or per-instrument/chunk retry planning. The last regression records a limit:
+an unchanged partial leg still retries under the existing pass ceiling.
+
+### Gap-page evidence verdicts
+
+`web/tests/gap-verdict.test.js` proves that absent/unreadable files, invalid
+timestamps, evidence errors, truncated reads and unmeasured calendar dates
+cannot render as complete. Unknown required totals are not zero. A zero
+denominator does not establish whole-span coverage. The route accepts only
+one-minute sources, and changing its selected feed/source/span clears stale
+results. These are UI regressions, not a certificate of market completeness.
+
+### Focused sweep-readiness audit — 2026-09-06 (D-0521)
+
+| Invariant | Executable proof |
+|---|---|
+| A regular-column bar must be warm before and after its fold; an unusable rollover daily ladder cannot admit a now-cold mask | `indicators/tests/audit_readiness.rs::a_session_rollover_cannot_admit_a_mask_after_its_daily_anchor_becomes_unusable` |
+| Finite complete ladders equal independently enumerated subsets across all six words, including threshold edges and shuffled/repeated/invalid offers | `engine/tests/sweep_readiness_oracle.rs::complete_ladders_equal_independent_exhaustive_subsets_across_all_six_words` (378 fixture cells; this is not universal input coverage) |
+| A writer opened before another writer's interrupted tail refuses every tested partial stride and changes no existing byte | `cli::results::tests::an_open_writer_refuses_a_later_torn_tail_without_changing_any_byte` |
+| Unsealed catch-up rows do not supply deduplication identities; later sealed rows do; damaged strides remain readable as explicit damage | `cli::results::tests::an_open_writer_does_not_index_corrupted_catchup_identities` |
+| History shrinkage cannot reuse an open writer's stale index to append | `cli::results::tests::an_open_writer_refuses_a_shrunken_ledger_without_reusing_its_stale_index` |
+| Both combination displays assemble the whole bounded frontier, reconcile totals, and refuse incomplete or inconsistent pages | `web/tests/frontier-pages.test.js` (257/4,096 rows, malformed/cyclic cursors, changing identity/rules/counts/ranks, HTTP/JSON failures and explicit refusals) |
+
+The fixes do not assert whole-crate coverage, every-allocation recovery,
+collision-free hashes, permanent telemetry retention, universal expression
+support or constant total sweep work. Their remaining verification obligations
+and the measured limitations belong to the dated audit report.
+
+### Durable evidence-scoped pull recovery — 2026-09-06
+
+| Invariant | Executable proof |
+|---|---|
+| Exact feed, membership, exclusions, rungs and inclusive month bounds; normalized duplicate submissions | `api::recovery::tests::exact_scope_order_dedup_and_partial_month_bounds`, `bad_feed_empty_basket_excluded_index_and_wrong_envelope_refuse` |
+| Interrupted requests consume the same three-attempt budget after reopen | `budgets_survive_restart_and_interrupted_attempts_are_charged` |
+| A changed basket cannot refund an exhausted exact-day reservation | `overlapping_plans_cannot_purchase_more_attempts_for_the_same_gap` |
+| Clean HTTP alone and uncertain source coverage cannot verify a unit | `failed_receipts_and_unknown_coverage_never_become_verified` |
+| A repaired gap stops retries without hiding lifecycle uncertainty; a newly owed verified child keeps its remaining budget | `repaired_gaps_stop_without_laundering_lifecycle_uncertainty` |
+| Actual candles on closed/outside-session minutes remain unresolved | `closed_or_outside_session_source_minutes_never_verify` |
+| Exact-day recovery requires only its own dated CAS evidence, never a different day's file | `api::server::tests::recovery_cash_clock_requires_only_its_exact_inclusive_dates` |
+| Both recovery boundary events actually reach the installed log sink | `recovery_boundary_events_are_read_back_from_the_installed_sink` and `api::emitted` accounting |
+| Missing stock history is neither a retry warrant nor an automatic listing exemption | `absent_stock_history_is_unknown_not_a_retry_or_exemption` |
+| Exact sourced withdrawal boundaries preserve conflicting observations | `sourced_withdrawal_is_exact_and_conflicting_source_is_preserved`, `pull::cash_auction::tests::independent_forcemot_inactivity_has_exact_identity_and_inclusive_boundaries` |
+| Closed/unknown dates, duplicate timestamps and unsafe source access are explicit | `session_boundaries_closed_unknown_and_duplicates_are_not_silent`, `source_reader_uses_the_real_store_path_and_never_creates_missing_files` |
+| Repeated seeding preserves state; missing roots, invalid requests and duplicate ownership do not launch work | `seeding_reuses_exact_budgets_and_syncs_activation_without_vendor_access`, `invalid_start_missing_pointer_and_duplicate_claim_do_not_start_work` |
+| Start acknowledgement follows durable plan activation; a read-only fixture finishes without vendor or source writes | `start_acknowledges_a_saved_plan_and_read_only_fixture_finishes` |
+| STOP during seeding survives both seeding and process restart | `stop_during_seed_cannot_be_cleared_by_seed_or_boot_resume` |
+| STOP/explicit clear are append-only and scoped to one plan; uncertainty never clears intent | `api::recovery_control::tests::stop_and_explicit_clear_survive_new_site_and_preserve_history`, `corrupt_or_empty_stop_history_refuses_and_is_never_truncated`, `valid_crc_does_not_let_foreign_identity_or_status_clear_a_stop` |
+| STOP success requires durable state; failed persistence returns 503 with memory stop retained, while non-recovery stop stays filesystem-free | `handler_acknowledges_only_durable_recovery_stop`, `handler_io_refusal_returns_503_and_retains_memory_stop`, `normal_pull_stop_and_idle_handler_remain_filesystem_free` |
+| Escaped page content and empty/error states cannot imply complete coverage | `status_page_escapes_payload_and_never_calls_an_empty_state_complete` |
+| Fixed encoding, reserved bytes, CRC, immutable bodies, writer locks, replay and direct tail bounds | `api::recovery_journal::tests` |
+| Partial/zero-byte writes, sync uncertainty and foreign extent changes never publish a successful append | `partial_and_zero_byte_write_failures_do_not_publish_and_poison_the_handle`, `sync_failure_preserves_old_index_and_reopen_recovers_the_uncertain_record`, `metadata_failure_or_foreign_length_change_poison_without_a_write` |
+| Lifecycle evidence binds exact symbol/ISIN, date, URL, size and digest, without claiming full history | `pull::cash_session_cache::tests::local_lifecycle_binds_exact_identity_date_source_length_and_digest`, `actual_receipted_lifecycle_snapshot_never_claims_complete_history` |
+
+These checks do not establish 100% branch coverage, mutation closure, historical
+point-in-time identity, provider completeness or constant total run cost.
+
+### Historical sweep readiness follow-through (D-0523)
+
+These are executable invariants. Their presence in this table does not assert
+that a later source snapshot passed every required gate.
+
+| Invariant | Executable proof |
+|---|---|
+| Every live condition has an emitter; all 62 candle patterns have named positive and dark-counterpart fixtures | `indicators::evaluator::tests::the_position_set_is_the_union_of_the_modules`; `pattern::exemplars` inventory and translation/reset tests; `docs/15-indicator-readiness.md` |
+| Cold rollover cannot admit a newly unready truth row | `indicators/tests/audit_readiness.rs::a_session_rollover_cannot_admit_a_mask_after_its_daily_anchor_becomes_unusable` |
+| Nonpositive valid-shaped candles refuse transactionally; missing indicator evidence remains unknown | `indicators/tests/sweep_predicate_readiness.rs` sign, availability, VWAP, projection and anchored-column regressions |
+| Fixed six-word AND search agrees with independent finite enumeration; scheduling requests cannot change answers | `engine/tests/sweep_readiness_oracle.rs`; maximum-lane scheduling and explicit-memory metadata tests |
+| AND/OR/NOT preserves unknown, every live position is accepted, nonlive positions and explicit resource breaches refuse | `vocab/tests/expression.rs` truth-table, full signed vocabulary and capacity tests |
+| Canonical saved programs validate opcodes, operands, padding, stack shape and structural sibling order | `persisted_programs_reject_bad_versions_stack_shapes_operands_and_padding`; `every_short_encoded_program_agrees_with_independent_infix_reconstruction` |
+| Complete expression bytes and every variable run term bind the identity | `runner::expression::tests::expression_identity_binds_the_program_and_every_runtime_term` |
+| Bad source alignment/order and failed row delivery cannot return a completed expression summary | Runner expression streaming tests |
+| Stored expression integrity, exact source rows, unknowns, empty history, no-overwrite and same-read mutation detection remain explicit | `cli::expression::tests`, including every-byte/every-truncation, interleaved write and generated-column integration tests |
+| Lost/replaced pending expression paths and changed acknowledged bytes cannot be successfully published | `cli::expression::tests::replaced_or_mutated_pending_evidence_cannot_be_acknowledged_as_published` |
+| Cold opens and concurrent appends preserve row boundaries and file-generation evidence | `cli::results::tests` and `cli::result_set::tests`; eight-writer stress and non-retained-device header diagnostic |
+| Start, exact token/identity, child counts, row seals, completion and requested validation cannot be reconstructed from absent data | `crates/cli/tests/sweep_evidence.rs` lifecycle, concurrent attempt, corruption, deletion, truncation and foreign-file matrices |
+| Acknowledged evidence lost/replaced before terminal publication cannot become a completed empty attempt | Public sweep-evidence before-terminal loss/replacement regression matrices |
+| Empty, cold, refused or unreconciled search samples cannot be completed; only a recorded resource breach is halted | `cli::sweep_wiring_tests` completion classification matrices; shared `runner::complete` requires nonzero swept bars |
+| A durable admission refusal precedes evaluator preparation; child/receipt failure never publishes a parent result | `cli::sweep_wiring_tests` reservation, evaluator refusal, identity and actual unadmitted-publication fault tests |
+| Actual separately loaded execution bytes affect stored identity | `cli::sweep_wiring_tests` interior execution digest sensitivity |
+| Every automatic probe is announced before its walk and reports levels/terminal; a callback error prevents subsequent successful probes | `runner/tests/auto_reporting.rs` |
+| Every assembled frontier/depth page belongs to one exact identity/attempt with reconciling counts | `web/tests/frontier-pages.test.js`; `web/tests/sweep-evidence.test.js`; `api::sweepevidence::tests` |
+| A failed refreshed handle is surfaced before a later reopen; committed top rendering shares the CLI rule | `api::detail::tests::verified_cache_exposes_refresh_refusal_before_any_later_reopen`; `api::topjson::tests` |
+| Attempt events and inspection commands cannot masquerade as whole sweep completion; active CLI observation outranks a completed browser slot | `api::sweeprun::tests` command/attempt interleaving, clipped/missing fields and overlapping lifecycle fixtures |
+| Only five represented historical rules are described by the visible five-rule verdict | `web/tests/sweep-evidence.test.js` human comparison and frontend contract tests |
+| Human table stays synchronized with its reviewed source; automated checks retain separate actual logs | `web/sweep-readiness/build-review.mjs --check`; Rust `web/sweep-readiness/verify.rs` |
+
+Complete touched-crate branch/line coverage, no surviving mutation,
+real-data/deployment verification and full institutional admission remain
+separate required evidence. No row above grants universal O(1) latency or space.
+
+### Resumable historical search and candidate authority (D-0524)
+
+| Invariant | Executable proof |
+|---|---|
+| AND continuation preserves uninterrupted survivors, counters and extinction across the same fixed policy | `engine/tests/resume_readiness.rs`; independent exhaustive configurations and each reached restart boundary |
+| Stored AND recovery validates the column/policy before restoring audit rows, persists each completed level and refuses final replacement | `cli::and_checkpoint::tests` persisted restart, sink-failure, ranked-helper and final-corruption tests |
+| Marked corrupt latest checkpoints never fall back, unmarked reservations are never reused, failed writers cannot acknowledge later work | `cli::search_checkpoint::tests` restart, corruption, admission and poisoned-writer tests |
+| An owner symlink cannot create an unrelated missing target | `dangling_owner_symlink_refuses_without_creating_a_foreign_file` |
+| Every saved expression step is a reachable grammar successor; structural validity alone cannot claim exhaustion | `structurally_valid_sealed_early_exhaustion_and_wrong_successor_are_refused` |
+| Canonical expression order and work survive bounded pause/reopen; bad widths, alphabets and maximum-capacity programs obey the same grammar | `vocab/tests/expression_search.rs` and `vocab/tests/expression_search_readiness.rs` |
+| Maximum encoded expressions render without recursive stack growth; formatter errors propagate | `canonical_display_round_trips_normal_programs_and_renders_maximum_wire_without_recursion` |
+| Search identity binds initial language/alphabet and nine run terms, independently of later cursor progress | `runner::expression::tests` search identity tests |
+| Expression conjunction pricing exactly matches all legacy grid fields and each materialized cell in both directions | `runner/tests/expression_pricing.rs::conjunctions_match_all_legacy_trade_and_grid_fields_for_both_sides` |
+| OR/NOT pricing uses definite truth, shares exact execution, and rejects a modified selected cell | Remaining `runner/tests/expression_pricing.rs` tests |
+| Priced expression resume requires both exact trade children in addition to signal evidence | `priced_search_restarts_with_both_sides_and_refuses_missing_trade_children` |
+| Captured nonwinning candidates keep their own selected-cell trades, actual caps, tiers and no-cell outcomes | `cli::candidate_trades::tests` real-screen, exact two-side and multi-tier tests |
+| Capture failure or lost acknowledged children prevent sealing/parent publication, including after validation | `actual_audit_refuses_a_failed_capture_before_publishing_its_parent`, callback-failure and final-confirmation tests |
+| Expression capture cannot substitute an AND catalog with identical referenced bits | `expression_capture_replays_or_not_without_relabelling_the_same_referenced_and_bits`; API/browser model-pinning tests |
+| Malformed price grids/overrides refuse before pricing, every variable policy term changes identity, and dropped execution signals remain visible | `cli::expression_search::tests` pricing admission, identity and projection-report tests |
+| Selection V6 requires genuine Execution V4 authority, preserves terminal cardinalities and authenticates every fixed byte | `cli::selection_v6::tests`, including actual Population/Execution handoff, every-byte mutation and exact append/reopen |
+| V4 chronological replay consumes exact retained OOS witnesses and preserves inclusive occupancy and explicit unpriced decisions | `cli::global_replay_v4` regression tests, including the genuine stored-witness fixture |
+
+These are finite executable invariants. The per-module measured coverage and
+mutation results are separate; none of these rows asserts complete market-input
+coverage or approved institutional configuration.
+
+### Strict input admission and safe stored publication (D-0525)
+
+| Invariant | Executable proof |
+|---|---|
+| Cold audit authenticates exact header, data and CRC sidecar, including partial format blocks and physical extent | `store::checksum_audit` tests: record/CRC byte faults, block boundaries, replacement and missing/extra/truncated input matrices |
+| Receipts are append-only, source-bound and cannot grant rows after any required byte or path changes | `exact_receipts_reopen_with_same_identity_and_keep_every_real_row`, `every_torn_prefix_recovers_only_by_appending_the_exact_suffix`, `warm_receipt_checks_refuse_every_fault_and_never_release_a_row` |
+| Visible complete receipt bytes are not authority while the publisher owns the exclusive lock; typed readers retain shared ownership | `visible_complete_bytes_are_not_durable_authority_while_a_publisher_holds_the_lock` |
+| Missing receipts, prior context, physical resource ceilings and FIFO paths refuse without replacement data or waiting for a pipe peer | `strict_input_caps_and_missing_prior_context_refuse_without_fallback`, `receipt_fifo_cannot_block_either_read_or_publication`, store bounded subprocess path tests |
+| Native and coarse strict inputs use the same calendar conversion and exact real-row handles, with all six roles required through publication | `native_and_coarse_use_exact_audited_rows_and_the_same_calendar_converters`, `every_context_source_and_the_saved_role_binding_remain_required_after_loading` |
+| Lost or corrupt acknowledged depth/ranked children and a failed final source guard never reach the real parent result writer | `stored_month_publication_tests::lost_or_corrupt_acknowledged_children_never_reach_the_real_parent_writer`, `strict_guard_refusal_precedes_terminal_and_parent_publication` |
+| Successful computation evidence is sealed before parent publication; a failed parent append returns its actual failure | `genuine_terminal_and_all_acknowledged_rows_exist_before_parent_publication`, `parent_write_refusal_keeps_completed_computation_and_returns_the_exact_failure` |
+| Every priced-audit publication branch seals acknowledged depth/rank evidence first; late loss cannot append a parent, and final capture confirmation remains required | `audit_publication_tests::actual_audit_late_depth_or_ranking_loss_cannot_publish_a_parent`, `actual_audit_publishes_only_after_the_real_empty_ranking_is_sealed`, `audit_finalizer_rechecks_exact_priced_catalog_and_children_before_terminal` |
+| Test-only one-shot publication fault injection cannot contaminate a later audit | `audit_publication_tests::test_fault_guard_cannot_leak_an_unconsumed_callback` |
+| Permanent result-publication refusal cannot return a successful stored-command exit; prose or prefix lookalikes do not become failures | `tests::a_failed_stored_parent_append_cannot_return_command_success`, `a_refusal_is_recognised_in_every_spelling_a_renderer_emits` |
+| An internal missing execution minute is described as a missing exact same-day bar, without incorrectly calling it a session end | `a_coarse_execution_report_names_an_internal_missing_minute` |
+| Checksum completion cannot masquerade as sweep or financial completion | `web/tests/sweep-evidence.test.js` checksum-audit comparison regression |
+| Missing institutional policy exposes all 37 required choices before loading market spans for sizing, for both final selection and later replay | `ledger_v6::tests::missing_policy_refuses_before_ledger_v6_market_sizing`, `missing_policy_refuses_before_ledger_v6_replay_market_sizing` |
+| Checksum test fixtures cannot contaminate the process-wide production telemetry census | All seven `store::checksum_audit::tests` retain the existing `emits::hold_the_sink` guard; `emits::every_emit_in_this_crate_reaches_the_log_through_its_production_call` still requires exactly seven real production emit sites |
+
+This list identifies executable tests, not an assertion that every verification
+gate or every possible source/OS failure has passed. The dated verification
+report records actual runs separately.
+
+### VWAP and strict multi-month completion (D-0526)
+
+| Invariant | Executable proof |
+|---|---|
+| All 20 VWAP predicates have their own reachable true/false outcomes and correct tolerance-dependent availability | `vwap::tests::all_twenty_known_positions_follow_their_actual_reference_and_tolerance` |
+| Every actual evaluator VWAP bit and its negation agrees with independent integer levels; first contribution and new session remain Unknown | `sweep_predicate_readiness::all_vwap_predicates_and_negations_match_independent_integer_levels` |
+| Zero dispersion certifies 13 exact predicates but never treats the seven undefined near predicates as known false | `vwap::tests::zero_dispersion_knows_exact_comparisons_but_cannot_certify_near_false` |
+| Unrepresentable offset/upper/lower levels cannot produce truth or known-false band evidence | `vwap::tests::unrepresentable_band_levels_cannot_be_truth_or_known_false` |
+| Moving decoded range bars does not release source/receipt authority; every required month and predecessor remains necessary | `audited_range_tests::each_unique_source_is_required_even_after_decoded_bars_are_moved`, `every_required_month_missing_or_corrupt_refuses_without_a_shorter_span`, `linked_role_nodes_are_exact_reusable_and_each_predecessor_stays_required` |
+| Strict source failure is durable before any audit computation, and actual terminal rechecking precedes parent publication | `audit_publication_tests::strict_source_refusal_is_saved_before_any_audit_computation`, `strict_source_must_remain_current_until_the_real_audit_terminal` |
+| Legacy institutional output directories and sizing reads cannot precede complete policy resolution | `ledger_all::tests::missing_policy_refuses_before_legacy_ledger_market_sizing_or_output_creation` |
+| The actual strict multi-month kernel publishes and reuses valid native/coarse evidence, but terminal source/receipt/rank loss prevents a parent | `audited_stored::range::tests::actual_strict_range_kernel_publishes_and_reuses_native_and_coarse_evidence`, `actual_strict_range_terminal_refuses_changed_source_binding_or_acknowledged_rank` |
+
+New finite tests are evidence of these invariants, not a declaration that the
+separate line/branch coverage, mutation, source-wide or deployment gates passed.
+
+### Available false predicates and explicit launch evidence (D-0527)
+
+| Invariant | Executable proof |
+|---|---|
+| All 20 opening-range true/false/NOT predicates use their frozen window, including the exact first closing bar and session reset | `orb_known_readiness::all_twenty_relations_and_not_match_independent_frozen_range_comparisons`, `first_closing_bar_holes_preopen_and_missing_windows_follow_actual_session_evidence` |
+| Opening-range exact comparisons and near availability distinguish zero span, invalid widths and positive integer extremes; refused bars preserve state | Remaining `orb_known_readiness` tests and anchored Column handoff |
+| All 27 previous-day/five-session Fibonacci true/false/NOT predicates agree with independent integer levels and tolerance boundaries | `fib_known_readiness::all_twenty_seven_predicates_and_not_match_integer_oracle_at_both_band_edges` |
+| Previous-session availability requires completed usable references; cold, unusable, nonregular and overflowing references cannot silently become false | Remaining `fib_known_readiness` tests, including `public_column_retains_known_false_fibonacci_answers_for_negated_search` |
+| Current-day false answers use the emitted pre-fold leg through new extremes, leg erasure/flip, equal touches and session reset | `current_day_fib_known_readiness::availability_uses_the_old_leg_through_new_extremes_touches_and_session_reset` and independent every-rung/band/overflow tests |
+| All eleven gap predicates and their negations use pre-fold levels; absent/engulfing/overflowing gaps and nonregular anchors keep their explicit semantics | `gap_known_readiness::all_eleven_gap_predicates_and_negations_match_independent_pre_fold_levels`, `absent_ambiguous_and_unrepresentable_gap_references_never_satisfy_not`, `non_regular_session_cannot_replace_the_prior_regular_gap_anchor` |
+| Exact-minute gap replacement copies known false, clears stale local availability, preserves other families and refuses without partial mutation | `gap_known_readiness::exact_minute_overlay_preserves_known_false_and_is_transactional_on_missing_evidence`, `column::tests::exact_gap_replacement_clears_every_local_gap_bit_and_no_other_family` |
+| Future exact-minute evidence cannot change already mapped truth or availability | `anchored::tests::future_exact_minutes_cannot_change_an_already_mapped_signal_column` |
+| Coarse and straddling candles cannot define short opening ranges; stored ORB and GapFib truth/known pairs come from exact one-minute closes | `exact_minute_orb_gap_readiness` independent opening-range oracle across declared intraday rungs |
+| A new session without an opening window clears stale truth and availability, including absent gap references | `exact_minute_orb_gap_readiness::new_session_without_opening_window_clears_stale_truth_and_known_including_absent_gap` |
+| The combined minute bridge rejects missing, mismatched, corrupt or unaligned evidence before changing any row | `exact_minute_orb_gap_readiness::combined_bridge_rejects_late_missing_mismatched_corrupt_and_unaligned_minutes_transactionally` |
+| A summary, missing read, failed read or nonpricing operation cannot certify trade capture; the rendered candidate action and wording share eligibility | `web/tests/sweep-evidence.test.js` missing/failed, noncandidate-mode and audit/expression comparison tests |
+| A priced no-cell outcome preserves recorded signals/refusals without fabricated totals; exit indices map to their own saved ladders | `web/tests/candidate-trades.test.js` no-cell, selected-exit and missing/empty/zero distinction tests |
+| Launch and detailed comparison tables agree with the dated reviewed report, retaining only supported local evidence links | `web/sweep-readiness/build-review.mjs --check` |
+| The strict API preserves exact feed/rung/span/attempt and accepts only server-owned checksum paths/limits | `strict_tests::strict_command_parser_and_typed_adapter_preserve_exact_request_and_attempt`, `request_paths_and_limits_cannot_replace_server_strict_configuration` |
+| Missing/invalid strict configuration and out-of-domain request/environment settings refuse before a slot or attempt, with explicit field names | `strict_tests::missing_strict_configuration_is_structured_503_before_attempt_or_slot`, `strict_out_of_domain_request_settings_refuse_before_configuration_slot_or_start`, `strict_invalid_server_environment_refuses_before_configuration_slot_or_start` |
+| Strict CLI invalid runtime settings cannot open real source admission or begin preparation | `audited_range_tests::strict_invalid_runtime_settings_refuse_before_real_source_admission_or_preparation` |
+| Native/coarse strict API adapter retries reuse genuine parent evidence; late rank loss returns error and cannot publish a parent | `audited_range_tests::strict_api_adapter_reuses_real_parent_and_returns_late_rank_loss_as_error` |
+| A source change after folding explicitly seals preparation Refused before returning the actual error | `audited_range_tests::strict_preparation_source_change_seals_refusal_before_returning_error` |
+| Strict settings share actual runtime scalar bounds and reject fallback/clamping before source admission | `strict_range_knobs::tests::strict_scalar_bounds_match_shared_readers_at_exact_limits`, `strict_environment_validation_refuses_without_defaulting_or_exposing_values` |
+| An unwritten strict task-completion event becomes a visible refusal while preserving the original outcome and already-written result evidence | `strict_tests::strict_terminal_audit_requires_written_and_preserves_original_evidence_text` |
+| Strict and ordinary commands share the same pre-spawn cleanup guard, durable attempt boundary and terminal finish; strict terminal audit settles before normal disarm | `strict_tests::strict_and_ordinary_commands_share_one_guarded_task_and_terminal_finish`, `sweeprun::tests::all_three_browser_engine_tasks_arm_and_disarm_the_same_finisher` |
+
+Every proof above is finite and source-scoped. Saved test results are not an
+attestation of subsequent source edits, runtime configuration or deployment.
+
+### Time-window false availability (D-0528)
+
+| Invariant | Executable proof |
+|---|---|
+| All four existing half-open clock predicates are known on every accepted timestamp; NOT preserves both true and false answers | `time_known_readiness::all_1440_minutes_on_two_days_preserve_half_open_truth_and_make_every_false_clock_known` |
+| No positive clock window is invented outside the existing intervals; rollover requires no price history | `time_known_readiness::outside_the_declared_windows_no_positive_clock_is_substituted_and_rollover_needs_no_history` |
+| Clock negation composes correctly with AND/OR while missing price references remain Unknown | `time_known_readiness::clock_negation_composes_with_and_or_while_an_unseeded_price_predicate_stays_unknown` |
+| A warmed search column retains all315 post-early-morning bullish signals in the declared375-minute fixture | `time_known_readiness::actual_search_column_keeps_the_315_not_early_morning_signals` |
+| A corrupt or repeated candle cannot publish clock availability or advance the state used by the next accepted candle | `time_known_readiness::a_refused_boundary_candle_cannot_advance_or_publish_clock_state` |
+
+### Session, trend and crossing false availability (D-0529)
+
+| Invariant | Executable proof |
+|---|---|
+| All25 session answers match independent integer descriptions; the19 new known positions belong only to that module | `session_known_readiness` independent all-position oracle and `session` private exact-owner test |
+| Prior-three history excludes the current bar and resets within an already warm Column; unavailable prior history cannot satisfy NOT | `prior_three_excludes_current_and_resets_even_when_the_search_column_is_warm`, `newly_available_false_descriptions_compose_without_promoting_absent_history` |
+| Missing/flat gaps, odd rounding, near boundaries, zero ranges, integer extremes and nonregular references retain their declared semantics | `session_known_readiness` gap, extremes and calendar tests |
+| A refused bar cannot publish session availability or advance its references | `session_known_readiness::refusals_do_not_publish_or_warm_any_session_reference` |
+| Swing availability waits for both observed right-hand confirmation bars; each near band needs its own valid tolerance | `trend_known_readiness::confirmed_swings_become_known_only_after_both_right_hand_bars_have_folded`, `each_swing_band_checks_its_exact_tolerance_and_inclusive_edges` |
+| First BoS, continuation, both reversal directions, equality and non-events agree with an independent structure oracle; a missing opposite swing remains Unknown | `first_break_continuation_reversal_quiet_and_equality_follow_the_independent_oracle`, `a_missing_opposite_swing_stays_unknown_and_cannot_satisfy_negation` |
+| Refused/extreme candles conserve trend references; earlier average/stop contribution gates and existing cross-day history remain unchanged | Remaining `trend_known_readiness` public tests |
+| Every crossing/ordinal truth, known answer and negation agrees with an independent last-definite-side oracle | `crossing_known_readiness::every_crossing_and_ordinal_matches_a_last_definite_side_oracle_including_known_non_events` |
+| A usable touch preserves memory/count, a new session clears it, and a refused candle cannot change the next valid answer | `a_touch_is_known_false_but_cannot_erase_the_side_or_count_across_it`, `available_crossing_negation_survives_column_handoff_and_refusal_is_transactional` |
+| Both current base references and an earlier same-session definite side are required to certify all five crossing/ordinal non-events; other bits and emitted truth stay intact | `evaluator::tests::crossing_known_requires_both_current_sides_and_a_prior_side_in_the_same_session` |
+| A truth-only fold commits the same state and refusal behavior; switching later to Boolean availability cannot lose any reference | `evaluator::tests::truth_only_fold_can_handoff_to_known_without_state_or_refusal_drift` and existing public truth/known equivalence oracles |
+
+### Strict V6, fixed intraday clock and browser correlation (D-0530–D-0532)
+
+| Invariant | Executable proof |
+|---|---|
+| Every bit of both full checksum bindings changes computation identity; old no-receipt identities remain distinct and unchanged | `identity::tests::checksum_receipt_identity_binds_every_bit_and_keeps_unknown_distinct` and legacy identity regressions |
+| Independent signal/minute/daily limits refuse before Candidate computation; identical strict inputs reuse, while changed receipt policy rekeys | `strict_v6_independent_role_caps_refuse_before_candidate_computation`, `strict_v6_same_real_source_reuses_and_receipt_policy_rekeys_ordinary_identity` |
+| Required source/receipt replacement and mutation during the actual ladder cannot publish a successful Candidate | `strict_v6_every_consumed_source_and_receipt_replacement_invalidates_retained_authority`, `strict_v6_source_change_during_actual_ladder_refuses_before_candidate_publication` |
+| Both evaluated, both mixed and genuinely all-empty stored families reach their correct Selection authority without a fabricated zero-row V1 | `strict_v6_both_evaluated_and_both_mixed_shapes_reach_real_selection`, `strict_v6_extinct_selection_keeps_both_family_sources_through_final_reauthentication` |
+| Empty and evaluated family capabilities freshly reopen all retained supporting ledgers; later OOS sources survive witness projection | `strict_v6_retained_empty_and_evaluated_families_reopen_every_saved_support_record`, `strict_v6_oos_witness_keeps_actual_later_source_guard_after_cohort_is_dropped` |
+| One-microsecond/half-minute offsets cannot certify15:09 or move the15:10 boundary; missing required data does not erase earlier valid ordinary horizons | `fixed_deadline_readiness::microsecond_and_half_minute_offsets_never_certify_a_1509_record_or_a_fill`, `a_lone_off_grid_required_record_is_missing_while_earlier_exact_rows_stay_usable`, `a_shifted_last_row_cannot_move_the_fixed_deadline_or_replace_the_exact_boundary` |
+| Negative civil days and timestamp extremes use checked exact deadlines; native/projected mask/expression paths reject off-grid execution and interiors | Remaining `fixed_deadline_readiness` public tests and canonical trade-boundary regressions |
+| A supplied compatibility exit table cannot override canonical session facts, claim a later close or substitute a foreign session | `fixed_deadline_readiness::public_compatibility_walk_refuses_a_later_boundary_from_a_foreign_slice` and `trade` exact-table equivalence regression |
+| Command acceptance and terminal status preserve adjacent u64 attempt tokens beyond browser integer precision | `strict_tests::command_acceptance_and_status_preserve_exact_attempts_beyond_browser_integer_precision` |
+| The browser queues every selected admitted pair, preserves exact requests, stops on uncertainty/refusal and never retries an ambiguous POST | `web/tests/receipt-batch.test.js`12 mocked transport/state-machine regressions |
+
+These are named finite proofs. Complete touched-crate coverage, all mutations,
+production activation and approved institutional policy remain separate gates.
+
+### Actual clocks and exact-attempt recovery (D-0533)
+
+| Invariant | Executable proof |
+|---|---|
+| Foreign cached geometry cannot move an actual15:09 forced-close record to15:20 in either direction, column mode, predicate mode or public grid | `foreign_slice_deadline_readiness::every_public_cached_walk_refuses_foreign_facts_that_move_1509_to_1520` |
+| Actual clock checks preserve earlier valid ordinary horizons and refuse a cached lookup that names a different actual instant | `actual_clock_guard_preserves_earlier_horizons_on_both_public_predicate_paths`, `matching_forced_boundary_cannot_hide_a_foreign_earlier_horizon_lookup` |
+| Valid endpoints cannot hide a late or foreign-day interior timestamp from stop/target pricing | `foreign_slice_deadline_readiness::checked_grids_refuse_an_actual_late_or_foreign_day_inside_cached_endpoints` |
+| Only a canonical positive u64 token selects status; aliases, duplicate keys and overflow refuse | `strict_tests::exact_status_selector_requires_one_canonical_positive_u64_without_aliases` |
+| Unrelated active or unknown CLI activity cannot hide a matching retained browser terminal | `strict_tests::exact_status_retains_browser_terminal_despite_active_or_unknown_external_status` |
+| Running/refused outcomes retain their exact identity; absent/replaced slots never substitute another attempt | `strict_tests::exact_status_keeps_running_and_refused_states_and_never_substitutes_another_attempt` |
+| Every batch poll and manual recheck addresses its accepted decimal token, including values above JavaScript integer precision | `web/tests/receipt-batch.test.js` exact-selector polling and recheck regressions |
+
+### Parallel strict-test isolation (D-0534)
+
+| Invariant | Executable proof |
+|---|---|
+| Strict range evidence tests cannot observe another test's temporary process-wide knob values | The shared `knobs::serially()` guard spans `actual_strict_range_kernel_publishes_and_reuses_native_and_coarse_evidence`, `actual_strict_range_terminal_refuses_changed_source_binding_or_acknowledged_rank`, `strict_api_adapter_reuses_real_parent_and_returns_late_rank_loss_as_error` and `strict_preparation_source_change_seals_refusal_before_returning_error`; verified together by `cargo test --workspace --locked` |
+
+### Explicit research policy (D-0535)
+
+| Invariant | Executable proof |
+|---|---|
+| One supplied profile resolves all37 delegated fields; risk multiples preserve exact units and values | `research_policy::tests::shipped_profile_resolves_all_37_without_requiring_manual_values` |
+| Every missing, duplicate, unknown, reserved stated or invalid version field refuses | `every_missing_duplicate_unknown_and_stated_field_refuses` |
+| Invalid integers, booleans, non-price risk expressions, overflow, zero risk, bad UTF-8 and excessive input refuse | `exact_domains_overflow_and_malformed_values_refuse` |
+| Exact file bytes and risk provenance are deterministic, including comment-only file edits | `file_bytes_and_risk_are_audited_even_if_numeric_values_match` |
+| Missing, directory, final-symlink and oversized file inputs refuse | `disk_reader_refuses_missing_directory_symlink_and_oversized_input` |
+| The executable explanation validates the complete runner policy without market input or hidden override values | `executable_policy_check_validates_without_reading_markets_or_overrides` |
+| Human percentages, ratios and signed price units retain exact precision | `human_limits_preserve_exact_rates_ratios_prices_and_special_rules` |
+| Selected policy reaches V6 physical preflight without manually supplying gates; explicit overrides are visible and malformed values refuse | `selected_runtime_profile_reaches_v6_preflight_and_preserves_override_refusals` |
+| The guide contains every configured field once and its human limit agrees with the file | `node web/policy-guide/build-guide.mjs --check` (frontend only) |
+| Exactly16KiB can hold a complete valid profile; one extra byte refuses without accepting a prefix | `research_policy::adversarial_tests::exact_file_bound_accepts_complete_text_and_one_extra_byte_refuses` |
+| A loaded profile owns its snapshot; rereading a changed or removed file authenticates the new actual state | `loaded_profile_is_an_owned_snapshot_and_rereads_require_current_real_bytes` |
+| Signed and unsigned risk extremes cannot wrap or cross price domains | `signed_and_unsigned_risk_extremes_never_wrap_or_cross_domains` |
+| Disabling an optional rejection rule does not claim the underlying evidence was measured; alternate count/rate limits render exactly | `edited_optional_checks_and_count_limits_explain_applied_values_without_claiming_evidence` |
+| Owner-selected file paths, per-field override precedence and malformed-policy refusal remain isolated from request knobs | `isolated_process_precedence_preserves_owner_selected_path_and_refusals` and five named isolated child cases |
+| Appending, replacing or removing the actual policy file between its bounded read and final generation check refuses; a subsequent clean read remains usable | `real_policy_file_mutations_inside_the_read_window_refuse_without_returning_a_snapshot`, using a one-shot thread-local test-only mutation hook |
+
+The7 September final policy run passed13 unique tests plus6 isolated child
+executions. Exact-binary coverage measured100% lines and branches for parsing,
+risk resolution, human formatting and fixed-point formatting. The reader is
+94.12% lines and50% branches: during-read generation failure was not injected.
+A defensive parser index-guard region is unreachable through the current closed
+field enum and remains uncovered. This is not whole-CLI coverage closure.
+Evidence: `target/sweep-audit-20260906/research-policy-coverage/final-tests.log`
+and `final-selected.txt`; merged-profile diagnostics were empty.
+
+A later14-test run plus the same6 isolated child executions passed after adding
+the actual read-window mutation regression. This closes the named behavioral
+gap; the earlier13-test coverage percentages remain a dated measurement until
+a new exact-binary instrumented run is recorded. Log:
+`target/sweep-audit-20260906/research-policy-read-window-tests.log`.
+
+The subsequent exact-binary instrumented rerun also passed14 tests plus6 child
+executions, with empty profile/coverage diagnostics. `ResearchPolicy::read`
+now has18/18 measured lines and2/2 branches;33/36 regions are covered. Initial
+generation and low-level read I/O error closures remain untested. Parsing and
+the three value-formatting functions retain their previously measured complete
+main-function line/branch coverage, with the same closed-schema index-region
+limit. The coverage README records both checkpoints without merging profiles.
+
+### Actual-clock assertion closure (D-0533 follow-up, 2026-09-07)
+
+| Invariant | Executable proof |
+|---|---|
+| Signed/extreme timestamp day identity uses the exact civil interval; absent, reversed, subminute, foreign-day and unrepresentable forced-exit endpoints refuse | `actual_day_matches_civil_interval_membership_at_signed_extremes_and_midnight`, `square_off_requires_available_ordered_actual_endpoints_and_a_representable_deadline`, `square_off_exact_intervals_reject_foreign_days_subminutes_and_late_entry` |
+| Earlier ordinary horizons remain valid without forging exact15:09 forced fills; cached horizon indices must match actual timestamps and positive cadence | `truncated_boundaries_allow_earlier_holds_without_forging_forced_one_minute_fills`, `horizon_lookup_requires_positive_cadence_exact_actual_timestamp_and_present_index` |
+| Actual path bounds admit inclusive whole-minute endpoints and refuse absent, reversed, duplicated or backward timestamps | `clock_accepts_inclusive_whole_minute_endpoints_and_never_duplicate_or_reversed_time`, `clock_missing_or_reversed_endpoints_cannot_admit_an_actual_record` |
+| Refused clock/candle rows cannot change extrema; counted refusals preserve offset alignment | `admission_keeps_clock_membership_and_candle_refusals_out_of_extremes`, `admission_counts_duplicate_clock_once_and_preserves_extremes_offset_alignment` |
+
+Fresh exact-binary profiles cover the selected clock functions and closures at
+100% measured lines/regions/available branches, with58 test executions and no
+profile mismatch diagnostics. A63-mutant replay caught all63; the earlier public
+suite alone missed8. This is selected-function evidence, not whole-runner or
+whole-module100% coverage. The exact evidence manifest is
+`target/sweep-audit-20260906/clock-boundary-final-coverage/README.md`.
+
+### Full-program research families, statistics and comparison (D-0536–D-0537)
+
+| Invariant | Executable proof |
+|---|---|
+| Research scope matches the existing snapshot intersection and cannot alias cash, derivatives, references or nonmembers to a legacy index | `research_family_readiness::runtime_scope_matches_the_independent_snapshot_intersection`, `scope_refuses_impostors_duplicates_and_limits_without_silent_truncation` |
+| Named capacity errors, every family-codec byte, complete membership identity and required observed stops remain explicit | `scope_refusals_report_the_named_problem_and_actual_physical_limit`, `fixed_family_codec_rejects_every_changed_byte_and_wrong_length`, `membership_identity_binds_the_complete_ordered_snapshot_tables`, `exact_observed_required_stop_retains_its_public_coordinate` |
+| Shared cash resolution preserves old two-index bytes and prices/replays every Boolean coordinate without an AND or index alias | `legacy_resolution_identity_matches_the_recorded_pre_extraction_library`, `eligible_cash_prices_and_replays_every_boolean_coordinate_without_index_alias` |
+| Every supplied program, direction and exit cell retains exact trade/session conservation, zero coordinates, full grid settings and horizon | `strict_boolean_catalog_keeps_every_coordinate_exact_rows_and_unknowns_and_reuses` |
+| Body, receipt or actual source replacement invalidates retained candidate authority; acknowledged body loss cannot publish completion | `committed_boolean_family_refuses_body_receipt_and_actual_source_replacement`, `acknowledged_boolean_candidate_body_loss_refuses_before_completion_publication` |
+| Duplicate catalogs and physical-cap failures cannot publish a complete candidate family | `malformed_catalog_and_physical_caps_refuse_without_a_completed_candidate_parent` |
+| Observers cannot accept a publisher's uncompleted durability window; owner replacement refuses and an existing reader cannot indefinitely block identical reruns | `observer_holds_publication_barrier_and_refuses_changed_owner` and the retained-reader rerun assertions in the complete catalog test |
+| Complete zero-inclusive program populations use the existing exact statistics kernels; constant-return candidates cannot gain invented Romano–Wolf evidence | `complete_program_population_matches_existing_exact_bootstrap_receipts`, `zero_trade_coordinate_remains_in_family_and_cannot_gain_rw_evidence` |
+| Work, memory arithmetic and odd/misaligned periods refuse without a shortened or padded population | `explicit_physical_limits_and_overflow_refuse_before_shared_numeric_work`, `cscv_keeps_all_periods_and_refuses_misalignment_without_padding`, `actual_source_odd_calendar_and_foreign_catalog_refuse_without_statistics_completion` |
+| Real producer capabilities from complete generated stored cash/index fixtures reach durable statistics, exact reuse and subsequent corruption refusal | `actual_opaque_cash_and_index_sources_publish_complete_idempotent_statistics`, `committed_statistics_refuse_tampered_body_receipt_and_linked_candidate` |
+| A complete explicit policy comparison retains every candidate and every missing later-period reason; policy changes rekey and corruption refuses | `complete_cash_boolean_admission_retains_every_reason_and_missing_oos_cannot_pass`, `admission_policy_identity_resource_refusal_and_corruption_are_explicit` |
+| A missing or refused worker result cannot be mistaken for a complete requested cohort | `boolean_catalog_command::tests::incomplete_or_refused_worker_results_cannot_complete_a_cohort` |
+
+The initial stored-fixture success assumptions were corrected from measured
+calendar and predicate evidence: complete July–August has42 accepted sessions,
+and a cash VWAP tautology is not a zero-signal expression. No actual session was
+dropped or padded, and no production policy or cash availability was relaxed to
+make those tests pass. The16 candidate/statistics/admission checks passed across
+`boolean-final-combined-v2-tests.log` (14 passes,2 then-invalid admission fixture
+policies) and `boolean-admission-final-v2-tests.log` (both repaired admission
+fixtures pass). This is generated-fixture integration evidence, not a production
+historical run or a later all-source release clearance. The final common-reader
+extraction and added observers require their own subsequent combined checks.
+
+The focused research-family/resolution/comparison mutation campaign reconciled
+116 distinct descriptions:100 caught,15 unviable and one surviving redundant
+early family-codec guard. Replacing its width/magic `||` with `&&` still cannot
+admit an invalid encoding because the final canonical re-encoding rejects it.
+The defensive guard is retained and the survivor is reported, so this is not a
+zero-survivor result. The corresponding13-test instrumented scope measured
+research-family169/169 lines and18/18 branches, research-resolution147/151 lines
+and7/8 branches, and detached comparison56/56 lines and2/2 branches. Later cold
+observer codec changes are outside that source checkpoint. Evidence is under
+`target/sweep-audit-20260906/research-family-coverage*` and the reconciled mutation
+artifacts; none of this closes whole-runner coverage or all touched modules.
+
+### Saved Boolean observation (D-0538)
+
+| Invariant | Executable proof |
+|---|---|
+| All three namespaces refuse an active publisher; an idle cached reader releases its lease so identical publication can finish | `every_namespace_observer_waits_for_publication_and_idle_cache_allows_rerun` |
+| Unknown namespaces, over-budget bodies, corrupt content and replaced generations refuse; failed decoding/projection releases its lease | `observation_rejects_caps_unknown_namespaces_corruption_and_foreign_generation`, `refused_decoder_and_projection_release_the_publication_lease` |
+| Cold statistics retain every candidate, split and source with exact aggregate byte admission; resealed padding, count, kind and source substitutions refuse | `cold_statistics_pages_conserve_all_candidates_splits_sources_and_exact_read_budget`, `cold_statistics_refuses_resealed_padding_counts_kinds_and_cross_linked_sources` |
+| Cold admission preserves the complete saved policy, values and reason partitions and refuses changed ancestors or resealed policy/verdict substitutions | `cold_admission_preserves_complete_policy_all_values_reasons_and_refuses_changed_ancestors`, `cold_admission_refuses_resealed_policy_values_verdict_padding_and_foreign_stage` |
+| HTTP selectors, completion pins and cardinality cannot substitute a later or partial page; unknown storage roots are not searched or created | `exact_model_selectors_require_completion_for_every_later_or_detail_page`, `page_cardinality_and_completion_never_accept_a_partial_or_replacement_page`, `missing_saved_receipt_names_configured_root_without_creating_or_searching_it` |
+| All44 evidence fields and reason positions and all39 policy values preserve exact integers, unavailable states and false requirements | `all_44_evidence_fields_preserve_exact_extremes_and_each_unavailable_tag`, `all_44_reason_positions_render_their_exact_saved_partition_and_status`, `all_39_policy_values_preserve_complete_numeric_values_and_false_requirements` |
+| Browser pages reconcile exact parent/source identities, cardinalities, floating bits and reason masks before display | `web/tests/boolean-catalog.test.js`, `web/tests/boolean-evidence.test.js` |
+
+The final linked generated-fixture run passed23 tests and a subsequent final
+cold-reader rerun passed4 tests. Logs are `boolean-linked-observation-final-tests.log`
+and `boolean-linked-observation-frozen-tests.log` under the ignored sweep audit
+directory. These do not establish original raw-source freshness on a cold saved
+reader or claim a production historical campaign.
+
+The later decoder revision uses fallible fixed-array conversion for record width,
+preserving exact canonical validation while removing the redundant boolean
+guards. The14-test focused rerun passed. The current decoder replay tested9
+mutants:7 caught,2 unviable, no survivors. This is a targeted delta, not a fresh
+whole116-mutant campaign. New exact-binary whole-file coverage is
+research-family167/167 lines and14/14 branches, observer codec30/30 lines and6/6
+branches, and detached comparison56/56 lines and2/2 branches. Resolution remains
+147/151 lines and7/8 branches; whole-crate closure is not claimed. See
+`research-fixed-width-decoders-mutation.log` and the updated ignored evidence
+manifest for exact binary/source hashes and profile diagnostics.
+
+| Invariant | Executable proof |
+|---|---|
+| A statistics work ceiling that overflows refuses before catalog, market or output access | `boolean_catalog_command::tests::impossible_statistics_budget_refuses_before_catalog_market_or_output_access` (isolated executable child with a valid profile and missing market/catalog paths) |
+| Exhausted candidate capture reports the actual program, side, coordinate and required versus remaining trade/byte capacity without a completed parent | `malformed_catalog_and_physical_caps_refuse_without_a_completed_candidate_parent`, including a generated stored tautology with a one-trade ceiling |
+
+### Incremental grammar campaign recovery (D-0541)
+
+| Invariant | Executable proof |
+|---|---|
+| Binary batches preserve the existing cursor's exact ordering and resume without skipping programs | `bounded_batches_resume_without_skipping_reordering_or_false_exhaustion` |
+| Cold batch decoding replays admitted work and rejects altered programs, counts, cursor bytes and padding | `binary_batch_replay_detects_changed_counters_programs_and_padding` |
+| Invalid batch framing and physical count/length limits refuse before parsing a separately malformed inner cursor | `batch_format_and_byte_admission_precede_cursor_parsing`, `batch_count_and_exact_length_admission_precede_cursor_parsing` |
+| Node-only progress stays paused and all cumulative counter/capacity arithmetic is checked | `node_only_progress_remains_paused_and_all_arithmetic_is_checked` |
+| Only a terminal fixed grammar cursor reports exhaustion | `only_the_cursor_terminal_state_can_report_fixed_grammar_exhaustion` |
+| Pending batches survive restart; a failed child completion check cannot advance the grammar cursor | `restart_keeps_unfinished_batch_and_requires_exact_campaign_before_advancing` |
+| Resealed predecessor substitutions, skipped/repeated work, malformed completions and changed batch boundaries refuse | `sealed_but_skipped_reordered_foreign_and_incomplete_history_refuses`, `checkpoint_counter_reseeding_and_changed_batch_boundaries_refuse` |
+| Empty bounded node work advances without inventing a historical campaign | `empty_node_work_checkpoint_can_resume_without_inventing_a_campaign` |
+| Invalid alphabets, dates and zero work allowances refuse before output or market access | `command_shape_refuses_invalid_alphabet_spans_and_work_allowances` |
+| Before pricing, reserve the full next checkpoint transition so unchanged bounds can recover it; charge interrupted ordinals, history bytes, the shared directory limit and arithmetic overflow | `checkpoint_admission_reserves_plan_and_done_before_work_and_restarts_at_exact_cap`, `checkpoint_admission_charges_crash_holes_memory_discovery_and_overflow` |
+| Keep source guards through grammar completion and refuse same-byte inode replacement before or after acknowledgment without erasing saved history | `grammar_done_holds_and_rechecks_source_generation_before_and_after_acknowledgment` |
+| Generated strict sources reach actual eight-timeframe execution, cold completion readers and exact retry; a genuine foreign campaign refuses before its ancestry reader is called | `generated_grammar_executes_and_recovers_real_eight_rung_receipts` |
+
+These are finite regression obligations. They do not establish whole touched-
+crate coverage, mutation closure, unbounded throughput or whole-grammar
+statistical acceptance. Fresh combined test and real-OHLCV evidence must be
+reported against the actual source checkpoint, separately from earlier runs.
+
+### Eight-timeframe saved campaign (D-0539)
+
+| Invariant | Executable proof |
+|---|---|
+| Fixed widths, padding, family scope and aggregate completion reconcile exactly | `fixed_campaign_codec_refuses_padding_width_status_scope_and_completion_forgery` |
+| Ordered full-wire program digest preserves AND/OR/NOT and program order | `exact_program_digest_binds_order_operators_and_full_fixed_wire` |
+| Saved pause remains observable under a writer lease and cannot become completed by age or liveness | `checkpoint_pause_resume_pin_history_and_owner_are_independent_of_liveness` |
+| Overview checks exact child receipts, their byte budget and publication barriers without claiming to read bodies | `overview_checks_exact_receipts_and_budget_without_pretending_to_check_bodies` |
+| Acknowledged links cannot change/disappear across progress; predecessor substitutions refuse | `campaign_history_refuses_crosswired_predecessors_and_changed_acknowledged_stages` |
+| Reservation-only or exhausted checkpoint history cannot become completed evidence | `unacknowledged_snapshot_and_exhausted_reservation_never_become_complete` |
+| All eight generated-fixture timeframes reach the real candidate/statistics/admission path, resume and preserve completed pins; changed raw sources, child bodies or program/horizon links refuse | `generated_all_eight_campaign_pauses_resumes_exactly_and_refuses_changed_source_or_child` |
+
+### Frozen-exit later comparison (D-0540)
+
+| Invariant | Executable proof |
+|---|---|
+| Every original coordinate is replayed, including zero/unknown programs | `later_replays_every_frozen_coordinate_and_preserves_zero_unknown_programs` |
+| Original anchor/program/series cannot be substituted and overlapping data refuses | `later_refuses_overlap_program_substitution_foreign_series_and_changed_anchor` |
+| Later price changes cannot re-resolve training levels; a later timestamp on the same IST session still refuses | `later_prices_cannot_reresolve_training_levels`, `a_later_timestamp_in_the_same_ist_session_is_not_an_oos_period` |
+| Foreign resolution, evaluator substitution and entirely cold data refuse | `later_refuses_foreign_frozen_resolution_changed_evaluator_and_entirely_cold_data` |
+| Durable later capture, exact original links, every zero session, cold pages, malformed bytes and 15:09/15:10 bar-open boundary are checked | `stored_later_comparison_preserves_population_zero_sessions_and_pinned_cold_pages` |
+| Overlap, changed build, insufficient capacity and lost original receipt refuse | `stored_later_refuses_overlap_wrong_build_resource_and_original_receipt_loss` |
+| Invalid or absent later command arguments refuse before I/O | `explicit_later_command_rejects_overlap_daily_zero_and_missing_arguments_before_io` |
+| The later lifecycle round-trips as its distinct operation14 | `validation_request_and_completion_kind_remain_explicit` in `crates/cli/tests/sweep_evidence.rs` |
+
+The automated overview/later projections and refresh races are also exercised
+by `booleancampaignjson_tests.rs`, `booleanoosjson_tests.rs`, and the frontend
+`boolean-campaign.test.js`, `boolean-oos.test.js`, `campaign-monitor.test.js`
+suites. A browser projection test is distinct from a real raw-price replay.
+
+### Zero-conservative family and fixed-training windows (D-0542–D-0544)
+
+| Invariant | Executable proof |
+|---|---|
+| Full coordinate order retains exact zero and nonpositive hypotheses conservatively | `zero_and_nonpositive_rows_remain_mapped_with_conservative_one`, `negative_variable_rows_still_compete_in_positive_resample_maxima` |
+| All-zero families produce no rejection; nonzero constants refuse | `all_zero_is_complete_non_rejection_but_nonzero_constants_still_refuse` |
+| Full-family identity binds ordering, values, procedure and physical bounds | `full_identity_binds_zeros_order_every_value_procedure_and_physical_admission` |
+| The mapped procedure agrees with an independent full-family zero-floor reference over1,152 small families | `complete_small_integer_families_match_explicit_zero_floored_full_suffix_reference` |
+| Exact allocation does not renumber retries or round across thresholds | `every_predeclared_cell_shares_one_budget_and_retries_do_not_renumber`, `exact_boundary_scaling_and_draw_resolution_never_round_through_ppm`, `complete_small_probability_lattice_matches_unreduced_integer_comparison` |
+| Whole declared civil partition precedes observed outcomes; zero/unreachable alpha stays explicit | `qualification_partition_covers_every_civil_day_before_later_observations`, `qualification_zero_and_unreachable_alpha_keep_all_eight_allocated_units` |
+| Full plan identities, exact bounds, overlap and detached malformed partitions refuse | `qualification_identity_binds_both_full_sources_and_every_declared_term`, `qualification_plan_refuses_overlap_invalid_dates_and_exact_physical_caps`, `qualification_detached_codec_is_exact_bounded_and_cannot_hide_foreign_partition` |
+| Actual selected-coordinate folds conserve every trade and zero window | `complete_fixed_original_fold_projection_matches_independent_trade_partition` |
+| Both directions reject foreign programs, anchors, selected coordinates and ordinals | `both_sides_reject_foreign_full_program_anchors_selections_and_ordinals` |
+| Timestamp extremes, missing actual windows, exact map capacity and numeric overflow refuse correctly | `exact_ist_day_preserves_both_timestamp_extremes_and_negative_epoch_boundaries`, `fixed_plan_rejects_training_overlap_missing_dates_empty_actual_folds_and_mapping_ceiling`, `defensive_numeric_overflow_and_zero_outcomes_cannot_be_encoded_as_success` |
+| Optional fold integration preserves every existing OOS V1 byte and original authority | `optional_fixed_training_folds_preserve_every_v1_byte_and_exact_original_authority` |
+| Foreign months, missing partition coverage and additional proof-memory limits refuse | `optional_fold_proof_refuses_foreign_month_partitions_and_additional_memory_bounds` |
+| Eight journal slots resume exact pending reservations and cannot be reassigned | `all_eight_slots_restart_without_reassignment_and_reuse_exact_pending_reservations` |
+| Failed or uncertain publication retains old acknowledged state and poisons the writer | `failed_begin_finish_and_refusal_keep_old_slots_and_poison_the_uncertain_writer`, `uncertain_readback_never_exposes_unacknowledged_completion_and_reopen_checks_the_child` |
+| Crash holes count toward limits; resealed history cannot omit acknowledged transitions | `exact_checkpoint_cap_counts_crash_holes_but_not_as_acknowledged_records`, `validly_resealed_latest_cannot_omit_acknowledged_intermediate_history`, `resealed_state_cannot_skip_begin_retract_completion_or_crosswire_units` |
+| Malformed scope/completion and bounded UTF-8 refusal text remain explicit | `scope_initial_record_foreign_identity_and_partial_completion_refuse`, `utf8_refusal_is_bounded_retained_and_retry_clears_only_the_pending_reason` |
+| Complete original/later qualification reopens every coordinate, preserves zero families and refuses missing fold authority, foreign plans or changed source evidence | `complete_original_later_qualification_reopens_all_coordinates_and_keeps_zero_families`, `qualification_refuses_missing_original_fold_authority_wrong_plan_and_changed_source` |
+| Exact finite allocation cannot cross the policy threshold through rounded ppm observations | `qualification_probability_projection_preserves_exact_finite_allocation_boundary` |
+| Saved numeric mapping retains unreduced conservative one and rejects altered ranks, probabilities, plans, padding or recurrence | `qualification_codec_preserves_unreduced_zero_one_and_complete_active_mapping`, `qualification_codec_refuses_resealed_rank_probability_plan_and_padding_changes`, `qualification_codec_reconciles_exact_stepdown_recurrence_and_section_overflow` |
+| Cold source audit reproduces full matrix identity and original statistics without claiming to rerun resampling | `cold_source_audit_reproduces_full_identity_and_statistics_without_resampling` |
+| Every ordered original and later identity belongs to its predeclared rung, and changing any of the sixteen bindings changes the scope | `qualification_ordered_source_bindings_preserve_every_identity_and_family_position`, `qualification_identity_binds_both_full_sources_and_every_declared_term` |
+| Read-only eight-slot observation permits a concurrent owner, preserves refusal and rejects changed predecessor history without opening a writer or authenticating child bodies | `read_only_overview_observes_owner_and_all_eight_slots_without_opening_child_bodies`, `overview_keeps_recorded_refusal_and_refuses_changed_pinned_history` |
+| Missing or malformed command arguments and overlapping training/later spans refuse before source or output access | `qualified_command_rejects_invalid_or_overlapping_scope_before_io` |
+| Fresh overall completion rechecks every earlier saved child, and missing evidence before or after final acknowledgment cannot produce a success result | `final_publication_rechecks_all_saved_children_and_reopens_the_same_eight_links`, `deleted_earlier_child_blocks_final_publication_and_preserves_a_durable_refusal`, `failure_after_final_acknowledgment_is_explicit_and_never_rewrites_saved_history` |
+| Runtime observation admission retains exact positive limits and rejects malformed or unaddressable configuration without fallback | `missing_defaults_and_exact_positive_runtime_budgets_are_retained`, `malformed_or_unaddressable_values_refuse_without_default`, `non_utf8_configuration_and_authentication_failure_are_explicit` |
+| A smaller observation allowance cannot reuse a previously admitted catalog or later cache; every evidence model reports the exact configured bound | `a_smaller_server_budget_cannot_reuse_a_previously_admitted_catalog`, `lowered_budget_refuses_cached_later_ancestry_and_original_pin_recovers_after_readmission`, `every_evidence_model_names_the_exact_server_owned_budget_on_authentication_refusal` |
+
+Test names identify obligations, not an assertion that all verification gates
+have passed on any later source revision. Record the actual combined run and
+remaining coverage/mutation obligations separately.
+
+### Search-wide allowance and durable grammar continuation (D-0548–D-0549)
+
+| Invariant | Executable proof |
+|---|---|
+| History and Plan admission bound actual retained capacity; oversized sealed records refuse before replay | `one_slot_history_admission_bounds_actual_retained_capacity`, `plan_buffer_capacity_stays_within_exact_serialized_admission`, `restore_rejects_sealed_oversize_before_body_decode_or_child_replay` |
+| Descriptor/program, seal/payload and Plan sequence/seal/width checks remain independently required | `campaign_projection_requires_each_exact_descriptor_and_program_field`, `acknowledged_record_requires_both_expected_seal_and_exact_payload`, `done_link_requires_exact_plan_sequence_seal_and_record_width` |
+| Countable batch/timeframe shares telescope under one alpha and retain exact identity on retry | `independently_accumulated_finite_prefixes_telescope_without_exceeding_alpha`, `fixed_slots_retries_and_digest_bind_the_entire_numeric_contract` |
+| Exact fractions, draw floors, arithmetic ceilings and every small probability-lattice boundary remain conservative | `exact_threshold_draw_floor_and_scaled_probability_share_one_boundary`, `probability_lattice_matches_direct_unreduced_integer_comparison`, `nonintegral_draw_threshold_is_rounded_up_before_subtracting_one`, `machine_and_draw_ceilings_refuse_without_wrapping_or_reusing_a_slot` |
+| Reservation, refusal and completion preserve the same pre-work binding; only completed work advances | `generated_reservation_completion_and_refusal_round_trip_without_changing_binding`, `ordered_transitions_require_prework_reservation_and_preserve_failed_slot_on_retry` |
+| Complete declared program allocation is admitted independently before corrupted-cursor replay | `physical_grammar_reservation_precedes_corrupt_cursor_replay` |
+| Truncations, altered padding, partial predecessors, changed source/policy/programs and forged rung counts cannot become accepted records | `every_record_truncation_and_exact_header_length_refuses`, `every_byte_mutation_is_refused_or_remains_an_exact_canonical_observation`, `refusal_utf8_padding_and_predecessor_parts_are_exact`, `frozen_source_policy_program_limits_and_allocation_cannot_be_substituted`, `missing_overflowed_or_reassigned_rung_results_never_count_as_completion` |
+| Node-only grammar progress carries no invented qualification or results | `node_only_progress_carries_no_invented_qualification_or_results` |
+| Wrong search identity refuses before grammar replay; aggregate byte and node limits do not silently become per-record limits | `foreign_requested_identity_is_rejected_before_a_malformed_grammar_is_replayed`, `exact_complete_history_bytes_and_replay_allowances_are_not_per_record_fallbacks` |
+| Lost or skipped acknowledged history cannot fall back to older success | `skipping_an_acknowledged_record_or_replacing_its_pin_refuses_the_entire_history`, `lost_or_corrupt_latest_acknowledgement_never_falls_back_to_an_older_snapshot` |
+| Journal completion is not child authority; malformed/empty/missing observation remains explicit | `journal_reopens_pending_refused_and_complete_observations_without_inventing_child_authority`, `unknown_empty_and_zero_replay_requests_have_distinct_explicit_refusals` |
+| Search correction changes only probability evidence; it preserves the complete original observations and all absent authority | `search_projection_changes_only_exact_probability_fields_and_retains_full_source`, `missing_fold_and_execution_authority_is_never_replaced_by_numeric_success`, `inconsistent_detached_source_verdict_cannot_be_promoted` |
+| Equality may pass, a fractional ppm excess cannot round down to pass, and insufficient draw resolution never increases draws or admits a result | `equality_passes_but_fractional_ppm_excess_never_rounds_into_admission`, `unreachable_draw_resolution_keeps_evidence_and_draws_without_positive_admission` |
+| Genuine generated all-eight qualification resumes the same refused batch, refuses a lost child before new work, preserves restored old pins and rejects paging after parent loss | `generated_search_recovers_same_ordinal_and_refuses_missing_ancestry` |
+| Failed terminal publication retains the original work error, while failure after acknowledged completion never rewrites that history | `search_settlement_preserves_original_failure_when_terminal_audit_cannot_be_written`, `search_settlement_retains_acknowledged_completion_and_names_late_failure` |
+| Malformed command scope and resource values refuse before source access; changing an invocation pause preserves fixed batch work and grammar | `search_command_refuses_missing_scope_invalid_dates_and_malformed_allowances_before_io`, `search_invocation_pause_allowance_does_not_change_initial_grammar_or_fixed_batch_work` |
+
+Test fixtures labelled generated are fault/contract checks, not historical market
+results. File-byte mutation enumeration is a codec property check, distinct from
+mutation-testing production code. These names do not certify later revisions or
+full-crate coverage; preserve actual result logs beside the source checkpoint.
+
+### Exact runtime exit-grid wiring (D-0551)
+
+| Invariant | Executable proof |
+|---|---|
+| Missing resolution and explicit five retain the original directional policies and digests | `absent_and_explicit_five_preserve_original_policy_and_digest` |
+| Every admitted scalar resolution constructs its exact three axes, preserving risk, execution and cell limits; two-level policies match an independent source-only census | `every_admitted_runtime_resolution_binds_exact_axes_without_changing_risk` |
+| Invalid, zero, fractional, overflowing and over-ceiling settings refuse without default or clamping | `invalid_runtime_resolution_refuses_without_default_or_clamp` |
+| Changing either directional exit policy changes the actual source-only candidate descriptor, while a catalog-only change preserves that descriptor | `generated_source_descriptor_binds_both_runtime_exit_policies_independent_of_catalog` |
+| Node allowances exceeding record admission, missing completion pins and orphan summaries cannot become accepted search evidence | `declaration_rejects_progressed_cursors_zero_authority_and_invalid_physical_caps`, `missing_overflowed_or_reassigned_rung_results_never_count_as_completion`, `node_only_progress_carries_no_invented_qualification_or_results` |
+| An actual linked search detail reports its complete parent/campaign/child byte admission and selected-batch replay work; wrong child pins and undeclared timeframe ordinals refuse | `generated_search_recovers_same_ordinal_and_refuses_missing_ancestry` |
+
+### Explicit settings and nested failure settlement (D-0552)
+
+| Invariant | Executable proof |
+|---|---|
+| Each supported ordinary-range scalar retains its ordinary meaning, but every unused legacy control refuses on the explicit Boolean path | `boolean_rejects_each_unused_legacy_setting_without_changing_ordinary_validation` |
+| The Boolean grid setting retains the shared exact scalar boundary without accepting another legacy control | `boolean_grid_resolution_keeps_the_shared_exact_boundary` |
+| Request overrides and malformed/non-UTF-8 environment values are checked; actual Boolean preparation rejects unsupported controls before absent/inaccessible policy and source paths | `boolean_request_preflight_checks_override_non_utf8_and_actual_prepared_boundary` |
+| An actual refusal-publication collision preserves the original cause and publication error, states unconfirmed persistence, poisons the failed writer and reopens as pending | `failed_refusal_publication_preserves_original_reason_and_reopens_pending_state` |
+| Successful refusal publication remains observable, while subsequent verification failure after completion retains the acknowledged history | `deleted_earlier_child_blocks_final_publication_and_preserves_a_durable_refusal`, `failure_after_final_acknowledgment_is_explicit_and_never_rewrites_saved_history` |
+
+### Versioned shared probability ceilings and release admission (D-0553, D-0554)
+
+| Invariant | Executable proof |
+|---|---|
+| A writer-valid unequal FWER/Romano policy cannot let V2 White/SPA comparisons exceed the shared ceiling; the exact original V1 outcome remains observable | `stricter_shared_search_allowance_cannot_be_relaxed_by_individual_policy_ceilings` |
+| Effective policy only tightens four probability fields, retains every other value, preserves original bytes and is idempotent | `shared_probability_cap_preserves_every_other_policy_value_and_never_loosens_a_ceiling`, `search_policy_exposes_effective_limits_without_replacing_the_original` |
+| Equality, one-unit-above, zero and unrepresentable exact fractions have explicit outcomes without optimistic rounding | `unequal_family_ceilings_keep_exact_boundary_failures_as_saved_rejections`, `zero_shared_allowance_rejects_positive_probability_without_aborting_the_search`, `exact_probability_projection_refuses_unrepresentable_integer_boundaries` |
+| V1 bytes/hash remain independently pinned; V2 has a distinct declared identity and neither version can enter the other's history | `legacy_projection_spec_has_pinned_original_bytes_and_digest`, `legacy_records_round_trip_exactly_and_new_rule_changes_only_versioned_identity`, `mixed_or_unknown_projection_headers_refuse_before_inner_replay`, `projection_rule_cannot_change_inside_an_existing_search_history` |
+| Historical defensive arithmetic is retained without claiming inconsistent detached alpha is an actual writer configuration | `legacy_probability_guard_remains_exact_for_inconsistent_detached_allocations` |
+| Self/forward ancestry, acknowledged retries beyond admission, corrupted derived caches and a skipped reservation cannot become accepted progress | `self_or_forward_predecessor_refuses_before_opening_a_foreign_checkpoint`, `declared_record_allowance_counts_every_acknowledged_retry`, `replay_cache_corruption_cannot_replace_authenticated_history_or_completed_positions`, `a_completed_result_cannot_skip_the_next_prework_reservation` |
+| UI checks the exact recorded rule, original/effective policy and row-policy binding, and cannot silently relabel a historical result | `historical version remains explicit and cannot silently become a current shared-limit result`, `missing, unrelated, loosened and incorrectly bound effective policies refuse`, `an admitted label cannot override the exact shared probability bound` |
+| Missing release measurements refuse before live observation, including completely offline execution | `offline_and_missing_mandatory_admission_never_invoke_live_observation`, `absent_stale_incomplete_foreign_or_missing_mandatory_measurements_refuse` |
+| Coverage requires all scoped source files and exact raw counts; a partial mutation census, survivor or timeout cannot clear release | `coverage_requires_exact_line_branch_counts_and_all_source_files`, `survivors_timeouts_unviable_and_incomplete_mutant_census_never_clear_release` |
+| Compiler-invalid mutations need exact completed compiler evidence and cannot hide infrastructure failure | `compiler_invalid_is_accounted_separately_with_exact_completed_build_evidence`, `timeout_infrastructure_foreign_or_incomplete_build_is_not_compiler_invalid` |
+| A missing active recovery plan returns503 and a visible error without creating or mutating history | `missing_active_plan_is_503_and_visible_without_creating_or_mutating_history` |
+
+Names identify proof obligations, not automatic gate passes. Preserve actual
+execution, source and measurement receipts; no finite test set proves every
+possible market input, filesystem race or whole-crate coverage.
+
+### Release evidence remains bound through observation (D-0556)
+
+| Invariant | Executable proof |
+|---|---|
+| Observation cannot replace or mutate already verified artifact, source or measurement bytes and retain admission | `terminal_observation_rechecks_artifact_source_and_measurement_bytes` |
+| Newly added source/dashboard build files are checked again with the original inventory bounds | `terminal_observation_rechecks_complete_source_and_dashboard_censuses` |
+| A genuine caught outcome retains completed Build then Test phases in order | `genuine_cargo_test_phase_shape_is_retained_by_complete_census`, `caught_summary_requires_both_completed_phases_in_order` |
+| A caught summary cannot override successful tests, timeouts, signals or infrastructure failures | `caught_summary_never_overrides_success_timeout_or_infrastructure_status` |
+
+These checks bind the bytes observed at the final verification point; they do
+not claim an exclusive lease against future writers.
+
+### Unambiguous release reports and incomplete child refusal (D-0557)
+
+| Invariant | Executable proof |
+|---|---|
+| Raw report keys are unique at every nesting level after escape decoding and integer values retain exact precision | `raw_report_json_preserves_exact_numbers_and_rejects_recursive_duplicate_keys` |
+| Physical input and recursion limits remain finite; trailing JSON refuses | `strict_report_json_keeps_byte_recursion_and_complete_input_bounds` |
+| Contradictory checks and status cannot overwrite a failure or active observation | `duplicate_checks_and_status_fields_are_refused_without_observation` |
+| Duplicate coverage or mutation fields cannot become passing measurements; noninteger/overflow counts refuse | `duplicate_coverage_census_and_outcome_fields_cannot_replace_failures`, `coverage_requires_exact_line_branch_counts_and_all_source_files` |
+| A different real campaign checkpoint cannot replace a pinned completed-search claim | `a_new_campaign_checkpoint_cannot_replace_the_exact_pin_in_a_completed_search_claim` |
+| An exact campaign pin with waiting, started or refused slots cannot establish completed children | `matching_campaign_pin_cannot_promote_waiting_started_or_refused_slots_to_complete` |
+
+The D-0558 frontend preparation is checked by running the production check
+command with the generated framework configuration absent; it is not a new
+backend requirement or a test of visual layout.
+
+### Browser startup, saved-result visibility and request ownership (D-0559–D-0560)
+
+| Invariant | Executable proof |
+|---|---|
+| A validated saved feed avoids inventory discovery; first visits still prefer actual held data using HEAD only | `web/tests/feed-startup.test.js`: saved preference and first-visit held-data cases |
+| Missing, malformed, degraded or foreign census headers never become fabricated zero rows | `web/tests/feed-summary.test.js` |
+| An explicit choice or clear cannot be overwritten by late discovery or census replies | `web/tests/feed-startup.test.js`, compiled store-module cases in `web/tests/store-startup.test.js` |
+| Concurrent selected-feed consumers share one fetch and parse; refresh and failures retain their identity | `web/tests/store-census.test.js` |
+| A disposed status read cannot publish or resurrect a poll; hidden health checks stop | `web/tests/page-requests.test.js` |
+| Comparison work is opt-in, bounded to two groups, and cannot publish a cancelled partial population | `web/tests/bounded-comparison.test.js` |
+| Empty ordinary ledger wording does not assert that saved Boolean research is absent | `web/tests/page-requests.test.js`: ordinary-ledger scope case |
+| Browser result selection cannot name a store root, repeat keys or invent an out-of-page setting | `web/tests/saved-backtest.test.js` |
+| An older or disposed result request cannot replace the current selection, and refusal never becomes empty success | `web/tests/saved-backtest.test.js` |
+| The local viewer refuses nonloopback launches, control methods, foreign pins and unsafe assets without creating store history | native tests in `web/saved-backtest/viewer.rs` |
+
+Actual browser evidence for the saved market-data run and the isolated full
+frontend is recorded under `target/sweep-audit-20260906/page-load-20260907/`.
+Those finite observations are not an exhaustive browser/platform or full-sweep
+certification. The inspector does not relax the existing release gates.
+
+## DB preparation and saved-result explanations — D-0561 to D-0563
+
+| Invariant | Executable proof |
+|---|---|
+| DB preparation publishes one complete current snapshot; cancellation, failed decoration and stale work cannot publish partial totals | `web/tests/database-preparation.test.js` |
+| Chunked prefixes preserve complete buckets and initial pickers wait for actual held segments | `web/tests/database-preparation.test.js`: mixed-rung, full-store, generated 148,222-row and actual-page picker cases |
+| Visible setting joins are limited to 32 rows, split gaps, read sequentially and preserve the exact original/later ancestry | `web/tests/saved-backtest-setting-pages.test.js` |
+| Duplicate coordinates, missing numeric facts, changed pins, caller edits during reads and later-page failure cannot become a partial successful comparison | `web/tests/saved-backtest-setting-pages.test.js` |
+| Integer money, ppm distances, policy ratios, missing values and measured zero retain distinct exact meanings | `web/tests/saved-backtest-explanations.test.js` |
+| Rule descriptions consume the supplied Rust vocabulary; NOT never turns unknown VWAP into a known entry | `web/tests/saved-backtest-explanations.test.js`; native vocabulary test in `web/saved-backtest/viewer.rs` |
+| Frontend publication preserves every old immutable chunk and verifies its sealed source, destination and rollback bytes | native `staging_apply_retry_and_rollback_preserve_both_chunk_generations` in `web/sweep-readiness/frontend-publish.rs` |
+| Changed files, duplicate manifests, symlinks, lock contention and an interrupted apply remain explicit refusal or resumable states | remaining native tests in `web/sweep-readiness/frontend-publish.rs` |
+
+These frontend and inspection proofs do not close the outstanding complete
+touched-crate coverage, full-module mutation or production recovery requirements.
+
+## Explicit main-app inspection — D-0564
+
+| Invariant | Executable proof |
+|---|---|
+| Only the complete declared inspection mode disables execution with that label; failures stay closed and a legacy 404 is named separately | `web/tests/runtime-inspection.test.js` |
+| A saved-results link must use canonical loopback HTTP and the exact saved-selection contract | `web/tests/runtime-inspection.test.js`; native saved-link test in `web/sweep-readiness/main-inspector-tests.rs` |
+| Run and Descend refuse before touching command state or transport when execution is disabled | actual-function cases in `web/tests/runtime-inspection.test.js` |
+| All control methods, unknown GET routes and foreign request authorities refuse before the inner handler | `web/sweep-readiness/main-inspector-tests.rs` |
+| Real read-handler fixtures retain every file and directory; construction starts no acquisition or recovery | `actual_read_handlers_preserve_every_fixture_byte_and_directory` in `web/sweep-readiness/main-inspector-tests.rs` |
+| A route-shaped frontend asset cannot grant a backend read, and empty directories also count toward traversal bounds | `asset_inventory_cannot_open_extra_backend_routes_and_bounds_empty_directories` in `web/sweep-readiness/main-inspector-tests.rs` |
+| Missing exact-setting links are explicitly refused even inside a final short page | `an exact result in the final short page must exist before it is shown as opened` in `web/tests/saved-backtest.test.js` |
+| Both original and later execution refusals remain visible ahead of secondary measured failures | `web/tests/saved-backtest-explanations.test.js`: period-refusal and missing-period cases |
+
+## Inspection navigation, frozen labels and final read ownership — D-0565 to D-0567
+
+| Invariant | Executable proof |
+|---|---|
+| Cross-port user navigation admits only already permitted HTML documents; JSON, frames, background requests, origins, bodies and duplicate headers still refuse | native `user_document_navigation_crosses_ports_but_evidence_and_frames_do_not` and `navigation_does_not_admit_foreign_origins_duplicate_headers_or_bodies` in `web/saved-backtest/viewer.rs`; corresponding document tests in `web/sweep-readiness/main-inspector-tests.rs` |
+| Busy retries have at most three attempts, preserve Retry-After bounds and final failures, and cannot restart after cancellation | `web/tests/saved-backtest-requests.test.js` |
+| Trade and zero-inclusive session pages match the displayed setting's exact original/later identities, exits, totals and refusals | final seven join cases in `web/tests/saved-backtest-setting-pages.test.js` |
+| Failed comparison loading disables all row inspection; a third busy response cannot publish a selected trade | live browser fault-injection evidence under `target/sweep-audit-20260906/db-results-20260908/`; error responses alone were injected, never market bars or results |
+| Historical vocabulary has an explicit snapshot-byte pin and complete native-table validation; changed fields refuse even with a recomputed matching file pin | native `recorded_vocabulary_refuses_changed_pins_tables_versions_and_commits` in `web/saved-backtest/viewer.rs` |
+| Captured historical vocabulary and saved-grid bindings do not invent a current reader source commit | actual captured vocabulary integration in `vocabulary_comes_from_linked_rust_table_and_foreign_grid_refuses`; final `/viewer.json` evidence |
+| Changing only the imported saved-selection contract changes the main version; its absence refuses versioning | both actual-function cases in `web/tests/source-digest.test.js` |
+
+These are finite inspection and frontend proofs. They do not replace the
+outstanding complete crate coverage, module mutation, dependency-policy,
+production recovery and full-sweep activation requirements.
+
+## Durable invocation and integrated research inspection — 2026-09-08
+
+| Invariant | Executable proof |
+|---|---|
+| Outer invocation IDs survive reopen; a saved start is not process liveness | `cli::operation_audit::tests::exact_status_survives_reopen_and_never_equates_a_start_with_liveness` |
+| The reserved namespace base is never an invocation, before or after index creation; exact maximum IDs remain lossless | `cli::operation_audit::tests::durable_id_boundaries_are_exact_before_and_after_index_creation` |
+| The oldest saved invocation ends newest-first pagination with no invented continuation | `api::operation_audit::tests::oldest_invocation_ends_the_exact_newest_first_cursor` |
+| Duplicate terminals, busy writers, torn files and failed sync/partial writes cannot acknowledge success | `cli::operation_audit::tests::{a_second_terminal_or_later_progress_never_appends,busy_index_refuses_without_reserving_or_dispatching_an_invocation,torn_index_and_torn_invocation_are_preserved_and_refused,disk_full_partial_write_and_sync_failure_are_never_acknowledged}` |
+| Panic/drop have explicit terminal outcomes when storage permits; scoped progress never borrows another thread's identity | `cli::operation_audit::tests::{dropped_and_panicking_owners_record_distinct_terminal_facts,thread_context_is_scoped_and_counts_only_explicit_boundaries}` |
+| Production HTTP records its bounded public request separately, refuses before dispatch when admission fails, and leaves its audit reader read-only | `api::operation_audit::tests::{production_router_wires_durable_request_audit_and_its_read_only_reader,failed_audit_start_never_polls_the_handler,failed_terminal_says_that_the_handler_already_ran}` |
+| Missing activated recovery history cannot be recreated by boot or a same-scope start | `api::recovery::tests::missing_activated_plan_cannot_be_recreated_by_boot_or_same_scope_start` |
+| Recovery inspection creates no missing journal and preserves original history | `api::recovery::tests::missing_active_plan_is_503_and_visible_without_creating_or_mutating_history` |
+| Successor preparation is idempotent, separate from activation, preserves budgets and keeps predecessor disclosure beyond the recent event window | `api::recovery::tests::successor_preparation_is_idempotent_separate_from_activation_and_keeps_old_budgets` |
+| Busy/malformed/changed scope and incomplete seals refuse without silently replacing work | `api::recovery::tests::{concurrent_successor_preparation_or_start_refuses_without_claiming_or_clearing_stop,successor_identity_rejects_implicit_duplicate_malformed_or_changed_scope_fields,lost_budget_stale_pointer_and_incomplete_seal_never_become_prepared_work}` |
+| Observed removal/replacement cannot keep publishing journal appends through an unnamed or different inode | `api::recovery_journal::tests::deleted_or_replaced_filename_refuses_append_and_preserves_the_old_index` |
+| The integrated tester preserves exact selection, cancellation, bounded paging and recorded zero versus read failure | `web/tests/research-tester.test.js`; actual source/coordinate joins in `web/tests/saved-backtest-setting-pages.test.js` |
+| Audit display keeps exact upper-half IDs, newest-first cursors, explicit unknown endings and bounded failure reasons | `web/tests/invocation-audit.test.js` |
+| Retry preserves the failed page's exact source, period, kind and decimal offset, including offsets above JavaScript's integer precision | `retry after a page failure retains the exact nonzero offset, period, kind and source pins` in `web/tests/research-tester.test.js` |
+| Historical naming requires two explicit matching grids; a missing or sparse grid cannot pass by vacuous iteration | `missing, foreign or incomplete grid provenance suppresses names instead of relabelling history` in `web/tests/research-tester.test.js` |
+| A typed audit read refusal preserves its bounded reason without claiming an engine task or required write was attempted | `typed read failures preserve the storage reason without claiming a write was attempted` in `web/tests/invocation-audit.test.js` |
+| HTTP routing assertions read the status line, not digits embedded in diagnostic content or a temporary path | `api::ingest::route_tests::the_three_routes_answer_and_none_of_them_shadows_the_front_end`, using a deliberate `405` fixture path |
+
+These tests establish their named finite properties. Complete touched-crate
+line/branch coverage, mutation results, dependency-rule compliance and full
+production sweep admission remain separate required evidence.
+
+## Declared Boolean launch and observation — D-0572
+
+| Invariant | Executable proof |
+|---|---|
+| The launch preserves all selected families, both periods, all eight native timeframes and exact work allowances | `api::booleanlaunch::tests::declared_search_dispatch_preserves_all_families_periods_and_exact_work_allowances` |
+| Malformed, extra, duplicate, null, path-bearing or noncanonical declarations never become work | `api::booleanlaunch::tests::{launch_refuses_absence_null_duplicates_unknown_paths_and_noncanonical_or_unsafe_numbers,launch_scope_never_turns_references_derivatives_alias_duplicates_or_wrong_spans_into_work}` |
+| Search identity, acknowledged counts and exhaustion cannot regress or turn a work allowance into complete grammar exhaustion | `api::booleanlaunch::tests::exact_status_separates_durable_identity_paused_work_and_exhaustion`; `web/tests/boolean-launch.test.js` |
+| A busy shared worker slot refuses without reserving another invocation | `api::booleanlaunch::tests::repeated_launch_cannot_bypass_the_shared_active_worker_gate` |
+| Configuration reads use the production route and audit only their HTTP outcome without starting a search | `api::booleanlaunch::tests::production_metadata_route_audits_only_its_http_outcome_without_launching_work` |
+| Changed displayed policy refuses before acceptance; an accepted empty private store ends with a durable refusal instead of invented results | `api::booleanlaunch::tests::explicit_configuration_accepts_the_declared_launch_and_preserves_refused_terminal_status` |
+| Missing, filtered or dropped terminal telemetry refuses success while preserving the original computation evidence | `api::booleanlaunch::tests::boolean_terminal_audit_failure_refuses_success_without_erasing_saved_evidence` |
+| A published search callback can read its acknowledged reservation, and final exhaustion/counts come from the saved journal | `cli::boolean_search_command::integration_tests::generated_search_recovers_same_ordinal_and_refuses_missing_ancestry` |
+| Browser admission preserves native signed/boolean policy values, exact IDs and single-submission behavior; framework proxies cannot silently replace validated identities | `web/tests/boolean-launch.test.js` |
+| Actual page startup and polling route Boolean jobs before ordinary outcome handling, ignore stale replies and refresh a resumed same-ID search | `web/tests/boolean-launch-page.test.js` |
+| The shipped frontend accepts the native configuration serializer's signed paisa, boolean requirements and maximum u64 values without coercion | `web/sweep-readiness/check-native-launch.mjs`, against the retained native test's actual metadata output |
+
+These are finite contract tests. A generated failure fixture is not a historical
+market outcome, and a successful command is not full research or release
+clearance. The dated comparison records which source revision actually ran the
+tests, coverage and mutation checks.
+
+## Backtest read recovery — D-0573
+
+| Invariant | Executable proof |
+|---|---|
+| A temporary ledger overload retries the same bounded GET visibly; a successful retry still passes the ordinary envelope validator | `the actual ledger loader recovers from server backpressure with a visible, exact GET retry` in `web/tests/backtest-ledger-retry.test.js` |
+| Persistent overload stops after the retry bound; a generic evidence refusal is validated once and malformed success supplies no results | `persistent busy replies stop; generic 503 evidence is validated once and malformed success is refused` in `web/tests/backtest-ledger-retry.test.js` |
+| Replacing or disposing a ledger request aborts its wait and revokes late publication | `replacing a ledger read aborts its pending wait and an old completion cannot replace the new result`; `component cancellation aborts the waiting read and revokes any late reply` in `web/tests/backtest-ledger-retry.test.js` |
+| A current validated status clears an obsolete startup warning; malformed and stale responses cannot establish recovery | `a recovered valid status clears the old startup warning; malformed or stale status cannot clear it` in `web/tests/boolean-launch-page.test.js` |
+| HTTP success with an absent or invalid job field remains unknown and continues observation; only explicit null establishes no job | `the real status seam requires explicit no-job evidence and keeps malformed HTTP successes unknown` in `web/tests/boolean-launch-page.test.js` |
+
+## Census transfer, page ownership and current sweep admission — D-0574 / D-0575
+
+| Invariant | Executable proof |
+|---|---|
+| Warm census responses share bytes and validators; simultaneous cold encoding occurs once for an exact snapshot | `server::store_wire::tests::unchanged_sources_share_bytes_and_never_rebuild_or_rehash`; `concurrent_cold_requests_encode_once` |
+| Failed or poisoned encoding is an explicit refusal; vendor and format identities remain separate | `server::store_wire::tests::failed_encoding_is_not_cached_as_an_empty_success`; `poisoned_cache_refuses_instead_of_serving_stale_bytes`; `vendor_and_format_do_not_share_validators_or_bodies` |
+| Compact transfer preserves every original field and unknown reason | `server::universe_route_tests::compact_census_preserves_every_expanded_row_and_unknown_reason`; `web/tests/store-census-wire.test.js` |
+| HEAD does not populate the wire cache or invent a zero representation length; exact conditional GET returns 304; corrupt census and invalid input do not become successful or retryable input | `server::tests::routed_census_head_omits_representation_length_without_encoding`; `server::universe_route_tests::census_head_does_not_encode_and_matching_get_reuses_bytes`; `compact_census_refusals_never_turn_into_not_modified_or_retryable_input` |
+| Simultaneous cold census reads reuse the already-published snapshot for identical manifest stamps | `server::universe_route_tests::concurrent_cold_census_readers_publish_one_shared_snapshot` |
+| Only validated 304 evidence reuses immutable prepared rows, and visible time pages use addressed native reads | `web/tests/store-census.test.js`; `database-preparation.test.js`; `database-pages.test.js`; `store-startup.test.js` |
+| Feed surveys avoid full inventories; cancelled page or catalogue work cannot publish into newer selections | `web/tests/feed-summary.test.js`; `catalogue-loader.test.js`; `page-lifecycle.test.js`; `pooled.test.js` |
+| Native application capabilities identify runtime availability without certifying release readiness | `server::universe_route_tests::actual_application_capability_is_explicit_and_not_release_clearance`; `web/tests/runtime-inspection.test.js` |
+| A cooperating active sweep owns one validated store lease; ordinary dispatch cannot lock one store and compute into another | `cli::execution_lease::tests`; `api::sweeprun::admission_tests::ordinary_dispatch_cannot_claim_one_store_and_compute_into_another` |
+| Historical outcome uncertainty is retained separately from current admission, and adopted-job completion refreshes admission without another POST | `web/tests/sweep-admission.test.js`; `boolean-launch-page.test.js`; `api::sweeprun::admission_tests` |
+
+## Native day targets and honest request deadlines — D-0576
+
+| Invariant | Executable proof |
+|---|---|
+| Native civil-day targets draw inclusive monthly coverage without mutating the reported endpoints | `web/tests/autopilot-target.test.js` |
+| Leap days, malformed inputs, reversed days within one month and the 600-month limit retain exact refusal behavior | `web/tests/autopilot-target.test.js` |
+| A request deadline reports the observed absence of a timely answer and does not invent a locked store or accepted connection | `web/tests/ask.test.js` |
+
+The dated page comparison records actual narrow-screen navigation inspection;
+that finite browser check is not a claim of universal layout or latency coverage.
+
+## Target-scoped Autopilot coverage — D-0577
+
+| Invariant | Executable proof |
+|---|---|
+| Coverage selects the exact feed, timeframe and date window before counting distinct instrument-months | `actual coverage filters the declared feed, timeframe and window before counting distinct records` in `web/tests/autopilot-coverage.test.js` |
+| Empty months remain visible even when unrelated aggregate records exceed the reported count; an instrument count cannot establish membership | `the live-shaped 141-month span keeps all 59 empty months even when global counts exceed a reported denominator`; `an excess of different stored instruments in one month cannot fill an empty month or prove target membership` in `web/tests/autopilot-coverage.test.js` |
+| Identical records count once and conflicting duplicates withhold measured totals | `identical census records are counted once and conflicting duplicates withhold the actual headline totals` in `web/tests/autopilot-coverage.test.js` |
+| Partial-month presence and bar counts remain separate from unknown overlap | `partial months exclude outside bars and distinguish confirmed presence from unknown overlap` in `web/tests/autopilot-coverage.test.js` |
+| Missing scope, failed reads, contradictory timestamps and unsafe counts cannot publish measured coverage | `missing scope, malformed ranges, failed reads and unsafe counts cannot publish a measured target total` in `web/tests/autopilot-coverage.test.js` |
+
+## Selected qualified-search timeframes — D-0578
+
+| Invariant | Executable proof |
+|---|---|
+| Every nonempty supported subset retains its canonical physical slots and never widens to all eight | `cli::boolean_search_command::tests::selected_launch_validation_accepts_every_canonical_subset_and_rejects_invalid_scope_before_io`; `api::booleanlaunch::tests::every_nonempty_canonical_timeframe_subset_is_preserved_without_widening` |
+| Excluded signal resolutions are not read and repeated execution resumes the exact selection | `generated_selected_search_reads_no_unselected_signal_rungs_and_resumes_exact_scope` in `crates/cli/src/boolean_search_integration_tests.rs` |
+| Subset identity, historical all-eight bytes and omitted-result refusal remain distinct | `scoped_search_records_bind_selection_keep_legacy_bytes_and_refuse_omitted_results` in `crates/cli/src/boolean_search_record_tests.rs` |
+| Nonadjacent saved slots resume without completing excluded units; summary rows preserve their original indices | `selected_nonadjacent_slots_resume_without_starting_or_completing_excluded_units` in `crates/cli/src/boolean_qualified_journal_tests.rs`; `api::booleansearchjson::tests::every_selected_summary_keeps_its_original_physical_rung_and_count` |
+| Browser launch, saved research and strategy testing retain native selected scope | `web/tests/boolean-launch.test.js`; `web/tests/boolean-qualified-search.test.js`; `web/tests/qualified-campaign.test.js`; `web/tests/research-tester.test.js` |
+
+## Boolean population bounds — D-0580
+
+| Invariant | Executable proof |
+|---|---|
+| The exact conjunction lower bound cannot overflow or saturate into a small population | `cli::boolean_search_launch::sizing::tests::count_matches_integer_subsets_and_retains_large_exact_decimals` |
+| The reported alphabet is the production evaluator's alphabet and its complete conjunction fits the existing expression representation | `cli::boolean_search_launch::sizing::tests::live_model_counts_the_runtime_alphabet_without_claiming_a_total_or_eta` |
+| Sizing metadata cannot present a lower bound as a measured total or an elapsed-time forecast | `api::booleanlaunch::work::tests::sizing_is_a_lower_bound_and_never_a_measured_population_or_eta` |
+
+## Index daily/weekly consistency — D-0579
+
+| Invariant | Executable proof in `crates/cli/src/index_consistency_tests.rs` |
+|---|---|
+| All 1,024 five-session combinations of winning, losing, flat and no-trade days obey the declared daily ratio, weekly tests and streak limit | `every_five_day_win_loss_flat_no_trade_sequence_obeys_the_declared_policy` |
+| Every nonempty pattern of absent expected sessions is missing evidence, not an invented zero day | `every_missing_position_refuses_instead_of_manufacturing_a_zero_day` |
+| A three-loss streak across two otherwise passing weeks fails; flat/no-trade sessions cannot clear it | `losses_cross_week_boundaries_even_when_both_individual_weeks_pass`; `flat_and_no_trade_days_preserve_a_loss_streak_and_only_a_win_resets_it` |
+| Calendar closures, exclusions and genuine weekend sessions keep their separate meanings | `long_loss_runs_are_counted_exactly_across_holidays_and_year_boundaries`; `existing_excluded_sessions_and_real_weekend_sessions_remain_distinct` |
+| Short/partial weeks do not supply vacuous weekly approval, and unknown calendar facts stay unmeasured | `short_and_partial_weeks_never_pass_the_weekly_test_vacuously`; `missing_calendar_authority_stays_unmeasured_even_when_rows_are_offered` |
+| Malformed order, counts, P&L, spans and overflow refuse before presenting partial work as complete | `malformed_order_counts_returns_spans_and_unexpected_sessions_refuse`; `count_and_both_paisa_overflow_directions_refuse_before_partial_day_updates` |
+| Only the two canonical index families receive the policy; retaining details cannot alter its result identity | `policy_is_index_only_and_week_retention_does_not_change_identity` |
+| Truncation, changed policy fields and forged passing-week claims cannot reopen as valid evidence | `exact_versioned_codecs_refuse_truncation_changed_rules_and_forged_week_claims` |
+
+## Native signal-candle stop and complete ancestry — D-0581/D-0582
+
+These name executable regression cases. Their existence is not a claim that
+every release gate or all possible faults have been verified.
+
+| Invariant | Executable proof |
+|---|---|
+| All eight signal resolutions preserve the original candle low/high and immediate next-minute entry | `runner::signal_candle_stop::tests::all_eight_rungs_keep_original_signal_low_high_and_exact_next_minute_entry` |
+| Both sides permit 15:09 entry; a triggered stop takes precedence over that minute's forced close | `entry_at_1509_can_stop_or_close_in_its_own_minute_on_both_sides` |
+| A gap at/beyond the stop never creates a free entry; subsequent stop gaps retain both conservative and optimistic readings | `exact_open_at_or_beyond_stop_skips_the_entry_without_a_free_gap_trade`; `shared_stop_fill_uses_open_gap_before_retrace_and_printed_extreme_for_both_sides` |
+| Missing, refused or duplicated entry/path/closing bars cannot supply a nearby fabricated execution | `missing_or_refused_path_before_a_stop_preserves_occupancy_and_never_prices_later_touch`; `missing_duplicate_or_corrupt_closing_record_is_not_a_nearby_close`; `missing_immediate_entry_never_moves_to_a_later_open_and_duplicate_entry_blocks_day` |
+| There is at most one open position per setting; later windows retain their original causal prefix | `one_position_allows_sequential_reentry_but_never_the_same_exit_minute`; `fixed_later_window_preserves_causal_column_and_rekeys_without_counting_earlier_days` |
+| Unavailable index VWAP remains unknown under OR/NOT, with no invented trade | `cli::index_stop::tests::index_spot_vwap_unknown_is_not_made_true_by_or_not` |
+| Candidate observations include complete long/short pairs and reconcile every event/trade/day even after malicious resealing | all six tests in `crates/cli/src/index_stop_store_tests.rs` |
+| Original, later and full-span consistency are mandatory; numerical claims must reproduce from exact native parents | `crates/cli/src/index_stop_qualification_tests.rs` |
+| A saved receipt cannot enlarge the current cold reader's numerical work or estimated memory admission | `saved_limits_cannot_enlarge_current_cold_replay_work_or_memory_admission` in `crates/cli/src/index_stop_qualification_tests.rs` |
+| Tighter sufficient current replay limits preserve the original procedure bounds, complete statistics, rows and completion pin after independent resource admission | `tighter_sufficient_replay_limits_preserve_original_statistics_and_completion` in `crates/cli/src/index_stop_qualification_tests.rs` |
+| Checkpoint recovery compares the exact source pair, measurement windows, effective policy, resampling procedure, allocation and answer-changing limits before numerical replay | `checkpoint_expected_facts_reject_recomputed_foreign_children_before_replay`; `checkpoint_expected_sources_and_windows_reject_valid_foreign_ancestry_before_replay` in `crates/cli/src/index_stop_qualification_tests.rs` |
+| Recovering an acknowledged checkpoint cannot borrow a larger replay allowance from its saved producer configuration | `checkpoint_replay_caps_cannot_be_enlarged_by_declared_producer_bounds`; `complete_native_search_reopens_all_ancestors_and_resumes_without_duplicating_the_batch` |
+| Reader admission cannot be exceeded by an acknowledged checkpoint; exact retry retains the original cursor and selected slots | all six tests in `crates/cli/src/index_stop_search_checkpoint_tests.rs` |
+| Generated complete stored history reaches native execution, daily/statistical evidence, durable qualification and exact batch resume | `complete_native_search_reopens_all_ancestors_and_resumes_without_duplicating_the_batch` in `crates/cli/src/index_stop_search_tests.rs` |
+| Missing source or observer failure cannot create completed research | `source_and_observer_refusals_never_create_a_completed_search` |
+| Both indices and all 255 nonempty timeframe subsets have exact launch scope, with no grid fields accepted | `api::indexstoplaunch::tests::every_selected_subset_and_both_indices_preserve_exact_native_scope`; `missing_ambiguous_and_grid_fields_never_become_single_stop_execution` |
+
+Generated fixtures exercise mechanics only. They do not establish a real-market
+winning strategy, complete historical source coverage or production readiness.
+
+## Backtest single-stop controls and comparison — D-0583
+
+| Invariant | Executable proof |
+|---|---|
+| One explicit Run sweep action submits one exact request; refresh, restore, hidden-page handling and uncertain responses do not resubmit | `web/tests/index-stop-launch.test.js` |
+| The page preserves all 255 nonempty timeframe subsets and refuses malformed or mixed index scope | `web/tests/index-stop-launch.test.js` |
+| One saved timeframe comparison opens automatically from exact acknowledged pins; switching timeframes opens no execution request | `web/tests/index-stop-launch.test.js` |
+| The displayed prior context month crosses year boundaries while the selected training period remains unchanged; the date is not source-availability certification | `the required earlier context month crosses years without changing the selected training span or certifying source availability` in `web/tests/index-stop-launch.test.js` |
+| The inherited reward/loss caption reads the exact effective policy, preserves overrides and unknown values, and cannot change a plan or submit a sweep | `the inherited reward/risk caption uses the exact effective threshold including overrides and u64 precision`; `an unresolved or malformed effective ratio stays unavailable instead of assuming zero or three`; `the visible caption follows resolved policy changes without mutating a plan or submitting a request` in `web/tests/index-stop-launch.test.js` |
+| Native results retain exact index-point arithmetic, both fill readings and bounded pinned trade pages | `web/tests/index-stop-results.test.js` |
+| A comparison keeps institutional, day/week and combined verdicts distinct and refuses malformed evidence or changed pins | `web/tests/index-stop-qualification.test.js` |
+
+## Original source inspection and cumulative comparison — D-0585/D-0586
+
+These references identify tests, not a claim that the release has passed its
+coverage, mutation, real-source or browser gates.
+
+| Invariant | Executable proof |
+|---|---|
+| Original trades and names are readable without writes; changing a selected setting reuses authenticated source state | `original_context_reads_exact_archived_trades_and_zero_trade_names_without_writes` in `crates/cli/src/index_stop_source_context_tests.rs` |
+| Source plus the actual complete catalog must fit before publication; runtime bounds never fall back after invalid input | `original_context_costs_cover_actual_catalog_and_refuse_before_publication`; `original_context_budget_resolver_is_exact_and_context_binding_rejects_foreign_pins` |
+| One guarded source projection holds all three distinct publication locks; success, callback failure, partial acquisition failure and attempted nested access cannot release a still-needed lock | `original_context_projection_holds_all_three_owners_until_success_and_error_callbacks_finish`; `original_context_busy_owner_prevents_projection_and_releases_earlier_leases`; `original_context_nested_reader_access_cannot_unlock_a_guarded_view` |
+| Current monthly files and current vocabulary names cannot replace saved source evidence | `original_context_is_independent_of_changed_current_market_files`; `original_context_names_are_pinned_not_substituted_by_current_vocabulary` |
+| Legacy absence, foreign resealed source/build, torn bytes, malformed lengths and page overflow refuse without a substitute or prefix | `original_context_legacy_missing_refuses_without_changing_existing_catalog`; `original_context_foreign_relation_and_changed_build_are_rejected_after_valid_sealing`; `original_context_partial_torn_and_changed_archives_never_supply_candles`; `original_context_independent_bounds_and_exact_window_extents_refuse_without_prefixes`; `original_context_codec_rejects_tails_lengths_versions_and_foreign_loader_before_publication` |
+| Separate signal/execution roles and later measurement retain the original causal input prefix | `original_context_separate_execution_and_later_measurement_keep_original_causal_prefix` |
+| V1 and V2 declarations retain exact scope and policy; malformed or nested envelopes refuse | `declaration_versions_keep_exact_scope_sources_and_preallocation_policy`; `truncation_trailing_unknown_policy_unpinned_context_and_nested_envelopes_refuse` in `crates/cli/src/index_stop_search_reader_tests.rs` |
+| Old pinned prefixes survive newer pending work; acknowledged orphan checkpoints cannot silently disappear | `pinned_prefix_survives_new_pending_checkpoint_without_relabelling_or_future_reads`; `orphan_acknowledged_checkpoint_is_not_silently_removed_from_cumulative_scope` |
+| Two complete families use exact shared numerical work; one-unit-short and overflow bounds refuse the complete aggregate | `two_complete_generated_families_are_parent_bound_before_cumulative_admission`; `cumulative_charge_refuses_overflow_and_never_returns_a_prefix` |
+| One cumulative projection protects every contributing artifact, including families outside the displayed page; conflicting aliases, partial lock acquisition and nested access cannot release an outer lease | `compound_scope_deduplicates_aliases_without_unlocking_other_namespaces`; `compound_scope_refuses_conflicting_aliases_and_rolls_back_partial_acquisition`; `compound_projection_rejects_same_descriptor_reentry_without_releasing_outer_lock`; `compound_scope_revalidates_after_callback_and_releases_every_owner` in `crates/cli/src/boolean_observation_file_tests.rs`; `two_complete_generated_families_are_parent_bound_before_cumulative_admission` |
+| Source and cumulative API requests require exact scope and bounded pins before file reads; ranking precedes filtering and pagination | `api::indexstopcandlesjson::tests`; `api::indexstoprankingjson::tests` |
+| Source metadata, trade coordinates, original condition tokens and candle prices must match; aborted reads cannot publish stale charts or launch work | `web/tests/index-stop-source.test.js`; `web/tests/index-stop-chart.test.js` |
+| Cumulative refresh failures preserve the old scope and exact details beyond the first page target the saved canonical setting | `web/tests/index-stop-ranking.test.js`; `web/tests/index-stop-qualification.test.js` |
+
+## Original single-stop VIX annotations — D-0587
+
+These test references do not certify real-market data or replace the native
+coverage and mutation gates.
+
+| Invariant | Executable proof |
+|---|---|
+| Original VIX candles retain all seven fields, both directions and the true forced-close interval | `index_stop_vix_exact_original_fields_both_directions_and_forced_interval_are_visible` in `crates/cli/src/index_stop_vix_tests.rs` |
+| A hole in a validated month differs from an unavailable, corrupt or locked original month | `index_stop_vix_valid_month_holes_and_unavailable_months_are_never_conflated`; `index_stop_vix_corrupt_and_locked_reference_months_publish_explicit_unavailability` |
+| Retry and cold inspection preserve the first saved snapshot; different VIX data changes only the independent reference publication | `index_stop_vix_retries_and_cold_reopen_retain_snapshot_after_current_data_changes`; `index_stop_vix_reference_changes_only_its_independent_publication` |
+| Zero-trade extents, malformed pages and insufficient complete capture/read budgets cannot produce partial annotations or inspection writes | `index_stop_vix_bounds_pages_and_zero_trade_extents_refuse_without_inspection_writes`; `index_stop_vix_full_capture_budget_refuses_before_any_companion_publication` |
+| Missing, torn, corrupt, foreign resealed or hidden-unavailable companions do not borrow current VIX or complete a refused native publication | `index_stop_vix_missing_torn_or_corrupt_companion_never_backfills_on_read`; `index_stop_vix_resealed_foreign_trade_and_hidden_unavailable_state_are_rejected`; `index_stop_vix_corrupt_publication_prevents_completed_native_attempt_without_rewriting_catalog` |
+| One VIX page retains both publication owners throughout the projection and releases them on callback error | `index_stop_vix_compound_projection_excludes_each_writer_and_releases_on_error` |
+| Repeated references to one original minute agree on the complete stamp, within a trade and across settings; cold-validation scratch is admitted first | `index_stop_vix_resealed_repeated_minutes_cannot_disagree_across_settings_or_within_a_trade`; `index_stop_vix_repeated_minute_scratch_is_admitted_before_cold_validation` |
+| The exact saved reference publication remains required through the outer native catalog completion | `single_stop_retained_vix_publication_is_required_through_outer_terminal` in `crates/cli/src/index_stop_tests.rs` |
+| API requests preserve exact catalog/trade pins and distinguish absence, unavailability and numeric zero; invalid pages preserve current cache admission while changed owners evict it | `api::indexstopvixjson::tests` |
+| The browser validates original trade/month/stamp agreement, both directions and exit intervals; cancelled or stale replies cannot replace another trade or start work | `web/tests/index-stop-vix.test.js` |
+
+## Single-stop CSCV payload admission — D-0589
+
+| Invariant | Executable proof |
+|---|---|
+| A 16-period, zero-trade family still charges all 6,435 canonical masks, saved and reproduced native split payloads and both candidate score vectors before numerical replay | `sixteen_training_periods_refuse_unadmitted_cscv_payload_before_replay` in `crates/cli/src/index_stop_qualification_tests.rs` |
+| The exact checked payload estimate admits production and current replay; one byte less refuses, while sufficient current limits leave the saved identity, completion, original bounds, statistics and rows unchanged | `complete_cscv_payload_exact_and_minus_one_admission_preserves_saved_evidence` |
+| A resealed saved split extent or layout cannot exceed or replace the independently derived training geometry before replay; genuine no-layout evidence retains its absent state | `resealed_cscv_layout_and_extent_are_rejected_before_numeric_replay` |
+
+These are payload-admission tests, not a process-RSS measurement. Allocator
+metadata, over-allocation, thread stacks and unrelated process allocations are
+outside this estimate. Stored observation-body byte admission remains separate.
+
+## Native policy schema and launch ownership — D-0590
+
+| Invariant | Executable proof |
+|---|---|
+| Browser validation requires the exact native V1 names and wire types, derived without copying threshold values; unsupported native types or mismatched field tables stop frontend generation | `the shipped browser schema exactly matches all native policy names and wire types without threshold defaults`; `unsupported native types, duplicate names and a changed or missing V1 field cannot generate a permissive browser schema` in `web/tests/native-policy-schema.test.js` |
+| Missing, unknown, duplicate or wrongly typed policy fields cannot create a ready index launch plan or dispatch a request; valid complete effective overrides remain visible | `each missing, replaced, duplicate or wrongly typed policy field blocks index launch before request dispatch`; `the inherited reward/risk caption uses the exact effective threshold including overrides and u64 precision` in `web/tests/index-stop-launch.test.js`; the complete policy cases in `web/tests/boolean-launch.test.js` |
+| A stale A-to-B-to-A configuration response cannot restore readiness for a newer request or outdated form values | `actual configuration A to B to A reads cannot restore stale readiness, and current form choices rebuild or refuse the exact plan` in `web/tests/index-stop-launch.test.js` |
+| Repeated clicks while acknowledgement is pending cannot submit a second plan | `rapid repeated clicks cannot submit a second plan while the first acknowledgement is still pending` in `web/tests/index-stop-launch.test.js` |
+
+Configuration validation does not attest historical OHLCV. The preview labels
+that boundary explicitly; native source admission and the operator's launch
+hold remain separate requirements.

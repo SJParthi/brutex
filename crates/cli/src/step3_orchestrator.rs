@@ -34,7 +34,7 @@ use runner::exit_grid_policy::{
     ExecutionSeriesV1, ExitGridPolicyV1, InstrumentFamilyV1 as ExitInstrumentFamilyV1,
     ResolvedExitGridV1,
 };
-use runner::identity::{DailyReferenceBinding, ReferenceIntegrity};
+use runner::identity::DailyReferenceBinding;
 use runner::outcome::Horizon;
 use runner::validate::{AnchoredSearchAuthorityProjectionV4, AnchoredSearchValidationV4};
 
@@ -92,14 +92,8 @@ use crate::population_admission_v4::{
 use crate::population_finalization_v4::{
     PopulationFinalizationV4Bounds, commit_population_finalization_v4,
 };
-use crate::population_observations_v1::{
-    ObservationAuthorityBoundsV2, produce_natural_extinction_observation_v2,
-};
-use crate::population_statistics_v3::{
-    PopulationStatisticsV3Bounds, ProducedPopulationStatisticsV3,
-    produce_all_extinct_population_statistics_v3, produce_evaluated_population_statistics_v3,
-    produce_mixed_population_statistics_v3,
-};
+use crate::population_observations_v1::ObservationAuthorityBoundsV2;
+use crate::population_statistics_v3::PopulationStatisticsV3Bounds;
 use crate::population_v6::{
     PopulationV6Bounds, bind_population_v6_all_extinct_source_v1,
     bind_population_v6_banknifty_evaluated_source_v1, bind_population_v6_nifty_evaluated_source_v1,
@@ -227,6 +221,7 @@ pub(crate) struct CommittedCandidatePreAdmissionV1 {
     base_evidence_audit: BaseEvidenceReopenAuditV2,
     base_evidence_bounds: BaseEvidenceLedgerBoundsV2,
     pre_admission_audit: PreAdmissionDataReopenAuditV1,
+    pre_admission_bounds: PreAdmissionDataBoundsV1,
     /// The SAME candidate measured into the V2 Pre-Admission record, retained
     /// beside the V1 one rather than instead of it.
     ///
@@ -373,6 +368,7 @@ pub(crate) struct AdmittedRootV1 {
     canonical: PathBuf,
     directory: File,
     generation: [u64; 2],
+    strict: Option<Arc<strict::Inputs>>,
 }
 
 impl AdmittedRootV1 {
@@ -416,6 +412,7 @@ impl AdmittedRootV1 {
             canonical,
             directory,
             generation,
+            strict: None,
         })
     }
 
@@ -424,6 +421,11 @@ impl AdmittedRootV1 {
     }
 
     pub(crate) fn require_same(&self, stage: &str) -> Result<(), Step3OrchestratorRefusal> {
+        if let Some(inputs) = &self.strict {
+            inputs
+                .require_current()
+                .map_err(|why| format!("Step 3 strict sources refused at {stage}: {why}"))?;
+        }
         let held = self
             .directory
             .metadata()
@@ -491,7 +493,15 @@ pub(crate) struct BoundedStoredContextV1 {
     pub(crate) signal: Span,
     pub(crate) daily: DailyContext,
     pub(crate) minute: ExactMinuteContext,
+    pub(crate) strict: Option<Arc<strict::Inputs>>,
 }
+
+#[path = "stored_family_v6.rs"]
+pub(crate) mod family_v6;
+#[path = "strict_v6_inputs.rs"]
+pub(crate) mod strict;
+#[path = "v6_statistics_adapter.rs"]
+mod v6_statistics_adapter;
 
 struct ResolvedExecutionContextV1<'a> {
     series: ExecutionSeriesV1<'a>,
@@ -538,11 +548,10 @@ pub(crate) struct StoredSearchMemberV4 {
 }
 
 impl StoredSearchMemberV4 {
-    fn bind(
-        committed: &CommittedCandidatePreAdmissionV1,
+    fn bind_candidate(
+        audit: &CandidateUniverseReopenAuditV1,
         validation: AnchoredSearchValidationV4,
-    ) -> Result<Self, Step3OrchestratorRefusal> {
-        let audit = committed.candidate_audit();
+    ) -> Result<Self, String> {
         let receipt = audit.receipt();
         let authority = validation
             .search_authority_projection()
@@ -648,6 +657,10 @@ pub(crate) struct CommittedStoredCandidatePreAdmissionV1 {
 }
 
 impl CommittedStoredCandidatePreAdmissionV1 {
+    pub(crate) fn strict_inputs(&self) -> Option<Arc<strict::Inputs>> {
+        self.execution.stored.strict.clone()
+    }
+
     #[must_use]
     pub(crate) const fn candidate_pre_admission(&self) -> &CommittedCandidatePreAdmissionV1 {
         &self.committed
@@ -678,6 +691,7 @@ impl CommittedStoredCandidatePreAdmissionV1 {
                     .to_owned(),
             );
         }
+        family_v6::require_evaluated_support(self)?;
         self.root
             .require_same("after Candidate successor read-only reopen")?;
         Ok(ledger)
@@ -2200,30 +2214,31 @@ pub(crate) struct StoredPopulationV6SummaryV1 {
 }
 
 pub(crate) fn commit_stored_population_v6_route(
-    nifty_source: CommittedStoredCandidatePreAdmissionV1,
-    banknifty_source: CommittedStoredCandidatePreAdmissionV1,
+    nifty_source: impl Into<family_v6::StoredFamilyV6>,
+    banknifty_source: impl Into<family_v6::StoredFamilyV6>,
     route: &StoredPopulationV6RouteV1<'_>,
 ) -> Result<(CommittedStoredExecutionV4, StoredPopulationV6SummaryV1), Step3OrchestratorRefusal> {
+    let nifty_source = nifty_source.into();
+    let banknifty_source = banknifty_source.into();
+    let inputs = strict::Guards::from_sources([
+        nifty_source.strict_inputs(),
+        banknifty_source.strict_inputs(),
+    ]);
+    inputs.require_current()?;
     let (_base_evidence, mut base_reader) =
-        reopen_paired_base_evidence_v2(&nifty_source, &banknifty_source)?;
-    let nifty = nifty_source.candidate_pre_admission();
-    let banknifty = banknifty_source.candidate_pre_admission();
+        family_v6::reopen_pair(&nifty_source, &banknifty_source)?;
+    let nifty = nifty_source.candidate_audit();
+    let banknifty = banknifty_source.candidate_audit();
     require_canonical_observation_family_order_v2(
-        nifty.observations().family(),
-        banknifty.observations().family(),
+        nifty.receipt().family(),
+        banknifty.receipt().family(),
     )?;
 
     // EXTINCT MEANS THE LADDER EMPTIED, and the Candidate row count is where
     // that is recorded. It is read from the freshly reopened audit rather than
     // the in-process preparation, so the branch is decided by what is on disk.
-    let nifty_evaluated = nifty.candidate_audit().row_count() != 0;
-    let banknifty_evaluated = banknifty.candidate_audit().row_count() != 0;
-
-    let produced = produce_route_statistics_v3(
-        (nifty, nifty_evaluated),
-        (banknifty, banknifty_evaluated),
-        route,
-    )?;
+    let produced = v6_statistics_adapter::produce(&nifty_source, &banknifty_source, route)?;
+    inputs.require_current()?;
     let statistics_commit = produced
         .append_and_reopen(route.statistics_root, route.statistics_bounds)
         .map_err(|why| format!("Step 3 Statistics V3 receipt-last commit refused: {why}"))?;
@@ -2232,11 +2247,12 @@ pub(crate) fn commit_stored_population_v6_route(
         .map_err(|why| format!("Step 3 Statistics V3 admission source refused: {why}"))?;
 
     let search = StoredSearchPairV4 {
-        nifty: nifty_source.search.clone(),
-        banknifty: banknifty_source.search.clone(),
+        nifty: nifty_source.search().clone(),
+        banknifty: banknifty_source.search().clone(),
     };
     let nifty_projection = search.nifty().projection()?;
     let banknifty_projection = search.banknifty().projection()?;
+    inputs.require_current()?;
     let lineage = persist_anchored_search_lineage_v4(
         route.lineage_root,
         route.lineage_bounds,
@@ -2246,8 +2262,8 @@ pub(crate) fn commit_stored_population_v6_route(
     .map_err(|why| format!("Step 3 V6 Search V4 lineage commit refused: {why}"))?
     .authority();
 
-    let nifty_audit = nifty.candidate_audit();
-    let banknifty_audit = banknifty.candidate_audit();
+    let nifty_audit = nifty;
+    let banknifty_audit = banknifty;
     let prepared = prepare_population_admission_v4(
         &statistics,
         &nifty_audit,
@@ -2263,6 +2279,7 @@ pub(crate) fn commit_stored_population_v6_route(
     // two ever differed, the report that quoted the input would be describing a
     // run that did not happen.
     let projection = statistics.authority_projection();
+    inputs.require_current()?;
     let admission =
         commit_population_admission_v4(route.admission_root, route.admission_bounds, prepared)
             .map_err(|why| format!("Step 3 Population Admission V4 commit refused: {why}"))?
@@ -2285,6 +2302,7 @@ pub(crate) fn commit_stored_population_v6_route(
         banknifty_universe: statistics.banknifty_family().candidate_universe_id(),
     };
 
+    inputs.require_current()?;
     let finalization = commit_population_finalization_v4(
         route.finalization_root,
         route.finalization_bounds,
@@ -2297,15 +2315,8 @@ pub(crate) fn commit_stored_population_v6_route(
     // carries which families it holds in its own type
     // (`PopulationV6CandidateAuthoritiesV1`), so the extinct arms bind fewer
     // authorities rather than binding empty ones.
-    let source = match (nifty_evaluated, banknifty_evaluated) {
-        (true, true) => bind_population_v6_source_v1(finalization, nifty_source, banknifty_source),
-        (true, false) => bind_population_v6_nifty_evaluated_source_v1(finalization, nifty_source),
-        (false, true) => {
-            bind_population_v6_banknifty_evaluated_source_v1(finalization, banknifty_source)
-        }
-        (false, false) => bind_population_v6_all_extinct_source_v1(finalization),
-    }
-    .map_err(|why| format!("Step 3 Population V6 bind refused: {why}"))?;
+    inputs.require_current()?;
+    let source = bind_stored_population_v6(finalization, nifty_source, banknifty_source, inputs)?;
 
     let population = commit_population_v6(route.population_root, route.population_bounds, source)
         .map_err(|why| format!("Step 3 Population V6 commit refused: {why}"))?
@@ -2315,82 +2326,6 @@ pub(crate) fn commit_stored_population_v6_route(
         commit_stored_execution_v4(route.execution_root, route.execution_bounds, population)
             .map_err(|why| format!("Step 3 Execution V4 commit refused: {why}"))?;
     Ok((execution, summary))
-}
-
-/// Picks the Statistics V3 producer this rung's pair of families calls for.
-///
-/// # Errors
-///
-/// Names the producer that refused, and the family whose V2 Pre-Admission could
-/// not prove natural extinction.
-fn produce_route_statistics_v3(
-    nifty: (&CommittedCandidatePreAdmissionV1, bool),
-    banknifty: (&CommittedCandidatePreAdmissionV1, bool),
-    route: &StoredPopulationV6RouteV1<'_>,
-) -> Result<ProducedPopulationStatisticsV3, Step3OrchestratorRefusal> {
-    let (nifty, nifty_evaluated) = nifty;
-    let (banknifty, banknifty_evaluated) = banknifty;
-    // COMMITTED, NOT JUST PRODUCED. The extinct arms take an
-    // `ObservationAuthorityCommitV2`, so an extinction authority is only a
-    // statistics source once it is a durable ledger record -- the same
-    // receipt-last discipline every other stage on this route follows.
-    let extinction = |family: &CommittedCandidatePreAdmissionV1, name: &str| {
-        let (produced, commit) = family.pre_admission_v2();
-        let authority =
-            produce_natural_extinction_observation_v2(produced, commit).map_err(|why| {
-                format!("Step 3 {name} natural-extinction observation refused: {why}")
-            })?;
-        let committed = authority
-            .append_and_reopen(route.observation_root, route.observation_bounds)
-            .map_err(|why| {
-                format!("Step 3 {name} Observation V2 receipt-last commit refused: {why}")
-            })?;
-        Ok::<_, Step3OrchestratorRefusal>((authority, committed))
-    };
-
-    match (nifty_evaluated, banknifty_evaluated) {
-        (true, true) => produce_evaluated_population_statistics_v3(
-            nifty.observations(),
-            nifty.pre_admission_audit(),
-            banknifty.observations(),
-            banknifty.pre_admission_audit(),
-            route.procedure,
-        )
-        .map_err(|why| format!("Step 3 Statistics V3 evaluated pair refused: {why}")),
-        (true, false) => {
-            let (extinct, commit) = extinction(banknifty, "BANKNIFTY")?;
-            produce_mixed_population_statistics_v3(
-                nifty.observations(),
-                nifty.pre_admission_audit(),
-                &extinct,
-                &commit,
-                route.procedure,
-            )
-            .map_err(|why| format!("Step 3 Statistics V3 mixed pair refused: {why}"))
-        }
-        (false, true) => {
-            let (extinct, commit) = extinction(nifty, "NIFTY")?;
-            produce_mixed_population_statistics_v3(
-                banknifty.observations(),
-                banknifty.pre_admission_audit(),
-                &extinct,
-                &commit,
-                route.procedure,
-            )
-            .map_err(|why| format!("Step 3 Statistics V3 mixed pair refused: {why}"))
-        }
-        (false, false) => {
-            let (nifty_extinct, nifty_commit) = extinction(nifty, "NIFTY")?;
-            let (banknifty_extinct, banknifty_commit) = extinction(banknifty, "BANKNIFTY")?;
-            produce_all_extinct_population_statistics_v3(
-                &nifty_extinct,
-                &nifty_commit,
-                &banknifty_extinct,
-                &banknifty_commit,
-            )
-            .map_err(|why| format!("Step 3 Statistics V3 all-extinct pair refused: {why}"))
-        }
-    }
 }
 
 pub(crate) fn commit_stored_observation_statistics_v2(
@@ -2713,6 +2648,7 @@ impl RetainedStoredExecutionContextV1 {
                 daily_bound: request.daily_bound(),
             },
             root,
+            self.stored.strict.as_ref().map(|inputs| inputs.config()),
         )?;
         if stored.signal.vendor != self.stored.signal.vendor
             || stored.signal.key != self.stored.signal.key
@@ -2731,7 +2667,8 @@ impl RetainedStoredExecutionContextV1 {
         // Hold a second capability for the cohort's lifetime. The original
         // retained source remains borrowed by this method and cannot be moved
         // into a later Selection/Replay successor.
-        let cohort_root = AdmittedRootV1::admit(root.path())?;
+        let mut cohort_root = AdmittedRootV1::admit(root.path())?;
+        cohort_root.strict.clone_from(&stored.strict);
         root.require_same("after stored OOS cohort root admission")?;
         cohort_root.require_same("before stored OOS cohort construction")?;
         StoredPostTrainingOosCohortV1::from_retained(
@@ -2760,6 +2697,7 @@ impl RetainedStoredExecutionContextV1 {
         &self,
         committed: &CommittedCandidatePreAdmissionV1,
     ) -> Result<StoredExecutionJoinFactsV1, Step3OrchestratorRefusal> {
+        self.stored.require_current()?;
         let execution = self
             .stored
             .minute
@@ -2800,8 +2738,8 @@ impl RetainedStoredExecutionContextV1 {
             eligibility_policy: DAILY_ELIGIBILITY_POLICY,
             gap_overlay_policy: EXACT_MINUTE_GAP_POLICY,
             excluded_ist_days: &CHARTER_NON_REGULAR_IST_DAYS,
-            daily_integrity: ReferenceIntegrity::UnverifiedNoReceipt,
-            minute_integrity: ReferenceIntegrity::UnverifiedNoReceipt,
+            daily_integrity: self.stored.integrity(),
+            minute_integrity: self.stored.integrity(),
             swept_series_calendar_policy: SWEPT_SERIES_CALENDAR_POLICY,
         };
         let authorities = StoredFactAuthoritiesV1 {
@@ -2870,8 +2808,8 @@ impl RetainedStoredExecutionContextV1 {
             eligibility_policy: DAILY_ELIGIBILITY_POLICY,
             gap_overlay_policy: EXACT_MINUTE_GAP_POLICY,
             excluded_ist_days: &CHARTER_NON_REGULAR_IST_DAYS,
-            daily_integrity: ReferenceIntegrity::UnverifiedNoReceipt,
-            minute_integrity: ReferenceIntegrity::UnverifiedNoReceipt,
+            daily_integrity: self.stored.integrity(),
+            minute_integrity: self.stored.integrity(),
             swept_series_calendar_policy: SWEPT_SERIES_CALENDAR_POLICY,
         };
         let signal_bound = StoredSpanLoadBoundV1::new(self.load_ceilings.signal)
@@ -3037,13 +2975,66 @@ pub(crate) fn commit_stored_candidate_pre_admission_authority_v1(
     commit_stored_with_verified_build_v1(request, verified_commit, &no_progress_observer)
 }
 
+/// Strict institutional door; ordinary callers retain the historical contract.
+pub(crate) fn commit_strict_candidate_pre_admission_authority_v1(
+    request: StoredCandidatePreAdmissionRequestV1<'_>,
+    config: &crate::audited_range_command::StrictConfig,
+) -> Result<family_v6::StoredFamilyV6, String> {
+    let commit = VerifiedBuildCommitV1::current()?;
+    commit_family_with_inputs_v6(request, commit, &|_, _, _| {}, Some(config), true)
+}
+
 fn commit_stored_with_verified_build_v1(
     request: StoredCandidatePreAdmissionRequestV1<'_>,
     verified_commit: VerifiedBuildCommitV1<'_>,
     on_level: &dyn Fn(&engine::Frontier, usize, u64),
 ) -> Result<CommittedStoredCandidatePreAdmissionV1, Step3OrchestratorRefusal> {
-    let root = AdmittedRootV1::admit(request.root)?;
-    let context = load_bounded_stored_context_v1(&request, &root)?;
+    commit_stored_with_inputs_v1(request, verified_commit, on_level, None)
+}
+
+fn commit_stored_with_inputs_v1(
+    request: StoredCandidatePreAdmissionRequestV1<'_>,
+    verified_commit: VerifiedBuildCommitV1<'_>,
+    on_level: &dyn Fn(&engine::Frontier, usize, u64),
+    config: Option<&crate::audited_range_command::StrictConfig>,
+) -> Result<CommittedStoredCandidatePreAdmissionV1, String> {
+    let family = commit_family_with_inputs_v6(request, verified_commit, on_level, config, false)?;
+    family
+        .into_parts()
+        .0
+        .ok_or_else(|| "ordinary Pre-Admission V1 cannot represent an extinct family".to_owned())
+}
+
+fn commit_family_with_inputs_v6(
+    request: StoredCandidatePreAdmissionRequestV1<'_>,
+    verified_commit: VerifiedBuildCommitV1<'_>,
+    on_level: &dyn Fn(&engine::Frontier, usize, u64),
+    config: Option<&crate::audited_range_command::StrictConfig>,
+    allow_extinct: bool,
+) -> Result<family_v6::StoredFamilyV6, String> {
+    let mut root = AdmittedRootV1::admit(request.root)?;
+    let context = load_bounded_stored_context_v1(&request, &root, config)?;
+    root.strict.clone_from(&context.strict);
+    let attempt = strict::begin(&context, &request, verified_commit.0)?;
+    let result = commit_loaded_stored_v1(
+        request,
+        verified_commit,
+        on_level,
+        root,
+        context,
+        allow_extinct,
+    );
+    strict::finish(attempt, result)
+}
+
+fn commit_loaded_stored_v1(
+    request: StoredCandidatePreAdmissionRequestV1<'_>,
+    verified_commit: VerifiedBuildCommitV1<'_>,
+    on_level: &dyn Fn(&engine::Frontier, usize, u64),
+    root: AdmittedRootV1,
+    context: BoundedStoredContextV1,
+    allow_extinct: bool,
+) -> Result<family_v6::StoredFamilyV6, String> {
     let resolved = resolve_stored_execution_v1(
         &context,
         verified_commit,
@@ -3057,8 +3048,8 @@ fn commit_stored_with_verified_build_v1(
         eligibility_policy: DAILY_ELIGIBILITY_POLICY,
         gap_overlay_policy: EXACT_MINUTE_GAP_POLICY,
         excluded_ist_days: &CHARTER_NON_REGULAR_IST_DAYS,
-        daily_integrity: ReferenceIntegrity::UnverifiedNoReceipt,
-        minute_integrity: ReferenceIntegrity::UnverifiedNoReceipt,
+        daily_integrity: context.integrity(),
+        minute_integrity: context.integrity(),
         swept_series_calendar_policy: SWEPT_SERIES_CALENDAR_POLICY,
     };
     let source = CandidateUniverseProductionSourceV1::new(
@@ -3089,7 +3080,7 @@ fn commit_stored_with_verified_build_v1(
         .anchored_search_v4(request.sweeper)
         .map_err(|why| format!("Step 3 retained stored Search V4 refused: {why}"))?;
 
-    let committed = commit_candidate_pre_admission_authority_guarded_v1(
+    let committed = commit_candidate_family_guarded_v6(
         root.path(),
         Some(&root),
         request.sweeper,
@@ -3097,8 +3088,10 @@ fn commit_stored_with_verified_build_v1(
         request.bounds.candidate,
         request.bounds.pre_admission,
         on_level,
+        allow_extinct,
     )?;
-    let search = StoredSearchMemberV4::bind(&committed, search_validation)?;
+    let search =
+        StoredSearchMemberV4::bind_candidate(&committed.candidate_audit(), search_validation)?;
     let execution_range = resolved.execution_range.clone();
     let family = resolved.family;
     let long = resolved.long.clone();
@@ -3124,32 +3117,13 @@ fn commit_stored_with_verified_build_v1(
         long,
         short,
     };
-    root.require_same("before final retained/reopened authority join")?;
-    let runtime_facts = execution.stored_facts(&committed)?;
-    let reopened_facts = reopened_execution_facts_v1(&committed)?;
-    require_exact_stored_execution_join(&runtime_facts, &reopened_facts)?;
-    require_reopened_pre_admission_context_v1(&committed, &runtime_facts)?;
-    let reopened_signal_bars = usize::try_from(reopened_facts.signal.count)
-        .map_err(|_| "Step 3 reopened signal count does not fit usize".to_owned())?;
-    if execution.search_splits != crate::walk_forward_splits(reopened_signal_bars)
-        || execution.search_splits < 2
-    {
-        return Err(
-            "Step 3 retained Search V4 split count differs from the canonical reopened signal policy"
-                .to_owned(),
-        );
-    }
-    Ok(CommittedStoredCandidatePreAdmissionV1 {
-        root,
-        committed,
-        search,
-        execution,
-    })
+    family_v6::finish(root, committed, search, execution)
 }
 
 fn load_bounded_stored_context_v1(
     request: &StoredCandidatePreAdmissionRequestV1<'_>,
     root: &AdmittedRootV1,
+    config: Option<&crate::audited_range_command::StrictConfig>,
 ) -> Result<BoundedStoredContextV1, Step3OrchestratorRefusal> {
     load_bounded_stored_context_from_spec_v1(
         StoredContextLoadSpecV1 {
@@ -3163,6 +3137,7 @@ fn load_bounded_stored_context_v1(
             daily_bound: request.bounds.daily_records,
         },
         root,
+        config,
     )
 }
 
@@ -3183,7 +3158,11 @@ struct StoredContextLoadSpecV1<'a> {
 fn load_bounded_stored_context_from_spec_v1(
     spec: StoredContextLoadSpecV1<'_>,
     root: &AdmittedRootV1,
+    config: Option<&crate::audited_range_command::StrictConfig>,
 ) -> Result<BoundedStoredContextV1, Step3OrchestratorRefusal> {
+    if let Some(config) = config {
+        return strict::load(spec, root, config);
+    }
     let requested_span =
         RequestedSpanIdentityV1::new(spec.from.0, spec.from.1, spec.to.0, spec.to.1)
             .map_err(|why| format!("Step 3 requested span refused: {why}"))?;
@@ -3246,6 +3225,7 @@ fn load_bounded_stored_context_from_spec_v1(
         signal,
         daily,
         minute,
+        strict: None,
     })
 }
 
@@ -3963,6 +3943,37 @@ fn commit_candidate_pre_admission_authority_guarded_v1<'a>(
     pre_admission_bounds: PreAdmissionDataBoundsV1,
     on_level: &dyn Fn(&engine::Frontier, usize, u64),
 ) -> Result<CommittedCandidatePreAdmissionV1, Step3OrchestratorRefusal> {
+    match commit_candidate_family_guarded_v6(
+        root,
+        admitted_root,
+        sweeper,
+        source,
+        candidate_bounds,
+        pre_admission_bounds,
+        on_level,
+        false,
+    )? {
+        family_v6::CandidateCommitV6::Evaluated(committed) => Ok(*committed),
+        family_v6::CandidateCommitV6::Extinct(_) => {
+            Err("Pre-Admission V1 cannot represent a zero-candidate family".to_owned())
+        }
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one typed source and its existing independent publication bounds plus explicit V2 extinction permission"
+)]
+fn commit_candidate_family_guarded_v6<'a>(
+    root: &Path,
+    admitted_root: Option<&AdmittedRootV1>,
+    sweeper: &Sweeper,
+    source: CandidateUniverseProductionSourceV1<'a>,
+    candidate_bounds: CandidateUniverseBoundsV1,
+    pre_admission_bounds: PreAdmissionDataBoundsV1,
+    on_level: &dyn Fn(&engine::Frontier, usize, u64),
+    allow_extinct: bool,
+) -> Result<family_v6::CandidateCommitV6, String> {
     let candidate = produce_candidate_universe_v1(sweeper, source, candidate_bounds, on_level)
         .map_err(|why| format!("Step 3 Candidate production refused: {why}"))?;
     if !candidate.population_run().is_complete() {
@@ -3991,37 +4002,40 @@ fn commit_candidate_pre_admission_authority_guarded_v1<'a>(
         );
     }
 
-    let base_evidence_bounds = BaseEvidenceLedgerBoundsV2::new(
-        candidate_bounds.max_rows(),
-        candidate_bounds.max_universes(),
-    )
-    .map_err(|why| format!("Step 3 Base Evidence bounds refused: {why}"))?;
-    require_admitted_root_v1(
+    let (base_evidence_bounds, base_evidence_audit) = commit_family_base(
+        root,
         admitted_root,
-        "before Base Evidence receipt-last append/reopen",
+        &candidate,
+        candidate_bounds,
+        &candidate_audit,
     )?;
-    let base_evidence = candidate
-        .append_base_evidence_and_reopen(root, base_evidence_bounds, &candidate_audit)
-        .map_err(|why| format!("Step 3 Base Evidence receipt-last commit refused: {why}"))?;
-    require_admitted_root_v1(
-        admitted_root,
-        "after Base Evidence receipt-last append/reopen",
-    )?;
-    let base_evidence_audit = base_evidence.audit();
-    if base_evidence_audit.candidate_universe_id() != candidate_audit.universe_id()
-        || base_evidence_audit.record_count() != candidate_audit.row_count()
-        || base_evidence_audit.family() != candidate_audit.receipt().family()
-    {
-        return Err(
-            "Step 3 reopened Base Evidence differs from its exact Candidate authority".to_owned(),
-        );
-    }
 
     let candidate_facts = ReopenedJoinFactsV1 {
         universe_id: candidate_audit.universe_id(),
         completion_digest: candidate_audit.content_digest(),
         row_count: candidate_audit.row_count(),
     };
+    if candidate_facts.row_count == 0 && allow_extinct {
+        let (pre_admission, pre_admission_commit) = commit_pre_admission_v2(
+            root,
+            admitted_root,
+            &candidate,
+            &candidate_commit,
+            pre_admission_bounds,
+            candidate_facts,
+        )?;
+        return Ok(family_v6::CandidateCommitV6::Extinct(Box::new(
+            family_v6::ExtinctCandidateV6 {
+                candidate: candidate_audit,
+                candidate_bounds,
+                base: base_evidence_audit,
+                base_bounds: base_evidence_bounds,
+                pre_admission,
+                pre_admission_commit,
+                pre_admission_bounds,
+            },
+        )));
+    }
     let (pre_admission_audit, prepared_pre_admission) = commit_pre_admission_v1(
         root,
         admitted_root,
@@ -4040,18 +4054,21 @@ fn commit_candidate_pre_admission_authority_guarded_v1<'a>(
         candidate_facts,
     )?;
 
-    Ok(CommittedCandidatePreAdmissionV1 {
-        candidate_audit,
-        candidate_bounds,
-        base_evidence_audit,
-        base_evidence_bounds,
-        pre_admission_audit,
-        pre_admission_v2,
-        pre_admission_v2_commit,
-        observations,
-        prepared_candidate_receipt: prepared_receipt,
-        prepared_pre_admission,
-    })
+    Ok(family_v6::CandidateCommitV6::Evaluated(Box::new(
+        CommittedCandidatePreAdmissionV1 {
+            candidate_audit,
+            candidate_bounds,
+            base_evidence_audit,
+            base_evidence_bounds,
+            pre_admission_audit,
+            pre_admission_bounds,
+            pre_admission_v2,
+            pre_admission_v2_commit,
+            observations,
+            prepared_candidate_receipt: prepared_receipt,
+            prepared_pre_admission,
+        },
+    )))
 }
 
 fn require_admitted_root_v1(
@@ -4111,18 +4128,78 @@ fn require_exact_reopened_join(
     Ok(())
 }
 
+fn commit_family_base(
+    root: &Path,
+    admitted_root: Option<&AdmittedRootV1>,
+    candidate: &ProducedCandidateUniverseV1<'_>,
+    candidate_bounds: CandidateUniverseBoundsV1,
+    candidate_audit: &CandidateUniverseReopenAuditV1,
+) -> Result<(BaseEvidenceLedgerBoundsV2, BaseEvidenceReopenAuditV2), String> {
+    let base_evidence_bounds = BaseEvidenceLedgerBoundsV2::new(
+        candidate_bounds.max_rows(),
+        candidate_bounds.max_universes(),
+    )
+    .map_err(|why| format!("Step 3 Base Evidence bounds refused: {why}"))?;
+    require_admitted_root_v1(
+        admitted_root,
+        "before Base Evidence receipt-last append/reopen",
+    )?;
+    let base_evidence = candidate
+        .append_base_evidence_and_reopen(root, base_evidence_bounds, candidate_audit)
+        .map_err(|why| format!("Step 3 Base Evidence receipt-last commit refused: {why}"))?;
+    require_admitted_root_v1(
+        admitted_root,
+        "after Base Evidence receipt-last append/reopen",
+    )?;
+    let base_evidence_audit = base_evidence.audit();
+    if base_evidence_audit.candidate_universe_id() != candidate_audit.universe_id()
+        || base_evidence_audit.record_count() != candidate_audit.row_count()
+        || base_evidence_audit.family() != candidate_audit.receipt().family()
+    {
+        return Err(
+            "Step 3 reopened Base Evidence differs from its exact Candidate authority".to_owned(),
+        );
+    }
+
+    Ok((base_evidence_bounds, base_evidence_audit))
+}
+
+fn bind_stored_population_v6(
+    finalization: crate::population_finalization_v4::CommittedStoredPopulationFinalizationV4,
+    nifty_source: family_v6::StoredFamilyV6,
+    banknifty_source: family_v6::StoredFamilyV6,
+    inputs: strict::Guards,
+) -> Result<crate::population_v6::PopulationV6ProductionSourceV1, String> {
+    let (nifty_evaluated, nifty_extinct) = nifty_source.into_parts();
+    let (banknifty_evaluated, banknifty_extinct) = banknifty_source.into_parts();
+    let mut source = match (nifty_evaluated, banknifty_evaluated) {
+        (Some(nifty), Some(banknifty)) => {
+            bind_population_v6_source_v1(finalization, nifty, banknifty)
+        }
+        (Some(nifty), None) => bind_population_v6_nifty_evaluated_source_v1(finalization, nifty),
+        (None, Some(banknifty)) => {
+            bind_population_v6_banknifty_evaluated_source_v1(finalization, banknifty)
+        }
+        (None, None) => bind_population_v6_all_extinct_source_v1(finalization),
+    }
+    .map_err(|why| format!("Step 3 Population V6 bind refused: {why}"))?;
+    source.retain_strict_inputs(inputs)?;
+    source.retain_extinct_inputs([nifty_extinct, banknifty_extinct])?;
+    Ok(source)
+}
 #[cfg(test)]
 pub(crate) use tests::{
     StatisticsV3EvaluatedPairFixture, statistics_v3_evaluated_pair_fixture,
     statistics_v3_evaluated_pair_fixture_with_price_shift,
-    with_population_v6_evaluated_pair_fixture,
+    with_population_v6_evaluated_pair_fixture, with_stored_oos_replay_fixture,
+    with_stored_oos_replay_observer_fixture,
 };
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::population_admission_v3::AdmissionV3Status;
-    use indicators::anchored::{AnchoredEvaluator, overlay_exact_minute_gapfib};
+    use indicators::anchored::{AnchoredEvaluator, overlay_exact_minute_orb_and_gapfib};
     use indicators::column::AnchoredColumn;
     use indicators::evaluator::Calendar;
     use pull::calendar::{DayKind, kind_of};
@@ -4372,6 +4449,36 @@ mod tests {
         )
     }
 
+    pub(crate) fn with_stored_oos_replay_fixture<T>(
+        action: impl FnOnce(
+            crate::stored_post_training_oos::StoredPostTrainingOosWitnessV1,
+        ) -> Result<T, String>,
+    ) -> Result<T, String> {
+        with_stored_oos_replay_observer_fixture(&mut |_| Ok(()), action)
+    }
+
+    pub(crate) fn with_stored_oos_replay_observer_fixture<T>(
+        observer: &mut crate::stored_post_training_oos::StoredOosObserverV1<'_>,
+        action: impl FnOnce(
+            crate::stored_post_training_oos::StoredPostTrainingOosWitnessV1,
+        ) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let fixture = StoredSuccessFixture::new()?;
+        seed_stored_family_month(
+            &fixture.source,
+            Vendor::Zerodha,
+            "NIFTY",
+            FIXTURE_OOS_MONTH,
+            2_000_000,
+        )?;
+        let long = exit_policy(Side::Long)?;
+        let short = exit_policy(Side::Short)?;
+        let committed = committed_fixture_family(&fixture.source, "NIFTY", &long, &short)?;
+        let disposition = first_selected_disposition(&committed)?;
+        let cohort = committed.stored_post_training_oos_cohort(fixture_oos_request()?)?;
+        action(cohort.mint_witness_recorded(&disposition, observer)?)
+    }
+
     fn fixture_month_bars(
         year: u16,
         month: u8,
@@ -4593,7 +4700,7 @@ mod tests {
         request: &StoredCandidatePreAdmissionRequestV1<'_>,
     ) -> Result<u64, Step3OrchestratorRefusal> {
         let root = AdmittedRootV1::admit(request.root)?;
-        let context = load_bounded_stored_context_v1(request, &root)?;
+        let context = load_bounded_stored_context_v1(request, &root, None)?;
         let mut evaluator = AnchoredEvaluator::new(
             request.widths,
             request.availability,
@@ -4604,7 +4711,7 @@ mod tests {
         let anchored = AnchoredColumn::build_required(&context.signal.bars, &mut evaluator)
             .map_err(|why| format!("fixture anchored column refused: {why:?}"))?;
         let mut column = anchored.into_column();
-        overlay_exact_minute_gapfib(
+        overlay_exact_minute_orb_and_gapfib(
             &context.signal.bars,
             &context.minute.bars,
             i64::from(context.rung_seconds).saturating_mul(1_000_000),
@@ -6187,4 +6294,6 @@ mod tests {
             Err(why) if why.contains("does not fit u32 seconds")
         ));
     }
+
+    include!("strict_v6_tests.rs");
 }

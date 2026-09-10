@@ -43,8 +43,10 @@ export const ASK_MS = 15_000;
  * `fetch`, with an end.
  *
  * Identical to `fetch` in every respect except that it cannot outlive `ms`,
- * and that the error it throws on timeout says what happened and what it means
- * rather than naming the mechanism that stopped it.
+ * and that the error it throws on timeout names the missed deadline. A timeout
+ * alone cannot establish whether a connection reached the server or where the
+ * delay occurred. This deadline covers the fetch of response headers; callers
+ * that also need a body-read deadline must keep ownership of that whole read.
  *
  * A caller that passes its own `signal` keeps it: `AbortSignal.any` makes the
  * request answer to both, so an operator-pressed cancel still cancels and the
@@ -67,10 +69,9 @@ export async function ask(url, options = {}) {
     if (signal?.aborted) throw error;
     if (ceiling.aborted) {
       throw new Error(
-        `No answer from ${url} within ${Math.round(ms / 1000)} s, so the request was ` +
-          `given up rather than left waiting. The server accepted the connection and ` +
-          `did not finish: it is wedged or the store is locked, which is a different ` +
-          `fact from being slow.`
+        `No response from ${url} within ${Math.round(ms / 1000)} s. The request ` +
+          `timed out and was cancelled. This alone does not identify whether the ` +
+          `delay was in the browser, connection, or server.`
       );
     }
     throw error;

@@ -125,3 +125,38 @@ test('a job that throws rejects the call, which is why callers return failures a
 test('IN_FLIGHT is six, the browser’s per-origin ceiling over HTTP/1.1', () => {
   assert.equal(IN_FLIGHT, 6);
 });
+
+test('aborting a chart batch stops dispatching queued months and rejects after in-flight work drains', async () => {
+  const controller = new AbortController();
+  /** @type {((value:number)=>void)[]} */
+  const pending = [];
+  /** @type {number[]} */
+  const called = [];
+  const running = pooled(Array.from({ length: 100 }, (_, i) => i), 3, (item) => {
+    called.push(item);
+    return /** @type {Promise<number>} */ (new Promise((resolve) => pending.push(resolve)));
+  }, controller.signal);
+  const refused = assert.rejects(running, /AbortError|aborted/);
+  controller.abort();
+  for (const resolve of pending) resolve(1);
+  await refused;
+  assert.deepEqual(called, [0, 1, 2]);
+});
+
+test('one failed month stops dispatching the remaining chart months', async () => {
+  /** @type {()=>void} */ let release = () => {};
+  const stalled = /** @type {Promise<void>} */ (new Promise((resolve) => { release = resolve; }));
+  /** @type {number[]} */
+  const called = [];
+  const running = pooled([0, 1, 2, 3, 4], 2, async (item) => {
+    called.push(item);
+    if (item === 0) throw new Error('damaged month');
+    await stalled;
+    return item;
+  });
+  const rejected = assert.rejects(running, /damaged month/);
+  release();
+  await rejected;
+  await after(0);
+  assert.deepEqual(called, [0, 1]);
+});

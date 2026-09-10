@@ -846,3 +846,132 @@ Authentication, exact joins, hashing, persistence and reopen are
 input/file/system proportional; only admitted fixed-record address arithmetic
 is worst-case O(1). No universal O(1) space/latency or customer-scale guarantee
 is inferred.
+
+## Cash-stock research checkpoint — 2026-09-05
+
+The operator has not started the full Zerodha cash-stock pull and requires an
+explicit go-ahead. **Bulk pull approval is withheld.** No vendor pull or server
+was started by this implementation session; the existing NIFTY sweep was left
+running on its already-built binary.
+
+Implemented preparation:
+
+- `cli research-plan VENDOR`: read-only inventory for all eight intraday
+  timeframes plus daily reference, from 2020-01-01 through yesterday IST.
+- `ResearchWindow`: one clock resolution, exact half-open timestamp bounds,
+  clipping helper and versioned requested-date identity fields.
+- Cash enumeration positively intersects existing F&O and total-market
+  membership instead of treating every F&O name as an equity.
+- Runner opt-in SL+TP, SL+TTP and their union, excluding other variants before
+  pricing. Legacy callers retain their previous exit population.
+- Three incorrect imports in the already-existing untracked `pool.rs` draft
+  were corrected so focused CLI tests could compile. A table-format warning
+  and unchecked candidate access were fixed; missing candidates are named
+  rather than panicking. Its strategy logic was not otherwise certified.
+
+Required before calling the full workflow implemented or starting research:
+
+1. Verify the live cash-only `/pull/spot` request, actual external-store root,
+   and current Zerodha entitlement/session evidence without exposing secrets.
+2. Bring the authoritative session calendar beyond its current 2026-08-21
+   boundary using verified sources; audit through the frozen requested date.
+3. Verify exact-day OHLCV/volume, folds, listing/corporate-action handling and
+   distinguish the current membership snapshot from historical membership.
+4. Integrate the frozen date and exit-family policy into the actual search,
+   replay, full run identity and durable research manifests/checkpoints.
+5. Replace the draft pool's shortlist-only discovery, correct its coarse-bar
+   execution call and compute portfolio drawdown from chronological sized
+   trades. Its current maximum individual drawdown is NOT a pooled bound.
+6. Persist/reopen pooled ranked rows and every selected row's trade details;
+   expose matching UI/API results and coverage instead of independent lists.
+7. Benchmark the exact mode, enforce explicit resource/cancellation policy,
+   and measure whether the requested workload fits 24 hours. No guarantee yet.
+8. Complete full workspace tests, Clippy, formatting, deny, coverage and
+   mutation gates. Do not merge/deploy by bypassing the dirty-tree commit stamp.
+
+No charges and no statistical validation are the requested discovery policy,
+not a claim that live execution is costless or future winners are assured.
+
+Verification at this checkpoint: 11 focused CLI tests passed (nine research
+window/inventory cases, the missing pooled-candidate regression and command
+listing); 513 runner library tests passed, including the new exit-family
+enumeration/equivalence cases. Strict library Clippy passed for `cli` and
+`runner`; workspace formatting and `git diff --check` passed. These are
+component checks, not a full-workspace test result, coverage/mutation proof,
+live vendor entitlement check, deployed workflow or completed stock sweep.
+No release binary was replaced and no new research result was persisted.
+
+## Historical sweep completion follow-through — 2026-09-06 (D-0524)
+
+The highlighted index sweep work now includes the stored AND continuation,
+canonical AND/OR/NOT cursor, signal-only and priced expression commands,
+exact evaluated-candidate trade catalogs, bounded detail readers, Selection V6
+and the explicit later-period Global Replay V4 command. Contracts and scoped
+tests are in `docs/19` through `docs/22`; the current human comparison is
+`docs/14-sweep-readiness-20260906.md`. Earlier absence statements describe their
+earlier checkpoint, not a prohibition against this authorized implementation.
+
+The common API/browser integration now passes its scoped checks. A separate
+clean source snapshot ran two real historical expression searches through
+8→16 candidate restart, and an independent reader verified all 64 trade files
+and 31,279 exact trades. A real AND run reached extinction and recovered its
+saved checkpoint without duplicating the parent. Exact scope, identities,
+zero cell-rule admissions and missing independent scrub receipt are in
+`docs/23-historical-sweep-verification.md`. Final stable workspace gates are
+reported separately by the repeatable verifier. The production acquisition
+service and unrelated sessions' changes were preserved.
+
+On7 September the operator delegated the37 remaining policy choices. D-0535
+supplies an explicit versioned research profile and an automated explanation;
+no fixture threshold is promoted into a claim of pre-existing approval.
+The profile must be selected for the actual process and every candidate still
+needs its required measured evidence. Configuration is not market admission.
+Full touched-crate line/branch coverage, mutation closure, visual verification
+and customer-scale measurements remain evidence requirements, not automatic
+consequences of source implementation. Whole-sweep O(1) time and unlimited
+durable history in O(1) total space are not implementable requirements.
+
+The later operator-authorized clean backend activation closed the new-route
+404 mismatch. Read-only HTTP checks confirmed both routes, the existing asset
+version, a still-paused automatic scheduler and resumed existing recovery.
+This is separately recorded in `docs/23-historical-sweep-verification.md`.
+
+Local parallel work now uses the operator-supplied MacBook baseline recorded
+in `docs/25-macbook-runtime-budget.md`: M4 Pro, 14 CPU cores and 48 GiB memory,
+with current headroom checked at runtime. This sizes operating concurrency;
+it does not replace engine admissions with machine-specific magic constants.
+
+The D-0526 continuation completes all20 VWAP truth/known mappings, adds strict
+multi-month admission to the shared pricing kernel, and tests actual source,
+receipt and ranked-child loss before parent publication. `docs/26-vwap-mapping.md`
+contains the cash/index/futures distinction and independent real-row evidence.
+`audit-audited-range` is additive; futures are still storage-only, no prices or
+volumes are synthesized, and the current acquisition remains undisturbed.
+Later clean-build executions and combined gates retain their actual snapshot
+under `target/sweep-audit-20260906/` and the automated comparison check panel.
+
+The7 September fixed-training qualification continuation is documented in
+`docs/29-fixed-training-qualification.md` and D-0542–D-0544. It connects a
+zero-conservative full-family procedure, a predeclared finite eight-timeframe
+allocation, original frozen exits, complete genuinely later windows, durable
+qualification comparisons and restartable slot reservations. Test fixtures,
+clean real-data runs, combined verification and live activation must retain
+separate source-stamped evidence. Passing a research policy is not Selection V6
+authority, a claim about arbitrary additional grammar batches, or trading approval.
+
+The D-0549 continuation adds a distinct declared-search command and observer.
+It fixes a testing-budget gap between individually qualified finite batches and
+the whole declared grammar search: one exact countable allocation now binds
+every batch/timeframe before pricing. Reservations, retries, complete child links,
+all-coordinate projections, independent history/decoding bounds and a retained
+parent guard are integrated. The new dashboard compares original and corrected
+results without rewriting either source evidence or older formats. See
+`docs/30-search-wide-qualification.md` for the easy comparison and limitations.
+
+Final source-stamped tests, real retained-OHLCV continuation, direct handler and
+frontend replay, full coverage/mutation obligations and safe service activation
+remain separate steps. The current acquisition and shared checkout are preserved.
+An initial implementation or previous release's green checks do not clear new
+source automatically. D-0548's seven exact allocation/guard mutation replays all
+failed their tests as intended; fresh campaign coverage remains395/412 lines and
+69/84 branches, so it does not close the whole-crate100% requirement.

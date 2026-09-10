@@ -26,11 +26,10 @@
    * "IS SOMETHING HAPPENING RIGHT NOW" — MEASURED, NEVER TIMED
    * ═══════════════════════════════════════════════════════════════════════
    *
-   * There is no record of a run IN FLIGHT anywhere in this system. A pull is
-   * one synchronous POST and its journal record is appended when it ENDS, so a
-   * nine-minute backfill is nine minutes in which every surface says nothing
-   * is happening. That is the single most-missed thing during an unattended
-   * twelve-hour run and it is what the top strip exists for.
+   * This strip measures store changes. The completed pull journal is not an
+   * execution monitor; current request state is exposed separately by the
+   * pull and sweep surfaces. No change in the store alone proves neither an
+   * idle process nor a completed request.
    *
    * The strip does not run a timer and call it progress. It subtracts two
    * successive answers and states what moved:
@@ -73,7 +72,7 @@
    * records or 11,200. The coverage grid is bounded by the target window (80
    * cells today) and not by the store.
    */
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { feeds } from '$lib/feeds.svelte.js';
   // THE ZONE IS NAMED, BECAUSE THE MACHINE'S ZONE IS NOT THE PRODUCT'S.
   //
@@ -89,6 +88,7 @@
   // ceiling; see `$lib/ask.js` for why the wrapper exists rather than a signal
   // threaded through every call site.
   import { ask } from '$lib/ask.js';
+  import { createPageRequests } from '$lib/page-requests.js';
 
   /* ══════════════════════════════════════════════════════════════════════
      CONSTANTS — each one traceable to a file in this repository
@@ -315,13 +315,17 @@
   let base = $state(null);
 
   let live = $state(true);
+  const auditRequests = createPageRequests();
+  const olderRequests = createPageRequests();
+  onDestroy(() => { auditRequests.dispose(); olderRequests.dispose(); });
 
-  async function read(page = 0) {
-    const feed = feeds.active;
+  /** @param {import('$lib/page-requests.js').ReadTicket} ticket
+   * @param {number} page @param {string|null} feed */
+  async function read(ticket, page, feed) {
     if (!feed) return null;
     const url = `/audit.json?feed=${encodeURIComponent(feed)}${page ? `&page=${page}` : ''}`;
     const t0 = performance.now();
-    const r = await ask(url, { cache: 'no-store' });
+    const r = await ask(url, { cache: 'no-store', signal: ticket.signal });
     const ms = Math.round(performance.now() - t0);
     if (!r.ok) {
       // THE REAL ERROR, NAMED. A 404 here means the process serving this port
@@ -349,8 +353,10 @@
     return { body: await r.json(), ms };
   }
 
-  async function refresh() {
-    if (!feeds.active) {
+  /** @param {import('$lib/page-requests.js').ReadTicket} ticket */
+  async function refreshCurrent(ticket) {
+    const feed = feeds.active;
+    if (!feed) {
       /* NO FEED CLEARS, RATHER THAN FREEZING WHAT WAS THERE. This was a bare
          `return`, so on clearing the feed `payload` and `samples` both kept
          the previous feed's values while the poll went on ticking and the
@@ -372,7 +378,8 @@
     }
     load.state = payload ? 'refreshing' : 'first';
     try {
-      const got = await read(0);
+      const got = await read(ticket, 0, feed);
+      if (!ticket.current() || feeds.active !== feed) return;
       if (!got) return;
       const body = got.body;
       payload = body;
@@ -397,26 +404,45 @@
       if (!last || s.at > last.at) samples = [...samples, s].slice(-SAMPLES);
       base ??= { at: s.at, bars: s.bars, im: s.im, gen: s.gen };
     } catch (why) {
+      if (!ticket.current() || feeds.active !== feed) return;
       load.state = 'error';
       load.error = String(why instanceof Error ? why.message : why);
+    } finally {
+      if (ticket.current() && feeds.active === feed && live && !document.hidden) {
+        auditRequests.schedule(refreshCurrent, hot ? HOT_MS : COLD_MS);
+      }
     }
   }
 
-  async function loadOlder() {
+  function refresh() {
+    return auditRequests.run(refreshCurrent);
+  }
+
+  /** @param {import('$lib/page-requests.js').ReadTicket} ticket */
+  async function readOlder(ticket) {
     if (loadingOlder || pagesHeld >= Math.min(MAX_PAGES, payload?.journal?.pages ?? 1)) return;
+    const feed = feeds.active;
+    const page = pagesHeld;
+    if (!feed) return;
     loadingOlder = true;
     try {
-      const got = await read(pagesHeld);
+      const got = await read(ticket, page, feed);
+      if (!ticket.current() || feeds.active !== feed) return;
       if (got) {
         older = [...older, ...got.body.runs];
         pagesHeld += 1;
       }
     } catch (why) {
+      if (!ticket.current() || feeds.active !== feed) return;
       load.error = String(why instanceof Error ? why.message : why);
       load.state = 'error';
     } finally {
-      loadingOlder = false;
+      if (ticket.current() && feeds.active === feed) loadingOlder = false;
     }
+  }
+
+  function loadOlder() {
+    if (!loadingOlder) return olderRequests.run(readOlder);
   }
 
   /**
@@ -429,18 +455,8 @@
    * again — a request storm, ~30 identical GETs before it was seen in the
    * network log. The dependency here is the FEED and nothing else.
    */
-  $effect(() => {
-    const feed = feeds.active;
-    if (!feed) return;
-    untrack(() => {
-      payload = null;
-      older = [];
-      pagesHeld = 1;
-      samples = [];
-      base = null;
-      refresh();
-    });
-  });
+  // The feed and Live switch own one lifecycle below. Reads never subscribe
+  // the effect to the payload that they themselves publish.
 
   /* ══════════════════════════════════════════════════════════════════════
      PRIORITY 1 — IS SOMETHING HAPPENING RIGHT NOW
@@ -517,24 +533,39 @@
    */
   const hot = $derived(pulse.moving);
 
+  let watchedFeed = /** @type {string|null|undefined} */ (undefined);
   $effect(() => {
-    if (!live) return;
-    const period = hot ? HOT_MS : COLD_MS;
-    const tick = () => {
-      if (!document.hidden) refresh();
-    };
-    const id = window.setInterval(tick, period);
-    // Coming back to the tab re-reads at once rather than waiting out the
-    // period, so a page brought forward is never showing a stale answer while
-    // it counts down.
-    const wake = () => {
-      if (!document.hidden) refresh();
-    };
-    document.addEventListener('visibilitychange', wake);
-    return () => {
-      clearInterval(id);
-      document.removeEventListener('visibilitychange', wake);
-    };
+    const feed = feeds.active;
+    const enabled = live;
+    return untrack(() => {
+      auditRequests.cancel();
+      olderRequests.cancel();
+      loadingOlder = false;
+      const changed = watchedFeed !== feed;
+      watchedFeed = feed;
+      if (changed) {
+        payload = null;
+        older = [];
+        pagesHeld = 1;
+        samples = [];
+        base = null;
+        load.state = 'idle';
+        load.error = null;
+      }
+      if (feed && !document.hidden && (enabled || changed)) void refresh();
+      const wake = () => {
+        auditRequests.cancel();
+        olderRequests.cancel();
+        loadingOlder = false;
+        if (!document.hidden && live && feeds.active) void refresh();
+      };
+      document.addEventListener('visibilitychange', wake);
+      return () => {
+        document.removeEventListener('visibilitychange', wake);
+        auditRequests.cancel();
+        olderRequests.cancel();
+      };
+    });
   });
 
   /** The measured-rate sparkline: bars per minute between successive answers. */
@@ -1161,12 +1192,10 @@
         {/if}
 
         <p class="fine">
-          <b>There is no record of a run in flight anywhere in this system.</b> A pull is one
-          synchronous POST and its journal record is appended when it ENDS, so a nine-minute
-          backfill writes nothing to the journal for nine minutes. Everything in this panel is
-          therefore derived from the store itself — the manifest's commit counter, its byte
-          timestamp and its totals, subtracted between two answers. No timer stands in for progress
-          and no percentage is shown that nobody could check.
+          <b>This panel measures changes in stored data.</b> It compares the recorded write
+          count, write time and totals between reads. A quiet store does not prove that a
+          request has finished. Use <a href="/autopilot">Autopilot</a> for the pull scheduler's
+          state and <a href="/backtest">Backtest</a> for sweep execution and saved outcomes.
         </p>
       </section>
 

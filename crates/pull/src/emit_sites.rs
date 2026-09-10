@@ -246,6 +246,8 @@ fn request_over(at: Window) -> BarRequest {
 /// The plan every ingest below runs under.
 fn plan_over(request: &BarRequest) -> Plan<'_> {
     Plan {
+        calendar: crate::calendar::Runtime::default(),
+        cash_schedule: None,
         columns: Columns::TrueDataIndex,
         request,
         encoding: TimestampEncoding::EpochSecondsUtc,
@@ -269,6 +271,27 @@ fn ingest_body(scratch: &Scratch) -> Ingested {
         .expect("the folder is readable and the column shape is right")
 }
 
+/// A complete regular session for drivers whose premise requires clean
+/// derivation. Sparse BODY remains the fixture for snapshot and decode counts.
+fn ingest_complete_session(scratch: &Scratch) -> Ingested {
+    use std::fmt::Write as _;
+
+    let mut body = String::new();
+    for minute in 555..930 {
+        writeln!(
+            body,
+            "20221003,{:02}:{:02}:00,100.00,0,0",
+            minute / 60,
+            minute % 60
+        )
+        .expect("a fixture string");
+    }
+    let archive = scratch.archive(&[(INSTRUMENT, &body)]);
+    let request = request_over(window());
+    crate::ingest::from_dir(&archive, &scratch.store(), plan_over(&request))
+        .expect("a complete session archive")
+}
+
 /// A credential source that answers from memory and reaches nothing.
 ///
 /// `CLAUDE.md` §8 puts the value in Parameter Store and nowhere else; this
@@ -277,6 +300,62 @@ fn ingest_body(scratch: &Scratch) -> Ingested {
 struct Fixed {
     /// What every read returns.
     answer: Result<&'static str, SecretError>,
+}
+
+/// Reaches the production warning with complete minute candles; duplicate
+/// removal succeeds and the file-based registry checks its recorded count.
+fn drive_duplicate_candles(scratch: &Scratch) {
+    let request =
+        request_over(Window::new(window().from(), window().from()).expect("one full fixture day"));
+    let open = i64::from(request.window.from().days_from_epoch()) * 86_400
+        - crate::session::IST_OFFSET_SECS
+        + 555 * 60;
+    let mut rows: Vec<_> = (0..375)
+        .map(|minute| RawRow {
+            timestamp: open + minute * 60,
+            open: 100,
+            high: 100,
+            low: 100,
+            close: 100,
+            volume: 1,
+            open_interest: None,
+        })
+        .collect();
+    let first = *rows.first().expect("a full session");
+    rows.insert(1, first);
+    let done = crate::ingest::from_window(
+        &RawWindow { rows },
+        INSTRUMENT,
+        "emit-sites",
+        &scratch.store(),
+        plan_over(&request),
+    );
+    assert!(done.failures.is_empty(), "{:?}", done.failures);
+    assert_eq!(done.bars_committed, 375);
+    assert_eq!(done.rows_folded, 1);
+    assert!(done.balances());
+}
+
+/// Missing requested coverage is reported even when the response is empty.
+fn drive_request_minutes(scratch: &Scratch) {
+    let request = request_over(Window::new(window().from(), window().from()).expect("one day"));
+    let done = crate::ingest::from_window(
+        &RawWindow { rows: Vec::new() },
+        INSTRUMENT,
+        "emit-sites",
+        &scratch.store(),
+        plan_over(&request),
+    );
+    assert_eq!(done.bars_committed, 0);
+    assert_eq!(done.failures.len(), 1);
+    assert!(
+        done.failures
+            .first()
+            .expect("gap receipt")
+            .why
+            .contains("375 missing scheduled minutes")
+    );
+    assert!(!done.balances());
 }
 
 impl SecretSource for Fixed {
@@ -381,6 +460,20 @@ struct Site {
 /// Every `telemetry::emit` under `crates/pull/src` except the one the module
 /// header names, one row each.
 static SITES: &[Site] = &[
+    Site {
+        at: "crates/pull/src/ingest.rs — from_window request coverage warning",
+        target: "pull.request_minutes",
+        message: "request minute coverage incomplete",
+        says: ("reason", Says::Holds("375 missing scheduled minutes")),
+        drive: drive_request_minutes,
+    },
+    Site {
+        at: "crates/pull/src/ingest.rs — from_window duplicate warning",
+        target: "pull.duplicate",
+        message: "identical vendor candles deduplicated; volume counted once",
+        says: ("duplicates", Says::Signs(1)),
+        drive: drive_duplicate_candles,
+    },
     Site {
         // A CAPTURE FAILURE IS DELIBERATELY NOT THE PULL'S FAILURE. That makes
         // the event its only durable voice: the caller receives the vendor
@@ -1013,7 +1106,7 @@ fn drive_census_refused(_scratch: &Scratch) {
 
 /// A whole-file census image, built from a census holding one month.
 fn drive_census_imaged(scratch: &Scratch) {
-    let done = ingest_body(scratch);
+    let done = ingest_complete_session(scratch);
     assert_eq!(
         done.failures,
         Vec::new(),
@@ -1482,7 +1575,7 @@ fn degrade_second_slot(store: &Path) {
 fn drive_census_degraded(scratch: &Scratch) {
     // A FIRST RUN, so there is a real census to damage. Writing one by hand
     // would be a second opinion about the format.
-    let done = ingest_body(scratch);
+    let done = ingest_complete_session(scratch);
     assert_eq!(
         done.failures,
         Vec::new(),
@@ -1491,11 +1584,7 @@ fn drive_census_degraded(scratch: &Scratch) {
     degrade_second_slot(&scratch.store());
 
     // AND A SECOND RUN, which opens the damaged census.
-    let archive = scratch.archive(&[(INSTRUMENT, BODY)]);
-    let store = scratch.store();
-    let request = request_over(window());
-    let after = crate::ingest::from_dir(&archive, &store, plan_over(&request))
-        .expect("the folder is still readable");
+    let after = ingest_complete_session(scratch);
     assert!(
         after
             .failures
@@ -1530,7 +1619,7 @@ fn drive_census_unpublished(scratch: &Scratch) {
     use std::os::unix::fs::PermissionsExt as _;
 
     // A FIRST RUN, so a real census exists to be made unwritable.
-    let done = ingest_body(scratch);
+    let done = ingest_complete_session(scratch);
     assert_eq!(done.failures, Vec::new(), "the run that builds it is clean");
 
     let store = scratch.store();
@@ -1602,10 +1691,11 @@ fn block_the_two_minute_rung(store: &Path) {
 fn drive_derived_shortfall(scratch: &Scratch) {
     let store = scratch.store();
     block_the_two_minute_rung(&store);
-    let archive = scratch.archive(&[(INSTRUMENT, BODY)]);
-    let request = request_over(window());
-    let done = crate::ingest::from_dir(&archive, &store, plan_over(&request))
-        .expect("the folder is readable; the rung is what refuses");
+    let done = ingest_complete_session(scratch);
+    assert_eq!(
+        done.derived_files,
+        crate::ingest::derived_count(store::path::Timeframe::MINUTE_1) - 1
+    );
     assert!(
         done.bars_stored > 0,
         "the PULLED rung still lands — a fixture where nothing stored would \

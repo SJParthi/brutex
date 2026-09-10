@@ -698,6 +698,11 @@ pub enum Refusal {
         /// What arrived.
         got: String,
     },
+    /// Unknown, repeated or incompatible explicit cash-identity policy.
+    InvalidCashIdentity {
+        /// The rejected request value or incompatibility.
+        got: String,
+    },
     /// A bar length was named, and it is not a rung of the ladder.
     ///
     /// A `rate` was supplied and is not a rate.
@@ -898,12 +903,8 @@ impl fmt::Display for Refusal {
                  and no greek is computed for this run, which is honest; a \
                  rate that cannot be read is not one to guess at"
             ),
-            Self::UnknownVendor { ref got } => write!(
-                f,
-                "REFUSED · {got:?} is not a vendor this build has a feed for. \
-                 Nothing was pulled rather than another vendor's bars being \
-                 filed under a prefix you did not ask for"
-            ),
+            Self::UnknownVendor { ref got } => f.write_str(&unknown_vendor_refusal(got)),
+            Self::InvalidCashIdentity { ref got } => f.write_str(&cash_identity_refusal(got)),
             Self::ExpiredSeriesIsOneMinuteOnly { ref got } => write!(
                 f,
                 "REFUSED · an expired series is pulled at ONE MINUTE only, and \
@@ -946,6 +947,70 @@ impl fmt::Display for Refusal {
 
 impl std::error::Error for Refusal {}
 
+fn cash_identity_refusal(got: &str) -> String {
+    format!(
+        "REFUSED · cash_identity {got:?}: use isin, or explicitly use zerodha_cross_checked or zerodha_symbol with Zerodha. Native-only symbol mapping is not ISIN verification"
+    )
+}
+
+fn unknown_vendor_refusal(got: &str) -> String {
+    format!(
+        "REFUSED · {got:?} is not a vendor this build has a feed for. Nothing was pulled rather than another vendor's bars being filed under a prefix you did not ask for"
+    )
+}
+
+/// Cash identity assurance is explicit and never inferred from a failed join.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CashIdentity {
+    /// Require the exchange/vendor ISIN join.
+    #[default]
+    Isin,
+    /// Exact native Zerodha identity, explicitly not ISIN-verified.
+    ZerodhaSymbol,
+    /// Exact native token plus exchange ISIN corroborated by an independent master.
+    /// The ISIN is never attributed to Zerodha's ISIN-less file.
+    ZerodhaCrossChecked,
+}
+
+impl CashIdentity {
+    /// Human-readable receipt and audit evidence.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Isin => "ISIN verification required for cash shares",
+            Self::ZerodhaSymbol => {
+                "Zerodha exact native symbol mapping — NOT ISIN-verified; current master only"
+            }
+            Self::ZerodhaCrossChecked => {
+                "Zerodha exact native token + NSE ISIN cross-check with independent master; current snapshot, not historical identity proof"
+            }
+        }
+    }
+}
+
+fn parse_cash_identity(body: &str) -> Result<CashIdentity, Refusal> {
+    let choices = crate::server::params(body, "cash_identity");
+    let policy = match choices.as_slice() {
+        [] => CashIdentity::Isin,
+        [choice] if choice == "isin" => CashIdentity::Isin,
+        [choice] if choice == "zerodha_symbol" => CashIdentity::ZerodhaSymbol,
+        [choice] if choice == "zerodha_cross_checked" => CashIdentity::ZerodhaCrossChecked,
+        _ => {
+            return Err(Refusal::InvalidCashIdentity {
+                got: choices.join(","),
+            });
+        }
+    };
+    if policy != CashIdentity::Isin
+        && parse_feed(&param(body, "vendor")) != Some(pull::vendor::Feed::Zerodha)
+    {
+        return Err(Refusal::InvalidCashIdentity {
+            got: "the selected Zerodha identity policy requires Zerodha".to_owned(),
+        });
+    }
+    Ok(policy)
+}
+
 /// One spot pull, validated.
 // NO LONGER `Copy`, and the reason is the members set.
 //
@@ -957,6 +1022,8 @@ impl std::error::Error for Refusal {}
 // by reference.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpotRequest {
+    /// Explicit assurance policy; omitted requests retain strict ISIN proof.
+    pub cash_identity: CashIdentity,
     /// Which set of instruments.
     pub target: SpotTarget,
     /// The instruments actually ticked, or EMPTY for the target's whole set.
@@ -1293,6 +1360,7 @@ fn refused_field(why: &Refusal) -> Option<&'static str> {
         Refusal::UnknownTarget { .. } => Some("target"),
         Refusal::UnknownSeries { .. } => Some("series"),
         Refusal::UnknownVendor { .. } => Some("vendor"),
+        Refusal::InvalidCashIdentity { .. } => Some("cash_identity"),
         Refusal::UnknownGranularity { .. } | Refusal::ExpiredSeriesIsOneMinuteOnly { .. } => {
             Some("granularity")
         }
@@ -1403,6 +1471,7 @@ fn parse_spot_inner(body: &str, today: Day) -> Result<SpotRequest, Refusal> {
     }
 
     Ok(SpotRequest {
+        cash_identity: parse_cash_identity(body)?,
         target,
         members,
         window: parse_window(body, today)?,
@@ -2166,6 +2235,53 @@ pub const NO_QUEUE: &str = "REFUSED · the selection is legal and was understood
     clippy::panic
 )]
 mod tests {
+    #[test]
+    fn cash_identity_requires_explicit_valid_vendor_scoped_choice() {
+        assert_eq!(
+            parse_cash_identity("vendor=zerodha").unwrap(),
+            CashIdentity::Isin
+        );
+        assert_eq!(
+            parse_cash_identity("vendor=zerodha&cash_identity=isin").unwrap(),
+            CashIdentity::Isin
+        );
+        assert_eq!(
+            parse_cash_identity("vendor=zerodha&cash_identity=zerodha_symbol").unwrap(),
+            CashIdentity::ZerodhaSymbol
+        );
+        assert_eq!(
+            parse_cash_identity("vendor=zerodha&cash_identity=zerodha_cross_checked").unwrap(),
+            CashIdentity::ZerodhaCrossChecked
+        );
+        for body in [
+            "vendor=zerodha&cash_identity=",
+            "vendor=zerodha&cash_identity=auto",
+            "vendor=zerodha&cash_identity=isin&cash_identity=isin",
+            "vendor=dhan&cash_identity=zerodha_symbol",
+            "cash_identity=zerodha_symbol",
+            "vendor=dhan&cash_identity=zerodha_cross_checked",
+            "cash_identity=zerodha_cross_checked",
+            "vendor=zerodha&cash_identity=zerodha_cross_checked&cash_identity=isin",
+        ] {
+            assert!(
+                matches!(
+                    parse_cash_identity(body),
+                    Err(Refusal::InvalidCashIdentity { .. })
+                ),
+                "{body}"
+            );
+        }
+        assert!(
+            CashIdentity::ZerodhaSymbol
+                .label()
+                .contains("NOT ISIN-verified")
+        );
+        assert!(
+            CashIdentity::ZerodhaCrossChecked
+                .label()
+                .contains("independent master")
+        );
+    }
     use super::*;
     use std::time::Duration;
 
@@ -4175,7 +4291,7 @@ mod route_tests {
             crate::server::router_serving(
                 site,
                 std::sync::Arc::new(crate::assets::Assets::new(&crate::scratch::path(
-                    "ingest-routes-front",
+                    "ingest-routes-front-405",
                 ))),
                 addr,
             ),
@@ -4228,9 +4344,18 @@ mod route_tests {
         // THE PAGE IS STILL THE PAGE. Not 405 — whatever the asset layer says
         // about a front end that was never built, it is the front end saying it.
         let page = get("/autopilot").await;
-        assert!(
-            !page.contains("405"),
+        let status_code = page
+            .lines()
+            .next()
+            .and_then(|line| line.split_ascii_whitespace().nth(1))
+            .expect("the response has an HTTP status code");
+        assert_ne!(
+            status_code, "405",
             "GET /autopilot must still reach the front end: {page}"
+        );
+        assert!(
+            page.contains("ingest-routes-front-405"),
+            "the unbuilt-frontend diagnostic must exercise 405 in body text: {page}"
         );
 
         let _ = std::net::TcpStream::connect(stop_addr);

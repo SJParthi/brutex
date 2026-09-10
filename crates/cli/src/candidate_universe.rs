@@ -44,7 +44,10 @@
 //! than measured. `CLAUDE.md` §3 rule 6.
 
 #[path = "population_base_evidence_v2.rs"]
-mod population_base_evidence_v2;
+pub(crate) mod population_base_evidence_v2;
+
+#[path = "boolean_candidate_v1.rs"]
+pub mod boolean_candidate_v1;
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -57,7 +60,7 @@ use std::os::unix::fs::{FileExt as _, MetadataExt as _};
 use brutex_core::blake3::{Hasher, hash};
 use indicators::Candle;
 use indicators::anchored::{
-    AnchoredEvaluator, DailyEligibility, DailyReference, overlay_exact_minute_gapfib,
+    AnchoredEvaluator, DailyEligibility, DailyReference, overlay_exact_minute_orb_and_gapfib,
 };
 use indicators::column::{AnchoredColumn, Column};
 use indicators::evaluator::{CHARTER_NON_REGULAR_IST_DAYS, Calendar, Widths};
@@ -380,7 +383,7 @@ pub struct CandidateCalendarCoverageV1 {
 }
 
 impl CandidateCalendarCoverageV1 {
-    fn from_complete(
+    pub(crate) fn from_complete(
         rung_seconds: u32,
         requested_span: RequestedSpanIdentityV1,
         signal: CompleteCalendarReceiptV2,
@@ -1344,6 +1347,18 @@ impl<'a> CandidateGlobalReplayOosSourceV1<'a> {
         resolved: &ResolvedExitGridV1,
         disposition: &ExecutionDispositionV1,
     ) -> Result<GlobalReplayWitnessUniverseV1, CandidateUniverseRefusal> {
+        self.mint_witness_recorded(ladder, resolved, disposition, &mut |_| Ok(()))
+    }
+
+    /// Call the fallible identity publisher immediately before trade replay.
+    /// The existing mint entry point preserves its original caller contract.
+    pub(crate) fn mint_witness_recorded(
+        &self,
+        ladder: engine::Ladder,
+        resolved: &ResolvedExitGridV1,
+        disposition: &ExecutionDispositionV1,
+        before_replay: &mut dyn FnMut([u8; 32]) -> Result<(), String>,
+    ) -> Result<GlobalReplayWitnessUniverseV1, CandidateUniverseRefusal> {
         self.require_integrity()?;
         let selected = disposition.selected().ok_or_else(|| {
             "Global Replay OOS winner has no authorized selected-exit capability".to_owned()
@@ -1395,6 +1410,7 @@ impl<'a> CandidateGlobalReplayOosSourceV1<'a> {
         .map_err(|why| format!("Global Replay OOS exact run refused: {why:?}"))?;
         let oos = OosExecutionSeriesV1::new(self.execution_series, 0)
             .map_err(|why| format!("Global Replay OOS boundary refused: {why:?}"))?;
+        before_replay(execution_run.run_id().bytes())?;
         resolved
             .replay_global_witness(oos, &self.execution_column, selected, execution_run)
             .map_err(|why| format!("Global Replay OOS witness refused: {why:?}"))
@@ -1466,10 +1482,10 @@ fn derive_global_replay_oos_source_id(source: &CandidateGlobalReplayOosSourceV1<
 }
 
 #[derive(Clone, Copy, Debug)]
-struct CandidateEvaluationInputsV1 {
-    widths: Widths,
-    availability: Availability,
-    thresholds: Thresholds,
+pub(crate) struct CandidateEvaluationInputsV1 {
+    pub(crate) widths: Widths,
+    pub(crate) availability: Availability,
+    pub(crate) thresholds: Thresholds,
 }
 
 /// Monotone causal adapter used only by retained Search V4.
@@ -1589,7 +1605,7 @@ impl CandidateSearchColumnBuilderV1<'_> {
     }
 }
 
-fn build_candidate_columns(
+pub(crate) fn build_candidate_columns(
     signal_bars: &[Candle],
     daily_references: &[DailyReference],
     reference_minute_context: &[Candle],
@@ -1628,7 +1644,7 @@ fn build_candidate_columns(
 }
 
 /// Builds one exact anchored signal column from the typed daily reference and
-/// exact-minute `GapFib` context accepted by Candidate production.
+/// exact-minute ORB/`GapFib` context accepted by Candidate production.
 ///
 /// Keeping this as the single implementation is important for the retained
 /// Search V4 successor: every causal prefix must use the same evaluator and
@@ -1663,7 +1679,7 @@ fn build_candidate_signal_column(
     }
     let mut signal_column = anchored.into_column();
     let signal_length_micros = signal_length_micros(rung_seconds)?;
-    overlay_exact_minute_gapfib(
+    overlay_exact_minute_orb_and_gapfib(
         signal_bars,
         reference_minute_context,
         signal_length_micros,
@@ -1672,7 +1688,9 @@ fn build_candidate_signal_column(
         &mut signal_column,
     )
     .map_err(|why| {
-        format!("candidate exact-minute GapFib overlay refused without a coarse fallback: {why:?}")
+        format!(
+            "candidate exact-minute ORB/GapFib overlay refused without a coarse fallback: {why:?}"
+        )
     })?;
     require_column_sources("signal", &signal_column, signal_bars.len())?;
     Ok(signal_column)
@@ -3944,7 +3962,7 @@ fn signal_length_micros(rung_seconds: u32) -> Result<i64, CandidateUniverseRefus
         .ok_or_else(|| "candidate signal duration overflowed microseconds".to_owned())
 }
 
-fn require_exact_calendar(
+pub(crate) fn require_exact_calendar(
     name: &str,
     bars: &[Candle],
     rung_seconds: u32,
@@ -5034,8 +5052,8 @@ fn expected_counts(
             reconciliation.extinction_complete, reconciliation.closure_complete
         ));
     }
-    if reconciliation.extinction_depth == 0 {
-        return Err("candidate extinction depth is zero".to_owned());
+    if reconciliation.extinction_depth == 0 && reconciliation.frequent_itemsets != 0 {
+        return Err("candidate zero nonempty depth carries frequent itemsets".to_owned());
     }
     let long_cells_per_mask = reconciliation.exit_cells_per_mask.long();
     let short_cells_per_mask = reconciliation.exit_cells_per_mask.short();
@@ -5540,7 +5558,7 @@ fn require_load_bound(
     Ok(())
 }
 
-fn requested_span_days(
+pub(crate) fn requested_span_days(
     requested_span: RequestedSpanIdentityV1,
 ) -> Result<(i64, i64), CandidateUniverseRefusal> {
     let first = i64::from(
@@ -6564,6 +6582,92 @@ mod tests {
         };
         PreparedCandidateUniverseV1::new(&descriptor, zero_row_reconciliation, Vec::new())
             .expect("natural extinction seals an exact zero-row Candidate family")
+    }
+
+    #[test]
+    fn initial_empty_frontier_depth_zero_requires_complete_zero_reconciliation() {
+        let descriptor = descriptor(219);
+        let mut proof = zero_prepared(219).receipt().reconciliation();
+        proof.extinction_depth = 0;
+        let prepared = PreparedCandidateUniverseV1::new(&descriptor, proof, Vec::new())
+            .expect("completed k1 extinction has zero nonempty frontiers");
+        assert_eq!(prepared.receipt().reconciliation().extinction_depth, 0);
+        assert_eq!(prepared.receipt().row_count(), 0);
+        for index in 0..4 {
+            let mut changed = proof;
+            match index {
+                0 => changed.extinction_complete = false,
+                1 => changed.closure_complete = false,
+                2 => changed.unknown_closure_itemsets = 1,
+                _ => {
+                    changed.frequent_itemsets = 1;
+                    changed.redundant_itemsets = 1;
+                    changed.sweep_trials += 1;
+                }
+            }
+            assert!(
+                PreparedCandidateUniverseV1::new(&descriptor, changed, Vec::new()).is_err(),
+                "missing zero-frontier proof {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn actual_candidate_resource_halt_cannot_mint_initial_empty_completion() {
+        let fixture = ProductionFixture::new();
+        let sweeper = Sweeper::new(
+            engine::Ladder::with_min_hits(1)
+                .with_ceiling(1)
+                .with_pair_budget(1),
+        );
+        let bounds = CandidateUniverseBoundsV1::new(1_000_000, 4).expect("bounded fixture");
+        let run = sweeper
+            .run_prepared_population_by_reporting(
+                fixture.source().signal_column,
+                &|_, _, _| {},
+                |_| Ok::<(), ()>(()),
+            )
+            .expect("non-pricing observer cannot fail");
+        assert!(
+            run.outcome.sweep.halted.is_some(),
+            "fixture must hit an actual engine resource bound"
+        );
+        assert!(
+            reconcile_candidate_population(
+                &run,
+                &ExitCellsPerMaskV2::new(2, 2).expect("bounded grid sides"),
+                0
+            )
+            .is_err()
+        );
+        let result =
+            produce_candidate_universe_v1(&sweeper, fixture.source(), bounds, &|_, _, _| {});
+        assert!(
+            result.is_err(),
+            "actual exhausted resource budget cannot produce an extinction authority"
+        );
+    }
+
+    #[test]
+    fn actual_empty_and_cold_columns_cannot_mint_initial_empty_completion() {
+        let bars = runner::synthetic::sessions(1);
+        let sweeper = Sweeper::new(engine::Ladder::with_min_hits(1_000_000));
+        let cells = ExitCellsPerMaskV2::new(2, 2).expect("two existing grid sides");
+        for length in [0, 100] {
+            let input = bars.get(..length).expect("bounded generated input");
+            let mut evaluator = indicators::evaluator::Evaluator::new(
+                Widths::pinned().expect("pinned widths"),
+                Availability::Absent,
+                Thresholds::CLASSICAL,
+            );
+            let column = Column::build(input, &mut evaluator);
+            assert!(column.is_empty(), "fixture must contain no warmed row");
+            let run = sweeper
+                .run_prepared_population_by_reporting(column, &|_, _, _| {}, |_| Ok::<(), ()>(()))
+                .expect("no candidate callback can fail");
+            assert!(!run.is_complete());
+            assert!(reconcile_candidate_population(&run, &cells, 0).is_err());
+        }
     }
 
     #[test]

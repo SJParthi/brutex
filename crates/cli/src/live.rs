@@ -706,6 +706,15 @@ fn freshness_of(meta: &std::fs::Metadata, now: std::time::SystemTime) -> Freshne
 /// `now` is the instant [`Freshness`] is measured against; it is the caller's
 /// so that every run in one census is dated by one clock read.
 fn read_one(path: &Path, named: [u8; 32], now: std::time::SystemTime) -> Option<Run> {
+    read_one_with_limit(path, named, now, None)
+}
+
+fn read_one_with_limit(
+    path: &Path,
+    named: [u8; 32],
+    now: std::time::SystemTime,
+    row_limit: Option<usize>,
+) -> Option<Run> {
     let mut file = File::open(path).ok()?;
     let mut header = [0_u8; HEADER_BYTES];
     file.read_exact(&mut header).ok()?;
@@ -736,6 +745,12 @@ fn read_one(path: &Path, named: [u8; 32], now: std::time::SystemTime) -> Option<
     let len = meta.len();
     let freshness = freshness_of(&meta, now);
     let available = usize::try_from(len.saturating_sub(ROWS_AT as u64)).ok()? / STRIDE_BYTES;
+    if let Some(limit) = row_limit
+        && (count > limit
+            || len != u64::try_from(ROWS_AT.checked_add(count.checked_mul(STRIDE_BYTES)?)?).ok()?)
+    {
+        return None;
+    }
     let readable = count.min(available);
 
     let mut rows = Vec::with_capacity(readable);
@@ -774,10 +789,18 @@ fn read_one(path: &Path, named: [u8; 32], now: std::time::SystemTime) -> Option<
             // skipping it would renumber every later row.
             break;
         };
+        if row_limit.is_some()
+            && (row.identity != named || usize::from(row.rank) != nth.checked_add(1)?)
+        {
+            return None;
+        }
         if nth == 0 {
             identity = row.identity;
         }
         rows.push(row);
+    }
+    if row_limit.is_some() && rows.len() != count {
+        return None;
     }
     if rows.is_empty() {
         // A started-but-empty file is a real state -- a run that has not yet
@@ -791,6 +814,165 @@ fn read_one(path: &Path, named: [u8; 32], now: std::time::SystemTime) -> Option<
         rows,
         freshness,
     })
+}
+
+/// Maximum directory entries inspected by one live dashboard refresh.
+pub const LIVE_ENTRY_LIMIT: usize = 4_096;
+/// Maximum independently named live runs admitted by one dashboard refresh.
+pub const LIVE_RUN_LIMIT: usize = 128;
+/// Maximum rows admitted from each live run, before any row buffer is allocated.
+pub const LIVE_ROW_LIMIT: usize = 256;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct LiveStamp {
+    len: u64,
+    modified: std::time::SystemTime,
+    created: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    generation: (u64, u64, i64, i64),
+}
+
+impl LiveStamp {
+    fn of(path: &Path) -> Result<Self, Refusal> {
+        let metadata = std::fs::metadata(path)
+            .map_err(|why| format!("{} could not be measured: {why}", path.display()))?;
+        if !metadata.is_file() {
+            return Err(format!("{} is not a regular live file", path.display()));
+        }
+        Ok(Self {
+            len: metadata.len(),
+            modified: metadata.modified().map_err(|why| {
+                format!(
+                    "{} has no readable modification time: {why}",
+                    path.display()
+                )
+            })?,
+            created: metadata.created().ok(),
+            #[cfg(unix)]
+            generation: {
+                use std::os::unix::fs::MetadataExt as _;
+                (
+                    metadata.dev(),
+                    metadata.ino(),
+                    metadata.ctime(),
+                    metadata.ctime_nsec(),
+                )
+            },
+        })
+    }
+}
+
+/// Bounded live-file index. Every refresh checks directory membership and each
+/// file's metadata; unchanged files reuse their previously verified rows.
+///
+/// Cost includes directory entries and returned rows; changed files additionally
+/// decode their rows. Explicit entry/run/row ceilings bound each term. Cached
+/// values are replaced only after one entire refresh succeeds.
+#[derive(Default)]
+pub struct CensusCache {
+    root: Option<PathBuf>,
+    runs: std::collections::BTreeMap<PathBuf, (LiveStamp, Run)>,
+}
+
+impl CensusCache {
+    /// Refreshes the complete bounded live snapshot without creating files.
+    ///
+    /// # Errors
+    /// Refuses unreadable entries, over-limit directories/files, incomplete or
+    /// corrupt named live files, and a file changing while it is read.
+    pub fn refresh(&mut self, root: &Path) -> Result<Census, Refusal> {
+        self.refresh_at(root, std::time::SystemTime::now())
+    }
+
+    fn refresh_at(&mut self, root: &Path, now: std::time::SystemTime) -> Result<Census, Refusal> {
+        let entries = match std::fs::read_dir(Live::dir(root)) {
+            Ok(entries) => entries,
+            Err(why) if why.kind() == std::io::ErrorKind::NotFound => {
+                self.runs.clear();
+                self.root = Some(root.to_path_buf());
+                return Ok(Census {
+                    listed: true,
+                    ..Census::default()
+                });
+            }
+            Err(why) => return Err(format!("live directory could not be listed: {why}")),
+        };
+        let mut next = std::collections::BTreeMap::new();
+        let mut census = Census {
+            listed: true,
+            ..Census::default()
+        };
+        for (index, entry) in entries.enumerate() {
+            if index >= LIVE_ENTRY_LIMIT {
+                return Err(format!(
+                    "live directory exceeds {LIVE_ENTRY_LIMIT} entries; no prefix snapshot is exposed"
+                ));
+            }
+            let path = entry
+                .map_err(|why| format!("live directory entry is unreadable: {why}"))?
+                .path();
+            let Some(identity) = identity_from_name(&path) else {
+                census.strays = census.strays.saturating_add(1);
+                continue;
+            };
+            if path != Live::path(root, &identity) {
+                return Err(format!(
+                    "{} is not a canonical live filename; no duplicate identity is inferred",
+                    path.display()
+                ));
+            }
+            if next.len() >= LIVE_RUN_LIMIT {
+                return Err(format!(
+                    "live directory exceeds {LIVE_RUN_LIMIT} runs; no prefix snapshot is exposed"
+                ));
+            }
+            let stamp = LiveStamp::of(&path)?;
+            let max_bytes = ROWS_AT.saturating_add(LIVE_ROW_LIMIT.saturating_mul(STRIDE_BYTES));
+            if stamp.len > u64::try_from(max_bytes).unwrap_or(u64::MAX) {
+                return Err(format!(
+                    "{} exceeds the live snapshot limit of {LIVE_ROW_LIMIT} rows",
+                    path.display()
+                ));
+            }
+            let cached = (cfg!(unix) && self.root.as_deref() == Some(root))
+                .then(|| self.runs.get(&path))
+                .flatten()
+                .filter(|(old, _)| *old == stamp);
+            let mut run = if let Some((_, run)) = cached {
+                run.clone()
+            } else {
+                read_one_with_limit(&path, identity, now, Some(LIVE_ROW_LIMIT)).ok_or_else(|| {
+                    format!("{} is unreadable, incomplete, corrupt, or above the live row limit; no ranked prefix is exposed", path.display())
+                })?
+            };
+            if LiveStamp::of(&path)? != stamp {
+                return Err(format!(
+                    "{} changed during the live refresh; retry for one coherent snapshot",
+                    path.display()
+                ));
+            }
+            run.freshness = now
+                .duration_since(stamp.modified)
+                .map_or(Freshness::Unknown, |age| {
+                    if age.as_secs() >= STALE_AFTER_SECS {
+                        Freshness::Stale(age.as_secs())
+                    } else {
+                        Freshness::Touched(age.as_secs())
+                    }
+                });
+            match run.freshness {
+                Freshness::Stale(_) => census.stale = census.stale.saturating_add(1),
+                Freshness::Unknown => census.undated = census.undated.saturating_add(1),
+                Freshness::Touched(_) => {}
+            }
+            census.runs.push(run.clone());
+            next.insert(path, (stamp, run));
+        }
+        census.runs.sort_by_key(|run| run.identity);
+        self.root = Some(root.to_path_buf());
+        self.runs = next;
+        Ok(census)
+    }
 }
 
 /// The identity a live file is named for, and [`census_at`]'s name filter.
@@ -964,6 +1146,139 @@ mod tests {
             gross_win: 320_000,
             gross_loss: -150_000,
         }
+    }
+
+    #[test]
+    fn bounded_live_cache_observes_atomic_updates_removal_and_root_changes() {
+        let root = tempdir();
+        let identity = [91_u8; 32];
+        let mut cache = super::CensusCache::default();
+        assert!(
+            cache
+                .refresh(root.path())
+                .expect("empty directory")
+                .runs
+                .is_empty()
+        );
+        let mut live = Live::open(root.path(), &identity).expect("live");
+        live.publish(&[row(identity, 1, 100)], Summary::default())
+            .expect("first");
+        assert_eq!(
+            cache.refresh(root.path()).expect("first read").runs[0].rows[0].t_milli,
+            100
+        );
+        assert_eq!(
+            cache.refresh(root.path()).expect("cached read").runs[0].rows[0].t_milli,
+            100
+        );
+        live.publish(&[row(identity, 1, 200)], Summary::default())
+            .expect("replacement");
+        assert_eq!(
+            cache.refresh(root.path()).expect("changed read").runs[0].rows[0].t_milli,
+            200
+        );
+        let other = tempdir();
+        assert!(
+            cache
+                .refresh(other.path())
+                .expect("other root")
+                .runs
+                .is_empty()
+        );
+        assert_eq!(
+            cache
+                .refresh(root.path())
+                .expect("original root")
+                .runs
+                .len(),
+            1
+        );
+        assert!(live.finish().is_empty());
+        assert!(cache.refresh(root.path()).expect("removed").runs.is_empty());
+    }
+
+    #[test]
+    fn bounded_live_cache_refuses_torn_corrupt_and_misidentified_rows_without_prefixes() {
+        let root = tempdir();
+        let identity = [92_u8; 32];
+        let mut live = Live::open(root.path(), &identity).expect("live");
+        let mut cache = super::CensusCache::default();
+        for rows in [vec![row([93; 32], 1, 100)], vec![row(identity, 2, 100)]] {
+            live.publish(&rows, Summary::default())
+                .expect("malformed fixture");
+            assert!(cache.refresh(root.path()).is_err());
+        }
+        live.publish(
+            &[row(identity, 1, 100), row(identity, 2, 200)],
+            Summary::default(),
+        )
+        .expect("valid");
+        assert_eq!(
+            cache.refresh(root.path()).expect("valid read").runs.len(),
+            1
+        );
+        let path = Live::path(root.path(), &identity);
+        let mut bytes = std::fs::read(&path).expect("fixture");
+        let original = bytes.clone();
+        bytes[ROWS_AT + STRIDE_BYTES + 50] ^= 1;
+        std::fs::write(&path, &bytes).expect("corruption");
+        assert!(
+            cache.refresh(root.path()).is_err(),
+            "cached rows must not hide same-length corruption"
+        );
+        std::fs::write(&path, &original[..original.len() - 1]).expect("torn tail");
+        assert!(
+            cache.refresh(root.path()).is_err(),
+            "no valid prefix on truncation"
+        );
+        std::fs::write(&path, &original).expect("restored");
+        assert_eq!(
+            cache.refresh(root.path()).expect("recovery").runs[0]
+                .rows
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn bounded_live_cache_refuses_row_run_and_directory_limits() {
+        let root = tempdir();
+        let mut cache = super::CensusCache::default();
+        for byte in 0..=u8::try_from(super::LIVE_RUN_LIMIT).expect("bound fits byte") {
+            Live::open(root.path(), &[byte; 32]).expect("empty named run");
+        }
+        assert!(
+            cache
+                .refresh(root.path())
+                .expect_err("run ceiling")
+                .contains("runs")
+        );
+        let root = tempdir();
+        let identity = [95_u8; 32];
+        let mut live = Live::open(root.path(), &identity).expect("live");
+        let rows: Vec<_> = (1..=super::LIVE_ROW_LIMIT + 1)
+            .map(|rank| row(identity, u16::try_from(rank).expect("rank fits"), 100))
+            .collect();
+        live.publish(&rows, Summary::default())
+            .expect("over-limit fixture");
+        assert!(
+            cache
+                .refresh(root.path())
+                .expect_err("row ceiling")
+                .contains("rows")
+        );
+        let root = tempdir();
+        std::fs::create_dir_all(Live::dir(root.path())).expect("directory");
+        for index in 0..=super::LIVE_ENTRY_LIMIT {
+            std::fs::write(Live::dir(root.path()).join(format!("stray-{index}")), [])
+                .expect("stray");
+        }
+        assert!(
+            cache
+                .refresh(root.path())
+                .expect_err("entry ceiling")
+                .contains("entries")
+        );
     }
 
     /// A run's best rows are readable WHILE it is still running.

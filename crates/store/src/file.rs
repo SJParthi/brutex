@@ -1151,6 +1151,44 @@ impl BarFile {
         )
     }
 
+    /// Opt-in audited read with nonblocking regular-file opens for all three files.
+    /// Keeps the exact shared month lock and original data/checksum handles.
+    ///
+    /// # Errors
+    /// Refuses a busy, missing, aliased, unsupported or corrupt source and every
+    /// full checksum-audit failure. Existing read/write doors are unchanged.
+    pub fn open_existing_audited(
+        root: &Path,
+        path: StorePath<'_>,
+        symbol_id: u32,
+        max_bytes: u64,
+    ) -> Result<crate::checksum_audit::AuditedBarFile, String> {
+        if path.file() != FileKind::Bars {
+            return Err("strict historical checksum audit requires a bar path".to_owned());
+        }
+        let bars_path = path.to_path_buf(root);
+        let lock_path = path.with_file(FileKind::Lock).to_path_buf(root);
+        let lock =
+            crate::checksum_audit::open_regular(&lock_path).map_err(|why| why.to_string())?;
+        lock.try_lock_shared().map_err(|why| why.to_string())?;
+        let bars =
+            crate::checksum_audit::open_regular(&bars_path).map_err(|why| why.to_string())?;
+        let len = bars.metadata().map_err(|why| why.to_string())?.len();
+        Self::validated(
+            bars,
+            bars_path,
+            Some(path.with_file(FileKind::Checksums).to_path_buf(root)),
+            Some(lock),
+            len,
+            symbol_id,
+            path.timeframe().secs(),
+            table_of(path.file()),
+            Access::Audit,
+        )
+        .map_err(|why| why.to_string())?
+        .audit_checksums(max_bytes)
+    }
+
     /// The checks both doors perform, once.
     ///
     /// Split out so the read-only and read-write paths cannot drift about what
@@ -1404,6 +1442,11 @@ impl BarFile {
                     Err(why) if why.kind() == io::ErrorKind::NotFound => None,
                     Err(why) => return Err(classify(at, Action::Open, &why)),
                 },
+                Access::Audit => Some(fault(
+                    crate::checksum_audit::open_regular(at),
+                    at,
+                    Action::Open,
+                )?),
             }
         } else {
             None
@@ -1545,6 +1588,45 @@ impl BarFile {
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.bars_path
+    }
+
+    /// Independently audit every committed checksum block and retain this exact
+    /// read handle for bounded verified reads. Existing read behavior is unchanged.
+    ///
+    /// # Errors
+    /// Refuses missing locks/checksums, non-exact extents, changed files, an
+    /// exceeded byte ceiling, or any full-audit checksum/header failure.
+    pub fn audit_checksums(
+        self,
+        max_bytes: u64,
+    ) -> Result<crate::checksum_audit::AuditedBarFile, String> {
+        crate::checksum_audit::AuditedBarFile::from_file(self, max_bytes)
+    }
+
+    #[expect(
+        clippy::used_underscore_binding,
+        reason = "the existing lifetime-only lock is now also authenticated by the opt-in checksum reader; its legacy ownership remains unchanged"
+    )]
+    pub(crate) fn checksum_inputs(&self) -> Result<crate::checksum_audit::Inputs<'_>, String> {
+        Ok(crate::checksum_audit::Inputs {
+            data: &self.bars,
+            data_path: &self.bars_path,
+            sidecar: self
+                .checksums
+                .as_ref()
+                .ok_or("strict checksum audit requires an existing sidecar")?,
+            sidecar_path: self
+                .crc_path
+                .as_deref()
+                .ok_or("strict checksum audit refuses a file born without checksums")?,
+            lock: self
+                ._lock
+                .as_ref()
+                .ok_or("strict checksum audit requires an existing held month lock")?,
+            lock_path: self
+                .bars_path
+                .with_extension(FileKind::Lock.extension().trim_start_matches('.')),
+        })
     }
 
     /// Appends a batch and publishes it.
@@ -2063,7 +2145,7 @@ impl BarFile {
 /// before a byte is written", and this is that boundary for the two properties
 /// the bytes themselves cannot carry — an impossible bar and a batch out of
 /// order are both well-formed records afterwards.
-fn survey<R: Row>(batch: &[R]) -> Result<(i64, i64), StoreError> {
+pub(crate) fn survey<R: Row>(batch: &[R]) -> Result<(i64, i64), StoreError> {
     let Some(first) = batch.first() else {
         return Err(StoreError::EmptyBatch);
     };
@@ -3655,6 +3737,8 @@ fn open_read(path: &Path) -> io::Result<File> {
 /// if convenient" is how `open_existing` came to create on a `GET`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Access {
+    /// Strict historical admission requires a present nonblocking regular sidecar.
+    Audit,
     /// `open_or_create`: the writer's door.
     Write,
     /// `open_existing`: the reader's door, which creates nothing.

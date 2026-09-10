@@ -140,15 +140,14 @@ fn refuse(name: &str, raw: &str) {
 #[must_use]
 pub(crate) fn count(name: &str) -> Option<u64> {
     let raw = var(name)?;
-    match raw.trim().parse::<u64>() {
-        Ok(n) if n > 0 => Some(n),
+    if let Some(n) = positive_count(&raw) {
+        Some(n)
+    } else {
         // ZERO IS THE CASE WORTH NAMING. A rung count of zero prices only the
         // no-exit baseline and a screen cap of zero considers nothing at all, so
         // both are settings that would silently answer a different question.
-        _ => {
-            refuse(name, &raw);
-            None
-        }
+        refuse(name, &raw);
+        None
     }
 }
 
@@ -177,13 +176,42 @@ pub(crate) fn count_usize(name: &str) -> Option<usize> {
 /// siblings were not. This is that guard, shared.
 pub(crate) fn count_usize_within(name: &str, ceiling: usize) -> Option<usize> {
     let raw = var(name)?;
-    match raw.trim().parse::<usize>() {
-        Ok(n) if n > 0 && n <= ceiling => Some(n),
-        _ => {
-            refuse(name, &raw);
-            None
-        }
+    if let Some(n) = machine_count(&raw, ceiling) {
+        Some(n)
+    } else {
+        refuse(name, &raw);
+        None
     }
+}
+
+/// Pure scalar readers shared by ordinary resolution and strict admission.
+pub(crate) fn positive_count(raw: &str) -> Option<u64> {
+    raw.trim().parse::<u64>().ok().filter(|value| *value > 0)
+}
+
+pub(crate) fn machine_count(raw: &str, ceiling: usize) -> Option<usize> {
+    raw.trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|value| *value > 0 && *value <= ceiling)
+}
+
+pub(crate) fn nonnegative_floor(raw: &str) -> Option<i64> {
+    raw.trim().parse::<i64>().ok().filter(|value| *value >= 0)
+}
+
+pub(crate) fn horizon_count(raw: &str) -> Option<runner::outcome::Horizon> {
+    raw.trim()
+        .parse::<u32>()
+        .ok()
+        .and_then(runner::outcome::Horizon::bars)
+}
+
+pub(crate) fn sizing_rate(raw: &str) -> Option<i64> {
+    raw.trim()
+        .parse::<i64>()
+        .ok()
+        .filter(|value| *value > 5_000 && *value < 10_000)
 }
 
 /// Record an unusable value for a knob this module cannot parse for the caller.

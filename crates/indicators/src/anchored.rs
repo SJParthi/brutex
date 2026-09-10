@@ -44,6 +44,7 @@ use std::collections::HashMap;
 use crate::daily::{DailyLevels, Unusable};
 use crate::evaluator::{Calendar, Evaluator, Widths};
 use crate::gap::GapFib;
+use crate::orb::Orb;
 use crate::pattern::Thresholds;
 use crate::vwap::Availability;
 use crate::{Candle, Corrupt};
@@ -367,7 +368,7 @@ impl<'a> AnchoredEvaluator<'a> {
     /// The same [`Corrupt`] refusals as [`Evaluator::step`].  A refusal changes
     /// neither indicator state, the daily cursor, nor the census.
     pub fn step(&mut self, bar: &Candle) -> Result<ConditionMask, Corrupt> {
-        self.step_with_warmth(bar).map(|(mask, _)| mask)
+        self.step_with_warmth(bar).map(|(mask, _, _)| mask)
     }
 
     /// Step once and return whether the complete run was warm immediately
@@ -376,15 +377,15 @@ impl<'a> AnchoredEvaluator<'a> {
     pub(crate) fn step_with_warmth(
         &mut self,
         bar: &Candle,
-    ) -> Result<(ConditionMask, bool), Corrupt> {
+    ) -> Result<(ConditionMask, ConditionMask, bool), Corrupt> {
         let mut next = *self;
         let signal_day = crate::ist_day(bar.ts_micros);
         next.advance_before(signal_day);
         let warm = next.evaluator.warmed_up();
-        let mask = next.evaluator.step(bar)?;
+        let (mask, known) = next.evaluator.step_known(bar)?;
         next.charge_signal(signal_day);
         *self = next;
-        Ok((mask, warm))
+        Ok((mask, known, warm && next.evaluator.warmed_up()))
     }
 
     /// The currently installed eligible daily OHLCV, if one exists.
@@ -484,7 +485,10 @@ impl<'a> AnchoredEvaluator<'a> {
     }
 }
 
-/// Accounting for the exact-minute `GapFib` overlay on one signal column.
+/// Accounting for an exact-minute overlay on one signal column.
+///
+/// The existing name is retained for compatibility. Both the GapFib-only and
+/// combined ORB/GapFib bridges count the same source minutes and aligned rows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ExactMinuteGapCensus {
     /// Exact stored one-minute bars folded through [`GapFib`].
@@ -678,6 +682,89 @@ pub fn overlay_exact_minute_gapfib(
     calendar: Calendar,
     column: &mut crate::column::Column,
 ) -> Result<ExactMinuteGapCensus, ExactMinuteGapRefusal> {
+    overlay_exact_minute(
+        signal,
+        exact_minute,
+        signal_length_micros,
+        widths,
+        calendar,
+        column,
+        ExactMinuteFamilies::GapFib,
+    )
+}
+
+/// Replace ORB positions 86..=105 and `GapFib` positions 132..=142 from real
+/// one-minute evidence, preserving all other signal-family truth and availability.
+///
+/// A coarse candle may cross an opening-range boundary. Folding its entire high
+/// and low at its opening timestamp includes prices from after that boundary.
+/// This bridge instead streams [`Orb::step`] once per supplied minute and takes
+/// the truth and known masks at the signal's exact final minute. ORB references
+/// therefore use only real minutes inside their own window. The GapFib-only
+/// compatibility bridge and this combined bridge share every alignment and
+/// refusal rule documented on [`overlay_exact_minute_gapfib`].
+///
+/// Replacement is transactional: cadence, OHLCV, close alignment and column
+/// source checks finish before either family changes. Work and retained masks
+/// grow with the supplied minute/signal counts; this is not an O(1) whole fold.
+///
+/// # Errors
+///
+/// [`ExactMinuteGapRefusal`] names the shared exact-minute evidence refusal.
+pub fn overlay_exact_minute_orb_and_gapfib(
+    signal: &[Candle],
+    exact_minute: &[Candle],
+    signal_length_micros: i64,
+    widths: Widths,
+    calendar: Calendar,
+    column: &mut crate::column::Column,
+) -> Result<ExactMinuteGapCensus, ExactMinuteGapRefusal> {
+    overlay_exact_minute(
+        signal,
+        exact_minute,
+        signal_length_micros,
+        widths,
+        calendar,
+        column,
+        ExactMinuteFamilies::OrbAndGapFib,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum ExactMinuteFamilies {
+    GapFib,
+    OrbAndGapFib,
+}
+
+impl ExactMinuteFamilies {
+    /// Both masks describe the same minute close; ORB's post-step known state
+    /// uses the identical frozen windows that its truth emission just read.
+    fn step(
+        self,
+        bar: &Candle,
+        gap: &mut GapFib,
+        orb: &mut Orb,
+        widths: Widths,
+        calendar: &Calendar,
+    ) -> Result<(ConditionMask, ConditionMask), Corrupt> {
+        let (mut truth, mut known) = gap.step_known(bar, widths.fib, calendar)?;
+        if matches!(self, Self::OrbAndGapFib) {
+            truth = truth.union(&orb.step(bar, widths.fib)?);
+            known = known.union(&orb.known(widths.fib));
+        }
+        Ok((truth, known))
+    }
+}
+
+fn overlay_exact_minute(
+    signal: &[Candle],
+    exact_minute: &[Candle],
+    signal_length_micros: i64,
+    widths: Widths,
+    calendar: Calendar,
+    column: &mut crate::column::Column,
+    families: ExactMinuteFamilies,
+) -> Result<ExactMinuteGapCensus, ExactMinuteGapRefusal> {
     if signal_length_micros < MINUTE_MICROS || signal_length_micros.rem_euclid(MINUTE_MICROS) != 0 {
         return Err(ExactMinuteGapRefusal::InvalidSignalLength(
             signal_length_micros,
@@ -691,6 +778,7 @@ pub fn overlay_exact_minute_gapfib(
     }
 
     let mut gap = GapFib::new();
+    let mut orb = Orb::new();
     let mut minute_masks = Vec::with_capacity(exact_minute.len());
     // The latest minute-of-day any supplied session reached. Accumulated in the pass
     // that already walks every minute, so it costs one comparison per bar and no
@@ -707,8 +795,8 @@ pub fn overlay_exact_minute_gapfib(
                 return Err(ExactMinuteGapRefusal::MalformedMinuteCadence { index });
             }
         }
-        let mask = gap
-            .step(bar, widths.fib, &calendar)
+        let mask = families
+            .step(bar, &mut gap, &mut orb, widths, &calendar)
             .map_err(|why| ExactMinuteGapRefusal::CorruptMinute { index, why })?;
         latest_session_micros = latest_session_micros.max(ist_micros_of_day(bar.ts_micros));
         minute_masks.push(mask);
@@ -784,7 +872,11 @@ pub fn overlay_exact_minute_gapfib(
         };
         exact_for_signal.push(mask);
     }
-    if !column.replace_gapfib(&exact_for_signal) {
+    let replaced = match families {
+        ExactMinuteFamilies::GapFib => column.replace_gapfib(&exact_for_signal),
+        ExactMinuteFamilies::OrbAndGapFib => column.replace_orb_and_gapfib(&exact_for_signal),
+    };
+    if !replaced {
         return Err(ExactMinuteGapRefusal::OverlayLengthMismatch);
     }
     let rows = u64::try_from(exact_for_signal.len()).unwrap_or(u64::MAX);
@@ -1667,6 +1759,7 @@ mod tests {
         )
         .expect("future evidence is well formed but causally irrelevant");
         assert_eq!(left.bits(), right.bits());
+        assert_eq!(left.known(), right.known());
         assert_eq!(left.sources(), right.sources());
         assert_eq!(left_census.signal_rows, right_census.signal_rows);
         assert_eq!(left_census.overlaid, right_census.overlaid);

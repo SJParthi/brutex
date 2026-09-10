@@ -53,10 +53,13 @@ pub mod admission;
 pub mod align;
 pub mod audit;
 pub mod bootstrap;
+pub mod bootstrap_zero_v2;
 pub mod bound;
 pub mod closed;
 pub mod excursion;
 pub mod exit_grid_policy;
+pub mod expression;
+pub mod family_allocation_v1;
 pub mod grid;
 pub mod identity;
 pub mod outcome;
@@ -66,6 +69,9 @@ pub mod rank;
 pub mod replay_mask;
 pub mod report;
 pub mod resample;
+pub mod research_family;
+pub mod search_allocation_v1;
+pub mod signal_candle_stop;
 pub mod significance;
 pub mod split;
 pub mod synthetic;
@@ -100,7 +106,7 @@ pub struct Outcome {
 
 /// The completion identity shared by retained and streamed outcomes.
 fn complete(census: &Census, first_swept: Option<usize>, bars: u64, extinct: bool) -> bool {
-    first_swept.is_some() && bars == census.swept && extinct && census.reconciles()
+    bars > 0 && first_swept.is_some() && bars == census.swept && extinct && census.reconciles()
 }
 
 impl Outcome {
@@ -275,10 +281,17 @@ impl Sweeper {
     /// anywhere: the batch runs months in parallel, and retention is what binds.
     #[must_use]
     pub fn run_prepared_streamed(&self, column: &Column) -> StreamedOutcome {
+        self.run_prepared_streamed_reporting(column, &mut |_, _, _| {})
+    }
+
+    /// The same streamed walk, exposing its measured level counters.
+    pub fn run_prepared_streamed_reporting(
+        &self,
+        column: &Column,
+        report: &mut dyn FnMut(&engine::Frontier, usize, u64),
+    ) -> StreamedOutcome {
         let live = live_positions();
-        let sweep = self
-            .ladder
-            .walk_streamed(column.bits(), &live, &mut |_, _, _| {});
+        let sweep = self.ladder.walk_streamed(column.bits(), &live, report);
         StreamedOutcome {
             census: column.census(),
             first_swept: column.first_swept(),
@@ -545,23 +558,98 @@ impl Sweeper {
             ranked.considered, sweep.streamed,
             "the ranker must see every survivor the engine streams"
         );
-        let trials = sweep.levels.iter().fold(0_u64, |total, level| {
-            total
-                .saturating_add(level.survivors)
-                .saturating_add(level.infrequent)
-        });
-        RankedRun {
-            outcome: RankedOutcome {
-                census: column.census(),
-                first_swept: column.first_swept(),
-                effective_trials: trials.saturating_sub(ranked.redundant),
-                trials,
-                closure_complete: ranked.closure_complete,
-                sweep,
-            },
-            ranked,
-            column,
-        }
+        ranked_run(column, sweep, ranked)
+    }
+}
+
+/// Rank a restored retained sweep using the same accumulator as streamed runs.
+/// No indicator fold or combination search is repeated. Every preceding level
+/// is scored once, including the complete history restored from a checkpoint.
+///
+/// # Errors
+/// Refuses a signal-column count mismatch, malformed level accounting, or a
+/// failed tally allocation. The caller must bind the full signal/scoring/forward
+/// inputs to the checkpoint's validated identity before invoking this adapter.
+pub fn rank_checkpointed_sweep(
+    column: Column,
+    scoring_column: Option<&Column>,
+    forward: &crate::outcome::Forward,
+    sweep: Sweep,
+    keep: usize,
+    lens: crate::rank::Lens,
+) -> Result<RankedRun, String> {
+    if sweep.bars != u64::try_from(column.bits().len()).unwrap_or(u64::MAX)
+        || sweep.bars != column.census().swept
+        || !sweep.levels.iter().all(engine::Frontier::reconciles)
+        || !restored_terminal(&sweep)
+    {
+        return Err("restored sweep and signal column/accounting disagree".into());
+    }
+    let mut levels = Vec::new();
+    levels
+        .try_reserve_exact(sweep.levels.len())
+        .map_err(|error| error.to_string())?;
+    let mut accumulator = crate::rank::Accumulator::new(keep, lens);
+    let mut streamed = 0_u64;
+    for (index, level) in sweep.levels.iter().enumerate() {
+        // A partial successor cannot certify closure for its predecessor.
+        // This is exactly the shared engine retirement callback's rule.
+        let next = sweep
+            .levels
+            .get(index + 1)
+            .filter(|next| sweep.halted.is_none_or(|halt| halt.k != next.k));
+        accumulator.offer_retired(level, next, scoring_column.unwrap_or(&column), forward);
+        let tally = engine::keep::Tally::of(level);
+        streamed = streamed.saturating_add(tally.survivors);
+        levels.push(tally);
+    }
+    let ranked = accumulator.finish();
+    let summary = engine::keep::Streamed {
+        levels,
+        streamed,
+        excluded: sweep.excluded,
+        bars: sweep.bars,
+        min_hits: sweep.min_hits,
+        halted: sweep.halted,
+    };
+    Ok(ranked_run(column, summary, ranked))
+}
+
+fn restored_terminal(sweep: &Sweep) -> bool {
+    let Some(last) = sweep.levels.last() else {
+        return sweep.halted.is_some_and(|halt| halt.k == 0);
+    };
+    let sequence = sweep.levels.iter().enumerate().all(|(offset, level)| {
+        u64::from(level.k) == u64::try_from(offset).unwrap_or(u64::MAX).saturating_add(1)
+            && (offset + 1 == sweep.levels.len() || !level.frequent.is_empty())
+    });
+    sequence
+        && sweep
+            .halted
+            .map_or(last.frequent.is_empty(), |halt| halt.k == last.k)
+}
+
+fn ranked_run(
+    column: Column,
+    sweep: engine::keep::Streamed,
+    ranked: crate::rank::Ranked,
+) -> RankedRun {
+    let trials = sweep.levels.iter().fold(0_u64, |total, level| {
+        total
+            .saturating_add(level.survivors)
+            .saturating_add(level.infrequent)
+    });
+    RankedRun {
+        outcome: RankedOutcome {
+            census: column.census(),
+            first_swept: column.first_swept(),
+            effective_trials: trials.saturating_sub(ranked.redundant),
+            trials,
+            closure_complete: ranked.closure_complete,
+            sweep,
+        },
+        ranked,
+        column,
     }
 }
 
@@ -625,6 +713,19 @@ pub struct StreamedOutcome {
     pub first_swept: Option<usize>,
     /// The walk, with each level reduced to its tally.
     pub sweep: engine::keep::Streamed,
+}
+
+impl StreamedOutcome {
+    /// Whether a warmed, reconciled input produced a complete streamed walk.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        complete(
+            &self.census,
+            self.first_swept,
+            self.sweep.bars,
+            self.sweep.completed(),
+        )
+    }
 }
 
 /// A ranked sweep's census and exact level tallies, without retained survivors.
@@ -747,6 +848,24 @@ pub struct Auto {
     pub refused_below: Option<u64>,
 }
 
+/// Structural probe boundaries from the shared threshold search.
+#[derive(Debug)]
+pub enum AutoProbeEvent<'a> {
+    /// Must succeed before this ladder computes any candidate.
+    Started(Ladder),
+    /// Actual counters reported by this probe's engine walk.
+    Level {
+        /// The completed frontier accounting.
+        frontier: &'a engine::Frontier,
+        /// Cumulative admitted candidates.
+        admitted: usize,
+        /// Cumulative join pairs.
+        pairs: u64,
+    },
+    /// The probe's exact outcome, before another probe can start.
+    Finished(&'a Sweep),
+}
+
 impl Sweeper {
     /// Sweeps without a caller choosing a threshold.
     ///
@@ -794,6 +913,30 @@ impl Sweeper {
     /// different input policy.
     #[must_use]
     pub fn auto_prepared(&self, column: &Column) -> Auto {
+        self.auto_prepared_reporting(column, &|_| Ok(()))
+            .unwrap_or_else(|_| self.auto_memory_refusal(column))
+    }
+
+    fn auto_memory_refusal(&self, column: &Column) -> Auto {
+        Auto {
+            affordable: false,
+            outcome: Self::outcome_of(column, self.ladder.refused_on_memory(column.census().swept)),
+            min_hits: None,
+            attempts: 0,
+            refused_below: None,
+        }
+    }
+
+    /// Search with durable admission hooks around every actual probe.
+    ///
+    /// # Errors
+    /// Returns the reporter's refusal before another probe can run. A failed
+    /// start prevents that probe; a failed level or finish prevents publication.
+    pub fn auto_prepared_reporting(
+        &self,
+        column: &Column,
+        report: &dyn Fn(AutoProbeEvent<'_>) -> Result<(), String>,
+    ) -> Result<Auto, String> {
         let live = live_positions();
         // THE OWNED SUPPORT COLUMN IS BUILT ONCE TOO, AND IT WAS NOT.
         //
@@ -807,7 +950,8 @@ impl Sweeper {
         // rebuilt that identical allocation up to thirty-four times, having
         // already paid for it once. Found by an O(1) audit; no per-walk cost was
         // wrong, which is why review missed it.
-        let support_column = engine::column::Column::from_rows(column.bits());
+        let support_column = engine::column::Column::try_from_rows(column.bits())
+            .map_err(|why| format!("the auto support column could not be allocated: {why}"))?;
         let census = column.census();
         let first_swept = column.first_swept();
 
@@ -835,10 +979,7 @@ impl Sweeper {
             // The CALLER's ceiling, not a fresh default: `auto` used to be an
             // associated function and silently discarded whatever budget the
             // `Sweeper` was built with.
-            let sweep = Ladder::with_min_hits(threshold)
-                .with_ceiling(self.ladder.ceiling())
-                .with_pair_budget(PROBE_PAIRS)
-                .walk_column(&support_column, &live, &|_, _, _| {});
+            let sweep = self.auto_probe(threshold, &support_column, &live, report)?;
             if sweep.completed() {
                 // A PROBE THAT FOUND NOTHING IS NOT AN ANSWER, and this is the
                 // whole of the bug an audit found on a 98,124-bar column.
@@ -954,10 +1095,7 @@ impl Sweeper {
             while hi.saturating_sub(lo) > 1 {
                 let mid = lo.saturating_add(hi.saturating_sub(lo) / 2);
                 attempts = attempts.saturating_add(1);
-                let sweep = Ladder::with_min_hits(mid)
-                    .with_ceiling(self.ladder.ceiling())
-                    .with_pair_budget(PROBE_PAIRS)
-                    .walk_column(&support_column, &live, &|_, _, _| {});
+                let sweep = self.auto_probe(mid, &support_column, &live, report)?;
                 if sweep.completed() {
                     let found = sweep.depth() >= 1;
                     hi = mid;
@@ -976,7 +1114,7 @@ impl Sweeper {
         }
 
         let (min_hits, sweep) = best.map_or((None, Sweep::default()), |(t, s)| (Some(t), s));
-        Auto {
+        Ok(Auto {
             affordable: min_hits.is_some(),
             outcome: Outcome {
                 census,
@@ -986,7 +1124,37 @@ impl Sweeper {
             min_hits,
             attempts,
             refused_below,
+        })
+    }
+
+    fn auto_probe(
+        &self,
+        threshold: u64,
+        column: &engine::column::Column,
+        live: &[u32],
+        report: &dyn Fn(AutoProbeEvent<'_>) -> Result<(), String>,
+    ) -> Result<Sweep, String> {
+        let ladder = Ladder::with_min_hits(threshold)
+            .with_ceiling(self.ladder.ceiling())
+            .with_pair_budget(PROBE_PAIRS)
+            .with_support_lanes(self.ladder.support_lanes());
+        report(AutoProbeEvent::Started(ladder))?;
+        let failure = std::cell::RefCell::new(None);
+        let sweep = ladder.walk_column(column, live, &|frontier, admitted, pairs| {
+            if failure.borrow().is_none() {
+                *failure.borrow_mut() = report(AutoProbeEvent::Level {
+                    frontier,
+                    admitted,
+                    pairs,
+                })
+                .err();
+            }
+        });
+        if let Some(why) = failure.into_inner() {
+            return Err(why);
         }
+        report(AutoProbeEvent::Finished(&sweep))?;
+        Ok(sweep)
     }
 }
 
@@ -1516,6 +1684,122 @@ mod tests {
         assert_eq!(run.ranked.considered, run.outcome.sweep.streamed);
     }
 
+    #[test]
+    fn checkpoint_ranking_preserves_streamed_scores_trials_and_partial_closure() {
+        let bars = synthetic::sessions(8);
+        let signal = Column::build(&bars, &mut evaluator());
+        let forward = crate::outcome::forward(&bars, &signal, crate::outcome::Horizon::DEFAULT);
+        let bit_column = engine::column::Column::try_from_rows(signal.bits()).expect("column");
+        for ladder in [bounded(), Ladder::with_min_hits(1).with_ceiling(1)] {
+            for lens in [
+                crate::rank::Lens::Detectability,
+                crate::rank::Lens::Payoff,
+                crate::rank::Lens::Path,
+            ] {
+                for keep in [0, 10] {
+                    let expected = Sweeper::new(ladder).run_prepared_ranked_by_reporting(
+                        signal.clone(),
+                        &signal,
+                        &forward,
+                        keep,
+                        lens,
+                        &|_, _, _| {},
+                    );
+                    let mut saved = Vec::new();
+                    let completed = ladder
+                        .walk_checkpointed(&bit_column, &live_positions(), [7; 32], &mut |view| {
+                            if view.terminal() {
+                                view.write_to(&mut saved)
+                                    .map_err(|error| error.to_string())?;
+                            }
+                            Ok(())
+                        })
+                        .expect("retained checkpoint walk");
+                    let checkpoint = engine::resume::Checkpoint::read_from(
+                        &mut saved.as_slice(),
+                        saved.len() as u64,
+                        [7; 32],
+                    )
+                    .expect("decode");
+                    let resumed = ladder
+                        .resume_checkpointed(
+                            &bit_column,
+                            &live_positions(),
+                            [7; 32],
+                            checkpoint,
+                            &mut |_| Ok(()),
+                        )
+                        .expect("resume");
+                    assert_eq!(resumed, completed);
+                    let got = super::rank_checkpointed_sweep(
+                        signal.clone(),
+                        Some(&signal),
+                        &forward,
+                        resumed,
+                        keep,
+                        lens,
+                    )
+                    .expect("rank restored");
+                    assert_eq!(got.ranked.top, expected.ranked.top);
+                    assert_eq!(got.ranked.closed_top, expected.ranked.closed_top);
+                    assert_eq!(got.ranked.considered, expected.ranked.considered);
+                    assert_eq!(got.ranked.redundant, expected.ranked.redundant);
+                    assert_eq!(got.outcome.trials, expected.outcome.trials);
+                    assert_eq!(
+                        got.outcome.effective_trials,
+                        expected.outcome.effective_trials
+                    );
+                    assert_eq!(
+                        got.outcome.closure_complete,
+                        expected.outcome.closure_complete
+                    );
+                    assert_eq!(got.outcome.is_complete(), expected.outcome.is_complete());
+                    assert_eq!(got.outcome.sweep.levels, expected.outcome.sweep.levels);
+                    assert_eq!(got.outcome.sweep.excluded, expected.outcome.sweep.excluded);
+                    assert_eq!(got.outcome.sweep.halted, expected.outcome.sweep.halted);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn checkpoint_rank_adapter_refuses_a_missing_terminal_or_mismatched_column() {
+        let bars = synthetic::sessions(8);
+        let signal = Column::build(&bars, &mut evaluator());
+        let forward = crate::outcome::forward(&bars, &signal, crate::outcome::Horizon::DEFAULT);
+        let original = Sweeper::new(bounded()).run_prepared(&signal).sweep;
+        assert!(
+            original
+                .levels
+                .last()
+                .expect("terminal")
+                .frequent
+                .is_empty()
+        );
+        for mutation in 0..4 {
+            let mut invalid = original.clone();
+            match mutation {
+                0 => {
+                    invalid.levels.pop();
+                }
+                1 => invalid.bars += 1,
+                2 => invalid.levels.clear(),
+                _ => invalid.levels.first_mut().expect("first").generated += 1,
+            }
+            assert!(
+                super::rank_checkpointed_sweep(
+                    signal.clone(),
+                    None,
+                    &forward,
+                    invalid,
+                    10,
+                    crate::rank::Lens::Detectability
+                )
+                .is_err()
+            );
+        }
+    }
+
     /// The exact call that OOM-killed this process, now a loud refusal.
     ///
     /// `min_hits(2)` over eight sessions is 0.067% support: nearly all 238
@@ -1637,7 +1921,7 @@ mod tests {
         ];
         // EVERY MODULE UNDER `crates/runner/src/`. A module missing from this
         // list is a module the guard does not cover, which is what it was.
-        let sources: [(&str, &str); 24] = [
+        let sources: [(&str, &str); 25] = [
             ("admission.rs", include_str!("admission.rs")),
             ("align.rs", include_str!("align.rs")),
             ("audit.rs", include_str!("audit.rs")),
@@ -1646,6 +1930,7 @@ mod tests {
             ("closed.rs", include_str!("closed.rs")),
             ("excursion.rs", include_str!("excursion.rs")),
             ("exit_grid_policy.rs", include_str!("exit_grid_policy.rs")),
+            ("expression.rs", include_str!("expression.rs")),
             ("grid.rs", include_str!("grid.rs")),
             ("identity.rs", include_str!("identity.rs")),
             ("lib.rs", include_str!("lib.rs")),

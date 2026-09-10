@@ -11,8 +11,11 @@ A brute-force backtesting engine for Indian spot indices. It sweeps
 combinations of boolean market conditions over historical 1-minute bars and
 ranks what survives.
 
-**Engine surface — exactly two instruments, NSE only:**
-`NSE-NIFTY`, `NSE-BANKNIFTY`.
+**Engine surface — NSE only:** `NSE-NIFTY`, `NSE-BANKNIFTY`, plus
+the F&O cash equities added by D-0506. Cash research enumerates the
+intersection of the existing F&O and total-market membership tables; an F&O
+index name is not a stock. Those tables are a snapshot, NOT point-in-time
+membership since 2020. D-0508 reconciles this section with that decision.
 
 BSE and MCX are not swept and not pulled. Narrowed from three
 instruments by D-0017. Existing BSE data already on disk is not deleted --
@@ -22,7 +25,10 @@ append-only history applies to the store as well.
 observable trades, but it never enters the condition vocabulary, never enters
 ranking, and never enters run identity.
 
-Futures, options and single stocks may be **stored**. They are never swept.
+Futures and options may be **stored**. They are never swept. Cash stocks
+outside the named research surface remain storage-only. Cost-excluded,
+unvalidated cash-stock discovery must be labelled as such, never as a live
+trading or profitability assurance.
 
 ---
 
@@ -111,6 +117,11 @@ CI gate 1 enforces this by walking every tracked file. It is not advisory.
 5. **Idempotence.** Same inputs, same outputs, byte for byte. Reruns are safe.
 6. **Honest limits.** If a bound cannot be met, say so. Never claim a
    measurement you did not take. Label extrapolations as extrapolations.
+   For local parallel work, consult `docs/25-macbook-runtime-budget.md` and
+   recheck current resource headroom. The operator's M4 Pro has 14 CPU cores
+   and 48 GiB memory; the additional 8 TB drive is disconnected until the
+   operator mounts it. Installed or disconnected capacity is not available
+   working memory, free space, measured throughput or total O(1) assurance.
 7. **No look-ahead.** At bar N the engine may read bars 0..N.
 
    **Enforced by the SHAPE of the fold, not by an accessor.** This rule used to
@@ -130,8 +141,11 @@ CI gate 1 enforces this by walking every tracked file. It is not advisory.
    the right tool there. Two rules follow from the distinction, and the second
    is the one that bites: **a new consumer that takes `&[Candle]` and indexes
    into it inherits no protection at all** — `vwap::availability_of` reads the
-   whole slice, which is exactly why `cli` and `runner` pass
-   `Availability::Absent` rather than deriving it. Wiring `PastPrefix` into the
+   whole slice, which is exactly why stored callers select availability from
+   instrument kind before reading bars: spot indices use `Availability::Absent`,
+   eligible cash equities use `Availability::Present` (D-0507). Futures remain
+   outside the sweep scope. No caller may infer eligibility from later volume.
+   Wiring `PastPrefix` into the
    fold, or writing a gate that refuses slice indexing on that path, would make
    the original sentence true; until one of those lands this is the honest
    statement. D-0212.

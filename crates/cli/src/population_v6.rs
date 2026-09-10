@@ -2547,6 +2547,8 @@ fn combine<T>(
 pub(crate) struct PopulationV6ProductionSourceV1 {
     finalization: CommittedStoredPopulationFinalizationV4,
     candidates: PopulationV6CandidateAuthoritiesV1,
+    strict_inputs: crate::step3_orchestrator::strict::Guards,
+    extinct_inputs: Vec<crate::step3_orchestrator::family_v6::StoredFamilyV6>,
 }
 
 /// Which of the two charter families this Population V6 source actually holds.
@@ -2598,8 +2600,35 @@ struct AuthenticatedPopulationV6UpstreamV1 {
 }
 
 impl PopulationV6ProductionSourceV1 {
+    pub(crate) fn retain_extinct_inputs(
+        &mut self,
+        inputs: [Option<crate::step3_orchestrator::family_v6::StoredExtinctFamilyV6>; 2],
+    ) -> Result<(), String> {
+        self.extinct_inputs
+            .try_reserve_exact(2)
+            .map_err(|why| why.to_string())?;
+        for input in inputs.into_iter().flatten() {
+            let source =
+                crate::step3_orchestrator::family_v6::StoredFamilyV6::Extinct(Box::new(input));
+            source.require_current()?;
+            self.extinct_inputs.push(source);
+        }
+        Ok(())
+    }
+    pub(crate) fn retain_strict_inputs(
+        &mut self,
+        inputs: crate::step3_orchestrator::strict::Guards,
+    ) -> Result<(), String> {
+        inputs.require_current()?;
+        self.strict_inputs = inputs;
+        Ok(())
+    }
     /// Reauthenticates Finalization and every reachable Candidate source as one snapshot.
     fn authenticate(&mut self) -> Result<AuthenticatedPopulationV6UpstreamV1, PopulationV6Refusal> {
+        self.strict_inputs.require_current()?;
+        for source in &self.extinct_inputs {
+            source.require_current()?;
+        }
         let first_finalization = self
             .finalization
             .population_source()
@@ -2623,6 +2652,10 @@ impl PopulationV6ProductionSourceV1 {
             return Err(
                 "Population V6 upstream authority changed during authentication".to_owned(),
             );
+        }
+        self.strict_inputs.require_current()?;
+        for source in &self.extinct_inputs {
+            source.require_current()?;
         }
         Ok(AuthenticatedPopulationV6UpstreamV1 {
             finalization: first_finalization,
@@ -2718,6 +2751,8 @@ fn bind_population_v6_source(
     let mut source = PopulationV6ProductionSourceV1 {
         finalization,
         candidates,
+        strict_inputs: crate::step3_orchestrator::strict::Guards::default(),
+        extinct_inputs: Vec::new(),
     };
     source.authenticate()?;
     Ok(source)
@@ -3120,6 +3155,90 @@ pub(crate) struct CommittedStoredPopulationV6 {
 }
 
 impl CommittedStoredPopulationV6 {
+    /// Mints later stored replay evidence only for exact admitted, authorized
+    /// members of this retained population. Selection determines the requested
+    /// prefix; this boundary supplies the live dispositions and source facts.
+    pub(crate) fn selected_stored_oos_witnesses(
+        &mut self,
+        request: crate::stored_post_training_oos::StoredPostTrainingOosRequestV1,
+        strategies: &[[u8; 32]],
+        max_candidates: u64,
+        observer: &mut crate::stored_post_training_oos::StoredOosObserverV1<'_>,
+    ) -> Result<Vec<crate::stored_post_training_oos::StoredPostTrainingOosWitnessV1>, String> {
+        if strategies.len() > 25 {
+            return Err("Population V6 replay request exceeds one actual Top-25".to_owned());
+        }
+        let before = self.execution_v4_source()?;
+        let mut cohorts = [None, None];
+        let mut witnesses = Vec::new();
+        let mut remaining = max_candidates;
+        witnesses
+            .try_reserve_exact(strategies.len())
+            .map_err(|why| why.to_string())?;
+        let mut seen = std::collections::HashSet::new();
+        for strategy in strategies {
+            if !seen.insert(*strategy) {
+                return Err("Population V6 replay repeats a strategy".to_owned());
+            }
+            let row = before
+                .rows()
+                .iter()
+                .find(|row| row.population().candidate_semantic_id() == *strategy)
+                .ok_or("Population V6 replay strategy is absent from exact source")?;
+            if row.population().status() != AdmissionV4DecisionStatus::Admitted
+                || !row.disposition().is_authorized()
+            {
+                return Err(
+                    "Population V6 replay requires admitted and execution-authorized evidence"
+                        .to_owned(),
+                );
+            }
+            let family = row.population().family();
+            let slot = usize::from(family == AdmissionV4Family::BankNifty);
+            let cohort = cohorts
+                .get_mut(slot)
+                .ok_or("Population V6 replay family slot")?;
+            if cohort.is_none() {
+                let held = match (&self.upstream.candidates, family) {
+                    (
+                        PopulationV6CandidateAuthoritiesV1::Both { nifty, .. }
+                        | PopulationV6CandidateAuthoritiesV1::Nifty(nifty),
+                        AdmissionV4Family::Nifty,
+                    ) => nifty,
+                    (
+                        PopulationV6CandidateAuthoritiesV1::Both { banknifty, .. }
+                        | PopulationV6CandidateAuthoritiesV1::BankNifty(banknifty),
+                        AdmissionV4Family::BankNifty,
+                    ) => banknifty,
+                    _ => {
+                        return Err(
+                            "Population V6 selected family has no retained stored source"
+                                .to_owned(),
+                        );
+                    }
+                };
+                *cohort = Some(held.stored_post_training_oos_cohort(request)?);
+            }
+            let witness = cohort
+                .as_ref()
+                .ok_or("Population V6 OOS cohort disappeared")?
+                .mint_witness_recorded(row.disposition(), observer)?;
+            remaining = remaining.checked_sub(u64::try_from(witness.candidate_count()).map_err(|why| why.to_string())?)
+                .ok_or("Population V6 stored OOS aggregate candidate ceiling exceeded; no partial replay")?;
+            witnesses.push(witness);
+        }
+        let after = self.execution_v4_source()?;
+        if before.receipt() != after.receipt()
+            || before.source() != after.source()
+            || before.families() != after.families()
+            || before.parameters() != after.parameters()
+            || before.rows() != after.rows()
+        {
+            return Err("Population V6 source changed during stored OOS replay".to_owned());
+        }
+        Ok(witnesses)
+    }
+
     pub(crate) const fn structural_receipt(&self) -> PopulationV6StructuralReceipt {
         self.population.receipt
     }

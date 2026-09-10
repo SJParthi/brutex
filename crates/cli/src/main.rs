@@ -65,7 +65,7 @@ fn main() -> std::process::ExitCode {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut out = String::new();
-    let code = cli::run(&args, &mut out);
+    let code = cli::run_durable(&args, &mut out);
     // PRINTED ON SUCCESS TOO, and that is the change. It used to print only on
     // failure, so a run whose events landed somewhere `/logs` does not read
     // looked exactly like a run that was fully observable. `install_log`'s doc

@@ -2490,11 +2490,31 @@ async fn gaps_json(
     // on this exchange and segment — agreed by union, and the audited series is
     // excluded from its own denominator. A bar is proof the exchange traded;
     // silence is not proof that it did not.
-    let peers = peer_calendar(&site, &asked);
-    let months: Vec<AuditedMonth> = span
-        .iter()
-        .map(|month| audit_one(&site, &asked, *month, peers.calendar.as_ref()))
-        .collect();
+    if asked.timeframe != store::path::Timeframe::MINUTE_1 {
+        return refuse("minute coverage requires timeframe=1min; coarser bars cannot prove their source minutes".to_owned());
+    }
+    let peers = if asked.exchange == "NSE" && asked.segment == "CASH" && asked.contract.is_none() {
+        // A peer's auction eligibility is not this stock's eligibility.
+        PeerCalendar {
+            calendar: None,
+            from: Vec::new(),
+        }
+    } else {
+        peer_calendar(&site, &asked)
+    };
+    let mut months = Vec::with_capacity(span.len());
+    for month in &span {
+        let schedule = audit_cash_schedule(&site, &asked, *month).await;
+        let mut audited = audit_one(
+            &site,
+            &asked,
+            *month,
+            peers.calendar.as_ref(),
+            schedule.as_ref().ok().and_then(Option::as_ref),
+        );
+        audited.evidence_error = schedule.err();
+        months.push(audited);
+    }
 
     (
         axum::http::StatusCode::OK,
@@ -2725,11 +2745,13 @@ fn next_month(month: store::path::YearMonth) -> Option<store::path::YearMonth> {
 struct AuditedMonth {
     /// Which month.
     month: store::path::YearMonth,
-    /// Bars the calendar says this month owed. Zero when the file is absent —
-    /// the calendar still owed them, and [`Self::absent`] is why none are held.
+    /// Bars the verified schedule expects, including an entirely absent file.
+    /// Zero is not a complete verdict when the input or schedule is unverified.
     expected: u32,
     /// Bars the store actually held.
     held: u32,
+    /// Invalid minute-grid/order input; coverage is withheld, not complete.
+    invalid_timestamps: u32,
     /// Minutes absent for a reason that is a real loss.
     lost: u32,
     /// Every absent minute, loss or not.
@@ -2748,6 +2770,8 @@ struct AuditedMonth {
     /// leaves exactly this. Returning it as a `400` would end the walk at the
     /// first hole and report the absence as a malformed request.
     absent_file: Option<String>,
+    /// Missing/corrupt dated session evidence is not a missing bar file.
+    evidence_error: Option<String>,
     /// Records `bars::page` could not read.
     unreadable: usize,
     /// Whether `MAX_GAPS` stopped this month's walk.
@@ -2760,7 +2784,7 @@ impl AuditedMonth {
     /// This month as one JSON object.
     fn render(&self) -> String {
         format!(
-            r#"{{"month":{},"expected":{},"held":{},"lost_minutes":{},"absent_minutes":{},"unmeasured_minutes":{},"truncated":{},"unreadable_records":{},"absent_file":{},"gaps":[{}]}}"#,
+            r#"{{"month":{},"expected":{},"held":{},"lost_minutes":{},"absent_minutes":{},"unmeasured_minutes":{},"truncated":{},"unreadable_records":{},"invalid_timestamps":{},"absent_file":{},"evidence_error":{},"gaps":[{}]}}"#,
             render::json_string(&self.month.to_string()),
             self.expected,
             self.held,
@@ -2769,12 +2793,100 @@ impl AuditedMonth {
             self.unmeasured,
             self.truncated,
             self.unreadable,
+            self.invalid_timestamps,
             self.absent_file
+                .as_ref()
+                .map_or_else(|| "null".to_owned(), |why| render::json_string(why)),
+            self.evidence_error
                 .as_ref()
                 .map_or_else(|| "null".to_owned(), |why| render::json_string(why)),
             self.runs,
         )
     }
+}
+
+/// Restore only local, receipted session metadata for this exact cash stock.
+/// A gap-page read never downloads a master, widens a pull, or borrows another
+/// instrument's flag. A missing date names its evidence error and leaves the
+/// post-CAS denominator unmeasured; source bars remain readable and unchanged.
+async fn audit_cash_schedule(
+    site: &Site,
+    asked: &Addressed,
+    month: store::path::YearMonth,
+) -> Result<Option<pull::cash_auction::Schedule>, String> {
+    let first = Day::new(month.year(), month.month(), 1).map_err(|why| why.to_string())?;
+    let window =
+        pull::session::Window::new(first, first.end_of_month()).map_err(|why| why.to_string())?;
+    audit_cash_schedule_window(site, asked, window).await
+}
+
+async fn audit_cash_schedule_window(
+    site: &Site,
+    asked: &Addressed,
+    window: pull::session::Window,
+) -> Result<Option<pull::cash_auction::Schedule>, String> {
+    if asked.exchange != "NSE" || asked.segment != "CASH" || asked.contract.is_some() {
+        return Ok(None);
+    }
+    let days: Vec<Day> = (window.from().days_from_epoch()..=window.to().days_from_epoch())
+        .filter_map(|number| Day::from_days(number).ok())
+        .filter(|day| {
+            pull::vendor::cash_auction_eligibility_required(*day)
+                && pull::calendar::kind_of(i64::from(day.days_from_epoch()))
+                    == pull::calendar::DayKind::Open(pull::calendar::Session::full())
+        })
+        .collect();
+    if days.is_empty() {
+        return Ok(None);
+    }
+    let isin = brutex_core::universe::nse_isin(&asked.symbol).ok_or_else(|| {
+        format!(
+            "{}: no exact current ISIN for dated cash-session audit",
+            asked.symbol
+        )
+    })?;
+    let mut dated = std::collections::HashMap::new();
+    pull::cash_session_cache::prepare_local_observed(
+        &site.store_root.join("session-masters"),
+        &days,
+        &mut dated,
+    )
+    .await?;
+    let mut schedule = pull::cash_auction::Schedule::default();
+    for day in days {
+        let master = dated
+            .get(&day.days_from_epoch())
+            .ok_or_else(|| format!("{day}: dated cash-session audit evidence missing"))?;
+        let eligible = master
+            .eligibility(&asked.symbol, isin.as_str())
+            .map_err(|why| format!("{day}: {why}"))?;
+        schedule.insert(day, eligible)?;
+    }
+    Ok(Some(schedule))
+}
+
+/// The recovery auditor uses the same receipted cash-session authority as the
+/// gap page. This read never fetches metadata or derives a schedule from bars.
+pub(crate) async fn recovery_cash_schedule(
+    site: &Site,
+    symbol: &str,
+    window: pull::session::Window,
+) -> Result<Option<pull::cash_auction::Schedule>, String> {
+    let month = window.from().year_month().map_err(|why| why.to_string())?;
+    audit_cash_schedule_window(
+        site,
+        &Addressed {
+            vendor: brutex_core::vendor::Vendor::Zerodha,
+            month,
+            timeframe: store::path::Timeframe::MINUTE_1,
+            contract: None,
+            exchange: "NSE".to_owned(),
+            segment: "CASH".to_owned(),
+            symbol: symbol.to_owned(),
+        },
+        window,
+    )
+    .await
 }
 
 /// Audit one month of one series.
@@ -2790,15 +2902,18 @@ fn audit_one(
     asked: &Addressed,
     month: store::path::YearMonth,
     calendar: Option<&pull::calendar::Calendar>,
+    cash_schedule: Option<&pull::cash_auction::Schedule>,
 ) -> AuditedMonth {
     let empty = |absent_file: Option<String>| AuditedMonth {
         month,
         expected: 0,
         held: 0,
+        invalid_timestamps: 0,
         lost: 0,
         absent: 0,
         unmeasured: 0,
         absent_file,
+        evidence_error: None,
         unreadable: 0,
         truncated: false,
         runs: String::new(),
@@ -2810,17 +2925,19 @@ fn audit_one(
              for, so there is no range to audit against"
         )));
     };
-    let file = match asked.open(site, month) {
-        Ok(file) => file,
-        Err(why) => return empty(Some(why)),
-    };
     let first = i64::from(first_day.days_from_epoch());
     let last = i64::from(first_day.end_of_month().days_from_epoch());
 
     // THE WHOLE MONTH, by index. `page` reads at a fixed stride, so this is
     // `n_valid` seeks of known length and nothing scans.
-    let n = usize::try_from(file.header().n_valid).unwrap_or(usize::MAX);
-    let (rows, faults) = bars::page(&file, 0, n);
+    let (rows, faults, absent_file) = match asked.open(site, month) {
+        Ok(file) => {
+            let n = usize::try_from(file.header().n_valid).unwrap_or(usize::MAX);
+            let (rows, faults) = bars::page(&file, 0, n);
+            (rows, faults, None)
+        }
+        Err(why) => (Vec::new(), Vec::new(), Some(why)),
+    };
     let stamps: Vec<i64> = rows.iter().map(|bar| bar.ts_micros).collect();
     // A MARKET SESSION AND AN INDEX-PUBLICATION WINDOW ARE NOT THE SAME FACT.
     // On 2021-02-24 SEBI proves 220 normal-market minutes, but also records
@@ -2828,7 +2945,9 @@ fn audit_one(
     // and gives no common interval for every stored index. The index-specific
     // door therefore refuses to turn that day into invented vendor holes;
     // CASH and derivative series keep the verified exchange-session calendar.
-    let ledger = if asked.segment == "INDEX" {
+    let ledger = if asked.exchange == "NSE" && asked.segment == "CASH" && asked.contract.is_none() {
+        pull::gaps::classify_cash(&stamps, first, last, cash_schedule)
+    } else if asked.segment == "INDEX" {
         pull::gaps::classify_spot_index_against(&stamps, first, last, calendar)
     } else {
         pull::gaps::classify_against(&stamps, first, last, calendar)
@@ -2857,6 +2976,7 @@ fn audit_one(
         month,
         expected: ledger.expected,
         held: ledger.held,
+        invalid_timestamps: ledger.invalid_timestamps,
         lost: ledger.lost_minutes(),
         absent: ledger.absent_minutes(),
         unmeasured: ledger.unmeasured_minutes(),
@@ -2865,7 +2985,8 @@ fn audit_one(
         // audit did not see, so it is scored as a HOLE. Reported beside the
         // verdict so "the file is damaged" cannot be read as "the vendor is
         // missing minutes" — opposite faults wanting opposite fixes.
-        absent_file: None,
+        absent_file,
+        evidence_error: None,
         unreadable: faults.len(),
         truncated: ledger.truncated,
         runs,
@@ -3162,6 +3283,9 @@ pub type CensusCache = std::sync::Mutex<
     )>,
 >;
 
+#[path = "store_wire.rs"]
+mod store_wire;
+
 /// What [`census_now`] hands back: the two cached halves, shared not copied.
 ///
 /// Named because clippy refuses the inline tuple, and named SEPARATELY from
@@ -3225,6 +3349,18 @@ pub(crate) fn census_now(site: &Site) -> CensusNow {
             .census
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Another cold reader may have finished the same manifest snapshot
+        // while this request was reading. Keep its canonical Arc: replacing
+        // it with identical data would invalidate the encoded-response cache
+        // and repeat the full body encoding and hash for every cold reader.
+        if let Some((at, current_censuses, current_entries)) = held.as_ref()
+            && *at == stamps
+        {
+            return (
+                std::sync::Arc::clone(current_censuses),
+                std::sync::Arc::clone(current_entries),
+            );
+        }
         *held = Some((
             stamps,
             std::sync::Arc::clone(&censuses),
@@ -3943,10 +4079,9 @@ async fn verify_json(
 ///
 /// # Cost
 ///
-/// O(body). The body is built either way — this hashes what was already
-/// produced — so the server pays one pass over bytes it is holding, and the
-/// READER is spared the transfer and the parse entirely. That is where the time
-/// an operator actually feels was going.
+/// O(body) once per immutable census snapshot, vendor and wire format. The
+/// wire cache retains both bytes and this digest, so unchanged GETs reuse the
+/// encoding and conditional GETs need no new body pass. HEAD omits both.
 fn census_etag(body: &str) -> String {
     // `hex32` AND NOT A SECOND LOOP. This file already renders 32 bytes as hex
     // at its foot, under a test that pins the width — writing the same fold
@@ -3972,7 +4107,63 @@ async fn store_json(
     axum::extract::State(site): axum::extract::State<Loaded>,
     asked_with: axum::http::HeaderMap,
     uri: axum::http::Uri,
-) -> (axum::http::StatusCode, axum::http::HeaderMap, String) {
+    method: axum::http::Method,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    let head = method == axum::http::Method::HEAD;
+    let result =
+        match crate::detail::run(move || store_response(&site, &asked_with, &uri, &method)).await {
+            Ok(response) => response,
+            Err(why) => (
+                if matches!(why, crate::detail::RunError::Saturated) {
+                    axum::http::StatusCode::TOO_MANY_REQUESTS
+                } else {
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE
+                },
+                census_response_headers(matches!(why, crate::detail::RunError::Saturated)),
+                serde_json::json!({"error":format!("census read unavailable: {why:?}")})
+                    .to_string()
+                    .into(),
+            ),
+        };
+    let mut response = result.into_response();
+    if head {
+        // An exact empty body makes Axum invent Content-Length: 0, which would
+        // misdescribe the GET representation. Unknown size permits omission.
+        *response.body_mut() =
+            axum::body::Body::from_stream(axum::body::Body::empty().into_data_stream());
+        response
+            .headers_mut()
+            .remove(axum::http::header::CONTENT_LENGTH);
+    }
+    response
+}
+
+fn census_response_headers(retry: bool) -> axum::http::HeaderMap {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json; charset=utf-8"),
+    );
+    if retry {
+        headers.insert(
+            axum::http::header::RETRY_AFTER,
+            axum::http::HeaderValue::from_static("1"),
+        );
+    }
+    headers
+}
+
+fn store_response(
+    site: &Site,
+    asked_with: &axum::http::HeaderMap,
+    uri: &axum::http::Uri,
+    method: &axum::http::Method,
+) -> (
+    axum::http::StatusCode,
+    axum::http::HeaderMap,
+    axum::body::Bytes,
+) {
     let query = uri.query().unwrap_or("");
     // REFUSED BY NAME, NEVER SUBSTITUTED. The `.unwrap_or(Vendor::Dhan)` that
     // stood here was unreachable for an ABSENT feed — `parse_vendor` answers
@@ -3992,12 +4183,25 @@ async fn store_json(
         return (
             axum::http::StatusCode::BAD_REQUEST,
             headers,
-            no_such_feed_json(&asked),
+            no_such_feed_json(&asked).into(),
         );
     };
 
     // FRESH, NOT THE STARTUP SNAPSHOT. See `census_now`.
-    let (censuses, entries) = census_now(&site);
+    let format = match param(query, "encoding").as_str() {
+        "" => store_wire::Format::Expanded,
+        store_wire::ENCODING => store_wire::Format::Compact,
+        _ => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                census_response_headers(false),
+                serde_json::json!({"error":"unrecognised census encoding"})
+                    .to_string()
+                    .into(),
+            );
+        }
+    };
+    let (censuses, entries) = census_now(site);
     let census = censuses.iter().find(|c| c.vendor == feed);
     // 503, FOR THE REASON `health` GIVES: a monitor reads the status code and
     // nothing else. The body stays an array so the readers that only want rows
@@ -4009,14 +4213,33 @@ async fn store_json(
     };
     let mut headers = census_headers(census);
 
-    let body = store_body(&censuses, &entries, feed);
-    let etag = census_etag(&body);
+    // HEAD is a header read, not a full census encoding whose body Axum drops.
+    // Representation headers that require generating a body are omitted.
+    if method == axum::http::Method::HEAD {
+        return (code, headers, axum::body::Bytes::new());
+    }
+    let encoded = match site
+        .census_wire
+        .get(&censuses, feed, format, || match format {
+            store_wire::Format::Expanded => Ok(store_body(&censuses, &entries, feed)),
+            store_wire::Format::Compact => store_wire::compact(&censuses, &entries, feed),
+        }) {
+        Ok(encoded) => encoded,
+        Err(why) => {
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                headers,
+                serde_json::json!({"error":why}).to_string().into(),
+            );
+        }
+    };
+    let etag = &encoded.etag;
     // `from_str` cannot fail on this value — it is quotes and hex — but the
     // header map takes a `Result` and a silently dropped validator would mean a
     // reader never gets a 304 and never knows why. Refusing to guess: if it
     // could not be built the response simply carries no validator, which is the
     // pre-existing behaviour rather than a new failure.
-    if let Ok(value) = axum::http::HeaderValue::from_str(&etag) {
+    if let Ok(value) = axum::http::HeaderValue::from_str(etag) {
         headers.insert(axum::http::header::ETAG, value);
     }
 
@@ -4028,11 +4251,15 @@ async fn store_json(
     // whole point is that the counter is broken — and `census_headers` carries
     // the reason in `x-brutex-census-note`, which a 304 body would still deliver
     // but a caching reader might not re-read. A failure keeps its status.
-    if code == axum::http::StatusCode::OK && none_match_hit(&asked_with, &etag) {
-        return (axum::http::StatusCode::NOT_MODIFIED, headers, String::new());
+    if code == axum::http::StatusCode::OK && none_match_hit(asked_with, etag) {
+        return (
+            axum::http::StatusCode::NOT_MODIFIED,
+            headers,
+            axum::body::Bytes::new(),
+        );
     }
 
-    (code, headers, body)
+    (code, headers, encoded.body)
 }
 
 /// The health endpoint.
@@ -4299,6 +4526,8 @@ pub struct Site {
     /// census says, so a pull rewrites them and the next request rebuilds.
     /// Nothing else can make this stale.
     pub census: CensusCache,
+    /// Encoded responses for one exact immutable census snapshot.
+    census_wire: store_wire::Cache,
     /// The run the operator started, if one is in flight or has just ended.
     ///
     /// # Why it is state on the site and not a global
@@ -4315,6 +4544,8 @@ pub struct Site {
     /// here rather than taken out: the page reads its summary after it ends,
     /// and a slot emptied on completion would answer that read with nothing.
     pub run: std::sync::Mutex<Option<crate::pullrun::Progress>>,
+    /// Active recovery plan for durable STOP routing; normal pulls leave None.
+    pub(crate) recovery_active: std::sync::Mutex<Option<[u8; 32]>>,
     /// The browser-started SWEEP, in the same shape as [`Self::run`] and for
     /// the same reasons: one slot per `Site` so concurrent tests do not refuse
     /// each other, `Some` with no `finished_micros` as the one reading of "in
@@ -4350,6 +4581,8 @@ pub struct Site {
     /// pull in progress or reset a rate budget the vendor is still counting
     /// against. See [`Parsed`]. D-0316.
     pub parsed: std::sync::RwLock<Parsed>,
+    /// Serializes reparses without blocking readers of the previous snapshot.
+    reload_lock: std::sync::Mutex<()>,
     /// One manifest census per vendor, in [`Vendor::ALL`] order.
     pub censuses: Vec<census::VendorCensus>,
     /// The coverage grid's instrument axis — every series the censuses hold,
@@ -4457,6 +4690,13 @@ impl Site {
     ///
     /// The verdict, when the fresh parse reads no vendor at all.
     pub fn reparse(&self, masters: &Path) -> Result<String, String> {
+        let _reload = self
+            .reload_lock
+            .lock()
+            .map_err(|_| "master reload lock poisoned; previous universe retained".to_owned())?;
+        // A file changed during parsing must remain visibly newer than this
+        // snapshot, not be hidden by a timestamp taken after the read.
+        let parsed_at = std::time::SystemTime::now();
         let read = universe(masters);
         // A PARSE THAT READ NOTHING MUST NOT REPLACE ONE THAT DID. Swapping an
         // empty universe in would take a working page to a blank one because a
@@ -4469,6 +4709,24 @@ impl Site {
         let fresh = read.merged.by_key.len();
         {
             let held = self.universe();
+            if read.unreadable > 0 || read.non_routine > 0 {
+                return Err(format!(
+                    "master reload refused: {} unreadable rows and {} unrecognised declines; previous universe retained: {}",
+                    read.unreadable,
+                    read.non_routine,
+                    read.notes.join(" · ")
+                ));
+            }
+            if read
+                .unread
+                .iter()
+                .any(|(vendor, _)| !held.read.unread.iter().any(|(old, _)| old == vendor))
+            {
+                return Err(format!(
+                    "master reload lost a previously readable feed; previous universe retained: {}",
+                    read.notes.join(" · ")
+                ));
+            }
             if fresh == 0 && !held.read.merged.by_key.is_empty() {
                 return Err(format!(
                     "the masters on disk parsed into an EMPTY universe, so the {} \
@@ -4487,7 +4745,7 @@ impl Site {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         *held = Parsed {
             read,
-            at: std::time::SystemTime::now(),
+            at: parsed_at,
             targets,
         };
         Ok(summary)
@@ -4532,14 +4790,17 @@ impl Site {
         Self {
             calendars: std::sync::Mutex::new(std::collections::HashMap::new()),
             census: std::sync::Mutex::new(None),
+            census_wire: store_wire::Cache::default(),
             budgets: std::sync::Mutex::new(feed_budgets()),
             // NO RUN UNTIL SOMEBODY PRESSES PULL. A site that started life
             // holding one would answer `/pull/run.json` for a run nobody asked
             // for, which is the shape `CLAUDE.md` §4 bans in the other
             // direction: a report with nothing behind it.
             run: std::sync::Mutex::new(None),
+            recovery_active: std::sync::Mutex::new(None),
             // NO SWEEP UNTIL SOMEBODY PRESSES RUN, for the reason above it.
             sweep: std::sync::Mutex::new(None),
+            reload_lock: std::sync::Mutex::new(()),
             parsed: std::sync::RwLock::new(Parsed {
                 read,
                 // STAMPED AT THE PARSE, not at the first request that asks. The
@@ -5063,6 +5324,40 @@ fn window_facts(window: pull::session::Window) -> Vec<(&'static str, String)> {
     ]
 }
 
+/// Requested spot interval only. Per-chunk wire dates belong to each feed's
+/// descriptor, not the legacy Dhan-specific date caption in `window_facts`.
+fn spot_window_facts(asked: &ingest::SpotRequest) -> Vec<(&'static str, String)> {
+    let exclusive = matches!(asked.feed.descriptor().transport,
+        pull::vendor::Transport::Http(spec)
+            if spec.range_end_for(asked.granularity) == pull::vendor::RangeEnd::Exclusive);
+    window_facts(asked.window)
+        .into_iter()
+        .filter(|(label, _)| *label != "toDate on the wire" || exclusive)
+        .map(|(label, value)| {
+            (
+                label,
+                if label == "Timeframe" {
+                    asked.granularity.to_string()
+                } else {
+                    value
+                },
+            )
+        })
+        .collect()
+}
+
+fn spot_reach_text(asked: &ingest::SpotRequest, site: &Site) -> String {
+    if asked.cash_identity == ingest::CashIdentity::Isin {
+        return reach_text(asked.target, asked.feed, site);
+    }
+    format!(
+        "Selected policy: {}. The default vendor-supplied ISIN coverage is not \
+         this policy's result. Every requested member is checked before vendor work; \
+         a missing or ambiguous match refuses the request without shrinking it.",
+        asked.cash_identity.label(),
+    )
+}
+
 /// What one spot request is answered with, given a day to check the window
 /// against.
 ///
@@ -5124,12 +5419,9 @@ async fn spot_answer(
                 // there and Groww lists 24 of them. An operator was told 35,
                 // watched eleven instruments refuse by name, and had nothing on
                 // the receipt that had predicted it. D-0120.
-                (
-                    "This feed can name",
-                    reach_text(asked.target, asked.feed, site),
-                ),
+                ("This feed can name", spot_reach_text(&asked, site)),
             ];
-            facts.extend(window_facts(asked.window));
+            facts.extend(spot_window_facts(&asked));
 
             // THE TRANSPORT CHOOSES THE PATH. Nothing else does.
             //
@@ -5155,6 +5447,10 @@ async fn spot_answer(
             // bar length would leave an operator unable to say which of two
             // directories a run wrote to.
             facts.push(("Bar length", asked.granularity.to_string()));
+            facts.push((
+                "Cash identity assurance",
+                asked.cash_identity.label().to_owned(),
+            ));
             match asked.feed.descriptor().transport {
                 // THE BROKER PATH. The credential is read from Parameter Store
                 // (D-0051), the descriptor drives the request, and the bars
@@ -5220,6 +5516,76 @@ async fn spot_answer(
 /// eighty-one chunks would make eighty chunks' bars vanish from a receipt whose
 /// entire purpose is that they do not.
 fn land_one(landed: &BrokerWindow, site: &Site) -> pull::ingest::Ingested {
+    land_one_scheduled(landed, site, None)
+}
+
+fn land_one_scheduled(
+    landed: &BrokerWindow,
+    site: &Site,
+    cash_schedule: Option<&pull::cash_auction::Schedule>,
+) -> pull::ingest::Ingested {
+    land_bodies_scheduled(landed, site, cash_schedule, &landed.bodies)
+}
+
+/// Read existing index observations for diagnostics, never schedule authority.
+/// The cached calendar is keyed by feed and full identity and invalidated by
+/// manifest changes. No vendor fetch or calendar construction from this response.
+fn ingestion_observations(
+    landed: &BrokerWindow,
+    site: &Site,
+) -> Option<std::sync::Arc<pull::calendar::Calendar>> {
+    if landed.exchange != "NSE"
+        || landed.contract.is_some()
+        || !matches!(landed.segment, "INDEX" | "CASH")
+        || landed.granularity != pull::vendor::Granularity::Minute1
+    {
+        return None;
+    }
+    let symbol = if landed.segment == "INDEX" && landed.instrument == "BANKNIFTY" {
+        "BANKNIFTY"
+    } else {
+        "NIFTY"
+    };
+    let (fresh, _) = census_now(site);
+    let vendor = fresh
+        .iter()
+        .find(|census| census.vendor == landed.store_vendor)?;
+    let held = census::held_entries(std::slice::from_ref(vendor));
+    let mut months: Vec<_> = held
+        .iter()
+        .filter_map(|(series, month)| {
+            (series.exchange.as_str() == "NSE"
+                && series.segment.as_str() == "INDEX"
+                && series.symbol.as_str() == symbol
+                && series.contract.is_none())
+            .then_some(*month)
+        })
+        .collect();
+    months.sort_unstable();
+    months.dedup();
+    if months.is_empty() {
+        return None;
+    }
+    Some(crate::calendar_of::cached(
+        &site.calendars,
+        &site.store_root,
+        landed.store_vendor,
+        "NSE",
+        "INDEX",
+        symbol,
+        &months,
+    ))
+}
+
+fn land_bodies_scheduled(
+    landed: &BrokerWindow,
+    site: &Site,
+    cash_schedule: Option<&pull::cash_auction::Schedule>,
+    bodies: &[(pull::session::Window, pull::fetch::RawWindow)],
+) -> pull::ingest::Ingested {
+    // Snapshot before any source append. Observations explain refusals only;
+    // Runtime preserves the static authority even when all index feeds agree.
+    let observed_calendar = ingestion_observations(landed, site);
     let request = pull::fetch::BarRequest {
         instrument_id: String::new(),
         // THE INSTRUMENT'S OWN CLASS, WHICH DECIDES THE SESSION CLOCK.
@@ -5242,6 +5608,11 @@ fn land_one(landed: &BrokerWindow, site: &Site) -> pull::ingest::Ingested {
         granularity: landed.granularity,
     };
     let plan = pull::ingest::Plan {
+        cash_schedule,
+        calendar: observed_calendar.as_deref().map_or_else(
+            pull::calendar::Runtime::default,
+            pull::calendar::Runtime::from_observed,
+        ),
         columns: pull::csv::Columns::Gdfl,
         request: &request,
         // FROM THE DESCRIPTOR, NOT A LITERAL. Dhan stamps epoch seconds and
@@ -5272,7 +5643,7 @@ fn land_one(landed: &BrokerWindow, site: &Site) -> pull::ingest::Ingested {
         contract: landed.contract,
     };
     let mut done = pull::ingest::Ingested::default();
-    for (chunk, body) in &landed.bodies {
+    for (chunk, body) in bodies {
         // EACH BODY IS FILTERED AGAINST THE WINDOW IT WAS FETCHED FOR.
         //
         // One `BarRequest` was built above and reused for every body, carrying
@@ -5346,7 +5717,7 @@ async fn broker_answer(
             audit::Scope::Spot,
             audit::Outcome::NotStarted,
             now,
-            asked.target.label(),
+            &spot_audit_origin(asked.cash_identity, asked.target.label()),
             why,
         )
         .with_window(asked.window);
@@ -5376,7 +5747,7 @@ async fn broker_answer(
             audit::Scope::Spot,
             audit::Outcome::NotStarted,
             now,
-            asked.target.label(),
+            &spot_audit_origin(asked.cash_identity, asked.target.label()),
             &blocked.why,
         )
         .with_window(asked.window);
@@ -5420,7 +5791,11 @@ async fn broker_answer(
             format!("{} named: {}", named.len(), named.join(", "))
         },
     ));
-    facts.push(("Instruments attempted", run.attempted.to_string()));
+    facts.push(("Instruments expected", run.attempted.to_string()));
+    facts.push((
+        "Instruments attempted",
+        run.reached.saturating_add(run.refused.len()).to_string(),
+    ));
     facts.push(("Instruments reached", run.reached.to_string()));
     if !run.refused.is_empty() {
         facts.push((
@@ -5495,15 +5870,29 @@ async fn broker_answer(
         };
         return refuse(facts, first, status);
     }
+    let origin = spot_audit_origin(asked.cash_identity, &run.origin);
     landed_answer(
         &run.total,
         asked.window,
         now,
-        &run.origin,
+        &origin,
         journal,
         facts,
         run.took,
     )
+}
+
+/// What one sweep over the tracked universe did.
+fn spot_audit_origin(policy: ingest::CashIdentity, origin: &str) -> String {
+    match policy {
+        ingest::CashIdentity::Isin => origin.to_owned(),
+        ingest::CashIdentity::ZerodhaSymbol => {
+            format!("zerodha_symbol NOT ISIN-verified; {origin}")
+        }
+        ingest::CashIdentity::ZerodhaCrossChecked => {
+            format!("zerodha_cross_checked NSE-ISIN current snapshot; {origin}")
+        }
+    }
 }
 
 /// What one sweep over the tracked universe did.
@@ -5566,6 +5955,26 @@ pub(crate) struct BrokerRun {
 }
 
 impl BrokerRun {
+    /// A transport refusal must also reach the receipt's failure accounting.
+    /// Otherwise a different member's successful write makes the whole basket green.
+    fn record_refusal(&mut self, instrument: &str, why: String) {
+        self.total.failures.push(pull::ingest::Failure {
+            instrument: instrument.to_owned(),
+            why: why.clone(),
+        });
+        self.refused.push(why);
+    }
+
+    /// Preserve partial writes, but never certify an interrupted basket.
+    fn record_stop(&mut self) {
+        if let Some(why) = &self.stopped {
+            self.total.failures.push(pull::ingest::Failure {
+                instrument: "requested basket".to_owned(),
+                why: why.clone(),
+            });
+        }
+    }
+
     /// A run that never opened a socket, and why.
     ///
     /// Every other counter stays at its default and that is the POINT: nothing
@@ -5686,6 +6095,10 @@ fn note_run_started(asked: &ingest::SpotRequest, instruments: usize) -> Option<u
     });
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::info("pull.run", "started")
+            .with(
+                "cash_identity",
+                telemetry::Value::Str(asked.cash_identity.label()),
+            )
             .with("feed", telemetry::Value::Str(asked.feed.wire()))
             .with("target", telemetry::Value::Str(asked.target.label()))
             .with("rung", telemetry::Value::Str(asked.granularity.dir()))
@@ -5727,7 +6140,11 @@ fn note_run_finished(out: &BrokerRun, balanced: bool, claimed: Option<u64>) {
                 "finished — BOOKS DO NOT BALANCE"
             },
         )
-        .with("attempted", telemetry::Value::Uint(out.attempted as u64))
+        .with("expected", telemetry::Value::Uint(out.attempted as u64))
+        .with(
+            "attempted",
+            telemetry::Value::Uint(out.reached.saturating_add(out.refused.len()) as u64),
+        )
         .with("reached", telemetry::Value::Uint(out.reached as u64))
         .with("members", telemetry::Value::Uint(out.total.members as u64))
         .with(
@@ -6075,6 +6492,337 @@ fn spot_targets(
     targets
 }
 
+/// A pull must not silently shrink a named basket or use a ticker match as
+/// proof of a cash identity. This runs once before network work; it reuses the
+/// prebuilt ISIN index and performs one hash probe per requested member.
+fn spot_mapping_refusal(
+    asked: &ingest::SpotRequest,
+    read: &Read,
+    targets: &[brutex_core::instrument::InstrumentKey],
+) -> Option<String> {
+    let vendor = asked.feed.store_vendor()?;
+    let resolved: std::collections::HashSet<_> =
+        targets.iter().map(|key| key.underlying.as_str()).collect();
+    let expected: Vec<&str> = if asked.members.is_empty() {
+        asked
+            .target
+            .members()
+            .map_or_else(Vec::new, <[&str]>::to_vec)
+    } else {
+        asked
+            .members
+            .iter()
+            .map(brutex_core::symbol::Symbol::as_str)
+            .collect()
+    };
+    let mut issues: Vec<String> = expected
+        .into_iter()
+        .filter(|name| !resolved.contains(name))
+        .map(|name| format!("{name}: no unambiguous vendor ID in the requested target"))
+        .collect();
+    for key in targets {
+        if let Err(why) = spot_vendor_identity_for(read, key, vendor, asked.cash_identity) {
+            issues.push(why);
+        }
+    }
+    if issues.is_empty() {
+        return None;
+    }
+    issues.sort_unstable();
+    issues.dedup();
+    Some(format!(
+        "Instrument mapping is not ready for {}: {}. No vendor was contacted; resolve the named identities or explicitly choose a fully mapped subset. Current membership is a snapshot, not historical membership coverage.",
+        asked.feed.display(),
+        issues.join("; ")
+    ))
+}
+
+/// Names the evidence required before cash-minute landing may proceed.
+#[cfg(test)]
+fn spot_cash_session_refusal(
+    asked: &ingest::SpotRequest,
+    targets: &[brutex_core::instrument::InstrumentKey],
+) -> Option<String> {
+    if asked.granularity != pull::vendor::Granularity::Day1
+        && pull::vendor::cash_auction_eligibility_required(asked.window.to())
+        && targets
+            .iter()
+            .any(|key| key.kind == brutex_core::instrument::Kind::Equity)
+    {
+        Some("Intraday cash session coverage is not verified from 2026-08-03: dated per-stock CAS eligibility and auction-phase separation are required. No vendor was contacted. Daily candles are not blocked by this intraday check; index and derivative hours are separate.".to_owned())
+    } else {
+        None
+    }
+}
+
+/// Acquire eligibility for response dates and committed dates in source months
+/// that derivation will reread. Historical metadata must already be local and
+/// receipted; all dates require exact symbol+ISIN verification. This does not
+/// promote an unmeasured calendar day into a certified regular session:
+/// request coverage still reports it and derived bars remain withheld.
+async fn prepare_cash_schedule(
+    landed: &BrokerWindow,
+    bodies: &[(pull::session::Window, pull::fetch::RawWindow)],
+    instrument: &brutex_core::instrument::InstrumentKey,
+    site: &Site,
+    dated: &mut std::collections::HashMap<u32, pull::cash_auction::DailyEligibility>,
+) -> Result<Option<pull::cash_auction::Schedule>, String> {
+    if landed.granularity == pull::vendor::Granularity::Day1
+        || landed.listing != pull::vendor::Listing::Equity
+    {
+        return Ok(None);
+    }
+    if landed.exchange != "NSE"
+        || landed.segment != "CASH"
+        || landed.contract.is_some()
+        || landed.instrument != instrument.underlying.as_str()
+    {
+        return Err("cash schedule requires the exact NSE cash source identity".to_owned());
+    }
+    let source_days = observed_cash_source_days(bodies, landed.spec.timestamps)?;
+    let mut days = observed_cash_days(bodies, landed.spec.timestamps)?;
+    let historical = if landed.granularity == pull::vendor::Granularity::Minute1 {
+        let months: Result<Vec<_>, _> = source_days.iter().map(|day| day.year_month()).collect();
+        pull::ingest::committed_cash_days(
+            &site.store_root,
+            landed.store_vendor,
+            instrument.underlying.as_str(),
+            &months.map_err(|why| why.to_string())?,
+        )?
+    } else {
+        Vec::new()
+    };
+    let cache_root = site.store_root.join("session-masters");
+    pull::cash_session_cache::prepare_local_observed(&cache_root, &historical, dated).await?;
+    // Historical entries have just been receipt-checked, including any date
+    // repeated in this response. Do not decompress those masters twice.
+    days.retain(|day| historical.binary_search(day).is_err());
+    pull::cash_session_cache::prepare_observed(&cache_root, &days, dated).await?;
+    days.extend(historical);
+    days.sort_unstable();
+    days.dedup();
+    if days.is_empty() {
+        return Ok(None);
+    }
+    let isin =
+        brutex_core::universe::nse_isin(instrument.underlying.as_str()).ok_or_else(|| {
+            format!(
+                "{}: no ISIN for dated cash-session verification",
+                instrument.underlying
+            )
+        })?;
+    let mut schedule = pull::cash_auction::Schedule::default();
+    for day in &days {
+        let master = dated
+            .get(&day.days_from_epoch())
+            .ok_or_else(|| format!("{day}: dated eligibility not acquired"))?;
+        let eligible = master
+            .eligibility(instrument.underlying.as_str(), isin.as_str())
+            .map_err(|why| format!("{day}: {why}; instrument landing refused"))?;
+        schedule.insert(*day, eligible)?;
+    }
+    note_cash_schedule_verified(days.len(), 1);
+    Ok(Some(schedule))
+}
+
+fn observed_cash_days(
+    bodies: &[(pull::session::Window, pull::fetch::RawWindow)],
+    encoding: pull::vendor::TimestampEncoding,
+) -> Result<Vec<Day>, String> {
+    Ok(observed_cash_source_days(bodies, encoding)?
+        .into_iter()
+        .filter(|day| pull::vendor::cash_auction_eligibility_required(*day))
+        .collect())
+}
+
+fn observed_cash_source_days(
+    bodies: &[(pull::session::Window, pull::fetch::RawWindow)],
+    encoding: pull::vendor::TimestampEncoding,
+) -> Result<Vec<Day>, String> {
+    use pull::vendor::TimestampEncoding;
+    let mut days = std::collections::HashSet::new();
+    for (window, body) in bodies {
+        for row in &body.rows {
+            let epoch = match encoding {
+                TimestampEncoding::EpochMillisUtc => row.timestamp.div_euclid(1_000),
+                TimestampEncoding::EpochSecondsUtc | TimestampEncoding::IsoDateTimeOffset => {
+                    row.timestamp
+                }
+                TimestampEncoding::IstDateTimeText | TimestampEncoding::IsoDateTimeText => row
+                    .timestamp
+                    .checked_sub(pull::session::IST_OFFSET_SECS)
+                    .ok_or("cash eligibility timestamp overflow")?,
+            };
+            let day = pull::session::IstMoment::from_epoch_secs(epoch)
+                .map_err(|why| why.to_string())?
+                .day();
+            if day >= window.from()
+                && day <= window.to()
+                && window
+                    .verdict(
+                        epoch,
+                        pull::session::Cadence::Minute,
+                        pull::vendor::Venue::NseCash,
+                    )
+                    .map_err(|why| why.to_string())?
+                    .is_none()
+            {
+                days.insert(day.days_from_epoch());
+            }
+        }
+    }
+    let mut numbers: Vec<_> = days.into_iter().collect();
+    numbers.sort_unstable();
+    numbers
+        .into_iter()
+        .map(|day| Day::from_days(day).map_err(|why| why.to_string()))
+        .collect()
+}
+
+async fn land_spot(
+    landed: &BrokerWindow,
+    instrument: &brutex_core::instrument::InstrumentKey,
+    site: &Site,
+    dated: &mut std::collections::HashMap<u32, pull::cash_auction::DailyEligibility>,
+) -> pull::ingest::Ingested {
+    let mut done = pull::ingest::Ingested::default();
+    for bodies in landed.bodies.chunks(1) {
+        match prepare_cash_schedule(landed, bodies, instrument, site, dated).await {
+            Ok(schedule) => done.absorb(land_bodies_scheduled(
+                landed,
+                site,
+                schedule.as_ref(),
+                bodies,
+            )),
+            Err(why) => done.absorb(pull::ingest::Ingested {
+                members: bodies.len(),
+                rows_read: bodies.iter().map(|(_, body)| body.rows.len()).sum(),
+                failures: vec![pull::ingest::Failure {
+                    instrument: instrument.underlying.to_string(),
+                    why,
+                }],
+                ..pull::ingest::Ingested::default()
+            }),
+        }
+    }
+    done
+}
+
+fn note_cash_schedule_verified(days: usize, instruments: usize) {
+    let _logged = telemetry::emit(
+        &telemetry::Event::info("pull.cash_session", "dated eligibility verified")
+            .with("days", telemetry::Value::Uint(days as u64))
+            .with("instruments", telemetry::Value::Uint(instruments as u64))
+            .with(
+                "policy",
+                telemetry::Value::Str("NSE MII symbol+ISIN; continuous only; auction excluded"),
+            ),
+    );
+}
+
+/// Both wire fields come from one catalogue snapshot. Recheck at the fetch
+/// boundary so a refresh cannot pair a class from one snapshot with another ID.
+#[cfg(test)]
+fn spot_vendor_identity(
+    read: &Read,
+    key: &brutex_core::instrument::InstrumentKey,
+    vendor: Vendor,
+) -> Result<(brutex_core::vendor::VendorId, pull::vendor::Listing), String> {
+    spot_vendor_identity_for(read, key, vendor, ingest::CashIdentity::Isin)
+}
+
+fn spot_vendor_identity_for(
+    read: &Read,
+    key: &brutex_core::instrument::InstrumentKey,
+    vendor: Vendor,
+    policy: ingest::CashIdentity,
+) -> Result<(brutex_core::vendor::VendorId, pull::vendor::Listing), String> {
+    if policy != ingest::CashIdentity::Isin && vendor != Vendor::Zerodha {
+        return Err("Zerodha identity policy cannot name another vendor".to_owned());
+    }
+    let entry = read.merged.by_key.get(key);
+    let id = entry
+        .and_then(|entry| entry.ids.get(vendor as usize).copied().flatten())
+        .ok_or_else(|| {
+            format!(
+                "{}: {} has no unambiguous vendor ID",
+                key.underlying,
+                vendor.as_str()
+            )
+        })?;
+    if key.kind == brutex_core::instrument::Kind::Index {
+        return Ok((id, pull::vendor::Listing::Index));
+    }
+    if key.kind != brutex_core::instrument::Kind::Equity {
+        return Err(format!("{}: not a spot instrument", key.underlying));
+    }
+    if policy != ingest::CashIdentity::Isin {
+        if vendor != Vendor::Zerodha
+            || key.exchange != brutex_core::instrument::Exchange::Nse
+            || key.segment != brutex_core::instrument::Segment::Cash
+            || read.merged.native_id(vendor, key) != Some(id)
+        {
+            return Err(format!(
+                "{}: no unique exact native NSE cash identity for the explicitly selected Zerodha symbol policy",
+                key.underlying
+            ));
+        }
+        if policy == ingest::CashIdentity::ZerodhaCrossChecked {
+            zerodha_isin_cross_check(read, key)?;
+        }
+        return Ok((id, pull::vendor::Listing::Equity));
+    }
+    let isin = brutex_core::universe::nse_isin(key.underlying.as_str())
+        .ok_or_else(|| format!("{}: exchange ISIN is unavailable", key.underlying))?;
+    if entry.and_then(|entry| entry.vendor_isin(vendor)).is_none() {
+        return Err(format!(
+            "{}: {} vendor ID exists but vendor-specific cash ISIN evidence is unavailable; \
+             refresh alone cannot supply a field absent from the vendor master. \
+             A separately verified identity mapping is required before this cash pull",
+            key.underlying,
+            vendor.as_str()
+        ));
+    }
+    if read.constituents.id(vendor, key.exchange, isin) != Some(id)
+        || entry.and_then(|entry| entry.vendor_isin(vendor)) != Some(isin)
+    {
+        return Err(format!(
+            "{}: selected vendor ID does not uniquely match the exchange ISIN {isin}",
+            key.underlying
+        ));
+    }
+    Ok((id, pull::vendor::Listing::Equity))
+}
+
+/// Keep the exchange's ISIN and the broker's token as separate assertions.
+/// An exact, unambiguous ISIN-bearing independent listing must corroborate
+/// the exchange table. No vendor's ISIN column is synthesized or overwritten.
+fn zerodha_isin_cross_check(
+    read: &Read,
+    key: &brutex_core::instrument::InstrumentKey,
+) -> Result<(), String> {
+    let isin = brutex_core::universe::nse_isin(key.underlying.as_str())
+        .ok_or_else(|| format!("{}: exchange ISIN is unavailable", key.underlying))?;
+    let corroborated = read.merged.by_key.get(key).is_some_and(|entry| {
+        Vendor::ALL.into_iter().any(|vendor| {
+            vendor != Vendor::Zerodha
+                && entry.vendor_isin(vendor) == Some(isin)
+                && read.merged.native_id(vendor, key).is_some_and(|native| {
+                    entry.ids.get(vendor as usize).copied().flatten() == Some(native)
+                        && read.constituents.id(vendor, key.exchange, isin) == Some(native)
+                })
+        })
+    });
+    if !corroborated {
+        return Err(format!(
+            "{}: exchange ISIN {isin} has no unambiguous exact independent master witness; \
+             Zerodha token mapping alone is not sufficient for the selected cross-check",
+            key.underlying,
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) async fn broker_run(
     asked: &ingest::SpotRequest,
     site: &Site,
@@ -6102,6 +6850,10 @@ pub(crate) async fn broker_run(
     // continues. Over ~11,200 requests a run that dies on the first network
     // blip is a run that never finishes, and a single `?` here would be that.
     let mut targets = spot_targets(asked, site);
+    if let Some(why) = spot_mapping_refusal(asked, &site.universe().read, &targets) {
+        return BrokerRun::blocked(why, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    let mut dated = std::collections::HashMap::new();
     // Sorted so a run is reproducible: `HashMap` order is not stable between
     // processes, and an unordered backfill resumes in a different place after
     // every restart.
@@ -6236,7 +6988,7 @@ pub(crate) async fn broker_run(
                 );
                 site.autopilot
                     .fail(&instrument.underlying.to_string(), &month, &why);
-                out.refused.push(why);
+                out.record_refusal(instrument.underlying.as_str(), why);
             }
             Ok(landed) => {
                 // ANY SUCCESS CLEARS THE BREAKER. The vendor answered, so
@@ -6246,7 +6998,7 @@ pub(crate) async fn broker_run(
                 vendor_down_streak = breaker_next(vendor_down_streak, false);
                 out.reached += 1;
                 out.origin.clone_from(&landed.origin);
-                let mut landed_one = land_one(&landed, site);
+                let mut landed_one = land_spot(&landed, instrument, site, &mut dated).await;
                 note_short_window(
                     &landed.instrument,
                     landed.unfetched.as_deref(),
@@ -6276,10 +7028,66 @@ pub(crate) async fn broker_run(
     // claiming to be fetching the last instrument it touched for as long as the
     // process lived.
     site.autopilot.publish(|status| status.now = None);
+    out.record_stop();
     out.took = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
-    let balanced = out.total.balances();
-    note_run_finished(&out, balanced, claimed_run);
+    note_run_finished(&out, out.total.balances(), claimed_run);
     out
+}
+
+/// Exact recovery unit, using the existing mapping, credential, rate-limit,
+/// source-write and derivation path. The typed result precedes HTML rendering.
+/// A failed audit append is a failure, even when source bars already landed.
+pub(crate) async fn recovery_spot(
+    site: &Site,
+    asked: &ingest::SpotRequest,
+) -> Result<BrokerRun, String> {
+    let _seat = site
+        .autopilot
+        .take_seat(asked.feed)
+        .ok_or_else(|| "the selected feed already has an active pull".to_owned())?;
+    let now = std::time::SystemTime::now();
+    let run = broker_run(asked, site, &census::read_all(&site.store_root)).await;
+    let journal = site.journal();
+    let origin = spot_audit_origin(asked.cash_identity, &run.origin);
+    let record = if let Some(blocked) = &run.blocked {
+        audit::Record::refused(
+            audit::Scope::Spot,
+            audit::Outcome::NotStarted,
+            now,
+            &origin,
+            &blocked.why,
+        )
+        .with_window(asked.window)
+    } else {
+        audit::Record::of_run(
+            audit::Scope::Spot,
+            now,
+            run.took,
+            &origin,
+            asked.window,
+            &run.total,
+        )
+    };
+    journal.append(&record)?;
+    for failure in &run.total.failures {
+        journal.append(&audit::Record::member_failure(
+            audit::Scope::Spot,
+            now,
+            &failure.instrument,
+            asked.window,
+            &failure.why,
+        ))?;
+    }
+    Ok(run)
+}
+
+/// Mapping evidence is checked before both recovery audits and wire requests.
+pub(crate) fn recovery_mapping(site: &Site, asked: &ingest::SpotRequest) -> Result<(), String> {
+    let targets = spot_targets(asked, site);
+    match spot_mapping_refusal(asked, &site.universe().read, &targets) {
+        Some(why) => Err(why),
+        None => Ok(()),
+    }
 }
 
 /// The credential, the client and one window — or the reason there is none.
@@ -8571,33 +9379,12 @@ async fn broker_window(
     // symbol's shape. Everything the operator sweeps is either an NSE index or
     // an NTM cash equity — `catalog::tracked` admits exactly those two — so the
     // else-arm is Equity rather than a third refusal path that cannot be hit.
-    let listing = site
-        .universe()
-        .read
-        .merged
-        .by_key
-        .get(instrument)
-        .filter(|e| e.universe.contains(brutex_core::universe::Universe::INDEX))
-        .map_or(pull::vendor::Listing::Equity, |_| {
-            pull::vendor::Listing::Index
-        });
-    let Some(instrument_id) = site
-        .universe()
-        .read
-        .merged
-        .by_key
-        .get(instrument)
-        .and_then(|e| e.ids.get(vendor as usize).copied().flatten())
-    else {
-        return Err(format!(
-            "{} does not list {} in the instrument master this build read, so \
-             there is no id to name it by. Refused rather than sending another \
-             vendor's id, which would ask for the wrong instrument and be \
-             answered.",
-            vendor.as_str(),
-            instrument.underlying
-        ));
-    };
+    let (instrument_id, listing) = spot_vendor_identity_for(
+        &site.universe().read,
+        instrument,
+        vendor,
+        asked.cash_identity,
+    )?;
 
     // THE WIRE STARTS HERE, AND THE REFUSAL SAYS SO.
     //
@@ -8707,7 +9494,9 @@ fn landed_answer(
     facts.push(("Rows folded into an open bar", done.rows_folded.to_string()));
     facts.push(("Slices the census counted", done.counted.to_string()));
     facts.push(("Rows dropped", done.census.total().to_string()));
-    facts.push(("Members failed", done.failures.len().to_string()));
+    // One instrument can generate several coverage/derivation diagnostics;
+    // this list also contains run-level failures, so it is not a member count.
+    facts.push(("Failure diagnostics", done.failures.len().to_string()));
     facts.push(("Took", render_elapsed(took)));
     // EVERY ROW ACCOUNTED FOR, or say so. A row that vanished without landing
     // in one of the four is indistinguishable from a row the vendor never sent.
@@ -8723,7 +9512,7 @@ fn landed_answer(
             )
         } else {
             format!(
-                "NO — {} rows read, {} stored, {} folded, {} dropped, {} members failed",
+                "NO — {} rows read, {} stored, {} folded, {} dropped, {} failure diagnostics",
                 done.rows_read,
                 done.bars_stored,
                 done.rows_folded,
@@ -8745,7 +9534,11 @@ fn landed_answer(
         window,
         &done.failures,
     ));
-    let reason = if done.balances() {
+    let reason = if !done.failures.is_empty() {
+        "PARTIAL OR FAILED: one or more requested members or coverage checks failed. \
+         Successful writes remain on disk; they do not certify the full request. \
+         The reasons are recorded below and at /audit."
+    } else if done.balances() {
         "The run finished and every row is accounted for. Bars are on disk, \
          the manifest counts them, and this run is on the record at /audit."
     } else {
@@ -9052,6 +9845,8 @@ fn run_local(
         ));
     };
     let plan = pull::ingest::Plan {
+        cash_schedule: None,
+        calendar: pull::calendar::Runtime::default(),
         columns: layout.shape,
         request: &request,
         encoding: pull::vendor::TimestampEncoding::EpochSecondsUtc,
@@ -9203,6 +9998,8 @@ pub(crate) async fn pull_run_json(
 /// asked the vendor for bars must be allowed to write them, or pressing stop
 /// would throw away answers that were already paid for and leave the store
 /// short of what the vendor was charged for.
+/// Recovery STOP is persisted separately before success is acknowledged; an
+/// I/O failure leaves the in-memory stop set but returns an explicit 503.
 pub(crate) async fn pull_run_stop(
     axum::extract::State(site): axum::extract::State<Loaded>,
 ) -> (axum::http::StatusCode, axum::http::HeaderMap, String) {
@@ -9217,6 +10014,18 @@ pub(crate) async fn pull_run_stop(
         }
         _ => false,
     };
+    if stopping && let Err(why) = crate::recovery_control::stop(&site) {
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            json_headers(),
+            serde_json::json!({
+                "stopping": true,
+                "stop_persisted": false,
+                "error": format!("Recovery STOP was not durably recorded: {why}. The in-memory stop remains set; restart safety is not confirmed.")
+            })
+            .to_string(),
+        );
+    }
     (
         axum::http::StatusCode::OK,
         json_headers(),
@@ -11963,6 +12772,8 @@ fn land_rolling_group(
         granularity: asked.granularity,
     };
     let plan = pull::ingest::Plan {
+        cash_schedule: None,
+        calendar: pull::calendar::Runtime::default(),
         columns: pull::csv::Columns::Gdfl,
         request: &request,
         encoding: wire.spec.timestamps,
@@ -13628,6 +14439,48 @@ pub fn router(site: Loaded) -> axum::Router {
     )
 }
 
+/// Production HTTP surface with durable sweep-control and result-read auditing.
+/// The full server uses this entry point. Read-only evidence adapters use
+/// [`router_serving`] so reading an immutable source cannot write into it.
+pub fn audited_router_serving(
+    site: Loaded,
+    front: std::sync::Arc<assets::Assets>,
+    local_addr: SocketAddr,
+) -> axum::Router {
+    router_serving(std::sync::Arc::clone(&site), front, local_addr)
+        .route("/inspection.json", axum::routing::get(application_mode))
+        .layer(axum::middleware::from_fn_with_state(
+            site,
+            crate::operation_audit::note_request,
+        ))
+}
+
+/// Native application capabilities, distinct from legacy compatibility and
+/// read-only inspection adapters. Availability is never release certification.
+async fn application_mode() -> (
+    axum::http::StatusCode,
+    [(axum::http::HeaderName, &'static str); 2],
+    String,
+) {
+    let commit = cli::commit_stamp();
+    (
+        axum::http::StatusCode::OK,
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/json; charset=utf-8",
+            ),
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+        ],
+        serde_json::json!({
+            "schema": 2, "mode": "application", "can_sweep": commit.is_some(),
+            "can_pull": true, "can_write": true, "release_cleared": false,
+            "commit": commit,
+        })
+        .to_string(),
+    )
+}
+
 /// [`router`], over a front end the caller names.
 ///
 /// Split for the reason [`run_in`] takes a directory: which directory the
@@ -13710,6 +14563,14 @@ pub fn router_serving(
         // so the operator's retry loop is no longer inside a browser tab. See
         // `crate::pullrun`.
         .route("/pull/run", axum::routing::post(pull_run))
+        .route(
+            "/pull/recovery",
+            axum::routing::post(crate::recovery::start).get(crate::recovery::page),
+        )
+        .route(
+            "/pull/recovery.json",
+            axum::routing::get(crate::recovery::recent),
+        )
         .route("/pull/run.json", axum::routing::get(pull_run_json))
         .route("/pull/run/stop", axum::routing::post(pull_run_stop))
         // THE AUTOPILOT'S THREE. Status is a read of one in-memory struct
@@ -13797,6 +14658,50 @@ pub fn router_serving(
             "/frontier.json",
             axum::routing::get(crate::frontierjson::frontier_json),
         )
+        .route(
+            "/sweep-evidence.json",
+            axum::routing::get(crate::sweepevidence::evidence_json),
+        )
+        .route(
+            "/candidate-trades.json",
+            axum::routing::get(crate::candidatejson::candidate_json),
+        )
+        .route(
+            "/expression-search.json",
+            axum::routing::get(crate::expressionsearchjson::expression_search_json),
+        )
+        .route(
+            "/boolean-candidates.json",
+            axum::routing::get(crate::booleanjson::boolean_json),
+        )
+        .route(
+            "/boolean-statistics.json",
+            axum::routing::get(crate::booleanevidencejson::statistics_json),
+        )
+        .route(
+            "/boolean-admission.json",
+            axum::routing::get(crate::booleanevidencejson::admission_json),
+        )
+        .route(
+            "/boolean-qualification.json",
+            axum::routing::get(crate::booleanevidencejson::qualification_json),
+        )
+        .route(
+            "/boolean-campaign.json",
+            axum::routing::get(crate::booleancampaignjson::campaign_json),
+        )
+        .route(
+            "/boolean-qualified-campaign.json",
+            axum::routing::get(crate::booleancampaignjson::qualified_campaign_json),
+        )
+        .route(
+            "/boolean-qualified-search.json",
+            axum::routing::get(crate::booleansearchjson::search_json),
+        )
+        .route(
+            "/boolean-oos.json",
+            axum::routing::get(crate::booleanoosjson::later_json),
+        )
         // WHAT IS RUNNING RIGHT NOW. `/frontier.json` above serves a FINISHED
         // run and shows the PREVIOUS one for however long this one takes;
         // `/backtest/run.json` says `in_flight` and a start stamp and no
@@ -13834,6 +14739,34 @@ pub fn router_serving(
             "/engine/command",
             axum::routing::post(crate::sweeprun::command),
         )
+        .route(
+            "/engine/boolean-launch.json",
+            axum::routing::get(crate::booleanlaunch::metadata),
+        )
+        .route(
+            "/index-stop.json",
+            axum::routing::get(crate::indexstopjson::index_stop_json),
+        )
+        .route(
+            "/index-stop-candles.json",
+            axum::routing::get(crate::indexstopcandlesjson::index_stop_candles_json),
+        )
+        .route(
+            "/engine/index-stop-launch.json",
+            axum::routing::get(crate::indexstoplaunch::metadata),
+        )
+        .route(
+            "/index-stop-qualification.json",
+            axum::routing::get(crate::indexstopqualificationjson::index_stop_qualification_json),
+        )
+        .route(
+            "/index-stop-ranking.json",
+            axum::routing::get(crate::indexstoprankingjson::index_stop_ranking_json),
+        )
+        .route(
+            "/index-stop-vix.json",
+            axum::routing::get(crate::indexstopvixjson::index_stop_vix_json),
+        )
         // A READ, so no slot and no commit gate: it records nothing.
         .route(
             "/engine/top.json",
@@ -13859,6 +14792,10 @@ pub fn router_serving(
         .route(
             "/backtest/run.json",
             axum::routing::get(crate::sweeprun::run_json),
+        )
+        .route(
+            "/backtest/audit.json",
+            axum::routing::get(crate::operation_audit::audit_json),
         )
         .route("/health", axum::routing::get(health))
         // THE FRONT END, LAST. A fallback rather than a `/*path` route, so
@@ -14117,8 +15054,9 @@ fn cross_origin_sentence(method: &axum::http::Method, header: &str, value: &str)
         "REFUSED — a {method} on this server is answered only for its own \
          pages, and {header} says this one came from somewhere else: {}.\n\
          \n\
-         No vendor was contacted, no autopilot state moved, and nothing was \
-         written. These routes are POST-only so a crawler cannot start them \
+         No vendor was contacted, no autopilot state moved, and no requested \
+         market-data or engine work was dispatched. A refusal audit may be \
+         recorded. These routes are POST-only so a crawler cannot start them \
          (D-0128); this check is for the other tab in your browser, which \
          POST-only does not stop.\n",
         note_alphabet(value)
@@ -15110,8 +16048,16 @@ async fn run_in_over(
                 // window. It holds the same `Arc`, so pause/resume and the
                 // status it publishes are the ones the routes read.
                 let flying = tokio::spawn(autopilot::fly(Loaded::clone(&site)));
+                if let Err(why) = crate::recovery::resume(Loaded::clone(&site)) {
+                    eprintln!("Recovery NOT resumed: {why}");
+                }
                 let code = stopped_over(
-                    serve(listener, router_serving(site, front, bound_addr), shutdown).await,
+                    serve(
+                        listener,
+                        audited_router_serving(site, front, bound_addr),
+                        shutdown,
+                    )
+                    .await,
                     clean,
                 );
                 // Ctrl-C stopped the HTTP surface; stop the backfill too. A
@@ -15592,8 +16538,1229 @@ mod tests {
     }
 
     /// A site over the given masters and an empty store.
-    fn site(name: &str, dir: &Path) -> Site {
+    pub(super) fn site(name: &str, dir: &Path) -> Site {
         Site::load(dir, &store_root(name))
+    }
+
+    /// A full regular session plus one extra snapshot in its first minute.
+    /// Persistence tests must not call sparse Saturday ticks a complete pull.
+    fn complete_archive_session() -> String {
+        let mut body = GDFL_MEMBER_HEAD.to_owned();
+        for minute in 555..930 {
+            let _ = writeln!(
+                body,
+                "NIFTY,10/01/2022,{:02}:{:02}:00,100.00,0,0,0,0,5,7",
+                minute / 60,
+                minute % 60
+            );
+            if minute == 555 {
+                body.push_str("NIFTY,10/01/2022,09:15:30,100.50,0,0,0,0,3,7\n");
+            }
+        }
+        body
+    }
+
+    fn successful_basket_member() -> BrokerRun {
+        BrokerRun {
+            attempted: 2,
+            reached: 1,
+            total: pull::ingest::Ingested {
+                members: 1,
+                rows_read: 1,
+                bars_stored: 1,
+                bars_committed: 1,
+                ..pull::ingest::Ingested::default()
+            },
+            ..BrokerRun::default()
+        }
+    }
+
+    #[test]
+    fn several_diagnostics_for_one_instrument_are_not_failed_member_counts() {
+        let done = pull::ingest::Ingested {
+            members: 1,
+            rows_read: 734,
+            bars_stored: 734,
+            failures: ["missing minute", "derived bucket withheld"]
+                .into_iter()
+                .map(|why| pull::ingest::Failure {
+                    instrument: "DALBHARAT".to_owned(),
+                    why: why.to_owned(),
+                })
+                .collect(),
+            ..pull::ingest::Ingested::default()
+        };
+        let journal = audit::Journal::at(&store_root("diagnostics-not-members"));
+        let window =
+            pull::session::Window::new(day(2026, 8, 27), day(2026, 8, 28)).expect("fixture window");
+        let (_, page) = landed_answer(
+            &done,
+            window,
+            std::time::SystemTime::UNIX_EPOCH,
+            "fixture",
+            &journal,
+            Vec::new(),
+            1,
+        );
+        assert!(page.contains("<th>Members read</th><td>1</td>"));
+        assert!(page.contains("<th>Failure diagnostics</th><td>2</td>"));
+        assert!(page.contains("0 dropped, 2 failure diagnostics"));
+        assert!(page.contains("PARTIAL OR FAILED"));
+        assert!(page.contains("missing minute"));
+        assert!(page.contains("derived bucket withheld"));
+        assert!(!page.contains("Members failed"));
+        assert!(!page.contains("members failed"));
+    }
+
+    #[test]
+    fn a_partial_broker_basket_cannot_render_or_record_as_stored() {
+        let mut run = successful_basket_member();
+        assert!(run.total.balances());
+        run.record_refusal(
+            "RELIANCE",
+            "RELIANCE: vendor refused this member".to_owned(),
+        );
+        assert_eq!(run.refused.len(), 1);
+        assert_eq!(run.total.failures.len(), 1);
+        assert_eq!(run.total.failures[0].instrument, "RELIANCE");
+        assert_eq!(run.total.bars_committed, 1, "successful writes survive");
+        let journal = audit::Journal::at(&store_root("partial-basket-receipt"));
+        let window = pull::session::Window::new(day(2024, 1, 1), day(2024, 1, 2)).expect("window");
+        let (_, page) = landed_answer(
+            &run.total,
+            window,
+            std::time::SystemTime::UNIX_EPOCH,
+            "fixture",
+            &journal,
+            Vec::new(),
+            1,
+        );
+        assert!(page.contains("PARTIAL OR FAILED"), "{page}");
+        assert!(!page.contains("badge good"), "{page}");
+        assert_eq!(
+            audit::Record::of_run(
+                audit::Scope::Spot,
+                std::time::SystemTime::UNIX_EPOCH,
+                1,
+                "fixture",
+                window,
+                &run.total
+            )
+            .outcome,
+            audit::Outcome::Failed
+        );
+    }
+
+    #[test]
+    fn an_interrupted_broker_basket_keeps_writes_but_fails_completion() {
+        let mut run = successful_basket_member();
+        run.record_stop();
+        assert!(
+            run.total.failures.is_empty(),
+            "an unstopped run is unchanged"
+        );
+        run.stopped = Some("operator stopped after one of two instruments".to_owned());
+        run.record_stop();
+        assert_eq!(run.total.failures.len(), 1);
+        assert_eq!(
+            run.total.failures[0].why,
+            run.stopped.clone().expect("reason")
+        );
+        assert!(!run.total.balances());
+        assert_eq!(run.total.bars_committed, 1);
+    }
+
+    #[test]
+    fn master_reload_preserves_snapshot_on_a_damaged_or_missing_feed() {
+        let groww = format!("{GROWW_HEAD}NSE,CASH,,NIFTY,IDX,,NIFTY,,,NSE-NIFTY\n");
+        let dir = masters("reload-preserves", Some(&groww), Some(DHAN_HEAD));
+        let site = site("reload-preserves", &dir);
+        let stamp = site.universe().at;
+        let count = site.universe().read.merged.by_key.len();
+        assert!(count > 0);
+        std::fs::write(
+            dir.join("groww_instruments.csv"),
+            format!("{GROWW_HEAD}broken\n"),
+        )
+        .expect("damage fixture only");
+        let why = site
+            .reparse(&dir)
+            .expect_err("malformed rows refuse reload");
+        assert!(why.contains("previous universe retained"), "{why}");
+        assert_eq!(site.universe().at, stamp);
+        assert_eq!(site.universe().read.merged.by_key.len(), count);
+        std::fs::remove_file(dir.join("groww_instruments.csv")).expect("remove fixture only");
+        let why = site.reparse(&dir).expect_err("lost feed refuses reload");
+        assert!(why.contains("previously readable feed"), "{why}");
+        assert_eq!(site.universe().at, stamp);
+        std::fs::write(dir.join("groww_instruments.csv"), groww).expect("restore fixture");
+        let before = std::time::SystemTime::now();
+        site.reparse(&dir).expect("restored input reloads");
+        assert!(site.universe().at >= before);
+        assert_eq!(site.universe().read.merged.by_key.len(), count);
+    }
+
+    #[test]
+    fn crawl_rows_never_borrow_another_vendors_isin() {
+        let mut merged = merge::Merged::default();
+        let mut entry = merge::Entry::default();
+        let groww_isin = brutex_core::isin::Isin::new("INE002A01018").expect("ISIN");
+        let dhan_isin = brutex_core::isin::Isin::new("INE009A01021").expect("ISIN");
+        entry.isin = Some((Vendor::Groww, groww_isin));
+        entry.conflict = Some((Vendor::Dhan, dhan_isin));
+        entry.ids[Vendor::Dhan as usize] =
+            Some(brutex_core::vendor::VendorId::new("123").expect("id"));
+        entry.vendor_isins[Vendor::Dhan as usize] = Some(dhan_isin);
+        let key = brutex_core::instrument::InstrumentKey::index(
+            brutex_core::instrument::Exchange::Nse,
+            "NIFTY",
+        )
+        .expect("key");
+        merged.by_key.insert(key, entry);
+        let rows = resolved_master_rows(&merged, Vendor::Dhan);
+        assert_eq!(
+            rows,
+            vec![(
+                "123".to_owned(),
+                "NIFTY".to_owned(),
+                dhan_isin.as_str().to_owned()
+            )]
+        );
+        entry.vendor_isins[Vendor::Dhan as usize] = None;
+        merged.by_key.insert(key, entry);
+        assert_eq!(resolved_master_rows(&merged, Vendor::Dhan)[0].2, "");
+        entry.ids[Vendor::Dhan as usize] = None;
+        merged.by_key.insert(key, entry);
+        assert!(resolved_master_rows(&merged, Vendor::Dhan).is_empty());
+    }
+
+    fn readiness_fixture(tag: &str, isin: &str) -> (Site, ingest::SpotRequest) {
+        let groww = format!("{GROWW_HEAD}NSE,CASH,,RELIANCE,EQ,EQ,{isin},,,NSE-RELIANCE\n");
+        let dir = masters(tag, Some(&groww), Some(DHAN_HEAD));
+        let asked = ingest::parse_spot(
+            "vendor=groww&target=equities&member=RELIANCE&from=2026-08-03&to=2026-08-05",
+            day(2026, 8, 10),
+        )
+        .expect("request");
+        (site(tag, &dir), asked)
+    }
+
+    #[test]
+    fn mapping_preflight_accepts_only_the_selected_verified_cash_identity() {
+        let (site, asked) = readiness_fixture("preflight-good", "INE002A01018");
+        let targets = spot_targets(&asked, &site);
+        assert_eq!(targets.len(), 1);
+        assert!(spot_mapping_refusal(&asked, &site.universe().read, &targets).is_none());
+        let (wrong, asked) = readiness_fixture("preflight-wrong", "INE009A01021");
+        let why = spot_mapping_refusal(
+            &asked,
+            &wrong.universe().read,
+            &spot_targets(&asked, &wrong),
+        )
+        .expect("ticker alone is not identity evidence");
+        assert!(why.contains("RELIANCE"), "{why}");
+        assert!(why.contains("exchange ISIN"), "{why}");
+        let (absent, asked) = readiness_fixture("preflight-absent", "");
+        assert!(
+            spot_mapping_refusal(
+                &asked,
+                &absent.universe().read,
+                &spot_targets(&asked, &absent)
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn mapping_preflight_never_silently_shrinks_the_requested_basket() {
+        let (site, mut asked) = readiness_fixture("preflight-basket", "INE002A01018");
+        asked
+            .members
+            .insert(brutex_core::symbol::Symbol::new("INFY").expect("symbol"));
+        let why = spot_mapping_refusal(&asked, &site.universe().read, &spot_targets(&asked, &site))
+            .expect("one selected name is absent");
+        assert!(why.contains("INFY: no unambiguous vendor ID"), "{why}");
+        assert!(!why.contains("RELIANCE:"), "{why}");
+        asked.members.clear();
+        let why = spot_mapping_refusal(&asked, &site.universe().read, &spot_targets(&asked, &site))
+            .expect("a whole basket must not mean only the mastered subset");
+        assert!(why.contains("AGL:"), "{why}");
+        assert!(why.contains("INFY:"), "{why}");
+    }
+
+    #[tokio::test]
+    async fn mapping_preflight_refuses_before_any_instrument_is_attempted() {
+        let (mut site, mut asked) = readiness_fixture("preflight-wire", "INE002A01018");
+        site.broker = Broker::Live;
+        asked
+            .members
+            .insert(brutex_core::symbol::Symbol::new("INFY").expect("symbol"));
+        let run = broker_run(&asked, &site, &[]).await;
+        assert_eq!(run.attempted, 0);
+        let blocked = run
+            .blocked
+            .expect("preflight refuses before network or ladder");
+        assert_eq!(blocked.code, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(blocked.why.contains("INFY"));
+    }
+
+    #[test]
+    fn mapping_preflight_rechecks_the_current_snapshot_and_vendor() {
+        let (site, asked) = readiness_fixture("preflight-snapshot", "INE002A01018");
+        let targets = spot_targets(&asked, &site);
+        let key = targets.first().expect("RELIANCE selected");
+        let groww = format!("{GROWW_HEAD}NSE,CASH,,RELIANCE,EQ,EQ,INE002A01018,,,NSE-RELIANCE\n");
+        let mut read = universe(&masters(
+            "preflight-snapshot-copy",
+            Some(&groww),
+            Some(DHAN_HEAD),
+        ));
+        let (_, listing) = spot_vendor_identity(&read, key, Vendor::Groww).expect("verified");
+        assert_eq!(listing, pull::vendor::Listing::Equity);
+        assert!(spot_vendor_identity(&read, key, Vendor::Dhan).is_err());
+        read.merged.by_key.get_mut(key).expect("entry").vendor_isins[Vendor::Groww as usize] = None;
+        assert!(
+            spot_vendor_identity(&read, key, Vendor::Groww).is_err(),
+            "a retained join cannot replace missing vendor evidence"
+        );
+        read.merged.by_key.get_mut(key).expect("entry").vendor_isins[Vendor::Groww as usize] =
+            Some(brutex_core::isin::Isin::new("INE002A01018").expect("ISIN"));
+        read.merged.by_key.get_mut(key).expect("entry").ids[Vendor::Groww as usize] =
+            Some(brutex_core::vendor::VendorId::new("different-id").expect("id"));
+        assert!(
+            spot_vendor_identity(&read, key, Vendor::Groww).is_err(),
+            "new ID cannot borrow the old ISIN join"
+        );
+        read.merged.by_key.get_mut(key).expect("entry").ids[Vendor::Groww as usize] = None;
+        assert!(spot_vendor_identity(&read, key, Vendor::Groww).is_err());
+    }
+
+    #[test]
+    fn mapping_preflight_zerodha_cash_names_missing_evidence_not_missing_id() {
+        let dir = masters(
+            "preflight-zerodha-evidence",
+            Some(GROWW_HEAD),
+            Some(DHAN_HEAD),
+        );
+        std::fs::write(
+            dir.join(Vendor::Zerodha.master_file()),
+            "instrument_token,exchange_token,tradingsymbol,name,last_price,expiry,\
+             strike,tick_size,lot_size,instrument_type,segment,exchange\n\
+             738561,2885,RELIANCE,RELIANCE INDUSTRIES,0,,0,0.05,1,EQ,NSE,NSE\n",
+        )
+        .expect("master fixture");
+        let read = universe(&dir);
+        let key = read
+            .merged
+            .by_key
+            .keys()
+            .find(|key| key.underlying.as_str() == "RELIANCE")
+            .expect("cash member exists");
+        let why = spot_vendor_identity(&read, key, Vendor::Zerodha).expect_err("no ISIN proof");
+        assert!(why.contains("zerodha"), "{why}");
+        assert!(why.contains("vendor ID exists"), "{why}");
+        assert!(
+            why.contains("separately verified identity mapping"),
+            "{why}"
+        );
+        let (id, class) = spot_vendor_identity_for(
+            &read,
+            key,
+            Vendor::Zerodha,
+            ingest::CashIdentity::ZerodhaSymbol,
+        )
+        .expect("explicit exact native mapping");
+        assert_eq!(id.as_str(), "738561");
+        assert_eq!(class, pull::vendor::Listing::Equity);
+        assert!(
+            spot_vendor_identity_for(
+                &read,
+                key,
+                Vendor::Groww,
+                ingest::CashIdentity::ZerodhaSymbol,
+            )
+            .is_err()
+        );
+    }
+
+    fn cross_checked_fixture(
+        name: &str,
+        witness: &str,
+    ) -> (Read, brutex_core::instrument::InstrumentKey) {
+        let dir = masters(name, Some(witness), Some(DHAN_HEAD));
+        std::fs::write(
+            dir.join(Vendor::Zerodha.master_file()),
+            "instrument_token,exchange_token,tradingsymbol,name,last_price,expiry,\
+             strike,tick_size,lot_size,instrument_type,segment,exchange\n\
+             738561,2885,RELIANCE,RELIANCE INDUSTRIES,0,,0,0.05,1,EQ,NSE,NSE\n",
+        )
+        .expect("master fixture");
+        let read = universe(&dir);
+        let key = *read
+            .merged
+            .by_key
+            .keys()
+            .find(|key| key.underlying.as_str() == "RELIANCE")
+            .expect("cash listing");
+        (read, key)
+    }
+
+    #[test]
+    fn cross_checked_identity_retains_both_sources_without_inventing_a_vendor_isin() {
+        let witness = format!("{GROWW_HEAD}NSE,CASH,,RELIANCE,EQ,EQ,INE002A01018,,,NSE-RELIANCE\n");
+        let (read, key) = cross_checked_fixture("cross-checked-valid", &witness);
+        let (id, listing) = spot_vendor_identity_for(
+            &read,
+            &key,
+            Vendor::Zerodha,
+            ingest::CashIdentity::ZerodhaCrossChecked,
+        )
+        .expect("exact native token and independent exchange-ISIN match");
+        assert_eq!(id.as_str(), "738561");
+        assert_eq!(listing, pull::vendor::Listing::Equity);
+        assert_eq!(read.merged.by_key[&key].vendor_isin(Vendor::Zerodha), None);
+        assert!(
+            spot_vendor_identity(&read, &key, Vendor::Zerodha).is_err(),
+            "cross-check never fabricates a Zerodha ISIN"
+        );
+        assert!(
+            spot_vendor_identity_for(
+                &read,
+                &key,
+                Vendor::Groww,
+                ingest::CashIdentity::ZerodhaCrossChecked,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn spot_receipt_names_the_selected_policy_and_rung_not_dhan_wire_dates() {
+        let (site, mut asked) = readiness_fixture("cross-checked-receipt-facts", "INE002A01018");
+        asked.cash_identity = ingest::CashIdentity::ZerodhaCrossChecked;
+        asked.feed = pull::vendor::Feed::Zerodha;
+        asked.granularity = pull::vendor::Granularity::Day1;
+        let facts = spot_window_facts(&asked);
+        assert_eq!(
+            facts.iter().find(|(k, _)| *k == "Timeframe").unwrap().1,
+            "1day"
+        );
+        assert!(facts.iter().all(|(k, _)| *k != "toDate on the wire"));
+        assert!(spot_reach_text(&asked, &site).contains("independent master"));
+        assert!(!spot_reach_text(&asked, &site).contains("0 of 213"));
+        asked.granularity = pull::vendor::Granularity::Minute1;
+        assert_eq!(
+            spot_window_facts(&asked)
+                .iter()
+                .find(|(k, _)| *k == "Timeframe")
+                .unwrap()
+                .1,
+            "1min"
+        );
+        asked.cash_identity = ingest::CashIdentity::Isin;
+        assert_eq!(
+            spot_reach_text(&asked, &site),
+            reach_text(asked.target, asked.feed, &site)
+        );
+        asked.feed = pull::vendor::Feed::Dhan;
+        asked.granularity = pull::vendor::Granularity::Day1;
+        assert!(
+            spot_window_facts(&asked)
+                .iter()
+                .any(|(k, _)| *k == "toDate on the wire")
+        );
+    }
+
+    #[test]
+    fn cross_checked_identity_refuses_absent_wrong_or_ambiguous_independent_evidence() {
+        let good = format!("{GROWW_HEAD}NSE,CASH,,RELIANCE,EQ,EQ,INE002A01018,,,NSE-RELIANCE\n");
+        let wrong = format!("{GROWW_HEAD}NSE,CASH,,RELIANCE,EQ,EQ,INE009A01021,,,NSE-RELIANCE\n");
+        let ambiguous =
+            format!("{good}NSE,CASH,,RELIANCE,EQ,EQ,INE002A01018,,,NSE-RELIANCE-OTHER\n");
+        for (name, witness) in [
+            ("cross-checked-absent", GROWW_HEAD),
+            ("cross-checked-wrong", wrong.as_str()),
+            ("cross-checked-ambiguous", ambiguous.as_str()),
+        ] {
+            let (read, key) = cross_checked_fixture(name, witness);
+            let why = spot_vendor_identity_for(
+                &read,
+                &key,
+                Vendor::Zerodha,
+                ingest::CashIdentity::ZerodhaCrossChecked,
+            )
+            .expect_err("native token alone is insufficient");
+            assert!(why.contains("independent master witness"), "{name}: {why}");
+        }
+        let (mut read, key) = cross_checked_fixture("cross-checked-stale", &good);
+        read.merged.by_key.get_mut(&key).unwrap().ids[Vendor::Groww as usize] =
+            Some(brutex_core::vendor::VendorId::new("changed-after-join").unwrap());
+        assert!(
+            zerodha_isin_cross_check(&read, &key).is_err(),
+            "stale join cannot lend evidence to a changed native token"
+        );
+    }
+
+    #[test]
+    fn cross_checked_identity_still_requires_the_exact_zerodha_native_key() {
+        let witness = format!("{GROWW_HEAD}NSE,CASH,,RELIANCE,EQ,EQ,INE002A01018,,,NSE-RELIANCE\n");
+        let (mut read, key) = cross_checked_fixture("cross-checked-native-changed", &witness);
+        read.merged.by_key.get_mut(&key).unwrap().ids[Vendor::Zerodha as usize] =
+            Some(brutex_core::vendor::VendorId::new("borrowed-alias-token").unwrap());
+        let why = spot_vendor_identity_for(
+            &read,
+            &key,
+            Vendor::Zerodha,
+            ingest::CashIdentity::ZerodhaCrossChecked,
+        )
+        .expect_err("an ISIN witness cannot make an alias an exact native token");
+        assert!(
+            why.contains("unique exact native NSE cash identity"),
+            "{why}"
+        );
+    }
+
+    #[test]
+    fn mapping_preflight_indices_need_ids_but_never_a_stock_isin() {
+        let groww = format!("{GROWW_HEAD}NSE,CASH,,NIFTY,IDX,,NIFTY,,,NSE-NIFTY\n");
+        let read = universe(&masters("preflight-index", Some(&groww), Some(DHAN_HEAD)));
+        let key = brutex_core::instrument::InstrumentKey::index(
+            brutex_core::instrument::Exchange::Nse,
+            "NIFTY",
+        )
+        .expect("index");
+        let (id, listing) = spot_vendor_identity(&read, &key, Vendor::Groww).expect("index ID");
+        assert_eq!(id.as_str(), "NSE-NIFTY");
+        assert_eq!(listing, pull::vendor::Listing::Index);
+        assert!(spot_vendor_identity(&read, &key, Vendor::Dhan).is_err());
+    }
+
+    #[test]
+    fn cash_session_preflight_preserves_the_effective_date_and_instrument_scope() {
+        let (site, mut asked) = readiness_fixture("cash-session-boundary", "INE002A01018");
+        asked.granularity = pull::vendor::Granularity::Minute1;
+        let cash = spot_targets(&asked, &site);
+        assert!(spot_cash_session_refusal(&asked, &cash).is_some());
+        asked.window = pull::session::Window::new(day(2026, 7, 1), day(2026, 8, 2)).unwrap();
+        assert!(spot_cash_session_refusal(&asked, &cash).is_none());
+        asked.window = pull::session::Window::new(day(2026, 7, 1), day(2026, 8, 3)).unwrap();
+        assert!(spot_cash_session_refusal(&asked, &cash).is_some());
+        let index = brutex_core::instrument::InstrumentKey::index(
+            brutex_core::instrument::Exchange::Nse,
+            "NIFTY",
+        )
+        .unwrap();
+        assert!(spot_cash_session_refusal(&asked, &[index]).is_none());
+        assert!(spot_cash_session_refusal(&asked, &[]).is_none());
+        assert!(spot_cash_session_refusal(&asked, &[cash[0], index]).is_some());
+        asked.granularity = pull::vendor::Granularity::Day1;
+        assert!(spot_cash_session_refusal(&asked, &cash).is_none());
+        assert!(spot_cash_session_refusal(&asked, &[cash[0], index]).is_none());
+        asked.granularity = pull::vendor::Granularity::Minute1;
+        assert!(spot_cash_session_refusal(&asked, &cash).is_some());
+    }
+
+    #[test]
+    fn observed_eligibility_dates_are_windowed_deduplicated_and_encoding_aware() {
+        use pull::fetch::{RawRow, RawWindow};
+        use pull::session::{IST_OFFSET_SECS, Window};
+        use pull::vendor::TimestampEncoding;
+        let first = day(2026, 8, 3);
+        let last = day(2026, 9, 4);
+        let window = Window::new(first, last).unwrap();
+        let utc = |d: Day| i64::from(d.days_from_epoch()) * 86_400 - IST_OFFSET_SECS + 555 * 60;
+        let row = |timestamp| RawRow {
+            timestamp,
+            open: 100,
+            high: 100,
+            low: 100,
+            close: 100,
+            volume: 1,
+            open_interest: None,
+        };
+        for encoding in [
+            TimestampEncoding::EpochSecondsUtc,
+            TimestampEncoding::EpochMillisUtc,
+            TimestampEncoding::IsoDateTimeOffset,
+            TimestampEncoding::IstDateTimeText,
+            TimestampEncoding::IsoDateTimeText,
+        ] {
+            let rows = [last, first, first, day(2026, 8, 2), day(2026, 9, 5)]
+                .into_iter()
+                .map(|d| {
+                    let epoch = utc(d);
+                    row(match encoding {
+                        TimestampEncoding::EpochMillisUtc => epoch * 1_000,
+                        TimestampEncoding::IstDateTimeText | TimestampEncoding::IsoDateTimeText => {
+                            epoch + IST_OFFSET_SECS
+                        }
+                        _ => epoch,
+                    })
+                })
+                .collect();
+            assert_eq!(
+                super::observed_cash_days(&[(window, RawWindow { rows })], encoding).unwrap(),
+                vec![first, last]
+            );
+        }
+        assert!(
+            super::observed_cash_days(
+                &[(
+                    window,
+                    RawWindow {
+                        rows: vec![row(i64::MIN)]
+                    }
+                )],
+                TimestampEncoding::IstDateTimeText
+            )
+            .is_err()
+        );
+        assert!(
+            super::observed_cash_days(
+                &[(
+                    window,
+                    RawWindow {
+                        rows: vec![row(i64::MAX)]
+                    }
+                )],
+                TimestampEncoding::EpochSecondsUtc
+            )
+            .is_err()
+        );
+        assert!(
+            super::observed_cash_days(&[], TimestampEncoding::EpochSecondsUtc)
+                .unwrap()
+                .is_empty()
+        );
+        let outside_hours = RawWindow {
+            rows: vec![row(utc(day(2026, 8, 23)) - 60)],
+        };
+        assert!(
+            super::observed_cash_days(
+                &[(window, outside_hours)],
+                TimestampEncoding::EpochSecondsUtc
+            )
+            .unwrap()
+            .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_later_cash_evidence_preserves_earlier_chunks_and_counts_refused_rows() {
+        use pull::fetch::{RawRow, RawWindow};
+        use pull::session::{IST_OFFSET_SECS, Window};
+        use pull::vendor::{Feed, Granularity, Listing, Transport};
+        let (site, _) = readiness_fixture("cash-chunk-isolation", "INE002A01018");
+        let before = day(2026, 7, 1);
+        let after = day(2026, 8, 3);
+        let key = brutex_core::instrument::InstrumentKey::cash(
+            brutex_core::instrument::Exchange::Nse,
+            "RELIANCE",
+        )
+        .unwrap();
+        let row = |date: Day| RawRow {
+            timestamp: i64::from(date.days_from_epoch()) * 86_400 - IST_OFFSET_SECS + 555 * 60,
+            open: 100,
+            high: 100,
+            low: 100,
+            close: 100,
+            volume: 1,
+            open_interest: None,
+        };
+        let Transport::Http(spec) = Feed::Zerodha.descriptor().transport else {
+            panic!("HTTP descriptor");
+        };
+        let landed = BrokerWindow {
+            listing: Listing::Equity,
+            contract: None,
+            unfetched: None,
+            instrument: "RELIANCE".to_owned(),
+            origin: "test only".to_owned(),
+            spec,
+            exchange: "NSE",
+            segment: "CASH",
+            store_vendor: Vendor::Zerodha,
+            window: Window::new(before, after).unwrap(),
+            granularity: Granularity::Minute1,
+            bodies: vec![
+                (
+                    Window::new(before, before).unwrap(),
+                    RawWindow {
+                        rows: vec![row(before)],
+                    },
+                ),
+                (
+                    Window::new(after, after).unwrap(),
+                    RawWindow {
+                        rows: vec![row(after)],
+                    },
+                ),
+            ],
+        };
+        let cache = site.store_root.join("session-masters");
+        std::fs::create_dir_all(&cache).unwrap();
+        // An unreceipted local entry refuses before any public network call.
+        std::fs::write(
+            cache.join("NSE_CM_security_03082026.csv.gz"),
+            b"incomplete fixture",
+        )
+        .unwrap();
+        let mut dated = std::collections::HashMap::new();
+        let done = super::land_spot(&landed, &key, &site, &mut dated).await;
+        assert_eq!(done.rows_read, 2);
+        assert_eq!(done.bars_committed, 1);
+        assert!(
+            done.failures
+                .iter()
+                .any(|failure| failure.why.contains("incomplete cash-session cache"))
+        );
+        let again = super::land_spot(&landed, &key, &site, &mut dated).await;
+        assert_eq!(again.rows_read, 2);
+        assert_eq!(again.bars_committed, 0);
+        assert!(!again.failures.is_empty());
+    }
+
+    #[test]
+    fn production_ingestion_attests_only_the_bounded_calendar_extension() {
+        use pull::fetch::{RawRow, RawWindow};
+        use pull::session::{IST_OFFSET_SECS, Window};
+        use pull::vendor::{Feed, Granularity, Listing, Transport};
+        for (tag, date, verified) in [
+            ("runtime-calendar-bounded", day(2026, 9, 4), true),
+            ("runtime-calendar-beyond", day(2026, 9, 11), false),
+        ] {
+            let (site, _) = readiness_fixture(tag, "INE002A01018");
+            let midnight = i64::from(date.days_from_epoch()) * 86_400 - IST_OFFSET_SECS;
+            let row = |timestamp| RawRow {
+                timestamp,
+                open: 100,
+                high: 100,
+                low: 100,
+                close: 100,
+                volume: 0,
+                open_interest: None,
+            };
+            let Transport::Http(spec) = Feed::Zerodha.descriptor().transport else {
+                panic!("HTTP descriptor");
+            };
+            let window = Window::new(date, date).unwrap();
+            let mut landed = BrokerWindow {
+                listing: Listing::Index,
+                contract: None,
+                unfetched: None,
+                instrument: "NIFTY".to_owned(),
+                origin: "test only".to_owned(),
+                spec,
+                exchange: "NSE",
+                segment: "INDEX",
+                store_vendor: Vendor::Zerodha,
+                window,
+                granularity: Granularity::Day1,
+                bodies: vec![(
+                    window,
+                    RawWindow {
+                        rows: vec![row(midnight)],
+                    },
+                )],
+            };
+            assert!(super::ingestion_observations(&landed, &site).is_none());
+            let daily = super::land_one(&landed, &site);
+            assert_eq!(daily.bars_committed, 1);
+            assert!(daily.failures.is_empty(), "{:?}", daily.failures);
+            landed.granularity = Granularity::Minute1;
+            landed.bodies = vec![(
+                window,
+                RawWindow {
+                    rows: (0..375)
+                        .map(|minute| row(midnight + (555 + minute) * 60))
+                        .collect(),
+                },
+            )];
+            for expected_new in [375, 0] {
+                let done = super::land_one(&landed, &site);
+                assert_eq!(done.bars_committed, expected_new);
+                if verified {
+                    assert!(done.derived_files > 0);
+                    assert!(done.failures.is_empty(), "{:?}", done.failures);
+                    continue;
+                }
+                assert_eq!(done.derived_files, 0);
+                assert!(
+                    done.failures
+                        .iter()
+                        .any(|f| f.why.starts_with("request minute coverage UNVERIFIED")
+                            && f.why.contains("observed trading does not attest"))
+                );
+                assert!(
+                    done.failures
+                        .iter()
+                        .any(|f| !f.why.starts_with("request minute coverage")
+                            && f.why.contains("validated calendar provenance missing"))
+                );
+            }
+            let observed = super::ingestion_observations(&landed, &site).unwrap();
+            assert!(matches!(
+                observed.kind_of(i64::from(date.days_from_epoch())),
+                pull::calendar::DayKind::Open(_)
+            ));
+            assert_eq!(
+                pull::calendar::Runtime::from_observed(&observed)
+                    .kind_of(i64::from(date.days_from_epoch())),
+                if verified {
+                    pull::calendar::DayKind::Open(pull::calendar::Session::full())
+                } else {
+                    pull::calendar::DayKind::Unmeasured
+                }
+            );
+        }
+    }
+
+    async fn cash_month_replay_fixture(
+        tag: &str,
+    ) -> (Site, BrokerWindow, brutex_core::instrument::InstrumentKey) {
+        use pull::fetch::{RawRow, RawWindow};
+        use pull::session::{IST_OFFSET_SECS, Window};
+        use pull::vendor::{Feed, Granularity, Listing, Transport};
+        // gzip of a synthetic NSE-format master: RELIANCE, EQ,
+        // INE002A01018, CAS eligible. Installed through the real receipt writer.
+        const MASTER: &[u8] = &[
+            31, 139, 8, 0, 0, 0, 0, 0, 0, 3, 5, 193, 65, 10, 128, 32, 16, 0, 192, 123, 111, 217,
+            131, 10, 129, 87, 145, 13, 22, 66, 168, 237, 5, 26, 72, 164, 30, 116, 59, 248, 251,
+            102, 182, 167, 81, 27, 210, 43, 221, 112, 165, 183, 243, 172, 17, 56, 201, 228, 62,
+            128, 152, 2, 96, 201, 177, 200, 244, 101, 100, 247, 37, 105, 60, 218, 98, 172, 93, 225,
+            196, 157, 92, 240, 8, 120, 0, 5, 84, 202, 56, 165, 149, 182, 160, 151, 31, 144, 83,
+            148, 134, 86, 0, 0, 0,
+        ];
+        let (site, _) = readiness_fixture(tag, "INE002A01018");
+        let early = day(2026, 8, 3);
+        let late = day(2026, 8, 24);
+        let root = site.store_root.join("session-masters");
+        for date in [early, late] {
+            pull::cash_session_cache::install(&root, date, MASTER).unwrap();
+        }
+        let key = brutex_core::instrument::InstrumentKey::cash(
+            brutex_core::instrument::Exchange::Nse,
+            "RELIANCE",
+        )
+        .unwrap();
+        let Transport::Http(spec) = Feed::Zerodha.descriptor().transport else {
+            panic!("HTTP descriptor")
+        };
+        let window = Window::new(early, late).unwrap();
+        let rows = [early, late]
+            .into_iter()
+            .flat_map(|date| {
+                let open = i64::from(date.days_from_epoch()) * 86_400 - IST_OFFSET_SECS + 555 * 60;
+                (0..360).map(move |minute| RawRow {
+                    timestamp: open + minute * 60,
+                    open: 100,
+                    high: 100,
+                    low: 100,
+                    close: 100,
+                    volume: 1,
+                    open_interest: None,
+                })
+            })
+            .collect();
+        let mut landed = BrokerWindow {
+            listing: Listing::Equity,
+            contract: None,
+            unfetched: None,
+            instrument: "RELIANCE".to_owned(),
+            origin: "test only".to_owned(),
+            spec,
+            exchange: "NSE",
+            segment: "CASH",
+            store_vendor: Vendor::Zerodha,
+            window,
+            granularity: Granularity::Minute1,
+            bodies: vec![(window, RawWindow { rows })],
+        };
+        // Seed each actual date independently: missing intervening source days
+        // are not needed as fixture evidence and must not be synthesized.
+        let mut dated = std::collections::HashMap::new();
+        for date in [early, late] {
+            let span = Window::new(date, date).unwrap();
+            let rows = landed.bodies[0]
+                .1
+                .rows
+                .iter()
+                .copied()
+                .filter(|row| {
+                    pull::session::IstMoment::from_epoch_secs(row.timestamp)
+                        .unwrap()
+                        .day()
+                        == date
+                })
+                .collect();
+            let bodies = [(span, RawWindow { rows })];
+            let schedule = super::prepare_cash_schedule(&landed, &bodies, &key, &site, &mut dated)
+                .await
+                .unwrap();
+            let done = super::land_bodies_scheduled(&landed, &site, schedule.as_ref(), &bodies);
+            assert_eq!(done.bars_committed, 360);
+            assert!(done.failures.is_empty(), "{:?}", done.failures);
+        }
+        landed.window = Window::new(late, late).unwrap();
+        landed.bodies[0].0 = landed.window;
+        landed.bodies[0].1.rows.drain(..360);
+        (site, landed, key)
+    }
+
+    fn cash_month_files(site: &Site) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut pending = vec![site.store_root.join("bars/zerodha/NSE/CASH/RELIANCE")];
+        let mut files = Vec::new();
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    files.push((path.clone(), std::fs::read(path).unwrap()));
+                }
+            }
+        }
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+        assert!(!files.is_empty());
+        files
+    }
+
+    #[tokio::test]
+    async fn recovery_cash_clock_requires_only_its_exact_inclusive_dates() {
+        let (site, _, _) = cash_month_replay_fixture("recovery-cash-clock").await;
+        let before = cash_month_files(&site);
+        let early = day(2026, 8, 3);
+        let exact = pull::session::Window::new(early, early).unwrap();
+        let clock = super::recovery_cash_schedule(&site, "RELIANCE", exact)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(clock.close(early).unwrap(), 915);
+        let next = day(2026, 8, 4);
+        let missing = super::recovery_cash_schedule(
+            &site,
+            "RELIANCE",
+            pull::session::Window::new(next, next).unwrap(),
+        )
+        .await
+        .unwrap_err();
+        assert!(missing.contains("missing locally"), "{missing}");
+        assert!(
+            !site
+                .store_root
+                .join("session-masters/NSE_CM_security_04082026.csv.gz")
+                .exists()
+        );
+        assert_eq!(cash_month_files(&site), before);
+    }
+
+    #[tokio::test]
+    async fn cash_gap_page_uses_receipted_local_flags_and_refuses_missing_or_corrupt_evidence() {
+        let (site, _, _) = cash_month_replay_fixture("cash-gap-clock").await;
+        let site = std::sync::Arc::new(site);
+        let before = cash_month_files(&site);
+        let asked = Addressed::parse(
+            "feed=zerodha&exchange=NSE&segment=CASH&symbol=RELIANCE&timeframe=1min&month=2026-08",
+        )
+        .unwrap();
+        let cache = site.store_root.join("session-masters");
+        let sample = std::fs::read(cache.join("NSE_CM_security_03082026.csv.gz")).unwrap();
+        let missing = super::audit_cash_schedule(&site, &asked, asked.month)
+            .await
+            .unwrap_err();
+        assert!(missing.contains("missing locally"), "{missing}");
+        assert!(
+            !cache.join("NSE_CM_security_04082026.csv.gz").exists(),
+            "a GET cannot fetch missing metadata"
+        );
+        let uri: axum::http::Uri = "/gaps.json?feed=zerodha&exchange=NSE&segment=CASH&symbol=RELIANCE&timeframe=1min&month=2026-08".parse().unwrap();
+        let (code, _, unknown) = gaps_json(axum::extract::State(site.clone()), uri.clone()).await;
+        assert_eq!(code, axum::http::StatusCode::OK);
+        assert!(unknown.contains("missing locally"), "{unknown}");
+        assert!(
+            unknown.contains(r#""held":720"#),
+            "source still visible: {unknown}"
+        );
+        let first = day(2026, 8, 1);
+        let mut sessions = 0;
+        for number in first.days_from_epoch()..=first.end_of_month().days_from_epoch() {
+            if pull::calendar::kind_of(i64::from(number))
+                == pull::calendar::DayKind::Open(pull::calendar::Session::full())
+            {
+                let date = Day::from_days(number).unwrap();
+                pull::cash_session_cache::install(&cache, date, &sample).unwrap();
+                sessions += 1;
+            }
+        }
+        let (_, _, checked) = gaps_json(axum::extract::State(site.clone()), uri.clone()).await;
+        assert!(
+            checked.contains(&format!(r#""expected":{}"#, sessions * 360)),
+            "{checked}"
+        );
+        assert!(
+            checked.contains(&format!(r#""lost_minutes":{}"#, sessions * 360 - 720)),
+            "whole absent source days stay visible: {checked}"
+        );
+        assert!(checked.contains(r#""evidence_error":null"#), "{checked}");
+        assert!(
+            checked.contains(r#""source":"table""#),
+            "cash peers do not set the close: {checked}"
+        );
+        let wrong = Addressed { symbol: "TCS".to_owned(), ..Addressed::parse("feed=zerodha&exchange=NSE&segment=CASH&symbol=RELIANCE&timeframe=1min&month=2026-08").unwrap() };
+        let identity = super::audit_cash_schedule(&site, &wrong, wrong.month)
+            .await
+            .unwrap_err();
+        assert!(identity.contains("no EQ mapping"), "{identity}");
+        std::fs::write(
+            cache.join("NSE_CM_security_04082026.csv.gz.receipt"),
+            "damaged fixture receipt",
+        )
+        .unwrap();
+        let (_, _, corrupt) = gaps_json(axum::extract::State(site.clone()), uri).await;
+        assert!(
+            !corrupt.contains(r#""evidence_error":null"#),
+            "a previously read master does not hide disk damage: {corrupt}"
+        );
+        assert!(corrupt.contains("receipt"), "{corrupt}");
+        assert_eq!(
+            cash_month_files(&site),
+            before,
+            "auditing never edits source or derived bars"
+        );
+    }
+
+    #[tokio::test]
+    async fn minute_gap_route_refuses_daily_or_coarse_rows_as_minute_evidence() {
+        let site = std::sync::Arc::new(Site::serving(
+            &masters("gaps-rung", None, None),
+            &store_root("gaps-rung"),
+        ));
+        for rung in ["1day", "5min", "60min"] {
+            let uri = format!("/gaps.json?feed=zerodha&exchange=NSE&segment=INDEX&symbol=NIFTY&timeframe={rung}&month=2026-08").parse().unwrap();
+            let (code, _, body) = gaps_json(axum::extract::State(site.clone()), uri).await;
+            assert_eq!(code, axum::http::StatusCode::BAD_REQUEST, "{body}");
+            assert!(body.contains("requires timeframe=1min"), "{body}");
+        }
+    }
+
+    #[test]
+    fn absent_minute_file_retains_calendar_obligation_like_an_empty_file() {
+        let root = store_root("gap-absent-obligation");
+        let site = std::sync::Arc::new(Site::serving(
+            &masters("gap-absent-obligation", None, None),
+            &root,
+        ));
+        let asked = Addressed::parse(
+            "feed=zerodha&exchange=NSE&segment=INDEX&symbol=NIFTY&timeframe=1min&month=2024-01",
+        )
+        .unwrap();
+        let date = i64::from(day(2024, 1, 1).days_from_epoch());
+        let calendar =
+            pull::calendar::Calendar::from_observed(&[pull::calendar::Observed::from_runs(
+                date,
+                &[(555, 929)],
+            )]);
+        let absent = audit_one(&site, &asked, asked.month, Some(&calendar), None);
+        assert!(absent.absent_file.is_some());
+        assert_eq!(absent.held, 0);
+        assert_eq!(absent.expected, 375);
+        assert_eq!(absent.lost, 375);
+        assert!(
+            absent
+                .runs
+                .contains(r#""from":555,"to":929,"minutes":375,"reason":"vendor-hole""#)
+        );
+        let path = store::path::StorePath::new(store::path::PathParts {
+            vendor: Vendor::Zerodha,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: store::path::Timeframe::MINUTE_1,
+            month: asked.month,
+            file: store::path::FileKind::Bars,
+        })
+        .unwrap();
+        let id =
+            u32::try_from(brutex_core::universe::fnv1a("NIFTY") & u64::from(u32::MAX)).unwrap();
+        drop(store::file::BarFile::open_or_create(&root, path, id).unwrap());
+        let empty = audit_one(&site, &asked, asked.month, Some(&calendar), None);
+        assert!(empty.absent_file.is_none());
+        assert_eq!(empty.expected, absent.expected);
+        assert_eq!(empty.lost, absent.lost);
+        assert_eq!(empty.runs, absent.runs);
+    }
+
+    #[test]
+    fn committed_off_grid_minutes_do_not_certify_the_gap_page() {
+        for (tag, extra) in [("gap-shifted", false), ("gap-extra-stamp", true)] {
+            let root = store_root(tag);
+            let site = std::sync::Arc::new(Site::serving(&masters(tag, None, None), &root));
+            let asked = Addressed::parse(
+                "feed=zerodha&exchange=NSE&segment=INDEX&symbol=NIFTY&timeframe=1min&month=2024-01",
+            )
+            .unwrap();
+            let date = i64::from(day(2024, 1, 1).days_from_epoch());
+            let at = |minute: i64| (date * 86_400 - 19_800 + minute * 60) * 1_000_000;
+            let mut rows: Vec<_> = (555..930)
+                .map(|minute| store::format::Bar {
+                    ts_micros: at(minute) + if extra { 0 } else { 30_000_000 },
+                    open: 100,
+                    high: 110,
+                    low: 90,
+                    close: 105,
+                    volume: 1,
+                    open_interest: i64::MIN,
+                })
+                .collect();
+            if extra {
+                rows.insert(
+                    1,
+                    store::format::Bar {
+                        ts_micros: at(555) + 30_000_000,
+                        ..rows[0]
+                    },
+                );
+            }
+            let path = store::path::StorePath::new(store::path::PathParts {
+                vendor: Vendor::Zerodha,
+                exchange: "NSE",
+                segment: "INDEX",
+                symbol: "NIFTY",
+                contract: None,
+                timeframe: store::path::Timeframe::MINUTE_1,
+                month: asked.month,
+                file: store::path::FileKind::Bars,
+            })
+            .unwrap();
+            let id =
+                u32::try_from(brutex_core::universe::fnv1a("NIFTY") & u64::from(u32::MAX)).unwrap();
+            let mut file = store::file::BarFile::open_or_create(&root, path, id).unwrap();
+            file.append(&rows).unwrap();
+            let source_path = file.path().to_owned();
+            let before = std::fs::read(&source_path).unwrap();
+            drop(file);
+            let audit = audit_one(&site, &asked, asked.month, None, None);
+            assert_eq!(audit.invalid_timestamps, if extra { 1 } else { 375 });
+            assert_eq!(audit.expected, 0, "no coverage claim on invalid input");
+            assert_eq!(audit.lost, 0, "no invented downstream holes");
+            assert!(audit.render().contains(&format!(
+                r#""invalid_timestamps":{}"#,
+                audit.invalid_timestamps
+            )));
+            assert_eq!(
+                std::fs::read(&source_path).unwrap(),
+                before,
+                "audit is read-only"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cash_partial_month_replay_loads_committed_dates_outside_request() {
+        let (site, landed, key) = cash_month_replay_fixture("cash-month-context").await;
+        let before = cash_month_files(&site);
+        let mut dated = std::collections::HashMap::new();
+        let schedule =
+            super::prepare_cash_schedule(&landed, &landed.bodies, &key, &site, &mut dated)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(schedule.close(day(2026, 8, 3)).unwrap(), 915);
+        assert_eq!(schedule.close(day(2026, 8, 24)).unwrap(), 915);
+        assert_eq!(dated.len(), 2, "only actual source/response dates");
+        assert!(schedule.close(day(2026, 8, 4)).is_err());
+        let done = super::land_spot(&landed, &key, &site, &mut dated).await;
+        assert_eq!(done.bars_committed, 0);
+        assert!(done.derived_files > 0);
+        assert!(done.failures.is_empty(), "{:?}", done.failures);
+        assert_eq!(
+            cash_month_files(&site),
+            before,
+            "all original bytes preserved"
+        );
+    }
+
+    #[tokio::test]
+    async fn cash_partial_month_replay_refuses_missing_or_corrupt_earlier_receipt() {
+        for (tag, missing) in [("cash-month-missing", true), ("cash-month-corrupt", false)] {
+            let (site, landed, key) = cash_month_replay_fixture(tag).await;
+            let mut dated = std::collections::HashMap::new();
+            super::prepare_cash_schedule(&landed, &landed.bodies, &key, &site, &mut dated)
+                .await
+                .unwrap();
+            let before = cash_month_files(&site);
+            let receipt = site
+                .store_root
+                .join("session-masters/NSE_CM_security_03082026.csv.gz.receipt");
+            if missing {
+                std::fs::remove_file(&receipt).unwrap();
+            } else {
+                std::fs::write(&receipt, "corrupt fixture receipt").unwrap();
+            }
+            let done = super::land_spot(&landed, &key, &site, &mut dated).await;
+            assert_eq!(done.bars_committed, 0);
+            assert_eq!(done.derived_files, 0);
+            assert_eq!(done.rows_read, 360);
+            assert_eq!(done.failures.len(), 1);
+            assert!(
+                done.failures[0]
+                    .why
+                    .contains(if missing { "incomplete" } else { "receipt" }),
+                "{:?}",
+                done.failures
+            );
+            assert_eq!(cash_month_files(&site), before);
+            assert_eq!(
+                dated.len(),
+                2,
+                "warm memory cannot mask damaged disk evidence"
+            );
+            if missing {
+                assert!(!receipt.exists());
+            } else {
+                assert_eq!(
+                    std::fs::read_to_string(receipt).unwrap(),
+                    "corrupt fixture receipt"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_policy_assurance_survives_the_bounded_audit_source() {
+        let source = "vendor endpoint ".repeat(30);
+        let origin = spot_audit_origin(ingest::CashIdentity::ZerodhaSymbol, &source);
+        let record = audit::Record::of_run(
+            audit::Scope::Spot,
+            std::time::UNIX_EPOCH,
+            0,
+            &origin,
+            pull::session::Window::new(day(2026, 7, 1), day(2026, 7, 31)).unwrap(),
+            &pull::ingest::Ingested::default(),
+        );
+        assert!(
+            record
+                .source
+                .starts_with("zerodha_symbol NOT ISIN-verified;")
+        );
+        assert_eq!(
+            spot_audit_origin(ingest::CashIdentity::Isin, &source),
+            source
+        );
+        let cross_checked = spot_audit_origin(ingest::CashIdentity::ZerodhaCrossChecked, &source);
+        let record = audit::Record::refused(
+            audit::Scope::Spot,
+            audit::Outcome::Failed,
+            std::time::UNIX_EPOCH,
+            &cross_checked,
+            "fixture",
+        );
+        assert!(
+            record
+                .source
+                .starts_with("zerodha_cross_checked NSE-ISIN current snapshot;")
+        );
     }
 
     /// The census is read once per manifest change, not once per request.
@@ -15726,7 +17893,7 @@ mod tests {
         drop(squatter);
     }
 
-    fn agreeing(name: &str) -> PathBuf {
+    pub(super) fn agreeing(name: &str) -> PathBuf {
         masters(
             name,
             Some(&format!(
@@ -17695,7 +19862,7 @@ mod tests {
             let over = post(
                 addr,
                 "/pull/spot",
-                "target=indices&from=2021-12-30&to=2022-01-02",
+                "target=indices&granularity=1day&from=2021-12-30&to=2022-01-02",
             )
             .await;
             assert!(
@@ -17729,7 +19896,7 @@ mod tests {
             let one = post(
                 addr,
                 "/pull/spot",
-                "target=equities&from=2022-01-08&to=2022-01-08",
+                "target=equities&granularity=1day&from=2022-01-08&to=2022-01-08",
             )
             .await;
             assert!(one.contains("503"), "{one}");
@@ -17848,7 +20015,10 @@ mod tests {
             )
             .await;
             assert!(
-                !ok.contains("413"),
+                ok.lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    != Some("413"),
                 "an ordinary form is nowhere near the bound: {ok}"
             );
 
@@ -17861,7 +20031,11 @@ mod tests {
             );
             let refused = post(addr, "/pull/spot", &huge).await;
             assert!(
-                refused.contains("413"),
+                refused
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    == Some("413"),
                 "a body past the bound is refused loudly: {refused}"
             );
             assert!(
@@ -19692,13 +21866,38 @@ mod tests {
         response.split_once("\r\n\r\n").map_or("", |(_, body)| body)
     }
 
+    #[tokio::test]
+    async fn routed_census_head_omits_representation_length_without_encoding() {
+        let dir = agreeing("routed-wire-head");
+        let built = Loaded::new(site("routed-wire-head", &dir));
+        let snapshot = std::sync::Arc::clone(&built);
+        served_over("routed-wire-head", built, |addr| async move {
+            let head = tokio::task::spawn_blocking(move || {
+                use std::io::Read as _;
+                let mut socket = std::net::TcpStream::connect(addr).expect("connect");
+                socket.write_all(b"HEAD /store.json?feed=groww HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n").expect("write");
+                let mut text = String::new();
+                socket.read_to_string(&mut text).expect("read");
+                text
+            }).await.expect("join");
+            assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+            assert!(!head.to_ascii_lowercase().contains("content-length:"), "{head}");
+            assert!(head.contains("x-brutex-census-state:"), "{head}");
+            assert!(body_of(&head).is_empty());
+            assert!(snapshot.census_wire.is_empty());
+            let full = get(addr, "/store.json?feed=groww").await;
+            assert_eq!(body_of(&full), "[]");
+            assert!(!snapshot.census_wire.is_empty());
+        }).await;
+    }
+
     /// A store root whose Groww counter exists and will not decode.
     ///
     /// Sixteen bytes, which is shorter than the header region, so
     /// `Manifest::open` refuses it by name and `census::read_vendor` answers
     /// `Census::Unreadable`. NOT an absent file — that is the other state, and
     /// telling the two apart is the whole point of what is asserted below.
-    fn corrupt_census(name: &str) -> PathBuf {
+    pub(super) fn corrupt_census(name: &str) -> PathBuf {
         let root = store_root(name);
         std::fs::write(
             pull::manifest::manifest_path(&root, Vendor::Groww),
@@ -20365,7 +22564,7 @@ mod tests {
             )]);
         assert_eq!(calendar.expected_bars(day), Some(220));
 
-        let verdict = audit_one(&site, &asked, month, Some(&calendar));
+        let verdict = audit_one(&site, &asked, month, Some(&calendar), None);
         assert_eq!(verdict.held, 54, "stored evidence remains visible");
         assert_eq!(verdict.expected, 0, "no invented index denominator");
         assert_eq!(verdict.lost, 0, "no invented vendor loss");
@@ -23587,7 +25786,7 @@ mod tests {
             "each one counted by the reason it was declined for: {html}"
         );
         assert!(
-            html.contains("<th>Members failed</th><td>0</td>"),
+            html.contains("<th>Failure diagnostics</th><td>0</td>"),
             "a declined row is not a failure: {html}"
         );
         // RENAMED HONESTLY, and the arithmetic is now spelled out rather than
@@ -23632,7 +25831,10 @@ mod tests {
             "the RUN completed; one member did not — those are different \
              answers and the page gives both: {html}"
         );
-        assert!(html.contains("<th>Members failed</th><td>1</td>"), "{html}");
+        assert!(
+            html.contains("<th>Failure diagnostics</th><td>1</td>"),
+            "{html}"
+        );
         assert!(
             html.contains("2 rows read, 0 stored"),
             "the receipt spells out WHY it does not balance rather than \
@@ -23685,16 +25887,9 @@ mod tests {
     async fn a_run_writes_under_the_same_store_root_the_page_reports() {
         let dir = agreeing("localroot");
         let site = site("localroot", &dir);
-        let folder = vendor_folder(
-            "localroot",
-            &format!(
-                "{GDFL_MEMBER_HEAD}\
-                 NIFTY,08/01/2022,10:00:00,100.00,0,0,0,0,0,7\n\
-                 NIFTY,08/01/2022,10:00:30,100.50,0,0,0,0,0,7\n"
-            ),
-        );
+        let folder = vendor_folder("localroot", &complete_archive_session());
         let (code, html) = spot_answer(
-            &spot_form(&folder, "2022-01-08", "2022-01-08"),
+            &spot_form(&folder, "2022-01-10", "2022-01-10"),
             day(2026, 8, 7),
             moment(),
             &site,
@@ -23722,14 +25917,6 @@ mod tests {
     /// The whole loop in one test: a run happens, a record lands on disk, and
     /// the page renders that record's counters rather than an em dash.
     #[tokio::test]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one store, pulled TWICE, and the second pull is the point: it \
-                  is the only state where offered and written disagree, and a \
-                  separate test would need its own first pull to reach it — at \
-                  which point the two fixtures could drift and the pair would \
-                  stop comparing anything."
-    )]
     async fn a_run_is_recorded_and_the_pull_page_reads_the_record_back() {
         let dir = agreeing("localaudit");
         let site = site("localaudit", &dir);
@@ -23743,17 +25930,9 @@ mod tests {
             "{before}"
         );
 
-        let folder = vendor_folder(
-            "localaudit",
-            &format!(
-                "{GDFL_MEMBER_HEAD}\
-                 NIFTY,08/01/2022,10:00:00,100.00,0,0,0,0,5,7\n\
-                 NIFTY,08/01/2022,10:00:30,100.50,0,0,0,0,3,7\n\
-                 NIFTY,08/01/2022,10:01:00,101.00,0,0,0,0,2,7\n"
-            ),
-        );
+        let folder = vendor_folder("localaudit", &complete_archive_session());
         let (code, receipt) = spot_answer(
-            &spot_form(&folder, "2022-01-08", "2022-01-08"),
+            &spot_form(&folder, "2022-01-10", "2022-01-10"),
             day(2026, 8, 7),
             moment(),
             &site,
@@ -23777,17 +25956,17 @@ mod tests {
             "{receipt}"
         );
 
-        // 3 rows in, 2 bars out (10:00 and 10:01), 1 folded, 0 dropped.
-        assert!(html_fact(&receipt, "Rows read", "3"), "{receipt}");
+        // 376 snapshots in, 375 minute bars out, 1 folded, 0 dropped.
+        assert!(html_fact(&receipt, "Rows read", "376"), "{receipt}");
         assert!(
-            html_fact(&receipt, "Bars offered to the store", "2"),
+            html_fact(&receipt, "Bars offered to the store", "375"),
             "{receipt}"
         );
         // A FIRST PULL WRITES WHAT IT OFFERS, so the two agree here. The
         // divergence is a re-pull's, and this row is what makes it visible:
         // measured on a real store, `bars_stored: 1643341, bars_committed: 0`.
         assert!(
-            html_fact(&receipt, "Bars written to the file", "2"),
+            html_fact(&receipt, "Bars written to the file", "375"),
             "{receipt}"
         );
         assert!(
@@ -23803,7 +25982,7 @@ mod tests {
             "every counter is measured now: {after}"
         );
         assert!(after.contains("STORED"), "{after}");
-        assert!(after.contains("2022-01-08..=2022-01-08"), "{after}");
+        assert!(after.contains("2022-01-10..=2022-01-10"), "{after}");
         assert!(after.contains("1 record(s)"), "{after}");
         assert!(
             after.contains("It is a file on disk, not memory"),
@@ -23815,7 +25994,7 @@ mod tests {
         assert!(page.contains("2026-08-07 10:00:00 IST"), "{page}");
         assert!(page.contains("STORED"), "{page}");
         assert!(
-            page.contains(">3</td>") && page.contains(">2</td>"),
+            page.contains(">376</td>") && page.contains(">375</td>"),
             "{page}"
         );
         for forbidden in ["<script", "javascript:", "onclick", "onload", "onerror"] {
@@ -23834,7 +26013,7 @@ mod tests {
         // bars_committed: 0` — sixteen lakh bars offered, zero written, under a
         // single figure captioned as though they were written.
         let (again_code, again) = spot_answer(
-            &spot_form(&folder, "2022-01-08", "2022-01-08"),
+            &spot_form(&folder, "2022-01-10", "2022-01-10"),
             day(2026, 8, 7),
             moment(),
             &site,
@@ -23842,13 +26021,13 @@ mod tests {
         .await;
         assert_eq!(again_code, axum::http::StatusCode::OK, "{again}");
         assert!(
-            html_fact(&again, "Bars offered to the store", "2"),
-            "the rung offered both bars again — a re-pull reads the same rows: \
+            html_fact(&again, "Bars offered to the store", "375"),
+            "the rung offered all bars again — a re-pull reads the same rows: \
              {again}"
         );
         assert!(
             html_fact(&again, "Bars written to the file", "0"),
-            "and wrote NEITHER, because the store already holds them. This is \
+            "and wrote NONE, because the store already holds them. This is \
              the pair the first receipt could not distinguish from a first \
              pull: {again}"
         );
@@ -24994,6 +27173,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn dated_cash_session_evidence_is_logged_with_resolved_counts() {
+        let _shared = crate::emitted::sink();
+        let from = crate::emitted::mark();
+        super::note_cash_schedule_verified(25, 208);
+        let said = crate::emitted::landed(from, "pull.cash_session", "dated eligibility verified");
+        assert!(
+            said.iter().any(|record| {
+                record.level == telemetry::Level::Info
+                    && crate::emitted::counts(record, "days", 25)
+                    && crate::emitted::counts(record, "instruments", 208)
+                    && crate::emitted::says(
+                        record,
+                        "policy",
+                        "NSE MII symbol+ISIN; continuous only; auction excluded",
+                    )
+            }),
+            "dated verification and its scope must reach the audit sink: {said:?}"
+        );
+    }
+
     /// **THE SITE INSIDE `broker_run`'S LOOP, DRIVEN OVER A REAL UNIVERSE.**
     ///
     /// `pull.spot instrument refused` is the last of the three
@@ -25982,7 +28182,7 @@ mod percentage_tests {
         YearMonth::new(year, ordinal).expect("a month")
     }
 
-    fn series(segment: Segment, symbol: &str) -> census::Series {
+    pub(super) fn series(segment: Segment, symbol: &str) -> census::Series {
         series_at(segment, symbol, Timeframe::MINUTE_1)
     }
 
@@ -26010,7 +28210,9 @@ mod percentage_tests {
     /// The path is deliberately a name nothing ever writes: every assertion
     /// below that reads a close therefore reads it from the manifest, and a
     /// change that reached for a bar file would fail rather than pass slowly.
-    fn census_of(rows: &[(census::Series, YearMonth, u64, Closes)]) -> census::VendorCensus {
+    pub(super) fn census_of(
+        rows: &[(census::Series, YearMonth, u64, Closes)],
+    ) -> census::VendorCensus {
         let mut manifest = Manifest::open(Vendor::Groww, &[], &[]).expect("a genesis census");
         for &(series, at, bars, closes) in rows {
             manifest
@@ -26034,7 +28236,7 @@ mod percentage_tests {
         }
     }
 
-    fn priced(first: i64, last: i64) -> Closes {
+    pub(super) fn priced(first: i64, last: i64) -> Closes {
         Closes::known(first, last).expect("two prices")
     }
 
@@ -26672,6 +28874,28 @@ mod percentage_tests {
 /// module's, read from the exchange's own navigation and never composed.
 const INDEX_HOST: &str = "https://www.niftyindices.com";
 
+/// Copies only this vendor's identity evidence at the crawl boundary.
+/// The list is ordered for reproducibility; this is O(n log n) preparation,
+/// not a per-bar or per-lookup operation.
+fn resolved_master_rows(merged: &merge::Merged, vendor: Vendor) -> Vec<(String, String, String)> {
+    let mut rows: Vec<_> = merged
+        .by_key
+        .iter()
+        .filter_map(|(key, entry)| {
+            let id = entry.ids.get(vendor as usize).copied().flatten()?;
+            Some((
+                id.as_str().to_owned(),
+                key.underlying.as_str().to_owned(),
+                entry
+                    .vendor_isin(vendor)
+                    .map_or_else(String::new, |isin| isin.as_str().to_owned()),
+            ))
+        })
+        .collect();
+    rows.sort_unstable();
+    rows
+}
+
 /// `POST /universe/resolve` — crawl the exchange's directory and report what
 /// agreed with a feed's master.
 ///
@@ -26747,34 +28971,9 @@ pub async fn universe_resolve(
     // The inner scope is what guarantees the release. Owning three short
     // strings per instrument costs one allocation each over a bounded set and
     // is the price of not holding a lock across the network.
-    let owned: Vec<(String, String, String)> = {
+    let owned = {
         let held = site.universe();
-        held.read
-            .merged
-            .by_key
-            .iter()
-            .filter_map(|(key, entry)| {
-                entry
-                    .ids
-                    .get(vendor as usize)
-                    .and_then(Option::as_ref)
-                    .map(|id| {
-                        (
-                            id.as_str().to_owned(),
-                            key.underlying.as_str().to_owned(),
-                            // THE ISIN IS OPTIONAL AND ITS ABSENCE IS A REAL
-                            // STATE, not a gap to paper over: an index has
-                            // none, and `Verdict::VendorHasNoIsin` is the
-                            // bucket that exists to say so without blaming the
-                            // vendor.
-                            entry
-                                .isin
-                                .as_ref()
-                                .map_or_else(String::new, |(_, isin)| isin.as_str().to_owned()),
-                        )
-                    })
-            })
-            .collect()
+        resolved_master_rows(&held.read.merged, vendor)
     };
     let master: Vec<pull::universe::VendorInstrument<'_>> = owned
         .iter()
@@ -27122,6 +29321,153 @@ mod universe_route_tests {
             one.starts_with('"') && one.ends_with('"'),
             "an ETag is a quoted-string by RFC 9110: {one}"
         );
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+    fn compact_census_preserves_every_expanded_row_and_unknown_reason() {
+        use super::percentage_tests::{census_of, priced, series};
+        use brutex_core::instrument::Segment;
+        use serde_json::{Value, json};
+        use store::path::YearMonth;
+        let march = YearMonth::new(2025, 3).unwrap();
+        let april = YearMonth::new(2025, 4).unwrap();
+        let index = series(Segment::Index, "NIFTY");
+        let cash = series(Segment::Cash, "RELIANCE");
+        let held = census_of(&[
+            (index, march, 7, priced(100, 103)),
+            (index, april, 11, priced(103, 101)),
+            (cash, april, 13, priced(80, 82)),
+        ]);
+        let censuses = vec![held];
+        let entries = census::held_entries(&censuses);
+        let ordinary: Value =
+            serde_json::from_str(&store_body(&censuses, &entries, Vendor::Groww)).unwrap();
+        let compact: Value =
+            serde_json::from_str(&store_wire::compact(&censuses, &entries, Vendor::Groww).unwrap())
+                .unwrap();
+        let expanded: Vec<Value> = compact["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| {
+                let word = |field: &str, at: usize| {
+                    row[at].as_u64().map_or(Value::Null, |index| {
+                        compact[field][usize::try_from(index).unwrap()].clone()
+                    })
+                };
+                json!({
+                    "feed":compact["feed"],"instrument":word("instruments",0),
+                    "month":word("months",1),"timeframe":word("timeframes",2),
+                    "rows":row[3],"first_ts":row[4],"last_ts":row[5],
+                    "chg_bps":row[6],"chg_why":word("reasons",7),
+                    "prev_chg_bps":row[8],"prev_chg_why":word("reasons",9)
+                })
+            })
+            .collect();
+        assert_eq!(Value::Array(expanded), ordinary);
+        assert_eq!(compact["rows"].as_array().unwrap().len(), 3);
+        assert_eq!(compact["instruments"].as_array().unwrap().len(), 2);
+        assert_eq!(compact["schema"], 1);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+    async fn actual_application_capability_is_explicit_and_not_release_clearance() {
+        let (status, headers, body) = application_mode().await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert!(headers.contains(&(axum::http::header::CACHE_CONTROL, "no-store")));
+        let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(value["schema"], 2);
+        assert_eq!(value["mode"], "application");
+        assert_eq!(value["release_cleared"], false);
+        assert_eq!(value["can_sweep"], cli::commit_stamp().is_some());
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+    fn census_head_does_not_encode_and_matching_get_reuses_bytes() {
+        use super::tests::{agreeing, site};
+        use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
+        let dir = agreeing("wirehead");
+        let built = site("wirehead", &dir);
+        let uri: Uri = "/store.json?feed=groww&encoding=census-tuples-v1"
+            .parse()
+            .unwrap();
+        let (status, headers, body) =
+            store_response(&built, &HeaderMap::new(), &uri, &Method::HEAD);
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.is_empty());
+        assert!(!headers.contains_key(header::ETAG));
+        assert!(headers.contains_key("x-brutex-census-state"));
+        assert!(built.census_wire.is_empty());
+
+        let (status, headers, first) =
+            store_response(&built, &HeaderMap::new(), &uri, &Method::GET);
+        assert_eq!(status, StatusCode::OK);
+        assert!(!built.census_wire.is_empty());
+        let (_, _, second) = store_response(&built, &HeaderMap::new(), &uri, &Method::GET);
+        assert_eq!(first.as_ptr(), second.as_ptr());
+        let mut conditional = HeaderMap::new();
+        conditional.insert(header::IF_NONE_MATCH, headers[header::ETAG].clone());
+        let (status, _, empty) = store_response(&built, &conditional, &uri, &Method::GET);
+        assert_eq!(status, StatusCode::NOT_MODIFIED);
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn concurrent_cold_census_readers_publish_one_shared_snapshot() {
+        use super::tests::{agreeing, site};
+        let dir = agreeing("wireconcurrent");
+        let built = site("wireconcurrent", &dir);
+        *built.census.lock().unwrap() = None;
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            let readers: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        census_now(&built)
+                    })
+                })
+                .collect();
+            let mut previous: Option<CensusNow> = None;
+            for reader in readers {
+                let current = reader.join().unwrap();
+                if let Some(prior) = &previous {
+                    assert!(std::sync::Arc::ptr_eq(&prior.0, &current.0));
+                    assert!(std::sync::Arc::ptr_eq(&prior.1, &current.1));
+                }
+                previous = Some(current);
+            }
+        });
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+    fn compact_census_refusals_never_turn_into_not_modified_or_retryable_input() {
+        use super::tests::{agreeing, corrupt_census};
+        use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
+        let dir = agreeing("wirerefused");
+        let built = Site::load(&dir, &corrupt_census("wirerefused"));
+        let uri: Uri = "/store.json?feed=groww&encoding=census-tuples-v1"
+            .parse()
+            .unwrap();
+        let (status, headers, _) = store_response(&built, &HeaderMap::new(), &uri, &Method::GET);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        let mut conditional = HeaderMap::new();
+        conditional.insert(header::IF_NONE_MATCH, headers[header::ETAG].clone());
+        let (status, headers, body) = store_response(&built, &conditional, &uri, &Method::GET);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(headers["x-brutex-census-state"], "unreadable");
+        assert!(!body.is_empty());
+        for query in ["/store.json?encoding=unknown", "/store.json?feed=unknown"] {
+            let (status, headers, _) =
+                store_response(&built, &conditional, &query.parse().unwrap(), &Method::GET);
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(!headers.contains_key(header::RETRY_AFTER));
+        }
     }
 
     #[test]

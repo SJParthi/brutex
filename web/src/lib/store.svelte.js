@@ -69,7 +69,10 @@ import { foldWindow, foldKey } from '$lib/fold.js';
 // A REQUEST THAT CANNOT END IS A SPINNER THAT LIES. `ask` is `fetch` with a
 // ceiling; see `$lib/ask.js` for why the wrapper exists rather than a signal
 // threaded through every call site.
+import { createCensusLoader, STORE_CENSUS_MS } from '$lib/store-census.js';
 import { ask } from '$lib/ask.js';
+import { readFeedHeader } from '$lib/feed-summary.js';
+import { pooled } from '$lib/pooled.js';
 
 /* ======================================================================
    THE RUNGS ON DISK — the store's own list, not a second copy of it.
@@ -296,6 +299,7 @@ const empty = () => ({
  *   feed: string | null,
  *   at: number | null,
  *   error: string | null,
+ *   busy: string | null,
  *   generation: number,
  *   reads: number,
  *   lastOk: { at: number | null, feed: string | null }
@@ -308,17 +312,42 @@ const empty = () => ({
    stamp will not go on. The four nullable fields are exactly the four this
    module's failure contract clears, so the type that admits both states is the
    type that lets the contract be written at all. */
+// Census rows are immutable snapshots, replaced only after a complete read.
+// Deep proxying 148,222 rows creates a reactive object for every inspected row
+// and field even though none can change independently. Keep the array raw;
+// its accessor remains reactive when the complete snapshot is replaced.
+/** @type {StoreRow[]} */
+let rawRows = $state.raw([]);
 /** @type {StoreReading} */
 export const store = $state({
   state: 'none',
   feed: null,
   at: null,
   error: null,
+  busy: null,
   generation: 0,
   reads: 0,
   lastOk: { at: null, feed: null },
-  ...empty()
+  ...empty(),
+  get rows() { return rawRows; },
+  set rows(value) { rawRows = value; }
 });
+
+const census = createCensusLoader(ask, STORE_CENSUS_MS, ({ nextAttempt, delayMs }) => {
+  store.busy = `The database reader is busy. Retrying in ${delayMs / 1000} s (attempt ${nextAttempt} of 3).`;
+});
+
+/**
+ * Shared selected-feed response, including its HTTP status and headers. The
+ * request and JSON body have one 30-second deadline. Refresh advances the same
+ * generation used by the folded store, so Backtest and DB reuse one census.
+ * Successful body rows are shared read-only; no server-summary endpoint is needed.
+ * @param {string} feed
+ * @returns {Promise<import('$lib/store-census.js').CensusAnswer>}
+ */
+export function readStoreCensus(feed) {
+  return census.load(feed, store.generation);
+}
 
 /* `${feed}#${generation}` already asked for. NOT reactive: it is bookkeeping
    about a request, and an effect that reads what it writes re-runs forever. */
@@ -449,23 +478,27 @@ function read(feed, generation) {
   }
   store.state = 'reading';
   store.error = null;
+  store.busy = null;
 
-  const mine = ask(`/store.json?feed=${encodeURIComponent(feed)}`)
-    .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status} from /store.json`))))
+  const token = {};
+  flightToken = token;
+  const mine = census.load(feed, generation)
+    .then((r) => (r.ok ? r.body : Promise.reject(new Error(`HTTP ${r.status} from /store.json`))))
     .then((body) => {
-      if (asked !== key) return; // a newer feed or generation won; this answer is stale
+      if (asked !== key || flightToken !== token) return;
       if (!Array.isArray(body)) throw new Error('the body of /store.json is not a JSON array');
-      Object.assign(store, fold(body));
+      if (valueFeed !== feed || rawRows !== body) Object.assign(store, fold(body));
       valueFeed = feed;
       store.feed = feed;
       store.at = Date.now();
       store.state = 'ready';
       store.error = null;
+      store.busy = null;
       store.reads += 1;
       store.lastOk = { at: store.at, feed };
     })
     .catch((why) => {
-      if (asked !== key) return;
+      if (asked !== key || flightToken !== token) return;
       // NAMED, NOT SHRUGGED, AND THE STAMP GOES WITH IT. A page that says
       // "nothing stored" over a failed request states a fact about a disk it
       // never read. `lastOk` survives under its own name; `at` and `feed` do
@@ -476,6 +509,7 @@ function read(feed, generation) {
       store.at = null;
       store.state = 'error';
       store.error = String(why?.message ?? why);
+      store.busy = null;
       // The key is released so a Refresh press can retry the same
       // (feed, generation) without needing a bump nobody asked for.
       asked = null;
@@ -484,8 +518,6 @@ function read(feed, generation) {
   // The token, not the promise, decides whether this read is still the current
   // one when it lands. A newer feed or generation replaces `flightToken` on its
   // way past, and this one then clears nothing.
-  const token = {};
-  flightToken = token;
   flight = mine.finally(() => {
     if (flightToken === token) flight = null;
   });
@@ -535,8 +567,18 @@ export function syncStore(feed) {
        Clearing at the one place all of them share beats stamping three pages
        separately. `empty()` is the same unasked state the module starts in, so
        "no feed" and "before the first feed" become one state — which is what
-       they actually are. */
+       they actually are. The request token and stamp are also cleared: an
+       older response cannot publish again after this explicit clear. */
     clearValue();
+    asked = null;
+    flightToken = null;
+    flight = null;
+    valueFeed = null;
+    store.feed = null;
+    store.at = null;
+    store.error = null;
+    store.busy = null;
+    store.state = 'none';
     return;
   }
   read(feed, generation);
@@ -740,10 +782,8 @@ export function foldMonths(months, scope) {
    THE SURVEY — a DIFFERENT question, asked once.
    ----------------------------------------------------------------------
    "Which feed holds anything at all" is not "what does this feed hold". It
-   spans every feed, it is what picks the default selection on load, and it is
-   what `/db` names when the selected feed is empty and the operator needs
-   somewhere to go. It was two independent N-request folds — one in
-   `loadFeeds`, one in `/db` — answering one question on two clocks.
+   spans every feed and is requested explicitly by `/db` when the operator
+   needs to find held data. It no longer delays the shared feed selection.
    ====================================================================== */
 /**
  * WHAT ONE FEED HOLDS, as the survey found it.
@@ -790,9 +830,8 @@ let surveyFlight = null;
 
 /**
  * Read every feed's store once. `list` is `[{ wire, ready }, …]` from
- * `/feeds.json`. At most one pass per (feed list, generation), so the boot pass
- * that picks the default is the SAME pass `/db` reads when it finds the selected
- * feed empty — and a Refresh, which bumps the generation, re-asks it.
+ * `/feeds.json`. At most one pass per (feed list, generation). A Refresh,
+ * which bumps the generation, re-asks it. This is not part of shared startup.
  *
  * `Feed` is REFERENCED, NOT REDEFINED. `$lib/feeds.svelte.js` owns that shape
  * and both callers pass it their `feeds.all`; a second local spelling of it
@@ -806,7 +845,8 @@ let surveyFlight = null;
 export function surveyStores(list) {
   const feedsIn = [...(list ?? [])];
   const wires = feedsIn.map((f) => f.wire).join(',');
-  const key = `${wires}#${store.generation}`;
+  const generation = store.generation;
+  const key = `${wires}#${generation}`;
   if (surveyAsked === key) return surveyFlight ?? Promise.resolve(survey);
   surveyAsked = key;
   // A DIFFERENT FEED LIST IS A DIFFERENT QUESTION, so the previous answer is
@@ -819,28 +859,12 @@ export function surveyStores(list) {
   survey.state = 'reading';
   survey.error = null;
 
-  surveyFlight = Promise.all(
-    feedsIn.map((f) =>
-      ask(`/store.json?feed=${encodeURIComponent(f.wire)}`)
-        .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-        .then((d) => {
-          const rows = Array.isArray(d) ? d : [];
-          // THE SAME TEST FOR "READABLE" AS THE CENSUS FOLD, and deliberately
-          // the same function. Two definitions of which rows count is how the
-          // feed picker comes to report a bar total the page it opens cannot
-          // reproduce, and the operator has no way to tell which one lied.
-          let bars = 0;
-          let cells = 0;
-          for (const row of rows) {
-            if (rowFault(row) !== null) continue;
-            bars += row.rows;
-            cells += 1;
-          }
-          // `any` IS "THIS FEED HAS ENTRIES", NOT "THIS FEED HAS COUNTABLE
-          // ONES". It is what `/db` points at when the selected feed is empty,
-          // and a store whose rows this build cannot parse is still somewhere
-          // to go — saying otherwise would hide a store behind a parse fault.
-          return { wire: f.wire, ready: f.ready, bars, cells, any: rows.length > 0, error: null };
+  surveyFlight = pooled(feedsIn, 2, (f) =>
+      readFeedHeader(f.wire, ask)
+        .then(({ bars, cells }) => {
+          // Finding which feed holds data needs committed header counters,
+          // never five complete inventory downloads and folds.
+          return { wire: f.wire, ready: f.ready, bars, cells, any: cells > 0, error: null };
         })
         // ONE FEED'S FAILURE IS NOT EVERY FEED'S. The reason rides on the row so
         // a caller can say "this feed could not be read" rather than "this feed
@@ -853,7 +877,6 @@ export function surveyStores(list) {
           any: false,
           error: String(why?.message ?? why)
         }))
-    )
   )
     .then((all) => {
       if (surveyAsked !== key) return survey;

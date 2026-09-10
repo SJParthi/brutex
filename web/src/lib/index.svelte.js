@@ -1,19 +1,12 @@
 /**
- * The instrument index, and the reason the whole universe ships to the browser.
+ * The selected feed's instrument index. A held catalogue is reused until the
+ * feed changes or the operator explicitly re-reads its master. Concurrent
+ * readers share one request; stale responses never rebuild the current index.
  *
- * O(1) PER KEYSTROKE. The surface is bounded at ~800 instruments by decision,
- * so the entire searchable set is one response at load. After that every
- * keystroke is ONE Map probe on a 1..4-character prefix bucket — not a scan of
- * 800, and not a request. A request per character is ~800 requests to type one
- * symbol and makes keystroke latency a function of the network.
- *
- * Beyond four characters the bucket is already small and filtering it costs
- * less than the memory a deeper index would. That is the only place cost is not
- * constant, and it is bounded by the largest 4-prefix bucket rather than by the
- * universe.
- *
- * Building the index is O(n) ONCE, at load. That is inherent — every row has to
- * be seen to be indexed — and it is paid a single time for the session.
+ * Building the index costs O(rows). Search normalizes the query, probes one
+ * prefix bucket for 1..4 characters, and filters that bucket for longer text.
+ * Its output and longest matching bucket are not constant in the number of
+ * instruments. No request is made for each keystroke.
  */
 
 // A REQUEST THAT CANNOT END IS A SPINNER THAT LIES. `ask` is `fetch` with a
@@ -23,7 +16,7 @@ import { ask } from '$lib/ask.js';
 // THE ARITHMETIC LIVES IN `$lib/prefix.js` so a test can drive it. This module
 // imports `$lib/ask.js`, which node cannot resolve, so the O(1) claim in the
 // opening comment was unreachable from `node --test` even in principle.
-import { build, probe } from '$lib/prefix.js';
+import { createCatalogueLoader } from '$lib/catalogue-loader.js';
 
 // `feed` IS NOT BOOKKEEPING — IT IS THE GATE. /ingest:1449 and /db:1013 both
 // derive `catalogueIsThisFeed = catalogue.ready && catalogue.feed === feeds.active`
@@ -85,11 +78,7 @@ import { build, probe } from '$lib/prefix.js';
  * @type {{ rows: MasterRow[], ready: boolean, feed: string | null, error: string | null }}
  */
 export const catalogue = $state({ rows: [], ready: false, feed: null, error: null });
-let byPrefix = new Map();
-// The feed whose answer is IN FLIGHT. Switching feed twice quickly can land the
-// responses out of order; without this the last to RETURN wins instead of the
-// last one ASKED, and the page answers confidently for the wrong broker.
-let inFlight = null;
+const loader = createCatalogueLoader(catalogue, ask);
 
 /**
  * AN ABSENT FEED IS REFUSED HERE, NOT GUARDED FOR AT EVERY CALL SITE.
@@ -101,66 +90,14 @@ let inFlight = null;
  * broker's instrument list as the answer for "no broker", which is the same
  * class of fault as a cleared feed picker still showing Dhan.
  *
- * Both callers today write `if (feeds.active) loadCatalogue(feeds.active)`, so
- * it is unreachable — by convention, at two sites, which is exactly the kind of
- * safety that lasts until a third caller is written. Refusing here makes it
- * structural, and the reason is stated rather than defaulted.
+ * The layout forwards a cleared selection so the retained catalogue and its
+ * pending read are both revoked. The Markets re-read button explicitly forces
+ * a current-feed refresh. Neither path asks the API with an absent feed.
  *
  * @param {string | null | undefined} feed
+ * @param {boolean} [force] Re-read a held feed after an explicit refresh.
  */
-export async function loadCatalogue(feed) {
-  if (!feed) {
-    catalogue.rows = [];
-    catalogue.ready = false;
-    catalogue.feed = null;
-    catalogue.error =
-      'No feed was named, so no instrument master was read. This is a refusal, not an empty vendor: asking the API with a blank feed answers with the default vendor’s list, which would be counted here under a broker nobody selected.';
-    return;
-  }
-  inFlight = feed;
-  try {
-    // THE FEED IS PART OF THE QUESTION. The two brokers do not list the same
-    // instruments, so "every instrument" is a different set per feed and the
-    // index has to be rebuilt when the selection changes.
-    const r = await ask(`/instruments.json?feed=${encodeURIComponent(feed ?? '')}`);
-    if (!r.ok) {
-      // THE SERVER ALREADY SAID WHY, AND THIS THREW IT AWAY.
-      //
-      // D-0124 added `x-brutex-master-state` and `x-brutex-master-note` to this
-      // exact response so a page could tell a vendor whose master was never
-      // READ from one whose master lists nothing — two states that produce the
-      // same empty screen and need opposite actions. This line reported
-      // `HTTP 503` and dropped both.
-      //
-      // Measured: selecting a broker whose instrument file is not on disk drew
-      // "/instruments.json could not be read, so no name is counted here:
-      // Error: HTTP 503" — a status code, about a file, with no mention of the
-      // file. The note says which one and what to do about it.
-      const note = r.headers.get('x-brutex-master-note');
-      const state = r.headers.get('x-brutex-master-state');
-      if (note) throw new Error(state ? `${state} — ${note}` : note);
-      throw new Error(`HTTP ${r.status}`);
-    }
-    const rows = await r.json();
-    const next = build(rows);
-    // A response for a feed the operator has already left is DISCARDED, never
-    // stamped.
-    if (inFlight !== feed) return;
-    byPrefix = next;
-    catalogue.rows = rows;
-    catalogue.feed = feed;
-    catalogue.ready = true;
-    catalogue.error = null;
-  } catch (why) {
-    if (inFlight !== feed) return;
-    // The stamp is CLEARED on failure. Leaving the previous feed's name on a
-    // failed read is the stale-value shape §4 bans — the page would go on
-    // counting the old master and say nothing was wrong.
-    catalogue.feed = null;
-    catalogue.ready = false;
-    catalogue.error = String(why);
-  }
-}
+export const loadCatalogue = (feed, force = false) => loader.load(feed, force);
 
 /**
  * One probe for 1..4 characters; a filter over one bucket beyond that.
@@ -168,5 +105,5 @@ export async function loadCatalogue(feed) {
  * @param {string} typed
  */
 export function search(typed) {
-  return probe(byPrefix, catalogue.rows, typed);
+  return loader.search(typed);
 }

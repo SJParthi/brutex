@@ -262,6 +262,8 @@ fn option_plan(request: &BarRequest, contract: Contract) -> Plan<'_> {
 
 fn plan(request: &BarRequest) -> Plan<'_> {
     Plan {
+        calendar: pull::calendar::Runtime::default(),
+        cash_schedule: None,
         columns: pull::csv::Columns::Gdfl,
         request,
         encoding: TimestampEncoding::EpochSecondsUtc,
@@ -363,9 +365,20 @@ fn a_window_fetched_from_a_broker_lands_in_the_store_and_is_counted() {
     );
     assert_eq!(done.bars_stored, 4, "all four are inside the session");
     assert!(
-        done.failures.is_empty(),
-        "nothing failed: {:?}",
+        !done.balances(),
+        "source rows balance but derivation is partial"
+    );
+    assert!(
         done.failures
+            .iter()
+            .any(|f| f.why.contains("incomplete or invalid minute coverage")),
+        "{:?}",
+        done.failures
+    );
+    assert_eq!(done.bars_committed, 4);
+    assert_eq!(
+        done.derived_files, 2,
+        "only 2min and 3min contain complete buckets"
     );
 
     // ── THE BARS ARE ACTUALLY ON THE DISK ───────────────────────────────
@@ -390,31 +403,55 @@ fn a_window_fetched_from_a_broker_lands_in_the_store_and_is_counted() {
     // ── AND THE CENSUS COUNTS THEM ──────────────────────────────────────
     // A store that holds rows its counter denies is the worst outcome
     // `ingest` names, so this is asserted rather than assumed.
-    let manifest = census(&store_root);
-    let entry = manifest.entry(&key("NIFTY")).expect("the month is counted");
-    assert_eq!(entry.rows, 4, "the counter agrees with the store");
-    // THE MINUTE'S OWN ROW IS STILL FOUR. What changed is that it is no longer
-    // the ONLY row: the same four bars are folded into every rung derived from
-    // the minute, so the census holds one key per rung and its total is the sum
-    // across them. Both are asserted against the rule that produced them —
-    // `derived_count` — so a rung added to the store moves this with it.
-    let rungs = 1_u64 + pull::ingest::derived_count(store::path::Timeframe::MINUTE_1) as u64;
-    assert_eq!(
-        manifest.keys(),
-        rungs,
-        "one census key per rung: the one fetched and each one derived"
-    );
-    assert!(
-        manifest.total_rows() >= 4 && manifest.total_rows() <= 4 * rungs,
-        "every derived rung folds four minute bars into at most four bars, \
-         never more: {} rows over {rungs} rung(s)",
-        manifest.total_rows()
-    );
+    assert_sparse_minute_census(&store_root);
 
     // ── THE REQUEST WAS THE DESCRIPTOR'S ────────────────────────────────
     let sent = seen
         .recv_timeout(core::time::Duration::from_secs(5))
         .expect("the broker was contacted");
+    assert_broker_request(&sent);
+}
+
+fn assert_sparse_minute_census(store_root: &Path) {
+    let manifest = census(store_root);
+    let entry = manifest.entry(&key("NIFTY")).expect("the month is counted");
+    assert_eq!(entry.rows, 4, "the counter agrees with the store");
+    // Four source minutes support two complete 2min buckets and one 3min
+    // bucket. Wider buckets and the remaining 3min tail must be withheld.
+    assert_eq!(
+        manifest.keys(),
+        3,
+        "only the source and rungs with complete buckets are counted"
+    );
+    assert_eq!(
+        manifest.total_rows(),
+        7,
+        "four source + two 2min + one 3min"
+    );
+    for (timeframe, expected) in [(Timeframe::MINUTE_2, 2), (Timeframe::MINUTE_3, 1)] {
+        let entry_key = EntryKey {
+            timeframe,
+            ..key("NIFTY")
+        };
+        assert_eq!(
+            manifest
+                .entry(&entry_key)
+                .expect("complete buckets counted")
+                .rows,
+            expected
+        );
+    }
+    assert!(
+        manifest
+            .entry(&EntryKey {
+                timeframe: Timeframe::MINUTE_5,
+                ..key("NIFTY")
+            })
+            .is_none()
+    );
+}
+
+fn assert_broker_request(sent: &str) {
     assert!(sent.starts_with("POST /v2/charts/historical"), "{sent}");
     assert!(
         sent.contains("access-token: A-FAKE-TOKEN"),
@@ -521,7 +558,14 @@ fn an_empty_answer_stores_nothing_and_writes_no_census() {
         done.counted, 0,
         "nothing was counted, because nothing landed"
     );
-    assert!(done.failures.is_empty(), "an empty window is not a failure");
+    assert_eq!(done.failures.len(), 1);
+    assert!(
+        done.failures
+            .first()
+            .expect("missing coverage receipt")
+            .why
+            .contains("375 missing scheduled minutes")
+    );
 
     // AND NOTHING WAS WRITTEN. A census published for a run that stored no bar
     // would be a counter describing an install that did not happen.
@@ -576,6 +620,11 @@ fn pulling_the_same_window_twice_changes_nothing_the_second_time() {
         first_total,
         "a rerun adds no rows to any rung, derived or fetched"
     );
+    assert_eq!(second.bars_committed, 0);
+    assert_eq!(
+        first.failures, second.failures,
+        "rerunning sparse source preserves its partial outcome"
+    );
 }
 
 /// The broker path and the folder path are the same code below the seam.
@@ -598,13 +647,10 @@ fn the_broker_path_and_the_folder_path_are_one_implementation() {
     // pull reports the same shape a folder pull does — including the ones a
     // hand-rolled second implementation would have forgotten.
     assert_eq!(done.members, 1);
-    // ONE COUNTER ROW PER FILE — the rung fetched and every rung derived from
-    // it. Asserted against the RULE so a rung added to `Timeframe::KNOWN` moves
-    // this expectation with it rather than breaking a literal.
+    // The sparse source and the two rungs with complete buckets are counted.
     assert_eq!(
-        done.counted,
-        1 + pull::ingest::derived_count(store::path::Timeframe::MINUTE_1),
-        "the counter row was recorded for the fetched rung and each derived one"
+        done.counted, 3,
+        "the counter records only files containing complete derived buckets"
     );
     assert_eq!(done.rows_folded, 0, "one-minute bars, nothing to fold");
     assert_eq!(
@@ -612,7 +658,28 @@ fn the_broker_path_and_the_folder_path_are_one_implementation() {
         0,
         "every row is inside the session and the window"
     );
-    assert!(done.failures.is_empty());
+    assert!(
+        done.failures
+            .iter()
+            .any(|f| f.why.contains("incomplete or invalid minute coverage"))
+    );
+    let archive_scratch = Scratch::new("shared-archive");
+    let member = pull::archive::Member {
+        path: PathBuf::from("fixture.csv"),
+        instrument: "NIFTY".to_owned(),
+        rows: raw.rows.clone(),
+    };
+    let mut archive_done =
+        ingest::from_members(&[member], &archive_scratch.store(), plan(&request));
+    // Only the broker door attests the declared request, beyond shared folding.
+    archive_done.failures.push(pull::ingest::Failure {
+        instrument: "NIFTY".to_owned(),
+        why: "request minute coverage gap on 2025-07-01: 09:19–15:30 IST (end exclusive), 371 missing scheduled minutes; no bars fabricated".to_owned(),
+    });
+    assert_eq!(
+        done, archive_done,
+        "all shared outcomes agree; the broker additionally reports exact request-span coverage"
+    );
 }
 
 // ===========================================================================
@@ -1249,13 +1316,24 @@ fn a_batch_spanning_two_months_lands_in_both_and_the_bars_go_to_the_right_one() 
     };
     let done = pull::ingest::from_window(&raw, "NIFTY", &url, &store_root, plan(&request));
 
-    assert_eq!(
-        done.failures.len(),
-        0,
-        "no member failed: {:?}",
+    assert!(
+        !done.balances(),
+        "one minute per month cannot form a complete derived bucket"
+    );
+    assert!(
+        done.failures
+            .iter()
+            .any(|f| f.why.contains("incomplete or invalid minute coverage")),
+        "{:?}",
         done.failures
     );
     assert_eq!(done.bars_stored, 2, "both bars are on disk");
+    assert_eq!(done.bars_committed, 2);
+    assert_eq!(done.derived_files, 0);
+    assert_eq!(
+        done.counted, 2,
+        "both source months are counted despite derivation failures"
+    );
 
     // AND IN TWO DIFFERENT FILES, each holding its own month.
     let months: Vec<String> = walk_bin_files(&store_root)
@@ -1274,6 +1352,17 @@ fn a_batch_spanning_two_months_lands_in_both_and_the_bars_go_to_the_right_one() 
         months.iter().any(|m| m == "2025-08"),
         "August's bar has its own file: {months:?}"
     );
+    let manifest = census(&store_root);
+    for (month, timestamp) in [(7, 1_753_936_200_000_000), (8, 1_754_022_600_000_000)] {
+        let entry_key = EntryKey {
+            month: YearMonth::new(2025, month).expect("fixture month"),
+            ..key("NIFTY")
+        };
+        let entry = manifest.entry(&entry_key).expect("source month counted");
+        assert_eq!(entry.rows, 1);
+        assert_eq!(entry.first_ts_micros, timestamp);
+        assert_eq!(entry.last_ts_micros, timestamp);
+    }
 }
 
 /// Every `.bin` under a store root, in no particular order.

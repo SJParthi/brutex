@@ -40,7 +40,7 @@
 //! O(1) per leg beyond the leg's own work: the group lookup is a linear scan of
 //! the vendor list, which is bounded by the number of feeds this build has
 //! (four), not by the number of legs. The pass loop holds one `Progress` and
-//! rewrites it in place; nothing accumulates per pass.
+//! one checkpoint per leg; nothing accumulates per pass.
 //!
 //! **UNVERIFIED as a measurement.** The bound is argued from the
 //! shape of the code and no bench in this workspace times it.
@@ -58,19 +58,11 @@ use crate::server::{Loaded, Site, percent_decode};
 /// it is REPORTED when it is reached rather than being silently the end.
 pub const MAX_PASSES: u32 = 400;
 
-/// How many clean empty passes mean "there is nothing left to get".
+/// How many passes without retryable failures or store growth end idle retries.
 ///
-/// **Three, and only for a pass that FAILED AT NOTHING.** Operator's rule of
-/// 2026-08-20: a vendor answering "no data available" is acceptable after three
-/// attempts; every other outcome is retried until it succeeds.
-///
-/// | Pass gained no bars and… | Meaning | What the loop does |
-/// |---|---|---|
-/// | nothing refused, nothing errored | there is no more data | count toward three, then stop |
-/// | a leg failed, refused or dropped | rate, socket, power, credential | **retry, with no limit** |
-///
-/// The two are indistinguishable by bar count alone -- a throttled pass and a
-/// finished window both store zero -- which is why the cause is what decides.
+/// Empty receipts and already-present bars can both produce this outcome. It
+/// does not prove full basket coverage. Permanent refusals halt their feed;
+/// transient failures retry up to [`MAX_PASSES`].
 pub const CLEAN_EMPTY_PASSES: u32 = 3;
 
 /// How often the store is re-counted while a pass is still running.
@@ -157,33 +149,33 @@ pub struct FeedReport {
     pub vendor: String,
     /// How many legs it carries.
     pub legs: u32,
-    /// How many it has finished this pass.
+    /// How many attempted legs returned this pass, including failed responses.
+    /// Skipped legs and an interrupted in-flight leg are not counted.
     pub legs_done: u32,
     /// The label of the leg on the wire right now.
     pub doing: String,
-    /// How many times a failure sent this chain round again.
+    /// How many subsequent passes actually retried this feed after a failure.
     pub retries: u32,
-    /// The first reason this chain failed, kept rather than the last, so the
-    /// page names a CAUSE rather than whatever went wrong most recently.
+    /// The first transient failure, replaced by a terminal cause if one occurs.
     pub last_error: Option<String>,
-    /// Whether this chain has nothing left to do.
+    /// Whether this feed's latest pass ended, including a refusal or stop.
     pub finished: bool,
     /// Whether this feed's CREDENTIAL is dead, so re-asking cannot help.
     ///
     /// # Why this is a field and not another `last_error`
     ///
-    /// Because it changes what the loop DOES, not only what the page says. Every
-    /// other failure on this path is transient by default and retried without a
-    /// ceiling — the operator's rule of 2026-08-20, and the right default for a
-    /// dropped socket or a throttle. A dead token is the one reason that is
-    /// certain rather than probable: §8 forbids minting one here, so the value
-    /// cannot change until somebody refreshes it outside this process, and every
-    /// pass until then spends requests to be refused identically.
+    /// Because it changes what the loop DOES, not only what the page says.
+    /// A dead token halts its feed, as does a fixed request/preflight refusal.
+    /// Transient failures such as dropped sockets and throttles remain eligible
+    /// for retry up to the pass ceiling. §8 forbids minting a token here, so a
+    /// credential halt requires access to be corrected outside this run.
     ///
     /// Set once, never cleared for the life of the run. It is per FEED, because
     /// a credential is — the same reason the seats and the governors are.
     pub credential_dead: bool,
-    /// Legs this pass declined to attempt because a leg they depend on failed.
+    /// Legs not attempted this pass because they were already clean in this
+    /// retry cycle, or because of a dependency, terminal refusal or stop. An
+    /// interrupted in-flight request is neither done nor skipped.
     ///
     /// **A request not made leaves no trace, which is exactly why it needs a
     /// counter.** An expired derivative is priced against the underlying's bar
@@ -204,7 +196,7 @@ pub struct FeedReport {
 pub struct Progress {
     /// How many passes have completed.
     pub passes: u32,
-    /// How many passes were retried after a failure.
+    /// How many subsequent passes actually retried at least one failed feed.
     pub retries: u32,
     /// The store's row count when the run started.
     pub rows_at_start: u64,
@@ -488,7 +480,7 @@ pub fn by_feed(legs: Vec<Leg>) -> Vec<(String, Vec<Leg>)> {
 ///
 /// One manifest read per vendor per pass — four reads, not four per leg. It is
 /// deliberately outside the per-leg path.
-fn rows_now(site: &Site) -> u64 {
+pub(crate) fn rows_now(site: &Site) -> u64 {
     let (censuses, _) = crate::server::census_now(site);
     censuses
         .iter()
@@ -577,7 +569,8 @@ impl Drop for Finisher {
                     "The run ended without recording a summary, which means the task \
                      carrying it stopped abnormally — a panic, or the server shutting \
                      down under it. Nothing already written to the store is affected; \
-                     press Pull again and it resumes from what is stored."
+                     press Pull again to start a new run. Leg checkpoints exist \
+                     only in memory and are not restored after a restart."
                         .to_owned(),
                 );
             }
@@ -585,240 +578,331 @@ impl Drop for Finisher {
     }
 }
 
-/// Runs one vendor's legs, in order, and answers whether any of them failed.
-///
-/// # Sequential, and not as a preference
-///
-/// A rate budget is per vendor, so two legs fired at one broker together spend
-/// one ceiling twice. `pull::fold`'s ladder is the other half: the day pass for
-/// a month must land before the minute pass for it, and spot before the
-/// derivatives that reference it. [`by_feed`] has already sorted them; this
-/// awaits them in that order.
-///
-/// # How a leg is judged
-///
-/// `status.is_success()` AND the receipt's own verdict element reads good. The
-/// status alone is not enough — a refusal inside a run that reached the vendor
-/// and stored nothing is answered 200 with a receipt that says so, which is
-/// exactly the case the browser loop used to read through `readReceipt`. The
-/// `badge good` marker is the same one `crates/api` tests already assert on.
-///
-/// What is recorded is the leg and its status, NOT the receipt's prose: the
-/// detail is already in the journal, and copying an HTML fragment into a status
-/// document would be a second, drifting copy of it.
-async fn run_chain(site: Loaded, nth: usize, legs: Vec<Leg>) -> bool {
-    let mut failed = false;
-    // DID THIS FEED'S SPOT LEG FAIL? Asked because the derivative legs behind
-    // it cannot succeed without it, and asking anyway spends a shared token to
-    // be told so.
-    //
-    // `by_feed` sorts every leg by `ladder_rank`, whose order is
-    // `1day, 1min, 1s, futures, options` — so by the time an `Fno` leg is
-    // reached, every spot leg for this feed has already run and this flag is
-    // final. The ORDER was enforced; the dependency it exists to express was
-    // not, which is the half `pull::fold::Ladder` documents as "only a
-    // completely clean stage advances" and nothing implemented.
-    let mut spot_failed = false;
-    for (index, leg) in legs.iter().enumerate() {
+/// The result of a feed's last pass. Kept inside the conductor so a terminal
+/// refusal cannot be mistaken for a clean pass when that feed is skipped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PassOutcome {
+    Clean,
+    Retry,
+    Halted,
+}
+
+/// A clean receipt checkpoints only this leg, only for the current retry
+/// cycle. Shared with the conductor so a later request panicking cannot lose
+/// earlier receipts along with the task's return value. Relaxed atomics carry
+/// no other data; the conductor joins every chain before the next pass.
+type Checkpoints = std::sync::Arc<[std::sync::atomic::AtomicBool]>;
+
+fn checkpoints_for(groups: &[(String, Vec<Leg>)]) -> Vec<Checkpoints> {
+    groups
+        .iter()
+        .map(|(_, legs)| {
+            legs.iter()
+                .map(|_| std::sync::atomic::AtomicBool::new(false))
+                .collect()
+        })
+        .collect()
+}
+
+/// The receipt and HTTP status jointly decide whether another attempt helps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LegOutcome {
+    Stored,
+    Empty,
+    Retry,
+    Permanent,
+    Credential,
+}
+
+/// These are statuses of our internal handlers, not raw vendor responses.
+/// 404 is an unavailable route/resource and 422 the mapping/session preflight
+/// refusal. A 400 is terminal only with an explicit REFUSED verdict: the server
+/// also uses 400 for pre-wire failures, including temporary credential reads.
+/// 409 stays retryable for a busy feed seat or an unfinished ladder prerequisite.
+fn leg_outcome(status: axum::http::StatusCode, html: &str) -> LegOutcome {
+    if matches!(status.as_u16(), 401 | 403)
+        || (!status.is_success() && crate::autopilot::credential_fault_in_page(html))
+    {
+        return LegOutcome::Credential;
+    }
+    if matches!(status.as_u16(), 404 | 422) {
+        return LegOutcome::Permanent;
+    }
+    // Read the first verdict badge, not any green badge elsewhere in a page.
+    let badge = html
+        .split_once("<span class=\"badge ")
+        .and_then(|(_, rest)| rest.split_once("</span>"))
+        .map(|(verdict, _)| verdict);
+    if status == axum::http::StatusCode::BAD_REQUEST && badge == Some("bad\">REFUSED") {
+        return LegOutcome::Permanent;
+    }
+    if status.is_success() {
+        match badge {
+            Some("good\">STORED") => return LegOutcome::Stored,
+            Some("bad\">EMPTY") => return LegOutcome::Empty,
+            _ => {}
+        }
+    }
+    // Some handlers return HTTP 200 with a failed receipt. Its explicit
+    // credential verdict must still halt the feed.
+    if crate::autopilot::credential_fault_in_page(html) {
+        LegOutcome::Credential
+    } else {
+        LegOutcome::Retry
+    }
+}
+
+/// The production request boundary. Tests substitute receipts here while
+/// exercising the same pass loop and feed state transitions, without sockets.
+async fn request_leg(site: Loaded, leg: Leg) -> (axum::http::StatusCode, String) {
+    match leg.route {
+        Route::Spot => {
+            let (status, _receipt, body) =
+                crate::server::pull_spot(axum::extract::State(site), leg.body).await;
+            (status, body.0)
+        }
+        Route::Fno => {
+            let (status, body) =
+                crate::server::pull_fno(axum::extract::State(site), leg.body).await;
+            (status, body.0)
+        }
+    }
+}
+
+/// Record a failure without copying an HTML document into the wire status.
+/// A terminal cause replaces an earlier transient error so the action needed
+/// to resume is visible. Otherwise retain the first failure for diagnosis.
+fn note_leg_failure(
+    site: &Site,
+    nth: usize,
+    leg: &Leg,
+    status: axum::http::StatusCode,
+    outcome: LegOutcome,
+) {
+    let reason = match outcome {
+        LegOutcome::Credential => {
+            "CREDENTIAL or authorization failure. This feed is halted \
+            for the rest of this run. Refresh or correct access where it is managed, then \
+            start a new pull; no token is minted here."
+        }
+        LegOutcome::Permanent => {
+            "PERMANENT REFUSAL for this request. This feed is halted \
+            for the rest of this run. Correct the request or preflight evidence before \
+            starting a new pull. The refusal details are in the audit journal."
+        }
+        _ => {
+            "its receipt did not read clean. The reason is in the audit journal; \
+            this leg remains owed and is eligible for another pass."
+        }
+    };
+    with_progress(site, |progress| {
+        if let Some(feed) = progress.feeds.get_mut(nth) {
+            if feed.last_error.is_none()
+                || matches!(outcome, LegOutcome::Credential | LegOutcome::Permanent)
+            {
+                feed.last_error = Some(format!(
+                    "{} answered HTTP {}: {reason}",
+                    leg.label,
+                    status.as_u16()
+                ));
+            }
+            feed.credential_dead |= outcome == LegOutcome::Credential;
+        }
+    });
+}
+
+/// Run one feed's legs sequentially. Only a response that actually returned
+/// advances `legs_done`; dependencies and early breaks remain unattempted.
+async fn run_chain<F, Fut>(
+    site: Loaded,
+    nth: usize,
+    legs: Vec<Leg>,
+    checkpoints: Checkpoints,
+    attempted: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    request: F,
+) -> PassOutcome
+where
+    F: Fn(Loaded, Leg) -> Fut,
+    Fut: core::future::Future<Output = (axum::http::StatusCode, String)>,
+{
+    let mut result = PassOutcome::Clean;
+    let mut failed_spot_rank = None;
+    for (leg, clean) in legs.iter().zip(checkpoints.iter()) {
         if stopping(&site) {
             break;
         }
-        // THE SAME SHAPE AS THE DEAD-CREDENTIAL BREAK BELOW, and for the same
-        // reason: these requests would each earn the same refusal.
-        //
-        // `pricing::NoSpotAtStamp` is that refusal by name — an expired
-        // option's implied volatility is solved against the underlying's bar at
-        // the same minute, so a chain whose spot leg failed prices nothing. A
-        // SKIP rather than a break, so the reason reaches the page per leg
-        // instead of the chain simply ending short.
-        if spot_failed && leg.route == Route::Fno {
-            let owed = leg.label.clone();
-            with_progress(&site, |progress| {
-                if let Some(feed) = progress.feeds.get_mut(nth) {
-                    feed.skipped = feed.skipped.saturating_add(1);
-                    // `get_or_insert`, NOT an overwrite. `last_error` keeps the
-                    // FIRST cause on purpose, and on this path that cause is
-                    // the spot failure itself — which is what an operator needs
-                    // to read. This sentence only lands when a leg was somehow
-                    // deferred without one being recorded.
-                    feed.last_error.get_or_insert(format!(
-                        "{owed} was not attempted: this feed's spot leg failed, and an \
-                         expired derivative is priced against the underlying's bar at \
-                         the same minute. The leg is owed and will be asked for once \
-                         spot lands."
-                    ));
-                }
-            });
+        if clean.load(std::sync::atomic::Ordering::Relaxed) {
             continue;
         }
-        let label = leg.label.clone();
+        // A failed daily leg holds back minutes/seconds, and any failed spot
+        // rung holds back FNO. Other legs on the same rung may still progress.
+        // Checkpointed prerequisites remain clean during failure retries.
+        if failed_spot_rank
+            .is_some_and(|rank| leg.route == Route::Fno || ladder_rank(&leg.dir) > rank)
+        {
+            continue;
+        }
         with_progress(&site, |progress| {
             if let Some(feed) = progress.feeds.get_mut(nth) {
-                feed.doing = label;
-                feed.legs_done = u32::try_from(index).unwrap_or(u32::MAX);
+                feed.doing.clone_from(&leg.label);
             }
         });
-
-        let (status, html) = match leg.route {
-            Route::Spot => {
-                let (status, _receipt, body) = crate::server::pull_spot(
-                    axum::extract::State(Loaded::clone(&site)),
-                    leg.body.clone(),
-                )
-                .await;
-                (status, body.0)
+        attempted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (status, html) = request(Loaded::clone(&site), leg.clone()).await;
+        with_progress(&site, |progress| {
+            if let Some(feed) = progress.feeds.get_mut(nth) {
+                feed.legs_done = feed.legs_done.saturating_add(1);
             }
-            Route::Fno => {
-                let (status, body) = crate::server::pull_fno(
-                    axum::extract::State(Loaded::clone(&site)),
-                    leg.body.clone(),
-                )
-                .await;
-                (status, body.0)
-            }
-        };
-
-        if !(status.is_success() && html.contains("badge good")) {
-            failed = true;
-            // RECORDED PER ROUTE, not as one flag for the chain. `failed`
-            // already says the chain is dirty; this says WHICH half, and only
-            // the spot half is a prerequisite for anything else.
-            spot_failed |= leg.route == Route::Spot;
-
-            // IS THIS THE CREDENTIAL? ASKED HERE, BECAUSE NOTHING ON THIS PATH
-            // EVER ASKED IT.
-            //
-            // `autopilot::classify` has existed and been tested since the
-            // autopilot was written, and it had TWO call sites, both inside
-            // `autopilot.rs`. The manual run — the one an operator presses —
-            // had no credential handling of any kind. A dead token therefore
-            // produced `retries` climbing and a `lastError` reading "answered
-            // HTTP 401 … the leg is owed and will be asked for again", for up
-            // to `MAX_PASSES` × `RETRY_WAIT` — **two hours of 401s against a
-            // token another system shares**, with the word "credential"
-            // appearing nowhere.
-            //
-            // §8 is explicit that this repository never mints one, so there is
-            // nothing to retry INTO: the refreshed value is read on the next
-            // pull, and every request spent before then is spent to be told the
-            // same thing. `CLAUDE.md` §4 — degrade loudly and name the reason.
-            //
-            // PER FEED, NEVER THE WHOLE RUN. A credential is per vendor, so a
-            // dead Dhan token must not stop Groww — the same reason the seats
-            // and the governors are per feed. `conduct` skips only the feed
-            // this fires on.
-            // ASKED OF A PAGE, SO IT USES THE PAGE-SAFE TEST. This was
-            // `classify(&html) == Trouble::Credential`, and `classify`'s table
-            // contains the bare word "credential" — which `accepted_html`'s own
-            // headline contains on EVERY page it renders, in both of the
-            // sentences `halt_for` can return. So this line answered "the token
-            // is dead" for every failing leg, whatever had gone wrong, and then
-            // skipped that feed for the rest of the run under §8's rule that a
-            // dead token cannot change mid-run.
-            //
-            // Dhan's HTTP 400 `DH-905` — a malformed request, credential read
-            // fine fourteen times in the same run — reported CREDENTIAL DEAD on
-            // 2026-08-25. See `autopilot::credential_fault_in_page`.
-            let dead_credential = crate::autopilot::credential_fault_in_page(&html);
-
-            let why = if dead_credential {
-                format!(
-                    "{} answered HTTP {} and the reason is the CREDENTIAL, not \
-                     the network. This feed is halted for the rest of the run: \
-                     §8 forbids minting a token here, so re-asking cannot fix \
-                     it and every attempt would spend a request to be refused \
-                     identically. Refresh the token where it is minted; the new \
-                     value is read on the next pull, and the run resumes from \
-                     what the store already holds. Other feeds are unaffected.",
-                    leg.label,
-                    status.as_u16()
-                )
-            } else {
-                format!(
-                    "{} answered HTTP {} and its receipt did not read good. The \
-                     reason is in the audit journal; this line only records that \
-                     the leg is owed and will be asked for again.",
-                    leg.label,
-                    status.as_u16()
-                )
-            };
-            with_progress(&site, |progress| {
-                if let Some(feed) = progress.feeds.get_mut(nth) {
-                    // THE FIRST REASON, KEPT — not the last. A later failure
-                    // must not paint over the one that started the trouble.
-                    //
-                    // A CREDENTIAL DEATH IS THE ONE EXCEPTION, and it has to
-                    // be: it arrives on whichever leg happens to run after the
-                    // token expires, so an earlier transport blip would
-                    // otherwise hide the only reason that cannot be waited out.
-                    if feed.last_error.is_none() || dead_credential {
-                        feed.last_error = Some(why);
-                    }
-                    if dead_credential {
-                        feed.credential_dead = true;
-                    }
-                }
-            });
-            if dead_credential {
-                // THE REST OF THIS FEED'S LEGS ARE NOT ATTEMPTED. They would
-                // each earn the same 401 against the same dead token.
-                break;
-            }
+        });
+        let outcome = leg_outcome(status, &html);
+        if matches!(outcome, LegOutcome::Stored | LegOutcome::Empty) {
+            clean.store(true, std::sync::atomic::Ordering::Relaxed);
+            continue;
         }
+        note_leg_failure(&site, nth, leg, status, outcome);
+        if leg.route == Route::Spot {
+            failed_spot_rank = Some(ladder_rank(&leg.dir));
+        }
+        if matches!(outcome, LegOutcome::Credential | LegOutcome::Permanent) {
+            result = PassOutcome::Halted;
+            break;
+        }
+        result = PassOutcome::Retry;
     }
-
-    let done = u32::try_from(legs.len()).unwrap_or(u32::MAX);
     with_progress(&site, |progress| {
         if let Some(feed) = progress.feeds.get_mut(nth) {
-            feed.legs_done = done;
-            feed.doing = String::new();
+            feed.skipped = u32::try_from(legs.len())
+                .unwrap_or(u32::MAX)
+                .saturating_sub(feed.legs_done);
+            feed.doing.clear();
             feed.finished = true;
         }
     });
-    failed
+    result
 }
 
-/// The whole run: passes over every feed until the window is satisfied.
+/// Run one pass, preserving terminal outcomes across passes. Retry counters
+/// advance only when a failed feed actually attempts another request, including a
+/// pass after a failure that also committed bars.
 ///
-/// # What ends it, and what does not
-///
-/// | Pass gained bars | A leg failed | What happens |
-/// |---|---|---|
-/// | yes | either | another pass, immediately |
-/// | no | yes | another pass after [`RETRY_WAIT`], **with no limit** |
-/// | no | no | one of [`CLEAN_EMPTY_PASSES`], then finish |
-///
-/// The operator's rule of 2026-08-20 in full: *"even after 3 attempts … where
-/// it provides the result as no data available means then it is entirely
-/// acceptable … other than this issue it can be any kinds of extreme worst case
-/// scenarios like power cut or some other issue or internet issue or duplicate
-/// issue or uniqueness issues … it should always be fetched until it is
-/// successful, it should never ever stop"*. A failed pass is transient BY
-/// DEFAULT and is retried without a ceiling; only a pass that asked for
-/// everything and was refused nothing may count toward the end.
-///
-/// # Why a panicking chain is a failed chain
-///
-/// `JoinHandle` answers `Err` for a panicked or cancelled task. Treating that
-/// as "this chain is done" would end a run on the one outcome that most needs
-/// retrying, so it is folded into `failed` alongside an ordinary refusal.
-///
-/// # Cost
-///
-/// Per pass: one census read before, one after, and one spawn per vendor. The
-/// per-leg path adds a mutex take and a `String` clone for the status document
-/// — O(1) each, and no allocation that grows with how many passes came before.
-///
-/// **UNVERIFIED as a measurement.** The bound is argued from the
-/// shape of the code and no bench in this workspace times it.
-/// `CLAUDE.md` §3 rule 6: a structural argument is not a
-/// measurement, however sound it is.
+/// Reopen clean legs only after ALL retryable feeds recover (halted feeds stay
+/// halted). A healthy sibling must not be repulled merely because another feed
+/// failed. Repeated clean passes remain intentional: STORED/EMPTY receipts do
+/// not attest complete coverage, and the existing incremental/idle policy asks
+/// again until three passes add no rows. The tradeoff is that a previously
+/// clean leg is not refreshed while a sibling is still retrying, even if its
+/// data becomes available meanwhile. Nothing here provides restart resume.
+/// These receipt checkpoints do not repair or certify source gaps. In
+/// particular, HTTP 200 PARTIAL remains Retry: the entire unchanged failed leg
+/// is eligible on every pass, even without growth, up to the run's pass ceiling.
+/// There is no chunk checkpoint or new classification of its untyped prose.
+async fn run_pass<F, Fut>(
+    site: &Loaded,
+    groups: &[(String, Vec<Leg>)],
+    outcomes: &mut [PassOutcome],
+    checkpoints: &[Checkpoints],
+    request: &F,
+) where
+    F: Fn(Loaded, Leg) -> Fut + Clone + Send + 'static,
+    Fut: core::future::Future<Output = (axum::http::StatusCode, String)> + Send + 'static,
+{
+    if stopping(site) {
+        return;
+    }
+    let halted = halted_feeds(site);
+    let retry_cycle = outcomes.contains(&PassOutcome::Retry);
+    let mut flying = Vec::with_capacity(groups.len());
+    for (nth, (((_vendor, group), prior), clean)) in groups
+        .iter()
+        .zip(outcomes.iter_mut())
+        .zip(checkpoints)
+        .enumerate()
+    {
+        if halted.get(nth).copied().unwrap_or(false) {
+            *prior = PassOutcome::Halted;
+        }
+        if *prior == PassOutcome::Halted {
+            continue;
+        }
+        if !retry_cycle {
+            for leg in clean.iter() {
+                leg.store(false, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        let again = *prior == PassOutcome::Retry;
+        with_progress(site, |progress| {
+            if let Some(feed) = progress.feeds.get_mut(nth) {
+                feed.finished = false;
+                feed.legs_done = 0;
+                feed.skipped = 0;
+            }
+        });
+        let attempted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        flying.push((
+            nth,
+            again,
+            std::sync::Arc::clone(&attempted),
+            tokio::spawn(run_chain(
+                Loaded::clone(site),
+                nth,
+                group.clone(),
+                Checkpoints::clone(clean),
+                attempted,
+                request.clone(),
+            )),
+        ));
+    }
+    let mut retrying = false;
+    for (nth, again, attempted, chain) in flying {
+        let outcome = match chain.await {
+            Ok(outcome) => outcome,
+            Err(dead) => {
+                note_dead_chain(
+                    site,
+                    nth,
+                    attempted.load(std::sync::atomic::Ordering::Relaxed),
+                    &dead,
+                );
+                PassOutcome::Retry
+            }
+        };
+        if again && attempted.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+            retrying = true;
+            with_progress(site, |progress| {
+                if let Some(feed) = progress.feeds.get_mut(nth) {
+                    feed.retries = feed.retries.saturating_add(1);
+                }
+            });
+        }
+        if let Some(held) = outcomes.get_mut(nth) {
+            *held = outcome;
+        }
+    }
+    if retrying {
+        with_progress(site, |progress| {
+            progress.retries = progress.retries.saturating_add(1);
+        });
+    }
+}
+
+/// Server-owned passes outlive the browser, but are not persisted across a
+/// server restart. Feeds run in parallel; each feed's legs run sequentially.
+/// Fixed refusals halt that feed. Transient failures retry up to [`MAX_PASSES`].
+/// Idle termination is an observation about store growth, never full coverage.
 pub async fn conduct(site: Loaded, legs: Vec<Leg>) {
-    // RELEASED ON EVERY EXIT, INCLUDING A PANIC. See `Finisher`.
+    conduct_with(site, legs, request_leg).await;
+}
+
+/// The request seam permits deterministic coordinator tests without vendors,
+/// credentials, alternate production behavior, or a second pass loop.
+async fn conduct_with<F, Fut>(site: Loaded, legs: Vec<Leg>, request: F)
+where
+    F: Fn(Loaded, Leg) -> Fut + Clone + Send + 'static,
+    Fut: core::future::Future<Output = (axum::http::StatusCode, String)> + Send + 'static,
+{
     let _finisher = Finisher {
         site: Loaded::clone(&site),
     };
-
     let groups = by_feed(legs);
     let started_rows = rows_now(&site);
     with_progress(&site, |progress| {
@@ -834,23 +918,6 @@ pub async fn conduct(site: Loaded, legs: Vec<Leg>) {
             .collect();
     });
 
-    // THE STORE IS READ WHILE THE PASS RUNS, NOT ONLY BETWEEN PASSES.
-    //
-    // `rows_now` was refreshed at pass boundaries alone. A pass is one leg per
-    // feed and a single F&O leg can run for half an hour, so for that whole
-    // time the document said `rowsNow: 0` -- measured 2026-08-20 20:41, with
-    // **2,213 bar files on disk** and the run reporting zero. The operator read
-    // it exactly as it was written: *"keeps on running but no results stored
-    // anywhere"*.
-    //
-    // A ticker rather than a read per leg, because the leg is the thing that is
-    // slow: updating after each one would still leave the half-hour gap it is
-    // meant to fill. One manifest read every [`ROWS_TICK`] costs far less than
-    // the page's own two-second poll of the document it feeds.
-    //
-    // ABORTED, NEVER LEAKED. The handle is dropped at the end of `conduct`
-    // after an explicit `abort`, so a finished run leaves nothing reading the
-    // store behind it.
     let ticker = {
         let site = Loaded::clone(&site);
         tokio::spawn(async move {
@@ -861,102 +928,47 @@ pub async fn conduct(site: Loaded, legs: Vec<Leg>) {
             }
         })
     };
-
+    let mut outcomes = vec![PassOutcome::Clean; groups.len()];
+    let checkpoints = checkpoints_for(&groups);
     let mut passes = 0_u32;
-    let mut retries = 0_u32;
     let mut clean_empty = 0_u32;
-
     while passes < MAX_PASSES {
         if stopping(&site) {
             break;
         }
+        let repairing = outcomes.contains(&PassOutcome::Retry);
         let before = rows_now(&site);
-
-        // PARALLEL ACROSS FEEDS. One task per vendor, all started before any is
-        // awaited — awaiting each in turn as it is spawned would serialise them
-        // and quietly undo the whole point.
-        // A FEED WHOSE CREDENTIAL DIED IS NOT RE-OPENED, and its `finished`
-        // stays true so the page keeps showing it halted rather than pending.
-        let halted = halted_feeds(&site);
-        with_progress(&site, |progress| {
-            for feed in &mut progress.feeds {
-                if feed.credential_dead {
-                    continue;
-                }
-                feed.finished = false;
-                feed.legs_done = 0;
-            }
-        });
-        let mut flying = Vec::with_capacity(groups.len());
-        for (nth, (_vendor, group)) in groups.iter().enumerate() {
-            // SKIPPED, NOT RE-ASKED. §8 forbids minting a token here, so the
-            // value cannot change until somebody refreshes it outside this
-            // process — every pass until then would spend this feed's whole
-            // ladder to be refused identically. The other feeds are untouched,
-            // because a credential is per vendor.
-            if halted.get(nth).copied().unwrap_or(false) {
-                continue;
-            }
-            // THE FEED INDEX TRAVELS WITH THE HANDLE. `flying` is now SHORTER
-            // than `groups` whenever a feed is halted, so the position in this
-            // vector is no longer the position in `progress.feeds` — and
-            // `note_dead_chain` writes by that index. Pairing them is what stops
-            // a panic being reported against somebody else's feed.
-            flying.push((
-                nth,
-                tokio::spawn(run_chain(Loaded::clone(&site), nth, group.clone())),
-            ));
-        }
-        let mut failed = false;
-        for (nth, chain) in flying {
-            match chain.await {
-                Ok(chain_failed) => failed |= chain_failed,
-                // A PANICKED OR CANCELLED CHAIN IS A FAILED CHAIN — AND IT IS
-                // NAMED ON THE FEED IT KILLED.
-                //
-                // This read `chain.await.unwrap_or(true)`, which counted a dead
-                // chain as failed and said nothing about WHICH feed died. The
-                // fingerprint of that, measured 2026-08-20: `doing` frozen at
-                // the leg it was on, `finished` still false, `lastError` still
-                // null, no journal record, no socket — indefinitely, because a
-                // task that panics never reaches the code that clears its own
-                // fields. A feed that has stopped is then indistinguishable
-                // from one that is working slowly, which is the confusion this
-                // whole module exists to remove.
-                //
-                // The panic itself goes to STDERR through the panic hook and
-                // never reaches `telemetry`, so this line is the only surface
-                // that can say it happened at all.
-                Err(dead) => {
-                    failed = true;
-                    note_dead_chain(&site, nth, &dead);
-                }
-            }
-        }
-
+        run_pass(&site, &groups, &mut outcomes, &checkpoints, &request).await;
         passes = passes.saturating_add(1);
         let after = rows_now(&site);
         with_progress(&site, |progress| {
             progress.passes = passes;
             progress.rows_now = after;
         });
-
-        if stopping(&site) {
+        if stopping(&site)
+            || outcomes
+                .iter()
+                .all(|outcome| *outcome == PassOutcome::Halted)
+        {
             break;
         }
         if after > before {
-            // PROGRESS. Whatever else went wrong, bars landed, so the window is
-            // not finished and the next pass is worth making.
             clean_empty = 0;
             continue;
         }
-        if failed {
+        if outcomes.contains(&PassOutcome::Retry) {
             clean_empty = 0;
-            retries = retries.saturating_add(1);
-            with_progress(&site, |progress| progress.retries = retries);
-            // WAITED, NOT SPUN. The governor backs off inside a pass; this is
-            // the gap between passes, which nothing else covers.
-            tokio::time::sleep(RETRY_WAIT).await;
+            // No delay for a pass that can never be scheduled again.
+            if passes < MAX_PASSES {
+                tokio::time::sleep(RETRY_WAIT).await;
+            }
+            continue;
+        }
+        if repairing {
+            // A repair pass reused earlier receipts, so it is not a fresh
+            // observation of every eligible leg. Require full clean passes
+            // for idle termination, including after a failure that added rows.
+            clean_empty = 0;
             continue;
         }
         clean_empty = clean_empty.saturating_add(1);
@@ -964,11 +976,52 @@ pub async fn conduct(site: Loaded, legs: Vec<Leg>) {
             break;
         }
     }
-
     ticker.abort();
-    let landed = rows_now(&site).saturating_sub(started_rows);
-    let summary = summary_of(passes, retries, landed, stopping(&site));
-    with_progress(&site, |progress| progress.finished = Some(summary));
+    let current_rows = rows_now(&site);
+    with_progress(&site, |progress| {
+        progress.rows_now = current_rows;
+        progress.finished = Some(run_summary(
+            progress,
+            &outcomes,
+            current_rows.saturating_sub(started_rows),
+        ));
+    });
+}
+
+/// Terminal feeds remain part of the final verdict even while other feeds
+/// reach an idle stop. Neither a skipped feed nor a stopped task is success.
+fn run_summary(progress: &Progress, outcomes: &[PassOutcome], landed: u64) -> String {
+    let halted: Vec<String> = progress
+        .feeds
+        .iter()
+        .zip(outcomes)
+        .filter(|(feed, outcome)| feed.credential_dead || **outcome == PassOutcome::Halted)
+        .map(|(feed, _)| {
+            format!(
+                "{}: {}",
+                feed.vendor,
+                feed.last_error.as_deref().unwrap_or("terminal refusal")
+            )
+        })
+        .collect();
+    if !halted.is_empty() {
+        return format!(
+            "INCOMPLETE after {} pass(es); {landed} bar(s) added to the store census. \
+             {} pass(es) were retried after a failure. Halted feed(s): {} \
+             Full basket coverage has not been verified.{}",
+            progress.passes,
+            progress.retries,
+            halted.join("; "),
+            if progress.stopping {
+                " The operator also pressed stop."
+            } else if progress.passes >= MAX_PASSES {
+                " The remaining work reached the pass ceiling."
+            } else {
+                ""
+            }
+        );
+    }
+    summary_of(progress.passes, progress.retries, landed, progress.stopping)
 }
 
 /// Records that one feed's chain stopped abnormally, on the feed it killed.
@@ -984,9 +1037,16 @@ pub async fn conduct(site: Loaded, legs: Vec<Leg>) {
 ///
 /// The panic itself goes to standard error through the panic hook and never
 /// reaches `telemetry`, so this is the only surface that can say it happened.
-fn note_dead_chain(site: &Site, nth: usize, dead: &tokio::task::JoinError) {
+fn note_dead_chain(site: &Site, nth: usize, attempted: usize, dead: &tokio::task::JoinError) {
     with_progress(site, |progress| {
         if let Some(feed) = progress.feeds.get_mut(nth) {
+            // Labels may be empty. An explicit attempt count, not display
+            // text, distinguishes a panicked request from an unattempted leg.
+            let interrupted = u32::from(attempted > feed.legs_done as usize);
+            feed.skipped = feed
+                .legs
+                .saturating_sub(feed.legs_done)
+                .saturating_sub(interrupted);
             feed.finished = true;
             feed.doing = String::new();
             if feed.last_error.is_none() {
@@ -1001,12 +1061,8 @@ fn note_dead_chain(site: &Site, nth: usize, dead: &tokio::task::JoinError) {
     });
 }
 
-/// What the run did, in a sentence that distinguishes the three ways it can end.
-///
-/// Separated from [`conduct`] so it can be asserted directly: the difference
-/// between "the window is finished" and "this is a runaway stop" is the whole
-/// value of the summary, and a test that had to run four hundred passes to
-/// check it would not be run.
+/// Describe an operator stop, pass ceiling, or idle stop. Store growth and
+/// receipt verdicts cannot establish coverage of every requested instrument.
 #[must_use]
 pub fn summary_of(passes: u32, retries: u32, landed: u64, stopped: bool) -> String {
     // NOT `retried`: clippy denies a binding whose name is one letter from
@@ -1018,23 +1074,22 @@ pub fn summary_of(passes: u32, retries: u32, landed: u64, stopped: bool) -> Stri
     };
     if stopped {
         return format!(
-            "Stopped after {passes} pass(es); {landed} bar(s) landed before you \
-             pressed stop.{note}"
+            "Stopped after {passes} pass(es); {landed} bar(s) added to the store census \
+             before you pressed stop.{note} Full basket coverage has not been verified."
         );
     }
     if passes >= MAX_PASSES {
         return format!(
-            "Reached the {MAX_PASSES}-pass ceiling with {landed} bar(s) landed.{note} \
+            "Reached the {MAX_PASSES}-pass ceiling with {landed} bar(s) added to the store census.{note} \
              This is a runaway stop and NOT a verdict on the window — press Pull \
-             again to continue from where this stopped; nothing already stored is \
-             refetched."
+             again to continue. Full basket coverage has not been verified."
         );
     }
     format!(
-        "{passes} pass(es), {landed} bar(s) landed.{note} The last \
-         {CLEAN_EMPTY_PASSES} asked for everything, were refused nothing and gained \
-         nothing — which is what \"no more data\" looks like, and the only reading \
-         this run treats as finished."
+        "Idle retries stopped after {passes} pass(es); {landed} bar(s) added to the store census.{note} \
+         The last {CLEAN_EMPTY_PASSES} passes reported no retryable failures and no row growth. \
+         Empty responses or already-present bars can explain this. \
+         Full basket coverage has not been verified."
     )
 }
 
@@ -1369,7 +1424,8 @@ mod tests {
         let ceiling = summary_of(MAX_PASSES, 4, 500, false);
         let stopped = summary_of(9, 1, 500, true);
 
-        assert!(finished.contains("no more data"), "{finished}");
+        assert!(finished.contains("Idle retries stopped"), "{finished}");
+        assert!(finished.contains("Full basket coverage has not been verified"));
         assert!(!finished.contains("runaway"), "{finished}");
         assert!(ceiling.contains("runaway stop"), "{ceiling}");
         assert!(!ceiling.contains("no more data"), "{ceiling}");
@@ -1542,12 +1598,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&folder);
         std::fs::create_dir_all(&folder).expect("mkdir");
         let mut f = std::fs::File::create(folder.join("NIFTY.NFO.csv")).expect("create");
-        f.write_all(
-            b"Ticker,Date,Time,LTP,BuyPrice,BuyQty,SellPrice,SellQty,LTQ,OpenInterest\n\
-              NIFTY.NFO,01/07/2025,09:16:16,27674,0,0,0,0,65,65\n\
-              NIFTY.NFO,01/07/2025,09:17:04,27680,0,0,0,0,40,70\n",
-        )
-        .expect("write");
+        f.write_all(b"Ticker,Date,Time,LTP,BuyPrice,BuyQty,SellPrice,SellQty,LTQ,OpenInterest\n")
+            .expect("write");
+        // A success fixture covers the whole session; two sparse ticks cannot
+        // prove complete derived minute candles.
+        for minute in 555..930 {
+            writeln!(
+                f,
+                "NIFTY.NFO,01/07/2025,{:02}:{:02}:00,27674,0,0,0,0,65,65",
+                minute / 60,
+                minute % 60
+            )
+            .expect("write session");
+        }
 
         let site = site("archivepress");
         let store = site.store_root.clone();
@@ -1564,14 +1627,10 @@ mod tests {
         claim(&site);
         // BOUNDED, AND THE BOUND IS NOT DECORATION.
         //
-        // `conduct`'s pass loop is deliberately unbounded on failure: a pass
-        // whose legs failed sleeps `RETRY_WAIT` and goes again, up to
-        // `MAX_PASSES`. That is right for an operator waiting out a vendor and
-        // catastrophic for a test — MEASURED, by breaking this test's own
-        // fixture: with no data rows the leg fails, the loop retries, and the
-        // test ran past sixty seconds instead of failing. Unbounded it would
-        // have taken `MAX_PASSES` x `RETRY_WAIT` ~= two hours and WEDGED CI
-        // rather than reddening it.
+        // A transient failure sleeps `RETRY_WAIT` between passes, up to
+        // `MAX_PASSES`, so the test must have its own short bound. Empty
+        // receipts now end idle retries; the assertion on the store below
+        // still rejects an empty fixture as proof that the archive was saved.
         //
         // The clean path takes a fraction of a second — no socket, no governor,
         // one folder — so anything approaching this bound is already the
@@ -1606,8 +1665,7 @@ mod tests {
         assert!(
             ran.is_ok(),
             "the press did not finish inside {bound:?}. On this path that means \
-             the leg FAILED and the pass loop is retrying it — the loop is \
-             unbounded on failure by design, so the run would continue for \
+             the leg FAILED and the pass loop is retrying it, potentially for \
              MAX_PASSES x RETRY_WAIT. Read the feed's `lastError`: {:?}",
             observed(&site).feeds
         );
@@ -1750,56 +1808,878 @@ mod tests {
         );
     }
 
-    /// **THE SPAWN LOOP CONSULTS THE SKIP LIST, AND PAIRS THE INDEX WITH THE
-    /// HANDLE.**
-    ///
-    /// Two properties that fail independently, and the second is the subtle one.
-    ///
-    /// Skipping makes `flying` SHORTER than `groups`, so a position in that
-    /// vector is no longer a position in `progress.feeds` — and `note_dead_chain`
-    /// writes by that index. Without the pairing, a panic in one feed would be
-    /// reported against another feed's row, and only when a credential died AND
-    /// something panicked in the same pass. That is a bug nobody would find by
-    /// reading.
-    ///
-    /// Source-text because the alternative is a twenty-second sleep per pass:
-    /// the loop is only observable through a run, and a run whose legs fail is
-    /// deliberately unbounded. The skip's INPUT is driven for real by the test
-    /// above.
-    #[test]
-    fn the_spawn_loop_skips_halted_feeds_and_carries_the_index_with_the_handle() {
-        let source = include_str!("pullrun.rs");
-        let body = source
-            .split_once("pub async fn conduct")
-            .expect("conduct exists")
-            .1;
-        let body = &body[..body
-            .find("\n}\n")
-            .expect("conduct's body ends at a column-0 brace")];
+    fn receipt(status: u16, verdict: &str) -> (axum::http::StatusCode, String) {
+        (
+            axum::http::StatusCode::from_u16(status).expect("HTTP status"),
+            crate::render::receipt_page(&crate::render::Receipt {
+                scope: "Spot pull",
+                verdict,
+                reason: "synthetic coordinator receipt",
+                good: verdict == "STORED",
+                facts: &[],
+                footnote: "No vendor was contacted.",
+            }),
+        )
+    }
 
+    async fn simulated<F, Fut>(name: &str, legs: Vec<Leg>, request: F) -> Progress
+    where
+        F: Fn(Loaded, Leg) -> Fut + Clone + Send + 'static,
+        Fut: core::future::Future<Output = (axum::http::StatusCode, String)> + Send + 'static,
+    {
+        let held = site(name);
+        claim(&held);
+        tokio::time::timeout(
+            core::time::Duration::from_secs(5),
+            conduct_with(Loaded::clone(&held), legs, request),
+        )
+        .await
+        .expect("the synthetic run must finish without retry sleeps");
+        observed(&held)
+    }
+
+    #[test]
+    fn fixed_refusals_and_transient_conflicts_have_different_dispositions() {
+        for code in [404, 422] {
+            let (status, html) = receipt(code, "NOT STARTED");
+            assert_eq!(leg_outcome(status, &html), LegOutcome::Permanent, "{code}");
+        }
+        for code in [401, 403] {
+            let (status, html) = receipt(code, "NOT STARTED");
+            assert_eq!(leg_outcome(status, &html), LegOutcome::Credential, "{code}");
+        }
+        for code in [400, 408, 409, 429, 500, 502, 503, 504] {
+            let (status, html) = receipt(code, "NOT STARTED");
+            assert_eq!(leg_outcome(status, &html), LegOutcome::Retry, "{code}");
+        }
+        let (status, html) = receipt(400, "REFUSED");
+        assert_eq!(leg_outcome(status, &html), LegOutcome::Permanent);
+        let (status, html) = receipt(200, "FAILED");
+        assert_eq!(leg_outcome(status, &html), LegOutcome::Retry);
+        let (_, green) = receipt(200, "STORED");
+        assert_eq!(
+            leg_outcome(status, &format!("{html}{green}")),
+            LegOutcome::Retry,
+            "a later good badge must not override the first receipt verdict"
+        );
+        assert_eq!(leg_outcome(status, "not a receipt"), LegOutcome::Retry);
+        let (_, empty) = receipt(200, "EMPTY");
+        assert_eq!(leg_outcome(status, &empty), LegOutcome::Empty);
+        assert_eq!(leg_outcome(status, &green), LegOutcome::Stored);
+        assert_eq!(
+            leg_outcome(status, &format!("{html}<p>access token expired</p>")),
+            LegOutcome::Credential,
+            "a failed HTTP 200 can still carry a credential failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dead_feed_remains_incomplete_after_healthy_feeds_finish() {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let capture = std::sync::Arc::clone(&calls);
+        let progress = simulated(
+            "dead-and-healthy",
+            vec![
+                leg("zerodha", "1day"),
+                leg("zerodha", "1min"),
+                leg("groww", "1day"),
+                leg("groww", "1min"),
+            ],
+            move |_site, leg| {
+                capture.lock().expect("calls").push(leg.label);
+                std::future::ready(if leg.vendor == "zerodha" {
+                    receipt(401, "NOT STARTED")
+                } else {
+                    receipt(200, "STORED")
+                })
+            },
+        )
+        .await;
+        let dead = &progress.feeds[0];
+        let healthy = &progress.feeds[1];
+        assert!(dead.credential_dead);
+        assert_eq!((dead.legs_done, dead.skipped, dead.retries), (1, 1, 0));
+        assert!(!healthy.credential_dead);
+        assert_eq!(
+            (healthy.legs_done, healthy.skipped, healthy.retries),
+            (2, 0, 0)
+        );
+        assert!(healthy.finished);
+        assert_eq!(progress.passes, CLEAN_EMPTY_PASSES);
+        assert_eq!(progress.retries, 0, "halting is not retrying");
+        let calls = calls.lock().expect("calls");
+        assert_eq!(calls.iter().filter(|s| s.starts_with("zerodha")).count(), 1);
+        assert_eq!(calls.iter().filter(|s| s.starts_with("groww")).count(), 6);
+        assert!(!progress.running());
+        let summary = progress.finished.expect("terminal summary");
+        assert!(summary.contains("INCOMPLETE") && summary.contains("zerodha"));
+        assert!(summary.contains("CREDENTIAL"));
+        assert!(!summary.contains("asked for everything") && !summary.contains("no more data"));
+    }
+
+    #[tokio::test]
+    async fn permanent_422_stops_after_one_response_without_retrying() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let capture = std::sync::Arc::clone(&calls);
+        let progress = simulated(
+            "permanent-preflight",
+            vec![leg("zerodha", "1day"), leg("zerodha", "1min")],
+            move |_site, _leg| {
+                capture.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                std::future::ready(receipt(422, "NOT STARTED"))
+            },
+        )
+        .await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(
+            (progress.passes, progress.retries, progress.rows_now),
+            (1, 0, 0)
+        );
+        let feed = &progress.feeds[0];
+        assert_eq!((feed.legs_done, feed.skipped, feed.retries), (1, 1, 0));
         assert!(
-            body.contains("let halted = halted_feeds(&site);"),
-            "the pass loop must read the skip list, or a dead token keeps \
-             costing this feed's whole ladder every pass"
+            !feed.credential_dead,
+            "preflight is not an expired credential"
+        );
+        assert!(feed.finished);
+        let summary = progress.finished.expect("terminal summary");
+        assert!(summary.contains("INCOMPLETE"));
+        assert!(summary.contains("HTTP 422") && summary.contains("PERMANENT REFUSAL"));
+    }
+
+    #[tokio::test]
+    async fn empty_receipts_end_idle_retries_without_claiming_coverage() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let capture = std::sync::Arc::clone(&calls);
+        let progress = simulated(
+            "empty-is-unverified",
+            vec![leg("zerodha", "1day"), leg("zerodha", "1min")],
+            move |_site, _leg| {
+                capture.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                std::future::ready(receipt(200, "EMPTY"))
+            },
+        )
+        .await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 6);
+        assert_eq!(
+            (progress.passes, progress.retries, progress.rows_now),
+            (3, 0, 0)
+        );
+        assert_eq!(progress.feeds[0].legs_done, 2);
+        let summary = progress.finished.expect("idle summary");
+        assert!(summary.contains("Idle retries stopped") && summary.contains("Empty responses"));
+        assert!(summary.contains("Full basket coverage has not been verified"));
+        assert!(!summary.contains("no more data"));
+    }
+
+    #[tokio::test]
+    async fn operator_stop_counts_the_returned_leg_and_leaves_the_rest_unattempted() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let capture = std::sync::Arc::clone(&calls);
+        let progress = simulated(
+            "stop-between-legs",
+            vec![leg("zerodha", "1day"), leg("zerodha", "1min")],
+            move |site, _leg| {
+                assert_eq!(
+                    observed(&site).feeds[0].legs_done,
+                    0,
+                    "in-flight is not done"
+                );
+                capture.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                with_progress(&site, |progress| progress.stopping = true);
+                std::future::ready(receipt(200, "STORED"))
+            },
+        )
+        .await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(
+            (progress.feeds[0].legs_done, progress.feeds[0].skipped),
+            (1, 1)
+        );
+        assert_eq!(progress.retries, 0);
+        assert!(progress.finished.expect("stopped").contains("pressed stop"));
+    }
+
+    fn pass_fixture(name: &str, legs: Vec<Leg>) -> (Loaded, Vec<(String, Vec<Leg>)>) {
+        let held = site(name);
+        claim(&held);
+        let groups = by_feed(legs);
+        with_progress(&held, |progress| {
+            progress.feeds = groups
+                .iter()
+                .map(|(vendor, legs)| FeedReport {
+                    vendor: vendor.clone(),
+                    legs: u32::try_from(legs.len()).expect("fixture leg count"),
+                    ..FeedReport::default()
+                })
+                .collect();
+        });
+        (held, groups)
+    }
+
+    /// Drive the production pass seam without the conductor's retry sleep.
+    /// Requests are identified by their full leg, including distinct bodies
+    /// with identical display labels. No assertion depends on feed interleaving.
+    struct Passes {
+        site: Loaded,
+        groups: Vec<(String, Vec<Leg>)>,
+        outcomes: Vec<PassOutcome>,
+        checkpoints: Vec<Checkpoints>,
+    }
+
+    impl Passes {
+        fn new(name: &str, legs: Vec<Leg>) -> Self {
+            let (site, groups) = pass_fixture(name, legs);
+            let outcomes = vec![PassOutcome::Clean; groups.len()];
+            let checkpoints = checkpoints_for(&groups);
+            Self {
+                site,
+                groups,
+                outcomes,
+                checkpoints,
+            }
+        }
+
+        async fn run<F, Fut>(&mut self, request: F)
+        where
+            F: Fn(Loaded, Leg) -> Fut + Clone + Send + 'static,
+            Fut: core::future::Future<Output = (axum::http::StatusCode, String)> + Send + 'static,
+        {
+            run_pass(
+                &self.site,
+                &self.groups,
+                &mut self.outcomes,
+                &self.checkpoints,
+                &request,
+            )
+            .await;
+        }
+
+        async fn respond(&mut self, replies: &[(&str, u16, &str)]) -> Vec<Leg> {
+            let replies: Vec<_> = replies
+                .iter()
+                .map(|(body, status, verdict)| (body.to_string(), *status, verdict.to_string()))
+                .collect();
+            let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let capture = std::sync::Arc::clone(&calls);
+            self.run(move |_site, leg| {
+                capture.lock().expect("calls").push(leg.clone());
+                std::future::ready(
+                    replies
+                        .iter()
+                        .find(|(body, _, _)| *body == leg.body)
+                        .map_or_else(
+                            || receipt(200, "STORED"),
+                            |(_, code, verdict)| receipt(*code, verdict),
+                        ),
+                )
+            })
+            .await;
+            std::mem::take(&mut *calls.lock().expect("calls"))
+        }
+    }
+
+    fn named_leg(vendor: &str, dir: &str, body: &str) -> Leg {
+        Leg {
+            route: if matches!(dir, "futures" | "options") {
+                Route::Fno
+            } else {
+                Route::Spot
+            },
+            body: body.to_owned(),
+            ..leg(vendor, dir)
+        }
+    }
+
+    #[tokio::test]
+    async fn retry_passes_only_request_owed_legs_including_successes_after_a_failure() {
+        let day = named_leg("zerodha", "1day", "daily");
+        let owed = named_leg("zerodha", "1min", "owed");
+        let clean = named_leg("zerodha", "1min", "already");
+        let future = named_leg("zerodha", "futures", "future");
+        let option = named_leg("zerodha", "options", "option");
+        assert_eq!(owed.label, clean.label, "labels are not checkpoint keys");
+        let mut passes = Passes::new(
+            "checkpoint-non-prefix",
+            vec![
+                option.clone(),
+                day.clone(),
+                owed.clone(),
+                clean.clone(),
+                future.clone(),
+            ],
+        );
+        for (index, code) in [429, 409, 503].into_iter().enumerate() {
+            let calls = passes.respond(&[("owed", code, "NOT STARTED")]).await;
+            assert_eq!(
+                calls,
+                if index == 0 {
+                    vec![day.clone(), owed.clone(), clean.clone()]
+                } else {
+                    vec![owed.clone()]
+                }
+            );
+            assert_eq!(passes.outcomes, [PassOutcome::Retry]);
+            let progress = observed(&passes.site);
+            let feed = &progress.feeds[0];
+            assert_eq!(feed.legs_done as usize, calls.len());
+            assert_eq!(feed.skipped as usize, 5 - calls.len());
+            assert_eq!(feed.retries as usize, index);
+            assert_eq!(progress.retries, feed.retries);
+            assert!(feed.last_error.as_ref().unwrap().contains("HTTP 429"));
+            assert!(feed.finished && feed.doing.is_empty());
+        }
+        assert_eq!(
+            passes.respond(&[]).await,
+            vec![owed.clone(), future, option],
+            "both FNO legs wait for the outstanding spot response"
+        );
+        assert_eq!(passes.outcomes, [PassOutcome::Clean]);
+        assert_eq!(observed(&passes.site).feeds[0].retries, 3);
+        assert_eq!(
+            passes.respond(&[("daily", 503, "NOT STARTED")]).await,
+            vec![day],
+            "a fresh full pass resets checkpoints and rechecks dependencies"
+        );
+        assert_eq!(observed(&passes.site).feeds[0].retries, 3);
+        assert_eq!(passes.outcomes, [PassOutcome::Retry]);
+    }
+
+    #[tokio::test]
+    async fn failed_daily_and_minute_rungs_defer_dependents_until_their_retry_succeeds() {
+        let first = named_leg("zerodha", "1day", "first");
+        let second = named_leg("zerodha", "1day", "second");
+        let minute = named_leg("zerodha", "1min", "minute");
+        let second_bars = named_leg("zerodha", "1s", "seconds");
+        let option = named_leg("zerodha", "options", "option");
+        let mut passes = Passes::new(
+            "checkpoint-dependencies",
+            vec![
+                minute.clone(),
+                first.clone(),
+                second.clone(),
+                second_bars.clone(),
+                option.clone(),
+            ],
+        );
+        assert_eq!(
+            passes.respond(&[("first", 409, "NOT STARTED")]).await,
+            vec![first.clone(), second],
+            "another daily leg can succeed even though the first is owed"
+        );
+        let feed = &observed(&passes.site).feeds[0];
+        assert_eq!((feed.legs_done, feed.skipped), (2, 3));
+        assert_eq!(
+            passes.respond(&[("minute", 502, "FAILED")]).await,
+            vec![first, minute.clone()]
+        );
+        assert_eq!(passes.outcomes, [PassOutcome::Retry]);
+        assert_eq!(passes.respond(&[]).await, vec![minute, second_bars, option]);
+        let feed = &observed(&passes.site).feeds[0];
+        assert_eq!((feed.legs_done, feed.skipped, feed.retries), (3, 2, 2));
+        assert_eq!(passes.outcomes, [PassOutcome::Clean]);
+    }
+
+    #[tokio::test]
+    async fn healthy_feeds_wait_until_all_retrying_feeds_recover_before_a_fresh_pass() {
+        let zerodha = named_leg("zerodha", "1day", "z");
+        let groww = named_leg("groww", "1day", "g");
+        let dhan = named_leg("dhan", "1day", "d");
+        let mut passes = Passes::new(
+            "checkpoint-siblings",
+            vec![zerodha.clone(), groww.clone(), dhan.clone()],
+        );
+        let mut calls = passes
+            .respond(&[("z", 503, "FAILED"), ("g", 429, "FAILED")])
+            .await;
+        calls.sort_by(|a, b| a.body.cmp(&b.body));
+        assert_eq!(calls, vec![dhan.clone(), groww.clone(), zerodha.clone()]);
+        let mut calls = passes.respond(&[("g", 409, "NOT STARTED")]).await;
+        calls.sort_by(|a, b| a.body.cmp(&b.body));
+        assert_eq!(calls, vec![groww.clone(), zerodha.clone()]);
+        let healthy = &observed(&passes.site).feeds[2];
+        assert_eq!(
+            (healthy.legs_done, healthy.skipped, healthy.retries),
+            (0, 1, 0)
+        );
+        assert!(healthy.finished && healthy.last_error.is_none());
+        assert_eq!(passes.respond(&[]).await, vec![groww.clone()]);
+        let progress = observed(&passes.site);
+        assert_eq!(progress.retries, 2, "passes, not the sum of feed retries");
+        assert_eq!(
+            progress.feeds.iter().map(|f| f.retries).collect::<Vec<_>>(),
+            [1, 2, 0]
+        );
+        let mut calls = passes.respond(&[]).await;
+        calls.sort_by(|a, b| a.body.cmp(&b.body));
+        assert_eq!(calls, vec![dhan, groww, zerodha]);
+        assert_eq!(passes.outcomes, [PassOutcome::Clean; 3]);
+        assert_eq!(observed(&passes.site).retries, 2);
+    }
+
+    #[tokio::test]
+    async fn terminal_refusals_after_checkpointed_progress_never_resurrect_a_feed() {
+        for (code, verdict) in [(401, "NOT STARTED"), (422, "NOT STARTED"), (400, "REFUSED")] {
+            let day = named_leg("zerodha", "1day", "day");
+            let minute = named_leg("zerodha", "1min", "minute");
+            let option = named_leg("zerodha", "options", "option");
+            let mut passes = Passes::new(
+                &format!("checkpoint-terminal-{code}"),
+                vec![day.clone(), minute.clone(), option],
+            );
+            assert_eq!(
+                passes.respond(&[("minute", 503, "FAILED")]).await,
+                vec![day, minute.clone()]
+            );
+            assert_eq!(
+                passes.respond(&[("minute", code, verdict)]).await,
+                vec![minute]
+            );
+            for _ in 0..2 {
+                assert!(passes.respond(&[]).await.is_empty());
+            }
+            assert_eq!(passes.outcomes, [PassOutcome::Halted]);
+            let progress = observed(&passes.site);
+            let feed = &progress.feeds[0];
+            assert_eq!((feed.legs_done, feed.skipped, feed.retries), (1, 2, 1));
+            assert_eq!(feed.credential_dead, code == 401);
+            assert_eq!(progress.retries, 1);
+            let summary = run_summary(&progress, &passes.outcomes, 0);
+            assert!(summary.contains("INCOMPLETE") && summary.contains(&format!("HTTP {code}")));
+            assert!(!summary.contains("HTTP 503"));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stop_during_retry_counts_only_the_returned_request_and_preserves_checkpoints() {
+        let day = named_leg("zerodha", "1day", "day");
+        let minute = named_leg("zerodha", "1min", "minute");
+        let option = named_leg("zerodha", "options", "option");
+        let mut passes = Passes::new("checkpoint-stop", vec![day.clone(), minute.clone(), option]);
+        assert_eq!(
+            passes.respond(&[("minute", 503, "FAILED")]).await,
+            vec![day, minute.clone()]
+        );
+        passes
+            .run(move |site, requested| {
+                assert_eq!(requested, minute);
+                assert_eq!(observed(&site).feeds[0].legs_done, 0);
+                with_progress(&site, |p| p.stopping = true);
+                std::future::ready(receipt(200, "STORED"))
+            })
+            .await;
+        let progress = observed(&passes.site);
+        let feed = &progress.feeds[0];
+        assert_eq!((feed.legs_done, feed.skipped, feed.retries), (1, 2, 1));
+        assert!(feed.finished && feed.doing.is_empty());
+        assert!(run_summary(&progress, &passes.outcomes, 0).contains("pressed stop"));
+        assert!(passes.respond(&[]).await.is_empty());
+        assert_eq!(
+            observed(&passes.site),
+            progress,
+            "stopped passes do not change counters"
+        );
+        assert_eq!(
+            passes.checkpoints[0]
+                .iter()
+                .map(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+                .collect::<Vec<_>>(),
+            [true, true, false]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_panicking_request_with_an_empty_label_is_attempted_not_skipped() {
+        let mut minute = named_leg("zerodha", "1min", "minute");
+        minute.label.clear();
+        let option = named_leg("zerodha", "options", "option");
+        let mut passes = Passes::new(
+            "checkpoint-empty-label-panic",
+            vec![minute.clone(), option.clone()],
+        );
+        passes
+            .run(|_site, _leg| async {
+                panic!("synthetic first-leg panic");
+                #[allow(unreachable_code)]
+                receipt(200, "STORED")
+            })
+            .await;
+        let progress = observed(&passes.site);
+        let feed = &progress.feeds[0];
+        assert_eq!((feed.legs_done, feed.skipped, feed.retries), (0, 1, 0));
+        assert!(feed.finished && feed.doing.is_empty());
+        assert_eq!(passes.outcomes, [PassOutcome::Retry]);
+        assert!(feed.last_error.as_ref().unwrap().contains("abnormally"));
+        assert_eq!(passes.respond(&[]).await, vec![minute, option]);
+        assert_eq!(observed(&passes.site).retries, 1);
+        assert_eq!(passes.outcomes, [PassOutcome::Clean]);
+    }
+
+    #[tokio::test]
+    async fn stop_before_a_queued_retry_starts_does_not_count_it_as_attempted() {
+        let mut passes = Passes::new(
+            "checkpoint-stop-queued",
+            vec![
+                named_leg("zerodha", "1day", "z"),
+                named_leg("groww", "1day", "g"),
+            ],
+        );
+        assert_eq!(
+            passes
+                .respond(&[("z", 503, "FAILED"), ("g", 503, "FAILED")])
+                .await
+                .len(),
+            2
+        );
+        // The default current-thread runtime cannot interleave these ready
+        // requests: whichever task starts first sets stop before it returns.
+        passes
+            .run(|site, _leg| {
+                with_progress(&site, |p| p.stopping = true);
+                std::future::ready(receipt(200, "STORED"))
+            })
+            .await;
+        let progress = observed(&passes.site);
+        assert_eq!(progress.retries, 1);
+        assert_eq!(progress.feeds.iter().map(|f| f.retries).sum::<u32>(), 1);
+        assert_eq!(progress.feeds.iter().map(|f| f.legs_done).sum::<u32>(), 1);
+        assert_eq!(progress.feeds.iter().map(|f| f.skipped).sum::<u32>(), 1);
+        assert!(
+            progress
+                .feeds
+                .iter()
+                .all(|f| f.finished && f.doing.is_empty())
+        );
+        assert!(passes.respond(&[]).await.is_empty());
+        assert_eq!(observed(&passes.site), progress);
+    }
+
+    /// A synthetic census change, not an assertion that market bars exist.
+    /// This exercises the real conductor's growth branch without retry sleeps.
+    fn grow_synthetic_census(site: &Site) {
+        use brutex_core::instrument::{Exchange, Segment};
+        use brutex_core::symbol::Symbol;
+        use brutex_core::vendor::Vendor;
+        use pull::manifest::{Entry, EntryKey, Manifest, manifest_path};
+        use store::path::{Timeframe, YearMonth};
+
+        let mut census = Manifest::open(Vendor::Zerodha, &[], &[]).expect("empty fixture");
+        census
+            .record(Entry {
+                key: EntryKey {
+                    contract: None,
+                    exchange: Exchange::Nse,
+                    segment: Segment::Index,
+                    symbol: Symbol::new("NIFTY").expect("symbol"),
+                    timeframe: Timeframe::MINUTE_1,
+                    month: YearMonth::new(2025, 7).expect("month"),
+                },
+                rows: 1,
+                first_ts_micros: 1,
+                last_ts_micros: 1,
+            })
+            .expect("record counter");
+        std::fs::write(
+            manifest_path(&site.store_root, Vendor::Zerodha),
+            census.image(),
+        )
+        .expect("write fixture census");
+    }
+
+    #[tokio::test]
+    async fn a_growing_failed_pass_recovers_only_owed_legs_then_requires_full_idle_passes() {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let capture = std::sync::Arc::clone(&calls);
+        let progress = simulated(
+            "checkpoint-growth",
+            vec![leg("zerodha", "1day"), leg("zerodha", "1min")],
+            move |site, leg| {
+                let mut seen = capture.lock().expect("calls");
+                seen.push(leg.dir.clone());
+                std::future::ready(if seen.len() == 2 {
+                    assert_eq!(leg.dir, "1min");
+                    grow_synthetic_census(&site);
+                    receipt(503, "FAILED")
+                } else {
+                    receipt(200, "STORED")
+                })
+            },
+        )
+        .await;
+        assert_eq!(
+            *calls.lock().expect("calls"),
+            [
+                "1day", "1min", "1min", "1day", "1min", "1day", "1min", "1day", "1min"
+            ]
+        );
+        assert_eq!(
+            (
+                progress.passes,
+                progress.retries,
+                progress.rows_at_start,
+                progress.rows_now
+            ),
+            (5, 1, 0, 1)
+        );
+        assert_eq!(
+            (
+                progress.feeds[0].legs_done,
+                progress.feeds[0].skipped,
+                progress.feeds[0].retries
+            ),
+            (2, 0, 1)
+        );
+        assert!(!progress.running());
+        let summary = progress.finished.expect("idle summary");
+        assert!(
+            summary.contains("Idle retries stopped")
+                && summary.contains("Full basket coverage has not been verified")
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_receipts_are_checkpointed_during_repairs_and_reasked_on_full_passes() {
+        let empty = named_leg("zerodha", "1day", "empty");
+        let owed = named_leg("zerodha", "1min", "owed");
+        let mut passes = Passes::new("checkpoint-empty", vec![empty.clone(), owed.clone()]);
+        assert_eq!(
+            passes
+                .respond(&[("empty", 200, "EMPTY"), ("owed", 503, "FAILED")])
+                .await,
+            vec![empty.clone(), owed.clone()]
+        );
+        assert_eq!(passes.respond(&[]).await, vec![owed.clone()]);
+        assert_eq!(
+            passes.respond(&[("empty", 200, "EMPTY")]).await,
+            vec![empty, owed]
+        );
+        assert_eq!(passes.outcomes, [PassOutcome::Clean]);
+    }
+
+    #[tokio::test]
+    async fn identical_partial_receipts_keep_the_full_failed_leg_owed_without_growth() {
+        let daily = named_leg("zerodha", "1day", "daily");
+        let minute = named_leg("zerodha", "1min", "from=2020-01-01&to=2026-08-31");
+        let mut passes = Passes::new(
+            "checkpoint-partial-limit",
+            vec![daily.clone(), minute.clone()],
+        );
+        for index in 0..MAX_PASSES {
+            let calls = passes.respond(&[(&minute.body, 200, "PARTIAL")]).await;
+            assert_eq!(
+                calls,
+                if index == 0 {
+                    vec![daily.clone(), minute.clone()]
+                } else {
+                    vec![minute.clone()]
+                }
+            );
+            assert_eq!(passes.outcomes, [PassOutcome::Retry]);
+            let progress = observed(&passes.site);
+            assert_eq!(progress.retries, index);
+            assert_eq!(progress.feeds[0].retries, index);
+            assert_eq!(rows_now(&passes.site), 0);
+        }
+        let progress = observed(&passes.site);
+        assert!(
+            progress.feeds[0]
+                .last_error
+                .as_ref()
+                .unwrap()
+                .contains("HTTP 200")
+        );
+        let summary = summary_of(MAX_PASSES, progress.retries, 0, false);
+        assert!(
+            summary.contains("ceiling")
+                && summary.contains("Full basket coverage has not been verified")
+        );
+    }
+
+    #[tokio::test]
+    async fn retries_count_rescheduled_feeds_and_reset_pass_counters() {
+        let mut derivative = leg("zerodha", "options");
+        derivative.route = Route::Fno;
+        let (held, groups) = pass_fixture(
+            "retry-counters",
+            vec![leg("zerodha", "1day"), derivative, leg("groww", "1day")],
+        );
+        let mut outcomes = vec![PassOutcome::Clean; 2];
+        let checkpoints = checkpoints_for(&groups);
+        run_pass(
+            &held,
+            &groups,
+            &mut outcomes,
+            &checkpoints,
+            &|_site, leg: Leg| {
+                std::future::ready(if leg.vendor == "zerodha" {
+                    receipt(409, "NOT STARTED")
+                } else {
+                    receipt(200, "STORED")
+                })
+            },
+        )
+        .await;
+        assert_eq!(outcomes, [PassOutcome::Retry, PassOutcome::Clean]);
+        let first = observed(&held);
+        assert_eq!(first.retries, 0, "a failure is not yet a retry");
+        assert_eq!((first.feeds[0].legs_done, first.feeds[0].skipped), (1, 1));
+
+        for _ in 0..2 {
+            run_pass(
+                &held,
+                &groups,
+                &mut outcomes,
+                &checkpoints,
+                &|_site, _leg| std::future::ready(receipt(200, "STORED")),
+            )
+            .await;
+        }
+        let after = observed(&held);
+        assert_eq!(after.retries, 1);
+        assert_eq!((after.feeds[0].retries, after.feeds[1].retries), (1, 0));
+        assert_eq!((after.feeds[0].legs_done, after.feeds[0].skipped), (2, 0));
+        assert_eq!(outcomes, [PassOutcome::Clean, PassOutcome::Clean]);
+    }
+
+    #[tokio::test]
+    async fn a_terminal_refusal_replaces_an_earlier_transient_cause_and_stays_halted() {
+        let (held, groups) = pass_fixture("terminal-after-retry", vec![leg("zerodha", "1day")]);
+        let mut outcomes = vec![PassOutcome::Clean];
+        let checkpoints = checkpoints_for(&groups);
+        run_pass(
+            &held,
+            &groups,
+            &mut outcomes,
+            &checkpoints,
+            &|_site, _leg| std::future::ready(receipt(503, "NOT STARTED")),
+        )
+        .await;
+        run_pass(
+            &held,
+            &groups,
+            &mut outcomes,
+            &checkpoints,
+            &|_site, _leg| std::future::ready(receipt(422, "NOT STARTED")),
+        )
+        .await;
+        run_pass(
+            &held,
+            &groups,
+            &mut outcomes,
+            &checkpoints,
+            &|_site, _leg| {
+                panic!("a terminal feed must never be requested again");
+                #[allow(unreachable_code)]
+                std::future::ready(receipt(200, "STORED"))
+            },
+        )
+        .await;
+        assert_eq!(outcomes, [PassOutcome::Halted]);
+        let progress = observed(&held);
+        assert_eq!((progress.retries, progress.feeds[0].retries), (1, 1));
+        let why = progress.feeds[0]
+            .last_error
+            .as_deref()
+            .expect("terminal cause");
+        assert!(why.contains("HTTP 422") && !why.contains("HTTP 503"));
+        assert!(run_summary(&progress, &outcomes, 0).contains("INCOMPLETE"));
+    }
+
+    #[tokio::test]
+    async fn a_panicking_chain_keeps_its_feed_index_after_a_sibling_halts() {
+        let (held, groups) = pass_fixture(
+            "panic-after-halt",
+            vec![
+                leg("zerodha", "1day"),
+                leg("groww", "1day"),
+                leg("groww", "1min"),
+                named_leg("groww", "options", "option"),
+                leg("dhan", "1day"),
+            ],
+        );
+        let mut outcomes = vec![PassOutcome::Clean; 3];
+        let checkpoints = checkpoints_for(&groups);
+        run_pass(
+            &held,
+            &groups,
+            &mut outcomes,
+            &checkpoints,
+            &|_site, leg: Leg| {
+                std::future::ready(if leg.vendor == "zerodha" {
+                    receipt(401, "NOT STARTED")
+                } else {
+                    receipt(200, "STORED")
+                })
+            },
+        )
+        .await;
+        run_pass(
+            &held,
+            &groups,
+            &mut outcomes,
+            &checkpoints,
+            &|_site, leg: Leg| async move {
+                assert_ne!(leg.vendor, "zerodha", "the halted feed cannot be spawned");
+                assert_ne!(leg.dir, "1min", "synthetic second-leg panic");
+                receipt(200, "STORED")
+            },
+        )
+        .await;
+        assert_eq!(
+            outcomes,
+            [PassOutcome::Halted, PassOutcome::Retry, PassOutcome::Clean]
+        );
+        let progress = observed(&held);
+        assert!(progress.feeds[0].credential_dead);
+        assert_eq!(
+            progress.feeds[1].legs_done, 1,
+            "the panicked response never returned"
         );
         assert!(
-            body.contains("flying.push((\n                nth,"),
-            "the feed index must travel WITH the handle: `flying` is shorter \
-             than `groups` whenever a feed is skipped, and `note_dead_chain` \
-             writes by that index"
+            progress.feeds[1]
+                .last_error
+                .as_deref()
+                .expect("panic cause")
+                .contains("abnormally")
         );
-        // THE OLD SHAPE, ASSEMBLED AT RUN TIME so this assertion does not match
-        // its own source — three times now a source-text test in this workspace
-        // has done exactly that.
-        let bare = format!(
-            "{}{}",
-            "for (nth, chain) in flying.into_iter()", ".enumerate()"
+        assert!(progress.feeds[2].last_error.is_none());
+        assert_eq!(progress.feeds[2].legs_done, 1);
+        assert_eq!(progress.feeds[1].skipped, 1, "the option never started");
+        assert!(progress.feeds[1].finished && progress.feeds[1].doing.is_empty());
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let capture = std::sync::Arc::clone(&calls);
+        run_pass(
+            &held,
+            &groups,
+            &mut outcomes,
+            &checkpoints,
+            &move |_site, leg: Leg| {
+                capture.lock().expect("calls").push(leg);
+                std::future::ready(receipt(200, "STORED"))
+            },
+        )
+        .await;
+        assert_eq!(
+            *calls.lock().expect("calls"),
+            [
+                leg("groww", "1min"),
+                named_leg("groww", "options", "option")
+            ]
         );
-        assert!(
-            !body.contains(bare.as_str()),
-            "enumerating `flying` re-derives the index from a vector that no \
-             longer matches `progress.feeds`"
+        assert_eq!(
+            outcomes,
+            [PassOutcome::Halted, PassOutcome::Clean, PassOutcome::Clean]
         );
+        let progress = observed(&held);
+        assert_eq!(
+            (
+                progress.feeds[1].legs_done,
+                progress.feeds[1].skipped,
+                progress.feeds[1].retries
+            ),
+            (2, 1, 1)
+        );
+        assert_eq!(progress.retries, 1);
     }
 
     /// **A DEAD CREDENTIAL IS A REASON THIS PATH CAN NAME, AND HALT ON.**
@@ -2035,17 +2915,9 @@ mod tests {
     ///
     /// # Why this drives `run_chain` and not `conduct`
     ///
-    /// Measured, by writing it the other way first: `conduct`'s pass loop is
-    /// unbounded on failure by design — a dirty pass sleeps `RETRY_WAIT` and
-    /// goes again, up to `MAX_PASSES` — and this fixture's spot leg fails on
-    /// EVERY pass, because a folder that is absent stays absent. The test ran
-    /// to its own 30-second bound instead of finishing. Unbounded it would have
-    /// taken `MAX_PASSES` × `RETRY_WAIT` ≈ two hours and WEDGED CI rather than
-    /// reddening it.
-    ///
-    /// `run_chain` is one pass, which is the unit this behaviour lives in: the
-    /// skip is a decision inside a single walk of the legs, and the retry loop
-    /// around it is a different property with its own tests.
+    /// This exercises the real local-archive handler in one pass. Its refusal
+    /// leaves the derivative behind it unattempted. Retry counters and HTTP 409
+    /// dependency skips are tested separately through `run_pass`.
     #[tokio::test]
     async fn a_failed_spot_leg_stops_the_derivative_legs_behind_it() {
         let site = site("spotfirst");
@@ -2092,6 +2964,12 @@ mod tests {
                             .to_owned(),
                     },
                 ],
+                [false, false]
+                    .into_iter()
+                    .map(std::sync::atomic::AtomicBool::new)
+                    .collect(),
+                std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                request_leg,
             ),
         )
         .await;
@@ -2113,6 +2991,7 @@ mod tests {
              thing that distinguishes a deferred leg from one that was never \
              asked for"
         );
+        assert_eq!(feed.legs_done, 1, "only the spot response returned");
 
         // THE CAUSE IS THE SPOT FAILURE, NOT THE SKIP. `last_error` keeps the
         // FIRST reason deliberately, so an operator reads what went wrong

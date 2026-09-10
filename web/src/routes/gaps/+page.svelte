@@ -20,18 +20,19 @@
    * (month, rung) is its own denominator, so "short by zero" is a tautology and
    * it prints `unverified` rather than a verdict.
    *
-   * This page asks the absolute question. `/gaps.json` runs `pull::gaps`, which
-   * consults `pull::calendar` per day and classifies every absent minute:
+   * `/gaps.json` runs a minute audit against dated session evidence. NSE cash
+   * additionally needs the exact stock's dated closing-auction eligibility;
+   * a generic peer cannot establish that schedule or the stock's listing life.
    *
    *   · `closed`         — the exchange did not trade. Not a loss.
    *   · `outside-window` — it traded, and this minute was outside its windows.
    *                        Muhurat is one hour in the afternoon; a
    *                        disaster-recovery Saturday has a two-hour hole in
    *                        the middle by design. Not a loss.
-   *   · `vendor-hole`    — inside a window the exchange traded, and the bar is
-   *                        not there. **The only variant that is a loss.**
-   *   · `unmeasured`     — the calendar does not cover this day, so no claim is
-   *                        made. Deliberately not folded into `closed`: "the
+   *   · `vendor-hole`    — an expected minute is absent. This wire name does
+   *                        not prove provider fault or that the stock traded.
+   *   · `unmeasured`     — required calendar or session evidence is missing,
+   *                        so no claim is made. Not folded into `closed`: "the
    *                        exchange was shut" and "nobody has looked" are
    *                        different facts.
    *
@@ -46,9 +47,9 @@
    * # A month with NO FILE is the loudest row here
    *
    * A backfill that stopped in March 2021 leaves no file at all, and it is
-   * shown as `no file` rather than as a hole of some size — the size is
-   * unknowable and claiming one would be an invention. `/gaps.json` walks past
-   * it rather than refusing, which is the whole reason the ranged form exists.
+   * shown as `no file`. Known session evidence can still establish expected
+   * and missing minutes; missing evidence remains unmeasured. `/gaps.json`
+   * continues through the range and retains both findings.
    *
    * # One request for the whole range
    *
@@ -57,11 +58,13 @@
    * `/bars/window.json` was built to refuse — measured there at 2,187 requests,
    * past what a browser will open.
    */
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { feeds } from '$lib/feeds.svelte.js';
   import { ask } from '$lib/ask.js';
+  import { createPageRequests } from '$lib/page-requests.js';
   import { store, syncStore } from '$lib/store.svelte.js';
   import { parseKey } from '$lib/instrument.js';
+  import { monthVerdict, isWholeAudit } from '$lib/gap-verdict.js';
 
   /** @typedef {{ day: number, from: number, to: number, minutes: number, reason: string }} Run */
   /**
@@ -73,7 +76,9 @@
    *   absent_minutes: number,
    *   truncated: boolean,
    *   unreadable_records: number,
+   *   invalid_timestamps?: number,
    *   absent_file: string | null,
+   *   evidence_error?: string | null,
    *   unmeasured_minutes: number,
    *   gaps: Run[]
    * }} MonthVerdict
@@ -100,17 +105,26 @@
    * }} Answer
    */
 
-  /* THE FORM, SEEDED FROM THE CENSUS AND NEVER FROM A LITERAL. A hardcoded
+  /* The instrument and span are seeded from the census. A hardcoded
      default span once threw away 40 of 121 months and reported 81/81 with no
-     hole — the answer looked complete because the question was small. Every
-     default below is read off `/store.json`. */
+     hole — the answer looked complete because the question was small.
+     The endpoint audits only source minutes, so its timeframe is fixed. */
   let symbol = $state('');
-  let rung = $state('');
+  const rung = '1min';
   let from = $state('');
   let to = $state('');
 
   /** @type {{ phase: 'idle' | 'loading' | 'done' | 'failed', body: Answer | null, why: string }} */
   let result = $state({ phase: 'idle', body: null, why: '' });
+  const auditRequests = createPageRequests();
+  const questionKey = $derived(JSON.stringify([feeds.active, symbol, rung, from, to]));
+  onDestroy(() => auditRequests.dispose());
+  $effect(() => {
+    questionKey;
+    auditRequests.cancel();
+    result = { phase: 'idle', body: null, why: '' };
+    return () => auditRequests.cancel();
+  });
 
   $effect(() => {
     if (feeds.active) syncStore(feeds.active);
@@ -153,33 +167,27 @@
 
   /* Every symbol the census holds for this feed, in one pass. */
   const symbols = $derived.by(() => {
+    if (store.feed !== feeds.active) return [];
     const seen = new Set();
     for (const row of store.rows ?? []) seen.add(row.instrument);
     return [...seen].sort();
   });
 
-  /* Every rung the census holds. Read rather than listed: the store ships nine
-     and the engine sweeps eight, and a page that named them would be a second
-     list free to disagree with the first. */
-  const rungs = $derived.by(() => {
-    const seen = new Set();
-    for (const row of store.rows ?? []) if (row.instrument === symbol) seen.add(row.timeframe);
-    return [...seen].sort();
-  });
-
-  /* The span the census actually holds for the chosen series — the widest true
-     answer, so the form opens on the whole of it rather than on a guess. */
+  /* Stored minute months seed the span. A census entry establishes neither
+     historical listing dates nor the provider's available history. */
   const span = $derived.by(() => {
     let lo = null;
     let hi = null;
+    if (store.feed !== feeds.active) return { lo, hi };
     for (const row of store.rows ?? []) {
       if (row.instrument !== symbol) continue;
-      if (rung && row.timeframe !== rung) continue;
+      if (row.timeframe !== rung) continue;
       if (lo === null || row.month < lo) lo = row.month;
       if (hi === null || row.month > hi) hi = row.month;
     }
     return { lo, hi };
   });
+  const hasMinuteSource = $derived(span.lo !== null);
 
   /* SEEDING, NOT BINDING. The fields are the operator's once they touch them,
      so each is filled only while it is empty — a census that reloads must not
@@ -189,10 +197,6 @@
     if (!symbol && first) untrack(() => (symbol = first));
   });
   $effect(() => {
-    const first = rungs[0];
-    if (!rung && first) untrack(() => (rung = first));
-  });
-  $effect(() => {
     const { lo, hi } = span;
     untrack(() => {
       if (!from && lo) from = lo;
@@ -200,8 +204,10 @@
     });
   });
 
-  async function run() {
-    if (!feeds.active || !symbol || !rung || !from || !to) return;
+  /** @param {import('$lib/page-requests.js').ReadTicket} ticket @param {string} asked */
+  async function runCurrent(ticket, asked) {
+    if (!ticket.current() || asked !== questionKey) return;
+    if (!feeds.active || !symbol || !hasMinuteSource || !from || !to) return;
     const at = parsed;
     if (!at || !at.exchange || !at.segment || !at.underlying) {
       /* A HALF-KNOWN PLACE IS NOT A PLACE. Asking the route for `undefined`
@@ -233,13 +239,15 @@
          asked for — ~44,640 per month against at most ~11,625 stored bars — and
          121 months is a real ask. Giving up on a read that is working would
          report a wedged server that is not one. */
-      const response = await ask(url, { cache: 'no-store', ms: 60_000 });
+      const response = await ask(url, { cache: 'no-store', ms: 60_000, signal: ticket.signal });
+      if (!ticket.current() || asked !== questionKey) return;
       /* TEXT FIRST, THEN PARSE. Calling `.json()` on a refusal is how a 404
          becomes `SyntaxError: Unexpected token '<'` — measured, against a
          server binary older than this page: the route was not registered, the
          body was not JSON, and the operator was shown a parser error about a
          character instead of the fact that their build is stale. */
       const text = await response.text();
+      if (!ticket.current() || asked !== questionKey) return;
       let body = null;
       try {
         body = JSON.parse(text);
@@ -271,8 +279,15 @@
       }
       result = { phase: 'done', body, why: '' };
     } catch (error) {
+      if (!ticket.current() || asked !== questionKey) return;
       result = { phase: 'failed', body: null, why: error instanceof Error ? error.message : String(error) };
     }
+  }
+
+  function run() {
+    const asked = questionKey;
+    auditRequests.cancel();
+    return auditRequests.run((ticket) => runCurrent(ticket, asked));
   }
 
   /** @param {number | null | undefined} n */
@@ -288,22 +303,11 @@
   const clock = (m) =>
     `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
 
-  /** Only the runs that are a LOSS. The other three reasons are why a healthy
-      store has thousands of absent minutes, and listing them would bury the
-      one that matters.
+  /** Expected absences, with the backend's exact dates and minute boundaries.
+      The wire name does not establish that the provider caused the absence.
       @param {MonthVerdict} m
       @returns {Run[]} */
   const losses = (m) => (m.gaps ?? []).filter((g) => g.reason === 'vendor-hole');
-
-  /** One month's verdict word. Absence is its own state, never a zero.
-      @param {MonthVerdict} m
-      @returns {{ word: string, kind: 'ok' | 'bad' | 'absent' | 'quiet' }} */
-  function verdict(m) {
-    if (m.absent_file) return { word: 'no file', kind: 'absent' };
-    if (m.expected === 0) return { word: 'nothing owed', kind: 'quiet' };
-    if (m.lost_minutes === 0) return { word: 'whole', kind: 'ok' };
-    return { word: 'short', kind: 'bad' };
-  }
 </script>
 
 <svelte:head><title>Completeness · brutex</title></svelte:head>
@@ -312,11 +316,12 @@
   <header class="head">
     <h1>Completeness</h1>
     <p class="sub">
-      Whether a stored series is <b>whole</b>, measured against the exchange calendar rather than
-      against its neighbours. <code>/db</code> compares each instrument-month to the fullest peer at
-      the same rung, which cannot see a gap that hit every instrument at once. This asks
-      <code>pull::gaps</code> what the calendar owed, day by day, and only a minute inside a window
-      the exchange actually traded counts as a loss.
+      Whether a stored <b>1min</b> series is whole against the available dated session evidence.
+      <code>/db</code> compares each instrument-month to the fullest peer, which cannot see a gap
+      shared by every instrument. Here, missing means an expected minute is absent; it does not
+      prove provider fault. NSE cash needs the exact stock's dated closing-auction eligibility.
+      A stored dataset does not establish the instrument's full listing history or the source's
+      available history.
     </p>
   </header>
 
@@ -329,8 +334,8 @@
     </label>
     <label class="f">
       <span class="fk">Rung</span>
-      <select bind:value={rung}>
-        {#each rungs as r (r)}<option value={r}>{r}</option>{/each}
+      <select value={rung} disabled aria-describedby="minute-audit-note">
+        <option value="1min">1min</option>
       </select>
     </label>
     <label class="f">
@@ -341,12 +346,34 @@
       <span class="fk">To</span>
       <input bind:value={to} placeholder="YYYY-MM" size="8" />
     </label>
-    <button class="go" onclick={run} disabled={result.phase === 'loading'}>
+    <button
+      class="go"
+      onclick={run}
+      disabled={result.phase === 'loading' || !feeds.active || !hasMinuteSource || !from || !to}
+      aria-describedby="minute-audit-note"
+    >
       {result.phase === 'loading' ? 'Reading…' : 'Audit'}
     </button>
   </div>
 
-  {#if result.phase === 'idle'}
+  <p class="whence" id="minute-audit-note">
+    This is a source-minute audit. Daily and coarser bars cannot prove their source minutes.
+  </p>
+
+  {#if !hasMinuteSource}
+    <p class="state">
+      {#if store.error}
+        Minute audit unavailable: the store census could not be read. {store.error}
+      {:else if !feeds.active || store.feed !== feeds.active}
+        Waiting for the selected feed's store census before a minute audit can be offered.
+      {:else if symbol}
+        No 1min source is recorded for {symbol} in this feed's store census. Audit is disabled;
+        select a series with stored 1min bars. Other timeframes cannot substitute for them.
+      {:else}
+        No stored series is available to select for a minute audit.
+      {/if}
+    </p>
+  {:else if result.phase === 'idle'}
     <p class="state">
       Pick a series and a span. The whole range is one request — the endpoint answers every month
       between the two, so nothing here fans out per month.
@@ -362,13 +389,16 @@
     </div>
   {:else if result.body}
     {@const b = result.body}
+    {@const whole = isWholeAudit(b)}
     <div class="census">
-      <div class="cell {b.lost_minutes === 0 && b.months_absent === 0 ? 'p' : 'x'}">
+      <div class="cell {whole ? 'p' : b.lost_minutes > 0 ? 'x' : ''}">
         <span class="n">{fmt(b.lost_minutes)}</span>
-        <span class="k">minutes lost</span>
-        <span class="s">inside a window the exchange traded</span>
+        <span class="k">minutes missing</span>
+        <span class="s">
+          {whole ? 'none missing in measured windows' : 'expected absences; see month verdicts'}
+        </span>
       </div>
-      <div class="cell {b.months_absent === 0 ? 'p' : 'x'}">
+      <div class="cell {whole ? 'p' : b.months_absent > 0 ? 'x' : ''}">
         <span class="n">{fmt(b.months_absent)}</span>
         <span class="k">months with no file</span>
         <span class="s">of {fmt(b.months)} looked at</span>
@@ -376,7 +406,7 @@
       <div class="cell i">
         <span class="n">{fmt(b.held)}</span>
         <span class="k">bars held</span>
-        <span class="s">against {fmt(b.expected)} the calendar owed</span>
+        <span class="s">against {fmt(b.expected)} expected from available evidence</span>
       </div>
     </div>
 
@@ -389,36 +419,35 @@
         calendar derived from it would read every hole as the edge of a trading window and answer
         <em>no losses</em> for any input.
       {:else}
-        the <b>typed calendar table</b>, {b.calendar?.first} to {b.calendar?.last}. No other feed
-        or symbol in this store could vote, and deriving a calendar from the audited series itself
-        would make every hole invisible.
+        the <b>typed calendar table</b>, {b.calendar?.first} to {b.calendar?.last}.
       {/if}
+      NSE cash uses the typed calendar and exact dated stock session metadata. Generic peers
+      cannot supply a stock's closing-auction eligibility. None of these readings establishes
+      its full listing lifetime or guarantees that a provider can supply every expected minute.
     </p>
 
     {#if b.calendar?.stale}
       <div class="refusal">
         <span class="rlabel">The table has run out</span>
         <p>
-          The typed calendar knows {b.calendar.first} to <b>{b.calendar.last}</b>, and today is past
-          it. Every day after that is <b>unmeasured</b> — not a loss and not a clean bill, because
-          this build has no holiday list for it. Those days add nothing to <em>owed</em> while their
-          bars still count as <em>held</em>, which is why <em>held</em> can exceed <em>owed</em>
-          above.
+          The typed calendar covers {b.calendar.first} to <b>{b.calendar.last}</b>, and today is
+          past it. It cannot verify sessions beyond that bound. A historical span fully inside
+          the bound still requires complete session evidence and readable, valid records.
         </p>
         <p class="rhint">
-          {fmt(b.unmeasured_minutes)} minutes in this answer are unclaimed for that reason. Storing
-          a second feed's copy of any symbol on this exchange would replace the table with a peer
-          reading that widens by itself. Extending the table instead is an exchange fact and belongs
-          in <code>docs/00-charter.md</code> — this build will not invent a trading day.
+          Calendar extensions require dated exchange evidence. Peer data cannot replace missing
+          cash-session metadata for the exact stock and date.
         </p>
       </div>
-    {:else if b.unmeasured_minutes > 0}
+    {/if}
+    {#if b.unmeasured_minutes > 0 || b.calendar?.covers_span === false}
       <div class="refusal">
         <span class="rlabel">Partly unclaimed</span>
         <p>
-          {fmt(b.unmeasured_minutes)} minutes in this span are <b>unmeasured</b> — outside
-          {b.calendar?.first} to {b.calendar?.last}, or a session whose length this build does not
-          know. They are neither a loss nor a clean bill, and they add nothing to <em>owed</em>.
+          {fmt(b.unmeasured_minutes)} minutes in this span are <b>unmeasured</b>.
+          Calendar coverage or required dated session metadata is incomplete; the month rows
+          name missing evidence. Unknown minutes are excluded from <em>owed</em>, so zero
+          measured absences cannot establish completeness and <em>held</em> may exceed <em>owed</em>.
         </p>
       </div>
     {/if}
@@ -440,14 +469,14 @@
           <th>Month</th>
           <th class="num">Held</th>
           <th class="num">Owed</th>
-          <th class="num">Lost</th>
+          <th class="num">Missing</th>
           <th>Verdict</th>
           <th>Where</th>
         </tr>
       </thead>
       <tbody>
         {#each b.month as m (m.month)}
-          {@const v = verdict(m)}
+          {@const v = monthVerdict(m)}
           <tr class={v.kind}>
             <td class="mono">{m.month}</td>
             <td class="num mono">{fmt(m.held)}</td>
@@ -455,28 +484,41 @@
             <td class="num mono">{m.lost_minutes ? fmt(m.lost_minutes) : '—'}</td>
             <td><span class="tag {v.kind}">{v.word}</span></td>
             <td class="where">
-              {#if m.absent_file}
-                <span class="dim">{m.absent_file}</span>
-              {:else}
-                {#each losses(m).slice(0, 6) as g (`${g.day}-${g.from}`)}
-                  <span class="run">
-                    {dayLabel(g.day)}
-                    <span class="dim">{clock(g.from)}–{clock(g.to)}</span>
-                    <span class="dim">· {g.minutes}m</span>
-                  </span>
-                {/each}
-                {#if losses(m).length > 6}
-                  <span class="dim">and {losses(m).length - 6} more runs</span>
-                {/if}
-                {#if m.unreadable_records}
-                  <span class="run bad">
-                    {m.unreadable_records} record(s) unreadable — counted as holes, but the fault is
-                    the FILE, not the vendor
-                  </span>
-                {/if}
-                {#if m.truncated}
-                  <span class="run bad">this month's run list hit its ceiling and is not complete</span>
-                {/if}
+              {#if m.absent_file != null}
+                <span class="dim">{m.absent_file || 'The month file is unavailable.'}</span>
+              {/if}
+              {#if m.evidence_error != null}
+                <span class="run bad">
+                  Dated session evidence unavailable: {m.evidence_error || 'No reason supplied.'}
+                </span>
+              {/if}
+              {#if m.unmeasured_minutes > 0}
+                <span class="run bad">
+                  {fmt(m.unmeasured_minutes)} minutes unmeasured — calendar or dated session
+                  evidence is incomplete; zero measured absences does not mean whole
+                </span>
+              {/if}
+              {#if m.invalid_timestamps}
+                <span class="run bad">
+                  {fmt(m.invalid_timestamps)} invalid timestamp(s) — off-grid, duplicate or
+                  backward stamps; this month's totals are unverified
+                </span>
+              {/if}
+              {#each losses(m) as g (`${g.day}-${g.from}`)}
+                <span class="run">
+                  {dayLabel(g.day)}
+                  <span class="dim">{clock(g.from)}–{clock(g.to)}</span>
+                  <span class="dim">· {g.minutes}m</span>
+                </span>
+              {/each}
+              {#if m.unreadable_records}
+                <span class="run bad">
+                  {fmt(m.unreadable_records)} record(s) unreadable — the file could not supply
+                  those bars; this does not establish provider fault
+                </span>
+              {/if}
+              {#if m.truncated}
+                <span class="run bad">this month's run list hit its ceiling and is not complete</span>
               {/if}
             </td>
           </tr>

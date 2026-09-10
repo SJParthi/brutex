@@ -27,7 +27,7 @@
    */
   import '$lib/theme.css';
   import { page } from '$app/state';
-  import { feeds, loadFeeds } from '$lib/feeds.svelte.js';
+  import { feeds, loadFeeds, selectFeed } from '$lib/feeds.svelte.js';
   import { loadCatalogue } from '$lib/index.svelte.js';
   // THE ZONE IS NAMED, BECAUSE THE MACHINE'S ZONE IS NOT THE PRODUCT'S.
   //
@@ -42,6 +42,8 @@
   // ceiling; see `$lib/ask.js` for why the wrapper exists rather than a signal
   // threaded through every call site.
   import { ask } from '$lib/ask.js';
+  import { watchVisible } from '$lib/page-requests.js';
+  import { runtimeInspection, loadInspection } from '$lib/runtime-inspection.svelte.js';
 
   /** ONE DEFINITION OF A FEED, AND IT IS NOT THIS FILE'S.
    *
@@ -56,6 +58,7 @@
    */
 
   let { children } = $props();
+  $effect(() => { void loadInspection(); });
 
   // The feed list loads once. The INSTRUMENT list reloads whenever the feed
   // changes, because the two brokers do not list the same instruments —
@@ -66,7 +69,7 @@
     loadFeeds().finally(() => (feedsTried = true));
   });
   $effect(() => {
-    if (feeds.active) loadCatalogue(feeds.active);
+    void loadCatalogue(feeds.active);
   });
 
   const NAV = [
@@ -513,7 +516,7 @@
        toggle on the selected option needs none of that and is reachable by
        Enter on the highlighted row, which a footer button inside
        `role="listbox"` would not be. */
-    feeds.active = f.wire === feeds.active ? null : f.wire;
+    selectFeed(f.wire === feeds.active ? null : f.wire);
     close();
   }
 
@@ -636,19 +639,24 @@
    */
   /** @type {{ state: 'checking' | 'up' | 'down', ms: number, why: string | null, at: number }} */
   let api = $state({ state: 'checking', ms: 0, why: null, at: 0 });
+  let refreshProbe = () => {};
 
-  async function probe() {
+  /** @param {import('$lib/page-requests.js').ReadTicket} ticket */
+  async function probe(ticket) {
     const t0 = performance.now();
     try {
-      const r = await ask('/feeds.json', { cache: 'no-store' });
+      const r = await ask('/feeds.json', { cache: 'no-store', signal: ticket.signal });
+      if (!ticket.current()) return;
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const ct = r.headers.get('content-type') ?? '';
       if (!ct.includes('json')) {
         throw new Error(`answered ${ct || 'no content-type'}, not JSON — the API is not behind this route`);
       }
       await r.json();
+      if (!ticket.current()) return;
       api = { state: 'up', ms: Math.round(performance.now() - t0), why: null, at: Date.now() };
     } catch (why) {
+      if (!ticket.current()) return;
       /* A CAUGHT VALUE IS `unknown`, AND THAT IS THE TRUTH ABOUT `throw`.
          Anything can be thrown, so nothing about `.message` is guaranteed —
          which is precisely why this line reads it defensively and falls back
@@ -670,14 +678,15 @@
   }
 
   $effect(() => {
-    probe();
-    const id = setInterval(probe, PROBE_MS);
-    const wake = () => document.visibilityState === 'visible' && probe();
-    document.addEventListener('visibilitychange', wake);
-    return () => {
-      clearInterval(id);
-      document.removeEventListener('visibilitychange', wake);
-    };
+    const watching = watchVisible(probe, PROBE_MS, {
+      visible: () => document.visibilityState === 'visible',
+      listen: (wake) => {
+        document.addEventListener('visibilitychange', wake);
+        return () => document.removeEventListener('visibilitychange', wake);
+      }
+    });
+    refreshProbe = watching.refresh;
+    return () => { watching(); refreshProbe = () => {}; };
   });
 
   /* ====================================================================
@@ -848,7 +857,7 @@
       bind:this={navEl}
       onfocusin={(e) => keepInNav(/** @type {Element} */ (e.target))}
     >
-      {#each NAV as t (t.href)}
+      {#each NAV.filter(t => runtimeInspection.value.mode !== 'read-only-main-app' || !['/ingest','/autopilot'].includes(t.href)) as t (t.href)}
         <!-- `data-sveltekit-reload` ONLY WHERE THE ENTRY ASKS FOR IT. An empty
              string renders the attribute; `undefined` omits it entirely, so the
              five in-app tabs keep client-side routing and only `/logs` leaves.
@@ -887,7 +896,7 @@
       class="status"
       class:bad={api.state === 'down'}
       type="button"
-      onclick={probe}
+      onclick={() => refreshProbe()}
       title={api.state === 'down'
         ? `Probing /feeds.json failed: ${api.why}`
         : `Round trip to /feeds.json. Checked ${stampLabel(api.at)}. Click to re-check.`}
@@ -1056,6 +1065,89 @@
   {/if}
 
   <main class="main" id="main" tabindex="-1">
+    <div class="inspection-banner" role="status">
+      <span>{runtimeInspection.value.why}</span>
+      {#if runtimeInspection.value.phase === 'failed'}
+        <button class="btn ghost" onclick={() => { void loadInspection(); }}>Recheck server mode</button>
+      {/if}
+    </div>
     {@render children()}
   </main>
 </div>
+
+<style>
+  .main > .inspection-banner {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 9px 16px;
+    border-bottom: 1px solid var(--line);
+    background: var(--panel);
+    color: var(--ink-2);
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  .inspection-banner button { flex-shrink: 0; }
+
+  /* A narrow window gives navigation its own full-width row. Keeping it in
+     the desktop flex row can squeeze its hit area beneath the status buttons.
+     The shell must grow the header row with it, rather than clipping at 46px. */
+  @media (max-width: 700px) {
+    .shell:not(.bare) {
+      grid-template-rows: auto minmax(0, 1fr);
+    }
+    .topbar {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+      gap: 6px;
+      min-width: 0;
+      padding: 6px 10px;
+    }
+    .topbar > .brand {
+      grid-column: 1;
+      grid-row: 1;
+      margin-right: 0;
+    }
+    .topbar > nav {
+      grid-column: 1 / -1;
+      grid-row: 2;
+      min-height: 44px;
+      width: 100%;
+      margin: 0;
+      padding: 6px;
+      scroll-padding-inline: 6px;
+    }
+    .topbar > nav .tab { flex: 0 0 auto; }
+    .topbar > .spacer { display: none; }
+    .topbar > .status {
+      grid-column: 1 / -1;
+      min-width: 0;
+      max-width: 100%;
+    }
+    .topbar > button.status {
+      grid-column: 2;
+      grid-row: 1;
+      justify-self: end;
+      min-height: 30px;
+    }
+    .topbar > .themer {
+      grid-column: 3;
+      grid-row: 1;
+    }
+    .topbar > .combo {
+      grid-column: 1 / -1;
+      min-width: 0;
+    }
+    .topbar .combo-btn {
+      flex: 1;
+      min-width: 0;
+    }
+    .topbar .combo-pop {
+      min-width: 0;
+      width: 100%;
+      max-width: calc(100vw - 20px);
+    }
+  }
+</style>

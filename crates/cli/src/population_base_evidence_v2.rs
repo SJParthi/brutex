@@ -1560,7 +1560,7 @@ const fn measured_when(measured: bool, value: u64) -> ObservedU64V1 {
     }
 }
 
-fn measured_rate(
+pub(crate) fn measured_rate(
     part: u64,
     total: u64,
     name: &'static str,
@@ -1583,7 +1583,7 @@ fn rate_ppm(part: u64, total: u64, name: &'static str) -> Result<u64, BaseEviden
     u64::try_from(quotient).map_err(|_| BaseEvidenceRefusalV2::Arithmetic(name))
 }
 
-fn ratio_observed(
+pub(crate) fn ratio_observed(
     numerator: u64,
     denominator: u64,
     name: &'static str,
@@ -1599,7 +1599,10 @@ fn ratio_observed(
     }
 }
 
-fn return_drawdown(profit: i64, drawdown: i64) -> Result<ObservedU64V1, BaseEvidenceRefusalV2> {
+pub(crate) fn return_drawdown(
+    profit: i64,
+    drawdown: i64,
+) -> Result<ObservedU64V1, BaseEvidenceRefusalV2> {
     if profit <= 0 {
         Ok(ObservedU64V1::Measured(0))
     } else if drawdown == 0 {

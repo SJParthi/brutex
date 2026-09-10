@@ -81,10 +81,11 @@ pub enum Reason {
     OutsideWindow,
     /// Inside a window the exchange traded, and the bar is not there.
     ///
-    /// **This is the only variant that is a real loss**, and the only one worth
-    /// an operator's attention. It cannot be repaired from the same vendor: a
-    /// re-run returns the same nothing, because the vendor does not hold it.
-    /// The route to zero is another feed's copy of the same minute.
+    /// An expected minute absent from the supplied store image. This alone
+    /// cannot distinguish a missed download from an absent provider record or
+    /// an instrument that did not trade. A scoped source replay and identity /
+    /// listing evidence are needed before attributing the cause. Another feed
+    /// must never silently replace this feed's history.
     VendorHole,
     /// The calendar does not cover this day, so no claim is made.
     ///
@@ -149,6 +150,9 @@ pub struct Ledger {
     pub expected: u32,
     /// Bars the store actually held.
     pub held: u32,
+    /// Off-grid, duplicate or non-increasing timestamps in the input image.
+    /// When nonzero, coverage totals are withheld, not a clean zero verdict.
+    pub invalid_timestamps: u32,
     /// Whether [`MAX_GAPS`] stopped the walk before it finished.
     ///
     /// **Never silent.** A truncated ledger that read like a complete one would
@@ -296,10 +300,46 @@ pub fn classify_spot_index_against(
     classify_with_subject(stored, first, last, against, Subject::SpotIndex)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Subject {
+/// Audit NSE cash minutes against the independently verified exchange calendar
+/// and this exact stock's dated continuous-session eligibility.
+///
+/// A peer's observed close is not this stock's schedule. Before the CAS change,
+/// exceptional exchange windows retain their verified shape. From the change,
+/// only full verified sessions with exact dated eligibility get a denominator;
+/// missing eligibility and exceptional / unknown sessions remain unmeasured.
+/// No metadata is fetched and no source bars are altered by this function.
+#[must_use]
+pub fn classify_cash(
+    stored: &[i64],
+    first: i64,
+    last: i64,
+    schedule: Option<&crate::cash_auction::Schedule>,
+) -> Ledger {
+    classify_with_subject(stored, first, last, None, Subject::Cash(schedule))
+}
+
+#[derive(Clone, Copy)]
+enum Subject<'a> {
     ExchangeSession,
     SpotIndex,
+    Cash(Option<&'a crate::cash_auction::Schedule>),
+}
+
+fn cash_kind(day: i64, kind: DayKind, schedule: Option<&crate::cash_auction::Schedule>) -> DayKind {
+    let Some(date) = u32::try_from(day)
+        .ok()
+        .and_then(|number| crate::session::Day::from_days(number).ok())
+    else {
+        return DayKind::Unmeasured;
+    };
+    if !crate::vendor::cash_auction_eligibility_required(date) || kind == DayKind::Closed {
+        return kind;
+    }
+    if kind != DayKind::Open(calendar::Session::full()) {
+        return DayKind::Unmeasured;
+    }
+    crate::fold::minute_session(day, kind, crate::vendor::Venue::NseCash, schedule)
+        .unwrap_or(DayKind::Unmeasured)
 }
 
 fn classify_with_subject(
@@ -307,12 +347,25 @@ fn classify_with_subject(
     first: i64,
     last: i64,
     against: Option<&Calendar>,
-    subject: Subject,
+    subject: Subject<'_>,
 ) -> Ledger {
     let mut ledger = Ledger {
         held: u32::try_from(stored.len()).unwrap_or(u32::MAX),
         ..Ledger::default()
     };
+    let mut previous = None;
+    for &stamp in stored {
+        if stamp.rem_euclid(60_000_000) != 0 || previous.is_some_and(|last| stamp <= last) {
+            ledger.invalid_timestamps = ledger.invalid_timestamps.saturating_add(1);
+        }
+        previous = Some(stamp);
+    }
+    if ledger.invalid_timestamps > 0 {
+        // Flooring a bad timestamp to a minute invents evidence; retaining it
+        // in the merge stalls the cursor and invents hundreds of later holes.
+        // Neither interpretation is a coverage result. Report the bad input.
+        return ledger;
+    }
     // THE ONE CURSOR. It only ever moves forward, which is what makes the whole
     // walk linear in the two inputs rather than quadratic.
     let mut cursor = 0_usize;
@@ -330,8 +383,11 @@ fn classify_with_subject(
         // the still-trading morning, and no source read here states the exact
         // BANKNIFTY or VIX interval. Calling absent index bars vendor holes
         // would therefore invent the denominator this audit exists to supply.
-        if subject == Subject::SpotIndex && day == calendar::SYSTEMS_OUTAGE_DAY {
+        if matches!(subject, Subject::SpotIndex) && day == calendar::SYSTEMS_OUTAGE_DAY {
             kind = DayKind::OpenLengthUnmeasured;
+        }
+        if let Subject::Cash(schedule) = subject {
+            kind = cash_kind(day, kind, schedule);
         }
         // ADVANCE PAST ANY STORED BAR BEFORE THIS DAY. A bar the caller handed
         // us from outside the range is skipped rather than counted against it.
@@ -395,6 +451,9 @@ fn classify_with_subject(
         // A RUN NEVER SPANS TWO DAYS. 15:29 on Friday and 09:15 on Monday are
         // not contiguous in any sense an operator cares about.
         flush(&mut ledger, &mut run);
+        if day == last {
+            break;
+        }
         day += 1;
     }
     flush(&mut ledger, &mut run);
@@ -536,6 +595,142 @@ mod tests {
         (calendar::OPEN_MINUTE..=calendar::LAST_MINUTE)
             .map(|m| at(day, m))
             .collect()
+    }
+
+    #[test]
+    fn stored_minute_audit_rejects_off_grid_duplicate_and_backward_timestamps() {
+        let day = 20668;
+        let exact = full_day(day);
+        let checked = classify(&exact, day, day);
+        assert_eq!(checked.expected, 375);
+        assert_eq!(checked.invalid_timestamps, 0);
+        assert_eq!(checked.lost_minutes(), 0);
+        let shifted: Vec<_> = exact.iter().map(|stamp| stamp + 30_000_000).collect();
+        let broken = classify(&shifted, day, day);
+        assert_eq!(broken.invalid_timestamps, 375);
+        assert_eq!(
+            broken.expected, 0,
+            "coverage withheld, not falsely complete"
+        );
+        let mut same_minute = exact.clone();
+        same_minute.insert(1, at(day, 555) + 30_000_000);
+        let repeated = classify(&same_minute, day, day);
+        assert_eq!(repeated.invalid_timestamps, 1);
+        assert_eq!(repeated.lost_minutes(), 0, "do not invent 374 later gaps");
+        *same_minute.get_mut(1).expect("inserted timestamp") = at(day, 555);
+        assert_eq!(classify(&same_minute, day, day).invalid_timestamps, 1);
+        let mut backward = exact;
+        backward.swap(0, 1);
+        assert_eq!(classify(&backward, day, day).invalid_timestamps, 1);
+    }
+
+    #[test]
+    fn cash_auction_flags_are_dated_and_missing_metadata_is_not_a_clean_day() {
+        let eligible = crate::session::Day::new(2026, 8, 27).expect("date");
+        let ordinary = crate::session::Day::new(2026, 8, 28).expect("date");
+        let first = i64::from(eligible.days_from_epoch());
+        let last = i64::from(ordinary.days_from_epoch());
+        let mut schedule = crate::cash_auction::Schedule::default();
+        schedule.insert(eligible, true).expect("exact flag");
+        schedule
+            .insert(ordinary, false)
+            .expect("next day's exact flag");
+        let mut bars: Vec<_> = (555..915).map(|minute| at(first, minute)).collect();
+        bars.extend(
+            (555..930)
+                .filter(|minute| *minute != 763)
+                .map(|minute| at(last, minute)),
+        );
+        let checked = classify_cash(&bars, first, last, Some(&schedule));
+        assert_eq!(checked.held, 734);
+        assert_eq!(checked.expected, 735);
+        assert_eq!(checked.lost_minutes(), 1);
+        assert!(checked.gaps.iter().any(|gap| gap.day == last
+            && gap.from == 763
+            && gap.to == 763
+            && gap.reason == Reason::VendorHole));
+        assert!(
+            !checked
+                .gaps
+                .iter()
+                .any(|gap| gap.day == first && gap.reason == Reason::VendorHole)
+        );
+        let unknown = classify_cash(&bars, first, last, None);
+        assert_eq!(unknown.expected, 0);
+        assert_eq!(unknown.lost_minutes(), 0);
+        assert_eq!(unknown.held, 734);
+        assert_eq!(unknown.unmeasured_minutes(), 2880);
+        let mut one_date = crate::cash_auction::Schedule::default();
+        one_date
+            .insert(eligible, true)
+            .expect("only one day verified");
+        let partial = classify_cash(&bars, first, last, Some(&one_date));
+        assert_eq!(partial.expected, 360);
+        assert_eq!(
+            partial.unmeasured_minutes(),
+            1440,
+            "never carry yesterday's flag forward"
+        );
+    }
+
+    #[test]
+    fn cash_ineligible_tail_and_entire_absent_day_remain_expected_gaps() {
+        let date = crate::session::Day::new(2026, 8, 27).expect("date");
+        let day = i64::from(date.days_from_epoch());
+        let mut schedule = crate::cash_auction::Schedule::default();
+        schedule.insert(date, false).expect("explicit ineligible");
+        let prefix: Vec<_> = (555..915).map(|minute| at(day, minute)).collect();
+        let tail = classify_cash(&prefix, day, day, Some(&schedule));
+        assert_eq!(tail.expected, 375);
+        assert_eq!(tail.lost_minutes(), 15);
+        assert!(
+            tail.gaps
+                .iter()
+                .any(|gap| gap.from == 915 && gap.to == 929 && gap.reason == Reason::VendorHole)
+        );
+        let absent = classify_cash(&[], day, day, Some(&schedule));
+        assert_eq!(absent.expected, 375);
+        assert_eq!(absent.lost_minutes(), 375);
+    }
+
+    #[test]
+    fn cash_audit_preserves_pre_change_sessions_and_never_promotes_unknown_days() {
+        let pre = i64::from(
+            crate::session::Day::new(2026, 7, 31)
+                .expect("date")
+                .days_from_epoch(),
+        );
+        let normal = classify_cash(&full_day(pre), pre, pre, None);
+        assert_eq!(normal.expected, 375);
+        assert_eq!(normal.lost_minutes(), 0);
+        let holiday = classify_cash(&[], 20479, 20479, None);
+        assert_eq!(holiday.expected, 0);
+        assert_eq!(holiday.unmeasured_minutes(), 0);
+        let future = calendar::LAST_DAY + 1;
+        let mut schedule = crate::cash_auction::Schedule::default();
+        schedule
+            .insert(
+                crate::session::Day::from_days(u32::try_from(future).expect("day")).expect("date"),
+                false,
+            )
+            .expect("flag");
+        let unknown = classify_cash(&full_day(future), future, future, Some(&schedule));
+        assert_eq!(
+            unknown.expected, 0,
+            "a master is not a trading-calendar extension"
+        );
+        assert_eq!(unknown.unmeasured_minutes(), 1440);
+        let dr = classify_cash(&[], 19784, 19784, None);
+        assert_eq!(
+            dr.expected, 105,
+            "verified pre-change exceptional windows remain intact"
+        );
+        assert_eq!(dr.lost_minutes(), 105);
+        for outside in [i64::MIN, -1, i64::MAX] {
+            let invalid_day = classify_cash(&[], outside, outside, None);
+            assert_eq!(invalid_day.expected, 0);
+            assert_eq!(invalid_day.unmeasured_minutes(), 1440);
+        }
     }
 
     /// **A COMPLETE DAY REPORTS NOTHING MISSING — WHICH IS THE WHOLE POINT.**

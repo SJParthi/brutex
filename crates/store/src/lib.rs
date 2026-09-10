@@ -54,12 +54,14 @@
 
 pub mod block;
 pub mod catalog;
+pub mod checksum_audit;
 pub mod crc;
 pub mod file;
 pub mod format;
 pub mod header;
 pub mod layout;
 pub mod path;
+pub mod repair;
 
 /// Proof that this crate's seven `telemetry::emit` sites reach a file, driven
 /// through the production calls that own them. Compiled only under `cfg(test)`

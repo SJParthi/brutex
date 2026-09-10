@@ -13,6 +13,10 @@
 //! stop is the one whose stop rung is [`crate::excursion::NEVER`], and it is
 //! computed in the same pass as all the others.
 //!
+//! [`evaluate_families`] and [`evaluate_families_over`] opt into a smaller
+//! population: SL+TP, SL+TTP, or both. They preserve the legacy ladders and
+//! execution rules, but enumerate only the requested families before pricing.
+//!
 //! # The sniper metric, and why it is a ratio
 //!
 //! The aim is a setup precise enough that winners run and losers are cut for
@@ -890,8 +894,8 @@ pub fn trades_needed_for(win_rate_bp: i64, assurance_bp: i64, ceiling: u64) -> u
 /// Every variant of one combination.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Grid {
-    /// One per (stop, target, trail, arm) setting, including the row with none
-    /// of them.
+    /// One per admitted (stop, target, trail, arm) setting. Legacy evaluation
+    /// includes the all-none baseline; restricted [`ExitFamilies`] do not.
     pub cells: Vec<Cell>,
     /// Signals the combination fired, before exclusivity.
     pub signals: u64,
@@ -1370,6 +1374,52 @@ pub const fn variants(stops: usize, targets: usize, trails: usize) -> usize {
         .saturating_mul(tsl_settings)
         .saturating_add(arms_over_all_targets.saturating_mul(armed_rungs_over_all_tsl));
     stops.saturating_add(1).saturating_mul(per_stop)
+}
+
+/// Exit families admitted before any per-variant trade sequence is priced.
+///
+/// This selects a bounded subset of the existing grid, without changing its
+/// ladders, ratio admission, fills, horizon or session square-off. It introduces
+/// no instrument eligibility or claim of a complete stock search. Every
+/// restricted family requires an initial fixed stop; none includes a baseline.
+///
+/// This is opt-in research support, not a validated stock mode. Legacy ladder
+/// calibration uses excursions from the supplied sample; selecting a family
+/// adds no causal calibration or training/test separation. The caller owns the
+/// date window and any later validation on separate bars.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ExitFamilies {
+    /// The complete legacy population, including stopless and mixed exits.
+    #[default]
+    All,
+    /// Initial SL and fixed TP; neither TSL nor TTP.
+    SlTp,
+    /// Initial SL and TTP (activation plus trail); neither fixed TP nor TSL.
+    SlTtp,
+    /// The union of [`Self::SlTp`] and [`Self::SlTtp`], each variant once.
+    SlTpAndSlTtp,
+}
+
+impl ExitFamilies {
+    /// Cell-count upper bound for already-built ladder lengths.
+    ///
+    /// With S stops, T targets and R trails, SL+TP has S*T cells, SL+TTP has
+    /// S*T*R, and their union has S*T*(1+R). Ratio admission may remove fixed
+    /// SL/TP pairs; it does not restrict TTP activation, matching legacy cells.
+    /// Missing required ladders yield zero. Arithmetic saturates on overflow.
+    ///
+    /// This is not a hard memory or runtime ceiling: callers still bound their
+    /// input and ladder sizes. Shared path preprocessing is unchanged.
+    #[must_use]
+    pub const fn variants(self, stops: usize, targets: usize, trails: usize) -> usize {
+        let pairs = stops.saturating_mul(targets);
+        match self {
+            Self::All => variants(stops, targets, trails),
+            Self::SlTp => pairs,
+            Self::SlTtp => pairs.saturating_mul(trails),
+            Self::SlTpAndSlTtp => pairs.saturating_add(pairs.saturating_mul(trails)),
+        }
+    }
 }
 
 /// How [`evaluate`] builds the exit grid's three ladders.
@@ -1939,12 +1989,98 @@ pub fn evaluate_over(
     levels: Levels<'_>,
     facts: &crate::trade::SliceFacts,
 ) -> Grid {
+    evaluate_families_over(
+        bars,
+        column,
+        mask,
+        horizon,
+        side,
+        levels,
+        facts,
+        ExitFamilies::All,
+    )
+}
+
+/// [`evaluate`] with an explicit exit-family population.
+///
+/// Derives the same ladders as legacy evaluation, including its target
+/// thinning. Reservation uses the selected-family count; only admitted variants
+/// reach the pricing walk.
+/// An absent required ladder produces no cells, without substituting a family.
+/// Use [`evaluate_families_over`] to share slice facts across candidates.
+#[must_use]
+pub fn evaluate_families(
+    bars: &[Candle],
+    column: &Column,
+    mask: &ConditionMask,
+    horizon: Horizon,
+    side: Side,
+    levels: Levels<'_>,
+    families: ExitFamilies,
+) -> Grid {
+    let facts = crate::trade::SliceFacts::of(bars, column);
+    evaluate_families_over(bars, column, mask, horizon, side, levels, &facts, families)
+}
+
+/// [`evaluate_families`] with the same shared slice facts as [`evaluate_over`].
+///
+/// [`ExitFamilies::All`] preserves the legacy cell order and results. Restricted
+/// families are emitted in that same order with excluded variants skipped
+/// before pricing; returned ladders and signal/refusal counts are unchanged.
+#[must_use]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the compatibility signature plus the explicit family selection"
+)]
+pub fn evaluate_families_over(
+    bars: &[Candle],
+    column: &Column,
+    mask: &ConditionMask,
+    horizon: Horizon,
+    side: Side,
+    levels: Levels<'_>,
+    facts: &crate::trade::SliceFacts,
+    families: ExitFamilies,
+) -> Grid {
     let direction = match side {
         Side::Long => costs::fill::Direction::Long,
         Side::Short => costs::fill::Direction::Short,
     };
     let timed = crate::trade::walk_over(bars, column, mask, horizon, direction, facts);
-    evaluate_timed(bars, side, levels, &timed, facts)
+    evaluate_timed(bars, side, levels, &timed, facts, families)
+}
+
+/// Evaluate an explicit Boolean expression using the common exit-grid passes.
+/// The caller must bind the complete expression and these exact pricing inputs
+/// in its run identity; the referenced mask alone is insufficient.
+///
+/// # Errors
+/// Refuses a misaligned expression signal column before pricing.
+pub fn evaluate_expression_over(
+    bars: &[Candle],
+    column: &Column,
+    expression: &crate::expression::Expression,
+    horizon: Horizon,
+    side: Side,
+    levels: Levels<'_>,
+    facts: &crate::trade::SliceFacts,
+) -> Result<Grid, String> {
+    let timed = crate::trade::walk_expression_over(
+        bars,
+        column,
+        expression,
+        horizon,
+        direction_of(side),
+        facts,
+    )?;
+    Ok(evaluate_timed(
+        bars,
+        side,
+        levels,
+        &timed,
+        facts,
+        ExitFamilies::All,
+    ))
 }
 
 /// The four grid passes, after the time-exit walk has been obtained through
@@ -1961,6 +2097,7 @@ fn evaluate_timed(
     levels: Levels<'_>,
     timed: &crate::trade::Trades,
     facts: &crate::trade::SliceFacts,
+    families: ExitFamilies,
 ) -> Grid {
     let Levels {
         rungs,
@@ -2196,7 +2333,7 @@ fn evaluate_timed(
         }
         Some(bitmap)
     };
-    let cell_capacity = variants(stops.len(), targets.len(), trails.len());
+    let cell_capacity = families.variants(stops.len(), targets.len(), trails.len());
     evaluate_timed_with_exact_ladders(
         bars,
         side,
@@ -2207,6 +2344,7 @@ fn evaluate_timed(
         trails,
         ratio_bitmap.as_deref(),
         Vec::with_capacity(cell_capacity),
+        families,
     )
 }
 
@@ -2214,8 +2352,8 @@ fn evaluate_timed(
 ///
 /// `ratio_bitmap`, when present, is row-major `stop * target` admission. The
 /// expensive per-cell sequence walk reads one boolean by checked index; it
-/// never scans the pair set. Stop-only, target-only and all-none rows are
-/// always present, exactly as in the historical derived-grid loop.
+/// never scans the pair set. With [`ExitFamilies::All`], stop-only, target-only
+/// and all-none rows remain present, as in the historical derived-grid loop.
 ///
 /// **UNVERIFIED as a measured bound.** No bench in this workspace
 /// times this, so the shape above is read from the source rather
@@ -2234,6 +2372,7 @@ fn evaluate_timed_with_exact_ladders(
     trails: Ladder,
     ratio_bitmap: Option<&[bool]>,
     mut cells: Vec<Cell>,
+    families: ExitFamilies,
 ) -> Grid {
     // Every candidate path is measured once against all exact ladders. The
     // sequence comes from `occupancy`, not the level-less trade list: an early
@@ -2276,62 +2415,23 @@ fn evaluate_timed_with_exact_ladders(
     .unwrap_or(u64::MAX);
 
     let rungs_of = (stops.rungs(), targets.rungs(), trails.rungs());
-    for stop_setting in 0..=stops.len() {
-        for target_setting in 0..=targets.len() {
-            let stop = (stop_setting < stops.len()).then_some(stop_setting);
-            let target = (target_setting < targets.len()).then_some(target_setting);
-            if let (Some(stop_index), Some(target_index), Some(bitmap)) =
-                (stop, target, ratio_bitmap)
-            {
-                let admitted = stop_index
-                    .checked_mul(targets.len())
-                    .and_then(|row| row.checked_add(target_index))
-                    .and_then(|slot| bitmap.get(slot))
-                    .copied()
-                    .unwrap_or(false);
-                if !admitted {
-                    continue;
-                }
-            }
-            for trail_setting in 0..=trails.len() {
-                let tsl = (trail_setting < trails.len()).then_some(trail_setting);
-                let armed_trail_cap = tsl.unwrap_or(trails.len());
-                cells.push(one_variant(
-                    bars,
-                    &candidates,
-                    rungs_of,
-                    Variant {
-                        stop,
-                        target,
-                        tsl,
-                        ttp: None,
-                    },
-                    side,
-                    None,
-                ));
-                // A TTP can arm only strictly before a fixed target and can
-                // trail only strictly tighter than a live TSL. These are the
-                // same two degeneracy refusals [`variants`] counts.
-                for arm in 0..target_setting {
-                    for trail in 0..armed_trail_cap {
-                        cells.push(one_variant(
-                            bars,
-                            &candidates,
-                            rungs_of,
-                            Variant {
-                                stop,
-                                target,
-                                tsl,
-                                ttp: Some(Ttp { arm, trail }),
-                            },
-                            side,
-                            None,
-                        ));
-                    }
-                }
-            }
-        }
-    }
+    enumerate_variants(
+        stops.len(),
+        targets.len(),
+        trails.len(),
+        ratio_bitmap,
+        families,
+        |variant| {
+            cells.push(one_variant(
+                bars,
+                &candidates,
+                rungs_of,
+                variant,
+                side,
+                None,
+            ));
+        },
+    );
 
     Grid {
         cells,
@@ -2340,6 +2440,90 @@ fn evaluate_timed_with_exact_ladders(
         targets,
         trails,
         refused_paths,
+    }
+}
+
+/// Visits only admitted variants, in legacy order. The visitor owns pricing,
+/// so rejecting a setting here cannot accidentally compute and discard a cell.
+fn enumerate_variants(
+    stops: usize,
+    targets: usize,
+    trails: usize,
+    ratio_bitmap: Option<&[bool]>,
+    families: ExitFamilies,
+    mut visit: impl FnMut(Variant),
+) {
+    for stop_setting in 0..=stops {
+        let stop = (stop_setting < stops).then_some(stop_setting);
+        if stop.is_none() && families != ExitFamilies::All {
+            continue;
+        }
+        for target_setting in 0..=targets {
+            let target = (target_setting < targets).then_some(target_setting);
+            if (families == ExitFamilies::SlTp && target.is_none())
+                || (families == ExitFamilies::SlTtp && target.is_some())
+            {
+                continue;
+            }
+            if let (Some(stop_index), Some(target_index), Some(bitmap)) =
+                (stop, target, ratio_bitmap)
+            {
+                let admitted = stop_index
+                    .checked_mul(targets)
+                    .and_then(|row| row.checked_add(target_index))
+                    .and_then(|slot| bitmap.get(slot))
+                    .copied()
+                    .unwrap_or(false);
+                if !admitted {
+                    continue;
+                }
+            }
+            if families != ExitFamilies::All {
+                if target.is_some() {
+                    visit(Variant {
+                        stop,
+                        target,
+                        tsl: None,
+                        ttp: None,
+                    });
+                } else {
+                    for arm in 0..targets {
+                        for trail in 0..trails {
+                            visit(Variant {
+                                stop,
+                                target: None,
+                                tsl: None,
+                                ttp: Some(Ttp { arm, trail }),
+                            });
+                        }
+                    }
+                }
+                continue;
+            }
+            for trail_setting in 0..=trails {
+                let tsl = (trail_setting < trails).then_some(trail_setting);
+                let armed_trail_cap = tsl.unwrap_or(trails);
+                visit(Variant {
+                    stop,
+                    target,
+                    tsl,
+                    ttp: None,
+                });
+                // A TTP can arm only strictly before a fixed target and can
+                // trail only strictly tighter than a live TSL. These are the
+                // same two degeneracy refusals [`variants`] counts.
+                for arm in 0..target_setting {
+                    for trail in 0..armed_trail_cap {
+                        visit(Variant {
+                            stop,
+                            target,
+                            tsl,
+                            ttp: Some(Ttp { arm, trail }),
+                        });
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -2365,16 +2549,53 @@ pub(crate) fn evaluate_resolved_policy_v1(
         Side::Short => costs::fill::Direction::Short,
     };
     let timed = crate::trade::walk_over(bars, column, mask, horizon, direction, &facts);
+    evaluate_resolved_timed(bars, side, &resolved.view(), &facts, &timed, exact, cells)
+}
+
+/// Complete policy coordinates for an explicit three-valued program.
+pub(crate) fn evaluate_resolved_expression_policy_v1(
+    bars: &[Candle],
+    column: &Column,
+    expression: &crate::expression::Expression,
+    horizon: Horizon,
+    side: Side,
+    resolved: &crate::exit_grid_policy::ResolvedGridViewV1<'_>,
+) -> Result<Grid, String> {
+    let exact = resolved.ladders().map_err(|why| why.to_string())?;
+    let cells = reserve_policy_cells_v1(resolved.cell_count()).map_err(|why| why.to_string())?;
+    let facts = crate::trade::SliceFacts::of(bars, column);
+    let timed = crate::trade::walk_expression_over(
+        bars,
+        column,
+        expression,
+        horizon,
+        direction_of(side),
+        &facts,
+    )?;
+    evaluate_resolved_timed(bars, side, resolved, &facts, &timed, exact, cells)
+        .map_err(|why| why.to_string())
+}
+
+fn evaluate_resolved_timed(
+    bars: &[Candle],
+    side: Side,
+    resolved: &crate::exit_grid_policy::ResolvedGridViewV1<'_>,
+    facts: &crate::trade::SliceFacts,
+    timed: &crate::trade::Trades,
+    exact: crate::exit_grid_policy::ResolvedLaddersV1,
+    cells: Vec<Cell>,
+) -> Result<Grid, crate::exit_grid_policy::ExitGridErrorV1> {
     let grid = evaluate_timed_with_exact_ladders(
         bars,
         side,
-        &timed,
-        &facts,
+        timed,
+        facts,
         exact.stops,
         exact.targets,
         exact.trails,
         Some(resolved.ratio_bitmap()),
         cells,
+        ExitFamilies::All,
     );
     let actual = u64::try_from(grid.cells.len()).map_err(|_| {
         crate::exit_grid_policy::ExitGridErrorV1::ArithmeticOverflow("enumerated grid cell count")
@@ -2587,6 +2808,74 @@ pub fn materialize_cell(
             replayed.pessimistic,
             replayed.max_drawdown
         ));
+    }
+    reconcile_rows(selected, &rows)?;
+    Ok(rows)
+}
+
+/// Replays one policy-selected expression cell through the common grid engine.
+/// Every cell field and independently folded trade aggregate must match.
+///
+/// # Errors
+/// Invalid signal alignment, absent priceable replay, or any cell/row mismatch.
+pub fn materialize_expression_cell(
+    bars: &[Candle],
+    column: &Column,
+    expression: &crate::expression::Expression,
+    horizon: Horizon,
+    side: Side,
+    grid: &Grid,
+    selected: &Cell,
+) -> Result<Vec<TradeRow>, String> {
+    let facts = crate::trade::SliceFacts::of(bars, column);
+    let timed = crate::trade::walk_expression_over(
+        bars,
+        column,
+        expression,
+        horizon,
+        direction_of(side),
+        &facts,
+    )?;
+    let mut rows = Vec::new();
+    if timed.occupancy.is_empty() {
+        let empty = one_variant(
+            bars,
+            &[],
+            (
+                grid.stops.rungs(),
+                grid.targets.rungs(),
+                grid.trails.rungs(),
+            ),
+            Variant {
+                stop: selected.stop,
+                target: selected.target,
+                tsl: selected.tsl,
+                ttp: selected.ttp,
+            },
+            side,
+            None,
+        );
+        return if empty == *selected {
+            Ok(rows)
+        } else {
+            Err("selected expression empty cell differs from exact replay".to_owned())
+        };
+    }
+    let replay = levelled_timed(
+        bars,
+        side,
+        Ladders {
+            stops: &grid.stops,
+            targets: &grid.targets,
+            trails: &grid.trails,
+        },
+        Chosen::from_cell(selected),
+        Some(&mut rows),
+        &facts,
+        &timed,
+    );
+    if replay.cell.as_ref() != Some(selected) {
+        return Err("selected expression cell differs from exact replay".to_owned());
     }
     reconcile_rows(selected, &rows)?;
     Ok(rows)
@@ -3227,6 +3516,18 @@ fn levelled_over(
     facts: &crate::trade::SliceFacts,
 ) -> ReplayOutcomeV1 {
     let timed = crate::trade::walk_over(bars, column, mask, horizon, direction_of(side), facts);
+    levelled_timed(bars, side, ladders, variant, trades, facts, &timed)
+}
+
+fn levelled_timed(
+    bars: &[Candle],
+    side: Side,
+    ladders: Ladders<'_>,
+    variant: Chosen,
+    trades: Option<&mut Vec<TradeRow>>,
+    facts: &crate::trade::SliceFacts,
+    timed: &crate::trade::Trades,
+) -> ReplayOutcomeV1 {
     if timed.occupancy.is_empty() {
         return ReplayOutcomeV1 {
             cell: None,
@@ -4703,6 +5004,21 @@ fn level_fill(
     (bar.open, true)
 }
 
+/// Shared printed-OHLCV stop bracket; callers establish that the stop fired.
+pub(crate) fn printed_stop_fills_v1(
+    bar: &Candle,
+    stop: i64,
+    side: Side,
+    rested_at_open: bool,
+) -> (i64, i64, bool) {
+    let (optimistic, gapped) = level_fill(bar, stop, Resting::Stop, side, rested_at_open);
+    (
+        optimistic,
+        stop_slippage(optimistic, bar, side, Resting::Stop, true),
+        gapped,
+    )
+}
+
 /// A stop's fill, worsened to the bar's adverse extreme under the pessimistic
 /// reading.
 ///
@@ -4824,6 +5140,232 @@ fn peak(bars: &[Candle], from: usize, to: usize, entry: i64, side: Side, adverse
     }
     let scaled = i128::from(worst).saturating_mul(1_000_000) / i128::from(entry);
     i64::try_from(scaled).unwrap_or(i64::MAX)
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, reason = "tests require valid synthetic fixtures")]
+mod exit_family_tests {
+    use super::{ExitFamilies, Grid, Levels, Ttp, enumerate_variants};
+    use indicators::column::Column;
+    use indicators::evaluator::{Evaluator, Widths};
+    use indicators::pattern::Thresholds;
+    use indicators::vwap::Availability;
+    use vocab::ConditionMask;
+
+    use crate::excursion::Side;
+    use crate::outcome::Horizon;
+    use crate::trade::SliceFacts;
+
+    type Setting = (Option<usize>, Option<usize>, Option<usize>, Option<Ttp>);
+
+    const FAMILIES: [ExitFamilies; 4] = [
+        ExitFamilies::All,
+        ExitFamilies::SlTp,
+        ExitFamilies::SlTtp,
+        ExitFamilies::SlTpAndSlTtp,
+    ];
+
+    fn belongs(family: ExitFamilies, (stop, target, tsl, ttp): Setting) -> bool {
+        let fixed = matches!((stop, target, tsl, ttp), (Some(_), Some(_), None, None));
+        let armed = matches!((stop, target, tsl, ttp), (Some(_), None, None, Some(_)));
+        match family {
+            ExitFamilies::All => true,
+            ExitFamilies::SlTp => fixed,
+            ExitFamilies::SlTtp => armed,
+            ExitFamilies::SlTpAndSlTtp => fixed || armed,
+        }
+    }
+
+    fn settings(
+        stops: usize,
+        targets: usize,
+        trails: usize,
+        bitmap: Option<&[bool]>,
+        family: ExitFamilies,
+    ) -> Vec<Setting> {
+        let mut visited = Vec::new();
+        enumerate_variants(stops, targets, trails, bitmap, family, |variant| {
+            visited.push((variant.stop, variant.target, variant.tsl, variant.ttp));
+        });
+        visited
+    }
+
+    #[test]
+    fn exit_family_enumeration_counts_and_shapes() {
+        for (stops, targets, trails, fixed_count, armed_count) in [
+            (0, 2, 3, 0, 0),
+            (2, 0, 3, 0, 0),
+            (2, 3, 0, 6, 0),
+            (1, 1, 1, 1, 1),
+            (2, 3, 4, 6, 24),
+            (4, 4, 4, 16, 64),
+        ] {
+            let legacy = settings(stops, targets, trails, None, ExitFamilies::All);
+            assert_eq!(legacy.len(), super::variants(stops, targets, trails));
+            for (family, count) in [
+                (ExitFamilies::SlTp, fixed_count),
+                (ExitFamilies::SlTtp, armed_count),
+                (ExitFamilies::SlTpAndSlTtp, fixed_count + armed_count),
+            ] {
+                // This is the visitor that pricing uses, not a filtered Grid.
+                let visited = settings(stops, targets, trails, None, family);
+                assert_eq!(visited.len(), count, "{family:?}");
+                assert_eq!(family.variants(stops, targets, trails), count);
+                assert!(visited.iter().all(|&setting| belongs(family, setting)));
+                let expected: Vec<_> = legacy
+                    .iter()
+                    .copied()
+                    .filter(|&setting| belongs(family, setting))
+                    .collect();
+                assert_eq!(
+                    visited, expected,
+                    "preserve every matching rung and its order"
+                );
+                let mut unique = visited;
+                unique.sort_unstable();
+                unique.dedup();
+                assert_eq!(unique.len(), count, "no duplicate settings");
+            }
+        }
+    }
+
+    #[test]
+    fn exit_family_ratio_admission_precedes_the_pricing_visitor() {
+        let bitmap = [false, true, false, true, false, true];
+        assert_eq!(
+            settings(2, 3, 2, Some(&bitmap), ExitFamilies::SlTp),
+            vec![
+                (Some(0), Some(1), None, None),
+                (Some(1), Some(0), None, None),
+                (Some(1), Some(2), None, None),
+            ]
+        );
+        for (bitmap, fixed_count) in [(&bitmap[..], 3), (&[true][..], 1), (&[][..], 0)] {
+            let legacy = settings(2, 3, 2, Some(bitmap), ExitFamilies::All);
+            for (family, count) in [
+                (ExitFamilies::SlTp, fixed_count),
+                (ExitFamilies::SlTtp, 12),
+                (ExitFamilies::SlTpAndSlTtp, fixed_count + 12),
+            ] {
+                let visited = settings(2, 3, 2, Some(bitmap), family);
+                assert_eq!(visited.len(), count);
+                let expected: Vec<_> = legacy
+                    .iter()
+                    .copied()
+                    .filter(|&setting| belongs(family, setting))
+                    .collect();
+                assert_eq!(visited, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn exit_family_counts_saturate_and_default_is_legacy() {
+        assert_eq!(ExitFamilies::default(), ExitFamilies::All);
+        assert_eq!(ExitFamilies::All.variants(4, 4, 4), 625);
+        for family in FAMILIES {
+            assert_eq!(family.variants(usize::MAX, usize::MAX, 2), usize::MAX);
+        }
+        assert_eq!(ExitFamilies::SlTtp.variants(usize::MAX, usize::MAX, 0), 0);
+        assert_eq!(ExitFamilies::SlTp.variants(usize::MAX, 0, usize::MAX), 0);
+        assert_eq!(
+            ExitFamilies::SlTpAndSlTtp.variants(0, usize::MAX, usize::MAX),
+            0
+        );
+    }
+
+    fn column(bars: &[indicators::Candle]) -> Column {
+        Column::build(
+            bars,
+            &mut Evaluator::new(
+                Widths::pinned().expect("valid widths"),
+                Availability::Absent,
+                Thresholds::CLASSICAL,
+            ),
+        )
+    }
+
+    fn matching_grid(legacy: &Grid, family: ExitFamilies) -> Grid {
+        let mut expected = legacy.clone();
+        expected
+            .cells
+            .retain(|cell| belongs(family, (cell.stop, cell.target, cell.tsl, cell.ttp)));
+        expected
+    }
+
+    #[test]
+    fn exit_family_cells_equal_legacy_on_synthetic_bars() {
+        let bars = crate::synthetic::sessions(8);
+        let column = column(&bars);
+        let facts = SliceFacts::of(&bars, &column);
+        let mask = ConditionMask::default();
+        let horizon = Horizon::bars(15).expect("nonzero horizon");
+        for side in [Side::Long, Side::Short] {
+            for levels in [
+                Levels::derived(3),
+                Levels {
+                    rungs: 3,
+                    step_ppm: Some(25),
+                    stops_ppm: &[20, 40, 80],
+                    forced: Some(30),
+                    ratios: false,
+                },
+                Levels {
+                    ratios: true,
+                    ..Levels::derived(3)
+                },
+            ] {
+                let legacy = super::evaluate(&bars, &column, &mask, horizon, side, levels);
+                assert!(legacy.cells.iter().any(|cell| cell.trades > 0));
+                assert!(legacy.baseline().is_some());
+                for family in FAMILIES {
+                    let selected = super::evaluate_families(
+                        &bars, &column, &mask, horizon, side, levels, family,
+                    );
+                    let shared = super::evaluate_families_over(
+                        &bars, &column, &mask, horizon, side, levels, &facts, family,
+                    );
+                    assert_eq!(selected, matching_grid(&legacy, family));
+                    assert_eq!(shared, selected, "sharing facts must not change results");
+                    if family != ExitFamilies::All {
+                        assert!(selected.baseline().is_none());
+                        if !levels.ratios || family == ExitFamilies::SlTtp {
+                            assert!(!selected.cells.is_empty());
+                            assert!(selected.cells.iter().any(|cell| cell.trades > 0));
+                            assert_eq!(
+                                selected.cells.len(),
+                                family.variants(
+                                    selected.stops.len(),
+                                    selected.targets.len(),
+                                    selected.trails.len(),
+                                )
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn exit_family_empty_input_does_not_substitute_a_baseline() {
+        let bars = [];
+        let column = column(&bars);
+        let facts = SliceFacts::of(&bars, &column);
+        for family in FAMILIES {
+            let grid = super::evaluate_families_over(
+                &bars,
+                &column,
+                &ConditionMask::default(),
+                Horizon::bars(15).expect("nonzero horizon"),
+                Side::Long,
+                Levels::derived(3),
+                &facts,
+                family,
+            );
+            assert_eq!(grid, Grid::default());
+        }
+    }
 }
 
 #[cfg(test)]

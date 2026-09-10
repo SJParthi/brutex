@@ -736,8 +736,9 @@ impl crate::chain::Discovery for PublicFetch {
         // NOT `from_utf8_lossy`. A master with a replacement character where a
         // symbol used to be parses cleanly and resolves the wrong instrument —
         // a silent corruption, which is worse than a refusal an operator reads.
-        String::from_utf8(held)
-            .map_err(|why| Refusal::transport(format!("{url} body is not UTF-8 — {why}")))
+        String::from_utf8(held).map_err(|why| {
+            Refusal::answered(status.as_u16(), format!("{url} body is not UTF-8 — {why}"))
+        })
     }
 }
 
@@ -934,6 +935,28 @@ fn replace_locked(dir: &Path, source: &Source, body: &str) -> Result<Result<(), 
 /// an operator and not matched on by a retry.
 #[must_use]
 pub fn land(dir: &Path, source: &Source, body: &str) -> Landed {
+    let converted = match validated_body(source, body) {
+        Ok(body) => body,
+        Err(why) => return Landed::Refused(why),
+    };
+    land_validated(dir, source, &converted)
+}
+
+/// Checks the complete payload before it can replace a stored master.
+/// Skipped instruments are valid decoder outcomes, not parser errors.
+///
+/// # Errors
+/// Returns the first structural or data-row failure, without changing disk.
+pub fn validated_body<'a>(
+    source: &Source,
+    body: &'a str,
+) -> Result<std::borrow::Cow<'a, str>, String> {
+    if body.len() > MAX_BODY_BYTES {
+        return Err(format!(
+            "`{}` exceeds the {MAX_BODY_BYTES}-byte ceiling",
+            source.url
+        ));
+    }
     // CONVERTED FIRST, THEN CHECKED. The guards below describe the file the
     // engine reads, not the document the host answered with — running them on
     // NSE's JSON would refuse it for opening with `{`, which is true of every
@@ -943,14 +966,14 @@ pub fn land(dir: &Path, source: &Source, body: &str) -> Landed {
         Shape::NseIndexJson => match nse_index_csv(body) {
             Ok(csv) => std::borrow::Cow::Owned(csv),
             Err(why) => {
-                return Landed::Refused(format!("`{}` — {why}", source.url));
+                return Err(format!("`{}` — {why}", source.url));
             }
         },
     };
     let body: &str = &converted;
 
     if body.len() < MIN_BODY_BYTES {
-        return Landed::Refused(format!(
+        return Err(format!(
             "`{}` answered {} byte(s), under the {MIN_BODY_BYTES} a master must \
              exceed. An error page, a cut connection and a proxy splash all \
              arrive as a short 200, and writing one over a working master \
@@ -974,7 +997,7 @@ pub fn land(dir: &Path, source: &Source, body: &str) -> Landed {
     // costs one comparison rather than a parse.
     let opener = body.trim_start().as_bytes().first().copied();
     if opener == Some(b'{') || opener == Some(b'[') || opener == Some(b'<') {
-        return Landed::Refused(format!(
+        return Err(format!(
             "`{}` answered {} bytes opening with `{}`, which is JSON or markup \
              and not the CSV a master is. A body like this passes a comma test \
              — JSON is full of commas — so it is refused on its first byte \
@@ -990,7 +1013,7 @@ pub fn land(dir: &Path, source: &Source, body: &str) -> Landed {
     // comparison on the first line rather than a parse of the whole file.
     let first = body.lines().next().unwrap_or_default();
     if !first.contains(',') {
-        return Landed::Refused(format!(
+        return Err(format!(
             "`{}` answered {} bytes whose first line carries no comma, so it is \
              not the CSV a master is. First line: {}",
             source.url,
@@ -1006,7 +1029,7 @@ pub fn land(dir: &Path, source: &Source, body: &str) -> Landed {
     if let Some(vendor) = source.vendor {
         let missing = missing_columns(first, vendor);
         if !missing.is_empty() {
-            return Landed::Refused(format!(
+            return Err(format!(
                 "`{}` answered a CSV that is not {vendor:?}'s master: the reader needs \
                  {} column(s) the header does not carry — {}. The old file is untouched. \
                  First line: {}",
@@ -1018,6 +1041,90 @@ pub fn land(dir: &Path, source: &Source, body: &str) -> Landed {
         }
     }
 
+    if let Some(vendor) = source.vendor {
+        validate_rows(body, vendor).map_err(|why| format!("`{}` — {why}", source.url))?;
+    }
+    Ok(converted)
+}
+
+fn validate_rows(body: &str, vendor: Vendor) -> Result<(), String> {
+    // Match api::master's line-based reader and its 4096-byte row limit.
+    const MAX_ROW_BYTES: usize = 4096;
+    let mut lines = body.lines();
+    let header = lines.next().unwrap_or_default();
+    if header.len() > MAX_ROW_BYTES {
+        return Err(format!("header exceeds {MAX_ROW_BYTES} bytes"));
+    }
+    let columns: std::collections::HashMap<_, _> = header
+        .trim_end()
+        .split(',')
+        .enumerate()
+        .map(|(i, name)| (name.trim(), i))
+        .collect();
+    let names = vendor.master_columns();
+    let widest = required_columns(vendor)
+        .iter()
+        .filter_map(|name| columns.get(name))
+        .copied()
+        .max()
+        .unwrap_or(0);
+    let mut fields = Vec::with_capacity(widest + 1);
+    let mut rows = 0;
+    for (offset, line) in lines.enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let line_number = offset + 2;
+        if line.len() > MAX_ROW_BYTES {
+            return Err(format!("line {line_number} exceeds {MAX_ROW_BYTES} bytes"));
+        }
+        fields.clear();
+        fields.extend(line.split(','));
+        if fields.len() <= widest {
+            return Err(format!(
+                "line {line_number} has {} fields; requires {}",
+                fields.len(),
+                widest + 1
+            ));
+        }
+        let get = |name: &str| {
+            columns
+                .get(name)
+                .and_then(|i| fields.get(*i))
+                .copied()
+                .unwrap_or("")
+        };
+        let decoded = brutex_core::vendor::decode_master_row(
+            vendor,
+            brutex_core::vendor::MasterRow {
+                vendor_id: get(names.vendor_id),
+                exchange: get(names.exchange),
+                segment: get(names.segment),
+                underlying: get(names.underlying),
+                trading_symbol: get(names.trading_symbol),
+                instrument_type: get(names.instrument_type),
+                listing_class: get(names.listing_class),
+                isin: get(names.isin),
+                expiry: get(names.expiry),
+                strike_rupees: get(names.strike),
+                option_side: names.option_side.map_or("", get),
+            },
+        )
+        .map_err(|why| format!("line {line_number}: {why}"))?;
+        if let brutex_core::vendor::Decoded::Skipped(declined) = decoded
+            && !declined.reason.is_routine()
+        {
+            return Err(format!("line {line_number}: {}", declined.reason.reason()));
+        }
+        rows += 1;
+    }
+    if rows == 0 {
+        return Err("master has no data rows".to_owned());
+    }
+    Ok(())
+}
+
+fn land_validated(dir: &Path, source: &Source, body: &str) -> Landed {
     if let Err(why) = std::fs::create_dir_all(dir) {
         return Landed::Refused(format!(
             "the masters directory {} cannot be created — {why}",
@@ -1464,7 +1571,40 @@ mod tests {
             return an_index_csv();
         };
         let columns = super::required_columns(vendor);
-        let row = vec!["X"; columns.len()].join(",");
+        let names = vendor.master_columns();
+        let row = columns
+            .iter()
+            .map(|name| {
+                if *name == names.vendor_id {
+                    "1333"
+                } else if *name == names.exchange {
+                    "NSE"
+                } else if *name == names.segment {
+                    if vendor == brutex_core::vendor::Vendor::Dhan {
+                        "E"
+                    } else if vendor == brutex_core::vendor::Vendor::Zerodha {
+                        "NSE"
+                    } else {
+                        "CASH"
+                    }
+                } else if *name == names.underlying || *name == names.trading_symbol {
+                    "RELIANCE"
+                } else if *name == names.instrument_type {
+                    if vendor == brutex_core::vendor::Vendor::Dhan {
+                        "EQUITY"
+                    } else {
+                        "EQ"
+                    }
+                } else if *name == names.listing_class {
+                    "EQ"
+                } else if *name == names.isin {
+                    "INE002A01018"
+                } else {
+                    ""
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(",");
         let mut body = columns.join(",");
         body.push('\n');
         while body.len() <= MIN_BODY_BYTES {
@@ -1747,11 +1887,65 @@ mod tests {
         assert!(!changed, "identical bytes are not a change");
 
         let mut moved = body.clone();
-        moved.push_str("BANKNIFTY,BANK NIFTY,INE000000001\n");
+        moved.push_str(body.lines().nth(1).expect("a complete data row"));
+        moved.push('\n');
         let Landed::Written { changed, .. } = land(&dir, source, &moved) else {
             panic!("the third write lands");
         };
         assert!(changed, "different bytes are a change");
+    }
+
+    #[test]
+    fn unreadable_data_rows_preserve_the_previous_master() {
+        let dir = scratch("unreadable-rows");
+        let source = &SOURCES[0];
+        let good = a_master();
+        assert!(land(&dir, source, &good).is_written());
+        let vendor = source.vendor.expect("vendor source");
+        let columns = super::required_columns(vendor);
+        let malformed = columns
+            .iter()
+            .map(|name| {
+                if *name == vendor.master_columns().exchange {
+                    "NSE"
+                } else {
+                    "X"
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        for bad in ["short".to_owned(), malformed, "X".repeat(4097)] {
+            let candidate = format!("{good}{bad}\n");
+            let Landed::Refused(why) = land(&dir, source, &candidate) else {
+                panic!("an unreadable data row must refuse");
+            };
+            assert!(why.contains("line "), "{why}");
+            assert_eq!(
+                std::fs::read_to_string(path_of(&dir, source)).expect("old master"),
+                good
+            );
+        }
+    }
+
+    #[test]
+    fn intentionally_skipped_rows_are_valid_even_when_none_are_kept() {
+        for vendor in [Vendor::Dhan, Vendor::Groww, Vendor::Zerodha] {
+            let columns = super::required_columns(vendor);
+            let row = columns
+                .iter()
+                .map(|name| {
+                    if *name == vendor.master_columns().exchange {
+                        "BSE"
+                    } else {
+                        "X"
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            let body = format!("{}\n{row}\n", columns.join(","));
+            assert!(super::validate_rows(&body, vendor).is_ok());
+            assert!(super::validate_rows(&format!("{}\n", columns.join(",")), vendor).is_err());
+        }
     }
 
     #[test]
@@ -2678,14 +2872,7 @@ mod tests {
         // URL costs an operator the file they had.
         let dir = scratch("wrong-shape");
         let source = &SOURCES[0];
-        let good = {
-            let mut body = super::required_columns(Vendor::Dhan).join(",");
-            body.push('\n');
-            while body.len() <= MIN_BODY_BYTES {
-                body.push_str("NSE,E,INE002A01018,EQUITY,RELIANCE,RELIANCE,ES,EQ,,,,1333\n");
-            }
-            body
-        };
+        let good = a_master();
         assert!(
             land(&dir, source, &good).is_written(),
             "the right shape lands"

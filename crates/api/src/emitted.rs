@@ -1508,7 +1508,13 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     /// never looks at — which is why the site had no test and CI gate 19 found
     /// it recording a failure with nothing logged. Narrowing the signature to
     /// the instrument and the reason made the proof a three-line call.
-    const REACHED_IN_SERVER_TESTS: usize = 13;
+    /// 13 -> 14: `pull.cash_session dated eligibility verified`, driven by
+    /// `server::tests::dated_cash_session_evidence_is_logged_with_resolved_counts`.
+    const REACHED_IN_SERVER_TESTS: usize = 14;
+    // Both production recovery boundaries are emitted and read back through
+    // this installed sink by recovery::tests::
+    // recovery_boundary_events_are_read_back_from_the_installed_sink.
+    const REACHED_IN_RECOVERY_TESTS: usize = 2;
     /// AND THREE MORE THAT NO TEST IN THIS BINARY DRIVES, added 2026-08-20 and
     /// named here rather than quietly counted: `pull.roll walk starting`,
     /// `pull.roll group starting` and `pull.roll walk finished`. They report a
@@ -1584,7 +1590,7 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     /// `pull.fno discovery refused`, the three named before it and the seven
     /// named here, which are the sites no test in this binary can drive.
     const UNREACHABLE: usize = 8;
-    // COUNTED FROM THE SOURCE, not declared. A FORTY-NINTH emit added
+    // COUNTED FROM THE SOURCE, not declared. An additional emit added
     // anywhere under `crates/api/src` fails this test until somebody decides
     // which of the three columns it belongs in, which is the whole point of
     // the accounting.
@@ -1594,15 +1600,15 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // exactly what `cargo test` is and the row costs nothing to reach.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 49,
+        lib_sites, 52,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"
     );
 
     assert_eq!(
-        SITES_HERE + REACHED_IN_SERVER_TESTS + UNREACHABLE,
+        SITES_HERE + REACHED_IN_SERVER_TESTS + REACHED_IN_RECOVERY_TESTS + UNREACHABLE,
         lib_sites,
-        "every emit site is proven here, proven in server::tests, or named above"
+        "every emit site is proven here, in server::tests or recovery::tests, or named above"
     );
 }

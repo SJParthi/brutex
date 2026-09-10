@@ -5226,7 +5226,7 @@ fn absent_open_interest_is_the_null_sentinel_and_zero_is_zero() {
 /// same integer land on different instants and a test can see the difference.
 #[test]
 fn the_timestamp_encoding_is_dispatched_never_assumed() {
-    use pull::fetch::{BarRequest, RawRow, RawWindow, land};
+    use pull::fetch::{BarRequest, RawRow, RawWindow, land_with_cash_schedule as land};
     use pull::session::{Day, Window};
     use pull::vendor::{PriceScale, TimestampEncoding};
 
@@ -5244,6 +5244,10 @@ fn the_timestamp_encoding_is_dispatched_never_assumed() {
     };
     let raw = RawWindow { rows: vec![row] };
     let day = Day::new(2026, 8, 7).expect("a real date");
+    let mut schedule = pull::cash_auction::Schedule::default();
+    schedule
+        .insert(day, false)
+        .expect("explicit non-CAS cash session");
     let request = BarRequest {
         instrument_id: String::new(),
         listing: pull::vendor::Listing::Equity,
@@ -5256,6 +5260,7 @@ fn the_timestamp_encoding_is_dispatched_never_assumed() {
         &request,
         TimestampEncoding::EpochSecondsUtc,
         PriceScale::Paisa,
+        Some(&schedule),
     )
     .expect("a legal window");
 
@@ -5264,6 +5269,7 @@ fn the_timestamp_encoding_is_dispatched_never_assumed() {
         &request,
         TimestampEncoding::IstDateTimeText,
         PriceScale::Paisa,
+        Some(&schedule),
     )
     .expect("a legal window");
 
@@ -5283,11 +5289,15 @@ fn the_timestamp_encoding_is_dispatched_never_assumed() {
 /// Rupees become paisa exactly, and a price that would overflow refuses.
 #[test]
 fn a_rupee_price_becomes_paisa_and_an_overflow_refuses() {
-    use pull::fetch::{BarRequest, FetchError, RawRow, RawWindow, land};
+    use pull::fetch::{BarRequest, FetchError, RawRow, RawWindow, land_with_cash_schedule as land};
     use pull::session::{Day, Window};
     use pull::vendor::{PriceScale, TimestampEncoding};
 
     let day = Day::new(2026, 8, 7).expect("a real date");
+    let mut schedule = pull::cash_auction::Schedule::default();
+    schedule
+        .insert(day, false)
+        .expect("explicit non-CAS cash session");
     let request = BarRequest {
         instrument_id: String::new(),
         listing: pull::vendor::Listing::Equity,
@@ -5312,6 +5322,7 @@ fn a_rupee_price_becomes_paisa_and_an_overflow_refuses() {
         &request,
         TimestampEncoding::EpochSecondsUtc,
         PriceScale::Rupees,
+        Some(&schedule),
     )
     .expect("a legal window");
     assert_eq!(
@@ -5336,6 +5347,7 @@ fn a_rupee_price_becomes_paisa_and_an_overflow_refuses() {
         &request,
         TimestampEncoding::EpochSecondsUtc,
         PriceScale::Rupees,
+        Some(&schedule),
     )
     .expect_err("i64::MAX rupees cannot become paisa");
     assert!(
@@ -5375,11 +5387,15 @@ fn the_wire_end_honours_the_vendors_inclusivity() {
 /// Every row is accounted for: a bar, or a drop with a named reason.
 #[test]
 fn every_row_is_either_a_bar_or_a_counted_drop() {
-    use pull::fetch::{BarRequest, RawRow, RawWindow, land};
+    use pull::fetch::{BarRequest, RawRow, RawWindow, land_with_cash_schedule as land};
     use pull::session::{Day, Window};
     use pull::vendor::{PriceScale, TimestampEncoding};
 
     let day = Day::new(2026, 8, 7).expect("a real date");
+    let mut schedule = pull::cash_auction::Schedule::default();
+    schedule
+        .insert(day, false)
+        .expect("explicit non-CAS cash session");
     let request = BarRequest {
         instrument_id: String::new(),
         listing: pull::vendor::Listing::Equity,
@@ -5415,6 +5431,7 @@ fn every_row_is_either_a_bar_or_a_counted_drop() {
         &request,
         TimestampEncoding::EpochSecondsUtc,
         PriceScale::Paisa,
+        Some(&schedule),
     )
     .expect("a legal window");
 

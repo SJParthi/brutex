@@ -4,9 +4,12 @@
   "type": "module",
   "scripts": {
     "dev": "vite dev --port 5173",
+    "prebuild": "node policy-guide/build-guide.mjs --check",
     "build": "vite build",
     "preview": "vite preview",
-    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "precheck": "node policy-guide/build-guide.mjs --check",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "pretest": "node policy-guide/build-guide.mjs --check",
     "test": "node --test \"tests/*.test.js\""
   },
   "devDependencies": {

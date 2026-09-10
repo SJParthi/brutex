@@ -193,6 +193,8 @@ fn run(archive: &Path, store_root: &Path, request: &BarRequest) -> Ingested {
         archive,
         store_root,
         Plan {
+            calendar: pull::calendar::Runtime::default(),
+            cash_schedule: None,
             columns: Columns::TrueDataIndex,
             request,
             // `pull::csv::decode` converts the vendor's IST wall clock to UTC
@@ -208,6 +210,26 @@ fn run(archive: &Path, store_root: &Path, request: &BarRequest) -> Ingested {
         },
     )
     .expect("the folder is readable and the column shape is right")
+}
+
+/// These sparse snapshots exercise source filtering, not complete sessions.
+/// Source accounting must hold even though derived coverage is explicitly partial.
+fn assert_partial_derivation(done: &Ingested) {
+    assert_eq!(
+        done.rows_read,
+        done.bars_stored + done.rows_folded + done.census.total() as usize
+    );
+    assert!(
+        !done.balances(),
+        "missing derived coverage is not a clean run"
+    );
+    assert!(
+        done.failures.iter().any(|failure| failure
+            .why
+            .contains("incomplete or invalid minute coverage")),
+        "{:?}",
+        done.failures
+    );
 }
 
 /// Every bar the store holds for the fixture's month, in index order.
@@ -261,7 +283,7 @@ fn a_bar_outside_the_requested_window_is_never_stored() {
     };
 
     let done = run(&archive, &store_root, &request);
-    assert_eq!(done.failures, Vec::new(), "no member failed");
+    assert_partial_derivation(&done);
     assert_eq!(done.members, 1);
     assert_eq!(done.rows_read, ROWS, "every row of the fixture was read");
     assert_eq!(done.bars_stored, BARS);
@@ -397,7 +419,7 @@ fn a_narrower_window_stores_strictly_fewer_bars_and_says_why() {
     };
 
     let done = run(&archive, &store_root, &request);
-    assert_eq!(done.failures, Vec::new(), "no member failed");
+    assert_partial_derivation(&done);
     // TWO: only the rows inside the published session. The pre-open and
     // post-close rows the vendor sent are dropped again — operator rule of
     // 2026-08-20.
@@ -469,7 +491,13 @@ fn idempotent_repull_leaves_the_file_byte_identical() {
         second.bars_stored, BARS,
         "the re-run reports the bars it offered, not the zero it wrote"
     );
-    assert_eq!(second.failures, Vec::new(), "and it is not an error either");
+    assert_partial_derivation(&first);
+    assert_partial_derivation(&second);
+    assert_eq!(second.bars_committed, 0);
+    assert_eq!(
+        first.failures, second.failures,
+        "a no-op rerun preserves the derivation shortfall without inventing an append failure"
+    );
 }
 
 #[test]

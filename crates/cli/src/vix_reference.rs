@@ -184,6 +184,36 @@ impl VixReferenceMonth {
         self.records
     }
 
+    /// Pin the complete original validated reference snapshot, including holes.
+    /// This presentation digest is never a strategy or execution identity.
+    pub(crate) fn snapshot_digest(&self) -> [u8; 32] {
+        let mut digest = brutex_core::blake3::Hasher::new();
+        digest.update(b"brutex-india-vix-validated-month-snapshot-v1\0");
+        digest.update(self.vendor.as_str().as_bytes());
+        digest.update(&self.month.year().to_le_bytes());
+        digest.update(&[self.month.month()]);
+        digest.update(&self.records.to_le_bytes());
+        for slot in &self.slots {
+            let Some(bar) = slot else {
+                digest.update(&[0]);
+                continue;
+            };
+            digest.update(&[1]);
+            for value in [
+                bar.ts_micros,
+                bar.open,
+                bar.high,
+                bar.low,
+                bar.close,
+                bar.volume,
+                bar.open_interest,
+            ] {
+                digest.update(&value.to_le_bytes());
+            }
+        }
+        digest.finalize()
+    }
+
     /// Stamp an exact timestamp from this month.
     ///
     /// # Cost

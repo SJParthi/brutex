@@ -59,11 +59,11 @@
 //! # Cost
 //!
 //! After indexes exist, one hash probe finds the run's block and reading it is
-//! linear in the selected rows. This route opens afresh: it indexes all frontier
-//! rows, then all ledger rows and detail receipts to prove the commit and exact
-//! count. Request setup is O(total frontier + total runs + total receipts), not
-//! O(1); the in-memory probes alone are O(1). D-0404 and limits §98 state the
-//! full bound. The HTTP door caps every freshly indexed file at 64 MiB, one
+//! linear in the selected rows. Cold opens index historical frontier, ledger
+//! and receipt rows. Warm requests refresh only appended rows, retaining
+//! generation checks and a parent snapshot before touching children. These
+//! refreshes and selected-row reads are not O(1) overall. The HTTP door caps
+//! every indexed file at 64 MiB, one
 //! verified result at 4,096 rows, one page at 256 rows and encoded JSON at 8
 //! MiB. Four detail tasks across both routes may be queued or running. The
 //! blocking file/index/encoding path runs on `spawn_blocking`; saturation
@@ -138,11 +138,7 @@ fn respond(
         return unavailable(axum::http::StatusCode::SERVICE_UNAVAILABLE, &why);
     }
 
-    let receipt = match cli::result_set::committed_receipt_bounded(
-        &root,
-        &identity,
-        crate::detail::MAX_SCAN_BYTES,
-    ) {
+    let receipt = match crate::detail::committed_receipt(&root, &identity) {
         Ok(receipt) => receipt,
         Err(why) => return refuse(json, &why),
     };
@@ -169,7 +165,7 @@ fn respond(
     // Held for the process and REFRESHED per request rather than opened fresh:
     // a fresh open walked every frontier row ever written to return ten. See
     // `detail::Cached` for the ordering argument and the refusal path.
-    let (rows, partial) = match crate::detail::FRONTIER.with(
+    let (rows, partial) = match crate::detail::FRONTIER.with_verified(
         &root,
         || cli::frontier::Frontier::open_read_bounded(&root, crate::detail::MAX_SCAN_BYTES),
         cli::frontier::Frontier::refresh,
@@ -970,12 +966,12 @@ mod tests {
             .and_then(|(_, after)| after.split_once("fn render_row(").map(|(body, _)| body))
             .expect("respond body");
         assert_eq!(
-            respond.matches("committed_receipt_bounded(").count(),
+            respond.matches("crate::detail::committed_receipt(").count(),
             1,
             "one request owns one bounded canonical receipt snapshot"
         );
         let receipt = respond
-            .find("committed_receipt_bounded(")
+            .find("crate::detail::committed_receipt(")
             .expect("bounded parent read");
         let child = respond
             .find("Frontier::open_read_bounded")

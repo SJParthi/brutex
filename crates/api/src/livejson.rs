@@ -66,12 +66,43 @@
 
 use std::path::PathBuf;
 
+static CENSUS: std::sync::LazyLock<std::sync::Mutex<cli::live::CensusCache>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(cli::live::CensusCache::default()));
+
 /// The headers every JSON route here answers with.
 type JsonHeaders = [(axum::http::header::HeaderName, &'static str); 1];
 
 /// Every run with a live file, newest measurement first within each.
 pub async fn live_json() -> (axum::http::StatusCode, JsonHeaders, String) {
-    respond(crate::server::store_dir())
+    let root = crate::server::store_dir();
+    match crate::detail::run(move || respond(root)).await {
+        Ok(response) => response,
+        Err(crate::detail::RunError::Saturated) => unavailable(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "live snapshot capacity is full; no blocking task was queued. Retry after another detail read finishes",
+        ),
+        Err(crate::detail::RunError::Join(why)) => unavailable(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            &format!("the live snapshot task could not be joined: {why}"),
+        ),
+    }
+}
+
+fn unavailable(
+    status: axum::http::StatusCode,
+    why: &str,
+) -> (axum::http::StatusCode, JsonHeaders, String) {
+    (
+        status,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/json; charset=utf-8",
+        )],
+        format!(
+            r#"{{"runs":[],"listed":false,"refusal":{}}}"#,
+            crate::render::json_string(why)
+        ),
+    )
 }
 
 /// [`live_json`], with the root passed in so a test can drive it.
@@ -86,26 +117,21 @@ fn respond(root: Result<PathBuf, String>) -> (axum::http::StatusCode, JsonHeader
 
     let root = match root {
         Ok(root) => root,
-        Err(why) => {
-            return (
-                axum::http::StatusCode::OK,
-                json,
-                format!(
-                    r#"{{"runs":[],"count":0,"refusal":{}}}"#,
-                    crate::render::json_string(&why)
-                ),
-            );
-        }
+        Err(why) => return unavailable(axum::http::StatusCode::SERVICE_UNAVAILABLE, &why),
     };
 
-    // SKIPPING IS STILL RIGHT, AND IT IS NOW COUNTED. This directory is
-    // transient by design and a half-written file is an ordinary state, not a
-    // corruption to report -- but reporting `count: 0` for a machine whose
-    // three live files are one version old told the operator the sweep was not
-    // running. `skipped` and `listed` are the two facts that were folded into
-    // an empty list: `listed: false` is "I could not look", and any nonzero
-    // `skipped` beside `count: 0` is "something is there and I cannot read it".
-    let census = cli::live::census(&root);
+    // A cached census reuses unchanged decoded rows, while still measuring
+    // bounded directory entries and file generations. A malformed named live
+    // file or exceeded bound refuses the whole census instead of exposing a
+    // plausible partial list or claiming an idle machine.
+    let census = match CENSUS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .refresh(&root)
+    {
+        Ok(census) => census,
+        Err(why) => return unavailable(axum::http::StatusCode::SERVICE_UNAVAILABLE, &why),
+    };
     let runs = &census.runs;
 
     let mut out = String::with_capacity(runs.len().saturating_mul(2_400).saturating_add(128));
@@ -255,8 +281,8 @@ mod tests {
         let (status, _, body) = respond(Err("no HOME, so no store root".to_owned()));
         assert_eq!(
             status,
-            axum::http::StatusCode::OK,
-            "a refusal is still an answer"
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "unreadable configuration is not a successful empty census"
         );
         assert!(
             body.contains(r#""refusal":"no HOME, so no store root""#),

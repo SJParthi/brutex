@@ -77,6 +77,19 @@ impl Column {
         }
     }
 
+    /// Copies row masks after fallibly reserving their complete storage.
+    ///
+    /// # Errors
+    /// Returns the allocator's refusal before copying any row. This cannot
+    /// intercept an operating-system overcommit kill after reservation succeeds.
+    pub fn try_from_rows(
+        bar_bits: &[ConditionMask],
+    ) -> Result<Self, std::collections::TryReserveError> {
+        let mut rows = crate::reserved(bar_bits.len())?;
+        rows.extend_from_slice(bar_bits);
+        Ok(Self { rows })
+    }
+
     /// How many bars this column holds.
     #[must_use]
     pub fn bars(&self) -> u64 {

@@ -44,6 +44,19 @@
 //! = 1,671  exactly the count on disk
 //! ```
 //!
+//! The baseline now extends through 2026-09-04, and only through that date.
+//! NSE/CMTR/71775 (2025-12-12), capital-market TRADING holidays for 2026,
+//! https://nsearchives.nseindia.com/content/circulars/CMTR71775.pdf, lists no
+//! trading holiday in this extension. The charter's regular weekday schedule
+//! supplies the hours, not the observed candles. Independently checked NIFTY
+//! and BANKNIFTY minute windows each contain exactly 375 distinct consecutive
+//! stamps, 09:15–15:29 IST, on Aug 24–28 and Aug 31–Sep 4. The four intervening
+//! dates are ordinary scheduled weekends (Aug 22–23, 29–30); their closure is
+//! the bounded schedule classification, not an inference from missing rows.
+//! These ten sessions add ten weekdays: 1,765 - 92 + 8 = 1,681 open dates.
+//! Earlier bits and exceptional/unknown-length sessions are unchanged. No
+//! weekday rule is applied outside this fixed, corroborated extension.
+//!
 //! The 92 are self-validating: Republic Day, Independence Day, Gandhi Jayanti,
 //! Christmas, Good Friday, Holi and Mahashivratri all fall where they should,
 //! and the list also contains one-offs no rule would generate — 2024-01-22, the
@@ -84,7 +97,7 @@
 //! # Cost
 //!
 //! One subtraction, one array index and one bit test — O(1), no hash, no search,
-//! no allocation. The bitset is 307 bytes for 2,455 days and lives in
+//! no allocation. The bitset is 309 bytes for 2,469 days and lives in
 //! `.rodata`. The four irregular sessions and the five length-unmeasured days
 //! are fixed tables whose lengths are compile-time constants, so the walks over
 //! them are bounded and not scans that grow.
@@ -97,17 +110,17 @@
 /// First day this calendar knows: **2019-12-02**, as days since the epoch.
 pub const FIRST_DAY: i64 = 18_232;
 
-/// Last day this calendar knows: **2026-08-21**, as days since the epoch.
-pub const LAST_DAY: i64 = 20_686;
+/// Last day this calendar knows: **2026-09-04**, as days since the epoch.
+pub const LAST_DAY: i64 = 20_700;
 
 /// How many days the bitset covers.
-pub const DAYS: usize = 2_455;
+pub const DAYS: usize = 2_469;
 
 // TWO ASSERTIONS AND NO CAST. One `DAYS as i64` would say the same thing and
 // would be the workspace's only sign-losing cast on a path that never needs
 // one; both sides are compared against the literal instead.
-const _: () = assert!(LAST_DAY - FIRST_DAY + 1 == 2_455);
-const _: () = assert!(DAYS == 2_455);
+const _: () = assert!(LAST_DAY - FIRST_DAY + 1 == 2_469);
+const _: () = assert!(DAYS == 2_469);
 
 /// Minute-of-day a standard NSE equity session opens: **09:15**.
 pub const OPEN_MINUTE: u16 = 9 * 60 + 15;
@@ -326,8 +339,9 @@ const LENGTH_UNMEASURED: [i64; 5] = [
 
 /// Whether each day in the window traded. One bit per day, LSB first.
 ///
-/// Derived from the `1day` bars of NIFTY, BANKNIFTY and INDIAVIX, which agree.
-static TRADED: [u8; 307] = [
+/// Original 307 bytes: daily NIFTY/BANKNIFTY/INDIAVIX agreement through Aug 21.
+/// Appended two bytes: the sourced, corroborated extension described above.
+static TRADED: [u8; 309] = [
     0x9F, 0xCF, 0x67, 0xF3, 0xF9, 0x7C, 0x3E, 0xBF, 0xCF, 0xE7, 0xF1, 0xF9, 0x74, 0x3E, 0x9F, 0x8B,
     0xA3, 0xF3, 0x79, 0x7C, 0x3E, 0x1F, 0xCF, 0xE7, 0xF3, 0xF9, 0x7C, 0x3E, 0x9F, 0xCF, 0xE7, 0xF3,
     0xF9, 0x7C, 0x3E, 0x9F, 0xCF, 0xE7, 0xF1, 0xF9, 0x7C, 0x3E, 0x9F, 0x9F, 0xE7, 0xE3, 0xF9, 0x7C,
@@ -347,7 +361,7 @@ static TRADED: [u8; 307] = [
     0xF9, 0x7C, 0x3E, 0x9F, 0xC7, 0x67, 0xF3, 0xF9, 0x7C, 0x3E, 0x97, 0xCF, 0x67, 0xF3, 0xD9, 0x7C,
     0x3E, 0x9F, 0xCF, 0xE7, 0x73, 0xF9, 0x7C, 0x2E, 0x1F, 0xEF, 0xE7, 0xF3, 0xF9, 0x74, 0x3E, 0x9F,
     0x4B, 0xE3, 0xD3, 0xF9, 0x3C, 0x3E, 0x9F, 0xCF, 0xE5, 0xF3, 0xF9, 0x3C, 0x3E, 0x9F, 0xCF, 0xE7,
-    0xF3, 0xF9, 0x7C,
+    0xF3, 0xF9, 0x7C, 0x3E, 0x1F,
 ];
 
 const _: () = assert!(TRADED.len() == DAYS.div_ceil(8));
@@ -371,7 +385,7 @@ pub fn kind_of(epoch_day: i64) -> DayKind {
         return DayKind::Unmeasured;
     }
     // `try_from` RATHER THAN `as`, and the failure arm is honest rather than a
-    // panic. The range check above already makes the difference 0..=2454, so
+    // panic. The range check above already makes the difference 0..=2468, so
     // this cannot fail; if a future edit breaks that, saying "I have not
     // measured this day" is the safe answer and `expect` is banned outright.
     let Ok(offset) = usize::try_from(epoch_day - FIRST_DAY) else {
@@ -447,8 +461,8 @@ mod tests {
 
     /// **THE ARITHMETIC THAT MAKES THIS A MEASUREMENT AND NOT A LIST.**
     ///
-    /// 1,755 weekdays, minus 92 days nothing traded, plus 8 weekend days all
-    /// three instruments did trade, is 1,671 — the exact count of `1day` bars on
+    /// 1,765 weekdays, minus 92 days nothing traded, plus 8 weekend days the
+    /// instruments did trade, is 1,681 — the count of `1day` sessions on
     /// disk. A typed calendar can be plausible; only a reconciling one can be
     /// checked, and this is the check.
     #[test]
@@ -487,20 +501,20 @@ mod tests {
             }
         }
 
-        assert_eq!(weekday_total, 1_755, "weekdays in 2019-12-02..=2026-08-21");
+        assert_eq!(weekday_total, 1_765, "weekdays in 2019-12-02..=2026-09-04");
         assert_eq!(
             closed, 92,
             "weekdays on which nothing traded — NSE holidays"
         );
         assert_eq!(weekend_sessions, 8, "Budget Saturdays, Muhurat, DR tests");
         assert_eq!(
-            open, 1_671,
+            open, 1_681,
             "and the total is exactly the number of 1day bars the store holds"
         );
         assert_eq!(
             weekday_total - closed + weekend_sessions,
             open,
-            "1755 - 92 + 8 = 1671, or this calendar is not the one the bars describe"
+            "1765 - 92 + 8 = 1681, or this calendar is not the one the bars describe"
         );
     }
 
@@ -529,6 +543,102 @@ mod tests {
         // made six complete series read SHORT.
         assert_eq!(sessions_between(16_436, LAST_DAY), None);
         assert!(sessions_between(FIRST_DAY, LAST_DAY).is_some());
+    }
+
+    #[test]
+    fn bounded_extension_has_exactly_ten_open_and_four_closed_dates() {
+        let opens = [
+            20_689, 20_690, 20_691, 20_692, 20_693, 20_696, 20_697, 20_698, 20_699, 20_700,
+        ];
+        let closed = [20_687, 20_688, 20_694, 20_695];
+        for day in 20_687..=20_700 {
+            if opens.contains(&day) {
+                assert_eq!(kind_of(day), DayKind::Open(Session::full()));
+                assert_eq!(expected_bars(day), Some(375));
+            } else {
+                assert!(closed.contains(&day));
+                assert_eq!(kind_of(day), DayKind::Closed);
+                assert_eq!(expected_bars(day), Some(0));
+            }
+        }
+        assert_eq!(sessions_between(20_687, 20_700), Some(10));
+        assert_eq!(kind_of(20_686), DayKind::Open(Session::full()));
+        for day in [FIRST_DAY - 1, 20_701, 20_702, 20_703, 21_000] {
+            assert_eq!(kind_of(day), DayKind::Unmeasured);
+            assert_eq!(expected_bars(day), None);
+        }
+        assert_eq!(sessions_between(20_700, 20_701), None);
+    }
+
+    #[test]
+    fn extension_preserves_every_original_bit_and_exception() {
+        // Fingerprint measured from all 307 baseline bytes before this edit.
+        let fingerprint = TRADED[..307]
+            .iter()
+            .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+                (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+            });
+        assert_eq!(fingerprint, 0x25a6_d5dd_6f29_f488);
+        assert_eq!(&TRADED[306..], &[0x7C, 0x3E, 0x1F]);
+        for day in FIRST_DAY..=20_686 {
+            let offset = usize::try_from(day - FIRST_DAY).expect("baseline offset");
+            let was_open =
+                TRADED.get(offset / 8).expect("baseline byte") & (1 << (offset % 8)) != 0;
+            let expected = if LENGTH_UNMEASURED.contains(&day) {
+                DayKind::OpenLengthUnmeasured
+            } else if let Some((_, session)) = IRREGULAR.iter().find(|(d, _)| *d == day) {
+                DayKind::Open(*session)
+            } else if was_open {
+                DayKind::Open(Session::full())
+            } else {
+                DayKind::Closed
+            };
+            assert_eq!(kind_of(day), expected, "baseline day {day}");
+        }
+    }
+
+    #[test]
+    fn extension_matches_both_measured_index_minute_grids() {
+        // Compact measured timestamp summaries from the four Aug/Sep response
+        // files, independently checked on 2026-09-06. No prices or private file
+        // access in this fixture. Both indices had exactly the same grids;
+        // the source walk checked EVERY stamp, uniqueness and 60-second spacing.
+        let measured = [
+            (20_689, 375, 33_300, 55_740),
+            (20_690, 375, 33_300, 55_740),
+            (20_691, 375, 33_300, 55_740),
+            (20_692, 375, 33_300, 55_740),
+            (20_693, 375, 33_300, 55_740),
+            (20_696, 375, 33_300, 55_740),
+            (20_697, 375, 33_300, 55_740),
+            (20_698, 375, 33_300, 55_740),
+            (20_699, 375, 33_300, 55_740),
+            (20_700, 375, 33_300, 55_740),
+        ];
+        for index in ["NIFTY", "BANKNIFTY"] {
+            let mut total = 0;
+            for (day, count, first, last) in measured {
+                let DayKind::Open(session) = kind_of(day) else {
+                    panic!("{index} {day}")
+                };
+                let scheduled: Vec<_> = (0..86_400_u32)
+                    .step_by(60)
+                    .filter(|second| {
+                        session.expects(u16::try_from(second / 60).expect("minute of day"))
+                    })
+                    .collect();
+                assert_eq!(scheduled.len(), count, "{index} {day}");
+                assert_eq!(scheduled.first(), Some(&first));
+                assert_eq!(scheduled.last(), Some(&last));
+                assert!(
+                    scheduled
+                        .windows(2)
+                        .all(|pair| matches!(pair, [first, second] if second - first == 60))
+                );
+                total += count;
+            }
+            assert_eq!(total, 3_750, "{index}");
+        }
     }
 
     /// **THE FOUR IRREGULAR SESSIONS USE THEIR RECORDED EVIDENCE LANE.**
@@ -836,6 +946,99 @@ mod tests {
 pub struct Calendar {
     first: i64,
     kinds: Vec<DayKind>,
+}
+
+/// Calendar input for ingestion, distinct from the observed display calendar.
+/// Observations carry no validated schedule provenance: neither their windows
+/// nor their absent rows may override the static calendar or extend its authority.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Runtime<'a> {
+    observed: Option<&'a Calendar>,
+}
+
+impl<'a> Runtime<'a> {
+    /// Attach observations for diagnostics only. This does not attest a schedule.
+    #[must_use]
+    pub const fn from_observed(observed: &'a Calendar) -> Self {
+        Self {
+            observed: Some(observed),
+        }
+    }
+
+    /// Preserve all static answers, including unknown session lengths.
+    #[must_use]
+    pub fn kind_of(self, day: i64) -> DayKind {
+        kind_of(day)
+    }
+
+    /// Why an unknown date cannot support a completeness claim.
+    #[must_use]
+    pub fn unverified_reason(self, day: i64) -> &'static str {
+        let observation = self.observed.and_then(|calendar| {
+            day.checked_sub(calendar.first)
+                .and_then(|at| usize::try_from(at).ok())
+                .and_then(|at| calendar.kinds.get(at))
+        });
+        match observation {
+            Some(DayKind::Open(_) | DayKind::OpenLengthUnmeasured) => {
+                "observed trading does not attest scheduled session hours; validated calendar provenance missing"
+            }
+            _ => "calendar authority missing; absent observations do not prove closure",
+        }
+    }
+}
+
+#[cfg(test)]
+mod runtime_tests {
+    use super::*;
+
+    #[test]
+    fn observations_preserve_every_static_answer_and_both_unknown_bounds() {
+        let observed = Calendar::from_observed(&[
+            Observed::from_runs(FIRST_DAY - 1, &[(555, 929)]),
+            Observed::from_runs(LAST_DAY + 3, &[(555, 929)]),
+        ]);
+        let runtime = Runtime::from_observed(&observed);
+        for day in FIRST_DAY - 2..=LAST_DAY + 4 {
+            assert_eq!(runtime.kind_of(day), kind_of(day), "day {day}");
+            assert_eq!(Runtime::default().kind_of(day), kind_of(day));
+        }
+        assert_eq!(runtime.kind_of(i64::MIN), DayKind::Unmeasured);
+        assert_eq!(runtime.kind_of(i64::MAX), DayKind::Unmeasured);
+        assert!(
+            runtime
+                .unverified_reason(i64::MIN)
+                .contains("absent observations")
+        );
+        assert!(
+            runtime
+                .unverified_reason(i64::MAX)
+                .contains("absent observations")
+        );
+    }
+
+    #[test]
+    fn unknown_observed_lengths_and_empty_calendars_carry_no_authority() {
+        let observed = Calendar::from_observed(&[Observed::from_runs(LAST_DAY + 1, &[])]);
+        let runtime = Runtime::from_observed(&observed);
+        assert_eq!(runtime.kind_of(LAST_DAY + 1), DayKind::Unmeasured);
+        assert!(
+            runtime
+                .unverified_reason(LAST_DAY + 1)
+                .contains("observed trading")
+        );
+        let empty = Calendar::from_observed(&[]);
+        assert!(
+            Runtime::from_observed(&empty)
+                .unverified_reason(0)
+                .contains("absent observations")
+        );
+        assert!(
+            Runtime::default()
+                .unverified_reason(LAST_DAY + 1)
+                .contains("calendar authority missing")
+        );
+    }
 }
 
 /// One day as the store observed it.

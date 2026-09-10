@@ -1120,6 +1120,8 @@ fn a_price_that_leaves_the_paisa_grid_refuses_the_window_and_names_its_field() {
 /// The plan every ingest test below runs, with the one field it varies.
 fn plan_over<'a>(request: &'a BarRequest, exchange: &'a str, scale: PriceScale) -> Plan<'a> {
     Plan {
+        calendar: pull::calendar::Runtime::default(),
+        cash_schedule: None,
         columns: Columns::TrueDataIndex,
         request,
         // `pull::csv::decode` has already converted the vendor's IST wall clock
@@ -1176,11 +1178,23 @@ fn a_folder_that_is_not_there_refuses_the_whole_run() {
 /// One malformed member is counted and named, and the run stores the others.
 #[test]
 fn a_member_that_cannot_be_stored_is_named_and_the_run_carries_on() {
+    use std::fmt::Write as _;
+
     let scratch = Scratch::new("PARTIAL");
     // Twenty-five bytes: one past what `brutex_core::symbol::Symbol` holds, so
     // the instrument taken from the file name is refused.
     let too_long = "AAAAAAAAAAAAAAAAAAAAAAAAA";
-    let dir = folder_of(&scratch, &[("NIFTY", ONE_ROW), (too_long, ONE_ROW)]);
+    let mut complete = String::new();
+    for minute in 555..930 {
+        writeln!(
+            complete,
+            "20221003,{:02}:{:02}:00,38445.65,0,0",
+            minute / 60,
+            minute % 60
+        )
+        .expect("fixture string");
+    }
+    let dir = folder_of(&scratch, &[("NIFTY", &complete), (too_long, ONE_ROW)]);
     let request = request();
     let done = pull::ingest::from_dir(
         &dir,
@@ -1190,8 +1204,15 @@ fn a_member_that_cannot_be_stored_is_named_and_the_run_carries_on() {
     .expect("the folder and the column shape are both right");
 
     assert_eq!(done.members, 2, "both members were read");
-    assert_eq!(done.rows_read, 2);
-    assert_eq!(done.bars_stored, 1, "the good member still landed");
+    assert_eq!(done.rows_read, 376);
+    assert_eq!(
+        done.bars_stored, 375,
+        "the complete good member still landed"
+    );
+    assert_eq!(
+        done.derived_files,
+        pull::ingest::derived_count(Timeframe::MINUTE_1)
+    );
     assert_eq!(done.failures.len(), 1, "and exactly one failed");
     assert_eq!(
         done.failures[0].instrument, too_long,
@@ -1326,11 +1347,19 @@ fn a_member_whose_bars_cross_a_month_boundary_lands_in_both_months() {
     .expect("the folder is readable");
 
     assert!(
-        done.failures.is_empty(),
-        "a two-month batch is no longer a refusal — {:?}",
+        done.failures.iter().any(|failure| failure
+            .why
+            .contains("incomplete or invalid minute coverage")),
+        "sparse derived buckets must be refused: {:?}",
         done.failures
     );
     assert_eq!(done.bars_stored, 2, "one bar in October, one in November");
+    assert_eq!(
+        done.bars_committed, 2,
+        "the source append succeeded in both months"
+    );
+    assert_eq!(done.counted, 2);
+    assert_eq!(done.derived_files, 0);
 
     // AND EACH BAR IS IN ITS OWN MONTH'S FILE. A splitter that filed October
     // under November would save the request and corrupt the store — which is
@@ -1430,7 +1459,18 @@ fn bars_that_do_not_follow_the_file_are_refused_by_the_append() {
     )
     .expect("the folder is readable");
     assert_eq!(first.bars_stored, 1, "the later bar is on disk");
-    assert!(first.balances());
+    assert_eq!(first.bars_committed, 1);
+    assert_eq!(first.counted, 1);
+    assert_eq!(first.derived_files, 0);
+    assert!(
+        first.failures.iter().any(|failure| failure
+            .why
+            .contains("incomplete or invalid minute coverage")),
+        "the source landed but its one-minute session is partial: {:?}",
+        first.failures
+    );
+    let path = store.join("bars/groww/NSE/INDEX/NIFTY/1min/2022-10.bin");
+    let before = fs::read(&path).expect("the committed source file");
 
     let earlier = scratch.root.join("EARLIER");
     fs::create_dir_all(&earlier).expect("a folder");
@@ -1452,6 +1492,12 @@ fn bars_that_do_not_follow_the_file_are_refused_by_the_append() {
          addressed by base + header + index·stride cannot hold it"
     );
     assert_eq!(second.failures.len(), 1);
+    assert_eq!(second.bars_committed, 0);
+    assert_eq!(
+        fs::read(&path).expect("source remains readable"),
+        before,
+        "a refused earlier append preserves every stored byte"
+    );
     assert!(
         !second.failures[0].why.is_empty(),
         "and the store's own refusal is what the run reports"

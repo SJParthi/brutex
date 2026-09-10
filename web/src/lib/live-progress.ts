@@ -29,7 +29,8 @@ export interface LiveRung {
 }
 
 export interface ActiveSweepAttempt {
-  attempt: number;
+  attempt?: number;
+  attempt_key?: string;
   kind: string;
   feed: string;
   underlying: string;
@@ -40,14 +41,14 @@ export interface ActiveSweepAttempt {
 }
 
 export type LiveProgress =
-  | { phase: 'ready'; attempt: number; rungs: LiveRung[]; why: '' }
-  | { phase: 'failed'; attempt: number | null; rungs: []; why: string };
+  | { phase: 'ready'; attempt: string; rungs: LiveRung[]; why: '' }
+  | { phase: 'failed'; attempt: string | null; rungs: []; why: string };
 
 type JsonObject = Record<string, unknown>;
 
 interface LogRecord {
   seq: number;
-  run: number;
+  run: string;
   ts: number;
   level: string;
   target: string;
@@ -58,7 +59,7 @@ interface LogRecord {
 }
 
 interface RunContext {
-  attempt: number;
+  attempt: string;
   kind: string;
   feed: string;
   underlying: string;
@@ -110,20 +111,59 @@ const natural = (value: unknown): value is number => safeInteger(value) && value
 
 const positive = (value: unknown): value is number => safeInteger(value) && value > 0;
 
+const U64_MAX = (1n << 64n) - 1n;
+
+/** Aliases come from typed Rust u64 values before JSON number rounding. A
+ * present alias must validate even when a usable legacy number also exists.
+ * Unsafe numeric fields cannot establish identity; safe numeric fields still
+ * have to agree, so adding an alias cannot hide a contradictory legacy ID.
+ */
+function exactToken(
+  value: JsonObject,
+  numericField: string,
+  aliasField: string,
+  allowZero = false
+): string | null {
+  const legacy = value[numericField];
+  if (!Object.hasOwn(value, aliasField)) {
+    return natural(legacy) && (allowZero || legacy > 0) ? String(legacy) : null;
+  }
+  const alias = value[aliasField];
+  if (
+    typeof alias !== 'string' || alias.length > 20 || !/^(0|[1-9]\d*)$/.test(alias) ||
+    BigInt(alias) > U64_MAX || (!allowZero && alias === '0')
+  ) return null;
+  if (legacy !== undefined && (
+    typeof legacy !== 'number' || !Number.isInteger(legacy) || legacy < 0 ||
+    legacy > Number(U64_MAX) || (!allowZero && legacy === 0) ||
+    (Number.isSafeInteger(legacy) && String(legacy) !== alias)
+  )) return null;
+  return alias;
+}
+
+/** The same identity guard is used by the page before it builds its log query.
+ * Safe legacy numeric attempts are normalized to strings; no unsafe numeric
+ * token is converted into an apparently exact key.
+ */
+export function liveAttemptKey(run: unknown): string | null {
+  return object(run) ? exactToken(run, 'attempt', 'attempt_key') : null;
+}
+
 const nonempty = (value: unknown): value is string =>
   typeof value === 'string' && value.trim().length > 0;
 
 const month = (value: unknown): value is number =>
   safeInteger(value) && value >= 1 && value <= 12;
 
-function refused(why: string, attempt: number | null = null): LiveProgress {
+function refused(why: string, attempt: string | null = null): LiveProgress {
   return { phase: 'failed', attempt, rungs: [], why };
 }
 
 function contextOf(run: unknown): { ok: true; value: RunContext } | { ok: false; why: string } {
   if (!object(run)) return { ok: false, why: 'The active sweep attempt is not an object.' };
-  if (!positive(run.attempt)) {
-    return { ok: false, why: 'The active sweep has no positive safe attempt token.' };
+  const attempt = liveAttemptKey(run);
+  if (attempt === null) {
+    return { ok: false, why: 'The active sweep has no consistent exact attempt token.' };
   }
   const kind = run.kind;
   const feed = run.feed;
@@ -153,7 +193,7 @@ function contextOf(run: unknown): { ok: true; value: RunContext } | { ok: false;
   return {
     ok: true,
     value: {
-      attempt: run.attempt,
+      attempt,
       kind,
       feed,
       underlying,
@@ -201,9 +241,10 @@ function recordsOf(payload: unknown): { ok: true; records: LogRecord[] } | { ok:
     if (!object(candidate)) {
       return { ok: false, why: `Event ${index} is not an object.` };
     }
+    const run = exactToken(candidate, 'run', 'run_key', true);
     if (
       !positive(candidate.seq) ||
-      !natural(candidate.run) ||
+      run === null ||
       !natural(candidate.ts) ||
       typeof candidate.level !== 'string' ||
       typeof candidate.target !== 'string' ||
@@ -220,7 +261,7 @@ function recordsOf(payload: unknown): { ok: true; records: LogRecord[] } | { ok:
     if (candidate.dropped_fields !== 0) {
       return { ok: false, why: `Event ${index} dropped telemetry fields.` };
     }
-    records.push(candidate as unknown as LogRecord);
+    records.push({ ...candidate, run } as unknown as LogRecord);
   }
 
   for (let index = 1; index < records.length; index += 1) {
@@ -235,8 +276,8 @@ function recordsOf(payload: unknown): { ok: true; records: LogRecord[] } | { ok:
 
 function sameContext(fields: JsonObject, context: RunContext, marker: boolean): string | null {
   const expected: ReadonlyArray<keyof RunContext> = marker
-    ? ['attempt', 'kind', 'feed', 'underlying', 'from_year', 'from_month', 'to_year', 'to_month']
-    : ['attempt', 'feed', 'underlying', 'from_year', 'from_month', 'to_year', 'to_month'];
+    ? ['kind', 'feed', 'underlying', 'from_year', 'from_month', 'to_year', 'to_month']
+    : ['feed', 'underlying', 'from_year', 'from_month', 'to_year', 'to_month'];
   for (const field of expected) {
     if (fields[field] !== context[field]) return field;
   }
@@ -269,7 +310,10 @@ export function reduceLiveProgress(activeRun: unknown, payload: unknown): LivePr
   const matching: LogRecord[] = [];
   for (const record of admittedRecords.records) {
     if (record.target !== TARGET || !LIVE_MESSAGES.has(record.message)) continue;
-    const fieldAttempt = record.fields.attempt;
+    const fieldAttempt = exactToken(record.fields, 'attempt', 'attempt_key');
+    if (fieldAttempt === null) {
+      return refused(`A ${record.message} event has no consistent exact field attempt token.`, context.attempt);
+    }
     const claimsCurrent = record.run === context.attempt || fieldAttempt === context.attempt;
     if (!claimsCurrent) continue;
     if (record.run !== context.attempt || fieldAttempt !== context.attempt) {

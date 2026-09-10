@@ -69,14 +69,17 @@
  * @property {number | null} [support_ppm] The frequent floor, in parts per million.
  * @property {number} [started_micros] Microseconds, the unit `crates/api` writes.
  * @property {number} [attempt] Opaque exact token shared by status and structural events.
+ * @property {string} [attempt_key] Exact u64 token; authoritative beyond the safe-number range.
  * @property {number | null} [finished_micros] `null` while the run is in flight.
  * @property {string | null} [report] The rung table, on a run that swept.
  * @property {string | null} [refusal] Why nothing was swept, on a run that did not.
+ * @property {string} [status] Explicit external lifecycle status, including unknown.
+ * @property {string} [why] Why external execution state cannot be established.
  */
 
 /**
  * @typedef {object} SweepState
- * @property {'idle'|'starting'|'running'|'done'|'failed'} phase
+ * @property {'idle'|'starting'|'running'|'done'|'failed'|'unknown'} phase
  * @property {Running | null} run
  * @property {string} why
  */
@@ -90,7 +93,8 @@
  * - no run at all — the process has started none, so `idle`
  * - `in_flight` — `running`, and the caller schedules the next poll
  * - `refusal` set — `failed`, carrying the server's own sentence
- * - otherwise — `done`, and the ledger is worth re-reading
+ * - a nonempty completion report — `done`, and the ledger is worth re-reading
+ * - missing or unreadable lifecycle evidence — `unknown`, never completed
  *
  * `in_flight` is tested BEFORE `refusal` on purpose. The two are independent
  * fields and a slot that carried a stale refusal into a fresh run would
@@ -101,9 +105,13 @@
  */
 export function sweepOutcome(run) {
 	if (!run) return { phase: 'idle', run: null, why: '' };
+	if (run.status === 'unknown' || typeof run.in_flight !== 'boolean') {
+		return { phase: 'unknown', run, why: run.why || 'The server cannot establish whether this execution is running or finished.' };
+	}
 	if (run.in_flight) return { phase: 'running', run, why: '' };
 	if (run.refusal) return { phase: 'failed', run, why: run.refusal };
-	return { phase: 'done', run, why: '' };
+	if (typeof run.report === 'string' && run.report.length > 0) return { phase: 'done', run, why: '' };
+	return { phase: 'unknown', run, why: run.why || 'Execution is no longer reported in flight, but no completion or refusal receipt was supplied.' };
 }
 
 /**

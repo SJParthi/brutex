@@ -824,6 +824,7 @@ mod tests {
                     isin: isin.map(|i| (Vendor::Groww, i)),
                     conflict: None,
                     universe: *u,
+                    ..Entry::default()
                 },
             );
         }
@@ -833,6 +834,7 @@ mod tests {
             by_key,
             conflicts: Vec::new(),
             eligibility: Vec::new(),
+            ..Merged::default()
         })
     }
 
@@ -1087,6 +1089,7 @@ mod tests {
                 by_key: HashMap::new(),
                 conflicts: Vec::new(),
                 eligibility: Vec::new(),
+                ..Merged::default()
             })
             .counts(Selection::new(false, "", "")),
             UniverseCounts::default()

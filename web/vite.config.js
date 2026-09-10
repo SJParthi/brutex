@@ -26,6 +26,7 @@ const API = `http://127.0.0.1:${process.env.BRUTEX_API_PORT ?? 8080}`;
 // which is right, but it should not have been possible. A prefix would be
 // tidier; these routes are not under one.
 const ROUTES = [
+	'/inspection.json',
 	'/instruments.json',
 	'/feeds.json',
 	'/bars.json',
@@ -76,6 +77,7 @@ const ROUTES = [
 	// in development only, which is the trap the `/audit` note above records.
 	'/backtest/run',
 	'/backtest/run.json',
+	'/backtest/audit.json',
 	// THE SECOND COMMAND, and it needed a third entry rather than being covered
 	// by one of the two above: Vite matches a proxy key by PREFIX, and neither
 	// `/backtest/run` nor `/backtest/run.json` is a prefix of
@@ -98,10 +100,15 @@ const ROUTES = [
 	// in `web/src` ever fetched it, so twenty-four of every twenty-five results
 	// were written correctly and never seen by anyone.
 	//
-	// Listed with the `.json` suffix rather than as `/engine`, for the same
-	// reason `/backtest/run` is: `/engine/command` is a POST that no page calls
-	// and proxying the whole prefix would claim it too.
+	// Keep the engine routes explicit so the page itself stays with Svelte.
 	'/engine/top.json',
+	// Receipt and Boolean searches submit through the same Rust task slot.
+	// Their configuration read must also reach Rust instead of Vite's HTML fallback.
+	'/engine/command',
+	'/engine/boolean-launch.json',
+	'/engine/index-stop-launch.json',
+	'/index-stop.json',
+	'/index-stop-qualification.json',
 	// ONE RUN'S ROUND TRIPS. The per-trade table on the backtest page rendered
 	// a padlock in every cell, because nothing wrote the file it reads and no
 	// route served it. `cli::trades` writes it now and `/trades.json` serves it,
@@ -116,6 +123,15 @@ const ROUTES = [
 	// Serving the numbers and ordering them here is what makes that a slider
 	// rather than a rebuild.
 	'/frontier.json',
+	'/sweep-evidence.json',
+	'/boolean-candidates.json',
+	'/boolean-statistics.json',
+	'/boolean-admission.json',
+	'/boolean-qualification.json',
+	'/boolean-campaign.json',
+	'/boolean-qualified-campaign.json',
+	'/boolean-qualified-search.json',
+	'/boolean-oos.json',
 	// THE EVENT FEED, WHICH IS THE ONLY LIVE PROGRESS THAT EXISTS.
 	//
 	// `GET /backtest/run.json` reads a struct written exactly twice — once when

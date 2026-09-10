@@ -697,6 +697,53 @@ pub fn land(
     encoding: TimestampEncoding,
     scale: PriceScale,
 ) -> Result<Landed, FetchError> {
+    land_with_cash_schedule(raw, request, encoding, scale, None)
+}
+
+fn cash_close_verdict(
+    epoch_utc: i64,
+    request: &BarRequest,
+    schedule: Option<&crate::cash_auction::Schedule>,
+) -> Result<Option<crate::session::DropReason>, FetchError> {
+    if request.listing.venue() != crate::vendor::Venue::NseCash
+        || request.granularity == crate::vendor::Granularity::Day1
+    {
+        return Ok(None);
+    }
+    let moment = crate::session::IstMoment::from_epoch_secs(epoch_utc).map_err(|why| {
+        FetchError::BodyNotUnderstood {
+            detail: why.to_string(),
+        }
+    })?;
+    if !crate::vendor::cash_auction_eligibility_required(moment.day()) {
+        return Ok(None);
+    }
+    let schedule = schedule.ok_or_else(|| FetchError::BodyNotUnderstood {
+        detail: format!(
+            "cash eligibility UNVERIFIED on {}; dated security master required",
+            moment.day()
+        ),
+    })?;
+    let close = schedule
+        .close(moment.day())
+        .map_err(|detail| FetchError::BodyNotUnderstood { detail })?;
+    Ok((moment.minute_of_day() >= u32::from(close))
+        .then_some(crate::session::DropReason::AtOrAfterSessionClose))
+}
+
+/// Land continuous candles against the same dated cash schedule used by the
+/// request audit and derived-timeframe fold. Unknown eligibility refuses before
+/// any caller can append these rows.
+///
+/// # Errors
+/// Returns timestamp, price, or unresolved cash-session errors.
+pub fn land_with_cash_schedule(
+    raw: &RawWindow,
+    request: &BarRequest,
+    encoding: TimestampEncoding,
+    scale: PriceScale,
+    cash_schedule: Option<&crate::cash_auction::Schedule>,
+) -> Result<Landed, FetchError> {
     let mut bars = Vec::with_capacity(raw.rows.len());
     let mut census = DropCensus::default();
     let mut outside_session = 0u32;
@@ -747,7 +794,7 @@ pub fn land(
         // not one. A drop is a bar this engine DECLINED; a timestamp it could
         // not read is the vendor or the decoder being wrong, and those are
         // different answers.
-        let verdict = request
+        let mut verdict = request
             .window
             // THE VENUE DECIDES THE HOURS, and the listing decides the venue.
             // NSE's 2026-08-03 CAS change put the index close at 15:15 and left
@@ -763,6 +810,9 @@ pub fn land(
                 raw: row.timestamp,
                 why,
             })?;
+        if verdict.is_none() {
+            verdict = cash_close_verdict(epoch_utc, request, cash_schedule)?;
+        }
         // A SESSION-HOURS VERDICT IS COUNTED AND KEPT. A WINDOW ONE IS DROPPED.
         //
         // Operator's rule, 2026-08-19: **whatever the vendor provides, we

@@ -3046,6 +3046,10 @@ fn folder_input(suggestions: &[String]) -> String {
         let _ = write!(out, "<option value=\"{}\">", escape(f));
     }
     out.push_str("</datalist>");
+    if !archive_suggestions_enabled() {
+        out.push_str("<p class=\"fine\">Automatic CSV-folder suggestions are disabled for this process (BRUTEX_ARCHIVE_SUGGESTIONS=0). No discovery scan was performed; explicit folder imports remain available.</p>");
+        return out;
+    }
     let _ = write!(
         out,
         "<p class=\"fine\">{} folder(s) holding CSVs found under \
@@ -3082,6 +3086,18 @@ const MAX_FOLDER_SUGGESTIONS: usize = 60;
 /// `docs/06-limits.md` §34 records the cost and what is not bounded about it.
 #[must_use]
 pub fn folder_suggestions() -> Vec<String> {
+    folders_when(archive_suggestions_enabled(), discover_folders)
+}
+
+fn archive_suggestions_enabled() -> bool {
+    std::env::var_os("BRUTEX_ARCHIVE_SUGGESTIONS").as_deref() != Some(std::ffi::OsStr::new("0"))
+}
+
+fn folders_when(enabled: bool, discover: impl FnOnce() -> Vec<String>) -> Vec<String> {
+    if enabled { discover() } else { Vec::new() }
+}
+
+fn discover_folders() -> Vec<String> {
     let mut found: Vec<String> = Vec::new();
     if let Some(home) = std::env::var_os("HOME") {
         let home = std::path::PathBuf::from(home);
@@ -3095,6 +3111,23 @@ pub fn folder_suggestions() -> Vec<String> {
     found.sort();
     found.dedup();
     found
+}
+
+#[test]
+fn disabled_archive_suggestions_never_enter_the_filesystem_discovery() {
+    let mut called = false;
+    let absent = folders_when(false, || {
+        called = true;
+        vec!["unexpected".to_owned()]
+    });
+    assert!(!called);
+    assert!(absent.is_empty());
+    let found = folders_when(true, || {
+        called = true;
+        vec!["fixture".to_owned()]
+    });
+    assert!(called);
+    assert_eq!(found, vec!["fixture".to_owned()]);
 }
 
 /// Directories at or under `dir` that directly contain a `.csv`.

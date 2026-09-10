@@ -10,12 +10,11 @@
  * table. A fifth feed appears here the day its row exists — nothing in this
  * file names a vendor.
  */
-import { survey, surveyStores } from '$lib/store.svelte.js';
 // A REQUEST THAT CANNOT END IS A SPINNER THAT LIES. `ask` is `fetch` with a
 // ceiling; see `$lib/ask.js` for why the wrapper exists rather than a signal
 // threaded through every call site.
 import { ask } from '$lib/ask.js';
-import { pickDefaultFeed } from '$lib/pick.js';
+import { createFeedStartup } from '$lib/feed-startup.js';
 
 /**
  * ONE FEED, AS `/feeds.json` SENDS IT.
@@ -101,73 +100,13 @@ import { pickDefaultFeed } from '$lib/pick.js';
 /** @type {{ all: Feed[], active: string | null, error: string | null }} */
 export const feeds = $state({ all: [], active: null, error: null });
 
-/* ONE FLIGHT, AND ONE ANSWER PER PAGE LIFE.
- *
- * `/feeds.json` carries no parameter — every call asks the identical question —
- * and it was answered FIVE times on a single load, measured with
- * `performance.getEntriesByType`. Two call sites in the layout and a navigation
- * apiece is all it takes, because nothing here checked whether the answer was
- * already in hand or already on its way.
- *
- * `flight` de-duplicates the concurrent case; the `feeds.all.length` check
- * de-duplicates the sequential one. `force` is the escape, and `retryFeeds` in
- * the layout is why it exists — a retry after an error must actually re-ask.
- *
- * The same shape `surveyStores` already uses in `store.svelte.js`; this file
- * simply never got it. */
-/** @type {Promise<void> | null} */
-let flight = null;
+// Descriptors validate a saved preference. First visits use only census HEAD
+// headers to retain the data-backed default; full inventories are requested by
+// pages that need them. Late summaries cannot replace an explicit selection.
+const startup = createFeedStartup(feeds, ask, () => globalThis.localStorage);
 
 /** @param {boolean} [force] */
-export async function loadFeeds(force = false) {
-  if (!force) {
-    if (flight) return flight;
-    if (feeds.all.length > 0 && !feeds.error) return;
-  }
-  flight = loadFeedsNow();
-  try {
-    await flight;
-  } finally {
-    flight = null;
-  }
-}
+export const loadFeeds = (force = false) => startup.load(force);
 
-async function loadFeedsNow() {
-  try {
-    const r = await ask('/feeds.json');
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    feeds.all = await r.json();
-    // THE FEED THAT ACTUALLY HOLDS DATA, preferred over the one that merely
-    // could.
-    //
-    // "first ready feed" opened every page on Dhan — ready because a broker's
-    // credential proves entitlement, and holding nothing because it had never
-    // pulled. Groww sat one dropdown away with 8,922 bars and the operator saw
-    // an empty DB, an empty chart and "With data 0", which reads as a broken
-    // build rather than as an unselected feed.
-    //
-    // So the store decides the default and the credential is the fallback. One
-    // pass, and it answers the only question worth asking on load: which of
-    // these can show me something right now.
-    //
-    // THE PASS IS `$lib/store.svelte.js`'s AND NOT THIS FILE'S. It used to be
-    // one of SIX independent reads of `/store.json` across the product, and one
-    // of TWO that asked this same across-every-feed question — `/db` asked it
-    // again, on its own clock, to name where the rows are when the selected
-    // feed is empty. Two folds of one answer is how two surfaces come to
-    // disagree about the same disk. `surveyStores` folds it once and stamps it
-    // with the feed list it answered for; both readers read that.
-    await surveyStores(feeds.all);
-    const held = feeds.all.map(
-      (f) => survey.byFeed.get(f.wire) ?? { wire: f.wire, ready: f.ready, bars: 0 }
-    );
-    // THE RULE ITSELF IS IN `$lib/pick.js` so a test can drive it. This module
-    // imports `$lib/ask.js`, which node cannot resolve, so the choice that
-    // decides which feed every page opens on was unreachable from `node --test`.
-    feeds.active = pickDefaultFeed(held);
-  } catch (why) {
-    // LOUD, NOT SILENT. A feed list that quietly fails leaves a picker with no
-    // options and no reason, which is the shape CLAUDE.md section 4 bans.
-    feeds.error = String(why);
-  }
-}
+/** @param {string | null} wire The explicit choice, including clearing it. */
+export const selectFeed = (wire) => startup.select(wire);

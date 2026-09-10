@@ -33,7 +33,7 @@ test('an ordinary answer passes straight through', async () => {
   assert.equal(answer.status, 200);
 });
 
-test('a request that never settles is given up, and the message names why', async () => {
+test('a timeout names the missed deadline without inventing a server diagnosis', async () => {
   const err = await withFetch(
     /** @type {any} */ (
       (/** @type {any} */ _url, /** @type {RequestInit} */ init) =>
@@ -45,8 +45,9 @@ test('a request that never settles is given up, and the message names why', asyn
   );
   assert.ok(err instanceof Error, 'it throws');
   assert.match(err.message, /\/bars\.json/, 'the URL is named');
-  assert.match(err.message, /given up rather than left waiting/, 'the choice is named');
-  assert.match(err.message, /wedged/, 'and it separates wedged from slow');
+  assert.match(err.message, /timed out and was cancelled/, 'the measured outcome is named');
+  assert.match(err.message, /does not identify.*browser, connection, or server/, 'the cause is left unknown');
+  assert.doesNotMatch(err.message, /accepted the connection|wedged|store is locked/, 'a timeout proves none of these');
 });
 
 test("an operator's own cancel is reported as a cancel, not as a timeout", async () => {
@@ -62,7 +63,7 @@ test("an operator's own cancel is reported as a cancel, not as a timeout", async
     () => ask('/pull/spot', { signal: mine.signal }).then(() => null).catch((e) => e)
   );
   assert.match(err.message, /cancelled by the operator/);
-  assert.doesNotMatch(err.message, /given up rather than left waiting/);
+  assert.doesNotMatch(err.message, /timed out and was cancelled/);
 });
 
 test('the ceiling is a local-read ceiling, not a vendor one', () => {

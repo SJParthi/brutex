@@ -196,6 +196,28 @@ fn emit(
     mask
 }
 
+/// Availability uses the same integer level and vocabulary band admission as
+/// truth. Testing the level against itself certifies a Boolean answer only
+/// when the range is positive, the tolerance family is correct and the rung
+/// fits the price type. An unavailable level can never make NOT a signal.
+fn known_ladder(
+    mut known: ConditionMask,
+    rungs: &[(i32, u16)],
+    anchor: i64,
+    range: i64,
+    direction: Direction,
+    tolerance: Tolerance,
+) -> ConditionMask {
+    for (p, index) in rungs {
+        let Some(level) = rung_level(anchor, *p, range, direction) else {
+            continue;
+        };
+        known =
+            vocab::table::set_near(known, *index, tolerance, level, level, range).unwrap_or(known);
+    }
+    known
+}
+
 /// Both previous-day ladders, for one closing price. 16 positions.
 ///
 /// **Sixteen, and this said fifteen.** The bullish ladder carries seven rungs, not
@@ -228,6 +250,28 @@ pub fn prev_day_bits(levels: &DailyLevels, close: i64, tolerance: Tolerance) -> 
         range,
         Direction::Up,
         close,
+        tolerance,
+    )
+}
+
+/// Which previous-day Fibonacci predicates have a sound true or false answer.
+/// The same completed daily reference and 16 checked rungs serve both paths.
+pub(crate) fn prev_day_known(levels: &DailyLevels, tolerance: Tolerance) -> ConditionMask {
+    let range = levels.pdh().saturating_sub(levels.pdl());
+    let known = known_ladder(
+        ConditionMask::ZERO,
+        &PREV_DAY_DOWN,
+        levels.pdh(),
+        range,
+        Direction::Down,
+        tolerance,
+    );
+    known_ladder(
+        known,
+        &PREV_DAY_UP,
+        levels.pdl(),
+        range,
+        Direction::Up,
         tolerance,
     )
 }
@@ -366,6 +410,25 @@ impl Prev5 {
         };
         emit(mask, &PREV5_UP, low, range, Direction::Up, close, tolerance)
     }
+
+    /// Availability for the same five completed sessions and checked span.
+    /// A cold, nonpositive or overflowing reference remains unknown.
+    pub(crate) fn known(&self, tolerance: Tolerance) -> ConditionMask {
+        let Some((high, low)) = self.extremes() else {
+            return ConditionMask::ZERO;
+        };
+        let Some(range) = high.checked_sub(low) else {
+            return ConditionMask::ZERO;
+        };
+        known_ladder(
+            ConditionMask::ZERO,
+            &PREV5_UP,
+            low,
+            range,
+            Direction::Up,
+            tolerance,
+        )
+    }
 }
 
 /// The length is asserted against the three ladders rather than written twice.
@@ -414,6 +477,28 @@ mod tests {
 
     fn levels(h: i64, l: i64, c: i64) -> DailyLevels {
         DailyLevels::from_previous_session(h, l, c).expect("this fixture session is sane")
+    }
+
+    #[test]
+    fn known_five_session_span_refuses_overflow_and_nonpositive_ranges() {
+        let mut overflow = Prev5::new();
+        overflow.push_completed_session(i64::MAX, i64::MAX);
+        for _ in 0..4 {
+            overflow.push_completed_session(i64::MIN, i64::MIN);
+        }
+        assert_eq!(overflow.known(tol()), ConditionMask::ZERO);
+        for (high, low) in [(100, 100), (99, 100)] {
+            let mut ring = Prev5::new();
+            for _ in 0..5 {
+                ring.push_completed_session(high, low);
+            }
+            assert_eq!(ring.known(tol()), ConditionMask::ZERO);
+        }
+        let mut valid = Prev5::new();
+        for _ in 0..5 {
+            valid.push_completed_session(1_000, 100);
+        }
+        assert_eq!(valid.known(tol()).popcount(), 11);
     }
 
     /// Every position is live, is `Kind::Near`, and appears exactly once.

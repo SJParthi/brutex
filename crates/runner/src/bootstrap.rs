@@ -1307,7 +1307,7 @@ pub fn romano_wolf_adjusted_p_values_v1(
     })
 }
 
-fn romano_wolf_family_digest_v1(
+pub(crate) fn romano_wolf_family_digest_v1(
     returns: &[Vec<i64>],
     draws: usize,
     seed: u64,
@@ -1448,7 +1448,7 @@ fn aligned(returns: &[Vec<i64>]) -> Option<usize> {
 }
 
 /// Mean and standard error of one series.
-fn summarise(series: &[i64]) -> Performance {
+pub(crate) fn summarise(series: &[i64]) -> Performance {
     let n = series.len();
     if n == 0 {
         return Performance::default();
@@ -1500,7 +1500,7 @@ fn summarise(series: &[i64]) -> Performance {
 /// "not an infinitely strong result -- it is a degenerate sample, and reporting
 /// it as zero refuses to dress one up as the other." This is that same answer.
 /// A degenerate sample is not evidence, so it contributes none.
-fn studentized(statistic: f64, standard_error: f64) -> f64 {
+pub(crate) fn studentized(statistic: f64, standard_error: f64) -> f64 {
     if standard_error > 0.0 {
         statistic / standard_error
     } else {

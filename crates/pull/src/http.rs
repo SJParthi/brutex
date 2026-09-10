@@ -2405,6 +2405,37 @@ impl HttpSource {
     }
 }
 
+/// A successful discovery document must be bounded and preserve exact UTF-8.
+async fn strict_discovery_body(
+    answer: &mut reqwest::Response,
+    cap: usize,
+) -> Result<String, crate::chain::Refusal> {
+    use crate::chain::Refusal;
+    let status = answer.status().as_u16();
+    if answer.content_length().is_some_and(|len| len > cap as u64) {
+        return Err(Refusal::answered(
+            status,
+            format!("body exceeds the {cap}-byte ceiling"),
+        ));
+    }
+    let mut held = Vec::new();
+    while let Some(chunk) = answer
+        .chunk()
+        .await
+        .map_err(|why| Refusal::transport(format!("body read failed: {why}")))?
+    {
+        if held.len().saturating_add(chunk.len()) > cap {
+            return Err(Refusal::answered(
+                status,
+                format!("body exceeds the {cap}-byte ceiling"),
+            ));
+        }
+        held.extend_from_slice(&chunk);
+    }
+    String::from_utf8(held)
+        .map_err(|why| Refusal::answered(status, format!("body is not UTF-8: {why}")))
+}
+
 impl crate::chain::Discovery for HttpSource {
     async fn get(&self, url: &str) -> Result<String, crate::chain::Refusal> {
         use crate::chain::Refusal;
@@ -2419,7 +2450,7 @@ impl crate::chain::Discovery for HttpSource {
         // a dropped socket, a DNS failure or a timeout, and `Refusal::transport`
         // is the arm that says so — the caller's retry ladder sizes a blip
         // differently from a backend that answered 500.
-        let answer = builder
+        let mut answer = builder
             .header(name, value)
             .send()
             .await
@@ -2455,10 +2486,7 @@ impl crate::chain::Discovery for HttpSource {
         // THE BODY READ IS A TRANSPORT FAILURE, NOT A REFUSAL. The status was
         // already a success; what failed is the socket delivering the rest of
         // it, which is a blip and is ladder-eligible as one.
-        let body = answer
-            .text()
-            .await
-            .map_err(|why| Refusal::transport(format!("{why}")))?;
+        let body = strict_discovery_body(&mut answer, crate::masters::MAX_BODY_BYTES).await?;
         // THE DISCOVERY CALLS ARE THE ONES WITH NO FIXTURE AT ALL. Groww's
         // expiries and contracts answers are parsed by field names taken from
         // its documentation and never from an observed response.
@@ -3194,6 +3222,53 @@ fn local_seconds(text: &str) -> Option<i64> {
               keep panics out of the crate rather than out of its tests"
 )]
 mod tests {
+    #[test]
+    fn discovery_body_is_bounded_strict_and_distinguishes_truncation() {
+        use std::io::{Read as _, Write as _};
+        type Case<'a> = (&'a str, &'a [u8], usize, Option<u16>, &'a str);
+        let cases: &[Case<'_>] = &[
+            ("Content-Length: 4\r\n", b"okay", 4, None, "okay"),
+            ("Content-Length: 5\r\n", b"", 4, Some(200), "ceiling"),
+            ("", b"12345", 4, Some(200), "ceiling"),
+            ("Content-Length: 1\r\n", &[0xff], 4, Some(200), "UTF-8"),
+            ("Content-Length: 4\r\n", b"ab", 4, None, "body read failed"),
+        ];
+        for &(headers, bytes, cap, status, expected) in cases {
+            let socket = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback");
+            let address = socket.local_addr().expect("address");
+            let body = bytes.to_vec();
+            let head = format!("HTTP/1.1 200 OK\r\n{headers}Connection: close\r\n\r\n");
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = socket.accept().expect("request");
+                let mut request = [0; 4096];
+                let received = stream.read(&mut request).expect("headers");
+                assert!(received > 0, "the client sent request bytes");
+                stream.write_all(head.as_bytes()).expect("response headers");
+                let _ = stream.write_all(&body);
+            });
+            let result = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime")
+                .block_on(async {
+                    let mut answer = super::pooled_client()
+                        .expect("client")
+                        .get(format!("http://{address}"))
+                        .send()
+                        .await
+                        .expect("response");
+                    super::strict_discovery_body(&mut answer, cap).await
+                });
+            server.join().expect("fixture server");
+            if expected == "okay" {
+                assert_eq!(result.expect("exact cap is allowed"), expected);
+            } else {
+                let refusal = result.expect_err("invalid body");
+                assert_eq!(refusal.status, status);
+                assert!(refusal.detail.contains(expected), "{}", refusal.detail);
+            }
+        }
+    }
 
     /// A descriptor's budget reaches the source that enforces it.
     ///

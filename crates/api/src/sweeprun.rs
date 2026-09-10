@@ -27,16 +27,11 @@
 //!
 //! # ONE WRITER TO THE LEDGER, AND THIS IS THE SECOND
 //!
-//! `cli::results` is append-only with no file lock: it seeks to the end and
-//! writes. That is safe while exactly one process appends. This module makes
-//! the server a second appender, so a browser-started sweep finishing at the
-//! same moment as a hand-run `cli` can interleave two records.
-//!
-//! **The slot below does not prevent that** — it is one server's slot, and the
-//! terminal does not consult it. What it prevents is two sweeps from THIS
-//! process. The cross-process case is named in `docs/06-limits.md` rather than
-//! papered over, because a lock file is a store-format change and belongs with
-//! the crate that owns the format.
+//! Result appends use file locks, and the in-process slot excludes a second
+//! browser command. `cli::execution_lease` now also holds one store-scoped OS
+//! lease throughout each cooperating CLI/HTTP command and its terminal audit.
+//! Historical telemetry remains outcome evidence; it does not own that lease.
+//! Older binaries and callers bypassing these entry points do not participate.
 
 use std::fmt::Write as _;
 
@@ -111,6 +106,10 @@ pub struct Progress {
     pub report: Option<String>,
     /// Why it could not run, when that is the answer.
     pub refusal: Option<String>,
+    /// Exact declared Boolean request and journal observations, when applicable.
+    pub boolean_search: Option<Box<crate::booleanlaunch::Status>>,
+    /// Additive single-stop request and pinned journal progress, when applicable.
+    pub index_stop: Option<Box<crate::indexstoplaunch::Status>>,
 }
 
 impl Progress {
@@ -142,6 +141,8 @@ impl Progress {
             finished_micros: None,
             report: None,
             refusal: None,
+            boolean_search: None,
+            index_stop: None,
         }
     }
 
@@ -166,7 +167,7 @@ impl Progress {
         // FIRST, because it decides how every field after it should be read —
         // `support_ppm` is a fixed threshold on a sweep and the ceiling a walk
         // STARTED from on a descent.
-        let _ = write!(out, r#""kind":"{}""#, self.kind.word());
+        let _ = write!(out, r#""kind":"{}","where":"browser""#, self.kind.word());
         let _ = write!(out, r#","feed":{}"#, crate::render::json_string(&self.feed));
         let _ = write!(
             out,
@@ -185,7 +186,38 @@ impl Progress {
         }
         let _ = write!(out, r#","started_micros":{}"#, self.started_micros);
         let _ = write!(out, r#","attempt":{}"#, self.attempt);
+        // Preserve the exact u64 correlation key beyond JavaScript's safe
+        // integer range. The numeric field remains for existing readers.
+        let _ = write!(out, r#","attempt_key":"{}""#, self.attempt);
         let _ = write!(out, r#","in_flight":{}"#, self.in_flight());
+        if let Some(search) = self.boolean_search.as_ref()
+            && let Some(fields) = search.fields().as_object()
+        {
+            for (key, value) in fields {
+                let _ = write!(out, ",{}:{value}", crate::render::json_string(key));
+            }
+        }
+        if let Some(search) = self.index_stop.as_ref() {
+            let mut fields = search.fields();
+            if let Some(object) = fields.as_object_mut() {
+                let elapsed = self
+                    .finished_micros
+                    .unwrap_or_else(now_micros)
+                    .checked_sub(self.started_micros)
+                    .and_then(|value| u64::try_from(value).ok());
+                object.insert(
+                    "elapsed_micros".into(),
+                    serde_json::json!(elapsed.map(|value| value.to_string())),
+                );
+                object.insert("elapsed_basis".into(), serde_json::json!("wall-clock"));
+            }
+            let _ = write!(
+                out,
+                r#","command":{},"index_stop":{}"#,
+                crate::render::json_string(crate::indexstoplaunch::COMMAND),
+                fields
+            );
+        }
         match self.finished_micros {
             Some(at) => {
                 let _ = write!(out, r#","finished_micros":{at}"#);
@@ -1034,16 +1066,65 @@ struct TaskFinisher {
     site: crate::server::Loaded,
     /// False only after this task installed its normal final value.
     armed: bool,
+    /// Durable invocation ownership travels with the queued/active closure.
+    audit: Option<cli::operation_audit::Attempt>,
+    /// Excludes cooperating CLI/HTTP writers until this guard is dropped.
+    lease: Option<cli::execution_lease::Lease>,
 }
 
 impl TaskFinisher {
     /// Arms one guard for the already-claimed slot.
+    #[cfg(test)]
     fn new(site: crate::server::Loaded) -> Self {
-        Self { site, armed: true }
+        Self {
+            site,
+            armed: true,
+            audit: None,
+            lease: None,
+        }
+    }
+
+    fn audited(site: crate::server::Loaded, audit: cli::operation_audit::Attempt) -> Self {
+        Self {
+            site,
+            armed: true,
+            audit: Some(audit),
+            lease: None,
+        }
+    }
+
+    fn with_lease(mut self, lease: cli::execution_lease::Lease) -> Self {
+        self.lease = Some(lease);
+        self
+    }
+
+    fn enter<T>(&self, work: impl FnOnce() -> T) -> T {
+        match self.audit.as_ref() {
+            Some(audit) => audit.enter(work),
+            None => work(),
+        }
     }
 
     /// Installs a normal result and prevents `Drop` from painting over it.
-    fn finish(mut self, done: Progress) {
+    fn finish(mut self, mut done: Progress) {
+        use cli::operation_audit::Phase;
+        let phase = match completion_audit(&done).outcome {
+            "report" => Phase::Completed,
+            "refused" => Phase::Refused,
+            _ => Phase::Failed,
+        };
+        if let Some(audit) = self.audit.as_mut()
+            && let Err(why) = audit.finish(phase, 0)
+        {
+            let original = done.refusal.take().or_else(|| done.report.take());
+            done.report = None;
+            done.refusal = Some(format!(
+                "refused: required terminal invocation audit is unconfirmed: {why}. Existing computation evidence was not removed.\n{}",
+                original
+                    .as_deref()
+                    .unwrap_or("No final report was returned.")
+            ));
+        }
         let mut slot = self
             .site
             .sweep
@@ -1059,6 +1140,14 @@ impl Drop for TaskFinisher {
         if !self.armed {
             return;
         }
+        let audit_failure = self.audit.as_mut().and_then(|audit| {
+            let phase = if std::thread::panicking() {
+                cli::operation_audit::Phase::Failed
+            } else {
+                cli::operation_audit::Phase::Cancelled
+            };
+            audit.finish(phase, 0).err()
+        });
         let mut slot = self
             .site
             .sweep
@@ -1069,7 +1158,7 @@ impl Drop for TaskFinisher {
         };
         progress.finished_micros = Some(now_micros());
         progress.report = None;
-        progress.refusal = Some(ABNORMAL_END.to_owned());
+        progress.refusal = Some(audit_failure.map_or_else(|| ABNORMAL_END.to_owned(), |why| format!("{ABNORMAL_END}\nThe required terminal invocation audit is also unconfirmed: {why}")));
     }
 }
 
@@ -1146,9 +1235,13 @@ fn completion_audit(progress: &Progress) -> CompletionAudit<'_> {
 ///
 /// Kept as one production emit site so all three entry points use the same
 /// vocabulary and the emit-site census can drive it without running a sweep.
-pub(crate) fn emit_completion(progress: &Progress, operation: &str, elapsed_micros: u64) {
+pub(crate) fn emit_completion(
+    progress: &Progress,
+    operation: &str,
+    elapsed_micros: u64,
+) -> telemetry::Emitted {
     let audit = completion_audit(progress);
-    let _outcome = telemetry::emit_for_run(
+    telemetry::emit_for_run(
         progress.attempt,
         &telemetry::Event::new(audit.level, "api.sweep", "an engine task finished")
             .with("attempt", progress.attempt)
@@ -1158,7 +1251,7 @@ pub(crate) fn emit_completion(progress: &Progress, operation: &str, elapsed_micr
             .with("outcome", audit.outcome)
             .with("why", audit.why)
             .with("elapsed_micros", elapsed_micros),
-    );
+    )
 }
 
 /// Runs the sweep and records what it produced.
@@ -1355,24 +1448,23 @@ pub fn now_micros() -> i64 {
 
 /// Reserves one exact attempt token.
 ///
-/// The installed sink owns the durable sequence space, so a restart resumes
-/// above every attempt still retained in the log. There is deliberately no
-/// process-local fallback: an attempt with no log cannot satisfy the exact
-/// marker contract the live monitor requires.
-fn reserve_attempt() -> Result<u64, Refusal> {
-    let sink = telemetry::global().ok_or_else(|| {
-        Refusal::Unobservable(
-            "no telemetry sink is installed, so no exact auditable attempt can be reserved. \
-             No engine work was started."
-                .to_owned(),
-        )
-    })?;
-    sink.reserve_run_id().ok_or_else(|| {
-        Refusal::Unobservable(
-            "the exact telemetry attempt id space is exhausted, so this run cannot be \
-             separated from earlier log records. No engine work was started."
-                .to_owned(),
-        )
+/// The append-only invocation index owns the durable sequence space, so a
+/// restart cannot reuse an earlier attempt ID. This reservation is separate
+/// from rotating telemetry and from computation identity. A failed required
+/// audit refuses before an engine task can be queued.
+fn reserve_invocation(
+    site: &crate::server::Loaded,
+    label: &str,
+) -> Result<cli::operation_audit::Attempt, Refusal> {
+    cli::operation_audit::begin(
+        &site.store_root,
+        cli::operation_audit::Origin::Browser,
+        label,
+    )
+    .map_err(|why| {
+        Refusal::Unobservable(format!(
+            "required durable invocation audit could not start: {why}. No engine work was started."
+        ))
     })
 }
 
@@ -1434,29 +1526,28 @@ fn json_headers() -> JsonHeaders {
 ///
 /// # Cost
 ///
-/// **O(1) on the request path, and the sweep is not on it.** The handler takes
-/// one uncontended lock, reads one `Option`, writes one, and spawns. It does
-/// not touch the store, the ledger or a bar file. The sweep that follows is
-/// the brute force itself — `CLAUDE.md` §6 makes its depth a matter of
-/// extinction rather than a parameter, so its cost is the work, not the route
-/// — and it runs on a blocking thread where it cannot starve a worker.
+/// Admission writes a bounded number of fixed-size audit records on the
+/// shared blocking worker door. File synchronization and lock acquisition
+/// do not have a constant-latency guarantee. No bar or candidate scan runs
+/// on this request path. The sweep runs separately on a blocking thread;
+/// its total work remains proportional to the search it must perform.
 ///
-/// # Why it answers immediately
+/// # Why it answers before the sweep finishes
 ///
-/// A one-day span is 43 ms and a fifteen-minute span at 4.7% support is 390 s
-/// per month. Holding the connection would exceed every proxy timeout in the
-/// path and give the operator a spinner with no way to ask what it was doing.
-/// The page polls [`run_json`] instead, which is one lock take.
-///
-/// **UNVERIFIED as a measurement.** The bound is argued from the
-/// shape of the code and no bench in this workspace times it.
-/// `CLAUDE.md` §3 rule 6: a structural argument is not a
-/// measurement, however sound it is.
+/// Once required admission barriers succeed, the response identifies the
+/// detached task. The page polls [`run_json`] for that exact attempt. A
+/// process restart can expose the persisted outcome, but cannot reconstruct
+/// lost report prose or establish that an unconfirmed task is still running.
 pub async fn run(
     axum::extract::State(site): axum::extract::State<crate::server::Loaded>,
     body: String,
 ) -> (axum::http::StatusCode, JsonHeaders, String) {
-    run_with(&site, &body, cli::commit_stamp())
+    match crate::detail::run(move || run_with(&site, &body, cli::commit_stamp())).await {
+        Ok(response) => response,
+        Err(why) => refused(&Refusal::Unobservable(format!(
+            "bounded sweep admission is unavailable: {why:?}; no engine command was dispatched"
+        ))),
+    }
 }
 
 /// One refusal, as the answer this route gives.
@@ -1473,6 +1564,51 @@ fn refused(why: &Refusal) -> (axum::http::StatusCode, JsonHeaders, String) {
             crate::render::json_string(why.why())
         ),
     )
+}
+
+/// The same physical store is claimed before the start audit and before spawn.
+/// A positive GET snapshot never substitutes for this atomic POST admission.
+fn claim_execution(
+    site: &crate::server::Loaded,
+    uses_configured_store: bool,
+) -> Result<cli::execution_lease::Lease, Refusal> {
+    if uses_configured_store {
+        let configured = cli::preflight_store_root().map_err(Refusal::Unobservable)?;
+        require_same_execution_store(&site.store_root, &configured)?;
+    }
+    let lease = cli::execution_lease::Lease::acquire(&site.store_root).map_err(|why| {
+        if matches!(why, cli::execution_lease::Refusal::Busy) {
+            Refusal::Busy(why.to_string())
+        } else {
+            Refusal::Unobservable(why.to_string())
+        }
+    })?;
+    if let Some(dir) = crate::logs::cli_log_dir() {
+        let observed = observe_elsewhere(&dir, now_micros() / 1_000);
+        if !observed.launch_clear {
+            return Err(Refusal::Unobservable(
+                "the external command evidence still reports activity or is damaged/unconfirmed; inspect the execution-status note before starting another run".to_owned(),
+            ));
+        }
+    }
+    Ok(lease)
+}
+
+/// Ordinary library calls resolve their process store internally; their lease
+/// and API evidence must name that same canonical directory before dispatch.
+fn require_same_execution_store(
+    site_root: &std::path::Path,
+    configured_root: &std::path::Path,
+) -> Result<(), Refusal> {
+    let canonical = |path: &std::path::Path| {
+        std::fs::canonicalize(path).map_err(|why| {
+            Refusal::Unobservable(format!("execution store cannot be canonicalized: {why}"))
+        })
+    };
+    if canonical(site_root)? != canonical(configured_root)? {
+        return Err(Refusal::Unobservable("the API evidence store differs from the CLI execution store; no lease was claimed and no command was dispatched".to_owned()));
+    }
+    Ok(())
 }
 
 /// [`run`], with the build's commit stamp passed in.
@@ -1525,7 +1661,7 @@ pub(crate) fn run_with(
     // THE SLOT IS CLAIMED UNDER THE LOCK AND THE WORK STARTS OUTSIDE IT.
     // Holding a std mutex across an await is the deadlock this pattern exists
     // to avoid, so the guard is dropped before anything is spawned.
-    let (started, attempt) = {
+    let (started, attempt, audit, lease) = {
         let mut held = match site.sweep.lock() {
             Ok(held) => held,
             Err(poisoned) => poisoned.into_inner(),
@@ -1543,10 +1679,15 @@ pub(crate) fn run_with(
             );
             return refused(&Refusal::Busy(why));
         }
-        let attempt = match reserve_attempt() {
-            Ok(attempt) => attempt,
+        let lease = match claim_execution(site, true) {
+            Ok(lease) => lease,
             Err(why) => return refused(&why),
         };
+        let mut audit = match reserve_invocation(site, "sweep") {
+            Ok(audit) => audit,
+            Err(why) => return refused(&why),
+        };
+        let attempt = audit.id();
         let started = now_micros();
         let accepted = Progress::started(
             &asked.feed,
@@ -1558,10 +1699,11 @@ pub(crate) fn run_with(
             attempt,
         );
         if let Some(why) = marker_refusal(emit_attempt_started(&accepted)) {
+            let _terminal = audit.finish(cli::operation_audit::Phase::Refused, 0);
             return refused(&why);
         }
         *held = Some(accepted.clone());
-        (started, attempt)
+        (started, attempt, audit, lease)
     };
 
     // ONE EVENT PER RUN, NOT ONE PER BAR. Gate 17 silences `vocab engine
@@ -1590,11 +1732,11 @@ pub(crate) fn run_with(
     // ARMED BEFORE SPAWN. If Tokio drops a queued closure during shutdown, the
     // captured guard still releases the slot even though the closure body never
     // begins. A guard constructed inside the closure would miss that window.
-    let guard = TaskFinisher::new(std::sync::Arc::clone(site));
+    let guard = TaskFinisher::audited(std::sync::Arc::clone(site), audit).with_lease(lease);
     tokio::task::spawn_blocking(move || {
-        let finished = conduct(&asked, started, attempt);
+        let finished = guard.enter(|| conduct(&asked, started, attempt));
         let elapsed = now_micros().saturating_sub(started);
-        emit_completion(&finished, "sweep", elapsed.max(0).unsigned_abs());
+        let _outcome = emit_completion(&finished, "sweep", elapsed.max(0).unsigned_abs());
         let mut done = finished;
         done.finished_micros = Some(now_micros());
         guard.finish(done);
@@ -1603,7 +1745,7 @@ pub(crate) fn run_with(
     (
         axum::http::StatusCode::ACCEPTED,
         json_headers(),
-        r#"{"accepted":true,"refusal":null}"#.to_owned(),
+        command_acceptance(attempt),
     )
 }
 
@@ -1637,7 +1779,12 @@ pub async fn descend(
     axum::extract::State(site): axum::extract::State<crate::server::Loaded>,
     body: String,
 ) -> (axum::http::StatusCode, JsonHeaders, String) {
-    descend_with(&site, &body, cli::commit_stamp())
+    match crate::detail::run(move || descend_with(&site, &body, cli::commit_stamp())).await {
+        Ok(response) => response,
+        Err(why) => refused(&Refusal::Unobservable(format!(
+            "bounded descent admission is unavailable: {why:?}; no engine command was dispatched"
+        ))),
+    }
 }
 
 /// [`descend`], with the build's commit stamp passed in.
@@ -1669,7 +1816,7 @@ pub(crate) fn descend_with(
         return refused(&why);
     }
 
-    let (started, attempt) = {
+    let (started, attempt, audit, lease) = {
         let mut held = match site.sweep.lock() {
             Ok(held) => held,
             Err(poisoned) => poisoned.into_inner(),
@@ -1682,10 +1829,15 @@ pub(crate) fn descend_with(
                 .to_owned();
             return refused(&Refusal::Busy(why));
         }
-        let attempt = match reserve_attempt() {
-            Ok(attempt) => attempt,
+        let lease = match claim_execution(site, true) {
+            Ok(lease) => lease,
             Err(why) => return refused(&why),
         };
+        let mut audit = match reserve_invocation(site, "descent") {
+            Ok(audit) => audit,
+            Err(why) => return refused(&why),
+        };
+        let attempt = audit.id();
         let started = now_micros();
         let accepted = Progress::started(
             &asked.feed,
@@ -1698,10 +1850,11 @@ pub(crate) fn descend_with(
         )
         .of_kind(Kind::Descent);
         if let Some(why) = marker_refusal(emit_attempt_started(&accepted)) {
+            let _terminal = audit.finish(cli::operation_audit::Phase::Refused, 0);
             return refused(&why);
         }
         *held = Some(accepted.clone());
-        (started, attempt)
+        (started, attempt, audit, lease)
     };
 
     let _ = telemetry::emit_if!(
@@ -1715,11 +1868,11 @@ pub(crate) fn descend_with(
         "attempt" => telemetry::Value::Uint(attempt),
     );
 
-    let guard = TaskFinisher::new(std::sync::Arc::clone(site));
+    let guard = TaskFinisher::audited(std::sync::Arc::clone(site), audit).with_lease(lease);
     tokio::task::spawn_blocking(move || {
-        let finished = conduct_descent(&asked, started, attempt);
+        let finished = guard.enter(|| conduct_descent(&asked, started, attempt));
         let elapsed = now_micros().saturating_sub(started);
-        emit_completion(&finished, "descent", elapsed.max(0).unsigned_abs());
+        let _outcome = emit_completion(&finished, "descent", elapsed.max(0).unsigned_abs());
         let mut done = finished;
         done.finished_micros = Some(now_micros());
         guard.finish(done);
@@ -1728,49 +1881,212 @@ pub(crate) fn descend_with(
     (
         axum::http::StatusCode::ACCEPTED,
         json_headers(),
-        r#"{"accepted":true,"refusal":null}"#.to_owned(),
+        command_acceptance(attempt),
     )
 }
 
 /// `GET /backtest/run.json` — what the sweep is doing, for the page to poll.
 ///
-/// **O(1).** One lock take and one struct read. It never consults the store,
-/// so an operator refreshing this every second through an hour-long sweep
-/// costs the disk nothing.
-///
-/// **UNVERIFIED as a measurement.** The bound is argued from the
-/// shape of the code and no bench in this workspace times it.
-/// `CLAUDE.md` §3 rule 6: a structural argument is not a
-/// measurement, however sound it is.
+/// An active browser slot is read directly. Otherwise a bounded telemetry tail
+/// is inspected on the shared blocking worker door. The tail costs O(bytes
+/// scanned), up to its stated cap; unreadable evidence is unknown, never idle.
+/// A canonical `?attempt=<u64>` selects only that browser attempt. An absent
+/// local attempt in the durable namespace is looked up on the blocking door;
+/// its saved outcome does not reconstruct report prose or prove liveness.
+/// External activity cannot hide or replace the selected identity.
 pub async fn run_json(
     axum::extract::State(site): axum::extract::State<crate::server::Loaded>,
+    uri: axum::http::Uri,
 ) -> (axum::http::StatusCode, JsonHeaders, String) {
-    let held = match site.sweep.lock() {
-        Ok(held) => held,
-        Err(poisoned) => poisoned.into_inner(),
+    let selected = match requested_attempt(uri.query()) {
+        Ok(selected) => selected,
+        Err(why) => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                json_headers(),
+                browser_attempt_unknown(None, why),
+            );
+        }
     };
-    let body = held.as_ref().map_or_else(
-        // NO SWEEP IN THIS PROCESS IS NOT NO SWEEP. The slot above is one
-        // server's `Mutex`, so it knows only about runs the browser itself
-        // started -- and this module's own header says so: *"the slot below
-        // does not prevent that -- it is one server's slot"*.
-        //
-        // The operator runs long sweeps from the CLI, which cannot reach this
-        // memory. The page then read `"running":null` and drew an idle console
-        // over a machine at 1,300% CPU four hours into a grid. That is the
-        // failure wearing a success's clothes `CLAUDE.md` §4 bans: not a
-        // missing feature, but a POSITIVE statement that nothing is running,
-        // made by a surface that had not looked.
-        //
-        // The store is the shared thing, so the fallback reads it.
-        elsewhere_json,
-        |progress| format!(r#"{{"running":{}}}"#, progress.to_json()),
-    );
-    (axum::http::StatusCode::OK, json_headers(), body)
+    let local = site
+        .sweep
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(attempt) = selected {
+        if local
+            .as_ref()
+            .is_some_and(|progress| progress.attempt == attempt)
+        {
+            return (
+                axum::http::StatusCode::OK,
+                json_headers(),
+                selected_browser_status(local.as_ref(), attempt),
+            );
+        }
+        if attempt <= cli::operation_audit::ID_BASE {
+            return (
+                axum::http::StatusCode::OK,
+                json_headers(),
+                selected_browser_status(None, attempt),
+            );
+        }
+        let root = site.store_root.clone();
+        let observed =
+            crate::detail::run(move || crate::operation_audit::persisted_status(&root, attempt))
+                .await;
+        let (status, body) = match observed {
+            Ok(Ok(Some(body))) => (axum::http::StatusCode::OK, body),
+            Ok(Ok(None)) => (
+                axum::http::StatusCode::OK,
+                selected_browser_status(None, attempt),
+            ),
+            Ok(Err(why)) => (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                browser_attempt_unknown(Some(attempt), &why),
+            ),
+            Err(why) => (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                browser_attempt_unknown(
+                    Some(attempt),
+                    &format!("persistent invocation read unavailable: {why:?}"),
+                ),
+            ),
+        };
+        return (status, json_headers(), body);
+    }
+    if let Some(progress) = local.as_ref().filter(|progress| progress.in_flight()) {
+        return (
+            axum::http::StatusCode::OK,
+            json_headers(),
+            format!(r#"{{"running":{}}}"#, progress.to_json()),
+        );
+    }
+    let dir = crate::logs::cli_log_dir();
+    let root = site.store_root.clone();
+    match crate::detail::run(move || {
+        observed_status_with_admission(&root, local.as_ref(), dir.as_deref(), now_micros() / 1_000)
+    })
+    .await
+    {
+        Ok(body) => (axum::http::StatusCode::OK, json_headers(), body),
+        Err(why) => {
+            let why = format!(
+                "external sweep status is unavailable: {why:?}; no idle or successful completion is inferred"
+            );
+            (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                json_headers(),
+                unknown_status(&why),
+            )
+        }
+    }
 }
 
-/// The answer when nothing is running anywhere this process can see.
-const NO_SWEEP: &str = r#"{"running":null,"why":"no sweep has been started from this console"}"#;
+/// This door accepts one canonical decimal token, not a lossy numeric value or
+/// an ambiguous/duplicated query. An empty query retains the global view.
+fn requested_attempt(query: Option<&str>) -> Result<Option<u64>, &'static str> {
+    let Some(query) = query.filter(|query| !query.is_empty()) else {
+        return Ok(None);
+    };
+    let invalid = "attempt status requires exactly one canonical positive u64 decimal query: ?attempt=<token>";
+    if query.len() > 28 {
+        return Err(invalid);
+    }
+    let raw = query.strip_prefix("attempt=").ok_or(invalid)?;
+    if raw.is_empty() || raw.starts_with('0') || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(invalid);
+    }
+    raw.parse::<u64>().map(Some).map_err(|_| invalid)
+}
+
+fn selected_browser_status(local: Option<&Progress>, attempt: u64) -> String {
+    match local.filter(|progress| progress.attempt == attempt) {
+        Some(progress) => format!(r#"{{"running":{}}}"#, progress.to_json()),
+        None => browser_attempt_unknown(
+            Some(attempt),
+            "this exact browser attempt is not retained in this process; no other attempt or external command is a substitute, and no completion is inferred",
+        ),
+    }
+}
+
+fn browser_attempt_unknown(attempt: Option<u64>, why: &str) -> String {
+    serde_json::json!({
+        "running": {
+            "where": "browser",
+            "status": "unknown",
+            "requested_attempt": attempt.map(|value| value.to_string()),
+            "in_flight": false,
+            "why": why,
+            "refusal": null,
+            "report": null,
+        }
+    })
+    .to_string()
+}
+
+fn external_observation(dir: Option<&std::path::Path>, now: i64) -> ExternalObservation {
+    dir.map_or_else(
+        || ExternalObservation { at_millis: None, uncertain: true, in_flight: false, launch_clear: false, body: unknown_status("the CLI telemetry directory is not configured; external execution state is unknown") },
+        |dir| observe_elsewhere(dir, now),
+    )
+}
+
+fn observed_status(local: Option<&Progress>, external: ExternalObservation) -> String {
+    if let Some(local) = local
+        && !external.uncertain
+        && !external.in_flight
+        && external
+            .at_millis
+            .is_none_or(|at| at <= local.finished_micros.unwrap_or(local.started_micros) / 1_000)
+    {
+        return format!(r#"{{"running":{}}}"#, local.to_json());
+    }
+    external.body
+}
+
+fn observed_status_with_admission(
+    root: &std::path::Path,
+    local: Option<&Progress>,
+    dir: Option<&std::path::Path>,
+    now: i64,
+) -> String {
+    let external = external_observation(dir, now);
+    let (available, why) = match cli::execution_lease::probe(root) {
+        Err(why) => (false, why.to_string()),
+        Ok(()) if !external.launch_clear => (false, "External activity or damaged execution evidence remains unresolved. A new sweep has not been admitted.".to_owned()),
+        Ok(()) => (true, "The store execution lease is currently free. A launch rechecks and claims it atomically. Historical status is separate; this does not establish that older binaries or bypassing callers are idle.".to_owned()),
+    };
+    let mut body = observed_status(local, external);
+    // Every local status serializer above produces one complete JSON object.
+    // Add a separate authority; never rewrite unknown history into completion.
+    body.pop();
+    let _ = write!(
+        body,
+        r#","admission":{{"schema_version":1,"scope":"cooperating-store-writers","available":{available},"why":{}}}}}"#,
+        crate::render::json_string(&why)
+    );
+    body
+}
+
+struct ExternalObservation {
+    at_millis: Option<i64>,
+    uncertain: bool,
+    in_flight: bool,
+    /// Healthy history without an unresolved sweep marker does not own a lease.
+    launch_clear: bool,
+    body: String,
+}
+
+fn unknown_status(why: &str) -> String {
+    format!(
+        r#"{{"running":{{"where":"cli","status":"unknown","in_flight":false,"why":{},"refusal":null,"report":null}}}}"#,
+        crate::render::json_string(why)
+    )
+}
+
+/// Absence of retained observations is not a census of every external process.
+const NO_SWEEP: &str = r#"{"running":null,"why":"no local sweep or retained external lifecycle has been observed; this is not proof that every external process is idle"}"#;
 
 /// The target prefix `cli` stamps on the records a sweep emits as it advances.
 ///
@@ -1788,12 +2104,9 @@ const CLI_SWEEP_TARGET: &str = "cli";
 
 /// How long a silence may run before the page should doubt the sweep.
 ///
-/// Reported TO the page rather than applied here, because this cannot tell a
-/// stopped sweep from a stretch that emits nothing, and deciding which would be
-/// inventing the distinction. Fifteen minutes is longer than the widest measured
-/// gap between records on a live `range-all` — the one-minute rung went twenty
-/// minutes silent BEFORE grid progress existed, and ten records per rung is what
-/// closed it.
+/// A start without sufficiently recent correlated activity becomes unknown.
+/// Uncorrelated legacy rung events cannot refresh a different command's token.
+/// This never turns silence into a terminal success or a process-death claim.
 const STALE_AFTER_MILLIS: i64 = 15 * 60 * 1_000;
 
 /// A sweep this process did not start, recovered from the telemetry log.
@@ -1813,66 +2126,151 @@ const STALE_AFTER_MILLIS: i64 = 15 * 60 * 1_000;
 /// chose and cannot read off a log line without inventing them. Naming the
 /// source in `where` lets the page say *"a sweep is running outside this
 /// console"* instead of implying it owns one.
-fn elsewhere_json() -> String {
-    crate::logs::cli_log_dir().map_or_else(
-        || NO_SWEEP.to_owned(),
-        |dir| elsewhere_over(&dir, now_micros() / 1_000),
-    )
+fn status_tail(
+    dir: &std::path::Path,
+    target: &str,
+    run: Option<u64>,
+    limit: usize,
+) -> telemetry::Tail {
+    let query = telemetry::Query::last(limit)
+        .from_target(target.to_owned())
+        .scanning_at_most(crate::logs::SCAN_BYTES);
+    let query = if let Some(run) = run {
+        query.from_run(run)
+    } else {
+        query
+    };
+    telemetry::tail(dir, telemetry::DEFAULT_KEEP_FILES, &query)
 }
 
-/// What [`elsewhere_json`] says, with the directory and the clock handed in.
-///
-/// Split out because the outer function reads `BRUTEX_STORE` through a process
-/// global and stamps the wall clock, and a test that has to set both can only
-/// run alone. This takes them, so the behaviour is testable without a global and
-/// the age arithmetic is checkable against a fixed `now`.
-fn elsewhere_over(dir: &std::path::Path, now_millis: i64) -> String {
-    let tail = telemetry::tail(
-        dir,
-        telemetry::DEFAULT_KEEP_FILES,
-        &telemetry::Query {
-            target: Some(CLI_SWEEP_TARGET.to_owned()),
-            ..telemetry::Query::last(1)
-        },
-    );
-    let Some(last) = tail.records.last() else {
-        return NO_SWEEP.to_owned();
+fn tail_fault(tail: &telemetry::Tail) -> Option<String> {
+    let clipped = tail
+        .records
+        .iter()
+        .any(|row| row.cut || row.dropped_fields != 0);
+    if !tail.errors.is_empty()
+        || tail.malformed > 0
+        || tail.partial_tail
+        || tail.hit_scan_cap
+        || clipped
+    {
+        Some(format!(
+            "external sweep log is incomplete: {} unreadable files, {} malformed records, partial tail {}, scan cap {}, clipped records {}. {}",
+            tail.errors.len(),
+            tail.malformed,
+            tail.partial_tail,
+            tail.hit_scan_cap,
+            clipped,
+            tail.errors.join("; ")
+        ))
+    } else {
+        None
+    }
+}
+
+fn observe_elsewhere(dir: &std::path::Path, now: i64) -> ExternalObservation {
+    // Durable run/probe evidence uses this same target. Its completion cannot
+    // replace a whole-command marker, nor can its uncorrelated token refresh
+    // that command's activity. Search a bounded retained window explicitly.
+    let lifecycle = status_tail(dir, "cli.lifecycle", None, 256);
+    if let Some(why) = tail_fault(&lifecycle) {
+        return ExternalObservation {
+            at_millis: None,
+            uncertain: true,
+            in_flight: false,
+            launch_clear: false,
+            body: unknown_status(&why),
+        };
+    }
+    let Some(marker) = lifecycle.records.iter().find(|record| {
+        matches!(
+            record.message.as_str(),
+            "command started" | "command finished"
+        ) && match record.field("command") {
+            Some(telemetry::OwnedValue::Str(command)) => cli::is_sweep_command(command),
+            // A malformed marker is not an inspection command we can skip.
+            // Retain it so status becomes unknown instead of borrowing an
+            // older sweep's successful completion.
+            _ => true,
+        }
+    }) else {
+        let legacy = status_tail(dir, CLI_SWEEP_TARGET, None, 1);
+        let fault = tail_fault(&legacy);
+        let launch_clear = fault.is_none();
+        let why = fault.or_else(|| legacy.records.first().map(|record| {
+            format!("latest CLI event: {}. The bounded 256-event lifecycle window has no authoritative sweep-command marker; completion and current activity are unknown", record.message)
+        }));
+        return ExternalObservation {
+            at_millis: legacy.records.first().map(|record| record.at_unix_millis),
+            uncertain: why.is_some(),
+            in_flight: false,
+            launch_clear,
+            body: why.map_or_else(|| NO_SWEEP.to_owned(), |why| unknown_status(&why)),
+        };
     };
-    // Clamped at zero: a store written by a machine whose clock is ahead must
-    // not report a sweep in the future.
-    let age = now_millis.saturating_sub(last.at_unix_millis).max(0);
-    // `in_flight` AND `attempt` ARE THE PAGE'S CONTRACT, and shipping this
-    // without them made the whole fallback inert.
-    //
-    // `sweep.js`'s `sweepOutcome` tests `run.in_flight` FIRST and falls through
-    // to `phase:'done'` when it is absent, and `adoptRunning` returns early on
-    // anything that is not `'running'` -- so the poll timer was never armed and
-    // the console went on showing `{phase:'idle'}`, which is the exact defect
-    // this function was added to fix. The Rust half answered correctly into a
-    // shape the browser does not read.
-    //
-    // `attempt` is the log-binding token: `fetchLive` refuses a run without a
-    // positive safe integer, and `live-progress.ts` matches a record only when
-    // its `run` AND its `attempt` field both equal it. A terminal sweep has no
-    // browser attempt, so the telemetry RUN ID stands in -- `cli` stamps the
-    // same number into the records' `attempt` field for exactly this reason,
-    // which is what makes the two sides agree.
-    //
-    // `in_flight` is the window applied, not merely reported: the page needs a
-    // boolean and computing it here beats every caller re-deriving it. Both
-    // `age_millis` and `stale_after_millis` stay on the payload so a reader can
-    // see WHY the boolean says what it says -- silence longer than the window
-    // means the sweep stopped, or that it is inside a stretch that emits
-    // nothing, and nothing here can tell those apart.
-    let in_flight = age <= STALE_AFTER_MILLIS;
-    format!(
-        r#"{{"running":{{"where":"cli","in_flight":{in_flight},"attempt":{},"run":{},"message":{},"at_unix_millis":{},"age_millis":{age},"stale_after_millis":{}}}}}"#,
-        last.run,
-        last.run,
+    let activity = status_tail(dir, CLI_SWEEP_TARGET, Some(marker.run), 1);
+    if let Some(why) = tail_fault(&activity) {
+        return ExternalObservation {
+            at_millis: Some(marker.at_unix_millis),
+            uncertain: true,
+            in_flight: false,
+            launch_clear: false,
+            body: unknown_status(&why),
+        };
+    }
+    let last = activity.records.first().unwrap_or(marker);
+    let phase = match marker.field("phase") {
+        Some(telemetry::OwnedValue::Str(phase)) => phase.as_str(),
+        _ => "unknown",
+    };
+    let named_sweep = matches!(marker.field("command"), Some(telemetry::OwnedValue::Str(command)) if cli::is_sweep_command(command));
+    let age = now.saturating_sub(last.at_unix_millis).max(0);
+    let (status, why) = match (marker.message.as_str(), phase) {
+        ("command started", "running")
+            if age <= STALE_AFTER_MILLIS && marker.run > 0 && named_sweep =>
+        {
+            ("running", "")
+        }
+        ("command finished", "completed") if marker.run > 0 && named_sweep => ("completed", ""),
+        ("command finished", "refused") if marker.run > 0 && named_sweep => (
+            "refused",
+            "the external command reported a refusal; inspect its lifecycle and result logs",
+        ),
+        _ => (
+            "unknown",
+            "the external command has no usable terminal receipt or recent activity; silence is not completion",
+        ),
+    };
+    let body = format!(
+        r#"{{"running":{{"where":"cli","status":"{status}","observation_scope":"latest-command","in_flight":{},"attempt":{},"attempt_key":"{}","run":{},"message":{},"at_unix_millis":{},"age_millis":{age},"stale_after_millis":{},"why":{},"refusal":{},"report":{}}}}}"#,
+        status == "running",
+        marker.run,
+        marker.run,
+        marker.run,
         crate::logs::quoted(&last.message),
         last.at_unix_millis,
         STALE_AFTER_MILLIS,
-    )
+        crate::render::json_string(why),
+        if status == "refused" {
+            crate::render::json_string(why)
+        } else {
+            "null".to_owned()
+        },
+        if status == "completed" {
+            crate::render::json_string(
+                "The external command recorded successful completion. Individual result receipts determine which outputs committed.",
+            )
+        } else {
+            "null".to_owned()
+        }
+    );
+    ExternalObservation {
+        at_millis: Some(last.at_unix_millis),
+        uncertain: status == "unknown",
+        in_flight: status == "running",
+        launch_clear: matches!(status, "completed" | "refused"),
+        body,
+    }
 }
 
 /* ==================================================================
@@ -1909,12 +2307,31 @@ EVERY OTHER COMMAND THE ENGINE HAS, AND WHY THEY SHARE ONE ROUTE
 /// typed the word and knows what they asked for. D-0300.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
+    /// One index, all declared Boolean programs and the fixed signal-candle stop.
+    IndexStopQualifiedSearch {
+        /// Exact selected timeframes and original/later observation periods.
+        request: Box<crate::indexstoplaunch::Asked>,
+    },
+    /// Fixed AND/OR/NOT grammar with one declared search-wide research policy.
+    BooleanQualifiedSearch {
+        /// All selected families and both explicit observation periods.
+        request: Box<crate::booleanlaunch::Asked>,
+    },
     /// One rung, full validated audit — walk-forward, PBO and the bootstrap.
     AuditRange {
         /// Feed word, instrument and rung.
         span: AskedRung,
         /// Absolute hit floor for this rung.
         min_hits: u64,
+    },
+    /// One checksum-admitted range using explicit server-owned physical limits.
+    AuditAuditedRange {
+        /// Feed word, instrument and intraday rung.
+        span: AskedRung,
+        /// Explicit positive support count.
+        min_hits: u64,
+        /// Supported existing runtime settings, fixed for this command's lifetime.
+        knobs: Vec<(&'static str, String)>,
     },
     /// The elite rules applied at ONE fixed support.
     Screen {
@@ -1970,7 +2387,10 @@ impl Command {
     #[must_use]
     pub const fn word(&self) -> &'static str {
         match *self {
+            Self::IndexStopQualifiedSearch { .. } => crate::indexstoplaunch::COMMAND,
+            Self::BooleanQualifiedSearch { .. } => crate::booleanlaunch::COMMAND,
             Self::AuditRange { .. } => "audit-range",
+            Self::AuditAuditedRange { .. } => "audit-audited-range",
             Self::Screen { .. } => "screen",
             Self::AutoStored { .. } => "auto-stored",
             Self::SweepStored { .. } => "sweep-stored",
@@ -1987,10 +2407,13 @@ impl Command {
     pub fn underlying(&self) -> &str {
         match *self {
             Self::AuditRange { ref span, .. }
+            | Self::AuditAuditedRange { ref span, .. }
             | Self::Screen { ref span, .. }
             | Self::AutoStored { ref span }
             | Self::SweepStored { ref span, .. } => &span.underlying,
             Self::SweepAll { .. } => "ALL",
+            Self::IndexStopQualifiedSearch { ref request } => &request.index,
+            Self::BooleanQualifiedSearch { .. } => "SELECTED",
         }
     }
 
@@ -1999,10 +2422,13 @@ impl Command {
     pub fn feed(&self) -> &str {
         match *self {
             Self::AuditRange { ref span, .. }
+            | Self::AuditAuditedRange { ref span, .. }
             | Self::Screen { ref span, .. }
             | Self::AutoStored { ref span }
             | Self::SweepStored { ref span, .. } => &span.feed,
             Self::SweepAll { ref feed, .. } => feed,
+            Self::IndexStopQualifiedSearch { ref request } => &request.feed,
+            Self::BooleanQualifiedSearch { ref request } => &request.feed,
         }
     }
 
@@ -2011,12 +2437,15 @@ impl Command {
     pub fn window(&self) -> ((u16, u8), (u16, u8)) {
         match *self {
             Self::AuditRange { ref span, .. }
+            | Self::AuditAuditedRange { ref span, .. }
             | Self::Screen { ref span, .. }
             | Self::AutoStored { ref span }
             | Self::SweepStored { ref span, .. } => (span.from, span.to),
             // A batch is not a span, and (0,1)..(0,1) is a value no real month
             // can take -- year zero -- so the page cannot render it as one.
             Self::SweepAll { .. } => ((0, 1), (0, 1)),
+            Self::IndexStopQualifiedSearch { ref request } => request.window(),
+            Self::BooleanQualifiedSearch { ref request } => request.window(),
         }
     }
 }
@@ -2074,8 +2503,11 @@ fn rung_from(body: &WireBody) -> Result<AskedRung, Refusal> {
 }
 
 /// Every command word this route accepts, in the order the refusal lists them.
-const EVERY_COMMAND: [&str; 5] = [
+const EVERY_COMMAND: [&str; 8] = [
+    crate::indexstoplaunch::COMMAND,
+    crate::booleanlaunch::COMMAND,
     "audit-range",
+    "audit-audited-range",
     "screen",
     "auto-stored",
     "sweep-stored",
@@ -2092,8 +2524,22 @@ const EVERY_COMMAND: [&str; 5] = [
 /// word — an operator who asks for `sweep` deserves to be told WHY it is not
 /// here, not merely that it is not.
 pub fn command_from(body: &str) -> Result<Command, Refusal> {
-    let body = wire_body(body)?;
-    command_from_wire(&body)
+    let wire = wire_body(body)?;
+    if wire.string("command") == Some(crate::indexstoplaunch::COMMAND) {
+        return crate::indexstoplaunch::parse(body)
+            .map(|request| Command::IndexStopQualifiedSearch {
+                request: Box::new(request),
+            })
+            .map_err(Refusal::Malformed);
+    }
+    if wire.string("command") == Some(crate::booleanlaunch::COMMAND) {
+        return crate::booleanlaunch::parse(body)
+            .map(|request| Command::BooleanQualifiedSearch {
+                request: Box::new(request),
+            })
+            .map_err(Refusal::Malformed);
+    }
+    command_from_wire(&wire)
 }
 
 /// [`command_from`] after strict JSON decoding and duplicate detection.
@@ -2125,6 +2571,11 @@ fn command_from_wire(body: &WireBody) -> Result<Command, Refusal> {
         "audit-range" => Ok(Command::AuditRange {
             span: rung_from(body)?,
             min_hits: positive_min_hits(body)?,
+        }),
+        "audit-audited-range" => Ok(Command::AuditAuditedRange {
+            span: rung_from(body)?,
+            min_hits: positive_min_hits(body)?,
+            knobs: strict_knobs(body)?,
         }),
         "screen" => {
             let support_ppm: u64 = whole(
@@ -2203,6 +2654,30 @@ pub fn conduct_command(asked: &Command, now_micros: i64, attempt: u64) -> Progre
     )
     .of_kind(Kind::Command);
     let text = match *asked {
+        Command::IndexStopQualifiedSearch { .. } => {
+            "refused: single-stop research requires its prepared audited browser dispatch".into()
+        }
+        Command::BooleanQualifiedSearch { .. } => {
+            "refused: declared Boolean research requires its prepared audited browser dispatch"
+                .into()
+        }
+        Command::AuditAuditedRange { .. } => {
+            let configuration = cli::audited_range_command::StrictConfig::from_env();
+            let root = crate::server::store_dir();
+            return match (configuration, root) {
+                (Ok(configuration), Ok(root)) => {
+                    conduct_strict_command(asked, now_micros, attempt, &configuration, &root)
+                }
+                (Err(why), _) => {
+                    settle(&mut progress, format!("refused: {why}"), now_micros);
+                    progress
+                }
+                (_, Err(why)) => {
+                    settle(&mut progress, format!("refused: {why}"), now_micros);
+                    progress
+                }
+            };
+        }
         Command::AuditRange { ref span, min_hits } => cli::audit_range(
             &span.feed,
             &span.underlying,
@@ -2272,7 +2747,12 @@ pub async fn command(
     axum::extract::State(site): axum::extract::State<crate::server::Loaded>,
     body: String,
 ) -> (axum::http::StatusCode, JsonHeaders, String) {
-    command_with(&site, &body, cli::commit_stamp())
+    match crate::detail::run(move || command_with(&site, &body, cli::commit_stamp())).await {
+        Ok(response) => response,
+        Err(why) => refused(&Refusal::Unobservable(format!(
+            "bounded command admission is unavailable: {why:?}; no engine command was dispatched"
+        ))),
+    }
 }
 
 /// [`command`], with the build's commit stamp passed in.
@@ -2283,15 +2763,40 @@ pub(crate) fn command_with(
     body: &str,
     stamp: Option<&str>,
 ) -> (axum::http::StatusCode, JsonHeaders, String) {
+    command_with_configuration(
+        site,
+        body,
+        stamp,
+        cli::audited_range_command::StrictConfig::from_env,
+    )
+}
+
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the shared lease admits one fixed-size prepared command; inline payloads avoid a separate per-command allocation"
+)]
+enum PreparedCommand {
+    Boolean(cli::boolean_search_launch::Admission),
+    IndexStop(cli::index_stop_search::Launch),
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one shared admission lock and audited dispatch for every browser command"
+)]
+fn command_with_configuration(
+    site: &crate::server::Loaded,
+    body: &str,
+    stamp: Option<&str>,
+    configure: impl FnOnce() -> Result<
+        cli::audited_range_command::StrictConfig,
+        cli::audited_range_command::ConfigRefusal,
+    >,
+) -> (axum::http::StatusCode, JsonHeaders, String) {
     let asked = match command_from(body) {
         Ok(asked) => asked,
         Err(why) => {
-            let _ = telemetry::emit_if!(
-                telemetry::Level::Warn,
-                "api.sweep",
-                "an engine command was refused before it started",
-                "why" => telemetry::Value::Str(why.why()),
-            );
+            note_command_refusal(why.why());
             return refused(&why);
         }
     };
@@ -2300,7 +2805,21 @@ pub(crate) fn command_with(
         return refused(&why);
     }
 
-    let (started, attempt) = {
+    // Resolve only the explicit strict command, once, before claiming a slot or
+    // emitting a start. Ordinary commands do not depend on this configuration.
+    let strict = if let Command::AuditAuditedRange { ref knobs, .. } = asked {
+        if let Err(why) = cli::audited_range_command::validate_runtime(knobs) {
+            return strict_settings_refused(&why);
+        }
+        match configure() {
+            Ok(config) => Some(config),
+            Err(why) => return strict_configuration_refused(&why),
+        }
+    } else {
+        None
+    };
+
+    let (started, attempt, audit, launch, lease) = {
         let mut held = match site.sweep.lock() {
             Ok(held) => held,
             Err(poisoned) => poisoned.into_inner(),
@@ -2314,13 +2833,39 @@ pub(crate) fn command_with(
                     .to_owned(),
             ));
         }
-        let (from, to) = asked.window();
-        let attempt = match reserve_attempt() {
-            Ok(attempt) => attempt,
+        let uses_configured_store = !matches!(
+            asked,
+            Command::AuditAuditedRange { .. }
+                | Command::BooleanQualifiedSearch { .. }
+                | Command::IndexStopQualifiedSearch { .. }
+        );
+        let lease = match claim_execution(site, uses_configured_store) {
+            Ok(lease) => lease,
             Err(why) => return refused(&why),
         };
+        let launch = match &asked {
+            Command::BooleanQualifiedSearch { request } => {
+                crate::booleanlaunch::prepare(request, &site.store_root)
+                    .map(|value| Some(PreparedCommand::Boolean(value)))
+            }
+            Command::IndexStopQualifiedSearch { request } => {
+                crate::indexstoplaunch::prepare(request, &site.store_root)
+                    .map(|value| Some(PreparedCommand::IndexStop(value)))
+            }
+            _ => Ok(None),
+        };
+        let launch = match launch {
+            Ok(value) => value,
+            Err(why) => return refused(&Refusal::Unobservable(why)),
+        };
+        let (from, to) = asked.window();
+        let mut audit = match reserve_invocation(site, asked.word()) {
+            Ok(audit) => audit,
+            Err(why) => return refused(&why),
+        };
+        let attempt = audit.id();
         let started = now_micros();
-        let accepted = Progress::started(
+        let mut accepted = Progress::started(
             asked.feed(),
             asked.underlying(),
             from,
@@ -2330,11 +2875,18 @@ pub(crate) fn command_with(
             attempt,
         )
         .of_kind(Kind::Command);
+        if let Command::BooleanQualifiedSearch { ref request } = asked {
+            accepted.boolean_search = Some(Box::new(crate::booleanlaunch::Status::new(request)));
+        }
+        if let Command::IndexStopQualifiedSearch { ref request } = asked {
+            accepted.index_stop = Some(Box::new(crate::indexstoplaunch::Status::new(request)));
+        }
         if let Some(why) = marker_refusal(emit_attempt_started(&accepted)) {
+            let _terminal = audit.finish(cli::operation_audit::Phase::Refused, 0);
             return refused(&why);
         }
         *held = Some(accepted.clone());
-        (started, attempt)
+        (started, attempt, audit, launch, lease)
     };
 
     let _ = telemetry::emit_if!(
@@ -2347,12 +2899,32 @@ pub(crate) fn command_with(
         "attempt" => telemetry::Value::Uint(attempt),
     );
 
-    let guard = TaskFinisher::new(std::sync::Arc::clone(site));
+    let guard = TaskFinisher::audited(std::sync::Arc::clone(site), audit).with_lease(lease);
+    let store_root = site.store_root.clone();
+    let launch_site = std::sync::Arc::clone(site);
     tokio::task::spawn_blocking(move || {
-        let finished = conduct_command(&asked, started, attempt);
+        let finished = guard.enter(|| match (launch, &asked) {
+            (
+                Some(PreparedCommand::Boolean(admission)),
+                Command::BooleanQualifiedSearch { request },
+            ) => crate::booleanlaunch::conduct(request, admission, started, attempt, &launch_site),
+            (
+                Some(PreparedCommand::IndexStop(admission)),
+                Command::IndexStopQualifiedSearch { request },
+            ) => {
+                crate::indexstoplaunch::conduct(request, admission, started, attempt, &launch_site)
+            }
+            _ => match strict.as_ref() {
+                Some(config) => {
+                    conduct_strict_command(&asked, started, attempt, config, &store_root)
+                }
+                None => conduct_command(&asked, started, attempt),
+            },
+        });
         let elapsed = now_micros().saturating_sub(started);
-        emit_completion(&finished, asked.word(), elapsed.max(0).unsigned_abs());
+        let emitted = emit_completion(&finished, asked.word(), elapsed.max(0).unsigned_abs());
         let mut done = finished;
+        command_terminal_audit(&asked, &mut done, emitted);
         done.finished_micros = Some(now_micros());
         guard.finish(done);
     });
@@ -2360,66 +2932,221 @@ pub(crate) fn command_with(
     (
         axum::http::StatusCode::ACCEPTED,
         json_headers(),
-        r#"{"accepted":true,"refusal":null}"#.to_owned(),
+        command_acceptance(attempt),
     )
 }
 
+/// The reserved worker token is returned from admission itself, never inferred
+/// from the mutable latest-status slot. Decimal text preserves every u64 bit.
+fn command_acceptance(attempt: u64) -> String {
+    format!(r#"{{"accepted":true,"refusal":null,"attempt":"{attempt}"}}"#)
+}
+
+pub(crate) fn command_terminal_audit(
+    command: &Command,
+    progress: &mut Progress,
+    emitted: telemetry::Emitted,
+) {
+    if matches!(
+        command,
+        Command::AuditAuditedRange { .. }
+            | Command::BooleanQualifiedSearch { .. }
+            | Command::IndexStopQualifiedSearch { .. }
+    ) {
+        strict_terminal_audit(progress, emitted);
+    }
+}
+
+fn strict_terminal_audit(progress: &mut Progress, emitted: telemetry::Emitted) {
+    let reason = match emitted {
+        telemetry::Emitted::Written => return,
+        telemetry::Emitted::Filtered => "the terminal audit event was filtered by the log level",
+        telemetry::Emitted::Dropped => "the terminal audit event could not be written",
+        telemetry::Emitted::NotInstalled => {
+            "no audit-log sink was installed for the terminal event"
+        }
+    };
+    let original = progress.refusal.take().or_else(|| progress.report.take());
+    progress.report = None;
+    progress.refusal = Some(format!(
+        "refused: strict command terminal audit is missing: {reason}. Existing result evidence was not removed. This refusal is visible in this process; it cannot assert a durable terminal event.\n{}",
+        original
+            .as_deref()
+            .unwrap_or("No computation report or refusal was returned.")
+    ));
+}
+
+fn strict_configuration_refused(
+    why: &cli::audited_range_command::ConfigRefusal,
+) -> (axum::http::StatusCode, JsonHeaders, String) {
+    note_command_refusal(&why.to_string());
+    (
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        json_headers(),
+        serde_json::json!({
+            "accepted": false,
+            "started": false,
+            "code": "strict_input_configuration_missing_or_invalid",
+            "refusal": why.to_string(),
+            "missing": why.missing,
+            "invalid": why.invalid,
+        })
+        .to_string(),
+    )
+}
+
+fn strict_settings_refused(
+    why: &cli::audited_range_command::KnobRefusal,
+) -> (axum::http::StatusCode, JsonHeaders, String) {
+    note_command_refusal(&why.to_string());
+    (
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        json_headers(),
+        serde_json::json!({
+            "accepted": false,
+            "started": false,
+            "code": "strict_runtime_settings_invalid",
+            "refusal": why.to_string(),
+            "invalid": why.invalid,
+        })
+        .to_string(),
+    )
+}
+
+fn note_command_refusal(why: &str) {
+    let _ = telemetry::emit_if!(
+        telemetry::Level::Warn,
+        "api.sweep",
+        "an engine command was refused before it started",
+        "why" => telemetry::Value::Str(why),
+    );
+}
+
+fn conduct_strict_command(
+    asked: &Command,
+    started: i64,
+    attempt: u64,
+    config: &cli::audited_range_command::StrictConfig,
+    store_root: &std::path::Path,
+) -> Progress {
+    let _knobs = strict_knob_context(asked).map(|context| apply_knobs(&context));
+    let (from, to) = asked.window();
+    let mut progress = Progress::started(
+        asked.feed(),
+        asked.underlying(),
+        from,
+        to,
+        None,
+        started,
+        attempt,
+    )
+    .of_kind(Kind::Command);
+    let result = strict_request(asked, attempt, store_root)
+        .and_then(|request| cli::audited_range_command::audit(request, config));
+    settle_strict_result(&mut progress, result, started);
+    progress
+}
+
+fn strict_request<'a>(
+    asked: &'a Command,
+    attempt: u64,
+    store_root: &'a std::path::Path,
+) -> Result<cli::audited_range_command::Request<'a>, String> {
+    match asked {
+        Command::AuditAuditedRange { span, min_hits, .. } => {
+            Ok(cli::audited_range_command::Request {
+                store_root,
+                vendor: &span.feed,
+                underlying: &span.underlying,
+                rung: &span.rung,
+                from: span.from,
+                to: span.to,
+                min_hits: *min_hits,
+                attempt: Some(attempt),
+            })
+        }
+        _ => Err(
+            "strict input configuration requires the explicit audit-audited-range command"
+                .to_owned(),
+        ),
+    }
+}
+
+fn strict_knobs(body: &WireBody) -> Result<Vec<(&'static str, String)>, Refusal> {
+    for field_name in ["support_ppm", "sizing_rate_bp"] {
+        if body.scalar(field_name).is_some() {
+            return Err(Refusal::Malformed(format!(
+                "`{field_name}` does not apply to audit-audited-range: this command uses the explicit min_hits count. No setting was ignored"
+            )));
+        }
+    }
+    for (field_name, name) in KNOBS {
+        if let Some(raw) = body.scalar(field_name)
+            && !cli::audited_range_command::request_value(name, &raw.text())
+        {
+            return Err(Refusal::Malformed(format!(
+                "`{field_name}` is not a usable value for the existing runtime setting; omit it to use the existing policy. No setting was ignored"
+            )));
+        }
+    }
+    let mut knobs = knobs_in(body);
+    for (name, value) in &mut knobs {
+        if *name == "BRUTEX_VALIDATE" && value != "0" {
+            "1".clone_into(value);
+        }
+    }
+    Ok(knobs)
+}
+
+fn strict_knob_context(asked: &Command) -> Option<Asked> {
+    let Command::AuditAuditedRange { span, knobs, .. } = asked else {
+        return None;
+    };
+    Some(Asked {
+        feed: span.feed.clone(),
+        underlying: span.underlying.clone(),
+        from: span.from,
+        to: span.to,
+        rungs: EVERY_RUNG
+            .iter()
+            .copied()
+            .filter(|rung| *rung == span.rung)
+            .collect(),
+        knobs: knobs.clone(),
+    })
+}
+
+fn settle_strict_result(progress: &mut Progress, result: Result<String, String>, finished: i64) {
+    progress.report = None;
+    progress.refusal = None;
+    match result {
+        Ok(report) => progress.report = Some(report),
+        Err(why) => progress.refusal = Some(format!("refused: {why}")),
+    }
+    progress.finished_micros = Some(finished);
+}
+
+#[cfg(test)]
+#[path = "strict_sweep_tests.rs"]
+mod strict_tests;
+
 /// `GET /engine/top.json` — the ranked frontier, as `cli top` prints it.
 ///
-/// **A READ, so it takes no slot and no commit gate.** It records nothing, so
-/// §3 rule 3's identity requirement does not bind and an unstamped build can
-/// serve it honestly. `feed` and `underlying` are optional and filter together:
+/// This read takes the shared bounded detail-worker slot but no write/commit
+/// gate. `feed` and `underlying` are optional and filter together:
 /// `cli top` takes both or neither, and this keeps that shape rather than
 /// inventing a third case the CLI has no answer for.
 pub async fn top_json(uri: axum::http::Uri) -> (axum::http::StatusCode, JsonHeaders, String) {
-    let query = uri.query().unwrap_or_default();
-    let param = |name: &str| -> Option<String> {
-        query.split('&').find_map(|pair| {
-            pair.split_once('=')
-                .filter(|(key, _)| *key == name)
-                .map(|(_, value)| value.to_owned())
-        })
-    };
-    let feed = param("feed");
-    let underlying = param("underlying");
-    let text = match (feed.as_deref(), underlying.as_deref()) {
-        (Some(f), Some(u)) => cli::top_list(Some(f), Some(u)),
-        (None, None) => cli::top_list(None, None),
-        _ => {
-            return (
-                axum::http::StatusCode::BAD_REQUEST,
-                json_headers(),
-                format!(
-                    r#"{{"report":null,"refusal":{}}}"#,
-                    crate::render::json_string(
-                        "`feed` and `underlying` filter together: give both or \
-                         neither. `cli top` has no answer for one alone, and \
-                         inventing one here would make this page disagree with \
-                         the terminal about the same file."
-                    )
-                ),
-            );
-        }
-    };
-    let refused_it = text.starts_with(REFUSED);
-    let body = if refused_it {
-        format!(
-            r#"{{"report":null,"refusal":{}}}"#,
-            crate::render::json_string(&text)
-        )
-    } else {
-        format!(
-            r#"{{"report":{},"refusal":null}}"#,
-            crate::render::json_string(&text)
-        )
-    };
-    let status = if refused_it {
-        axum::http::StatusCode::BAD_REQUEST
-    } else {
-        axum::http::StatusCode::OK
-    };
-    (status, json_headers(), body)
+    crate::topjson::top_json(uri).await
 }
+
+#[cfg(test)]
+#[path = "sweeprun_admission_tests.rs"]
+#[expect(
+    clippy::expect_used,
+    reason = "private admission fixtures must fail loudly"
+)]
+mod admission_tests;
 
 #[cfg(test)]
 #[expect(
@@ -2434,10 +3161,139 @@ mod tests {
         conduct_command, descent_from, marker_refusal, now_micros, settle, stamp_refusal,
     };
 
+    fn elsewhere_over(dir: &std::path::Path, now_millis: i64) -> String {
+        super::observe_elsewhere(dir, now_millis).body
+    }
+
     fn finisher_site(name: &str) -> crate::server::Loaded {
         let masters = crate::scratch::path(&format!("sweep-finisher-masters-{name}"));
         let store = crate::scratch::path(&format!("sweep-finisher-store-{name}"));
         std::sync::Arc::new(crate::server::Site::load(&masters, &store))
+    }
+
+    fn durable_finisher(name: &str) -> (crate::server::Loaded, u64, TaskFinisher) {
+        let site = finisher_site(name);
+        std::fs::create_dir_all(&site.store_root).expect("private invocation store");
+        let audit = super::reserve_invocation(&site, "sweep").expect("durable admission");
+        let id = audit.id();
+        *site.sweep.lock().expect("private slot") = Some(Progress::started(
+            "zerodha",
+            "NIFTY",
+            (2020, 1),
+            (2020, 1),
+            None,
+            7,
+            id,
+        ));
+        let guard = TaskFinisher::audited(std::sync::Arc::clone(&site), audit);
+        (site, id, guard)
+    }
+
+    #[test]
+    fn durable_task_finisher_publishes_only_after_its_terminal_barrier() {
+        let (site, id, guard) = durable_finisher("durable-task-complete");
+        guard.enter(cli::operation_audit::completed_boundary);
+        let mut done = site
+            .sweep
+            .lock()
+            .expect("private slot")
+            .clone()
+            .expect("started");
+        settle(
+            &mut done,
+            "private lifecycle fixture; no market computation".to_owned(),
+            10,
+        );
+        guard.finish(done);
+        let saved = cli::operation_audit::read(&site.store_root, id)
+            .expect("read exact")
+            .expect("saved");
+        assert_eq!(saved.phase, cli::operation_audit::Phase::Completed);
+        assert_eq!(saved.completed_boundaries, 1);
+        let slot = site.sweep.lock().expect("private slot");
+        assert!(slot.as_ref().expect("completed").report.is_some());
+        drop(slot);
+        std::fs::remove_dir_all(&site.store_root).expect("private cleanup");
+    }
+
+    #[test]
+    fn durable_task_finisher_does_not_publish_success_after_a_torn_audit() {
+        use std::io::Write as _;
+        let (site, id, guard) = durable_finisher("durable-task-torn");
+        let path = site
+            .store_root
+            .join(format!("audit/invocations-v1/{id:020}.bin"));
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .expect("private journal")
+            .write_all(&[1])
+            .expect("private torn-write injection");
+        let mut done = site
+            .sweep
+            .lock()
+            .expect("private slot")
+            .clone()
+            .expect("started");
+        settle(
+            &mut done,
+            "private completed handler fixture".to_owned(),
+            10,
+        );
+        guard.finish(done);
+        let slot = site.sweep.lock().expect("private slot");
+        let progress = slot.as_ref().expect("refused terminal");
+        assert!(progress.report.is_none());
+        assert!(
+            progress
+                .refusal
+                .as_deref()
+                .expect("refusal")
+                .contains("terminal invocation audit is unconfirmed")
+        );
+        assert!(!progress.in_flight());
+        assert!(cli::operation_audit::read(&site.store_root, id).is_err());
+        drop(slot);
+        std::fs::remove_dir_all(&site.store_root).expect("private cleanup");
+    }
+
+    #[test]
+    fn durable_task_finisher_records_panic_and_cancel_without_claiming_a_report() {
+        for (name, panic, expected) in [
+            (
+                "durable-task-cancel",
+                false,
+                cli::operation_audit::Phase::Cancelled,
+            ),
+            (
+                "durable-task-panic",
+                true,
+                cli::operation_audit::Phase::Failed,
+            ),
+        ] {
+            let (site, id, guard) = durable_finisher(name);
+            if panic {
+                let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                    let _guard = guard;
+                    std::panic::resume_unwind(Box::new("private lifecycle panic"));
+                }));
+                assert!(caught.is_err());
+            } else {
+                drop(guard);
+            }
+            assert_eq!(
+                cli::operation_audit::read(&site.store_root, id)
+                    .expect("read")
+                    .expect("saved")
+                    .phase,
+                expected
+            );
+            let slot = site.sweep.lock().expect("private slot");
+            assert!(slot.as_ref().expect("terminal").report.is_none());
+            assert!(slot.as_ref().expect("terminal").refusal.is_some());
+            drop(slot);
+            std::fs::remove_dir_all(&site.store_root).expect("private cleanup");
+        }
     }
 
     fn body(feed: &str, span: &str) -> String {
@@ -3134,12 +3990,32 @@ mod tests {
         // guard on two of them is still one route that can wedge the process,
         // so pin the production census against the module before its tests.
         let production = include_str!("sweeprun.rs")
-            .split_once("#[cfg(test)]")
+            .split_once("\n#[cfg(test)]")
             .expect("this module has one test boundary")
             .0;
-        let armed = ["let guard = Task", "Finisher::new"].concat();
+        let armed = ["let guard = Task", "Finisher::audited"].concat();
         let disarmed = ["guard.", "finish(done);"].concat();
         assert_eq!(production.matches(&armed).count(), 3, "one guard per task");
+        let before_spawn = [
+            armed.as_str(),
+            "(std::sync::Arc::clone(site), audit).with_lease(lease);\n    tokio::task::spawn_blocking(move || {",
+        ]
+        .concat();
+        assert_eq!(
+            production.matches(&before_spawn).count(),
+            2,
+            "sweep and descent arm immediately before queueing, with no intervening await"
+        );
+        let command_before_spawn = [
+            armed.as_str(),
+            "(std::sync::Arc::clone(site), audit).with_lease(lease);\n    let store_root = site.store_root.clone();\n    let launch_site = std::sync::Arc::clone(site);\n    tokio::task::spawn_blocking(move || {",
+        ]
+        .concat();
+        assert_eq!(
+            production.matches(&command_before_spawn).count(),
+            1,
+            "the command guard also protects the synchronous store-path and status-slot clones; no await, return, or other work may intervene before queueing"
+        );
         assert_eq!(
             production.matches(&disarmed).count(),
             3,
@@ -3856,7 +4732,7 @@ mod tests {
 
         // AN EMPTY LOG IS NOT A RUNNING SWEEP.
         assert_eq!(
-            super::elsewhere_over(&dir, 1_000_000),
+            elsewhere_over(&dir, 1_000_000),
             super::NO_SWEEP,
             "a store nobody has swept in must say so, not guess"
         );
@@ -3870,16 +4746,22 @@ mod tests {
         // without this the console would report itself as a running sweep.
         let _ = sink.emit(&telemetry::Event::info("api.serve", "not a sweep"));
         assert_eq!(
-            super::elsewhere_over(&dir, 1_000_000),
+            elsewhere_over(&dir, 1_000_000),
             super::NO_SWEEP,
             "only the sweep target counts, or serving the page reads as a run"
         );
 
-        let _ = sink.emit(&telemetry::Event::info(
-            super::CLI_SWEEP_TARGET,
-            r#"exit grid "entered""#,
-        ));
-        let json = super::elsewhere_over(&dir, i64::MAX);
+        let _ = sink.emit_for_run(
+            42,
+            &telemetry::Event::info("cli.lifecycle", "command started")
+                .with("phase", "running")
+                .with("command", "sweep-stored"),
+        );
+        let _ = sink.emit_for_run(
+            42,
+            &telemetry::Event::info(super::CLI_SWEEP_TARGET, r#"exit grid "entered""#),
+        );
+        let json = elsewhere_over(&dir, i64::MAX);
         assert!(
             json.contains(r#""where":"cli""#),
             "the page must be told the sweep is not this console's: {json}"
@@ -3895,10 +4777,191 @@ mod tests {
         );
 
         // A CLOCK BEHIND THE STORE'S must not read as a sweep in the future.
-        let skewed = super::elsewhere_over(&dir, 0);
+        let skewed = elsewhere_over(&dir, 0);
         assert!(
             skewed.contains(r#""age_millis":0"#),
             "age is clamped at zero under clock skew: {skewed}"
         );
+        assert!(skewed.contains(r#""status":"running""#));
+        assert!(
+            json.contains(r#""status":"unknown""#),
+            "stale is not completed"
+        );
+    }
+
+    #[test]
+    fn external_lifecycle_replaces_a_finished_browser_slot_and_distinguishes_terminal_outcomes() {
+        let dir = crate::scratch::path("sweep-external-lifecycle");
+        let _ = std::fs::remove_dir_all(&dir);
+        let sink = telemetry::Sink::open(&telemetry::Config::new(&dir)).expect("sink");
+        let mut local = Progress::started("zerodha", "NIFTY", (2020, 1), (2020, 1), None, 1, 1);
+        local.finished_micros = Some(2);
+        local.report = Some("old completed browser run".to_owned());
+        let emit = |message, phase| {
+            assert_eq!(
+                sink.emit_for_run(
+                    44,
+                    &telemetry::Event::info("cli.lifecycle", message)
+                        .with("phase", phase)
+                        .with("command", "sweep-stored")
+                ),
+                telemetry::Emitted::Written
+            );
+        };
+        emit("command started", "running");
+        let status =
+            super::observed_status(Some(&local), super::external_observation(Some(&dir), 0));
+        assert!(
+            status.contains(r#""attempt":44"#),
+            "new CLI attempt replaces finished browser slot: {status}"
+        );
+        assert!(status.contains(r#""status":"running""#));
+        local.finished_micros = Some(i64::MAX);
+        let overlapping =
+            super::observed_status(Some(&local), super::external_observation(Some(&dir), 0));
+        assert!(
+            overlapping.contains(r#""status":"running""#),
+            "a CLI command that started before browser completion remains active: {overlapping}"
+        );
+        local.finished_micros = Some(2);
+        let _ = sink.emit_for_run(44, &telemetry::Event::info("cli.audit", "rung finished"));
+        assert!(
+            elsewhere_over(&dir, 0).contains(r#""status":"running""#),
+            "rung completion does not finish its command"
+        );
+        emit("command finished", "completed");
+        let completed = elsewhere_over(&dir, i64::MAX);
+        assert!(completed.contains(r#""status":"completed""#));
+        assert!(completed.contains(r#""in_flight":false"#));
+        emit("command finished", "refused");
+        let refused = elsewhere_over(&dir, 0);
+        assert!(refused.contains(r#""status":"refused""#));
+        assert!(!refused.contains(r#""refusal":null"#));
+        local.finished_micros = Some(i64::MAX);
+        assert!(
+            super::observed_status(Some(&local), super::external_observation(Some(&dir), 0))
+                .contains("old completed browser run")
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn attempt_lifecycle_cannot_hide_or_complete_a_command_and_the_marker_window_is_bounded() {
+        let dir = crate::scratch::path("sweep-command-attempt-lifecycle");
+        let _ = std::fs::remove_dir_all(&dir);
+        let sink = telemetry::Sink::open(&telemetry::Config::new(&dir)).expect("sink");
+        let started = telemetry::Event::info("cli.lifecycle", "command started")
+            .with("phase", "running")
+            .with("command", "audit-range");
+        assert_eq!(sink.emit_for_run(91, &started), telemetry::Emitted::Written);
+        let attempt = telemetry::Event::info("cli.lifecycle", "sweep evidence attempt finished")
+            .with("attempt", 92_u64)
+            .with("completion", "completed");
+        for _ in 0..255 {
+            assert_eq!(sink.emit_for_run(0, &attempt), telemetry::Emitted::Written);
+        }
+        let observed = elsewhere_over(&dir, 0);
+        assert!(observed.contains(r#""status":"running""#), "{observed}");
+        assert!(observed.contains(r#""attempt":91"#), "{observed}");
+        assert!(!observed.contains(r#""attempt":92"#), "{observed}");
+        assert_eq!(sink.emit_for_run(0, &attempt), telemetry::Emitted::Written);
+        let capped = elsewhere_over(&dir, 0);
+        assert!(capped.contains(r#""status":"unknown""#), "{capped}");
+        let finished = telemetry::Event::info("cli.lifecycle", "command finished")
+            .with("phase", "completed")
+            .with("command", "audit-range");
+        assert_eq!(
+            sink.emit_for_run(91, &finished),
+            telemetry::Emitted::Written
+        );
+        assert_eq!(sink.emit_for_run(0, &attempt), telemetry::Emitted::Written);
+        let completed = elsewhere_over(&dir, i64::MAX);
+        assert!(completed.contains(r#""status":"completed""#), "{completed}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn inspection_commands_and_incomplete_markers_cannot_become_sweep_completion() {
+        let dir = crate::scratch::path("sweep-inspection-command-lifecycle");
+        let _ = std::fs::remove_dir_all(&dir);
+        let sink = telemetry::Sink::open(&telemetry::Config::new(&dir)).expect("sink");
+        let started = telemetry::Event::info("cli.lifecycle", "command started")
+            .with("phase", "running")
+            .with("command", "sweep-stored");
+        assert_eq!(
+            sink.emit_for_run(101, &started),
+            telemetry::Emitted::Written
+        );
+        for command in ["top", "results", "research-plan", "verify", "fold-audit"] {
+            let inspected = telemetry::Event::info("cli.lifecycle", "command finished")
+                .with("phase", "completed")
+                .with("command", command);
+            assert_eq!(
+                sink.emit_for_run(102, &inspected),
+                telemetry::Emitted::Written
+            );
+            let observed = elsewhere_over(&dir, 0);
+            assert!(
+                observed.contains(r#""status":"running""#),
+                "{command}: {observed}"
+            );
+            assert!(
+                observed.contains(r#""attempt":101"#),
+                "{command}: {observed}"
+            );
+        }
+        let malformed =
+            telemetry::Event::info("cli.lifecycle", "command finished").with("phase", "completed");
+        assert_eq!(
+            sink.emit_for_run(103, &malformed),
+            telemetry::Emitted::Written
+        );
+        assert!(elsewhere_over(&dir, 0).contains(r#""status":"unknown""#));
+        let mut tail = super::status_tail(&dir, "cli.lifecycle", None, 1);
+        assert!(super::tail_fault(&tail).is_none());
+        tail.records.first_mut().expect("latest fixture record").cut = true;
+        assert!(super::tail_fault(&tail).is_some());
+        let latest = tail.records.first_mut().expect("latest fixture record");
+        latest.cut = false;
+        latest.dropped_fields = 1;
+        assert!(super::tail_fault(&tail).is_some());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn unreadable_partial_capped_and_legacy_external_evidence_never_becomes_idle_or_done() {
+        for tail in [
+            telemetry::Tail {
+                errors: vec!["permission denied".to_owned()],
+                ..telemetry::Tail::default()
+            },
+            telemetry::Tail {
+                malformed: 1,
+                ..telemetry::Tail::default()
+            },
+            telemetry::Tail {
+                partial_tail: true,
+                ..telemetry::Tail::default()
+            },
+            telemetry::Tail {
+                hit_scan_cap: true,
+                ..telemetry::Tail::default()
+            },
+        ] {
+            assert!(super::tail_fault(&tail).is_some());
+        }
+        let dir = crate::scratch::path("sweep-external-legacy");
+        let _ = std::fs::remove_dir_all(&dir);
+        let sink = telemetry::Sink::open(&telemetry::Config::new(&dir)).expect("sink");
+        let _ = sink.emit_for_run(45, &telemetry::Event::info("cli.audit", "rung finished"));
+        assert!(elsewhere_over(&dir, 0).contains(r#""status":"unknown""#));
+        assert!(
+            super::observed_status(None, super::external_observation(None, 0))
+                .contains(r#""status":"unknown""#)
+        );
+        std::fs::remove_file(telemetry::current_path(&dir)).expect("remove fixture log");
+        std::fs::create_dir(telemetry::current_path(&dir)).expect("unreadable log fixture");
+        assert!(elsewhere_over(&dir, 0).contains(r#""status":"unknown""#));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

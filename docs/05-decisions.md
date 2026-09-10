@@ -32532,3 +32532,2681 @@ must — `commit` is a term of the identity (§3 rule 3) and the two binaries
 carry different ones — so the identity line was excluded from the diff by
 name. The index arm is `Absent` and the output proves it changed nothing for
 NIFTY.
+
+## D-0508
+
+**Cash-stock research preparation resolves 2020-01-01 through yesterday in
+IST once per request; restricted exit families are opt-in engine APIs.**
+
+The operator confirmed both the fixed start and the rolling inclusive end on
+2026-09-05. `cli research-plan VENDOR` now produces a read-only inventory for
+all eight intraday rungs plus the vendor-served daily reference. The end is the
+previous IST calendar date, not the previous month, UTC date or assumed last
+trading day. A future run must freeze this window and include its version,
+start and end identity words alongside the other required run-identity terms.
+`ResearchWindow::retain` excludes today and pre-start signal/execution bars;
+earlier indicator references, if needed, are a separate warm-up input.
+
+This is preparation, NOT integration into the existing month-addressed
+`range-rung`/`pool` sweep paths. It does not certify complete data, persist a
+research run, schedule a pull, or start a sweep. The inventory counts paths,
+not valid bars or complete sessions. Its report names these limitations and
+does not silently reinterpret an earlier last stored month as yesterday.
+
+Cash symbols come from the intersection of `FNO_UNDERLYINGS` with
+`NTM_INDEX`, and then the existing sweepability gate. F&O membership alone
+includes indices: the previous draft's `swept_index` fallback could label
+FINNIFTY/MIDCPNIFTY/NIFTYNXT50 as equities. No new hand-kept equity list is added.
+Neither snapshot proves historical F&O membership, corporate-action treatment
+or listing-date coverage. AGENTS.md section 1 is reconciled with D-0506 and this
+explicit operator-authorised research surface; derivatives remain excluded.
+
+The runner's new exit-family API preserves existing callers with the legacy
+All family. The two opt-in populations require SL+TP without TSL/TTP, or
+SL+TTP without fixed TP/TSL. Unwanted variants are omitted before pricing.
+These APIs reuse the existing ladder calibration and therefore do not prove
+causal out-of-sample calibration. No CLI policy/identity is silently switched.
+
+The operator has NOT started the bulk Zerodha pull and explicitly requires a
+go-ahead first. No session initiates it. Approval remains withheld until the
+concrete cash-only request, actual external destination and current
+credential/entitlement evidence are checked. The recorded calendar ending
+2026-08-21 is also insufficient to certify research through 2026-09-04.
+
+Verification is recorded with the implementation checkpoint, not inferred
+from these declarations. No 24-hour, all-combinations, O(1)-whole-search or
+profitability guarantee is made.
+
+## D-0509
+
+**`cli pool`: one combination across the whole stored surface — every
+instrument screened alone, then the union of their top combinations priced on
+every instrument and the trades pooled. Which stock, before it moves.**
+
+**The question.** D-0506 widened the surface for a stated objective: among the
+213 F&O underlyings, on most days one of them trends one way from the open. A
+combination that names that stock before it moves fires rarely on any one
+instrument, loses little when wrong and wins enormously when right. Its win
+rate is irrelevant; its tail is the result. A single-instrument sweep cannot
+find it — on one stock it is a handful of trades a year and the support floor
+prunes it before it is ranked — and the operator confirmed that both the
+per-symbol and the cross-sectional readings are wanted: *"even own symbol or
+cross section also it doesn't matter, our only aim is to find that rare
+trending guy."*
+
+**What is built.** `cli pool VENDOR RUNG FROM_Y FROM_M TO_Y TO_M SUPPORT_PPM`
+runs two passes and renders two tables.
+
+*Pass 1, PER SYMBOL.* The surface is `store::catalog::walk` filtered through
+`stored::swept_index` — the two indices by name and the F&O cash equities by
+`FNO_INDEX`, on this feed and rung — sorted and deduplicated. Each instrument
+is screened by `one_rung`, the exact function `range-rung` uses, in parallel
+over instruments with indexed `collect`. Each run carries its own nine-term
+identity and persists its own ledger row and frontier block; nothing about a
+single-instrument run changed. The table is sorted by the money — smallest
+drawdown, then the worst trade closest to zero, then the net — with refusals
+named last.
+
+*Pass 2, POOLED.* Every screened instrument's frontier rows are read back by
+identity and their `(mask, side)` pairs unioned: one `HashSet` insert decides
+membership, a `Vec` keeps first-seen order. Each instrument's span is then
+prepared exactly as `screen_range_inner` prepares one — the same loaders, the
+one-minute execution check, the withheld holed days, the anchored column, the
+kind-derived VWAP verdict (D-0507) — and every candidate is priced on it
+through `grid::evaluate_over` and `shown_cell`, the screen's own selector.
+The cells are folded across instruments: trades, wins, net, gross win and
+gross loss are sums; the worst trade and the smallest win are minima; the
+drawdown is the LARGEST single-instrument drawdown among those pooled and the
+column is named `dd>=` because it is a lower bound, not the pooled figure.
+The rank is the operator's tail rule first (`min_win / |worst| >= min_rr_bp`,
+read from `Rules` and never written here), then the smallest drawdown bound,
+then the profit factor with its never-lost sentinel demoted through `ranked`
+exactly as a cell's is, then the net.
+
+**Why the drawdown is a bound and not a figure.** A pooled drawdown is a
+property of the merged, time-ordered trade sequence across instruments. The
+exit grid keeps per-cell aggregates, not per-trade P&L, and exposing the
+sequence from the grid is a change to the hot loop that is not made here.
+`docs/06-limits.md` §171 records it. The bound is stated on every report.
+
+**Why nothing is charged, and why every report says so.** No cost of any
+kind, by the operator's instruction for this pass — *"even here also still
+don't use the costs"* — so the tail is visible before anything is subtracted
+from it. On an index that is correct by charter. On a cash equity it is not:
+STT alone is 0.025% of every sell. The opening of every report states this
+beside the totals, and D-0506's consequence stands: the cost model is
+necessary before any stock result is acted on.
+
+**Why the pooled table is not persisted.** A pooled row has no instrument,
+and §3 rule 3 identifies a run by one; inventing a placeholder symbol for the
+pool is the fabrication §3 rule 1 forbids and the exact defect `batch`
+refused for the same reason. A pool ledger with an identity of its own — a
+digest over the member identities — is a new store format and a later
+entry. The pass-1 runs are persisted; the pooled table is rendered, and the
+report's persistence note says which is which.
+
+**What stays constant-time, and what is merely bounded.** No rule-4 primitive
+is touched: the per-bar and per-candidate operations live inside the screen
+and are unchanged. The union is one expected-O(1) insert per frontier row;
+the fold is one pass over `instruments × |union|` cells with O(1) work each;
+the catalog walk is paid once. Pass 1 costs `instruments` screens; pass 2
+costs `instruments × |union|` grid evaluations. Both are stated in the module
+documentation as costs, not claimed away.
+
+**Reproducibility.** Both passes are `par_iter` over instruments with indexed
+`collect`; the pooled fold is sequential over the collected cells; the
+surface is a `BTreeSet` walk. Two runs over one store print the same bytes.
+§3 rule 5.
+
+**Tests.** `the_surface_is_the_swept_index_and_not_everything_stored`,
+`an_empty_store_lists_no_surface`, `the_fold_adds_totals_and_takes_the_extremes`,
+`refusals_and_unfired_candidates_are_never_folded_in`,
+`the_ranking_leads_with_the_rule_and_the_drawdown`,
+`ratios_render_as_multiples_and_the_sentinel_as_words`,
+`a_mask_renders_as_six_fixed_width_hex_words`,
+`a_missing_pooled_candidate_is_reported_not_indexed`, and the source-shape
+gate `the_pool_prepares_a_span_exactly_as_the_screen_does`, which pins that
+`price_all` names the screen's loaders and checks in the screen's order.
+`every_command_is_listed_in_both_places` pins the wiring. Invariant SC-08.
+
+**Not decided here.** Whether any candidate meets the rule on real equities:
+the store holds NIFTY only, and the pooled table over one instrument is the
+per-symbol table. The verb is built and tested on fixtures; its first real
+run waits on the operator's pull of the F&O cash series.
+
+## D-0510
+
+**2026-09-05 — Preserve identity evidence and refuse incomplete derivation claims.**
+
+Duplicate vendor assertions must survive parsing until ambiguity is decided;
+neither input order nor an alias may choose a conflicting vendor ID. An ISIN
+belongs to the vendor that supplied it and cannot be borrowed from a merged
+neighbour. Crawl export reads that same per-vendor evidence.
+
+Master refresh validates data rows before replacing the file, serializes the
+application's download/landing/reload transaction, and keeps the previous live
+snapshot when a previously readable feed disappears or becomes unreadable.
+Network body limits and strict UTF-8 apply to credentialed discovery as well.
+External processes writing the same directory are outside the async lock.
+
+Minute-derived candles require scheduled source coverage. Incomplete buckets
+are not fabricated; complete unaffected buckets remain eligible. Broker candle
+duplicates and archive snapshots have different semantics. Resume derivation
+consults committed source history at the batch boundary. Previously persisted
+conflicting bars are not rewritten under an existing format version.
+
+This does not create missing exchange identities, repair historical source
+holes, prove vendor completeness, or make history scans O(1). Regression names,
+performance limits and the verification boundary are in `docs/12-ingest-audit.md`.
+Full section 9 certification is pending the reported gates, not assumed.
+
+## D-0511
+
+2026-09-05 — Spot pull readiness must preserve the requested basket.
+
+Before any broker instrument is attempted, an explicitly selected member or a
+member of a requested published basket must resolve in that target for the
+selected vendor. Otherwise refuse with the missing names instead of silently
+pulling a smaller set. An explicitly chosen fully mapped subset remains legal.
+This is identity validation, not an expansion of the engine surface.
+
+Cash IDs must uniquely match the exchange ISIN through the already-built join.
+The fetch boundary reuses the same resolver, reading ID and listing class from
+one catalogue snapshot. Index IDs do not require a cash-share ISIN.
+
+A later observed day proves that a previous observed day's absent closing
+buckets can be reported as missing source coverage. Intervening entirely absent
+days and the final day's unknown endpoint remain unverified. No repair inserts
+fabricated candles or overwrites historical records. Tests and remaining
+certification limits are recorded in `docs/12-ingest-audit.md`.
+
+## D-0512
+
+2026-09-05 — Derived-minute completeness shares the source venue's dated hours.
+
+For regular calendar sessions, derive resolves the venue from the stored
+exchange and segment and uses `Venue::hours_on`, rather than assuming every
+instrument has 375 minutes. This preserves the derivatives extension effective
+2026-08-03 without extending cash or index hours. Closing bounds are exclusive;
+the last opening-stamped minute is 15:29 before and 15:39 after the change.
+The compatibility fold wrapper retains its index venue. Exceptional sessions
+remain withheld on the fixed store grid, with diagnostics. No historical files
+are rewritten and no missing source minute is invented. Per-stock cash CAS
+eligibility is not inferred from this venue-level schedule and remains open.
+Sources are recorded in `docs/00-charter.md` section 7.
+
+## D-0513
+
+2026-09-05 — Explicit plain TrueData FNO shape and identity refusal evidence.
+
+The existing plain TrueData FNO descriptor already selected five fields through
+the index-named parser shape. It now selects the explicit `TrueDataFno` shape;
+no automatic field-count guessing or bid/ask synthesis is introduced. The
+nine-field `TrueDataFutures` parser remains distinct. `Columns` is not a
+persisted wire enum, so no store-version reinterpretation follows. Direct ZIP
+support, product selection UI and raw quote persistence are not claimed by this
+change. Source sample facts are recorded in `docs/08-vendor-samples.md` and the
+existing descriptor documentation.
+
+Cash pull refusal distinguishes an absent vendor ID from an existing ID with
+absent vendor-specific ISIN evidence. This does not weaken D-0511 or assert that
+Zerodha cannot serve historical data; its published schema lacks the evidence
+this local policy demands. See `docs/00-charter.md` section 8.
+
+## D-0514
+
+2026-09-05 — Explicit Zerodha native-symbol cash mapping, never ISIN fallback.
+
+Following the operator's go-ahead after the proposed alternative was explained,
+spot requests may explicitly name `cash_identity=zerodha_symbol`. The default
+and autopilot remain `isin`. Unknown, repeated or non-Zerodha alternative-mode
+requests refuse. This is a separately labelled policy, not a second attempt
+after ISIN proof fails; the constituent ISIN join itself is unchanged.
+
+Native IDs are indexed once from original listing keys. No confirmed unsuffixed
+alias is adopted. A conflicting ID for a key, or one ID shared by different
+keys of the same vendor, cannot resolve. The ordinary merged-ID guard still
+applies. Queries are expected O(1) hash lookups; building the index is O(rows)
+expected and storage grows with listings. No worst-case constant-time claim
+follows from reserving capacity.
+
+The choice is shown in the form, receipt, run event and the front of the bounded
+audit source string as NOT ISIN-verified. It proves current-master identity
+only, not historical renames, corporate actions or point-in-time membership.
+Source authority: Kite specification recorded in charter section 8.
+
+Cash requests reaching the CAS effective date are refused before vendor work
+until dated per-instrument eligibility and phase separation are available.
+The date comes from the existing canonical vendor schedule. This conservative
+refusal does not assert that all shares participate in CAS, nor extend cash to
+derivative hours. No stored format is rewritten and no historical pull is
+started by this change.
+
+## D-0515
+
+2026-09-05 — Broker candle alignment and one-minute derivation safety.
+
+Reject off-grid broker candle timestamps before folding or appending; archive
+snapshot timestamps retain their separate aggregation path. Daily candles do
+not inherit the intraday session-open alignment rule. No timestamp is repaired
+by rounding at the broker boundary.
+
+Coarser-than-minute source data remains storable, but automatic derived output
+is refused with a named diagnostic: it cannot attest underlying minute
+completeness. This removes the unchecked plain-fold fallback; it is not a
+general coarse-source completeness implementation. Existing files are untouched.
+
+The operator clarified the requested Zerodha pull as underlying spot only,
+daily and one-minute sources. No futures/options contract pull is requested.
+Other intraday research rungs are derived from the minute source. This is a
+request scope, not a change to the engine's instrument universe. Month-end
+request coverage and post-change cash session eligibility remain open.
+
+## D-0516
+
+2026-09-05 — Audit the declared broker spot-minute window, not only observed
+monthly buckets. A monotone cursor over deduplicated source timestamps plus
+one visit per requested civil day reports contiguous missing intervals,
+including wholly absent regular days and final/month-end tails. Complexity is
+O(rows + days + reported gaps), not O(1) for the whole import. No timestamps
+or prices are fabricated and no historical files are rewritten.
+
+The new audit runs after source ingestion. Valid writes survive; coverage
+failures enter the existing failure receipt and telemetry paths. A missing
+interval is evidence of incomplete requested coverage, not a claim that the
+vendor caused it or that the security was listed on every historical date.
+Closed calendar days are excluded. Exceptional/unmeasured sessions and
+post-change cash eligibility are named UNVERIFIED, not guessed.
+
+Daily and derivative requests and archive snapshots are outside this spot
+minute audit. Daily cash requests are also exempted from the API's CAS
+intraday preflight guard: a daily candle does not claim an intraday phase.
+Intraday cash requests on/after 2026-08-03 still require dated per-instrument
+eligibility before vendor work. No new eligibility data is invented.
+
+The coverage banner no longer claims that unresolved selected instruments are
+silently skipped. It reports default identity coverage separately from the
+all-or-nothing request preflight and the explicit non-ISIN Zerodha option.
+`coverage::tests::the_notes_name_only_the_targets_a_feed_is_short_of` proves
+that distinction in its rendered text.
+
+## D-0517
+
+2026-09-05 — Separate Zerodha native token and independent ISIN evidence.
+
+The operator asked to retain both identifiers rather than waive ISIN evidence.
+Add explicit `cash_identity=zerodha_cross_checked`: exact native NSE cash key
+and token, plus the exchange's transcribed ISIN corroborated by at least one
+other vendor's exact native listing with an unambiguous ISIN join. A stale join,
+changed ID, absent witness or conflicting native mapping refuses. No vendor
+ISIN column is filled from another source. Existing `isin` remains the default;
+native-only `zerodha_symbol` remains explicitly NOT ISIN-verified. Both
+alternatives are Zerodha-only and the browser sends an exact selection.
+
+The cross-check label survives in the bounded audit source before the vendor
+endpoint text. The evidence is current-snapshot only, not point-in-time proof
+of renames, listing history, corporate actions or F&O membership. It does not
+remove the dated per-stock CAS eligibility requirement. Source authority is
+charter section 8, not a claim that an ISIN field exists in Kite's CSV.
+
+Per-member broker refusals and interruption now also enter the aggregate
+`Ingested.failures`, so another member's successful writes cannot turn a
+partial basket into a STORED receipt. Expected and attempted counts are
+separate. Successful writes are retained. No record layout or prior data is
+modified. Lookup uses the existing indices and a fixed vendor enumeration;
+whole-basket ingestion and evidence storage are not constant-time/space.
+
+The live minute preflight passed the selected basket's mapping and then refused
+the dated CAS guard before vendor work. Its receipt exposed stale default-ISIN
+coverage and an unconditional Dhan wire-date caption. Spot receipts now name
+the explicit policy, actual requested timeframe, and only show the exclusive
+wire-date caption when the feed's timeframe-specific descriptor says exclusive.
+Refused-request audit sources also retain the selected identity policy.
+
+## D-0518
+
+2026-09-05 — A halted feed cannot make the coordinator's summary successful.
+
+Keep credential and permanent preflight failures in the terminal INCOMPLETE
+summary even when another feed succeeds. Count returned leg attempts and
+actually rescheduled retries, not planned or skipped work. Internal 422/404
+refusals halt; 401/403 halt for access failure. Internal 400 is terminal only
+with the explicit REFUSED receipt. Busy/unfinished-prerequisite 409 remains
+retryable. Empty receipts can finish the existing idle retry bound without
+claiming full-window coverage. Tests inject responses at the production
+request boundary; no live credential or vendor is involved. Coordinator state
+is still process-local, not a crash-resumable job journal. Successful store
+writes and per-leg audit records retain their existing persistence contracts.
+
+## D-0519
+
+2026-09-06 — Dated NSE cash-session evidence replaces the blanket minute refusal.
+
+Download/cache the exchange's dated MII security masters using the verified
+source and flag semantics in charter §9. Parse outside the bar loop, reject ambiguous EQ
+identities and join each requested symbol to its ISIN for each applicable day.
+Do not carry today's F&O membership or yesterday's eligibility into another
+date. Mapping still refuses before broker work. Dated eligibility is acquired
+for dates actually returned by the broker, then required before those source
+minutes can land. Missing evidence refuses instrument landing, not silently
+substituting another date. The existing `flate2`
+workspace dependency is used by `pull` for bounded gzip decoding; it adds no
+language or workspace-crate edge.
+
+Pass the same per-instrument schedule through minute landing, request-wide
+coverage and every derived timeframe. Before 2026-08-03 the regular cash close
+stays 15:30; afterward the explicit flag selects 15:15 or 15:30. Auction
+observations are excluded from continuous bars and counted under the existing
+after-close census. Unverified lower-level callers cannot bypass this by
+omitting the schedule: landing refuses and derived buckets are withheld.
+Daily candles and the index/derivative schedules are not changed.
+
+Source evidence is retained separately under runtime `session-masters`, never
+under bar paths. Existing candle formats and historical files are unchanged.
+This does not certify actual execution of every minute, historical membership,
+listing/rename history, or absence of exceptional halts. Verification results
+must name outstanding gates rather than calling the whole workspace guaranteed.
+
+The live calendar ends on 2026-08-21. A security master does not extend its
+measured open-day or exceptional-session proof. The observed-date acquisition
+path can retain filtered source minutes beyond that boundary while request
+coverage stays UNVERIFIED and derived buckets remain withheld. No weekday is
+declared open or closed merely to start a download. The stricter full-window
+`prepare` API still refuses unknown calendar dates. Suffix-only callers must
+also retain the eligibility evidence needed when rereading prior source
+minutes for month derivation; absent context withholds rather than guesses.
+
+Eligibility preparation and landing are isolated per returned broker chunk.
+In-window rows outside generic cash hours do not trigger metadata requests.
+A later chunk's missing evidence leaves earlier chunk writes intact; refused
+rows are counted and its reason is retained. Verified context accumulated in
+the run is reused across chunk suffixes for month derivation, without treating
+an absent optional identity as an eligibility value.
+
+## D-0520
+
+2026-09-06 — Broker-only startup may explicitly skip optional CSV suggestions.
+
+The live process bound port 8080 but answered no HTTP requests. A process
+sample located the startup thread in `folder_suggestions -> collect_csv_dirs
+-> read_dir -> open`, not the broker or data store. CSV suggestion discovery
+is unrelated to a Zerodha HTTPS pull. `BRUTEX_ARCHIVE_SUGGESTIONS=0` now
+skips that discovery before any folder access; default behavior is unchanged.
+The folder form names the disabled scan rather than claiming no files exist.
+Explicit archive imports remain available. This does not change OS access
+permissions, the user's home, source data, or identity/session checks.
+
+## Zerodha ingest form clarification — 2026-09-06
+
+The browser defaults to the already-authorized `zerodha_cross_checked` policy:
+native token plus independently corroborated ISIN. Backend absent/unknown
+policy handling remains strict; no fallback to token-only is introduced.
+The visible label explains stock identity verification and identifies the
+vendor-supplied ISIN choice as unavailable in the Zerodha master. This is
+current-snapshot evidence, not historical identity certification.
+
+The aggregate expected-bar display reads `unverified` when any reachable
+month lacks an expected count, instead of presenting the partial sum as a
+complete denominator. Existing per-month coverage verdicts are unchanged.
+
+Per-row retries replace the selected basket with exactly that row's `member`
+field. The existing server filter already supports it. Date bounds, feed,
+timeframe and identity policy are preserved, including symbols containing `&`.
+The former behavior repulled the whole selected basket from a single-row button.
+
+## Explicit bar-repair revisions and calendar evidence boundary — 2026-09-06
+
+Add `store::repair` as an explicit, non-promoted revision facility. Original
+bar/CRC pairs and append semantics remain unchanged. Publication validates a
+source generation, retains every original timestamp, reserves one named
+revision, writes and verifies its complete pair, and publishes a completion
+receipt last. Exact completed retries are idempotent; interrupted or conflicting
+evidence is preserved and refused. Full protocol and resource bounds are in
+`crates/store/REPAIR.md`. The two-lock exception is original shared lock then
+revision writer lock, both nonblocking; no revision holder waits for an original
+lock. No automatic selection, live repair or migration is authorized by this API.
+Coordinated writer admission, manifests, indexed overlays and cached readers
+must share a committed revision authority before transparent promotion exists.
+
+Ingest now carries `calendar::Runtime` separately from display observations.
+Observed windows and inferred closures do not extend the compiled calendar's
+authority. Unknown dates retain explicit diagnostics; source acquisition is
+preserved and unsupported derived bars remain withheld. This is an evidence
+boundary and diagnostic repair, not a claim of verified sessions after August
+21 or a declaration that historical minute gaps have been filled.
+
+### Bounded measured extension through 2026-09-04
+
+Subsequent primary-source and stored-index checks recorded in `docs/00-charter.md`
+support extending the measured baseline from August 21 through September 4.
+The appended interval contains ten regular index sessions and four weekend
+closures; earlier calendar bits and sourced exceptions are retained. This is
+a dated data extension, not an automatic future weekday rule. Dates beyond
+September 4 remain unmeasured, and runtime observations still cannot override
+the baseline. Cash eligibility and incomplete-source safeguards are unchanged.
+The earlier August-21 limitation above describes the pre-extension revision.
+
+### Cash partial-month replay context — 2026-09-06
+
+Derived bars are rebuilt from the stored source month, not only a request's
+suffix. Therefore eligibility context must include actual committed source
+dates in each affected month. The API obtains those dates through the Rust
+ingest boundary and revalidates their local dated receipts before landing.
+It then resolves the exact symbol and ISIN for each date. Missing or damaged
+historical receipts refuse explicitly; warm memory is not sufficient evidence.
+No unobserved date is synthesized, no source value is rewritten, and no repair
+revision is automatically promoted. Discovering these dates scans the affected
+source month; this is O(source rows), not constant total work.
+
+### Diagnostic and scheduling-state distinctions — 2026-09-06
+
+A coverage failure list is a list of diagnostics, not a count of distinct
+failed instruments. Receipts use the former label. Incomplete source/schedule
+evidence, a complete candidate missing behind the stored tail, and a proven
+complete-source byte conflict carry distinct remedies without relaxing the
+append-only/refusal rules.
+
+The autopilot's paused state describes automatic scheduling only. An
+independently started request can still populate its current-pull field. An
+additive `pull_active` JSON field and activity-aware explanation expose that
+distinction; no scheduling state, authorization or retry behavior changes.
+
+### Stored-minute audit uses the ingestion clock — 2026-09-06
+
+The NSE cash gap endpoint now uses the bounded exchange calendar and local,
+receipted per-date symbol/ISIN eligibility. It shares the continuous-session
+clock with minute derivation. Peers cannot supply another cash stock's close.
+Missing or corrupt eligibility is a named `evidence_error`; post-CAS coverage
+then remains unmeasured. No gap-page GET acquires metadata or alters bars.
+Pre-CAS exceptional calendars and the separate spot-index outage policy remain
+unchanged. Only `1min` source files may answer a minute-completeness request.
+
+Missing files retain any independently known expected-minute obligation,
+alongside the file error. Invalid stored timestamp grids/order are separately
+counted as `invalid_timestamps`; coverage totals are withheld for invalid
+input rather than flooring stamps or producing downstream false gaps. These
+are additive JSON report fields, not changes to existing store file versions.
+An expected absent minute is not, on its own, proof of provider fault or an
+instrument's historical listing lifetime. No alternate feed or synthetic row
+is substituted, and no repair revision is silently promoted.
+
+### Retry-cycle checkpoints and evidence-aware gap rendering — 2026-09-06
+
+A clean request receipt checkpoints that leg while another leg/feed is
+retrying. Earlier receipts survive a later sibling task panic. A new complete
+pass resets those checkpoints only after retrying feeds recover; terminal
+feeds remain terminal. Prerequisite daily/minute and spot/FNO ordering is
+preserved. A repair subset is not counted as a fresh full idle observation.
+Attempt accounting follows entry to the request, not a nonempty display label.
+The checkpoint state is process-local and does not add a disk format or claim
+restart recovery. Partial-receipt classification and the existing pass ceiling
+are unchanged; the unresolved failed leg is not silently called successful.
+
+The gap page renders evidence states separately from known missing minutes.
+Source/metadata damage and unknown dates take precedence over a green total.
+All reported missing runs remain inspectable, and the page uses one-minute
+source files only. No policy option is introduced to waive evidence failures.
+
+### D-0521 — Sweep-readiness boundary repairs and reproducible comparison — 2026-09-06
+
+This focused audit preserves the existing conjunction-only search surface,
+condition numbering, fixed-width masks, run-identity format and store versions.
+It does not turn the requested universal constant total time/space or latency
+assurance into a promise. The detailed source findings and measured checks are
+recorded in `docs/14-sweep-readiness-20260906.md`.
+
+The regular column now requires the evaluator to be warm both before and after
+its successful step. The first condition retains the trend-seed boundary; the
+second refuses the newly cold mask when session rollover discards a daily
+ladder whose integer levels cannot be represented. Anchored evaluation retains
+its existing prevalidated reference boundary.
+
+An existing result writer revalidates the physical extent under its append
+lock. A partial tail or history shrink refuses before appending and preserves
+every existing byte. Catch-up admits only identities from seal-verified rows,
+matching initial open; damaged complete rows retain their physical strides and
+remain explicit read refusals. The V3 layout and append-only history do not
+change. Catch-up still costs work proportional to new records, and fresh opens
+still scan the existing ledger.
+
+Both browser frontier consumers assemble and reconcile all explicit pages
+before displaying a complete comparison. A maximum of 16 pages of 256 rows
+matches the existing 4,096-row read bound. Identity, rules, ranks, page metadata
+and totals must agree; a later-page error never publishes an earlier prefix as
+a complete frontier. Only the exact expected pagination notice is cleared once
+all pages reconcile. This changes browser transport, not candidate admission.
+
+`web/sweep-readiness/` contains the dated comparison and an independent Rust
+verification runner. Check logs and exit codes are saved per invocation under
+ignored `target/` directories; the latest check view is replaceable operator
+output, not a market record or a strategy identity. Browser JavaScript stays
+under `web/`; no crate acquires a front-end toolchain dependency. The comparison
+remains a dated review and never silently treats refreshed tests as a new audit.
+
+### D-0522 — Opt-in, evidence-scoped durable spot recovery — 2026-09-06
+
+The new `POST /pull/recovery` accepts explicit Zerodha F&O spot members,
+cross-checked current identity and source `1day`/`1min` legs only. It shares
+the existing run slot, per-feed seat, broker governor, credential path, source
+writer and derivation path. It does not start the broad autopilot or the legacy
+400-pass whole-basket retry loop. The user-authorized operation is the frozen
+210-member selection, 2019-12-01 through 2026-09-04, both source rungs.
+
+Month intersections preserve inclusive endpoints. A missing source day is
+eligible for a bounded request only when the same symbol already has its own
+daily or minute observation on that date and the mapping/calendar evidence
+permits it. Missing evidence remains UNVERIFIED; other stocks' candles and
+current universe membership cannot prove historical activity. The source-backed
+FORCEMOT withdrawal interval uses the sources already recorded in the charter.
+Current NSE listing/removal/readmission metadata is a qualified snapshot, never
+a complete historical lifecycle certificate or authority to delete older bars.
+
+An append-only recovery V1 journal reserves each exact-day attempt before any
+wire request. There are at most three coordinator attempts per exact-day child
+across plans; an interrupted attempt remains charged. Shared `attempts.bin`
+is authoritative, so changing unrelated basket members cannot purchase a new
+budget for the same day. A missing seed, corrupt/torn journal,
+uncertain write, unavailable store, mapping refusal or credential block never
+silently resets that budget. A completed or blocked plan is not automatically
+restarted. Startup resumes only a previously activated, sealed in-flight plan
+without a persisted stop. Stop intent is recorded separately before success is
+acknowledged, avoiding the active plan's writer lock. An explicit reactivation
+may clear the stop and retry a formerly blocked child with its remaining budget.
+Acceptance follows durable plan activation, not merely spawning a task. Pending
+children are source-reconciled even when an interrupted request already filled
+the gap; an unknown receipt remains qualified and never invents commit counts.
+
+HTTP 200 or unchanged returned rows are not coverage success. Each request
+retains ordinary audit receipts and is followed by source readback. A scan
+window may pass the measured schedule checks while the plan still contains
+unknown history. The completion summary therefore names verified, inapplicable,
+unverified and missing/blocked windows separately; it is not a whole-history
+guarantee. No synthetic candle, other-feed fallback or repair promotion occurs.
+
+`GET /pull/recovery` is a Rust-rendered comparison view, and its JSON sibling
+reads at most 100 recent journal events. These are events, not the complete
+current inventory; repeated windows are not deduplicated into an invented
+status. An unlocked reader may observe a complete record still awaiting sync.
+Persistent corruption is an explicit refusal, not a green/empty dashboard.
+
+The state bound is 100,000 units, and a source-month read refuses above 50,000
+records. These are visible operational bounds, not silently selected data.
+Auditing is O(source rows + days), restart is O(journal records), state space is
+O(work units), and indexed updates are expected/amortized O(1). Disk/network
+latency and total acquisition are not constant-time. Gate, coverage and mutation
+results must be reported as measured, not inferred from these invariants.
+
+### D-0523 — Historical sweep evidence, availability and explicit expressions — 2026-09-06
+
+The operator requested the complete historical drill-down path, including
+AND/OR/NOT, candle patterns, institutional-filter visibility and adversarial
+verification, while preserving other sessions' work. This decision changes no
+instrument surface, renumbers no condition, introduces no foreign backend
+runtime, and grants no profitability or universal complexity assurance.
+
+Locked choices:
+
+- Keep the extinction-driven AND ladder and its anti-monotonic pruning. Clamp
+  worker requests to an available scheduling bound, use fallible engine setup
+  and frontier reservations, and return named Memory/Workers halts. No depth
+  parameter or silent bounded-depth fallback is added.
+- Preserve a separate fixed-width known mask with every retained truth row.
+  Unknown does not mean false. All emitted truths are known; false availability
+  is intentionally conservative where a family has not certified its negative
+  answer. Projection, exact-minute replacement and exclusion clear/copy both
+  masks together. The regular evaluator must be warm both before and after its
+  fold. Checked production candles reject nonpositive prices after structural
+  validation, preserving refusal precedence.
+- Add a separate versioned explicit-expression route, not an OR variant of the
+  Apriori ladder. Source grammar uses live names/IDs, `!`, `&`, `|` and grouping;
+  truth uses three-valued AND/OR/NOT. V1 has a fixed 1,151-instruction descriptor
+  and explicit source/nesting bounds. Its complete bytes extend the PARAMS term
+  of the existing nine-term identity. Legacy AND identities retain their bytes.
+  Structural sibling canonicalization is not general Boolean equivalence.
+- Save expression source-row results in new, immutable V1 attempt files. Each
+  56-byte row binds its 24-byte data to the header and ordinal with a full
+  BLAKE3 seal; the terminal file seal binds the whole file and exact counts.
+  Publication verifies the acknowledged length, pathname/file generation and
+  full written bytes before and after creating the non-replacing result link.
+  The reader validates before row visitation and revalidates each visited row.
+  [The byte contract](17-expression-evidence.md) is part of this choice.
+- Save starts before the computation they identify. Distinguish preparation,
+  fixed search, automatic orchestration, exact probes, audit and expression
+  operations. FOLD-V1 preparation identities preserve existing input-withholding
+  and support-sizing algorithms without inventing a final strategy identity
+  before those facts exist. An automatic search with no affordable result
+  refuses explicitly; it does not silently choose the statistical floor.
+- Bind monthly audit policy through the shared full policy function, apply the
+  existing minute execution floor, and bind the actual separately loaded
+  execution slice in a domain-separated data digest. Reading an exact-minute
+  reference separately is not a substitute for hashing the priced input.
+  VIX remains outside run identity.
+- Append versioned durable attempt, depth and retained-signal ranking evidence.
+  Terminal publication verifies acknowledged counts, row identity/token/seals,
+  full child contents and generations. A lost or replaced acknowledged child
+  cannot become completed-empty evidence. Historical formats are not rewritten.
+  [The lifecycle protocol](16-sweep-evidence.md) defines ordering and widths.
+  Search completion also requires a nonempty usable sample and reconciled
+  extinction. Empty/cold/refused samples are Refused; Halted names an actual
+  recorded engine resource breach, not merely absence of an affordable result.
+  Sink failures prevent successful publication; the existing infallible level
+  callback can finish its active walk before that failure is returned.
+- Lock initial Results/Receipts scans through generation capture, release before
+  returning the handle, preserve device diagnostics, and reuse safely refreshed
+  parent/writer indexes. Warm delta processing does not remove cold history
+  scans, fsync costs or the need to reject same-size replacement/corruption.
+- Expose bounded attempt-pinned pages and a human comparison in the sweep UI.
+  “5 rules pass” means precisely the five historical checks represented there;
+  it does not imply the other admission predicates or institutional authority.
+  Preparation, orchestration and expression completion are not AND completion.
+  Only actual sweep-command lifecycle markers determine external sweep status;
+  malformed, clipped, unreadable and stale evidence remains unknown.
+- Keep arbitrary ranked-candidate trade replay, exhaustive Boolean/sequence
+  enumeration, Selection V6 and full institutional deployment explicitly
+  unsupported until their required authority/search contracts exist. Never
+  substitute selected-winner trades, missing policy values or a requested
+  validation flag for those proofs.
+
+The frontend comparison is generated from the reviewed report and separately
+shows actual verification logs. It is not an automatic proof that every source
+finding remains current. The Rust verifier refuses a successful sequence when
+source differences occur at its checkpoints. Fixed-width operations can be
+constant per item; exhaustive search, cold reads, integrity scans and retained
+history cannot have constant total time/space. Coverage/mutation gaps, ignored
+checks, real-data provenance and deployment status are reported without a
+blanket release certificate. The comparison and evidence inventories are
+`docs/14` through `docs/18`.
+
+### D-0524 — Resumable searches, exact candidate pricing and Selection V6 — 2026-09-06
+
+The operator authorized implementation of the outstanding historical sweep
+capabilities. This supersedes D-0523's implementation-status statement that
+Boolean enumeration, arbitrary evaluated-candidate trades and Selection V6
+were absent. It does not change instrument scope, approve market policy, or
+claim exhaustive testing, total O(1) complexity or production deployment.
+
+Locked choices:
+
+- Reuse the AND engine's level walk for continuation. Engine checkpoints bind
+  the exact input column, live alphabet, support, implication and resource
+  policy, counters and retained frontier history. Cold recovery validates
+  before restoring depth rows. A resource halt is terminal for that identity;
+  it cannot be relabelled extinction or silently advanced with different
+  limits. The stored caller durably publishes each completed level and
+  authenticates the final checkpoint before publishing the parent.
+- Use one versioned immutable checkpoint journal for AND and expression
+  callers, with explicit namespaces, exclusive ownership, monotonic reserved
+  sequence directories and separately synced completion seals. Failed writes
+  poison the handle. Interrupted unmarked reservations are disclosed and never
+  reused. Damaged marked latest state refuses without older-state fallback.
+  Existing lock files are reopened without creation or symlink following.
+- Enumerate the fixed Expression V1 language using a canonical postfix cursor,
+  including AND, OR, NOT, repeated leaves and nested negation. AND support
+  pruning is inapplicable. There is no new depth parameter: candidate/node
+  budgets pause progress and cannot claim language exhaustion. The full initial
+  cursor descriptor extends PARAMS under `BTXEXS01`; later progress does not
+  change identity. Semantic transition replay bounds each saved interval to
+  4,096 grammar nodes and rejects sealed skipped candidates/false exhaustion.
+  Canonical syntax uniqueness is not general Boolean-equivalence deduplication
+  or an ordered temporal sequence language.
+- Keep signal-only and priced expression entry points explicit. The priced
+  command binds the actual minute execution bytes, grid controls and every
+  applied cell rule before evaluation. It uses the ordinary trade/occupancy/
+  exit kernel with a three-valued predicate; only definite truth can enter.
+  Cell materialization verifies the entire selected cell and independently
+  reconciles exact trade totals. Support qualification is recorded separately
+  and supplies no institutional admission.
+- Capture both directions of every retained candidate actually priced in each
+  visited ordinary screen pass, and both directions of each priced expression.
+  Persist exact selected-cell trades plus explicit no-cell outcomes. Preserve
+  actual retention/candidate caps, policy tiers and all applied ladders. Do not
+  present skipped, calibration, validation or every-grid-cell work as captured.
+  Use a distinct expression namespace and full program/trade identity; an OR
+  program's referenced bits cannot be interpreted as an AND mask. Reconfirm
+  acknowledged children immediately before legacy parent publication.
+- Add Selection V6 whose sole production handoff is retained Execution V4
+  authority. Reauthenticate Population V6 and execution dispositions before
+  shared ranking. Accept genuine terminal empty families and actual 0..25
+  prefixes; Top 10 is the same prefix's first ten. Keep Selection V5 immutable.
+  Global Replay V4 accepts eight retained Selection V6 sources, exact later
+  OOS witnesses and the common chronological single-position scheduler. New
+  fixed records preserve all offered candidates and decisions. VIX is stamped
+  only after economic scheduling and cannot enter ranking or economic identity.
+  A zero-stream schedule does not attest OOS market coverage.
+- Expose bounded, exact-attempt candidate/trade pages and read-only search
+  snapshots through Rust API readers. Continuations bind full seals and
+  previously admitted snapshot positions. The browser retains bounded pages,
+  exact decimal integers and canonical full expression text from Rust. An
+  observed writer lock is not proof of continuing liveness, and a sealed capture
+  is distinct from overall run completion. Missing data remains unavailable.
+
+The byte contracts and test inventories are `docs/19-candidate-trades.md`,
+`docs/20-sweep-resume.md`, `docs/21-institutional-sweep.md` and
+`docs/22-expression-search.md`. Checkpoints and saved trade histories grow with
+the work retained; cold authentication and fsync remain real costs. The 37
+institutional policy values still require an approved source. Each verification
+claim must name its actual run; neither a fixture nor compiled route proves a
+completed real-market run, deployed UI, full coverage or zero surviving mutants
+across all touched modules.
+
+### D-0525 — Strict historical input receipts and post-audit readiness repairs — 2026-09-06
+
+The operator authorized finishing the historical sweep path and activating its
+tested backend. Keep the existing pull/recovery job and unrelated source work;
+no full production sweep starts before its required data and readiness gates.
+Actual research remains real stored OHLCV, intraday and cost-excluded as asked.
+Generated unit fixtures are test evidence and never market results.
+
+Locked choices:
+
+- Tighten restored AND state without changing valid checkpoint bytes: an
+  explicitly excluded condition cannot survive, and a nonhalting state must
+  remain strictly below its pair budget. Preserve real terminal halts and the
+  shared join's outer-row budget overshoot. Error-path and independent codec
+  tests, rather than removing guards, establish the new module coverage.
+- Immutable candidate, checkpoint and expression reads use nonblocking shared
+  locks and one Rust read-only opener. On verified macOS and Linux x86_64/aarch64
+  ABIs, native nonblocking/no-follow flags refuse final symlinks and FIFO waits.
+  Unsupported targets refuse instead of guessing flags. Intermediate path
+  components require a trusted root; filesystem/device latency is still not
+  a constant-time guarantee. Writers and existing evidence byte versions are
+  unchanged.
+- Add separate `checksum-audit-stored` and `sweep-audited-stored` commands.
+  Full header/data/sidecar checks produce fixed append-only V1 receipts and
+  an opaque reader retaining the exact audited source handles. Cold admission
+  scans actual bytes; warm rows come from the very block just verified. Missing,
+  changed, unsealed, aliased or over-budget inputs refuse. A receipt reader
+  retains the shared publication lock for its whole typed lifetime so visible
+  bytes before sync are not authority. An identical completed receipt is reused
+  read-only, allowing concurrent readers without rewriting its history.
+- A strict sweep decodes signal, execution, prior/current daily and
+  prior/current minute roles through those retained readers and the ordinary
+  calendar/conversion helpers. A separately saved six-role manifest traces
+  every input receipt. Its ordered bindings extend DATA_DIGEST under a new
+  domain; all nine run terms remain, legacy identities and ReferenceIntegrity
+  fields remain unchanged, and both branches use one stored sweep kernel.
+  Guards are checked before folding and immediately before terminal publication.
+  The common stored-month path and all four priced-audit publication branches
+  authenticate and seal all acknowledged depth and ranked children before
+  appending a parent result. Priced branches also confirm their exact captured
+  candidate evidence at that boundary. A refused final guard
+  or damaged child cannot reach that parent writer. A later parent write failure
+  remains an explicit error alongside completed computation evidence. Completion
+  attests that input snapshot, not that source paths remain unchanged forever;
+  no later source check retroactively turns a published terminal into a refusal.
+  A standalone `RESULT NOT RECORDED` report marker is a command refusal too:
+  completed computation with failed persistence cannot return a success exit
+  and permit an automated next step. Prose mentioning that phrase and longer
+  words sharing its prefix remain ordinary report text.
+  Physical
+  byte/record caps are explicit; none is a strategy depth parameter.
+- Append checksum-audit as lifecycle operation 10. The dashboard labels it
+  input integrity only; it cannot become a completed sweep, pricing outcome
+  or institutional admission. Candidate/search error responses expose bounded
+  known-schema refusal reasons and accept no partial rows.
+- Resolve the complete institutional policy before loading eight historical
+  spans for ledger sizing. Keep vendor validation first and preserve successful
+  policy bytes, approved override precedence and all downstream identities.
+  Missing policy emits its actual worksheet before unrelated data gaps can
+  hide it; no threshold is inferred from available hardware or past profits.
+- Use the operator's verified M4 Pro/14-core/48-GiB configuration for local
+  concurrency planning and recheck current headroom. The additional 8 TB drive
+  is operator-confirmed disconnected, so it contributes no current capacity.
+  This is recorded in `docs/25-macbook-runtime-budget.md` and referenced from
+  the session law; no hardware identifier or credential is copied into it.
+
+Each verification and live activation retains its actual source snapshot and
+scope. Full touched-crate coverage/mutation closure, approved institutional
+policy and full historical-market execution are not inferred from a successful
+subset, a checksum receipt, a CPU specification or an HTTP status.
+
+### D-0526 — Complete VWAP availability and strict range publication — 2026-09-06
+
+The operator requested completion of VWAP mapping while historical sweep
+hardening continues, and clarified cash-stock/futures applicability versus
+spot-index abstention. Preserve the existing engine research surface: cash
+equities already admitted by D-0506/D-0507 and the two named spot indices.
+Contract VWAP applicability does not authorize futures sweeps.
+
+- Complete false-answer availability for all 20 existing VWAP positions.
+  Previously only four base bits were certified false; computed false near
+  and band predicates stayed unknown, withholding valid NOT expressions.
+  All 13 exact comparisons now become known when the current-session mean,
+  sigma and relevant representable levels exist. The seven near predicates
+  additionally require positive sigma and their declared tolerance family.
+  Two positive-volume contributors remain required, zero-volume observations
+  add no weight, and session reset/absent eligibility cannot satisfy NOT.
+- Truth and known masks share checked band bounds. An unrepresentable offset
+  or edge withholds the whole affected band instead of fabricating a saturated
+  level. Preserve all bit names, historic aliases, grammar/store versions and
+  original outputs on representable inputs. New false availability deliberately
+  changes Boolean outcomes; the existing run commit term binds that change.
+- State the actual OHLCV typical-price approximation in the mapping report.
+  Futures use their own contract volume in principle; their current defensive
+  CLI availability arm is scope-related. No future-bar volume scan, index
+  constituent-volume proxy, mixed contract or invented tick source is added.
+- Add `audit-audited-range` with explicit vendor, instrument, rung, month
+  bounds, minimum support, receipt root and physical byte/record ceilings.
+  Retain every unique source once and require every requested month plus
+  preceding minute/daily context. New 512-byte chronological span-link receipts
+  use their own namespace and bind all six roles per month. The final root
+  extends DATA_DIGEST under a new domain; existing monthly receipt bytes stay
+  unchanged. No shorter-span or withheld-day fallback is used by this strict
+  path, and no depth parameter is introduced.
+- Feed those retained inputs into the existing audit/pricing kernel. Preserve
+  the source guard through moving decoded bars; check it before computation
+  and again inside terminal publication before parent append. Record preparation
+  identity before folding. Its shared helper accepts the already-gated command
+  commit so preparation and result belong to the same source stamp; other
+  preparation callers keep their original clean-build check.
+- Move legacy `ledger-all` policy resolution before market-sizing loads and
+  output creation, matching the previous V6 correction. Missing approved
+  admission values refuse with the complete worksheet; no policy is invented.
+- Expose the production engine's fallible join-preparation translation through
+  one private generic boundary used by deterministic tests. Allocation refusal
+  preserves exact prior counters, and observers receive exactly one terminal
+  boundary. Keep the existing search and wire semantics.
+- Bound expression parser progress through slice iteration and renderer work
+  by three times the fixed instruction capacity. Malformed private stacks and
+  cursors refuse or remain Unknown; valid grammar ordering and serialized
+  identities remain byte-identical. Retain defensive checks and disclose
+  equivalent raw mutants and uncovered paths rather than removing protections
+  for an artificial full-coverage result.
+
+The comparison is generated from the dated review and includes distinct VWAP
+and strict multi-month rows. Verification evidence remains separately scoped
+to its actual source, inputs and gates. No change to live ingestion, no futures
+sweep, no total O(1) claim and no unconditional institutional assurance follows
+from these repairs.
+
+### D-0527 — Predicate availability, exact opening ranges and honest launch evidence — 2026-09-06
+
+The operator requested a fresh end-to-end readiness answer with concrete
+repairs and an understandable comparison. Additional audit findings make an
+unconditional full-campaign readiness claim false.
+
+- Opening-range and Fibonacci false answers use the very same reference,
+  representability and tolerance rules as their existing truth predicates.
+  Opening ranges freeze before emission. Previous-day and five-session ladders
+  use completed references. Current-day and opening-gap ladders use pre-fold
+  state; a reference established by this bar cannot certify this bar's answer.
+  Missing or unrepresentable references remain Unknown, including under NOT.
+- Exact-minute projection carries truth and known masks together. Clear both
+  local masks before copying the exact family evidence; a stale local reference
+  cannot become known false. Retaining the extra parallel masks uses space
+  proportional to admitted rows, not constant total space.
+- Coarse signal candles cannot define a shorter or straddled opening range.
+  Add an explicit combined ORB/GapFib exact-minute bridge at stored execution
+  boundaries. It uses the already-required same-feed, same-instrument one-minute
+  stream and the existing exact closing-minute alignment. Keep the original
+  public GapFib-only bridge compatible. Other signal-local families keep their
+  declared timeframe semantics. No new feed, tick source or price proxy is added.
+- These availability and corrected coarse-range answers deliberately change
+  affected Boolean/search results. Preserve vocabulary positions, existing
+  truth primitives, store versions and run framing; the mandatory commit term
+  separates the new computations from old results.
+- Make the explicit `audit-audited-range` API command share the checked CLI
+  adapter, exact browser attempt and terminal/refusal settlement. The receipt
+  directory and physical byte/record ceilings are server-owned configuration,
+  resolved once before a slot is claimed. Missing or invalid fields produce a
+  structured refusal naming fields only, with no ordinary-audit fallback.
+  Applicable existing pricing knobs are retained; knobs incompatible with
+  explicit absolute support refuse rather than being silently ignored.
+- Explicitly finish preparation when a post-fold source check fails, and
+  propagate unsuccessful final publication as a command error. A successful
+  computation cannot hide missing result persistence. Existing worker cleanup
+  is retained; this does not promise immediate cancellation inside a running
+  blocking kernel.
+- Share scalar parsing with the ordinary runtime readers so strict validation
+  cannot accept a value that later clamps or falls back. Check effective server
+  settings before admission and direct strict CLI settings before source load;
+  refuse actual later resolution failures before pricing/publication. A dropped,
+  filtered or unavailable strict task-completion event becomes a visible
+  refusal preserving the original outcome text. This cannot make a failed
+  physical write durable, and does not erase already-written result evidence.
+- A search summary never claims that an unopened trade capture was verified.
+  A priced no-cell outcome is labelled "No selected cell". The detail view
+  exposes recorded signals, refused-path counts and selected exit settings
+  without inventing missing values, zero results or individual refusal causes.
+- Generate both the launch-decision table and detailed comparison from the
+  dated reviewed report, preserve its local evidence links, and label saved
+  test checks separately from present source freshness and deployed-binary
+  identity. Historical counts remain historical; corrected later counts do not
+  erase original failure logs.
+
+The full institutional campaign remains subject to its own unresolved policy,
+integration, coverage/mutation and activation requirements. Boolean captures
+do not grant Selection V6 authority by substituting referenced AND bits, and
+institutional cash-stock expansion is distinct from ordinary cash discovery.
+No live acquisition restart, approved financial threshold, trading action,
+universal O(1) bound or full-market assurance is inferred from this decision.
+
+### D-0528 — Available false clock windows — 2026-09-06
+
+The continued Boolean review found that the four time-of-day predicates44–47
+were known only when true. Consequently `!44` was False inside early morning
+and Unknown afterwards, silently excluding valid not-early-morning candidates
+from Boolean search. The positive AND vocabulary and truth bits were correct.
+
+Certify all four clock predicates on every already-accepted timestamp. Retain
+the existing half-open IST windows09:15–10:15,10:15–12:00,12:00–14:00 and
+14:00–15:30. No prior price, forming-day level or future bar is needed to answer
+whether an accepted timestamp belongs to one of these windows. Low-level
+pre-open/post-close timestamp acceptance is unchanged: no positive window is
+invented there, and market-session admission remains the stored boundary's job.
+
+The added availability uses the existing fixed known mask and adds no dynamic
+allocation, scan, new bit, storage version or dependency. Corrected Boolean
+answers remain separated by the mandatory commit term in run identity. The
+new outside-crate tests independently cover every minute of two civil days,
+all four negations, AND/OR with an unavailable price predicate, a warmed
+Column retaining315 post-early-morning signals, and transactional rejection of
+malformed or repeated candles.
+
+This closes four specific false-availability omissions. Other session/history,
+swing/break and crossing/ordinal availability remains separately documented.
+The earlier V7 and clean174435aa real-data results precede this change; they
+are retained as named checkpoints and cannot certify later source edits.
+
+### D-0529 — Available false session, trend and crossing predicates — 2026-09-06
+
+Continued review found110 more positions whose false answers had no complete
+availability path:19 session descriptions/history/gap predicates,6 swing-near
+and structure-event predicates, and85 crossings/ordinals. Preserve every truth
+primitive, vocabulary position and stored layout; repair their existing known
+mask at the same causal reference boundary. The mandatory commit term separates
+changed Boolean results from earlier runs.
+
+Session descriptions use the accepted current bar and post-fold running
+extremes. Prior-three sequences use pre-fold same-session history, including
+flat bars as available observations. Prior-session comparisons use the same
+eligible previous session as truth. A midpoint exists only for a real nonflat
+opening gap; its near predicate also requires the shared valid tolerance/range.
+
+Trend availability reads the pre-fold state. Each confirmed swing-near predicate
+requires its own representable band. All four break events can be false and
+known once both swing latches exist. A prior structure direction is unnecessary
+for the existing first-break-as-BoS definition. Keep the existing cross-session
+trend history and two-observed-right-neighbour confirmation delay.
+
+Crossing/ordinal absence is known only with a remembered earlier definite side
+in this same session and both currently available base comparisons. A known
+touch or band interior is a non-event and cannot erase memory; missing levels
+and a first definite side do not establish a prior observation for themselves.
+Preserve already-emitted truths and their known bits. The loop remains fixed
+at17 mapped levels and allocates nothing.
+
+Independent public tests cover all new positions, NOT/AND/OR, Column handoff,
+refusals, resets, exact tolerance edges and positive integer extremes. Scoped
+mutation checks caught26 deliberate session mutations,6 generated trend-known
+mutations and5 generated crossing-known mutations. These are finite tested
+scopes, not whole-module mutation closure or100% touched-crate coverage.
+The family inventory now names an availability path for all328 live positions;
+it does not claim every possible inference from an incomplete reference.
+
+The first post-repair indicator benchmark exceeded its unchanged2000-floor
+truth-only budget at2202 floors. Truth-only callers were also computing and
+discarding the complete known mask. Give `Evaluator::step` the same
+transactional `stepped` commit directly; availability has no state mutations.
+Boolean/Column callers retain `step_known`. A dedicated API-handoff/refusal
+regression and the full indicator suite preserve truth and future known state.
+The repeated existing benchmark passed at958 floors without relaxing a budget;
+its whole-Column20,000→200,000 per-bar ratio was1.048. These are finite host
+measurements, not constant total search time or a market-latency guarantee.
+
+### D-0530 — Strict institutional inputs and genuine initial extinction — 2026-09-06
+
+The V6 institutional entry point resolves the existing37 admission choices,
+then explicit checksum location/physical limits, runtime settings and clean
+build provenance before any source sizing. It uses the shared strict range
+loader, enforcing independent raw signal/minute/daily limits before decoding.
+Retain all source/role receipt guards through Candidate, Population, Selection
+and later OOS witnesses/replay publication, including families with no winners.
+
+Append integrity tag1 carrying a full32-byte checksum binding to the Runner
+reference identity. Preserve every old tag0 digest byte. The family-specific
+data digest binds actual receipt identities and all physical/role bounds.
+The common cohort-policy digest binds integrity mode, not a family-specific
+receipt: mixing an instrument's data identity into this shared policy made
+every strict NIFTY/BANKNIFTY pair refuse. The actual pair tests exposed that
+incorrect first composition; its failure log is retained.
+
+Actual first-level extinction exposed a second unreachable route. Engine depth
+counts nonempty frequent levels, so a completed search with no frequent
+singleton has depth0. Candidate/V2 Pre-Admission/V2 Observation validation must
+accept that truthful value only with reconciled zero frequent/closed outcomes.
+No schema stride, condition position, old record or legacy identity is rewritten.
+Never fabricate depth1 to satisfy an erroneous positive-depth guard.
+
+Keep legacy V1 Pre-Admission's nonempty schema unchanged. A new opaque stored
+family enum distinguishes evaluated V1 authority from actual empty Candidate,
+Base V2 and Pre-Admission V2 authority. V6 statistics dispatches from that type
+and freshly authenticated row counts; it cannot mint extinction from a missing,
+cold, all-refused or halted search. Supporting Candidate, Base, Pre-Admission
+and Search records are freshly reopened around successor publication. Empty
+families retain both their physical source guards and ledger authorities through
+Selection. The existing all-extinct Statistics V3 producer supplies no
+fabricated bootstrap numbers.
+
+This is strict AND-family institutional integration for the existing two
+indices. It neither supplies financial thresholds nor gives a Boolean program
+institutional authority by reinterpreting its referenced bits as a conjunction.
+Explicitly counted partial input refusals remain bound to the source census;
+zero candidates does not mean every market observation was complete or valid.
+
+### D-0531 — Exact intraday15:10 across public execution doors — 2026-09-06
+
+The operator reaffirmed intraday-only trading with forced exit at15:10 IST.
+This preserves D-0436's fixed clock; it does not derive a new exchange close.
+
+Adversarial tests found that floored minute detection could accept15:09:30 as
+the required15:09 record, while subtracting whole minutes from a timestamp
+preserved its fractional-minute residue and moved liquidation to15:10:30.
+Require an exact whole-minute required record, compute the true civil-day
+deadline with checked wide arithmetic, and refuse off-grid or unrepresentable
+execution intervals. Native/projected mask and expression walks share the
+same stricter SliceFacts acceptance map. Well-formed minute data retains its
+existing acceptance bitmap.
+
+The old public `walk_with` entry point also trusted a caller-supplied
+`SquareOff` table that could name a later or foreign-day row. Compare each
+supplied boundary with the already-derived canonical facts before opening that
+path. Mismatch is an explicit counted refusal, never a silently substituted
+exit or a fabricated successful trade. The existing grid compatibility wrapper
+already derives canonical facts and cannot use its ignored table to extend
+the clock.
+
+Only the accepted unique15:09 one-minute interval can price forced liquidation;
+missing, corrupt, duplicate or ambiguous required data has no substitute.
+The existing Open/PrintedExtreme fill models remain unchanged. This is not a
+claim to know an exact15:10 tick or broker fill. Raw geometry helpers alone do
+not authenticate checksum, calendar or price validity.
+
+### D-0532 — Receipt-checked browser batches and exact attempt correlation — 2026-09-06
+
+Add an explicit receipt-checked research mode covering the selected instruments
+and server-published intraday rungs. Require an absolute positive minimum-hit
+count; do not invent one or silently apply ordinary percentage/sizing knobs.
+Send each immutable request through the existing strict API command, one job
+at a time, with supported runtime overrides captured in its visible request.
+
+Command acceptance returns the actual reserved attempt as decimal text.
+Browser status additionally carries `attempt_key` as decimal text and
+`where:browser`, preserving the numeric legacy field. This preserves adjacent
+u64 tokens beyond JavaScript's safe integer range. A queue may advance only
+after matching the exact accepted token and the complete browser context.
+Unrelated/CLI status, malformed responses, network ambiguity or refusal stops
+future submissions. Never automatically repeat a POST that might have started.
+
+The page shows a paged per-job comparison of request, state, exact audit attempt,
+refusal and recorded result. Its4096-job bound limits browser bookkeeping and
+refuses excess before any submission; it does not cap engine depth. Closing
+the page stops future submissions while an accepted server job continues.
+This is not a durable aggregate server queue or automatic reload-resume
+authority. Research remains cost-excluded, intraday-only and fixed at15:10;
+Selection V6 and later institutional replay remain separate authorities.
+
+### D-0533 — Recheck actual execution clocks and the exact browser attempt — 2026-09-06
+
+Final independent review found two concrete gaps after the earlier repairs.
+The public cached-facts trade APIs can receive `SliceFacts` derived from a
+different bar slice. Comparing a supplied table to those same foreign facts
+does not authenticate the actual execution clock: foreign15:09 could point
+to actual15:20. The common trade path must check actual entry and exit
+timestamps against the fixed15:10 IST policy, and a cached horizon result must
+match the actual requested horizon timestamp. Both directions, native/projected
+columns, masks, expressions and grid callers retain this common enforcement.
+No later exit or overnight path may be justified by cached geometry.
+
+Endpoint checks alone were insufficient: a late or foreign-day interior record
+could still trigger a grid stop or target while cached acceptance stayed clean.
+The checked crossing path validates actual timestamps during its existing bar
+pass, with counted refusal before a corrupt row can move a level or price an
+exit. Standalone excursion geometry remains separate from this checked engine
+door. This adds no second path scan or per-candidate allocation.
+
+The global latest-status route can legitimately prefer newer or uncertain CLI
+activity over a finished browser slot. A receipt-checked queue therefore cannot
+use that global view to recover its own completed attempt. Add a sole canonical
+positive-u64 `attempt` query to `/backtest/run.json`: return only the matching
+retained browser slot, including completion or refusal. Missing/replaced slots
+remain explicitly Unknown, invalid/duplicate/noncanonical selectors refuse,
+and no-query global observation keeps its existing semantics. The browser
+polls and rechecks the exact accepted decimal token and never retries an
+ambiguous POST. This adds no durable aggregate queue or restart recovery.
+
+### D-0534 — Serialize strict test readers with process-wide knob writers — 2026-09-06
+
+The frozen V9 workspace run exposed four strict range integration failures:
+each correctly refused an invalid `BRUTEX_GRID_RUNGS` value. A concurrent
+candidate-trade test deliberately installs that value under the existing
+`knobs::serially()` guard, while those strict readers did not acquire the same
+guard. An exact frozen-binary isolated replay passed. Hold the existing shared
+guard across each affected test's setup, strict computation and final evidence
+assertions. Production validation, policy limits and refusal assertions remain
+unchanged. Keep the V9 failure and rerun the full workspace; a focused replay
+alone cannot clear a failure caused by parallel execution.
+
+### D-0535 — One explicit, explained research profile under delegated choices — 2026-09-07
+
+The operator delegated choosing the37 missing thresholds and requested an
+explanation without manual entry. `config/intraday-research-v1.toml` supplies a
+documented research profile, not an invented pre-existing institutional approval.
+The choices and primary method sources are recorded in `docs/22-research-policy.md`
+and its canonical comparison source. Papers govern method descriptions; they do
+not prescribe these sample, loss, concentration or significance limits.
+
+`BRUTEX_ADMISSION_POLICY_FILE` is a process-owner path selector, outside
+request-controlled engine knobs. One bounded read accepts at most16KiB from a
+regular file without following a final symlink, requires a stable ordinary
+filesystem generation, and records a domain-separated BLAKE3 digest of the read
+bytes. V1 accepts a restricted TOML subset: flat fields, integers, booleans,
+comments and quoted `risk*MULTIPLIER` expressions on paisa fields only. Checked
+wide arithmetic refuses negative unsigned results and overflow. Require exactly37
+fields and version1; duplicates, unknown keys, tables, absent fields and attempts
+to supply the two stated fields refuse.
+
+Validate the file's complete runner policy before applying overrides. Existing
+`BRUTEX_ADMIT_...` precedence remains visible for all39 fields. A malformed
+override cannot fall back; a valid override cannot redeem an out-of-domain file.
+No selected file retains the previous complete worksheet behavior. Resolved
+numeric policies keep their existing canonical admission identity/persistence
+contracts. The file digest is report provenance, not proof of market computation.
+
+`cli policy-check FILE MAX_POINTS` explains all39 resolved limits and units
+without reading historical bars or inheriting gate overrides. The browser guide
+is generated under `web/` from the canonical explanation and actual profile and
+checks human limits against exact configuration values. No Rust build or test
+requires the frontend toolchain. The guide invents no strategy results or
+institutional certification.
+
+This does not restart the live service. Intraday-only15:10IST execution,
+real-OHLCV requirements, storage-only derivatives, complete statistical
+populations and remaining release gates remain required.
+
+### D-0536 — Explicit Boolean catalog research preserves full programs and cash identity — 2026-09-07
+
+The delegated research scope requires OR/NOT and eligible cash stocks without
+changing the meaning of existing two-index AND records. A new128-byte
+`ResearchFamilyV1` binds the complete instrument key and, for cash, the existing
+F&O/total-market snapshot digest. Only the two actual indices map to the legacy
+family enum. No future, option, reference instrument or index name posing as a
+stock can enter this research surface. The snapshot is not point-in-time
+membership. Canonical scope order is the two indices followed by eligible cash
+symbols; duplicate input refuses rather than being silently dropped.
+
+The shared exit-resolution and execution kernels serve both family types.
+Program identity retains the complete three-valued expression and all actual
+execution inputs. Referenced leaves must never substitute for the program:
+`a OR b`, `a AND b` and `NOT a` are different strategies. The new explicit
+catalog route evaluates every supplied program, both directions and every
+resolved exit coordinate, retaining zero-trade and refused coordinates as well
+as exact completed trades and zero-inclusive accepted-session observations.
+Persist the actual resolved grid settings and source digests with the body so
+later drill-down does not need current environment values.
+
+`boolean-catalog-stored` takes a complete explicitly supplied catalog and one
+intraday timeframe. It does not claim exhaustive Boolean grammar enumeration,
+all-timeframe campaign completion or Selection V6 authority. The catalog is
+bounded input with no accepted prefix; the existing extinction-based AND
+search gains no depth setting. Independent families may execute in parallel
+within explicit divided physical limits. No successful family receipt can
+substitute for completion of the whole requested cohort.
+
+### D-0537 — Complete Boolean statistics and research comparison use new receipt domains — 2026-09-07
+
+New Boolean statistics consume opaque committed candidate sources. Require the
+same complete ordered catalog, execution cohort and aligned accepted sessions
+across the canonical family scope. Every program/direction/exit coordinate
+stays in the statistical population, including losing, refused and zero-trade
+coordinates. Reuse the existing White, SPA, Romano–Wolf, Wilson and CSCV numeric
+kernels. Exact bounds admit the complete work before computation; no shorter
+history, dropped odd period, padded session or selected-only population may
+silently replace a refused input.
+
+The existing Romano–Wolf kernel cannot studentize a constant-return candidate.
+Retaining zero-trade coordinates can therefore make that family test unavailable.
+Record the named condition; do not remove the coordinate or invent an adjusted
+p-value. A policy requiring this evidence remains unmeasured. Statistical
+method changes for degenerate populations require a separately justified choice.
+
+New statistics use512-byte records and new research admission uses a512-byte
+header followed by1024-byte candidate rows. The448-byte `BRAPRO01` projection
+reuses all44 existing reason comparisons against the full39-field policy but
+grants no legacy evidence seal. Exact source-bound trade metrics are measured;
+missing anchored, later OOS and statistical authority stays unmeasured/refused.
+Persist every candidate decision and each failed/unmeasured/refused reason mask.
+The CLI aggregates all reason counts and displays at most256 detailed rows,
+explicitly stating that the complete body retains the remaining decisions.
+
+Candidate, statistics and admission lifecycle operations have distinct append-only
+discriminators11,12 and13. New bodies and completion receipts live under their
+own versioned namespaces; no existing format is mutated or decoded as these
+types. Writers publish completion only after actual body/source checks and
+durable writes. Read-only projections never mint the opaque capability required
+to author a later stage. Cold authentication and full-family statistics are real
+work; bounded pages do not imply constant total storage, enumeration or latency.
+
+### D-0538 — Observe saved Boolean evidence without extending its authority — 2026-09-07
+
+Use one shared cold reader for the three new Boolean receipt namespaces. It
+authenticates the complete body and completion under a shared publication
+lease, retains file generations, and reacquires the lease around each complete
+warm projection. Release the lease before returning the idle cached reader so
+an identical rerun can acquire its publisher lock. A busy publisher, replaced
+owner, changed body or failed projection refuses; none becomes an empty page.
+
+Statistics and admission observers authenticate every linked saved ancestor
+under one aggregate serialized-byte budget. Require exact cohort, catalog,
+session order, source counts and completion pins. Recompute all research
+comparison values and verdicts against the complete saved policy. The detached
+codec grants no older admission capability. Saved hashes cannot reconstruct an
+unknown raw-market root: these are authenticated saved snapshots, not fresh
+raw-market audits or authorization to publish a successor.
+
+The three read-only HTTP routes use only the existing server-owned evidence
+root, shared detail-worker admission, bounded caches, at most256 rows per page,
+the64MiB ancestor-read ceiling and8MiB response ceiling. These existing physical
+limits refuse whole requests instead of truncating. They are not total RAM or
+latency guarantees. Exact decimal integer values, floating-point bits, all44
+evidence states and reason positions, and all39 policy settings reach the
+browser. Later pages and source drill-down require the retained completion pin.
+The dashboard labels saved completion separately from strategy admission and
+does not claim a production campaign or untouched holdout has run.
+
+### D-0539 — Checkpoint complete catalogs across eight intraday timeframes — 2026-09-07
+
+Add `boolean-campaign-stored` over the existing fixed intraday rung list. Reuse
+the catalog's typed preparation and parallel family producer. Derive all
+expected family catalog identities from retained strict source receipts before
+pricing; bind the full ordered program catalog, resolved research policy,
+source fingerprints and clean build in the campaign identity. Keep source
+guards until completion. The per-invocation timeframe job allowance is a work
+budget, never a strategy depth parameter.
+
+Use the existing immutable acknowledged journal in a new
+`boolean-campaign-v1` namespace. Record each timeframe's waiting, running,
+paused, refused or completed state and exact candidate/statistics/admission
+receipts. Resume authenticates completed children and the same source plan
+before skipping work. A failed or interrupted child cannot complete a parent;
+an identical retry can finish its earlier immutable work. Physical byte and
+checkpoint-history ceilings refuse rather than truncate.
+
+The read-only campaign overview authenticates the acknowledged snapshot and
+fixed child completion receipts. Detailed child bodies authenticate on their
+separate bounded routes. This distinction keeps an eight-timeframe overview
+readable without loading every trade and must be explicit in the response and
+browser. Cold snapshot discovery and child validation are not O(1). Completion
+means the finite training catalog was computed, not institutional acceptance,
+later-period success, full Boolean grammar exhaustion or trading approval.
+
+### D-0540 — Observe later prices under frozen Boolean training exits — 2026-09-07
+
+Add an opaque runner training anchor minted only from a validated complete
+program-aware training grid. Retain the original program, resolved grid,
+evaluator, execution horizon and exact training provenance. Later observations
+must use strictly later actual IST sessions with matching family/feed/build
+and evaluator. The later path evaluates every original coordinate using the
+frozen training levels; later prices never select new percentile levels,
+ratios, stops or trails. Keep zero-trade coordinates and zero-return accepted
+sessions. Real one-minute execution and the existing 15:10 IST intraday
+deadline continue to apply.
+
+`boolean-oos-stored` reuses strict catalog preparation, then records the
+distinct later-month comparison in a new `boolean-oos-v1` body/completion
+namespace. Lifecycle operation14 is `boolean-oos`; existing discriminator
+values and candidate bytes are unchanged. The live producer retains original
+and later source guards through publication. Cold observation authenticates
+the complete original candidate artifact, full program/family/grid mapping and
+the later artifact within its aggregate read budget. It grants no live source
+or successor-authoring capability.
+
+This is a measured later-period comparison. It does not fabricate anchored
+folds, change the research admission profile or coerce Boolean/cash evidence
+into legacy Selection V6 authority. Those distinctions remain visible.
+
+### D-0541 — Resume full-wire grammar batches only after their campaigns — 2026-09-07
+
+Connect the existing fixed V1 AND/OR/NOT grammar cursor to the eight-timeframe
+campaign through binary program batches. Do not round-trip generated programs
+through the narrower text parser: valid fixed-wire programs can exceed its
+source nesting or byte bounds. There is still no strategy depth parameter.
+Positive program and grammar-node allowances bound work, not the language.
+Bind those batch boundaries and the source/policy descriptor into the journal
+identity because they determine each finite statistical comparison.
+
+In `boolean-grammar-v1`, acknowledge the exact before/after cursor, programs
+and work counters before campaign execution. Advance to the next batch only
+after authenticating the exact batch's complete eight-timeframe campaign.
+An interrupted or refused campaign leaves that batch pending. Empty node-work
+progress records no invented campaign. Cold recovery checks the predecessor
+chain, replays each admitted bounded grammar segment and verifies each claimed
+campaign's exact program and preparation digests. Budget pause is never
+reported as grammar exhaustion. Total cold recovery, enumeration, statistical
+work and storage grow with the actual work; no constant total latency is claimed.
+
+Each batch retains a separate explicit statistical population. Combining
+passing rows from many batches is not a multiple-testing correction across
+the entire grammar. Neither batch completion nor eventual syntactic grammar
+exhaustion establishes full-search significance or strategy admission.
+
+Reserve the entire next Plan/Done pair, or the pending plan's remaining Done,
+before pricing. Charge interrupted reservation ordinals against the smallest
+configured record, history-memory and shared directory-discovery ceiling.
+Otherwise a successful append could create history that the unchanged next
+invocation cannot recover. Hold the fresh all-source preparation guards through
+grammar completion publication and check them before and after acknowledgment;
+saved child authentication alone does not prove the original files stayed put.
+
+### D-0542 — Preserve zero candidates in a separate conservative statistical procedure — 2026-09-07
+
+Keep the V1 Romano–Wolf behavior and bytes unchanged. Add a V2 wrapper that
+retains the full original coordinate population and identity. Exact all-zero
+series receive conservative probability one; variable nonpositive observed
+means also receive probability one but remain in the shared resampling maxima.
+Nonzero constant series refuse. Positive observed thresholds retain the shared
+stepdown kernel and its exact counts, ranks, unrounded statistic bits and
+plus-one probabilities. The full-family mapping and procedure/bounds are
+identified separately from the active subfamily.
+
+This is not a fabricated studentized zero statistic. For a positive threshold,
+adding a zero floor to a resampling maximum cannot change its exceedance;
+nonpositive hypotheses are conservatively not rejected. The shared bootstrap's
+validity assumptions remain. The finite small-integer oracle is executable
+implementation evidence, not universal financial or distribution-free proof.
+
+### D-0543 — Populate later-window evidence only from original frozen exits — 2026-09-07
+
+Declare complete contiguous later civil windows before later pricing. Create a
+typed fold plan from the original resolved grid and training anchor, bind one
+bar-to-window map to the later evaluation, and materialize each selected
+coordinate once. Reconcile each fold's actual sessions, trades, wins and
+pessimistic return with the whole later cell. Empty actual windows refuse;
+accepted zero-trade windows remain measured zeros. Refused original coordinates
+without a selected-exit capability cannot acquire fold authority.
+
+These are fixed-training later windows, not expanding-prefix retraining.
+Partitioning an already fully trained sample would leak the training exit
+selection into the alleged holdout; therefore every requested window must be
+strictly after original training. Preserve the existing OOS V1 identity and
+body; optional fold projections are additional live typed evidence and have a
+separate `BRXFVL01` canonical format. Decoding produces an observation only.
+No stored observation can reconstruct the opaque authoring capability.
+
+### D-0544 — Predeclare and persist finite eight-timeframe qualification — 2026-09-07
+
+The new `boolean-qualified-campaign-stored` command joins original complete
+catalog training, later frozen-coordinate observations and the common research
+policy. Preflight every requested source over all eight existing intraday
+timeframes before later pricing. Bind the complete original/later descriptors,
+catalog, policy, date partition, procedure and resource limits into a new plan.
+Allocate one eighth of the finite family testing threshold to each timeframe.
+Do not recycle or renumber failed, interrupted or completed allocations.
+The allocation does not cover arbitrary additional catalogs or grammar batches.
+
+Use original training PBO as its explicitly labelled diagnostic; evaluate
+execution and profitability fields from the genuinely later sample. Populate
+the three later-window fields only from matching original selected-coordinate
+proof. Retain zero/refused rows and every policy reason. Store exact statistical
+fractions and use conservative ceiling ppm in this successor so an exact
+probability above a threshold cannot pass through floor rounding. Old shared
+probability projections and old admission bytes remain unchanged.
+
+Persist `boolean-qualification-v1` with fixed header/family/candidate/fold
+sections and receipt-last completion. Operation15 records its lifecycle.
+`boolean-qualified-campaign-v1` acknowledges the complete eight-slot scope
+before pricing and links every immutable qualification result. Recovery checks
+all acknowledged predecessors, including absence of skipped acknowledged
+records. Reservation holes consume capacity without becoming completions.
+Uncertain publication poisons the writer; it cannot expose a false completed
+state. Source guards survive through final acknowledgment.
+
+Cold observers authenticate the saved ancestors, source-derived classifications,
+full ordered-family hashes, numeric mappings, declared windows and conserved
+values. They do not rerun every bootstrap draw on a dashboard request, re-attest
+raw market data or mint source authority. The new plain-language comparison
+must retain that distinction. This is cost-excluded research, not legacy
+Selection V6 or live-trading approval. See `docs/29-fixed-training-qualification.md`.
+
+### D-0545 — Reconcile every saved child across overall qualification completion — 2026-09-07
+
+Before publishing the last timeframe slot, reopen and authenticate every prior
+saved qualification against its exact completion pin, declared scope, unit and
+allocation. Repeat the complete eight-child check after publication. Sequential
+observation bounds retained decoded populations to one child at a time. A child
+lost before publication leaves the final slot incomplete and permits a recorded
+refusal. A loss detected after publication returns an error while preserving the
+append-only acknowledged history; it cannot print an overall success claim.
+No check guarantees that external storage remains unchanged forever.
+
+This closes a difference between fresh execution and restart: restart already
+revalidated all saved children, whereas a fresh run had dropped earlier live
+capabilities after their own timeframe finished. Tests explicitly remove an
+earlier saved child at both sides of the final publication boundary. The overview
+continues to describe journal history; full child authentication remains a
+separate observation and is never inferred from a saved slot alone.
+
+### D-0546 — Share an explicit runtime allowance for Boolean evidence observation — 2026-09-07
+
+An actual saved qualification authenticated under the command's declared read
+allowance but exceeded the dashboard's fixed 64 MiB limit. Use one typed
+server-owned `BRUTEX_BOOLEAN_OBSERVATION_BYTES` allowance for Boolean catalog,
+statistics, admission, qualification and later-observation reads. Missing
+configuration preserves the 64 MiB default. Noncanonical, zero, overflowing,
+non-UTF-8 or unaddressable configured values refuse without substituting a
+default. Requests cannot supply their own unlimited read allowance.
+
+Include the effective allowance in every relevant cache key. Shrinking it must
+reauthenticate under the smaller bound rather than reuse a larger cached
+population. Successful responses expose the exact allowance; failures retain
+the authentication reason and name the allowance. Preserve complete ancestry,
+seal, pin, scope and row checks; never return an unauthenticated body prefix.
+This controls admitted serialized evidence, not measured process RSS or latency.
+
+### D-0547 — Exercise grammar recovery with genuine generated-source capabilities — 2026-09-07
+
+Share the existing grammar execution and recovery body behind a private
+preparation function. Production always supplies the existing clean-build-gated
+preparation function. Only test modules can supply the existing explicitly
+generated fixture preparation; no environment flag bypasses production provenance.
+The new regression executes real candidate/statistics/admission storage across
+all eight timeframes, verifies saved children with the actual cold reader and
+retries exact completed batches. It also constructs a genuine different campaign
+and proves identity refusal occurs before the ancestry reader is called.
+This addresses source-backed coverage gaps without inventing a clean commit,
+returning fake successful receipts or weakening the production guards.
+
+### D-0548 — Test grammar allocation and independent recovery guards — 2026-09-07
+
+Retain the existing restore, descriptor, predecessor and acknowledgment guards.
+Extract their independent field predicates into private helpers so tests can
+exercise each mismatch without manufacturing authoring authority. Test actual
+retained vector capacity, exact serialized Plan admission and oversized sealed
+checkpoint refusal before parsing or child replay. Seven selected mutation
+replays were caught; that does not claim a fresh full-module mutation campaign
+or 100% whole-crate coverage. The original failures remain in the audit history.
+
+### D-0549 — Allocate one error budget across a declared Boolean search — 2026-09-07
+
+A separately qualified finite batch does not qualify an unlimited sequence of
+batches. Add `search_allocation_v1`: zero-based batch b and each of the eight
+intraday timeframes receive the exact allowance
+`alpha / [8 * (b + 1) * (b + 2)]`. The total over every finite prefix is at most
+alpha. This is a fixed alpha-spending application of the online Bonferroni
+principle recorded in the charter; it is not proof that bootstrap assumptions
+hold for every market series. No independence between batches is added as an
+assumption by the spending rule. Valid individual testing evidence is still
+required. Changed sources, grammar, policy, procedure or batch boundaries form
+a different declared search; this rule does not combine arbitrary research
+projects into a universal error guarantee.
+
+Add the distinct `boolean-qualified-search-v1` journal and
+`boolean-qualified-search-stored` command. Bind the complete initial grammar,
+source descriptors, policy, batch work and physical admission before outcomes.
+Persist a batch reservation before pricing. Refused or empty batches keep their
+ordinal and allowance; retries cannot reset or recycle it. Only a completed
+batch permits the exact next cursor and ordinal. The invocation batch allowance
+pauses work without changing search identity or adding a depth parameter.
+
+The original finite qualification bodies remain unchanged. Store a separately
+hashed full-coordinate search projection, its exact allocation, four status
+counts and eight exact child identity/completion links in each completed search
+record. Re-evaluate the common research policy using conservatively scaled
+probabilities; do not promote an originally unqualified coordinate. Keep the
+original observations and all reasons available beside the new comparison.
+Insufficient statistical resolution cannot be repaired by silently increasing
+draws after seeing the outcomes.
+
+Cold observation authenticates every acknowledged parent record under explicit
+serialized-byte and grammar-replay work ceilings. Admit the complete declared
+program reservation independently of stored byte claims before decoding a
+batch. A retained detail reader keeps the parent search and campaign ancestry
+and rechecks them before and after paging. The producer reserves space for both
+the planned and terminal checkpoint before pricing, rechecks previous completed
+children on restart and around completion, and checks raw sources immediately
+before and after the final parent acknowledgment. Missing evidence refuses; a
+saved completion is never rewritten to conceal a later loss.
+
+The command uses the declared source-record admission also as its independent
+history replay-node ceiling, and prints the observer settings. Server observation
+uses required canonical positive `BRUTEX_BOOLEAN_SEARCH_REPLAY_NODES` and the
+existing `BRUTEX_BOOLEAN_OBSERVATION_BYTES`. Query parameters cannot raise either.
+Cold history validation, enumeration, evidence and total memory/time grow with
+the work. Reaching a physical limit pauses/refuses explicitly and never means
+grammar exhaustion or total O(1). Old formats and condition positions are intact.
+
+The shared qualification executor remains the production implementation for
+both text catalogs and grammar batches. Its test-only generated branch uses the
+existing generated campaign identity consistently through later replay. The
+search executor accepts private preparation function pointers for the genuine
+generated recovery fixture; the production entry supplies only the real,
+clean-build-gated preparation functions. No flag or environment value can select
+the generated path in a production executable. Failure settlement always keeps
+the original work error even when recording the terminal audit also fails.
+
+### D-0550 — Expose search comparison with staged release evidence — 2026-09-07
+
+Add a bounded read-only `/boolean-qualified-search.json` endpoint and the
+`boolean_qualified_search` backtest view. Overview exposes exact acknowledged
+search progress. Detail binds the requested parent pin, batch, timeframe and
+qualification completion, keeps original qualification beside the corrected
+common-policy projection and checks the retained ancestry through rendering.
+All counters and fractions use exact decimal strings. Report complete admitted
+search/campaign/child bytes and charged history plus selected-batch replay work;
+neither is labelled constant request latency or process RSS.
+
+The server controls both observation limits. A missing/malformed search replay
+allowance refuses rather than falling back. No indefinite overview cache or
+fabricated total percentage is added. A reserved batch overview does not claim
+its eight result summaries are complete; the existing qualified-campaign surface
+remains the detailed per-timeframe progress observer.
+
+Expose its prospective address from the acknowledged qualification plan so a
+reserved batch can link directly to saved timeframe progress. The address alone
+does not prove that child work has started or completed. Frontend validation
+requires exactly the four declared outcome counts and exact batch-count/phase
+conservation. An adversarial fifth negative count must not offset an inflated
+displayed total; unknown arithmetic fields cannot influence the accepted sum.
+
+Add a native Rust staged-release preflight under `web/sweep-readiness/`. Its
+manifest pins the complete frontend tree, API/CLI binaries, source declaration,
+actual required evidence admission and the seven-check verifier artifact.
+Read-only current job observations retain unknown/active/paused distinctions;
+recent recovery events or a null sweep result are not an authoritative idle
+census. The preflight does not restart, launch another API, stop acquisition or
+mint permission from an artifact pass. Preserve the active service until an
+actual safe handoff, and keep rollback artifacts separate from append-only data.
+
+### D-0551 — Honor the declared exit-grid resolution on shared stored paths — 2026-09-07
+
+The shared `ledger_all::exit_policy` previously accepted strict runtime
+configuration but always constructed five percentile levels. Read the existing
+`BRUTEX_GRID_RUNGS` setting through the same request-aware knob reader and strict
+scalar validator used by the other stored paths. Build the requested number of
+stop, target and trail percentiles exactly; do not clamp or silently substitute
+a smaller grid. Absence preserves the original five-level policy and digest
+byte for byte. Invalid values refuse before pricing. The existing fixed exit-cell
+ceiling remains an independent admission and can still refuse a resolved grid.
+
+Grid resolution changes the exit-policy digests. The candidate cohort already
+binds both directional policies, and its program-independent descriptor reaches
+the campaign/search source declarations. Preserve that identity chain and the
+existing file formats. Tests change each directional policy separately, compare
+the actual generated-source fingerprints, and confirm that changing only the
+catalog does not change the source-only descriptor.
+
+`MAX_POINTS` remains a risk threshold; it is never a substitute for grid
+resolution. Retain all original risk, deadline, execution and cost fields.
+An explicitly smaller verification grid is a different declared search, not a
+retry of a refused larger search. Preserve the original failure and its exact
+capture limits. Plan new physical admissions from a source-only conservative
+census before pricing; declared serialized limits are not measured RSS or a
+claim that the complete search will fit a finite machine.
+
+### D-0552 — Refuse ignored Boolean controls and preserve nested failure causes — 2026-09-07
+
+An explicit Boolean catalog uses its positional horizon, the declared admission
+profile/overrides and the shared percentile exit-grid policy. The legacy range
+screen's other controls do not govern this path. Reject explicitly supplied
+unsupported legacy settings by name before policy/source preparation instead
+of accepting their scalar spelling and silently ignoring their meaning.
+Reuse the existing setting-name table and request-aware reader. Keep
+`BRUTEX_GRID_RUNGS` supported with its strict bounds, keep malformed/non-UTF-8
+values refused, and leave ordinary range-screen validation unchanged. This does
+not translate legacy filters into new risk thresholds or change the39-field
+admission contract.
+
+Qualification can encounter a pricing/source failure followed by a second
+failure while saving its refusal. Preserve the original cause first and also
+name the publication failure; explicitly say refusal persistence is unconfirmed.
+A successful refusal write may say recorded. If completion was already
+acknowledged, retain it and report subsequent verification failure without
+rewriting history. Test actual journal publication failure and cold reopen,
+rather than manufacturing a successful saved refusal in a mock.
+
+A clean parallel replay reproduced identical clock-based temporary directory
+names in the qualification publication tests. Add a checked monotonic counter
+to their existing PID/timestamp namespace and retain contextual directory
+errors. This is test-fixture isolation; production journal addressing and
+append-only history are unchanged.
+
+### D-0553 — Version the shared probability ceiling and preserve historical arithmetic — 2026-09-07
+
+The stored search derives alpha from the minimum of the policy's FWER and
+Romano--Wolf ceilings. Its V1 comparison scales all three family probabilities,
+but its additional exact guard checks only Romano--Wolf. A valid unequal policy
+can therefore retain a White or SPA comparison above the advertised shared
+ceiling: FWER50,000, Romano25,000, White/SPA50,000 ppm; batch0 multiplies raw
+Romano1/640 to25,000 ppm and raw White/SPA1/400 to40,000 ppm. The original
+arithmetic admits otherwise passing observations. This establishes an
+inconsistent shared comparison, not a demonstrated failure of the overall
+type-I bound, bootstrap calibration, or any live trading result.
+
+An earlier detached numeric test used alpha25,000 from SPA while FWER and
+Romano were50,000. The actual command would not construct that declaration.
+Its defensive batch-abort result is not evidence of a reachable production
+abort. Retain that test only as explicitly inconsistent defensive input; use
+the real writer's FWER/Romano derivation in the reproduced V1-admitted to
+V2-rejected counterexample.
+
+New writes use `BRBQSS02`/`BRBQSR02`, at the original fixed strides and shared
+journal namespace. The discriminator binds a `SharedCeilingsV2` rule into the
+search identity and a distinct full-projection digest domain. V2 derives an
+effective policy by capping each of the four probability ceilings at alpha;
+all35 other values and requirements remain unchanged. Conservative upward
+ppm conversion cannot round an above-limit probability into admission. A
+failed comparison becomes a retained rejected row and does not interrupt
+other coordinates. An original failed qualification can never be promoted.
+
+The reader still decodes V1 with its exact original arithmetic, policy digest
+and summary domain. It must not recalculate an old V1 completion using V2,
+append a new rule to an old reservation, rewrite receipts or recycle assigned
+testing slots. Mismatched record/declaration versions and mixed-rule history
+refuse. The original V1 declaration has an independently constructed byte/hash
+fixture. A new build already changes the source identity; the explicit version
+also makes historical interpretation independent of a commit-name heuristic.
+
+The API exposes the recorded projection version, the original policy, the
+effective policy and the effective digest on each comparison. The browser
+checks that only the four allowed ceilings change, requires exact row-policy
+binding and labels historical V1 observations as such. Its table shows original
+and effective values side by side. Legacy observations are never labelled as
+passing the new rule. Generated numeric/codec fixtures prove boundaries; they
+are not market results. Actual historical compatibility and ordinary checks
+are recorded separately against the source version tested.
+
+### D-0554 — Refuse incomplete release evidence before live observation — 2026-09-07
+
+The original deployment plan registered ordinary successful checks and pinned
+artifacts, but lacked machine-enforced whole-crate coverage and complete-module
+mutation admission. Add version-two plans binding the reviewed crate/module
+scope, complete source-file hashes and an exact-source measurement receipt.
+Version-one plans retain stage-only behavior. No successful artifact check is
+an activation or release approval.
+
+Release admission requires raw LLVM integer line and branch counts to equal
+their covered counts and a complete emitted/outcome mutation census for every
+declared module. Missing, stale, incomplete or rounded evidence, surviving
+mutations, timeouts and infrastructure errors refuse. Compiler-invalid cases
+remain separately accounted only with a clean build/test baseline, the exact
+failed build and a pinned diagnostic at the mutated Rust line. There is no
+free-text equivalent-mutation override. Sources and reports have independent
+physical read limits; the verifier launches no measurement tool itself.
+
+`--offline` invokes no live-observation callback. `--require-release-gates`
+returns a distinct refusal when mandatory evidence is absent, before live
+observation. The retained85-artifact stage was actually checked: its artifacts
+passed and its missing mandatory evidence returned exit3. No service was
+activated, copied or interrupted. An actual safe handoff remains separate.
+
+Read-only recovery inspection found an active pointer whose original plan is
+absent. Existing handlers already return503 with `coverage_certified=false`
+and a visible unavailable page. A new regression verifies that this response
+creates no plan, claims no run slot and leaves pointer, STOP and attempt bytes
+and file generations unchanged. Attempt logs cannot reconstruct a missing
+durable plan/control inventory; no replacement history is invented.
+
+### D-0555 — Preserve the binding rule during dependency-probe remediation — 2026-09-07
+
+Dependency remediation was tested in an isolated copy without changing the
+shared dependency graph, registry cache or running service. Pinned process-free
+Rust replacements can preserve modern supported compiler behavior without
+executing compiler probes: quote baseline/patched functional tests, an actual
+process-launch trap, enforced MSRV refusal and stable/explicit-nightly
+quote-plus-proc-macro2 checks substantiate that bounded claim. Fifteen prototype
+packages compile with the original thirteen-member workspace; exact source,
+license and original lockfile archive provenance is retained in the audit.
+These experiments are not a release or full transitive-purity proof.
+
+The full local-vendor solution is refused. `libc`, `getrandom` and
+`iana-time-zone` introduce or retain system-ABI binding source, and §2 forbids
+vendored bindings independently of source-file extensions. Moving that code
+to another directory, fabricating build metadata, swallowing a probe failure
+or broadening a CI allowlist is not a remedy. No rule or release requirement
+is relaxed. Twelve inspected nonbinding patch candidates remain isolated
+pending a compliant solution for the blocked dependency graph and complete
+gates; they are not silently promoted as a partial purity fix.
+
+Native target observations are recorded separately from optional-platform
+branches. An externally maintained process-free compatible dependency could
+avoid in-repository binding copies, but no approved revision or publication
+was established here. Removing an unnecessary upstream clock feature is a
+separate source-backed alternative that requires compatibility proof and does
+not solve native libc compiler probes. `cargo deny` passing remains evidence
+about its own policy, not proof that dependency build scripts launch nothing.
+
+### D-0556 — Recheck release inputs after observation and require actual caught phases — 2026-09-07
+
+Release evidence is read through retained file handles and revalidated after
+observation callbacks, before publication. The final check uses the original
+expected hashes and physical limits and repeats the complete source/build
+inventory. Replacement, in-place changes and newly added source files refuse;
+neither a status callback nor a previously successful hash blesses later bytes.
+This closes the measured observation-to-publication gap. It does not claim a
+filesystem lease or protection against every change after the final check.
+Content hashes are verified on the initial read. The retained guards then
+compare file identity, length and change/modify generations while rescanning
+the bounded inventories; they do not rehash every file on each final check.
+
+A mutation summary labelled `CaughtMutant` is insufficient. The supported
+cargo-mutants outcome format must contain exactly an ordered successful Build
+phase and a completed Test phase with exit101. Missing, truncated, reordered,
+extra, successful-test, timeout, signal and infrastructure outcomes refuse.
+Normal additional cargo-mutants fields are retained. Native-driver TSV results
+remain separate finite evidence and are not converted into invented build/test
+receipts or used to clear this gate.
+
+The verifier's 31 tests, native compilation, formatting and warning-free lint
+passed. Two isolated fault replays were caught: deleting the terminal recheck
+and ignoring caught-phase validation. Those measurements cover this verifier;
+they do not certify whole backend crates or activate a service.
+
+### D-0557 — Reject ambiguous raw release reports recursively — 2026-09-07
+
+Raw release reports and status JSON now reject duplicate object keys after
+escape decoding at every nesting level. Exact signed/unsigned integer values,
+existing input limits and the parser's finite recursion limit are preserved;
+trailing content refuses. Normal additional LLVM/cargo-mutants metadata remains
+supported. Decimal, exponential, negative and overflowing coverage counts
+cannot pass the existing unsigned-integer admission boundary.
+
+Contradictory coverage, mutation, ordinary-check or running-state fields cannot
+overwrite failure with success. All35 verifier tests, strict standalone lint,
+formatting and native compilation passed. Removing only duplicate-key rejection
+in an isolated copy caused three ambiguity regressions to fail. This evidence
+is retained separately from the two earlier verifier fault replays and does not
+broaden the release scope or start live observation.
+
+### D-0558 — Make browser checks prepare their required configuration — 2026-09-07
+
+The frontend check script runs the installed framework's configuration sync
+before type checking. The prior command failed on a fresh source snapshot
+because the generated TypeScript configuration did not exist. An actual run
+with that generated directory moved aside now completes with zero errors and
+warnings; the37-setting guide still matches. No dependency or backend build
+step was added, and no network installation is needed for this preparation.
+
+### D-0559 — Bound browser startup work and own request lifetimes — 2026-09-07
+
+Choosing a feed no longer downloads every feed's full store inventory. A
+validated saved browser choice wins; otherwise bounded HEAD requests read the
+existing census state, exact counts and integrity headers. Missing, malformed,
+foreign-feed, degraded and unreadable summaries remain explicit failures. The
+first-visit default still prefers measured stored data; credential readiness
+alone must not reopen an empty feed while another feed holds the data.
+
+The selected-feed census shares both its request and parsed response for a
+refresh generation. Only one selected response is retained. Explicit selection,
+clear and refresh invalidate older publication rights. Health polling is single
+flight and visibility aware; late sweep-status responses cannot restart polling
+after the page is disposed. Complete-frontier comparisons require an explicit
+request and run at most two groups concurrently, preserving complete-population
+validation and refusing cancellation instead of ranking a partial population.
+
+The measured old Backtest visit transferred two identical 40,664,512-byte
+Zerodha census bodies. HEAD removes the transfer and browser parsing from feed
+discovery, but the old running API still constructs the body before answering
+HEAD. This frontend repair does not claim constant-time server serialization or
+zero inventory cost. The ordinary ledger's empty state now names only
+`results/runs.bin`; it cannot establish the absence of separately saved Boolean
+research. No backend startup or data-acquisition behavior changes here.
+
+### D-0560 — Inspect separately saved research without starting the live service — 2026-09-07
+
+`web/saved-backtest/` provides a focused browser entry and a standalone Rust
+inspection wrapper around the existing public saved-evidence GET handlers.
+The launch contract selects explicit, absolute, separate evidence and asset
+roots, a loopback address, and matching observation/replay allowances. The
+browser can select saved identities and checkpoints, never a filesystem root.
+The wrapper does not call the full API router, recovery, acquisition, credential
+discovery or sweep startup. Control methods and cross-origin reads refuse.
+It snapshots a finite set of static assets and admits one HTTP evidence read
+at a time; the underlying API retains its own bounded blocking-work admission.
+
+The page authenticates the existing search, qualification, original catalog
+and later-period contracts. Settings and trades are paged; continued pages
+carry exact completion receipts. Editable batch inputs do not relabel already
+opened rows. Missing evidence, actual zero trades, research rejection and
+execution refusal have different visible states. Observations across settings
+are not unique market executions, and cost-excluded results do not grant
+strategy admission or profitability assurance.
+
+This local inspection tool does not activate a new full API, clear pending
+release gates, import Boolean rows into the ordinary ledger, or certify the
+entire declared sweep. Its finite tests and observed browser timings remain
+separate from whole-crate coverage and mutation requirements. The current
+live service and its data acquisition remain in place.
+
+### D-0561 — Explain the exact saved setting and both observation periods — 2026-09-08
+
+The focused results table joins only its visible page, at most 32 settings,
+to authenticated later-coordinate pages containing the frozen original and
+later observations. Reads are sequential and split at source or coordinate
+gaps. The join checks the original ancestor, completion, instrument, side,
+coordinate, training totals and execution refusal. Cancellation, duplicate
+coordinates, missing fields or a failed page cannot publish a partial map.
+The setting number remains an address, never a fabricated rank.
+
+Rule names come from the linked Rust vocabulary. Both saved grid commit
+digests must match the vocabulary build before names are decoded; absent or
+foreign vocabulary leaves explicitly unnamed numeric conditions. Money uses
+exact integer paisa and exit distances use their saved ppm values. Missing
+evidence, measured zero, rejection and refusal remain distinct. The page
+shows training and later totals, exit differences, actual trades and all
+saved check limits without recalculating or relaxing a research decision.
+
+### D-0562 — Prepare the DB view without one uninterrupted census fold — 2026-09-08
+
+DB decoration and prefix construction run in bounded, cancellable slices.
+Only a complete current snapshot becomes visible; a partial denominator or
+prefix bucket cannot become a coverage result. Instrument display metadata
+and one denominator pass are reused within that snapshot. Initial segment
+selection waits for completed preparation so a futures-only inventory cannot
+accidentally choose an empty Spot segment. Existing user choices are preserved.
+
+The cold browser baseline downloaded two 40,664,512-byte inventories and
+recorded one 2,314 ms main-thread task. Sharing the selected response removes
+the duplicate browser download; chunking reduces uninterrupted preparation.
+The full inventory still has linear transfer, parsing and preparation cost.
+No claim of total O(1) page loading or guaranteed filesystem latency is made.
+
+### D-0563 — Publish frontend files with an explicit rollback record — 2026-09-08
+
+The standalone Rust frontend publisher seals exact source and destination
+file inventories, backs up all old mutable files, adds immutable chunks
+without replacement, then replaces mutable entries atomically per file.
+The version marker is published last. Existing chunks are retained for
+already opened pages and rollback. Changed inputs, unexpected destination
+bytes, symlinks and a busy publication owner refuse. Interrupted publication
+can resume or restore its pinned mutable bytes; completion is checked against
+the entire expected file inventory. This is not an atomic multi-file
+transaction, a backend restart, or full-sweep release clearance.
+
+### D-0564 — Restore real-data inspection while execution remains unadmitted — 2026-09-08
+
+The main inspection process uses `Site::load`, which leaves the broker
+refused, and an outer exact GET/HEAD allowlist around the existing read
+handlers. It never calls the serving constructor or startup path that
+launches recovery and acquisition. Controls, foreign authorities, request
+bodies, unreviewed read routes and exhausted read admission refuse before
+entering the inner handler. Frontend filenames cannot widen the API allowlist.
+Directory entries, paths, file sizes and concurrent reads have explicit bounds.
+
+`/inspection.json` declares the real masters/store roots, disabled execution,
+uncleared release status, library hashes and the runtime-supplied pinned link
+to the separately saved results. The frontend displays this mode, disables
+Run/Descend/receipt batches and guards the command functions. Failed capability
+reads keep execution disabled. A 404 from an older server is labelled legacy
+compatibility and never becomes release clearance.
+
+The prior reviewed temporary library set was no longer present after the
+interruption. Similarly named cached libraries had different hashes. The main
+inspector therefore labels their source provenance unverified rather than
+reusing the earlier engine commit claim. Its actual read tests preserve every
+fixture file and directory. It reads existing CLI logs and installs no durable
+HTTP access-log sink. This inspection surface does not resolve full coverage,
+mutation, dependency compliance, complete request auditing or the missing
+production recovery plan, and cannot start the full historical sweep.
+
+### D-0565 — Navigate between inspection pages and preserve bounded read failures — 2026-09-08
+
+The browser's real main-app link exposed a 403 when crossing local ports.
+The two inspection wrappers admit this document request only for a GET to an
+already admitted HTML page, exact Host, no Origin and one each of the browser
+headers `Sec-Fetch-Mode: navigate`, `Sec-Fetch-Dest: document` and
+`Sec-Fetch-User: ?1`. Cross-port JSON, background and iframe requests remain
+refused, as do duplicate authority headers, bodies and control methods.
+
+Saved reads retry an explicit busy response at most three times, sequentially,
+with cancellation and a visible notice. A 503 requires a valid Retry-After;
+ordinary evidence refusals are not retried. A supplied delay outside the bounded
+allowance is not shortened. The final response remains a failure, never an
+empty success. A failed settings comparison disables inspection until that
+page is successfully retried. Trade and session responses must also match the
+displayed source, period, identities, grid, expression, exits and totals before
+publication. Cancelled selections cannot scroll a later selection into view.
+
+### D-0566 — Pin historical vocabulary without inventing reader provenance — 2026-09-08
+
+The retained release library files were unavailable, and the similarly named
+cached CLI was unstamped. Linking the new navigation wrapper to those libraries
+cannot inherit the old release commit or its verification. The saved viewer
+therefore records actual wrapper/library hashes and unverified reader source.
+
+Before replacing the old read-only listener, its successful `/vocab.json`
+response was captured and pinned by BLAKE3, with the listener executable's
+existing SHA256 receipt and capture time retained. A new optional launch pair
+names that absolute snapshot path and its exact byte digest. Admission reads
+at most 128KiB plus one byte, refuses nonregular files/symlinks, duplicate or
+unknown JSON fields and malformed commits, and compares every row, position,
+name, live flag, count and version with the linked Rust table. It also verifies
+the recorded BLAKE3 of the historical commit string. Invalid supplied evidence
+refuses startup; the validated value is retained in memory.
+
+The snapshot pin covers the captured file bytes, not the reserialized HTTP
+response. `vocabulary_commit` identifies historical labels;
+`api_commit` and `api_source_commit` remain separate and may be null. Both saved
+grid commit digests must still match before the frontend decodes names. This
+recovers historical vocabulary evidence, not current API source assurance or
+full-sweep release clearance. The captured bytes and origin receipt are under
+`target/sweep-audit-20260906/db-results-20260908/`.
+
+### D-0567 — Include the imported selection contract in the frontend version — 2026-09-08
+
+The main frontend imports `saved-backtest/selection.js` through its inspection
+link validator. Its source fingerprint now includes that exact file in addition
+to the existing source/configuration inputs. Changing only the imported helper
+must change the version; removing it must refuse versioning. The actual digest
+function is tested with both cases. A version identity is an artifact/input
+fingerprint, not an engine release decision or exhaustive test certificate.
+
+### D-0568 — Durable outer invocation history without changing computation identity — 2026-09-08
+
+CLI sweeps, browser engine tasks and selected HTTP result/control requests now
+have separate durable outer invocation records. The existing identity-bound
+computation journals remain authoritative for their own saved work. A returned
+command or HTTP response is not a completed search or an admitted strategy.
+
+`audit/invocations-v1/index.bin` reserves fixed 256-byte starts under a file
+lock. Each invocation has its own append-only journal. IDs use the disjoint
+upper-half u64 domain `(1 << 63) + ordinal`, so a legacy telemetry token cannot
+select a new invocation after restart. Authoritative JSON aliases and frontend
+paging/progress keys retain exact decimal strings. Safe legacy numeric IDs
+remain supported where explicitly validated; rounded numbers never name work.
+
+Writes and syncs precede acknowledgement. Busy, torn, corrupt or failed storage
+refuses rather than dispatching unlogged work. Duplicate terminals refuse;
+process death or unavailable terminal storage leaves an unconfirmed outcome.
+Exact readers validate the indexed start and first/last records only, not all
+intermediate progress. Pages address at most 32 IDs; total storage grows with
+history and filesystem latency is not constant-time assurance.
+
+The full API startup uses `audited_router_serving`. Read-only adapters retain
+`router_serving`, preserving immutable-source inspection. Fixed operation names
+exclude request bodies, queries, credentials and arbitrary header text.
+`/backtest/audit.json` is itself excluded from request auditing so inspection
+cannot recurse. The existing Backtest page displays these separate outcomes.
+No candidate/bar-loop logging, alternate backend language or relaxed admission
+limit is introduced.
+
+### D-0569 — Preserve missing recovery history and prepare explicit successors — 2026-09-08
+
+A previously activated plan with a missing/incomplete journal cannot be silently
+reseeded on restart or a repeated same-scope request. Existing opens are
+non-creating; read-only observations preserve history. A STOP filename does not
+prove a stopped state: its decoded status remains authoritative. Missing
+recovery history is separate from the validity of selected sweep OHLCV inputs.
+
+The existing recovery endpoint can prepare a distinct successor using the
+original leg form, `recovery_action=prepare`, its exact predecessor scope and an
+explicit generation. Preparation is queued and idempotent. It cannot activate a
+worker, clear STOP, change the active pointer, reset shared attempts, read source
+bars or call a vendor. A separate explicit start requires the sealed prepared
+generation. A domain-separated versioned predecessor/generation descriptor is
+retained in the active journal; legacy pointers remain readable, while older
+readers must refuse the successor descriptor. Original completion is never
+reconstructed from summary events. The 1,024-byte recovery record is unchanged.
+
+Journal append checks the file's device/inode at its path before and after sync
+and refuses observed removal/replacement. This detects file loss; it does not
+establish the cause of a prior deletion or prevent arbitrary external changes.
+Full seal validation replays the finite scope on blocking workers, with
+O(records) time and O(distinct units) memory. No live successor was prepared or
+activated by the implementation verification.
+
+### D-0570 — Inspect qualified expressions inside the existing Backtest page — 2026-09-08
+
+The existing Backtest page now opens a qualified search setting in its saved
+research tester, with original/later comparisons, exact entry/exit rules,
+32-row trade and zero-inclusive session pages, and every saved policy check.
+A selection is bound to its search checkpoint, child completion, coordinate,
+source, direction and original/later identities before display. Cancellation,
+a new selection or a failed final join cannot publish a stale trade page.
+Condition names require both saved grids to match the supplied vocabulary build.
+No ordinary ledger row, current-market chart alignment, exit cause, account
+return, profitability rank or approval is manufactured from these observations.
+
+The operator's strongest-0.1%-of-setups target is a research-selection objective,
+not a relaxed acceptance threshold or a guarantee of exceptional profit. Current
+cost-excluded research and finite later comparisons do not establish an
+untouched final holdout, net profitability, a full-search top-tail rank or
+Selection V6 authority for Boolean/cash research. Those limits remain explicit.
+
+### D-0571 — Keep failed-page retries and current verification scope exact — 2026-09-08
+
+The integrated research tester retains the original period, page kind and exact
+decimal offset in loading, success and failure states. Retry repeats that page;
+it cannot silently start again at row zero. A failure from a hidden page does
+not replace the authenticated overview or policy checks. Selecting a setting
+focuses and scrolls its report into view after rendering, with a selection
+check so a later click cannot focus an older report.
+
+The durable audit browser reader distinguishes a read refusal from a failed
+required write boundary. Its bounded typed reason remains visible without
+inventing dispatch, completion or an empty journal. Historical names require
+two explicit matching grid commits; null or sparse arrays cannot satisfy the
+check vacuously.
+
+The repeatable Rust verification driver now runs all frontend regression files
+and the production frontend build. The comparison page retains its historical
+baseline and adds the separately dated integration table from
+`docs/31-backtest-integration-20260908.md`; generation refuses missing fields or
+unsupported status values. These projections do not certify unexecuted checks,
+later source changes, deployment or complete search exhaustion.
+
+The selected invocation-audit mutation campaign exposed two missing boundary
+assertions without requiring a production rule change. The API test
+`oldest_invocation_ends_the_exact_newest_first_cursor` now checks that the
+oldest record returns no further cursor. The CLI test
+`durable_id_boundaries_are_exact_before_and_after_index_creation` checks the
+reserved namespace base and exact first/maximum IDs on absent and populated
+indexes. Original surviving mutations and the separate test-only replay are
+retained; a selected campaign is not full-module mutation closure.
+
+### D-0572 — Launch the declared Boolean search from the existing Backtest page — 2026-09-08
+
+The main ordinary sweep action reaches the AND range path. A saved Boolean
+viewer did not make the declared AND/OR/NOT campaign launchable there. Add
+`boolean-qualified-search-stored` to the existing audited engine-command
+boundary, retaining its shared task slot, source stamp, durable outer attempt
+and explicit refusals. Existing ordinary and receipt-checked actions keep
+their meanings. The new mode sends every selected eligible instrument and
+uses the command's inherent eight intraday timeframes and live condition
+alphabet. It never accepts a browser-supplied store or receipt path.
+
+Training and wholly later month bounds remain explicit. Request work
+allowances are exact positive decimal strings; they are not a depth limit or
+proof of grammar exhaustion. Server-owned receipt limits, observation/replay
+budgets and the complete research policy are checked before dispatch. The
+configuration reader `/engine/boolean-launch.json` publishes validated
+available settings and named missing prerequisites. Optional configured
+defaults are not statistical authority or proof that the selected historical
+inputs pass their checks. No automatic data split or silent legacy-knob
+substitution is introduced.
+
+The CLI publishes the authentic search identity to its caller only after the
+corresponding declaration/reservation is durably readable. The HTTP status
+binds that identity and declared scope to the exact accepted attempt, allowing
+the existing saved-search viewer to follow it during work. Ending a command,
+finishing a bounded allowance, exhausting a declared grammar and admitting a
+strategy remain distinct outcomes. An ambiguous submission cannot be
+automatically posted again. This connection adds no Selection V6 authority,
+net-profitability assurance or permission to start a full campaign before its
+required release gates pass.
+
+The declaration also carries the displayed `expected_policy_digest`. Admission
+checks it against the complete policy it resolved before reserving a worker;
+the execution fingerprint detects a later configuration change. The browser
+cannot silently approve a different file merely because `max_points` stayed
+the same. The native policy serializer remains authoritative for signed paisa,
+unsigned counts and boolean requirements.
+
+Reload adopts a structured Boolean command through its own exact-attempt
+observer. A restored declaration authorizes observation only, never a new
+POST. Ordinary ladder/ledger refresh logic cannot turn that command into an
+ordinary sweep completion. A later work allowance with the same saved search
+identity explicitly refreshes its stopped results observer. Displayed running
+scope comes from the captured declaration, independent of edited form controls.
+
+### D-0573 — Recover bounded Backtest reads without resubmitting work — 2026-09-08
+
+A fresh private browser startup exhausted its four concurrent read slots. The
+ordinary ledger retained a 429 failure even after capacity returned, while a
+recovered status poll left the earlier startup warning visible. Reuse the
+existing bounded GET-only retry helper for ledger reads: at most three reads,
+respect the server's admitted Retry-After delay, expose each wait, and preserve
+the final refusal. A generic configuration/evidence 503 is validated once and
+does not imply retryable overload. Replacement and teardown abort the read and
+revoke late publication. A validated current status clears its old startup
+warning; an unknown or stale reply cannot. The status envelope must own an
+explicit `running` field containing null or an object; a missing field or
+false/zero/empty-string/array value cannot establish an idle server. Command submissions retain their
+single-submission rules. This does not make server capacity or total work O(1).
+
+### D-0574 — Reuse immutable census responses and address visible DB rows — 2026-09-08
+
+The real DB page fetched a 40,664,512-byte Zerodha census and performed whole
+inventories for feed counts. Header-only feed surveys now share bounded reads;
+HEAD avoids body encoding. GET runs on bounded blocking workers and retains
+encoded bytes and the body digest for one exact immutable census snapshot.
+The optional `census-tuples-v1` transport carries every original row, dictionary
+identity, exact count/timestamp and explicit unknown-ratio reason. Legacy array
+readers retain their representation. An unreadable census never becomes 304.
+
+The browser validates compact dictionaries and tuple fields, decodes in
+cancellable slices, and retains immutable raw rows without deep reactive
+proxies. Only an acknowledged matching ETag may reuse an earlier census. One
+completed preparation is reused by row-array identity. Normal time pages read
+exact month offsets and visible limits with extrema scanning disabled; other
+sorts retain their stated work. Date bounds participate in month cache identity.
+
+Shared catalogue and page reads coalesce current work, cancel abandoned work
+and reject stale replies, including A-to-B-to-A selections. Lifecycle polling
+does not outlive its page. The native application publishes an explicit runtime
+capability response; that response is not release clearance. Cold encoding,
+retained history, whole-census preparation and global sorting still grow with
+input. No total O(1) or fixed-latency assurance is inferred from these changes.
+
+### D-0575 — Separate saved outcome uncertainty from current sweep admission — 2026-09-08
+
+An old, incomplete lifecycle window remains an unknown historical outcome.
+Current launch admission separately requires readable status and a free
+store-scoped OS execution lease. The durable CLI entry and all three API
+dispatch boundaries hold the lease through terminal auditing. The fixed lease
+file must be an empty regular singly linked file; alias, busy, malformed and
+unreadable cases refuse rather than removing or repairing it. Ordinary API
+commands verify that their configured CLI store is the store being locked.
+
+The lease coordinates cooperating current binaries only. Direct library/test
+entry points and older external binaries are not proof of machine-wide idle
+state. Active or stale unfinished command evidence still refuses admission.
+The browser shows the actual reason, keeps research mode selectable and refreshes
+admission when an adopted child observer finishes. An ambiguous POST is never
+automatically submitted again. Research mode chooses AND-only versus declared
+AND/OR/NOT rules and their respective evidence requirements, not a speed or
+profitability guarantee. Boolean timeframes currently run sequentially;
+parallel family workers do not create eight-way NIFTY-only execution.
+
+### D-0576 — Display native day targets without inventing month bounds — 2026-09-08
+
+The Autopilot API reports civil dates while its coverage view draws monthly
+rows. The browser now validates exact Gregorian dates before projecting them
+to month keys, retains the original endpoints, and rejects reversed exact
+days even inside one month. Existing month keys remain supported and the
+600-row limit remains a refusal, never a truncated coverage claim.
+
+At narrow widths the primary navigation has its own scrollable row so API and
+theme controls cannot cover its links. Request deadline messages state the
+observed timeout without inventing its cause. Store activity and a free sweep
+slot are described separately from execution completion and input clearance.
+These frontend corrections change neither the scheduler nor research policy.
+
+### D-0577 — Compare Autopilot coverage only within its reported scope — 2026-09-08
+
+Whole-store counts across all resolutions cannot establish coverage for a daily
+target. The coverage projection now selects the reported feed, timeframe and
+date window before counting distinct instrument-month records. Every target
+month remains visible, including empty months. Identical duplicates count once;
+conflicting duplicates, unsafe counts and contradictory timestamps refuse.
+
+For partial boundary months, whole-file bar totals are included only when the
+stored endpoints establish that the entire file lies within the target dates.
+An endpoint inside the window proves presence but not the full in-range count;
+bracketing or missing endpoints leave overlap unverified. No additional bar
+read is used to pretend that this census contains finer evidence.
+
+The current target reports an instrument count without the exact membership
+list. Consequently neither excess aggregate records nor the scheduler's state
+can prove target membership or completion. The headline, gauges, month rows and
+expanded rows withhold completion percentages and disclose that limitation.
+Whole-store totals remain explicitly separate. The projection is linear in the
+changed census and is reused until its primitive scope or census changes; it
+does not claim constant-time whole-history preparation.
+
+### D-0578 — Bind selected intraday timeframes through qualified research — 2026-09-08
+
+The CLI accepts an optional eighteenth comma-separated timeframe argument and
+the HTTP declaration accepts an optional canonical `timeframes` array. Omission
+retains the original all-eight scope. Empty, duplicated, unknown, daily or
+noncanonical HTTP selections refuse before source access. CLI label order is
+canonicalized. Physical indices remain 0 through 7; a subset never renumbers a
+stored rung. Only selected signal resolutions are prepared and computed.
+
+Selection is part of campaign, qualification-plan, journal and search identity.
+The additive subset formats are BRBCAM02, BRBQPL02, BRQCAM02 and BRBQSS03 /
+BRBQSR03. Their all-eight encodings retain historical bytes. Excluded slots
+cannot acquire fabricated input digests, counts or completion links. All eight
+statistical units remain reserved; omitted units remain unspent rather than
+redistributing their error budget to selected work. A later policy version may
+add its own explicit identity without changing these historical encodings.
+
+Saved campaign, search and strategy-tester views preserve the same selection.
+The normal launch flow uses the selected timeframe set for Boolean research;
+ordinary AND discovery and its separate controls remain under advanced options.
+This is a scope/identity correction, not new timeframe parallelism or evidence
+that input, policy and full release checks have passed.
+
+### D-0579 — Add an index daily/weekly consistency policy — 2026-09-08
+
+The operator's accepted index-only research requirement is additional to all
+existing institutional checks: at least 3/5 winning eligible trading days;
+every complete Monday-Friday five-session week has at least three winning days
+and at most two losing days; and no losing-day streak exceeds two, including
+across calendar weeks. Multiple trades are permitted. Their pessimistic printed
+OHLCV returns are summed per strategy/setting and session before classifying the
+day. Rupee capital/profit/loss examples are not policy thresholds. Values are
+gross and costs remain excluded.
+
+V1 is limited to canonical NIFTY and BANKNIFTY research families. Cash families
+are explicitly not applicable. Flat and no-trade sessions remain distinct,
+count in the winning-day denominator, and do not manufacture a winning day.
+The conservative V1 interpretation is that only a winning session resets the
+losing-day streak; flat/no-trade days cannot conceal three losses separated by
+inactivity. This choice is disclosed with the policy, not inferred from a
+chart or from the calendar week changing.
+
+The existing exchange calendar and charter session exclusions remain the
+authority. Complete five-weekday-session weeks are tested separately from
+holiday-short and boundary-partial weeks. Eligible weekend sessions contribute
+to the daily ratio and loss streak but do not become an extra Mon-Fri weekday.
+No complete five-session week is unmeasured rather than a vacuous pass. Missing
+expected sessions refuse; unknown calendar facts remain unmeasured. No absent
+session is filled with a zero P&L.
+
+Policy bytes, exact saved qualification and later-source ancestry, session
+totals and week evidence must be retained in a new immutable receipt. Legacy
+qualifications remain explicitly not assessed against this policy. New policy
+requirements are versioned in the plan so removing a receipt cannot downgrade
+a new result to legacy semantics. Combined qualification requires both this
+assessment and the relevant existing institutional verdict. Passing a finite
+historical test is not a guarantee of future profits or of a top 0.1% rank over
+an unexhausted expression population.
+
+### D-0580 — Publish a search lower bound without inventing a completion ETA — 2026-09-08
+
+The complete V1 Boolean grammar allows 1,151 instructions, repeated leaves and
+AND/OR/NOT. It does not inherit the AND ladder's support-based pruning. For an
+alphabet of L live conditions, all nonempty distinct-condition conjunctions
+fit within 2L-1 instructions. Therefore 2^L-1 is a lower bound on syntactic
+programs per selected timeframe, before exits and statistical checks.
+
+The runtime descriptor obtains L from the production evaluator and retains
+the exact decimal bound without floating-point rounding or u64 saturation.
+It labels the full live alphabet explicitly; a custom subset does not inherit
+that population claim. Total grammar size and elapsed-time estimates remain
+absent. Batch programs, node allowance and invocation batch allowance only
+bound resumable work, not the complete declared grammar.
+
+The current alphabet has 328 live conditions: its conjunction subset alone is
+greater than 5 x 10^98 expressions. This already exceeds V1's cumulative u64
+work/program counters; those counters refuse overflow, not report exhaustion.
+Even one billion expressions per second would require approximately 1.7 x
+10^82 years for this lower bound. That is a mathematical illustration, not a
+measured throughput estimate. Full exhaustion in hours is not feasible. A
+useful finite research population must be identified honestly; it cannot be
+created by relabeling a paused batch as exhaustive completion.
+
+Timeframe execution is currently sequential in the qualified Boolean command.
+Parallel instrument-family workers do not supply eight-way NIFTY execution.
+Indexed/bounded dashboard reads and incremental accumulators can have constant
+per-operation work; history preparation, search, complete evidence validation
+and retained output still grow with their inputs. No wall-clock latency
+guarantee follows from O(1) algorithmic work.
+
+### D-0581 — Define one signal-candle risk stop for index consistency research — 2026-09-08
+
+The operator selected one defined risk-stop rule plus the mandatory 15:10 IST
+exit, replacing the broad exit grid in the new NIFTY/BANKNIFTY consistency
+workflow. The selected mechanical rule uses the completed signal candle's low
+for a long trade and high for a short trade. Entry uses the immediate next
+one-minute printed open in the same IST session. An opening price already at
+or beyond the stop refuses that entry instead of inventing a valid risk
+distance. A valid trade exits only on its stop or the exact 15:10 deadline.
+There is no target, trailing variant or arbitrary holding-period exit.
+
+The entry price is the printed open for both fill readings. A stop exit reuses
+the existing printed-OHLCV gap-first and pessimistic adverse-extreme pricing
+authority; its observed minute window is retained rather than inventing a tick
+timestamp. Forced liquidation uses the actual close of the unique accepted
+15:09 one-minute bar, which reaches 15:10. Entry at 15:09 and exit at that
+minute's close is valid. A stop triggered within that minute takes precedence.
+Missing, refused or duplicated closing evidence cannot supply a fabricated
+forced exit. Invalid interior paths remain explicit unpriceable occupancy.
+
+Only one position per strategy/setting can be open at once. Sequential multiple
+trades in the session are permitted. Their daily sum is assessed by D-0579.
+Training and later periods use the same versioned rule and frozen expression;
+each later stop comes from its own already completed signal candle. Neither
+future price data nor the example rupee values choose the stop. Original coarse
+signal indices must survive projection onto one-minute execution bars.
+
+This requires a distinct execution-policy identity and additive saved evidence.
+An existing fixed-grid selected coordinate or holding-period proof cannot be
+relabelled as this policy. Original grid records remain readable under their
+original semantics. New native execution, persistence, institutional adapters,
+CLI/API dispatch and browser observation must all be verified before the new
+workflow is advertised as runnable. This decision fixes the behavior to build;
+it does not claim those integration gates have already passed.
+
+### D-0582 — Retain native single-stop ancestry and exact resumable batches — 2026-09-08
+
+The single-stop execution policy has its own native observations and saved
+candidate namespace. Each program is evaluated in both directions; each
+direction retains optimistic and pessimistic printed-OHLCV readings of the same
+trade path. The two readings are not two independently selected strategies.
+Pessimistic results determine all institutional and daily consistency checks.
+Stop-minute favourable excursion uses only information certainly observed
+before exit, not an unknown ordering of that minute's high and low.
+
+Training source preparation ends at the original training boundary. Later
+evaluation retains the causal indicator history beginning at the original
+training start, then measures only its predeclared later-day window. The
+existing strict checksum loader, calendar and instrument-kind VWAP authority
+are reused. Unavailable index-spot VWAP remains unknown even in X OR NOT X.
+No legacy selected-grid proof is manufactured for the new execution rule.
+
+Native candidate receipts precede the separate institutional qualification.
+Training CSCV uses training only. Later White, SPA and Romano-Wolf calculations
+include the complete declared program-and-direction family. Fixed later civil
+windows retain zero-trade and refused periods. Mandatory consistency receipts
+bind training, later and their full combined calendar span. All three daily
+assessments and the institutional verdict must pass. Missing receipt, source,
+or numerical reconciliation remains refusal, not a historical downgrade.
+
+The grammar journal reserves an exact batch before pricing. A complete batch
+has a pinned qualification for every selected physical timeframe. Failed
+children leave the reservation pending; successful child artifacts remain
+reusable. The same declaration resumes without changing its program order or
+statistical allocation. Capture and answer-changing numeric bounds enter the
+declaration; invocation allowance, worker count and independent cold-reader
+budgets do not. Publication checks cumulative history bytes, records and replay
+work before acknowledgment, so raising a read budget can resume the same search.
+An invocation ending at its allowance is paused work, not grammar exhaustion.
+
+### D-0583 — Start operator sweeps from Backtest and disclose the split — 2026-09-08
+
+The operator requires all drill-down and brute-force historical launches to
+begin by clicking Run sweep on the application's Backtest page. The HTTP and
+Rust library worker are its internal implementation. The new single-stop path
+does not add a standalone terminal command. Opening metadata, restoring a
+saved result, refreshing a page, or retrying a read must never start or resend
+a sweep. An uncertain POST outcome is inspected by its exact invocation;
+uncertainty cannot authorize an automatic second launch. Existing historical
+readers and lower-level engine tests retain their own contracts.
+
+For the new index workflow the page may visibly propose the oldest 80% of the
+selected whole-month span for training and the remaining 20% for later
+comparison. This is a disclosed chronological partition, editable before
+Run sweep; it is not a claim that previously explored history is untouched.
+Explicit operator edits take precedence. Missing or overlapping periods,
+incomplete source evidence and unresolved configuration remain visible blockers.
+No grid, implicit holding horizon, capital amount or guaranteed profit is
+introduced by the proposal. The first production sweep remains unstarted
+until the corresponding release and source admissions pass.
+
+### D-0584 — Admit cold qualification replay independently of saved limits — 2026-09-08
+
+A saved qualification's numerical limits describe the admitted computation;
+they cannot authorize arbitrary work by a later reader. Native qualification
+reads therefore accept independent current bootstrap, CSCV and estimated
+numeric-memory bounds. The reader intersects those bounds with the saved
+limits before allocating numerical matrices or reproducing statistics. An
+otherwise valid receipt that exceeds a current bound is refused without a
+partial qualification. Increasing a reader allowance does not change the saved
+search identity or its statistical policy.
+
+This independence concerns reopening an existing artifact or a request with
+unchanged production bounds. The current browser launch configuration derives
+production numerical bounds by intersecting source-derived limits with the
+configured reader allowances. Changing that launch environment can therefore
+also change its production bounds and create a different declaration. The
+preview exposes those effective values. It must not promise that every change
+to an environment allowance resumes the same search.
+
+The API uses the current Boolean replay-work admission for each of bootstrap
+and CSCV work, and the observation-byte admission for estimated numeric memory.
+The cache key includes all three bounds. These are algorithmic work and buffer
+estimates, not an operating-system RSS or wall-clock guarantee. Bootstrap work
+counts the complete candidate family, later periods and all three procedures;
+CSCV work counts the complete training family, periods and canonical splits.
+
+The same boundary applies when recovering a search checkpoint. Before numerical
+replay, each linked qualification must match the original declaration's native
+source pair, measurement windows, effective institutional policy, procedure,
+full statistical allocation and answer-changing bounds. A valid artifact under
+a caller-supplied search ID is not sufficient evidence of those equalities.
+Publication hashes and source digests retain their existing formats; explicit
+comparison closes the missing relationship instead of changing historical bytes.
+
+### D-0585 — Bind original candles and vocabulary to single-stop results — 2026-09-09
+
+Single-stop result hashes could identify an original native input but could not
+reconstruct its readable source, build or condition names. A chart that fetched
+today's monthly files would attach potentially different candles to an old
+trade. New native producers therefore retain an immutable, content-addressed
+source companion containing the exact input roles, original build and vocabulary
+names. It is shared by the complete catalog rather than copied per setting.
+
+`index-stop-source-context-v1` uses `BRISSC01`; a fixed `BRISCL01` relation in
+`index-stop-catalog-context-v1` binds the exact catalog and completion to the
+source and completion. New catalog identities use the additive
+`brutex-index-stop-catalog-v2\0` domain with the original catalog identity and
+both source-context pins. Candidate and qualification V1 row layouts are not
+mutated. Search declaration `BRISSD02` retains the exact length-framed V1 body,
+the original canonical institutional policy and the selected source-context
+pairs. Historical `BRISSD01` bodies retain their original meaning and identity.
+
+Cold inspection authenticates the whole saved catalog and source companion and
+reconstructs native source/run identities before exposing original metadata or
+one bounded candle window. It does not open current market files or borrow
+today's names. Incompatible source semantics, missing legacy companions, torn
+records and foreign pins refuse explicitly. Existing legacy evidence tables
+remain readable. A cached reader can select another already authenticated
+setting without decoding the source again. Every read still rechecks held file
+generations and holds all three distinct publication locks throughout one
+projection, including candle materialization. Nested access through the same
+reader cannot release those locks. A stale cached reader is discarded after a
+generation failure so an explicit retry can authenticate byte-identical restored
+files under the same pin; the failed request is not silently retried. A returned
+candle marks a minute, not an invented tick timestamp.
+
+Producer and source viewer share `BRUTEX_BOOLEAN_OBSERVATION_BYTES`, including
+its existing 64 MiB source-view default. The producer first admits source plus
+the minimum complete declared batch, and then admits the actual complete
+catalog with source reconstruction before serialization/publication. Oversized
+families refuse as a whole. The allocation model and initial preflight do not
+guarantee a process RSS, disk latency or that every eventual catalog will fit.
+
+The Backtest proposal also displays the calendar month immediately preceding
+training, whose original minute and daily files the strict loader already
+requires. Displaying that date does not certify their presence and does not
+change the selected training start. Missing context remains an explicit source
+refusal, including at a year boundary.
+
+### D-0586 — Compare an exact acknowledged single-stop search prefix — 2026-09-09
+
+The latest saved batch is useful for progress but cannot establish the best
+result across earlier batches. The read-only cumulative reader now verifies an
+exact checkpoint prefix, its transitions and every included selected-timeframe
+qualification family before globally ordering results by later pessimistic
+index points, then original batch and setting for ties. Both directions,
+optimistic readings and refused/rejected evidence remain available. The default
+view filters to settings that passed both institutional and day/week checks;
+zero passing settings remains zero.
+
+Continuation pages bind a positive checkpoint sequence and its completion.
+Newer pending or failed work cannot relabel an older verified scope. The
+browser preserves its previous verified table during a failed refresh and
+opens each result's exact original qualification page and canonical setting,
+including settings beyond page one. These views perform no launch action.
+
+Each child receives the remaining independent numerical read allowance before
+replay. The reader charges the exact required work using the same formulas as
+native numerical admission, not the sum of larger declared maximum caps.
+Overflow, changed ancestry and insufficient complete-scope admission refuse
+without a partial leaderboard. A legacy declaration whose original policy
+cannot be independently recovered is not interpreted using the current policy.
+
+A new checkpoint still requires complete admitted-prefix replay and a global
+sort. One compound projection holds every contributing artifact's publication
+lock, including artifacts from families outside the displayed page, and checks
+their generations before and after the callback. Equal-path aliases must agree
+on the exact publication and generations before one shared lease is acquired;
+conflicting aliases, partial acquisition and nested access release no outer
+lease. The append-only search journal is checked under its own checkpoint rules
+without blocking a publisher from appending newer work.
+
+This guard sorts and checks retained artifact references: with F contributing
+artifacts and C checkpoint work, a warm read still has O(F log F + F + C)
+admission in addition to bounded indexed page projection. Neither path is
+claimed to provide O(1) total history verification, memory, latency, or an
+exhausted global top-0.1% population.
+
+### D-0587 — Preserve original VIX reference annotations outside strategy identity — 2026-09-09
+
+The native single-stop path did not retain the entry/exit VIX reference stamps
+required by the charter. It now publishes a separate immutable companion after
+the exact candidate catalog and original-source relation are saved. Capture
+uses the original request's store and feed with the existing canonical VIX
+month loader. It retains all seven fields of each exact reference candle, an
+exact-minute absence in a validated month, or the bounded original diagnostic
+when that entire month could not be validated. These states are distinct.
+
+`index-stop-vix-reference-v1` uses body magic `BRISVX01`. Its lookup identity
+binds the native catalog and completion in a separate domain. Its independent
+publication identity hashes the reference policy and exact saved annotations.
+VIX never changes the condition vocabulary, native source/run/search identities,
+qualification, price outcomes or ranking. Existing candidate, source and
+qualification formats are unchanged by this companion.
+
+An exact retry reopens the first saved reference publication before considering
+current VIX files. Missing, torn or corrupt saved companions refuse inspection;
+the reader never fills them from today's data. A previously saved unavailable
+month remains unavailable in that historical annotation even if new data later
+arrives. The month snapshot hash records the original canonical index; it is
+not a vendor signature or a per-candle inclusion proof.
+
+The entry and exit annotations describe full one-minute reference candles. A
+full entry-minute candle is known only after that minute completes. A stopped
+trade retains its native interval instead of claiming an exact intraminute VIX
+value; a forced 15:10 close uses the reference candle starting at 15:09. The
+Backtest table keeps these labels explicit and leaves original strategy candles
+available independently when reference inspection refuses.
+
+The producer and current reader share observation admission. Complete saved
+catalog/companion bytes, overlapping buffers, capture queries and one canonical
+month index are bounded before their allocation. Cold capture sorts trade
+requests and opens one reference month at a time. Cold inspection authenticates
+the whole admitted publication and its native trade bindings, then checks that
+every repeated reference to the same original minute has an identical full
+stamp. Its sorted boundary-reference scratch is admitted before allocation.
+Native completion retains a lightweight reference publication guard through the
+outer catalog terminal marker, without retaining a second decoded catalog.
+Bounded warm pages retain both publication owners while projecting. These are allocation
+and work bounds, not O(1) full-history time, constant latency or process-RSS
+measurements. An invalid page does not discard a still-current cache; changed
+or busy saved authorities cause an explicit refusal and permit a later cold
+retry after eviction.
+
+### D-0588 — Admit current replay work without rewriting saved procedure identity — 2026-09-09
+
+The single-stop cold reader must validate the exact native family against its
+current work and memory limits before numerical replay. Those limits cannot
+be enlarged by a saved producer configuration. They also cannot replace the
+producer bounds embedded in the original bootstrap digest: doing so rejected
+valid saved evidence when a smaller current allowance was still sufficient.
+
+The reader now performs the independent limited admission first, then
+reproduces the saved procedure with its unchanged original facts. This does
+not change any output format, statistical threshold, source input, draw count
+or completion pin. Tests retain below-required and maliciously enlarged limit
+refusals and assert complete equality under tighter sufficient bootstrap,
+split-work and memory caps. The cumulative fixture includes enough training
+sessions to exercise real canonical split work and its exact/minus-one bounds.
+An unrepresentable work total names its bootstrap or CSCV admission domain.
+
+These regression cases are evidence to execute, not a declaration that the
+release has passed its remaining verification or historical-source gates.
+
+### D-0589 — Charge complete canonical CSCV replay payloads — 2026-09-09
+
+The single-stop numeric memory estimate omitted the canonical mask allocation,
+the reproduced split vector, the saved split vector retained by a cold reader,
+and its two candidate score vectors. A generated zero-trade family with 16
+training and 16 later eligible periods reproduced the omission: its 6,435
+canonical splits required 823,712 bytes for those payloads on the checked
+64-bit host (`Split` occupied 56 bytes), yet the old reader accepted a current
+100,000-byte limit. This is measured test evidence of a missing estimate term,
+not a measurement of peak process RSS or a historical market result.
+
+The shared checked estimate now adds canonical split count times the native
+size of one mask pair and two `Split` records, plus two candidate-sized `i64`
+score vectors, before numerical work. Native type sizes describe transient
+payload only and do not enter any persisted bytes or identity. The same
+conservative estimate applies to production and replay so a producer also
+reserves the saved-vector allowance needed for inspection. An absent canonical
+layout contributes no mask, split or score payload and remains absent evidence.
+
+Before replay, the reader checks the saved layout, digest and split count
+against the exact original training period geometry. A resealed oversized or
+foreign extent therefore cannot bypass the two-canonical-vector allowance.
+All source, strategy, search, qualification and procedure formats and original
+digest inputs remain unchanged. Current limits can reject old evidence that
+does not fit the corrected estimate; they cannot rewrite its original bounds
+or reduce its statistical work. Exact/minus-one admission tests retain complete
+saved identity, completion, statistics and row equality at sufficient limits.
+
+This is a bounded payload estimate. Allocator metadata, allocator capacity
+over-allocation, thread stacks, library internals not itemized by this model
+and unrelated process allocations are not a total-RSS guarantee. Complete
+stored-body byte admission is still enforced independently. A green regression
+does not waive coverage, mutation, complexity or historical-source gates.
+
+### D-0590 — Validate the complete native policy before browser launch — 2026-09-09
+
+The browser validated 39 unique policy names and a small subset of their types,
+without requiring every native unsigned name. Replacing the reward/risk field
+with an unknown unsigned field could therefore leave metadata accepted for
+launch even though the visible ratio was unavailable. The native serializer
+produced the correct fields; the defect was the browser's malformed-response
+guard, not an observed corruption of the live policy.
+
+The existing frontend policy-guide generation now derives a small name/type
+schema from Rust `AdmissionPolicyValuesV1` and cross-checks it against the
+canonical `AdmissionFieldV1` names. Every V1 field must agree; unsupported types,
+duplicate names, missing names and mismatched tables refuse generation. The
+generated browser module contains no thresholds and ships no Rust source.
+Rust builds, tests and execution remain independent of frontend tooling.
+
+Both Boolean and single-stop launch validation use that schema. A ready policy
+must contain every exact native field once, with its correct wire type and
+integer range. Valid effective overrides are preserved rather than replaced by
+browser defaults. Regressions exercise all 39 fields as missing, replaced,
+duplicated and wrongly typed, plus a valid overridden reward/risk ratio.
+
+Additional component/controller regressions cover A-to-B-to-A configuration
+response ordering and repeated clicks before a submission is acknowledged.
+The visible action is named Check configuration: its result does not certify
+historical OHLCV. Native source admission and any explicit operator launch hold
+remain required. These changes neither submit work nor imply a completed sweep.
+
+The guide also removes stale wording that attributed the inherited 3:1 default
+to an already supplied operator rule. It identifies the two settings outside
+the 37-field file, explains the unmeasured no-loss case, and distinguishes the
+completed-trade win-share field from the separate 60% winning-day and weekly
+requirements. No configured threshold changes with this prose correction.
+
+### D-0591 — An unsatisfiable confidence pair refuses instead of pricing the search cap — 2026-09-10
+
+`Rules::derived` takes `base_bp.max(rules.min_win_rate_bp)` and `Rules::operator`
+holds the operator's stated 5,000 bp, so on any series whose own base rate is
+below chance the derived rate is exactly 5,000. `assurance_floor_bp` returns the
+caller's figure unchanged at or below chance, making the pair `(5_000, 5_000)`:
+a 95% lower bound asked to reach the rate it is a bound on. The Wilson bound
+approaches from below and never arrives, so `grid::trades_needed_for` exhausted
+its linear search and returned `TRADES_SEARCH_CEILING`, and
+`statistical_floor_ppm` divided that cap by the bar count and reported it as a
+support floor.
+
+Measured, zerodha NIFTY 60min 2020-01..2026-08: the banner read
+`floor 434140 ppm ... about 4999 round trip(s)`, the descent held ONE rung and
+nothing passed. Every rare setup was pruned before it was priced, and the number
+an operator read was the search cap wearing a statistic's clothes. With the pair
+made satisfiable through `BRUTEX_MIN_WIN_RATE_BP` the same span descended four
+rungs to 30563 ppm — 352 round trips, about one a week — and weighed 38,503,239
+combinations to an extinct frontier at depth 19.
+
+`elite_descend_with_attempt` now asks `unsatisfiable_confidence_pair` before it
+computes a floor, and refuses with the two figures, the reason no sample size
+satisfies them, and the knob that resolves it. This is not a new policy:
+`knobs::sizing_rate` already refuses the same pair on the typed path with the
+filter `*value > 5_000`. The derived path — the one an operator reaches without
+typing anything — was the half that had no guard. CLAUDE.md section 4 bans a
+fallback that hides a failure; a cap reported as a floor is one.
+
+No threshold moves and no admitted row changes. A satisfiable pair descends
+exactly as before, pinned in both directions by
+`an_unsatisfiable_confidence_pair_refuses_rather_than_pricing_the_cap`. The
+sibling test `the_support_floor_is_twenty_nine_trades_and_a_fifty_percent_rule_is_untestable`
+already recorded that the caller could not tell the ceiling from a real answer;
+this is the half that closes it.

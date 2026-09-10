@@ -54,22 +54,35 @@ export const IN_FLIGHT = 6;
  * @param {T[]} items
  * @param {number} limit
  * @param {(item: T, index: number) => Promise<R>} job
+ * @param {AbortSignal} [signal] Stop dispatching queued reads when their page leaves.
  * @returns {Promise<R[]>}
  */
-export async function pooled(items, limit, job) {
+export async function pooled(items, limit, job, signal) {
   /** @type {R[]} */
   const out = new Array(items.length);
   let next = 0;
+  let failed = false;
   const worker = async () => {
     for (;;) {
+      signal?.throwIfAborted();
+      if (failed) return;
       const i = next;
       next += 1;
       if (i >= items.length) return;
-      out[i] = await job(/** @type {T} */ (items[i]), i);
+      try {
+        out[i] = await job(/** @type {T} */ (items[i]), i);
+      } catch (why) {
+        failed = true;
+        throw why;
+      }
     }
   };
-  await Promise.all(
+  const completed = await Promise.allSettled(
     Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, worker)
   );
+  // A replacement batch must not start while a rejected batch still owns
+  // requests. Drain those workers before reporting the first named failure.
+  const refused = completed.find((result) => result.status === 'rejected');
+  if (refused?.status === 'rejected') throw refused.reason;
   return out;
 }

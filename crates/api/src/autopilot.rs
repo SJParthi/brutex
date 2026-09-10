@@ -224,7 +224,7 @@ pub enum Phase {
     Running,
     /// Waiting out a transport failure before retrying the same month.
     Backoff,
-    /// Stopped by the operator. Nothing is contacted.
+    /// Automatic scheduling is paused; a direct or finishing pull may be active.
     Paused,
     /// Terminal, with a reason. Only the operator clears it.
     Halted,
@@ -1409,7 +1409,7 @@ pub struct Status {
     pub bars_stored: u64,
     /// The whole span being aimed at.
     pub target: Target,
-    /// The cell on the wire right now, if any.
+    /// The reported pull cell, whether automatically or directly triggered.
     pub now: Option<InFlight>,
     /// The month the ladder has reached.
     pub cursor: String,
@@ -1510,6 +1510,8 @@ impl Status {
     /// flight, so it is not running*. Between two units the autopilot genuinely
     /// is waiting, and saying so is the difference this whole route exists to
     /// make visible.
+    /// A paused scheduler stays `paused` even when a direct pull updates `now`.
+    /// The JSON's `pull_active` field reports that activity separately.
     #[must_use]
     pub fn state(&self) -> &'static str {
         match self.phase {
@@ -1525,15 +1527,25 @@ impl Status {
     /// never returns empty for those two states: [`Status::detail`] is written
     /// on every transition into them, and if one ever were empty this says so
     /// out loud rather than shipping a contract violation.
+    /// Pull activity is appended at read time so a paused dwell cannot leave
+    /// the explanation stale when a direct pull starts or finishes.
     #[must_use]
     pub fn why(&self) -> String {
-        if !self.detail.is_empty() {
-            return self.detail.clone();
+        let mut why = if self.detail.is_empty() {
+            String::from(
+                "the autopilot changed state without recording a reason, which is itself \
+                 the bug — nothing here should be able to stop without naming why",
+            )
+        } else {
+            self.detail.clone()
+        };
+        if self.phase == Phase::Paused && self.now.is_some() {
+            why.push_str(
+                " A pull is active; the automatic scheduler remains paused. \
+                 The now field reports pull progress.",
+            );
         }
-        String::from(
-            "the autopilot changed state without recording a reason, which is itself \
-             the bug — nothing here should be able to stop without naming why",
-        )
+        why
     }
 
     /// The status as JSON, hand-written for the same reason every other JSON
@@ -1550,15 +1562,18 @@ impl Status {
     /// missing list and an empty list are different facts and only the second
     /// is good news. The `phase`/`feeds` fields below are additional detail the
     /// page ignores.
+    /// `pull_active` means this same snapshot has a reported `now` cell. It
+    /// does not identify the caller or claim to count every concurrent pull.
     #[must_use]
     pub fn json(&self) -> String {
         use std::fmt::Write as _;
         let mut out = String::with_capacity(2048);
         let _ = write!(
             out,
-            r#"{{"state":{},"why":{},"cursor":{},"journal":{},"journal_error":{},"waiting_ms":{},"absorbed_ms":{},"target":{{"from":{},"to":{},"instruments":{},"timeframe":{},"feed":{}}},"now":"#,
+            r#"{{"state":{},"why":{},"pull_active":{},"cursor":{},"journal":{},"journal_error":{},"waiting_ms":{},"absorbed_ms":{},"target":{{"from":{},"to":{},"instruments":{},"timeframe":{},"feed":{}}},"now":"#,
             render::json_string(self.state()),
             render::json_string(&self.why()),
+            self.now.is_some(),
             render::json_string(&self.cursor),
             render::json_string(&self.journal),
             render::json_string(&self.journal_error),
@@ -1602,10 +1617,9 @@ impl Status {
                 render::json_string(&failed.at),
             );
         }
-        out.push(']');
         let _ = write!(
             out,
-            r#","phase":{},"detail":{},"since_unix":{},"due_unix":{},"ticks":{},"bars_stored":{},"feeds":["#,
+            r#"],"phase":{},"detail":{},"since_unix":{},"due_unix":{},"ticks":{},"bars_stored":{},"feeds":["#,
             render::json_string(self.phase.state()),
             render::json_string(&self.detail),
             self.since_unix,
@@ -2464,8 +2478,9 @@ async fn dwell_paused(control: &Control) {
     control.publish(|status| {
         status.phase = Phase::Paused;
         status.detail = String::from(
-            "stopped by the operator. Nothing is being asked of any vendor. Press \
-             Resume to carry on from where the store already reaches.",
+            "the automatic scheduler is paused by the operator. It will not start \
+             new automatic pulls. Press Resume to continue automatic backfill \
+             from where the store already reaches.",
         );
         status.due_unix = 0;
     });
@@ -3132,6 +3147,7 @@ async fn tick(
     series: &[Series],
 ) -> TickOutcome {
     let asked = ingest::SpotRequest {
+        cash_identity: ingest::CashIdentity::Isin,
         // THE AUTOPILOT NAMES NO MEMBER, which is how it asks for the whole
         // target. It backfills a set rather than a selection, and an empty set
         // is that request rather than a narrowing of it.
@@ -5446,6 +5462,112 @@ mod tests {
         let json = control.json();
         assert!(json.contains(r#""state":"paused""#), "{json}");
         assert!(json.contains("Press Resume"), "{json}");
+    }
+
+    /// Pausing the scheduler says nothing about requests from other callers.
+    #[tokio::test]
+    async fn paused_idle_status_scopes_the_pause_to_the_automatic_scheduler() {
+        let control = Control::new();
+        control.pause();
+        let epoch = control.epoch();
+        dwell_paused(&control).await;
+
+        let json: serde_json::Value = serde_json::from_str(&control.json()).unwrap();
+        assert_eq!(json["state"], "paused");
+        assert_eq!(json["phase"], "paused");
+        assert_eq!(json["pull_active"], false);
+        assert!(json["now"].is_null());
+        assert_eq!(json["due_unix"], 0);
+        assert_eq!(json["why"], json["detail"]);
+        let why = json["why"].as_str().unwrap();
+        assert!(why.contains("automatic scheduler"), "{why}");
+        assert!(!why.contains("Nothing is being asked"), "{why}");
+        assert!(control.is_paused());
+        assert_eq!(control.epoch(), epoch);
+    }
+
+    /// Synthetic progress matching the reported direct-pull shape; no fetch.
+    fn status_pull() -> InFlight {
+        InFlight {
+            instrument: String::from("MOTHERSON"),
+            month: String::from("2026-08"),
+            timeframe: String::from("1min"),
+            feed: String::from("Groww"),
+            index: 132,
+            of: 210,
+            since: std::time::Instant::now(),
+        }
+    }
+
+    /// The handler observes a direct pull before and after the paused dwell.
+    #[tokio::test]
+    async fn paused_active_status_keeps_direct_pull_progress_visible() {
+        let site = empty_site("paused-active-status");
+        site.autopilot.pause();
+        dwell_paused(&site.autopilot).await;
+        let epoch = site.autopilot.epoch();
+        let _seat = site.autopilot.take_seat(pull::vendor::Feed::Groww).unwrap();
+        site.autopilot.publish(|status| {
+            status.now = Some(status_pull());
+        });
+
+        for _ in 0..2 {
+            let (headers, body) = status_json(axum::extract::State(Loaded::clone(&site))).await;
+            assert_eq!(headers[0].1, "application/json; charset=utf-8");
+            let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(json["state"], "paused");
+            assert_eq!(json["phase"], "paused");
+            assert_eq!(json["pull_active"], true);
+            assert_eq!(json["now"]["instrument"], "MOTHERSON");
+            assert_eq!(json["now"]["month"], "2026-08");
+            assert_eq!(json["now"]["timeframe"], "1min");
+            assert_eq!(json["now"]["feed"], "Groww");
+            assert_eq!(json["now"]["index"], 132);
+            assert_eq!(json["now"]["of"], 210);
+            assert!(json["now"]["elapsed_ms"].is_u64());
+            let why = json["why"].as_str().unwrap();
+            assert!(why.contains("A pull is active"), "{why}");
+            assert!(why.contains("automatic scheduler remains paused"), "{why}");
+            assert!(!body.contains("Nothing is being asked"), "{body}");
+            assert!(site.autopilot.is_paused());
+            assert_eq!(site.autopilot.epoch(), epoch);
+            assert!(!site.autopilot.stopped(epoch));
+            assert!(site.autopilot.feed_seat_held(pull::vendor::Feed::Groww));
+            dwell_paused(&site.autopilot).await;
+        }
+    }
+
+    /// Activity follows `now` on each read without changing the stored phase.
+    #[test]
+    fn pull_activity_transitions_preserve_the_scheduler_phase() {
+        for (phase, idle_state, active_state) in [
+            (Phase::Paused, "paused", "paused"),
+            (Phase::Running, "waiting", "running"),
+        ] {
+            let mut status = Status {
+                phase,
+                detail: String::from("scheduler status fixture"),
+                ..Status::default()
+            };
+            for active in [false, true, false] {
+                status.now = active.then(status_pull);
+                let json: serde_json::Value = serde_json::from_str(&status.json()).unwrap();
+                assert_eq!(json["pull_active"], active);
+                assert_eq!(json["now"].is_object(), active);
+                assert_eq!(
+                    json["state"],
+                    if active { active_state } else { idle_state }
+                );
+                assert_eq!(json["phase"], phase.state());
+                assert_eq!(status.phase, phase);
+                assert_eq!(json["detail"], "scheduler status fixture");
+                if phase == Phase::Paused && active {
+                    assert!(json["why"].as_str().unwrap().contains("A pull is active"));
+                } else {
+                    assert_eq!(json["why"], json["detail"]);
+                }
+            }
+        }
     }
 
     /// The status starts by saying it has not started, and publishing changes

@@ -645,10 +645,12 @@ export async function quoteOn(feed, key, timeframe, month, day, time = '') {
  * @param {string} feed
  * @param {{key: string, timeframe: string, month: string}[]} rows
  * @param {string} day `YYYY-MM-DD`, or `''`
+ * @param {string} [time]
+ * @param {AbortSignal} [signal] Cancels queued work; shared reads already started remain cached.
  * @returns {Promise<Quote[]>}
  */
-export function quotesOn(feed, rows, day, time = '') {
-  return pooled(rows, IN_FLIGHT, (r) => quoteOn(feed, r.key, r.timeframe, r.month, day, time));
+export function quotesOn(feed, rows, day, time = '', signal) {
+  return pooled(rows, IN_FLIGHT, (r) => quoteOn(feed, r.key, r.timeframe, r.month, day, time), signal);
 }
 
 /**

@@ -118,6 +118,8 @@ pub mod calendar;
 /// -- because every fixture on the expired-derivative path is hand-written from
 /// the documentation and none was ever an observed response.
 pub mod capture;
+pub mod cash_auction;
+pub mod cash_session_cache;
 /// THE CALLER `crate::fno` NEVER HAD -- expiries, then contracts, then bars.
 pub mod chain;
 pub mod config;

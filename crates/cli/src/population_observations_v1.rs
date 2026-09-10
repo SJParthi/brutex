@@ -1241,7 +1241,7 @@ fn require_pair_sources(
     Ok(())
 }
 
-fn derive_layout(period_count: usize) -> Result<CscvLayoutReceiptV1, String> {
+pub(crate) fn derive_layout(period_count: usize) -> Result<CscvLayoutReceiptV1, String> {
     let period_count = u64::try_from(period_count)
         .map_err(|_| "aligned observation period count does not fit u64".to_owned())?;
     let upper = u32::try_from(period_count.min(u64::from(MAX_CSCV_SEGMENTS_V1)))
@@ -1301,7 +1301,7 @@ fn layout_digest(layout: CscvLayoutReceiptV1) -> [u8; 32] {
     hasher.finalize()
 }
 
-fn canonical_masks(layout: CscvLayoutReceiptV1) -> Result<Vec<(u64, u64)>, String> {
+pub(crate) fn canonical_masks(layout: CscvLayoutReceiptV1) -> Result<Vec<(u64, u64)>, String> {
     if layout.digest != layout_digest(layout)
         || layout.split_count != canonical_split_count(layout.segment_count)?
         || layout.period_count
@@ -3074,7 +3074,7 @@ impl ObservationAuthorityDataV2 {
             || self.disposition != ObservationAuthorityDispositionV2::NaturallyExtinct
             || !proof.extinction_complete
             || !proof.closure_complete
-            || proof.extinction_depth == 0
+            || (proof.extinction_depth == 0 && proof.frequent_itemsets != 0)
             || proof.unknown_closure_itemsets != 0
             || proof.closed_itemsets != 0
         {

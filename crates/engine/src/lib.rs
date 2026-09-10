@@ -106,9 +106,24 @@ pub mod column;
 /// caller feeds from the level boundary. Neither is a depth parameter and the
 /// module header says why at length.
 pub mod keep;
+pub mod resume;
 
 use core::hash::{BuildHasher, Hasher};
-use std::collections::HashSet;
+use std::collections::{HashSet, TryReserveError};
+
+/// Reserve completely before a collection is populated.
+fn reserved<T>(capacity: usize) -> Result<Vec<T>, TryReserveError> {
+    let mut rows = Vec::new();
+    rows.try_reserve_exact(capacity)?;
+    Ok(rows)
+}
+
+/// At most one level per table position, plus the empty extinction witness.
+/// Shared by retained, streamed and resumed callers. Tombstones make this a
+/// conservative reservation; capacity itself is not a search-depth condition.
+fn level_slots() -> usize {
+    vocab::table::COUNT.saturating_add(1)
+}
 
 /// The multiplier, from Firefox's `FxHash` by way of `rustc`'s own.
 ///
@@ -567,6 +582,9 @@ pub enum Breach {
     /// then halts naming that. It uses what a 4 GB machine has and what a 48 GB
     /// machine has, discovers which at runtime, and asks nobody.
     Memory,
+    /// The operating system refused to create a support-counting worker.
+    /// No serial fallback or incomplete batch is presented as a completed run.
+    Workers,
 }
 
 /// The outcome of a whole sweep.
@@ -810,12 +828,26 @@ struct Tail {
 /// and `engine::tests::a_streamed_walk_and_a_retaining_walk_are_the_same_walk`
 /// is where it is measured.
 trait Sink {
+    type Error;
     /// The level just completed, the cumulative admitted count, the cumulative
     /// pairs.
     fn report(&mut self, level: &Frontier, admitted: usize, pairs: u64);
     /// The walk is done with this level; `next` is the adjacent level when one
     /// was built before retirement.
     fn retire(&mut self, level: Frontier, next: Option<&Frontier>);
+    fn checkpoint(&mut self, _level: &Frontier, _progress: &Progress) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+/// Cumulative state at a level boundary; also the state resumed from disk.
+#[derive(Debug)]
+struct Progress {
+    excluded: Vec<Excluded>,
+    bars: u64,
+    admitted: usize,
+    pairs: u64,
+    halted: Option<Halt>,
 }
 
 /// The sink that keeps every survivor -- [`Ladder::walk_column`]'s behaviour,
@@ -827,6 +859,7 @@ struct Retaining<'a> {
 }
 
 impl Sink for Retaining<'_> {
+    type Error = std::convert::Infallible;
     fn report(&mut self, level: &Frontier, admitted: usize, pairs: u64) {
         (self.on_level)(level, admitted, pairs);
     }
@@ -853,6 +886,7 @@ struct Streaming<'a> {
 }
 
 impl Sink for Streaming<'_> {
+    type Error = std::convert::Infallible;
     fn report(&mut self, level: &Frontier, admitted: usize, pairs: u64) {
         (self.on_level)(level, admitted, pairs);
     }
@@ -986,7 +1020,34 @@ impl Ladder {
         if self.support_lanes == 0 {
             lanes()
         } else {
-            self.support_lanes
+            // A requested lane count is an upper bound on scheduling, never
+            // an instruction to reserve arbitrarily many worker batches.
+            self.support_lanes.min(lanes())
+        }
+    }
+
+    /// Record an input-allocation refusal before any candidate was computed.
+    ///
+    /// `k = 0` distinguishes setup failure from a partially evaluated level.
+    /// The empty vectors are evidence of no attempted computation, not extinction.
+    #[must_use]
+    pub fn refused_on_memory(self, bars: u64) -> Sweep {
+        Sweep {
+            bars,
+            min_hits: self.min_hits,
+            halted: Some(self.halt(0, 0, 0, Breach::Memory)),
+            ..Sweep::default()
+        }
+    }
+
+    fn halt(self, k: u32, candidates: usize, pairs: u64, breach: Breach) -> Halt {
+        Halt {
+            k,
+            candidates,
+            ceiling: self.ceiling,
+            pairs,
+            pair_budget: self.pair_budget,
+            breach,
         }
     }
 
@@ -1095,8 +1156,10 @@ impl Ladder {
         // depth. The former vertical representation saved memory traffic by
         // reading only k bitmaps and thereby made the operation Theta(k), which
         // golden rule 4 forbids.
-        let column = Column::from_rows(bar_bits);
-        self.walk_column(&column, live, on_level)
+        match Column::try_from_rows(bar_bits) {
+            Ok(column) => self.walk_column(&column, live, on_level),
+            Err(_) => self.refused_on_memory(len_u64(bar_bits.len())),
+        }
     }
 
     /// [`Self::walk_reporting`] over a column the caller already copied.
@@ -1125,10 +1188,10 @@ impl Ladder {
         live: &[u32],
         on_level: &dyn Fn(&Frontier, usize, u64),
     ) -> Sweep {
-        let mut sink = Retaining {
-            levels: Vec::new(),
-            on_level,
+        let Ok(levels) = reserved(level_slots()) else {
+            return self.refused_on_memory(column.bars());
         };
+        let mut sink = Retaining { levels, on_level };
         let tail = self.walk_into(column, live, &mut sink);
         Sweep {
             levels: sink.levels,
@@ -1189,8 +1252,11 @@ impl Ladder {
         live: &[u32],
         on_level: &mut dyn FnMut(&Frontier, usize, u64),
     ) -> keep::Streamed {
+        let Ok(levels) = reserved(level_slots()) else {
+            return self.refused_streamed_on_memory(column.bars());
+        };
         let mut sink = Streaming {
-            levels: Vec::new(),
+            levels,
             streamed: 0,
             on_level,
             on_retire: None,
@@ -1220,8 +1286,20 @@ impl Ladder {
         live: &[u32],
         on_level: &mut dyn FnMut(&Frontier, usize, u64),
     ) -> keep::Streamed {
-        let column = Column::from_rows(bar_bits);
-        self.walk_column_streamed(&column, live, on_level)
+        match Column::try_from_rows(bar_bits) {
+            Ok(column) => self.walk_column_streamed(&column, live, on_level),
+            Err(_) => self.refused_streamed_on_memory(len_u64(bar_bits.len())),
+        }
+    }
+
+    fn refused_streamed_on_memory(self, bars: u64) -> keep::Streamed {
+        let refused = self.refused_on_memory(bars);
+        keep::Streamed {
+            bars: refused.bars,
+            min_hits: refused.min_hits,
+            halted: refused.halted,
+            ..keep::Streamed::default()
+        }
     }
 
     /// [`Self::walk_streamed`], also lending each level to `on_retire` at the
@@ -1241,9 +1319,14 @@ impl Ladder {
         on_level: &mut dyn FnMut(&Frontier, usize, u64),
         on_retire: &mut dyn FnMut(&Frontier, Option<&Frontier>),
     ) -> keep::Streamed {
-        let column = Column::from_rows(bar_bits);
+        let Ok(column) = Column::try_from_rows(bar_bits) else {
+            return self.refused_streamed_on_memory(len_u64(bar_bits.len()));
+        };
+        let Ok(levels) = reserved(level_slots()) else {
+            return self.refused_streamed_on_memory(column.bars());
+        };
         let mut sink = Streaming {
-            levels: Vec::new(),
+            levels,
             streamed: 0,
             on_level,
             on_retire: Some(on_retire),
@@ -1270,23 +1353,56 @@ impl Ladder {
     /// of an Apriori walk kept in step by review is the shape this repository
     /// refuses everywhere else. So there is one walk, and the only difference
     /// between the callers is a `Sink`.
-    fn walk_into(self, column: &Column, live: &[u32], sink: &mut dyn Sink) -> Tail {
+    fn walk_into(
+        self,
+        column: &Column,
+        live: &[u32],
+        sink: &mut dyn Sink<Error = std::convert::Infallible>,
+    ) -> Tail {
+        match self.try_walk_into(column, live, sink) {
+            Ok(tail) => tail,
+            Err(_) => Tail {
+                excluded: Vec::new(),
+                bars: column.bars(),
+                min_hits: self.min_hits,
+                halted: Some(self.halt(0, 0, 0, Breach::Memory)),
+            },
+        }
+    }
+
+    fn try_walk_into(
+        self,
+        column: &Column,
+        live: &[u32],
+        sink: &mut dyn Sink<Error = std::convert::Infallible>,
+    ) -> Result<Tail, TryReserveError> {
+        let (first, progress) = self.first_level(column, live)?;
+        Ok(self
+            .continue_walk(column, first, progress, sink)
+            .unwrap_or_else(|never| match never {}))
+    }
+
+    fn first_level(
+        self,
+        column: &Column,
+        live: &[u32],
+    ) -> Result<(Frontier, Progress), TryReserveError> {
         let bars = column.bars();
-        let mut excluded_positions: Vec<Excluded> = Vec::new();
-        let mut halted_at: Option<Halt> = None;
+        let mut excluded_positions: Vec<Excluded> = reserved(live.len())?;
 
         // ── k=1, and the D-0080 exclusion guard ──────────────────────────────
         // Every position is measured BEFORE the ladder starts, and one at
         // support 0 or at support == bars is named in the output rather than
         // dropped. A support-0 position poisons its whole subtree; a support-1
         // position partitions nothing.
-        let mut first: Vec<Itemset> = Vec::with_capacity(live.len());
+        let mut first: Vec<Itemset> = reserved(live.len())?;
         // Both counted inside the loop below, so every entry in `live` increments exactly
         // one bucket and `Frontier::reconciles` becomes an invariant of the loop rather
         // than an identity one residual makes true by construction.
         let mut duplicates = 0_u64;
         let mut infrequent = 0_u64;
-        let mut offered: HashSet<u32> = HashSet::with_capacity(live.len());
+        let mut offered: HashSet<u32> = HashSet::new();
+        offered.try_reserve(live.len())?;
         for &p in live {
             // The caller's list is checked rather than trusted, and each rejection is
             // NAMED. Three ways it can be wrong, all silent before this:
@@ -1351,7 +1467,7 @@ impl Ladder {
         // out of a caller list that may contain anything -- so the claim described the
         // output of the code below rather than its input, and the count was wrong whenever
         // it mattered.
-        let mut current = Frontier {
+        let current = Frontier {
             k: 1,
             frequent: first,
             generated,
@@ -1361,6 +1477,25 @@ impl Ladder {
             infrequent,
         };
 
+        Ok((
+            current,
+            Progress {
+                excluded: excluded_positions,
+                bars,
+                admitted: 0,
+                pairs: 0,
+                halted: None,
+            },
+        ))
+    }
+
+    fn continue_walk<E>(
+        self,
+        column: &Column,
+        mut current: Frontier,
+        mut progress: Progress,
+        sink: &mut dyn Sink<Error = E>,
+    ) -> Result<Tail, E> {
         // k=1 IS REPORTED TOO, AND IT WAS NOT.
         //
         // The reporter's only call site was inside the loop below, which starts
@@ -1374,24 +1509,23 @@ impl Ladder {
         // saying "a walk of depth d makes exactly d calls" while its assertion
         // said `levels.len() - 1`. The assertion was right about the code and
         // the code was wrong about the intent; both now say `d`.
-        sink.report(&current, 0, 0);
+        sink.report(&current, progress.admitted, progress.pairs);
+        sink.checkpoint(&current, &progress)?;
         // ── k=2 upward, until a level produces nothing ───────────────────────
         // `current` is held by value rather than read back out of `sweep.levels`,
         // so the level is moved into the record exactly once and no clone is
         // needed. The empty level that ends the walk is recorded too — a reader
         // of the output can see that the ladder died rather than was stopped.
-        let mut k: u32 = 1;
+        let mut k = current.k;
         // Distinct candidates admitted across every level so far. This remains
         // cumulative for BOTH sinks so choosing streamed retention cannot change
         // which combinations the ladder reaches. On the retaining path it also
         // bounds accumulated survivors; on the streamed path it is the same
         // conservative search budget even though retired levels are freed.
-        let mut admitted: usize = 0;
         // Cumulative on BOTH axes. `pairs` was per-level, which is the exact
         // defect fixed for `admitted` in 5b791da reintroduced on the time axis:
         // a walk of depth 12 could spend twelve budgets and record no Halt.
-        let mut pairs_walked: u64 = 0;
-        while !current.frequent.is_empty() {
+        while !current.frequent.is_empty() && progress.halted.is_none() {
             // `saturating_add`, not `checked_add`, and the difference is a branch
             // no test can reach. A level's masks all have `popcount == k` and a
             // popcount cannot exceed `ConditionMask::BITS`, so `k` never passes
@@ -1404,9 +1538,9 @@ impl Ladder {
             // a per-level cap left the peak at `depth * ceiling`, and the process
             // died rather than refused.
             let (next, halt, added, walked) =
-                self.next_level(column, &current, k, admitted, pairs_walked);
-            admitted = admitted.saturating_add(added);
-            pairs_walked = pairs_walked.saturating_add(walked);
+                self.next_level(column, &current, k, progress.admitted, progress.pairs);
+            progress.admitted = progress.admitted.saturating_add(added);
+            progress.pairs = progress.pairs.saturating_add(walked);
             // A successor stopped by a budget is PARTIAL, so it cannot prove
             // closure for the level below it. Lend it only after a complete
             // build; otherwise `None` makes downstream certification fail.
@@ -1426,7 +1560,9 @@ impl Ladder {
             // BEFORE the halt test, deliberately -- see the method doc. A caller
             // watching a walk that stops at the ceiling needs the level that
             // stopped it, and that is the one the `break` below would skip.
-            sink.report(&current, admitted, pairs_walked);
+            progress.halted = halt;
+            sink.report(&current, progress.admitted, progress.pairs);
+            sink.checkpoint(&current, &progress)?;
             // A HALTED LEVEL IS PARTIAL, so climbing off it would build k+1 from
             // an incomplete frontier and label the result complete. Anti-monotonicity
             // only licenses the prune when the previous level is the WHOLE frequent
@@ -1434,17 +1570,16 @@ impl Ladder {
             // frequent, and nothing downstream could tell. So the walk stops, the
             // partial level is recorded below, and `Sweep::halted` names why.
             if halt.is_some() {
-                halted_at = halt;
                 break;
             }
         }
         sink.retire(current, None);
-        Tail {
-            excluded: excluded_positions,
-            bars,
+        Ok(Tail {
+            excluded: progress.excluded,
+            bars: progress.bars,
             min_hits: self.min_hits,
-            halted: halted_at,
-        }
+            halted: progress.halted,
+        })
     }
 
     /// Whether the walk may allocate one more distinct candidate.
@@ -1503,14 +1638,66 @@ impl Ladder {
         admitted: usize,
         pairs_walked: u64,
     ) -> (Frontier, Option<Halt>, usize, u64) {
+        self.next_level_using(k, admitted, pairs_walked, || {
+            self.try_next_level(column, prev, k, admitted, pairs_walked)
+        })
+    }
+
+    /// Translate the actual fallible join into one reported level. Keeping the
+    /// preparation boundary explicit lets a caller-local test supply a real
+    /// allocation refusal without exhausting the host or changing the join.
+    fn next_level_using(
+        self,
+        k: u32,
+        admitted: usize,
+        pairs_walked: u64,
+        prepare: impl FnOnce() -> Result<(Frontier, Option<Halt>, usize, u64), TryReserveError>,
+    ) -> (Frontier, Option<Halt>, usize, u64) {
+        match prepare() {
+            Ok(next) => next,
+            Err(_) => (
+                joined_frontier(k, Vec::new(), 0, 0, 0),
+                Some(self.halt(k, admitted, pairs_walked, Breach::Memory)),
+                0,
+                0,
+            ),
+        }
+    }
+
+    fn try_next_level(
+        self,
+        column: &Column,
+        prev: &Frontier,
+        k: u32,
+        admitted: usize,
+        pairs_walked: u64,
+    ) -> Result<(Frontier, Option<Halt>, usize, u64), TryReserveError> {
+        self.try_next_level_observing(column, prev, k, admitted, pairs_walked, &mut |_| {})
+    }
+
+    /// Same join with a local batch-boundary observer. Production supplies a
+    /// zero-sized no-op; tests measure actual handoffs without global fault
+    /// switches, allocator sabotage, or changes to candidate/support semantics.
+    fn try_next_level_observing(
+        self,
+        column: &Column,
+        prev: &Frontier,
+        k: u32,
+        admitted: usize,
+        pairs_walked: u64,
+        on_batch: &mut impl FnMut(usize),
+    ) -> Result<(Frontier, Option<Halt>, usize, u64), TryReserveError> {
         let lane_count = self.support_lanes();
         let batch_cap = lane_count.saturating_mul(BATCH_PER_LANE);
-        let mut batch: Vec<ConditionMask> = Vec::with_capacity(batch_cap);
+        let mut batch: Vec<ConditionMask> = reserved(batch_cap)?;
         // Expected O(1) membership probes for the subset prune.
         // `ConditionMask` derives `Hash + Eq`, so the key is the mask itself and
         // no separate index is needed. This is not candidate duplicate
         // rejection: the injective join below needs no such table.
-        let frequent_prev: MaskSet = prev.frequent.iter().map(|i| i.mask).collect();
+        let JoinIndex {
+            frequent: frequent_prev,
+            keyed,
+        } = JoinIndex::try_new(&prev.frequent)?;
         // THE DEDUP SET IS GONE, AND IT NEVER REJECTED ANYTHING.
         //
         // `seen` was a `MaskSet` holding every candidate this level generated,
@@ -1553,17 +1740,17 @@ impl Ladder {
         // `docs/06-limits.md` §5 is about. The heuristic is capped at the
         // ladder's own ceiling so a huge frontier cannot reserve past what a
         // level is allowed to hold anyway.
-        let mut out: Vec<Itemset> = Vec::with_capacity(frequent_prev.len().min(self.ceiling));
+        let mut out: Vec<Itemset> = reserved(frequent_prev.len().min(self.ceiling))?;
         let mut generated: u64 = 0;
         // NOT `mut`, AND THAT IS THE PROOF. Nothing increments it any more:
         // the prefix join cannot produce a repeat and `keyed.dedup()` removes
         // the malformed-input case before the join. The field is still
         // REPORTED, so a level that somehow found one would have to make this
         // mutable again -- a compiler error is a better guard than a counter.
-        let duplicates: u64 = 0;
         let mut pruned: u64 = 0;
         let mut infrequent: u64 = 0;
         let mut halted: Option<Halt> = None;
+        let mut batch_failure = None;
 
         // THE JOIN, GROUPED BY (k−2)-PREFIX — and the whole cost of this level.
         //
@@ -1606,14 +1793,6 @@ impl Ladder {
         // needs, and prefix blocks are NOT contiguous under it. Relying on it
         // would silently drop candidates. So the key is computed and sorted on
         // explicitly here: |F| log |F| per level against the |F|²/2 it removes.
-        let mut keyed: Vec<(ConditionMask, ConditionMask)> =
-            Vec::with_capacity(prev.frequent.len());
-        keyed.extend(
-            prev.frequent
-                .iter()
-                .map(|it| (without_highest(&it.mask), it.mask)),
-        );
-        keyed.sort_unstable_by_key(|(prefix, mask)| (prefix.words(), mask.words()));
         // THE DEDUP THAT `seen` USED TO DO, MOVED HERE AND MADE CHEAPER.
         //
         // The join is injective over a frontier whose masks are distinct, so no
@@ -1632,7 +1811,6 @@ impl Ladder {
         // ADJACENT and `dedup` is one O(|F|) pass over a vector that was just
         // walked — against the O(candidates) hashing it replaces, which ran once
         // per PAIR rather than once per member.
-        keyed.dedup();
 
         let mut pairs: u64 = 0;
         'join: for block in keyed.chunk_by(|a, b| a.0 == b.0) {
@@ -1648,14 +1826,12 @@ impl Ladder {
                 // returns, which is the opposite of the loud refusal
                 // `CLAUDE.md` §4 requires.
                 if pairs_walked.saturating_add(pairs) >= self.pair_budget {
-                    halted = Some(Halt {
+                    halted = Some(self.halt(
                         k,
-                        candidates: admitted.saturating_add(emitted),
-                        ceiling: self.ceiling,
-                        pairs: pairs_walked.saturating_add(pairs),
-                        pair_budget: self.pair_budget,
-                        breach: Breach::Pairs,
-                    });
+                        admitted.saturating_add(emitted),
+                        pairs_walked.saturating_add(pairs),
+                        Breach::Pairs,
+                    ));
                     break 'join;
                 }
                 for (_, b) in block.iter().skip(offset.saturating_add(1)) {
@@ -1690,15 +1866,18 @@ impl Ladder {
                     // seen fire, which is the shape of every defect an audit
                     // found today. `exhausted` takes the growth amount, so a test
                     // hands it `usize::MAX` and the whole arm runs.
-                    if let Some(breach) = self.exhausted(emitted, admitted, &mut out, 1) {
-                        halted = Some(Halt {
+                    // Reserve for EVERY pending candidate before accepting this
+                    // one. A later batch drain can then append all survivors
+                    // without allocating behind the memory-refusal boundary.
+                    if let Some(breach) =
+                        self.exhausted(emitted, admitted, &mut out, batch.len().saturating_add(1))
+                    {
+                        halted = Some(self.halt(
                             k,
-                            candidates: admitted.saturating_add(emitted),
-                            ceiling: self.ceiling,
-                            pairs: pairs_walked.saturating_add(pairs),
-                            pair_budget: self.pair_budget,
+                            admitted.saturating_add(emitted),
+                            pairs_walked.saturating_add(pairs),
                             breach,
-                        });
+                        ));
                         break 'join;
                     }
                     generated = generated.saturating_add(1);
@@ -1758,30 +1937,29 @@ impl Ladder {
                     // identity is checked. The cost is that the ladder table
                     // cannot say WHICH prune fired. Named here because the table
                     // cannot name it.
-                    if let (Some(left), Some(right)) = (highest_position(a), highest_position(b))
-                        && !vocab::implication::pair_is_informative(
-                            u16::try_from(left).unwrap_or(u16::MAX),
-                            u16::try_from(right).unwrap_or(u16::MAX),
-                        )
-                    {
+                    if !parents_informative(a, b) {
                         pruned = pruned.saturating_add(1);
                         continue;
                     }
                     // COUNTED IN A BATCH, ACROSS EVERY CORE. `column.support`
-                    // is Theta(k * bars/64) and is the dominant cost of the
+                    // is Theta(bars) with fixed-six-word work per bar and dominates the
                     // whole walk; everything above it here is a hash probe or a
                     // six-word OR. Deferring it is what lets it be spread
                     // without moving the dedup or the budget out of sequence.
                     batch.push(cand);
                     if batch.len() >= batch_cap {
-                        drain(
+                        on_batch(batch.len());
+                        if let Err(breach) = drain(
                             column,
                             &mut batch,
                             self.min_hits,
                             lane_count,
                             &mut out,
                             &mut infrequent,
-                        );
+                        ) {
+                            batch_failure = Some(breach);
+                            break 'join;
+                        }
                     }
                 }
             }
@@ -1790,29 +1968,92 @@ impl Ladder {
         // batch, and a level that dropped it would report those candidates as
         // neither frequent nor infrequent -- a silent loss of exactly the rows a
         // halt is meant to be loud about.
-        drain(
-            column,
-            &mut batch,
-            self.min_hits,
-            lane_count,
-            &mut out,
-            &mut infrequent,
-        );
-        sort_canonically(&mut out);
-        (
-            Frontier {
+        let failed = batch_failure.or_else(|| {
+            on_batch(batch.len());
+            drain(
+                column,
+                &mut batch,
+                self.min_hits,
+                lane_count,
+                &mut out,
+                &mut infrequent,
+            )
+            .err()
+        });
+        if let Some(breach) = failed {
+            // A drain commits its counts and rows only after every worker
+            // succeeds. Uncommitted candidates must not be labelled infrequent
+            // or vanish from a supposedly reconciled completed frontier.
+            generated = generated.saturating_sub(len_u64(batch.len()));
+            emitted = emitted.saturating_sub(batch.len());
+            halted = Some(self.halt(
                 k,
-                frequent: out,
-                generated,
-                duplicates,
-                excluded: 0,
-                pruned,
-                infrequent,
-            },
+                admitted.saturating_add(emitted),
+                pairs_walked.saturating_add(pairs),
+                breach,
+            ));
+        }
+        sort_canonically(&mut out);
+        Ok((
+            joined_frontier(k, out, generated, pruned, infrequent),
             halted,
             emitted,
             pairs,
-        )
+        ))
+    }
+}
+
+/// One prior frontier indexed for subset membership and injective prefix joins.
+struct JoinIndex {
+    frequent: MaskSet,
+    keyed: Vec<(ConditionMask, ConditionMask)>,
+}
+
+impl JoinIndex {
+    fn try_new(previous: &[Itemset]) -> Result<Self, TryReserveError> {
+        let mut frequent = MaskSet::default();
+        frequent.try_reserve(previous.len())?;
+        frequent.extend(previous.iter().map(|item| item.mask));
+        let mut keyed = reserved(previous.len())?;
+        keyed.extend(
+            previous
+                .iter()
+                .map(|item| (without_highest(&item.mask), item.mask)),
+        );
+        keyed.sort_unstable_by_key(|(prefix, mask)| (prefix.words(), mask.words()));
+        keyed.dedup();
+        Ok(Self { frequent, keyed })
+    }
+}
+
+/// The only newly introduced pair is formed by the two parents' highest bits.
+fn parents_informative(a: &ConditionMask, b: &ConditionMask) -> bool {
+    highest_position(a)
+        .zip(highest_position(b))
+        .is_none_or(|(left, right)| {
+            vocab::implication::pair_is_informative(
+                u16::try_from(left).unwrap_or(u16::MAX),
+                u16::try_from(right).unwrap_or(u16::MAX),
+            )
+        })
+}
+
+/// Prefix joins cannot duplicate masks or introduce non-live singleton offers.
+fn joined_frontier(
+    k: u32,
+    frequent: Vec<Itemset>,
+    generated: u64,
+    pruned: u64,
+    infrequent: u64,
+) -> Frontier {
+    Frontier {
+        k,
+        frequent,
+        generated,
+        duplicates: 0,
+        excluded: 0,
+        pruned,
+        infrequent,
     }
 }
 
@@ -1849,10 +2090,10 @@ pub fn support(bar_bits: &[ConditionMask], mask: &ConditionMask) -> u64 {
 /// candidate ceiling remains as the bound that does. Two bounds, different
 /// failure modes, and neither is claimed to be the other.
 ///
-/// `len() == capacity()` first, so the reserve call is made only when growth is
-/// actually due rather than on every candidate.
+/// `Vec::try_reserve` already checks spare capacity before allocating. Repeating
+/// that comparison here adds a redundant branch and two definitions of growth.
 fn cannot_grow(out: &mut Vec<Itemset>, by: usize) -> bool {
-    out.len() == out.capacity() && out.try_reserve(by).is_err()
+    out.try_reserve(by).is_err()
 }
 
 /// The itemset minus its highest set position — the join's grouping key.
@@ -1965,21 +2206,12 @@ fn without_highest(m: &ConditionMask) -> ConditionMask {
 ///
 /// # The memory it adds, counted properly
 ///
-/// This said "the batch is the ONLY memory this change adds", and that was
-/// false. Three allocations, not one:
-///
-/// * the batch itself — `lanes x BATCH_PER_LANE x 48` bytes, **5.5 MB** on
-///   fourteen cores, and reserved at the top of EVERY `next_level` including a
-///   terminal one that generates nothing;
-/// * `parts: Vec<Vec<Itemset>>` in [`drain`] — up to one `Itemset` per batched
-///   candidate at 56 bytes, **6.4 MB**;
-/// * each lane's own `kept`, now pre-sized to its chunk. Before that it grew by
-///   doubling and could overshoot to twice the chunk.
-///
-/// Real added peak is therefore about **12 MB**, not 5.5 — and eight concurrent
-/// rungs multiply it again. `docs/06-limits.md` records memory, not time, as
-/// what bounds a sweep — a measured 1.0 GB at 17.9 million survivors — so the
-/// figure being wrong mattered in the scarce currency.
+/// For a batch capacity C, masks occupy 48*C bytes and temporary support counts
+/// occupy 8*C bytes. The output additionally reserves room for every pending
+/// candidate's 56-byte Itemset before admission. Workers borrow disjoint count
+/// slices; there are no worker-owned result vectors or intermediate parts.
+/// These are type-size formulas, not an observed process-memory measurement.
+/// Allocator metadata, thread runtime state and other live frontiers are extra.
 const BATCH_PER_LANE: usize = 8_192;
 
 /// A zero batch would never drain and the walk would never terminate. Checked
@@ -2018,7 +2250,7 @@ fn lanes() -> usize {
 /// rejects a duplicate, the pair counter decides a halt — and those are hash
 /// probes and integer adds. Moving them would need locks and would change when
 /// a budget fires, which changes the ANSWER. `Column::support` is the opposite:
-/// it takes `&Column`, touches nothing, and costs `Theta(k * bars/64)`. Only
+/// it takes `&Column`, touches no shared state, and costs `Theta(bars)`. Only
 /// the expensive, shared-nothing half is spread.
 ///
 /// # Determinism
@@ -2029,19 +2261,13 @@ fn lanes() -> usize {
 /// 5 holds twice over. `a_batched_level_is_identical_to_a_single_lane_one`
 /// measures it rather than trusting either argument.
 ///
-/// # A lane that panics takes the process down, carrying its own reason
+/// # Explicit resource refusal and atomic publication
 ///
-/// `resume_unwind` and not `expect`: a support count cannot fail — it is an AND
-/// and a popcount over a slice the caller owns — so a panicking lane means
-/// memory has been corrupted underneath the walk, and continuing would file
-/// whatever it produced as a market fact. `CLAUDE.md` §4: degrade loudly, or
-/// refuse.
-///
-/// `expect` would satisfy that too and this crate bans it outright, correctly:
-/// it would replace the lane's own panic message with a fixed string, so an
-/// operator would be told "a support-counting lane" where the lane itself said
-/// which index it was and what it saw. `resume_unwind` re-raises the ORIGINAL
-/// payload, so the message that reaches the log is the one that knows something.
+/// Recoverable reservations return Memory; an OS thread creation error returns
+/// Workers. The scope joins started workers before returning. No support counts
+/// or output rows commit until every worker was created successfully. Worker
+/// panic propagates through the scope and is not converted into a completed
+/// result. Standard-library runtime allocation and process abort remain limits.
 fn drain(
     column: &Column,
     batch: &mut Vec<ConditionMask>,
@@ -2049,57 +2275,37 @@ fn drain(
     lane_count: usize,
     out: &mut Vec<Itemset>,
     infrequent: &mut u64,
-) {
+) -> Result<(), Breach> {
     if batch.is_empty() {
-        return;
+        return Ok(());
     }
     let width = batch.len().div_ceil(lane_count.max(1)).max(1);
-    let parts: Vec<Vec<Itemset>> = std::thread::scope(|scope| {
-        let handles: Vec<_> = batch
-            .chunks(width)
-            .map(|chunk| {
-                scope.spawn(move || {
-                    // PRE-SIZED, AND IT WAS NOT. `Vec::new()` here grew by
-                    // doubling inside every lane, which can overshoot to twice
-                    // the chunk before `out.extend` takes it -- the same defect
-                    // an audit already found on `out` four hundred lines above,
-                    // reintroduced by this function on the day it was written.
-                    //
-                    // The chunk length is the CEILING, not an estimate: a lane
-                    // keeps at most one itemset per candidate it was handed. It
-                    // over-reserves when most candidates are infrequent, and
-                    // that is the right way round -- the alternative is a
-                    // doubling series whose peak is unbounded above the same
-                    // number.
-                    let mut kept: Vec<Itemset> = Vec::with_capacity(chunk.len());
-                    for mask in chunk {
-                        let hits = column.support(mask);
-                        if hits >= min_hits {
-                            kept.push(Itemset { mask: *mask, hits });
-                        }
+    out.try_reserve(batch.len()).map_err(|_| Breach::Memory)?;
+    let mut counts = reserved(batch.len()).map_err(|_| Breach::Memory)?;
+    counts.resize(batch.len(), 0_u64);
+    std::thread::scope(|scope| {
+        for (masks, hits) in batch.chunks(width).zip(counts.chunks_mut(width)) {
+            std::thread::Builder::new()
+                .spawn_scoped(scope, move || {
+                    for (mask, count) in masks.iter().zip(hits) {
+                        *count = column.support(mask);
                     }
-                    kept
                 })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|handle| {
-                handle
-                    .join()
-                    .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
-            })
-            .collect()
-    });
-    // INFREQUENT IS THE REMAINDER, NOT A SECOND COUNT. Counting it inside the
-    // lanes and summing would be one more thing to keep agreeing with `out`.
-    let kept: usize = parts.iter().map(Vec::len).sum();
-    let missed = batch.len().saturating_sub(kept);
-    *infrequent = infrequent.saturating_add(u64::try_from(missed).unwrap_or(u64::MAX));
-    for part in parts {
-        out.extend(part);
+                .map_err(|_| Breach::Workers)?;
+        }
+        Ok(())
+    })?;
+    // All worker results commit together in original candidate order. No
+    // worker owns a growing result vector and this loop cannot allocate.
+    for (mask, hits) in batch.iter().zip(counts) {
+        if hits >= min_hits {
+            out.push(Itemset { mask: *mask, hits });
+        } else {
+            *infrequent = infrequent.saturating_add(1);
+        }
     }
     batch.clear();
+    Ok(())
 }
 
 fn every_subset_is_frequent(cand: &ConditionMask, frequent: &MaskSet) -> bool {
@@ -2446,7 +2652,10 @@ mod tests {
         let mut batch = candidates.clone();
         let mut out_par: Vec<Itemset> = Vec::new();
         let mut inf_par: u64 = 0;
-        drain(&column, &mut batch, min_hits, 4, &mut out_par, &mut inf_par);
+        assert_eq!(
+            drain(&column, &mut batch, min_hits, 4, &mut out_par, &mut inf_par),
+            Ok(())
+        );
 
         // THE SINGLE-LANE REFERENCE, written out rather than referenced, so a
         // reader comparing the two can see both.
@@ -2487,7 +2696,10 @@ mod tests {
         let mut batch: Vec<ConditionMask> = Vec::new();
         let mut out: Vec<Itemset> = Vec::new();
         let mut infrequent: u64 = 7;
-        drain(&column, &mut batch, 1, 1, &mut out, &mut infrequent);
+        assert_eq!(
+            drain(&column, &mut batch, 1, 1, &mut out, &mut infrequent),
+            Ok(())
+        );
         assert!(out.is_empty(), "nothing in, nothing out");
         assert_eq!(infrequent, 7, "and an untouched tally, not a reset one");
     }
@@ -2777,7 +2989,11 @@ mod tests {
         let single = Ladder::with_min_hits(1).with_support_lanes(0);
         let several = Ladder::with_min_hits(1).with_support_lanes(4);
         assert_eq!(single.support_lanes(), 1, "zero must not strand a batch");
-        assert_eq!(several.support_lanes(), 4, "the named bound is exact");
+        assert_eq!(
+            several.support_lanes(),
+            4.min(lanes()),
+            "the named bound cannot exceed available scheduling capacity"
+        );
 
         let column = bars(&[
             &[0, 1, 2],
@@ -2794,6 +3010,113 @@ mod tests {
             several.walk(&column, &[0, 1, 2]),
             "lane count changed the generated frontiers or their order"
         );
+    }
+
+    #[test]
+    fn reservation_capacity_overflow_refuses_and_finite_capacity_is_preallocated() {
+        assert!(
+            reserved::<u64>(usize::MAX).is_err(),
+            "capacity overflow must refuse without attempting RAM exhaustion"
+        );
+        let mut rows = reserved::<u64>(8).unwrap_or_default();
+        assert!(
+            rows.capacity() >= 8,
+            "finite requested capacity must be reserved"
+        );
+        assert!(rows.is_empty(), "reservation cannot invent result rows");
+        let capacity = rows.capacity();
+        rows.extend(0..8);
+        assert_eq!(
+            rows.capacity(),
+            capacity,
+            "the reserved appends cannot grow storage"
+        );
+        assert_eq!(rows.len(), 8);
+    }
+
+    #[test]
+    fn streamed_setup_memory_refusal_preserves_actual_input_metadata() {
+        let result = Ladder::with_min_hits(7).refused_streamed_on_memory(123);
+        assert_eq!(result.bars, 123);
+        assert_eq!(result.min_hits, 7);
+        assert!(result.levels.is_empty() && result.excluded.is_empty());
+        assert_eq!(
+            result
+                .halted
+                .map(|halt| (halt.k, halt.candidates, halt.pairs, halt.breach)),
+            Some((0, 0, 0, Breach::Memory))
+        );
+    }
+
+    #[test]
+    fn all_walk_sinks_reserve_metadata_for_the_complete_live_depth_domain() {
+        let rows = bars(&[&[0, 64, 233], &[0, 64], &[0, 233], &[64, 233], &[]]);
+        let live = [0, 64, 233];
+        let column = Column::from_rows(&rows);
+        let ladder = Ladder::with_min_hits(1).with_support_lanes(1);
+        let retained = ladder.walk_column(&column, &live, &|_, _, _| {});
+        let streamed = ladder.walk_column_streamed(&column, &live, &mut |_, _, _| {});
+        let mut retired_levels = 0;
+        let retired =
+            ladder.walk_streamed_with_retirement(&rows, &live, &mut |_, _, _| {}, &mut |_, _| {
+                retired_levels += 1;
+            });
+        assert!(retained.halted.is_none() && retained.levels.len() > 1);
+        assert_eq!(streamed.halted, retained.halted);
+        assert_eq!(retired.halted, retained.halted);
+        assert_eq!(streamed.levels.len(), retained.levels.len());
+        assert_eq!(retired_levels, retained.levels.len());
+        // Each live bit can add one depth, followed by its empty extinction
+        // witness. Even this short run must preallocate that legal domain:
+        // otherwise a deeper run performs hidden metadata growth mid-search.
+        for capacity in [
+            retained.levels.capacity(),
+            streamed.levels.capacity(),
+            retired.levels.capacity(),
+        ] {
+            assert!(capacity > LIVE_POSITIONS, "metadata capacity {capacity}");
+        }
+    }
+
+    #[test]
+    fn a_real_join_setup_allocation_refusal_keeps_depth_and_prior_counters()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (live, column) = a_climbing_column();
+        let ladder = Ladder::with_min_hits(1)
+            .with_ceiling(10_000)
+            .with_pair_budget(1_000_000)
+            .with_support_lanes(1);
+        let (first, _) = ladder.first_level(&column, &live)?;
+        let (previous, halt, admitted, pairs) = ladder.next_level(&column, &first, 2, 0, 0);
+        assert!(halt.is_none() && !previous.frequent.is_empty());
+        assert!(
+            admitted > 0 && pairs > 0,
+            "the fixture must do actual join work"
+        );
+        let refusal = reserved::<ConditionMask>(usize::MAX)
+            .err()
+            .ok_or("capacity overflow unexpectedly reserved storage")?;
+        let mut calls = 0;
+        let (next, halt, generated, walked) =
+            ladder.next_level_using(previous.k + 1, admitted, pairs, || {
+                calls += 1;
+                Err(refusal)
+            });
+        assert_eq!(calls, 1, "failed preparation must not be retried silently");
+        assert_eq!(next.k, 3, "setup refusal belongs to the attempted depth");
+        assert!(next.frequent.is_empty() && next.reconciles());
+        assert_eq!((next.generated, next.infrequent, next.pruned), (0, 0, 0));
+        assert_eq!(
+            (generated, walked),
+            (0, 0),
+            "failed setup attempted no new pair"
+        );
+        let halt = halt.ok_or("allocation refusal lost its explicit halt")?;
+        assert_eq!(halt.breach, Breach::Memory);
+        assert_eq!(halt.k, 3);
+        assert_eq!((halt.candidates, halt.pairs), (admitted, pairs));
+        assert_eq!((halt.ceiling, halt.pair_budget), (10_000, 1_000_000));
+        Ok(())
     }
 
     #[test]
@@ -3621,9 +3944,13 @@ mod tests {
              to the same answer on over a thousand candidates."
         );
         assert_eq!(
-            exits, 12,
+            exits, 17,
             "the shipping region of this file may leave a loop early in exactly \
-             twelve places, and every one is accounted for.\n\
+             seventeen places, and every one is accounted for.\n\
+             Five resource-safety exits were added: four setup returns refuse \
+             support-column or level-record storage before computation; one \
+             batch exit reports MEMORY or WORKERS and rolls back uncommitted \
+             candidates. Every added exit preserves a named noncompleted halt.\n\
              \x20 IT WAS TEN UNTIL THE MEANING PRUNE LANDED, and the two it \
              added are named first because they are the newest:\n\
              \x20 1 KEY RETURN -- `highest_position` handing back the top set \
@@ -3696,10 +4023,13 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            code.contains(concat!("while !current.", "frequent.is_empty() {")),
-            "the k-loop must stop on extinction ALONE. A second conjunct in its \
-             condition is a depth cap that carries no `break` and is therefore \
-             invisible to the count above."
+            code.contains(concat!(
+                "while !current.",
+                "frequent.is_empty() && progress.halted.is_none() {"
+            )),
+            "the shared k-loop may stop only on extinction or an already recorded \
+             resource halt. The second conjunct prevents a resumed partial frontier \
+             from advancing. No depth, frontier width or input-size conjunct is allowed."
         );
         assert!(
             code.contains(concat!("for (_, b) in block.", "iter().skip(")),
@@ -3887,7 +4217,7 @@ mod tests {
              level join feeds -- must read the owned fixed-width column."
         );
         assert!(
-            src.contains(concat!("Column::", "from_rows(bar_bits)")),
+            shipped.contains(concat!("Column::", "try_from_rows(bar_bits)")),
             "the walk must build the reusable row-major column once, before k=1"
         );
     }
@@ -4726,6 +5056,55 @@ mod tests {
     }
 
     #[test]
+    fn actual_join_batches_fill_before_handoff_and_keep_budget_tails()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let live: Vec<u32> = (0..ConditionMask::BITS)
+            .filter(|&position| u16::try_from(position).is_ok_and(vocab::table::is_live))
+            .collect();
+        let full = live
+            .iter()
+            .copied()
+            .fold(ConditionMask::ZERO, ConditionMask::with_bit);
+        let column = Column::try_from_rows(&[full, ConditionMask::ZERO])?;
+        for ceiling in [100, super::BATCH_PER_LANE * 2 + 1, 100_000] {
+            let ladder = Ladder::with_min_hits(1)
+                .with_ceiling(ceiling)
+                .with_support_lanes(1);
+            let (first, _) = ladder.first_level(&column, &live)?;
+            let mut handed = Vec::new();
+            let (next, halt, _, _) =
+                ladder.try_next_level_observing(&column, &first, 2, 0, 0, &mut |pending| {
+                    if pending > 0 {
+                        handed.push(pending);
+                    }
+                })?;
+            let (tail, full_batches) = handed.split_last().ok_or("no actual support batch")?;
+            assert!(
+                full_batches
+                    .iter()
+                    .all(|&length| length == super::BATCH_PER_LANE),
+                "early handoff creates needless allocations/workers; this is resource behavior"
+            );
+            assert!(*tail > 0 && *tail <= super::BATCH_PER_LANE);
+            assert_eq!(
+                handed.iter().sum::<usize>() as u64,
+                next.frequent.len() as u64 + next.infrequent
+            );
+            assert!(next.reconciles());
+            if ceiling == 100_000 {
+                assert!(halt.is_none());
+                assert!(
+                    full_batches.len() >= 2,
+                    "exercise repeated full handoffs, not only a tail"
+                );
+            } else {
+                assert!(halt.is_some());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn a_high_bit_survives_the_whole_ladder() {
         // The predecessor's bug was a frontier narrower than the vocabulary, so the
         // highest LIVE positions must survive the whole ladder.
@@ -4977,5 +5356,40 @@ mod caller_input {
         let b = bars(&[&[0], &[1]]);
         let s = Ladder::with_min_hits(0).walk(&b, &[0, 1]);
         assert_eq!(s.min_hits, 1, "the result must echo the raised threshold");
+    }
+
+    /// A durable observer can reject a second terminal acknowledgement without
+    /// relying on a timer. The two fixtures independently require extinction at
+    /// k=2 (disjoint live singletons) and k=1 (both positions always false).
+    #[test]
+    fn a_checkpoint_observer_gets_one_terminal_boundary_and_no_later_level()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (rows, expected_depth) in [(bars(&[&[0], &[64], &[]]), 2), (bars(&[&[]]), 1)] {
+            let column = Column::from_rows(&rows);
+            let mut terminal_seen = false;
+            let mut checkpoints = 0;
+            let sweep = Ladder::with_min_hits(1)
+                .with_support_lanes(1)
+                .walk_checkpointed(&column, &[0, 64], [0x7b; 32], &mut |view| {
+                    if terminal_seen {
+                        return Err("the walk advanced beyond its terminal boundary".into());
+                    }
+                    checkpoints += 1;
+                    terminal_seen = view.terminal();
+                    Ok(())
+                })?;
+            assert!(terminal_seen);
+            assert_eq!(checkpoints, expected_depth);
+            assert_eq!(sweep.levels.len(), expected_depth);
+            assert_eq!(sweep.depth(), expected_depth - 1);
+            assert!(sweep.halted.is_none());
+            assert!(
+                sweep
+                    .levels
+                    .last()
+                    .is_some_and(|level| level.frequent.is_empty())
+            );
+        }
+        Ok(())
     }
 }

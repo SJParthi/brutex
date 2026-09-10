@@ -73,7 +73,7 @@
 use brutex_core::instrument::InstrumentKey;
 use brutex_core::isin::Isin;
 use brutex_core::universe::{self, Universe};
-use brutex_core::vendor::{Listing, Skip, Vendor, VendorSet};
+use brutex_core::vendor::{Listing, Skip, Vendor, VendorId, VendorSet};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// One instrument, after every vendor has had its say.
@@ -88,19 +88,28 @@ pub struct Entry {
     /// `None` where that vendor does not list the instrument, which a caller
     /// must refuse on rather than substitute another vendor's.
     pub ids: [Option<brutex_core::vendor::VendorId>; brutex_core::vendor::Vendor::ALL.len()],
+    /// Each vendor's own ISIN; absent or ambiguous assertions remain `None`.
+    pub vendor_isins: [Option<Isin>; Vendor::ALL.len()],
+    /// Vendors whose same-key or alias assertions disagree on id or ISIN.
+    pub ambiguous: VendorSet,
     /// Which vendors listed it. Seeing two here is the deduplication, on
     /// screen.
     pub vendors: VendorSet,
-    /// The ISIN, and the vendor that gave it. `None` for an index, which has
-    /// no ISIN at all.
+    /// A deterministic display representative, never per-vendor provenance.
+    /// Use `vendor_isin` for resolution and `Merged::assertions` for evidence.
     pub isin: Option<(Vendor, Isin)>,
-    /// A **different** ISIN a later vendor gave for the same key.
-    ///
-    /// Both are kept. Picking one would be choosing a winner without evidence,
-    /// and dropping the row would hide the disagreement entirely.
+    /// A different ISIN for display. Complete evidence is in `Merged::assertions`.
     pub conflict: Option<(Vendor, Isin)>,
     /// Which of the engine's universes this instrument is in.
     pub universe: Universe,
+}
+
+impl Entry {
+    /// The ISIN this vendor unambiguously supplied, never another vendor's.
+    #[must_use]
+    pub fn vendor_isin(&self, vendor: Vendor) -> Option<Isin> {
+        self.vendor_isins.get(vendor as usize).copied().flatten()
+    }
 }
 
 /// One vendor's whole contribution to the merge.
@@ -135,6 +144,12 @@ pub enum Verdict {
 /// The merged universe, and everything that disagreed while it was built.
 #[derive(Debug, Default)]
 pub struct Merged {
+    /// Exact vendor-native ids, built from original listing keys at construction.
+    /// Empty in default-built fixtures; use [`Self::native_id`] for lookup.
+    pub native_ids: NativeIds,
+    /// All distinct vendor assertions beside their resolved key. Retained even
+    /// when an ambiguous entry refuses to expose a request id.
+    pub assertions: Vec<(Vendor, InstrumentKey, Listing)>,
     /// Which mastered vendors actually supplied rows to this merge.
     ///
     /// # Why "confirmed" cannot be asked of `Vendor::MASTERED`
@@ -165,6 +180,23 @@ pub struct Merged {
 }
 
 impl Merged {
+    /// An unambiguous id for this vendor's exact original [`Listing::key`].
+    /// One expected O(1) hash lookup; never scans assertions or resolves aliases.
+    /// This is vendor-symbol evidence only, not independent identity evidence.
+    /// Missing keys, conflicting ids, and ids shared by different native keys
+    /// return `None`. Normal merged identity lookup is unchanged.
+    #[must_use]
+    pub fn native_id(
+        &self,
+        vendor: Vendor,
+        key: impl std::borrow::Borrow<InstrumentKey>,
+    ) -> Option<VendorId> {
+        self.native_ids
+            .by_key
+            .get(&(vendor, *key.borrow()))
+            .copied()
+    }
+
     /// The number of distinct instruments.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -260,6 +292,49 @@ impl Merged {
     }
 }
 
+/// Prebuilt exact-native lookup. Private entries prevent callers from bypassing
+/// the construction-time checks; `Default` is an empty index.
+#[derive(Debug, Default)]
+pub struct NativeIds {
+    by_key: HashMap<(Vendor, InstrumentKey), VendorId>,
+}
+
+impl NativeIds {
+    fn build(sources: &[Source], capacity: usize) -> Self {
+        let mut forward = HashMap::with_capacity(capacity);
+        let mut reverse = HashMap::with_capacity(capacity);
+        for source in sources {
+            for listing in &source.kept {
+                forward
+                    .entry((source.vendor, listing.key))
+                    .and_modify(|id| {
+                        if *id != Some(listing.vendor_id) {
+                            *id = None;
+                        }
+                    })
+                    .or_insert(Some(listing.vendor_id));
+                reverse
+                    .entry((source.vendor, listing.vendor_id))
+                    .and_modify(|key| {
+                        if *key != Some(listing.key) {
+                            *key = None;
+                        }
+                    })
+                    .or_insert(Some(listing.key));
+            }
+        }
+        let mut by_key = HashMap::with_capacity(capacity);
+        for ((vendor, key), id) in forward {
+            if let Some(id) = id
+                && reverse.get(&(vendor, id)) == Some(&Some(key))
+            {
+                by_key.insert((vendor, key), id);
+            }
+        }
+        Self { by_key }
+    }
+}
+
 /// Merges every vendor's kept listings into one map, and cross-checks it.
 ///
 /// Two passes, because the confirmation a strip needs may come from a vendor
@@ -273,8 +348,9 @@ impl Merged {
 /// true of one. It is corrected rather than left to be believed.
 ///
 /// * `asserted` and `by_key` are `HashMap`/`HashSet` **pre-sized from
-///   `capacity`**, so a probe is O(1) in the worst case and not merely
-///   amortised — the argument for that reservation is written out below, and
+///   `capacity`**. Probes have expected O(1) cost, not a guaranteed worst-case
+///   bound: reservation avoids growth but cannot eliminate hash collisions.
+///   The argument for that reservation is written out below, and
 ///   `api::bench::every_order_and_pill_is_flat` measures the request path these
 ///   two feed at 2,787 and at 50,000 instruments.
 /// * `kept_isins` and `disputes` are `BTreeMap`, so they are **O(log n)
@@ -300,6 +376,8 @@ impl Merged {
 /// parsed — `server::universe`, reached from `server::Site::load` once per
 /// process — which is the read D-0039 moved out of the request at 150 ms, and
 /// is why `server::instruments_html_from` takes an already-loaded universe.
+/// Retained assertions are sorted once at startup (O(n log n)) so diagnostic
+/// representatives and evidence order do not depend on source or row order.
 #[must_use]
 pub fn merge(sources: &[Source]) -> Merged {
     // THE BOUND, TAKEN ONCE AND USED BY BOTH MAPS BELOW.
@@ -334,8 +412,14 @@ pub fn merge(sources: &[Source]) -> Merged {
     //  a_vendor_set_is_a_set_and_every_vendor_has_its_own_bit`, which asserts
     // both that `default()` is `EMPTY` and that adding twice is adding once.
     let mut kept_isins: BTreeMap<Isin, VendorSet> = BTreeMap::new();
+    let mut raw_identity = HashMap::with_capacity(capacity);
+    let mut raw_ambiguous = HashSet::with_capacity(capacity);
     for s in sources {
         for l in &s.kept {
+            let identity = (l.vendor_id, l.isin);
+            if *raw_identity.entry((s.vendor, l.key)).or_insert(identity) != identity {
+                raw_ambiguous.insert((s.vendor, l.key));
+            }
             if let Some(i) = l.isin {
                 asserted.insert((l.key, i));
                 let keepers = kept_isins.entry(i).or_default();
@@ -356,8 +440,8 @@ pub fn merge(sources: &[Source]) -> Merged {
     //
     // The upper bound is known exactly before the loop starts: no more distinct
     // keys can exist than there are kept listings. Reserving that much means the
-    // map never grows, so no rehash can occur at all and the amortised
-    // qualifier disappears from the guarantee. `capacity` is taken at the top
+    // map need not grow during insertion. This does not provide worst-case
+    // constant-time collision handling. `capacity` is taken at the top
     // of this function, because `asserted` needs the same number.
     //
     // It over-reserves when two vendors name the same instrument — which is the
@@ -407,43 +491,24 @@ pub fn merge(sources: &[Source]) -> Merged {
         .filter(|&v| seen.contains(v))
         .collect();
     let mut out = Merged {
+        native_ids: NativeIds::build(sources, capacity),
         by_key: HashMap::with_capacity(capacity),
         contributed,
         ..Merged::default()
     };
-    for s in sources {
-        let vendor = s.vendor;
-        for l in &s.kept {
-            let key = resolve(l, &asserted);
-            let e = out.by_key.entry(key).or_default();
-            e.vendors = e.vendors.with(vendor);
-            e.universe = universe::of_instrument(&key);
-            // THE VENDOR'S OWN ID, carried to the one index a request looks in.
-            // Slotted by vendor, never merged: `securityId 13` and
-            // `NSE-NIFTY` name the same instrument at two brokers and are not
-            // interchangeable — sending one to the other is how a request asks
-            // the wrong broker for the wrong thing.
-            if let Some(slot) = e.ids.get_mut(vendor as usize) {
-                *slot = Some(l.vendor_id);
-            }
-            match (e.isin, l.isin) {
-                // Nothing on record yet: take what this vendor said, whether
-                // that is an ISIN or the honest absence of one.
-                (None, given) => e.isin = given.map(|i| (vendor, i)),
-                // Two vendors, two different ISINs, one key. Name both.
-                (Some((first_vendor, first)), Some(given)) if first != given => {
-                    e.conflict = Some((vendor, given));
-                    out.conflicts.push(format!(
-                        "{key}: {} says {first}, {} says {given}",
-                        first_vendor.as_str(),
-                        vendor.as_str()
-                    ));
-                }
-                // Agreement, or a vendor with nothing to add.
-                _ => {}
-            }
-        }
+    let assertions = ordered_assertions(sources, &asserted);
+    for &(vendor, key, l) in &assertions {
+        merge_assertion(
+            &mut out,
+            vendor,
+            key,
+            l,
+            raw_ambiguous.contains(&(vendor, l.key)),
+        );
     }
+    out.assertions = assertions;
+    out.conflicts.sort_unstable();
+    out.conflicts.dedup();
 
     // THE ELIGIBILITY CHECK. One vendor declined this ISIN; did another keep
     // it? Sorted by ISIN, so the output does not depend on map iteration
@@ -493,6 +558,8 @@ pub fn merge(sources: &[Source]) -> Merged {
         }
     }
     out.eligibility = disputes.into_values().flatten().collect();
+    out.eligibility.sort_unstable();
+    out.eligibility.dedup();
     // THE MERGED UNIVERSE, AND THE TWO WAYS IT CAN BE WRONG.
     //
     // Everything downstream — the target filter, the sweep surface, what a
@@ -531,6 +598,88 @@ pub fn merge(sources: &[Source]) -> Merged {
         ),
     );
     out
+}
+
+/// Retains distinct assertions in a stable order after alias resolution.
+fn ordered_assertions(
+    sources: &[Source],
+    asserted: &HashSet<(InstrumentKey, Isin)>,
+) -> Vec<(Vendor, InstrumentKey, Listing)> {
+    let mut assertions: Vec<_> = sources
+        .iter()
+        .flat_map(|s| s.kept.iter().map(|l| (s.vendor, resolve(l, asserted), *l)))
+        .collect();
+    assertions.sort_unstable_by(|(av, ak, a), (bv, bk, b)| {
+        (
+            *av as usize,
+            ak,
+            a.key,
+            a.isin,
+            a.vendor_id.as_str(),
+            a.unsuffixed,
+        )
+            .cmp(&(
+                *bv as usize,
+                bk,
+                b.key,
+                b.isin,
+                b.vendor_id.as_str(),
+                b.unsuffixed,
+            ))
+    });
+    assertions.dedup();
+    assertions
+}
+
+/// Records one assertion without allowing ambiguity to restore a request id.
+fn merge_assertion(
+    out: &mut Merged,
+    vendor: Vendor,
+    key: InstrumentKey,
+    listing: Listing,
+    raw_ambiguous: bool,
+) {
+    let e = out.by_key.entry(key).or_default();
+    let previously_seen = e.vendors.contains(vendor);
+    e.vendors = e.vendors.with(vendor);
+    e.universe = universe::of_instrument(&key);
+    if let Some(slot) = e.ids.get_mut(vendor as usize) {
+        if raw_ambiguous
+            || (previously_seen
+                && (*slot != Some(listing.vendor_id)
+                    || e.vendor_isins.get(vendor as usize).copied().flatten() != listing.isin))
+        {
+            e.ambiguous = e.ambiguous.with(vendor);
+            out.conflicts.push(format!(
+                "{key}: {} has ambiguous id/ISIN assertions",
+                vendor.as_str()
+            ));
+        }
+        *slot = if e.ambiguous.contains(vendor) {
+            None
+        } else {
+            Some(listing.vendor_id)
+        };
+    }
+    if let Some(slot) = e.vendor_isins.get_mut(vendor as usize) {
+        *slot = if e.ambiguous.contains(vendor) {
+            None
+        } else {
+            listing.isin
+        };
+    }
+    match (e.isin, listing.isin) {
+        (None, given) => e.isin = given.map(|i| (vendor, i)),
+        (Some((first_vendor, first)), Some(given)) if first != given => {
+            e.conflict = Some((vendor, given));
+            out.conflicts.push(format!(
+                "{key}: {} says {first}, {} says {given}",
+                first_vendor.as_str(),
+                vendor.as_str()
+            ));
+        }
+        _ => {}
+    }
 }
 
 /// The identity to file a listing under.
@@ -596,6 +745,155 @@ mod tests {
             vendor,
             kept,
             declined: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn native_ids_accept_duplicates_and_keep_vendors_separate() {
+        let a = equity("RELIANCE", "INE002A01018");
+        let mut b = a;
+        b.vendor_id = VendorId::new("other").unwrap();
+        let mut c = equity("BLUECHIP", "INE657B01025");
+        c.vendor_id = a.vendor_id;
+        let merged = merge(&[
+            from(Vendor::Zerodha, vec![a, a]),
+            from(Vendor::Groww, vec![b, c]),
+        ]);
+        assert_eq!(merged.native_id(Vendor::Zerodha, a.key), Some(a.vendor_id));
+        assert_eq!(merged.native_id(Vendor::Groww, a.key), Some(b.vendor_id));
+        assert_eq!(merged.native_id(Vendor::Groww, c.key), Some(c.vendor_id));
+        assert_eq!(merged.native_id(Vendor::Zerodha, c.key), None);
+        assert_eq!(merged.native_id(Vendor::Dhan, a.key), None);
+        assert_eq!(Merged::default().native_id(Vendor::Zerodha, a.key), None);
+    }
+
+    #[test]
+    fn native_conflicts_in_either_direction_stay_refused_under_permutation() {
+        let a = equity("RELIANCE", "INE002A01018");
+        let mut different_id = a;
+        different_id.vendor_id = VendorId::new("other").unwrap();
+        let mut different_key = equity("BLUECHIP", "INE657B01025");
+        different_key.vendor_id = different_id.vendor_id;
+        let mut third_key = equity("CHOLAFIN", "INE121A01024");
+        third_key.vendor_id = different_id.vendor_id;
+        let rows = [a, different_id, different_key, third_key, a];
+        for shift in 0..rows.len() {
+            for reversed in [false, true] {
+                let mut permutation = rows.to_vec();
+                permutation.rotate_left(shift);
+                if reversed {
+                    permutation.reverse();
+                }
+                let mut sources = vec![
+                    from(Vendor::Zerodha, permutation),
+                    from(Vendor::Dhan, vec![a]),
+                ];
+                if reversed {
+                    sources.reverse();
+                }
+                let merged = merge(&sources);
+                for key in [a.key, different_key.key, third_key.key] {
+                    assert_eq!(merged.native_id(Vendor::Zerodha, key), None);
+                }
+                assert_eq!(merged.native_id(Vendor::Dhan, a.key), Some(a.vendor_id));
+                assert_eq!(merged.by_key[&a.key].ids[Vendor::Zerodha as usize], None);
+            }
+        }
+    }
+
+    #[test]
+    fn native_lookup_never_uses_the_confirmed_unsuffixed_alias() {
+        let canonical = equity("BLUECHIP", "INE657B01025");
+        let mut alias = equity("BLUECHIP-BE", "INE657B01025");
+        alias.unsuffixed = Some(canonical.key);
+        alias.vendor_id = VendorId::new("native-alias").unwrap();
+        let merged = merge(&[
+            from(Vendor::Dhan, vec![canonical]),
+            from(Vendor::Groww, vec![alias]),
+        ]);
+        assert_eq!(
+            merged.native_id(Vendor::Groww, alias.key),
+            Some(alias.vendor_id)
+        );
+        assert_eq!(merged.native_id(Vendor::Groww, canonical.key), None);
+        assert_eq!(
+            merged.by_key[&canonical.key].ids[Vendor::Groww as usize],
+            Some(alias.vendor_id)
+        );
+
+        // Two distinct native mappings may collapse onto one merged key. The
+        // opt-in native lookup must not restore the ambiguous merged id.
+        let merged = merge(&[
+            from(Vendor::Dhan, vec![canonical]),
+            from(Vendor::Groww, vec![alias, canonical]),
+        ]);
+        assert_eq!(
+            merged.native_id(Vendor::Groww, alias.key),
+            Some(alias.vendor_id)
+        );
+        assert_eq!(
+            merged.native_id(Vendor::Groww, canonical.key),
+            Some(canonical.vendor_id)
+        );
+        assert_eq!(
+            merged.by_key[&canonical.key].ids[Vendor::Groww as usize],
+            None
+        );
+        assert!(
+            merged.by_key[&canonical.key]
+                .ambiguous
+                .contains(Vendor::Groww)
+        );
+    }
+
+    #[test]
+    fn conflicts_and_assertions_are_independent_of_source_and_row_order() {
+        let a = equity("RELIANCE", "INE002A01018");
+        let mut b = a;
+        b.vendor_id = brutex_core::vendor::VendorId::new("other").expect("id");
+        let c = equity("RELIANCE", "INE009A01021");
+        let forward = merge(&[
+            from(Vendor::Groww, vec![a, b, c]),
+            from(Vendor::Dhan, vec![a]),
+            from(Vendor::Zerodha, vec![c]),
+        ]);
+        let reversed = merge(&[
+            from(Vendor::Zerodha, vec![c]),
+            from(Vendor::Dhan, vec![a]),
+            from(Vendor::Groww, vec![c, b, a]),
+        ]);
+        assert_eq!(forward.by_key, reversed.by_key);
+        assert_eq!(forward.assertions, reversed.assertions);
+        assert_eq!(forward.conflicts, reversed.conflicts);
+        let entry = forward.by_key[&a.key];
+        assert_eq!(entry.ids[Vendor::Groww as usize], None);
+        assert_eq!(entry.vendor_isin(Vendor::Dhan), a.isin);
+        assert_eq!(entry.vendor_isin(Vendor::Zerodha), c.isin);
+        assert_eq!(forward.assertions.len(), 5);
+    }
+
+    #[test]
+    fn conflicting_raw_alias_rows_remain_refused_when_their_resolutions_differ() {
+        let canonical = equity("RELIANCE", "INE002A01018");
+        let mut alias = equity("RELIANCE-EQ", "INE002A01018");
+        alias.unsuffixed = Some(canonical.key);
+        let mut conflicting = alias;
+        conflicting.isin = Isin::new("INE009A01021").ok();
+        for rows in [vec![alias, conflicting], vec![conflicting, alias]] {
+            let merged = merge(&[
+                from(Vendor::Dhan, vec![canonical]),
+                from(Vendor::Groww, rows),
+            ]);
+            for key in [canonical.key, alias.key] {
+                let entry = merged.by_key[&key];
+                assert!(entry.ambiguous.contains(Vendor::Groww));
+                assert_eq!(entry.ids[Vendor::Groww as usize], None);
+                assert_eq!(entry.vendor_isin(Vendor::Groww), None);
+            }
+            assert_eq!(
+                merged.by_key[&canonical.key].ids[Vendor::Dhan as usize],
+                Some(canonical.vendor_id)
+            );
         }
     }
 

@@ -877,6 +877,7 @@ fn verdict(out: &mut String, outcome: &Outcome) {
                     engine::Breach::Pairs => "pairs",
                     // Not a budget anyone set. The machine refused.
                     engine::Breach::Memory => "MEMORY",
+                    engine::Breach::Workers => "WORKERS",
                 },
                 "",
             );
@@ -929,6 +930,7 @@ fn verdict_ranked(out: &mut String, outcome: &RankedOutcome) {
                     engine::Breach::Candidates => "candidates",
                     engine::Breach::Pairs => "pairs",
                     engine::Breach::Memory => "MEMORY",
+                    engine::Breach::Workers => "WORKERS",
                 },
                 "",
             );

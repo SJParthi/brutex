@@ -37,15 +37,16 @@
    * `CLAUDE.md` §3 rule 6: never claim a measurement not taken, and label
    * extrapolations as extrapolations.
    */
-  import { feeds } from '$lib/feeds.svelte.js';
-  import { cashIdentityFor } from '$lib/cash-identity.js';
+  import { feeds, selectFeed } from '$lib/feeds.svelte.js';
+  import { cashIdentityFor, DEFAULT_ZERODHA_CASH_IDENTITY } from '$lib/cash-identity.js';
+  import { singleMemberBody } from '$lib/row-pull.js';
   import Picker from '$lib/Picker.svelte';
   import { catalogue } from '$lib/index.svelte.js';
   import { MON, dayLabel, monthLabel, stampLabel } from '$lib/dates.js';
   // `untrack`, because one effect on this page must react to a FEED CHANGE and
   // to nothing else — see the rung-drop effect for why an effect that reacts to
   // its own write is a hazard rather than a nicety.
-  import { onMount, untrack } from 'svelte';
+  import { onDestroy, onMount, untrack } from 'svelte';
   // `survey` IS ALREADY IN MEMORY AND COSTS NOTHING TO READ.
   //
   // `$lib/feeds.svelte.js` awaits `surveyStores(feeds.all)` while loading the
@@ -78,6 +79,7 @@
   // `web/tests/timeout.test.js` now refuses a bare `fetch` anywhere in
   // `web/src` so the ceiling cannot be reverted silently a second time.
   import { ask as request } from '$lib/ask.js';
+  import { createPageRequests, watchVisible } from '$lib/page-requests.js';
   import { exact } from '$lib/money.js';
   // FINDING A NAME IN 750 OF THEM. One `Map.get` per keystroke against an
   // index over distinct symbols; see `$lib/find.js` for why an infix index
@@ -1889,7 +1891,7 @@
    */
   const notReadyFeeds = $derived(feeds.all.filter((f) => f.ready !== true));
   let feedTuck = $state(false);
-  let zerodhaSymbolMapping = $state(false);
+  let zerodhaCashIdentity = $state(DEFAULT_ZERODHA_CASH_IDENTITY);
   // Same promotion rule as the universe drawer, for the same reason: forcing it
   // open whenever the selection was inside meant it was open whenever an
   // operator had selected a not-ready feed, which is exactly when the menu most
@@ -2791,7 +2793,7 @@
        here would have sent N identical requests for the scope feed and
        reported them as N different ones. */
     p.set('vendor', vendor ?? feeds.active ?? '');
-    p.set('cash_identity', cashIdentityFor(vendor ?? feeds.active, zerodhaSymbolMapping));
+    p.set('cash_identity', cashIdentityFor(vendor ?? feeds.active, zerodhaCashIdentity));
     p.set('from', a);
     p.set('to', b);
     p.set('granularity', dir);
@@ -5188,7 +5190,8 @@
     /* THE ONE DIVISION THE CELL WAS ASKING THE READER FOR. `null` where the
        rung states no bars-per-session: a bar against an unknown total is the
        invented yardstick the `no yardstick` verdict exists to refuse. */
-    const ratio = r.per !== null && r.exp > 0 ? Math.min(1, r.got / r.exp) : null;
+    const expectedKnown = r.per !== null && !r.months.some((month) => month.exp === null && month.k !== 'beyond');
+    const ratio = expectedKnown && r.exp > 0 ? Math.min(1, r.got / r.exp) : null;
     const settled = total - r.unproved;
 
     return {
@@ -5201,6 +5204,7 @@
       why: VERDICT[r.state][2],
       /** 0..1, or null where there is no denominator to divide by. */
       ratio,
+      expectedKnown,
       /** The same, as a width. `0` stays `0` — an empty track is drawn, not skipped. */
       pct: ratio === null ? 0 : ratio * 100,
       /** Whole percent, for the face. Never rounded UP to 100 off a short read. */
@@ -5388,11 +5392,8 @@
    * `vendor`, `from`, `to`, `granularity`, the two days as ISO — narrowed to
    * the DAYS this row is short and to the row's own rung.
    *
-   * IT CANNOT BE NARROWED TO THE INSTRUMENT AND THE BUTTON SAYS SO. There is no
-   * member field on `api::ingest::SpotRequest`, so the server resolves
-   * `target=` and answers for the whole set. What this button genuinely
-   * narrows is the WINDOW and the RUNG, which is real work saved, and the row
-   * is what the outcome list is then built for.
+   * The native member filter now exists. Replace the basket members with the
+   * visible row's symbol, preserving its feed, window and identity policy.
    */
   /** @param {CensusRow} row */
   async function pullRow(row) {
@@ -5400,7 +5401,7 @@
     const span = shortSpan(row);
     if (!span) return;
     await runPull(
-      [{ dir: row.tf, label: row.tfLabel, body: wireBodyFor(row.tf, span.from, span.to) }],
+      [{ dir: row.tf, label: row.tfLabel, body: singleMemberBody(wireBodyFor(row.tf, span.from, span.to), row.sym) }],
       // THE MASTER'S KEY, because that is what `classifyBuild` compares on.
       new Set([row.mkey])
     );
@@ -6558,12 +6559,33 @@
    * nobody measured; what the card shows after a resume is how long THIS TAB
    * has been watching.
    */
-  async function resumeRun() {
+  const resumeRequests = createPageRequests();
+  let viewAlive = true;
+  /** @type {null|(()=>void)} */ let stopRunWatch = null;
+  /** @type {null|Promise<void>} */ let runWatchPromise = null;
+  /** @type {null|(()=>void)} */ let finishRunWatch = null;
+  function stopWatchingRun() {
+    stopRunWatch?.();
+    stopRunWatch = null;
+    finishRunWatch?.();
+    finishRunWatch = null;
+    runWatchPromise = null;
+  }
+  onDestroy(() => {
+    viewAlive = false;
+    resumeRequests.dispose();
+    stopWatchingRun();
+  });
+
+  /** @param {import('$lib/page-requests.js').ReadTicket} ticket */
+  async function resumeRunCurrent(ticket) {
     let doc;
     try {
-      const r = await request('/pull/run.json', { ms: 15_000 });
+      const r = await request('/pull/run.json', { ms: 15_000, signal: ticket.signal });
+      if (!ticket.current()) return;
       if (!r.ok) return;
       doc = await r.json();
+      if (!ticket.current()) return;
     } catch {
       /* A status this page could not read is not a run this page may claim.
          The Pull button stays offered; the server refuses it by name if a run
@@ -6582,14 +6604,20 @@
     seenRead = store.reads;
     releaseWatch = watchStore(5000);
     try {
-      baseline = await snapshot();
-      live = baseline;
+      const measured = await snapshot();
+      if (!ticket.current()) return;
+      baseline = measured;
+      live = measured;
     } catch {
       /* Without a baseline the card cannot show a difference, but the run is
          real and worth watching; the census table reads the store on its own
          clock either way. */
     }
-    await watchRun();
+    if (ticket.current()) await watchRun();
+  }
+
+  function resumeRun() {
+    return resumeRequests.run(resumeRunCurrent);
   }
 
   /** @param {Event} [e] */
@@ -6715,25 +6743,29 @@
    * meant a broken pull. Now the run is a task on the server, so a dropped poll
    * means only that this tab lost sight of it for two seconds.
    *
-   * It ends when the server says `running:false` and on nothing else — not on a
-   * poll error, not on a timeout, not on the operator switching tabs.
+   * Observation pauses while hidden and ends on page disposal. Neither action
+   * sends Stop to the server. An open visible page keeps observing until the
+   * server reports its result, including after transient read failures.
    */
-  async function watchRun() {
-    for (;;) {
-      await new Promise((done) => setTimeout(done, POLL_MS));
-      if (controller?.signal.aborted && aborted) {
-        /* The operator pressed Stop AND the server was told. The run winds down
-           at its next leg boundary; the summary arrives on a later poll, so the
-           watch keeps going rather than guessing at one here. */
-      }
+  /** @param {import('$lib/page-requests.js').ReadTicket} ticket */
+  async function pollRunCurrent(ticket) {
       let doc;
       try {
-        const r = await request('/pull/run.json', { ms: 15_000 });
+        const r = await request('/pull/run.json', { ms: 15_000, signal: ticket.signal });
+        if (!ticket.current()) return;
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         doc = await r.json();
+        if (!ticket.current()) return;
+        if (!doc || typeof doc.running !== 'boolean' || !Array.isArray(doc.feeds) ||
+            doc.feeds.some((/** @type {any} */ feed) => !feed || typeof feed !== 'object' ||
+              !Number.isSafeInteger(feed.legs) || feed.legs < 0 ||
+              !Number.isSafeInteger(feed.legsDone) || feed.legsDone < 0)) {
+          throw new Error('The run status did not contain a valid running flag and feed progress list');
+        }
       } catch (why) {
-        pollError = `The run is still going; this page just could not read its status: ${why}. Retrying every ${POLL_MS / 1000}s.`;
-        continue;
+        if (!ticket.current()) return;
+        pollError = `Run status is unknown; this page could not read it: ${why}. Retrying every ${POLL_MS / 1000}s while this page is visible.`;
+        return;
       }
       pollError = null;
       runState = doc;
@@ -6772,14 +6804,34 @@
         phase = 'done';
         finishedAt = Date.now();
         try {
-          live = await snapshot();
+          const measured = await snapshot();
+          if (!ticket.current()) return;
+          live = measured;
         } catch {
           /* The census refreshes on its own five-second clock; a failed read
              here is not worth overwriting the summary for. */
         }
+        if (!ticket.current()) return;
+        releaseWatch?.();
+        releaseWatch = null;
+        stopWatchingRun();
         return;
       }
-    }
+  }
+
+  function watchRun() {
+    if (!viewAlive) return Promise.resolve();
+    if (runWatchPromise) return runWatchPromise;
+    const watching = /** @type {Promise<void>} */ (new Promise((resolve) => { finishRunWatch = resolve; }));
+    runWatchPromise = watching;
+    stopRunWatch = watchVisible(pollRunCurrent, POLL_MS, {
+      visible: () => document.visibilityState === 'visible',
+      listen: (wake) => {
+        document.addEventListener('visibilitychange', wake);
+        return () => document.removeEventListener('visibilitychange', wake);
+      }
+    });
+    return watching;
   }
 
   /**
@@ -7239,7 +7291,7 @@
       // bar: the URL and the run disagreed permanently.
       if (named.length > 1) {
         // A REAL FAN-OUT, which is a decision and therefore touched.
-        feeds.active = named[0];
+        selectFeed(named[0]);
         pullFeeds = new Set(named);
         feedsTouched = true;
       } else if (named.length === 1) {
@@ -7247,7 +7299,7 @@
         // empty plus `feedsTouched` false means "follows the scope", so
         // seeding it with a single entry would say the same thing twice and
         // drift from `feeds.active`.
-        feeds.active = named[0];
+        selectFeed(named[0]);
         pullFeeds = new Set();
         feedsTouched = false;
       } else if (wantFeeds.size === 0) {
@@ -8311,10 +8363,13 @@
 
                 {#if feedsChosen.includes('zerodha') || feeds.active === 'zerodha'}
                   <div class="field">
-                    <span class="lab">Zerodha cash identity</span>
-                    <label><input type="checkbox" bind:checked={zerodhaSymbolMapping} />
-                      Use exact native exchange, symbol and instrument type</label>
-                    <span class="note quiet wrap full">Opt-in only. NOT ISIN-verified. Ambiguous matches are refused. Current-master mapping does not prove historical renames or membership.</span>
+                    <span class="lab">Stock identity verification</span>
+                    <select class="din" aria-label="Zerodha cash identity" bind:value={zerodhaCashIdentity}>
+                      <option value="isin">Vendor-supplied ISIN — unavailable in Zerodha master</option>
+                      <option value="zerodha_cross_checked">Token + independent ISIN cross-check (recommended)</option>
+                      <option value="zerodha_symbol">Exact token only — NOT ISIN-verified</option>
+                    </select>
+                    <span class="note quiet wrap full">Zerodha does not supply ISINs. The cross-check requires an exact NSE cash listing and a separate, unambiguous ISIN-bearing master matching the exchange table. Missing or conflicting evidence is refused. This is current-snapshot evidence, not proof of historical renames or membership.</span>
                   </div>
                 {/if}
                 {#if isFolderFeed}
@@ -9330,14 +9385,14 @@
                       {/if}
                       <td
                         class="num mono"
-                        title={r.per === null
-                          ? `${r.tfLabel} has no bars-per-session this page can state, so ${n(r.got)} stored bar(s) are counted and nothing is claimed about what they should be.`
+                        title={!c?.expectedKnown
+                          ? `${n(r.got)} stored bar(s). The expected total is unverified because the timeframe or at least one reachable month's calendar expectation is unknown.`
                           : `${n(r.got)} stored against ${n(r.exp)} expected — ${n(windowSessions)} NSE session(s) inside the window × ${n(r.per)} bar(s) per session, over ${n(r.months.length)} month file(s).`}
                       >
-                        <span class:up={r.per !== null && r.got >= r.exp} class:warn={r.per !== null && r.got < r.exp}
+                        <span class:up={c?.expectedKnown && r.got >= r.exp} class:warn={c?.expectedKnown && r.got < r.exp}
                           >{n(r.got)}</span
                         >
-                        / {r.per === null ? '—' : n(r.exp)}
+                        / {!c?.expectedKnown ? 'unverified' : n(r.exp)}
                         <!-- THE RATIO THE TWO NUMBERS ALREADY STATE, AS A
                              LENGTH. `0 / 11,29,875` and `11,04,320 / 11,29,875`
                              are both two long tabular numbers, and telling them
@@ -9528,7 +9583,7 @@
                               ? 'A pull is already on the wire — /pull/spot is synchronous and this page sends one at a time.'
                               : problems.length > 0
                                 ? `The request above has ${n(problems.length)} thing(s) to fix first: ${problems[0].why}`
-                                : `POST /pull/spot — target=${target}, vendor=${feeds.active}, granularity=${r.tf}, from=${sp?.from}, to=${sp?.to}. That is ${dayLabel(sp?.from ?? '')} – ${dayLabel(sp?.to ?? '')}: the days covering the ${n(r.unproved)} unsettled month file(s) of this series, clipped to the window you chose. It is NOT narrowed to ${r.sym}: this body carries whatever is ticked above, so the server answers for all of those. That is this page's limit and not the route's — SpotRequest carries a member set and broker_run filters on it; pullRow simply reuses the ticked body. What this DOES narrow is the window and the rung, and the outcome list below is built for this row.`}
+                                : `POST /pull/spot — target=${target}, vendor=${feeds.active}, member=${r.sym}, granularity=${r.tf}, from=${sp?.from}, to=${sp?.to}. Retries only ${r.sym}, over the ${n(r.unproved)} unsettled month file(s), clipped to your selected window. Identity verification is preserved. Existing interior gaps may require versioned repair; a retry does not certify completeness.`}
                             onclick={() => pullRow(r)}
                           >
                             Pull {n(r.unproved)}
@@ -9814,7 +9869,7 @@
            tick a second vendor without silently moving what the counts below
            are measured against. That separation is the whole reason
            `pullFeeds` and `feeds.active` are two values — see `feedsChosen`. */
-        if (!feeds.active && sel.size > 0) feeds.active = [...sel][0];
+        if (!feeds.active && sel.size > 0) selectFeed([...sel][0]);
       }}
     />
     <!-- ONE FEED SAYS NOTHING HERE; MORE THAN ONE HAS SOMETHING ONLY THIS

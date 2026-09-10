@@ -1,14 +1,14 @@
-//! One bounded door for the two disk-backed result-detail endpoints.
-//!
-//! Both `/trades.json` and `/frontier.json` rebuild several fixed-stride
-//! indexes before they can answer an identity lookup.  That work is blocking
-//! file I/O and CPU work, so it must not occupy a Tokio worker.  It is also
-//! bounded twice: a small process-wide admission counter limits queued plus
-//! running blocking tasks, and callers preflight every file they will index
-//! against [`MAX_SCAN_BYTES`].
+//! Shared bounded admission for blocking sweep detail, live and status reads.
+//! Cold fixed-stride indexes cost O(history); refreshed indexes consume new
+//! records. Neither blocking file reads nor formatting occupies a Tokio worker.
+//! Admission limits queued plus running tasks, and readers enforce byte/row caps.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[path = "boolean_observation_budget.rs"]
+mod boolean_observation_budget;
+pub(crate) use boolean_observation_budget::BooleanObservationBudget;
 
 /// Detail reads that may be queued or running at once, across both endpoints.
 pub const MAX_CONCURRENT: usize = 4;
@@ -351,6 +351,37 @@ impl<T> Cached<T> {
         let (_, handle) = held.insert((root.to_path_buf(), open()?));
         Ok(f(handle))
     }
+
+    /// Uses a refreshed handle, exposing any failed generation or integrity
+    /// check on this request. A refused handle is discarded; a later request
+    /// may attempt a fresh validated open after the underlying issue is fixed.
+    ///
+    /// # Errors
+    /// Returns the first failed refresh/open rather than hiding it behind an
+    /// automatic successful reopen during the same request.
+    pub fn with_verified<R>(
+        &self,
+        root: &std::path::Path,
+        open: impl FnOnce() -> Result<T, String>,
+        refresh: impl FnOnce(&mut T) -> Result<(), String>,
+        f: impl FnOnce(&mut T) -> R,
+    ) -> Result<R, String> {
+        let mut held = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((at, handle)) = held.as_mut()
+            && at.as_path() == root
+        {
+            if let Err(why) = refresh(handle) {
+                *held = None;
+                return Err(why);
+            }
+            return Ok(f(handle));
+        }
+        let (_, handle) = held.insert((root.to_path_buf(), open()?));
+        Ok(f(handle))
+    }
 }
 
 impl<T> Default for Cached<T> {
@@ -365,6 +396,27 @@ pub static TRADES: Cached<cli::trades::Trades> = Cached::new();
 /// The process's one read handle on `frontier.bin`. See [`Cached`].
 pub static FRONTIER: Cached<cli::frontier::Frontier> = Cached::new();
 
+static PARENTS: Cached<cli::result_set::CommittedParents> = Cached::new();
+
+/// Refreshes both parent indexes once and returns one owned receipt before
+/// the caller refreshes any child. Cold open is O(history); warm refresh is
+/// O(new parent rows), with each file still subject to the HTTP byte ceiling.
+///
+/// # Errors
+/// Returns parent generation/integrity/size failures and missing committed
+/// receipts; no child is exposed after an unsuccessful parent refresh.
+pub fn committed_receipt(
+    root: &Path,
+    identity: &[u8; 32],
+) -> Result<Option<cli::result_set::Receipt>, String> {
+    PARENTS.with_verified(
+        root,
+        || cli::result_set::CommittedParents::open_read_bounded(root, MAX_SCAN_BYTES),
+        cli::result_set::CommittedParents::refresh,
+        |parents| parents.receipt(identity),
+    )?
+}
+
 #[cfg(test)]
 #[allow(
     clippy::expect_used,
@@ -376,6 +428,35 @@ mod tests {
     use super::{
         Cached, MAX_PAGE_ROWS, MAX_QUERY_BYTES, MAX_SCAN_BYTES, Page, preflight, run, window,
     };
+
+    #[test]
+    fn verified_cache_exposes_refresh_refusal_before_any_later_reopen() {
+        let cache = Cached::new();
+        let root = std::path::Path::new("/verified-fixture");
+        assert_eq!(
+            cache.with_verified(root, || Ok(7), |_| Ok(()), |v| *v),
+            Ok(7)
+        );
+        let mut reopened = false;
+        let result = cache.with_verified(
+            root,
+            || {
+                reopened = true;
+                Ok(9)
+            },
+            |_| Err("corrupted generation".to_owned()),
+            |v| *v,
+        );
+        assert_eq!(result, Err("corrupted generation".to_owned()));
+        assert!(
+            !reopened,
+            "a successful fallback must not hide the failed validation"
+        );
+        assert_eq!(
+            cache.with_verified(root, || Ok(9), |_| Err("must open".to_owned()), |v| *v),
+            Ok(9)
+        );
+    }
 
     /// A CACHED HANDLE IS OPENED ONCE, REFRESHED AFTER, AND REOPENED ON A REFUSAL.
     ///

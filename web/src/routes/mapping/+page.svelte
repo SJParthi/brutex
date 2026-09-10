@@ -56,9 +56,10 @@
    * a feed marks as indices on NSE. Everything else is a different join on a
    * different key and is not claimed by these numbers.
    */
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { feeds } from '$lib/feeds.svelte.js';
   import { ask } from '$lib/ask.js';
+  import { createPageRequests } from '$lib/page-requests.js';
   import * as prefix from '$lib/prefix.js';
 
   /* ====================================================================
@@ -100,12 +101,18 @@
    * this is a standing fact about the server and is true on arrival.
    */
   let restartNeeded = $state(false);
+  const masterRequests = createPageRequests();
+  const joinRequests = createPageRequests();
+  onDestroy(() => { masterRequests.dispose(); joinRequests.dispose(); });
 
-  async function readMasters() {
+  /** @param {import('$lib/page-requests.js').ReadTicket} ticket */
+  async function readMastersCurrent(ticket) {
     try {
-      const response = await ask('/masters/status.json');
+      const response = await ask('/masters/status.json', { signal: ticket.signal });
+      if (!ticket.current()) return;
       if (!response.ok) return;
       const body = await response.json();
+      if (!ticket.current()) return;
       onDisk = body.masters ?? [];
       /* THE RESTART FLAG COMES FROM HERE, AND IT WAS BEING THROWN AWAY.
          Two routes carry a `restart_required` and only one of them means
@@ -121,12 +128,17 @@
          They now agree. */
       restartNeeded = Boolean(body.restart_required);
     } catch {
+      if (!ticket.current()) return;
       // A STATUS READ THAT FAILS IS NOT THIS PAGE'S SUBJECT. The join's own
       // refusal already says what is missing; a second red banner about the
       // same absence would be noise, and inventing a state for it would be
       // worse than saying nothing.
       onDisk = [];
     }
+  }
+
+  function readMasters() {
+    return masterRequests.run(readMastersCurrent);
   }
 
   async function refreshMasters() {
@@ -270,8 +282,8 @@
     }
   }
 
-  /** @param {string|null} feed */
-  async function fetchJoin(feed) {
+  /** @param {import('$lib/page-requests.js').ReadTicket} ticket @param {string|null} feed */
+  async function readJoin(ticket, feed) {
     if (!feed) {
       /* NO FEED IS A STATE, NOT A REASON TO RETURN AND LEAVE THE LAST ONE UP.
          This was a bare `return`, placed BEFORE the line below, so `load` kept
@@ -301,8 +313,9 @@
     load = { phase: 'loading', body: null, why: '' };
     try {
       const response = await ask(`/indexmap.json?feed=${encodeURIComponent(feed)}`, {
-        cache: 'no-store'
+        cache: 'no-store', signal: ticket.signal
       });
+      if (!ticket.current() || feeds.active !== feed) return;
       if (!response.ok) {
         // THE BODY CARRIES THE REASON AND IS READ RATHER THAN DISCARDED.
         // A 500 here is almost always the operator's NSE catalogue file being
@@ -316,11 +329,15 @@
         } catch {
           /* Not JSON. The status line above is all there is to say. */
         }
+        if (!ticket.current() || feeds.active !== feed) return;
         load = { phase: 'failed', body: null, why };
         return;
       }
-      load = { phase: 'ready', body: await response.json(), why: '' };
+      const body = await response.json();
+      if (!ticket.current() || feeds.active !== feed) return;
+      load = { phase: 'ready', body, why: '' };
     } catch (error) {
+      if (!ticket.current() || feeds.active !== feed) return;
       load = {
         phase: 'failed',
         body: null,
@@ -332,9 +349,22 @@
     }
   }
 
+  /** @param {string|null} feed */
+  function fetchJoin(feed) {
+    joinRequests.cancel();
+    load = { phase: 'loading', body: null, why: '' };
+    if (!feed) {
+      load = { phase: 'failed', body: null,
+        why: 'No feed is chosen, so there is no master to join against. Choose a feed in the top bar.' };
+      return Promise.resolve();
+    }
+    return joinRequests.run((ticket) => readJoin(ticket, feed));
+  }
+
   $effect(() => {
     const feed = feeds.active;
     untrack(() => fetchJoin(feed));
+    return () => joinRequests.cancel();
   });
 
   /* ====================================================================

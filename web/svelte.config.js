@@ -25,8 +25,10 @@ import { join } from 'node:path';
  * fingerprint of the tree that produced it, so staleness is legible without a
  * rebuild at all.
  *
- * What it covers is everything that can change the output: `src/`, the
- * lockfile, and the two config files. `package.json` is not read directly --
+ * It covers `src/`, the saved-selection helper imported by the main app, the
+ * lockfile, and the two config files. An imported helper outside `src/` is
+ * still executable input: leaving it out lets the client bundle change while
+ * its version stays the same. `package.json` is not read directly --
  * `package-lock.json` carries it.
  */
 function sourceDigest() {
@@ -42,7 +44,7 @@ function sourceDigest() {
     }
   };
   walk('src');
-  for (const file of ['package-lock.json', 'svelte.config.js', 'vite.config.js']) {
+  for (const file of ['package-lock.json', 'svelte.config.js', 'vite.config.js', 'saved-backtest/selection.js']) {
     hash.update(file);
     hash.update(readFileSync(file));
   }

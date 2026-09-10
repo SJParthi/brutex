@@ -57,6 +57,7 @@ fn rungs() -> usize {
     1 + pull::ingest::derived_count(store::path::Timeframe::MINUTE_1)
 }
 
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -130,47 +131,48 @@ impl Drop for Scratch {
 // The fixture
 // ===========================================================================
 
-/// One `TrueData` index member: `date,time,price,volume,open_interest`.
-///
-/// The same eight rows `integration.rs` drives, and they are the same eight for
-/// a reason: two are declined, five become bars, and **one folds into a bar
-/// that is already open**. That last row is the whole of `rows_folded`.
-///
-/// # Why five and not three
-///
-/// `09:14:59` and `15:30:00` sit outside the published session, and this build
-/// used to DROP them. It no longer does — operator's rule of 2026-08-19:
-/// whatever the vendor provides is stored. Only the three rows outside the
-/// operator's WINDOW are declined now, which is a different question: those are
-/// the extra day this build's own `toDate + 1` asked for, not data the vendor
-/// volunteered.
-const BODY: &str = "\
-20221002,10:00:00,38400.00,0,0
-20221003,09:14:59,38410.00,0,0
-20221003,09:15:00,38445.65,0,0
-20221003,09:15:30,38450.00,0,0
-20221003,15:29:59,38500.00,0,0
-20221003,15:30:00,38510.00,0,0
-20221004,09:20:00,38600.00,0,0
-20221005,10:00:00,38700.00,0,0
-";
+/// Two complete regular sessions in `TrueData` index CSV shape. Complete
+/// minute coverage lets every derived rung reach the census; the original
+/// folded tick and four refused rows still exercise the row accounting.
+fn body() -> &'static str {
+    static BODY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        let mut body =
+            String::from("20221002,10:00:00,38400.00,0,0\n20221003,09:14:59,38410.00,0,0\n");
+        for day in [3, 4] {
+            for minute in 0..SESSION_BARS {
+                let clock = 9 * 60 + 15 + minute;
+                let price = if day == 3 && minute == 0 {
+                    "38445.65"
+                } else {
+                    "38600.00"
+                };
+                writeln!(
+                    body,
+                    "202210{day:02},{:02}:{:02}:00,{price},0,0",
+                    clock / 60,
+                    clock % 60
+                )
+                .expect("write fixture");
+                if day == 3 && minute == 0 {
+                    body.push_str("20221003,09:15:30,38450.00,0,0\n");
+                }
+            }
+            if day == 3 {
+                body.push_str("20221003,15:30:00,38510.00,0,0\n");
+            }
+        }
+        body.push_str("20221005,10:00:00,38700.00,0,0\n");
+        body
+    });
+    &BODY
+}
 
-/// Rows in [`BODY`].
-const ROWS: usize = 8;
-/// How many become bars.
-///
-/// **Three, and it was five.** The operator's rule of 2026-08-20 replaced their
-/// own rule of 2026-08-19: a row outside the venue's published session is
-/// DROPPED again rather than stored. `09:14:59` and `15:30:00` were the two
-/// that moved.
-///
-/// What decided it, measured: Dhan sends NSE index bars through 15:38 while
-/// Groww and Zerodha stop at 15:29, so under the keep-everything rule one
-/// vendor's index month held nine bars past a close the exchange publishes as
-/// 15:30 — and the same file, before 2026-08-03, ended at 15:29. A store whose
-/// last bar of a session depends on which broker filled it is not one two
-/// vendors can be compared in.
-const BARS: usize = 3;
+/// 09:15 through 15:29 inclusive, with one bar per minute.
+const SESSION_BARS: usize = 375;
+/// Bars from both requested sessions.
+const BARS: usize = 2 * SESSION_BARS;
+/// Rows in [`body`], including the folded tick and refused rows.
+const ROWS: usize = BARS + FOLDED + DROPPED;
 /// How many fold into a bar that is already open — 09:15:30 into 09:15:00.
 const FOLDED: usize = 1;
 /// How many are declined — by the window OR by the session.
@@ -190,7 +192,7 @@ const OUTSIDE_SESSION: usize = 2;
 /// The vendor whose census these tests write.
 const VENDOR: Vendor = Vendor::Groww;
 
-/// The month [`BODY`] lands in.
+/// The month [`body`] lands in.
 fn month() -> YearMonth {
     YearMonth::new(2022, 10).expect("October 2022")
 }
@@ -217,6 +219,8 @@ fn request() -> BarRequest {
 /// The plan every run below uses, with the one field a caller varies.
 fn plan_over<'a>(request: &'a BarRequest, segment: &'a str) -> Plan<'a> {
     Plan {
+        calendar: pull::calendar::Runtime::default(),
+        cash_schedule: None,
         columns: Columns::TrueDataIndex,
         request,
         encoding: TimestampEncoding::EpochSecondsUtc,
@@ -278,7 +282,7 @@ fn bar_file(store_root: &Path, instrument: &str) -> BarFile {
 #[test]
 fn the_census_counts_exactly_what_the_store_holds() {
     let scratch = Scratch::new("COUNTS");
-    let archive = scratch.archive(&[("NIFTY", BODY), ("BANKNIFTY", BODY)]);
+    let archive = scratch.archive(&[("NIFTY", body()), ("BANKNIFTY", body())]);
     let store = scratch.store();
 
     let done = run(&archive, &store, &request());
@@ -332,8 +336,7 @@ fn the_census_counts_exactly_what_the_store_holds() {
     assert_eq!(census.degraded_reason(), None, "and it loads clean");
     assert_eq!(census.header().vendor, VENDOR);
 
-    // THE INVARIANT, READ OFF THE DISK. Not "the census says three" — the bar
-    // file's own committed header says three, and the census agrees with it.
+    // The census agrees with the bar file's own committed header.
     for instrument in ["NIFTY", "BANKNIFTY"] {
         let entry = census
             .entry(&key(instrument))
@@ -367,7 +370,7 @@ fn the_census_counts_exactly_what_the_store_holds() {
 #[test]
 fn a_folded_row_is_counted_as_consumed_and_the_books_balance() {
     let scratch = Scratch::new("FOLDED");
-    let archive = scratch.archive(&[("NIFTY", BODY)]);
+    let archive = scratch.archive(&[("NIFTY", body())]);
     let store = scratch.store();
 
     let done = run(&archive, &store, &request());
@@ -379,28 +382,24 @@ fn a_folded_row_is_counted_as_consumed_and_the_books_balance() {
          volume, high, low and close are IN that bar, so it is neither a bar \
          nor a drop"
     );
-    // THE CENSUS COUNTS DROPS, AND A KEPT ROW IS NOT ONE. The two rows outside
-    // the session are stored, so they appear in `bars_stored` and must NOT
-    // appear here — a row on both sides of `balances()` would make the books
-    // reconcile by double-counting.
+    // Session and window refusals are drops, never stored or folded rows.
     assert_eq!(done.census.total() as usize, DROPPED);
     assert_eq!(
         ROWS,
         BARS + FOLDED + DROPPED,
-        "and the three categories are still the whole of what was read — the \
-         two outside-session rows are inside BARS, not beside it"
+        "stored, folded and dropped rows account for every input row"
     );
     assert_eq!(OUTSIDE_SESSION, 2, "09:14:59 and 15:30:00");
     assert_eq!(
         ROWS,
         BARS + FOLDED + DROPPED,
-        "the four categories are the whole of what was read"
+        "the three categories are the whole of what was read"
     );
     assert!(
         done.balances(),
-        "eight read = three stored + one folded + four dropped; before the \
-         fold had a counter this run answered NO with nothing wrong"
+        "750 stored + one folded + four dropped account for all 755 rows"
     );
+    assert!(done.failures.is_empty(), "{:?}", done.failures);
 
     // The folded row is not a claim about arithmetic: it is in the bar.
     let file = bar_file(&store, "NIFTY");
@@ -423,7 +422,7 @@ fn a_folded_row_is_counted_as_consumed_and_the_books_balance() {
 #[test]
 fn a_re_run_leaves_the_census_byte_for_byte() {
     let scratch = Scratch::new("RERUN");
-    let archive = scratch.archive(&[("NIFTY", BODY)]);
+    let archive = scratch.archive(&[("NIFTY", body())]);
     let store = scratch.store();
     let path = manifest_path(&store, VENDOR);
 
@@ -447,10 +446,8 @@ fn a_re_run_leaves_the_census_byte_for_byte() {
     // stored 375" over a run that wrote nothing at all. `bars_committed` is
     // what tells the two apart, so it is the one field that MUST differ here.
     assert_eq!(
-        first.bars_committed, 3,
-        "the first run wrote the month — three bars, because the two rows \
-         outside the published session are dropped again under the operator \
-         rule of 2026-08-20"
+        first.bars_committed, BARS,
+        "the first run wrote both complete sessions"
     );
     assert_eq!(
         second.bars_committed, 0,
@@ -525,7 +522,7 @@ fn a_run_that_stores_nothing_publishes_nothing() {
 #[test]
 fn a_second_window_records_the_whole_month_not_the_suffix() {
     let scratch = Scratch::new("APPEND");
-    let archive = scratch.archive(&[("NIFTY", BODY)]);
+    let archive = scratch.archive(&[("NIFTY", body())]);
     let store = scratch.store();
 
     let narrow = BarRequest {
@@ -539,19 +536,15 @@ fn a_second_window_records_the_whole_month_not_the_suffix() {
         granularity: pull::vendor::Granularity::Minute1,
     };
     let first = run(&archive, &store, &narrow);
-    // TWO. A one-day window drops the pre-open and post-close rows again —
-    // the operator rule of 2026-08-20 replaced the keep-everything rule of
-    // 2026-08-19.
-    assert_eq!(first.bars_stored, 2);
-    // AND THE CENSUS AGREES WITH THE FILE. Two, for the same reason: the
-    // counter records what the month HOLDS, and the pre-open and post-close
-    // rows are no longer in it.
+    assert!(first.failures.is_empty(), "{:?}", first.failures);
+    assert_eq!(first.bars_stored, SESSION_BARS);
+    // The first window records exactly one complete session.
     assert_eq!(
         census_of(&store)
             .entry(&key("NIFTY"))
             .expect("the month is in the census")
             .rows,
-        2
+        SESSION_BARS as u64
     );
 
     let wider = BarRequest {
@@ -565,25 +558,22 @@ fn a_second_window_records_the_whole_month_not_the_suffix() {
         granularity: pull::vendor::Granularity::Minute1,
     };
     let second = run(&archive, &store, &wider);
-    assert_eq!(second.bars_stored, 1, "one bar was appended");
+    assert!(second.failures.is_empty(), "{:?}", second.failures);
+    assert_eq!(second.bars_stored, SESSION_BARS, "one session was appended");
 
     let census = census_of(&store);
     let entry = census.entry(&key("NIFTY")).expect("still recorded");
     let file = bar_file(&store, "NIFTY");
     assert_eq!(
-        entry.rows, 3,
-        "the entry counts the FILE, not the one-bar batch that was offered — \
-         five now, since the pre-open and post-close rows are kept"
+        entry.rows, BARS as u64,
+        "the entry counts both sessions in the FILE, not just the appended session"
     );
     assert_eq!(entry.rows, file.header().n_valid);
     assert_eq!(
         entry.first_ts_micros,
         file.read_record(0).expect("record 0").ts_micros
     );
-    // THE LAST RECORD, ADDRESSED AS THE LAST. This read index 2 because the
-    // file held three records; it holds five now that the pre-open and
-    // post-close rows are kept, and a literal index is a test that has to be
-    // edited every time the fixture grows.
+    // Compare against the last committed record, at the end of session two.
     let last = file.header().n_valid.saturating_sub(1);
     assert_eq!(
         entry.last_ts_micros,
@@ -609,7 +599,7 @@ fn a_second_window_records_the_whole_month_not_the_suffix() {
 #[test]
 fn a_segment_the_census_cannot_key_stores_no_bars() {
     let scratch = Scratch::new("SEGMENT");
-    let archive = scratch.archive(&[("NIFTY", BODY)]);
+    let archive = scratch.archive(&[("NIFTY", body())]);
     let store = scratch.store();
 
     // `FUT` passes `StorePath`, which accepts any upper-case segment, and is
@@ -643,7 +633,7 @@ fn a_segment_the_census_cannot_key_stores_no_bars() {
 #[test]
 fn a_census_that_will_not_open_stops_the_run_before_it_writes() {
     let scratch = Scratch::new("GARBAGE");
-    let archive = scratch.archive(&[("NIFTY", BODY)]);
+    let archive = scratch.archive(&[("NIFTY", body())]);
     let store = scratch.store();
     let path = manifest_path(&store, VENDOR);
     fs::create_dir_all(path.parent().expect("a parent")).expect("the census directory");
@@ -680,7 +670,7 @@ fn a_census_that_will_not_open_stops_the_run_before_it_writes() {
 #[test]
 fn a_census_that_cannot_be_read_is_not_treated_as_a_first_ingest() {
     let scratch = Scratch::new("UNREADABLE");
-    let archive = scratch.archive(&[("NIFTY", BODY)]);
+    let archive = scratch.archive(&[("NIFTY", body())]);
     let store = scratch.store();
     let path = manifest_path(&store, VENDOR);
     // A directory where the census file goes: it has metadata, and reading it
@@ -701,7 +691,7 @@ fn a_census_that_cannot_be_read_is_not_treated_as_a_first_ingest() {
 #[test]
 fn a_census_that_cannot_be_measured_stops_the_run() {
     let scratch = Scratch::new("TOOLONG");
-    let archive = scratch.archive(&[("NIFTY", BODY)]);
+    let archive = scratch.archive(&[("NIFTY", body())]);
     // One path component past every filesystem's name limit. Neither
     // "no file" nor "no directory": the host cannot answer the question.
     let store = scratch.root.join("A".repeat(500));
@@ -727,7 +717,7 @@ fn a_census_that_cannot_be_measured_stops_the_run() {
 #[test]
 fn a_census_larger_than_this_build_can_write_is_refused_by_name() {
     let scratch = Scratch::new("HUGE");
-    let archive = scratch.archive(&[("NIFTY", BODY)]);
+    let archive = scratch.archive(&[("NIFTY", body())]);
     let store = scratch.store();
     let path = manifest_path(&store, VENDOR);
     fs::create_dir_all(path.parent().expect("a parent")).expect("the census directory");
@@ -758,7 +748,7 @@ fn a_census_larger_than_this_build_can_write_is_refused_by_name() {
 #[test]
 fn a_month_the_census_refuses_is_named_not_swallowed() {
     let scratch = Scratch::new("BACKWARDS");
-    let archive = scratch.archive(&[("NIFTY", BODY)]);
+    let archive = scratch.archive(&[("NIFTY", body())]);
     let store = scratch.store();
     let path = manifest_path(&store, VENDOR);
 
@@ -856,7 +846,7 @@ fn a_month_the_census_refuses_is_named_not_swallowed() {
 #[test]
 fn a_census_that_cannot_be_installed_names_what_is_left_uncounted() {
     let scratch = Scratch::new("NOINSTALL");
-    let archive = scratch.archive(&[("NIFTY", BODY)]);
+    let archive = scratch.archive(&[("NIFTY", body())]);
     let store = scratch.store();
     // A file where the census directory goes. Reading through it is
     // `NotADirectory`, which is one of the two shapes of "there is nothing
@@ -890,7 +880,7 @@ fn a_census_that_cannot_be_installed_names_what_is_left_uncounted() {
 #[test]
 fn a_census_whose_temporary_cannot_be_written_publishes_nothing() {
     let scratch = Scratch::new("NOTEMP");
-    let archive = scratch.archive(&[("NIFTY", BODY)]);
+    let archive = scratch.archive(&[("NIFTY", body())]);
     let store = scratch.store();
     let path = manifest_path(&store, VENDOR);
     fs::create_dir_all(path.parent().expect("a parent")).expect("the census directory");
@@ -922,7 +912,7 @@ fn a_census_whose_temporary_cannot_be_written_publishes_nothing() {
 #[test]
 fn a_degraded_census_is_named_and_the_run_installs_the_repair() {
     let scratch = Scratch::new("DEGRADED");
-    let archive = scratch.archive(&[("NIFTY", BODY)]);
+    let archive = scratch.archive(&[("NIFTY", body())]);
     let store = scratch.store();
     let path = manifest_path(&store, VENDOR);
 
@@ -1062,7 +1052,7 @@ fn a_run_that_cannot_take_the_census_lock_writes_no_bars_at_all() {
         .expect("the lock file");
     held.try_lock().expect("this test is the first holder");
 
-    let archive = scratch.archive(&[("AAAA", BODY), ("BBBB", BODY), ("CCCC", BODY)]);
+    let archive = scratch.archive(&[("AAAA", body()), ("BBBB", body()), ("CCCC", body())]);
     let done = ingest::from_dir(&archive, &store, plan_over(&request(), "INDEX"))
         .expect("the folder itself is readable — the census is what is contended");
 
@@ -1141,7 +1131,7 @@ fn publishing_one_entry_writes_one_entry_and_not_the_whole_census() {
     let mut inodes = Vec::new();
     let incremental = scratch.root.join("STORE-INCREMENTAL");
     for name in ["AAA", "BBB", "CCC", "DDD"] {
-        let archive = scratch.archive(&[(name, BODY)]);
+        let archive = scratch.archive(&[(name, body())]);
         let done = run(&archive, &incremental, &request());
         assert!(
             done.failures.is_empty(),
@@ -1198,7 +1188,12 @@ fn publishing_one_entry_writes_one_entry_and_not_the_whole_census() {
 
     // THE SAME CENSUS, BUILT IN ONE BATCH. Four members, one install.
     let batched = scratch.root.join("STORE-BATCHED");
-    let archive = scratch.archive(&[("AAA", BODY), ("BBB", BODY), ("CCC", BODY), ("DDD", BODY)]);
+    let archive = scratch.archive(&[
+        ("AAA", body()),
+        ("BBB", body()),
+        ("CCC", body()),
+        ("DDD", body()),
+    ]);
     let done = run(&archive, &batched, &request());
     assert!(done.failures.is_empty(), "{:?}", done.failures);
 
@@ -1263,7 +1258,7 @@ fn write_version_1_census(path: &Path, entries: &[Entry]) {
 #[test]
 fn a_version_1_census_upgrades_on_the_first_run_that_records_anything() {
     let scratch = Scratch::new("UPGRADE");
-    let archive = scratch.archive(&[("NIFTY", BODY)]);
+    let archive = scratch.archive(&[("NIFTY", body())]);
     let store = scratch.store();
     let path = manifest_path(&store, VENDOR);
 

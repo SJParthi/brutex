@@ -35,7 +35,7 @@ use runner::exit_grid_policy::{
     ExecutionDispositionV1, ExecutionSeriesV1, GlobalReplayWitnessUniverseV1, ResolvedExitGridV1,
     instrument_digest_v1,
 };
-use runner::identity::{DailyReferenceBinding, ReferenceIntegrity};
+use runner::identity::DailyReferenceBinding;
 use runner::outcome::Horizon;
 
 use crate::candidate_universe::CandidateGlobalReplayOosSourceV1;
@@ -146,9 +146,34 @@ pub(crate) struct StoredPostTrainingOosWitnessV1 {
     cohort_id: [u8; 32],
     witness_id: [u8; 32],
     witness: GlobalReplayWitnessUniverseV1,
+    strict: Option<std::sync::Arc<crate::step3_orchestrator::strict::Inputs>>,
 }
 
+/// Fallible structural boundaries for the V4 coordinator's durable audit.
+/// A start callback must succeed before the corresponding computation begins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StoredOosComputationV1 {
+    FoldStarted([u8; 32]),
+    FoldCompleted,
+    ReplayStarted([u8; 32]),
+    ReplayCompleted,
+}
+
+pub(crate) type StoredOosObserverV1<'a> =
+    dyn FnMut(StoredOosComputationV1) -> Result<(), String> + 'a;
+
 impl StoredPostTrainingOosWitnessV1 {
+    pub(crate) fn strict_inputs(
+        &self,
+    ) -> Option<std::sync::Arc<crate::step3_orchestrator::strict::Inputs>> {
+        self.strict.clone()
+    }
+    /// Exact universe size, for aggregate resource refusal before retaining
+    /// another selected stream. This does not expose a construction door.
+    pub(crate) fn candidate_count(&self) -> usize {
+        self.witness.candidates().len()
+    }
+
     #[must_use]
     pub(crate) const fn cohort_id(&self) -> [u8; 32] {
         self.cohort_id
@@ -263,6 +288,7 @@ impl StoredPostTrainingOosCohortV1 {
     }
 
     fn require_integrity(&self) -> Result<(), StoredPostTrainingOosRefusal> {
+        self.stored.require_current()?;
         self.root
             .require_same("while authenticating stored post-training OOS cohort")?;
         let training_last = require_same_training_source(&self.long, &self.short)?;
@@ -300,6 +326,24 @@ impl StoredPostTrainingOosCohortV1 {
         &self,
         disposition: &ExecutionDispositionV1,
     ) -> Result<StoredPostTrainingOosWitnessV1, StoredPostTrainingOosRefusal> {
+        self.mint_witness_inner(disposition, None)
+    }
+
+    /// Preserves the existing witness contract while allowing its caller to
+    /// refuse before folding or replay if durable identity publication fails.
+    pub(crate) fn mint_witness_recorded(
+        &self,
+        disposition: &ExecutionDispositionV1,
+        observer: &mut StoredOosObserverV1<'_>,
+    ) -> Result<StoredPostTrainingOosWitnessV1, StoredPostTrainingOosRefusal> {
+        self.mint_witness_inner(disposition, Some(observer))
+    }
+
+    fn mint_witness_inner(
+        &self,
+        disposition: &ExecutionDispositionV1,
+        mut observer: Option<&mut StoredOosObserverV1<'_>>,
+    ) -> Result<StoredPostTrainingOosWitnessV1, StoredPostTrainingOosRefusal> {
         self.require_integrity()?;
         let execution = self.execution()?;
         let execution_calendar = crate::stored::calendar_receipt_v2_for_bars(
@@ -319,6 +363,24 @@ impl StoredPostTrainingOosCohortV1 {
         )
         .map_err(|why| format!("stored OOS execution series refused: {why}"))?;
         let daily_reference = self.daily_reference();
+        // The empty column obtains the canonical evaluator fingerprint without
+        // evaluating any input bar. Do not duplicate its byte encoding here.
+        let mut evaluator =
+            indicators::evaluator::Evaluator::new(self.widths, self.availability, self.thresholds);
+        let specification = indicators::column::Column::build(&[], &mut evaluator)
+            .evaluation_spec_token()
+            .ok_or("stored OOS evaluator specification unavailable before fold")?
+            .fingerprint_v1();
+        if specification.as_bytes() != &disposition.evaluation_spec_fingerprint() {
+            return Err("stored OOS disposition evaluator differs before fold".to_owned());
+        }
+        let fold_identity = hash_parts(
+            b"brutex-stored-oos-fold-v1\0",
+            &[&self.audit.cohort_id, specification.as_bytes()],
+        );
+        if let Some(observer) = &mut observer {
+            observer(StoredOosComputationV1::FoldStarted(fold_identity))?;
+        }
         let source = CandidateGlobalReplayOosSourceV1::new(
             self.family,
             self.stored.rung_seconds,
@@ -341,11 +403,22 @@ impl StoredPostTrainingOosCohortV1 {
             StoredSpanLoadBoundV1::new(self.load_ceilings.daily)
                 .map_err(|why| format!("stored OOS daily ceiling refused: {why}"))?,
         )?;
+        if let Some(observer) = &mut observer {
+            observer(StoredOosComputationV1::FoldCompleted)?;
+        }
         let resolved = match disposition.side() {
             runner::excursion::Side::Long => &self.long,
             runner::excursion::Side::Short => &self.short,
         };
-        let witness = source.mint_witness(self.ladder, resolved, disposition)?;
+        let witness = match &mut observer {
+            Some(observer) => source.mint_witness_recorded(
+                self.ladder,
+                resolved,
+                disposition,
+                &mut |identity| observer(StoredOosComputationV1::ReplayStarted(identity)),
+            )?,
+            None => source.mint_witness(self.ladder, resolved, disposition)?,
+        };
         witness
             .require_integrity()
             .map_err(|why| format!("stored OOS Runner witness integrity refused: {why}"))?;
@@ -364,10 +437,14 @@ impl StoredPostTrainingOosCohortV1 {
                 &universe_digest,
             ],
         );
+        if let Some(observer) = observer {
+            observer(StoredOosComputationV1::ReplayCompleted)?;
+        }
         Ok(StoredPostTrainingOosWitnessV1 {
             cohort_id: self.audit.cohort_id,
             witness_id,
             witness,
+            strict: self.stored.strict.clone(),
         })
     }
 
@@ -433,8 +510,8 @@ impl StoredPostTrainingOosCohortV1 {
             eligibility_policy: crate::stored::DAILY_ELIGIBILITY_POLICY,
             gap_overlay_policy: crate::stored::EXACT_MINUTE_GAP_POLICY,
             excluded_ist_days: &indicators::evaluator::CHARTER_NON_REGULAR_IST_DAYS,
-            daily_integrity: ReferenceIntegrity::UnverifiedNoReceipt,
-            minute_integrity: ReferenceIntegrity::UnverifiedNoReceipt,
+            daily_integrity: self.stored.integrity(),
+            minute_integrity: self.stored.integrity(),
             swept_series_calendar_policy: crate::stored::SWEPT_SERIES_CALENDAR_POLICY,
         }
     }

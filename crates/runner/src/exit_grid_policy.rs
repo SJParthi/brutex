@@ -34,6 +34,16 @@ use crate::outcome::{FORCED_EXIT_MINUTE, Horizon};
 /// The canonical version encoded into every V1 policy and resolution digest.
 pub const EXIT_GRID_POLICY_VERSION_V1: u16 = 1;
 
+#[path = "expression_execution.rs"]
+pub mod expression_execution;
+
+#[path = "resolved_grid_view.rs"]
+mod resolved_grid_view;
+pub(crate) use resolved_grid_view::ResolvedGridViewV1;
+
+#[path = "research_exit_grid.rs"]
+pub mod research_resolution;
+
 /// One regular NSE minute in microseconds.
 const ONE_MINUTE_MICROS: i64 = 60_000_000;
 
@@ -730,6 +740,60 @@ impl ExitGridPolicyV1 {
         let instrument = *series.instrument();
         let training_execution_1m = series.bars();
         let family = InstrumentFamilyV1::of(&instrument)?;
+        let ResolvedGridLevelsV1 {
+            stops,
+            targets,
+            trails,
+            ratio_pairs,
+            ratio_bitmap,
+            forced_stop_index,
+            cell_count,
+        } = self.resolve_levels(training_execution_1m)?;
+
+        let policy_digest = self.digest();
+        let training_digest = crate::identity::data_digest(training_execution_1m);
+        let training_bars = u64::try_from(training_execution_1m.len())
+            .map_err(|_| ExitGridErrorV1::ArithmeticOverflow("training bar count"))?;
+        let training_first_ts_micros = training_execution_1m
+            .first()
+            .map(|bar| bar.ts_micros)
+            .ok_or(ExitGridErrorV1::EmptyExecutionSeries)?;
+        let training_last_ts_micros = training_execution_1m
+            .last()
+            .map(|bar| bar.ts_micros)
+            .ok_or(ExitGridErrorV1::EmptyExecutionSeries)?;
+        let mut resolved = ResolvedExitGridV1 {
+            instrument,
+            family,
+            feed_digest: hash(series.feed().as_bytes()),
+            commit_digest: hash(series.commit().as_bytes()),
+            calendar_digest: series.calendar_digest(),
+            policy: self.clone(),
+            policy_digest,
+            training_digest,
+            training_bars,
+            training_first_ts_micros,
+            training_last_ts_micros,
+            stop_levels_ppm: stops,
+            target_levels_ppm: targets,
+            trail_levels_ppm: trails,
+            ratio_pairs,
+            ratio_bitmap,
+            forced_stop_index,
+            cell_count,
+            digest: [0; 32],
+        };
+        resolved.digest = digest_resolved(&resolved);
+        Ok(resolved)
+    }
+
+    /// One common TRAINING resolver for legacy and additive research families.
+    /// Family admission and the result's versioned identity belong to each
+    /// constructor; observed levels, policy checks and budgets are identical.
+    fn resolve_levels(
+        &self,
+        training_execution_1m: &[Candle],
+    ) -> Result<ResolvedGridLevelsV1, ExitGridErrorV1> {
         if self.cost_model_id != printed_ohlcv_cost_model_id_v1() {
             return Err(ExitGridErrorV1::UnsupportedCostModelId);
         }
@@ -790,41 +854,15 @@ impl ExitGridPolicyV1 {
         }
         let ratio_bitmap = ratio_bitmap_of(stops.len(), targets.len(), &ratio_pairs)?;
 
-        let policy_digest = self.digest();
-        let training_digest = crate::identity::data_digest(training_execution_1m);
-        let training_bars = u64::try_from(training_execution_1m.len())
-            .map_err(|_| ExitGridErrorV1::ArithmeticOverflow("training bar count"))?;
-        let training_first_ts_micros = training_execution_1m
-            .first()
-            .map(|bar| bar.ts_micros)
-            .ok_or(ExitGridErrorV1::EmptyExecutionSeries)?;
-        let training_last_ts_micros = training_execution_1m
-            .last()
-            .map(|bar| bar.ts_micros)
-            .ok_or(ExitGridErrorV1::EmptyExecutionSeries)?;
-        let mut resolved = ResolvedExitGridV1 {
-            instrument,
-            family,
-            feed_digest: hash(series.feed().as_bytes()),
-            commit_digest: hash(series.commit().as_bytes()),
-            calendar_digest: series.calendar_digest(),
-            policy: self.clone(),
-            policy_digest,
-            training_digest,
-            training_bars,
-            training_first_ts_micros,
-            training_last_ts_micros,
-            stop_levels_ppm: stops,
-            target_levels_ppm: targets,
-            trail_levels_ppm: trails,
+        Ok(ResolvedGridLevelsV1 {
+            stops,
+            targets,
+            trails,
             ratio_pairs,
             ratio_bitmap,
             forced_stop_index,
             cell_count,
-            digest: [0; 32],
-        };
-        resolved.digest = digest_resolved(&resolved);
-        Ok(resolved)
+        })
     }
 
     /// Test-only shorthand whose fixed identities are visibly synthetic.
@@ -934,6 +972,17 @@ impl ExitGridPolicyV1 {
     pub const fn max_gap_fills(&self) -> u64 {
         self.max_gap_fills
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ResolvedGridLevelsV1 {
+    stops: Vec<Ppm>,
+    targets: Vec<Ppm>,
+    trails: Vec<Ppm>,
+    ratio_pairs: Vec<RatioPairV1>,
+    ratio_bitmap: Vec<bool>,
+    forced_stop_index: Option<usize>,
+    cell_count: u64,
 }
 
 /// Which of the two legal swept spot indices a resolution belongs to.
@@ -1910,31 +1959,7 @@ impl ResolvedExitGridV1 {
         column: &'a indicators::column::Column,
         horizon: Horizon,
     ) -> Result<AttestedTrainingV1<'a>, ExitGridErrorV1> {
-        self.require_runtime_integrity()?;
-        self.require_matching_series(series)?;
-        let bars = series.bars();
-        validate_execution_bars(bars)?;
-        let count = u64::try_from(bars.len())
-            .map_err(|_| ExitGridErrorV1::ArithmeticOverflow("training replay bar count"))?;
-        if count != self.training_bars || crate::identity::data_digest(bars) != self.training_digest
-        {
-            return Err(ExitGridErrorV1::TrainingSeriesMismatch);
-        }
-        let evaluation_spec = column
-            .evaluation_spec_token()
-            .ok_or(ExitGridErrorV1::MissingEvaluationSpec)?;
-        require_complete_acceptance(column, bars.len())?;
-        validate_column_sources(column, bars.len(), 0)?;
-        validate_arithmetic_envelope(bars, self)?;
-        let column_digest = digest_column(column);
-        Ok(AttestedTrainingV1 {
-            resolution_digest: self.digest,
-            bars,
-            column,
-            horizon,
-            column_digest,
-            evaluation_spec,
-        })
+        self.view().attest_training(series, column, horizon)
     }
 
     /// Prices one run's complete TRAINING grid over an already-attested slice.
@@ -2531,30 +2556,12 @@ impl ResolvedExitGridV1 {
         if evaluated.resolution_digest != self.digest || evaluated.side != self.side() {
             return Err(ExitGridErrorV1::EvaluationResolutionMismatch);
         }
-        let grid = &evaluated.grid;
-        if grid.stops.rungs() != self.stop_levels_ppm()
-            || grid.targets.rungs() != self.target_levels_ppm()
-            || grid.trails.rungs() != self.trail_levels_ppm()
-        {
-            return Err(ExitGridErrorV1::ReplayLadderMismatch);
-        }
-        let cells = u64::try_from(grid.cells.len())
-            .map_err(|_| ExitGridErrorV1::ArithmeticOverflow("replay cell count"))?;
-        if cells != self.cell_count {
-            return Err(ExitGridErrorV1::ReplayCellCountMismatch {
-                expected: self.cell_count,
-                actual: cells,
-            });
-        }
-        if !self.coordinate_sequence_is_complete(&grid.cells) {
-            return Err(ExitGridErrorV1::ReplayCoordinatePopulationMismatch);
-        }
-        if grid.refused_paths != 0 {
-            return Err(ExitGridErrorV1::RefusedExecutionPaths {
-                paths: grid.refused_paths,
-            });
-        }
-        Ok(grid)
+        self.validate_complete_grid(&evaluated.grid)?;
+        Ok(&evaluated.grid)
+    }
+
+    fn validate_complete_grid(&self, grid: &Grid) -> Result<(), ExitGridErrorV1> {
+        self.view().validate_complete_grid(grid)
     }
 
     fn seal_selection(
@@ -2592,68 +2599,11 @@ impl ResolvedExitGridV1 {
         &self,
         series: ExecutionSeriesV1<'_>,
     ) -> Result<(), ExitGridErrorV1> {
-        if *series.instrument() != self.instrument {
-            return Err(ExitGridErrorV1::SeriesIdentityMismatch("instrument"));
-        }
-        if hash(series.feed().as_bytes()) != self.feed_digest {
-            return Err(ExitGridErrorV1::SeriesIdentityMismatch("feed"));
-        }
-        if hash(series.commit().as_bytes()) != self.commit_digest {
-            return Err(ExitGridErrorV1::SeriesIdentityMismatch("commit"));
-        }
-        if series.calendar_digest() != self.calendar_digest {
-            return Err(ExitGridErrorV1::SeriesIdentityMismatch("calendar"));
-        }
-        Ok(())
+        self.view().require_matching_series(series)
     }
 
     fn coordinate_row_offsets(&self) -> Result<Vec<Option<usize>>, ExitGridErrorV1> {
-        let stop_settings = self.stop_levels_ppm.len().checked_add(1).ok_or(
-            ExitGridErrorV1::ArithmeticOverflow("coordinate stop settings"),
-        )?;
-        let target_settings = self.target_levels_ppm.len().checked_add(1).ok_or(
-            ExitGridErrorV1::ArithmeticOverflow("coordinate target settings"),
-        )?;
-        let row_count = stop_settings.checked_mul(target_settings).ok_or(
-            ExitGridErrorV1::ArithmeticOverflow("coordinate row-offset count"),
-        )?;
-        let mut offsets = Vec::new();
-        offsets.try_reserve_exact(row_count).map_err(|_| {
-            ExitGridErrorV1::BufferAllocationRefused {
-                buffer: "coordinate row offsets",
-                elements: row_count,
-            }
-        })?;
-        let mut ordinal = 0_usize;
-        for stop_setting in 0..stop_settings {
-            for target_setting in 0..target_settings {
-                let stop = (stop_setting < self.stop_levels_ppm.len()).then_some(stop_setting);
-                let target =
-                    (target_setting < self.target_levels_ppm.len()).then_some(target_setting);
-                if let (Some(stop_index), Some(target_index)) = (stop, target)
-                    && !self.ratio_pair_admitted(stop_index, target_index)
-                {
-                    offsets.push(None);
-                    continue;
-                }
-                offsets.push(Some(ordinal));
-                ordinal = ordinal
-                    .checked_add(coordinate_row_width(
-                        target_setting,
-                        self.trail_levels_ppm.len(),
-                    )?)
-                    .ok_or(ExitGridErrorV1::ArithmeticOverflow("coordinate row offset"))?;
-            }
-        }
-        let actual = u64::try_from(ordinal)
-            .map_err(|_| ExitGridErrorV1::ArithmeticOverflow("coordinate population width"))?;
-        if actual != self.cell_count {
-            return Err(ExitGridErrorV1::ReplayCellCountMismatch {
-                expected: self.cell_count,
-                actual,
-            });
-        }
-        Ok(offsets)
+        self.view().coordinate_row_offsets()
     }
 
     fn canonical_coordinate_ordinal(
@@ -2661,173 +2611,32 @@ impl ResolvedExitGridV1 {
         row_offsets: &[Option<usize>],
         coordinate: Chosen,
     ) -> Result<Option<usize>, ExitGridErrorV1> {
-        let stop_setting = coordinate.stop.unwrap_or(self.stop_levels_ppm.len());
-        let target_setting = coordinate.target.unwrap_or(self.target_levels_ppm.len());
-        let target_settings = self.target_levels_ppm.len().checked_add(1).ok_or(
-            ExitGridErrorV1::ArithmeticOverflow("coordinate target settings"),
-        )?;
-        let row_slot = stop_setting
-            .checked_mul(target_settings)
-            .and_then(|row| row.checked_add(target_setting))
-            .ok_or(ExitGridErrorV1::ArithmeticOverflow(
-                "coordinate row-offset slot",
-            ))?;
-        let Some(row_start) = row_offsets.get(row_slot).copied().flatten() else {
-            return Ok(None);
-        };
-        let trail_setting = coordinate.tsl.unwrap_or(self.trail_levels_ppm.len());
-        let prior_trail_groups = trail_setting
-            .checked_add(
-                target_setting
-                    .checked_mul(checked_sum_below(trail_setting)?)
-                    .ok_or(ExitGridErrorV1::ArithmeticOverflow(
-                        "coordinate prior armed trails",
-                    ))?,
-            )
-            .ok_or(ExitGridErrorV1::ArithmeticOverflow(
-                "coordinate trail-group offset",
-            ))?;
-        let within_group = match coordinate.ttp {
-            None => 0,
-            Some(ttp) => ttp
-                .arm
-                .checked_mul(trail_setting)
-                .and_then(|arm| arm.checked_add(ttp.trail))
-                .and_then(|offset| offset.checked_add(1))
-                .ok_or(ExitGridErrorV1::ArithmeticOverflow(
-                    "coordinate armed-trail offset",
-                ))?,
-        };
-        row_start
-            .checked_add(prior_trail_groups)
-            .and_then(|offset| offset.checked_add(within_group))
-            .map(Some)
-            .ok_or(ExitGridErrorV1::ArithmeticOverflow(
-                "coordinate canonical ordinal",
-            ))
-    }
-
-    fn coordinate_sequence_is_complete(&self, cells: &[Cell]) -> bool {
-        let mut actual = cells.iter();
-        let visited = self.visit_coordinates(|expected| {
-            actual
-                .next()
-                .is_some_and(|cell| Chosen::from_cell(cell) == expected)
-        });
-        visited && actual.next().is_none()
+        self.view()
+            .canonical_coordinate_ordinal(row_offsets, coordinate)
     }
 
     /// Visits the complete canonical ratio-filtered coordinate sequence.
     ///
     /// Returning `false` from `visit` stops immediately and propagates false.
-    pub(crate) fn visit_coordinates(&self, mut visit: impl FnMut(Chosen) -> bool) -> bool {
-        for stop_setting in 0..=self.stop_levels_ppm.len() {
-            for target_setting in 0..=self.target_levels_ppm.len() {
-                let stop = (stop_setting < self.stop_levels_ppm.len()).then_some(stop_setting);
-                let target =
-                    (target_setting < self.target_levels_ppm.len()).then_some(target_setting);
-                if let (Some(stop_index), Some(target_index)) = (stop, target)
-                    && !self.ratio_pair_admitted(stop_index, target_index)
-                {
-                    continue;
-                }
-                for trail_setting in 0..=self.trail_levels_ppm.len() {
-                    let tsl =
-                        (trail_setting < self.trail_levels_ppm.len()).then_some(trail_setting);
-                    let cap = tsl.unwrap_or(self.trail_levels_ppm.len());
-                    if !visit(Chosen {
-                        stop,
-                        target,
-                        tsl,
-                        ttp: None,
-                    }) {
-                        return false;
-                    }
-                    for arm in 0..target_setting {
-                        for trail in 0..cap {
-                            if !visit(Chosen {
-                                stop,
-                                target,
-                                tsl,
-                                ttp: Some(crate::grid::Ttp { arm, trail }),
-                            }) {
-                                return false;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        true
+    pub(crate) fn visit_coordinates(&self, visit: impl FnMut(Chosen) -> bool) -> bool {
+        self.view().visit_coordinates(visit)
     }
 
+    #[cfg(test)]
     fn ratio_pair_admitted(&self, stop_index: usize, target_index: usize) -> bool {
-        stop_index
-            .checked_mul(self.target_levels_ppm.len())
-            .and_then(|row| row.checked_add(target_index))
-            .and_then(|slot| self.ratio_bitmap.get(slot))
-            .copied()
-            .unwrap_or(false)
+        self.view().ratio_pair_admitted(stop_index, target_index)
     }
 
     fn chosen_is_in_bounds(&self, chosen: Chosen) -> bool {
-        if !self.chosen_axes_are_in_bounds(chosen) {
-            return false;
-        }
-        let (Some(stop_index), Some(target_index)) = (chosen.stop, chosen.target) else {
-            // Baseline/one-sided rows remain in the complete comparison grid,
-            // but a policy that states reward-to-risk limits may not select or
-            // replay a coordinate for which that ratio is undefined.
-            return false;
-        };
-        self.ratio_pair_admitted(stop_index, target_index)
+        self.view().chosen_is_in_bounds(chosen)
     }
 
     fn chosen_axes_are_in_bounds(&self, chosen: Chosen) -> bool {
-        if chosen.stop.is_some_and(|i| i >= self.stop_levels_ppm.len())
-            || chosen
-                .target
-                .is_some_and(|i| i >= self.target_levels_ppm.len())
-            || chosen.tsl.is_some_and(|i| i >= self.trail_levels_ppm.len())
-        {
-            return false;
-        }
-        if let Some(ttp) = chosen.ttp
-            && (ttp.arm >= self.target_levels_ppm.len()
-                || ttp.trail >= self.trail_levels_ppm.len()
-                || chosen.target.is_some_and(|target| ttp.arm >= target)
-                || chosen.tsl.is_some_and(|tsl| ttp.trail >= tsl))
-        {
-            return false;
-        }
-        true
+        self.view().chosen_axes_are_in_bounds(chosen)
     }
 
     fn execution_refusal_bits(&self, cell: &Cell) -> ExecutionRefusalBitsV1 {
-        let mut bits = ExecutionRefusalBitsV1::NONE;
-        if cell.stop.is_none() {
-            bits = bits.union(ExecutionRefusalBitsV1::MISSING_STOP);
-        }
-        if cell.target.is_none() {
-            bits = bits.union(ExecutionRefusalBitsV1::MISSING_TARGET);
-        }
-        if cell.trades == 0 {
-            bits = bits.union(ExecutionRefusalBitsV1::ZERO_TRADES);
-        }
-        if cell.ambiguous_bars > self.policy.max_ambiguous_bars() {
-            bits = bits.union(ExecutionRefusalBitsV1::AMBIGUITY_LIMIT);
-        }
-        if cell.gapped > self.policy.max_gap_fills() {
-            bits = bits.union(ExecutionRefusalBitsV1::GAP_LIMIT);
-        }
-        if matches!(
-            self.policy.forced_stop(),
-            ForcedStopV1::RequireExactObserved(_)
-        ) && cell.stop != self.forced_stop_index
-        {
-            bits = bits.union(ExecutionRefusalBitsV1::FORCED_STOP_MISMATCH);
-        }
-        bits
+        self.view().execution_refusal_bits(cell)
     }
 }
 
@@ -3882,6 +3691,13 @@ fn validate_column_sources(
 fn validate_arithmetic_envelope(
     bars: &[Candle],
     resolved: &ResolvedExitGridV1,
+) -> Result<(), ExitGridErrorV1> {
+    validate_arithmetic_envelope_view(bars, &resolved.view())
+}
+
+fn validate_arithmetic_envelope_view(
+    bars: &[Candle],
+    resolved: &ResolvedGridViewV1<'_>,
 ) -> Result<(), ExitGridErrorV1> {
     let count = i128::try_from(bars.len())
         .map_err(|_| ExitGridErrorV1::ArithmeticEnvelopeExceeded("bar count"))?;

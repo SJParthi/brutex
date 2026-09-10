@@ -38,7 +38,10 @@ fn bin() -> std::path::PathBuf {
 /// Created rather than assumed: the whole point of naming it is that it is not
 /// the one directory the operating system guarantees already exists.
 fn command(tag: &str) -> Command {
-    let root = std::env::temp_dir().join(format!("brutex-cli-binary-store-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!(
+        "brutex-cli-binary-store-{tag}-{}",
+        std::process::id()
+    ));
     let _made = std::fs::create_dir_all(&root);
     let mut command = Command::new(bin());
     command.env("BRUTEX_STORE", &root);

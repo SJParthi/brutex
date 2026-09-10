@@ -72,7 +72,7 @@ pub const FORCED_EXIT_MINUTE: i64 = 15 * 60 + 10;
 /// One bar's place in its own session.
 #[derive(Clone, Copy)]
 struct BarBound {
-    /// IST day, from [`indicators::ist_day`].
+    /// Exact Euclidean IST civil day, without saturating the timestamp offset.
     day: i64,
     /// The only opening minute whose one-minute close prices the fixed forced
     /// exit: 15:09 IST.
@@ -128,7 +128,7 @@ impl SessionBounds {
     pub(crate) fn with_step(bars: &[Candle], step_micros: i64, accepted: Option<&[bool]>) -> Self {
         struct ReverseSession {
             day: i64,
-            square_off: i64,
+            square_off: Option<i64>,
             last_fill: i64,
             last_fill_bar: Option<usize>,
             day_ended: bool,
@@ -146,10 +146,12 @@ impl SessionBounds {
         let mut required: std::collections::HashMap<i64, (u64, Option<usize>)> =
             std::collections::HashMap::new();
         for (index, bar) in bars.iter().enumerate() {
-            if ist_minute_of_day(bar.ts_micros) != required_open {
+            if bar.ts_micros.rem_euclid(60_000_000) != 0
+                || ist_minute_of_day(bar.ts_micros) != required_open
+            {
                 continue;
             }
-            let day = indicators::ist_day(bar.ts_micros);
+            let day = exact_ist_day(bar.ts_micros);
             required
                 .entry(day)
                 .and_modify(|seen| {
@@ -173,7 +175,7 @@ impl SessionBounds {
         // that day's fixed 15:10 timestamp; the same absolute instant is then
         // carried through every earlier row on the day.
         for (index, bar) in bars.iter().enumerate().rev() {
-            let day = indicators::ist_day(bar.ts_micros);
+            let day = exact_ist_day(bar.ts_micros);
             if !is_accepted(index) {
                 stamped.push(BarBound {
                     day,
@@ -187,11 +189,15 @@ impl SessionBounds {
             let mut session = match current.take() {
                 Some(session) if session.day == day => session,
                 _ => {
-                    let minute = ist_minute_of_day(bar.ts_micros);
-                    let square_off = bar
-                        .ts_micros
-                        .saturating_sub(minute.saturating_mul(60_000_000))
-                        .saturating_add(FORCED_EXIT_MINUTE.saturating_mul(60_000_000));
+                    // Derive the fixed instant from the civil day, never from
+                    // a row's residual seconds. At timestamp extremes an
+                    // unrepresentable deadline refuses instead of saturating.
+                    let square_off = i64::try_from(
+                        i128::from(day) * 86_400_000_000
+                            + i128::from(FORCED_EXIT_MINUTE) * 60_000_000
+                            - i128::from(indicators::IST_OFFSET_MICROS),
+                    )
+                    .ok();
                     ReverseSession {
                         day,
                         square_off,
@@ -205,7 +211,13 @@ impl SessionBounds {
             // A non-positive step cannot prove that even this bar's interval
             // completed. Refusing is the only answer that does not invent a
             // timeframe for an empty or one-bar slice.
-            let fillable = step > 0 && bar.ts_micros.saturating_add(step) <= session.square_off;
+            let fillable = step > 0
+                && bar.ts_micros.rem_euclid(60_000_000) == 0
+                && bar
+                    .ts_micros
+                    .checked_add(step)
+                    .zip(session.square_off)
+                    .is_some_and(|(close, deadline)| close <= deadline);
             if fillable && session.last_fill_bar.is_none() {
                 session.last_fill_bar = Some(index);
             }
@@ -797,16 +809,11 @@ pub(crate) fn median_step_micros_over(bars: &[Candle], accepted: Option<&[bool]>
 
 /// Minute of the IST day, `0..1440`.
 ///
-/// `div_euclid` and `rem_euclid`, never `/` and `%`: both truncate toward zero,
-/// which puts a pre-epoch stamp in a negative minute. `saturating_add` for the
-/// reason [`indicators::ist_day`] gives at length -- a wrap near `i64::MAX`
-/// returns a plausible in-session minute from a timestamp that is not in the
-/// session at all, and a saturated stamp lands far past the close where the
-/// comparisons above discard it.
-///
-/// The same computation [`indicators::orb::minutes_since_open`] makes, without
-/// its subtraction: that one answers "how far into the session", this one
-/// answers "what time is it", and the forced close is a time.
+/// Reduce the signed timestamp to a nonnegative day remainder before adding
+/// the fixed IST offset. This preserves pre-epoch and extreme timestamps
+/// exactly; dividing that nonnegative remainder into minutes cannot round a
+/// negative value toward zero. The minute-grid guard remains a separate fact:
+/// being within minute15:09 does not establish its exact opening timestamp.
 ///
 /// **This doc block, and `is_window_end`'s beside it, had come adrift.** Both
 /// sat ABOVE `priced` with no blank line between them and its own doc, so
@@ -817,10 +824,24 @@ pub(crate) fn median_step_micros_over(bars: &[Candle], accepted: Option<&[bool]>
 /// question without the circularity a derived boundary gave it -- and this block
 /// is back on the function it was written for.
 const fn ist_minute_of_day(ts_micros: i64) -> i64 {
-    ts_micros
-        .saturating_add(indicators::IST_OFFSET_MICROS)
-        .div_euclid(60_000_000)
-        .rem_euclid(1_440)
+    // Reduce before adding the offset: the intermediate is bounded by one
+    // day plus the fixed offset even at either end of the timestamp type.
+    (ts_micros.rem_euclid(86_400_000_000) + indicators::IST_OFFSET_MICROS)
+        .rem_euclid(86_400_000_000)
+        / 60_000_000
+}
+
+/// Euclidean civil-day rollover without overflowing the timestamp plus offset.
+const fn exact_ist_day(ts_micros: i64) -> i64 {
+    let day = ts_micros.div_euclid(86_400_000_000);
+    // The quotient of an i64 timestamp by a day is at most107 million in
+    // magnitude, so adding this single carry cannot approach an i64 limit.
+    day + if ts_micros.rem_euclid(86_400_000_000) >= 86_400_000_000 - indicators::IST_OFFSET_MICROS
+    {
+        1
+    } else {
+        0
+    }
 }
 
 /// What a combination's forward moves looked like.

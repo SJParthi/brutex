@@ -496,6 +496,7 @@ impl TierJoin {
 #[derive(Debug, Default, Clone)]
 struct Claim {
     per_vendor: [Vec<VendorId>; Vendor::ALL.len()],
+    ambiguous: VendorSet,
 }
 
 impl Claim {
@@ -632,6 +633,13 @@ impl Join {
     /// indistinguishable from success until the bars are wrong.
     #[must_use]
     pub fn id(&self, vendor: Vendor, exchange: Exchange, isin: Isin) -> Option<VendorId> {
+        if self
+            .by_isin
+            .get(&(exchange, isin))
+            .is_some_and(|c| c.ambiguous.contains(vendor))
+        {
+            return None;
+        }
         let ids = self
             .by_isin
             .get(&(exchange, isin))
@@ -797,38 +805,29 @@ fn reason_lines(vendor: Vendor, tier: Tier, heading: &str, rows: &[Unjoinable]) 
 ///
 /// # Each id is filed under the ISIN ITS OWN vendor spelled
 ///
-/// [`crate::merge::Entry`] keeps one ISIN per instrument key plus the different
-/// one a second vendor gave for the same key ([`crate::merge::Entry::conflict`],
-/// D-0020). The old join filed every vendor's id under the FIRST ISIN, which
-/// was harmless while the join started from that same entry — it was going to
-/// arrive back at the row it came from either way. Under NSE's key it is not
-/// harmless: a disputed name would hand back the id of a vendor whose master
-/// spells that paper with a different ISIN entirely, which is a request filed
-/// against the wrong instrument. So the disputing vendor's id is filed under
-/// the ISIN it actually gave, and nothing is filed under an ISIN its own master
-/// did not name.
+/// Every retained assertion is indexed under its own vendor's ISIN. A missing
+/// ISIN contributes nothing. Conflicting assertions remain visible, but their
+/// vendor is marked ambiguous even when they share one id.
 fn index_by_isin(merged: &Merged) -> HashMap<(Exchange, Isin), Claim> {
     let mut by_isin: HashMap<(Exchange, Isin), Claim> = HashMap::with_capacity(merged.by_key.len());
-    for (key, entry) in &merged.by_key {
-        // An index has no ISIN and is not skipped quietly — it is the
-        // `no_nse_isin` bucket, decided at resolution off the exchange's own
-        // file, where the name that asked for it is still in hand.
-        let Some((_, isin)) = entry.isin else {
+    for &(vendor, key, listing) in &merged.assertions {
+        let Some(isin) = listing.isin else {
             continue;
         };
-        let disputing = entry.conflict.map(|(vendor, _)| vendor);
         let claim = by_isin.entry((key.exchange, isin)).or_default();
-        for vendor in Vendor::ALL {
-            if Some(vendor) == disputing {
-                continue;
-            }
-            claim.push(vendor, entry.ids.get(vendor as usize).copied().flatten());
+        claim.push(vendor, Some(listing.vendor_id));
+        if merged
+            .by_key
+            .get(&key)
+            .is_some_and(|e| e.ambiguous.contains(vendor))
+        {
+            claim.ambiguous = claim.ambiguous.with(vendor);
         }
-        if let Some((vendor, disputed)) = entry.conflict {
-            by_isin
-                .entry((key.exchange, disputed))
-                .or_default()
-                .push(vendor, entry.ids.get(vendor as usize).copied().flatten());
+    }
+    for claim in by_isin.values_mut() {
+        for ids in &mut claim.per_vendor {
+            ids.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
+            ids.dedup();
         }
     }
     by_isin
@@ -903,7 +902,7 @@ fn bucket(
                 isin,
                 corroboration,
             }),
-            (Some(only), None) => {
+            (Some(only), None) if !claim.is_some_and(|c| c.ambiguous.contains(vendor)) => {
                 out.ids.push(*only);
                 out.matched.push(Matched {
                     symbol,
@@ -912,7 +911,7 @@ fn bucket(
                     corroboration,
                 });
             }
-            (Some(_), Some(_)) => out.ambiguous.push(Ambiguous {
+            (Some(_), _) => out.ambiguous.push(Ambiguous {
                 symbol,
                 isin,
                 ids: ids.to_vec(),
@@ -926,7 +925,7 @@ fn bucket(
 #[allow(clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
     use super::*;
-    use crate::merge::{Entry, Source, merge};
+    use crate::merge::{Source, merge};
     use brutex_core::instrument::{InstrumentKey, Kind, Segment};
     use brutex_core::vendor::Listing;
     use std::hint::black_box;
@@ -988,6 +987,78 @@ mod tests {
             kept,
             declined: Vec::new(),
         }
+    }
+
+    #[test]
+    fn provenance_and_same_vendor_conflicts_refuse_in_every_input_order() {
+        for reverse in [false, true] {
+            let mut missing = equity("RELIANCE", RELIANCE, "missing");
+            missing.isin = None;
+            let mut sources = vec![
+                source(Vendor::Groww, vec![equity("RELIANCE", RELIANCE, "present")]),
+                source(Vendor::Dhan, vec![missing]),
+            ];
+            if reverse {
+                sources.reverse();
+            }
+            let merged = merge(&sources);
+            let entry = &merged.by_key[&key("RELIANCE", Kind::Equity)];
+            assert_eq!(entry.vendor_isin(Vendor::Dhan), None);
+            assert_eq!(entry.vendor_isin(Vendor::Groww), Some(isin(RELIANCE)));
+            let join = Join::build(&merged);
+            assert_eq!(join.id(Vendor::Dhan, Exchange::Nse, isin(RELIANCE)), None);
+            assert!(
+                join.id(Vendor::Groww, Exchange::Nse, isin(RELIANCE))
+                    .is_some()
+            );
+
+            for (code, id, alias) in [
+                (RELIANCE, "other", false),
+                (INFY, "same", false),
+                (RELIANCE, "other", true),
+            ] {
+                let first = equity("RELIANCE", RELIANCE, "same");
+                let mut second = equity(if alias { "RELIANCE-EQ" } else { "RELIANCE" }, code, id);
+                if alias {
+                    second.unsuffixed = Some(first.key);
+                }
+                let mut rows = vec![first, second, first];
+                if reverse {
+                    rows.reverse();
+                }
+                let merged = merge(&[source(Vendor::Groww, rows)]);
+                let entry = &merged.by_key[&first.key];
+                assert_eq!(entry.ids[Vendor::Groww as usize], None);
+                assert_eq!(entry.vendor_isin(Vendor::Groww), None);
+                assert_eq!(merged.assertions.len(), 2);
+                let join = Join::build(&merged);
+                assert_eq!(join.id(Vendor::Groww, Exchange::Nse, isin(RELIANCE)), None);
+                assert!(
+                    join.tier(Vendor::Groww, Tier::Nifty50)
+                        .ambiguous
+                        .iter()
+                        .any(|r| r.symbol == "RELIANCE")
+                );
+                if code == INFY {
+                    assert_eq!(join.id(Vendor::Groww, Exchange::Nse, isin(INFY)), None);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn identical_assertions_deduplicate_without_creating_ambiguity() {
+        let row = equity("RELIANCE", RELIANCE, "same");
+        let merged = merge(&[source(Vendor::Groww, vec![row, row])]);
+        assert_eq!(merged.assertions.len(), 1);
+        assert_eq!(
+            merged.by_key[&row.key].ids[Vendor::Groww as usize],
+            Some(row.vendor_id)
+        );
+        assert_eq!(
+            Join::build(&merged).id(Vendor::Groww, Exchange::Nse, isin(RELIANCE)),
+            Some(row.vendor_id)
+        );
     }
 
     /// A universe carrying every shape the buckets exist for.
@@ -1771,29 +1842,16 @@ mod tests {
     /// matters here is that the big universe indexes thousands of ISINs and
     /// the small one indexes a handful.
     fn universe_of(n: usize) -> Merged {
-        let mut by_key = std::collections::HashMap::with_capacity(n);
+        let mut kept = Vec::with_capacity(n);
         for i in 0..n {
-            by_key.insert(
-                key(&format!("S{i:07}"), Kind::Equity),
-                Entry {
-                    ids: [None; Vendor::ALL.len()],
-                    vendors: VendorSet::EMPTY.with(Vendor::Dhan),
-                    isin: Isin::new(&format!("INE{:09}", i % 1_000_000_000))
-                        .ok()
-                        .map(|x| (Vendor::Dhan, x)),
-                    conflict: None,
-                    universe: Universe::TOTAL_MARKET,
-                },
-            );
+            kept.push(Listing {
+                key: key(&format!("S{i:07}"), Kind::Equity),
+                vendor_id: VendorId::new(&format!("id{i}")).expect("fixture id"),
+                isin: Isin::new(&format!("INE{:09}", i % 1_000_000_000)).ok(),
+                unsuffixed: None,
+            });
         }
-        Merged {
-            by_key,
-            conflicts: Vec::new(),
-            eligibility: Vec::new(),
-            // The fixture supplies both brokers' rows, so both are what any
-            // cross-check here is asked of.
-            contributed: vec![Vendor::Groww, Vendor::Dhan],
-        }
+        merge(&[source(Vendor::Dhan, kept)])
     }
 
     #[test]

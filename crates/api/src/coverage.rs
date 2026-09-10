@@ -295,10 +295,11 @@ impl Coverage {
                 let mut line = format!(
                     "{} · {}: {} of {} reachable — {} lacks, {} ambiguous, {} malformed, \
                      {} no NSE ISIN. \
-                     A run of target={} asks for the {} this feed can name and SKIPS the \
-                     rest before any budget or socket, because `server::broker_run` now \
-                     applies this same test — one array index per candidate. These names \
-                     are what it skipped",
+                     This is default identity coverage, not pull readiness. A run of \
+                     target={} preflights the selected basket and refuses unresolved \
+                     identities before vendor work; it does not silently skip them. \
+                     Explicit Zerodha native-symbol mapping is a separate, non-ISIN \
+                     policy. These names are unresolved under this coverage check",
                     vendor.as_str(),
                     target.label(),
                     covered.matched,
@@ -308,12 +309,6 @@ impl Coverage {
                     covered.malformed,
                     covered.no_nse_isin,
                     target.slug(),
-                    // THE REACHABLE COUNT, NOT THE PUBLISHED ONE. The sentence
-                    // used to end "STILL ATTEMPTS ALL {accounted}" and this
-                    // argument was that total; the run now asks for `matched`
-                    // and skips the difference, so the number here is what it
-                    // actually requests. D-0347.
-                    covered.matched,
                 );
                 let names: Vec<&str> = covered
                     .unresolved
@@ -1032,23 +1027,12 @@ mod tests {
                 line.contains("target="),
                 "and names the slug a run would use: {line}"
             );
-            // AND SAYS WHAT THE RUN ACTUALLY DOES.
-            //
-            // **This assertion was the other way round, and it was right to
-            // be.** It read `line.contains("STILL ATTEMPTS ALL")` under the
-            // reason *"the note must not claim a filter the pull path does not
-            // have"* — because `broker_run` filtered by the universe, so the
-            // shortfall was refused instrument by instrument rather than never
-            // attempted, and a note implying otherwise would have been a
-            // comforting lie on every boot.
-            //
-            // D-0347 wrote that filter. `broker_run` now applies the same
-            // one-array-index test this module uses, so the claim is true and
-            // the guard flips with it: the note must describe the skip, and
-            // must NOT still carry the sentence that admitted its absence.
+            // A coverage count is not permission to shrink a selected basket.
             assert!(
-                line.contains("SKIPS the rest before any budget or socket"),
-                "the note must state the filter the pull path now has: {line}"
+                line.contains("not pull readiness")
+                    && line.contains("does not silently skip")
+                    && line.contains("non-ISIN"),
+                "the note must distinguish coverage from request preflight: {line}"
             );
             assert!(
                 !line.contains("STILL ATTEMPTS ALL"),

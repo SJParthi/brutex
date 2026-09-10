@@ -37,6 +37,8 @@ use std::path::Path;
 use pull::chain::Discovery;
 use pull::masters::{self, Fetched, Landed, Source, Transport};
 
+static REFRESH: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// The JSON content type every route here answers with.
 type JsonHeaders = [(axum::http::HeaderName, &'static str); 1];
 
@@ -409,7 +411,24 @@ async fn obtain<D: Discovery, P: masters::Pause>(
     dir: &Path,
     source: &Source,
 ) -> (Landed, Fetched) {
-    let tried = masters::fetch(from, clock, source).await;
+    // Validate inside the ladder so a malformed success is a settled refusal
+    // for this URL and a declared mirror still gets its turn. Do not validate
+    // the session prime: it is intentionally not a master document.
+    struct Validating<'a, D> {
+        from: &'a D,
+        source: &'a Source,
+    }
+    impl<D: Discovery> Discovery for Validating<'_, D> {
+        async fn get(&self, url: &str) -> Result<String, pull::chain::Refusal> {
+            let body = self.from.get(url).await?;
+            if self.source.every_url().any(|candidate| candidate == url) {
+                masters::validated_body(self.source, &body)
+                    .map_err(|why| pull::chain::Refusal::answered(200, why))?;
+            }
+            Ok(body)
+        }
+    }
+    let tried = masters::fetch(&Validating { from, source }, clock, source).await;
     let landed = match tried.body {
         Some(ref body) => masters::land(dir, source, body),
         // THE LAST WORD THE HOST SAID, not a summary of the ladder. The full
@@ -489,6 +508,9 @@ pub async fn refresh(
     // answering from the boot parse. `Site::reparse` is what closes it.
     axum::extract::State(site): axum::extract::State<crate::server::Loaded>,
 ) -> (axum::http::StatusCode, JsonHeaders, String) {
+    // FIFO async lock covers fetch -> landing -> reload, including credentials
+    // and all sources. An older download cannot publish after a newer refresh.
+    let _refresh = REFRESH.lock().await;
     let Ok(dir) = crate::server::masters_dir() else {
         return (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -891,6 +913,61 @@ mod tests {
             .block_on(future)
     }
 
+    #[test]
+    fn refresh_requests_wait_before_starting_the_next_fetch() {
+        block_on(async {
+            let dir = scratch("refresh-serialization");
+            let site = std::sync::Arc::new(crate::server::Site::load(&dir, &dir));
+            let first = super::REFRESH.lock().await;
+            let mut next = Box::pin(super::refresh(axum::extract::State(site)));
+            let waker = std::task::Waker::noop();
+            let mut cx = std::task::Context::from_waker(waker);
+            assert!(std::future::Future::poll(next.as_mut(), &mut cx).is_pending());
+            // Cancel while queued: no directory lookup, credential or fetch.
+            drop(next);
+            drop(first);
+            assert!(super::REFRESH.try_lock().is_ok());
+        });
+    }
+
+    #[test]
+    fn malformed_success_uses_the_mirror_without_retrying_the_bad_payload() {
+        struct Mirror(std::sync::Mutex<Vec<String>>);
+        impl Discovery for Mirror {
+            async fn get(&self, url: &str) -> Result<String, Refusal> {
+                self.0.lock().expect("calls").push(url.to_owned());
+                Ok(if url.ends_with("primary") {
+                    format!("{}short\n", a_master())
+                } else {
+                    a_master()
+                })
+            }
+        }
+        let from = Mirror(std::sync::Mutex::new(Vec::new()));
+        let source = masters::Source {
+            url: "https://fixture.invalid/primary",
+            mirrors: &["https://fixture.invalid/mirror"],
+            prime: None,
+            ..masters::SOURCES[0]
+        };
+        let dir = scratch("validation-mirror");
+        let (landed, tried) = block_on(obtain(&from, &NoWait, &dir, &source));
+        assert!(landed.is_written(), "{landed:?}");
+        assert_eq!(from.0.lock().expect("calls").len(), 2);
+        assert!(matches!(
+            tried.attempts.first().expect("primary attempt").got,
+            masters::Got::Refused {
+                status: Some(200),
+                verdict: masters::Verdict::Never,
+                ..
+            }
+        ));
+        assert!(matches!(
+            tried.attempts.get(1).expect("mirror attempt").got,
+            masters::Got::Body { .. }
+        ));
+    }
+
     /// A clock that does not wait.
     ///
     /// The retry ladder's own schedule is asserted where the ladder lives —
@@ -922,7 +999,40 @@ mod tests {
     /// from `required_columns` so it cannot drift from what the reader wants.
     fn a_master_for(vendor: brutex_core::vendor::Vendor) -> String {
         let columns = masters::required_columns(vendor);
-        let row = vec!["X"; columns.len()].join(",");
+        let names = vendor.master_columns();
+        let row = columns
+            .iter()
+            .map(|name| {
+                if *name == names.vendor_id {
+                    "1333"
+                } else if *name == names.exchange {
+                    "NSE"
+                } else if *name == names.segment {
+                    if vendor == brutex_core::vendor::Vendor::Dhan {
+                        "E"
+                    } else if vendor == brutex_core::vendor::Vendor::Zerodha {
+                        "NSE"
+                    } else {
+                        "CASH"
+                    }
+                } else if *name == names.underlying || *name == names.trading_symbol {
+                    "RELIANCE"
+                } else if *name == names.instrument_type {
+                    if vendor == brutex_core::vendor::Vendor::Dhan {
+                        "EQUITY"
+                    } else {
+                        "EQ"
+                    }
+                } else if *name == names.listing_class {
+                    "EQ"
+                } else if *name == names.isin {
+                    "INE002A01018"
+                } else {
+                    ""
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(",");
         let mut body = columns.join(",");
         body.push('\n');
         while body.len() <= masters::MIN_BODY_BYTES {

@@ -1498,11 +1498,11 @@ impl TradeEvidenceV1 {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ReconciledTradeEvidenceV1 {
-    max_mae_paisa: ObservedU64V1,
-    weakest_period_return_paisa: ObservedI64V1,
-    session_concentration_ppm: ObservedU64V1,
-    largest_trade_profit_share_ppm: ObservedU64V1,
+pub(crate) struct ReconciledTradeEvidenceV1 {
+    pub(crate) max_mae_paisa: ObservedU64V1,
+    pub(crate) weakest_period_return_paisa: ObservedI64V1,
+    pub(crate) session_concentration_ppm: ObservedU64V1,
+    pub(crate) largest_trade_profit_share_ppm: ObservedU64V1,
 }
 
 impl ReconciledTradeEvidenceV1 {
@@ -1547,7 +1547,7 @@ fn trade_evidence_values(
     clippy::too_many_lines,
     reason = "one forward fold keeps every TradeRow-to-Cell reconciliation beside the accumulator it proves; splitting it would let row-derived evidence bypass part of the exact-cell check"
 )]
-fn reconcile_trade_rows(
+pub(crate) fn reconcile_trade_rows(
     cell: &Cell,
     rows: &[TradeRow],
 ) -> Result<ReconciledTradeEvidenceV1, String> {
