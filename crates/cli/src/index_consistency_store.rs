@@ -203,12 +203,22 @@ pub(crate) fn produce(
     verify_parent()?;
     // KEY the identity here; JUDGE the set inside the audited region below.
     //
-    // `declared_policy` ran here and refused a mixed or empty set before
-    // `sweep_evidence::begin`, so those two refusals -- and only those two --
-    // produced no attempt row, no Refused terminal and nothing on /logs, while
-    // every other refusal in this function still recorded one. The strict check
-    // is unchanged and still runs, inside `encode`, which is inside the closure.
-    // D-0601.
+    // `declared_policy` ran here and refused a MIXED or EMPTY set before
+    // `sweep_evidence::begin`, so neither produced an attempt row, a Refused
+    // terminal, or anything on /logs, while every other refusal in this
+    // function still recorded one. The mixed case is restored: `keying_policy`
+    // answers only "which content address is this" from the first record, the
+    // attempt opens, and `encode`'s `declared_policy` then refuses inside the
+    // closure and terminates the attempt as Refused.
+    //
+    // THE EMPTY CASE IS NOT FIXED AND CANNOT BE, and D-0601 overstated this by
+    // naming both. A record set with no evaluations declares no policy, so it
+    // has no content address, so there is no identity to file an audit row
+    // under -- `begin` takes one. The refusal is correct and the absence of a
+    // row is structural, not an oversight. Neither live producer can reach it:
+    // `index_stop_qualification_numeric` refuses an empty training family and
+    // `boolean_qualification_v1` refuses a zero count, both before this call.
+    // D-0602.
     let policy = keying_policy(&records)?;
     let id = identity(parent, pin, policy);
     let attempt =

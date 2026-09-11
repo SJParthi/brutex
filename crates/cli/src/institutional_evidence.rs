@@ -1630,8 +1630,9 @@ pub(crate) fn reconcile_trade_rows(
             // not reconcile ...". A win no larger than its own `best - worst`
             // bracket is a win under one admissible ordering and a loss under
             // another, so it is not the floor a 3:1 rule may rest on.
-            let bracket = row.best.saturating_sub(row.worst);
-            if row.worst > bracket && (min_win == 0 || row.worst < min_win) {
+            // `min(worst)` over the wins -- the bracket test this replaces was
+            // backwards and inflated the 3:1 rule. See `grid::tally_trade`. D-0602.
+            if row.worst > 0 && (min_win == 0 || row.worst < min_win) {
                 min_win = row.worst;
             }
             losing_streak = 0;
@@ -2075,11 +2076,27 @@ pub(crate) fn wilson_lower_ppm(wins: u64, trades: u64, expected_bp: i64) -> Resu
     clippy::cast_sign_loss,
     reason = "bootstrap probabilities are full-precision statistics, never prices; ppm exists only as the canonical admission comparison projection"
 )]
+/// Project a p-value into integer ppm, rounding AWAY from significance.
+///
+/// # Why `ceil` and not `floor`
+///
+/// This feeds `white_reality_p_value_ppm` and `spa_p_value_ppm`, which are
+/// compared against MAXIMA. Flooring moves a p-value down, which is toward
+/// significance: a bootstrap p-value is an exact rational `k/(draws+1)`, so at
+/// a million draws the granularity reaches this projection and
+/// `p = 50001/1000001 ~ 0.0500005` floored to `50_000` PASSES a `<= 50_000`
+/// gate the true value fails.
+///
+/// `outcome::milli` carries a doc block on exactly this principle and lands on
+/// the other side of it -- its truncation is "systematically toward zero, which
+/// is the direction that makes every finding look slightly weaker". Here the
+/// same truncation made findings look stronger. A rounding rule is only safe
+/// once you know which way the comparison runs. D-0602.
 fn probability_ppm(name: &str, value: f64) -> Result<u64, String> {
     if !value.is_finite() || !(0.0..=1.0).contains(&value) {
         return Err(format!("{name} p-value is outside finite [0,1]"));
     }
-    Ok((value * PPM as f64).floor() as u64)
+    Ok((value * PPM as f64).ceil() as u64)
 }
 
 fn require_digest(name: &str, digest: &[u8; 32]) -> Result<(), String> {

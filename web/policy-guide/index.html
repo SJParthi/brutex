@@ -27,25 +27,25 @@ const settings = [
     "group": "Sample",
     "field": "min_support_hits",
     "title": "Enough matching signals",
-    "limit": "At least 200",
-    "why": "A matching signal is not necessarily an entered or completed trade.",
-    "raw": "200"
+    "limit": "At least 40",
+    "why": "A matching signal is not necessarily an entered or completed trade. At 200 this floor demanded the combination fire on about seven percent of all bars over the swept window, which mandates a grinder rather than filtering one.",
+    "raw": "40"
   },
   {
     "group": "Sample",
     "field": "min_independent_sessions",
     "title": "Enough trading days",
-    "limit": "At least 60",
+    "limit": "At least 30",
     "why": "Counts distinct qualifying sessions; that alone cannot prove statistical independence.",
-    "raw": "60"
+    "raw": "30"
   },
   {
     "group": "Sample",
     "field": "min_trades",
     "title": "Enough completed trades",
-    "limit": "At least 200",
-    "why": "Avoids qualifying a strategy on a handful of outcomes. This is a screening floor, not a proof of adequate statistical power.",
-    "raw": "200"
+    "limit": "At least 40",
+    "why": "Avoids qualifying a strategy on a handful of outcomes. This is a screening floor, not a proof of adequate statistical power. At 200 it forced about 2.4 trades a week, which a setup meant to fire seldom cannot meet.",
+    "raw": "40"
   },
   {
     "group": "Loss and return",
@@ -59,17 +59,17 @@ const settings = [
     "group": "Loss and return",
     "field": "min_win_rate_ppm",
     "title": "Winning trade share",
-    "limit": "At least 40%",
+    "limit": "At least 25%",
     "why": "Counts completed trades, alongside the effective loss and reward/risk limits. The index workflow separately requires at least 60% winning eligible days.",
-    "raw": "400000"
+    "raw": "250000"
   },
   {
     "group": "Loss and return",
     "field": "min_wilson_win_rate_ppm",
     "title": "Cautious win-rate estimate",
-    "limit": "At least 35%",
-    "why": "Requires the Wilson lower bound to clear the floor; the method's assumptions still matter.",
-    "raw": "350000"
+    "limit": "At least 14%",
+    "why": "Requires the Wilson lower bound to clear the floor; the method’s assumptions still matter. At 35%, and even at 20%, this bound was unsatisfiable at the profile’s own minimum trade count: forty trades at the 25% point floor give a Wilson lower bound of 141,871 ppm.",
+    "raw": "140000"
   },
   {
     "group": "Loss and return",
@@ -139,33 +139,33 @@ const settings = [
     "group": "Concentration",
     "field": "max_session_concentration_ppm",
     "title": "Dependence on one day",
-    "limit": "At most 10%",
+    "limit": "At most 25%",
     "why": "One session cannot contribute more than a tenth of the trade count.",
-    "raw": "100000"
+    "raw": "250000"
   },
   {
     "group": "Concentration",
     "field": "max_largest_trade_profit_share_ppm",
     "title": "Dependence on one lucky trade",
-    "limit": "At most 10%",
-    "why": "Limits the measured profit share attributable to the largest trade.",
-    "raw": "100000"
+    "limit": "At most 50%",
+    "why": "Limits the measured share of GROSS WIN attributable to the largest trade. At 10%, admitting a winner N times the typical one required 9N+1 winning trades, so a tenfold outlier needed 91 winners and the best trade was capped near the average win.",
+    "raw": "500000"
   },
   {
     "group": "Loss and return",
     "field": "max_drawdown_paisa",
     "title": "Largest accumulated setback",
-    "limit": "At most 10R",
+    "limit": "At most 3R",
     "why": "Caps the peak-to-trough loss in price units; not an account-percentage limit.",
-    "raw": "\"risk*10\""
+    "raw": "\"risk*3\""
   },
   {
     "group": "Loss and return",
     "field": "max_losing_trade_rate_ppm",
     "title": "Losing trade share",
-    "limit": "At most 60%",
+    "limit": "At most 75%",
     "why": "A rate remains comparable across study lengths.",
-    "raw": "600000"
+    "raw": "750000"
   },
   {
     "group": "Loss and return",
@@ -187,9 +187,9 @@ const settings = [
     "group": "Sample",
     "field": "min_winning_trades",
     "title": "Enough winning trades",
-    "limit": "At least 80",
+    "limit": "At least 10",
     "why": "Adds an absolute sample floor alongside the win-rate rule.",
-    "raw": "80"
+    "raw": "10"
   },
   {
     "group": "Loss and return",

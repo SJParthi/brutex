@@ -35719,3 +35719,68 @@ gate-checks that prose.
 
 Verified on this tree: `cargo fmt --check` clean, `cargo clippy` clean,
 `cargo test -p cli --lib` 1,293 passed / 0 failed.
+
+### D-0602 — A win's bracket measures its size, never its sign — 2026-09-11
+
+**This reverses D-0595, and D-0595 was mine.** It excluded any winning trade no
+larger than its own `optimistic - pessimistic` bracket from `min_win`, arguing
+that such a win "is a win under one admissible ordering and a loss under
+another". That is false. `pessimistic` and `optimistic` are the two ENDS of one
+trade's measurement interval -- the worst attribution at the worst fills and the
+best at the best -- and `pessimistic <= optimistic` always. The branch is reached
+only when the pessimistic reading is positive, so the trade won under the worst
+admissible ordering and therefore under every one. The bracket is uncertainty
+about how LARGE the win was. It never says the sign could flip.
+
+**The direction is what makes this serious.** Dropping small certain wins out of
+`min_win` RAISED the floor, and `min_win` is the numerator of
+`worst_reward_risk_ppm` -- the mandatory `min_worst_reward_risk_ppm` gate, which
+is the operator's own stated rule, `min(win) >= 3 x max(loss)`. The loss side,
+`accrue_risk`, applied no bracket test at all, so an ambiguous LOSS stayed in the
+denominator while an ambiguous WIN left the numerator. Both halves pushed the
+ratio up. Worked case: wins of +100 (bracket 900) and +500 (bracket 100) against
+a worst loss of 200. Correct ratio 100/200 = 0.50x, fails 3:1. Computed 500/200
+= 2.50x -- five times better. It also made `guaranteed_floor` (`wins x min_win`)
+claim more than the sample realised, since `wins` still counted the trades the
+floor had excluded. Every result produced while D-0595 stood was flattered by
+it, including the +Rs 2,720.35 leaderboard in D-0597.
+
+**Four sites, and the first pass found three.** `grid::tally_trade`,
+`institutional_evidence::reconcile_trade_rows` and
+`population_base_evidence_v2::fold_trade_rows` reconcile against one another and
+were corrected together. `index_stop_qualification_metrics` was missed: it names
+the variable `win` rather than `pess`, so a search for `pess > bracket` returned
+nothing, and it is the one copy NOT reconciled against the others -- which is why
+its defect survived the reconciliation that caught the rest. It is also the
+single-stop path, the one live sweeps run. A second adversarial agent found it
+by searching for the SHAPE of the test rather than its spelling.
+
+`tally_trade` keeps its `_opt` parameter, now deliberately unused: it was
+threaded there for this test alone, and removing it would churn five call sites
+to delete an argument a future magnitude rule would have to thread back.
+
+**The same error survives in one more place, and is NOT fixed here.**
+`index_consistency.rs` classifies a DAY under `Policy::V2`/`V3` as a win when
+`pessimistic > bracket` and a loss when `optimistic < 0`. The loss rule is right
+-- lost under the best reading means lost under all. The win rule repeats this
+entry's error: a day with `0 < pessimistic <= bracket` won under every ordering
+and is filed as a scratch. It errs CONSERVATIVE -- fewer winning days, never an
+inflated verdict -- but it makes V3's one-in-three winning-day rule harder to meet
+for exactly the rare-winner shape V3 exists to admit. The symmetric rule is
+win iff `pessimistic > 0`, loss iff `optimistic < 0`, scratch otherwise. It is
+deferred rather than fixed because it changes what existing V2 and V3 records
+MEAN without changing their digests, which §3 rule 8 forbids; it needs a new
+version and an operator decision about the V3 records already written.
+
+**Also corrected.** `probability_ppm` projected White and SPA p-values into ppm
+with `floor`, which moves a p-value toward significance; both are compared
+against MAXIMA, so `p = 50001/1000001` floored to 50,000 passed a gate the true
+value fails. It rounds up now. `docs/04-invariants.md` AS-12 asserted D-0595's
+reasoning and cited a test that pinned the defect; AS-13 claimed all four folds
+held "the identical bracket test". Both are rewritten to what now holds.
+
+Verified on this tree: `cargo fmt --check` clean, `cargo clippy --all-targets`
+clean, `cargo test -p cli --lib` 1,294 passed / 0 failed, `-p runner --lib` 584
+passed / 0 failed, `web` suite 776 passed / 0 failed, policy guide 37 of 37
+limits matching. The p-value rounding change passes the suite, which proves
+nothing depended on the old floor; no test yet pins the new direction.

@@ -15,10 +15,10 @@ const WEEK = ['index', 'monday', 'kind', 'state', 'weekday_days', 'eligible_days
   'excluded_days', 'closed_weekdays', 'weekend_sessions', 'trades', 'pessimistic_paisa'];
 // These stable native reason labels are display text, not a second evaluator.
 const REASONS = [
-  ['winning_day_ratio_below_three_fifths', 'Fewer than 60% of eligible days were winning days.'],
-  ['complete_week_has_fewer_than_three_wins', 'A complete five-session week had fewer than three winning days.'],
-  ['complete_week_has_more_than_two_losses', 'A complete five-session week had more than two losing days.'],
-  ['losing_day_streak_exceeds_two', 'More than two losing days occurred without a winning day resetting the streak.'],
+  ['winning_day_ratio_below_policy_minimum', 'Fewer winning days than the policy requires.'],
+  ['complete_week_below_policy_minimum_wins', 'A complete five-session week had fewer winning days than the policy requires.'],
+  ['complete_week_above_policy_maximum_losses', 'A complete five-session week had more losing days than the policy allows.'],
+  ['losing_day_streak_above_policy_maximum', 'More losing days occurred in a row than the policy allows, without a winning day resetting the streak.'],
   ['no_complete_five_session_week', 'No complete five-session week was measured.'],
   ['no_eligible_session', 'No eligible trading day was available to measure.'],
   ['missing_expected_session', 'An expected trading day is missing its saved observation.'],
@@ -56,8 +56,24 @@ export function validateIndexConsistencyPolicy(value) {
     'maximum_losing_day_streak', 'pnl_basis', 'zero_days_reset_streak', 'costs_included', 'evaluated_scope'];
   if (!keys(value, fields) || value.schema_version !== 1 || !hex(value.policy_digest) ||
       !Array.isArray(value.instruments) || value.instruments.length !== 2 || !INDEXES.every((name, index) => value.instruments[index] === name) ||
-      value.minimum_winning_day_numerator !== '3' || value.minimum_winning_day_denominator !== '5' ||
-      value.minimum_week_winning_days !== '3' || value.maximum_week_losing_days !== '2' || value.maximum_losing_day_streak !== '2' ||
+      // THRESHOLDS ARE VALIDATED AS SHAPE, NEVER AS VALUES.
+      //
+      // These five read '3','5','3','2','2' — V1's numbers, hardcoded here. The
+      // server now serves V3 on this page, so this function threw on every
+      // load, IndexStopLaunch caught it into `phase:'failed'`, and the operator
+      // could not launch a sweep at all. Nothing caught that: no Rust gate reads
+      // `web/`, and `cargo test -p cli --lib` compiles neither `api` nor this.
+      //
+      // Re-asserting the numbers here is the same defect `CLAUDE.md` §5 names
+      // for the condition table: two copies of one fact, correct the day it is
+      // written and silently wrong the first time the other copy moves. The
+      // `policy_digest` above already authenticates the exact policy — it is
+      // `blake3` over the version word and all five thresholds — so a changed
+      // threshold is a changed digest and there is nothing left for a literal
+      // to add. What the browser must still refuse is a MALFORMED field.
+      !uint(value.minimum_winning_day_numerator) || !uint(value.minimum_winning_day_denominator) ||
+      !uint(value.minimum_week_winning_days) || !uint(value.maximum_week_losing_days) ||
+      !uint(value.maximum_losing_day_streak) ||
       value.pnl_basis !== 'pessimistic_gross_paisa' || value.zero_days_reset_streak !== false || value.costs_included !== false ||
       value.evaluated_scope !== 'training_and_later_with_calendar_gap_check') {
     throw new Error('The reported index day/week policy does not match the approved rule.');

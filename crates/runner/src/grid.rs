@@ -4265,13 +4265,19 @@ struct Streaks {
 /// [`Streaks`] is carried by the caller because each counter measures a RUN and
 /// is cleared by the OTHER'S outcome, which a per-trade function cannot do for
 /// itself. `max_winning_streak` was missing while its opposite shipped.
-const fn tally_trade(cell: &mut Cell, pess: i64, opt: i64, held: usize, streaks: &mut Streaks) {
+const fn tally_trade(cell: &mut Cell, pess: i64, _opt: i64, held: usize, streaks: &mut Streaks) {
     if pess > 0 {
         cell.gross_win = cell.gross_win.saturating_add(pess);
         if pess > cell.best_trade {
             cell.best_trade = pess;
         }
-        // THE FLOOR OF THE WINS, AND A SCRATCH IS NOT ON IT -- D-0595.
+        // THE FLOOR OF THE WINS IS THE SMALLEST WIN -- D-0602, correcting D-0595.
+        //
+        // `_opt` is retained in the signature and deliberately unused: it was
+        // threaded here for the bracket test below, which was wrong, and the
+        // callers still compute it for the optimistic reading. Removing it
+        // would churn five call sites to delete an argument a future magnitude
+        // rule would have to thread back.
         //
         // `min_win` starts at zero, which is below every winner, so the first
         // qualifying winner must set it unconditionally rather than by
@@ -4297,8 +4303,31 @@ const fn tally_trade(cell: &mut Cell, pess: i64, opt: i64, held: usize, streaks:
         // test and RECONCILES its result against this field, so the two must
         // agree exactly or every Step-3 run refuses with "same-pass TradeRows
         // do not reproduce the evaluated Cell".
-        let bracket = opt.saturating_sub(pess);
-        if pess > bracket && (cell.min_win == 0 || pess < cell.min_win) {
+        // THE BRACKET TEST THAT STOOD HERE WAS BACKWARDS, and it inflated the
+        // one gate the operator's whole rule rests on. D-0602.
+        //
+        // It read `pess > opt - pess`, on the argument that "a gain no larger
+        // than that bracket is a win under one admissible reading and a loss
+        // under another". That is not what those two numbers are. `pess` and
+        // `opt` are the two ENDS of one trade's measurement interval -- the
+        // worst attribution at the worst fills and the best at the best. Since
+        // `pess <= opt` always, `pess > 0` means the trade won under the WORST
+        // admissible reading and therefore under EVERY reading. The bracket
+        // measures how uncertain the win's SIZE is; it never says the sign
+        // could flip. No win reaching this branch was ever ambiguous.
+        //
+        // What the old test actually did was drop small CERTAIN wins out of the
+        // floor while leaving them in `wins`, `gross_win` and both streaks --
+        // and `accrue_risk` below applies no bracket test at all, so an
+        // ambiguous LOSS stays in the denominator while an ambiguous WIN left
+        // the numerator. Both moves push `min_win / worst_trade` UP, and that
+        // ratio is `min_worst_reward_risk_ppm`, the stated 3:1 rule. It also
+        // made `guaranteed_floor` (`wins * min_win`) claim more than the sample
+        // realised, because `wins` still counted the trades the floor excluded.
+        //
+        // A floor is the smallest thing that actually happened under the worst
+        // reading. That is `min(pess)` over the wins, and nothing else.
+        if pess > 0 && (cell.min_win == 0 || pess < cell.min_win) {
             cell.min_win = pess;
         }
         streaks.losing = 0;
@@ -5428,46 +5457,58 @@ mod tests {
     /// scratch really did win and `TradeAggregatesV2::validate` requires
     /// `losses == trades - wins`. Only the floor moves.
     #[test]
-    fn a_win_inside_its_own_pricing_bracket_is_not_the_smallest_win() {
+    fn the_floor_is_the_smallest_win_under_the_worst_reading_whatever_its_bracket() {
         let mut cell = Cell::default();
         let mut streaks = Streaks::default();
 
-        // (pessimistic, optimistic): a real win, a scratch, a bigger win.
+        // (pessimistic, optimistic): a real win, a SMALL win with a wide
+        // bracket, a bigger win.
         for (pess, opt) in [(300_i64, 400_i64), (20, 100), (900, 950)] {
             tally_trade(&mut cell, pess, opt, 1, &mut streaks);
             cell.trades = cell.trades.saturating_add(1);
         }
 
+        // THE TEST THIS REPLACES ASSERTED 300, AND IT WAS PINNING THE DEFECT.
+        //
+        // It said the 20-paisa win "spans 80 paisa of fill uncertainty and
+        // must not become the floor". But `pess` and `opt` are the two ENDS of
+        // one measurement interval, and `pess = 20 > 0` means the trade won
+        // under the WORST admissible reading -- so it won under every reading.
+        // The 80-paisa span is uncertainty about the win's SIZE, never about
+        // its sign. Excluding it raised `min_win` from 20 to 300, a FIFTEENFOLD
+        // inflation of the numerator of `min_worst_reward_risk_ppm`, which is
+        // the operator's stated 3:1 rule and gate 5 of 39. `accrue_risk`
+        // applies no such test to losses, so the denominator kept its own
+        // ambiguous trades: both halves moved the ratio up. D-0602.
         assert_eq!(
-            cell.min_win, 300,
-            "the 20-paisa win spans 80 paisa of fill uncertainty and must not \
-             become the floor; 300 against a 100 span survives either reading"
+            cell.min_win, 20,
+            "a floor is the smallest thing that actually happened under the \
+             worst reading; 20 won under both orderings and is that floor"
         );
         // `cell.wins` is deliberately not asserted here: it is incremented by
-        // the caller's own `pess > 0` block and not by this function, so a
-        // count read after `tally_trade` alone would be zero and would prove
-        // nothing about either behaviour.
+        // the caller's own `pess > 0` block and not by this function.
         assert_eq!(
             cell.gross_win, 1_220,
-            "the scratch is still a win and still in the gross: 300+20+900"
+            "every win is still a win and still in the gross: 300+20+900"
         );
         assert_eq!(cell.best_trade, 900, "the ceiling is untouched");
         assert_eq!(
             cell.max_winning_streak, 3,
-            "a scratch does not break a winning run"
+            "three wins in a row is three wins in a row"
         );
 
-        // THE OLD BEHAVIOUR, ASSERTED SO THE CHANGE IS VISIBLE. With no
-        // uncertainty at all every win qualifies, which is what the two test
-        // call sites above rely on and what a zero-spread fixture should give.
+        // And the bracket genuinely cannot change the answer: the same three
+        // pessimistic values with NO uncertainty give the same floor. If these
+        // two ever disagree, a sign test has been confused for a size test
+        // again.
         let mut certain = Cell::default();
         let mut none = Streaks::default();
         for pess in [300_i64, 20, 900] {
             tally_trade(&mut certain, pess, pess, 1, &mut none);
         }
         assert_eq!(
-            certain.min_win, 20,
-            "with a zero bracket the smallest win is the smallest win"
+            certain.min_win, cell.min_win,
+            "the floor cannot depend on how wide the fill bracket was"
         );
     }
 

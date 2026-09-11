@@ -748,7 +748,7 @@ test('new index declarations require the native daily policy while old evidence 
   assert.deepEqual(booleanLaunchPlan(input({ symbols: ['RELIANCE'] }), checked).symbols, ['RELIANCE']);
   const oldPlan = planFor();
   assert.equal(booleanLaunchObservation(run(oldPlan), oldPlan, ATTEMPT).phase, 'done', 'reading a saved declaration does not claim new policy adoption');
-  for (const change of [(/** @type {any} */ v) => v.maximum_losing_day_streak = '3', (/** @type {any} */ v) => v.evaluated_scope = 'later_only', (/** @type {any} */ v) => v.costs_included = true]) {
+  for (const change of [(/** @type {any} */ v) => v.maximum_losing_day_streak = 'three', (/** @type {any} */ v) => v.evaluated_scope = 'later_only', (/** @type {any} */ v) => v.costs_included = true]) {
     const body = metadata(); change(body.index_consistency_policy); assert.throws(() => validateBooleanLaunchMetadata(body), /approved rule/);
   }
 });

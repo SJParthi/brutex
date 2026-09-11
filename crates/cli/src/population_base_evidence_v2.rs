@@ -1087,8 +1087,9 @@ fn fold_trade_rows(
             // a scratch really did win, and `TradeAggregatesV2::validate`
             // requires `losses == trades - wins`. Only the question "what is
             // the smallest win this rule may rest on" changes.
-            let bracket = row.best.saturating_sub(row.worst);
-            if row.worst > bracket && (min_win == 0 || row.worst < min_win) {
+            // `min(worst)` over the wins -- the bracket test this replaces was
+            // backwards and inflated the 3:1 rule. See `grid::tally_trade`. D-0602.
+            if row.worst > 0 && (min_win == 0 || row.worst < min_win) {
                 min_win = row.worst;
             }
             losing_streak = 0;

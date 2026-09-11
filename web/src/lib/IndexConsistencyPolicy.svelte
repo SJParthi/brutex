@@ -8,9 +8,15 @@
     <p><b>Applies to NIFTY and BANKNIFTY.</b> Training, the later evaluation and the full date span
       must each satisfy these checks. Cash stocks keep their existing institutional checks.</p>
     <table><thead><tr><th>What is checked</th><th>Required result</th></tr></thead><tbody>
-      <tr><th>Winning trading days</th><td>At least 60% of all eligible trading days</td></tr>
-      <tr><th>Every complete five-session week</th><td>At least 3 winning days and no more than 2 losing days</td></tr>
-      <tr><th>Losing-day streak across weeks</th><td>No more than 2 losing days; only a winning day resets the streak</td></tr>
+      <!-- READ FROM THE POLICY, NEVER WRITTEN HERE. These three rows read "60%",
+           "3 winning days", "no more than 2 losing days" and "no more than 2"
+           as literal prose while the `policy` prop beside them was used only for
+           its digest. When the served policy moved, this table went on stating
+           the old rule next to records judged by the new one -- a page
+           advertising a two-day streak cap beside a record judged at ten. -->
+      <tr><th>Winning trading days</th><td>At least {policy.minimum_winning_day_numerator} in every {policy.minimum_winning_day_denominator} eligible trading days</td></tr>
+      <tr><th>Every complete five-session week</th><td>At least {policy.minimum_week_winning_days} winning {Number(policy.minimum_week_winning_days) === 1 ? 'day' : 'days'} and no more than {policy.maximum_week_losing_days} losing {Number(policy.maximum_week_losing_days) === 1 ? 'day' : 'days'}</td></tr>
+      <tr><th>Losing-day streak across weeks</th><td>No more than {policy.maximum_losing_day_streak} losing {Number(policy.maximum_losing_day_streak) === 1 ? 'day' : 'days'}; only a winning day resets the streak</td></tr>
     </tbody></table>
     <p>Multiple trades per day are allowed. A day uses the sum of its pessimistic gross profit and
       loss per unit. Flat days and days without trades remain separate and stay in the denominator.

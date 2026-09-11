@@ -15,7 +15,12 @@ function deferred(){
 
 test('the native policy names only both indices and exact approved rules with all-period scope',()=>{
  assert.strictEqual(validateIndexConsistencyPolicy(policy()).minimum_winning_day_denominator,'5');
- for(const change of [(/** @type {any} */ v) =>v.instruments.push('NSE-RELIANCE'),(/** @type {any} */ v) =>v.instruments.reverse(),(/** @type {any} */ v) =>v.minimum_winning_day_numerator='4',(/** @type {any} */ v) =>v.minimum_winning_day_denominator=5,(/** @type {any} */ v) =>v.maximum_losing_day_streak='3',(/** @type {any} */ v) =>v.zero_days_reset_streak=true,(/** @type {any} */ v) =>v.costs_included=true,(/** @type {any} */ v) =>v.pnl_basis='net',(/** @type {any} */ v) =>delete v.evaluated_scope,(/** @type {any} */ v) =>v.evaluated_scope='later_only',(/** @type {any} */ v) =>v.policy_digest='0'.repeat(64),(/** @type {any} */ v) =>v.account_balance=100000]){const v=policy();change(v);assert.throws(()=>validateIndexConsistencyPolicy(v));}
+ // A DIFFERENT but well-formed policy validates. The five thresholds are
+ // authenticated by policy_digest, not re-asserted here: pinning V1's numbers
+ // in the browser made this function throw on every load once the server began
+ // serving V3, and the launch page could not be opened at all.
+ {const v=policy();v.minimum_winning_day_numerator='1';v.minimum_winning_day_denominator='3';v.minimum_week_winning_days='1';v.maximum_week_losing_days='4';v.maximum_losing_day_streak='10';assert.strictEqual(validateIndexConsistencyPolicy(v).maximum_losing_day_streak,'10');}
+ for(const change of [(/** @type {any} */ v) =>v.instruments.push('NSE-RELIANCE'),(/** @type {any} */ v) =>v.instruments.reverse(),(/** @type {any} */ v) =>v.minimum_winning_day_numerator='-1',(/** @type {any} */ v) =>v.minimum_winning_day_denominator=5,(/** @type {any} */ v) =>v.maximum_losing_day_streak='three',(/** @type {any} */ v) =>v.zero_days_reset_streak=true,(/** @type {any} */ v) =>v.costs_included=true,(/** @type {any} */ v) =>v.pnl_basis='net',(/** @type {any} */ v) =>delete v.evaluated_scope,(/** @type {any} */ v) =>v.evaluated_scope='later_only',(/** @type {any} */ v) =>v.policy_digest='0'.repeat(64),(/** @type {any} */ v) =>v.account_balance=100000]){const v=policy();change(v);assert.throws(()=>validateIndexConsistencyPolicy(v));}
 });
 test('saved results bind exact qualification and preserve training, later, full and independent institutional verdicts',()=>{
  const value=assessment();assert.strictEqual(validateIndexConsistency(value,context()),value);assert.equal(indexCombinedLabel(value),'Both checks passed');
@@ -32,7 +37,7 @@ test('legacy admissions stay not assessed; cash exemption does not become an ind
  v.evaluation.instrument='NSE-NIFTY';assert.throws(()=>validateIndexConsistency(v,context()),/cannot be shown as passed/);
 });
 test('training or later failure cannot be hidden by a passing full-span summary',()=>{
- for(const name of ['training','later']){const v=assessment();reason(v.periods[name],1,'failed');v.periods[name].summary.winning_days='2';v.periods[name].summary.losing_days='3';sync(v);assert.equal(validateIndexConsistency(v,context()).state,'failed');assert.equal(v.periods.full.state,'passed');assert.equal(v.combined_qualifies,false);assert.match(indexConsistencyReasons(v)[0],/60%/);v.state='passed';v.combined_qualifies=true;assert.throws(()=>validateIndexConsistency(v,context()));}
+ for(const name of ['training','later']){const v=assessment();reason(v.periods[name],1,'failed');v.periods[name].summary.winning_days='2';v.periods[name].summary.losing_days='3';sync(v);assert.equal(validateIndexConsistency(v,context()).state,'failed');assert.equal(v.periods.full.state,'passed');assert.equal(v.combined_qualifies,false);assert.match(indexConsistencyReasons(v)[0],/winning days/);v.state='passed';v.combined_qualifies=true;assert.throws(()=>validateIndexConsistency(v,context()));}
 });
 test('missing days dominate failure and unknown calendar dominates a measured failure',()=>{
  const v=assessment();reason(v.periods.training,8,'failed');reason(v.periods.later,128,'unmeasured');sync(v);assert.equal(validateIndexConsistency(v,context()).state,'unmeasured');

@@ -29,26 +29,33 @@ fn trade_facts<S: Snapshot>(row: &S) -> Result<Trades, String> {
                 .checked_add(win)
                 .ok_or("single-stop gross wins overflow")?;
             out.max_win = out.max_win.max(win);
-            // THE SAME BRACKET TEST THE OTHER THREE FOLDS APPLY -- D-0595.
+            // THE FLOOR OF THE WINS IS THE SMALLEST WIN -- D-0602.
             //
-            // `optimistic_paisa` and `pessimistic_paisa` are one trade priced
-            // under both readings -- line 59 below already compares them to
-            // count ambiguous fills -- so their difference is this trade's own
-            // execution uncertainty. A win no larger than it is a win under one
-            // admissible ordering and a loss under another, and cannot be the
-            // floor a `min(win) >= 3x max(loss)` rule rests on. `max_win`,
-            // `gross_win` and the streaks are untouched: the trade still won.
-            let bracket = trade
-                .optimistic_paisa
-                .saturating_sub(trade.pessimistic_paisa)
-                .unsigned_abs();
-            if win > bracket {
-                out.min_win = if out.min_win == 0 {
-                    win
-                } else {
-                    out.min_win.min(win)
-                };
-            }
+            // This was the FOURTH copy of a bracket test the other three folds
+            // had already dropped as backwards, and it was the copy on the
+            // single-stop path -- the one live sweeps actually run. A search
+            // for `pess > bracket` found the other three and missed this one,
+            // because here the variable is named `win`.
+            //
+            // The test excluded any win no larger than `optimistic - pessimistic`
+            // on the argument that such a win "is a win under one admissible
+            // ordering and a loss under another". It is not. Those two numbers
+            // are the ENDS of one trade's interval, and this branch is reached
+            // only when the PESSIMISTIC reading is positive -- so the trade won
+            // under the worst ordering and therefore under every ordering. The
+            // bracket is uncertainty about the win's SIZE, never its sign.
+            //
+            // Dropping small certain wins out of `min_win` RAISED the floor, and
+            // `min_win` is the numerator of `worst_reward_risk_ppm`, which is the
+            // mandatory `min_worst_reward_risk_ppm` gate -- the operator's own
+            // `min(win) >= 3x max(loss)` rule. The loss side applies no such
+            // test, so ambiguous losses stayed in the denominator while
+            // ambiguous wins left the numerator: both halves inflated the ratio.
+            out.min_win = if out.min_win == 0 {
+                win
+            } else {
+                out.min_win.min(win)
+            };
             streaks.0 = streaks
                 .0
                 .checked_add(1)

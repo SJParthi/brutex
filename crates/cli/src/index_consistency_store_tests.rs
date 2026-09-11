@@ -256,3 +256,49 @@ fn loss_streak_crosses_training_boundary_and_flat_days_do_not_reset_it() {
         &value
     );
 }
+
+/// A mixed-policy set is refused, and the refusal is AUDITED.
+///
+/// # What this pins that the previous shape could not
+///
+/// The store named `Policy::V1` at four sites, so it could only ever hold the
+/// version it was written with. Deriving the policy from the evidence fixed
+/// that but moved the check ahead of `sweep_evidence::begin`, which silently
+/// stopped this refusal producing an attempt row while every other refusal in
+/// `produce` still made one. Keying on the first record restores it.
+///
+/// The empty case is deliberately NOT asserted to be audited: a set with no
+/// evaluations declares no policy, therefore has no content address, therefore
+/// has no identity for an attempt to be opened against. It refuses without a
+/// row and that is structural. D-0602.
+#[test]
+fn a_mixed_policy_set_is_refused_and_an_empty_one_cannot_even_be_addressed() {
+    let temp = Temp::new();
+    let mut mixed = record(false, false);
+    // One evaluation under a different policy than its two siblings.
+    mixed.later.policy = Policy::V2;
+    let mixed_result = produce(&temp.0, [8; 32], [9; 32], vec![mixed], BUDGET, || Ok(()));
+    assert!(
+        mixed_result
+            .as_ref()
+            .err()
+            .is_some_and(|why| why.contains("one exact policy")),
+        "a mixed-policy set must refuse naming the policy"
+    );
+    // An empty set names no policy at all, so it cannot be addressed.
+    let empty_result = produce(&temp.0, [8; 32], [9; 32], Vec::new(), BUDGET, || Ok(()));
+    assert!(
+        empty_result
+            .as_ref()
+            .err()
+            .is_some_and(|why| why.contains("at least one evaluated coordinate")),
+        "an empty set declares no policy and cannot be addressed"
+    );
+
+    // A coherent set still round-trips, so neither refusal is overreach.
+    let good = record(false, false);
+    assert_eq!(
+        write(&temp, good.clone()).record([9; 32], 0).unwrap(),
+        &good
+    );
+}
