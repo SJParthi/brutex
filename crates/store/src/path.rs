@@ -73,7 +73,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use brutex_core::instrument::{InstrumentKey, Kind};
+use brutex_core::instrument::{Contract, InstrumentKey, Kind};
 use brutex_core::symbol::SYMBOL_CAPACITY;
 use brutex_core::vendor::Vendor;
 
@@ -96,9 +96,35 @@ const _: () = assert!(MAX_SEGMENT_LEN == SYMBOL_CAPACITY);
 ///
 /// The timeframe is not caller text — it is one of [`Timeframe::KNOWN`], so
 /// its bound is the longest name in that table rather than
-/// [`MAX_SEGMENT_LEN`]. `store::unit::a_maximal_path_fits_the_declared_bound`
-/// checks the table against it.
-pub const MAX_TIMEFRAME_LEN: usize = 4;
+/// [`MAX_SEGMENT_LEN`].
+///
+/// Written down and then **checked against the table**, for the same reason
+/// [`MAX_VENDOR_LEN`] is: a computed maximum would silently widen [`MAX_LEN`]
+/// the day a longer rung appeared, where the assertion below is a compile error
+/// at the moment [`Timeframe::KNOWN`] changes.
+///
+/// It was `4` while the table held only `1min` and `1day`. The intraday rungs
+/// lifted it to `5` — `15min`, `30min` and `60min` all reach it.
+/// `store::unit::a_maximal_path_fits_the_declared_bound` proves the bound is
+/// reached and not merely sufficient.
+pub const MAX_TIMEFRAME_LEN: usize = 5;
+
+const _: () = {
+    // Named one by one rather than looped, for the reason `Vendor::ALL` is
+    // destructured above: a new rung must be a COMPILE ERROR here, not a name
+    // a loop silently accepts. Indexing the slice would also trip
+    // `clippy::indexing_slicing`, which this workspace denies.
+    assert!(Timeframe::DAY_1.name.len() <= MAX_TIMEFRAME_LEN);
+    assert!(Timeframe::MINUTE_1.name.len() <= MAX_TIMEFRAME_LEN);
+    assert!(Timeframe::MINUTE_3.name.len() <= MAX_TIMEFRAME_LEN);
+    assert!(Timeframe::MINUTE_5.name.len() <= MAX_TIMEFRAME_LEN);
+    assert!(Timeframe::MINUTE_15.name.len() <= MAX_TIMEFRAME_LEN);
+    assert!(Timeframe::MINUTE_30.name.len() <= MAX_TIMEFRAME_LEN);
+    assert!(Timeframe::MINUTE_60.name.len() <= MAX_TIMEFRAME_LEN);
+    // The bound must be REACHED, or it is loose rather than tight.
+    assert!(Timeframe::MINUTE_15.name.len() == MAX_TIMEFRAME_LEN);
+};
+const _: () = assert!(MAX_TIMEFRAME_LEN <= MAX_SEGMENT_LEN);
 
 /// The longest vendor segment.
 ///
@@ -117,12 +143,22 @@ pub const MAX_TIMEFRAME_LEN: usize = 4;
 ///
 /// `store::unit::every_vendor_is_a_legal_segment` proves the bound is reached,
 /// so it is tight rather than merely sufficient.
-pub const MAX_VENDOR_LEN: usize = 5;
+pub const MAX_VENDOR_LEN: usize = 8;
 
 const _: () = {
-    let [groww, dhan] = Vendor::ALL;
+    // Destructured rather than looped, so a new vendor is a COMPILE ERROR here
+    // and not a path segment that quietly exceeds the bound. `truedata` is
+    // eight bytes and lifted this ceiling from five.
+    let [groww, dhan, truedata, gdfl, zerodha] = Vendor::ALL;
     assert!(groww.as_str().len() <= MAX_VENDOR_LEN);
     assert!(dhan.as_str().len() <= MAX_VENDOR_LEN);
+    assert!(truedata.as_str().len() <= MAX_VENDOR_LEN);
+    assert!(gdfl.as_str().len() <= MAX_VENDOR_LEN);
+    // `zerodha` is seven bytes and did not move the ceiling. It is asserted
+    // here anyway, because this block's value is that EVERY vendor is checked —
+    // one left out is a path segment that quietly exceeds the bound, which is
+    // the failure the destructure exists to make impossible.
+    assert!(zerodha.as_str().len() <= MAX_VENDOR_LEN);
 };
 const _: () = assert!(MAX_VENDOR_LEN <= MAX_SEGMENT_LEN);
 
@@ -134,10 +170,11 @@ const _: () = assert!(MAX_VENDOR_LEN <= MAX_SEGMENT_LEN);
 pub const MAX_EXTENSION_LEN: usize = 5;
 
 const _: () = {
-    let [bars, checksums, overlay, lock] = FileKind::ALL;
+    let [bars, checksums, overlay, greeks, lock] = FileKind::ALL;
     assert!(bars.extension().len() <= MAX_EXTENSION_LEN);
     assert!(checksums.extension().len() <= MAX_EXTENSION_LEN);
     assert!(overlay.extension().len() <= MAX_EXTENSION_LEN);
+    assert!(greeks.extension().len() <= MAX_EXTENSION_LEN);
     assert!(lock.extension().len() <= MAX_EXTENSION_LEN);
 };
 
@@ -295,14 +332,176 @@ pub struct Timeframe {
 }
 
 impl Timeframe {
-    /// One-minute bars — the only timeframe D-0015 admits.
+    /// One-minute bars — what the engine sweeps.
     pub const MINUTE_1: Self = Self {
         secs: 60,
         name: "1min",
     };
 
+    /// Three-minute bars.
+    ///
+    /// # Why three, which is not a power of anything
+    ///
+    /// The operator's gap-leg rule reads *yesterday's last candle* against
+    /// *today's first candle*, and three minutes is the rung it is written for.
+    /// It is also the coarsest rung that divides the session cleanly: the fold
+    /// grid is anchored at IST midnight and the open is 555 minutes past it, so
+    /// a rung aligns with 09:15 exactly when it divides 555. One, three, five
+    /// and fifteen do. **Thirty and sixty do not** — 555/30 = 18.5 — which
+    /// leaves their first bar of the day a 15- and 45-minute stub. A rule that
+    /// names "the first candle" means something different on those two rungs,
+    /// and the difference is not a rounding error.
+    pub const MINUTE_3: Self = Self {
+        secs: 180,
+        name: "3min",
+    };
+
+    /// One-second bars — the rung the two archive feeds' files actually hold.
+    ///
+    /// # Why the store gains a rung below the minute
+    ///
+    /// `TrueData` and GDFL sell folders of per-second files. `docs/08-vendor-
+    /// samples.md` measured them at one row per whole second with no sub-second
+    /// field, so a second IS their finest record and it is what an operator
+    /// buys. The store had no directory for it, so a request for that rung
+    /// parsed, passed `served()`, and was then refused at the WRITE boundary —
+    /// the operator could ask for the thing he had paid for and nothing could
+    /// file it.
+    ///
+    /// # It is not intraday-aligned, and under the open anchor that is fine
+    ///
+    /// [`Self::aligns_with_the_open`] asks whether a rung divides the 555
+    /// minutes from IST midnight to the open, and answers `false` here because
+    /// its length is not a whole number of minutes at all. That predicate is
+    /// about a MIDNIGHT-anchored grid; `pull::fold` anchors an intraday rung at
+    /// the OPEN, where one second tiles the session exactly — 22,500 of them,
+    /// with no stub at either end.
+    ///
+    /// # What it unlocks, without another line being written
+    ///
+    /// `pull::ingest::derived_from` computes the derived set from this table:
+    /// every rung strictly coarser than the source whose length is a whole
+    /// multiple of it. One second divides all eight rungs above, so a
+    /// one-second ingest now files the second AND folds it into 1, 2, 3, 5, 10,
+    /// 15, 30 and 60 minutes — because the rule reads the table rather than a
+    /// list somebody has to remember to edit.
+    pub const SECOND_1: Self = Self {
+        secs: 1,
+        name: "1s",
+    };
+
+    /// Two-minute bars.
+    ///
+    /// **Does not divide 555** — 277.5 — so under a grid anchored at IST
+    /// midnight its first bar of the day would open at 09:14 and hold one
+    /// minute of trade. [`Self::aligns_with_the_open`] answers `false` for it
+    /// and every writer must ask, exactly as the thirty and sixty rungs do.
+    ///
+    /// It is in [`Self::KNOWN`] because the store's job is to have somewhere to
+    /// FILE a rung, and the alignment question belongs to whoever produces the
+    /// bar. D-0132 conflated the two: it removed five rungs from
+    /// `Granularity::store_timeframe` on an alignment argument, which is a fold
+    /// property being enforced by a path table. A directory is not a claim that
+    /// the bars inside it are aligned; the predicate is.
+    pub const MINUTE_2: Self = Self {
+        secs: 120,
+        name: "2min",
+    };
+
+    /// Five-minute bars. Divides 555; no stub at either end of the session.
+    pub const MINUTE_5: Self = Self {
+        secs: 300,
+        name: "5min",
+    };
+
+    /// Ten-minute bars.
+    ///
+    /// **Does not divide 555** — 55.5 — so the same caution as [`Self::MINUTE_2`]
+    /// applies: a midnight-anchored grid gives it a five-minute opening stub.
+    pub const MINUTE_10: Self = Self {
+        secs: 600,
+        name: "10min",
+    };
+
+    /// Fifteen-minute bars. The coarsest rung that still divides 555.
+    pub const MINUTE_15: Self = Self {
+        secs: 900,
+        name: "15min",
+    };
+
+    /// Thirty-minute bars. **Leaves a 15-minute stub at the open** — 555/30 is
+    /// 18.5 — so the session's first bar is half length. See [`Self::MINUTE_3`].
+    pub const MINUTE_30: Self = Self {
+        secs: 1_800,
+        name: "30min",
+    };
+
+    /// Sixty-minute bars. **Stubs at BOTH ends** — a 45-minute first bar and a
+    /// 30-minute last bar. See [`Self::MINUTE_3`].
+    pub const MINUTE_60: Self = Self {
+        secs: 3_600,
+        name: "60min",
+    };
+
+    /// One-day bars — what a backfill lands FIRST.
+    ///
+    /// # Why this exists beside the minute
+    ///
+    /// The stated backfill is ~800 instruments from 2020 to yesterday. At the
+    /// vendors' published caps that is **81 windows per instrument** at one
+    /// minute and **14** at day level — 5.8× fewer requests for the same span.
+    /// So the daily pass runs to completion first and the minute pass follows,
+    /// which is the operator's own sequencing and is also the cheaper way to
+    /// discover that a feed, a symbol or a date range is wrong.
+    ///
+    /// D-0015 deferred every timeframe but the minute and **built the seam for
+    /// exactly this**: `timeframe_secs` is already a `u32` of seconds in the
+    /// header, and the path is `…/<symbol>/<tf>/<yyyy-mm>.bin`, so a new rung
+    /// is a new directory and nothing else. No format change, no migration, and
+    /// every existing `1min` file keeps its bytes and its meaning. See D-0054.
+    ///
+    /// 86,400 seconds. A calendar day, not a session — the store addresses bars
+    /// by index and the timeframe names their spacing, so a daily bar is one
+    /// record per trading day whatever the session's length was.
+    pub const DAY_1: Self = Self {
+        secs: 86_400,
+        name: "1day",
+    };
+
     /// Every timeframe this build stores.
-    pub const KNOWN: &'static [Self] = &[Self::MINUTE_1];
+    ///
+    /// The daily rung is FIRST because a backfill lands it first, and because
+    /// `from_secs` walks this list — an order that matches the order things are
+    /// written costs nothing and reads honestly.
+    pub const KNOWN: &'static [Self] = &[
+        Self::DAY_1,
+        Self::SECOND_1,
+        Self::MINUTE_1,
+        Self::MINUTE_2,
+        Self::MINUTE_3,
+        Self::MINUTE_5,
+        Self::MINUTE_10,
+        Self::MINUTE_15,
+        Self::MINUTE_30,
+        Self::MINUTE_60,
+    ];
+
+    /// The number of minutes from IST midnight to the NSE open, 09:15.
+    ///
+    /// A rung's bars align with the open exactly when its length divides this.
+    pub const OPEN_MINUTES_PAST_IST_MIDNIGHT: u32 = 9 * 60 + 15;
+
+    /// Does a session's first bar on this rung start exactly at 09:15?
+    ///
+    /// False means the rung's opening bar is a stub, because the fold grid is
+    /// anchored at IST midnight rather than at the open. A rule that reads "the
+    /// first candle of the day" is reading a partial bar on those rungs, and
+    /// [`Self::MINUTE_3`] records why that matters.
+    #[must_use]
+    pub const fn aligns_with_the_open(self) -> bool {
+        self.secs.is_multiple_of(60)
+            && Self::OPEN_MINUTES_PAST_IST_MIDNIGHT.is_multiple_of(self.secs / 60)
+    }
 
     /// The timeframe of `secs` seconds.
     ///
@@ -388,6 +587,17 @@ pub enum FileKind {
     Checksums,
     /// Computed overlay fields, at their own stride.
     Overlay,
+    /// Computed greeks — implied volatility, delta, gamma, vega, theta, rho,
+    /// moneyness and the provenance that makes the row reproducible — at their
+    /// own stride.
+    ///
+    /// **A third file rather than a wider overlay**, and the reason is a rule
+    /// rather than a preference: [`crate::format::Overlay`] is exactly 24 bytes
+    /// with a compile-time assert, five greeks do not fit, and `CLAUDE.md` §3
+    /// rule 8 forbids mutating a format version in place. §4's row banning a
+    /// dynamic schema names the alternative outright — *"a new field is a new
+    /// file version at its own stride"*. See [`crate::format::GREEK_MAGIC`].
+    Greeks,
     /// The advisory lock a writer holds for the month.
     ///
     /// `docs/02-store-format.md` §9: "One writer per file, enforced by an
@@ -401,7 +611,13 @@ pub enum FileKind {
 
 impl FileKind {
     /// Every sibling file a month has.
-    pub const ALL: [Self; 4] = [Self::Bars, Self::Checksums, Self::Overlay, Self::Lock];
+    pub const ALL: [Self; 5] = [
+        Self::Bars,
+        Self::Checksums,
+        Self::Overlay,
+        Self::Greeks,
+        Self::Lock,
+    ];
 
     /// The file extension, dot included.
     #[must_use]
@@ -410,6 +626,7 @@ impl FileKind {
             Self::Bars => ".bin",
             Self::Checksums => ".crc",
             Self::Overlay => ".ovl",
+            Self::Greeks => ".grk",
             Self::Lock => ".lock",
         }
     }
@@ -431,8 +648,15 @@ pub struct PathParts<'a> {
     pub exchange: &'a str,
     /// The exchange segment, e.g. `INDEX`. Upper case.
     pub segment: &'a str,
-    /// The symbol or contract, e.g. `NIFTY`. Upper case.
+    /// The underlying symbol, e.g. `NIFTY`. Upper case.
     pub symbol: &'a str,
+    /// The contract, for a future or an option, and [`None`] for spot.
+    ///
+    /// A SEGMENT OF ITS OWN, below the underlying — see
+    /// [`brutex_core::instrument::Contract`] for why it is not part of the
+    /// symbol. `None` renders a path one level shallower, which is what a spot
+    /// instrument's path has always been.
+    pub contract: Option<Contract>,
     /// The bar length.
     pub timeframe: Timeframe,
     /// The month the file covers.
@@ -450,6 +674,8 @@ pub struct StorePath<'a> {
     exchange: &'a str,
     segment: &'a str,
     symbol: &'a str,
+    /// The contract level, present only for a future or an option.
+    contract: Option<Contract>,
     timeframe: Timeframe,
     month: YearMonth,
     file: FileKind,
@@ -479,6 +705,7 @@ impl<'a> StorePath<'a> {
     ///     exchange: "NSE",
     ///     segment: "INDEX",
     ///     symbol: "NIFTY",
+    ///     contract: None,
     ///     timeframe: Timeframe::MINUTE_1,
     ///     month: YearMonth::new(2024, 6)?,
     ///     file: FileKind::Bars,
@@ -490,6 +717,7 @@ impl<'a> StorePath<'a> {
     ///     exchange: "NSE",
     ///     segment: "INDEX",
     ///     symbol: "NIFTY",
+    ///     contract: None,
     ///     timeframe: Timeframe::MINUTE_1,
     ///     month: YearMonth::new(2024, 6)?,
     ///     file: FileKind::Bars,
@@ -510,11 +738,20 @@ impl<'a> StorePath<'a> {
         check_segment("exchange", parts.exchange, SegmentCase::Upper)?;
         check_segment("segment", parts.segment, SegmentCase::Upper)?;
         check_segment("symbol", parts.symbol, SegmentCase::Upper)?;
+        // THE CONTRACT IS CHECKED LIKE ANY OTHER SEGMENT. It is rendered by
+        // `Contract`, not typed by an operator, but a segment that reaches the
+        // filesystem unchecked is the traversal this function exists to refuse
+        // — and a renderer is exactly the thing a later change could alter
+        // without anyone re-reading this call.
+        if let Some(ref contract) = parts.contract {
+            check_segment("contract", contract.as_str(), SegmentCase::Upper)?;
+        }
         Ok(Self {
             vendor: parts.vendor,
             exchange: parts.exchange,
             segment: parts.segment,
             symbol: parts.symbol,
+            contract: parts.contract,
             timeframe: parts.timeframe,
             month: parts.month,
             file: parts.file,
@@ -539,17 +776,46 @@ impl<'a> StorePath<'a> {
         month: YearMonth,
         file: FileKind,
     ) -> Result<Self, PathError> {
-        match key.kind {
-            Kind::Index | Kind::Equity => Self::new(PathParts {
-                vendor,
-                exchange: key.exchange.as_str(),
-                segment: key.segment.as_str(),
-                symbol: key.underlying.as_str(),
-                timeframe,
-                month,
-                file,
-            }),
-            _ => Err(PathError::ContractPathUnsupported),
+        // ONE CALL, BOTH SHAPES. `Contract::of` answers `None` for spot and a
+        // rendered segment for a derivative, so the branch that used to be a
+        // refusal is now the ordinary difference between two paths.
+        let contract = match key.kind {
+            Kind::Index | Kind::Equity => None,
+            other => Some(Contract::of(other).ok_or(PathError::ContractPathUnsupported)?),
+        };
+        Self::new(PathParts {
+            vendor,
+            exchange: key.exchange.as_str(),
+            segment: key.segment.as_str(),
+            symbol: key.underlying.as_str(),
+            contract,
+            timeframe,
+            month,
+            file,
+        })
+    }
+
+    /// The same month, naming a different sibling file.
+    ///
+    /// [`FileKind::Lock`]'s documentation says the lock "needs a name that is
+    /// derived the same way every other sibling is, rather than invented at the
+    /// call site by string concatenation". This is that derivation. Every
+    /// segment has already been checked, and the extension is a closed set, so
+    /// nothing here can fail — a writer that needs both `.bin` and `.lock`
+    /// takes them from one validated path instead of building two.
+    ///
+    /// `store::write::the_lock_is_the_bar_paths_sibling` is what holds that up.
+    #[must_use]
+    pub const fn with_file(self, file: FileKind) -> Self {
+        Self {
+            vendor: self.vendor,
+            exchange: self.exchange,
+            segment: self.segment,
+            symbol: self.symbol,
+            contract: self.contract,
+            timeframe: self.timeframe,
+            month: self.month,
+            file,
         }
     }
 
@@ -619,12 +885,22 @@ impl fmt::Display for StorePath<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{}/{}/{}/{}/{}/{}/{}{}",
+            "{}/{}/{}/{}/{}",
             STORE_ROOT,
             self.vendor.as_str(),
             self.exchange,
             self.segment,
             self.symbol,
+        )?;
+        // THE CONTRACT LEVEL EXISTS ONLY WHERE THERE IS A CONTRACT. A spot
+        // path is unchanged, byte for byte, which is what keeps every bar file
+        // already on disk addressable by the same string that wrote it.
+        if let Some(ref contract) = self.contract {
+            write!(f, "/{contract}")?;
+        }
+        write!(
+            f,
+            "/{}/{}{}",
             self.timeframe.as_str(),
             self.month,
             self.file.extension(),

@@ -77,6 +77,79 @@ pub fn seal(layout: Layout, n_valid: u64, block: u64, bytes: &[u8]) -> Result<u3
     Ok(crc32c(bytes))
 }
 
+/// A verification asked of a file that carries no checksums, on the rolling
+/// log.
+///
+/// # This path cannot be reached in production today, and that is the point
+///
+/// No writer in this workspace sets [`crate::format::FLAG_CHECKSUMS`] —
+/// `docs/04-invariants.md` S-06 and S-06b record exactly that, and [`seal`] and
+/// [`verify`] have no production caller because of it. So the operator who
+/// first trips this arm is the operator running the *first* build that turns
+/// checksums on, against files written by every build before it. Their file is
+/// not corrupt; it simply predates the flag. Without this line the only record
+/// of that is a `ChecksumsAbsent` returned to a caller that may well treat it
+/// as a verification failure, which is the conflation S-06b exists to forbid:
+/// "verified" and "there was nothing to verify against" are different answers.
+///
+/// `Warn`, because no byte is wrong — and one event per block *asked for*,
+/// never per record.
+fn note_unverifiable(header: &Header, block: u64) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::warn("store.block", "no checksums to verify against")
+            .with("block", telemetry::Value::Uint(block))
+            .with("n_valid", telemetry::Value::Uint(header.n_valid))
+            .with("flags", telemetry::Value::Uint(u64::from(header.flags)))
+            .with(
+                "symbol_id",
+                telemetry::Value::Uint(u64::from(header.symbol_id)),
+            ),
+    );
+}
+
+/// A block whose committed bytes are not the bytes that were sealed.
+///
+/// # What nothing else in this workspace can say
+///
+/// This is the lost write the module header describes. An all-zero
+/// [`crate::format::Bar`] satisfies `ohlc_is_sane`, and its `open_interest` of
+/// zero is a **real** zero rather than [`crate::format::OI_NULL`], so a
+/// spot-index file quietly acquires derivative-shaped bars that go on to enter
+/// a sweep. No range check, no header field and no downstream reader can tell
+/// that extent from data. The checksum can — and until now it could tell only
+/// its immediate caller, in a return value that a batch verifier would fold
+/// into a count.
+///
+/// # Unreachable in production today, said plainly rather than left to be found
+///
+/// Same reason as [`note_unverifiable`]: nothing sets
+/// [`crate::format::FLAG_CHECKSUMS`], so `verify` has no production caller
+/// (S-06/S-06b). `CLAUDE.md` §3 rule 6 — this is stated here rather than
+/// implied, so nobody reads the emit as evidence the store is checksumming
+/// anything yet.
+///
+/// # Why `Error`, and why it is bounded by structure
+///
+/// One event per **block**, never per record: a block is 4,088 bytes, which is
+/// 73 records at the current stride, so a wholly corrupt month of one-minute
+/// bars is on the order of a hundred events rather than thousands. The bytes
+/// themselves are never logged — only their length, both checksums, and which
+/// block.
+fn note_block_mismatch(header: &Header, block: u64, bytes: &[u8], stored: u32, computed: u32) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::error("store.block", "checksum mismatch")
+            .with("block", telemetry::Value::Uint(block))
+            .with("stored", telemetry::Value::Uint(u64::from(stored)))
+            .with("computed", telemetry::Value::Uint(u64::from(computed)))
+            .with("bytes", telemetry::Value::count(bytes.len()))
+            .with("n_valid", telemetry::Value::Uint(header.n_valid))
+            .with(
+                "symbol_id",
+                telemetry::Value::Uint(u64::from(header.symbol_id)),
+            ),
+    );
+}
+
 /// Verifies one block's committed bytes against its stored checksum.
 ///
 /// # Errors
@@ -110,12 +183,14 @@ pub fn verify(
     stored: u32,
 ) -> Result<(), FormatError> {
     if !header.checksums_present() {
+        note_unverifiable(header, block);
         return Err(FormatError::ChecksumsAbsent);
     }
     let computed = seal(layout, header.n_valid, block, bytes)?;
     if computed == stored {
         Ok(())
     } else {
+        note_block_mismatch(header, block, bytes, stored, computed);
         Err(FormatError::BlockChecksum {
             block,
             stored,

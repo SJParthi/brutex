@@ -1,0 +1,409 @@
+//! Mapping a signal series onto the series a position is actually taken on.
+//!
+//! # The rule, and where it comes from
+//!
+//! `docs/00-charter.md` §3 stamps a bar at the OPEN of its interval, so the bar
+//! stamped `t` covers `[t, t + length)` and its close prints at `t + length`.
+//! A condition decided on that bar is therefore not knowable until `t + length`,
+//! and the one bar it can be acted on is the EXECUTION bar that opens exactly at
+//! that instant. If that one-minute bar is absent, the signal is unreachable;
+//! a later bar is a different trading decision, not a delayed fill.
+//!
+//! That single sentence is the whole module. Everything else here is arithmetic
+//! and refusals.
+//!
+//! # Why this exists at all
+//!
+//! Until it did, `runner::trade::walk` and `runner::grid::evaluate` each took
+//! ONE bar slice, so a condition found on a fifteen-minute bar was also filled
+//! on fifteen-minute bars and its stop was checked at fifteen-minute
+//! resolution. The entry INSTANT was already right — the next fifteen-minute bar
+//! opens exactly when the signal bar closes — so what this changes is not when a
+//! position is opened but **how finely the path afterwards is measured**:
+//!
+//! * a stop and a target both inside one bar's range have no order the data can
+//!   settle, and a fifteen-minute bar hides fifteen minutes of that path;
+//! * a trailing order tracks a running peak that updates 25 times a session on
+//!   fifteen-minute bars and 375 times on one-minute bars. The trail is the
+//!   figure that moves most, because the coarse series never saw the peak;
+//! * `Horizon` is counted in BARS, so "15" means fifteen minutes on a
+//!   one-minute series and three hours forty-five minutes on a fifteen-minute
+//!   one. Executing on one-minute bars makes the horizon mean minutes on every
+//!   signal timeframe, which is the only reading under which nine timeframes are
+//!   comparable at all.
+//!
+//! # No look-ahead is preserved, not merely hoped for
+//!
+//! `Column::reproject` copies the mask a bar produced and changes only the index
+//! it is filed under. No indicator is evaluated on a series it was not built
+//! for. The mask came from bars `0..=s` of the signal series and the index it
+//! now carries points at the bar opening exactly when that signal bar CLOSED, so
+//! `CLAUDE.md` §3 rule 7 holds by the same argument it always did.
+//!
+//! # Cost
+//!
+//! One merge pass over two sorted series: `O(signals + execution)` total and
+//! `O(1)` amortised per bar, with the execution cursor moving forward only.
+//! There is no binary search per signal and no scan. Run once per run, never per
+//! candidate.
+//!
+//! **UNVERIFIED as a measurement.** The bound is argued from the
+//! shape of the code and no bench in this workspace times it.
+//! `CLAUDE.md` §3 rule 6: a structural argument is not a
+//! measurement, however sound it is.
+
+use indicators::Candle;
+
+/// Where a signal series lands on an execution series, and what did not land.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Alignment {
+    /// For each column position, the execution index to act on, or `None`.
+    pub onto: Vec<Option<usize>>,
+    /// Signals with no execution bar exactly at their close.
+    ///
+    /// The session's last bars produce these, and so does a signal whose close
+    /// falls past the end of the execution series. Counted rather than hidden:
+    /// a projection that quietly shortened the column would make a smaller
+    /// sample read like a whole one.
+    pub unreachable: u64,
+}
+
+/// The instant a bar stamped `ts` stops being incomplete.
+///
+/// `ts + length`, saturating. A bar stamped at the open covers `[ts, ts+len)`,
+/// so this is the first instant its mask is knowable.
+const fn closes_at(ts_micros: i64, length_micros: i64) -> i64 {
+    ts_micros.saturating_add(length_micros)
+}
+
+/// Maps every position of a signal column onto an execution series.
+///
+/// `sources` is `Column::sources()` — the signal-series index each column
+/// position came from. `signal` and `execution` must each be sorted ascending
+/// by `ts_micros`, which `stored::load_span` guarantees and `Column::build`
+/// requires.
+///
+/// # The session boundary IS enforced here, and this doc used to deny it
+///
+/// It read: *"No bar is skipped for being in a different session, and none is
+/// required to be … `runner::trade`'s square-off rule then refuses it as an
+/// entry — duplicating it here would be a second spelling of one policy."*
+///
+/// The reasoning was sound and the premise was false. `trade::walk`'s rule 1b
+/// cannot see this case: on a projected column its `signal` binding is already an
+/// EXECUTION index, so 1b compares two adjacent one-minute bars of the next
+/// morning and passes. The rule that was supposed to catch it structurally
+/// cannot.
+///
+/// So a bucket whose close falls into the next trading day is `None` — the same
+/// answer this module already gives a signal with no execution bar at all, and
+/// what [`Alignment::unreachable`] already says happens. A signal closing onto
+/// the final accepted fill bar still maps and is still `trade`'s to refuse when
+/// no priceable exit remains; what is refused here is only the crossing of a day
+/// boundary, which is not a policy `trade` holds a second spelling of.
+///
+/// # Errors
+///
+/// `None` when `length_micros` is not positive, or when a `sources` entry does
+/// not index `signal`. Both are caller bugs rather than data conditions, so they
+/// refuse rather than being absorbed into `unreachable` — a count that mixed
+/// "no bar to trade" with "the caller passed the wrong slice" could not be read.
+#[must_use]
+pub fn onto_execution(
+    signal: &[Candle],
+    sources: &[usize],
+    execution: &[Candle],
+    length_micros: i64,
+) -> Option<Alignment> {
+    if length_micros <= 0 {
+        return None;
+    }
+    let mut onto: Vec<Option<usize>> = Vec::with_capacity(sources.len());
+    let mut unreachable: u64 = 0;
+    // THE CURSOR ONLY MOVES FORWARD, which is what makes this a merge and not a
+    // search. `sources` is ascending because `Column::build` walks the slice in
+    // order, so each signal's close is at or after the previous one's and the
+    // execution bar for it cannot be earlier than the last one found.
+    let mut cursor: usize = 0;
+    for &s in sources {
+        let bar = signal.get(s)?;
+        let deadline = closes_at(bar.ts_micros, length_micros);
+        while execution
+            .get(cursor)
+            .is_some_and(|c| c.ts_micros < deadline)
+        {
+            cursor = cursor.saturating_add(1);
+        }
+        // AND IT MUST BE THE SAME TRADING DAY.
+        //
+        // # The last bucket of every session mapped to the next morning
+        //
+        // A coarse bucket's close instant is past the last one-minute bar of its
+        // own day — 15:30 for a 15-minute bar stamped 15:15, 16:00 for a
+        // 60-minute one — so the cursor ran off the end of the session and
+        // stopped on the NEXT session's 09:15. `trade::walk` then entered at
+        // 09:16, on a signal that closed the previous afternoon.
+        //
+        // `walk`'s rule 1b could not catch it. On a projected column its
+        // `signal` binding is already an EXECUTION index, so 1b compares two
+        // adjacent one-minute bars of that next morning and passes. The guard
+        // was written for the signal-to-entry step and never sees it.
+        //
+        // MEASURED on `synthetic::sessions(40)`: 31 of 384 trades (8.07%) at the
+        // 15-minute rung entered **17.77 hours** after their signal closed, and
+        // 11 of 79 (13.92%) at 60-minute. Across 42 masks the crossing share ran
+        // 3.0%-8.4% at H=15 and 13.3%-25.6% at H=60, rising with the rung.
+        //
+        // # The symmetry that settles it
+        //
+        // At 15-minute, H=15: the 15:00 bucket is 32 swept and **0 eligible** —
+        // refused because its entry lands at 15:16, six minutes past the 15:10
+        // square-off. The 15:15 bucket is 31 swept and **31 eligible**, every
+        // one taken. The engine refused a signal six minutes stale and accepted
+        // one seventeen and three-quarter hours stale, in the same loop, on the
+        // same rung. It cannot be both.
+        //
+        // So the bucket is UNREACHABLE, which is the answer this function
+        // already has for a signal whose execution bar does not exist — and
+        // three docs, including this module's own `unreachable` field, already
+        // assert that is what happens.
+        // EXACTLY THE CLOSE INSTANT, NEVER MERELY A LATER BAR.
+        //
+        // The cursor still stops at the first timestamp at or after `deadline`,
+        // which preserves the one-pass merge. Equality is the policy: if the
+        // immediate one-minute bar is missing, a fill at the next available bar
+        // would silently turn a missing observation into a later trade.
+        let landed = execution.get(cursor).filter(|c| {
+            c.ts_micros == deadline
+                && indicators::ist_day(c.ts_micros) == indicators::ist_day(bar.ts_micros)
+        });
+        if landed.is_some() {
+            onto.push(Some(cursor));
+        } else {
+            onto.push(None);
+            unreachable = unreachable.saturating_add(1);
+        }
+    }
+    Some(Alignment { onto, unreachable })
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "the exception every test module in this workspace takes: a test \
+              that cannot panic cannot fail. `clippy::panic` is deliberately NOT \
+              in this list -- nothing here writes `panic!` and an unfulfilled \
+              expectation is itself a warning, so listing it would trade one \
+              lint for another"
+)]
+mod tests {
+    use super::{Alignment, onto_execution};
+    use indicators::Candle;
+
+    /// A bar stamped `minute` minutes past an arbitrary epoch anchor.
+    fn bar(minute: i64) -> Candle {
+        Candle {
+            ts_micros: minute * 60_000_000,
+            open: 2_500_000,
+            high: 2_500_100,
+            low: 2_499_900,
+            close: 2_500_050,
+            volume: 0,
+            open_interest: i64::MIN,
+        }
+    }
+
+    /// `n` one-minute bars from minute zero.
+    fn minutes(n: i64) -> Vec<Candle> {
+        (0..n).map(bar).collect()
+    }
+
+    /// `n` bars of `step` minutes each, from minute zero.
+    fn coarse(step: i64, n: i64) -> Vec<Candle> {
+        (0..n).map(|i| bar(i * step)).collect()
+    }
+
+    const FIFTEEN_MIN: i64 = 15 * 60 * 1_000_000;
+    const ONE_MIN: i64 = 60 * 1_000_000;
+
+    #[test]
+    fn a_signal_lands_only_on_the_execution_bar_at_its_exact_close() {
+        // THE WHOLE RULE. A fifteen-minute bar stamped at minute 0 covers
+        // [0, 15) and closes at 15, so the earliest one-minute bar that may act
+        // on it is the one stamped 15 -- not 14, which opened while the signal
+        // bar was still incomplete and is therefore look-ahead.
+        let signal = coarse(15, 4);
+        let exec = minutes(60);
+        let got = onto_execution(&signal, &[0, 1, 2, 3], &exec, FIFTEEN_MIN).expect("aligned");
+        assert_eq!(
+            got.onto,
+            vec![Some(15), Some(30), Some(45), None],
+            "each signal maps to its own close instant, and the last has no bar \
+             after it"
+        );
+        assert_eq!(got.unreachable, 1);
+    }
+
+    /// A BUCKET WHOSE CLOSE FALLS INTO THE NEXT TRADING DAY IS UNREACHABLE.
+    ///
+    /// # The last bucket of every session used to map to the next morning
+    ///
+    /// A coarse bucket's close instant is past the last one-minute bar of its own
+    /// day, so the cursor ran off the end of the session and stopped on the next
+    /// session's first bar. `trade::walk` then entered there, on a signal that
+    /// closed the previous afternoon.
+    ///
+    /// MEASURED on `synthetic::sessions(40)` before this guard: 31 of 384 trades
+    /// (8.07%) at the 15-minute rung entered **17.77 hours** after their signal
+    /// closed; 11 of 79 (13.92%) at 60-minute.
+    ///
+    /// And the engine was inconsistent with itself in the same loop: at
+    /// 15-minute, H=15, the 15:00 bucket was 32 swept and **0 eligible** — its
+    /// entry lands six minutes past the square-off — while the 15:15 bucket was
+    /// 31 swept and **31 eligible**. Six minutes stale is refused; seventeen and
+    /// three-quarter hours is taken.
+    ///
+    /// The IST day rolls at 18:30 UTC, which is why the fixture straddles minute
+    /// 1110 rather than midnight.
+    #[test]
+    fn a_bucket_whose_close_lands_in_the_next_session_is_unreachable() {
+        // Signal stamped 17:40 UTC; a 15-minute bucket closes at 17:55, which is
+        // still the same IST day, so this one MUST map.
+        let same_day = vec![bar(1_060)];
+        let exec = vec![bar(1_070), bar(1_075), bar(1_080)];
+        let got = onto_execution(&same_day, &[0], &exec, FIFTEEN_MIN).expect("aligned");
+        assert_eq!(
+            got.onto,
+            vec![Some(1)],
+            "a bucket closing inside its own day still maps -- its close is minute
+             1,075 and that is the bar at index 1 -- or the guard is refusing
+             what it should not"
+        );
+        assert_eq!(got.unreachable, 0);
+
+        // Signal stamped 18:20 UTC. Its bucket closes at 18:35 — past 18:30, so
+        // the NEXT IST day. Execution has bars either side of the boundary.
+        let crosses = vec![bar(1_100)];
+        let across = vec![bar(1_105), bar(1_108), bar(1_115), bar(1_116)];
+        assert_ne!(
+            indicators::ist_day(across[1].ts_micros),
+            indicators::ist_day(across[2].ts_micros),
+            "the fixture must straddle the IST rollover, or it proves nothing"
+        );
+        let got = onto_execution(&crosses, &[0], &across, FIFTEEN_MIN).expect("aligned");
+        assert_eq!(
+            got.onto,
+            vec![None],
+            "a bucket whose close falls into the next trading day has no bar it \
+             may be acted on — the next morning's open is not that bar"
+        );
+        assert_eq!(
+            got.unreachable, 1,
+            "and it is COUNTED as unreachable, which is the answer this function \
+             already gives when the execution bar does not exist"
+        );
+    }
+
+    #[test]
+    fn a_one_minute_signal_on_one_minute_bars_is_simply_the_next_bar() {
+        // The degenerate case, and it must stay degenerate: when the signal
+        // series IS the execution series, this is exactly "enter on the next
+        // bar", which is what the engine did before this module existed. If this
+        // ever disagreed, every existing one-minute result would have moved.
+        let bars = minutes(6);
+        let got = onto_execution(&bars, &[0, 1, 2, 3, 4, 5], &bars, ONE_MIN).expect("aligned");
+        assert_eq!(
+            got.onto,
+            vec![Some(1), Some(2), Some(3), Some(4), Some(5), None]
+        );
+        assert_eq!(got.unreachable, 1, "the last bar has no next bar");
+    }
+
+    #[test]
+    fn an_execution_gap_makes_the_immediate_fill_unreachable() {
+        // A one-minute series can contain a halt or missing records. The rule is
+        // the exact immediate minute, so a later bar never substitutes for the
+        // absent fill.
+        let signal = coarse(15, 2);
+        // Minutes 0..10 then a jump to 40. The first signal closes at 15 and
+        // the second at 30. Neither exact bar exists; minute 40 is not either
+        // decision's immediate next minute.
+        let mut exec: Vec<Candle> = (0..10).map(bar).collect();
+        exec.push(bar(40));
+        let got = onto_execution(&signal, &[0, 1], &exec, FIFTEEN_MIN).expect("aligned");
+        assert_eq!(
+            got.onto,
+            vec![None, None],
+            "a later available bar must never replace the exact immediate fill"
+        );
+        assert_eq!(exec[10].ts_micros, 40 * 60_000_000);
+        assert_eq!(got.unreachable, 2);
+    }
+
+    #[test]
+    fn a_signal_whose_close_is_past_every_execution_bar_is_unreachable() {
+        let signal = coarse(15, 2);
+        let exec = minutes(5);
+        let got = onto_execution(&signal, &[0, 1], &exec, FIFTEEN_MIN).expect("aligned");
+        assert_eq!(
+            got,
+            Alignment {
+                onto: vec![None, None],
+                unreachable: 2
+            },
+            "no execution bar exists at either exact close, and that is COUNTED \
+             rather than mapped to the last bar"
+        );
+    }
+
+    #[test]
+    fn the_cursor_never_moves_backwards_so_the_pass_stays_linear() {
+        // This is the property that makes the module O(signals + execution)
+        // rather than O(signals * execution). Asserted on the RESULT because
+        // that is observable: a non-decreasing output is exactly what a
+        // forward-only cursor produces, and a per-signal search could produce
+        // the same values while costing a scan each time.
+        let signal = coarse(3, 100);
+        let exec = minutes(400);
+        let sources: Vec<usize> = (0..100).collect();
+        let got = onto_execution(&signal, &sources, &exec, 3 * ONE_MIN).expect("aligned");
+        let mut last = 0;
+        for slot in &got.onto {
+            let at = slot.expect("every signal has a bar in this fixture");
+            assert!(at >= last, "the mapping must be non-decreasing");
+            last = at;
+        }
+        assert_eq!(got.onto.first().copied(), Some(Some(3)));
+    }
+
+    #[test]
+    fn a_non_positive_bar_length_is_refused_rather_than_looping() {
+        // A length of zero makes every deadline equal to the signal's own stamp,
+        // which would map a signal onto a bar that opened BEFORE it closed --
+        // look-ahead, silently. A negative one is worse. Neither is a data
+        // condition, so both refuse.
+        let bars = minutes(4);
+        assert!(onto_execution(&bars, &[0], &bars, 0).is_none());
+        assert!(onto_execution(&bars, &[0], &bars, -60_000_000).is_none());
+    }
+
+    #[test]
+    fn a_source_index_outside_the_signal_series_refuses() {
+        // A caller bug, not a data condition: absorbing it into `unreachable`
+        // would mix "no bar to trade" with "the wrong slice was passed" in one
+        // number that could then not be read.
+        let signal = minutes(3);
+        let exec = minutes(10);
+        assert!(onto_execution(&signal, &[0, 99], &exec, ONE_MIN).is_none());
+    }
+
+    #[test]
+    fn an_empty_signal_set_aligns_to_nothing_without_refusing() {
+        let exec = minutes(10);
+        let got =
+            onto_execution(&[], &[], &exec, ONE_MIN).expect("nothing to align is not an error");
+        assert!(got.onto.is_empty());
+        assert_eq!(got.unreachable, 0);
+    }
+}

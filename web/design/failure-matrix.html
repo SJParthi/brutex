@@ -1,0 +1,915 @@
+<title>Brutex Failure Matrix</title>
+
+<!--
+  EVERY WAY /ingest AND /db CAN BE WRONG — enumerated, compared, and labelled
+  with how much is actually KNOWN about each one.
+
+  Three status words, one meaning each:
+    HANDLED    I opened the file, read the code, it does the right thing.
+    BROKEN     I opened the file, read the code, it does the wrong thing.
+    UNVERIFIED Nobody has checked. NOT "probably fine", NOT "probably broken" —
+               unmeasured, per CLAUDE.md §3 rule 6.
+
+  No row claims a measurement that was not taken. Every HANDLED and BROKEN row
+  names a file you can open.
+
+  The table is built with DOM methods, never innerHTML: the cell text is data,
+  and data is never markup.
+-->
+
+<style>
+  :root {
+    --n0: #e9edf5;
+    --n1: #f5f7fb;
+    --n2: #ffffff;
+    --n3: #ffffff;
+    --n4: #eef1f7;
+    --n5: #edf0f6;
+    --n6: #dee3ed;
+    --n7: #c7cfdd;
+    --n8: #8b95a8;
+    --n9: #5a6478;
+    --n10: #38415a;
+    --n11: #0d1220;
+    --n12: #000814;
+    --up: #00875a;
+    --down: #d3143f;
+    --warn: #a86a06;
+    --info: #6d45d9;
+    --acc: #0e7f96;
+    --on-acc: #ffffff;
+    --acc-soft: rgba(14, 127, 150, 0.1);
+    --up-soft: rgba(0, 135, 90, 0.12);
+    --down-soft: rgba(211, 20, 63, 0.11);
+    --warn-soft: rgba(168, 106, 6, 0.13);
+    --e1: 0 1px 2px rgba(16, 24, 40, 0.07);
+    --e2: 0 6px 16px rgba(16, 24, 40, 0.1), 0 0 0 1px rgba(16, 24, 40, 0.05);
+    --glass: rgba(255, 255, 255, 0.86);
+    --gridline: rgba(13, 18, 32, 0.04);
+    --focus: #0b6376;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme='light']) {
+      --n0: #070a11;
+      --n1: #0b0e14;
+      --n2: #11151f;
+      --n3: #141924;
+      --n4: #1a2030;
+      --n5: #1b212e;
+      --n6: #232a3a;
+      --n7: #333c51;
+      --n8: #5c6679;
+      --n9: #8a95ab;
+      --n10: #b3bdd0;
+      --n11: #e6ebf5;
+      --n12: #fbfcff;
+      --up: #00e19b;
+      --down: #ff4d6a;
+      --warn: #f0b429;
+      --info: #9d7cf5;
+      --acc: #22d3ee;
+      --on-acc: #04060c;
+      --acc-soft: rgba(34, 211, 238, 0.14);
+      --up-soft: rgba(0, 225, 155, 0.16);
+      --down-soft: rgba(255, 77, 106, 0.16);
+      --warn-soft: rgba(240, 180, 41, 0.16);
+      --e1: 0 1px 2px rgba(0, 0, 0, 0.5);
+      --e2: 0 4px 14px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.04);
+      --glass: rgba(17, 21, 31, 0.82);
+      --gridline: rgba(230, 235, 245, 0.04);
+      --focus: #67e8f9;
+    }
+  }
+  :root[data-theme='dark'] {
+    --n0: #070a11;
+    --n1: #0b0e14;
+    --n2: #11151f;
+    --n3: #141924;
+    --n4: #1a2030;
+    --n5: #1b212e;
+    --n6: #232a3a;
+    --n7: #333c51;
+    --n8: #5c6679;
+    --n9: #8a95ab;
+    --n10: #b3bdd0;
+    --n11: #e6ebf5;
+    --n12: #fbfcff;
+    --up: #00e19b;
+    --down: #ff4d6a;
+    --warn: #f0b429;
+    --info: #9d7cf5;
+    --acc: #22d3ee;
+    --on-acc: #04060c;
+    --acc-soft: rgba(34, 211, 238, 0.14);
+    --up-soft: rgba(0, 225, 155, 0.16);
+    --down-soft: rgba(255, 77, 106, 0.16);
+    --warn-soft: rgba(240, 180, 41, 0.16);
+    --e1: 0 1px 2px rgba(0, 0, 0, 0.5);
+    --e2: 0 4px 14px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.04);
+    --glass: rgba(17, 21, 31, 0.82);
+    --gridline: rgba(230, 235, 245, 0.04);
+    --focus: #67e8f9;
+  }
+
+  :root {
+    --bg: var(--n1);
+    --panel: var(--n3);
+    --panel-2: var(--n4);
+    --line: var(--n6);
+    --line-soft: var(--n5);
+    --line-hard: var(--n7);
+    --well: var(--n0);
+    --ink: var(--n11);
+    --ink-hi: var(--n12);
+    --dim: var(--n9);
+    --faint: var(--n8);
+    --mono: ui-monospace, 'SF Mono', SFMono-Regular, 'JetBrains Mono', Menlo, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', system-ui, sans-serif;
+    --s2: 4px;
+    --s3: 6px;
+    --s4: 8px;
+    --s5: 12px;
+    --s6: 16px;
+    --s7: 24px;
+    --s8: 32px;
+    --r1: 4px;
+    --r5: 16px;
+    --r-full: 999px;
+    --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+    --ease-spring: cubic-bezier(0.2, 0.9, 0.3, 1.25);
+  }
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    background-image: linear-gradient(var(--gridline) 1px, transparent 1px);
+    background-size: 100% 32px;
+  }
+  :focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+    border-radius: var(--r1);
+  }
+  button {
+    font: inherit;
+    cursor: pointer;
+  }
+
+  @keyframes rise {
+    from {
+      opacity: 0;
+      transform: translateY(12px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  @keyframes pop {
+    from {
+      opacity: 0;
+      transform: scale(0.85);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  @keyframes fill {
+    from {
+      transform: scaleX(0);
+    }
+    to {
+      transform: none;
+    }
+  }
+  .rise {
+    opacity: 0;
+    animation: rise 560ms var(--ease) forwards;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 1ms !important;
+      animation-delay: 0ms !important;
+      transition-duration: 1ms !important;
+    }
+    .rise {
+      opacity: 1;
+    }
+  }
+
+  .wrap {
+    max-width: 1520px;
+    margin: 0 auto;
+    padding: var(--s8) var(--s7) 64px;
+    display: flex;
+    flex-direction: column;
+    gap: var(--s7);
+  }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--acc);
+    font-weight: 700;
+  }
+  h1 {
+    font-size: clamp(30px, 4.4vw, 44px);
+    line-height: 1.03;
+    letter-spacing: -0.03em;
+    font-weight: 700;
+    margin: 0;
+    text-wrap: balance;
+  }
+  .stand {
+    font-size: 16px;
+    color: var(--dim);
+    max-width: 76ch;
+    margin: 0;
+  }
+  .mast {
+    display: flex;
+    flex-direction: column;
+    gap: var(--s5);
+  }
+  .legend {
+    display: flex;
+    gap: var(--s6);
+    flex-wrap: wrap;
+    font-size: 12.5px;
+    color: var(--dim);
+    align-items: center;
+  }
+
+  .scores {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 1px;
+    background: var(--line-soft);
+    border: 1px solid var(--line);
+    border-radius: var(--r5);
+    overflow: hidden;
+    box-shadow: var(--e2);
+  }
+  .score {
+    background: var(--panel);
+    padding: var(--s6);
+    display: flex;
+    flex-direction: column;
+    gap: var(--s2);
+  }
+  .score .n {
+    font-family: var(--mono);
+    font-size: 32px;
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+  }
+  .score .k {
+    font-family: var(--mono);
+    font-size: 9.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: 700;
+  }
+  .score .d {
+    font-size: 12px;
+    color: var(--dim);
+  }
+  .score.ok .n {
+    color: var(--up);
+  }
+  .score.bad .n {
+    color: var(--down);
+  }
+  .score.un .n {
+    color: var(--warn);
+  }
+  .score.tot .n {
+    color: var(--ink-hi);
+  }
+  .bar {
+    display: flex;
+    height: 9px;
+    border-radius: var(--r-full);
+    overflow: hidden;
+    background: var(--well);
+    box-shadow: inset 0 0 0 1px var(--line);
+    margin-top: var(--s3);
+  }
+  .bar i {
+    transform-origin: left;
+    animation: fill 900ms var(--ease) both;
+  }
+  .bar i.ok {
+    background: var(--up);
+  }
+  .bar i.bad {
+    background: var(--down);
+  }
+  .bar i.un {
+    background: var(--warn);
+  }
+
+  .controls {
+    display: flex;
+    gap: var(--s4);
+    flex-wrap: wrap;
+    align-items: center;
+    position: sticky;
+    top: 0;
+    z-index: 30;
+    padding: var(--s5) 0;
+    background: var(--glass);
+    backdrop-filter: blur(12px) saturate(1.5);
+    -webkit-backdrop-filter: blur(12px) saturate(1.5);
+  }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s3);
+    height: 32px;
+    padding: 0 var(--s5);
+    border-radius: var(--r-full);
+    border: 1px solid var(--line-hard);
+    background: var(--panel);
+    font-size: 12px;
+    color: var(--dim);
+    transition: transform 130ms var(--ease), box-shadow 130ms var(--ease),
+      border-color 130ms var(--ease), color 130ms var(--ease);
+  }
+  .chip:hover {
+    transform: translateY(-1px);
+    box-shadow: var(--e1);
+    color: var(--ink);
+  }
+  .chip[aria-pressed='true'] {
+    border-color: var(--acc);
+    color: var(--acc);
+    background: var(--acc-soft);
+    font-weight: 600;
+  }
+  .chip .c {
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 11px;
+    opacity: 0.75;
+  }
+  .find {
+    height: 32px;
+    min-width: 230px;
+    flex: 1;
+    max-width: 320px;
+    padding: 0 var(--s5);
+    border-radius: var(--r-full);
+    border: 1px solid var(--line-hard);
+    background: var(--panel);
+    color: var(--ink);
+    font-size: 12px;
+    font-family: var(--sans);
+  }
+
+  .tblwrap {
+    border: 1px solid var(--line);
+    border-radius: var(--r5);
+    overflow: hidden;
+    box-shadow: var(--e2);
+    background: var(--panel);
+  }
+  .scroll {
+    overflow-x: auto;
+  }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    min-width: 1140px;
+  }
+  thead th {
+    position: sticky;
+    top: 0;
+    background: var(--panel-2);
+    text-align: left;
+    font-family: var(--mono);
+    font-size: 9.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: 700;
+    padding: var(--s5);
+    border-bottom: 1px solid var(--line-hard);
+    z-index: 4;
+    white-space: nowrap;
+  }
+  tbody td {
+    padding: var(--s5);
+    border-bottom: 1px solid var(--line-soft);
+    vertical-align: top;
+    font-size: 13px;
+  }
+  tbody tr {
+    transition: background 120ms var(--ease);
+  }
+  tbody tr:hover td {
+    background: var(--panel-2);
+  }
+  tr.hide {
+    display: none;
+  }
+  .catrow td {
+    background: var(--well);
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--acc);
+    font-weight: 700;
+    padding: var(--s4) var(--s5);
+    border-bottom: 1px solid var(--line);
+  }
+  .id {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--faint);
+    white-space: nowrap;
+  }
+  .scen {
+    font-weight: 600;
+    color: var(--ink-hi);
+    min-width: 200px;
+  }
+  .scen .cause {
+    display: block;
+    font-weight: 400;
+    color: var(--dim);
+    font-size: 12px;
+    margin-top: 3px;
+  }
+  .now,
+  .should {
+    min-width: 240px;
+  }
+  code {
+    font-family: var(--mono);
+    font-size: 11px;
+    background: var(--well);
+    border: 1px solid var(--line-soft);
+    border-radius: 3px;
+    padding: 0 4px;
+  }
+  .where {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--faint);
+    min-width: 170px;
+  }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-family: var(--mono);
+    font-size: 9.5px;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    font-weight: 700;
+    padding: 4px 9px;
+    border-radius: var(--r-full);
+    white-space: nowrap;
+    animation: pop 320ms var(--ease-spring) both;
+  }
+  .badge.ok {
+    background: var(--up-soft);
+    color: var(--up);
+  }
+  .badge.bad {
+    background: var(--down-soft);
+    color: var(--down);
+  }
+  .badge.un {
+    background: var(--warn-soft);
+    color: var(--warn);
+  }
+  .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+    flex: none;
+  }
+  .none {
+    padding: var(--s8);
+    text-align: center;
+    color: var(--dim);
+    font-size: 13px;
+  }
+  footer {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--faint);
+    display: flex;
+    gap: var(--s7);
+    flex-wrap: wrap;
+    padding-top: var(--s6);
+    border-top: 1px solid var(--line);
+  }
+</style>
+
+<div class="wrap">
+  <header class="mast rise">
+    <span class="eyebrow">/ingest · /db · every way it can go wrong</span>
+    <h1>Brutex Failure Matrix</h1>
+    <p class="stand">
+      Every extreme value, empty state, exception, race and edge case the two console pages can
+      meet — what happens today, what should happen, and how much is actually
+      <em>known</em> about each one. Rows marked UNVERIFIED are not guesses in either direction.
+      They are unmeasured, and saying so is the point.
+    </p>
+    <div class="legend" id="legend"></div>
+  </header>
+
+  <section class="scores rise" style="animation-delay:100ms" aria-label="Totals">
+    <div class="score tot">
+      <span class="k">Scenarios</span><span class="n" id="s-tot">0</span
+      ><span class="d">across 11 categories</span>
+    </div>
+    <div class="score ok">
+      <span class="k">Handled</span><span class="n" id="s-ok">0</span
+      ><span class="d">read in source, correct</span>
+    </div>
+    <div class="score bad">
+      <span class="k">Broken</span><span class="n" id="s-bad">0</span
+      ><span class="d">read in source, wrong</span>
+    </div>
+    <div class="score un">
+      <span class="k">Unverified</span><span class="n" id="s-un">0</span
+      ><span class="d">unmeasured, not assumed</span>
+    </div>
+    <div class="score">
+      <span class="k">Coverage</span>
+      <span class="bar">
+        <i class="ok" id="b-ok" style="animation-delay:500ms"></i>
+        <i class="bad" id="b-bad" style="animation-delay:560ms"></i>
+        <i class="un" id="b-un" style="animation-delay:620ms"></i>
+      </span>
+      <span class="d" id="s-pct">—</span>
+    </div>
+  </section>
+
+  <div class="controls rise" style="animation-delay:160ms">
+    <input
+      class="find"
+      id="find"
+      type="search"
+      placeholder="Search scenario, cause, file…"
+      aria-label="Search scenarios"
+    />
+    <button class="chip" type="button" data-f="all" aria-pressed="true">
+      All <span class="c" id="n-all">0</span>
+    </button>
+    <button class="chip" type="button" data-f="bad" aria-pressed="false">
+      Broken <span class="c" id="n-bad">0</span>
+    </button>
+    <button class="chip" type="button" data-f="un" aria-pressed="false">
+      Unverified <span class="c" id="n-un">0</span>
+    </button>
+    <button class="chip" type="button" data-f="ok" aria-pressed="false">
+      Handled <span class="c" id="n-ok">0</span>
+    </button>
+    <!-- "Touches", not "only": these keep the rows marked `both`, because a
+         shared scenario is one that touches this page too. Labelled "only" it
+         read as a lie — the /db filter returns 74 of 78, not 4. -->
+    <button class="chip" type="button" data-p="ingest" aria-pressed="false">Touches /ingest</button>
+    <button class="chip" type="button" data-p="db" aria-pressed="false">Touches /db</button>
+  </div>
+
+  <div class="tblwrap rise" style="animation-delay:220ms">
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:48px">ID</th>
+            <th style="width:56px">Page</th>
+            <th>Scenario &amp; what triggers it</th>
+            <th>What happens today</th>
+            <th>What should happen</th>
+            <th style="width:120px">Status</th>
+            <th>Evidence</th>
+          </tr>
+        </thead>
+        <tbody id="body"></tbody>
+      </table>
+    </div>
+    <div class="none" id="none" hidden>Nothing matches that filter.</div>
+  </div>
+
+  <footer>
+    <span>Status is about EVIDENCE, not confidence — “unverified” never means “probably fine”</span>
+    <span>Every Handled and Broken row names a file you can open</span>
+  </footer>
+</div>
+
+<script>
+  // ---------------------------------------------------------------------------
+  // DATA. `s`: ok | bad | un. Backticks mark code spans and are turned into real
+  // <code> elements by `frag()` — never parsed as markup.
+  // ---------------------------------------------------------------------------
+  var CATS = [
+    { name: 'A · Nothing is there — the empty and absent states', rows: [
+      { p:'both', t:'Store directory does not exist', c:'Fresh clone, no ~/.brutex/store', now:'A named blank state renders with a reason and a way forward', should:'Same — and never a bare 0', s:'ok', w:'ingest:4068 · db:4422' },
+      { p:'both', t:'Feed list cannot be read', c:'/feeds.json answers in a shape this build does not understand', now:'Dedicated blank: “The feed list could not be read”, plus Try again', should:'Same', s:'ok', w:'db/+page.svelte:4423' },
+      { p:'both', t:'No feed selected', c:'First load, nothing chosen', now:'Dedicated blank, distinct from “empty store”', should:'Same', s:'ok', w:'ingest:4075 · db:4444' },
+      { p:'both', t:'Feed chosen, store holds nothing', c:'New feed, never pulled', now:'Dedicated blank naming the feed', should:'Same — must NOT read as a failure', s:'ok', w:'ingest:4085' },
+      { p:'db', t:'Instrument has zero bars, neighbours have many', c:'Never pulled for this symbol', now:'0 in numeric columns, “never pulled” in date columns', should:'Exactly that — 0 and never-pulled are different facts', s:'ok', w:'db:2715 BAR_COLS' },
+      { p:'ingest', t:'Universe resolves to zero members', c:'A tier with no constituents for this feed', now:'Empty outcome list with a sentence naming the likely cause', should:'Same', s:'ok', w:'ingest:5149' },
+      { p:'both', t:'Census counter is zero while bar files exist', c:'Damaged counter after a crash', now:'Nothing notices — no reconcile pass exists in this build', should:'Detect and say “counters disagree with the files”', s:'un', w:'plan §10 item 19' },
+      { p:'db', t:'Month file holds fewer bars than the calendar expects', c:'Partial pull', now:'Coverage swatches are quartiles of the fullest month ON THE PAGE', should:'Quartiles of an IDEAL month — needs a trading calendar', s:'un', w:'06-limits · no calendar' }
+    ]},
+    { name: 'B · Numbers at the edge', rows: [
+      { p:'db', t:'Open interest is i64::MIN, the null sentinel', c:'Feed stamps no OI for this segment', now:'Server writes JSON null; page renders `unknown`, not a huge negative', should:'Exactly that', s:'ok', w:'db/+page.svelte:3055' },
+      { p:'db', t:'Open interest is a real zero', c:'Contract genuinely has none', now:'Renders 0, distinct from `unknown`', should:'Exactly that', s:'ok', w:'db/+page.svelte:3034' },
+      { p:'db', t:'A column has no source on this wire', c:'10 of the 24 bar columns', now:'Renders `no source` with its reason on hover', should:'Exactly that — never a fabricated number', s:'ok', w:'db:2715 BAR_COLS none' },
+      { p:'both', t:'Division by a zero denominator gives NaN or Infinity', c:'A ratio over an empty population', now:'Unaudited. Over 1,000 division sites in /db alone', should:'Every ratio guards its denominator and shows “no yardstick”', s:'un', w:'1,040 sites counted' },
+      { p:'both', t:'A silent fallback turns a failure into a plausible number', c:'`?? 0`, `|| 0`, `?? []`', now:'67 such operators across the two pages, none audited', should:'A failure degrades LOUDLY and names the reason (§4)', s:'un', w:'34 ingest · 33 db' },
+      { p:'db', t:'A paisa integer exceeds Number.MAX_SAFE_INTEGER', c:'A price × quantity product in the browser', now:'Depends whether any multiplication happens client-side — not traced', should:'Format server-side; never multiply paisa in JS', s:'un', w:'db:3012 states the rule' },
+      { p:'db', t:'Negative price', c:'Corrupt or synthetic bar', now:'No guard read', should:'Refuse the row and name it, not render it as fact', s:'un', w:'not audited' },
+      { p:'both', t:'A meter reads 100% while work is outstanding', c:'Rounding a nearly-complete ratio', now:'Guarded — outstanding is its own segment, so a meter cannot read full', should:'Exactly that', s:'ok', w:'autopilot:2401' },
+      { p:'both', t:'A partition does not sum to its total', c:'A bucket nobody accounted for', now:'Shouts `MISMATCH — n series, m accounted for`', should:'Exactly that — never round it away', s:'ok', w:'ingest:5390' }
+    ]},
+    { name: 'C · Text at the edge', rows: [
+      { p:'both', t:'Symbol carries a byte outside A–Z 0–9 - _ &', c:'Decimal strike, e.g. …276.65CE', now:'Refused with 5 loud signals; 596/day reproduced on GDFL', should:'Also name the offending byte and its offset', s:'bad', w:'core/src/error.rs:91' },
+      { p:'both', t:'Instrument name is very long', c:'Full registered company name', now:'Clipping vs wrapping never measured against the real longest', should:'Ellipsis, full value on hover, row height unchanged', s:'un', w:'no measurement taken' },
+      { p:'both', t:'Search matches zero rows', c:'Typo in the find box', now:'Is the empty result distinguishable from “still loading”? Not read', should:'Explicit “no match” state naming the query', s:'un', w:'not audited' },
+      { p:'db', t:'An index has no ISIN', c:'NIFTY 50, NIFTY BANK — no agency issues one', now:'Renders “no ISIN — index”, not blank', should:'Exactly that', s:'ok', w:'6a58d7c · 5 of 6 are indices' },
+      { p:'db', t:'The exchange file carries the WRONG ISIN', c:'AGL ↔ GRINDWELL', now:'ISIN withheld rather than written; the gap is named', should:'Exactly that — a count that agrees while the wrong row joins is worse', s:'ok', w:'6a58d7c commit body' },
+      { p:'both', t:'Symbol renamed between vendor deliveries', c:'`NIFTY` 2022 vs `NIFTY 50` 2025', now:'Two directories, one index — nothing reconciles them', should:'A canonical alias, descriptor-driven', s:'bad', w:'plan §10 item 17' }
+    ]},
+    { name: 'D · Scale', rows: [
+      { p:'both', t:'All 1,813 instruments listed unfiltered', c:'Clear the filter', now:'Paged at 200; page counters are O(1) map reads', should:'Same', s:'ok', w:'D-0042 · bench C-16' },
+      { p:'db', t:'375 bars × 24 columns in one view', c:'A full trading day at 1 minute', now:'Table declares 2,420px and scrolls in its own container', should:'Exactly that — the page body must never scroll sideways', s:'ok', w:'db:2715 widths' },
+      { p:'db', t:'Read budget exceeded', c:'80 instrument-months matched, budget of 4', now:'Partition shown on screen: read + over budget = matched', should:'Exactly that — never silently truncate', s:'ok', w:'db:5766 vsum' },
+      { p:'both', t:'Deep page index beyond the end', c:'Hand-edited page number', now:'Clamped, and the clamped deep page is in the bench line-up', should:'Clamp and say so', s:'ok', w:'gate 8 C-15' },
+      { p:'both', t:'Sort a column where many values tie', c:'Sort by Months, hundreds equal', now:'Stability asserted nowhere', should:'Stable, with a documented tiebreak', s:'un', w:'no test read' },
+      { p:'both', t:'Sort a column containing absences', c:'Sort by Oldest with never-pulled rows present', now:'Where nulls land is unspecified', should:'Nulls grouped at one end, stated in the header', s:'un', w:'no test read' },
+      { p:'db', t:'Sort a column that has no source', c:'Click the Delta header', now:'Refused — a column with `none` has nothing to order', should:'Exactly that, and the header says why', s:'ok', w:'db/+page.svelte:3168' },
+      { p:'ingest', t:'Select-all on a filtered set, then clear the filter', c:'Filter → select all → clear', now:'Is the selection the filtered set or everything? Not read', should:'Exactly what was visible, and the count says so', s:'un', w:'not audited' }
+    ]},
+    { name: 'E · Time, clock and calendar', rows: [
+      { p:'both', t:'A rolling floor resolves against the real clock', c:'Dhan’s rolling 5 years, Groww’s quarter', now:'`clamp_to_floor` calls `SystemTime::now()` and IGNORES the `today` passed to it', should:'Resolve against the supplied day, so it is testable', s:'bad', w:'api/src/server.rs:4161, 4173' },
+      { p:'both', t:'A test asserts a clock-derived date', c:'Any day that is not 2026-08-12', now:'RED today — expects 2026-05-12, gets 2026-05-14', should:'Thread a fixed day through, as vendor.rs already does', s:'bad', w:'api/src/server.rs:12780' },
+      { p:'both', t:'Browser is not in IST', c:'Laptop travelling', now:'Local-vs-IST mixing in dates.js not audited', should:'Every displayed day is IST; India has no DST, so no ambiguity', s:'un', w:'lib/dates.js' },
+      { p:'both', t:'A floor computed in UTC compared against a local day', c:'Any browser west of IST', now:'Off by one for part of every day if the two are mixed', should:'One clock, one zone, end to end', s:'un', w:'ingest rollFloor uses Date.UTC' },
+      { p:'both', t:'Month-end arithmetic produces an impossible day', c:'31 Jan minus one month', now:'Resolves 30 Feb to None rather than inventing a day', should:'Exactly that', s:'ok', w:'server.rs floor_oldest' },
+      { p:'both', t:'Census is older than the last pull', c:'Pull landed after the counters were committed', now:'Page says the counters are stale, and by how long', should:'Exactly that', s:'ok', w:'server tests' },
+      { p:'both', t:'Today is requested', c:'Operator sets To = today', now:'Never requested — yesterday is the newest day asked for', should:'Exactly that (R-2)', s:'ok', w:'finished_day_only' },
+      { p:'both', t:'Clock skew across DST', c:'—', now:'Not a risk: India observes no DST', should:'—', s:'ok', w:'plan §10 item 20' }
+    ]},
+    { name: 'F · The wire — server and browser disagreeing', rows: [
+      { p:'both', t:'The page reads a field the server never emits', c:'Field renamed on one side', now:'Renders undefined → blank, or a gate that never opens', should:'A contract test fails the build', s:'bad', w:'6a58d7c catalogue.feed' },
+      { p:'db', t:'/bars.json requested without a timeframe', c:'A 1day series asked on the default path', now:'Fixed once — server defaulted to 1min and the chart drew nothing, silently', should:'Timeframe always sent; a missing one refuses', s:'ok', w:'6a58d7c' },
+      { p:'ingest', t:'The browser holds a SECOND COPY of a wire fact', c:'`FLOOR_OPERATOR` / `FLOOR_DOC`', now:'Hardcoded floors /feeds.json already emits — and after D-0131 they DISAGREE', should:'Read `active.history` off the wire; delete the tables', s:'bad', w:'ingest/+page.svelte:632' },
+      { p:'ingest', t:'That second copy names a feed no descriptor has', c:'A `zerodha` row', now:'Present — and no row for truedata or gdfl, which the wire answers for', should:'Deleted with the table', s:'bad', w:'ingest/+page.svelte:634' },
+      { p:'both', t:'Server returns 5xx, or times out mid-request', c:'Vendor or server hiccup', now:'13 catch blocks across the two pages and the store, none audited', should:'Named error state, retry offered, never a silent empty list', s:'un', w:'6 ingest · 4 db · 3 store' },
+      { p:'both', t:'A response arrives after the user switched feed', c:'Fast clicking', now:'Guarded in at least one place — the previous feed’s counts must not show', should:'Every fetch keyed, stale replies dropped', s:'ok', w:'lib/store.svelte.js:248' },
+      { p:'both', t:'A number arrives as a string and is compared with ===', c:'JSON type drift', now:'No contract test exists', should:'A contract test pins every field’s type', s:'un', w:'none exists' }
+    ]},
+    { name: 'G · Concurrency, lifecycle, interruption', rows: [
+      { p:'both', t:'Two pulls run at once', c:'Two tabs, or a rerun', now:'CensusLock held across read-modify-write', should:'Exactly that', s:'ok', w:'pull::ingest · plan §9.1' },
+      { p:'both', t:'Process killed mid bar-file write', c:'Laptop sleep, kill -9', now:'Two-slot header recovery; CRC-32C per 56-byte record', should:'Exactly that', s:'ok', w:'store::header · store::block' },
+      { p:'both', t:'Token expires mid-run', c:'Daily reset at 06:00 IST', now:'401 for every later request, no re-read. CERTAIN to fire on a 22,400-request run', should:'Re-read the token; halt loudly if it is still dead', s:'bad', w:'plan §10 item 11' },
+      { p:'both', t:'One instrument fails during a sweep', c:'A single bad symbol', now:'No loop yet — when there is one it must not abort the other 799', should:'Per-instrument isolation', s:'un', w:'plan §10 item 14' },
+      { p:'both', t:'Restart loses progress', c:'Kill and rerun', now:'Rerun is safe, but redoes everything', should:'The census as the progress ledger', s:'bad', w:'plan §10 item 15' },
+      { p:'both', t:'A subscription outlives its route', c:'Navigate away mid-request', now:'Known hazard — a flag left standing when the markup is torn down', should:'Every subscription torn down on navigation', s:'un', w:'+layout.svelte:288' },
+      { p:'both', t:'Vendor restates history differently', c:'Same window, different bars', now:'Overlap verified byte for byte; a differing bar REFUSES', should:'Exactly that', s:'ok', w:'store::file' },
+      { p:'both', t:'Disk full mid-write', c:'No space left', now:'Returned as an error, never signalled — no writable mapping, by rule', should:'Exactly that', s:'ok', w:'CLAUDE.md §4' }
+    ]},
+    { name: 'H · Environment — theme, viewport, motion', rows: [
+      { p:'both', t:'Viewer on system theme, nothing stamped', c:'Default browser setting', now:'Handled — the dark block is guarded with :not([data-theme="light"])', should:'Exactly that', s:'ok', w:'theme.css:100' },
+      { p:'both', t:'Explicit light choice on a dark OS', c:'Toggle set to light', now:'Handled — the light block repeats the full ramp', should:'Exactly that', s:'ok', w:'theme.css:190' },
+      { p:'both', t:'A colour defined only inside a media query', c:'The classic unreadable-page bug', now:'Not present — both themes define complete token sets', should:'Exactly that', s:'ok', w:'theme.css:52/101/144/190' },
+      { p:'both', t:'A component reads a CSS var nobody defines', c:'Picker’s --raise / --panel2 / --accdeep', now:'FIXED — aliased through the ramp', should:'Plus a gate so it cannot recur', s:'ok', w:'theme.css:243' },
+      { p:'both', t:'A component hardcodes a font stack', c:'Picker', now:'`ui-monospace,Menlo,monospace` instead of `var(--mono)` — skips SF Mono and JetBrains Mono', should:'Always the token', s:'bad', w:'lib/Picker.svelte' },
+      { p:'both', t:'User prefers reduced motion', c:'OS accessibility setting', now:'Not audited in the live pages', should:'Every animation and transition suppressed', s:'un', w:'not audited' },
+      { p:'both', t:'Narrow viewport', c:'1280 laptop, or split screen', now:'No responsive audit of the live pages', should:'Strip wraps predictably; body never scrolls sideways', s:'un', w:'measured only in the reference' },
+      { p:'both', t:'Browser zoom at 200%', c:'Accessibility', now:'Not audited', should:'Layout holds, nothing clips', s:'un', w:'not audited' }
+    ]},
+    { name: 'I · Money and precision', rows: [
+      { p:'db', t:'A price is rendered as a float', c:'Dividing paisa in JS', now:'The rule is documented; the formatting path is not traced end to end', should:'Formatted once at the write boundary, never a float', s:'un', w:'db:3012 states the rule' },
+      { p:'both', t:'A statistical value is rounded for storage', c:'Sharpe, p-value, ratio', now:'Rule stated: full precision, never rounded', should:'Exactly that', s:'ok', w:'CLAUDE.md §7' },
+      { p:'both', t:'Tick-grid snapping applied twice', c:'Snap on read and on write', now:'Snapping happens ONCE, at the write boundary, half-up', should:'Exactly that', s:'ok', w:'CLAUDE.md §7' },
+      { p:'both', t:'Indian and Western digit grouping mixed in one table', c:'toLocaleString with different locales', now:'Not audited', should:'One grouping, everywhere', s:'un', w:'not audited' }
+    ]},
+    { name: 'J · Build and delivery — is what you see what you changed?', rows: [
+      { p:'both', t:'web/build is stale relative to web/src', c:'Edited source, forgot to rebuild', now:'Nothing ties them — the binary never compiles the bundle', should:'A gate proving the bundle came from current source', s:'bad', w:'06-limits §38 · D-0068' },
+      { p:'both', t:'A CI gate matches text inside a comment', c:'A comment describing the gate', now:'FIXED today — gate 17 failed the build on its own doc comment', should:'Strip comment lines, keep true line numbers', s:'ok', w:'commit d47732d' },
+      { p:'both', t:'Stale target/ artifacts masquerade as fresh', c:'Two sessions sharing one tree', now:'Zero-byte .rmeta made three crates fail to resolve while the source was fine', should:'Recognise the shape; cargo clean -p the crate', s:'ok', w:'reproduced this session' },
+      { p:'both', t:'A visual regression lands', c:'Any CSS edit', now:'Nothing fails. No gate has ever checked a page’s appearance', should:'Gates 24–27: token integrity, wire contract, state matrix, build freshness', s:'bad', w:'no gate exists' }
+    ]},
+    { name: 'K · Out of the box — the ones nobody lists', rows: [
+      { p:'both', t:'The page is correct and the DATA is a lie', c:'Vendor returns plausible but wrong bars', now:'Cross-vendor bar comparison does not exist', should:'Compare two vendors bar-for-bar; refuse and name the timestamp', s:'un', w:'04-invariants X-13 PENDING' },
+      { p:'both', t:'An empty vendor answer reads exactly like a market holiday', c:'A widened floor spends requests on days with no data', now:'Indistinguishable — the stated cost of D-0131’s widening', should:'A trading calendar derived from data settles it', s:'un', w:'vendor.rs ClaimStanding' },
+      { p:'both', t:'Two sessions edit the same file', c:'Two agents, one tree', now:'A lost write took /db from 8,791 lines to 2,204', should:'One writer per file, always', s:'bad', w:'happened once already' },
+      { p:'both', t:'A gate passes because it measures nothing', c:'Gate 1e read no exit status for a whole era', now:'Fixed — stub PATH and exit status both checked now', should:'Every gate proved against a deliberately broken input', s:'ok', w:'ci.yml gate 1e' },
+      { p:'both', t:'A document claims a measurement nobody took', c:'“180-day cap, 14 windows”', now:'Corrected — that cap appears in no source; the real figure is 80 months', should:'Label extrapolations as extrapolations (§3 rule 6)', s:'ok', w:'plan §4' },
+      { p:'both', t:'The operator cannot tell a refusal from an absence', c:'Any disabled control', now:'Mostly named — but only where someone remembered to', should:'Gate 26 makes it structural rather than remembered', s:'un', w:'gate not built' },
+      { p:'both', t:'A number is right and its LABEL is wrong', c:'Counter renamed, caption not updated', now:'Nothing ties a figure to its caption', should:'Caption and figure derive from one source', s:'un', w:'no check exists' },
+      { p:'both', t:'A sortable header gives no keyboard affordance', c:'Tab through the grid', now:'Not audited in the live pages', should:'Sortable headers are buttons announcing direction', s:'un', w:'not audited' }
+    ]}
+  ];
+
+  // Backtick-delimited spans become real <code> elements. No HTML is ever
+  // parsed: odd segments are code, even segments are text, both appended as
+  // nodes. This is why the table is built with DOM methods and not innerHTML.
+  function frag(text) {
+    var f = document.createDocumentFragment();
+    String(text)
+      .split('`')
+      .forEach(function (part, i) {
+        if (i % 2) {
+          var c = document.createElement('code');
+          c.textContent = part;
+          f.appendChild(c);
+        } else if (part) {
+          f.appendChild(document.createTextNode(part));
+        }
+      });
+    return f;
+  }
+  function cell(cls, text) {
+    var td = document.createElement('td');
+    if (cls) td.className = cls;
+    td.appendChild(frag(text));
+    return td;
+  }
+  function badge(s) {
+    var map = { ok: ['ok', 'Handled'], bad: ['bad', 'Broken'], un: ['un', 'Unverified'] };
+    var b = document.createElement('span');
+    b.className = 'badge ' + map[s][0];
+    var d = document.createElement('i');
+    d.className = 'dot';
+    b.appendChild(d);
+    b.appendChild(document.createTextNode(map[s][1]));
+    return b;
+  }
+
+  var body = document.getElementById('body');
+  var rowsAll = [];
+  var n = 0;
+  CATS.forEach(function (cat) {
+    var head = document.createElement('tr');
+    head.className = 'catrow';
+    var td = document.createElement('td');
+    td.colSpan = 7;
+    td.textContent = cat.name;
+    head.appendChild(td);
+    body.appendChild(head);
+
+    cat.rows.forEach(function (r) {
+      n += 1;
+      var tr = document.createElement('tr');
+      tr.dataset.s = r.s;
+      tr.dataset.p = r.p;
+      tr.dataset.q = (r.t + ' ' + r.c + ' ' + r.now + ' ' + r.should + ' ' + r.w).toLowerCase();
+
+      tr.appendChild(cell('id', String(n).padStart(2, '0')));
+      tr.appendChild(cell('id', r.p === 'both' ? 'both' : '/' + r.p));
+
+      var scen = document.createElement('td');
+      scen.className = 'scen';
+      scen.appendChild(frag(r.t));
+      var cause = document.createElement('span');
+      cause.className = 'cause';
+      cause.appendChild(frag(r.c));
+      scen.appendChild(cause);
+      tr.appendChild(scen);
+
+      tr.appendChild(cell('now', r.now));
+      tr.appendChild(cell('should', r.should));
+
+      var st = document.createElement('td');
+      st.appendChild(badge(r.s));
+      tr.appendChild(st);
+
+      tr.appendChild(cell('where', r.w));
+      body.appendChild(tr);
+      rowsAll.push(tr);
+    });
+  });
+
+  // ------------------------------------------------------------------ totals
+  function count(s) {
+    return rowsAll.filter(function (e) {
+      return e.dataset.s === s;
+    }).length;
+  }
+  var tot = rowsAll.length,
+    ok = count('ok'),
+    bad = count('bad'),
+    un = count('un');
+  var still = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function setNum(id, v) {
+    var el = document.getElementById(id);
+    if (still) {
+      el.textContent = String(v);
+      return;
+    }
+    var t0 = null;
+    requestAnimationFrame(function step(t) {
+      if (t0 === null) t0 = t;
+      var p = Math.min(1, (t - t0) / 900);
+      el.textContent = String(Math.round(v * (1 - Math.pow(1 - p, 3))));
+      if (p < 1) requestAnimationFrame(step);
+    });
+  }
+  setNum('s-tot', tot);
+  setNum('s-ok', ok);
+  setNum('s-bad', bad);
+  setNum('s-un', un);
+  document.getElementById('b-ok').style.width = (ok / tot) * 100 + '%';
+  document.getElementById('b-bad').style.width = (bad / tot) * 100 + '%';
+  document.getElementById('b-un').style.width = (un / tot) * 100 + '%';
+  document.getElementById('s-pct').textContent =
+    Math.round((ok / tot) * 100) + '% verified good · ' + Math.round((un / tot) * 100) + '% unmeasured';
+  document.getElementById('n-all').textContent = String(tot);
+  document.getElementById('n-ok').textContent = String(ok);
+  document.getElementById('n-bad').textContent = String(bad);
+  document.getElementById('n-un').textContent = String(un);
+
+  // Legend, built the same safe way.
+  var legend = document.getElementById('legend');
+  [
+    ['ok', 'code read, does the right thing'],
+    ['bad', 'code read, does the wrong thing'],
+    ['un', 'nobody has checked']
+  ].forEach(function (pair) {
+    var wrapEl = document.createElement('span');
+    wrapEl.appendChild(badge(pair[0]));
+    wrapEl.appendChild(document.createTextNode(' — ' + pair[1]));
+    wrapEl.style.display = 'inline-flex';
+    wrapEl.style.alignItems = 'center';
+    wrapEl.style.gap = '6px';
+    legend.appendChild(wrapEl);
+  });
+
+  // ----------------------------------------------------------------- filters
+  var fStatus = 'all';
+  var fPage = null;
+  var q = '';
+  function apply() {
+    var shown = 0;
+    rowsAll.forEach(function (e) {
+      var okS = fStatus === 'all' || e.dataset.s === fStatus;
+      var okP = !fPage || e.dataset.p === fPage || e.dataset.p === 'both';
+      var okQ = !q || e.dataset.q.indexOf(q) > -1;
+      var vis = okS && okP && okQ;
+      e.classList.toggle('hide', !vis);
+      if (vis) shown += 1;
+    });
+    // A category heading with nothing under it is noise.
+    [].slice.call(document.querySelectorAll('.catrow')).forEach(function (c) {
+      var any = false;
+      var el = c.nextElementSibling;
+      while (el && !el.classList.contains('catrow')) {
+        if (!el.classList.contains('hide')) any = true;
+        el = el.nextElementSibling;
+      }
+      c.classList.toggle('hide', !any);
+    });
+    document.getElementById('none').hidden = shown > 0;
+  }
+  document.querySelectorAll('.chip[data-f]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      fStatus = b.dataset.f;
+      document.querySelectorAll('.chip[data-f]').forEach(function (o) {
+        o.setAttribute('aria-pressed', String(o === b));
+      });
+      apply();
+    });
+  });
+  document.querySelectorAll('.chip[data-p]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      var on = b.getAttribute('aria-pressed') === 'true';
+      fPage = on ? null : b.dataset.p;
+      document.querySelectorAll('.chip[data-p]').forEach(function (o) {
+        o.setAttribute('aria-pressed', String(!on && o === b));
+      });
+      apply();
+    });
+  });
+  document.getElementById('find').addEventListener('input', function (e) {
+    q = e.target.value.trim().toLowerCase();
+    apply();
+  });
+</script>

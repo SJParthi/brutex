@@ -1,0 +1,2395 @@
+/* brutex — the operator console's visual system.
+ *
+ * A DARK-FIRST TERMINAL, not a dashboard template. The people who use this
+ * read Dhan and TradingView all day; those are dark, dense, monospaced where
+ * numbers live, and quiet everywhere else so the numbers are the only thing
+ * that moves. Every choice below follows from that.
+ *
+ * Numbers are ALWAYS tabular-nums. A price column whose digits change width is
+ * a column that shimmers while you read it.
+ *
+ * ---------------------------------------------------------------------------
+ * HOW THIS FILE IS ORGANISED, AND THE ONE RULE FOR EDITING IT
+ * ---------------------------------------------------------------------------
+ *
+ *   1. THE RAMP        raw colour, per theme, in four blocks (see below).
+ *   2. THE MAPPING     semantic names -> ramp steps. Written ONCE.
+ *   3. THE SCALES      radius, space, type, motion. Theme-invariant.
+ *   4. THE KEYFRAMES   inert until something asks for them.
+ *   5. THE COMPONENTS  every class the pages use, expressed through tokens.
+ *   6. THE MOTION      every `animation:` and `transition:` in the file, all
+ *                      of it inside `prefers-reduced-motion: no-preference`.
+ *
+ * **Never rename a token or a class.** Four route pages and a chart component
+ * reference these names directly and none of them are edited when this file is.
+ * Adding is free; renaming is a silent breakage on a page nobody re-opened.
+ *
+ * THE FOUR-BLOCK THEME PATTERN, and why it is four and not two:
+ *
+ *   :root                              the light ramp, and the baseline
+ *   @media (prefers-color-scheme:dark) the dark ramp, for an unset toggle
+ *   :root[data-theme="dark"]           the toggle, forcing dark
+ *   :root[data-theme="light"]          the toggle, forcing light
+ *
+ * The last two carry an attribute so they out-specify the bare `:root` inside
+ * the media query — media queries do not add specificity, so without the
+ * attribute the system preference would beat an explicit choice in one
+ * direction and lose in the other. With it, the toggle wins both ways. The
+ * shell writes `data-theme` for an explicit choice and REMOVES it for "auto",
+ * which is what hands control back to the media query.
+ */
+
+/* ==========================================================================
+   1. THE RAMP — light
+   --------------------------------------------------------------------------
+   NOT PURE GREY. Every step is pulled toward the accent's hue (~222deg) at
+   very low saturation. Pure #808080 grey beside a blue accent reads as dirty
+   yellow by simultaneous contrast; a neutral that shares the accent's hue
+   reads as neutral and lets the accent stay the only saturated thing on the
+   page. The ramp runs background -> foreground, n0 darkest surface in dark
+   mode and lightest in light mode, so the MAPPING below is written once.
+   ========================================================================== */
+:root {
+  color-scheme: light;
+
+  --n0: #e9edf5;   /* recessed — wells, track backgrounds       */
+  --n1: #f5f7fb;   /* page                                      */
+  --n2: #ffffff;   /* bars, sticky heads, raised surfaces       */
+  --n3: #ffffff;   /* panels                                    */
+  --n4: #eef1f7;   /* panel interior, hover                     */
+  --n5: #edf0f6;   /* hairline, soft                            */
+  --n6: #dee3ed;   /* hairline                                  */
+  --n7: #c7cfdd;   /* hairline, strong / disabled edge          */
+  /* MEASURED, NOT CHOSEN BY EYE. This was #8b95a8 and it failed WCAG AA on
+     every surface this app paints: 3.02:1 on --panel, 2.81:1 on --bg, 2.67:1 on
+     --panel-2 and 2.57:1 on --well, against a 4.5:1 floor. It is the console's
+     primary micro-label colour -- 16 declarations here, 19 in /ingest, 31 in
+     /db -- carried at 9.5px and 10px, so no large-text exemption applies.
+     #5f6a7c is the lightest value clearing 4.5:1 on the WORST of those four
+     surfaces (4.66:1 on --well). Two published candidates, #6b7688 and #656f81,
+     were rejected because they measure 3.91:1 and 4.32:1 there. */
+  --n8: #5f6a7c;   /* faint text — labels, units                */
+  --n9: #5a6478;   /* dim text — secondary                      */
+  --n10: #38415a;  /* ink, secondary emphasis                   */
+  --n11: #0d1220;  /* ink                                       */
+  --n12: #000814;  /* ink, strong                               */
+
+  /* SEMANTIC HUES, KEPT OFF THE ACCENT. Up/down/warn/info must survive an
+     accent change: if the accent were also the "info" colour then re-hueing
+     the brand would silently re-hue a meaning. They are four independent
+     hues — teal, red, amber, violet — and the accent is a fifth, blue. */
+  /* GREEN IS MEASURED TOO, AND FOR THE SAME REASON AMBER WAS. It was #00875a,
+     which measures 3.78–3.88 as TEXT on the three opaque light surfaces —
+     under the 4.5 floor on all of them, worst on --well. #00764e is the
+     lightest value on this hue that clears it (4.84); #007e54 was tried and
+     rejected at 4.35.
+     FOUND BY A CLEAN-LOAD MEASUREMENT, AND THAT MATTERS. An earlier sweep of
+     this same page reported three elements rendering DARK-ramp colours on a
+     light ground and could not explain them. They were an artefact of measuring
+     while the theme transition was still running: toggling and reading in the
+     same breath catches `color` mid-interpolation. Loading the page already in
+     light removed all three and left exactly two real failures — this one and
+     `.pg.on`. The lesson is in `theme.css` rather than in a commit message
+     because the next person to audit contrast here will reach for the toggle.
+     `--up-soft` moves with it, being the same hue at 12%. DARK IS UNTOUCHED:
+     #00e19b there clears the floor comfortably. */
+  --up: #00764e;
+  /* #d3143f MISSED BY 0.07, AND ONLY ON ITS OWN TINT. On white it measured
+     5.33:1 and passed, which is why it stood. On `--down-soft` -- the same hue
+     at 11% over white, i.e. `#fae5ea` -- it measured 4.428:1 against the 4.5
+     that normal-size text needs. Not a rounding quibble: 51 of the 71 contrast
+     failures left across the console were this one pair -- 26 on /mapping's
+     outcome chips, 21 on /audit, 4 on /autopilot.
+     Red 211 -> 205 takes the relative luminance 0.1471 -> 0.1384, the ratio to
+     4.63 on the tint and 5.57 on white. Six parts in 255 of one channel: below
+     a just-noticeable difference, and the semantic is unchanged. Computed off
+     the rendered pixels, not chosen by eye.
+
+     AND DARK WAS *NOT* UNTOUCHED. This paragraph used to end "DARK IS
+     UNTOUCHED -- #ff4d6a on its own 16% tint already clears", asserted from
+     the light measurement and never actually computed. True on `--bg` (5.058),
+     `--bg-2` (4.715) and `--panel` (4.534); FALSE on the two grounds that
+     matter most -- `--panel-2` 4.179 and `--line-soft` 4.149, which are the
+     table-row HOVER surfaces. The figure dimmed below the floor exactly when
+     the operator pointed at it, and `bx-flash-down` inherits whatever row it
+     fires on, so the tick flash failed on every `--panel-2` row.
+     Dark `--down` is now `#ff6178`: 4.635 / 4.601 on those two, 5.028 and
+     5.230 on the others. `#ff5c76` was the smaller step and was rejected --
+     it still measured 4.481 on `--line-soft`. */
+  --down: #cd133d;
+  /* AMBER IS MEASURED, NOT CHOSEN BY EYE — the same exercise `--n8` above
+     records, which `--warn` had never had. It was #a86a06, and that fails WCAG
+     AA as TEXT on every opaque surface this app paints: 3.78:1 on --well, the
+     worst of the three (--bg #f5f7fb, --panel-2 #eef1f7, --well #e9edf5).
+     It is a text colour far more often than it looks. /ingest alone renders 81
+     elements in it — every `.note.warn` sentence, the `<strong>` feed name
+     inside one, the stored-bar count, `61/140`, the `never pulled` chip and the
+     reach lane's from-date — at 12px and 15px, so no large-text exemption
+     applies to any of them.
+     #945d05 is the LIGHTEST value on this hue clearing 4.5:1 on --well
+     (4.68:1). #9c6205 was tried first and rejected at 4.30. Darker candidates
+     clear it with more room and were not taken: the floor is the target, and a
+     warning that has gone brown has stopped being a warning.
+     `--warn-soft` moves with it — the same hue at 13%, and two spellings of one
+     colour drift the day one of them is edited. Both light blocks carry the new
+     value; DARK IS UNTOUCHED, since #f0b429 there already clears the floor. */
+  --warn: #945d05;
+  --info: #6d45d9;
+  --acc: #0d768c;
+  /* HOW FAR `/audit`'s HEAT GRID MAY TRAVEL TOWARD `--acc`. A THEME value,
+     because the two ramps run in OPPOSITE directions.
+
+     The cell is `color-mix(--acc, fill x ceiling, --well)`. In light that walks
+     from near-white DOWN to a mid teal, so the darkest cell is the hardest and
+     `--ink` clears it at 5.81:1 -- 72% is safe.
+
+     In dark it walks from near-black UP to bright cyan, so the BRIGHTEST cell
+     is the hardest: at 72% the busiest month renders `#1a9bb0`, where `--ink`
+     measures 2.76:1. Fifty-nine such cells on one screen, measured.
+
+     No ink fixes it. Spanning the dark ramp would need a foreground at relative
+     luminance >= 0.19 (against the near-black end) and <= 0.018 (against the
+     bright end) at the same time -- impossible, so at 72% a mid-fill DEAD BAND
+     exists where neither `--ink` nor `--on-acc` passes. `--on-acc` clears only
+     at fill = 1 (6.14) and fails everywhere below. That is why the original
+     "dark ink for dense cells" rule was right for DARK and wrong for LIGHT,
+     and why deleting it fixed light and broke dark.
+
+     So the RAMP yields, not the ink. At 50% the brightest dark cell is
+     `#156f80` and `--ink` measures 4.86:1, the five steps still plainly
+     distinct (`#070a11 . #0a232d . #0e3c48 . #115564 . #156f80`). One ink
+     across the whole scale, in both themes, and the heat still reads. */
+  --heat-ceiling: 72%;
+  --acc-hi: #1c58c8;
+  --on-acc: #ffffff;
+
+  --acc-soft: rgba(14, 127, 150, 0.10);
+  --up-soft: rgba(0, 118, 78, 0.12);
+  --down-soft: rgba(211, 20, 63, 0.11);
+  --warn-soft: rgba(148, 93, 5, 0.13);
+  --info-soft: rgba(109, 69, 217, 0.11);
+
+  --focus: #0b6376;
+  --scrim: rgba(16, 24, 40, 0.28);
+
+  --e1: 0 1px 2px rgba(16, 24, 40, 0.07);
+  --e2: 0 6px 16px rgba(16, 24, 40, 0.1), 0 0 0 1px rgba(16, 24, 40, 0.05);
+  --e3: 0 20px 50px rgba(16, 24, 40, 0.16), 0 0 0 1px rgba(16, 24, 40, 0.06);
+}
+
+/* ==========================================================================
+   1. THE RAMP — dark, by system preference
+   --------------------------------------------------------------------------
+   These are the values the console was tuned against and they are unchanged.
+   ========================================================================== */
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+
+    --n0: #070a11;
+    --n1: #0b0e14;
+    --n2: #11151f;
+    --n3: #141924;
+    --n4: #1a2030;
+    --n5: #1b212e;
+    --n6: #232a3a;
+    --n7: #333c51;
+    --n8: #828da4;
+    --n9: #8a95ab;
+    --n10: #b3bdd0;
+    --n11: #e6ebf5;
+    --n12: #fbfcff;
+
+    --up: #00e19b;
+    --down: #ff6178;
+    --warn: #f0b429;
+    --info: #a98cf7;
+    --acc: #22d3ee;
+    --heat-ceiling: 50%;
+    --acc-hi: #7aa7ff;
+    --on-acc: #04060c;
+
+    --acc-soft: rgba(34, 211, 238, 0.14);
+    --up-soft: rgba(0, 225, 155, 0.16);
+    --down-soft: rgba(255, 77, 106, 0.16);
+    --warn-soft: rgba(240, 180, 41, 0.16);
+    --info-soft: rgba(157, 124, 245, 0.16);
+
+    --focus: #67e8f9;
+    --scrim: rgba(0, 0, 0, 0.55);
+
+    --e1: 0 1px 2px rgba(0, 0, 0, 0.5);
+    --e2: 0 4px 14px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.04);
+    --e3: 0 18px 48px rgba(0, 0, 0, 0.62), 0 0 0 1px rgba(255, 255, 255, 0.05);
+  }
+}
+
+/* ==========================================================================
+   1. THE RAMP — dark, forced by the toggle
+   ========================================================================== */
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --n0: #070a11;
+  --n1: #0b0e14;
+  --n2: #11151f;
+  --n3: #141924;
+  --n4: #1a2030;
+  --n5: #1b212e;
+  --n6: #232a3a;
+  --n7: #333c51;
+  --n8: #828da4;
+  --n9: #8a95ab;
+  --n10: #b3bdd0;
+  --n11: #e6ebf5;
+  --n12: #fbfcff;
+
+  --up: #00e19b;
+  --down: #ff6178;
+  --warn: #f0b429;
+  --info: #a98cf7;
+  --acc: #22d3ee;
+  --heat-ceiling: 50%;
+  --acc-hi: #7aa7ff;
+  --on-acc: #04060c;
+
+  --acc-soft: rgba(34, 211, 238, 0.14);
+  --up-soft: rgba(0, 225, 155, 0.16);
+  --down-soft: rgba(255, 77, 106, 0.16);
+  --warn-soft: rgba(240, 180, 41, 0.16);
+  --info-soft: rgba(157, 124, 245, 0.16);
+
+  --focus: #67e8f9;
+  --scrim: rgba(0, 0, 0, 0.55);
+
+  --e1: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --e2: 0 4px 14px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.04);
+  --e3: 0 18px 48px rgba(0, 0, 0, 0.62), 0 0 0 1px rgba(255, 255, 255, 0.05);
+}
+
+/* ==========================================================================
+   1. THE RAMP — light, forced by the toggle
+   --------------------------------------------------------------------------
+   Repeated rather than inherited from `:root`, because `:root` alone loses to
+   the dark media query and a toggle that only works in one direction is worse
+   than no toggle.
+   ========================================================================== */
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --n0: #e9edf5;
+  --n1: #f5f7fb;
+  --n2: #ffffff;
+  --n3: #ffffff;
+  --n4: #eef1f7;
+  --n5: #edf0f6;
+  --n6: #dee3ed;
+  --n7: #c7cfdd;
+  --n8: #5f6a7c;
+  --n9: #5a6478;
+  --n10: #38415a;
+  --n11: #0d1220;
+  --n12: #000814;
+
+  --up: #00764e;
+  --down: #cd133d;
+  --warn: #945d05;
+  --info: #6d45d9;
+  --acc: #0d768c;
+  --heat-ceiling: 72%;
+  --acc-hi: #1c58c8;
+  --on-acc: #ffffff;
+
+  --acc-soft: rgba(14, 127, 150, 0.10);
+  --up-soft: rgba(0, 118, 78, 0.12);
+  --down-soft: rgba(211, 20, 63, 0.11);
+  --warn-soft: rgba(148, 93, 5, 0.13);
+  --info-soft: rgba(109, 69, 217, 0.11);
+
+  --focus: #0b6376;
+  --scrim: rgba(16, 24, 40, 0.28);
+
+  --e1: 0 1px 2px rgba(16, 24, 40, 0.07);
+  --e2: 0 6px 16px rgba(16, 24, 40, 0.1), 0 0 0 1px rgba(16, 24, 40, 0.05);
+  --e3: 0 20px 50px rgba(16, 24, 40, 0.16), 0 0 0 1px rgba(16, 24, 40, 0.06);
+}
+
+/* ==========================================================================
+   2. THE MAPPING + 3. THE SCALES — theme-invariant, written once
+   --------------------------------------------------------------------------
+   `--bg`, `--panel`, `--line`, `--ink` and friends are the names the pages
+   already use and they keep meaning exactly what they meant. They now resolve
+   through the ramp instead of being literals, so a theme is one ramp edit.
+   ========================================================================== */
+:root {
+  --bg: var(--n1);
+  --bg-2: var(--n2);
+  --panel: var(--n3);
+  --panel-2: var(--n4);
+
+  /* PICKER'S THREE NAMES. `$lib/Picker.svelte` reads --raise, --panel2 and
+     --accdeep, which nothing ever defined, so all four of its call sites fell
+     through to hardcoded dark hex fallbacks — its menus rendered DARK ON A
+     LIGHT PAGE on every route that uses it. Aliased, not renamed: Picker is
+     shared and its spelling is not ours to change. They sit here so they
+     resolve through the neutral ramp each theme redefines above; var()
+     substitutes at use, so one definition covers both themes. */
+  --raise: var(--bg-2);
+  --panel2: var(--panel-2);
+  --accdeep: var(--acc-soft);
+  --line: var(--n6);
+  --line-soft: var(--n5);
+  /* AN EDGE, NEVER A TEXT COLOUR -- and it was used as one 28 times.
+     `--n7` is `#c7cfdd`, and its own comment two hundred lines up calls it a
+     hairline. Painted on type it measures 1.57:1 on white, 1.46:1 on `--bg`
+     and 1.39:1 on `--panel-2` -- against the 4.5:1 that normal-size text
+     needs. Measured across `/`: 126 segment tags and measured zeros, 16
+     separators, 5 bay-header captions, all of them effectively invisible.
+     They read as a design that had a fourth, quieter tier of text. It does
+     not exist: to clear 4.5:1 on `--panel-2` a foreground has to sit at or
+     below a relative luminance of 0.156, which lands on `#626c7e` -- which
+     IS `--faint` (`#5f6a7c`). There is no legible step between `--faint` and
+     a hairline, so quieter-than-faint has to be said with size or weight,
+     never with a lighter grey. Those 28 sites now use `--faint`.
+     Border and rule declarations keep this token; that is what it is for. */
+  --line-hard: var(--n7);
+  --well: var(--n0);
+
+  --ink: var(--n11);
+  --ink-hi: var(--n12);
+  --ink-2: var(--n10);
+  --dim: var(--n9);
+  --faint: var(--n8);
+
+  --mono: ui-monospace, 'SF Mono', SFMono-Regular, 'JetBrains Mono', Menlo, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', system-ui, sans-serif;
+
+  /* TYPE — LIFTED, ON THE OWNER'S INSTRUCTION, 14 Aug 2026.
+     "this design needs to be extremely animated, visualised, superb,
+      attractive … with font size bigger and data size also bigger."
+
+     WHAT THIS REPLACED, AND WHY THE OLD ARGUMENT LOSES. The block here read:
+     "a terminal is read at a distance of 50cm for eight hours; the scale is
+     tight because a big jump between two sizes reads as two documents." That
+     is a good argument about an OPERATOR'S console and it is the wrong
+     argument for this product: the screen is shown, demonstrated and sold, and
+     9.5px of micro-label is unreadable on a projector, in a screenshot, and to
+     anyone over forty. Density that only its author can read is not density.
+
+     LIFTED AS A SCALE, NOT AS A HANDFUL OF RULES. Every surface in this file
+     and in all four pages reads these nine tokens, so the ratios between sizes
+     survive the change and nothing has to be re-tuned rule by rule — which is
+     the whole reason the scale was tokenised. Roughly ×1.25 at the small end,
+     easing to ×1.35 at the display end so headline numbers gain the most.
+
+     THE STEPS STAY CLOSE for the reason the old comment gave: two adjacent
+     sizes that jump too far read as two documents. What changed is the floor,
+     not the spacing. */
+  /* 12px, UP FROM 11.5. Measured on /db against a 16px base: the column
+     headers, the strip captions and every `.k` label were rendering four and a
+     half pixels under the body text, and the one number-bearing grid on the
+     page was under it too. The floor moved once before for the same reason and
+     the comment above records that the SPACING is what must not change -- so
+     this is the floor again and the steps above it are untouched. */
+  --fs-micro: 12px;
+  --fs-mini: 12.5px;
+  --fs-xs: 13.5px;
+  --fs-sm: 15px;
+  --fs-base: 16px;
+  --fs-md: 18px;
+  --fs-lg: 22px;
+  --fs-xl: 30px;
+  --fs-2xl: 40px;
+
+  /* DATA — THE NUMBERS, AND THEY ARE THE POINT OF EVERY PAGE HERE.
+     "data size also bigger", stated in the same sentence as the font and
+     meaning something different by it: a bar count, a coverage percentage, a
+     row total and a date span are what an operator and a buyer both look AT,
+     while the labels around them are what they read once. So the data scale
+     runs one full step ahead of the prose scale rather than beside it.
+
+     Tabular figures are set with the numerals, not near them: a column of
+     counts whose digits are different widths cannot be scanned down, and that
+     is a property of the FONT rather than of the layout. */
+  --fs-data: 17px;
+  --fs-data-lg: 24px;
+  --fs-data-xl: 34px;
+  --num: 'SF Mono', ui-monospace, SFMono-Regular, 'JetBrains Mono', Menlo, monospace;
+
+  --lh-tight: 1.2;
+  --lh-base: 1.5;
+
+  /* THE SCALE STARTED AT 500, AND TWO CALLERS HAD ALREADY ASSUMED IT DID NOT.
+     `--w-reg` was read in `$lib/DayField.svelte` and in `/ingest`'s census
+     sub-header and defined in neither this file nor any other — measured, zero
+     definitions against two uses. An undefined custom property makes the whole
+     declaration invalid, so `font-weight` silently fell back to whatever was
+     inherited: on `/ingest` that is a `<th>`, whose default is bold, so the
+     census sub-header rendered at 700 under a rule asking for regular and a
+     comment calling it "not decoration". Nothing looked broken; the quiet line
+     was simply as loud as the line above it.
+     Adding the base weight fixes both call sites at once and completes a scale
+     that ran 500-600-700-800 with no plain 400 in it. */
+  --w-reg: 400;
+  --w-mid: 500;
+  --w-semi: 600;
+  --w-bold: 700;
+  --w-heavy: 800;
+
+  --track-caps: 0.1em; /* the uppercase micro-label tracking, in one place */
+
+  /* SPACE. A 2px base, because a 30px row cannot afford an 8px grid. */
+  --s1: 2px;
+  --s2: 4px;
+  --s3: 6px;
+  --s4: 8px;
+  --s5: 12px;
+  --s6: 16px;
+  --s7: 24px;
+  --s8: 32px;
+
+  --r1: 4px;
+  --r2: 6px;
+  --r: 8px; /* the historical name — unchanged, and still the default */
+  --r3: 8px;
+  --r4: 12px;
+  --r-full: 999px;
+
+  --row-h: 30px;
+  --topbar-h: 46px;
+  --rail-w: 320px;
+
+  /* MOTION. Durations are named for what they are FOR, not for how long they
+     are, so "make the hover snappier" is one edit and not a search for 120ms.
+     Nothing here is longer than a keystroke except the flash, which has to
+     outlast a saccade or it is not seen at all. */
+  --d-instant: 70ms;
+  --d-hover: 110ms;
+  --d-state: 160ms;
+  --d-enter: 220ms;
+  --d-panel: 300ms;
+  --d-flash: 720ms;
+  --d-shimmer: 1150ms;
+  --d-sweep: 1400ms;
+
+  --ease-out: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-spring: cubic-bezier(0.2, 0.9, 0.3, 1.25);
+}
+
+/* ==========================================================================
+   BASE
+   ========================================================================== */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+html,
+body {
+  height: 100%;
+}
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font: var(--fs-base) / var(--lh-base) var(--sans);
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden; /* the app owns its own scroll regions */
+}
+
+::selection {
+  background: var(--acc-soft);
+  color: var(--ink-hi);
+}
+
+/* Scrollbars belong to the instrument panel, not to the OS default. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--n7) transparent;
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--n7);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: var(--r-full);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--n8);
+  background-clip: content-box;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* FOCUS IS NEVER INVISIBLE. One rule, every interactive element, both themes.
+   `:focus-visible` and not `:focus`, so a mouse click does not ring a button;
+   a keyboard user gets the ring on everything without any page opting in. */
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: var(--r1);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* THE SKIP LINK. Off-screen until focused, then a real, visible target — the
+   nav is five stops deep and a keyboard operator should not pay them to reach
+   a 90,000-row table. */
+.skip {
+  position: absolute;
+  left: var(--s4);
+  top: -100px;
+  z-index: 100;
+  padding: var(--s3) var(--s5);
+  background: var(--acc);
+  color: var(--on-acc);
+  border-radius: var(--r2);
+  font-weight: var(--w-bold);
+  font-size: var(--fs-sm);
+  text-decoration: none;
+  box-shadow: var(--e2);
+}
+.skip:focus {
+  top: var(--s4);
+}
+
+/* ==========================================================================
+   NUMBERS
+   Tabular everywhere digits align. A symbol containing digits (NIFTY50) is
+   rendered tabular too, which is correct: it is still a column.
+   ========================================================================== */
+.num {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.mono {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+.up {
+  color: var(--up);
+}
+.down {
+  color: var(--down);
+}
+.warn {
+  color: var(--warn);
+}
+.info {
+  color: var(--info);
+}
+.muted {
+  color: var(--dim);
+}
+.faint {
+  color: var(--faint);
+}
+
+/* ==========================================================================
+   5. THE COMPONENTS
+   ========================================================================== */
+
+/* ---- shell ---------------------------------------------------------- */
+/*
+  THE COLUMN IS PINNED TO THE VIEWPORT, AND THE `minmax(0, ...)` IS THE WHOLE
+  POINT OF THE DECLARATION.
+
+  This grid names its rows and said nothing about its column, so the column was
+  implicit — `grid-auto-columns: auto`. An `auto` track takes its MINIMUM from
+  the largest automatic minimum size among its items, and a grid item that is
+  not a scroll container reads that as its MIN-CONTENT size. `.main` opts out
+  with `min-width: 0`. The top bar cannot: it is a nowrap flex row, so its
+  min-content is the sum of everything in it — 907px, measured.
+
+  So the track became 907px wide on a 760px viewport, `.main` was stretched to
+  match, and the BODY scrolled sideways. Not the page content: `.page`
+  hidden outright still left `main` at 907. The bar sized the app.
+
+  It showed up on five routes and not the other two, and the surviving two are
+  not a layout family — they are `FEED_OWNED`. `/ingest` and `/db` draw the
+  feed picker in their own control strip, so the bar stands down there, and
+  907 minus that picker is under 760. `/`, `/autopilot`, `/audit`, `/mapping`
+  and `/backtest` all keep it and all overflowed, across three different page
+  roots. The bar's contents were always the variable.
+
+  `1fr` alone would NOT have fixed it — a `fr` track still floors at the item's
+  automatic minimum. `minmax(0, 1fr)` is what states the floor is zero, which
+  is what lets the column be the container and hands the overflow to the bar,
+  where the next rule deals with it.
+*/
+.shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: var(--topbar-h) 1fr;
+  height: 100dvh;
+}
+/* A ROUTE THAT DRAWS ITS OWN TOP-LEVEL CHROME GETS THE WHOLE VIEWPORT.
+
+   The header row is declared above as a FIXED track, so a route that declines
+   to render the header still pays for it: `var(--topbar-h)` of page
+   background sits at the top of the window, above the page, looking like a
+   bar that failed to paint rather than one deliberately absent. That is the
+   silent-failure shape section 4 bans, arrived at through CSS.
+
+   One row, so there is nothing to leave behind. The rule is a modifier on
+   `.shell` and not a second class because the grid is the fact being changed
+   and `.shell` is what owns it; see `BARE` in `routes/+layout.svelte` for
+   which routes qualify and why the list is deliberately hard to join. */
+.shell.bare {
+  grid-template-rows: 1fr;
+}
+.topbar {
+  position: relative; /* the pull progress bar hangs off its bottom edge */
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  padding: 0 var(--s5);
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--line);
+  z-index: 20;
+}
+.brand {
+  font-weight: var(--w-heavy);
+  letter-spacing: -0.4px;
+  margin-right: var(--s5);
+  font-size: var(--fs-md);
+  white-space: nowrap;
+}
+.brand b {
+  color: var(--acc);
+}
+/* The nav is one flex item holding the tabs, so it can be a landmark without
+   the tabs losing the spacing they had when they were bare children.
+
+   IT IS ALSO WHERE THE BAR'S OVERFLOW GOES, now that the shell no longer
+   widens the app to fit it. Something in the bar has to yield below ~907px and
+   the nav is the only honest candidate: the brand names the product, and the
+   right-hand cluster is the API state and the feed — the two controls an
+   operator reaches for when a page looks wrong, so neither may drift off the
+   edge. Eight tabs, on the other hand, are a list, and a list can scroll.
+
+   `min-width: 0` alone only let the nav SHRINK; the tabs are `nowrap`, so they
+   spilled out of it and sat under the status cluster, unclickable. The scroll
+   container is what makes the shrunk nav navigable rather than merely narrow.
+
+   `overflow-y: hidden` is required, not tidiness: declaring one axis makes the
+   other compute to `auto`, and the active tab's underline sits at
+   `bottom: -1px`, so 1px of vertical overflow would have raised a second
+   scrollbar inside a 46px bar. `align-self: stretch` gives the nav the bar's
+   full height so that underline stays inside the box the axis now clips. */
+.topbar nav {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  min-width: 0;
+  align-self: stretch;
+  overflow-x: auto;
+  overflow-y: hidden;
+  /* ROOM FOR THE FOCUS RING, AT BOTH ENDS OF THE SCROLL.
+
+     `:focus-visible` draws `2px` of outline at `2px` of offset, so the ring
+     stands 4px outside the tab on every side. A scroll container clips at its
+     PADDING box, and a browser scrolls a focused child FLUSH to that edge — so
+     three of the eight tabs (`Markets` at rest, `Mapping` and `Logs` once
+     tabbed to) had the ring sliced off. Measured, not predicted.
+
+     A keyboard user who cannot see where focus landed has no way back, which
+     is WCAG 2.4.11 and the same class of defect as a control that scrolled off
+     the edge. Vertically there was nothing to fix: `align-self: stretch` above
+     leaves 3.1px of clearance top and bottom, so `overflow-y: hidden` never
+     touches the ring.
+
+     `padding-inline` is what puts the room INSIDE the clip box; `margin-inline`
+     takes the same amount back out of the flex layout so the tabs do not move;
+     and `scroll-padding-inline` is what stops `scrollIntoView` from parking a
+     tab against the edge and undoing the other two. All three, or none.
+
+     6px AND NOT 4px. Four is what the ring actually measures, and four put its
+     outer edge EXACTLY on the clip boundary -- 0.0px of margin at the head of
+     the scroll and 0.1px at the tail, measured. That is not a pass, it is a
+     coin toss against subpixel rounding on a fractional-DPR display. Six
+     leaves 2px of real slack and costs nothing, because the negative margin
+     hands the same 2px straight back to the layout. */
+  padding-inline: 6px;
+  margin-inline: -6px;
+  scroll-padding-inline: 6px;
+}
+.tab {
+  position: relative;
+  padding: var(--s3) var(--s5);
+  border-radius: var(--r2);
+  color: var(--dim);
+  text-decoration: none;
+  font-weight: var(--w-semi);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+.tab:hover {
+  color: var(--ink);
+  background: var(--panel-2);
+}
+/* THE ACTIVE TAB IS NOT JUST A TINT. A background alone is the same signal as
+   hover and the two get confused at a glance; the underline is unambiguous
+   and survives a colour-blind reading, which a hue difference does not. */
+.tab[aria-current='page'] {
+  color: var(--ink);
+  background: var(--acc-soft);
+}
+.tab[aria-current='page']::after {
+  content: '';
+  position: absolute;
+  left: var(--s5);
+  right: var(--s5);
+  bottom: -1px;
+  height: 2px;
+  background: var(--acc);
+  border-radius: 2px 2px 0 0;
+}
+.spacer {
+  flex: 1;
+}
+
+/* ---- main region ------------------------------------------------------
+   A real landmark so the skip link has somewhere to land. It is a flex column
+   and its child is told to fill, so a page whose root is `.split` (a grid) or
+   `.pane` (a flex column) keeps the exact height it had before there was a
+   `<main>` between it and the shell. */
+.main {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+.main > * {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+}
+.main:focus {
+  outline: none;
+}
+
+/* ---- the feed selector — one feed, never two ------------------------ */
+.feeds {
+  display: flex;
+  gap: var(--s3);
+  align-items: center;
+}
+.feeds .lbl,
+.lbl {
+  font-size: var(--fs-mini);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  color: var(--faint);
+  font-weight: var(--w-bold);
+}
+.feeds .lbl {
+  margin-right: var(--s2);
+}
+.feed {
+  padding: var(--s2) var(--s5);
+  border-radius: var(--r-full);
+  font-size: 11.5px;
+  font-weight: var(--w-bold);
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--dim);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.feed:hover:not(:disabled) {
+  border-color: var(--acc);
+  color: var(--ink);
+}
+.feed[aria-pressed='true'] {
+  background: var(--acc);
+  border-color: var(--acc);
+  color: var(--on-acc);
+}
+.feed:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.feed.not-ready {
+  opacity: 0.38;
+  cursor: not-allowed;
+  border-style: dashed;
+}
+.feed.not-ready:hover {
+  border-color: var(--line);
+  color: var(--dim);
+}
+.feed .kind {
+  opacity: 0.6;
+  font-weight: var(--w-mid);
+  margin-left: var(--s3);
+  font-size: var(--fs-mini);
+}
+
+/* ---- panes ---------------------------------------------------------- */
+.split {
+  display: grid;
+  grid-template-columns: var(--rail-w) 1fr;
+  min-height: 0;
+}
+.pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+.pane + .pane {
+  border-left: 1px solid var(--line);
+}
+.pane-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s4);
+  padding: var(--s4) var(--s5);
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-2);
+  min-height: 40px;
+  flex: none;
+  /* THE BAND SETS A SIZE, BECAUSE ANYTHING PUT IN IT BARE TAKES THE BODY'S.
+     `.pane-title`, `.head-sub`, `.status` and `.btn` all carry their own scale,
+     so this changes nothing that was already styled — it catches what is not.
+     What was not: /ingest's link to the audit log, which is a `.link`, and
+     `.link` deliberately sets `font: inherit` because it is built to sit INSIDE
+     prose and take the sentence's size. Standing alone in this band there is no
+     sentence to inherit from, so it took `body`'s 16px and rendered as the
+     largest, brightest, only-underlined text on a page whose scale otherwise
+     stops at 13.5px — the least important element on the page drawn as the most
+     important. Measured: 16px, --acc, underlined, against a 12px strip. */
+  font-size: var(--fs-xs);
+}
+.pane-title {
+  font-size: var(--fs-micro);
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--faint);
+  font-weight: var(--w-bold);
+}
+
+/* ---- search --------------------------------------------------------- */
+.search {
+  width: 100%;
+  font: inherit;
+  padding: 7px var(--s5);
+  border-radius: var(--r);
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+}
+.search:focus {
+  outline: 0;
+  border-color: var(--acc);
+  box-shadow: 0 0 0 3px var(--acc-soft);
+}
+.search:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+.search::placeholder {
+  color: var(--faint);
+}
+.search:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* ---- virtual list --------------------------------------------------- */
+.vlist {
+  flex: 1;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  position: relative;
+}
+.vrow {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: var(--s4);
+  align-items: center;
+  height: var(--row-h);
+  padding: 0 var(--s5);
+  cursor: pointer;
+  border-bottom: 1px solid var(--line-soft);
+  font-variant-numeric: tabular-nums;
+}
+.vrow:hover {
+  background: var(--panel-2);
+}
+.vrow[aria-selected='true'] {
+  background: var(--acc-soft);
+  box-shadow: inset 2px 0 0 var(--acc);
+}
+.vrow .sym {
+  font-weight: 650;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vrow .meta {
+  font-size: var(--fs-mini);
+  color: var(--faint);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+
+/* ---- table ---------------------------------------------------------- */
+.grid {
+  flex: 1;
+  overflow: auto;
+}
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg-2);
+  text-align: left;
+  padding: 7px var(--s5);
+  font-size: var(--fs-mini);
+  font-weight: var(--w-bold);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  color: var(--faint);
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+thead th.num {
+  text-align: right;
+}
+tbody td {
+  padding: 5px var(--s5);
+  border-bottom: 1px solid var(--line-soft);
+  white-space: nowrap;
+}
+tbody tr:hover td {
+  background: var(--panel-2);
+}
+
+.empty {
+  padding: var(--s7) var(--s6);
+  color: var(--faint);
+  text-align: center;
+  font-size: 12.5px;
+}
+.chart {
+  flex: 1;
+  min-height: 0;
+}
+
+/* ---- feed select: N feeds without changing shape ---- */
+.feedsel {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+}
+.feedsel select {
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: 650;
+  padding: var(--s2) 26px var(--s2) var(--s5);
+  border-radius: var(--r2);
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+  appearance: none;
+  cursor: pointer;
+  background-image: linear-gradient(45deg, transparent 50%, var(--dim) 50%),
+    linear-gradient(135deg, var(--dim) 50%, transparent 50%);
+  background-position: calc(100% - 14px) 52%, calc(100% - 9px) 52%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+.feedsel select:focus {
+  outline: 0;
+  border-color: var(--acc);
+  box-shadow: 0 0 0 3px var(--acc-soft);
+}
+
+/* ---- the feed combobox: N feeds, keyboard-complete -------------------
+   A listbox and not a `<select>` because the option has to carry more than a
+   name: the transport, whether the store holds anything, and — for a feed
+   that cannot be used — the SERVER'S OWN REASON. A native option renders one
+   string and no colour, so "unavailable" arrived without the why, which is
+   the half-silent failure CLAUDE.md section 4 bans. */
+.combo {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+}
+.combo-btn {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: 650;
+  padding: var(--s2) var(--s4) var(--s2) var(--s5);
+  min-width: 11rem;
+  border-radius: var(--r2);
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+  cursor: pointer;
+  text-align: left;
+}
+.combo-btn:hover {
+  border-color: var(--line-hard);
+  background: var(--panel-2);
+}
+.combo-btn[aria-expanded='true'] {
+  border-color: var(--acc);
+  box-shadow: 0 0 0 3px var(--acc-soft);
+}
+.combo-btn .val {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.combo-btn .sub {
+  font-size: var(--fs-mini);
+  font-weight: var(--w-bold);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.combo-btn .caret {
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid var(--dim);
+  border-bottom: 1.5px solid var(--dim);
+  transform: rotate(45deg) translate(-2px, -2px);
+  flex: none;
+}
+.combo-pop {
+  position: absolute;
+  top: calc(100% + var(--s3));
+  right: 0;
+  z-index: 60;
+  min-width: 22rem;
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: var(--s2);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r4);
+  box-shadow: var(--e3);
+}
+.combo-opt {
+  display: grid;
+  grid-template-columns: 14px 1fr auto;
+  align-items: center;
+  gap: var(--s4);
+  width: 100%;
+  padding: var(--s3) var(--s4);
+  border: 0;
+  border-radius: var(--r2);
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--fs-sm);
+  text-align: left;
+  cursor: pointer;
+}
+.combo-opt .tick {
+  color: var(--acc);
+  font-weight: var(--w-bold);
+}
+.combo-opt .name {
+  font-weight: 650;
+}
+.combo-opt .why {
+  grid-column: 2 / -1;
+  font-size: var(--fs-xs);
+  color: var(--warn);
+  white-space: normal;
+  line-height: 1.35;
+}
+.combo-opt .side {
+  font-size: var(--fs-mini);
+  font-weight: var(--w-bold);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+.combo-opt[data-hi='true'] {
+  background: var(--panel-2);
+}
+.combo-opt[aria-selected='true'] {
+  background: var(--acc-soft);
+  box-shadow: inset 2px 0 0 var(--acc);
+}
+.combo-opt[aria-disabled='true'] {
+  cursor: not-allowed;
+  color: var(--dim);
+}
+.combo-opt[aria-disabled='true'] .name {
+  color: var(--dim);
+}
+.combo-note {
+  padding: var(--s5);
+  font-size: var(--fs-sm);
+  color: var(--dim);
+  line-height: 1.5;
+}
+.combo-note strong {
+  display: block;
+  color: var(--ink);
+  font-size: var(--fs-base);
+  margin-bottom: var(--s1);
+}
+.combo-note.bad strong {
+  color: var(--down);
+}
+
+/* ---- status: is the API there, and is anything happening -------------
+   The operator has run a 32-minute pull with no way to tell it from a hang.
+   This strip is the answer to "is anything happening", and it is in the top
+   bar on every page because that question is not one page's question. */
+.status {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: var(--s2) var(--s4);
+  border-radius: var(--r-full);
+  border: 1px solid var(--line);
+  background: var(--panel);
+  font-family: inherit; /* it is sometimes a <button>, which would not inherit */
+  font-size: var(--fs-xs);
+  font-weight: var(--w-semi);
+  color: var(--dim);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  max-width: 30rem;
+  overflow: hidden;
+  flex: none;
+}
+button.status {
+  cursor: pointer;
+}
+button.status:hover {
+  border-color: var(--line-hard);
+  color: var(--ink);
+}
+button.status.bad:hover {
+  border-color: var(--down);
+  color: var(--down);
+}
+.status .txt {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.status .ms {
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: var(--fs-mini);
+}
+.status.bad {
+  border-color: var(--down);
+  background: var(--down-soft);
+  color: var(--down);
+}
+.status.busy {
+  border-color: var(--acc);
+  background: var(--acc-soft);
+  color: var(--ink);
+}
+/* THE ELAPSED CLOCK FOLLOWS THE STRIP IT SITS IN. `.status .ms` is `--faint`,
+   which is right on the bar's own `--bg-2` and wrong the moment `.busy` puts
+   `--acc-soft` behind it: measured in dark, `--faint` `#828da4` on the
+   composited `#13303c` is 4.153:1 — under the floor, and this strip is only on
+   screen WHILE A PULL IS RUNNING, which is precisely when the clock is being
+   read. `--ink-2` measures 7.328 there. Light already cleared at 4.763 and
+   improves too, so one rule serves both themes. */
+.status.busy .ms {
+  color: var(--ink-2);
+}
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--faint);
+  flex: none;
+}
+.dot.up {
+  background: var(--up);
+}
+.dot.down {
+  background: var(--down);
+}
+.dot.warn {
+  background: var(--warn);
+}
+.dot.acc {
+  background: var(--acc);
+}
+/* THE FIFTH TONE, AND ITS ABSENCE WAS A HOLE RATHER THAN A CHOICE. Section 1
+   defines five semantic hues — up, down, warn, info and the accent — and this
+   set carried four of them, so `.dot.info` fell through to `--faint` and drew
+   grey. That matters wherever a vocabulary uses `info` for a real state rather
+   than for chrome: /ingest's verdict table gives it to `retrying`, `no
+   yardstick` and `out of reach`, three of its seven, so three verdicts would
+   have shared one indistinguishable grey dot while the other four were
+   coloured. A legend that cannot tell three of its entries apart is not a
+   legend. */
+.dot.info {
+  background: var(--info);
+}
+
+/* The indeterminate bar, welded to the bottom edge of the top bar. It exists
+   only while a request is genuinely in flight — it is driven by the fetch
+   itself, never by a timer, so it cannot claim progress that is not happening. */
+.progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 2px;
+  overflow: hidden;
+  background: var(--acc-soft);
+}
+.progress i {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 34%;
+  background: linear-gradient(90deg, transparent, var(--acc), transparent);
+}
+
+/* ---- theme toggle ---- */
+.themer {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  padding: 2px;
+  border-radius: var(--r2);
+  border: 1px solid var(--line);
+  background: var(--well);
+}
+.themer button {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 22px;
+  border: 0;
+  border-radius: var(--r1);
+  background: transparent;
+  color: var(--faint);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--fs-xs);
+  font-weight: var(--w-bold);
+}
+.themer button:hover {
+  color: var(--ink);
+  background: var(--panel-2);
+}
+/* THE SELECTED MODE WEARS THE FILLED PILL EVERY OTHER SELECTED THING HERE
+   WEARS. This was `background: var(--panel); color: var(--acc)` — a white chip
+   with a teal 13px glyph — while the console's own selected treatment, the one
+   a chosen tab takes, is `background: var(--acc); color: var(--on-acc)`. One
+   control disagreeing with that makes a reader learn a second vocabulary for
+   "this one is on".
+
+   REPORTED AS "THIS IS NOT CHANGING ANYTHING", AND THAT WAS A FAIR READING.
+   Pressing `Force the light theme` on a machine whose OS is already light
+   changes the MODE and not one pixel of the page: `data-theme` goes from
+   absent to `light` and every colour resolves identically. All the press had
+   to show for itself was a 24x22 chip swapping a grey glyph for a teal one, in
+   the far corner. Filled, it is unmistakable — and that chip is the only
+   feedback that particular press can ever have. */
+.themer button[aria-pressed='true'] {
+  background: var(--acc);
+  color: var(--on-acc);
+  box-shadow: var(--e1);
+}
+/* HOVER MUST NOT OUTRANK SELECTED. `.themer button:hover` above sets
+   `--panel-2` at the same specificity, and the LATER rule wins — so hovering
+   the active mode repainted it as an inactive one: the selected state
+   vanishing under the pointer that came to check it. */
+.themer button[aria-pressed='true']:hover {
+  background: var(--acc);
+  color: var(--on-acc);
+}
+.themer svg {
+  width: 13px;
+  height: 13px;
+  display: block;
+}
+
+/* ---- universe tabs: index / F&O / NTM, never mixed ---- */
+.tabs {
+  display: flex;
+  gap: var(--s1);
+  padding: var(--s3) var(--s4);
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+  flex: none;
+}
+.utab {
+  padding: var(--s2) var(--s5);
+  border-radius: 5px;
+  font-size: 11.5px;
+  font-weight: 650;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--dim);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.utab:hover {
+  color: var(--ink);
+  background: var(--panel-2);
+}
+.utab[aria-pressed='true'] {
+  background: var(--acc-soft);
+  color: var(--ink);
+  border-color: var(--acc);
+}
+/* THE COUNT IS QUIETER BY WEIGHT, NOT BY OPACITY.
+
+   `opacity: 0.55` composites the ink toward whatever sits behind it, and at
+   11.5px the result is not quiet, it is unreadable. Measured in DARK: `--dim`
+   `#8a95ab` at 0.55 over `--bg-2` `#11151f` renders `#545b6c` — 2.685:1,
+   under even the 3:1 floor that only large text may use. LIGHT fails the same
+   way for the same reason. Seven of these sit on `/audit`'s filter tabs, and
+   an opacity-composited colour is invisible to a contrast scan that reads
+   `color` alone, which is why this outlived the sweep that fixed the rest.
+
+   Same lesson as `--line-hard`: there is no legible step below `--faint`, so
+   "quieter" has to be said with weight, never with a contrast level that
+   fails. The tab is 650 and the count drops to 500 — a visible hierarchy at
+   full legibility.
+
+   RE-QUIETED PER STATE, NOT PINNED: `.utab:hover` and `[aria-pressed]` both
+   raise the tab to `--ink`, so the count follows with `--ink-2` rather than
+   holding one tone against three different grounds. */
+.utab .n {
+  color: var(--faint);
+  font-weight: 500;
+  margin-left: 5px;
+  font-variant-numeric: tabular-nums;
+}
+.utab:hover .n,
+.utab[aria-pressed='true'] .n {
+  color: var(--ink-2);
+}
+
+.vrow .tag,
+.tag {
+  font-size: var(--fs-micro);
+  font-weight: var(--w-bold);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--panel-2);
+  color: var(--faint);
+  white-space: nowrap;
+}
+.vrow .tag.held,
+.tag.held,
+.tag.up {
+  background: var(--up-soft);
+  color: var(--up);
+}
+.tag.down {
+  background: var(--down-soft);
+  color: var(--down);
+}
+.tag.warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+.tag.info {
+  background: var(--info-soft);
+  color: var(--info);
+}
+.tag.acc {
+  background: var(--acc-soft);
+  color: var(--acc);
+}
+
+/* ---- buttons --------------------------------------------------------- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s3);
+  padding: var(--s3) var(--s5);
+  border-radius: var(--r2);
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: 650;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.btn:hover:not(:disabled) {
+  border-color: var(--line-hard);
+  background: var(--panel-2);
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.btn.primary {
+  background: var(--acc);
+  border-color: var(--acc);
+  color: var(--on-acc);
+}
+.btn.primary:hover:not(:disabled) {
+  background: var(--acc-hi);
+  border-color: var(--acc-hi);
+}
+.btn.ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--dim);
+}
+.btn.ghost:hover:not(:disabled) {
+  color: var(--ink);
+  background: var(--panel-2);
+  border-color: transparent;
+}
+.btn.danger {
+  border-color: var(--down);
+  color: var(--down);
+  background: var(--down-soft);
+}
+.kbd {
+  font-family: var(--mono);
+  font-size: var(--fs-mini);
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: var(--r1);
+  background: var(--well);
+  color: var(--dim);
+}
+
+/* ---- empty states that act, instead of a sentence in a void ---- */
+.blank {
+  max-width: 34rem;
+  margin: 8vh auto 0;
+  padding: 0 var(--s7);
+  text-align: center;
+}
+.blank h2 {
+  font-size: var(--fs-lg);
+  font-weight: var(--w-bold);
+  letter-spacing: -0.2px;
+  margin: 0 0 var(--s3);
+}
+.blank p {
+  color: var(--dim);
+  font-size: var(--fs-base);
+  margin: 0 0 var(--s6);
+}
+.blank .alt {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s3);
+  flex-wrap: wrap;
+  margin: 0 0 var(--s7);
+  padding: var(--s5);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--panel);
+}
+.blank .alt .lbl {
+  font-size: var(--fs-mini);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.blank .cta {
+  display: inline-block;
+  padding: var(--s4) var(--s7);
+  border-radius: var(--r);
+  background: var(--acc);
+  color: var(--on-acc);
+  text-decoration: none;
+  font-size: var(--fs-base);
+  font-weight: 650;
+}
+.blank .cta:hover {
+  background: var(--acc-hi);
+}
+.link {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--acc);
+  cursor: pointer;
+  text-decoration: underline;
+}
+.link:hover {
+  color: var(--acc-hi);
+}
+
+/* ---- summary strip: the four numbers you open the page for ---- */
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 1px;
+  background: var(--line);
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
+.stat {
+  background: var(--bg-2);
+  padding: 9px var(--s5);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.stat .k {
+  font-size: var(--fs-micro);
+  font-weight: var(--w-bold);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.stat .v {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 19px;
+  font-weight: var(--w-bold);
+  letter-spacing: -0.5px;
+  line-height: var(--lh-tight);
+}
+.stat .n {
+  font-size: var(--fs-micro);
+  color: var(--faint);
+}
+
+/* ---- sortable headers ---- */
+th .sort {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
+  color: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+}
+th .sort:hover {
+  color: var(--ink);
+}
+th.num .sort {
+  width: 100%;
+  text-align: right;
+}
+
+/* ---- loading placeholders -------------------------------------------
+   A skeleton is a SHAPE CLAIM, not decoration: it says "a row goes here and
+   it is this wide". The block is visible without motion; only the sweep is
+   conditional, so a reduced-motion reader still sees the shape. */
+.skel {
+  display: block;
+  position: relative;
+  overflow: hidden;
+  min-height: 1em;
+  border-radius: var(--r1);
+  background: var(--panel-2);
+  color: transparent;
+  user-select: none;
+}
+.skel.line {
+  height: 10px;
+  margin: 4px 0;
+}
+
+/* ==========================================================================
+   4. THE KEYFRAMES
+   --------------------------------------------------------------------------
+   Declaring a keyframe costs nothing until an `animation` names it, and every
+   `animation` in this file is inside the reduced-motion guard below. So these
+   can sit at the top level and stay readable.
+   ========================================================================== */
+
+/* THE TICK FLASH. What a trading terminal does when a number changes: a tint
+   at full strength immediately — it has to be there before the eye lands —
+   held briefly, then decayed. Green up, red down, and the hue is the semantic
+   token, never the accent. Retrigger it from a page by re-keying the node
+   (`{#key value}`) or by removing and re-adding the class on the next frame. */
+@keyframes bx-flash-up {
+  0% {
+    background-color: var(--up-soft);
+    color: var(--up);
+  }
+  55% {
+    background-color: var(--up-soft);
+    color: var(--up);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+@keyframes bx-flash-down {
+  0% {
+    background-color: var(--down-soft);
+    color: var(--down);
+  }
+  55% {
+    background-color: var(--down-soft);
+    color: var(--down);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+@keyframes bx-shimmer {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+@keyframes bx-row-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes bx-row-out {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+@keyframes bx-panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.996);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes bx-pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes bx-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes bx-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes bx-pulse {
+  0% {
+    box-shadow: 0 0 0 0 currentColor;
+    opacity: 1;
+  }
+  70% {
+    box-shadow: 0 0 0 6px transparent;
+    opacity: 0.85;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+    opacity: 1;
+  }
+}
+@keyframes bx-indeterminate {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(400%);
+  }
+}
+
+/* ==========================================================================
+   6. THE MOTION
+   --------------------------------------------------------------------------
+   EVERY `animation` AND `transition` IN THIS FILE IS IN HERE. That is the
+   whole design: a reader who has asked their operating system for less motion
+   gets a completely static console without one page opting out, and a page
+   author cannot forget the guard because there is nowhere else to put the
+   declaration.
+   ========================================================================== */
+@media (prefers-reduced-motion: no-preference) {
+  .tab,
+  .utab,
+  .feed,
+  .btn,
+  .link,
+  .combo-btn,
+  .combo-opt,
+  .themer button,
+  .search,
+  .vrow,
+  .blank .cta,
+  th .sort {
+    transition:
+      background-color var(--d-hover) var(--ease-out),
+      border-color var(--d-hover) var(--ease-out),
+      color var(--d-hover) var(--ease-out),
+      box-shadow var(--d-state) var(--ease-out),
+      opacity var(--d-hover) var(--ease-out);
+  }
+  .skip {
+    transition: top var(--d-state) var(--ease-spring);
+  }
+  .tab[aria-current='page']::after {
+    animation: bx-fade-in var(--d-state) var(--ease-out);
+  }
+  .combo-btn .caret {
+    transition: transform var(--d-state) var(--ease-out);
+  }
+  .combo-btn[aria-expanded='true'] .caret {
+    transform: rotate(225deg) translate(-2px, -2px);
+  }
+  .combo-pop {
+    animation: bx-pop-in var(--d-enter) var(--ease-spring);
+  }
+
+  /* Value flash — apply `.flash-up` / `.flash-down` to the cell that changed. */
+  .flash-up {
+    animation: bx-flash-up var(--d-flash) var(--ease-out);
+  }
+  .flash-down {
+    animation: bx-flash-down var(--d-flash) var(--ease-out);
+  }
+
+  /* Loading sweep. */
+  .skel::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, transparent, var(--line), transparent);
+    animation: bx-shimmer var(--d-shimmer) var(--ease-in-out) infinite;
+  }
+
+  /* Rows arriving and leaving. */
+  .row-in {
+    animation: bx-row-in var(--d-enter) var(--ease-out) backwards;
+  }
+  .row-out {
+    animation: bx-row-out var(--d-state) var(--ease-out) forwards;
+  }
+
+  /* Whole regions swapping. */
+  .panel-in {
+    animation: bx-panel-in var(--d-panel) var(--ease-out);
+  }
+  .fade-in {
+    animation: bx-fade-in var(--d-enter) var(--ease-out);
+  }
+
+  .spin {
+    animation: bx-spin 900ms linear infinite;
+  }
+  .dot.live {
+    animation: bx-pulse var(--d-sweep) var(--ease-out) infinite;
+  }
+  .progress i {
+    animation: bx-indeterminate var(--d-sweep) var(--ease-in-out) infinite;
+  }
+}
+
+/* ==========================================================================
+   NARROW
+   The top bar is the only thing that cannot wrap — the shell gives it a fixed
+   row and a wrapped bar would be clipped rather than taller. So at narrow
+   widths the labels go and the icons stay.
+   ========================================================================== */
+@media (max-width: 900px) {
+  :root {
+    --rail-w: 260px;
+  }
+  .topbar {
+    padding: 0 var(--s4);
+  }
+  .tab {
+    padding: var(--s3) var(--s4);
+  }
+  .status {
+    max-width: 12rem;
+  }
+  .combo-btn {
+    min-width: 8rem;
+  }
+  .combo-btn .sub {
+    display: none;
+  }
+}
+@media (max-width: 700px) {
+  .split {
+    grid-template-columns: 1fr;
+  }
+  .status .ms {
+    display: none;
+  }
+}
+
+/* ==========================================================================
+   7. THE DISPLAY LAYER — the numbers, at the size they are actually read at
+   --------------------------------------------------------------------------
+   THE OWNER'S INSTRUCTION, 14 Aug 2026: "extremely animated, visualised,
+   superb, attractive … font size bigger and data size also bigger."
+
+   Section 1's scale lifted the PROSE. This lifts the DATA, which is a
+   different job: a bar count, a coverage percentage and a date span are what
+   both an operator and a buyer look AT, while the labels around them are read
+   once and then skipped forever. So these run a step ahead of the prose scale
+   and they are set in tabular figures.
+
+   TABULAR FIGURES ARE NOT A FLOURISH. `font-variant-numeric: tabular-nums`
+   makes every digit the same width, so a column of counts can be scanned down
+   and 1,631 sits under 17,250 with its thousands separator in the same place.
+   Proportional digits make that column ragged and there is no layout fix for
+   it — the width lives in the font.
+
+   `text-wrap: nowrap` on a value, never on its label: a number that wraps
+   becomes two numbers for as long as it takes to re-read it.
+   ========================================================================== */
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  min-width: 0;
+}
+.stat > .k {
+  font-size: var(--fs-micro);
+  font-weight: var(--w-semi);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.stat > .v,
+.num {
+  font-family: var(--num);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-data);
+  font-weight: var(--w-semi);
+  line-height: var(--lh-tight);
+  color: var(--ink-hi);
+  white-space: nowrap;
+}
+.stat.lg > .v {
+  font-size: var(--fs-data-lg);
+  font-weight: var(--w-bold);
+}
+.stat.xl > .v {
+  font-size: var(--fs-data-xl);
+  font-weight: var(--w-heavy);
+  letter-spacing: -0.02em;
+}
+.stat > .foot {
+  font-size: var(--fs-mini);
+  color: var(--faint);
+}
+
+/* A number carrying its own verdict. The hue is the semantic token and never
+   the accent, which is the rule the flash keyframes already follow. */
+.num.up {
+  color: var(--up);
+}
+.num.down {
+  color: var(--down);
+}
+.num.nil {
+  color: var(--faint);
+}
+
+/* THE HEADLINE. One per page at most — the figure a page exists to report.
+   It borrows the accent as a gradient rather than a fill so it reads as
+   emphasis rather than as a link, and it falls back to a flat colour wherever
+   `background-clip: text` is not honoured. */
+.headline {
+  font-family: var(--num);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-2xl);
+  font-weight: var(--w-heavy);
+  line-height: var(--lh-tight);
+  letter-spacing: -0.03em;
+  color: var(--acc);
+  white-space: nowrap;
+}
+@supports (background-clip: text) or (-webkit-background-clip: text) {
+  .headline {
+    background: linear-gradient(100deg, var(--acc), var(--acc-hi) 60%, var(--acc));
+    background-size: 220% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+}
+
+@keyframes bx-sheen {
+  from {
+    background-position: 0% 50%;
+  }
+  to {
+    background-position: 200% 50%;
+  }
+}
+@keyframes bx-rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  /* THE SHEEN, and it is slow on purpose. Eight seconds is below the rate at
+     which motion competes for attention with a number that just changed —
+     which is the one thing on these pages that MUST win the eye. A fast
+     gradient would make the page look alive and the data look ignorable. */
+  @supports (background-clip: text) or (-webkit-background-clip: text) {
+    .headline {
+      animation: bx-sheen 8s var(--ease-in-out) infinite alternate;
+    }
+  }
+
+  /* THE ENTRANCE STAGGER. Panels arrive in reading order rather than all at
+     once, which is what makes a page feel composed rather than dumped. Capped
+     at six: past that the last panel waits long enough to read as slow, and a
+     seventh is drawn immediately rather than joining the queue. `backwards`
+     so a staggered node is not painted at full opacity for the frames before
+     its own delay begins. */
+  .rise {
+    animation: bx-rise var(--d-panel) var(--ease-out) backwards;
+  }
+  .rise:nth-child(2) {
+    animation-delay: 60ms;
+  }
+  .rise:nth-child(3) {
+    animation-delay: 120ms;
+  }
+  .rise:nth-child(4) {
+    animation-delay: 180ms;
+  }
+  .rise:nth-child(5) {
+    animation-delay: 240ms;
+  }
+  .rise:nth-child(6) {
+    animation-delay: 300ms;
+  }
+
+  /* A VALUE THAT LANDS. Distinct from `.flash-up` / `.flash-down`, which say a
+     number MOVED and in which direction. This says a number ARRIVED, and it
+     carries no hue for exactly that reason. */
+  .stat > .v,
+  .num,
+  .headline {
+    transition: color var(--d-state) var(--ease-out);
+  }
+}
+
+/* ==========================================================================
+   8. THE STRIP — web/design/ingest.html's system, moved here so it is ONE
+   --------------------------------------------------------------------------
+   WHY THIS SECTION EXISTS, AND IT IS THE ANSWER TO A QUESTION THAT KEPT
+   COMING BACK. `web/design/ingest.html` is the design reference and it carried
+   1,485 lines of its OWN inline <style>. Nothing imported it, nothing diffed
+   it, and the live page was built against this file instead — so there were
+   two hand-tuned CSS systems for one product and they drifted from the day
+   both existed. "Why does the real app not look like the mockup" has exactly
+   that answer, and no amount of re-tuning either copy fixes it.
+
+   The reference's classes live HERE now. The mockup and the four route pages
+   read the same rules, so they cannot drift: a change to the strip is a change
+   to both, or it is not a change at all.
+
+   NOTHING WAS RENAMED ON THE WAY IN, and none of these eight names existed in
+   this file before — checked, all zero. So this is additive: no page changes
+   behaviour by this section landing, and a page adopts the system by using the
+   names.
+   ========================================================================== */
+
+:root {
+  /* THE TWO ROW HEIGHTS THE STRIP IS BUILT ON. Lifted with the type scale in
+     section 1 — a 14px label row cannot hold an 11.5px uppercase label with
+     its own tracking, and a 34px control cannot hold 15px text with a border
+     and still look deliberate. */
+  --lab-h: 16px;
+  --ctl-h: 42px;
+}
+
+/* THE STRIP IS A GRID WITH NAMED ROWS, AND THAT IS THE WHOLE TRICK.
+   Every control sits on ONE baseline because label, control and note are three
+   SUBGRID rows shared by every field — not three flex children per column, each
+   free to be its own height. A refusal is a note that appears under one field,
+   and in a flex row it made that column taller and broke the line the eye was
+   following. Here it cannot: the note row is as tall as the tallest note and
+   every field uses it. */
+/* ONE CONTROL-STRIP VOCABULARY, AND IT IS THIS ONE.
+   `.strip` > `.field` > `.lab` / `.ctl` / `.note` is what `web/design` draws,
+   and it is what every route must use.
+
+   IT WAS DEAD CODE, MEASURED. Before this change no route file used `.lab` or
+   `.ctl` at all: /ingest had grown a private copy called `.pk` / `.plbl` /
+   `.pknote` and /db a second one called `.cell` / a bare span / `.count`. Three
+   spellings of one control, two of them maintained by hand inside 9,000-line
+   page files, and neither matching the design source. That is why the two pages
+   did not look alike and why neither looked like `web/design/db.html` — not a
+   styling accident, a vocabulary that nothing was pointed at. */
+.strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  /* NO ROW TEMPLATE HERE, AND THAT IS THE FIX RATHER THAN THE REGRESSION.
+     It used to declare three explicit tracks and pin every `.field` to
+     `grid-row: span 3` through `subgrid`. That aligns beautifully for ONE band
+     of fields and cannot wrap: /db carries ten rungs plus a full-width day
+     window and has to fall to a second band under six tracks, and a pinned row
+     cannot do that. /db's own workaround was `grid-template-rows: none`, which
+     is how it left this vocabulary in the first place.
+
+     The alignment moves INTO the field below, where it survives wrapping. */
+  gap: var(--s6) var(--s4);
+  padding: var(--s6);
+  align-items: start;
+  min-width: 0;
+}
+/* THE FIELD CARRIES ITS OWN THREE TRACKS — label, control, note — so a rung
+   aligns with its neighbours no matter which band it wrapped onto.
+
+   `minmax`, NOT A FIXED HEIGHT, and the difference was measured on /db: with
+   flat `var(--ctl-h)` the row resolved to 42px while the rungs in it were
+   88-104px, every one overflowed its own track, and the day window drew
+   straight through the feed rung's note. A floor aligns the common case; the
+   ceiling lets a genuinely taller control (the two-date window, a wrapped
+   summary) grow instead of clipping. `CLAUDE.md` §4 — degrade loudly, never
+   silently truncate. */
+.strip .field {
+  display: grid;
+  grid-template-rows: minmax(var(--lab-h), auto) minmax(var(--ctl-h), auto) auto;
+  row-gap: var(--s2);
+  align-content: start;
+  min-width: 0;
+}
+/* THE FULL-WIDTH RUNG. A day window is not a dropdown and does not belong in a
+   track beside four of them; `1 / -1` starts its own band at EVERY track count,
+   where `span 2` would finish a row of dropdowns and then break it. */
+.strip .field.wide {
+  grid-column: 1 / -1;
+}
+/* A RUNG THAT CANNOT BE USED IS DRAWN AND DISABLED, NEVER HIDDEN — `CLAUDE.md`
+   §4. "Why is there no segment control" is a question an absence answers badly. */
+.strip .field.off .lab,
+.strip .field.off .ctl {
+  opacity: 0.55;
+}
+/* The action column keeps the grid's shape and hides the two rows it has no
+   content for, rather than collapsing and pulling the button up a row. */
+.strip .field.go .lab,
+.strip .field.go .note {
+  visibility: hidden;
+}
+.strip .field.go .btn {
+  width: 100%;
+}
+
+.lab {
+  font-family: var(--mono);
+  font-size: var(--fs-micro);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  color: var(--faint);
+  font-weight: var(--w-semi);
+  line-height: var(--lab-h);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ctl {
+  height: var(--ctl-h);
+  display: flex;
+  align-items: center;
+  gap: var(--s4);
+  padding: 0 var(--s5);
+  background: var(--bg-2);
+  border: 1px solid var(--line-hard);
+  border-radius: var(--r2);
+  font-size: var(--fs-sm);
+  color: var(--ink);
+  white-space: nowrap;
+  box-shadow: var(--e1);
+  min-width: 0;
+}
+.ctl > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ctl .caret {
+  margin-left: auto;
+  color: var(--faint);
+  font-size: var(--fs-mini);
+}
+.ctl.off {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* A NOTE IS ONE LINE UNDER ONE CONTROL, and it carries a marker so a refusal
+   is distinguishable from a remark at a glance rather than by reading it.
+   `▲` for something that needs attention, `·` for something that merely is. */
+.note {
+  font-family: var(--mono);
+  font-size: var(--fs-micro);
+  line-height: 1.35;
+  color: var(--warn);
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s2);
+  min-height: 13px;
+}
+.note::before {
+  content: '▲';
+  font-size: 8px;
+  line-height: 1.9;
+  flex: none;
+}
+.note.quiet {
+  color: var(--faint);
+}
+.note.quiet::before {
+  content: '·';
+  font-size: var(--fs-xs);
+  line-height: 1.1;
+}
+
+/* THE METRIC TILE. The mockup's `.k / .v / .foot` triple, which is the same
+   shape as `.stat` in section 7 and is kept under its own name because the
+   reference uses it — one system, two entry points, no second ruleset. */
+.metric {
+  background: var(--panel);
+  padding: var(--s6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  position: relative;
+}
+.metric .k {
+  font-family: var(--mono);
+  font-size: var(--fs-micro);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  color: var(--faint);
+  font-weight: var(--w-semi);
+}
+.metric .v {
+  font-family: var(--num);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-data-lg);
+  font-weight: var(--w-bold);
+  line-height: var(--lh-tight);
+  color: var(--ink-hi);
+  white-space: nowrap;
+}
+.metric .foot {
+  font-size: var(--fs-mini);
+  color: var(--faint);
+}
+
+.panel-h {
+  display: flex;
+  align-items: center;
+  gap: var(--s5);
+  padding: var(--s5) var(--s6);
+  border-bottom: 1px solid var(--line-soft);
+  position: relative;
+}
+.ttl {
+  font-family: var(--mono);
+  font-size: var(--fs-micro);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  color: var(--faint);
+  font-weight: var(--w-bold);
+}
+.spacer {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .ctl,
+  .metric {
+    transition:
+      background-color var(--d-hover) var(--ease-out),
+      border-color var(--d-hover) var(--ease-out),
+      box-shadow var(--d-state) var(--ease-out);
+  }
+  .ctl:hover {
+    border-color: var(--acc);
+    box-shadow: var(--e2);
+  }
+  .ctl.off:hover {
+    border-color: var(--line-hard);
+    box-shadow: var(--e1);
+  }
+  .metric:hover {
+    background: var(--panel-2);
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   REGISTERED CUSTOM PROPERTIES — the ones a transition has to be able to read.
+
+   An unregistered custom property is substituted at computed-value time, so a
+   declaration that reads it changes DISCRETELY. /db's magnitude bar learned
+   this the expensive way: it carried `transition: background-image 160ms` and
+   `background-image` is not an animatable property, so the rule had never once
+   run. Registering the number the gradient is built from is what makes the
+   growth interpolable — the transition then names `--mag`, not the gradient.
+
+   Document level and not a component `<style>`: `@property` is a global
+   registration, and a second copy inside a scoped block is a second source of
+   truth for one name.
+   --------------------------------------------------------------------------- */
+@property --mag {
+  syntax: '<percentage>';
+  inherits: false;
+  initial-value: 0%;
+}
+@property --vmag {
+  syntax: '<percentage>';
+  inherits: false;
+  initial-value: 0%;
+}
+@property --rng {
+  syntax: '<number>';
+  inherits: false;
+  initial-value: 0;
+}
+
+/* ---- print ------------------------------------------------------------ */
+/*
+  THE APP OWNS ITS SCROLL REGIONS, AND A PRINTER HAS NONE.
+
+  `body`, `.shell` and `.main` pin themselves to the viewport and hide their
+  overflow, which is right on screen and wrong on paper: a print took the first
+  viewport, cropped everything below it, and produced a page that LOOKED
+  complete. A record that is silently short is worse than no record, and every
+  grid on this product is a record.
+
+  Two halves, and the second is the load-bearing one.
+
+  Releasing the heights fixes the ordinary tables. It CANNOT fix the virtual
+  ones. `/db`, `/ingest` and `/audit` render a window of rows and a spacer --
+  the rows outside the window are not clipped, they DO NOT EXIST in the
+  document, and no stylesheet can print an element the DOM does not hold.
+  Un-virtualising for print would need a render pass, which is a page change
+  and not a stylesheet's business.
+
+  So the sheet says so. A banner is printed at the top of the first page naming
+  the limit and pointing at the export that has no limit, because CLAUDE.md
+  section 4 allows a degraded answer that names its reason and forbids a
+  silent one. The operator learns the sheet is partial from the sheet itself,
+  which is the only place they can learn it after the paper leaves the machine.
+*/
+@media print {
+  html,
+  body,
+  .shell,
+  .main {
+    height: auto;
+    max-height: none;
+    overflow: visible;
+  }
+
+  body {
+    background: #fff;
+    color: #000;
+  }
+
+  /* Controls do not survive the trip to paper: nothing on a sheet can be
+     pressed, and a printed dropdown is an inkblot that means nothing. */
+  .topbar,
+  .combo-pop,
+  .themer {
+    display: none !important;
+  }
+
+  /* THE SHEET NAMES ITS OWN LIMIT. `position: static` so it joins the flow of
+     the first page rather than repeating on every one. */
+  body::before {
+    content: 'PARTIAL RECORD — this console renders long tables one window at a time, so a printed sheet contains only the rows that were on screen. Use the CSV export for the complete set.';
+    display: block;
+    padding: 8pt 10pt;
+    margin: 0 0 10pt;
+    border: 1pt solid #000;
+    font: 700 9pt/1.4 ui-monospace, Menlo, monospace;
+    color: #000;
+    background: #fff;
+  }
+
+  /* A link is a dead end on paper unless the sheet carries its target. */
+  a[href^='/']::after {
+    content: ' (' attr(href) ')';
+    font-size: 8pt;
+    font-weight: 400;
+  }
+}

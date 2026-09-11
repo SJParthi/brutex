@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32" role="img" aria-label="brutex">
+  <title>brutex</title>
+  <desc>
+    The brand mark, taken from web/design/ingest.html, where .brand .mark is a
+    22px rounded square filled with a 140deg gradient from the accent hue to the
+    info hue, carrying the glyph in the on-accent ink. Those three theme tokens
+    are spelled here as the literals the DARK ramp resolves them to, because an
+    icon cannot read a custom property, and the dark pair is the saturated one
+    so it stays legible against a light browser tab as well as a dark one.
+
+    The X is a stroked path and not a text glyph: text would resolve against
+    whatever font the viewer happens to have, and a mark that changes shape per
+    machine is not a mark.
+
+    NOTE FOR ANY LATER EDITOR: this is a desc element and not a comment, and
+    that is deliberate. The token names in this file's own design system begin
+    with a double hyphen, and a double hyphen is illegal inside an XML comment.
+    Written as a comment, this file parsed as an error document, served 200,
+    and every browser fell back to asking for /favicon.ico.
+  </desc>
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1" gradientTransform="rotate(-50 .5 .5)">
+      <stop offset="0" stop-color="#22d3ee"/>
+      <stop offset="1" stop-color="#9d7cf5"/>
+    </linearGradient>
+  </defs>
+  <rect width="32" height="32" rx="7" fill="url(#g)"/>
+  <path d="M10.5 10.5 21.5 21.5 M21.5 10.5 10.5 21.5"
+        stroke="#04060c" stroke-width="4.5" stroke-linecap="round" fill="none"/>
+</svg>

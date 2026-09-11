@@ -69,6 +69,7 @@ fn ratio(label: &str, base_ps: u128, at_ps: u128) -> bool {
 /// that is scanned by the marker search and then never becomes the identity.
 fn row(trading_symbol: &str) -> MasterRow<'_> {
     MasterRow {
+        vendor_id: "1333",
         exchange: "NSE",
         segment: "CASH",
         underlying: "RELIANCE",
@@ -80,6 +81,96 @@ fn row(trading_symbol: &str) -> MasterRow<'_> {
         strike_rupees: "",
         option_side: "",
     }
+}
+
+/// The per-row floor: the cheapest possible touch of the same eleven fields.
+///
+/// # Why a ratio alone cannot see a regression
+///
+/// Every row above divides one decode cost by another decode cost, and a
+/// UNIFORM slowdown cancels in a quotient. An independent audit measured exactly
+/// that elsewhere in this workspace: a mask operation **174x slower passed its
+/// crate's ratio rows at 0.98x-1.00x**, because both legs moved together.
+/// `crates/vocab`, `crates/indicators` and `crates/engine` each carry a
+/// floor-relative budget for that reason; `crates/core` did not, and this is it.
+///
+/// The denominator has to be something that cannot move when `decode_master_row`
+/// does. This reads the `len` of each of the same eleven fields and sums them —
+/// the same struct, the same eleven pointers chased, no parsing at all. The
+/// quotient is therefore "how many of the cheapest per-row things does one
+/// decode cost", which scales with the machine without scaling with a defect.
+fn floor_ps() -> u128 {
+    let r = row("NIFTYNXT50-Aug2026-101500-CE");
+    cost_ps(2_000, || {
+        let mut acc = 0_usize;
+        for field in [
+            r.vendor_id,
+            r.exchange,
+            r.segment,
+            r.underlying,
+            r.trading_symbol,
+            r.instrument_type,
+            r.listing_class,
+            r.isin,
+            r.expiry,
+            r.strike_rupees,
+            r.option_side,
+        ] {
+            acc = acc.wrapping_add(black_box(field).len());
+        }
+        black_box(acc)
+    })
+}
+
+/// Prints one budget in floors and returns whether it held.
+///
+/// A breached RATIO says the cost depends on the data. A breached BUDGET says
+/// the cost rose for every input at once, which no ratio in this file can report.
+fn budget(label: &str, floor: u128, at_ps: u128, allowed: u128) -> bool {
+    if floor == 0 {
+        println!("  {label:<58} UNMEASURABLE — the floor timed at zero");
+        return false;
+    }
+    let floors = at_ps.saturating_mul(1_000) / floor;
+    let ok = floors <= allowed.saturating_mul(1_000);
+    println!(
+        "  {label:<58} {at_ps:>8} ps = {}.{:03} floors, budget {allowed}   {}",
+        floors / 1_000,
+        floors % 1_000,
+        if ok { "ok" } else { "OVER BUDGET" }
+    );
+    ok
+}
+
+/// C-09b — one decode costs a bounded multiple of the per-row floor.
+fn decode_stays_within_its_budget() -> bool {
+    /// Floors allowed per row.
+    ///
+    /// Measured, arm64 laptop, release, `lto = "fat"`, four consecutive runs:
+    /// **33.823, 35.329, 35.972, 35.899** floors, at a floor of 2,104–2,146 ps.
+    /// The spread is tight because both legs walk the same eleven `&str` and are
+    /// pointer-chasing rather than arithmetic-bound.
+    ///
+    /// The budget is sized on the WORST observed multiple and not the mean, the
+    /// same rule `crates/engine` applies to its own. **110** leaves 3.06x for a
+    /// different microarchitecture, and still refuses the 174x uniform
+    /// regression this file's ratios would report as ok — such a decode would
+    /// read about 6,260 floors, which this budget refuses by a factor of 57.
+    ///
+    /// A breach of this is NOT a data dependence; C-09 is the row for that. It
+    /// means every input got dearer at once, which is the thing a quotient
+    /// cannot see.
+    const ALLOWED: u128 = 110;
+
+    let floor = floor_ps();
+    println!("  the per-row floor is {floor} ps — eleven `len` reads and a sum");
+    let at = cost_ps(2_000, || {
+        decode_master_row(
+            Vendor::Groww,
+            black_box(row("NIFTYNXT50-Aug2026-101500-CE")),
+        )
+    });
+    budget("C-09b decode against the per-row floor", floor, at, ALLOWED)
 }
 
 /// C-09 — per-row decode cost does not track the width of a vendor field.
@@ -129,6 +220,7 @@ fn main() {
     let mut ok = true;
     ok &= decode_is_flat_in_field_width();
     ok &= an_over_wide_row_is_refused();
+    ok &= decode_stays_within_its_budget();
     if ok {
         println!("all ratios within the ceiling");
     } else {

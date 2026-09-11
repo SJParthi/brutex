@@ -7,13 +7,21 @@ because a prohibition survives a rewrite better than a goal does.
 
 ## 1. Scope lock
 
-**The engine sweeps exactly two instruments, both on NSE.** Narrowed from
-three by D-0017: `BSE-SENSEX` is no longer swept and BSE is no longer pulled.
+**The engine sweeps two shapes, both on NSE.** Narrowed from three
+instruments by D-0017 (`BSE-SENSEX` is no longer swept and BSE is no longer
+pulled), then widened by D-0506 to the cash equities of the F&O universe.
 
-| Symbol | Exchange | Segment |
-|---|---|---|
-| `NSE-NIFTY` | NSE | INDEX |
-| `NSE-BANKNIFTY` | NSE | INDEX |
+| Symbol | Exchange | Segment | Since |
+|---|---|---|---|
+| `NSE-NIFTY` | NSE | INDEX | — |
+| `NSE-BANKNIFTY` | NSE | INDEX | — |
+| the 213 F&O underlyings, e.g. `NSE-HINDALCO` | NSE | CASH | D-0506 |
+
+The third row is not a list here and must not become one: the names are
+`core::universe::FNO_UNDERLYINGS`, derived from NSE's own F&O list with an
+ISIN beside each, and `InstrumentKey::is_sweepable` probes that index in O(1).
+The cash equity is the stock's own price series — what the spot level is for an
+index. It does not expire.
 
 `NSE-INDIAVIX` is **reference only** — stored, stamped onto observable trades
 as `vix_at_entry` / `vix_at_exit`, and never in the condition vocabulary, the
@@ -63,19 +71,100 @@ Sources are Indian exchange publications and the vendor documentation cited in
 | Muhurat (Diwali) session | ~1 hour, an evening session on a date that is
   otherwise a holiday. Verified dates: 2020-11-14, 2021-11-04, 2022-10-24,
   2023-11-12, 2024-11-01, 2025-10-21 |
+| Disaster-recovery sessions | NSE runs a **live-trading DR drill on a
+  Saturday**, out of the secondary site, to prove the site works. Two are in
+  the store: **2024-03-02 (Sat)** and **2024-05-18 (Sat)**, **105 bars each**,
+  09:15–09:59 then 11:30–12:29 with a 90-minute closure between. MEASURED by
+  decoding `zerodha/NSE/INDEX/NIFTY/1min/2024-03.bin` and `2024-05.bin`; also
+  recorded in `crates/pull/src/calendar.rs`. **A drill is not a market day**
+  and its OHLC never becomes the previous-day anchor — it is in
+  `CHARTER_NON_REGULAR_IST_DAYS` for exactly the reason the Muhurats are.
+  Unlike five of the six Muhurats, both land squarely inside the pull's
+  09:15–15:30 window, so nothing keeps them off disk by accident. What this
+  cost while they were absent from that list, measured on the store's own
+  bars: for Monday 2024-03-04 the anchor was the 105-bar Saturday rather than
+  the 375-bar Friday, moving the pivot **144.5 index points** and the CPR width
+  **6.2×** — enough alone to flip `cpr_class`, which is a vocabulary position.
+  See `docs/05-decisions.md` and `docs/11-findings.md`. |
 | Special weekend sessions | Union Budget sessions falling on a weekend, run at
   full regular hours. **2020-02-01 (Sat), 2025-02-01 (Sat), 2026-02-01 (Sun)**
-  — 375 bars each, confirmed in the lake. This is the complete set: 1 February
-  fell on a weekend in no other year from 2020 to date. Supersedes an earlier
-  claim of 2021-01-30 and 2021-02-01; see D-0014. |
+  — 375 bars each, confirmed in the lake and re-MEASURED by decoding
+  `zerodha/NSE/INDEX/NIFTY/1min/2020-02.bin`, `2025-02.bin` and `2026-02.bin`:
+  in each the session's first record is stamped 09:15, its 375th 15:29, and its
+  376th is the following trading day. This is the complete set OF BUDGET
+  weekend sessions: 1 February fell on a weekend in no other year from 2020 to
+  date. Supersedes an earlier claim of 2021-01-30 and 2021-02-01; see D-0014. |
+| 2024-01-20 (Sat) | A **full regular session on a Saturday**, and it is neither
+  a Budget day nor a disaster-recovery drill. MEASURED by decoding
+  `zerodha/NSE/INDEX/NIFTY/1min/2024-01.bin`: the month holds 8,250 minute bars
+  = 22 × 375, record 5,625 is stamped 09:15 on 2024-01-20, record 5,999 is
+  15:29, and record 6,000 is 2024-01-23 09:15. **375 bars, 09:15–15:29.**
+  **WHY the exchange traded that Saturday is UNVERIFIED** — no circular is
+  cited here and none is guessed; what is recorded is the shape on disk.
+  Because it is a full regular session it correctly REMAINS an ordinary
+  previous-day anchor and is deliberately **not** in
+  `CHARTER_NON_REGULAR_IST_DAYS`: what disqualifies a day from that list is that
+  its OHLC does not describe a regular session, and this one's does. It was
+  absent from this table while the calendar bitset already held it, which made
+  the derived count below wrong; that is a documentation defect and was never an
+  engine one. |
+| Weekend sessions on disk | **Six, totalling 1,710 one-minute bars**, all
+  MEASURED in the operator's own store rather than counted from this table:
+  three Budget sessions at 375 each (1,125), two disaster-recovery Saturdays at
+  105 each (210), and 2024-01-20 at 375. Against **618,296** `1min` NIFTY bars
+  — the `zerodha` feed's 81 month files, counted as `(length − 32768) / 56` —
+  that is **0.28%** of the series. The same denominator puts the superseded
+  1,335 at 0.216%, which is where the previously stated 0.21% came from; the
+  denominator was right and the numerator was not. The earlier figure of five
+  sessions and 1,335 bars omitted 2024-01-20 entirely. NSE trades on a
+  weekend more often than "weekday" implies, and `indicators::weekday_bit`
+  therefore leaves all five weekday positions false on every one of these bars —
+  honest under `docs/03-vocabulary.md` §4, and not free: those bars sit in a
+  weekday-conditioned candidate's support DENOMINATOR and never in its
+  numerator. |
+| 2021-02-24 NSE outage | NSE halted all segments from **11:40 IST**, ran a
+  15-minute pre-open from **15:30**, resumed normal trading at **15:45**, and
+  closed the extended session at **17:00**. Therefore the equity normal-market
+  windows are **09:15–11:39** and **15:45–16:59**, totalling **220 minute
+  slots**. This does **not** prove that 220 spot-index bars were published: the
+  same order records NIFTY computation unavailable from 10:06 to 11:43 and
+  does not give one exact availability window for NIFTY, BANKNIFTY and VIX.
+  Their shared 54-bar prefixes ending 10:08 cannot define their own denominator;
+  a generic index completeness audit marks the day unmeasured rather than
+  inventing either a clean session or a vendor-loss count. Primary source:
+  [SEBI Settlement Order SO/AB/EFD2/2023-24/6580](https://www.sebi.gov.in/sebi_data/attachdocs/jun-2023/1687270559560.pdf),
+  paragraphs 1–2; contemporaneous corroboration:
+  [SEBI PR No. 9/2021](https://www.sebi.gov.in/sebi_data/attachdocs/feb-2021/1614256948318.pdf).
+  **What is on disk is 54 bars, 09:15–10:08, and it is IST day 18,682.**
+  MEASURED by decoding `zerodha/NSE/INDEX/NIFTY/1min/2021-02.bin`: `n_valid` is
+  7,179, which is 19 × 375 + 54; record 6,375 is stamped 09:15, record 6,428 is
+  10:08, and record 6,429 is 2021-02-25 09:15. The 15:45–17:00 reopening is
+  entirely outside the pull's `[09:15, 15:30)` window, so ingest drops it — and
+  correctly: re-pulling can never recover a bar the window excludes.
+  **That 54-minute stub is therefore in `CHARTER_NON_REGULAR_IST_DAYS`, for the
+  identical reason the two DR Saturdays are.** It is a SHORTER session than the
+  Muhurat hour the list already refuses, so treating it as regular was strictly
+  the larger error: without the entry it became the previous-day anchor for
+  2021-02-25, moved the whole 44-position pivot ladder and both previous-day
+  Fibonacci ladders, and stayed inside `Prev5` for five sessions. Note the
+  distinction the list turns on — a Muhurat and a DR drill are days the exchange
+  never meant to be normal, this is a day it did. What disqualifies a session is
+  that its OHLC does not describe a regular day, never why it does not. |
 | Bar timestamp | the **OPEN** (left edge) of its minute. A bar covers the
   half-open window `[t, t + tf)`, left-closed and left-labelled. VERIFIED |
 | Last regular 1-minute bar | **15:29:00 IST**, not 15:30. 09:15 through 15:29
   inclusive is exactly 375 bars, which is the arithmetic that closes it. |
-| Forced exit | 15:20 IST, **inclusive of the 15:20 bar**: a bar is a
-  forced-exit bar iff `bar_open + tf > 15:20`. The 15:19 bar closes exactly at
-  15:20 and is not forced. Generalises to `session_close − 10 min`, which
-  yields 14:35 for the 2025 Muhurat session and 16:50 for 2021-02-24. |
+| Forced exit | **Fixed 15:10 IST product policy for every swept intraday
+  execution, not an exchange-closing-time fact.** Execution bars are stored at
+  their left edge, so the unique accepted `1min` bar stamped **15:09** covers
+  `[15:09, 15:10)` and is the only stored OHLCV record that may price the
+  forced fill. The 15:10 bar contains post-deadline prices and may not be used.
+  A missing, refused, duplicated or otherwise ambiguous 15:09 record has no
+  substitute: no 15:08/15:10 neighbour, delayed next-available minute,
+  interpolation or fabricated tick. A non-regular session without that exact
+  record cannot price a hold that needs forced liquidation, although an
+  earlier exact horizon may still be measured. D-0436 deliberately supersedes
+  the former dynamic `session_close − 10 min` / 15:20 policy. |
 | Tick grid | 2 decimal places |
 | Price storage | paisa integers, `i64` |
 | Track-1 brokerage | none. Spot indices are not tradable; the sweep is
@@ -123,9 +212,15 @@ Evidence lane is recorded per row and is never promoted while copying.
 |---|---|---|
 | Transport | official SDK, injected client | verified |
 | History endpoint | one method for spot and derivatives | verified |
-| Granularity fetched | `1minute` only. Every other timeframe is derived. | decided |
-| History depth | from 2020 | documented |
-| Window cap | 30 days per request at 1-minute granularity | documented |
+| Granularity fetched | `1minute` only. Every other timeframe is derived — **at the write boundary**, by `pull::fold`, into the rung the bars are filed under. See D-0055. | decided |
+| History depth, daily | **2020-01-01, and the vendor claims more.** This row read "from 2020 / documented" and the lane was wrong: no vendor page says 2020. The operator stated it on **11 Aug 2026** and again on **12 Aug 2026**, and the vendor's own interval table gives its `1 day` row **"Full history"** (`Groww Docs / 08-historical-data.md`). Two sources, disagreeing. The operator's is both the LATER day and the higher-standing claim, so it binds on either rule and the vendor's is carried beside it — `pull::vendor::Descriptor::history`, D-0113, D-0131. | operator-stated 11 Aug 2026, restated 12 Aug 2026, contested by vendor docs |
+| History depth, 1-minute | **2020-01-01 — the same day as the daily rung, and this row was REVERSED on 12 Aug 2026.** It read "a rolling 3 months — NOT 2020", binding the vendor's published `1 min` row **"Last 3 months"** (`Groww Docs / 08-historical-data.md`) on the rule that the stricter claim wins. The operator restated the floor on **12 Aug 2026**, having watched this build refuse January 2020 through May 2026 on his own account: *"GROWW — data is available from JANUARY 2020. A fixed floor, not a rolling one."* That is a report of what his entitlement answers, not a competing reading of what Groww published, so it outranks rather than merely out-stricts — see `pull::vendor::ClaimStanding`. The vendor's quarter is carried beside it as the contested claim. **UNVERIFIED:** he stated the figure against the vendor, not against a rung, so it is applied to both rungs unchanged; whether this rung truly reaches 2020 is unmeasured, and no request was made to find out. D-0113, D-0131. | operator-stated 12 Aug 2026, contested by vendor docs; the per-rung split UNVERIFIED |
+| Window cap, 1-minute | 30 days per request at 1-minute granularity | documented |
+| Window cap, 1-minute — the vendor's own table says 7 | **UNRESOLVED, and both figures are written down.** The 30 above is what this repository has carried and is what `pull::vendor::HttpSpec::window_caps` encodes. `Groww Docs / 08-historical-data.md`'s interval table gives the `1 min` row a **"Max Duration per Request" of 7 days**, and its `1 day` row 1,080. Nothing was changed on the strength of this reading: the 30 is operator-facing history and a narrower cap only costs requests, while a wrong one loses bars. Named here so it is not discovered a third time. | conflicting sources |
+| Window cap, daily | **UNVERIFIED.** No day-level figure is published in any source this repository has read; the 30 above carries its own "at 1-minute granularity" qualifier and is not promoted. Encoded as **absent** in `pull::vendor::HttpSpec::window_caps`, which means "the vendor bounds nothing here" — the store's one-month-per-file boundary still splits every request. | unverified |
+| Daily interval word | **`1day`.** The vendor's own annexure, *Candle Interval*, gives `GrowwAPI.CANDLE_INTERVAL_DAY` the value **`1day`** — the same table that gives `CANDLE_INTERVAL_MIN_1` the value `1minute` this repository already used. The full table also carries `2minute`…`4hour`, `1week` and `1month`; none is recorded here, because `store::path::Timeframe` has a directory for two rungs and a token for a rung the store cannot file is a request whose answer has nowhere to go. Was UNVERIFIED until the docs were read; D-0076. | verified from vendor annexure |
+| Index segment word | **`CASH`** — the same word an equity takes. The vendor's live-data page states it: *"Use the segment value FNO for derivatives and CASH for stocks and index."* Before this was read, `Listing::Index` was absent from the descriptor and a live index pull refused by name with `FetchError::ListingNotSpellable`. D-0076. | verified from vendor docs |
+| Instrument-type word | **Not applicable to this request.** The annexure carries an instrument-type alphabet (`EQ`, `IDX`, `FUT`, `CE`, `PE`), but the historical-candles request schema is `exchange`, `segment`, `trading_symbol`, `start_time`, `end_time`, `interval_in_minutes` and nothing else — there is no field for a kind, so no word is written into one. Contrast Dhan, whose request carries `instrument`. | verified from vendor docs |
 | Response shape | row arrays: `[ts, o, h, l, c, v, oi]`, `oi` null off-derivatives | verified |
 | Timestamp | native IST string, or epoch seconds defensively | verified |
 | Price unit | rupees as float on the wire; converted to paisa at the boundary | verified |
@@ -141,13 +236,161 @@ Evidence lane is recorded per row and is never promoted while copying.
 | Endpoint | intraday charts, 1/5/15/25/60 min — we fetch 1 only | verified from SDK |
 | Response shape | **parallel column arrays**, not rows. Unequal lengths reject the chunk. | documented |
 | Timestamp | epoch seconds, UTC | verified from SDK |
-| Window cap | 90 days per request | documented |
-| History depth | rolling ~5 years. **Not a fixed floor** — it moves every day. | documented |
+| Window cap, 1-minute | 90 days per request. Documented against the **intraday charts** endpoint named one row above, so it is recorded at the one-minute rung and not promoted past it. | documented |
+| Window cap, daily | **UNVERIFIED.** Whether the 90 above applies to a day-level request is not stated anywhere read; nor is whether `/v2/charts/historical` serves daily at all — the endpoint row calls it "intraday charts" and the descriptor's path string does not say. Encoded as **absent**, which the store's month boundary already bounds: every chunk is ≤ 31 days and therefore inside the 90 regardless. | unverified |
+| Daily interval word | **Not applicable — and that is itself the fact.** This vendor's request carries no interval parameter at all (five fields: `securityId`, `exchangeSegment`, `instrument`, `fromDate`, `toDate`), so this build cannot vary the rung on its wire. Bars are folded into whatever rung they are filed under, which is correct for any vendor cadence no coarser than the target. | verified from SDK |
+| History depth, daily | **A rolling ~5 years, and the vendor claims more.** Operator, **11 Aug 2026**: a rolling last 5 years — **not a fixed floor**, it moves every day. `Dhan Docs / 12-historical-data.md`, *Get Daily Historical Data*: *"The data for any scrip is available back upto the date of its inception."* Two sources, disagreeing; the operator's is the later day, so it binds and the vendor's is carried beside it. A stated absence of a floor cannot widen a stated one. **Restated unchanged on 12 Aug 2026** — *"DHAN — a ROLLING 5 YEARS"* — in the same breath as the Groww correction, so this row is confirmed rather than merely unrevisited. D-0113, D-0131. | operator-stated 11 Aug 2026, restated 12 Aug 2026, contested by vendor docs |
+| History depth, 1-minute | **A rolling 5 years, and here the two sources AGREE.** Same page, *Get Intraday Historical Data*: *"…for last 5 years."* Recorded although this build does not serve the rung — the row is a vendor fact, and `/feeds.json` emits it marked `served: false`. D-0113. | documented |
+| `toDate` inclusivity | **NON-INCLUSIVE on the daily endpoint, and NOT STATED on the intraday one.** `Dhan Docs / 12-historical-data.md`: the daily request table describes `toDate` as *"End date (YYYY-MM-DD, non-inclusive)"*; the intraday table one section below describes the same field as *"End date (YYYY-MM-DD)"*, with no qualifier. The expired-options endpoint (`14-expired-options-data.md`) repeats *non-inclusive*. `pull::vendor::HttpSpec::range_end` is per **vendor**, and the served path is the daily one, so the encoded `Exclusive` is right for what is sent today — and it is **UNVERIFIED** for the intraday path, which cannot be enabled without settling it. D-0113. | documented (daily) · unverified (intraday) |
 | Rate limit | 5/s, 100,000/day, no per-minute governor | documented |
 | Subscription | paid data plan; enforcement surfaces as a specific error code | documented |
 | Credentials | `/<org>/<env>/<vendor>/<field>` — read-only. Fields: `client-id`, `access-token`. Real segments resolved at runtime; see D-0013. | verified |
 | Security ids | NIFTY = 13 (verified from the SDK's own example). BANKNIFTY 25, SENSEX 51, INDIA VIX 21 — **community sources only, unverified.** | mixed |
 | India VIX candle availability | **UNVERIFIED.** No documentation states it. Treat as a hard gate before relying on it. | unverified |
+
+### 4z. Zerodha — recorded, and carried nowhere
+
+The operator stated on **11 Aug 2026** that Zerodha serves **a rolling 10 years**
+of history. It is written here because §3 rule 1 wants a stated fact traceable.
+
+**IT IS NOW CARRIED IN A DESCRIPTOR, and this paragraph said the opposite until
+14 Aug 2026.** It read: *"it is carried in no descriptor: `pull::vendor::Feed`
+has four rows and none of them is this vendor. There is no transport, no
+credential field and no wire name for it in this repository."* Every clause of
+that is now false, and leaving it standing made §4z — the traceability anchor
+every Zerodha fact in the code cites — assert that the thing citing it does not
+exist.
+
+| What shipped | Where |
+|---|---|
+| `Feed::Zerodha`, the fifth row | `pull::vendor::DESCRIPTORS` |
+| Store prefix `zerodha` | `core::vendor::Vendor::Zerodha` |
+| Transport | HTTP, `https://api.kite.trade` |
+| Credential fields | `api-key` and `access-token`, the second named by `Auth::key_field` |
+| Rungs asked for | `minute` and `day` |
+
+**The history-depth lane below is unchanged and still true**: one source,
+operator-stated, with no vendor page confirming it. A descriptor existing does
+not make an unverified figure verified, and the row still says so.
+
+| Fact | Value | Lane |
+|---|---|---|
+| History depth | rolling 10 years | operator-stated 11 Aug 2026, restated 14 Aug 2026, no vendor page states it |
+| Descriptor | **`Feed::Zerodha`, shipped 14 Aug 2026.** Was "none exists"; see the paragraph above for what that claim cost while it stood. | verified from source |
+
+**The vendor page has now been read.** `https://kite.trade/docs/connect/v3/historical/`,
+read 14 Aug 2026. Every row below is quoted from it, so the "no vendor page read"
+lane above applies only to the history depth, which that page still does not state.
+
+| Fact | Value | Lane |
+|---|---|---|
+| Base URL | `https://api.kite.trade` | documented |
+| Endpoint | `GET /instruments/historical/:instrument_token/:interval` | documented |
+| Auth | header `Authorization: token api_key:access_token`, plus `X-Kite-Version: 3` | documented |
+| Instrument identity | numeric `instrument_token`, from the instruments API — **not a symbol** | documented |
+| Intervals published | `minute` `3minute` `5minute` `10minute` `15minute` `30minute` `60minute` `day` | documented |
+| Intervals THIS BUILD WILL ASK FOR | **`minute` and `day` only** — the same two rungs Groww and Dhan serve. The operator narrowed it on 14 Aug 2026: "one and only one day pull and one min pull". The other six are real and are not wired, so `Descriptor::granularities` carries two and the remaining six refuse by name like every other unfetched rung. | operator-stated 14 Aug 2026 |
+| Window params | `from` / `to`, `yyyy-mm-dd hh:mm:ss` | documented |
+| `to` inclusivity | **INCLUSIVE — read from the vendor's own example, because the page never states it in words.** `from=2017-12-15 09:15:00&to=2017-12-15 09:20:00` is answered with **six** candles, stamped 09:15, 09:16, 09:17, 09:18, 09:19 and **09:20**. Both endpoints are present. The OI example one section below repeats the same window and returns the same six. This is the third vendor and the third answer — Dhan's daily `toDate` is non-inclusive, Groww's is inclusive, and Kite's is inclusive by demonstration rather than by assertion. `pull::vendor::HttpSpec::range_end` therefore takes `Inclusive` with the example as its citation. Re-read 14 Aug 2026. | documented by example, not by prose |
+| Extra params | `continuous` (0/1), `oi` (0/1) | documented |
+| Response | `{status, data:{candles:[[ts,o,h,l,c,volume(,oi)]]}}` — an array of ARRAYS, positional | documented |
+| Timestamp | `2017-12-15T09:15:00+0530` — ISO **carrying an offset** | documented |
+| Prices | decimal rupees (`1704.5`) | documented |
+| Expired F&O | `continuous=1` returns **day** candles for expired contracts of a live token's underlying, NFO and MCX futures | documented |
+| Window cap | **NOW STATED, AND NOT BY THE PAGE.** The historical page still states no span limit at any interval — that half of the old row was and remains true. The figures come from Zerodha's own Kite Connect developer forum, thread `kite.trade/forum/discussion/7756`, posted by staff member `rakeshr` in May 2020, which other forum threads and Zerodha staff cite as the canonical reference. Max days per single request: `minute` **60** · `3minute` **100** · `5minute` **100** · `10minute` **100** · `15minute` **200** · `30minute` **200** · `60minute` **400** · `day` **2000**. A request spanning more than the permitted days for its interval FAILS, so a backfill must chunk to them. Captured 19 Aug 2026. | forum-sourced, authoritative-but-unversioned |
+| Rate limit | **3 requests/second** on the historical candle endpoint | documented |
+| Rate-limit refusal | HTTP **429** | documented |
+| Session expiry | **`TokenException`, HTTP 403.** Caused by logout, natural expiry, **or the user logging into another Kite instance.** Clear the session and re-login. | documented |
+| Other exceptions | **NINE ON THE PAGE, AND A TENTH THAT IS NOT.** This row carried four. The exceptions page publishes nine, in this order: `TokenException` · `UserException` · `OrderException` · `InputException` · `MarginException` · `HoldingException` · `NetworkException` · `DataException` · `GeneralException`. The page also states the handling rule per group, which is what `pull::kite` encodes: `TokenException` clears the session and re-logins; `NetworkException` and `DataException` are *"candidates for a bounded retry"*; `InputException`, `MarginException` and `HoldingException` are *"deterministic rejections of the request as sent"*. Read 19 Aug 2026. | documented |
+| `PermissionException` — the tenth, and the one that costs | **NOT ON THE EXCEPTIONS PAGE. Live in the vendor's own SDK.** `github.com/zerodha/pykiteconnect`, `kiteconnect/exceptions.py`: *"Represents permission denied exceptions for certain calls. Default code is 403."* It is what an API key with no historical-data subscription is answered with. **It shares HTTP 403 with `TokenException`**, so on the status axis alone the two are one event — and this build reported the second as the first, telling an operator with no subscription that the next pull would read a refreshed credential. Nothing about that key is refreshable. The pair is why `pull::refusal` exists and why `HttpSpec::error_names` is a field. The vendor's own page warns of exactly this: the nine names are *"the complete set documented on this page, not the complete set of `error_type` strings the API can return"*, and an unrecognised `error_type` must be logged raw rather than folded into `GeneralException`. | vendor SDK, not the documentation page |
+| Other HTTP codes | 400 bad params · **405 method not allowed** · 404 not found · 410 gone permanently · 500 · 502 OMS down · 503 · 504 | documented |
+| Per-day quota | **NONE on this endpoint, and the only daily cap on the page is not ours.** `kite.trade/docs/connect/v3/exceptions/` publishes one daily figure — *"a single user/API key will not be able to place more than 5000 orders per day"* — and it is stated against ORDER PLACEMENT, alongside 400 orders/minute and 25 modifications per order. This build places no order and never will, so the figure is recorded as read and is **not** carried into `Budget::per_day`, which stays `None`. A `None` here means "no published bound on that span", which is the honest reading; copying the order cap across would be promoting a figure past the endpoint it was measured against, the same error the Dhan window-cap row names. Re-read 14 Aug 2026. | documented, and not applicable |
+| History DEPTH per interval | **THERE IS NOW A SECOND CLAIM, AND THIS ROW SAID THERE WAS NOT.** It read: *"it stands **uncontested** rather than contested: a vendor page that declines to state a depth is not a second claim, so `ClaimStanding` has one row to weigh here and no tie to break. Contrast Groww and Dhan, where a vendor table gives a competing figure."* The page is still silent — data *"spanning back several years"*, a phrase and not a figure — so that clause holds of the PAGE. It does not hold of the vendor. The same forum thread `kite.trade/forum/discussion/7756`, posted by the `kiteapi` staff account in August 2020, states: every intraday rung (`minute` through `60minute`) **up to 3 years**; `day` **since 1990 for some NSE instruments, and since January 2008 for BSE**. Captured 19 Aug 2026. So Kite now has exactly the tie Groww and Dhan have. **AND THEN A THIRD CLAIM ARRIVED, FROM THE SAME VENDOR, AND IT SETTLES IT THE OTHER WAY.** `kite.trade/forum/discussion/14149`, Zerodha staff `sujith`, **June 2024**: *"There is no fixed date for day candle data but for minute level data it starts somewhere around early 2015"*, and *"For some NSE stocks, day candles are back filled till late 1990s as well"*. Captured 22 Aug 2026. That is **four years later than the 2020 post**, on the same forum, at the same staff standing — so the contest was never operator-versus-vendor at all. It is **vendor versus vendor**, and the later word puts the minute rung at roughly eleven and a half years: LONGER than the ten the operator claimed. The rolling floor was not the risky widening this row feared; it was an **undershoot** that refused nineteen months of one-minute history the vendor holds. The "seven years of empty windows" cost is therefore **withdrawn, not restated** — it was sound only while the 2020 figure was the vendor's latest word. Both rungs are now `HistoryFloor::Fixed { 2015-01-01 }`, and `Fixed` rather than `Rolling` is a shape correction as much as a number one: Zerodha's minute history starts at a fixed point and grows forward, so a floor moving with the clock would refuse 2015–2020 by the year 2030. What remains UNVERIFIED is much narrower and is kept: *"somewhere around early 2015"* is the vendor's own hedge, so a window opening on 1 January 2015 may spend a few weeks on empty answers — the safe direction, since asking for slightly more than exists costs empty windows while asking for less loses data silently. D-0258. | vendor-sourced, and the vendor's later word now agrees with the operator |
+| Gap-filling / completeness | **UNVERIFIED, and no page claims it.** Nothing read states that a candle exists for every session minute, nor what a missing session returns. | unverified |
+
+**`TokenException` is the row to read twice.** It fires when the user logs into
+ANOTHER Kite instance — so a human opening kite.zerodha.com while a backfill runs
+kills that backfill's session. `CLAUDE.md` §8's rule that this repository never
+mints a token is not a limitation here, it is the correct posture: a mint would
+invalidate whatever else holds the session.
+
+At 3 req/s the arithmetic for a 2020→yesterday backfill is 80 month-windows ×
+~800 instruments ÷ 3 = **~5.9 hours of wall clock at the cap, per rung**, before
+any retry. That is arithmetic from a published limit, not a measurement.
+
+#### The instruments API — where a numeric token comes from, read 14 Aug 2026
+
+`https://kite.trade/docs/connect/v3/market-quotes/`. The historical endpoint is
+addressed by `instrument_token` and nothing else, so this page is the whole of
+how an instrument this repository already knows becomes a Kite request. It was
+not read when §4z was first written, and the fourth obstacle recorded below —
+"the instrument is a NUMERIC TOKEN … so the (exchange, symbol) key this
+repository joins on does not address a Kite request at all" — is **half right
+and the half that is wrong changes the design**.
+
+| Fact | Value | Lane |
+|---|---|---|
+| Endpoint | `GET /instruments` for every exchange, `GET /instruments/:exchange` for one | documented |
+| Response | a **gzipped CSV dump**, not JSON — the only endpoint on this vendor that is not JSON | documented |
+| Freshness | *"The dump is generated once everyday"*, and the page recommends requesting it once a day at around 08:30 AM and storing it | documented |
+| Columns, in order | `instrument_token`, `exchange_token`, `tradingsymbol`, `name`, `last_price`, `expiry`, `strike`, `tick_size`, `lot_size`, `instrument_type`, `segment`, `exchange` — twelve | documented |
+| **ISIN** | **ABSENT. There is no ISIN column.** D-0125 keyed the constituent join on NSE's own ISIN at both ends and D-0117 keys a tier to a vendor's ids on `(exchange, ISIN)`. Neither addresses a Kite row, because a Kite row does not carry one. | documented by absence |
+| The key the VENDOR names | *"For storage, it is recommended to use a combination of **exchange and tradingsymbol** as the unique key, **not** the numeric instrument token."* | documented |
+| Why not the token | *"Exchanges may reuse instrument tokens for different derivative instruments after each expiry."* A token is therefore stable for a spot index or a cash equity, which do not expire, and **unstable for F&O across an expiry boundary**. The engine surface is NSE spot (§1), so the reuse hazard does not reach it — and it binds the moment an F&O row is stored. | documented |
+| `instrument_type` alphabet | `EQ`, `FUT`, `CE`, `PE` — four words, and **no index word among them**. How an index row spells this column is **UNVERIFIED**; the page's own quote examples address one as `NSE:NIFTY 50`, so the tradingsymbol is known and the type and segment words are not. | documented (four) · unverified (index) |
+| An index tradingsymbol carries a SPACE | `NSE:NIFTY 50`, from this page's `/quote/ohlc` and `/quote/ltp` examples. Recorded because a value with a space cannot sit in a URL path segment unescaped, and `pull::http` refuses such a value by name rather than encoding it — see D-0134. | documented |
+| Rate limit | not the historical 3/s. The page's own table puts everything outside quote, historical and orders at **10 req/second**, and this call is one request per day. | documented |
+
+**So the token map is not a new kind of thing.** It is this vendor's instrument
+master, decoded into the `core::vendor::MasterRow` the other two brokers already
+decode into, keyed on `(exchange, tradingsymbol)` — which is the key **the vendor
+itself names**, and which `MasterRow::trading_symbol` already carries because
+Groww's CASH rows have always needed it. `core::vendor::VendorId` holds an opaque
+per-vendor id of up to 48 bytes and an `instrument_token` is at most eight
+digits, so the numeric token is a `VendorId` like any other and no second
+identity type is required.
+
+What is genuinely new is the **transport of the master**: gzipped CSV over HTTP,
+where the two existing masters are files on disk. That is a `pull::manifest`
+question and not a `pull::vendor::Descriptor` one.
+
+#### Why this vendor cannot be described by the current descriptor, and it is all three
+
+`docs/07-plan.md` §5 measured three fields that "cannot express an arbitrary
+broker at all" and predicted the vendor that would prove it. Zerodha is that
+vendor, and it trips **every one**:
+
+1. **`HttpSpec::bars_path` is a fixed string concatenated with `base_url`.**
+   Kite carries the instrument AND the interval as PATH SEGMENTS
+   (`/instruments/historical/5633/minute`). §5's exact words: "A vendor whose
+   instrument and granularity are *path segments* cannot be described."
+2. **`AuthScheme` is `Raw | Bearer`.** Kite's is `token api_key:access_token` —
+   a prefix AND a second secret. §5: "A scheme carrying a prefix and a **second**
+   secret cannot be described."
+3. **`TimestampEncoding::IsoDateTimeText` documents itself as carrying no zone.**
+   Kite returns `+0530`. §5: "A vendor returning `+0530` cannot be described."
+
+A fourth, not in §5 and found here: the instrument is a NUMERIC TOKEN from a
+separate instruments call, not a tradingsymbol, so the (exchange, symbol) key
+this repository joins on does not address a Kite **request** at all.
+
+**That fourth row is half right, and the half that is wrong was corrected on 14
+Aug 2026 by reading the instruments page** (above). The REQUEST is addressed by
+the numeric token, which is the true half. The **master row** is keyed by
+`(exchange, tradingsymbol)` — and that is not this repository's choice, it is the
+vendor's own instruction: *"it is recommended to use a combination of exchange
+and tradingsymbol as the unique key, not the numeric instrument token."* So the
+key this repository joins on **does** address a Kite row; what it does not do is
+address a Kite request, and the master is exactly the table that carries you from
+one to the other. The `(exchange, ISIN)` key of D-0117 and D-0125 is the one that
+genuinely cannot be used here, because the CSV has no ISIN column.
+
+**So adding Zerodha is not a descriptor row.** It is three `pull::vendor` type
+changes plus this vendor's instrument master, and each needs its own decision
+entry. The prediction in §5 was right and this is the evidence that closed it.
+The "instrument-token map" this line used to call for is **not** a new structure:
+it is `core::vendor::MasterRow` decoded from a gzipped CSV, with the numeric
+token living in the `VendorId` the other two brokers already populate.
 
 ### 4a. Instrument facts transcribed into source
 
@@ -165,7 +408,191 @@ Both index lists are **snapshots** of rebalanced indices, and none of the three
 has been checked against an exchange publication. `docs/06-limits.md` §11
 carries what that costs. D-0025 and D-0029.
 
+**The Total Market row above is now partly contradicted, and the contradiction
+is recorded rather than repaired.** On 2026-08-11 the exchange's own file was
+fetched for the first time (§4c). Excluding two placeholder scrips it holds 750
+real names, the same count — but not the same names. The exchange lists
+`GRINDWELL`, which `NIFTY_TOTAL_MARKET` does not hold; `NIFTY_TOTAL_MARKET`
+holds `AGL`, which the exchange does not list. One name in 750, and the
+constant's 750 is therefore **not a subset** of the exchange's 752. The array
+is deliberately left as it stands: it was measured 750/750 against two real
+vendor masters under the D-0025 gate, and that measurement cannot be redone
+from a downloaded CSV. `AGL` is **UNVERIFIED** — this repository does not know
+what instrument it is, and will not guess. D-0089 states the resolution and
+`docs/06-limits.md` §11 carries the cost.
+
+### 4d. The NSE index directory — read 14 Aug 2026, and it settles a claim this repository asserted the opposite of
+
+**`crates/api/src/ingest.rs` stated, as the justification for the whole shape of
+`SpotTarget::Indices`:** *"NSE publishes no file naming that set, so a hardcoded
+one would be invention and would go stale the day a vendor added a series."*
+
+**That is false, and it was read as false on 14 Aug 2026.** NSE Indices Limited
+— the company that computes the indices — publishes a categorised directory of
+every equity index it maintains, and each index's own page carries a link to its
+constituent CSV.
+
+| Category | Indices | Route |
+|---|---|---|
+| Broad-based | **22** | `niftyindices.com/indices/equity/broad-based-indices` |
+| Sectoral | **34** | `niftyindices.com/indices/equity/sectoral-indices` |
+| Strategy | **48** | `niftyindices.com/indices/equity/strategy-indices` |
+| Thematic | **44** | `niftyindices.com/indices/equity/thematic-indices` |
+| **Total** | **148** | four category pages, each listing its members |
+
+| Fact | Value | Lane |
+|---|---|---|
+| Directory exists | **Yes.** Four category pages, 148 equity indices between them, each linking its own page. | verified 14 Aug 2026 |
+| Constituent file | On each index's page, as `/IndexConstituent/ind_<name>list.csv` | verified |
+| CSV header | `Company Name,Industry,Symbol,Series,ISIN Code` — **identical to the five files §4c already reads**, and every row carries an ISIN | verified from a live body |
+| Measured example | `ind_niftybanklist.csv`, 916 bytes, header as above, first row `AU Small Finance Bank Ltd.,Financial Services,AUBANK,EQ,INE949L01017` | verified |
+| **The URL is NOT derivable from the index name** | `ind_niftybanklist.csv` against `ind_niftytotalmarket_list.csv` — one word-joined, one underscore-separated. There is no rule that turns "Nifty Bank" into the first and "Nifty Total Market" into the second. | verified, and it is the load-bearing row |
+
+**Why the last row decides the design.** A resolver that *derives* a CSV URL from
+an index's name is inventing a filename convention the exchange has not stated,
+and §3 rule 1 forbids exactly that — the two examples above already disagree
+with each other. So the directory must be **crawled**: category page → index
+page → the constituent link that page carries. Every step reads a URL the
+exchange published rather than one this repository composed.
+
+**What this does NOT settle.** Whether all 148 are instruments any vendor
+serves, and whether a vendor's "index series" set is a subset of these 148, is
+the cross-check the resolver exists to perform and has not performed. The count
+above is what the exchange publishes, not what is reachable. Nothing here
+widened `CLAUDE.md` §1 at the time it was written: the sweep surface was
+`NSE-NIFTY` and `NSE-BANKNIFTY`, and every one of the other 146 was **stored,
+never swept**. D-0506 has since widened the surface to the cash equities of the
+213 F&O underlyings; the 146 here are index constituents, a different question,
+and this paragraph is left as the record it was.
+
+### 4b. Option-greek facts, measured from a live chain
+
+Golden rule 1 again. `crates/greeks` makes claims about what a vendor's option
+chain *means*, and a unit convention nobody states is exactly the kind of claim
+that has to name its route. Every row below was measured from **one live Dhan
+option-chain response, one strike, both sides**, captured 2026-08-01:
+`IV 11.939337251984934 / 9.789193798280868` (percent), `delta 0.53871 /
+−0.46732`, `gamma 0.00132 / 0.00109`, `theta −15.1539 / −10.61131`,
+`vega 12.2025 / 12.18593`. The response carried **no rho, no spot, no strike,
+no timestamp and no expiry.**
+
+| Fact | Where it lives | Route | Lane |
+|---|---|---|---|
+| **Dhan publishes vega per one percentage point** | `greeks::bsm` module docs; `greeks::vendor_anchor::vega_is_published_per_percentage_point_and_the_index_level_proves_it` | The raw scaling implies an index level of **258.51**; the per-percent scaling implies **25,851.19**, which is where NIFTY trades. | measured; the vendor documents no unit |
+| **Dhan publishes theta per a CALENDAR day, not a trading day** | same, and `greeks::vendor_anchor::the_trading_day_divisor_is_excluded_and_the_calendar_one_is_not_selected` | The two sides of one strike must agree on `r`. They agree to **0.9999** points under 365 and **23.2598** under 252 — a factor of 23.3. | measured — but only as an **exclusion of 252** |
+| **The divisor is exactly 365** | `greeks::vendor_anchor::the_rate_criterion_has_its_root_at_370_and_365_is_a_convention_near_it` | The same criterion is affine in the divisor and has its root at **`D* = 370.0757`**, where the two sides agree to 2.8e-15 points; it also prefers **375** (spread 0.9700) to 365 (0.9999). `365` is the nearest ordinary calendar convention to that root, not a measurement of it. | **UNVERIFIED.** Withdrawn from "measured" by D-0046 |
+| **Dhan's two published IVs are transposed relative to its delta/gamma/vega block** | `greeks::vendor_anchor::the_two_published_volatilities_are_transposed_and_the_identity_says_so` | The scale-free identity `vega·gamma·sigma == n(d1)^2` — no spot, strike, maturity or rate in it — gives 1.21979 / 0.82249 as published and 1.00012 / 1.00315 swapped, against gamma's own printed slack of 0.38% / 0.46%. | measured, **from one strike only.** Whether every strike is transposed the same way is **UNVERIFIED** |
+| **Dhan uses standard spot BSM** | `greeks::vendor_anchor::our_greeks_reproduce_the_captured_dhan_chain` | Gamma and vega are near-identical between the two sides at one strike, which is BSM. | measured; **forward Black-76 is not excluded — UNVERIFIED** |
+| **Dhan's carry is zero** | `greeks::vendor_anchor::the_carry_is_consistent_with_zero_and_the_sample_cannot_pin_it` | `q = 0` reproduces the chain, and a single volatility would need `q = −42.54%`, which is not a rate. But `q = 1%` and `q = 2%` reproduce **all eight** published fields too, gammas included, at `T = 4.085` and `3.428` calendar days. | **UNVERIFIED.** `q = 0` is *consistent*, not measured. Withdrawn from "measured" by D-0046 |
+| **Dhan publishes no rho; Groww publishes all five** | `crates/greeks` ships rho regardless | The captured response has no `rho` field. Groww documents a dedicated Greeks section at `groww.in/trade-api/docs/curl/live-data`. | read from the response and from the vendor documentation |
+| **Dhan's risk-free rate** | nowhere — nothing in this repository hardcodes one | Solved at **9.4619%** (call side) and **10.4618%** (put side), each ±0.55 at 95% from the printed precision of delta alone, with a 1.00-point side-to-side residual outside both intervals. | **UNVERIFIED.** A hardcoded 10.0% fits the sample and so does a market rate near 7%; this sample cannot separate them |
+| **NIFTY and BANKNIFTY strike intervals** | nowhere — `Moneyness::from_ladder` takes the interval as an argument | No source states them. | **UNVERIFIED.** Assumed nowhere in code |
+
+The maturity is the best-conditioned parameter the sample carries:
+`T = 0.0141324716` years = **5.15835 calendar days**, ±0.079 at 95% over the
+rounding box of the printed fields. That interval is a **rounding-box width,
+not an identification result**, and it is conditional on `q = 0` and on the
+transposition — at `q = 2%` the same eight fields give `T = 3.428` days. The
+**day count that generates it** is UNVERIFIED without the capture timestamp.
+
+**And the sample is internally inconsistent with spot BSM at one instant.**
+Matching both published deltas forces the model's vega ratio to `0.998641`
+against the vendor's `1.001360`, in a quantity containing no spot, strike,
+maturity or rate. The best possible *single* contract is off by **884× the
+vendor's own display precision** — measured. Everything above is fitted with
+**two** mutually inconsistent contracts, one per side, which is a diagnostic
+and not an agreement. D-0046, and `docs/06-limits.md` §18.
+
+### 4c. NSE index constituents, read from the exchange's own files
+
+Golden rule 1 again, and this time the rule caught something that had already
+shipped. The web pages offered NIFTY 50 / 100 / 200 / 500 and produced them by
+slicing `core::universe::NIFTY_TOTAL_MARKET`, which is stored alphabetically —
+so `slice(0, 50)` yielded `360ONE, 3MINDIA, AADHARHFC, …` and the page called
+that the NIFTY 50. No source said any of it. The four tiers did not exist in
+this repository at all. D-0089 replaces the slice with the exchange's own
+published constituent files, which are the route recorded here.
+
+**Fetched 2026-08-11**, over HTTPS, from `nsearchives.nseindia.com` — the
+archive host of the exchange that computes the indices. Each file is a CSV with
+the header `Company Name, Industry, Symbol, Series, ISIN Code`; **every row
+carries an ISIN**, which is what makes a row checkable against a vendor master
+rather than merely readable.
+
+| Index | URL | Rows | Where it lives |
+|---|---|---|---|
+| NIFTY 50 | `https://nsearchives.nseindia.com/content/indices/ind_nifty50list.csv` | 50 | `core::universe::NIFTY_50` |
+| NIFTY 100 | `https://nsearchives.nseindia.com/content/indices/ind_nifty100list.csv` | 100 | `core::universe::NIFTY_100` |
+| NIFTY 200 | `https://nsearchives.nseindia.com/content/indices/ind_nifty200list.csv` | 200 | `core::universe::NIFTY_200` |
+| NIFTY 500 | `https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv` | 500 | `core::universe::NIFTY_500` |
+| NIFTY Total Market | `https://nsearchives.nseindia.com/content/indices/ind_niftytotalmarket_list.csv` | **752** | `core::universe::NIFTY_TOTAL_MARKET` holds **750** — see below |
+
+**Symbols only are transcribed.** `CLAUDE.md` §2 allows no `.csv` in the
+tracked tree, so the files are input and the data becomes Rust. The company
+name, industry, series and ISIN are read, used for the checks in this section,
+and not carried: nothing in `crates/core` reads them, and a field carried
+without a reader is a field that goes stale unnoticed.
+
+**Verified on the fetched files, not asserted:**
+
+- The tiers **nest**: all 50 NIFTY 50 symbols are in the 100, all 100 in the
+  200, all 200 in the 500, and all 500 in `NIFTY_TOTAL_MARKET` — zero outside
+  in every direction. Proved for every symbol by
+  `core::universe::the_published_tiers_nest_one_inside_the_next`, which is why
+  `of_equity` may set several bits for one name.
+- The Total Market file is exactly the union of the NIFTY 500 file and the
+  NIFTY Microcap 250 file — 752 rows, row for row, nothing on either side
+  alone. That matches niftyindices.com's own definition, "all stocks that are
+  part of Nifty 500 and Nifty Microcap 250".
+
+**The 752 that is 750.** Two of the 752 rows are NSE placeholder scrips, not
+constituents: `DUMMYINXGN` ("Dummy Inox Green Ltd.") and `DUMMYTRVN` ("Dummy
+Triveni Ltd."). Their identifiers are not ISINs — they read `DUM510W01014` and
+`DUM256C01024`, the real ISINs of `INOXGREEN` and `TRIVENI` with `INE` replaced
+by `DUM` — and both of those real constituents are separately present in the
+same file. Dropping the two placeholders leaves **750 real names**, which is
+the count niftyindices.com states and the count `NIFTY_TOTAL_MARKET` declares.
+The agreement of the counts is a coincidence of arithmetic, not of membership:
+see §4a's row, `docs/06-limits.md` §11, and D-0089, which records that the
+repository's 750 and the exchange's 750 differ by one name.
+
+**What NSE publishes and this repository does NOT carry.** The exchange's own
+index directory (`https://www.nseindia.com/api/allIndices`, same fetch) lists
+**139 indices**. This repository carries **five** of them — the four tiers above
+plus NIFTY Total Market — alongside the derived F&O underlying list of §4a. The
+other 134, sectoral and thematic and strategy indices among them — NIFTY BANK,
+NIFTY IT, NIFTY MIDCAP 150, NIFTY MICROCAP 250 and the rest — are **not
+carried**, are not a universe, and no part of this repository may claim
+membership in one. Two of them appear in this section only as evidence:
+Microcap 250 was read to check the Total Market's composition, and it was not
+transcribed.
+
+These are **snapshots.** NSE rebalances these indices semi-annually and none of
+the five has been checked against a constituent circular. `docs/06-limits.md`
+§11 carries what that costs.
+
 ---
+
+## 4e. Statistical procedure sources
+
+These sources govern the named procedure; they do not turn its assumptions
+into a guarantee about this dataset.
+
+| Procedure fact | Primary source | What is and is not carried |
+|---|---|---|
+| CSCV begins with one synchronous `T × N` performance matrix, partitions its rows into an even number `S` of equal-sized disjoint blocks, visits every canonical half-block training set with its exact complement as test, chooses the in-sample maximum under one fixed performance measure, and estimates PBO from how often that winner ranks below the out-of-sample median | Bailey, Borwein, López de Prado and Zhu (2015/2017), *The Probability of Backtest Overfitting*, [author-hosted PDF](https://www.davidhbailey.com/dhbpapers/backtest-prob.pdf), Algorithm 2.3 and §3.1; [journal abstract](https://www.risk.net/journal-of-computational-finance/2471206/the-probability-of-backtest-overfitting) | The synchronous complete-family construction, equal-block complementary enumeration and rank event are carried. The paper says different trading frequencies must be aggregated to one common index, but it does **not** choose this repository's IST observation unit, empty-session treatment, segment count, tie policy, pessimistic-return score, bootstrap seed/draw count or block length. Those remain explicit versioned implementation decisions and cannot be smuggled in as facts from the paper. |
+| Romano--Wolf stepdown controls family-wise error by testing maxima over successively smaller surviving hypothesis sets; a fixed bootstrap distribution makes those critical values monotone | Romano and Wolf (2005), *Exact and Approximate Stepdown Methods for Multiple Hypothesis Testing*, JASA 100(469), 94--108, [publisher DOI](https://doi.org/10.1198/016214504000000539), [author-hosted PDF](https://www.econ.uzh.ch/dam/jcr:ffffffff-935a-b0d6-ffff-ffffd823d949/jasa.pdf), especially §4.2 and Theorem 6 | The construction and its stated asymptotic conditions are carried. It is **not** a distribution-free finite-sample promise for arbitrary strategy returns. The paper explicitly directs dependent data to block bootstrap methods; it does not select this repository's block length. |
+| Candidate adjusted p-values order observed statistics from largest to smallest, count strict exceedances of each surviving-suffix resample maximum with the finite-resample `(+1)/(M+1)` correction, then apply a cumulative maximum; that monotonicity step is essential | Romano and Wolf (2016), *Efficient Computation of Adjusted p-Values for Resampling-Based Stepdown Multiple Testing*, [University of Zurich Working Paper 219](https://www.econ.uzh.ch/apps/workingpapers/wp/econwp219.pdf), Algorithms 3.1 and 4.1 and Remark 4.1 | `runner::bootstrap::romano_wolf_adjusted_p_values_v1` implements that exact-count algorithm over one shared stationary-bootstrap matrix. Exact observed-statistic ties use ascending caller position, and any zero-variance candidate refuses the complete adjusted receipt rather than receiving the strict-exceedance floor. Those two discrete-data rules are D-0460 implementation choices, not claims made by the paper. |
+
+---
+
+## 4f. Research policy explanation sources — reviewed 2026-09-07
+
+| Method or interpretation | Primary source | Boundary |
+|---|---|---|
+| Wilson intervals incorporate sample size when estimating a binomial proportion | [NIST confidence intervals](https://www.itl.nist.gov/div898/handbook/prc/section2/prc241.htm) | Does not establish independent trading outcomes or choose a minimum sample size for this repository. |
+| White's Reality Check addresses data snooping; Hansen's SPA uses studentization and a sample-dependent null distribution | [White (2000)](https://users.ssc.wisc.edu/~behansen/718/White2000.pdf), [Hansen (2005), primary publisher abstract](https://www.tandfonline.com/doi/abs/10.1198/073500105000000063) | These methods motivate complete-population evidence. Their assumptions remain material; they do not select this repository's acceptance thresholds. |
+| P-values do not measure the probability a hypothesis is true; decisions should not rest solely on a threshold | [American Statistical Association statement](https://www.amstat.org/asa/files/pdfs/p-valuestatement.pdf) | The delegated37-field profile contains explicit research choices. No cited source prescribes its5%p-value cutoff,20%PBO limit, sample floors or loss caps. See [the explanation](22-research-policy.md). |
 
 ## 5. Run identity
 
@@ -195,3 +622,147 @@ when a level produces nothing. Rank the survivors, persist a bounded top set,
 and record the identity.
 
 Nothing about that paragraph has a tunable depth.
+
+## 7. Dated regular-session completeness — verified 2026-09-05
+
+The NSE [CAS session rules](https://www.nseindia.com/static/products-services/closing-auction-session)
+distinguish derivatives (continuous through 15:40), non-CAS cash (through
+15:30), and CAS-eligible cash (continuous trading ends 15:15, followed by
+auction phases). The dated derivatives schedule already recorded in
+`pull::vendor` applies the extension from 2026-08-03, also confirmed by
+[Zerodha's dated implementation notice](https://zerodha.com/z-connect/general/everything-you-need-to-know-about-closing-auction-session-cas).
+Opening-stamped
+one-minute derivatives bars therefore end at 15:29 before the change and
+15:39 afterward on regular trading days. These are expected session bounds,
+not proof of vendor coverage. Exceptional sessions retain their own calendar
+classification. Generic cash venue hours do not prove per-instrument CAS
+eligibility; treating auction observations as continuous candles remains
+UNVERIFIED and must not be represented as resolved.
+
+## 8. Zerodha identity evidence — verified 2026-09-05
+
+The [Kite instruments specification](https://kite.trade/docs/connect/v3/market-quotes/)
+lists twelve CSV columns, without ISIN. It recommends exchange plus trading
+symbol as a storage key and warns that derivative numeric tokens may be reused
+after expiry. A valid parsed token therefore does not establish the
+vendor-specific cash ISIN proof required by D-0511. Refreshing the same schema
+does not supply that proof. This is a local assurance-policy limitation, not a
+claim that the vendor's historical API cannot serve cash candles.
+
+D-0517 keeps the two assertions separate: the exact Zerodha NSE cash token,
+and the exchange ISIN corroborated by an exact, unambiguous ISIN-bearing
+independent master listing. That cross-check is current-snapshot evidence;
+it does not claim that Zerodha supplied the ISIN or prove historical symbol
+changes or historical F&O membership. No ISIN is synthesized in its crawl.
+
+## 9. Dated cash closing-auction eligibility — verified 2026-09-06
+
+[NSE/CMTR/73845](https://nsearchives.nseindia.com/content/circulars/CMTR73845.zip)
+(22 April 2026), Annexure A, names the MII CSV column
+`ElgbltyClsgAuctnSsn`: 0 is not eligible and 1 is eligible, effective
+3 August 2026. The circular payload is a ZIP, not a PDF at the same basename.
+[NSE/CMTR/74466](https://nsearchives.nseindia.com/content/circulars/CMTR74466.zip)
+(29 May 2026), page 6, directs members to the dated
+`NSE_CM_security_ddmmyyyy.csv.gz` files. The file date, not its `UpdDt` cell,
+binds this evidence to a trading date.
+
+All 25 weekday masters from 2026-08-03 through 2026-09-04 were retrieved from
+NSE archives, with HTTP 200 and valid gzip streams. Actual endpoint examples:
+[3 August](https://nsearchives.nseindia.com//content/cm/NSE_CM_security_03082026.csv.gz)
+and [4 September](https://nsearchives.nseindia.com//content/cm/NSE_CM_security_04092026.csv.gz).
+Both contain exact EQ entries HINDALCO/INE038A01020 with flag 1 and
+20MICRONS/INE144J01027 with flag 0. Runtime joins must check date, series,
+symbol and ISIN; missing rows must never become flag 0.
+
+This verifies the scheduled continuous close (15:15 eligible, 15:30
+ineligible), not that every scheduled minute traded. Circular 74466 §A
+also names scheme-of-arrangement special-preopen and circuit-halt exceptions.
+Their occurrence remains UNVERIFIED; gaps or exceptional sessions must stay
+visible, with no fabricated bars. Auction execution-report absence does not
+establish non-eligibility. The cash policy does not change index hours or the
+separately cited derivatives schedule.
+
+### FORCEMOT NSE interruption — verified 2026-09-06
+
+[NSE circular CML58560](https://archives.nseindia.com/content/circulars/CML58560.pdf)
+withdraws FORCEMOT (INE451A01017) from the permitted-to-trade category with
+effect from 2023-10-26, after the close on 2023-10-25. The company's
+[filing including NSE circular CML60618](https://www.forcemotors.com/wp-content/uploads/2025/02/Announcement-under-Regulation-30-for-Listing-on-NSE.pdf)
+admits the same symbol and ISIN as an EQ listing from 2024-02-14. The missing
+November 2023, December 2023 and January 2024 daily files therefore overlap
+a documented NSE trading interruption, not evidence that another identical
+vendor retry will produce bars. Acquisition may request the two available
+periods separately, retaining this interval as explicitly not applicable to
+NSE trading. No BSE substitution or synthetic bars is authorized. This dated
+evidence is not yet wired into general instrument-calendar classification;
+the whole-window application prerequisite still refuses the interior holes.
+
+## Calendar extension evidence reviewed 2026-09-06
+
+Primary capital-market trading-holiday authority:
+[NSE/CMTR/71775, 12 December 2025](https://nsearchives.nseindia.com/content/circulars/CMTR71775.pdf).
+Its trading-holiday list has no holiday in 2026-08-22 through 2026-09-04.
+Do not substitute settlement-holiday tables: those answer a different question.
+The regular equity trading-week and hours rule is published at
+[NSE market timings](https://www.nseindia.com/resources/exchange-communication-holidays/).
+This evidence is used only for the bounded measured interval, not a perpetual
+weekday fallback or permission to infer future special sessions.
+
+Local Zerodha NIFTY and BANKNIFTY minute records were independently read for
+August 22 through September 4. Each index has 3,750 unique minute-aligned
+records across ten dates: August 24–28, August 31, September 1–4. Every date
+has exactly 375 records spanning 09:15–15:29 IST. Four read-only response
+snapshots are retained in the local audit calendar-extension directory.
+This corroborates the regular index windows for this interval only. It does
+not prove broker history universally complete, independently sourced feeds,
+historical stock identity, or stock-specific cash-auction eligibility; the
+existing dated eligibility authority remains necessary for cash stocks.
+
+## Historical circuit-breaker evidence boundary — 2026-09-06
+
+[Zerodha's contemporaneous March 13, 2020 bulletin](https://zerodha.com/marketintel/bulletin/249418/trading-halted-at-the-exchange)
+reports a market halt followed by a pre-open session. Its 09:26 publication
+timestamp is not proof of the exact halt's start minute. The general
+[NSE circuit-breaker rule](https://www.nse.in/products-services/equity-market-circuit-breakers)
+describes a 45-minute halt plus 15-minute reopening auction for a 10% trigger
+before 13:00. A rule is not a dated event log.
+
+Exact historical source-minute windows on March 13 and March 23, 2020 remain
+**UNVERIFIED** in this reconciliation. The ABB stored-grid audit names gaps on
+those dates under the existing regular-day model; this does not establish
+provider fault. Do not infer precise exchange windows from one stock's missing
+timestamps, or count every such absence as a minute the provider must supply.
+No calendar override is made from publication timestamps or news summaries.
+
+## VWAP applicability evidence — reviewed 2026-09-06
+
+[NSE Clearing's equity-derivatives settlement mechanism](https://www.nseclearing.in/clearing-settlement/equity-derivatives/settlement-mechanism)
+explicitly uses a futures contract's volume-weighted traded price. This
+establishes that futures VWAP is applicable to contract trades; it does not
+authorize futures sweeps here or prescribe this engine's session indicator.
+[NSE capital-market circular CMTR5588](https://nsearchives.nseindia.com/content/circulars/cmtr5588.htm),
+dated 2004-11-10, gives traded-value divided by traded-quantity VWAP for a
+cash security. Only that arithmetic/applicability is cited; its historical
+tax rates and settlement rules are not adopted as current rules.
+
+The engine's OHLCV typical-price approximation, sigma conventions and
+spot-index abstention remain the explicit implementation choices in D-0507
+and D-0526, not exchange certifications of the engine's calculated values.
+Prices and traded volumes must belong to the same stock or exact contract;
+no constituent-volume or futures-volume replacement grants a spot index VWAP.
+
+## Finite qualification statistical sources — reviewed 2026-09-07
+
+[Romano and Wolf, Efficient Computation of Adjusted p-Values for
+Resampling-Based Stepdown Multiple Testing](https://www.econ.uzh.ch/apps/workingpapers/wp/econwp219.pdf)
+provides the strict-exceedance plus-one probability and monotone stepdown
+construction used by the shared procedure. Its validity conditions depend on
+the testing and resampling setting. It does not establish universal validity
+for financial return sequences or certify this implementation.
+
+[Tian and Ramdas, Online control of the familywise error rate](https://arxiv.org/html/1910.04900)
+discusses the distinction between fixed and sequential testing families and
+allocation of testing levels. This implementation adopts a finite, predeclared
+eight-timeframe scope, not an unbounded online acceptance guarantee. Equal
+allocation and the zero-conservative wrapper are explicit repository choices
+in D-0542 and D-0544; resampling assumptions remain necessary.

@@ -1,0 +1,157 @@
+[package]
+name         = "cli"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+publish      = { workspace = true }
+description  = "The operator entry point for the sweep: bars in, ladder walked, report out."
+
+# WHY THIS CRATE EXISTS.
+#
+# Until it did, NOTHING THAT COULD BE RUN REACHED THE SWEEP. The only binary in
+# the workspace was `api`, whose dependency set is `core`, `pull`, `store` and
+# `telemetry` -- so `runner`, `engine`, `indicators`, `vocab` and `costs` were
+# compiled, tested, benchmarked and unreachable. `report::render`,
+# `report::render_auto` and `audit::render` -- the only surfaces that show the
+# census, the ladder, the significance bar, the trades and the walk-forward --
+# had no caller and no route. `CLAUDE.md` §5 named that absence as the live gap
+# and `docs/06-limits.md` §78 recorded it. This closes it.
+#
+# ONE DEPENDENCY, AND IT IS THE JOIN CRATE. `runner` already carries `core`,
+# `costs`, `engine`, `indicators` and `vocab`, so naming it once is the whole
+# graph. Adding any of the five directly would be a second spelling of an arrow
+# that already exists.
+#
+# NO ARROW TO `store`, AND THAT IS THE POINT. The operator's standing rule is
+# that neither a vendor pull nor the bars already on disk may be used at all, so
+# the only honest input is `runner::synthetic`, generated in-process. A binary
+# that could open the store would make the rule a matter of discipline again,
+# which is what gate 22 exists to prevent for the swept crates. This crate
+# declines the capability rather than declining to use it.
+#
+# NOT ON GATE 22'S LIST, and it must not be added to one: clause A pins
+# `vocab`, `indicators` and `engine` to `vocab` alone. This crate is the caller,
+# not a swept crate, exactly as `runner` is.
+#
+# THREE ARROWS, NOT ONE, BECAUSE `runner` RE-EXPORTS NOTHING. `Sweeper::run`
+# takes an `indicators::Evaluator` and `Sweeper::new` takes an `engine::Ladder`,
+# so a caller cannot construct either without naming those crates itself. The
+# alternative -- adding `pub use` re-exports to `runner` -- would put a second
+# spelling of two public types into the crate that is currently the only join,
+# and a second spelling is a second thing to keep in agreement.
+[dependencies]
+runner     = { path = "../runner", version = "0.1.0" }
+engine     = { path = "../engine", version = "0.1.0" }
+indicators = { path = "../indicators", version = "0.1.0" }
+vocab      = { path = "../vocab", version = "0.1.0" }
+# THE FILL DIRECTION, and nothing else. `trade::walk` takes a
+# `costs::fill::Direction`, so a caller cannot name a long or a short without
+# this arrow. It adds no capability -- `costs` declares `brutex_core` alone --
+# and the graph stays acyclic: cli -> costs -> core, beside the cli -> runner ->
+# costs that already exists.
+costs      = { path = "../costs", version = "0.1.0" }
+# THE ARROW D-0169 DECLINED, AND THE OPERATOR HAS NOW ASKED FOR.
+#
+# That entry read: "NO ARROW TO `store`: the operator's standing rule forbids
+# both a vendor pull and the bars already on disk, so the only honest input is
+# runner::synthetic." The two halves of that were never the same rule. Not
+# pulling from a vendor is a constraint on what a SESSION may do; being unable
+# to read bars already written is a constraint on what the BINARY can be, and it
+# is the reason `cli sweep` has only ever swept generated data.
+#
+# `crates/api` has `store` and no `runner`; `crates/cli` had `runner` and no
+# `store`. No crate in the workspace could do both, so nothing connected a
+# pulled bar to a ranked result -- the gap CLAUDE.md section 5 calls the live
+# one. This arrow is that connection.
+#
+# IT ADDS NO CAPABILITY TO THE SWEEP ITSELF. Gate 22 pins `indicators` and
+# `engine` to `vocab` alone and `cli` is not on its list, which D-0169 states
+# outright. The graph stays acyclic: cli -> store -> core, beside the existing
+# cli -> runner -> costs -> core.
+store      = { path = "../store", version = "0.1.0" }
+brutex_core = { path = "../core", package = "core", version = "0.1.0" }
+
+# THE CALENDAR ATTESTATION EDGE. `sweep-stored` already owns the stored-bar
+# boundary; this direct dependency lets that boundary classify each supplied
+# IST day through `pull::calendar` and bind the resulting complete,
+# incomplete, or unmeasured receipt. It does not move a network call into the
+# sweep and it does not let `runner` depend on vendor/calendar policy.
+pull       = { path = "../pull", version = "0.1.0" }
+
+# THE LOG THE SWEEP NEVER HAD.
+#
+# Until this arrow, a `sweep-stored` or `sweep-all` run produced **no event of
+# any kind** -- not the file it opened, not the bars it read, not a refusal. The
+# `/logs` page covers the pull half of the data path and had nothing at all from
+# the read half, so the one question an operator asks after a sweep that found
+# nothing -- "did it even open my file?" -- had no answer anywhere.
+#
+# GATE 17 PERMITS THIS, AND THE DISTINCTION IS THE WHOLE REASON THE ARROW IS
+# HERE AND NOT ONE CRATE DEEPER. That gate silences `vocab engine indicators
+# runner`, because those hold the loops: the ladder evaluates `(bits & mask) ==
+# mask` billions of times and its rule is not "each call is cheap" but "the
+# innermost loop calls nothing at all". `cli` holds no loop over bars and no loop
+# over candidates. It is the STRUCTURAL BOUNDARY -- one event per run, one per
+# instrument-month -- which is exactly the granularity gate 17's own comment
+# prescribes as the affordable one.
+telemetry  = { path = "../telemetry", version = "0.1.0" }
+
+# THE CORES THE SWEEP NEVER USED.
+#
+# `rayon` sat in `[workspace.dependencies]` with **no crate taking the arrow** --
+# an audit grepped every manifest and every source file and found the only
+# mention in the whole tree was `docs/01-architecture.md`, which claimed "data
+# parallel over candidates via rayon". So the sweep was entirely single-threaded
+# and one load-bearing sentence of the architecture document was fiction.
+#
+# GATE 22 DECIDES WHERE THE ARROW MAY GO, AND IT IS NOT WHERE THE DOCUMENT SAID.
+# `PINNED='vocab indicators engine'` pins those three to `vocab` alone, so
+# `crates/engine` -- which holds the candidate loop -- **cannot** take this
+# dependency. Parallelism over CANDIDATES is therefore not expressible without a
+# law change, and this arrow does not attempt one.
+#
+# What it parallelises is the axis `cli` owns: `sweep-all` walks every stored
+# instrument-month, and `docs/07-plan.md` §4 sizes that at ~800 instruments over
+# ~68 months = 54,000 sweeps. Each is wholly independent -- its own file, its own
+# evaluator, its own ladder, its own identity -- so this is embarrassingly
+# parallel work that was being done one core at a time.
+#
+# DETERMINISM IS PRESERVED BY SHAPE, NOT BY LUCK. `CLAUDE.md` §3 rule 5 requires
+# byte-identical output for identical input. rayon's indexed `collect` preserves
+# ORDER, and the `Tally` is folded sequentially over the collected rows afterwards
+# rather than mutated from the workers -- so no result depends on which thread
+# finished first. See `batch::sweep_under`.
+rayon      = { workspace = true }
+
+[build-dependencies]
+# `build.rs` proves that the bytes being compiled are the bytes at HEAD without
+# starting another process. Git's object store is SHA-1 addressed and its loose
+# and packed objects are zlib streams, so these are format readers rather than
+# application dependencies.
+sha1 = { workspace = true }
+flate2 = { workspace = true }
+
+[dev-dependencies]
+# The build-time verifier is included directly by its adversarial integration
+# test. Keeping these test-only avoids adding either crate to the CLI binary.
+sha1 = { workspace = true }
+flate2 = { workspace = true }
+
+[lints]
+workspace = true
+
+# ---------------------------------------------------------------------------
+# THIS IS NOT A DEPENDENCY. A [[bench]] target links this crate's own lib, its
+# dependencies and std. The [dependencies] table above is unchanged.
+#
+# It exists because gate 14 refused this crate in these words: "REFUSED
+# crates/cli -- 20 cost claim(s), no row in the table". `cli` was the only one
+# of the thirteen workspace crates with no benches/, and `CLAUDE.md` §5 makes it
+# the only entry point from which the sweep is reachable at all -- so the binary
+# an operator runs to produce a trading result had no measured bound of any kind.
+# ---------------------------------------------------------------------------
+[[bench]]
+name    = "ratio"
+harness = false
+test    = false

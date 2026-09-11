@@ -7,7 +7,7 @@
     clippy::indexing_slicing
 )]
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use brutex_core::instrument::{Exchange, Expiry, InstrumentKey, Kind, OptionSide, Segment};
@@ -19,8 +19,8 @@ use store::block;
 use store::crc::{CHECK_VALUE, crc32c, crc32c_split};
 use store::format::{
     BLOCK_LEN, Bar, FLAG_CHECKSUMS, FORMAT_VERSION, FormatError, HEADER_LEN, MAGIC, MAGIC_FAMILY,
-    MAX_SLOT_COUNT, OI_NULL, RECORD_STRIDE, RECORDS_PER_BLOCK, RETIRED_VERSIONS, SLOT_COUNT,
-    SLOT_LEN, SLOT_STRIDE,
+    MAX_SLOT_COUNT, OI_NULL, RECORD_LEN, RECORD_STRIDE, RECORDS_PER_BLOCK, RETIRED_VERSIONS,
+    SLOT_COUNT, SLOT_LEN, SLOT_STRIDE,
 };
 use store::header::Header;
 use store::layout::Layout;
@@ -298,6 +298,548 @@ fn ohlc_sanity_accepts_real_bars_and_rejects_impossible_ones() {
     );
 }
 
+/// D-0143 — every price is `>= 0`, and the containment clauses never said so.
+#[test]
+fn negative_prices_are_not_sane_however_well_ordered() {
+    // THE BAR THAT USED TO PASS. Every one of the five containment comparisons
+    // is satisfied -- high is the highest, low is the lowest -- because all
+    // five are RELATIVE and this bar is perfectly ordered. It was appended,
+    // the header advanced, the CRC was right, the count was right, and the
+    // month was recorded as good.
+    let all_negative = Bar {
+        ts_micros: 1_717_386_300_000_000,
+        open: -100,
+        high: -100,
+        low: -100,
+        close: -100,
+        volume: 0,
+        open_interest: OI_NULL,
+    };
+    assert!(
+        !all_negative.ohlc_is_sane(),
+        "a well-ordered bar whose every price is below zero is still impossible",
+    );
+
+    // Each field alone, so no clause can hide behind another. `low` is the one
+    // the ordering would have caught anyway if the others were positive, and it
+    // is asserted here for the same reason the other three are: this predicate
+    // must not depend on a clause of itself being true.
+    let real = Bar {
+        ts_micros: 1_717_386_300_000_000,
+        open: 2_333_870,
+        high: 2_333_870,
+        low: 2_308_370,
+        close: 2_310_955,
+        volume: 0,
+        open_interest: OI_NULL,
+    };
+    assert!(real.ohlc_is_sane());
+    for (name, bar) in [
+        (
+            "open",
+            Bar {
+                open: -1,
+                low: -2,
+                ..real
+            },
+        ),
+        (
+            "high",
+            Bar {
+                high: -1,
+                open: -1,
+                low: -2,
+                close: -1,
+                ..real
+            },
+        ),
+        ("low", Bar { low: -1, ..real }),
+        (
+            "close",
+            Bar {
+                close: -1,
+                low: -2,
+                ..real
+            },
+        ),
+    ] {
+        assert!(!bar.ohlc_is_sane(), "{name} below zero must be refused");
+    }
+
+    // Zero itself is a price, not an absence -- the boundary is `< 0`, and a
+    // bar of four zeroes is the `Bar::default()` a lost write leaves behind,
+    // which the block checksum is responsible for, not this predicate.
+    assert!(Bar::default().ohlc_is_sane());
+
+    // AND THE CONSEQUENCE THE OVERFLOW GUARDS ELSEWHERE DEPEND ON: with
+    // `high >= low >= 0`, the span cannot wrap. See `indicators::Corrupt`.
+    assert!(real.high.checked_sub(real.low).is_some());
+}
+
+/// A count is never negative, and the one legal negative is the OI sentinel.
+#[test]
+fn a_negative_count_is_refused_and_the_oi_sentinel_is_not() {
+    let real = Bar {
+        ts_micros: 1_717_386_300_000_000,
+        open: 2_333_870,
+        high: 2_333_870,
+        low: 2_308_370,
+        close: 2_310_955,
+        volume: 41_250,
+        open_interest: OI_NULL,
+    };
+    assert!(real.ohlc_is_sane() && real.counts_are_sane());
+
+    // ZERO IS A REAL COUNT, on both fields. §7: zero means zero.
+    assert!(
+        Bar {
+            volume: 0,
+            open_interest: 0,
+            ..real
+        }
+        .counts_are_sane()
+    );
+
+    // THE SENTINEL IS THE ONE LEGAL NEGATIVE, and it is `i64::MIN` -- so a
+    // naive `>= 0` on open interest would have refused every bar this store
+    // holds for a cash equity.
+    assert_eq!(OI_NULL, i64::MIN);
+    assert!(
+        Bar {
+            open_interest: OI_NULL,
+            ..real
+        }
+        .counts_are_sane()
+    );
+    assert!(
+        Bar {
+            open_interest: OI_NULL,
+            ..real
+        }
+        .oi_is_null()
+    );
+
+    // AND EVERYTHING ELSE BELOW ZERO IS REFUSED.
+    for (what, bar) in [
+        ("volume", Bar { volume: -1, ..real }),
+        (
+            "volume at the floor",
+            Bar {
+                volume: i64::MIN,
+                ..real
+            },
+        ),
+        (
+            "open interest",
+            Bar {
+                open_interest: -1,
+                ..real
+            },
+        ),
+        // One short of the sentinel: the nearest legal-looking impostor.
+        (
+            "open interest beside the sentinel",
+            Bar {
+                open_interest: i64::MIN + 1,
+                ..real
+            },
+        ),
+    ] {
+        assert!(!bar.counts_are_sane(), "{what} below zero must be refused");
+        // ...and the OHLC predicate still says yes, which is exactly why this
+        // is a second question and not a clause of the first.
+        assert!(
+            bar.ohlc_is_sane(),
+            "{what} does not make the OHLC impossible"
+        );
+    }
+}
+
+// ===========================================================================
+// The record's 56 bytes — the encoder, pinned
+// ===========================================================================
+//
+// WHY THIS SECTION EXISTS. `Bar::image` documents itself as "the single
+// authoritative encoder for the 56 bytes on disk" and argues that a second
+// encoder "would be a second definition of the format, free to drift". An
+// audit measured what the code actually had:
+//
+//   - nothing in the repository called `Bar::image`, so it carried zero
+//     coverage;
+//   - replacing its entire body with `[0u8; 56]` left all 79 store tests
+//     green;
+//   - `store::fault` re-implemented the encoder privately — the exact
+//     duplication the comment forbids.
+//
+// A comment asserting a property the code does not have is worse than an
+// untested function, because it stops anyone looking. The private copy is
+// deleted, `store::fault::bitflip_detected` now builds its bytes through
+// `Bar::image`, and the tests below pin the output so the zero mutant, a
+// swapped field pair, a moved offset and a flipped byte order each fail.
+// D-0039.
+
+/// The real first bar of 2024-06-03 from the lake, in paisa.
+///
+/// Spot, so its open interest is [`OI_NULL`] and its volume is a real zero —
+/// the two values a record can carry that mean something other than a number.
+const REAL_BAR: Bar = Bar {
+    ts_micros: 1_717_386_300_000_000,
+    open: 2_333_870,
+    high: 2_333_870,
+    low: 2_308_370,
+    close: 2_310_955,
+    volume: 0,
+    open_interest: OI_NULL,
+};
+
+/// Where each field's eight bytes begin in the image, in the order
+/// `Bar::image` writes them.
+const FIELD_OFFSETS: [usize; 7] = [0, 8, 16, 24, 32, 40, 48];
+
+/// How many fields one record has.
+const FIELDS: usize = 7;
+
+const _: () = assert!(FIELD_OFFSETS.len() == FIELDS);
+
+/// `base` with field `index` replaced by `value`.
+///
+/// The seven-arm match is the point: it names the fields in the order the
+/// image writes them, so a field added to `Bar` without a place in the format
+/// stops compiling here rather than silently going unencoded.
+fn with(base: Bar, index: usize, value: i64) -> Bar {
+    let mut bar = base;
+    match index {
+        0 => bar.ts_micros = value,
+        1 => bar.open = value,
+        2 => bar.high = value,
+        3 => bar.low = value,
+        4 => bar.close = value,
+        5 => bar.volume = value,
+        6 => bar.open_interest = value,
+        _ => panic!("a record has {FIELDS} fields; {index} is not one of them"),
+    }
+    bar
+}
+
+/// A record with `value` in field `index` and zero in every other field.
+fn only(index: usize, value: i64) -> Bar {
+    with(Bar::default(), index, value)
+}
+
+/// A deterministic 64-bit stream.
+///
+/// Not a random source — a *reproducible* one. `CLAUDE.md` §3 rule 5: same
+/// inputs, same outputs. A test that samples a different set on every run
+/// produces a failure nobody can reproduce, which is a test that reports
+/// nothing.
+struct Xorshift(u64);
+
+impl Xorshift {
+    /// The next value, as an `i64` with the same bits.
+    ///
+    /// Through `to_le_bytes`/`from_le_bytes` rather than a cast: this
+    /// workspace denies casts that can wrap, and the reinterpretation is what
+    /// is wanted — every 64-bit pattern, including the negative half.
+    fn draw(&mut self) -> i64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        i64::from_le_bytes(self.0.to_le_bytes())
+    }
+}
+
+#[test]
+fn the_record_image_is_the_pinned_bytes_of_a_known_bar() {
+    // THE TEST THE ALL-ZERO MUTANT CANNOT SURVIVE. A round trip cannot catch
+    // that mutant: `decode(image(r)) == r` is an identity under any pair of
+    // mutually inverse functions, and under an all-zero encoder the decode of
+    // zeros is a legal flat bar. Only literal bytes can catch it.
+    //
+    // These 56 bytes ARE the format. If this array has to change, a format
+    // version changes with it — CLAUDE.md §3 rule 8, and the reason
+    // `RETIRED_VERSIONS` exists.
+    #[rustfmt::skip]
+    const PINNED: [u8; RECORD_LEN] = [
+        // ts_micros     1_717_386_300_000_000 == 0x0006_19F4_285A_8700
+        0x00, 0x87, 0x5A, 0x28, 0xF4, 0x19, 0x06, 0x00,
+        // open                    2_333_870 == 0x0000_0000_0023_9CAE
+        0xAE, 0x9C, 0x23, 0x00, 0x00, 0x00, 0x00, 0x00,
+        // high                    2_333_870 == 0x0000_0000_0023_9CAE
+        0xAE, 0x9C, 0x23, 0x00, 0x00, 0x00, 0x00, 0x00,
+        // low                     2_308_370 == 0x0000_0000_0023_3912
+        0x12, 0x39, 0x23, 0x00, 0x00, 0x00, 0x00, 0x00,
+        // close                   2_310_955 == 0x0000_0000_0023_432B
+        0x2B, 0x43, 0x23, 0x00, 0x00, 0x00, 0x00, 0x00,
+        // volume                          0 -- a REAL zero
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        // open_interest  OI_NULL == i64::MIN == 0x8000_0000_0000_0000
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80,
+    ];
+
+    assert_eq!(REAL_BAR.image(), PINNED);
+    assert_eq!(REAL_BAR.image().len(), 56);
+    assert_eq!(RECORD_LEN, 56);
+    assert_eq!(u64::try_from(RECORD_LEN), Ok(RECORD_STRIDE));
+
+    // The mutant the audit actually planted, refused by name.
+    assert_ne!(REAL_BAR.image(), [0u8; RECORD_LEN], "the all-zero body");
+
+    // The two bytes that carry a meaning rather than a magnitude, on their
+    // own: the sentinel's sign bit is the LAST byte of the record, and a real
+    // zero volume is eight zero bytes and not an absence.
+    assert_eq!(PINNED[55], 0x80, "OI_NULL's sign bit, at byte 55");
+    assert_eq!(&PINNED[40..48], &[0u8; 8][..], "volume 0 IS eight zeros");
+
+    // The inverse taken on the PINNED bytes rather than on the encoder's
+    // output, so the decoder is pinned to the same 56 bytes and not merely to
+    // whatever `image` happens to return.
+    assert_eq!(Bar::decode(&PINNED), Ok(REAL_BAR));
+    assert_eq!(
+        Bar::decode(&[0u8; RECORD_LEN]),
+        Ok(Bar::default()),
+        "zeros decode to a flat bar with a REAL zero open interest",
+    );
+    assert_ne!(Bar::decode(&[0u8; RECORD_LEN]), Ok(REAL_BAR));
+}
+
+#[test]
+fn the_image_is_little_endian_and_each_field_owns_its_own_offset() {
+    // `Bar::image`'s doc comment claims little-endian. Stated here WITHOUT
+    // `to_le_bytes`, so the test does not prove the claim by restating it:
+    // the LEAST significant byte comes first.
+    let stepped = Bar {
+        ts_micros: 0x0102_0304_0506_0708,
+        ..Bar::default()
+    };
+    let image = stepped.image();
+    assert_eq!(
+        &image[..8],
+        &[0x08u8, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01][..],
+        "little-endian: least significant byte first",
+    );
+    assert_ne!(
+        &image[..8],
+        &[0x01u8, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08][..],
+        "big-endian, named so the claim cannot pass on a symmetric value",
+    );
+    assert_eq!(
+        &image[8..],
+        &[0u8; 48][..],
+        "one field set, one field moved"
+    );
+
+    // Every field, every byte of it: 7 x 8 = 56 placements, each asserted
+    // against all 56 bytes of the image. A swapped pair of fields, an offset
+    // off by one, or a byte order flipped inside a SINGLE field fails here.
+    let mut placements = 0usize;
+    for (field, &offset) in FIELD_OFFSETS.iter().enumerate() {
+        for byte in 0..8usize {
+            let mut wanted = [0u8; 8];
+            wanted[byte] = 0xA5;
+            let bar = only(field, i64::from_le_bytes(wanted));
+            let placed = bar.image();
+            for (at, got) in placed.iter().enumerate() {
+                let expect = if at == offset + byte { 0xA5u8 } else { 0u8 };
+                assert_eq!(*got, expect, "field {field} byte {byte}: image[{at}]");
+            }
+            assert_eq!(Bar::decode(&placed), Ok(bar), "and back again");
+            placements += 1;
+        }
+    }
+    assert_eq!(placements, 56, "every byte of every field was placed");
+    assert_eq!(FIELD_OFFSETS, [0, 8, 16, 24, 32, 40, 48]);
+    assert_eq!(
+        FIELD_OFFSETS[FIELDS - 1] + 8,
+        RECORD_LEN,
+        "no slack, no pad"
+    );
+}
+
+#[test]
+fn decoding_the_image_returns_the_record_byte_for_byte() {
+    // Every boundary a 64-bit field has. i64::MIN is OI_NULL -- the one value
+    // whose meaning is "absent" rather than a number -- so it appears in EVERY
+    // field, not only in the field that gives it that meaning.
+    const CORNERS: [i64; 12] = [
+        i64::MIN,
+        i64::MIN + 1,
+        -2_147_483_649,
+        -1,
+        0,
+        1,
+        255,
+        256,
+        2_147_483_648,
+        0x0102_0304_0506_0708,
+        i64::MAX - 1,
+        i64::MAX,
+    ];
+    const DRAWS: usize = 4_096;
+
+    assert_eq!(CORNERS[0], OI_NULL, "the null sentinel is a corner");
+    assert_eq!(CORNERS[4], 0, "and so is a real zero");
+
+    let mut cases: Vec<Bar> = Vec::new();
+    // One corner in one field at a time, twice: once against a real bar, so a
+    // field that is never written is caught, and once against zeros, so a
+    // field written into the WRONG offset is caught.
+    for field in 0..FIELDS {
+        for &corner in &CORNERS {
+            cases.push(with(REAL_BAR, field, corner));
+            cases.push(only(field, corner));
+        }
+    }
+    // Every field at the same corner at once.
+    for &corner in &CORNERS {
+        let mut bar = Bar::default();
+        for field in 0..FIELDS {
+            bar = with(bar, field, corner);
+        }
+        cases.push(bar);
+    }
+    // And 4,096 records whose every field is an unrelated 64-bit pattern.
+    let mut rng = Xorshift(0x2545_F491_4F6C_DD1D);
+    for _ in 0..DRAWS {
+        cases.push(Bar {
+            ts_micros: rng.draw(),
+            open: rng.draw(),
+            high: rng.draw(),
+            low: rng.draw(),
+            close: rng.draw(),
+            volume: rng.draw(),
+            open_interest: rng.draw(),
+        });
+    }
+    assert_eq!(
+        cases.len(),
+        FIELDS * CORNERS.len() * 2 + CORNERS.len() + DRAWS
+    );
+    assert_eq!(cases.len(), 4_276);
+
+    // `seen` maps an image back to the record that produced it; `distinct`
+    // counts the records themselves. If the two sizes agree, no two different
+    // records share one image -- the encoder is injective on this whole set,
+    // which is the property that makes a file's bytes mean one thing.
+    let mut seen: HashMap<[u8; RECORD_LEN], Bar> = HashMap::new();
+    let mut distinct: HashSet<[i64; 7]> = HashSet::new();
+    for bar in cases {
+        let image = bar.image();
+        assert_eq!(image.len(), RECORD_LEN);
+
+        // decode(image(r)) == r, EXACTLY.
+        let back = Bar::decode(&image).expect("56 bytes is a whole record");
+        assert_eq!(back, bar, "decode(image(r)) != r for {bar:?}");
+        // image(decode(image(r))) == image(r), byte for byte -- so the two are
+        // inverse in both directions, not merely in one.
+        assert_eq!(back.image(), image, "image(decode(image(r))) drifted");
+        // Field by field, so `PartialEq` alone is not what is being trusted.
+        assert_eq!(back.ts_micros, bar.ts_micros);
+        assert_eq!(back.open, bar.open);
+        assert_eq!(back.high, bar.high);
+        assert_eq!(back.low, bar.low);
+        assert_eq!(back.close, bar.close);
+        assert_eq!(back.volume, bar.volume);
+        assert_eq!(back.open_interest, bar.open_interest);
+        assert_eq!(back.oi_is_null(), bar.oi_is_null(), "the sentinel survived");
+        assert_eq!(back.oi(), bar.oi());
+
+        // A longer buffer decodes the FIRST record and never reads the tail.
+        let mut long = image.to_vec();
+        long.extend([0xFFu8; RECORD_LEN]);
+        assert_eq!(Bar::decode(&long), Ok(bar), "the tail reached the record");
+
+        if let Some(previous) = seen.insert(image, bar) {
+            assert_eq!(previous, bar, "two different records share one image");
+        }
+        distinct.insert([
+            bar.ts_micros,
+            bar.open,
+            bar.high,
+            bar.low,
+            bar.close,
+            bar.volume,
+            bar.open_interest,
+        ]);
+    }
+    assert_eq!(seen.len(), distinct.len(), "the encoder is not injective");
+    assert!(distinct.len() > DRAWS, "the sample did not collapse");
+}
+
+#[test]
+fn a_short_record_is_refused_and_never_completed_with_zeros() {
+    let image = REAL_BAR.image();
+
+    // Every length a ragged tail can leave behind, zero included.
+    for len in 0..RECORD_LEN {
+        assert_eq!(
+            Bar::decode(&image[..len]),
+            Err(FormatError::RecordTooShort { len }),
+            "a {len}-byte tail must be named, not completed",
+        );
+    }
+    assert_eq!(Bar::decode(&image), Ok(REAL_BAR), "56 bytes is enough");
+    assert_eq!(
+        Bar::decode(&[]),
+        Err(FormatError::RecordTooShort { len: 0 }),
+        "an empty tail is a tail",
+    );
+
+    // Measured against the specific wrong answer rather than against "not
+    // ok". The sentinel's sign bit is the LAST byte of the record, so a
+    // 55-byte tail completed with one zero would decode as a bar whose open
+    // interest is a REAL zero -- the field that tells a derivative series
+    // from an index series, inverted by an invented byte.
+    let mut completed = image;
+    completed[RECORD_LEN - 1] = 0;
+    let invented = Bar::decode(&completed).expect("56 bytes");
+    assert!(
+        !invented.oi_is_null(),
+        "this is what zero-filling would say"
+    );
+    assert_eq!(invented.oi(), Some(0));
+    assert_ne!(invented, REAL_BAR);
+    assert!(REAL_BAR.oi_is_null(), "and this is what the record says");
+
+    // The refusal names the length it saw, so the operator is not sent to a
+    // hex dump to find out how ragged the tail was.
+    let refusal = FormatError::RecordTooShort { len: 55 };
+    assert!(refusal.to_string().contains("55"));
+    assert!(refusal.to_string().contains("56"), "and the length needed");
+}
+
+#[test]
+fn decoding_reads_exactly_fifty_six_bytes_however_long_the_buffer_is() {
+    // CLAUDE.md §3 rule 4: bar lookup is O(1). `Bar::decode`'s copy loop is
+    // `image.iter_mut().zip(bytes.iter())` -- `image` is 56 bytes, so the zip
+    // stops at 56 whatever `bytes.len()` is. That is the structural argument;
+    // this is the observable form of it.
+    //
+    // NOT A TIMING MEASUREMENT. It proves the ANSWER does not depend on the
+    // buffer's length, which is why the trip count cannot either. Gate 8's
+    // bench measures header read and block seal, not this.
+    let image = REAL_BAR.image();
+    let mut haystack = image.to_vec();
+    // A whole month file's worth of bytes past the record, every one of them
+    // 0xFF -- the value that would corrupt any field it reached.
+    haystack.extend(std::iter::repeat_n(0xFFu8, 1 << 20));
+    assert_eq!(haystack.len(), RECORD_LEN + 1_048_576);
+
+    let from_long = Bar::decode(&haystack).expect("the first 56 bytes");
+    let from_exact = Bar::decode(&image).expect("the same 56 bytes");
+    assert_eq!(from_long, from_exact, "byte 57 onward changed the answer");
+    assert_eq!(from_long, REAL_BAR);
+    assert_eq!(from_long.image(), image, "and re-encodes to the same bytes");
+
+    // The same at the two lengths either side of the stride, so the boundary
+    // itself is walked and not stepped over.
+    assert_eq!(Bar::decode(&haystack[..RECORD_LEN]), Ok(REAL_BAR));
+    assert_eq!(Bar::decode(&haystack[..=RECORD_LEN]), Ok(REAL_BAR));
+    assert_eq!(
+        Bar::decode(&haystack[..RECORD_LEN - 1]),
+        Err(FormatError::RecordTooShort { len: 55 }),
+    );
+}
+
 // ===========================================================================
 // Version dispatch
 // ===========================================================================
@@ -314,7 +856,35 @@ fn the_constants_are_the_current_versions_layout() {
     assert_eq!(v2.records_per_block(), RECORDS_PER_BLOCK);
     assert_eq!(v2.block_len(), BLOCK_LEN);
     assert_eq!(Layout::CURRENT, v2);
-    assert_eq!(Layout::KNOWN, &[v2]);
+    // THREE GEOMETRIES, NOT ONE. `KNOWN` answers "which geometries can this
+    // build read", and two of the three are sidecars: the overlay's 24-byte
+    // records at version 9 and the computed greeks' 80 at version 8, beside the
+    // bar's 56 at version 2. Resolution is by the file's own version number, so
+    // none can be confused by a reader that reads the header it was handed.
+    assert_eq!(Layout::KNOWN, &[v2, Layout::OVERLAY, Layout::GREEKS]);
+    assert_eq!(Layout::OVERLAY.record_stride(), 24);
+    assert_eq!(Layout::GREEKS.record_stride(), 80);
+
+    // EVERY VERSION IN THE LIST IS DISTINCT, and every stride with it. A
+    // duplicate version makes resolution pick whichever row is first, and a
+    // duplicate stride makes two geometries indistinguishable to a reader that
+    // resolved correctly — asserted as a property over the whole list rather
+    // than as a pair, so a fourth row is checked against all three.
+    for (index, one) in Layout::KNOWN.iter().enumerate() {
+        for other in Layout::KNOWN.iter().skip(index + 1) {
+            assert_ne!(
+                one.version(),
+                other.version(),
+                "two geometries share a version, which is what resolves them apart"
+            );
+            assert_ne!(
+                one.record_stride(),
+                other.record_stride(),
+                "two geometries share a stride, so a record count computed for \
+                 one would be right for the other"
+            );
+        }
+    }
     const { assert!(SLOT_COUNT <= MAX_SLOT_COUNT) }
 
     // The header region is exactly `slot_count` slots at SLOT_STRIDE spacing,
@@ -367,7 +937,10 @@ fn every_known_row_is_one_declare_would_admit() {
 fn unknown_version_refuses() {
     // S-09. A future version has its own layout; guessing at it would read
     // fields from the wrong offsets and return plausible nonsense.
-    for version in [0u16, 3, 9, 255, u16::MAX] {
+    // 9 IS NO LONGER A STRANGER. The overlay sidecar took it, so a test that
+    // wants "a version this build does not know" has to pick one that stays
+    // unknown — 3 and 255 and u16::MAX still are, and 7 replaces the 9.
+    for version in [0u16, 3, 7, 255, u16::MAX] {
         let refusal = Layout::for_version(version);
         assert_eq!(refusal, Err(FormatError::UnknownVersion(version)));
         let rendered = refusal.unwrap_err().to_string();
@@ -896,8 +1469,10 @@ fn a_slot_that_is_not_a_bar_file_is_refused_before_its_version_is_read() {
 #[test]
 fn a_slot_naming_an_unknown_version_is_refused_by_number() {
     let mut slot = genesis_slot();
-    slot[8..10].copy_from_slice(&9u16.to_le_bytes());
-    assert_eq!(Header::decode(&slot), Err(FormatError::UnknownVersion(9)));
+    // 7, NOT 9. The overlay sidecar took version 9, so a slot naming it is a
+    // real geometry and this test needs one that is genuinely unknown.
+    slot[8..10].copy_from_slice(&7u16.to_le_bytes());
+    assert_eq!(Header::decode(&slot), Err(FormatError::UnknownVersion(7)));
 }
 
 #[test]
@@ -969,10 +1544,10 @@ fn a_slot_naming_the_wrong_stride_for_its_version_is_refused() {
 #[test]
 fn a_header_this_build_cannot_write_is_refused_at_commit() {
     let unknown = Header {
-        format_version: 9,
+        format_version: 7,
         ..Header::genesis(7, 60, 0)
     };
-    assert_eq!(unknown.commit(), Err(FormatError::UnknownVersion(9)));
+    assert_eq!(unknown.commit(), Err(FormatError::UnknownVersion(7)));
 
     let retired = Header {
         format_version: 1,
@@ -1080,6 +1655,7 @@ fn parts(vendor: Vendor, symbol: &str) -> PathParts<'_> {
         exchange: "NSE",
         segment: "INDEX",
         symbol,
+        contract: None,
         timeframe: Timeframe::MINUTE_1,
         month: YearMonth::new(2024, 6).expect("a real month"),
         file: FileKind::Bars,
@@ -1163,7 +1739,11 @@ fn every_vendor_is_a_legal_segment() {
         );
         assert!(vendor.as_str().len() <= MAX_VENDOR_LEN);
     }
-    assert_eq!(MAX_VENDOR_LEN, 5, "groww");
+    // 8, for `truedata`. It was 5 for `groww` until the archive feeds gained
+    // store prefixes of their own — without one, `run_local` filed every GDFL
+    // bar under `bars/dhan/`. The bound is the longest vendor segment and this
+    // asserts it EXACTLY, so a drift in either direction fails here.
+    assert_eq!(MAX_VENDOR_LEN, 8, "truedata");
     const { assert!(MAX_VENDOR_LEN <= MAX_SEGMENT_LEN) }
 
     // And the check is not vacuous: a vendor segment in the wrong case would
@@ -1382,6 +1962,7 @@ fn a_segment_that_could_escape_the_vendor_prefix_is_refused() {
             "symbol",
             PathParts {
                 symbol: "../DHAN",
+                contract: None,
                 ..parts(Vendor::Groww, "NIFTY")
             },
         ),
@@ -1399,12 +1980,52 @@ fn a_timeframe_and_a_month_are_values_not_strings() {
     assert_eq!(Timeframe::from_secs(60), Ok(Timeframe::MINUTE_1));
     assert_eq!(Timeframe::MINUTE_1.secs(), 60);
     assert_eq!(Timeframe::MINUTE_1.as_str(), "1min");
-    assert_eq!(Timeframe::KNOWN, &[Timeframe::MINUTE_1]);
-    // D-0015: minute bars only, until a minute-level result earns the upgrade.
+
+    // THE DAILY RUNG, added because a backfill lands it first: 14 windows per
+    // instrument against 81 at one minute, for the same 2020-to-yesterday span.
+    // D-0015 built the seam and D-0054 uses it — `timeframe_secs` was already
+    // a u32 of seconds and the path already had a `<tf>` segment, so this is a
+    // new directory and nothing else.
+    assert_eq!(Timeframe::from_secs(86_400), Ok(Timeframe::DAY_1));
+    assert_eq!(Timeframe::DAY_1.secs(), 86_400);
+    assert_eq!(Timeframe::DAY_1.as_str(), "1day");
+
+    // Every rung, and NO OTHERS. Asserted as the whole list rather than as a
+    // handful of `contains` calls, so a rung added without a decision entry
+    // fails here rather than appearing quietly in a path. The intraday rungs
+    // arrived with D-0077.
     assert_eq!(
-        Timeframe::from_secs(300),
-        Err(PathError::UnknownTimeframe { secs: 300 }),
+        Timeframe::KNOWN,
+        &[
+            Timeframe::DAY_1,
+            Timeframe::SECOND_1,
+            Timeframe::MINUTE_1,
+            Timeframe::MINUTE_2,
+            Timeframe::MINUTE_3,
+            Timeframe::MINUTE_5,
+            Timeframe::MINUTE_10,
+            Timeframe::MINUTE_15,
+            Timeframe::MINUTE_30,
+            Timeframe::MINUTE_60,
+        ],
+        "every timeframe this build stores, in the order a backfill writes them"
     );
+
+    // AND THEY DO NOT COLLIDE. Two rungs sharing a path segment would file one
+    // over the other; two sharing a length would make `from_secs` ambiguous.
+    assert_ne!(Timeframe::DAY_1.as_str(), Timeframe::MINUTE_1.as_str());
+    assert_ne!(Timeframe::DAY_1.secs(), Timeframe::MINUTE_1.secs());
+    assert!(
+        Timeframe::DAY_1.as_str().len() <= MAX_TIMEFRAME_LEN,
+        "`1day` is four bytes; D-0077's `15min` is the five that sets the bound"
+    );
+    // D-0077 added the intraday rungs, so 300s is now the legal `5min` and no
+    // longer a refusal. 45s is absent from the table and takes its place.
+    assert_eq!(
+        Timeframe::from_secs(45),
+        Err(PathError::UnknownTimeframe { secs: 45 }),
+    );
+    assert_eq!(Timeframe::from_secs(300), Ok(Timeframe::MINUTE_5));
     assert_eq!(
         Timeframe::from_secs(0),
         Err(PathError::UnknownTimeframe { secs: 0 }),
@@ -1453,6 +2074,7 @@ fn the_sibling_files_of_a_month_share_every_segment_but_the_extension() {
             "bars/groww/NSE/INDEX/NIFTY/1min/2024-06.bin".to_owned(),
             "bars/groww/NSE/INDEX/NIFTY/1min/2024-06.crc".to_owned(),
             "bars/groww/NSE/INDEX/NIFTY/1min/2024-06.ovl".to_owned(),
+            "bars/groww/NSE/INDEX/NIFTY/1min/2024-06.grk".to_owned(),
             "bars/groww/NSE/INDEX/NIFTY/1min/2024-06.lock".to_owned(),
         ],
     );
@@ -1461,7 +2083,11 @@ fn the_sibling_files_of_a_month_share_every_segment_but_the_extension() {
     // concatenates -- docs/02 §9's "one writer per file, enforced by an
     // advisory lock" needs a name that cannot drift from the file it guards.
     assert_eq!(FileKind::Lock.extension(), ".lock");
-    assert_eq!(FileKind::ALL.len(), 4);
+    // FIVE, since the computed greeks joined the family. Bars, their block
+    // checksums, the vendor-stated overlay, the computed greeks, and the lock.
+    // The count is asserted rather than the list alone so a sixth sibling added
+    // without a rendered path above fails here instead of silently.
+    assert_eq!(FileKind::ALL.len(), 5);
 
     let bars = StorePath::new(base).expect("legal");
     assert_eq!(bars.timeframe(), Timeframe::MINUTE_1);
@@ -1508,13 +2134,20 @@ fn a_path_is_built_from_the_canonical_identity_not_from_loose_strings() {
     // builder does not form -- so it refuses by name rather than filing every
     // expiry under the underlying and silently merging distinct series.
     let expiry = Expiry::new(2024, 6, 27).expect("a real expiry");
-    for kind in [
-        Kind::Future { expiry },
-        Kind::Option {
-            expiry,
-            strike: Paisa::from_raw(2_500_000),
-            side: OptionSide::Call,
-        },
+    // AND THE CONTRACT SEGMENT NOW EXISTS, which is what D-0019 asked for and
+    // what this used to assert the ABSENCE of. Each derivative gets its own
+    // directory under the underlying, so two expiries of one symbol — and two
+    // strikes of one expiry — can never share a bar file.
+    for (kind, expected) in [
+        (Kind::Future { expiry }, "2024-06-27-FUT"),
+        (
+            Kind::Option {
+                expiry,
+                strike: Paisa::from_raw(2_500_000),
+                side: OptionSide::Call,
+            },
+            "2024-06-27-2500000-CE",
+        ),
     ] {
         let contract = InstrumentKey {
             exchange: Exchange::Nse,
@@ -1522,15 +2155,27 @@ fn a_path_is_built_from_the_canonical_identity_not_from_loose_strings() {
             underlying: Symbol::new("NIFTY").expect("a real symbol"),
             kind,
         };
+        let path = StorePath::for_key(
+            Vendor::Groww,
+            &contract,
+            Timeframe::MINUTE_1,
+            month,
+            FileKind::Bars,
+        )
+        .expect("a derivative has a contract path now");
         assert_eq!(
-            StorePath::for_key(
-                Vendor::Groww,
-                &contract,
-                Timeframe::MINUTE_1,
-                month,
-                FileKind::Bars,
-            ),
-            Err(PathError::ContractPathUnsupported),
+            path.to_string(),
+            format!("bars/groww/NSE/FNO/NIFTY/{expected}/1min/2024-06.bin"),
+            "the contract is a segment of its OWN, below the underlying"
+        );
+        // THE STRIKE IS PAISA AND CARRIES NO DECIMAL POINT. `CLAUDE.md` §7:
+        // prices are i64 paisa, never a float. 2,500,000 paisa is 25,000
+        // rupees, and rendering it as `25000.00` would put a `.` in a path
+        // segment and invite a reader to parse it back as one.
+        assert!(
+            !expected.contains('.'),
+            "a strike rendered with a decimal point invites a reader to parse \
+             it back as a float: {expected}"
         );
     }
 }
@@ -1550,13 +2195,23 @@ fn a_maximal_path_fits_the_declared_bound() {
         .max_by_key(|f| f.extension().len())
         .expect("a non-empty table");
     assert_eq!(fattest.extension().len(), MAX_EXTENSION_LEN);
+    // And the longest RUNG, found the same way. It was hardcoded to `1min`
+    // while every rung was four bytes, which made the maximal path one byte
+    // short of MAX_LEN the moment D-0077 added `15min`.
+    let slowest_name = Timeframe::KNOWN
+        .iter()
+        .copied()
+        .max_by_key(|tf| tf.as_str().len())
+        .expect("a non-empty table");
+    assert_eq!(slowest_name.as_str().len(), MAX_TIMEFRAME_LEN);
 
     let path = StorePath::new(PathParts {
         vendor: widest,
         exchange: &longest,
         segment: &longest,
         symbol: &longest,
-        timeframe: Timeframe::MINUTE_1,
+        contract: None,
+        timeframe: slowest_name,
         month: YearMonth::new(9999, 12).expect("a real month"),
         file: fattest,
     })
@@ -1565,12 +2220,17 @@ fn a_maximal_path_fits_the_declared_bound() {
     // Exactly, not merely within: the bound is the length of the longest legal
     // path, so a bound that drifted in either direction fails here.
     assert_eq!(path.to_string().len(), MAX_LEN);
-    assert_eq!(MAX_LEN, 103);
+    // 107: MAX_VENDOR_LEN went 5 -> 8 when the archive feeds gained store
+    // prefixes, and MAX_TIMEFRAME_LEN went 4 -> 5 with D-0077's `15min`.
+    // MAX_LEN is derived from both. Asserted exactly, so the derivation cannot
+    // drift silently.
+    assert_eq!(MAX_LEN, 107);
     assert_eq!(
         path.to_string(),
         format!(
-            "bars/{}/{longest}/{longest}/{longest}/1min/9999-12{}",
+            "bars/{}/{longest}/{longest}/{longest}/{}/9999-12{}",
             widest.as_str(),
+            slowest_name.as_str(),
             fattest.extension(),
         ),
     );
@@ -1607,6 +2267,12 @@ fn every_format_error_renders_a_distinct_reason() {
     let all = [
         FormatError::OffsetOverflow,
         FormatError::SlotTooShort { len: 63 },
+        // A short RECORD and a short SLOT are two different files being wrong
+        // in two different places, and the enum says so -- but until D-0039
+        // this list omitted the record arm, so `Display` for it had never
+        // run. An arm nobody renders is an arm free to render as another
+        // arm's message.
+        FormatError::RecordTooShort { len: 55 },
         FormatError::HeaderRegionTooShort { slots: 1, need: 2 },
         FormatError::NotABarFile,
         FormatError::UnknownVersion(7),
@@ -1648,13 +2314,20 @@ fn every_format_error_renders_a_distinct_reason() {
         FormatError::NoValidHeader,
     ];
     assert_distinct(&all);
+    assert_eq!(all.len(), 22, "every variant the enum has, rendered");
     assert!(all[1].to_string().contains("63"), "the length is visible");
-    assert!(all[4].to_string().contains('7'), "the version is visible");
+    assert!(all[2].to_string().contains("55"), "the length is visible");
+    assert_ne!(
+        all[1].to_string(),
+        all[2].to_string(),
+        "a short slot and a short record must not share one message",
+    );
     assert!(all[5].to_string().contains('7'), "the version is visible");
-    assert!(all[7].to_string().contains("64"), "the stride is visible");
-    assert!(all[14].to_string().contains('4'), "the block is visible");
+    assert!(all[6].to_string().contains('7'), "the version is visible");
+    assert!(all[8].to_string().contains("64"), "the stride is visible");
+    assert!(all[15].to_string().contains('4'), "the block is visible");
     assert!(
-        all[19].to_string().contains("magic"),
+        all[20].to_string().contains("magic"),
         "the field is visible"
     );
     let as_error: &dyn std::error::Error = &FormatError::NotABarFile;
@@ -1708,5 +2381,156 @@ fn assert_distinct<E: std::fmt::Display + std::fmt::Debug>(all: &[E]) {
                 assert_ne!(a, b, "variants {i} and {j} render identically");
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The intraday rungs added beside 1min and 1day. D-0015 built the seam for
+// exactly this: a rung is a directory name and a `timeframe_secs`, so nothing
+// below the path layer changes.
+// ---------------------------------------------------------------------------
+
+/// Every rung's name and seconds agree, and `from_secs` finds each one.
+#[test]
+fn every_known_timeframe_round_trips_through_its_own_seconds() {
+    for tf in Timeframe::KNOWN {
+        let found = Timeframe::from_secs(tf.secs()).expect("a KNOWN rung resolves by its seconds");
+        assert_eq!(found, *tf, "{} did not resolve to itself", tf.as_str());
+    }
+}
+
+/// No two rungs share a length or a directory name. A collision would put two
+/// bar lengths in one directory, and the header would be the only thing that
+/// disagreed.
+#[test]
+fn no_two_timeframes_share_a_length_or_a_name() {
+    let n = Timeframe::KNOWN.len();
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let (a, b) = (Timeframe::KNOWN[i], Timeframe::KNOWN[j]);
+            assert_ne!(
+                a.secs(),
+                b.secs(),
+                "{} and {} share a length",
+                a.as_str(),
+                b.as_str()
+            );
+            assert_ne!(
+                a.as_str(),
+                b.as_str(),
+                "two rungs share the name {}",
+                a.as_str()
+            );
+        }
+    }
+}
+
+/// An unknown length is refused by name rather than given a derived directory.
+/// `docs/02-store-format.md` — a directory no reader looks for is data written
+/// into a hole.
+#[test]
+fn an_unlisted_length_is_refused_and_not_invented() {
+    // 120 LEFT THIS LIST BECAUSE IT BECAME A RUNG. It was here as "a plausible
+    // length nobody stores"; two minutes is stored now, so asserting it is
+    // refused would assert the opposite of the table. 90 and 240 take its place
+    // — still plausible, still absent, and still refused by name.
+    // 1 LEFT THIS LIST BECAUSE IT BECAME A RUNG, exactly as 120 did before it:
+    // one second is what the archive feeds' files hold and the store carries it
+    // now. 2 and 45 take its place — still plausible, still absent, still
+    // refused by name.
+    for secs in [0_u32, 2, 45, 90, 240, 7_200, 86_399] {
+        assert!(
+            Timeframe::from_secs(secs).is_err(),
+            "{secs}s resolved to a rung that is not in KNOWN"
+        );
+    }
+}
+
+/// The alignment split the gap-leg rule depends on. The fold grid is anchored
+/// at IST midnight and the open is 555 minutes past it, so a rung aligns
+/// exactly when its length divides 555. This is arithmetic, not a convention,
+/// and a rule that reads "the first candle of the day" reads a STUB on the two
+/// rungs that fail it.
+#[test]
+fn only_the_rungs_that_divide_555_start_a_session_on_time() {
+    assert!(Timeframe::MINUTE_1.aligns_with_the_open());
+    assert!(Timeframe::MINUTE_3.aligns_with_the_open(), "555/3 = 185");
+    assert!(Timeframe::MINUTE_5.aligns_with_the_open(), "555/5 = 111");
+    assert!(Timeframe::MINUTE_15.aligns_with_the_open(), "555/15 = 37");
+
+    assert!(
+        !Timeframe::MINUTE_30.aligns_with_the_open(),
+        "555/30 = 18.5"
+    );
+    assert!(
+        !Timeframe::MINUTE_60.aligns_with_the_open(),
+        "555/60 = 9.25"
+    );
+    assert!(
+        !Timeframe::DAY_1.aligns_with_the_open(),
+        "a day does not start at 09:15"
+    );
+
+    // And the property the assertions above are instances of.
+    for tf in Timeframe::KNOWN {
+        let by_arithmetic = tf.secs() % 60 == 0 && 555 % (tf.secs() / 60) == 0;
+        assert_eq!(
+            tf.aligns_with_the_open(),
+            by_arithmetic,
+            "{} disagrees with 555 % minutes == 0",
+            tf.as_str()
+        );
+    }
+}
+
+/// **Every rung's length, pinned exactly.** `MINUTE_30` could be changed from
+/// 1,800 seconds to 1,860 and every other test still passed — a 31-minute bar
+/// filed in the directory called `30min`, with the header agreeing and nothing
+/// disagreeing. The name and the arithmetic must both be nailed, because the
+/// directory name is what a reader trusts and the seconds are what the fold uses.
+#[test]
+fn every_rung_length_and_name_is_pinned_exactly() {
+    for (tf, secs, name) in [
+        (Timeframe::SECOND_1, 1_u32, "1s"),
+        (Timeframe::MINUTE_1, 60, "1min"),
+        (Timeframe::MINUTE_2, 120, "2min"),
+        (Timeframe::MINUTE_3, 180, "3min"),
+        (Timeframe::MINUTE_5, 300, "5min"),
+        (Timeframe::MINUTE_10, 600, "10min"),
+        (Timeframe::MINUTE_15, 900, "15min"),
+        (Timeframe::MINUTE_30, 1_800, "30min"),
+        (Timeframe::MINUTE_60, 3_600, "60min"),
+        (Timeframe::DAY_1, 86_400, "1day"),
+    ] {
+        assert_eq!(tf.secs(), secs, "{name} is not {secs} seconds");
+        assert_eq!(tf.as_str(), name, "the rung of {secs}s is not named {name}");
+        // And the name agrees with the arithmetic, so a renamed rung is caught
+        // even if its seconds are right.
+        if name.ends_with("min") {
+            let minutes: u32 = name
+                .trim_end_matches("min")
+                .parse()
+                .expect("a minute count");
+            assert_eq!(minutes * 60, secs, "{name} does not mean {minutes} minutes");
+        }
+    }
+    assert_eq!(
+        Timeframe::KNOWN.len(),
+        10,
+        "a rung was added or removed; D-0077 is the entry that has to change"
+    );
+    // EVERY RUNG IN THE TABLE IS ALSO IN `KNOWN`, and the count above only
+    // catches a rung added to one of the two. This catches it added to the
+    // other — a `MINUTE_2` const with no `KNOWN` entry is a directory name
+    // `from_secs` can never return, which is data written into a hole.
+    for (tf, _, name) in [
+        (Timeframe::SECOND_1, 1_u32, "1s"),
+        (Timeframe::MINUTE_2, 120, "2min"),
+        (Timeframe::MINUTE_10, 600, "10min"),
+    ] {
+        assert!(
+            Timeframe::KNOWN.contains(&tf),
+            "{name} is a const with no place in KNOWN"
+        );
     }
 }

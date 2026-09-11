@@ -20,6 +20,10 @@
 # confines to `.github/` and `crates/web/`.
 /mutants.out
 /mutants.out.old
+# Pre-external-drive mutation snapshots are preserved locally for recovery but
+# remain generated evidence, not repository source. Root the pattern so a
+# deliberately named fixture below a crate is not hidden.
+/mutants.out*.pre-wd-black-*
 
 # Editor and agent scratch. `.claude/` holds `launch.json` and
 # `settings.local.json`, and `.json` is NOT in CLAUDE.md section 2's allowed
@@ -27,7 +31,68 @@
 # `crates/web/`, so a single `git add -A` here would turn the build red. The
 # directory is local tooling, not source; it is ignored rather than deleted so
 # the tooling keeps working. See docs/05-decisions.md D-0028.
-/.claude/
+# THE OPERATOR TOOLING DIRECTORY, EXCEPT THE ONE FILE THAT IS THE PRODUCT.
+#
+# `.claude/` holds a local settings file and scratch worktrees, neither of
+# which belongs to anyone but the machine they are on. `launch.json` is
+# different: it is the Run configuration, and after D-0064 made the binary
+# serve the front end it is the ONLY thing standing between a fresh clone and
+# a working application. Ignored, it meant "clone and press Run" depended on
+# IntelliJ inferring a Cargo target rather than on anything this repository
+# promises — the IDE's guess, not the project's contract.
+#
+# Gate 1b already admits `.claude/` alongside `.github/` for exactly this
+# reason: it is configuration, not source, and it is not shipped.
+/.claude/*
+!/.claude/launch.json
+
+# Source maps: built by `vite build`, never tracked. Measured at 3.0 MB across
+# 26 files against a 940 kB artifact, rewritten whole on every rebuild, in a
+# tree that already commits `web/build` under D-0068. `vite.config.js` sets
+# `sourcemap: 'hidden'` so nothing requests the files that are not here.
+web/build/**/*.map
+
+# SCRATCH AT THE REPOSITORY ROOT, WHICH GATE 1 CANNOT SURVIVE.
+#
+# `a.txt` and `b.txt` have sat here since 2026-08-14 holding a 60-line copy of
+# `normal_cdf` lifted out of `crates/greeks/src/normal.rs`. `.txt` is on NO
+# allowlist — not CLAUDE.md section 2's, not gate 1's `allowed_names` — so a
+# single `git add -A` stages them and gate 1 goes red on a file nobody meant to
+# track. Nothing but nobody-typing-that-command was keeping the build green.
+#
+# Ignored rather than deleted, the same way `.claude/` is: a scratch copy of a
+# function being edited is somebody's working state, and the hazard here is
+# TRACKING it, not having it. Rooted with a leading slash so a `.txt` fixture
+# under `crates/` or `web/` is still a deliberate decision rather than a silent
+# omission.
+/*.txt
 
 # macOS.
 .DS_Store
+
+# The rolling log, written into the project root so the Run window and the
+# project tree show the same thing. `crates/api::served_log_dir` picks this
+# path when the process starts from a Cargo workspace, which is what pressing
+# Run does. Untracked: gate 1 walks TRACKED files, and `.ndjson` is on no
+# allowlist — a committed log would be the build failure CLAUDE.md section 2
+# describes.
+logs/
+# `logs` is now a symlink to the external WD_BLACK tree; the slash-only rule
+# above matches a directory but not that symlink. Historical migration
+# snapshots are likewise retained locally and must never enter gate 1.
+/logs
+/logs.pre-wd-black-*
+
+# IntelliJ. Untracked but NOT ignored until now: a single `git add -A` would
+# stage `.idea/*.xml`, and `.xml` is on no gate 1 allowlist. The same hazard the
+# `.claude/` block above is written for, for the other editor directory.
+.idea/
+
+# Local operator config and logs. These live in ~/.brutex, not here — but a
+# stray copy inside a PUBLIC repository is the failure mode §8 exists to prevent,
+# so the pattern is denied by name rather than by where the file happens to sit.
+/.env
+/server.log
+**/.env
+**/*.log
+seq-run/

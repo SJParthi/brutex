@@ -10,14 +10,27 @@ description  = "Types, errors, the frozen condition table, and the trading calen
 # ---------------------------------------------------------------------------
 # THIS SECTION IS DELIBERATELY EMPTY AND STAYS EMPTY.
 #
-# docs/01-architecture.md: core "May depend on: nothing". Every rule that both
-# the server and the browser must agree on lives here and is compiled twice --
-# once native, once to wasm32 -- so the two cannot drift. A dependency added
-# here is a dependency forced on crates/web, which compiles to WebAssembly
-# where the filesystem does not exist.
+# docs/01-architecture.md: core "May depend on: nothing".
+#
+# THIS COMMENT USED TO NAME A CRATE THAT NO LONGER EXISTS, and the rule it
+# stated survives the correction. It read: "Every rule that both the server and
+# the browser must agree on lives here and is compiled twice -- once native,
+# once to wasm32 -- so the two cannot drift. A dependency added here is a
+# dependency forced on crates/web ... it will make CI gate 7 fail for
+# crates/web."
+#
+# `crates/web` does not exist. D-0052 and D-0053 moved the front end to `web/`
+# as an unrestricted directory; CLAUDE.md section 5 records that there is no
+# such crate and that GATE 7 SKIPS PERMANENTLY, so nothing here can make it
+# fail. Nothing in this workspace compiles to wasm32 at all. D-0298.
+#
+# WHAT STILL BINDS, and it is the half that carries the rule: CI GATE 9 fails
+# on ANY dependency in this crate. That is a real gate, it runs on every push,
+# and it is what "may depend on nothing" means in practice -- not the wasm32
+# story, which was the reason and is now only history.
 #
 # Adding a line below requires an entry in docs/05-decisions.md naming what it
-# replaces, and it will make CI gate 7 fail for crates/web.
+# replaces, and gate 9 will fail until that argument is made.
 # ---------------------------------------------------------------------------
 [dependencies]
 

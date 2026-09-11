@@ -29,6 +29,12 @@ pub enum PriceError {
     OutOfRange,
     /// An arithmetic operation on two prices would have wrapped.
     Overflow,
+    /// The text is not a decimal number.
+    ///
+    /// Raised by [`crate::price::Paisa::from_rupee_text_half_up`], which exists because a
+    /// vendor that sends a price as TEXT has not lost any precision yet, and routing it
+    /// through a binary float is what loses it.
+    NotDecimal,
 }
 
 impl fmt::Display for PriceError {
@@ -37,6 +43,7 @@ impl fmt::Display for PriceError {
             Self::NotFinite => "price is not a finite number",
             Self::OutOfRange => "price does not fit in i64 paisa",
             Self::Overflow => "price arithmetic would overflow i64",
+            Self::NotDecimal => "price text is not a decimal number",
         };
         f.write_str(msg)
     }
@@ -50,13 +57,14 @@ impl std::error::Error for PriceError {}
 pub enum InstrumentError {
     /// The exchange segment of the identifier was not recognised.
     UnknownExchange,
-    /// The symbol is not one of the two the engine sweeps.
+    /// The instrument is not one the engine sweeps.
     ///
-    /// This is not a parse failure. The symbol may be perfectly valid and
-    /// stored — futures, options and single stocks all are — but
-    /// `docs/00-charter.md` section 1 fixes the swept set at exactly two,
-    /// and widening it requires a decision-ledger entry rather than a caller
-    /// passing a different string.
+    /// This is not a parse failure. The instrument may be perfectly valid and
+    /// stored — futures and options contracts are, and so is any cash equity
+    /// — but `docs/00-charter.md` section 1 fixes the swept surface at two
+    /// shapes: the NSE spot indices NIFTY and BANKNIFTY, and the NSE cash
+    /// equities of the 213 F&O underlyings (D-0506). Widening it requires a
+    /// decision-ledger entry rather than a caller passing a different string.
     NotSweepable,
     /// The identifier was empty or malformed.
     Malformed,
@@ -191,5 +199,32 @@ mod tests {
         assert_error(&PriceError::NotFinite);
         assert_error(&InstrumentError::Malformed);
         assert_error(&CalendarError::NotADate);
+
+        // The three lines above are a COMPILE-TIME check and assert nothing at run time:
+        // an audit noted that any `Display` change survives them, including one that
+        // renders the empty string. Implementing `std::error::Error` is only useful
+        // because a caller can print the thing, so what the caller gets is asserted here.
+        //
+        // Non-empty AND distinct. Distinctness is the half that matters: three errors
+        // that all render "invalid input" satisfy every other test in this file and tell
+        // an operator nothing about which one fired.
+        let rendered = [
+            PriceError::NotFinite.to_string(),
+            InstrumentError::Malformed.to_string(),
+            CalendarError::NotADate.to_string(),
+        ];
+        for message in &rendered {
+            assert!(
+                !message.trim().is_empty(),
+                "an error that renders to nothing is an error an operator cannot act on"
+            );
+        }
+        let distinct: std::collections::BTreeSet<&String> = rendered.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            rendered.len(),
+            "two of these errors render identically, so the message cannot say which \
+             refusal happened: {rendered:?}"
+        );
     }
 }

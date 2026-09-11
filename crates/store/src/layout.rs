@@ -106,12 +106,77 @@ impl Layout {
         RECORDS_PER_BLOCK,
     );
 
+    /// The overlay sidecar's geometry — 24-byte records, version 9.
+    ///
+    /// # Why it is NOT in [`Self::KNOWN`]
+    ///
+    /// That list answers "which versions of a BAR file can this build read",
+    /// and a reader resolving a bar file walks it. Offering the overlay there
+    /// would hand a 24-byte geometry to a reader expecting 56, and the header
+    /// would validate because the header region is the same shape in both.
+    ///
+    /// It is a `Layout` at all so the sidecar can use
+    /// [`crate::header::Header::validate`] and [`crate::block::seal`] rather
+    /// than growing a second copy of the header, the commit counter, the CRC
+    /// and the block arithmetic — a second copy being a second place for a torn
+    /// write to be handled differently.
+    pub const OVERLAY: Self = Self::declared(
+        crate::format::OVERLAY_VERSION,
+        crate::format::OVERLAY_MAGIC,
+        SLOT_COUNT,
+        crate::format::OVERLAY_STRIDE,
+        crate::format::OVERLAY_RECORDS_PER_BLOCK,
+    );
+
+    /// The computed-greeks sidecar's geometry — 80-byte records, version 8.
+    ///
+    /// Not in [`Self::KNOWN`], for exactly the reason [`Self::OVERLAY`] is not:
+    /// that list answers "which versions of a BAR file can this build read", and
+    /// offering an 80-byte geometry to a reader expecting 56 would validate at
+    /// the header and disagree at the first record.
+    ///
+    /// It is a `Layout` for the same reason too — so the sidecar reuses
+    /// [`crate::header::Header::validate`] and [`crate::block::seal`] instead of
+    /// growing a second copy of the header, the commit counter, the CRC and the
+    /// block arithmetic. Three files now share one torn-write story rather than
+    /// three.
+    pub const GREEKS: Self = Self::declared(
+        crate::format::GREEK_VERSION,
+        crate::format::GREEK_MAGIC,
+        SLOT_COUNT,
+        crate::format::GREEK_STRIDE,
+        crate::format::GREEK_RECORDS_PER_BLOCK,
+    );
+
     /// Every version this build can read, in ascending order.
     ///
     /// Adding a version is adding a row built by [`Layout::declared`]. Nothing
     /// else in this module names a version number, so a new row cannot change
     /// how an old one resolves.
-    pub const KNOWN: &'static [Self] = &[Self::V2];
+    /// # Why the overlay is here
+    ///
+    /// `KNOWN` answers "which geometries can this build read", and both can.
+    /// Resolution is BY THE FILE'S OWN VERSION NUMBER — a `.bar` carries 2 and
+    /// a `.ovl` carries 9 — so the two cannot be confused by a reader that
+    /// reads the header it was given, and a header doctored to lie about it
+    /// fails its own CRC.
+    ///
+    /// Excluding it was tried first and moved the problem rather than solving
+    /// it: `Header::decode_parts` resolves the version while decoding, long
+    /// before any caller can say which table it meant, so an overlay outside
+    /// this list is `UnknownVersion(9)` at the first byte.
+    ///
+    /// The second guard remains and is the one that matters: `BarFile` resolves
+    /// against a table chosen by FILE KIND, so a `.bar` path is offered only
+    /// the bar geometries whatever its header claims.
+    /// **AND THE GREEKS SIDECAR IS HERE FOR THE SAME REASON, NOT A DIFFERENT
+    /// ONE.** It was written outside this list first, and that is a `.grk` file
+    /// reporting `UnknownVersion(8)` at its own first byte — the identical
+    /// failure the paragraph above records for the overlay, rediscovered one
+    /// sidecar later. `Header::decode_parts` resolves a version while decoding.
+    /// Whether a geometry may be handed to a BAR reader is decided by
+    /// `crate::file::table_of`, from the file kind, and never by this list.
+    pub const KNOWN: &'static [Self] = &[Self::V2, Self::OVERLAY, Self::GREEKS];
 
     /// The version this build writes. Older versions are read, never written.
     pub const CURRENT: Self = Self::V2;
@@ -202,7 +267,8 @@ impl Layout {
     /// ```
     /// # use store::{format::FormatError, layout::Layout};
     /// assert_eq!(Layout::for_version(2)?.record_stride(), 56);
-    /// assert_eq!(Layout::for_version(9), Err(FormatError::UnknownVersion(9)));
+    /// // 7 rather than 9: version 9 is the overlay sidecar's geometry.
+    /// assert_eq!(Layout::for_version(7), Err(FormatError::UnknownVersion(7)));
     /// // Version 1 existed and is not decodable by this build. It is named as
     /// // retired rather than reported as unknown or, worse, read at version
     /// // 2's offsets.
@@ -347,6 +413,11 @@ impl Layout {
     /// therefore verify a record by reading one checksum — the property that
     /// makes `docs/02-store-format.md` §6's "verification is O(1) per read"
     /// true rather than approximately true.
+    ///
+    /// `S-20` is that property as an invariant, and
+    /// `store::geometry::no_record_straddles_a_block` walks 5,000 indices to
+    /// hold it; `store::geometry::a_block_index_names_seventy_three_consecutive_records`
+    /// asserts the partition — every index in exactly one block, none in two.
     #[must_use]
     pub const fn block_of(self, index: u64) -> u64 {
         index / self.records_per_block

@@ -1,0 +1,398 @@
+<title>Broker Feed Comparison</title>
+
+<!--
+  DHAN vs GROWW vs ZERODHA, field by field, so "can Zerodha reuse Dhan's
+  mechanism?" is answered per row rather than as one word.
+
+  Every DOCUMENTED row is quoted from a vendor page named in docs/00-charter.md
+  §4. Every UNVERIFIED row means no page read states it — not that it is
+  probably fine. CLAUDE.md §3 rule 6.
+
+  Built with DOM methods, never innerHTML: cell text is data, and data is never
+  markup.
+-->
+
+<style>
+  :root {
+    --n0:#e9edf5; --n1:#f5f7fb; --n2:#fff; --n3:#fff; --n4:#eef1f7; --n5:#edf0f6;
+    --n6:#dee3ed; --n7:#c7cfdd; --n8:#5f6a7c; --n9:#5a6478; --n10:#38415a;
+    --n11:#0d1220; --n12:#000814;
+    --up:#00875a; --down:#d3143f; --warn:#a86a06; --info:#6d45d9; --acc:#0e7f96;
+    --on-acc:#fff;
+    --up-soft:rgba(0,135,90,.12); --down-soft:rgba(211,20,63,.11);
+    --warn-soft:rgba(168,106,6,.13); --info-soft:rgba(109,69,217,.11);
+    --acc-soft:rgba(14,127,150,.10);
+    --e1:0 1px 2px rgba(16,24,40,.07);
+    --e2:0 6px 16px rgba(16,24,40,.1),0 0 0 1px rgba(16,24,40,.05);
+    --glass:rgba(255,255,255,.86); --focus:#0b6376;
+    --grid:rgba(13,18,32,.04);
+  }
+  @media (prefers-color-scheme:dark){:root:not([data-theme=light]){
+    --n0:#070a11;--n1:#0b0e14;--n2:#11151f;--n3:#141924;--n4:#1a2030;--n5:#1b212e;
+    --n6:#232a3a;--n7:#333c51;--n8:#828da4;--n9:#8a95ab;--n10:#b3bdd0;
+    --n11:#e6ebf5;--n12:#fbfcff;
+    --up:#00e19b;--down:#ff4d6a;--warn:#f0b429;--info:#9d7cf5;--acc:#22d3ee;
+    --on-acc:#04060c;
+    --up-soft:rgba(0,225,155,.16);--down-soft:rgba(255,77,106,.16);
+    --warn-soft:rgba(240,180,41,.16);--info-soft:rgba(157,124,245,.16);
+    --acc-soft:rgba(34,211,238,.14);
+    --e1:0 1px 2px rgba(0,0,0,.5);
+    --e2:0 4px 14px rgba(0,0,0,.5),0 0 0 1px rgba(255,255,255,.04);
+    --glass:rgba(17,21,31,.82);--focus:#67e8f9;--grid:rgba(230,235,245,.04);
+  }}
+  :root[data-theme=dark]{
+    --n0:#070a11;--n1:#0b0e14;--n2:#11151f;--n3:#141924;--n4:#1a2030;--n5:#1b212e;
+    --n6:#232a3a;--n7:#333c51;--n8:#828da4;--n9:#8a95ab;--n10:#b3bdd0;
+    --n11:#e6ebf5;--n12:#fbfcff;
+    --up:#00e19b;--down:#ff4d6a;--warn:#f0b429;--info:#9d7cf5;--acc:#22d3ee;
+    --on-acc:#04060c;
+    --up-soft:rgba(0,225,155,.16);--down-soft:rgba(255,77,106,.16);
+    --warn-soft:rgba(240,180,41,.16);--info-soft:rgba(157,124,245,.16);
+    --acc-soft:rgba(34,211,238,.14);
+    --e1:0 1px 2px rgba(0,0,0,.5);
+    --e2:0 4px 14px rgba(0,0,0,.5),0 0 0 1px rgba(255,255,255,.04);
+    --glass:rgba(17,21,31,.82);--focus:#67e8f9;--grid:rgba(230,235,245,.04);
+  }
+  :root{
+    --bg:var(--n1);--panel:var(--n3);--panel-2:var(--n4);--line:var(--n6);
+    --line-soft:var(--n5);--line-hard:var(--n7);--well:var(--n0);
+    --ink:var(--n11);--ink-hi:var(--n12);--dim:var(--n9);--faint:var(--n8);
+    --mono:ui-monospace,'SF Mono',SFMono-Regular,'JetBrains Mono',Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,'Inter','Segoe UI',system-ui,sans-serif;
+    --ease:cubic-bezier(.22,.61,.36,1);
+  }
+  *,*::before,*::after{box-sizing:border-box}
+  body{
+    background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:14px;
+    line-height:1.5;-webkit-font-smoothing:antialiased;
+    background-image:linear-gradient(var(--grid) 1px,transparent 1px);
+    background-size:100% 32px;
+  }
+  :focus-visible{outline:2px solid var(--focus);outline-offset:2px;border-radius:4px}
+  button{font:inherit;cursor:pointer}
+  @keyframes rise{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+  @keyframes pop{from{opacity:0;transform:scale(.85)}to{opacity:1;transform:none}}
+  .rise{opacity:0;animation:rise 560ms var(--ease) forwards}
+  @media (prefers-reduced-motion:reduce){*,*::before,*::after{
+    animation-duration:1ms!important;animation-delay:0ms!important;
+    transition-duration:1ms!important}.rise{opacity:1}}
+
+  .wrap{max-width:1440px;margin:0 auto;padding:32px 24px 64px;
+    display:flex;flex-direction:column;gap:24px}
+  .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.12em;
+    text-transform:uppercase;color:var(--acc);font-weight:700}
+  h1{font-size:clamp(28px,4.2vw,42px);line-height:1.04;letter-spacing:-.03em;
+    font-weight:700;margin:0;text-wrap:balance}
+  .stand{font-size:16px;color:var(--dim);max-width:76ch;margin:0}
+  .legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12.5px;color:var(--dim);
+    align-items:center}
+
+  .verdicts{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
+    gap:1px;background:var(--line-soft);border:1px solid var(--line);
+    border-radius:16px;overflow:hidden;box-shadow:var(--e2)}
+  .v{background:var(--panel);padding:16px;display:flex;flex-direction:column;gap:4px}
+  .v .k{font-family:var(--mono);font-size:9.5px;letter-spacing:.1em;
+    text-transform:uppercase;color:var(--faint);font-weight:700}
+  .v .n{font-family:var(--mono);font-size:26px;font-weight:700;
+    letter-spacing:-.03em;font-variant-numeric:tabular-nums;line-height:1.1}
+  .v .d{font-size:12px;color:var(--dim)}
+  .v.ok .n{color:var(--up)} .v.bad .n{color:var(--down)}
+  .v.un .n{color:var(--warn)} .v.tot .n{color:var(--ink-hi)}
+
+  .controls{display:flex;gap:8px;flex-wrap:wrap;align-items:center;
+    position:sticky;top:0;z-index:30;padding:12px 0;background:var(--glass);
+    backdrop-filter:blur(12px) saturate(1.5);
+    -webkit-backdrop-filter:blur(12px) saturate(1.5)}
+  .chip{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;
+    border-radius:999px;border:1px solid var(--line-hard);background:var(--panel);
+    font-size:12px;color:var(--dim);transition:all 130ms var(--ease)}
+  .chip:hover{transform:translateY(-1px);box-shadow:var(--e1);color:var(--ink)}
+  .chip[aria-pressed=true]{border-color:var(--acc);color:var(--acc);
+    background:var(--acc-soft);font-weight:600}
+  .chip .c{font-family:var(--mono);font-size:11px;opacity:.75;
+    font-variant-numeric:tabular-nums}
+
+  .tblwrap{border:1px solid var(--line);border-radius:16px;overflow:hidden;
+    box-shadow:var(--e2);background:var(--panel)}
+  .scroll{overflow-x:auto}
+  table{border-collapse:collapse;width:100%;min-width:1080px}
+  thead th{position:sticky;top:0;background:var(--panel-2);text-align:left;
+    font-family:var(--mono);font-size:9.5px;letter-spacing:.1em;
+    text-transform:uppercase;color:var(--faint);font-weight:700;padding:12px;
+    border-bottom:1px solid var(--line-hard);z-index:4;white-space:nowrap}
+  tbody td{padding:12px;border-bottom:1px solid var(--line-soft);
+    vertical-align:top;font-size:13px}
+  tbody tr{transition:background 120ms var(--ease)}
+  tbody tr:hover td{background:var(--panel-2)}
+  tr.hide{display:none}
+  .catrow td{background:var(--well);font-family:var(--mono);font-size:10px;
+    letter-spacing:.12em;text-transform:uppercase;color:var(--acc);
+    font-weight:700;padding:8px 12px;border-bottom:1px solid var(--line)}
+  .fact{font-weight:600;color:var(--ink-hi);min-width:150px}
+  .cell{min-width:190px}
+  code{font-family:var(--mono);font-size:11px;background:var(--well);
+    border:1px solid var(--line-soft);border-radius:3px;padding:0 4px}
+  .badge{display:inline-flex;align-items:center;gap:5px;font-family:var(--mono);
+    font-size:9.5px;letter-spacing:.07em;text-transform:uppercase;font-weight:700;
+    padding:4px 9px;border-radius:999px;white-space:nowrap;
+    animation:pop 320ms var(--ease) both}
+  .badge.same{background:var(--up-soft);color:var(--up)}
+  .badge.diff{background:var(--warn-soft);color:var(--warn)}
+  .badge.block{background:var(--down-soft);color:var(--down)}
+  .badge.un{background:var(--info-soft);color:var(--info)}
+  .dot{width:6px;height:6px;border-radius:50%;background:currentColor;flex:none}
+  footer{font-family:var(--mono);font-size:11px;color:var(--faint);display:flex;
+    gap:24px;flex-wrap:wrap;padding-top:16px;border-top:1px solid var(--line)}
+</style>
+
+<div class="wrap">
+  <header class="rise" style="display:flex;flex-direction:column;gap:12px">
+    <span class="eyebrow">dhan · groww · zerodha — field by field</span>
+    <h1>Broker Feed Comparison</h1>
+    <p class="stand">
+      Can Zerodha reuse the mechanism Dhan already uses? The answer is per row, not per
+      vendor — and three rows are hard blockers that need a type change in
+      <code>pull::vendor</code> before a single request can be built.
+    </p>
+    <div class="legend" id="legend"></div>
+  </header>
+
+  <section class="verdicts rise" style="animation-delay:100ms" aria-label="Verdict">
+    <div class="v tot"><span class="k">Rows compared</span><span class="n" id="s-tot">0</span><span class="d">across 7 groups</span></div>
+    <div class="v ok"><span class="k">Reusable as is</span><span class="n" id="s-same">0</span><span class="d">Dhan's path works</span></div>
+    <div class="v un"><span class="k">Differs, but expressible</span><span class="n" id="s-diff">0</span><span class="d">config, not code</span></div>
+    <div class="v bad"><span class="k">Blocks — needs a type change</span><span class="n" id="s-block">0</span><span class="d">cannot be described today</span></div>
+    <div class="v un"><span class="k">Unverified</span><span class="n" id="s-un">0</span><span class="d">no page states it</span></div>
+  </section>
+
+  <div class="controls rise" style="animation-delay:160ms">
+    <button class="chip" type="button" data-f="all" aria-pressed="true">All <span class="c" id="n-all">0</span></button>
+    <button class="chip" type="button" data-f="block" aria-pressed="false">Blockers <span class="c" id="n-block">0</span></button>
+    <button class="chip" type="button" data-f="un" aria-pressed="false">Unverified <span class="c" id="n-un">0</span></button>
+    <button class="chip" type="button" data-f="diff" aria-pressed="false">Differs <span class="c" id="n-diff">0</span></button>
+    <button class="chip" type="button" data-f="same" aria-pressed="false">Same <span class="c" id="n-same">0</span></button>
+  </div>
+
+  <div class="tblwrap rise" style="animation-delay:220ms">
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:160px">Fact</th>
+            <th>Dhan — implemented</th>
+            <th>Groww — implemented</th>
+            <th>Zerodha — documented</th>
+            <th style="width:150px">Reuse Dhan's path?</th>
+          </tr>
+        </thead>
+        <tbody id="body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <footer>
+    <span>DOCUMENTED = quoted from a vendor page named in docs/00-charter.md §4</span>
+    <span>UNVERIFIED = no page read states it — never "probably fine"</span>
+  </footer>
+</div>
+
+<script>
+  var G = [
+    { name: 'A · Transport and identity', rows: [
+      { f:'Protocol', d:'REST over HTTPS', g:'REST over HTTPS', z:'REST over HTTPS', v:'same',
+        n:'All three are brokers over HTTP. The archive feeds are the different kind.' },
+      { f:'Base URL', d:'vendor base + fixed path', g:'vendor base + fixed path',
+        z:'`https://api.kite.trade`', v:'same', n:'A plain base string; nothing exotic.' },
+      { f:'Bars endpoint', d:'ONE fixed path for spot and derivatives',
+        g:'fixed path, interval in a PARAMETER',
+        z:'`/instruments/historical/:instrument_token/:interval` — instrument AND interval are PATH SEGMENTS',
+        v:'block',
+        n:'`HttpSpec::bars_path` is a fixed string concatenated with base_url. plan §5 predicted exactly this: "A vendor whose instrument and granularity are path segments cannot be described."' },
+      { f:'Instrument identity', d:'`securityId` in the body', g:'symbol-based',
+        z:'numeric `instrument_token` from a SEPARATE instruments call — not a tradingsymbol',
+        v:'block',
+        n:'This repo joins on (exchange, symbol) and (exchange, ISIN). Neither addresses a Kite request. Needs a token map — a fourth limit plan §5 did not predict.' },
+      { f:'Auth scheme', d:'`AuthScheme::Raw` — one secret', g:'`AuthScheme` — one secret',
+        z:'`Authorization: token api_key:access_token` — a PREFIX plus a SECOND secret, and header `X-Kite-Version: 3`',
+        v:'block',
+        n:'`AuthScheme` is `Raw | Bearer`. plan §5: "A scheme carrying a prefix and a second secret cannot be described."' }
+    ]},
+    { name: 'B · What comes back', rows: [
+      { f:'Response shape', d:'object per bar', g:'object per bar',
+        z:'`{status,data:{candles:[[ts,o,h,l,c,volume(,oi)]]}}` — POSITIONAL arrays',
+        v:'diff', n:'A different decoder, but expressible — it is a parsing choice, not a type limit.' },
+      { f:'Timestamp', d:'epoch seconds, UTC', g:'ISO text, no zone',
+        z:'`2017-12-15T09:15:00+0530` — ISO CARRYING an offset', v:'block',
+        n:'`TimestampEncoding::IsoDateTimeText` documents itself as carrying no zone. plan §5: "A vendor returning +0530 cannot be described."' },
+      { f:'Prices', d:'decimal rupee text', g:'decimal rupee text', z:'decimal rupees (`1704.5`)',
+        v:'same', n:'Snapped to paisa once at the write boundary, half-up — CLAUDE.md §7.' },
+      { f:'Open interest', d:'present; i64::MIN is the null sentinel', g:'not carried',
+        z:'optional 7th element when `oi=1`', v:'diff',
+        n:'A flag on the request, and one more positional slot. Expressible.' }
+    ]},
+    { name: 'C · Rungs and windows', rows: [
+      { f:'Rungs this build asks for', d:'1min · 1day', g:'1min · 1day', z:'1min · 1day',
+        v:'same', n:'Operator narrowed Zerodha to two on 14 Aug 2026. Kite publishes eight; six stay unwired and refuse by name.' },
+      { f:'How the rung is named', d:'NO interval field at all — 5 request fields',
+        g:'an interval WORD in a parameter', z:'a path SEGMENT: `minute` or `day`',
+        v:'block', n:'Three vendors, three mechanisms. Only Zerodha puts it in the path.' },
+      { f:'Window cap, 1-minute', d:'90 days per request', g:'30/request carried; vendor table says 7 — UNRESOLVED',
+        z:'**UNVERIFIED** — the page states none', v:'un',
+        n:'The store’s one-month file boundary splits every request anyway, so a missing cap is bounded by ≤31 days regardless.' },
+      { f:'Window cap, daily', d:'**UNVERIFIED**', g:'**UNVERIFIED**', z:'**UNVERIFIED**',
+        v:'un', n:'No vendor states a day-level figure. All three are honest about it.' },
+      { f:'Window params', d:'`fromDate`/`toDate`', g:'from/to', z:'`from`/`to` as `yyyy-mm-dd hh:mm:ss`',
+        v:'diff', n:'A format string difference. Expressible.' },
+      { f:'`to` inclusivity', d:'NON-INCLUSIVE on daily; NOT STATED on intraday',
+        g:'not recorded', z:'**UNVERIFIED** — not stated', v:'un',
+        n:'Dhan’s asymmetry is already a recorded hazard. Zerodha’s is simply unknown.' }
+    ]},
+    { name: 'D · History depth', rows: [
+      { f:'Binding floor', d:'rolling 5 years — operator, 11 Aug 2026', g:'FIXED 2020-01-01 — operator, 12 Aug 2026 (D-0131)',
+        z:'rolling 10 years — operator, 11 & 14 Aug 2026', v:'same',
+        n:'All three are operator observations. `ClaimStanding::OperatorObservation` already models this.' },
+      { f:'Vendor’s own claim', d:'"back upto the date of its inception"', g:'1min "Last 3 months", 1day "Full history"',
+        z:'**NO PAGE STATES IT** — not even a contested figure', v:'un',
+        n:'Dhan and Groww each have a contested claim to carry beside the operator’s. Zerodha has none, so `contested: None`.' },
+      { f:'Expired F&O history', d:'no local-archive path, no HTTP transport → 503',
+        g:'same', z:'`continuous=1` returns DAY candles for expired contracts of a live token’s underlying (NFO/MCX futures)',
+        v:'diff', n:'A real capability neither other broker has. Not wired, and it is day-only.' }
+    ]},
+    { name: 'E · Rate limits and cost', rows: [
+      { f:'Rate limit', d:'5/sec, 100,000/day, no per-minute governor', g:'recorded in D-0023',
+        z:'**3 req/second** on historical candles', v:'diff',
+        n:'`pull::rate::Governor` already charges per request. A different number, not a different mechanism.' },
+      { f:'Rate refusal', d:'429', g:'429', z:'429', v:'same', n:'Same code, same AIMD decrease.' },
+      { f:'Backfill wall clock', d:'—', g:'—', z:'~5.9 h per rung at the cap',
+        v:'diff', n:'80 month-windows × ~800 instruments ÷ 3/sec. ARITHMETIC from a published limit, not a measurement.' }
+    ]},
+    { name: 'F · Errors, exceptions, token', rows: [
+      { f:'Session expiry', d:'token stale since 2026-07-25; repo never mints',
+        g:'refreshed daily', z:'`TokenException` + **403**', v:'diff',
+        n:'Same posture: CLAUDE.md §8 forbids minting. Correct here too.' },
+      { f:'⚠ What kills a session', d:'natural expiry', g:'natural expiry',
+        z:'logout, natural expiry, **OR the user logging into another Kite instance**',
+        v:'block',
+        n:'THE ROW TO READ TWICE. Opening kite.zerodha.com in a browser while a backfill runs kills that backfill. Same hazard shape as sharing a token with tickvault.' },
+      { f:'Named exceptions', d:'not enumerated in this repo', g:'not enumerated',
+        z:'9 named: TokenException · UserException · OrderException · InputException · MarginException · HoldingException · NetworkException · DataException · GeneralException',
+        v:'diff', n:'A switch on `error_type`. Zerodha is the best-documented of the three here.' },
+      { f:'HTTP codes', d:'not enumerated', g:'not enumerated',
+        z:'400 · 403 · 404 · 405 · 410 · 429 · 500 · 502 · 503 · 504', v:'diff',
+        n:'410 "gone permanently" is worth handling distinctly — it is not a retry.' },
+      { f:'Mid-run token expiry', d:'401 for every later request, NO re-read — certain to fire',
+        g:'same', z:'same, via 403', v:'block',
+        n:'plan §10 item 11: the only interruption CERTAIN to fire. Unfixed for all three, and Zerodha inherits it.' }
+    ]},
+    { name: 'G · Completeness — the operator’s main question', rows: [
+      { f:'"Precise filled data, every timeframe?"', d:'no vendor promise', g:'no vendor promise',
+        z:'**NO PAGE CLAIMS IT.** Nothing read states a candle exists for every session minute, nor what a missing session returns.',
+        v:'un',
+        n:'The honest answer is that Zerodha does not promise it — and §9.2 already establishes no vendor’s word can settle completeness. Only EXPECT/OBSERVE/DIFFER over the store does.' },
+      { f:'Trading calendar', d:'none in this build', g:'none', z:'none',
+        v:'un', n:'Without one, a weekend and a missing pull are indistinguishable. Blocks completeness for ALL feeds equally.' },
+      { f:'Per-instrument floor', d:'nowhere', g:'nowhere', z:'nowhere',
+        v:'un', n:'A scrip listed in 2024 has no bars in 2021 and nothing here knows that.' },
+      { f:'Gap detection', d:'no reconcile pass', g:'none', z:'none', v:'un',
+        n:'plan §10 item 19: "Census disagrees with the bar files → nothing notices."' }
+    ]}
+  ];
+
+  function frag(t){
+    var f=document.createDocumentFragment();
+    String(t).split('`').forEach(function(p,i){
+      if(i%2){var c=document.createElement('code');c.textContent=p;f.appendChild(c);}
+      else if(p){
+        p.split('**').forEach(function(q,j){
+          if(j%2){var b=document.createElement('b');b.textContent=q;f.appendChild(b);}
+          else if(q) f.appendChild(document.createTextNode(q));
+        });
+      }
+    });
+    return f;
+  }
+  function cell(cls,t){var td=document.createElement('td');if(cls)td.className=cls;
+    td.appendChild(frag(t));return td;}
+  function badge(v){
+    var m={same:['same','Reusable'],diff:['diff','Differs'],
+           block:['block','Blocks'],un:['un','Unverified']};
+    var b=document.createElement('span');b.className='badge '+m[v][0];
+    var d=document.createElement('i');d.className='dot';b.appendChild(d);
+    b.appendChild(document.createTextNode(m[v][1]));return b;
+  }
+
+  var body=document.getElementById('body'), all=[];
+  G.forEach(function(grp){
+    var h=document.createElement('tr');h.className='catrow';
+    var td=document.createElement('td');td.colSpan=5;td.textContent=grp.name;
+    h.appendChild(td);body.appendChild(h);
+    grp.rows.forEach(function(r){
+      var tr=document.createElement('tr');tr.dataset.v=r.v;
+      tr.appendChild(cell('fact',r.f));
+      tr.appendChild(cell('cell',r.d));
+      tr.appendChild(cell('cell',r.g));
+      tr.appendChild(cell('cell',r.z));
+      var last=document.createElement('td');
+      last.appendChild(badge(r.v));
+      var note=document.createElement('div');
+      note.style.cssText='font-size:12px;color:var(--dim);margin-top:6px';
+      note.appendChild(frag(r.n));
+      last.appendChild(note);
+      tr.appendChild(last);
+      body.appendChild(tr);all.push(tr);
+    });
+  });
+
+  function count(v){return all.filter(function(e){return e.dataset.v===v}).length}
+  var tot=all.length,same=count('same'),diff=count('diff'),
+      block=count('block'),un=count('un');
+  var still=window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function setN(id,v){
+    var el=document.getElementById(id);
+    if(still){el.textContent=String(v);return}
+    var t0=null;
+    requestAnimationFrame(function s(t){
+      if(t0===null)t0=t;
+      var p=Math.min(1,(t-t0)/900);
+      el.textContent=String(Math.round(v*(1-Math.pow(1-p,3))));
+      if(p<1)requestAnimationFrame(s);
+    });
+  }
+  setN('s-tot',tot);setN('s-same',same);setN('s-diff',diff);
+  setN('s-block',block);setN('s-un',un);
+  document.getElementById('n-all').textContent=String(tot);
+  document.getElementById('n-same').textContent=String(same);
+  document.getElementById('n-diff').textContent=String(diff);
+  document.getElementById('n-block').textContent=String(block);
+  document.getElementById('n-un').textContent=String(un);
+
+  var lg=document.getElementById('legend');
+  [['same','Dhan’s path works as is'],['diff','differs, but expressible today'],
+   ['block','needs a pull::vendor type change'],['un','no page states it']]
+   .forEach(function(p){
+    var w=document.createElement('span');
+    w.style.cssText='display:inline-flex;align-items:center;gap:6px';
+    w.appendChild(badge(p[0]));
+    w.appendChild(document.createTextNode(' — '+p[1]));
+    lg.appendChild(w);
+  });
+
+  var f='all';
+  function apply(){
+    all.forEach(function(e){e.classList.toggle('hide',f!=='all'&&e.dataset.v!==f)});
+    [].slice.call(document.querySelectorAll('.catrow')).forEach(function(c){
+      var any=false,el=c.nextElementSibling;
+      while(el&&!el.classList.contains('catrow')){
+        if(!el.classList.contains('hide'))any=true;el=el.nextElementSibling;}
+      c.classList.toggle('hide',!any);
+    });
+  }
+  document.querySelectorAll('.chip[data-f]').forEach(function(b){
+    b.addEventListener('click',function(){
+      f=b.dataset.f;
+      document.querySelectorAll('.chip[data-f]').forEach(function(o){
+        o.setAttribute('aria-pressed',String(o===b))});
+      apply();
+    });
+  });
+</script>

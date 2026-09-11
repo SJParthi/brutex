@@ -170,14 +170,21 @@ Consequences:
   cannot support; the reader falls back to the previous generation rather than
   refusing the whole file.
 
-`Commit::durable_through` is the byte offset step 3 must cover. This repository
-performs no I/O yet, so it states the offset rather than issuing the barrier.
+`Commit::durable_through` is the byte offset step 3 must cover. **It states the
+offset; `crates/store/src/file.rs` issues the barrier** — `sync_all` on the
+records before any slot that names them, and a second one after. This paragraph
+read "this repository performs no I/O yet, so it states the offset rather than
+issuing the barrier", which was true of the format crate alone and stopped being
+true of the repository when `BarFile` learned to write.
 
 **Exactly one writer per file.** Two writers reading the same generation
-produce the same slot, the same offset and the same record range. Nothing in
-the store crate can enforce that — an exclusive lock is I/O — so the writer
-takes one on the `.lock` sibling (§8) before step 1. This is a stated
-precondition, not a guarantee the format provides.
+produce the same slot, the same offset and the same record range. **The writer
+takes an advisory `try_lock` on the `.lock` sibling (§8) before step 1** and
+refuses loudly when it is held. The clause "nothing in the store crate can
+enforce that — an exclusive lock is I/O" stood in front of that sentence and
+contradicted it; the lock is real, and what it does *not* provide is
+cross-machine exclusion on a network filesystem, which is the honest limit and
+the one worth stating.
 
 ---
 
@@ -334,3 +341,1507 @@ append-only identifier, not a slot to be overwritten.
 No version-1 file can exist — version 1 never had a reader or a writer in this
 repository, only constants. The entry costs one comparison and removes the only
 way this build could misread one if that assumption is ever wrong.
+
+---
+
+## 11. The census file — `BRUTEXM`, versions 1 and 2
+
+Everything above is a **bar** file. The per-vendor census at
+`manifest/<vendor>.man` is a different format in the same store, and until
+D-0067 its only description was a module comment in `crates/pull/src/manifest.rs`
+— which made a Rust comment the authority for bytes on a disk. This section is
+the authority now.
+
+### 11.1 What is shared with the bar format, and what is not
+
+**Shared, because a reader must locate the header before it knows the version:**
+the two-slot header region, `slot_count × 16384`, 64 bytes of fields at the
+start of each slot, commit *g* in slot `g % 2`, and the highest valid generation
+wins. The 16384-byte spacing is the measured failure-unit argument of §2 and it
+is the same argument here.
+
+**Not shared:** the header's *fields* are counters, not a bar file's
+`symbol_id`/`timeframe_secs`; the magic is `BRUTEXM`, never `BRUTEXB`, and the
+family check is the first thing either decoder does; and the checksum domain is
+one contiguous run `0..60` rather than §2's discontiguous one, because this
+slot has no reserved field after its checksum.
+
+### 11.2 File layout
+
+```
+byte 0                 32768                                       EOF
+  ├──── header region ────┼─── entry 0 ──┼─── entry 1 ──┼── … ──────┤
+   2 slots × 16384 spacing    64 or 128      64 or 128
+```
+
+**Address of entry *i*: `32768 + i·stride`,** where `stride` comes from
+`pull::manifest::Layout`, selected by the file's own `format_version`. It is not
+a constant on the read path. 32768 divides by both strides, so an entry is
+64-byte aligned at either one and never straddles a cache line.
+
+### 11.3 One header slot — 64 bytes, both versions
+
+| Offset | Size | Field | Notes |
+|---|---|---|---|
+| 0 | 8 | `magic` | `b"BRUTEXM1"` or `b"BRUTEXM2"` — the last byte is the version |
+| 8 | 2 | `format_version` | `1` or `2`. **Selects the geometry.** |
+| 10 | 2 | `entry_stride` | `64` at version 1, `128` at version 2. Read it; never assume it, and check it against what the version declares. |
+| 16 | 8 | `generation` | which commit this slot holds. Higher wins. |
+| 24 | 8 | `n_valid` | the commit counter: entries readable |
+| 32 | 8 | `n_keys` | distinct `(instrument, timeframe, month)` keys among them |
+| 40 | 8 | `total_rows` | bars held across every distinct key |
+| 48 | 8 | `vendor` | NUL-padded text; a cross-check against the file name |
+| 54 | 6 | reserved | zero |
+| 60 | 4 | `crc` | CRC-32C over bytes `0..60`, one contiguous run |
+
+The slot layout is **identical across both versions**: only the magic, the
+version and the stride differ, which is why one decoder reads both and dispatch
+is a table lookup rather than a second parser.
+
+A slot whose magic and version field disagree is refused **by version**. There
+is no way to tell which of the two is the lie, and the version field is the
+thing that selects the geometry.
+
+### 11.4 Entry, version 1 — 64 bytes
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 24 | `symbol`, NUL-padded, canonical case |
+| 24 | 8 | `rows` — bars in that month's file |
+| 32 | 8 | `first_ts_micros` |
+| 40 | 8 | `last_ts_micros` |
+| 48 | 4 | `timeframe_secs` |
+| 52 | 2 | `year` |
+| 54 | 1 | `month` |
+| 55 | 1 | `exchange` code — NSE 1, BSE 2, append-only |
+| 56 | 1 | `segment` code — INDEX 1, CASH 2, FNO 3, append-only |
+| 57 | 3 | reserved, zero |
+| 60 | 4 | `crc` — CRC-32C over `0..60` |
+
+**Version 1 is not retired.** 43,422 entries across two vendors are on disk in
+this geometry and §3 rule 8 does not admit mutating them in place. It is read at
+its own stride and never written.
+
+### 11.5 Entry, version 2 — 128 bytes, two 64-byte halves
+
+Version 2 exists because `/store.json` must serve a month's percentage change
+without opening a bar file. It is **two** of the 64-byte checksummed units this
+format already has:
+
+```
+byte 0                        64                            128
+  ├──── a version-1 entry ─────┼──── the closes ─────────────┤
+       its own CRC at 60             its own CRC at 124
+```
+
+Bytes `0..64` are, byte for byte, a version-1 entry image. Bytes `64..128` are:
+
+| Offset | Size | Field | Notes |
+|---|---|---|---|
+| 64 | 8 | `first_close_paisa` | close of record `0`, or `i64::MIN` |
+| 72 | 8 | `last_close_paisa` | close of record `rows − 1`, or `i64::MIN` |
+| 80 | 44 | reserved | zero |
+| 124 | 4 | `crc` | CRC-32C over bytes `64..124` |
+
+Every one of the 128 bytes is covered by exactly one of the two checksums, so a
+flipped bit anywhere in the entry is detected — there is no window a corruption
+can land in and be called clean.
+
+**`i64::MIN` is the not-recorded sentinel, and zero means zero.** A close is a
+price in paisa, so `i64::MIN` is not a value any tick grid produces; this is the
+same convention §3 states for open interest, applied to a second field rather
+than a second mechanism that could drift out of step with the first. A month
+whose bars really closed at zero paisa records a zero and is told apart from a
+month whose closes nobody has read. Every version-1 entry reads back as
+not-recorded, because version 1 had nowhere to put a close and nothing ever did.
+
+**Both closes or neither.** They are read from record 0 and record `n_valid − 1`
+of one file in one operation, so half of a pair is a state no writer produces
+and it is refused rather than half-believed. A negative close that is not the
+sentinel is refused for the same reason: the sentinel must be one value, not a
+range.
+
+Reserved bytes are zero and stay zero. A future field takes reserved space in a
+**new version**, never by reinterpreting version 2 — §2's rule, unchanged.
+
+### 11.6 Old files stay readable, and the upgrade is a rewrite
+
+`pull::manifest::Layout` is the dispatch: `KNOWN` holds one row per version,
+`for_version` refuses an unknown version **by number**, and every geometric
+question is a method on the resolved row. Reading a version-1 region in 128-byte
+steps would decode every second entry as the tail of the one before it and
+return plausible integers, which is §9's "a wrong value that is well-formed"
+arriving through the front door.
+
+This build **writes** version 2 only. A census loaded from a version-1 file is
+published at version 2, and because the two strides disagree from the first
+entry onward, the publish is a whole-file rewrite rather than a positional
+append — the same path a repair and a first write already take. It is checked
+after the "nothing moved" gate, so a run that records nothing leaves a version-1
+file byte for byte as it was, and the conversion is paid once by the first run
+that has something to say.
+
+The entries carried across say **not recorded**, because that is the truth about
+them: nothing ever read a close for those months. They fill in as they are
+re-ingested — the census's equality probe covers the closes, so a month whose
+rows have not moved but whose closes have just been read for the first time is a
+change and is recorded, and once recorded it compares equal and the file stops
+moving.
+
+---
+
+## 12. Result-detail receipt — `results/detail-sets.bin`
+
+This sidecar is the explicit cardinality manifest for the two variable-length
+children of one run. `runs.bin` holds aggregate combinations and the chosen
+exit-grid trade count; neither is the row count of `frontier.bin` or
+`chosen-trades.bin`. The receipt therefore stores both exact child counts,
+including zero, rather than inferring completeness from a similarly named
+aggregate. It also carries the selected direction and exact trade policy,
+because the frequency-run identity's direction term is `Undirected` and a
+zero-trade result has no row from which either fact could be recovered.
+
+All integers are unsigned little-endian. The file is append-only and fixed
+stride. Version 2 is the only version this build reads or writes. Version 1's
+56-byte receipts named only two counts and the level-less trade child; they are
+not widened into the policy below.
+
+### 12.1 Header — 16 bytes
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 8 | ASCII magic `BRUTEXRC` |
+| 8 | 4 | version `2`, `u32` little-endian |
+| 12 | 4 | reserved, zero; a non-zero value is refused |
+
+The reader requires the exact magic, version, reserved value, and a total file
+length of `16 + n·64`. Magic and version are inspected before version-2
+geometry, so an intact `16 + n·56` version-1 file receives an explicit legacy
+version refusal instead of a misleading ragged-length error. No stride is
+guessed and no tail is padded or truncated.
+
+### 12.2 Receipt — 64 bytes
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 32 | nine-term run identity bytes |
+| 32 | 8 | exact `frontier.bin` row count for this identity |
+| 40 | 8 | exact `chosen-trades.bin` row count for this identity |
+| 48 | 1 | selected direction: `1=long`, `2=short`; every other value refuses |
+| 49 | 1 | trade policy: `1=chosen-grid-v1`; every other value refuses |
+| 50 | 6 | reserved, all zero; a non-zero byte refuses |
+| 56 | 8 | first eight bytes of BLAKE3 over bytes `0..56` |
+
+The seal covers every payload byte. A failed seal refuses the receipt file for
+result-set visibility; it is never skipped. Two receipts for one identity are
+also an ambiguous manifest and are refused at open. The normal append door
+takes an exclusive file lock, absorbs rows appended since its handle opened,
+and either appends one new sealed stride or byte-verifies the existing receipt.
+The same identity with different counts, direction or policy is nondeterminism
+and is not rewritten.
+A failed partial `write_all` is rolled back only to the byte offset that call
+measured before it wrote; a sync failure leaves the complete sealed receipt for
+an exact rerun to verify and re-sync.
+
+### 12.3 Commit order and read visibility
+
+One cooperating writer holds `results/write.lock` across the entire sequence:
+
+```
+1. append + sync the run's frontier block (or prove an explicit zero)
+2. append + sync the run's exact chosen-grid trade block (or prove an explicit zero)
+3. append/verify + sync this receipt with both exact counts
+4. sync the `results/` directory so all child names are durable
+5. append + sync the `runs.bin` parent -- the public commit marker
+6. sync the `results/` directory for the marker's name
+```
+
+A read-only detail lookup exposes rows only when the identity exists in
+`runs.bin`, exists in this receipt file, and the indexed detail-block count
+equals the corresponding receipt count. Zero is therefore a proved empty child,
+not a missing file guessed empty. If an entire child file is absent, an explicit
+zero count is likewise the only committed empty answer; a positive receipt count
+makes the missing file loud corruption. A seal failure, foreign row, content
+shortfall or count mismatch refuses the whole child; no valid prefix is returned
+as the complete answer. A prepared child or receipt without the final ledger
+parent is private and can be reused only by an exact rerun that derives and
+compares the same bytes. A ledger row with no receipt predates this protocol or
+may be a legacy ledger-first partial commit; the two states are indistinguishable
+from the old bytes, so both are named `unverifiable` and refused rather than
+guessed.
+
+### 12.4 Chosen trades — `results/chosen-trades.bin`, version 1
+
+The current trade child is a new path and magic rather than an in-place change
+to `results/trades.bin` version 2. The legacy file records a level-less horizon
+walk; relabelling those rows as the selected stop/target/trailing variant would
+change their meaning without changing their bytes. If only the legacy path is
+present, the reader names version 2 and requires an exact rerun. It never opens
+those bytes through this decoder.
+
+The 16-byte header is ASCII `BRUTEXCT` at bytes `0..8`, little-endian version
+`1` at `8..12`, and four reserved zero bytes at `12..16`. A non-zero reserve,
+unknown magic/version, or length other than `16 + n·136` refuses.
+
+Each sealed row is 136 bytes:
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 32 | nine-term frequency-run identity (its direction term is `Undirected`) |
+| 32 | 4 | zero-based contiguous sequence, `u32` |
+| 36 | 1 | selected direction: `1=long`, `2=short` |
+| 37 | 3 | reserved, all zero |
+| 40 | 8 | signal bar index, `u64` |
+| 48 | 8 | entry bar index, `u64` |
+| 56 | 8 | exit bar index, `u64` |
+| 64 | 8 | optimistic realised P&L, paisa per unit, `i64` |
+| 72 | 8 | pessimistic realised P&L, paisa per unit, `i64` |
+| 80 | 8 | entry timestamp, UTC microseconds, `i64` |
+| 88 | 8 | exit timestamp, UTC microseconds, `i64` |
+| 96 | 8 | maximum adverse excursion, ppm, `i64` |
+| 104 | 8 | maximum adverse excursion, paisa per unit, `i64` |
+| 112 | 8 | maximum favourable excursion, ppm, `i64` |
+| 120 | 8 | maximum favourable excursion, paisa per unit, `i64` |
+| 128 | 8 | first eight bytes of BLAKE3 over bytes `0..128` |
+
+Every row in one appended block must have the same identity and direction and
+sequences exactly `0..n-1`. A public read additionally requires the receipt's
+direction and `chosen-grid-v1` policy and refuses the complete block if any row
+disagrees. The selected cell is replayed before these bytes are prepared; its
+complete `Cell` and an independent row fold of count, optimistic/pessimistic
+sums, worst trade and maximum drawdown must all reconcile. The file stores no
+entry/exit price and no exit-cause enum, so neither may be claimed by the API or
+browser. Their absence does not weaken the bar indices, timestamps, direction,
+realised fills or MAE/MFE that the row does carry.
+
+---
+
+## 13. Ranked frontier — `results/frontier.bin`, version 4
+
+The ranked frontier is append-only and fixed-stride. Its 16-byte header is
+`BRUTEXFR` at bytes `0..8`, little-endian version `4` at `8..12`, and four
+reserved zero bytes at `12..16`. A non-zero reserved header byte is an unknown
+schema and is refused; the reader does not wait for it to affect a later field
+before noticing it.
+
+Each row is 272 bytes. All integer fields are little-endian:
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 32 | nine-term run identity |
+| 32 | 2 | one-based rank, `u16` |
+| 34 | 48 | six condition-mask `u64` words |
+| 82 | 8 | edge hits |
+| 90 | 8 | forward observations |
+| 98 | 8 | mean milli-paisa, `i64` |
+| 106 | 8 | t-statistic thousandths, `i64` |
+| 114 | 8 | payoff basis points, `i64` |
+| 122 | 8 | edge wins |
+| 130 | 8 | chosen-cell trades |
+| 138 | 8 | chosen-cell wins |
+| 146 | 8 | pessimistic total paisa, `i64` |
+| 154 | 8 | worst trade paisa, `i64` |
+| 162 | 8 | maximum drawdown paisa, `i64` |
+| 170 | 8 | smallest winning trade paisa, `i64` |
+| 178 | 8 | gross winning paisa, `i64` |
+| 186 | 8 | gross losing paisa, `i64` |
+| 194 | 1 | direction: `0=long`, `1=short`; every other byte is refused |
+| 195 | 5 | reserved, all zero; any non-zero byte is refused |
+| 200 | 8 | `max_mae_ppm`, `i64` |
+| 208 | 8 | `min_rr_bp`, `i64` |
+| 216 | 8 | `min_win_rate_bp`, `i64` |
+| 224 | 8 | `min_assurance_bp`, `i64` |
+| 232 | 8 | `min_weakest_bp`, `i64` |
+| 240 | 8 | `min_ret_over_dd_bp`, `i64` |
+| 248 | 8 | `min_trades`, `u64` |
+| 256 | 8 | `top`, `u64` on disk and saturated to the target `usize` on read |
+| 264 | 8 | first eight BLAKE3 bytes over `0..264` |
+
+The seal detects accidental byte damage; it does not assign meaning. A sealed
+row with an unknown direction or non-zero reserve is therefore still refused.
+Its sealed identity remains usable only as the block-index key, so an interrupted
+exact rerun finds the invalid prepared block and refuses instead of appending a
+second block around it. No invalid row reaches a public frontier response.
+
+---
+
+## 14. Calendar-authoritative population completion — version 4
+
+`results/population-completions-v4.bin` is a new append-only authority file. It
+does not reinterpret the V2 or V3 completion paths. The 16-byte header is ASCII
+`BRUTXPV4`, little-endian version `4`, and a zero `u32` reserve. The total length
+must be `16 + n·864`; an unknown header, ragged tail, failed seal or duplicate
+population identity refuses the file.
+
+Each 864-byte record is the unchanged 760-byte V3 payload, followed by this
+96-byte coverage record and an eight-byte BLAKE3 seal over the complete
+856-byte payload:
+
+| Payload offset | Size | Field |
+|---:|---:|---|
+| 760 | 4 | coverage schema version `1` |
+| 764 | 4 | exact signal rung in seconds |
+| 768 | 4 | execution rung, exactly `60` |
+| 772 | 4 | reserved, zero |
+| 776 | 8 | first requested IST civil-day identity, inclusive |
+| 784 | 8 | last requested IST civil-day identity, inclusive |
+| 792 | 32 | complete signal-rung calendar-receipt digest |
+| 824 | 32 | complete one-minute calendar-receipt digest |
+| 856 | 8 | first eight BLAKE3 bytes over payload `0..856` |
+
+Both calendar digests come only from typed complete V2 calendar receipts. Their
+day bounds must be equal and must cover the full requested civil-month span
+embedded in V3; observed endpoints cannot shrink it. The signal rung must equal
+the population rung and the execution rung must be one minute. The durable
+sequence is population rows, V2 audit completion, V3 span audit completion,
+then V4 calendar authority. A crash may therefore leave an auditable prefix but
+cannot silently bless missing coverage.
+
+## 15. Admission decision sidecars — version 1
+
+Admission is stored beside population rows so no historical row or selection
+byte changes meaning. Both files use the same `results/population-write.lock`
+as the population ledger.
+
+### 15.1 Decisions — `results/population-admission-v1.bin`
+
+The 16-byte header is `BRUTXAD1`, version `1`, and four reserved zero bytes. The
+length is exactly `16 + n·544`. Each record contains a 512-byte payload and a
+full 32-byte BLAKE3 payload seal:
+
+| Payload offset | Size | Field |
+|---:|---:|---|
+| 0 | 32 | population identity |
+| 32 | 8 | zero-based population-row sequence |
+| 40 | 32 | exact strategy digest |
+| 72 | 32 | domain-separated digest of the canonical 304-byte population-row payload |
+| 104 | 352 | canonical `AdmissionEvidenceV1` bytes |
+| 456 | 45 | canonical `AdmissionVerdictV1` bytes |
+| 501 | 11 | reserved, all zero |
+| 512 | 32 | BLAKE3 over payload `0..512` |
+
+The row-payload digest domain is
+`brutex-population-row-payload-v1\0`. The population module owns that digest;
+the admission module does not duplicate the row codec. Decision records for one
+population are contiguous and sequences are exactly `0..n-1`. A decision block
+without its completion is a hidden prepared orphan, never ranking authority.
+
+### 15.2 Receipt last — `results/population-admission-completions-v1.bin`
+
+The 16-byte header is `BRUTXAC1`, version `1`, and four reserved zero bytes. The
+length is exactly `16 + n·480`. Each record contains a 448-byte payload and a
+full 32-byte BLAKE3 payload seal:
+
+| Payload offset | Size | Field |
+|---:|---:|---|
+| 0 | 32 | population identity |
+| 32 | 32 | exact Population V4 completion digest |
+| 64 | 8 | decision count |
+| 72 | 8 | admitted count |
+| 80 | 8 | rejected count |
+| 88 | 8 | unmeasured count |
+| 96 | 8 | refused count |
+| 104 | 32 | ordered decision-record digest |
+| 136 | 310 | canonical `AdmissionPolicyV1` bytes |
+| 446 | 2 | reserved, zero |
+| 448 | 32 | BLAKE3 over payload `0..448` |
+
+The four terminal counts must sum to the decision count. Reopen decodes the
+canonical policy and every evidence/verdict pair, reevaluates the policy, and
+requires byte-identical recomputed verdicts before indexing the completion.
+Commit syncs decisions first and the receipt last; exact reruns byte-verify and
+reuse, while a different same-population block refuses without replacement.
+
+V1 has no genuine CSCV/PBO procedure identity or complete split-family
+receipt. Its three PBO-named observation slots therefore cannot contain a
+measured value. Construction and reopen now refuse any such record with the
+exact field and `UnsupportedMeasuredPboV1`; historical `Unmeasured` and
+`Refused` encodings remain readable. Consequently a publicly constructible V1
+record cannot produce `Admitted`: genuine measured PBO and an admissible
+success path require a successor evidence version, not reinterpretation of
+these bytes. This is a semantic refusal with no layout, stride, tag or version
+change.
+
+Open and reconciliation are linear in stored records. An indexed completion
+probe is average O(1), one decision is a fixed seek/read, and a bounded page is
+O(requested rows); none is an end-to-end latency claim.
+
+## 16. Admission-authoritative global selection — version 3
+
+`results/global-selections-v3.bin` is a new append-only ledger. It does not
+read or reinterpret either earlier selection path. Its 40-byte header is:
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 8 | ASCII magic `BRUTXSL3` |
+| 8 | 4 | version `3` |
+| 12 | 4 | header length, exactly `40` |
+| 16 | 4 | record stride, exactly `3112` |
+| 20 | 4 | requested Top-N, exactly `25` |
+| 24 | 8 | ranking score scale, exactly the runner V1 scale |
+| 32 | 8 | reserved, zero |
+
+The total file length is exactly `40 + n·3112`. Each record is a 3,080-byte
+payload followed by a full 32-byte BLAKE3 payload seal:
+
+| Payload offset | Size | Field |
+|---:|---:|---|
+| 0 | 32 | selection identity |
+| 32 | 4 | exact signal rung in seconds |
+| 36 | 4 | requested Top-N, exactly `25` |
+| 40 | 144 | NIFTY Population V4/admission reference |
+| 184 | 144 | BANKNIFTY Population V4/admission reference |
+| 328 | 32 | considered, admitted, refused and unmeasured counts, four `u64`s |
+| 360 | 32 | exact ordered population-proof digest |
+| 392 | 32 | ranking-policy digest |
+| 424 | 440 | canonical shared-cohort V2 identity |
+| 864 | 4 | selected row count, `0..=25` |
+| 868 | 4 | reserved, zero |
+| 872 | 2200 | 25 fixed 88-byte selected-entry slots; unused slots are all zero |
+| 3072 | 8 | reserved, zero |
+| 3080 | 32 | BLAKE3 over payload `0..3080` |
+
+Each 144-byte population reference stores, in canonical family order, a
+one-byte family tag plus seven zero reserve bytes, population identity, row
+count, ordered-row digest, exact Population V4 completion digest and exact
+admission-completion digest. Construction holds immutable join snapshots and
+streams both joined populations three times: proof/extrema, verified bounded
+Top-25, then exact selected-row resolution. Admission is derived only from the
+recomputed sidecar verdict; the legacy summary in a population row is checked
+for agreement but never authorizes ranking. Top 10 is the exact prefix of the
+same Top 25.
+
+The identity is
+`BLAKE3("brutex-global-selection-id-v3\0" || payload[32..3080])`.
+Open refuses a caller bound of zero, a file above that bound, unknown or legacy
+magic, noncanonical header fields, ragged records, bad seals, duplicate
+identities, invalid reserves or a content-derived identity mismatch. Latest
+lookup is keyed only by the exact `(shared-cohort digest, signal rung)` and is
+reconstructed in append order. Version 3 names admitted winners; it deliberately
+does not invent a replay horizon or decode opaque parameter digests. A separate
+append-only execution capability is required before any selected row can become
+global replay authority.
+
+## 17. Reconstructible execution capabilities — version 1
+
+Four append-only files share `results/population-write.lock`. Each has the same
+24-byte header: eight-byte file-specific magic, `u32` version `1`, `u32` header
+width `24`, `u32` fixed stride, then four reserved zero bytes. Every record is
+its fixed payload followed by a full 32-byte BLAKE3 seal of that payload.
+
+| Path | Magic | Payload | Stride |
+|---|---:|---:|---:|
+| `results/execution-parameters-v1.bin` | `BRUTXEP1` | 608 | 640 |
+| `results/execution-percentiles-v1.bin` | `BRUTXEG1` | 96 | 128 |
+| `results/execution-capabilities-v1.bin` | `BRUTXEC1` | 288 | 320 |
+| `results/execution-capability-completions-v1.bin` | `BRUTXEF1` | 384 | 416 |
+
+The 608-byte parameter payload is:
+
+| Payload offset | Size | Field |
+|---:|---:|---|
+| 0 | 192 | parameter, population, Population V4, policy, expected-resolution and training digests; six 32-byte values |
+| 192 | 155 | exact evaluation-spec fingerprint |
+| 347 | 9 | direction, family, execution/range/selector/forced-stop, next-minute-entry and forced-exit tags; one reserved zero byte |
+| 356 | 24 | signal rung, horizon, execution seconds and stop/target/trail atom counts; six `u32`s |
+| 380 | 2 | entry delay, exactly one minute |
+| 382 | 2 | forced-exit IST minute, exactly `910` (15:10) |
+| 384 | 40 | four runner parameters and maximum levels per axis; five `u64`s |
+| 424 | 16 | minimum and maximum reward/risk hundredths; two `i64`s |
+| 440 | 64 | ratio-pair/cell bounds, forced-stop ppm, ambiguity/gap bounds, training count and training endpoints |
+| 504 | 96 | ordered-percentile, cost-model and exact-execution-law digests |
+| 600 | 8 | reserved, zero |
+| 608 | 32 | BLAKE3 seal over payload `0..608` |
+
+Dynamic rung arrays are not truncated into the scalar record. Each 96-byte
+percentile payload stores parameter id `0..32`, population id `32..64`, axis
+tag at `64`, three reserved zero bytes, ordinal `68..72`, reduced numerator
+`72..76`, denominator `76..80`, and 16 reserved zero bytes. Its seal occupies
+`96..128`. Canonical order is long then short, and within each side stop then
+target then trail with contiguous zero-based ordinals.
+
+The 288-byte per-row capability payload is:
+
+| Payload offset | Size | Field |
+|---:|---:|---|
+| 0 | 256 | capability, parameter, population, Population V4, row-payload, strategy, training-run and selected-exit digests |
+| 256 | 8 | exact population-row sequence |
+| 264 | 4 | signal rung in seconds |
+| 268 | 1 | direction tag |
+| 269 | 1 | instrument-family tag |
+| 270 | 18 | reserved, zero |
+| 288 | 32 | BLAKE3 seal over payload `0..288` |
+
+The 384-byte completion payload is:
+
+| Payload offset | Size | Field |
+|---:|---:|---|
+| 0 | 160 | authority, population, Population V4, long-parameter and short-parameter digests |
+| 160 | 72 | first/count pairs for parameter, percentile and capability blocks, then row/long/short counts; nine `u64`s |
+| 232 | 128 | ordered parameter, percentile, capability and exact-execution-law digests |
+| 360 | 24 | reserved, zero |
+| 384 | 32 | BLAKE3 seal over payload `0..384` |
+
+The completion is synced last. Its semantic authority excludes physical block
+offsets so a valid orphan tail left by a crash cannot re-key an exact retry.
+Reopen validates every referenced block, order digest, side count and exact
+Population V4 binding before indexing it. This format makes an execution
+authority reconstructible; it does not prove that a production caller has
+rebuilt the selected exit from real stored training/OOS bytes.
+
+## 18. Global single-position replay publication — version 1
+
+Four append-only files share `results/global-replay-write.lock` and use the
+same 24-byte header and payload-plus-32-byte-seal convention as §17.
+
+| Path | Magic | Payload | Stride |
+|---|---:|---:|---:|
+| `results/global-replay-streams-v1.bin` | `BRUTXGS1` | 368 | 400 |
+| `results/global-replay-decisions-v1.bin` | `BRUTXGD1` | 208 | 240 |
+| `results/global-replay-trades-v1.bin` | `BRUTXGT1` | 320 | 352 |
+| `results/global-replay-completions-v1.bin` | `BRUTXGC1` | 1,216 | 1,248 |
+
+One 368-byte stream payload stores replay id `0..32`, stream ordinal/rank/rung
+`32..40`, family/direction plus six reserved bytes `40..48`, selection and
+population identities plus source row sequence `48..120`, seven 32-byte
+strategy/execution/training/selection/OOS/universe identities `120..344`,
+candidate and pricing-refused counts `344..360`, and eight reserved zero bytes.
+The manifest requires exactly `8 × 25 = 200` canonical streams.
+
+One 208-byte decision payload stores replay id and sequence `0..40`,
+stream/rank/rung `40..48`, family/direction/disposition/path and four reserved
+bytes `48..56`, strategy and candidate digests `56..120`, four signal/entry/
+occupancy/disposition timestamps `120..152`, candidate ordinal `152..160`, the
+simultaneously admitted strategy digest `160..192`, and 16 reserved zero bytes.
+
+One 320-byte admitted-money payload stores replay id and decision/stream/rank/
+rung/family/direction `0..50`, six reserved zero bytes, strategy digest
+`56..88`, the exact 88-byte `TradeRow` at `88..176`, exact-or-absent 64-byte
+India VIX stamps for entry and exit at `176..304`, then one `u64` each for
+ambiguous-bar and gap-fill counts. An absent VIX stamp is tag zero followed by
+63 zero bytes; an exact stamp is tag one, seven zero bytes and all seven stored
+OHLCV/OI `i64` fields. VIX changes the publication identity but not selection,
+P&L or the execution-only replay identity.
+
+The 1,216-byte receipt-last completion payload is:
+
+| Payload offset | Size | Field |
+|---:|---:|---|
+| 0 | 128 | publication, replay, manifest and common-cohort digests |
+| 128 | 256 | eight canonical Selection V3 identities |
+| 384 | 512 | sixteen execution-authority identities in rung then family order |
+| 896 | 112 | stream/decision/trade first/count pairs, six scheduler counters and two pricing-refusal counts; fourteen `u64`s |
+| 1008 | 160 | ordered stream/decision/trade, execution-law and VIX-policy digests |
+| 1168 | 48 | reserved, zero |
+| 1216 | 32 | BLAKE3 seal over payload `0..1216` |
+
+Reopen replays and reconciles the committed scheduler decisions before it
+indexes a receipt; valid unreferenced tails remain visible crash evidence but
+not authority. The fixed files and replay checker are implemented. One direct
+public-preparation test now supplies eight selections, sixteen execution
+authorities and 200 exact witnesses, reaches the scheduler, and refuses a
+missing or foreign authority. Its bars, selections, authorities and VIX month
+are controlled fixtures, however; no production stored-run caller or real
+Zerodha sweep has crossed this format.
+
+## 19. Stored-data completeness authority — version 1
+
+`results/stored-data-completeness-v1.bin` is one append-only receipt ledger.
+It is never inferred from Population V4 alone: preparation recomputes exact
+signal, complete one-minute context, evaluated execution and daily-reference
+identities, and only a durably appended record can reopen as authority.
+
+The sealed 64-byte header is:
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 16 | ASCII magic `BTX-DATA-COMP-V1` |
+| 16 | 4 | little-endian format version, `1` |
+| 20 | 4 | little-endian record stride, `676` |
+| 24 | 8 | reserved, zero |
+| 32 | 32 | BLAKE3 seal over bytes `0..32` |
+
+Every receipt is a 644-byte payload followed by a 32-byte BLAKE3 seal over that
+payload, for a 676-byte fixed stride:
+
+| Payload offset | Size | Field |
+|---:|---:|---|
+| 0 | 4 | receipt version, `1` |
+| 4 | 4 | reserved, zero |
+| 8 | 32 | Population V4 identity |
+| 40 | 32 | Population V4 completion content digest |
+| 72 | 1 | instrument family: NIFTY `1`, BANKNIFTY `2` |
+| 73 | 3 | reserved, zero |
+| 76 | 4 | signal rung seconds |
+| 80 | 20 | canonical requested-span identity |
+| 100 | 224 | four 56-byte stream facts: signal, complete minute context, evaluated execution and daily reference; each stores count, first timestamp, last timestamp and ordered data digest |
+| 324 | 8 | eligibility count; must equal daily count |
+| 332 | 32 | ordered eligibility-byte digest |
+| 364 | 224 | data, feed, source-commit, calendar-policy, daily-reference-policy, signal-calendar-receipt and execution-calendar-receipt digests |
+| 588 | 12 | daily schema, eligibility policy and gap-overlay policy, three `u32`s |
+| 600 | 2 | daily and minute integrity-evidence tags; version 1 accepts only explicit unverified tag `0` |
+| 602 | 2 | reserved, zero |
+| 604 | 8 | excluded IST-day count |
+| 612 | 32 | ordered excluded IST-day digest |
+| 644 | 32 | BLAKE3 seal over payload `0..644` |
+
+Open validates the complete header, exact whole-record tail, every record seal
+and semantic field, unique population identities and a caller-provided receipt
+ceiling before indexing. A writable handle holds an exclusive file lock; a
+read-only handle holds a shared lock. Before authority lookup or append, the
+handle rehashes the full file and refuses any length or same-length generation
+change. An exact retry reuses the existing receipt; different bytes for an
+existing population refuse. Legacy files have no promotion path. D-0458 and
+DC-01 define the authority boundary; §142 records the nonconstant open and
+preparation costs.
+
+## 20. Selection-V4/Execution-V2 global replay authority — version 2
+
+Five append-only files share `results/global-replay-write-v2.lock`. They do not
+open or reinterpret the V1 files in §18. Every file starts with the same
+24-byte envelope: eight-byte magic, little-endian format version `2`, header
+width `24`, record stride, then four reserved zero bytes.
+
+| Path | Magic | Payload | Stride |
+|---|---:|---:|---:|
+| `results/global-replay-authority-manifests-v2.bin` | `BRUX2GMF` | 3,536 | 3,568 |
+| `results/global-replay-streams-v2.bin` | `BRUX2STR` | 400 | 432 |
+| `results/global-replay-candidates-v2.bin` | `BRUX2CAN` | 104 | 136 |
+| `results/global-replay-decisions-v2.bin` | `BRUX2DEC` | 208 | 240 |
+| `results/global-replay-completions-v2.bin` | `BRUX2COM` | 384 | 416 |
+
+Every payload is followed by a 32-byte BLAKE3 seal over the complete payload.
+The manifest payload also carries its own semantic envelope: inner magic
+`BRUTXGM2`, semantic version `2` and payload width `3,536` at `0..16`.
+Manifest id and common-cohort digest occupy `16..80`; eight canonical
+Selection V4 ids occupy `80..336`. Sixteen population ids, Population V4
+completion digests, admission completion digests and Execution V2 completion
+ids occupy four 512-byte arrays at `336..2,384`. Thirty-two long/short dynamic
+parameter ids occupy `2,384..3,408`; sixteen row counts occupy
+`3,408..3,536`.
+
+One 400-byte stream header stores stream id `0..32`; ordinal, one-based rank
+and rung `32..40`; family/direction plus six reserved zero bytes `40..48`;
+selection id, population id and source row sequence `48..120`; then eight
+32-byte strategy, Execution V2 completion, row-disposition, fresh capability,
+training-run, selected-exit, OOS-run and candidate-universe digests
+`120..376`. Pricing-refused count, absolute candidate first and candidate count
+are the three `u64`s at `376..400`.
+
+One 104-byte candidate payload stores candidate digest `0..32`, stream id
+`32..64`, stream-local ordinal `64..72`, signal/entry/inclusive-occupancy
+timestamps `72..96`, the path tag at `96`, and seven reserved zero bytes. Path
+tags distinguish priceable, block-only, crossing-refused and both-refused
+occupancy; none contains or implies a money row.
+
+One 208-byte decision payload stores decision and replay ids `0..64`, global
+sequence `64..72`, stream ordinal plus six reserved zero bytes `72..80`,
+candidate ordinal/digest `80..120`, entry timestamp and strategy digest
+`120..160`, disposition/path plus six reserved zero bytes `160..168`, then the
+inclusive occupancy timestamp and simultaneous-winner digest `168..208`.
+Admitted and prior-occupancy decisions require a zero winner digest;
+same-minute blocks require `i64::MIN` in the occupancy slot and an exact
+nonzero winner digest.
+
+The receipt-last 384-byte completion payload is:
+
+| Payload offset | Size | Field |
+|---:|---:|---|
+| 0 | 256 | completion, replay, manifest, ordered-stream, ordered-candidate, ordered-decision, exact-execution-law and authority-scope digests |
+| 256 | 64 | manifest/stream/candidate/decision absolute first/count pairs; eight `u64`s |
+| 320 | 48 | offered, admitted, occupied-blocked, simultaneous-blocked, unreachable and refused counters |
+| 368 | 16 | pricing-refused candidates and admitted pricing-refused candidates |
+| 384 | 32 | BLAKE3 seal over payload `0..384` |
+
+Manifest, candidates, stream headers and decisions are appended and synced
+before the completion is appended and synced last. Reopen checks every whole
+record and seal, including unreferenced records; completion ranges may skip a
+valid orphan but may never overlap or run backwards. It reconstructs exactly
+200 canonical streams, requires their candidate subranges to partition the
+receipt range, and re-runs the global scheduler before indexing. Exact replay
+reuse is idempotent; corruption, sealed reordering, duplicate replay or
+completion identity and same-length post-open changes refuse.
+
+The authority-scope digest is deliberately the versioned
+`execution-only-no-money-no-vix` domain. Version 2 contains no admitted
+`TradeRow` and no exact-or-absent India VIX stamp, so it makes no claim about
+either authority and never borrows the V1 trade file. D-0459 and GPR-02 define
+this boundary; limits §143 records its nonconstant preparation/open costs.
+
+## 21. Complete Population V4 execution dispositions — version 2
+
+Four append-only files share the existing `results/population-write.lock` with
+Population V4 and admission. They never promote or reinterpret the V1
+execution-capability files. Every file starts with the same 24-byte envelope:
+eight-byte magic, little-endian format version `2`, header width `24`, record
+stride, then four reserved zero bytes.
+
+| Path | Magic | Payload | Stride |
+|---|---:|---:|---:|
+| `results/execution-disposition-parameters-v2.bin` | `BRUX2PR1` | 608 | 640 |
+| `results/execution-disposition-percentiles-v2.bin` | `BRUX2PC1` | 96 | 128 |
+| `results/execution-row-dispositions-v2.bin` | `BRUTXED2` | 480 | 512 |
+| `results/execution-capability-completions-v2.bin` | `BRUTXEF2` | 512 | 544 |
+
+The first two files reuse the exact sealed V1 scalar-parameter and percentile
+record codecs. One 480-byte row payload stores thirteen 32-byte digests at
+`0..416`: disposition, population, Population V4 completion, admission
+completion, population-row payload, strategy, sparse capability, dynamic
+parameter, runner disposition, training resolution, training run, complete
+grid context and condition column. Row sequence and refusal bits occupy
+`416..432`; admission and execution tags occupy `432..434`; the five canonical
+exit-coordinate fields occupy `434..474`; six reserved zero bytes occupy
+`474..480`. A 32-byte BLAKE3 seal follows. The capability digest is nonzero
+only for `Authorized`; refusal bits are exact, known and nonempty only for
+`PolicyRefused`.
+
+The receipt-last 512-byte completion payload is:
+
+| Payload offset | Size | Field |
+|---:|---:|---|
+| 0 | 320 | completion, population, Population V4, admission, long/short parameter, ordered-parameter, ordered-percentile, ordered-disposition and execution-law digests |
+| 320 | 72 | parameter/percentile/disposition absolute first/count pairs, row count, authorized count and policy-refused count; nine `u64`s |
+| 392 | 64 | exact 4×2 matrix, row-major `Admitted`, `Rejected`, `Unmeasured`, `Refused` by `Authorized`, `PolicyRefused` |
+| 456 | 56 | reserved, zero |
+| 512 | 32 | BLAKE3 seal over payload `0..512` |
+
+Parameters, percentiles and every terminal row are appended and synced before
+the completion is appended and synced last. The semantic completion identity
+excludes physical first offsets, so a valid crash orphan remains evidence but
+does not re-key an exact retry. Reopen validates every record and reconstructs
+the parameter blocks, exact row order, row count, sparse-capability/refusal
+partition, admission marginals, 4×2 matrix and ordered digests before indexing.
+Missing rows, foreign authority, torn or corrupt records, a semantically
+resealed matrix redistribution and same-length post-open mutation all refuse.
+Pages are limited to 256 rows. Preparation and reopen are O(rows); only an
+exact lookup on an already validated unchanged handle is average O(1).
+D-0463, ED-01 and limits §144 define the tested boundary.
+
+## 22. Exact institutional family statistics — version 1
+
+Two append-only files share `results/institutional-statistics-write-v1.lock`.
+Each starts with a sealed 64-byte header: 16-byte kind magic, little-endian
+format version and kind (`u32` each), stride (`u64`), then a 32-byte BLAKE3
+seal over those first 32 bytes.
+
+| Path | Magic | Payload | Stride |
+|---|---:|---:|---:|
+| `results/institutional-statistics-values-v1.bin` | `BTX-ISTATS-D-V1!` | 368 | 400 |
+| `results/institutional-statistics-completions-v1.bin` | `BTX-ISTATS-C-V1!` | 256 | 288 |
+
+The 368-byte value payload stores version/reserve at `0..8`; subject,
+Population V4, receipt-last selection, ranking-policy, selected-strategy and
+ordered Romano--Wolf family digests at `8..200`; then twenty-one `u64`s at
+`200..368`: draws, strategies, periods, seed, block, candidate index, canonical
+stepdown rank, observed-statistic `f64` bits, strict exceedances, initial,
+candidate-adjusted and full-family numerator/denominator pairs, White statistic
+and p-value bits, SPA statistic and p-value bits, and the exact-count-derived
+full-family/selected-candidate ppm projections. A 32-byte row seal follows.
+Prices never enter this format; all statistical `f64` values retain their exact
+source bits.
+
+The 256-byte completion payload stores version/reserve at `0..8`, subject at
+`8..40`, absolute row index at `40..48`, row-content digest at `48..80`, the
+five Population/selection/ranking/strategy/family digests at `80..240`, and the
+two ppm projections at `240..256`; a 32-byte seal follows. The value row is
+appended and synced before the completion is appended and synced last. A crash
+may leave exactly one valid trailing value row; it is not authority and only
+its byte-exact retry may append the receipt. Any second/middle/foreign orphan,
+duplicate subject, backward/reordered reference, malformed reserve, bad seal,
+ragged tail, over-bound file or stale length/same-length content refuses.
+
+The subject is the domain-separated digest of Population, selection receipt,
+ranking policy and strategy. A completion additionally binds the complete
+Romano--Wolf family and row content. Exact already-committed evidence is reused
+without appending; changed evidence under the same subject refuses. This is a
+narrow family-statistics authority. It does not contain raw Wilson, PBO or
+risk/ratio sources and cannot set the global full-precision completeness field.
+D-0461, IS-01 and limits §146 define that boundary.
+
+## 23. Pre-admission candidate universe — version 1
+
+Candidate Universe V1 is the first durable object in the selection-independent
+Step-3 successor path. Its codec encodes closed-mask/grid-cell source terms and
+raw direct-cell fields; production derivation of those terms is not yet proved.
+It contains no assurance, admission verdict, ranking score, selected rank or
+final Population identity. The current public surface is deliberately
+**audit only**: it can reopen, validate and page already existing V1 bytes, but
+there is no public production constructor or writer. Until the typed
+closed-frontier/full-grid producer exists, this format cannot authorize a live
+run merely because controlled fixture bytes pass its codec.
+
+The three paths are:
+
+| Path | Role |
+|---|---|
+| `candidate-universe-write-v1.lock` | one writer/shared-reader generation and path-identity lock |
+| `candidate-universe-rows-v1.bin` | contiguous canonical candidate rows |
+| `candidate-universe-completions-v1.bin` | receipt-last structural completion for audit; not production authority |
+
+Each data file begins with the same sealed 64-byte envelope:
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 16 | kind magic: `BTX-CAND-UROW-V1` or `BTX-CAND-UREC-V1` |
+| 16 | 4 | little-endian header version, exactly `1` |
+| 20 | 4 | kind, row `1` or completion `2` |
+| 24 | 8 | fixed stride, row `480` or completion `976` |
+| 32 | 32 | domain-separated BLAKE3 seal over bytes `0..32` |
+
+The complete length must be `64 + n*stride`. Unknown kind/version/stride,
+ragged tails or a failed header seal refuse before any record is indexed.
+
+### 23.1 Candidate rows — 480 bytes
+
+One row is a 448-byte payload plus a full 32-byte domain-separated BLAKE3
+seal. Its payload is:
+
+| Payload offset | Size | Field |
+|---:|---:|---|
+| 0 | 4 | row version, `1` |
+| 4 | 4 | reserved, zero |
+| 8 | 32 | candidate-universe identity |
+| 40 | 8 | zero-based canonical row sequence |
+| 48 | 32 | semantic candidate digest, before final Population rekey |
+| 80 | 48 | six durable condition-mask `u64` words |
+| 128 | 3 | direction, instrument family and closure tags; closure is exactly `Closed` |
+| 131 | 1 | reserved, zero |
+| 132 | 4 | signal rung in seconds, one of the eight canonical rungs |
+| 136 | 8 | closed-mask support hits |
+| 144 | 20 | stop, target, TSL, TTP-arm and TTP-trail indices; absent is `u32::MAX`, and TTP is either wholly present or wholly absent |
+| 164 | 4 | reserved, zero |
+| 168 | 32 | exact one-minute execution-run identity |
+| 200 | 4 | exact outcome horizon in one-minute bars |
+| 204 | 4 | reserved, zero |
+| 208 | 32 | complete evaluated-grid digest |
+| 240 | 8 | canonical cell ordinal in that grid |
+| 248 | 192 | every raw `Cell` fact in fixed order: trades, wins, pessimistic/optimistic money, fill cost, five terminal counts, ambiguous/gapped counts, MAE/MFE values, gross win/loss, best/min-win, bars held, losing/winning streaks, worst trade and maximum drawdown |
+| 440 | 8 | reserved, zero |
+| 448 | 32 | row seal over payload `0..448` |
+
+Rows are ordered without a set: closed mask order, direction order, then the
+canonical exit-coordinate key. Sequence must equal physical position inside
+its universe block. A duplicate/reordered coordinate, empty/invalid mask,
+foreign universe/grid/run identity, invalid direct-fact arithmetic or nonzero
+reserve refuses.
+
+### 23.2 Completion receipts — 976 bytes
+
+One completion is a 944-byte payload plus its full 32-byte content digest/seal:
+
+| Payload offset | Size | Field |
+|---:|---:|---|
+| 0 | 8 | receipt and row versions, both `1` |
+| 8 | 32 | candidate-universe identity |
+| 40 | 8 | committed row count |
+| 48 | 32 | digest of the exact ordered row payload sequence |
+| 80 | 112 | fourteen `u64` reconciliation counts: sweep/frequent/infrequent/closure partitions, direction counts, long/short cells and total expected/evaluated cells |
+| 192 | 12 | extinction depth, signal rung and one-minute horizon |
+| 204 | 3 | family, extinction-complete and closure-complete tags |
+| 207 | 33 | reserved, zero |
+| 240 | 352 | eleven 32-byte identities: data, feed, source commit, vocabulary, evaluation policy, long/short grid policy/resolution, canonical calendar policy and causal prior-day policy |
+| 592 | 20 | canonical requested month-span endpoints |
+| 612 | 32 | requested-span digest recomputed from those endpoints |
+| 644 | 12 | reserved, zero |
+| 656 | 96 | complete signal-rung and exact-one-minute calendar coverage |
+| 752 | 56 | exact signal stream count/endpoints/digest |
+| 808 | 56 | exact requested-span one-minute execution stream count/endpoints/digest |
+| 864 | 32 | exact signal-column digest |
+| 896 | 32 | exact execution-column digest |
+| 928 | 16 | reserved, zero |
+| 944 | 32 | completion content digest and record seal over payload `0..944` |
+
+Every expected/evaluated reconciliation count must agree, the frequent
+partition must close, and the row count must equal the complete long-plus-short
+grid population. Rows are written and synced before the receipt is written and
+synced last. A crash may leave one valid trailing row prefix. Only the
+byte-exact same universe may append its missing suffix and receipt; a foreign
+retry refuses rather than truncating or overwriting history. Reopen validates
+every sealed record, canonical order and receipt-to-row digest before indexing.
+Exact committed retry reuses bytes.
+
+Opening is O(rows + receipts) time and bounded index space. Open validates every
+record seal and semantic field. Later generation checks bind the held
+lock/row/receipt paths by metadata; on Unix they bind device and inode plus size
+and high-resolution modification/change times, but do not rehash full contents.
+Non-Unix generation identity is weaker and is recorded in limits §150. A
+validated sequence seek is worst-case O(1) in record count; indexed universe
+lookup is average O(1), a page is O(page rows), and open, hashing, durability,
+filesystem latency and construction are not O(1). D-0468, CU-01 and CU-02 bind
+the tested boundary.
+
+## 24. Pre-Admission Data audit ledger — version 1
+
+`pre-admission-data-v1.bin` and `pre-admission-data-v1.lock` form the second
+audit-only format in the selection-independent Step-3 path. The data file starts
+with a sealed 64-byte `BTX-PREADMIT-V1\0` header carrying version `1`, kind `1`
+and stride `740`. Each logical audit entry occupies two adjacent records: a
+`Data` record is appended and synced first, then a byte-equivalent semantic
+`Completion` record is appended and synced last. Only the kind differs. One
+valid final Data orphan may be completed by the exact retry; every middle,
+foreign or second orphan refuses.
+
+Each 740-byte record is a 708-byte payload plus a full 32-byte
+domain-separated BLAKE3 seal:
+
+| Payload offset | Size | Field |
+|---:|---:|---|
+| 0 | 16 | record version, Data/Completion kind and canonical sequence |
+| 16 | 96 | Pre-Admission identity, Candidate Universe identity and Candidate completion digest |
+| 112 | 24 | candidate row count, instrument family, signal rung, one-minute horizon and zero reserves |
+| 136 | 20 | canonical requested month span |
+| 156 | 128 | feed, source commit, measured-calendar policy and daily-reference policy digests |
+| 284 | 40 | exact signal count and ordered-bar digest |
+| 324 | 56 | complete one-minute-context count, endpoints and ordered-bar digest |
+| 380 | 40 | exact evaluated execution-subslice count and ordered-bar digest |
+| 420 | 56 | prior-day daily-reference count, endpoints and ordered-bar digest |
+| 476 | 88 | eligibility count, eligible count, excluded-day count and both ordered digests |
+| 564 | 56 | full requested-span signal calendar rung, bounds and receipt digest |
+| 620 | 56 | full requested-span one-minute calendar rung, bounds and receipt digest |
+| 676 | 24 | explicit nonzero signal, minute-context and daily stored-load ceilings |
+| 700 | 8 | execution subslice start index inside the complete minute context |
+| 708 | 32 | seal over payload `0..708` |
+
+The private preparation path measures actual candle slices. It requires the
+execution slice to equal one contiguous range of the supplied minute context,
+recomputes the exact signal and one-minute full-span calendar receipts, binds
+the exact daily records and eligibility bytes, and reconciles every Candidate
+completion source term. The public API can only bounded-open, audit and page
+existing bytes. It cannot author them, so a self-consistent file is structural
+audit evidence rather than production source authority until the typed
+Candidate producer owns the private append path.
+
+Opening validates the complete bounded file, both members of every pair and
+the cached lock/data generation before indexing. On Unix, generation binds
+device/inode, length, high-resolution modification/change times and a complete
+content hash, with metadata checked before and after hashing. One validated
+fixed-record seek is worst-case O(1) in record count; open is O(file bytes), a
+page is O(returned rows), and source preparation, hashing, locking, sync and
+filesystem latency remain input/system dependent. D-0471, PAD-01/PAD-02 and
+limits §153 define the boundary.
+
+## 25. Population Statistics audit ledger — version 2
+
+`population-statistics-v2-audit.bin` and its lock form the third audit-only
+Step-3 format. The data file begins with a sealed 64-byte
+`BTX-POPSTATS-V2\0` header carrying version `2`, kind `1` and stride `1,024`.
+Every record is a 992-byte payload plus a full 32-byte domain-separated BLAKE3
+seal. A logical block is ordered as Data, all Candidate rows, all Period rows
+in period-major order, all Split rows in split-major order, then Completion.
+The complete prefix is synced before Completion is synced last.
+
+All record payloads start with version, kind, physical record sequence and the
+32-byte audit identity in bytes `0..48`. Kind-specific live regions are:
+
+| Kind | Live payload region | Bound facts |
+|---|---:|---|
+| Data / Completion | `0..864` | logical sequence; rung/horizon/span; CSCV segments, periods and splits; bootstrap draws/seed/block; exact NIFTY and BANKNIFTY Pre-Admission bindings; feed/commit/calendar/daily policies; Wilson/CSCV policies; exact White/SPA/Romano--Wolf family evidence; split-derived PBO counts/fraction/bits; ordered candidate/period/split digests |
+| Candidate | `0..280` | canonical global and family sequence, family, semantic and Pre-Admission identities, trade/win totals, Wilson bits, Romano--Wolf statistic/rank/exceedances/exact initial and adjusted fractions, ordered period/split digests |
+| Period | `0..152` | candidate and period sequences, candidate identity, return in paisa, trade/win counts and shared aligned-period identity |
+| Split | `0..168` | candidate and split sequences, candidate identity, segment count, complementary train/test masks, train/test scores and split identity |
+
+Every unused byte through offset 992 is reserved zero. Data and Completion
+repeat identical semantic manifest fields; only kind and physical placement
+differ. Open recomputes the exact block from raw rows, including candidate
+order/totals, aligned-period and canonical-split digests, CSCV placement/counts
+and the stored bootstrap family. Only one valid trailing block prefix is
+recoverable, and only its byte-identical retry may append the suffix and
+Completion.
+
+The public boundary can bounded-open, verify its exact Pre-Admission pair,
+lookup a completed audit and page candidates. Source construction, writable
+open and append remain test-private, so the file is not production statistical
+authority yet. One validated candidate seek is worst-case O(1) in record count;
+open/recomputation and all statistical procedures are input-dependent. D-0472,
+PS-01/PS-02 and limits §154 define the boundary.
+
+## 26. Candidate observation companion authority — version 1
+
+`candidate-observation-authorities-v1.bin` and its advisory lock retain the
+source and policy authority required to reproduce exact Candidate session
+observations. The file begins with a 64-byte header: 16-byte magic
+`BTX-OBS-AUTH-H1\0`, `u32` version `1`, `u32` record stride `512`, eight zero
+reserved bytes, then a 32-byte BLAKE3 seal over bytes `0..32`.
+
+Each logical authority occupies two adjacent fixed 512-byte records. A Data
+record is appended and synced first; its Completion is appended and synced
+last. Both records use a 480-byte payload plus a 32-byte domain-separated seal.
+The Data live payload is:
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 16 | `BTX-OBS-AUTH-D1\0` magic |
+| 16 | 4 | file/version `1` |
+| 20 | 4 | kind `1` (Data) |
+| 24 | 32 | observation authority ID |
+| 56 | 32 | complete paired-observation identity |
+| 88 | 32 | paired source-only identity |
+| 120 | 32 | observation/score-policy identity |
+| 152 | 32 | deterministic CSCV-layout identity |
+| 184 | 64 | NIFTY then BANKNIFTY Candidate universe IDs |
+| 248 | 64 | NIFTY then BANKNIFTY observation-family IDs |
+| 312 | 32 | ordered accepted-session digest |
+| 344 | 32 | ordered exact-period digest |
+| 376 | 32 | ordered canonical split-score digest |
+| 408 | 8 | execution rung seconds and horizon bars |
+| 416 | 24 | period, NIFTY-candidate and BANKNIFTY-candidate counts |
+| 440 | 8 | segment count and observation schema version |
+| 448 | 24 | periods per segment, split count and split-score row count |
+| 472 | 4 | versioned maximum segment count, exactly `16` |
+| 476 | 4 | reserved zero |
+| 480 | 32 | Data-record seal |
+
+Completion carries 16-byte `BTX-OBS-AUTH-C1\0` magic, version `1`, kind `2`,
+the authority ID, Data-record seal, paired identity and logical record sequence
+through payload offset 128. Bytes `128..480` are zero and bytes `480..512`
+carry its completion seal. It must be adjacent to and byte-bind the preceding
+Data.
+
+This is deliberately a **companion authority, not a raw-observation store**.
+No period row and no split-score row is persisted here; existing Population
+Statistics V2 bytes remain unchanged. After a crash, the one allowed trailing
+Data can be completed only when a rerun rederives the exact opaque observation
+pair and produces byte-identical Data. Exact completed reruns reuse without
+appending. Open validates explicit file/count ceilings, header and every pair;
+cached access also generation-checks the named lock/data paths and hashes the
+bounded file. Missing/non-directory roots are refused and never created.
+
+The fixed stride makes one admitted pair position arithmetic constant in
+record count. Opening, scanning, hashing, Candidate replay, observation
+construction, split derivation, locking and sync remain input/filesystem
+dependent. D-0476, CO-01..CO-03 and limits §157 define the semantic and honest
+complexity boundary; D-0473/limits §155 still govern physical-volume identity
+and hot unplug.
+
+## Dated NSE cash-session cache (D-0519)
+
+Runtime `session-masters/NSE_CM_security_ddmmyyyy.csv.gz` retains the exact
+compressed exchange response. Its `.receipt` sibling is the publication
+marker, UTF-8 lines in this exact order:
+
+```text
+brutex-nse-cash-session-v1
+date=YYYY-MM-DD
+source=<exact dated NSE source URL>
+compressed_bytes=<decimal length>
+sha256=<lowercase SHA-256 of compressed bytes>
+```
+
+The limits are 4 MiB compressed, 32 MiB expanded, and 1 KiB receipt. A dated
+advisory lock serializes cooperating installations. Payload, receipt and
+directory are synced; an interrupted or conflicting pair refuses rather than
+being overwritten. The receipt binds acquisition provenance, not an exchange
+signature or an independently embedded trade date. No candle format changes.
+
+## Explicit bar repair V1 (not transparently promoted)
+
+`crates/store/REPAIR.md` specifies the additive revision protocol and exact
+144-byte completion receipt. Original V2 bar geometry is unchanged. Revisions
+live below `bar-revisions-v1/<ordinal>/` with their own bar/CRC/lock pair,
+create-once `.reserved-v1` marker, and completion-last `.repair-v1` receipt.
+Ordinary readers and census paths still select the original data. Missing or
+torn revision completion never falls back silently. Publication is the explicit
+exception to leaf-only month locks: original shared then revision writer,
+nonblocking; there is no reverse acquisition. No live pair is renamed or replaced.
+
+## Evidence-scoped recovery journal V1
+
+Separate files under `audit/recovery-v1/`; no candle or ordinary audit format
+changes. Each record is 1,024 bytes, little-endian:
+
+| Byte offset | Length | Field |
+|---|---|---|
+| 0 | 4 | Magic `BXRJ` |
+| 4 | 2 | Version 1 |
+| 6 | 1 | Queued 0, InFlight 1, Verified 2, Unverified 3, Exhausted 4, Blocked 5, NotApplicable 6 |
+| 7 | 1 | Zero |
+| 8 | 32 | Domain-separated work identity |
+| 40 / 44 | 4 each | Reserved attempts / unchanged attempts |
+| 48 / 56 | 8 each | Actually committed source rows / diagnostics |
+| 64 / 66 | 2 each | HTTP status / UTF-8 request-body length |
+| 68 | 12 | Zero |
+| 80 | 768 | Exact body, 1–768 bytes, then zero padding |
+| 848 / 856 | 8 each | Missing / unverified coverage quantities |
+| 864 | 156 | Zero |
+| 1020 | 4 | CRC-32C over bytes 0..1020 |
+
+Missing/unverified quantities are source days on 1day units and minutes on 1min
+units; diagnostics are not mixed into either quantity. An existing work key
+cannot bind a different body. A lifetime advisory writer lock protects each
+file. Append syncs before publishing the in-memory index; uncertain I/O poisons
+that handle. Reopen validates and syncs surviving records, retaining an
+interrupted reservation. Corrupt/torn files refuse without truncation.
+
+`<plan-id>.bin` stores month scans, exact-day retry children and evidence
+notes. The all-zero key, body `plan-seeded-v1`, seals plan creation. Its
+Verified state means reconciliation finished, NOT that all source data exists.
+`active.bin` stores activation pointers, with the activation ordinal in
+attempts; highest ordinal selects the most recently activated plan, not
+first-seen order. Pointer body is the lowercase plan identity and must agree
+with its key. File and containing-directory sync precede vendor work.
+
+`attempts.bin` uses the same V1 record layout as an authoritative shared
+exact-day attempt index across overlapping plans. Reservations sync there before
+the per-plan event mirror. `<plan-id>.stop.bin` records explicit stop/clear
+intent separately, so acknowledging a stop never waits for ownership of the
+active plan writer. These companions do not reinterpret existing record fields.
+
+The STOP companion has exactly one key, the plan identity, and immutable body
+`recovery-stop-v1:<lowercase-plan-id>`. `Blocked` means stopped; `Queued` means
+an explicitly requested clear. All numeric quantities and HTTP status are zero.
+Repeated same-state writes are idempotent; clear appends history rather than
+deleting it. An empty existing companion, foreign key, other state, conflicting
+body, corruption or unavailable store refuses; it never grants permission to
+resume. The record and newly created directory ancestry are synced before a
+STOP is acknowledged. A normal pull with no recovery owner touches no STOP file.
+
+Full open validates the entire journal. The bounded status tail validates only
+the requested suffix and physical extent; it is not a prefix audit or a
+guarantee that an active writer has completed its sync. A new incompatible
+layout requires a new version, never reinterpretation of this V1 stride.
+
+## Sweep attempt and explicit expression evidence (D-0523)
+
+The successor protocols in D-0524 add immutable checkpoint journals and full
+canonical cursor states ([AND](20-sweep-resume.md),
+[expression](22-expression-search.md)), exact selected-cell candidate/trade
+catalogs with distinct AND and expression namespaces
+([V1 contract](19-candidate-trades.md)), and separate fixed Selection V6 /
+Global Replay V4 records ([contract](21-institutional-sweep.md)). Their widths,
+domains, locking and completion ordering are specified in those documents.
+Legacy versions and meanings are unchanged; a new reader may not interpret
+an older authority as its successor merely because fields look similar.
+
+New evidence lives beside existing historical formats; no existing stride,
+condition position or ledger version is reinterpreted. The exact schemas,
+magic values, identities, directory layout, seals and publication ordering are
+specified in [Sweep evidence V1](16-sweep-evidence.md) and
+[Expression evidence V1](17-expression-evidence.md).
+
+Expression V1 uses a 3,457-byte fixed program descriptor, a 3,497-byte header,
+56-byte source-row records and a 64-byte counts/file-seal footer. Each row has
+24 data bytes plus a 32-byte header/ordinal-bound BLAKE3 seal. The file is
+published without replacement before terminal completion is recorded.
+
+Sweep lifecycle records distinguish preparation, orchestration, actual probes,
+audits and expressions. A start with no terminal record is not completion or
+proof that a process is alive. Terminal records must agree with acknowledged
+child contents/cardinalities and identities. Missing, replaced, torn, foreign
+or corrupt required evidence refuses; it is never represented as successful
+zero rows. Integrity scans are linear in saved rows even though records have a
+fixed stride and bounded per-row processing.
+
+## Separate checksum admission V1 (D-0525)
+
+The ordinary bar format and legacy run identities remain unchanged. A cold
+audit produces Evidence256 (`BRCAS001`): thirteen little-endian u64 format and
+extent fields, four 32-byte digests (raw header, committed records, exact CRC
+sidecar, entire data file), and sixteen reserved zero bytes. Signed timestamp
+fields retain their two's-complement bits.
+
+The separately keyed Receipt512 (`BRHCRC01`) contains version 1 at byte 8,
+source identity at 16, receipt identity at 48, Evidence256 at 80, reserved zero
+bytes from 336 to 480, and a separately domain-bound completion seal at 480.
+Publication appends an exact existing prefix only: payload sync precedes the
+seal, then file and parent directory sync precede acknowledgment. Completed
+identical receipts are verified and reused read-only. A typed reader retains
+shared receipt and source locks; visible bytes under an exclusive publisher
+lock do not establish durability.
+
+Strict stored sweeps also retain a separate fixed 512-byte six-role input
+manifest in `audited-inputs-v1/`. Ordered roles are signal, execution, prior
+daily, current daily, prior minute and current minute. Exact role receipt IDs
+extend the executed data digest under a new domain before the existing nine-term
+run identity is formed. See [the full byte and admission contract](24-checksum-admission.md)
+for fields, domains, locks, physical caps and failure semantics.
+
+Sweep lifecycle operation 10 is `checksum-audit`. It attests input integrity
+only; completion is neither a completed sweep nor a pricing/admission result.
+
+## Additive strict range input links (D-0526)
+
+`audited-spans-v1/` stores 512-byte `BRHSP001` nodes: version at8, preceding
+node identity at16, ordinal at48, year at56, month at64, six ordered 40-byte
+role/receipt pairs at72, reserved zeros at312..480 and completion seal at480.
+Every field uses the existing little-endian/32-byte digest conventions.
+The chronological chain's final identity binds all required months and extends
+the exact executed digest under a distinct span domain. The same retained
+receipt publication/locking protocol applies; existing monthly bytes do not
+change. [The admission contract](24-checksum-admission.md) gives the exact
+domains, zero-predecessor rule and actual strict audit/pricing handoff.
+
+## Boolean catalog successor records (D-0536–D-0537)
+
+The separate `boolean-candidates-v1`, `boolean-statistics-v1` and
+`boolean-admission-v1` namespaces preserve full expression and cash-family
+identity without reinterpreting legacy records. They share the112-byte
+`BRBLCM01` body-completion protocol. Statistics use512-byte records and research
+admission uses a512-byte header plus1024-byte candidate rows; its448-byte
+`BRAPRO01` comparison grants no legacy authority. The
+[catalog storage contract](27-boolean-catalog-research.md#storage-domains)
+records the layout, actual grid descriptors, publication order and strict
+observation boundary. Lifecycle operations11,12 and13 name these three stages.
+
+## Incremental Boolean campaign and later evidence — D-0539 through D-0541
+
+`boolean-campaign-v1/<identity>/<sequence>/payload` retains the existing
+immutable Journal envelope, seal and separately synced completion marker.
+The `BRBCAM01` payload has a256-byte header: magic8, campaign identity32,
+preparation descriptor32, ordered-program digest32, then seven u64 fields
+(program count, family count, first YYYYMM, last YYYYMM, one-minute horizon,
+aggregate state, predecessor sequence), predecessor seal32 and64 zero bytes.
+The initial predecessor sequence is `u64::MAX` with a zero seal.
+
+Exactly eight canonical timeframe rows follow. Each uses1168+192F bytes for
+F families: state u64, statistics identity/pin64, admission identity/pin64,
+reason byte length u64, fixed1024-byte zero-padded UTF-8 reason area, then F
+records of ResearchFamily128 + expected candidate identity32 + completion pin32.
+Paired zero stage identity/pins mean absent; zero candidate pin means its
+completion was not acknowledged. State0 is waiting,1 running,2 paused,3
+refused,4 completed. Total Journal payload envelope stays within the smaller
+of the configured byte ceiling and2MiB; reserved sequence must remain below1024.
+No existing records are deleted, rotated or reinterpreted.
+
+`boolean-oos-v1` shares the112-byte `BRBLCM01` completion receipt but uses a
+new232-byte `BRBOOS01` body header. It stores the later identity, original
+candidate identity/pin, later source identity, later execution digest, first
+and last actual timestamps, execution record count, four civil-month bounds
+and nested-body length. The nested candidate-shaped body carries the same
+original family, programs, resolved training grids and full coordinate order,
+with later observations. Lifecycle operation14 is `boolean-oos`. Its cold
+reader authenticates both complete bodies and their exact original/later
+links, and grants no source or institutional selection capability.
+
+`boolean-grammar-v1` uses the same Journal container with a48-byte caller
+envelope: `BRBGPN01` plan magic, predecessor sequence u64 (zero initially),
+predecessor seal32. The enclosed `BRBGBP01` batch is64 bytes plus two
+`CURSOR_BYTES` descriptors and N fixed `ENCODED_LEN` programs. Its six u64
+fields are work before, work after, programs before, program allowance, node
+allowance and program count; one exhaustion byte and seven zero bytes follow.
+`BRBGDN01` completion records use112 bytes: magic8, exact plan sequence8,
+plan seal32, campaign identity32 and campaign snapshot pin32. Both campaign
+fields are zero only for a batch with no programs. No completed child is
+inferred from a work reservation or elapsed time.
+
+### Fixed-training qualification successors (D-0542–D-0544)
+
+`BRBQPL01` is a new1,024-byte plan header plus16 bytes per declared later civil
+window. It binds the complete original/later campaign descriptors, catalog,
+scope, policy, bootstrap procedure, physical limits and finite allocation.
+Eight ordered original-catalog digests and eight ordered later-source digests
+bind each rung independently, so a valid child cannot be relabelled as a
+different timeframe in either production or saved-result observation.
+Each window is two signed64-bit IST civil-day numbers. Decoding validates the
+deterministically derived complete partition and returns observation metadata;
+it does not construct a live plan from saved bytes.
+
+`BRXFVL01` is a separate320-byte fixed-training projection header plus64 bytes
+per window. It carries seven full32-byte source/selection identities, ordinal,
+fold counts, aggregate return, execution-refusal bits, requested date interval
+and original last training day. Each fold retains exact interval, actual session
+count, trades, wins, pessimistic integer return and reserved zero padding.
+The optional projection never changes `boolean-oos-v1` identity or body bytes.
+
+`boolean-qualification-v1` uses the existing112-byte receipt-last completion
+envelope. `BRBQLF01` has a1,024-byte header, complete canonical plan bytes,
+128-byte original-linked later-family records, and1,024-byte coordinate rows.
+Each coordinate also reserves the complete320+64F fold section for F declared
+windows. An explicit absence tag requires that entire section to be zero.
+All coordinates are retained. The row records original/later identities,
+family/coordinate offsets, the448-byte common policy projection and exact
+zero-conservative/shared statistical facts. Unrounded statistics and exact
+fractions remain stored; conservative ppm comparisons are derived observations.
+Operation15 is `boolean-qualification`; prior operation numbers are unchanged.
+
+`boolean-qualified-campaign-v1` uses the acknowledged Journal container.
+Its `BRQCAM01` payload is9,200 bytes:112-byte header and eight1,136-byte slots.
+The header binds campaign identity, descriptor and predecessor sequence/pin.
+Each slot retains its unit identity, started flag, qualification identity/pin,
+reason length and a1,024-byte zero-padded UTF-8 reason. A retry cannot change
+completed slots or skip the durable start transition. Restore reconciles all
+acknowledged records while charging reservation-only holes to sequence capacity.
+No old format, discriminator, condition bit or receipt is rewritten in place.
+
+### Search-wide qualification journal (D-0549)
+
+`boolean-qualified-search-v1` uses the same acknowledged, sealed Journal
+container in its own namespace. `BRBQSS01` declares `144 + CURSOR_BYTES` bytes:
+magic8, two source digests32 each, policy32, the exact initial cursor, then five
+u64 values (program allowance, node allowance, source-byte admission,
+record/replay admission and alpha ppm). The search identity hashes this entire
+declaration.
+
+`BRBQSR01` has a2,520-byte header, the complete declaration, an exact `BRBGBP01`
+batch and optional original `BRBQPL01` qualification plan. Header positions are
+magic0, predecessor sequence8, predecessor seal16, ordinal48, phase56, batch
+length64, plan length72 and reason length80. Campaign identity/pin occupy88/120.
+Eight168-byte rung summaries start at152; each holds child identity32, child
+pin32, coordinate count8, four status counts8 each, projection hash32 and
+allocation hash32. Reason UTF-8 starts at1496 and has a1,024-byte zero-padded
+region. Phase0 means reserved,1 complete and2 refused. Unused child fields and
+summaries must be exactly zero. A node-only batch has no qualification plan or
+invented result links.
+
+The predecessor chain must include every acknowledged record. A reservation
+binds the exact declaration, ordinal, before/after cursor, work counters and
+qualification plan. A retry cannot alter that binding. A Complete permits only
+the exact next reserved batch; exhaustion is taken from the grammar cursor,
+never a work limit. History admission charges payloads, journal envelopes and
+retained indexes, and each decoded batch's declared node allowance. Detail reads
+reserve one additional batch replay. Stored program-capacity claims are checked
+against the external byte bound before allocation. Original qualification rows
+are not mutated; their separately derived search projection is448 canonical
+bytes per coordinate and its complete order is hashed into the rung summary.
+
+### Shared probability ceilings, additive search V2 (D-0553)
+
+`BRBQSS02` and `BRBQSR02` retain the exact V1 declaration and record strides,
+offsets and envelope namespace. Their magic selects `SharedCeilingsV2`:
+the original policy's four family-probability ceilings are each capped at the
+declared alpha before the complete projection is evaluated. The rule changes
+the declaration's bytes and therefore its search identity. V2 full-rung
+projection hashing uses `brutex-search-wide-projection-v2\0`; V1 keeps its
+original `brutex-search-wide-projection-v1\0` domain and original arithmetic.
+
+Both record and enclosed declaration must name the same known version. A
+history transition cannot change the rule. No extra mutable field or optional
+fallback controls interpretation. Older V1 records are decoded, recomputed and
+rendered with the original policy and guard, including any original rejection
+partitions. They are explicitly historical observations, not V2 decisions.
+New writer reservations use V2. Original qualification/catalog bodies remain
+unchanged and the new format never rewrites old acknowledged history.
+
+## Outer invocation journal V1 — 2026-09-08
+
+This append-only format is separate from strategy identities and result files.
+The configured store contains `audit/invocations-v1/index.bin`, one immutable
+start per invocation, and one `<exact-id>.bin` journal per ID. IDs are
+`(1 << 63) + ordinal`, where ordinals start at one. Every record is 256 bytes:
+
+| Bytes | Field |
+|---|---|
+| 0..8 | Magic `BXOPAU01` |
+| 8..16 | Exact u64 invocation ID |
+| 16..24 | Wall-clock milliseconds; zero means unavailable |
+| 24..32 | Elapsed microseconds in the owning process |
+| 32..40 | Completed structural boundaries, with no invented total |
+| 40, 41 | Phase and origin codes |
+| 42..44 | HTTP status, zero when unavailable/not applicable |
+| 44..46 | Public ASCII label length |
+| 46..48 | Reserved zero |
+| 48..144 | Bounded public label and zero padding |
+| 144..252 | Reserved zero |
+| 252..256 | CRC32C of the preceding bytes |
+
+Integer fields are little-endian. Phase codes are start=0, progress=1,
+completed=2, refused=3, failed=4 and cancelled=5. Origin codes are CLI=1,
+browser task=2 and HTTP request=3. Start/progress without a terminal are
+unconfirmed. The index and journal starts must agree. A bounded exact read
+checks the indexed start plus the journal's first/last records; it does not
+claim to rescan every intermediate CRC. Unknown formats, padding, corruption,
+torn tails and inconsistent ancestry refuse. No repair truncates history.
+
+## Native index consistency and single-stop evidence — D-0579/D-0582
+
+All namespaces below retain a zero-byte `owner.lock` and immutable body bytes.
+The existing112-byte `BRBLCM01` completion envelope is published last: magic8,
+artifact identity32, payload digest32, byte length8, envelope digest32.
+Integer fields are little-endian. Existing records are never reinterpreted.
+
+| Namespace / body magic | Fixed layout | Variable sections |
+|---|---|---|
+| `index-consistency-v1` / `BRICST01` | Header152: magic8, parent32, parent pin32, policy72, count8. Coordinate1824: binding176, full/training/later evaluations536 each, five counts8 each. | Full, training and later week arrays at144 bytes/week, then observed sessions at32 bytes/session. The final count retains the training-session prefix. |
+| `index-stop-candidates-v1` / `BRISCT01` | Header128: magic8, identity32, native policy80, count8. Candidate metadata3929: three digests96, family128, direction/rung/day bounds32, full expression3457, truth32, metrics160, three counts24. | Per candidate: events112, trades168, then periods96. Complete program-long/short pairs are mandatory. |
+| `index-stop-qualification-v1` / `BRISQF01` | Header990 binds both candidate ancestors, native/daily/institutional policies, numerical procedure, allocation and bounds. | CSCV splits64 each; each candidate row688 is followed by its fixed later folds64 each. Row688 retains four digests128, policy projection448, Wilson source bits8, twelve Romano values96 and fold count8. |
+
+Qualification cold-open replays numerical comparisons against its exact native
+parents, verifies all mandatory daily assessments, and admits the aggregate
+ancestor bytes under both the recorded and current read bounds. Read-only
+decoders cannot mint a native execution capability. Once admitted, direct
+indexed pages retain publication leases over the four distinct artifacts;
+they do not nest another same-file lock/unlock inside a held lease.
+
+Operation16 is `index-consistency`,17 is `index-stop`, and18 is
+`index-stop-qualification`. All prior discriminators retain their old meaning.
+
+`index-stop-search-v1` uses the shared96-byte-overhead acknowledged Journal
+container. Its declaration magic is `BRISSD01`: length-framed exact index/feed,
+physical-rung mask, four civil-day bounds, initial canonical grammar cursor,
+three policy digests, fifteen fixed numeric admissions/procedure values, and
+each selected rung's original/later native source digests. Its full hash is
+the search identity.
+
+Its `BRISCP01` payload starts with magic8, eight flag bytes, previous sequence8,
+previous pin32, five u64 counters/lengths, a complete grammar cursor, eight
+identity/pin pairs64 each, then the declaration and optional canonical batch.
+Flags retain pending, exhausted, scope and predecessor presence; padding is
+zero. The fixed extent is608 + CURSOR_BYTES. A complete nonempty batch carries
+exactly the selected qualification links. A node-only batch carries none.
+Ancestry covers every acknowledged checkpoint and retains exact program/node
+limits. Missing or changed child evidence refuses recovery.
+
+Serialized history and replay budgets are checked before acknowledgment. The
+common immutable body writer refuses differing or incomplete prior bytes;
+this is not an automatic repair for a torn artifact. Already successful child
+artifacts can be reused, but an incomplete conflicting artifact is preserved
+and reported. No reader turns a partial write into a completion receipt.
+
+## Original single-stop source companions — D-0585
+
+The immutable body/completion container remains unchanged. Two additive
+namespaces retain new source provenance:
+
+| Namespace / magic | Bound contents |
+|---|---|
+| `index-stop-source-context-v1` / `BRISSC01` | Original native source and loader/calendar versions, build, vocabulary names, input limits, source-day bounds, excluded sessions, eligibility and the exact separately stored signal/execution/exact-minute/daily OHLCV roles. Candles use seven little-endian i64 fields (56 bytes); an explicit alias records a shared signal/execution role instead of a duplicate array. |
+| `index-stop-catalog-context-v1` / `BRISCL01` | Fixed 136-byte body: magic8 followed by catalog identity32, catalog completion32, source-context identity32 and source-context completion32. |
+
+The source decoder walks and admits all length/count extents before allocating
+arrays. Unknown versions, tails, malformed ordering and absent required role
+evidence refuse. The original names are part of the immutable source identity.
+The relation cannot attach a foreign source to an otherwise correctly sealed
+catalog: inspection must reconstruct every native source/run identity and the
+new catalog identity before exposing metadata or candles.
+
+New catalog identity domain `brutex-index-stop-catalog-v2\0` binds the legacy
+catalog identity to the source-context identity and completion. This changes
+the identity domain, not any `BRISCT01` or `BRISQF01` record stride. Legacy
+catalogs lacking a companion retain their old table semantics and explicitly
+refuse original-source inspection.
+
+The additive search declaration `BRISSD02` is magic8, original V1 body length8,
+that exact `BRISSD01` body, the fixed canonical institutional policy, and one
+training/later source-context pair per selected physical rung. Each context
+is identity32 plus completion32. The hash of the complete outer declaration
+is the new search identity. V1 decoding is retained without rewriting old bytes.
+
+Cumulative ranking stores no replacement result file. It verifies the exact
+acknowledged checkpoint prefix and retains each family's original completion
+pins. Paging does not mutate a checkpoint or add a second ordering authority
+to persistent candidate/qualification records.
+
+## Original single-stop VIX reference companion — D-0587
+
+`index-stop-vix-reference-v1` uses the existing immutable body, zero-byte owner
+and 112-byte completion container. All integer fields are little-endian. The
+body is additive; no original candidate, source or qualification stride changes.
+
+| Part | Layout |
+|---|---|
+| Header, 200 bytes | `BRISVX01` magic8, lookup identity32, publication identity32, catalog identity32, catalog completion32, reference-policy digest32, then feed discriminator, setting count, trade count and reference-month count as four u64 words. |
+| Setting, 80 bytes each | Original run32, original source32, first trade offset8, trade count8. Extents are contiguous in the original setting order, including zero-trade settings. |
+| Month, 72 bytes plus reason | Year8, month8, validated-snapshot flag8, original row count8, snapshot digest32, reason byte length8, then bounded UTF-8 diagnostic bytes. A validated month has no reason; an unavailable month has no row count or snapshot digest. |
+| Trade annotation, 240 bytes each | Original local ordinal8, run32, original native trade digest32, entry/exit-bar/exit-from/exit-until timestamps32, month index8, then two 64-byte stamps. Each stamp is state8 and seven i64 candle fields56. Absent and unavailable states require zero payload padding. |
+
+The body order is header, settings, months and their reasons, then annotations.
+`brutex-index-stop-vix-reference-lookup-v1\0` binds catalog identity and pin.
+`brutex-index-stop-vix-publication-v1\0` hashes the body except its own
+32-byte publication field. The ordinary completion envelope authenticates the
+complete resulting body under the lookup identity.
+
+The reader checks every saved setting and original trade digest/interval
+against the exact catalog before serving pages. Unknown states, contradictory
+month availability, disagreement between repeated references to the same minute,
+foreign extents, tails and insufficient whole-publication admission refuse.
+The independent reference pins never become a source/run,
+search, qualification or ranking identity.

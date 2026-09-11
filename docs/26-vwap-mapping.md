@@ -1,0 +1,107 @@
+# VWAP mapping and evidence — 6 September 2026
+
+VWAP has 20 existing stable vocabulary positions. The current repair completes
+their false-answer availability for Boolean expressions. It does not add or
+renumber bits, enable futures sweeps or substitute volume from another instrument.
+
+| Instrument | Financial applicability | Current historical sweep behavior |
+|---|---|---|
+| NIFTY / BANKNIFTY spot index | No direct traded-index volume | All VWAP truth and known bits remain zero, even if a vendor reports constituent-volume aggregates |
+| Eligible underlying cash stock | Its own traded price and volume | Enabled by `Kind::Equity` before bars are read; readiness follows observed current-session volume |
+| Index or stock futures contract | That exact contract's traded price and volume | Storage-only under AGENTS §1; the sweep boundary refuses contracts. Its defensive availability arm is not a statement that futures lack volume |
+
+The external applicability sources are recorded in `docs/00-charter.md`.
+Instrument eligibility never comes from scanning future bars. Cash research
+membership remains the documented snapshot, not point-in-time membership.
+
+## Calculation and readiness
+
+This repository uses **OHLCV typical-price VWAP**:
+`floor(sum((high + low + close) * volume) / (3 * sum(volume)))`.
+It does not reconstruct trade-by-trade VWAP or claim equality across different
+bar aggregations. Input prices remain integer paisa; accumulator arithmetic is
+checked. No ticks, synthetic replacement volume or index/futures mixing occurs.
+
+The current observed bar is folded before its closing-price comparison. The
+first two positive-volume bars in the current IST session establish dispersion;
+zero-volume bars do not advance that count. A new session resets the reference.
+All positions remain unknown until that boundary, including the historical base
+pairs. Later zero-volume observations may compare against an already established
+session reference without contributing extra weight.
+
+Below, **exact** means mean and sigma exist and the relevant band bounds fit
+integer paisa. **Near** additionally requires positive sigma and the declared
+`SessionRange` tolerance family applied to this VWAP family's sigma scale.
+At zero sigma the 13 exact comparisons remain known; the seven near comparisons
+remain unknown. An overflowing band is neither true nor known-false.
+
+## Every existing position
+
+| Bit | Canonical vocabulary name | Comparison | False is known when |
+|---:|---|---|---|
+|52|`close_above_vwap`|Close > mean|Exact|
+|53|`close_below_vwap`|Close < mean|Exact|
+|143|`close_above_vwap_session`|Close > mean; retained alias of 52|Exact|
+|144|`close_below_vwap_session`|Close < mean; retained alias of 53|Exact|
+|145|`near_vwap_session`|Within declared tolerance of mean|Near|
+|146|`close_above_vwap_band1_upper`|Close > mean + sigma|Exact|
+|147|`close_below_vwap_band1_lower`|Close < mean − sigma|Exact|
+|148|`close_above_vwap_band2_upper`|Close > mean + 2 sigma|Exact|
+|149|`close_below_vwap_band2_lower`|Close < mean − 2 sigma|Exact|
+|150|`near_vwap_band1_upper`|Near mean + sigma|Near|
+|151|`near_vwap_band1_lower`|Near mean − sigma|Near|
+|152|`inside_vwap_band1`|Both edges inclusive|Exact|
+|190|`near_vwap_band2_upper`|Near mean + 2 sigma|Near|
+|191|`near_vwap_band2_lower`|Near mean − 2 sigma|Near|
+|192|`inside_vwap_band2`|Both edges inclusive|Exact|
+|193|`close_above_vwap_band3_upper`|Close > mean + 3 sigma|Exact|
+|194|`close_below_vwap_band3_lower`|Close < mean − 3 sigma|Exact|
+|195|`near_vwap_band3_upper`|Near mean + 3 sigma|Near|
+|196|`near_vwap_band3_lower`|Near mean − 3 sigma|Near|
+|197|`inside_vwap_band3`|Both edges inclusive|Exact|
+
+AND, OR and NOT use the same truth/known pair. A known false predicate may
+satisfy NOT; an unavailable predicate cannot. The column preserves those masks
+and source indices, and stored-expression/search paths use the instrument-kind
+policy both in preparation and replay. Code changes remain bound by the commit
+term of the nine-term run identity. Existing saved outputs are not rewritten.
+
+## Measured evidence and its limits
+
+The repaired indicator suite passed **392 tests, zero failures and zero ignored**
+in `target/sweep-audit-20260906/vwap-mapping-tests.log`. Indicator/CLI all-target
+Clippy passed in `vwap-strict-range-clippy.log`. New tests cover all 20 true and
+false outcomes, an independent 20-predicate integer oracle, negation, first-bar
+unknown, session reset, zero dispersion, wrong tolerance, and integer band limits.
+These focused results do not assert full touched-crate coverage or deployment.
+
+An independent Rust oracle also completed **36,200 saved real-market row
+comparisons** from a byte-verified local copy of May 2025 OHLCV. It checked source
+index, timestamp and truth, using its own checked accumulators: 18,100 comparisons
+for `52 | 53`, plus separate `52` and `53` checks for both cash stocks.
+Those saved rows were generated by clean build
+`b666337439cd9eb67ff48a67a0d37c3ad7667e35`, before the new band-known repair:
+
+| Instrument / signal bars | True | False | Unknown | Rows checked |
+|---|---:|---:|---:|---:|
+|RELIANCE / 1 minute|7,640|15|20|7,675|
+|ADANIENT / 5 minutes|1,356|1|18|1,375|
+|NIFTY / 1 minute|0|0|7,675|7,675|
+|BANKNIFTY / 5 minutes|0|0|1,375|1,375|
+
+The first 200 source bars are outside the saved column because of shared
+indicator warm-up. The actual files contain 21 IST sessions per instrument.
+Evidence: `target/sweep-audit-20260906/independent-vwap-oracle-expanded.log` and
+`independent_vwap_oracle.rs`; copied-input provenance is in
+`equity-vwap-copy.log`. The separate above/below checks detect direction swaps:
+RELIANCE bit52 has 3,320 true / 4,335 false / 20 unknown, and bit53 has
+4,320 / 3,335 / 20. ADANIENT bit52 has 594 / 763 / 18, and bit53 has
+762 / 595 / 18. Both priced search histories verify 16 distinct candidates and
+18 checkpoint links, with grammar exhaustion false. This authenticates saved
+receipts and transitions, not independently recomputed trade profits. The finite
+20-predicate tests separately check band formulas. Signal counts are not
+profitable-trade counts or institutional approval.
+
+Per-bar state and 20-position work are bounded. Reading N historical bars,
+persisting their results and exploring a growing search space remain growing
+work; hardware parallelism does not make those operations globally O(1).

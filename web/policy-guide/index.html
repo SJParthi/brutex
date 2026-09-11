@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Brutex · Understand the research checks</title>
+<style>
+:root{color-scheme:light;--ink:#142939;--muted:#526573;--line:#d7e1e6;--blue:#175779;--paper:#f5f7f4;--white:#fff;--amber:#775311}*{box-sizing:border-box}body{margin:0;color:var(--ink);background:var(--paper);font:16px/1.6 "Avenir Next",Avenir,system-ui,sans-serif}a{color:var(--blue);text-underline-offset:4px}button,input,select{font:inherit}a,button,input,select,summary{outline-offset:5px}:focus-visible{outline:3px solid #2180ac}header{border-bottom:1px solid var(--line);padding:22px max(24px,calc((100vw - 1350px)/2));display:flex;justify-content:space-between;gap:20px;background:var(--white)}header b{font-size:22px;letter-spacing:-1px}header span{font-size:13px;color:var(--muted)}main{max-width:1398px;margin:auto;padding:48px 24px 70px}.hero{display:grid;grid-template-columns:1.4fr 1fr;gap:65px}.eyebrow{text-transform:uppercase;letter-spacing:2px;font-size:12px;font-weight:750;color:var(--blue)}h1{font-size:clamp(34px,4.1vw,58px);line-height:1.07;letter-spacing:-2px;font-weight:650;margin:18px 0 24px;max-width:760px}h2{font-size:24px;letter-spacing:-.7px;margin:0 0 12px}p{max-width:79ch;margin:10px 0}.muted{color:var(--muted)}.note{padding:24px;background:#e8f0ee;border-top:4px solid #437966;align-self:start}.note strong{font-size:21px;display:block}.note p{font-size:14px}.formula{display:flex;gap:20px;align-items:center;margin:28px 0 34px;padding:20px 0;border-block:1px solid var(--line)}.formula b{font-size:31px;font-weight:600}.formula span{font-size:14px}.formula .plus{color:var(--muted);font-size:23px}.flow{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin:32px 0 42px}.flow article{padding:22px;background:var(--white);border:1px solid var(--line)}.flow small{color:var(--blue);font-weight:700;font-size:12px}.flow h3{margin:9px 0;font-size:20px;font-weight:650}.flow p{font-size:14px;color:var(--muted)}.controls{display:flex;gap:12px;flex-wrap:wrap;margin:22px 0 15px}input,select{padding:12px 14px;border:1px solid #b6c9d2;border-radius:5px;color:var(--ink);background:var(--white)}input{width:100%}.search{flex:1;min-width:240px}label>span{display:block;font-size:12px;font-weight:650;margin-bottom:5px}.scroll{overflow:auto;border:1px solid var(--line);border-radius:6px;background:var(--white)}table{border-collapse:collapse;width:100%;text-align:left}th{background:#e7edf0;font-size:12px;padding:15px 18px;white-space:nowrap;letter-spacing:.5px;text-transform:uppercase}td{padding:19px 18px;vertical-align:top;border-top:1px solid var(--line);font-size:14px}td:first-child{min-width:270px;width:25%}td:nth-child(2){min-width:175px;width:18%;font-weight:650}td:last-child{min-width:310px}td strong{display:block;font-size:16px;font-weight:650}td small{display:block;color:var(--muted);font-size:12px;margin-top:4px}details{margin-top:8px;font-size:12px;color:var(--muted)}summary{cursor:pointer;color:var(--blue)}code{overflow-wrap:anywhere;font-size:11px}#count{font-size:13px;color:var(--muted);margin:10px 0}.status{color:var(--amber);background:#f8efd9;font-size:12px;padding:5px 9px;display:inline-block;border-radius:4px}.risk{margin:40px 0;display:grid;grid-template-columns:1fr 1fr;gap:35px;background:#e8eff3;padding:28px}.risk p{font-size:14px}.risk b{font-size:22px}.risk ul{padding-left:22px;font-size:14px}.states{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-top:24px}.states div{padding:18px;border-top:3px solid #7c97a4;background:var(--white);font-size:13px}.states b{display:block;margin-bottom:8px;font-size:17px}.sources{border-top:1px solid var(--line);margin-top:40px;padding-top:24px;font-size:14px}.sources a{display:inline-block;margin:4px 20px 4px 0}footer{font-size:13px;color:var(--muted);margin-top:30px}@media(max-width:900px){.hero,.risk{grid-template-columns:1fr;gap:24px}.flow{grid-template-columns:1fr}.states{grid-template-columns:1fr 1fr}.formula{gap:10px;flex-wrap:wrap}main{padding-top:30px}header{align-items:start}header span{text-align:right}}@media print{.controls,details,header a{display:none}.scroll{overflow:visible}td{min-width:0!important}body{background:white}.hero{grid-template-columns:1fr}main{padding:0}.flow,.risk{break-inside:avoid}}
+</style>
+</head>
+<body>
+<header><b>brutex</b><span>Research policy explained · 7 September 2026<br><a href="../sweep-readiness/index.html">Open sweep readiness</a></span></header>
+<main>
+<div class="hero"><div><div class="eyebrow">Understand every check</div><h1>Enough evidence.<br>Less dependence on luck.</h1><p class="muted">The 37 settings are automatic filters for historical backtests. You do not need to calculate or enter them one by one. One research profile supplies the values; the engine checks the evidence.</p></div><aside class="note"><strong>A research profile, with clear limits.</strong><p>These values were selected under your delegation. They are editable research choices, not institutional certification or a guarantee of future returns.</p><p><b>Your execution rule stays fixed:</b> intraday only, with a 3:10 PM IST deadline. Historical runs use real OHLCV.</p><span class="status">Guide only · no strategy results evaluated here</span></aside></div>
+<div class="formula"><b>37</b><span>settings in one file</span><span class="plus">+</span><b>2</b><span>existing risk rules</span><span class="plus">=</span><b>39</b><span>automatic evidence checks</span></div>
+<div class="flow"><article><small>01 · CONFIGURE ONCE</small><h3>One complete profile</h3><p>The run reads a bounded file and resolves the price limits from its existing risk amount. A typo or missing setting produces a named refusal.</p></article><article><small>02 · COMPARE EVIDENCE</small><h3>Challenge each candidate</h3><p>Check sample size, losses, lucky-trade dependence, later test windows and statistical results across the declared search population.</p></article><article><small>03 · KEEP THE OUTCOME</small><h3>Explain every decision</h3><p>Admission evidence distinguishes passed, failed, unmeasured and refused. A setting in this guide is not itself evidence that a strategy passed.</p></article></div>
+<section aria-labelledby="table-title"><h2 id="table-title">All 37 settings, in plain language</h2><p class="muted">Search for a concern such as “lucky”, “loss”, “gap” or “later”. Open “Exact setting” when you need the stored configuration value.</p>
+<div class="controls"><label class="search"><span>Find a check</span><input id="search" type="search" placeholder="Search checks, limits or failure cases"></label><label><span>Show a group</span><select id="group"><option value="">All groups</option></select></label></div><div id="count" role="status" aria-live="polite"></div>
+<div class="scroll" tabindex="0" role="region" aria-label="Research policy comparison table"><table><thead><tr><th scope="col">Check</th><th scope="col">Research limit</th><th scope="col">Why it matters / boundary</th></tr></thead><tbody id="rows"></tbody></table></div></section>
+<section class="risk"><div><h2>What does “R” mean?</h2><p>R is the maximum single-trade loss selected for a run, expressed in price units. Backtest shows it when configured. Price limits scale from that amount using checked integer arithmetic.</p><p><b>Example only: R = 50 price points</b><br>10R = 500 points. −R = −50 points. The example does not set the campaign's risk amount or account capital.</p></div><div><h2>Two settings outside the profile</h2><ul><li>Worst single-trade loss must be no more than the configured R.</li><li>The inherited reward/risk default requires the smallest positive pessimistic trade to be at least three times the largest losing trade. An explicit override can change the threshold; Backtest shows its effective value.</li><li>No observed loss leaves that ratio unmeasured. This guide does not supply a live policy value.</li><li>The index workflow separately requires at least 60% winning eligible days and its weekly and loss-streak rules. The table's winning-trade share does not replace them.</li><li>The 15:10 IST execution deadline is a separate mandatory rule.</li><li>Excluded trading costs remain excluded and must remain labelled.</li></ul></div></section>
+<h2>Four outcomes that must stay different</h2><div class="states"><div><b>Passed</b>Measured evidence met the check. This describes the tested history.</div><div><b>Failed</b>The evidence was measured and missed the configured limit.</div><div><b>Unmeasured</b>Required evidence was unavailable or not calculated. It is not a pass.</div><div><b>Refused</b>Invalid data, a broken contract or a resource limit prevented a valid assessment.</div></div>
+<section class="sources"><h2>Methods have sources. Thresholds are research choices.</h2><p>The methods below motivate the types of evidence. They do not establish these exact limits as universally correct. In particular, a 5% p-value does not mean a 95% chance of profitable trading.</p><a href="https://www.itl.nist.gov/div898/handbook/prc/section2/prc241.htm">NIST · Wilson intervals</a><a href="https://www.davidhbailey.com/dhbpapers/backtest-prob.pdf">Bailey et al. · overfitting</a><a href="https://users.ssc.wisc.edu/~behansen/718/White2000.pdf">White · Reality Check</a><a href="https://www.tandfonline.com/doi/abs/10.1198/073500105000000063">Hansen · SPA</a><a href="https://users.ssc.wisc.edu/~behansen/718/RomanoWolf2005.pdf">Romano–Wolf · multiple testing</a><a href="https://www.amstat.org/asa/files/pdfs/p-valuestatement.pdf">ASA · p-value interpretation</a><p><a href="../../docs/research-policy/report-source.md">Read the complete explanation and edge-case comparison</a> · <a href="../../config/intraday-research-v1.toml">Open the editable profile</a></p></section>
+<footer>This page is generated from the reviewed explanation and the actual profile. It is not a live monitor. The full campaign, Boolean/cash institutional integration and release verification have separate readiness requirements. No invented pass rate, performance score or customer-capacity guarantee is shown.</footer>
+</main>
+<script>
+const settings = [
+  {
+    "group": "Sample",
+    "field": "min_support_hits",
+    "title": "Enough matching signals",
+    "limit": "At least 40",
+    "why": "A matching signal is not necessarily an entered or completed trade. At 200 this floor demanded the combination fire on about seven percent of all bars over the swept window, which mandates a grinder rather than filtering one.",
+    "raw": "40"
+  },
+  {
+    "group": "Sample",
+    "field": "min_independent_sessions",
+    "title": "Enough trading days",
+    "limit": "At least 30",
+    "why": "Counts distinct qualifying sessions; that alone cannot prove statistical independence.",
+    "raw": "30"
+  },
+  {
+    "group": "Sample",
+    "field": "min_trades",
+    "title": "Enough completed trades",
+    "limit": "At least 40",
+    "why": "Avoids qualifying a strategy on a handful of outcomes. This is a screening floor, not a proof of adequate statistical power. At 200 it forced about 2.4 trades a week, which a setup meant to fire seldom cannot meet.",
+    "raw": "40"
+  },
+  {
+    "group": "Loss and return",
+    "field": "max_mae_paisa",
+    "title": "Worst movement against a trade",
+    "limit": "At most R",
+    "why": "Measures adverse excursion even if the price later recovers.",
+    "raw": "\"risk*1\""
+  },
+  {
+    "group": "Loss and return",
+    "field": "min_win_rate_ppm",
+    "title": "Winning trade share",
+    "limit": "At least 25%",
+    "why": "Counts completed trades, alongside the effective loss and reward/risk limits. The index workflow separately applies its day-consistency rule, whose exact version the launch page states.",
+    "raw": "250000"
+  },
+  {
+    "group": "Loss and return",
+    "field": "min_wilson_win_rate_ppm",
+    "title": "Cautious win-rate estimate",
+    "limit": "At least 14%",
+    "why": "Requires the Wilson lower bound to clear the floor; the method’s assumptions still matter. At 35%, and even at 20%, this bound was unsatisfiable at the profile’s own minimum trade count: forty trades at the 25% point floor give a Wilson lower bound of 141,871 ppm.",
+    "raw": "140000"
+  },
+  {
+    "group": "Loss and return",
+    "field": "min_return_drawdown_ppm",
+    "title": "Return compared with drawdown",
+    "limit": "At least 2×",
+    "why": "The pessimistic return must be at least twice the measured drawdown.",
+    "raw": "2000000"
+  },
+  {
+    "group": "Loss and return",
+    "field": "min_weakest_period_return_paisa",
+    "title": "Worst required period",
+    "limit": "At least −R",
+    "why": "Allows a bounded losing period without hiding it behind a strong total.",
+    "raw": "\"risk*-1\""
+  },
+  {
+    "group": "Statistical evidence",
+    "field": "max_pbo_ppm",
+    "title": "Estimated backtest overfitting",
+    "limit": "At most 20%",
+    "why": "Limits the pipeline's PBO estimate. It does not state an 80% probability of future success.",
+    "raw": "200000"
+  },
+  {
+    "group": "Statistical evidence",
+    "field": "max_fwer_p_value_ppm",
+    "title": "Search-wide adjusted evidence",
+    "limit": "At most 5%",
+    "why": "Requires the family-wise adjusted p-value to clear the research threshold.",
+    "raw": "50000"
+  },
+  {
+    "group": "Statistical evidence",
+    "field": "max_spa_p_value_ppm",
+    "title": "Superior predictive ability",
+    "limit": "At most 5%",
+    "why": "Tests against the recorded benchmark while accounting for alternatives; not a win probability.",
+    "raw": "50000"
+  },
+  {
+    "group": "Later periods",
+    "field": "min_decided_folds",
+    "title": "Usable walk-forward windows",
+    "limit": "At least 6",
+    "why": "Enough historical train/test windows must produce an actual decision.",
+    "raw": "6"
+  },
+  {
+    "group": "Data and execution",
+    "field": "max_ambiguous_fill_rate_ppm",
+    "title": "Unclear candle event order",
+    "limit": "0%",
+    "why": "No admitted trade may rely on an ambiguous fill outcome. The sweep may still record rejected candidates.",
+    "raw": "0"
+  },
+  {
+    "group": "Data and execution",
+    "field": "max_gap_affected_rate_ppm",
+    "title": "Gap-affected outcomes",
+    "limit": "0%",
+    "why": "No admitted trade may be marked as affected by a gap. This does not replace source completeness checks.",
+    "raw": "0"
+  },
+  {
+    "group": "Concentration",
+    "field": "max_session_concentration_ppm",
+    "title": "Dependence on one day",
+    "limit": "At most 25%",
+    "why": "One session cannot contribute more than a quarter of the trade count.",
+    "raw": "250000"
+  },
+  {
+    "group": "Concentration",
+    "field": "max_largest_trade_profit_share_ppm",
+    "title": "Dependence on one lucky trade",
+    "limit": "At most 50%",
+    "why": "Limits the measured share of GROSS WIN attributable to the largest trade. At 10%, admitting a winner N times the typical one required 9N+1 winning trades, so a tenfold outlier needed 91 winners and the best trade was capped near the average win.",
+    "raw": "500000"
+  },
+  {
+    "group": "Loss and return",
+    "field": "max_drawdown_paisa",
+    "title": "Largest accumulated setback",
+    "limit": "At most 3R",
+    "why": "Caps the peak-to-trough loss in price units; not an account-percentage limit.",
+    "raw": "\"risk*3\""
+  },
+  {
+    "group": "Loss and return",
+    "field": "max_losing_trade_rate_ppm",
+    "title": "Losing trade share",
+    "limit": "At most 75%",
+    "why": "A rate remains comparable across study lengths.",
+    "raw": "750000"
+  },
+  {
+    "group": "Loss and return",
+    "field": "max_losing_trades",
+    "title": "Total losing-trade count",
+    "limit": "No extra absolute cap",
+    "why": "Explicit u64 maximum. The 75% rate and losing-streak limits still apply; long studies are not penalized only for being long.",
+    "raw": "18446744073709551615"
+  },
+  {
+    "group": "Loss and return",
+    "field": "min_pessimistic_profit_paisa",
+    "title": "Conservative total result",
+    "limit": "At least 5R",
+    "why": "Requires a positive result with a margin relative to the run's risk unit. Excluded costs remain excluded.",
+    "raw": "\"risk*5\""
+  },
+  {
+    "group": "Sample",
+    "field": "min_winning_trades",
+    "title": "Enough winning trades",
+    "limit": "At least 10",
+    "why": "Adds an absolute sample floor alongside the win-rate rule.",
+    "raw": "10"
+  },
+  {
+    "group": "Loss and return",
+    "field": "min_average_win_paisa",
+    "title": "Average winning amount",
+    "limit": "At least 1 paisa",
+    "why": "Requires a positive measured average; stronger size checks come from reward/risk and profit factor.",
+    "raw": "1"
+  },
+  {
+    "group": "Loss and return",
+    "field": "max_average_loss_paisa",
+    "title": "Average losing amount",
+    "limit": "At most R",
+    "why": "Keeps average loss within the stated run risk unit.",
+    "raw": "\"risk*1\""
+  },
+  {
+    "group": "Loss and return",
+    "field": "min_profit_factor_ppm",
+    "title": "Total winning amounts versus losing amounts",
+    "limit": "At least 1.5×",
+    "why": "Requires total gains to exceed total losses with a margin. Missing or undefined evidence must not be invented.",
+    "raw": "1500000"
+  },
+  {
+    "group": "Loss and return",
+    "field": "max_consecutive_losing_streak",
+    "title": "Longest losing streak",
+    "limit": "At most 10",
+    "why": "Challenges prolonged sequences of losses in the recorded trade order.",
+    "raw": "10"
+  },
+  {
+    "group": "Loss and return",
+    "field": "min_consecutive_winning_streak",
+    "title": "Required winning streak",
+    "limit": "0; none required",
+    "why": "A lucky streak is not a condition for admission. This is an explicit neutral value, not a missing setting.",
+    "raw": "0"
+  },
+  {
+    "group": "Statistical evidence",
+    "field": "min_bootstrap_draws",
+    "title": "Statistical resamples",
+    "limit": "At least 1,000",
+    "why": "Minimum procedure resolution. Resampling existing observations does not create new market history.",
+    "raw": "1000"
+  },
+  {
+    "group": "Statistical evidence",
+    "field": "min_bootstrap_strategies",
+    "title": "Compared strategy count",
+    "limit": "At least 2",
+    "why": "A family comparison needs alternatives. This floor never authorizes omitting searched candidates.",
+    "raw": "2"
+  },
+  {
+    "group": "Statistical evidence",
+    "field": "min_bootstrap_periods",
+    "title": "Aligned observation periods",
+    "limit": "At least 60",
+    "why": "Requires a common history for the compared strategies and resampling tests.",
+    "raw": "60"
+  },
+  {
+    "group": "Statistical evidence",
+    "field": "min_pbo_contributing_folds",
+    "title": "Usable overfitting splits",
+    "limit": "At least 6",
+    "why": "Requires valid ranking placements to contribute to the estimate.",
+    "raw": "6"
+  },
+  {
+    "group": "Statistical evidence",
+    "field": "max_pbo_unrankable_folds",
+    "title": "Unrankable overfitting splits",
+    "limit": "At most 0",
+    "why": "A broken or unusable ranking split cannot disappear from the assessment.",
+    "raw": "0"
+  },
+  {
+    "group": "Later periods",
+    "field": "min_profitable_oos_folds",
+    "title": "Profitable later test windows",
+    "limit": "At least 4",
+    "why": "Requires repeated positive results in walk-forward test windows; also keep a strictly later untouched holdout.",
+    "raw": "4"
+  },
+  {
+    "group": "Later periods",
+    "field": "min_oos_pessimistic_return_paisa",
+    "title": "Conservative later-period total",
+    "limit": "At least 1 paisa",
+    "why": "Requires a positive aggregate out-of-sample result, not just positive training results.",
+    "raw": "1"
+  },
+  {
+    "group": "Statistical evidence",
+    "field": "max_white_reality_p_value_ppm",
+    "title": "White Reality Check evidence",
+    "limit": "At most 5%",
+    "why": "A family-level check for data snooping against the recorded benchmark.",
+    "raw": "50000"
+  },
+  {
+    "group": "Statistical evidence",
+    "field": "require_white_reality_rejection",
+    "title": "White test actually reached rejection",
+    "limit": "Required",
+    "why": "A missing result or decorative p-value is insufficient.",
+    "raw": "true"
+  },
+  {
+    "group": "Statistical evidence",
+    "field": "max_romano_wolf_p_value_ppm",
+    "title": "Candidate-specific adjusted evidence",
+    "limit": "At most 5%",
+    "why": "Uses the candidate's adjusted result after multiple comparisons.",
+    "raw": "50000"
+  },
+  {
+    "group": "Statistical evidence",
+    "field": "require_romano_wolf_rejection",
+    "title": "Candidate test actually reached rejection",
+    "limit": "Required",
+    "why": "Requires an explicit Romano–Wolf decision for that candidate.",
+    "raw": "true"
+  }
+];
+// END GENERATED SETTINGS
+const rows=document.querySelector('#rows'), search=document.querySelector('#search'), group=document.querySelector('#group');
+for(const name of [...new Set(settings.map(row=>row.group))]){const option=document.createElement('option');option.value=name;option.textContent=name;group.append(option)}
+function render(){const query=search.value.trim().toLocaleLowerCase();const matches=settings.filter(row=>(!group.value||row.group===group.value)&&(!query||Object.values(row).join(' ').toLocaleLowerCase().includes(query)));rows.replaceChildren();for(const row of matches){const tr=document.createElement('tr'),name=document.createElement('td'),limit=document.createElement('td'),why=document.createElement('td'),title=document.createElement('strong'),category=document.createElement('small'),details=document.createElement('details'),summary=document.createElement('summary'),code=document.createElement('code');title.textContent=row.title;category.textContent=row.group;summary.textContent='Exact setting';code.textContent=`${row.field} = ${row.raw}`;details.append(summary,code);name.append(title,category,details);limit.textContent=row.limit;why.textContent=row.why;tr.append(name,limit,why);rows.append(tr)}document.querySelector('#count').textContent=`${matches.length} of ${settings.length} settings shown · research profile V1`}
+search.addEventListener('input',render);group.addEventListener('change',render);render();
+</script>
+</body></html>

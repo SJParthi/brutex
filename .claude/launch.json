@@ -1,0 +1,27 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "brutex — the whole application (press Run on THIS one). Stamps the build with HEAD, because crates/cli/src/lib.rs commit_stamp() reads BRUTEX_COMMIT at COMPILE time and a server built without it refuses every sweep by CLAUDE.md §3 rule 3.",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": [
+        "-c",
+        "BRUTEX_COMMIT=$(git rev-parse HEAD) exec cargo run --release -p api -- serve"
+      ],
+      "port": 8080,
+      "url": "http://127.0.0.1:8080"
+    },
+    {
+      "name": "web — Vite dev server (FRONT-END DEVELOPMENT ONLY, needs Node)",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "--prefix",
+        "web",
+        "run",
+        "dev"
+      ],
+      "port": 5173,
+      "url": "http://localhost:5173"
+    }
+  ]
+}

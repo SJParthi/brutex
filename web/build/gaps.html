@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark light" />
+    <!-- A MISSING FAVICON IS NOT A COSMETIC GAP, IT IS LOG NOISE.
+         With no icon declared the browser asks for `/favicon.ico` on every page
+         load, `assets.rs` has no such file, and the miss costs TWO warn-level
+         events — one `api.request` 404 and one `api.assets` "no such asset".
+         Measured against the running binary on 21 Aug 2026: 28 of the last 200
+         events, 17% of the log, all of it the console talking about itself. The
+         page that reads that log is one click away in the nav now, which is
+         exactly why the noise had to go with it. -->
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <title>brutex</title>
+    <link href="/_app/immutable/entry/start.CUiQo3oY.js" rel="modulepreload">
+		<link href="/_app/immutable/chunks/BjVaKE0-.js" rel="modulepreload">
+		<link href="/_app/immutable/chunks/BDXV1nL3.js" rel="modulepreload">
+		<link href="/_app/immutable/chunks/DK3Fl9T5.js" rel="modulepreload">
+		<link href="/_app/immutable/chunks/Dt-HX3Vu.js" rel="modulepreload">
+		<link href="/_app/immutable/entry/app.zefKPjq9.js" rel="modulepreload">
+		<link href="/_app/immutable/chunks/HclGiUj8.js" rel="modulepreload">
+		<link href="/_app/immutable/chunks/xihTtKlq.js" rel="modulepreload">
+		<link href="/_app/immutable/nodes/0.DMOT7NdA.js" rel="modulepreload">
+		<link href="/_app/immutable/chunks/Dlpwuq8F.js" rel="modulepreload">
+		<link href="/_app/immutable/chunks/DHq5sDda.js" rel="modulepreload">
+		<link href="/_app/immutable/chunks/D7R_6An9.js" rel="modulepreload">
+		<link href="/_app/immutable/chunks/MF_l0IGf.js" rel="modulepreload">
+		<link href="/_app/immutable/chunks/05hiwXtp.js" rel="modulepreload">
+		<link href="/_app/immutable/chunks/BpQdO6Zn.js" rel="modulepreload">
+		<link href="/_app/immutable/chunks/DIV4RXrM.js" rel="modulepreload">
+		<link href="/_app/immutable/nodes/7.DK5L8TWO.js" rel="modulepreload">
+		<link href="/_app/immutable/chunks/C3aQFFmv.js" rel="modulepreload">
+		<link href="/_app/immutable/chunks/BP0xixOr.js" rel="modulepreload">
+		
+		<link href="/_app/immutable/assets/0.ZfEnDvjl.css" rel="stylesheet">
+		<link href="/_app/immutable/assets/7.BhQwz-Ru.css" rel="stylesheet">
+  </head>
+  <body data-sveltekit-preload-data="hover">
+    <!--
+      WITHOUT SCRIPT THIS PAGE WAS A BLANK WHITE RECTANGLE, AND SAID NOTHING.
+
+      `+layout.js` sets `ssr = false`, so every prerendered file in `web/build`
+      is a shell: five files, byte-identical bodies, no nav and no headings.
+      That is the correct choice under D-0053 -- the Rust binary must never run
+      a JavaScript renderer -- but its consequence was a failure mode with no
+      symptom. A bundle that 404s from a stale cache, a chunk that throws on an
+      old browser, and JavaScript switched off all produced the same blank
+      page, and a blank page names no reason.
+
+      CLAUDE.md section 4: degrade loudly and name the reason, or refuse. Never
+      both silently. So this block names the reason AND routes onward, because
+      there is somewhere to go: `crates/api/src/render.rs` still serves plain
+      server-rendered HTML on the same origin, with ordinary form POSTs and no
+      script at all. Those pages are not a downgrade of this one, they are the
+      surface this one was built over, and they answer without a bundle.
+
+      Inline styles rather than classes: `theme.css` arrives through
+      `%sveltekit.head%`, and a block whose whole purpose is to survive a
+      failed asset load must not depend on an asset loading.
+    -->
+    <noscript>
+      <div style="max-width:46rem;margin:0 auto;padding:3rem 1.5rem;font:16px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#e7e9ef">
+        <h1 style="font-size:1.5rem;margin:0 0 .75rem">This console needs JavaScript, and it is switched off</h1>
+        <p style="margin:0 0 1rem;color:#a8afc2">
+          The pages under <code>/</code>, <code>/db</code>, <code>/ingest</code>,
+          <code>/audit</code> and <code>/autopilot</code> are rendered in the
+          browser. The server sends a shell and the script fills it, so with no
+          script there is nothing to show.
+        </p>
+        <p style="margin:0 0 1rem;color:#a8afc2">
+          If script is <em>enabled</em> and you are still reading this, the
+          bundle did not load &mdash; a stale cached chunk or a missing file
+          under <code>/_app/</code>. A hard reload is the first thing to try.
+        </p>
+        <p style="margin:0 0 .5rem">The server also renders these without any script:</p>
+        <ul style="margin:0;padding-left:1.25rem;color:#8aa6e8">
+          <li><a href="/dashboard" style="color:inherit">/dashboard</a></li>
+          <li><a href="/instruments" style="color:inherit">/instruments</a></li>
+          <li><a href="/store" style="color:inherit">/store</a></li>
+          <li><a href="/bars" style="color:inherit">/bars</a></li>
+          <li><a href="/logs" style="color:inherit">/logs</a></li>
+        </ul>
+      </div>
+    </noscript>
+    <div style="display:contents">
+			<script>
+				{
+					__sveltekit_1b8qzl4 = {
+						base: ""
+					};
+
+					const element = document.currentScript.parentElement;
+
+					Promise.all([
+						import("/_app/immutable/entry/start.CUiQo3oY.js"),
+						import("/_app/immutable/entry/app.zefKPjq9.js")
+					]).then(([kit, app]) => {
+						kit.start(app, element);
+					});
+				}
+			</script>
+		</div>
+  </body>
+</html>

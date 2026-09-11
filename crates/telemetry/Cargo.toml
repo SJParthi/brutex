@@ -1,0 +1,58 @@
+[package]
+name         = "telemetry"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+publish      = { workspace = true }
+description  = "The structured event stream: one NDJSON line per event, rotated, tailable from the end. Depends on nothing."
+
+# ---------------------------------------------------------------------------
+# THIS SECTION IS DELIBERATELY EMPTY AND STAYS EMPTY.
+#
+# Same rule as crates/core and crates/greeks, for a third reason: EVERYTHING is
+# meant to depend on this crate. A logger that sits at the bottom of the graph
+# can be taken by `core`, by `store`, by `pull`, by `api` and by a future
+# `engine` without any of them acquiring a transitive graph they did not ask
+# for.
+#
+# A CLAUSE NAMING A DELETED CRATE HAS BEEN REMOVED FROM HERE. It read: "and
+# `crates/web` compiles to wasm32 with `core` as its only arrow, so a
+# dependency added here would be one forced on a target that has no
+# filesystem." There is no `crates/web` -- D-0052 and D-0053 moved the front
+# end to `web/`, CLAUDE.md section 5 records that gate 7 skips permanently, and
+# nothing in this workspace targets wasm32. The reason above stands on its own
+# without it: a crate five others depend on must not drag a graph behind it.
+# D-0298.
+#
+# It is also why serde/serde_json are absent even though the workspace already
+# pins them and `crates/pull` already takes serde_json. See the "Why the JSON
+# is hand-written" section of src/lib.rs: the whole serialiser this crate needs
+# is an escape table over a fixed key order, it is ~40 lines, it writes
+# straight into a reusable buffer with no intermediate `Value` and no
+# allocation per event, and the escape surface is pinned byte-for-byte by
+# `json::every_escape_this_crate_writes_is_the_one_rfc8259_names`.
+#
+# Adding a line below makes this crate exactly as expensive to depend on as the
+# thing it was built to be cheaper than, and requires an entry in
+# docs/05-decisions.md naming what it replaces.
+# ---------------------------------------------------------------------------
+[dependencies]
+
+[lints]
+workspace = true
+
+# ---------------------------------------------------------------------------
+# GATE 8 — the O(1) ratio harness. `harness = false` so it is a plain binary
+# with no benchmarking framework and therefore no dependency; `test = false`
+# because `cargo test` must not run a timing loop, and the coverage gate must
+# not measure one. Same shape and same reasons as crates/core. See D-0034 and
+# crates/telemetry/benches/ratio.rs.
+#
+# A [[bench]] target is not a dependency: it links this crate's own lib and
+# std, and the empty [dependencies] table above stays empty.
+# ---------------------------------------------------------------------------
+[[bench]]
+name    = "ratio"
+harness = false
+test    = false

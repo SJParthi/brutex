@@ -222,9 +222,36 @@ impl Header {
     /// same thing to a reader, and both are safe.
     #[must_use]
     pub const fn genesis(symbol_id: u32, timeframe_secs: u32, flags: u32) -> Self {
+        Self::genesis_at(Layout::CURRENT, symbol_id, timeframe_secs, flags)
+    }
+
+    /// The first header of a file at a GIVEN geometry.
+    ///
+    /// # Why the geometry is a parameter
+    ///
+    /// [`Self::genesis`] wrote `Layout::CURRENT` and its stride, which is right
+    /// for a `.bar` and silently wrong for its `.ovl` sibling: the sidecar's
+    /// records are 24 bytes and its version is 9, so a file created at the bar's
+    /// geometry accepts a 24-byte batch at 56-byte offsets. The header would
+    /// validate, the CRC would pass — the bytes written are the bytes read —
+    /// and every field afterwards would come from the wrong place.
+    ///
+    /// Naming the layout at creation is what makes that a compile-time choice
+    /// rather than a default nobody revisits.
+    #[must_use]
+    pub const fn genesis_at(
+        layout: Layout,
+        symbol_id: u32,
+        timeframe_secs: u32,
+        flags: u32,
+    ) -> Self {
+        // THE STRIDE COMES FROM THE LAYOUT, not from a constant beside it, so
+        // the two cannot disagree about one file.
+        #[allow(clippy::cast_possible_truncation)]
+        let record_stride = layout.record_stride() as u16;
         Self {
-            format_version: Layout::CURRENT.version(),
-            record_stride: CURRENT_STRIDE,
+            format_version: layout.version(),
+            record_stride,
             flags,
             generation: 0,
             n_valid: 0,
@@ -338,6 +365,15 @@ impl Header {
     /// does not define, or [`FormatError::OffsetOverflow`] if the counter puts
     /// the end of the data past `u64`.
     pub fn commit(&self) -> Result<Commit, FormatError> {
+        self.commit_image()
+            .inspect_err(|&refusal| note_commit_refused(self, refusal))
+    }
+
+    /// [`Header::commit`]'s body, split so that its three refusals — the
+    /// version, the stride and the offset — reach **one** emit site instead of
+    /// three. Splitting for the event rather than repeating the event is what
+    /// keeps a later fourth refusal from being the one nobody logged.
+    fn commit_image(&self) -> Result<Commit, FormatError> {
         let layout = Layout::for_version(self.format_version)?;
         if u64::from(self.record_stride) != layout.record_stride() {
             return Err(FormatError::StrideMismatch(self.record_stride));
@@ -512,37 +548,12 @@ impl Header {
     /// # Ok::<(), FormatError>(())
     /// ```
     pub fn read_region(region: &[u8], file_len: u64) -> Result<Self, FormatError> {
-        let (header, layout) = best_candidate(region, None)?;
-
-        let slots = whole_slots(region);
-        if slots < layout.slot_count() {
-            return Err(FormatError::HeaderRegionTooShort {
-                slots,
-                need: layout.slot_count(),
-            });
+        let (header, newest, refused) = committed(region, file_len)
+            .inspect_err(|&refusal| note_header_unreadable(region, file_len, refusal))?;
+        if header.generation != newest {
+            note_header_fell_back(&header, newest, file_len, refused);
         }
-
-        // Newest first, at most one candidate per slot position. Bounded by
-        // the family slot count rather than by the generation strictly
-        // decreasing: a loop that leaned on the comparison would *hang* rather
-        // than fail if that comparison ever stopped being strict, and a hang
-        // is the one failure a test suite cannot report.
-        let mut newest = Some((header, layout));
-        let mut refusal = FormatError::NoValidHeader;
-        for _ in 0..MAX_SLOTS {
-            let Some((candidate, geometry)) = newest else {
-                return Err(refusal);
-            };
-            match candidate.validate(geometry, file_len) {
-                Ok(()) => return Ok(candidate),
-                Err(refused) => refusal = refused,
-            }
-            // The "no older candidate" error is dropped on purpose: the
-            // refusal from the newest slot that decoded says more about the
-            // file than "nothing else was there".
-            newest = best_candidate(region, Some(candidate.generation)).ok();
-        }
-        Err(refusal)
+        Ok(header)
     }
 
     /// The 64-byte slot image for this header, checksum computed.
@@ -569,6 +580,172 @@ impl Header {
         }
         out
     }
+}
+
+/// The committed header, the newest generation any slot claimed, and the
+/// refusal that stood between the two.
+///
+/// This is [`Header::read_region`]'s search, moved out of it whole and
+/// unchanged. It is split off for one reason: the search can end in three
+/// different places — no candidate at all, a region too short for the version,
+/// and every candidate refused in turn — and three `return Err` statements
+/// would need three copies of the same emit. One of them would eventually be
+/// added without the other two, and the refusal nobody logged is exactly the
+/// one an operator would be looking for.
+///
+/// The second element is the generation of the newest slot that *decoded*,
+/// which is not always the generation returned: when the newest commit fails
+/// [`Header::validate`], an older one is handed back on purpose. The third is
+/// the refusal that rejected the newer commit, so the caller can say **why** it
+/// walked back rather than only that it did.
+fn committed(region: &[u8], file_len: u64) -> Result<(Header, u64, FormatError), FormatError> {
+    let (header, layout) = best_candidate(region, None)?;
+
+    let slots = whole_slots(region);
+    if slots < layout.slot_count() {
+        return Err(FormatError::HeaderRegionTooShort {
+            slots,
+            need: layout.slot_count(),
+        });
+    }
+
+    // Newest first, at most one candidate per slot position. Bounded by
+    // the family slot count rather than by the generation strictly
+    // decreasing: a loop that leaned on the comparison would *hang* rather
+    // than fail if that comparison ever stopped being strict, and a hang
+    // is the one failure a test suite cannot report.
+    let claimed = header.generation;
+    let mut newest = Some((header, layout));
+    let mut refusal = FormatError::NoValidHeader;
+    for _ in 0..MAX_SLOTS {
+        let Some((candidate, geometry)) = newest else {
+            return Err(refusal);
+        };
+        match candidate.validate(geometry, file_len) {
+            Ok(()) => return Ok((candidate, claimed, refusal)),
+            Err(refused) => refusal = refused,
+        }
+        // The "no older candidate" error is dropped on purpose: the
+        // refusal from the newest slot that decoded says more about the
+        // file than "nothing else was there".
+        newest = best_candidate(region, Some(candidate.generation)).ok();
+    }
+    Err(refusal)
+}
+
+/// A header region that yielded no usable commit, on the rolling log.
+///
+/// # What was invisible
+///
+/// A file whose every header slot is damaged returned a [`FormatError`] to its
+/// caller and nothing else happened. The caller turns it into one refusal about
+/// one file, and a store that had lost a header looked from the outside exactly
+/// like a month that was never pulled — same empty answer, different cause, no
+/// way to tell them apart afterwards. An operator can now read which refusal
+/// the header search ended on, how many whole slots the region even held, and
+/// the file length that was checked against, without a hex dump.
+///
+/// # What it deliberately does not carry
+///
+/// **The path**, because this module has none: it is handed a byte region and a
+/// length, and inventing a name for the file would be a fabrication of the kind
+/// `CLAUDE.md` §3 rule 1 forbids. The path belongs to the caller in
+/// `crates/store/src/file.rs`, which knows it and already names it in
+/// `store.append`.
+///
+/// # Why `Error`, and why this is not a per-row emit
+///
+/// It fires at most **once per file open**, and only on the refusal — the
+/// ordinary successful read emits nothing at all, because that path runs once
+/// per bar file in a sweep and the write side is already covered by
+/// `store.append committed`.
+fn note_header_unreadable(region: &[u8], file_len: u64, refusal: FormatError) {
+    let why = refusal.to_string();
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::error("store.header", "no committed header")
+            .with("slots", telemetry::Value::Uint(whole_slots(region)))
+            .with("region_bytes", telemetry::Value::count(region.len()))
+            .with("file_len", telemetry::Value::Uint(file_len))
+            .with("why", telemetry::Value::Str(&why)),
+    );
+}
+
+/// A read that walked back to an older commit, on the rolling log.
+///
+/// # What was invisible
+///
+/// This is the fourth row of the table at the top of this module: the header
+/// became durable before the records it counts, so the newest slot is whole and
+/// **unsupported**, and [`Header::read_region`] hands back the previous
+/// generation rather than condemning the file. That recovery is right and it
+/// was completely silent. A file that had lost its last batch read back as a
+/// file that never had one, and the only symptom was a bar count nobody held a
+/// prior for. The question an operator could not answer — *did this file lose a
+/// commit, or was that batch never pulled?* — is now one line: the generation
+/// that was used, the generation that was rejected, and the refusal that
+/// rejected it.
+///
+/// # Why `Warn` and not `Error`
+///
+/// Nothing failed. Every bar returned is real and was committed. It is the
+/// **newest** commit that is gone, which is a fact worth a line and not worth a
+/// refusal — and `CLAUDE.md` §4 bans a fallback that hides a failure, which is
+/// precisely what this fallback was until now.
+fn note_header_fell_back(header: &Header, newest: u64, file_len: u64, refusal: FormatError) {
+    let why = refusal.to_string();
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::warn("store.header", "fell back to an older generation")
+            .with("generation", telemetry::Value::Uint(header.generation))
+            .with("rejected", telemetry::Value::Uint(newest))
+            .with("n_valid", telemetry::Value::Uint(header.n_valid))
+            .with(
+                "symbol_id",
+                telemetry::Value::Uint(u64::from(header.symbol_id)),
+            )
+            .with("file_len", telemetry::Value::Uint(file_len))
+            .with("why", telemetry::Value::Str(&why)),
+    );
+}
+
+/// A commit that could not be built, on the rolling log.
+///
+/// # What was invisible
+///
+/// [`Header::commit`] refuses a version this build cannot write, a stride the
+/// version does not define, or a counter whose data end is past `u64`. Each of
+/// those aborts an append, and the header state that produced it lived only in
+/// memory and was dropped with the error — so the numbers that caused the
+/// refusal did not survive it. The refusal reached a caller as one variant with
+/// one number in it; the *state* that produced it reached nobody. An operator
+/// can now see the version, the stride and the counter the writer was actually
+/// holding, which is what separates "this build is older than the file" from
+/// "this header was assembled wrong".
+///
+/// # Why `Error`, and why it is bounded
+///
+/// One event per **refused commit**, never per record and never on success: a
+/// commit that succeeds writes nothing here, because that is the once-per-append
+/// path `store.append committed` already carries.
+fn note_commit_refused(header: &Header, refusal: FormatError) {
+    let why = refusal.to_string();
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::error("store.header", "commit refused")
+            .with(
+                "format_version",
+                telemetry::Value::Uint(u64::from(header.format_version)),
+            )
+            .with(
+                "record_stride",
+                telemetry::Value::Uint(u64::from(header.record_stride)),
+            )
+            .with("generation", telemetry::Value::Uint(header.generation))
+            .with("n_valid", telemetry::Value::Uint(header.n_valid))
+            .with(
+                "symbol_id",
+                telemetry::Value::Uint(u64::from(header.symbol_id)),
+            )
+            .with("why", telemetry::Value::Str(&why)),
+    );
 }
 
 /// The best-positioned decoded slot whose generation is below `below`.

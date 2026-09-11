@@ -1,0 +1,98 @@
+[package]
+name         = "runner"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+publish      = { workspace = true }
+description  = "Drives one sweep: bars in, condition-bit column, Apriori ladder, result."
+
+# WHY THIS CRATE EXISTS, AND WHY IT COULD NOT BE A MODULE OF AN EXISTING ONE.
+#
+# `crates/indicators` turns a bar into a `ConditionMask`. `crates/engine` walks
+# the Apriori ladder over a slice of them. Nothing joined them, and neither of
+# them MAY: CI gate 22 clause A compares each sweep crate's flat `[dependencies]`
+# key set against a hardcoded `want` — `vocab` alone for both — and refuses any
+# other spelling outright. It ships no allowlist. So `indicators` cannot depend
+# on `engine`, `engine` cannot depend on `indicators`, and the only place the two
+# halves can legally meet is a crate that is not on gate 22's list.
+#
+# That is not a workaround. Gate 22 exists so a bar cannot reach the sweep, and
+# keeping the join OUT of the swept crates is exactly what preserves it: the
+# three crates that hold the mask, the vocabulary and the ladder still cannot
+# name a filesystem, and this crate — which also does not — is what carries data
+# between them.
+#
+# NO ARROW TO `store`, DELIBERATELY, AND NOT YET. This crate takes a slice of
+# candles the caller already holds. Reading them from disk is a separate unit
+# with a separate decision, and the operator's standing rule is that neither a
+# vendor pull nor the bars already on disk may be used at all — so the only
+# input this crate has ever been driven with is generated in-process.
+[dependencies]
+# A version alongside the path is required: deny.toml sets `wildcards = "deny"`
+# and a path dependency with no version IS a wildcard. The dependency KEY is
+# `brutex_core` and the PACKAGE is `core`, matching every other member.
+brutex_core = { path = "../core", package = "core", version = "0.1.0" }
+vocab       = { path = "../vocab", version = "0.1.0" }
+indicators  = { path = "../indicators", version = "0.1.0" }
+engine      = { path = "../engine", version = "0.1.0" }
+
+# THE FILL MODEL. `crate::trade` prices every entry and exit through
+# `costs::fill::worst_case_fills` rather than reimplementing a tick of adverse
+# movement here -- that function is the one `COSTS_VERIFIED` checks its examples
+# against, and a second copy of the rule would be a second thing to get wrong.
+#
+# The graph stays acyclic: `costs` declares `brutex_core` and nothing else, so
+# this adds `runner -> costs -> core` beside the `runner -> core` that already
+# exists. CLAUDE.md section 5 does not list `costs` or `runner` at all; D-0095
+# records that gap rather than pretending the drawing is complete.
+costs       = { path = "../costs", version = "0.1.0" }
+
+# THE TEN PERFORMANCE CORES THE RANKING NEVER TOUCHED.
+#
+# `crates/cli` already carries this arrow and its own comment explains where it
+# may NOT go: gate 22 clause A pins `vocab indicators engine` to `vocab` alone,
+# so `crates/engine` -- which holds the candidate loop -- cannot take it, and
+# parallelism over CANDIDATE ENUMERATION is not expressible without a law
+# change. That is still true and this arrow does not attempt one.
+#
+# WHAT IT DOES REACH IS THE OTHER HALF OF THE COST. `rank::walk` calls
+# `outcome::edge` once per frequent itemset and each call is O(bars), so the
+# ranking pass is O(|frequent| x bars) -- the largest single cost after the
+# enumeration and, unlike the enumeration, embarrassingly parallel. Nothing in
+# `docs/06-limits.md` claims otherwise; it was simply never spread.
+#
+# GATE 22 PERMITS THIS AND THE GATE SAYS SO ITSELF. `runner` is on `SWEEP` and
+# not on `PINNED`, and the two lists ask different questions: `PINNED` fixes a
+# dependency SET, `SWEEP` refuses a CAPABILITY, and the capability it refuses is
+# the filesystem -- clause B `std::fs`, clause C the `store` import, clause D
+# `include_str!`, clause E. rayon touches none of them. The gate's own comment
+# states that `runner` "MUST NOT be added" to `PINNED` because that would
+# contradict the law rather than extend it.
+#
+# DETERMINISM IS PROVED, NOT ASSUMED, AND THE PROOF IS ALREADY IN `rank.rs`.
+# `Scored::cmp` falls through to `self.mask.words().cmp(..)`, and its comment
+# names the reason: "keeps section 3 rule 5's byte-for-byte reproducibility".
+# Masks are unique across the frequent set, so NO TWO SCORED VALUES CAN COMPARE
+# EQUAL -- the sorted output is therefore unique whatever order the chunks
+# merge in. `a_parallel_walk_is_byte_identical_to_a_sequential_one` measures it
+# rather than trusting the argument.
+#
+# AND THE MEMORY DESIGN IS PRESERVED. This module refuses to allocate the whole
+# result set -- its own comment calls the trim-after form "the thing this module
+# refuses to do" -- so the parallel form keeps a BOUNDED heap per chunk and
+# merges those. Peak is chunks x keep, which is a function of the core count and
+# not of |frequent|.
+rayon       = { workspace = true }
+
+[lints]
+workspace = true
+
+# ---------------------------------------------------------------------------
+# THIS IS NOT A DEPENDENCY. A [[bench]] target links this crate's own lib, its
+# dependencies and std. The [dependencies] table above is unchanged.
+# ---------------------------------------------------------------------------
+[[bench]]
+name    = "ratio"
+harness = false
+test    = false

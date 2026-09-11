@@ -80,12 +80,20 @@ impl Paisa {
     /// assert_eq!(Paisa::from_rupees_half_up(23_109.55)?.raw(), 2_310_955);
     /// # Ok::<(), brutex_core::error::PriceError>(())
     /// ```
-    // This is the ONLY function in the workspace permitted to do floating-point
+    // This is the ONLY function on a PRICE path permitted to do floating-point
     // arithmetic, and the allow is written here rather than relaxed at the
     // workspace level so that any second such function is a visible, reviewable
     // addition. The vendor sends rupees as an IEEE double; something has to
     // accept it, and the whole design is that this is the only thing that does.
     // Everything downstream of the `Ok` below is an integer forever.
+    //
+    // It said "the only function in the WORKSPACE", and that has not been true
+    // since `crates/greeks` arrived with four module-wide allows for this same
+    // lint. Those are not a second price path: a delta of
+    // 0.00017142680429549402 is a statistical value, and CLAUDE.md section 7
+    // keeps those at full precision on purpose. The line is between a price and
+    // a statistic, not between an integer and a float, and
+    // `core::lint::no_float_in_price` is what now checks it (X-02, D-0061).
     #[allow(clippy::float_arithmetic)]
     pub fn from_rupees_half_up(rupees: f64) -> Result<Self, PriceError> {
         /// The scale factor as a float, pinned to the integer constant by the
@@ -111,13 +119,125 @@ impl Paisa {
         // this function's own doc comment on a negative tie.
         let floored = (rupees * SCALE + 0.5).floor();
 
-        if !(NEG_LIMIT..LIMIT).contains(&floored) {
+        // EXCLUSIVE at both ends. `(NEG_LIMIT..LIMIT)` was inclusive at the low end, so
+        // `from_rupees_half_up(-92_233_720_368_547_758.08)` returned
+        // `Paisa(-9_223_372_036_854_775_808)` -- a price bit-identical to §7's
+        // open-interest null sentinel and to `vocab::tolerance::UNPINNED`. A value that
+        // cannot be told apart from "there is no value" is not a price. The cost of
+        // refusing it is one representable quote at 9.2e16 rupees.
+        if floored <= NEG_LIMIT || floored >= LIMIT {
             return Err(PriceError::OutOfRange);
         }
 
         // Safe: the range check above proves the value fits.
         #[allow(clippy::cast_possible_truncation)]
         let paisa = floored as i64;
+        Ok(Self(paisa))
+    }
+
+    /// Converts rupee TEXT to paisa, exactly, rounding half-up.
+    ///
+    /// # Why this exists beside [`Self::from_rupees_half_up`]
+    ///
+    /// That function's comment says the vendor sends rupees as an IEEE double and that by
+    /// then the information is already gone. True where a vendor sends one.
+    /// `crates/core/src/vendor.rs` is not such a place: the master file is text, and
+    /// `parse_strike` used to parse it into a double and hand that here -- discarding an
+    /// exact decimal one line before the only function allowed to approximate one.
+    ///
+    /// An audit measured **271 mismatches in the 40,000 three-decimal strings from "0.000"
+    /// to "39.999"**: `"0.145"` became 14 paisa where exact half-up is 15, and `"1.005"`
+    /// became 100 where exact is 101. The loss is always downward, because the nearest
+    /// double to a three-decimal tie sits at or below it.
+    ///
+    /// # Rounding
+    ///
+    /// Half-up means ties toward positive infinity, which is what
+    /// [`Self::from_rupees_half_up`] does and why it adds `0.5` and floors rather than
+    /// calling `round`. So the third fractional digit decides, and the two signs decide
+    /// differently at an exact tie:
+    ///
+    /// * positive: round up when the remainder is `>= 0.5`, i.e. the third digit is `>= 5`
+    /// * negative: round up in magnitude only when the remainder is `> 0.5`, because
+    ///   `-14.5` toward positive infinity is `-14`
+    ///
+    /// §7 puts the tick grid at two decimal places, so a third digit should not arrive at
+    /// all. This is what happens if one does, rather than a silent truncation.
+    ///
+    /// # Errors
+    ///
+    /// [`PriceError::NotDecimal`] for text that is not an optionally-signed decimal, and
+    /// [`PriceError::OutOfRange`] when the value does not fit `i64` paisa.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use brutex_core::price::Paisa;
+    /// assert_eq!(Paisa::from_rupee_text_half_up("23109.55")?.raw(), 2_310_955);
+    /// assert_eq!(Paisa::from_rupee_text_half_up("0.145")?.raw(), 15);
+    /// # Ok::<(), brutex_core::error::PriceError>(())
+    /// ```
+    pub fn from_rupee_text_half_up(text: &str) -> Result<Self, PriceError> {
+        const _: () = assert!(PAISA_PER_RUPEE == 100);
+
+        // ASCII whitespace only. `str::trim` is Unicode-aware and strips U+00A0, so a
+        // non-breaking space smuggled into a master-file column would read as padding and
+        // the row would parse. In a vendor file that is a data anomaly the caller should
+        // see, not something to remove quietly.
+        let trimmed = text.trim_matches(|c: char| c.is_ascii_whitespace());
+        let (negative, digits) = match trimmed.strip_prefix('-') {
+            Some(rest) => (true, rest),
+            None => (false, trimmed.strip_prefix('+').unwrap_or(trimmed)),
+        };
+        let (whole, fraction) = digits.split_once('.').unwrap_or((digits, ""));
+        if whole.is_empty() && fraction.is_empty() {
+            return Err(PriceError::NotDecimal);
+        }
+        if !whole.bytes().all(|b| b.is_ascii_digit())
+            || !fraction.bytes().all(|b| b.is_ascii_digit())
+        {
+            return Err(PriceError::NotDecimal);
+        }
+
+        let rupees: i64 = if whole.is_empty() {
+            0
+        } else {
+            whole.parse().map_err(|_| PriceError::OutOfRange)?
+        };
+        let digit = |i: usize| -> i64 {
+            fraction
+                .as_bytes()
+                .get(i)
+                .map_or(0, |b| i64::from(b.saturating_sub(b'0')))
+        };
+        let truncated = rupees
+            .checked_mul(PAISA_PER_RUPEE)
+            .and_then(|p| p.checked_add(digit(0).saturating_mul(10)))
+            .and_then(|p| p.checked_add(digit(1)))
+            .ok_or(PriceError::OutOfRange)?;
+
+        // The remainder past two decimals, compared with a half without computing one.
+        let third = digit(2);
+        let tail_nonzero = fraction.bytes().skip(3).any(|b| b != b'0');
+        let round_up = if negative {
+            third > 5 || (third == 5 && tail_nonzero)
+        } else {
+            third >= 5
+        };
+        let magnitude = truncated
+            .checked_add(i64::from(round_up))
+            .ok_or(PriceError::OutOfRange)?;
+
+        let paisa = if negative {
+            magnitude.checked_neg().ok_or(PriceError::OutOfRange)?
+        } else {
+            magnitude
+        };
+        // No `paisa == i64::MIN` guard, deliberately, and the float path above DOES need
+        // one. Reaching `i64::MIN` requires a magnitude of 9_223_372_036_854_775_808, one
+        // past `i64::MAX`, so the checked chain above refuses it before `checked_neg` runs.
+        // A guard here would be a branch no input can enter -- the uncovered region an
+        // `unreachable!` leaves, which this workspace has removed four times.
         Ok(Self(paisa))
     }
 
@@ -167,6 +287,138 @@ impl Paisa {
 )]
 mod tests {
     use super::*;
+
+    /// Every three-decimal rupee string converts to the paisa an independent formula gives.
+    ///
+    /// The reference is deliberately a DIFFERENT calculation: total thousandths, then
+    /// `(t + 5) / 10` in integer division, which is half-up on positives without going near
+    /// a float and without reusing the parser's own digit walk rearranged. 40,000 strings,
+    /// `0.000` through `39.999` -- the exact range an audit measured 271 float mismatches
+    /// over.
+    #[test]
+    fn every_three_decimal_string_converts_exactly() {
+        let mut checked = 0_u32;
+        for thousandths in 0..40_000_i64 {
+            let text = format!(
+                "{}.{:03}",
+                thousandths / 1_000,
+                thousandths.rem_euclid(1_000)
+            );
+            let want = (thousandths + 5) / 10;
+            assert_eq!(
+                Paisa::from_rupee_text_half_up(&text).map(Paisa::raw),
+                Ok(want),
+                "{text} must be {want} paisa"
+            );
+            checked += 1;
+        }
+        assert_eq!(
+            checked, 40_000,
+            "the loop did not run, so this proves nothing"
+        );
+    }
+
+    /// The two witnesses the float path lost, named.
+    #[test]
+    fn the_witnesses_the_float_path_lost() {
+        assert_eq!(
+            Paisa::from_rupee_text_half_up("0.145").map(Paisa::raw),
+            Ok(15),
+            "exact half-up on 14.5 paisa is 15; through a double it returned 14"
+        );
+        assert_eq!(
+            Paisa::from_rupee_text_half_up("1.005").map(Paisa::raw),
+            Ok(101),
+            "exact half-up on 100.5 paisa is 101; through a double it returned 100"
+        );
+    }
+
+    /// A negative tie rounds toward POSITIVE infinity, which is what half-up means here.
+    ///
+    /// [`Paisa::from_rupees_half_up`]'s own comment says so: adding `0.5` then flooring is
+    /// half-up for every sign, and `round` would disagree on exactly this input. So `-0.145`
+    /// is `-14`, not `-15`. The two signs need different comparisons against the half, and
+    /// getting it wrong is a one-paisa error in the direction that flatters a short.
+    #[test]
+    fn a_negative_tie_rounds_toward_positive_infinity() {
+        assert_eq!(
+            Paisa::from_rupee_text_half_up("-0.145").map(Paisa::raw),
+            Ok(-14),
+            "-14.5 paisa toward positive infinity is -14"
+        );
+        assert_eq!(
+            Paisa::from_rupee_text_half_up("-0.1451").map(Paisa::raw),
+            Ok(-15),
+            "past the tie it rounds away, so the tie itself is the only special case"
+        );
+        assert_eq!(
+            Paisa::from_rupee_text_half_up("0.145").map(Paisa::raw),
+            Ok(15),
+            "and the positive tie goes the other way, which is the same rule"
+        );
+    }
+
+    /// Malformed text is refused by name, not read to the first bad byte.
+    #[test]
+    fn text_that_is_not_a_decimal_is_refused() {
+        for bad in [
+            "",
+            ".",
+            "-",
+            "+",
+            "abc",
+            "1e5",
+            "1,000.00",
+            "1.2.3",
+            "0x10",
+            "1..5",
+            "12 34",
+            "\u{a0}1.5",
+        ] {
+            assert_eq!(
+                Paisa::from_rupee_text_half_up(bad),
+                Err(PriceError::NotDecimal),
+                "{bad:?} is not a decimal"
+            );
+        }
+        // ASCII padding IS accepted: a master-file column may carry it. The non-breaking
+        // space above is not, and that is the difference `str::trim` would have erased.
+        assert_eq!(
+            Paisa::from_rupee_text_half_up("  2500.50  ").map(Paisa::raw),
+            Ok(250_050)
+        );
+        assert_eq!(Paisa::from_rupee_text_half_up(".5").map(Paisa::raw), Ok(50));
+        assert_eq!(Paisa::from_rupee_text_half_up("7").map(Paisa::raw), Ok(700));
+    }
+
+    /// `i64::MIN` is not a price, because it is the open-interest null sentinel.
+    ///
+    /// §7 makes `i64::MIN` mean "there is no open interest", and `vocab::tolerance::UNPINNED`
+    /// is the same bit pattern. The range check was `(NEG_LIMIT..LIMIT)`, inclusive at the
+    /// low end, so this input returned `Paisa(i64::MIN)`.
+    #[test]
+    fn the_open_interest_sentinel_is_not_a_price() {
+        assert_eq!(
+            Paisa::from_rupees_half_up(-92_233_720_368_547_758.08),
+            Err(PriceError::OutOfRange),
+            "a price equal to i64::MIN cannot be told apart from the OI null sentinel"
+        );
+        assert!(
+            Paisa::from_rupees_half_up(-90_000_000_000_000_000.0).is_ok(),
+            "a value clearly inside the bound is still a price, so one endpoint was removed \
+             rather than an interval"
+        );
+        // "One paisa inside" cannot be tested, and it is worth saying why rather than
+        // choosing a number that looks like it. The double spacing near 2^63 is 2048, so
+        // -92_233_720_368_547_757.0 and -92_233_720_368_547_758.08 are the SAME value and
+        // both floor to exactly -2^63. My first attempt asserted the former was `Ok`; it is
+        // not, and the wrong assumption was about float precision, not about this function.
+        assert_eq!(
+            Paisa::from_rupees_half_up(-92_233_720_368_547_757.0),
+            Err(PriceError::OutOfRange),
+            "at this magnitude a double cannot express a value one paisa inside the bound"
+        );
+    }
 
     #[test]
     fn raw_round_trips() {

@@ -1,0 +1,533 @@
+<title>Brutex Retry Design</title>
+
+<!--
+  RETRY ON /ingest — the design, and nothing but the design.
+
+  There is no code in this repository that this file proposes to have written.
+  It exists because the request was "design only, zero code", and because the
+  question turns out to have moved: two things landed underneath it that make a
+  targeted retry expressible for the first time, and one thing has NOT landed
+  that stops it being honest.
+
+  Three status words, one meaning each — the same vocabulary
+  `failure-matrix.html` uses, for the same reason:
+
+    EXISTS      I opened the file, read the code, it is there today.
+    MISSING     I opened the file, read the code, it is not there.
+    UNVERIFIED  Nobody has checked. NOT "probably fine", NOT "probably broken" —
+                unmeasured, per CLAUDE.md §3 rule 6.
+
+  Every EXISTS and MISSING row names a file you can open. No row claims a
+  measurement that was not taken.
+
+  Tables are built with DOM methods, never innerHTML: the cell text is data,
+  and data is never markup. Backticks become real <code> elements via frag().
+-->
+
+<style>
+  :root {
+    --n0: #e9edf5; --n1: #f5f7fb; --n2: #ffffff; --n3: #ffffff; --n4: #eef1f7;
+    --n5: #edf0f6; --n6: #dee3ed; --n7: #c7cfdd; --n8: #8b95a8; --n9: #5a6478;
+    --n10: #38415a; --n11: #0d1220; --n12: #000814;
+    --up: #00875a; --down: #d3143f; --warn: #a86a06; --info: #6d45d9;
+    --acc: #0e7f96; --on-acc: #ffffff;
+    --acc-soft: rgba(14, 127, 150, 0.1);
+    --up-soft: rgba(0, 135, 90, 0.12);
+    --down-soft: rgba(211, 20, 63, 0.11);
+    --warn-soft: rgba(168, 106, 6, 0.13);
+    --info-soft: rgba(109, 69, 217, 0.12);
+    --e1: 0 1px 2px rgba(16, 24, 40, 0.07);
+    --e2: 0 6px 16px rgba(16, 24, 40, 0.1), 0 0 0 1px rgba(16, 24, 40, 0.05);
+    --gridline: rgba(13, 18, 32, 0.04);
+    --focus: #0b6376;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme='light']) {
+      --n0: #070a11; --n1: #0b0e14; --n2: #11151f; --n3: #141924; --n4: #1a2030;
+      --n5: #1b212e; --n6: #232a3a; --n7: #333c51; --n8: #6b7789; --n9: #98a3b6;
+      --n10: #c2ccdb; --n11: #e6ebf5; --n12: #fbfcff;
+      --up: #00e19b; --down: #ff4d6a; --warn: #f0b429; --info: #9d7cf5;
+      --acc: #22d3ee; --on-acc: #04060c;
+      --acc-soft: rgba(34, 211, 238, 0.14);
+      --up-soft: rgba(0, 225, 155, 0.16);
+      --down-soft: rgba(255, 77, 106, 0.16);
+      --warn-soft: rgba(240, 180, 41, 0.16);
+      --info-soft: rgba(157, 124, 245, 0.16);
+      --e1: 0 1px 2px rgba(0, 0, 0, 0.5);
+      --e2: 0 4px 14px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.04);
+      --gridline: rgba(230, 235, 245, 0.04);
+      --focus: #67e8f9;
+    }
+  }
+  :root {
+    --bg: var(--n1); --panel: var(--n3); --panel-2: var(--n4);
+    --line: var(--n6); --line-soft: var(--n5); --line-hard: var(--n7);
+    --well: var(--n0); --ink: var(--n11); --ink-hi: var(--n12);
+    --dim: var(--n9); --faint: var(--n8);
+    --mono: ui-monospace, 'SF Mono', SFMono-Regular, 'JetBrains Mono', Menlo, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', system-ui, sans-serif;
+    --s2: 4px; --s3: 6px; --s4: 8px; --s5: 12px; --s6: 16px; --s7: 24px; --s8: 32px;
+    --r1: 4px; --r5: 16px; --r-full: 999px;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: var(--sans); font-size: 14px; line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: var(--s8) var(--s6) 64px; }
+
+  header { margin-bottom: var(--s7); }
+  h1 { font-size: 26px; line-height: 1.2; margin: 0 0 var(--s4); letter-spacing: -0.02em; color: var(--ink-hi); }
+  .sub { color: var(--dim); margin: 0; max-width: 76ch; }
+  .thesis {
+    margin-top: var(--s6); padding: var(--s5) var(--s6);
+    background: var(--acc-soft); border-left: 3px solid var(--acc);
+    border-radius: 0 var(--r1) var(--r1) 0; color: var(--ink);
+  }
+  .thesis b { color: var(--ink-hi); }
+
+  h2 {
+    font-size: 12px; text-transform: uppercase; letter-spacing: 0.09em;
+    color: var(--faint); margin: var(--s8) 0 var(--s5);
+    padding-bottom: var(--s3); border-bottom: 1px solid var(--line);
+  }
+  h3 { font-size: 15px; margin: var(--s7) 0 var(--s4); color: var(--ink-hi); }
+  p { max-width: 84ch; }
+
+  code {
+    font-family: var(--mono); font-size: 0.88em;
+    background: var(--well); border: 1px solid var(--line-soft);
+    padding: 1px 5px; border-radius: var(--r1); color: var(--ink);
+  }
+
+  .panel {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--r1); box-shadow: var(--e1);
+    overflow: hidden; margin-bottom: var(--s6);
+  }
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th {
+    text-align: left; font-weight: 600; font-size: 11px;
+    text-transform: uppercase; letter-spacing: 0.06em; color: var(--faint);
+    padding: var(--s4) var(--s5); border-bottom: 1px solid var(--line);
+    background: var(--panel-2); white-space: nowrap; vertical-align: bottom;
+  }
+  td { padding: var(--s4) var(--s5); border-bottom: 1px solid var(--gridline); vertical-align: top; }
+  tbody tr:last-child td { border-bottom: 0; }
+  .grp td {
+    background: var(--well); font-weight: 600; color: var(--ink-hi);
+    font-size: 12px; letter-spacing: 0.02em;
+  }
+  .ev { font-family: var(--mono); font-size: 11px; color: var(--dim); white-space: nowrap; }
+  .num { font-family: var(--mono); text-align: right; white-space: nowrap; }
+
+  .tag {
+    display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: 0.05em;
+    text-transform: uppercase; padding: 2px 7px; border-radius: var(--r-full); white-space: nowrap;
+  }
+  .t-ok { background: var(--up-soft); color: var(--up); }
+  .t-no { background: var(--down-soft); color: var(--down); }
+  .t-un { background: var(--warn-soft); color: var(--warn); }
+  .t-in { background: var(--info-soft); color: var(--info); }
+
+  ul { max-width: 84ch; padding-left: 20px; }
+  li { margin-bottom: var(--s3); }
+  .never li::marker { color: var(--down); }
+  .now li::marker { color: var(--up); }
+  .next li::marker { color: var(--warn); }
+
+  .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: var(--s6); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r1); padding: var(--s6); }
+  .card h3 { margin-top: 0; }
+
+  footer {
+    margin-top: var(--s8); padding-top: var(--s5); border-top: 1px solid var(--line);
+    color: var(--faint); font-size: 12px; display: flex; gap: var(--s7); flex-wrap: wrap;
+  }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>Retry on /ingest</h1>
+    <p class="sub">
+      A failed request is named, logged and dropped. Nothing retries it. This is what exists,
+      what changed underneath it, what can be built today without touching a crate, and the one
+      field that stands between "buildable" and "honest".
+    </p>
+    <div class="thesis">
+      <b>The finding.</b> Two ladders already retry, and neither of them can see a single
+      instrument. A month that fails wholesale gets nine attempts; one instrument out of 773 that
+      fails inside an otherwise-successful month gets none. What is new is that a request can now
+      name that instrument — <code>SpotRequest.members</code> is honoured end to end — so the
+      retry that was previously <i>inexpressible</i> is now merely <i>unbuilt</i>.
+      <b>What blocks it is one field:</b> <code>Failed</code> carries its reason as prose, and
+      classifying prose in the browser is the coupling this repository has already removed once.
+    </div>
+  </header>
+
+  <h2>1 · The three ladders that exist today</h2>
+  <p>
+    Three, not one, and they operate on three different units. Nothing in this section is
+    proposed — every row is in the tree right now.
+  </p>
+  <div class="panel">
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:150px">Ladder</th>
+            <th style="width:96px">Unit</th>
+            <th>What it does</th>
+            <th style="width:152px">Bound</th>
+            <th style="width:96px">Status</th>
+            <th>Evidence</th>
+          </tr>
+        </thead>
+        <tbody id="ladders"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <h2>2 · The gap, stated as an asymmetry</h2>
+  <p>
+    <code>Autopilot::fail()</code> takes an instrument, a month and a reason, puts them at the head
+    of a list, and truncates that list at 40. It does not call <code>classify()</code>. It does not
+    touch <code>attempts</code>. It does not schedule anything. The instrument is <b>named</b>, and
+    naming is the whole of the response.
+  </p>
+  <p>
+    The consequence is visible on the census and reads as a contradiction. A series whose month
+    failed wholesale can draw <span class="tag t-in">retrying</span> — because
+    <code>/ingest/status.json</code> reports it in flight and the page sets the
+    <code>retry</code> verdict from exactly that evidence. A series that failed <i>on its own</i>
+    inside a month that otherwise succeeded can never draw it, because nothing will ever put it in
+    flight again. It settles to <code>short</code> or <code>fail</code> and stays there, and the
+    operator's only lever is to re-run the whole window.
+  </p>
+
+  <h2>3 · What changed underneath, and why the question moved</h2>
+  <p>
+    The handoff note for this task said a pull can never be narrowed to a symbol, because
+    <code>SpotRequest</code> carries no member field. That was true when it was written and is not
+    true now. Both halves of the machinery a targeted retry needs have landed:
+  </p>
+  <div class="panel">
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:210px">What landed</th>
+            <th>What it makes possible</th>
+            <th style="width:96px">Status</th>
+            <th>Evidence</th>
+          </tr>
+        </thead>
+        <tbody id="landed"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <h2>4 · The rule this design may not break</h2>
+  <p>
+    <code>crates/pull/src/fetch.rs</code> deliberately removed a blind <code>with_retry</code>, and
+    records why in its own words: it "cannot tell a timeout from a decode fault by type", so it
+    spent its whole ladder — 13.75 s of backoff — "re-asking for bytes that will be identical and
+    will fail identically. A deterministic fault is not a blip."
+  </p>
+  <p>
+    <b>So the rule is: classify, then retry only the transient class.</b> Never loop on everything.
+    A retry control that offers itself for a dead credential is the same defect wearing a button.
+    The table below is that classification, and it is not invented here — every row is a variant
+    that exists in the tree, with the ladder's own answer beside it.
+  </p>
+  <div class="panel">
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:130px">Classification</th>
+            <th style="width:150px">Ladder's answer</th>
+            <th>What it means for a person</th>
+            <th style="width:180px">What /ingest should offer</th>
+          </tr>
+        </thead>
+        <tbody id="disp"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <h2>5 · What the page draws</h2>
+  <p>
+    The failure list is already on the page. What it lacks is a verdict per row and an action, and
+    the design of both follows from section 4: the action is offered per <i>class</i>, never per
+    row-because-it-is-red, and it is always a press.
+  </p>
+  <div class="cols">
+    <div class="card">
+      <h3>The list gains a class column</h3>
+      <p style="margin-top:0">
+        Grouped by class, worst first, exactly as the census groups by verdict. A group whose class
+        cannot be retried carries no button at all — not a disabled one. A disabled control invites
+        the reader to find out why it is disabled; a group that states its own refusal has already
+        told them.
+      </p>
+    </div>
+    <div class="card">
+      <h3>One button per retryable group</h3>
+      <p style="margin-top:0">
+        <i>"Pull these 7 again"</i> — and it builds a member list from those seven, for the months
+        they failed in, at the rung they failed at. Not the window. Not the target. This is the
+        capability section 3 says is new, and it is the whole reason the design is worth having.
+      </p>
+    </div>
+    <div class="card">
+      <h3>The halt outranks the button</h3>
+      <p style="margin-top:0">
+        The page already reads <code>waiting_on[].halted</code> per feed and already knows when the
+        sweep has stopped. A halted feed draws no retry for any class: every attempt would refuse
+        identically, and offering one would be a control that quietly does nothing.
+      </p>
+    </div>
+    <div class="card">
+      <h3>The count is bounded and says so</h3>
+      <p style="margin-top:0">
+        <code>MAX_FAILURES</code> is 40 and the list is truncated. The page must print
+        <i>"40 shown · N more in the journal"</i> rather than letting 40 read as a total — the same
+        rule the census pager follows, and the reason the truncation is not a hidden one.
+      </p>
+    </div>
+  </div>
+
+  <h2>6 · Buildable now · needs one field · never</h2>
+  <div class="cols">
+    <div class="card">
+      <h3 style="color:var(--up)">Buildable now — zero crate change</h3>
+      <ul class="now">
+        <li>Group the failure list by <b>month</b> and by <b>verbatim reason</b>. Exact-match
+          grouping is not classification and cannot be wrong about a class it never claims.</li>
+        <li>Offer a member-narrowed re-pull of a chosen group. <code>wireBodyFor</code> already
+          knows how to send <code>member=</code>; nothing new is needed on the wire.</li>
+        <li>Suppress every offer while the feed is halted, and name the halt instead.</li>
+        <li>Print the truncation beside the count.</li>
+        <li>Show the reason verbatim next to each group, so the <b>operator</b> classifies. A human
+          reading "PermissionException" will not press retry; a substring matcher might.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3 style="color:var(--warn)">Needs one field before it is honest</h3>
+      <ul class="next">
+        <li><code>Failed</code> should carry its <code>Disposition</code> (or its
+          <code>Trouble</code>) as a <b>field</b>, not leave it in <code>why</code> as prose.</li>
+        <li>Then, and only then, the page can label a group <i>"will not help"</i> versus
+          <i>"worth another attempt"</i> and refuse the first by name.</li>
+        <li>Why it matters: the classifier already exists and runs where the whole body is in
+          hand. Re-deriving it in the browser from a 500-character trimmed string is the exact
+          coupling <code>refusal_words</code> was written to avoid — and a long vendor message
+          pushes the name past the cut, so the browser would be classifying text the name is no
+          longer in.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3 style="color:var(--down)">Never</h3>
+      <ul class="never">
+        <li>An automatic retry the operator did not press. The sweep has ladders; the page has
+          buttons. Two schedulers on one store is the race, not the feature.</li>
+        <li>A blanket "retry all failures". That is <code>with_retry</code> again, at a larger
+          radius.</li>
+        <li>Classifying <code>why</code> by substring match in JavaScript.</li>
+        <li>A disabled retry button. State what the control cannot do; never draw a dead one.</li>
+        <li>Any retry count the page maintains itself. <code>attempts</code> and
+          <code>attempts_max</code> are on the status route; a second counter in the browser is
+          the two-clocks defect the census already removed once.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2>7 · Unverified — what nobody has checked</h2>
+  <div class="panel">
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:290px">Question</th>
+            <th>Why it is open</th>
+            <th style="width:96px">Status</th>
+          </tr>
+        </thead>
+        <tbody id="unver"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <footer>
+    <span>Status is about EVIDENCE, not confidence — "unverified" never means "probably fine"</span>
+    <span>Every EXISTS and MISSING row names a file you can open</span>
+    <span>Design only — nothing here has been built</span>
+  </footer>
+</div>
+
+<script>
+  // ---------------------------------------------------------------------------
+  // Backticks mark code spans and become real <code> elements. NEVER innerHTML:
+  // every cell below is data, and data is never markup.
+  // ---------------------------------------------------------------------------
+  function frag(text) {
+    var f = document.createDocumentFragment();
+    String(text)
+      .split('`')
+      .forEach(function (part, i) {
+        if (i % 2) {
+          var c = document.createElement('code');
+          c.textContent = part;
+          f.appendChild(c);
+        } else if (part) {
+          f.appendChild(document.createTextNode(part));
+        }
+      });
+    return f;
+  }
+
+  function cell(row, text, cls) {
+    var td = document.createElement('td');
+    if (cls) td.className = cls;
+    td.appendChild(frag(text));
+    row.appendChild(td);
+    return td;
+  }
+
+  var TAG = { ok: ['EXISTS', 't-ok'], no: ['MISSING', 't-no'], un: ['UNVERIFIED', 't-un'], in: ['PARTIAL', 't-in'] };
+
+  function tagCell(row, s) {
+    var td = document.createElement('td');
+    var b = document.createElement('span');
+    b.className = 'tag ' + TAG[s][1];
+    b.textContent = TAG[s][0];
+    td.appendChild(b);
+    row.appendChild(td);
+  }
+
+  // -- 1. the ladders ---------------------------------------------------------
+  var LADDERS = [
+    {
+      n: 'Transport ladder',
+      u: 'one request',
+      d: 'Inside a single pull. `step()` turns a status, an auth flag and the vendor’s own named reason into one of six outcomes: `CredentialDied`, `NotEntitled`, `Answered`, `ServerDown`, `Again`, `Exhausted`.',
+      b: 'per request',
+      s: 'ok',
+      w: 'api/server.rs:5335'
+    },
+    {
+      n: 'Month ladder',
+      u: 'one month',
+      d: 'The autopilot’s frontier. A month that fails increments `attempts`; at the bound it is recorded as stalled and passed. A stalled month is re-offered on a recheck.',
+      b: '3, then 2 more rounds ≥ 6 h apart — 9 in all',
+      s: 'ok',
+      w: 'api/autopilot.rs:99,158,171'
+    },
+    {
+      n: 'Credential re-read',
+      u: 'one feed',
+      d: 'A dead token is re-read once from Parameter Store. If the re-read returns the same dead value the feed halts. CLAUDE.md §8 forbids minting one here.',
+      b: '1',
+      s: 'ok',
+      w: 'api/autopilot.rs:140'
+    },
+    {
+      n: 'Instrument failure',
+      u: 'one instrument',
+      d: '`Autopilot::fail()` inserts `{instrument, month, why, at}` at the head of a display list and truncates at 40. It does NOT classify, does NOT touch `attempts`, and schedules nothing.',
+      b: 'no attempts at all',
+      s: 'no',
+      w: 'api/autopilot.rs:1902'
+    }
+  ];
+  var lb = document.getElementById('ladders');
+  LADDERS.forEach(function (r) {
+    var tr = document.createElement('tr');
+    cell(tr, r.n);
+    cell(tr, r.u);
+    cell(tr, r.d);
+    // NOT `.num`. Right-align is for true magnitudes, and this column holds
+    // "per request" and "no attempts at all". Measured before the change:
+    // the header sat at x=558 and its cells began at 816, 894 and 761 --
+    // a header and its data aligned to opposite edges.
+    cell(tr, r.b);
+    tagCell(tr, r.s);
+    cell(tr, r.w, 'ev');
+    lb.appendChild(tr);
+  });
+
+  // -- 2. what landed ---------------------------------------------------------
+  var LANDED = [
+    {
+      n: '`SpotRequest.members`',
+      d: 'A request can name the instruments it wants. `wireBodyFor` sends one `member=` per tick, `parse_spot` collects them and refuses rather than skips one it cannot read, and `broker_run` filters every candidate through `asked.members.contains(..)`. An empty set is the whole target and cannot silently widen.',
+      s: 'ok',
+      w: 'api/ingest.rs:925 · api/server.rs:4366'
+    },
+    {
+      n: '`refusal::Disposition`',
+      d: 'Six values — `NotEntitled`, `SessionDead`, `RequestWrong`, `ReasonGiven`, `Throttled`, `RetryBounded` — classified where the whole body is in hand, and mapped into the ladder ahead of the status match. This is the classification a retry control needs.',
+      s: 'ok',
+      w: 'pull/refusal.rs:110 · api/server.rs:5365'
+    },
+    {
+      n: '`Failed` carries a class',
+      d: 'It does not. The reason travels as free text in `why`, so the only classification available to the browser is a substring match over a 500-character trimmed string — which is precisely what section 6 forbids.',
+      s: 'no',
+      w: 'api/autopilot.rs:307'
+    },
+    {
+      n: 'Per-instrument retry in the page',
+      d: 'Neither the re-run button nor the per-row Next step builds a member list from a failed set; both re-send whatever is ticked. The route would accept it. The page does not offer it.',
+      s: 'no',
+      w: 'ingest/+page.svelte pullRow'
+    }
+  ];
+  var lnd = document.getElementById('landed');
+  LANDED.forEach(function (r) {
+    var tr = document.createElement('tr');
+    cell(tr, r.n);
+    cell(tr, r.d);
+    tagCell(tr, r.s);
+    cell(tr, r.w, 'ev');
+    lnd.appendChild(tr);
+  });
+
+  // -- 3. the decision table --------------------------------------------------
+  var DISP = [
+    ['`NotEntitled`', '`Step::NotEntitled`', 'The credential is alive and the subscription does not cover this. Identical forever. Waiting changes nothing.', 'No button. Name the subscription.'],
+    ['`SessionDead`', '`Step::CredentialDied`', 'The token died — expiry, logout, or a human opening another Kite session. Only a new token helps, and this repository never mints one.', 'No button. Name the re-read, then the halt.'],
+    ['`RequestWrong`', '`Step::Answered`', 'The request as sent is wrong and will be wrong again. Deterministic.', 'No button. Name the field.'],
+    ['`ReasonGiven`', '`Step::Answered`', 'The vendor named something outside the groups above. No source says retrying helps.', 'No button. Show the vendor’s words.'],
+    ['`Throttled`', '`throttle_ladder`', 'The vendor named the arrival rate. Ask again, slower; the governor takes its decrease first.', 'Button — and say it will be slower.'],
+    ['`RetryBounded`', '`server_ladder`', 'A fault behind the vendor’s API. Bounded backoff.', 'Button.'],
+    ['`Trouble::Store`', 'halts on a repeat', 'A full disk, a denied path, a short write. Hammering it is pure waste.', 'No button. Name the path.'],
+    ['`Trouble::Transport`', 'the retryable answer', 'A timeout, a reset, a 5xx. Also the answer for text nobody has classified — deliberately, because guessing "halted" for an unrecognised string stops a backfill for a blip.', 'Button, bounded.']
+  ];
+  var db = document.getElementById('disp');
+  DISP.forEach(function (r) {
+    var tr = document.createElement('tr');
+    r.forEach(function (v, i) { cell(tr, v, i === 3 ? '' : ''); });
+    db.appendChild(tr);
+  });
+
+  // -- 4. the open questions --------------------------------------------------
+  var UNVER = [
+    ['Does a per-instrument failure ever coexist with a succeeding month?', 'The design turns on it. `fail()` is called per instrument, and the month ladder is per month — but no test in the tree drives a run where one member fails and the month is written. If the two are in practice always simultaneous, the gap is narrower than section 2 states.', 'un'],
+    ['How often is the 40-row cap actually hit?', '`MAX_FAILURES` is 40 and a run can fail 409 members. The journal keeps them all. Nobody has counted how often the page shows a truncated list, which decides whether the "N more" line is an edge case or the normal reading.', 'un'],
+    ['Is `Record::of_run` keeping only the first failure a problem for this design?', 'The audit page already records that one reason per run survives — the alphabetically first — and 408 others were never written. A retry grouped by reason may therefore be grouping on a sample of one.', 'un'],
+    ['What does the store do with a re-pull of a month that is already partly written?', 'Append-only history says a version is never mutated in place. Whether a narrowed re-pull of seven instruments into an existing month file is an append, a rewrite or a refusal is not stated anywhere this design could find.', 'un']
+  ];
+  var ub = document.getElementById('unver');
+  UNVER.forEach(function (r) {
+    var tr = document.createElement('tr');
+    cell(tr, r[0]);
+    cell(tr, r[1]);
+    tagCell(tr, r[2]);
+    ub.appendChild(tr);
+  });
+</script>

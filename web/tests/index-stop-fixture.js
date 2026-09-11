@@ -1,0 +1,24 @@
+// Generated transport fixtures only; no trading results or runtime defaults.
+import {readFileSync} from 'node:fs';
+import {policy as indexPolicy} from './index-consistency-fixture.js';
+import {INDEX_STOP_COMMAND,validateIndexStopMetadata,indexStopLaunchPlan} from '../src/lib/index-stop-launch.js';
+export const hex=(/** @type {number} */ n)=>n.toString(16).padStart(2,'0').repeat(32);
+export const RUNGS=['1min','2min','3min','5min','10min','15min','30min','60min'];
+export const ATTEMPT='9223372036854775809';
+const source=readFileSync(new URL('../../crates/api/src/booleanadmission_projection.rs',import.meta.url),'utf8');
+const policySource=source.slice(source.search(/pub\((?:super|crate)\) fn policy\(/));
+const fields=/fields!\(([\s\S]+?)\);/.exec(policySource);
+if(!fields)throw new Error('Native policy projection was not found.');
+const names=[...fields[1].matchAll(/\b([a-z][a-z_]+)\b/g)].map(m=>m[1]);
+const bools=[...policySource.matchAll(/"(require_[a-z_]+)"/g)].map(m=>m[1]);
+/** @returns {any} */export function researchPolicy(){return {ready:true,digest:hex(8),values:[...names,...bools].map(name=>({name,value:bools.includes(name)?false:'0'})),refusal:null};}
+/** @returns {any} */export function metadata(){return {schema_version:1,model:'index-stop-qualified-search-launch',command:INDEX_STOP_COMMAND,ready:true,readiness_scope:'configuration-only; source admission occurs in the audited worker',refusal:null,selected_timeframes_supported:true,indices:['NSE-NIFTY','NSE-BANKNIFTY'],timeframes:[...RUNGS],execution_policy:'signal_candle_stop_v1',execution_policy_digest:hex(9),execution_rules:{signal:'Completed signal candle',long_stop:'Signal candle low',short_stop:'Signal candle high',entry:'Immediately following printed one-minute open',gap_invalid_entry:'Skip entry at or beyond the stop',forced_exit:'15:10 IST using the unique accepted 15:09 close',exits:['risk stop','15:10 IST'],directions:['long','short'],readings:['pessimistic','optimistic'],costs_included:false,maximum_open_positions_per_setting:1},index_consistency_policy:indexPolicy(),configured:{max_loss_points:'20',batch_programs:'2',node_allowance:'128',batch_allowance:'3'},policy:researchPolicy(),procedure:{draws:'9999',seed:'0',block_length:'2'},limits:{request_bytes:16384,max_loss_points_max:'184467440737095516',physical:Object.fromEntries(['checksum_bytes','checksum_records','capture_programs','capture_records','capture_bytes','qualification_bytes','qualification_memory_bytes','history_bytes','replay_nodes','qualification_replay_bootstrap_work','qualification_replay_split_work','qualification_replay_memory_bytes'].map(k=>[k,'4096']))},field_help:{max_loss_points:'Institutional loss bound, not candle stop.',batch_allowance:'A work bound, not all possible combinations.'},work_model:{parallel_timeframe_workers_max:2,parallelism:'Selected timeframes, bounded by CPU.',within_timeframe:'Both directions.',total_runtime:'Data and grammar dependent.',estimated_seconds:null,estimate_status:'unmeasured'}};}
+/** @param {any} [extra] */export const input=(extra={})=>({feed:'fixture-feed',symbols:['NIFTY'],timeframes:['1min','5min'],from:'2024-01',to:'2024-08',laterFrom:'2024-09',laterTo:'2024-12',bits:'all',batchPrograms:'2',nodeAllowance:'128',batchAllowance:'3',maxLossPoints:'20',...extra});
+/** @param {any} [extra] */export const plan=(extra={})=>indexStopLaunchPlan(input(extra),validateIndexStopMetadata(metadata()));
+/** @param {any} [request] @param {any} [extra] @returns {any} */
+export function running(request=plan(),extra={}){return {where:'browser',kind:'command',command:INDEX_STOP_COMMAND,attempt_key:ATTEMPT,in_flight:true,status:'running',report:null,refusal:null,finished_micros:null,index_stop:{schema_version:1,command:INDEX_STOP_COMMAND,execution_policy:'signal_candle_stop_v1',request,search_identity:hex(10),completed_batches:'0',completed_programs:'0',completed_work:'0',current_batch:'0',elapsed_micros:'1500000',elapsed_basis:'wall-clock',exhausted:false,qualifications:request.timeframes.map((/** @type {string} */ timeframe)=>({timeframe,rung:RUNGS.indexOf(timeframe),identity:null,completion:null,stage:'preparing'})),latest_saved_batch:null,...extra}};}
+/** @param {any} request @param {number} [batch] */
+export function saved(request,batch=0){return {batch:String(batch),qualifications:request.timeframes.map((/** @type {string} */ timeframe,/** @type {number} */ i)=>({timeframe,rung:RUNGS.indexOf(timeframe),identity:hex(20+i+batch*8),completion:hex(40+i+batch*8)}))};}
+/** @returns {{promise:Promise<any>,resolve:(value:any)=>void,reject:(error:any)=>void}} */
+export function deferred(){let resolve=/** @type {(v:any)=>void} */(()=>{}),reject=/** @type {(v:any)=>void} */(()=>{});const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return {promise,resolve,reject};}
+export const tick=()=>new Promise((/** @type {any} */ resolve)=>setTimeout(resolve,3));
