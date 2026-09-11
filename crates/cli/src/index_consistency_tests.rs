@@ -38,7 +38,7 @@ fn round_trip(result: &Evaluation) {
     );
     for week in &result.weeks {
         assert_eq!(
-            Week::decode(&week.canonical_bytes(), Policy::V1).unwrap(),
+            Week::decode(&week.canonical_bytes(), result.policy).unwrap(),
             *week
         );
     }
@@ -601,7 +601,10 @@ fn the_two_policies_share_every_threshold_and_never_share_an_identity() {
     let (one, two) = (Policy::V1, Policy::V2);
     assert_eq!(one.version(), 1);
     assert_eq!(two.version(), 2);
-    assert!(!one.magnitude_aware() && two.magnitude_aware());
+    assert_eq!(
+        (one.day_rule(), two.day_rule()),
+        (DayRule::PessimisticSign, DayRule::ExceedsOwnBracket)
+    );
 
     for (name, a, b) in [
         (
@@ -739,5 +742,201 @@ fn a_one_win_four_loss_week_passes_under_v3_and_its_row_survives_the_round_trip(
     // A row classified under one policy must not read as valid under another.
     for week in &v1.weeks {
         assert!(Week::decode(&week.canonical_bytes(), Policy::V3).is_err());
+    }
+}
+
+/// Every approved version's exact bytes, day rule, ratio basis and identity,
+/// pinned by literal words rather than by the numbers the code reads -- D-0605.
+#[test]
+fn every_approved_policy_keeps_its_exact_bytes_rule_and_identity() {
+    assert_eq!(
+        Policy::APPROVED,
+        [Policy::V1, Policy::V2, Policy::V3, Policy::V4]
+    );
+    let expected = [
+        (
+            Policy::V1,
+            [1, 3, 5, 3, 2, 2, 1, 1],
+            DayRule::PessimisticSign,
+            RatioBasis::EligibleDays,
+        ),
+        (
+            Policy::V2,
+            [2, 3, 5, 3, 2, 2, 1, 1],
+            DayRule::ExceedsOwnBracket,
+            RatioBasis::EligibleDays,
+        ),
+        (
+            Policy::V3,
+            [3, 1, 3, 1, 4, 10, 1, 1],
+            DayRule::ExceedsOwnBracket,
+            RatioBasis::EligibleDays,
+        ),
+        (
+            Policy::V4,
+            [4, 1, 4, 0, 5, u64::MAX, 1, 1],
+            DayRule::SignUnderBothReadings,
+            RatioBasis::DecidedDays,
+        ),
+    ];
+    let mut digests = Vec::new();
+    for (policy, pinned, rule, basis) in expected {
+        let raw = words::<72>(*b"BRICPO01", &pinned);
+        assert_eq!(policy.canonical_bytes(), raw, "{policy:?}");
+        assert_eq!(Policy::decode(&raw).unwrap(), policy);
+        assert_eq!(Policy::from_digest(policy.digest()), Some(policy));
+        assert_eq!((policy.day_rule(), policy.ratio_basis()), (rule, basis));
+        digests.push(policy.digest());
+    }
+    digests.sort_unstable();
+    digests.dedup();
+    assert_eq!(digests.len(), 4, "no two versions may share an identity");
+    assert_eq!(INDEX_STOP, Policy::V4);
+    assert_eq!(
+        [
+            DayRule::PessimisticSign.as_str(),
+            DayRule::ExceedsOwnBracket.as_str(),
+            DayRule::SignUnderBothReadings.as_str(),
+            RatioBasis::EligibleDays.as_str(),
+            RatioBasis::DecidedDays.as_str(),
+        ],
+        [
+            "pessimistic_sign",
+            "exceeds_own_bracket",
+            "sign_under_both_readings",
+            "eligible_days",
+            "decided_days",
+        ]
+    );
+}
+
+/// V4 counts a day by its sign under both readings; V3's bracket filed small
+/// certain wins as neither -- D-0605.
+#[test]
+fn v4_counts_a_day_by_its_sign_under_both_readings() {
+    let d = day(2024, 1, 2);
+    for (pessimistic, optimistic, v3, v4) in [
+        (1, 201, (0, 0, 1), (1, 0, 0)),
+        (100, 200, (0, 0, 1), (1, 0, 0)),
+        (101, 200, (1, 0, 0), (1, 0, 0)),
+        (0, 500, (0, 0, 1), (0, 0, 1)),
+        (-5, 900, (0, 0, 1), (0, 0, 1)),
+        (-5, 0, (0, 0, 1), (0, 0, 1)),
+        (-500, -1, (0, 1, 0), (0, 1, 0)),
+    ] {
+        let row = Session {
+            day: d,
+            pessimistic_paisa: pessimistic,
+            optimistic_paisa: optimistic,
+            trades: 2,
+        };
+        for (policy, want) in [(Policy::V3, v3), (Policy::V4, v4)] {
+            let out = evaluate(policy, family("NIFTY"), d, d, &[row], true);
+            let s = out.summary;
+            assert_eq!(
+                (s.winning_days, s.losing_days, s.zero_days),
+                want,
+                "{policy:?} ({pessimistic}, {optimistic})"
+            );
+            round_trip(&out);
+        }
+    }
+}
+
+/// V4 divides only by decided days, and no week or streak can fail it --
+/// D-0605.
+#[test]
+fn v4_ratio_counts_decided_days_and_no_week_or_streak_rule_can_fail() {
+    // Two complete weeks: a winning Monday, three losing days, the rest idle,
+    // and the whole second week without a single win.
+    let first = day(2025, 1, 6);
+    let last = day(2025, 1, 17);
+    let rows: Vec<Session> = (first..=last)
+        .filter(|&d| eligibility_of(d) == Eligibility::Eligible)
+        .map(|d| {
+            let (money, trades) = match d - first {
+                0 => (500, 1),
+                1 | 2 | 7 => (-100, 1),
+                _ => (0, 0),
+            };
+            Session {
+                day: d,
+                pessimistic_paisa: money,
+                optimistic_paisa: money,
+                trades,
+            }
+        })
+        .collect();
+    let v4 = evaluate(Policy::V4, family("NIFTY"), first, last, &rows, true);
+    assert_eq!((v4.summary.winning_days, v4.summary.losing_days), (1, 3));
+    assert_eq!(v4.summary.complete_weeks, 2);
+    assert_eq!(v4.summary.failing_weeks, 0);
+    assert_eq!(v4.summary.longest_losing_streak, 3);
+    // One win in four decided days is exactly the floor: nothing fires.
+    assert_eq!(v4.reasons, 0);
+    assert_eq!(v4.outcome, Outcome::Passed);
+    round_trip(&v4);
+    // The same days under V3: 1 of 10 eligible days fails its ratio, and the
+    // second week, with no win, fails its weekly minimum.
+    let v3 = evaluate(Policy::V3, family("NIFTY"), first, last, &rows, true);
+    assert_ne!(v3.reasons & Reason::WinningDayRatio.mask(), 0);
+    assert_ne!(v3.reasons & Reason::WeeklyWins.mask(), 0);
+    // A fourth loss drops the win share below one in four, and a span with no
+    // decided day at all has shown nothing: both fail V4's ratio, and only it.
+    let short: Vec<Session> = rows
+        .iter()
+        .map(|&row| {
+            if row.day == first + 8 {
+                Session {
+                    pessimistic_paisa: -100,
+                    optimistic_paisa: -100,
+                    trades: 1,
+                    ..row
+                }
+            } else {
+                row
+            }
+        })
+        .collect();
+    let idle: Vec<Session> = rows
+        .iter()
+        .map(|&row| Session {
+            pessimistic_paisa: 0,
+            optimistic_paisa: 0,
+            trades: 0,
+            ..row
+        })
+        .collect();
+    for sessions in [short, idle] {
+        let out = evaluate(Policy::V4, family("NIFTY"), first, last, &sessions, true);
+        assert_eq!(out.reasons, Reason::WinningDayRatio.mask());
+        round_trip(&out);
+    }
+}
+
+/// V4 refuses a row whose readings are inverted, or that trades nothing yet
+/// carries a reading; V3 keeps its exact previous answer -- D-0605.
+#[test]
+fn v4_refuses_inverted_or_idle_readings_that_v3_never_checked() {
+    let d = day(2024, 1, 2);
+    for row in [
+        Session {
+            day: d,
+            pessimistic_paisa: 100,
+            optimistic_paisa: 50,
+            trades: 1,
+        },
+        Session {
+            day: d,
+            pessimistic_paisa: 0,
+            optimistic_paisa: 5,
+            trades: 0,
+        },
+    ] {
+        let v4 = evaluate(Policy::V4, family("NIFTY"), d, d, &[row], false);
+        assert_eq!(v4.reasons, Reason::InvalidCountOrReturn.mask());
+        assert_eq!(v4.outcome, Outcome::Refused);
+        let v3 = evaluate(Policy::V3, family("NIFTY"), d, d, &[row], false);
+        assert_eq!(v3.reasons & Reason::InvalidCountOrReturn.mask(), 0);
     }
 }

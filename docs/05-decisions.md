@@ -35865,3 +35865,65 @@ Tests: `cscv_segment_totals_reproduce_every_per_period_split_exactly` compares
 both routes on all 462 splits of a 12-segment layout and pins both sides of the
 `i64::MAX` bound; the existing cold-replay tests compare recomputed statistics
 with saved bytes.
+
+### D-0605 — The consistency rule rejected the objective it was written for — 2026-09-11
+
+**Every setting in the first live batch failed one rule, and that rule forbids the
+rare winner by construction.** Batch 0 of the live search (`604d0d93…`, NIFTY,
+60min and 30min, 4,000 settings each) set `complete_week_below_policy_minimum_wins`
+on all 8,000. V3 (D-0597) demanded at least one winning day in EVERY complete
+five-session week, and a no-trade day is observed but not winning, so a setup that
+fires seldom -- CLAUDE.md §1's objective -- fails the first week it sits out. V3's
+winning-day ratio divided by eligible days INCLUDING no-trade days: a setup that
+trades a fraction f of days at day-win-rate w scores f·w, so at w = 1/3 it had to
+trade every day. D-0597 was mine, written when the operator said "you decide the
+ratio", and its derivation compared day counts with trade rules without asking
+what a no-trade day does to either.
+
+**Separately, the day classifier filed small certain wins as scratch.** V2 and V3
+count a day as a win only when its pessimistic sum exceeds its own
+`optimistic - pessimistic` bracket. D-0602 showed that test is backwards for one
+trade: a positive worst reading is a win under every ordering. An agent's decode
+of 100 saved V3 records found 180 of 16,312 trading days misfiled this way; on its
+own the fix flips no verdict, because the weekly rule rejects everything first.
+
+**V4 changes all three together, in one identity break.**
+- **Day rule.** A day wins when its pessimistic sum is positive and loses when even
+  its optimistic sum is negative; anything else is neither (`DayRule`).
+- **Ratio basis.** At least one day in four that ended as a win or a loss must be a
+  win: the trade policy's own 25% win-rate floor (`min_win_rate_ppm`), stated for
+  days. No-trade and neither-days stay out of the ratio (`RatioBasis`). A period
+  with no decided day at all has shown nothing and fails.
+- **Weekly rules and streak cap removed.** Weekly minimum 0, weekly maximum 5 (a
+  five-session week cannot exceed it), streak cap `u64::MAX`. The operator's
+  standing instruction is to remove every fixed threshold except the two that
+  define the objective -- extremely small maximum drawdown and extremely small
+  worst-case fills -- and both are enforced in money by the admission policy
+  (`max_drawdown_paisa`, `max_ambiguous_fill_rate_ppm`). A losing run is a
+  drawdown, and the drawdown gate measures it in rupees rather than day counts.
+
+V4's record is `BRICPO01` with words `[4, 1, 4, 0, 5, u64::MAX, 1, 1]`. V1-V3
+decode to their own frozen digests and behave exactly as before: the day rule and
+ratio basis are chosen by the version word. `Policy::decode` now walks `APPROVED`
+instead of a hand-written chain that would have refused a fourth version.
+`INDEX_STOP` becomes V4; the boolean route pins V1 by name and is unaffected.
+
+**The browser stopped re-applying V1.** `index-consistency.js` re-checked a passed
+period against 60% and a 2-day streak, and recomputed every complete week with
+3 wins / 2 losses, so the first V3 week that passed with one or two wins would
+have broken the page; `IndexConsistency.svelte` printed V1's rule text beside V3
+verdicts and labelled days by V1's sign test. Each saved assessment now carries
+its own policy description (tied to it by `policy_digest`), the description gains
+`day_rule` and `ratio_basis`, and each day row carries the server's `class` under
+the record's own rule. The browser validates structure and leaves the policy's
+numbers to the native decoder, as `fetchIndexConsistencyPage` already said it did.
+
+**What it costs.** The policy digest is part of the search identity, so a search
+launched on this build starts from batch 0, and qualifications saved under V3 are
+not readable by it. This is accepted rather than carried: no V3 result was
+admitted, and every V3 catalog also carries the last-bar misfiling D-0603 fixed.
+
+**Not claimed.** Nothing here makes a setting pass. On batch 0 the overfitting
+estimate (PBO 88.2% / 70.2% against 20%) and the multiple-testing p-values (raw
+0.61-0.998, displayed as 1.0 after the batch-0 alpha share of 1/16) reject every
+setting independently of this rule.

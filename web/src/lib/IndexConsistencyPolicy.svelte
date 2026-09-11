@@ -1,4 +1,5 @@
 <script>
+  import { indexConsistencyRules } from './index-consistency.js';
   let { policy = /** @type {any} */ (null) } = $props();
 </script>
 
@@ -8,18 +9,15 @@
     <p><b>Applies to NIFTY and BANKNIFTY.</b> Training, the later evaluation and the full date span
       must each satisfy these checks. Cash stocks keep their existing institutional checks.</p>
     <table><thead><tr><th>What is checked</th><th>Required result</th></tr></thead><tbody>
-      <!-- READ FROM THE POLICY, NEVER WRITTEN HERE. These three rows read "60%",
-           "3 winning days", "no more than 2 losing days" and "no more than 2"
-           as literal prose while the `policy` prop beside them was used only for
-           its digest. When the served policy moved, this table went on stating
-           the old rule next to records judged by the new one -- a page
-           advertising a two-day streak cap beside a record judged at ten. -->
-      <tr><th>Winning trading days</th><td>At least {policy.minimum_winning_day_numerator} in every {policy.minimum_winning_day_denominator} eligible trading days</td></tr>
-      <tr><th>Every complete five-session week</th><td>At least {policy.minimum_week_winning_days} winning {Number(policy.minimum_week_winning_days) === 1 ? 'day' : 'days'} and no more than {policy.maximum_week_losing_days} losing {Number(policy.maximum_week_losing_days) === 1 ? 'day' : 'days'}</td></tr>
-      <tr><th>Losing-day streak across weeks</th><td>No more than {policy.maximum_losing_day_streak} losing {Number(policy.maximum_losing_day_streak) === 1 ? 'day' : 'days'}; only a winning day resets the streak</td></tr>
+      <!-- READ FROM THE POLICY, NEVER WRITTEN HERE. These rows once read "60%",
+           "3 winning days" and "no more than 2" as literal prose while the
+           `policy` prop beside them was used only for its digest, so the table
+           stated the old rule beside records judged by the new one. The text now
+           comes from `indexConsistencyRules`, one function for every page. -->
+      {#each indexConsistencyRules(policy) as [what, rule]}<tr><th>{what}</th><td>{rule}</td></tr>{/each}
     </tbody></table>
-    <p>Multiple trades per day are allowed. A day uses the sum of its pessimistic gross profit and
-      loss per unit. Flat days and days without trades remain separate and stay in the denominator.
+    <p>Multiple trades per day are allowed; a day uses the sum of its trades, per unit.
+      {policy.ratio_basis === 'decided_days' ? 'Flat days and days without trades are neither wins nor losses and stay out of the ratio.' : 'Flat days and days without trades remain separate and stay in the denominator.'}
       Short calendar weeks and partial boundary weeks are shown separately. A missing expected day,
       including a gap between periods, withholds the result. Costs are excluded.</p>
     <details><summary>Exact policy identity</summary><code>{policy.policy_digest}</code></details>

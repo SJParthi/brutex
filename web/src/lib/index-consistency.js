@@ -30,6 +30,15 @@ const REASONS = [
   ['exact_arithmetic_overflow', 'The exact trade count or money total exceeded its supported range.'],
   ['week_output_allocation_refused', 'The weekly evidence could not be retained within available resources.']
 ];
+// Closed vocabularies the server reports; each names a native rule, never a number.
+const DAY_RULES = ['pessimistic_sign', 'exceeds_own_bracket', 'sign_under_both_readings'];
+const RATIO_BASES = ['eligible_days', 'decided_days'];
+const DAY_CLASSES = ['winning', 'losing', 'scratch', 'no_trade'];
+const DAY_RULE_TEXT = {
+  pessimistic_sign: 'A day is a win or a loss by the sign of its pessimistic total alone.',
+  exceeds_own_bracket: 'A day wins only if its pessimistic total exceeds the gap between its worst and best fills, and loses only if even its best reading is negative. Anything else counts as neither.',
+  sign_under_both_readings: 'A day wins only if it is positive under its worst fills, and loses only if it is negative under its best fills. Anything else counts as neither.'
+};
 /** @param {any} value */
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 /** @param {any} value */
@@ -53,7 +62,8 @@ const sum = (row, names) => names.reduce((total, name) => total + BigInt(row[nam
 export function validateIndexConsistencyPolicy(value) {
   const fields = ['schema_version', 'policy_digest', 'instruments', 'minimum_winning_day_numerator',
     'minimum_winning_day_denominator', 'minimum_week_winning_days', 'maximum_week_losing_days',
-    'maximum_losing_day_streak', 'pnl_basis', 'zero_days_reset_streak', 'costs_included', 'evaluated_scope'];
+    'maximum_losing_day_streak', 'pnl_basis', 'zero_days_reset_streak', 'costs_included', 'evaluated_scope',
+    'day_rule', 'ratio_basis'];
   if (!keys(value, fields) || value.schema_version !== 1 || !hex(value.policy_digest) ||
       !Array.isArray(value.instruments) || value.instruments.length !== 2 || !INDEXES.every((name, index) => value.instruments[index] === name) ||
       // THRESHOLDS ARE VALIDATED AS SHAPE, NEVER AS VALUES.
@@ -75,10 +85,34 @@ export function validateIndexConsistencyPolicy(value) {
       !uint(value.minimum_week_winning_days) || !uint(value.maximum_week_losing_days) ||
       !uint(value.maximum_losing_day_streak) ||
       value.pnl_basis !== 'pessimistic_gross_paisa' || value.zero_days_reset_streak !== false || value.costs_included !== false ||
-      value.evaluated_scope !== 'training_and_later_with_calendar_gap_check') {
+      value.evaluated_scope !== 'training_and_later_with_calendar_gap_check' ||
+      !DAY_RULES.includes(value.day_rule) || !RATIO_BASES.includes(value.ratio_basis) ||
+      value.minimum_winning_day_denominator === '0') {
     throw new Error('The reported index day/week policy does not match the approved rule.');
   }
   return value;
+}
+
+/** Plain-language rule rows for one served policy. Every number comes from the
+ * policy itself, and a threshold that cannot bind is described as absent.
+ * @param {any} policy @returns {Array<[string, string]>} */
+export function indexConsistencyRules(policy) {
+  const count = (/** @type {string} */ n, /** @type {string} */ word) => `${n} ${word}${n === '1' ? '' : 's'}`;
+  const basis = policy.ratio_basis === 'decided_days'
+    ? 'trading days that ended as a win or a loss'
+    : 'eligible trading days, counting flat and no-trade days';
+  const weekly = policy.minimum_week_winning_days === '0' && BigInt(policy.maximum_week_losing_days) >= 5n
+    ? 'No weekly rule: a setup that fires rarely may have weeks without a trade'
+    : `At least ${count(policy.minimum_week_winning_days, 'winning day')} and no more than ${count(policy.maximum_week_losing_days, 'losing day')}`;
+  const streak = BigInt(policy.maximum_losing_day_streak) === U64
+    ? 'No cap: the money drawdown limit governs losing runs'
+    : `No more than ${count(policy.maximum_losing_day_streak, 'losing day')}; only a winning day resets the streak`;
+  return [
+    ['How a day is judged', DAY_RULE_TEXT[/** @type {keyof typeof DAY_RULE_TEXT} */ (policy.day_rule)] ?? 'Unreported day rule'],
+    ['Winning trading days', `At least ${policy.minimum_winning_day_numerator} in every ${policy.minimum_winning_day_denominator} ${basis}`],
+    ['Every complete five-session week', weekly],
+    ['Losing-day streak across weeks', streak]
+  ];
 }
 
 /** @param {any} summary */
@@ -118,9 +152,11 @@ function validatePeriod(period, applicable) {
   validateSummary(period.summary);
   const s = period.summary;
   if (sum(s, ['complete_weeks', 'short_weeks', 'partial_weeks', 'unmeasured_weeks']) !== BigInt(period.weeks_count) ||
+      // A PASSED period is checked for what holds under EVERY policy. The ratio
+      // and streak thresholds belong to the version the digest names and are
+      // applied natively; re-applying V1's 3/5 and 2 here refused every V3 pass.
       period.state === 'passed' && (s.eligible_days === '0' || s.complete_weeks === '0' || s.missing_days !== '0' || s.unmeasured_days !== '0' ||
-        BigInt(s.winning_days) * 5n < BigInt(s.eligible_days) * 3n || BigInt(s.longest_losing_streak) > 2n || s.failing_weeks !== '0' ||
-        s.passing_weeks !== s.complete_weeks || s.observed_days !== period.days_count)) {
+        s.failing_weeks !== '0' || s.passing_weeks !== s.complete_weeks || s.observed_days !== period.days_count)) {
     throw new Error('The saved index-policy verdict contradicts its measured totals.');
   }
 }
@@ -131,16 +167,22 @@ function validatePeriod(period, applicable) {
  * @param {{qualification:any,setting_index:string,instrument:string,institutional:string}} context */
 export function validateIndexConsistency(value, context) {
   if (value === undefined) return null;
-  if (!keys(value, ['schema_version', 'state', 'policy_digest', 'receipt', 'qualification', 'setting_index',
+  if (!keys(value, ['schema_version', 'state', 'policy_digest', 'policy', 'receipt', 'qualification', 'setting_index',
     'combined_qualifies', 'evaluation', 'days_count', 'weeks_count', 'evaluated_scope', 'periods']) || value.schema_version !== 1 || !STATES.includes(value.state) ||
     !sameLink(value.qualification, context.qualification) || !uint(value.setting_index) || value.setting_index !== context.setting_index ||
     !INSTITUTIONAL.includes(context.institutional) || !uint(value.days_count) || !uint(value.weeks_count)) {
     throw new Error('The index day/week receipt does not match this exact setting and qualification.');
   }
   if (value.state === 'not_assessed') {
-    if (value.policy_digest !== null || value.receipt !== null || value.evaluation !== null || value.days_count !== '0' ||
+    if (value.policy_digest !== null || value.policy !== null || value.receipt !== null || value.evaluation !== null || value.days_count !== '0' ||
         value.weeks_count !== '0' || value.combined_qualifies !== null || value.evaluated_scope !== null || value.periods !== null) throw new Error('Older evidence cannot acquire a new index-policy verdict.');
     return value;
+  }
+  // The rule travels with its record, so a page can state the exact rule its
+  // verdict was reached under; the digest ties the two together.
+  validateIndexConsistencyPolicy(value.policy);
+  if (value.policy.policy_digest !== value.policy_digest) {
+    throw new Error('The saved assessment names a different index-policy rule than the one it carries.');
   }
   const expectedCombined = context.institutional === 'admitted' && ['passed', 'not_applicable'].includes(value.state);
   const e = value.evaluation;
@@ -237,9 +279,13 @@ function validateWeek(row) {
       sum(row, ['eligible_days', 'unmeasured_days', 'excluded_days', 'closed_weekdays']) !== BigInt(row.weekday_days) ||
       BigInt(row.trades) < BigInt(row.observed_days) - BigInt(row.no_trade_days)) throw new Error('A saved week has invalid or inconsistent day counts.');
   const kind = BigInt(row.weekday_days) < 5n ? 'partial' : BigInt(row.unmeasured_days) > 0n ? 'unmeasured' : BigInt(row.eligible_days) < 5n ? 'short' : 'complete';
-  const state = BigInt(row.missing_days) > 0n ? 'refused' : BigInt(row.unmeasured_days) > 0n ? 'unmeasured' : kind !== 'complete' ? 'not_applicable' :
-    BigInt(row.winning_days) >= 3n && BigInt(row.losing_days) <= 2n ? 'passed' : 'failed';
-  if (row.kind !== kind || row.state !== state) throw new Error('A partial, missing or failing week cannot be relabelled as passed.');
+  // Whether a complete week passes is the policy's call, made natively; the
+  // browser checks only what no policy can change. V1's 3-win/2-loss literal
+  // here refused every V3 week that passed with one or two wins.
+  const state = BigInt(row.missing_days) > 0n ? 'refused' : BigInt(row.unmeasured_days) > 0n ? 'unmeasured' : kind !== 'complete' ? 'not_applicable' : null;
+  if (row.kind !== kind || (state === null ? !['passed', 'failed'].includes(row.state) : row.state !== state)) {
+    throw new Error('A partial, missing or failing week cannot be relabelled as passed.');
+  }
 }
 
 /** One pinned, bounded page. The browser checks transport consistency; the
@@ -267,8 +313,12 @@ export async function fetchIndexConsistencyPage(value, kind, offset = '0', limit
   for (const [index, row] of body.rows.entries()) {
     if (!object(row) || row.index !== String(start + BigInt(index))) throw new Error('Saved day/week order changed.');
     if (kind === 'index-days') {
-      if (!keys(row, ['index', 'day', 'pessimistic_paisa', 'trades']) || !sint(row.day) || !sint(row.pessimistic_paisa) || !uint(row.trades) ||
-          row.trades === '0' && row.pessimistic_paisa !== '0') throw new Error('A saved day has inconsistent trades or money totals.');
+      if (!keys(row, ['index', 'day', 'pessimistic_paisa', 'trades', 'class']) || !sint(row.day) || !sint(row.pessimistic_paisa) || !uint(row.trades) ||
+          row.trades === '0' && row.pessimistic_paisa !== '0' || !DAY_CLASSES.includes(row.class) || (row.trades === '0') !== (row.class === 'no_trade') ||
+          // Under every day rule a win is positive, and a loss negative, even at the worst fills.
+          row.class === 'winning' && BigInt(row.pessimistic_paisa) <= 0n || row.class === 'losing' && BigInt(row.pessimistic_paisa) >= 0n) {
+        throw new Error('A saved day has inconsistent trades or money totals.');
+      }
     } else validateWeek(row);
     const day = BigInt(kind === 'index-days' ? row.day : row.monday);
     if (previous !== null && (day <= previous || kind === 'index-weeks' && day !== previous + 7n)) throw new Error('Saved days or weeks repeat or change order.');

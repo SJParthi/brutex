@@ -29,8 +29,10 @@ const CALENDAR_DOMAIN: &[u8] = b"brutex-index-consistency-calendar-v1\0";
 
 /// Approved policy. V1 and V2 require >=3/5 winning eligible days, >=3 wins and
 /// <=2 losses per complete Monday-Friday five-session week, and <=2 losing days
-/// per streak; [`Policy::V3`] restates all five for the rare-winner shape.
-/// Flat and no-trade days preserve a streak; only a winning day resets it.
+/// per streak; [`Policy::V3`] restates all five for the rare-winner shape, and
+/// [`Policy::V4`] judges a day under both readings, divides only by decided
+/// days and drops the weekly and streak rules. Flat and no-trade days preserve
+/// a streak; only a winning day resets it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Policy {
     /// The approved version-one rule: a day is a win or a loss by the SIGN of
@@ -99,6 +101,88 @@ pub enum Policy {
     ///
     /// V1 and V2 are untouched and still decode to their own frozen digests.
     V3,
+    /// The rare winner judged honestly: a day under BOTH readings, a ratio over
+    /// decided days only, and no weekly or streak rule -- D-0605.
+    ///
+    /// # What V3 could not admit
+    ///
+    /// Measured on batch 0 of a live 60min + 30min search: all 8,000 settings
+    /// failed V3's "at least one winning day in every complete week". A setup
+    /// that fires seldom has weeks with no trade, and a no-trade day is observed
+    /// but not winning, so the rule rejected the objective itself. V3's ratio
+    /// also divided by eligible days INCLUDING no-trade days, so a setup trading
+    /// a fraction f of days at day-win-rate w scored f*w and had to trade daily.
+    ///
+    /// # What V4 says instead
+    ///
+    /// A day wins when its pessimistic sum is positive -- a win under the worst
+    /// ordering is a win under every ordering -- and loses when even its
+    /// optimistic sum is negative; anything else is neither. At least one day in
+    /// four that ended as a win or a loss must be a win: the trade policy's own
+    /// 25% win-rate floor, stated for days. The weekly rules and the streak cap
+    /// are removed: the operator's money drawdown limit governs losing runs, and
+    /// it is one of the two fixed criteria the operator kept.
+    V4,
+}
+
+/// How one day's two readings become a win, a loss or neither.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DayRule {
+    /// V1: the sign of the pessimistic sum alone.
+    PessimisticSign,
+    /// V2 and V3: a win must exceed the day's own bracket and a loss must be a
+    /// loss even when read optimistically. Frozen; it files small certain wins
+    /// as neither, the error D-0602 corrected for a single trade.
+    ExceedsOwnBracket,
+    /// V4: positive under the worst reading wins, negative under the best
+    /// reading loses, anything else is neither -- D-0605.
+    SignUnderBothReadings,
+}
+impl DayRule {
+    /// Stable wire label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PessimisticSign => "pessimistic_sign",
+            Self::ExceedsOwnBracket => "exceeds_own_bracket",
+            Self::SignUnderBothReadings => "sign_under_both_readings",
+        }
+    }
+    /// Classify one day: `Greater` is a win, `Less` a loss, `Equal` neither.
+    #[must_use]
+    pub fn classify(self, row: Session) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        match self {
+            Self::PessimisticSign => row.pessimistic_paisa.cmp(&0),
+            Self::ExceedsOwnBracket if row.pessimistic_paisa > row.bracket_paisa() => {
+                Ordering::Greater
+            }
+            Self::SignUnderBothReadings if row.pessimistic_paisa > 0 => Ordering::Greater,
+            Self::ExceedsOwnBracket | Self::SignUnderBothReadings if row.optimistic_paisa < 0 => {
+                Ordering::Less
+            }
+            Self::ExceedsOwnBracket | Self::SignUnderBothReadings => Ordering::Equal,
+        }
+    }
+}
+
+/// Which days a winning-day ratio divides by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RatioBasis {
+    /// V1 to V3: every eligible day, flat and no-trade days included.
+    EligibleDays,
+    /// V4: only days that ended as a win or a loss -- D-0605.
+    DecidedDays,
+}
+impl RatioBasis {
+    /// Stable wire label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::EligibleDays => "eligible_days",
+            Self::DecidedDays => "decided_days",
+        }
+    }
 }
 /// The consistency policy the SINGLE-STOP research path evaluates under.
 ///
@@ -115,23 +199,37 @@ pub enum Policy {
 /// A constant is the right shape here and a literal is not: this is one fact
 /// with one owner, so changing the path's policy is one edit that cannot leave
 /// a describer behind. D-0600.
-pub const INDEX_STOP: Policy = Policy::V3;
+pub const INDEX_STOP: Policy = Policy::V4;
 
 impl Policy {
     /// Fixed encoding width for callers storing the additive policy record.
     pub const BYTE_LEN: usize = POLICY_BYTES;
-    /// Whether a day must clear its own bracket to count — false on [`Self::V1`].
+    /// How this version turns one day's two readings into a win, a loss or
+    /// neither. It replaces a bool that was true for two different rules.
     #[must_use]
-    pub const fn magnitude_aware(self) -> bool {
-        matches!(self, Self::V2 | Self::V3)
+    pub const fn day_rule(self) -> DayRule {
+        match self {
+            Self::V1 => DayRule::PessimisticSign,
+            Self::V2 | Self::V3 => DayRule::ExceedsOwnBracket,
+            Self::V4 => DayRule::SignUnderBothReadings,
+        }
     }
-    /// The encoded version word: `1`, `2` or `3`.
+    /// Which days this version's winning-day ratio divides by.
+    #[must_use]
+    pub const fn ratio_basis(self) -> RatioBasis {
+        match self {
+            Self::V1 | Self::V2 | Self::V3 => RatioBasis::EligibleDays,
+            Self::V4 => RatioBasis::DecidedDays,
+        }
+    }
+    /// The encoded version word: `1` through `4`.
     #[must_use]
     pub const fn version(self) -> u64 {
         match self {
             Self::V1 => 1,
             Self::V2 => 2,
             Self::V3 => 3,
+            Self::V4 => 4,
         }
     }
     /// Required winning-day ratio numerator.
@@ -139,7 +237,7 @@ impl Policy {
     pub const fn winning_day_numerator(self) -> u64 {
         match self {
             Self::V1 | Self::V2 => 3,
-            Self::V3 => 1,
+            Self::V3 | Self::V4 => 1,
         }
     }
     /// Required winning-day ratio denominator.
@@ -148,31 +246,49 @@ impl Policy {
         match self {
             Self::V1 | Self::V2 => 5,
             Self::V3 => 3,
+            Self::V4 => 4,
         }
     }
-    /// Minimum winning days in a complete five-session week.
+    /// Minimum winning days in a complete five-session week; none on V4.
     #[must_use]
     pub const fn min_weekly_wins(self) -> u64 {
         match self {
             Self::V1 | Self::V2 => 3,
             Self::V3 => 1,
+            Self::V4 => 0,
         }
     }
-    /// Maximum losing days in a complete five-session week.
+    /// Maximum losing days in a complete five-session week; all five on V4.
     #[must_use]
     pub const fn max_weekly_losses(self) -> u64 {
         match self {
             Self::V1 | Self::V2 => 2,
             Self::V3 => 4,
+            Self::V4 => 5,
         }
     }
-    /// Maximum losses before a winning day resets the streak.
+    /// Maximum losses before a winning day resets the streak; uncapped on V4.
     #[must_use]
     pub const fn max_losing_day_streak(self) -> u64 {
         match self {
             Self::V1 | Self::V2 => 2,
             Self::V3 => 10,
+            Self::V4 => u64::MAX,
         }
+    }
+    /// Whether `summary` falls below this version's winning-day ratio on its own
+    /// basis. On decided days, a span with no decided day has shown nothing and
+    /// fails; on eligible days the caller reports an empty span separately.
+    #[must_use]
+    pub fn winning_day_ratio_fails(self, summary: &Summary) -> bool {
+        let winning = u128::from(summary.winning_days);
+        let base = match self.ratio_basis() {
+            RatioBasis::EligibleDays => u128::from(summary.eligible_days),
+            RatioBasis::DecidedDays => winning + u128::from(summary.losing_days),
+        };
+        (self.ratio_basis() == RatioBasis::DecidedDays && base == 0)
+            || winning * u128::from(self.winning_day_denominator())
+                < base * u128::from(self.winning_day_numerator())
     }
 
     /// Canonical version, thresholds, zero-day rule and existing calendar policy.
@@ -212,7 +328,7 @@ impl Policy {
     }
     /// Every approved version, oldest first. Appending here is the ONLY step a
     /// new version needs to become decodable everywhere.
-    pub const APPROVED: [Self; 3] = [Self::V1, Self::V2, Self::V3];
+    pub const APPROVED: [Self; 4] = [Self::V1, Self::V2, Self::V3, Self::V4];
 
     /// Recover the version a stored digest was written under.
     ///
@@ -232,15 +348,14 @@ impl Policy {
     /// # Errors
     /// Unsupported versions, widths, thresholds or rule codes are refused.
     pub fn decode(raw: &[u8]) -> Result<Self, DecodeError> {
-        if raw == Self::V1.canonical_bytes() {
-            Ok(Self::V1)
-        } else if raw == Self::V2.canonical_bytes() {
-            Ok(Self::V2)
-        } else if raw == Self::V3.canonical_bytes() {
-            Ok(Self::V3)
-        } else {
-            Err(DecodeError::Format)
-        }
+        // THE APPROVED LIST IS THE DECODER. This was a hand-written chain of
+        // three comparisons while the doc above said appending to `APPROVED` was
+        // the only step a new version needs; a fourth version would have been
+        // refused everywhere it was read back.
+        Self::APPROVED
+            .into_iter()
+            .find(|policy| raw == policy.canonical_bytes())
+            .ok_or(DecodeError::Format)
     }
 }
 
@@ -387,13 +502,13 @@ impl Outcome {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u64)]
 pub enum Reason {
-    /// Winning eligible-day ratio is less than three fifths.
+    /// Winning days fall below the policy's ratio on its own basis.
     WinningDayRatio = 1,
-    /// A complete week has fewer than three winning days.
+    /// A complete week has fewer winning days than the policy's weekly minimum.
     WeeklyWins = 1 << 1,
-    /// A complete week has more than two losing days.
+    /// A complete week has more losing days than the policy's weekly maximum.
     WeeklyLosses = 1 << 2,
-    /// More than two losing days occurred without an intervening winning day.
+    /// More losing days occurred in a row than the policy allows.
     LosingDayStreak = 1 << 3,
     /// No complete five-session Monday-Friday week was measured.
     NoCompleteWeek = 1 << 4,
@@ -464,11 +579,11 @@ pub struct Summary {
     pub eligible_days: u64,
     /// Explicit eligible-day observations.
     pub observed_days: u64,
-    /// Positive summed pessimistic return days.
+    /// Days the policy's day rule counts as wins.
     pub winning_days: u64,
-    /// Negative summed pessimistic return days.
+    /// Days the policy's day rule counts as losses.
     pub losing_days: u64,
-    /// Flat days with at least one trade.
+    /// Days with trades that the day rule counts as neither.
     pub zero_days: u64,
     /// Explicit eligible days with no trades and zero return.
     pub no_trade_days: u64,
@@ -655,11 +770,11 @@ pub struct Week {
     pub eligible_days: u64,
     /// Explicit eligible weekday observations.
     pub observed_days: u64,
-    /// Positive weekday sums.
+    /// Weekdays the policy's day rule counts as wins.
     pub winning_days: u64,
-    /// Negative weekday sums.
+    /// Weekdays the policy's day rule counts as losses.
     pub losing_days: u64,
-    /// Flat weekday sums with trades.
+    /// Weekdays with trades that the day rule counts as neither.
     pub zero_days: u64,
     /// Explicit weekdays without trades.
     pub no_trade_days: u64,
@@ -1049,9 +1164,7 @@ impl Evaluation {
         }
         let expected = u64::try_from(self.last_day - self.first_day + 1)
             .map_err(|_| DecodeError::Inconsistent)?;
-        let ratio_failed = s.eligible_days != 0
-            && u128::from(s.winning_days) * u128::from(self.policy.winning_day_denominator())
-                < u128::from(s.eligible_days) * u128::from(self.policy.winning_day_numerator());
+        let ratio_failed = s.eligible_days != 0 && self.policy.winning_day_ratio_fails(&s);
         if s.calendar_days != expected
             || (s.eligible_days == 0) != (self.reasons & Reason::NoEligibleSession.mask() != 0)
             || (s.complete_weeks == 0) != (self.reasons & Reason::NoCompleteWeek.mask() != 0)
@@ -1116,7 +1229,7 @@ pub fn evaluate(
         state.issue(Reason::InvalidSpan, None);
         return state.finish();
     }
-    if let Err((reason, day)) = validate_sessions(first_day, last_day, sessions) {
+    if let Err((reason, day)) = validate_sessions(policy, first_day, last_day, sessions) {
         state.issue(reason, day);
         return state.finish();
     }
@@ -1142,11 +1255,7 @@ pub fn evaluate(
     }
     if state.result.summary.eligible_days == 0 {
         state.issue(Reason::NoEligibleSession, None);
-    } else if u128::from(state.result.summary.winning_days)
-        * u128::from(policy.winning_day_denominator())
-        < u128::from(state.result.summary.eligible_days)
-            * u128::from(policy.winning_day_numerator())
-    {
+    } else if policy.winning_day_ratio_fails(&state.result.summary) {
         state.issue(Reason::WinningDayRatio, None);
     }
     if state.result.summary.complete_weeks == 0 {
@@ -1291,39 +1400,18 @@ impl State {
         if weekday {
             week.observed_days += 1;
         }
-        // WHICH DAYS ARE EVIDENCE, AND WHICH ONLY LOOK LIKE IT -- D-0596.
+        // WHICH DAYS ARE EVIDENCE, AND WHICH ONLY LOOK LIKE IT -- D-0596, D-0605.
         //
-        // V1 read the SIGN of the pessimistic sum, so a day netting one paisa
-        // counted exactly as much as a day netting fifty thousand rupees, and a
-        // day that lost a paisa under the worst reading while winning handsomely
-        // under the best was filed as a loss. Every threshold in `Policy` counts
-        // days, so that classification is the entire input to the rule.
-        //
-        // V2 asks whether the day's outcome survives BOTH readings. A win must
-        // clear the day's own bracket -- `optimistic - pessimistic`, the spread
-        // between the worst and best ordering of its own trades. A loss must
-        // still be a loss under the OPTIMISTIC reading. A day that satisfies
-        // neither is a scratch: its sign depends on which admissible ordering
-        // you read, so it is evidence for no side and falls to the `Equal` arm,
-        // where it is already counted as a zero day and already preserves the
-        // streak exactly as a no-trade day does.
-        //
-        // The threshold is the day's own measurement uncertainty, not a number
-        // anybody chose -- the same principle D-0595 applied to one trade. On a
-        // V1 record the bracket is zero, so this reduces to the sign test and
-        // every existing row means precisely what it always meant.
-        let ordering = if self.result.policy.magnitude_aware() {
-            let bracket = row.bracket_paisa();
-            if row.pessimistic_paisa > bracket {
-                std::cmp::Ordering::Greater
-            } else if row.optimistic_paisa < 0 {
-                std::cmp::Ordering::Less
-            } else {
-                std::cmp::Ordering::Equal
-            }
-        } else {
-            row.pessimistic_paisa.cmp(&0)
-        };
+        // V1 read the SIGN of the pessimistic sum. V2 and V3 made a win clear the
+        // day's own bracket, which filed small certain wins as neither -- the
+        // error D-0602 corrected for a single trade. V4 asks only whether the
+        // outcome survives BOTH readings: positive under the worst ordering is a
+        // win under every ordering, negative under the best is a loss under
+        // every ordering, and anything else falls to the `Equal` arm, where it
+        // preserves the streak exactly as a no-trade day does. The rule is
+        // chosen by the version word already in the record, so every saved row
+        // keeps the meaning it was written with.
+        let ordering = self.result.policy.day_rule().classify(*row);
         match ordering {
             std::cmp::Ordering::Greater => {
                 summary.winning_days += 1;
@@ -1399,7 +1487,12 @@ impl State {
     }
 }
 
-fn validate_sessions(first: i64, last: i64, rows: &[Session]) -> Result<(), (Reason, Option<i64>)> {
+fn validate_sessions(
+    policy: Policy,
+    first: i64,
+    last: i64,
+    rows: &[Session],
+) -> Result<(), (Reason, Option<i64>)> {
     if rows.len() as u64
         > u64::try_from(last - first + 1).map_err(|_| (Reason::InvalidSpan, None))?
     {
@@ -1411,6 +1504,16 @@ fn validate_sessions(first: i64, last: i64, rows: &[Session]) -> Result<(), (Rea
             return Err((Reason::InvalidOrder, Some(row.day)));
         }
         if row.trades == 0 && row.pessimistic_paisa != 0 {
+            return Err((Reason::InvalidCountOrReturn, Some(row.day)));
+        }
+        // V4's win and loss tests exclude each other only on an ordered pair, so
+        // V4 refuses an inverted row, and a no-trade row carrying any reading --
+        // the checks `Session::decode` applies, applied to a row built in memory.
+        // Gated on the day rule, so V1 to V3 answer exactly as they always have.
+        if policy.day_rule() == DayRule::SignUnderBothReadings
+            && (row.optimistic_paisa < row.pessimistic_paisa
+                || (row.trades == 0 && row.optimistic_paisa != 0))
+        {
             return Err((Reason::InvalidCountOrReturn, Some(row.day)));
         }
         if matches!(

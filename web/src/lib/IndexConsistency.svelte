@@ -3,7 +3,7 @@
   import { candidateMoney } from './candidate-trades.js';
   import { indexStopPoints } from './index-stop-results.js';
   import { catalogDay } from './boolean-catalog.js';
-  import { validateIndexConsistency, indexConsistencyLabel, indexConsistencyReasons, indexCombinedLabel, createIndexConsistencyPages } from './index-consistency.js';
+  import { validateIndexConsistency, indexConsistencyLabel, indexConsistencyReasons, indexCombinedLabel, indexConsistencyRules, createIndexConsistencyPages } from './index-consistency.js';
   let { value = /** @type {any} */ (undefined), context = /** @type {any} */ (null), model = 'qualification' } = $props();
   let period = $state('full');
   let page = $state.raw(/** @type {any} */ ({ phase: 'idle', body: null, why: '' }));
@@ -21,7 +21,11 @@
   /** @param {string} key */
   function selectPeriod(key) { period = key; if (page.phase !== 'idle') void open(page.kind ?? 'index-weeks'); }
   /** @param {any} day */
-  const dayLabel = day => day.trades === '0' ? 'No trades' : BigInt(day.pessimistic_paisa) > 0n ? 'Winning day' : BigInt(day.pessimistic_paisa) < 0n ? 'Losing day' : 'Flat day';
+  // The server classifies each day under the record's own day rule; the sign of
+  // the pessimistic total alone was V1's rule and mislabelled every later one.
+  const dayLabel = day => ({ winning: 'Winning day', losing: 'Losing day', scratch: 'Neither: flat, or depends on fill order', no_trade: 'No trades' })[/** @type {'winning'|'losing'|'scratch'|'no_trade'} */ (day.class)] ?? 'Unclassified';
+  /** @param {any} s */
+  const ratioBase = s => checked.value?.policy?.ratio_basis === 'decided_days' ? String(BigInt(s.winning_days) + BigInt(s.losing_days)) : s.eligible_days;
   /** @param {string} kind */
   const weekLabel = kind => ({ complete: 'Five-session week', short: 'Short calendar week', partial: 'Partial boundary week', unmeasured: 'Calendar unconfirmed' })[/** @type {'complete'|'short'|'partial'|'unmeasured'} */ (kind)];
   /** @param {string} value */
@@ -40,16 +44,17 @@
     </div>
     {#each indexConsistencyReasons(checked.value) as why}<p class="reason">{why}</p>{/each}
     {#if checked.value?.periods && checked.value.state !== 'not_applicable'}
-      <p>Required in <b>each period</b>: at least 60% winning days; at least 3 wins and no more than 2 losses
-        in every complete five-session week; losing-day streak no longer than 2 across weeks.
-        Multiple trades are summed each day. Only a winning day resets the losing streak.</p>
+      <!-- The rule is the record's own, carried with it and tied to it by its
+           digest; this paragraph once stated V1's numbers beside V3 verdicts. -->
+      <p>Required in <b>each period</b>. Multiple trades are summed each day.</p>
+      {#each indexConsistencyRules(checked.value.policy) as [what, rule]}<p><b>{what}.</b> {rule}</p>{/each}
       <div class="scroll" role="region" aria-label="Compare training, later and full-span consistency">
         <table><caption>Separate period checks; a full-span pass alone is insufficient</caption>
-          <thead><tr><th>Period</th><th>Winning / eligible days</th><th>Passed / complete weeks</th><th>Failed weeks</th><th>Longest losing streak</th><th>Result</th></tr></thead>
+          <thead><tr><th>Period</th><th>Winning / {checked.value.policy.ratio_basis === 'decided_days' ? 'decided' : 'eligible'} days</th><th>Passed / complete weeks</th><th>Failed weeks</th><th>Longest losing streak</th><th>Result</th></tr></thead>
           <tbody>{#each periods as [key, label]}
             {@const p = checked.value.periods[key]}{@const s = p.summary}
             <tr><th>{label}<small>{catalogDay(p.first_day)} – {catalogDay(p.last_day)}</small></th>
-              <td>{s.winning_days} / {s.eligible_days}</td><td>{s.passing_weeks} / {s.complete_weeks}</td>
+              <td>{s.winning_days} / {ratioBase(s)}</td><td>{s.passing_weeks} / {s.complete_weeks}</td>
               <td>{s.failing_weeks}</td><td>{s.longest_losing_streak}</td><td>{indexConsistencyLabel(p.state)}</td></tr>
           {/each}</tbody>
         </table>
@@ -63,7 +68,7 @@
           <span><b>Flat, with trades</b>{s.zero_days}</span><span><b>No trades</b>{s.no_trade_days}</span>
           <span><b>Missing expected days</b>{s.missing_days}</span><span><b>Calendar unconfirmed days</b>{s.unmeasured_days}</span>
           <span><b>Trades</b>{s.trades}</span><span><b>Pessimistic gross / unit</b>{amount(s.pessimistic_paisa)}</span></div>
-        <p>Flat and no-trade days are included in the eligible-day denominator. Short calendar weeks:
+        <p>{checked.value.policy.ratio_basis === 'decided_days' ? 'Flat and no-trade days stay out of the ratio.' : 'Flat and no-trade days are included in the eligible-day denominator.'} Short calendar weeks:
           {s.short_weeks}; partial boundary weeks: {s.partial_weeks}; unconfirmed weeks: {s.unmeasured_weeks}.
           These are not counted as passed five-session weeks. Eligible weekend sessions: {s.weekend_sessions};
           they still affect the overall day ratio and losing streak.</p>

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {parse} from 'svelte/compiler';
-import {validateIndexConsistencyPolicy,validateIndexConsistency,validateSearchIndexConsistency,indexConsistencyContext,indexConsistencyLabel,indexConsistencyReasons,indexCombinedLabel,fetchIndexConsistencyPage,createIndexConsistencyPages} from '../src/lib/index-consistency.js';
+import {validateIndexConsistencyPolicy,validateIndexConsistency,validateSearchIndexConsistency,indexConsistencyContext,indexConsistencyLabel,indexConsistencyReasons,indexCombinedLabel,indexConsistencyRules,fetchIndexConsistencyPage,createIndexConsistencyPages} from '../src/lib/index-consistency.js';
 import {assessment,legacy,cash,context,policy,sync,reason,page,hex} from './index-consistency-fixture.js';
 const reply=(/** @type {any} */ body) =>async()=>({ok:true,json:async()=>body});
 const flush=()=>new Promise((/** @type {any} */ resolve) =>setTimeout(resolve,2));
@@ -20,7 +20,22 @@ test('the native policy names only both indices and exact approved rules with al
  // in the browser made this function throw on every load once the server began
  // serving V3, and the launch page could not be opened at all.
  {const v=policy();v.minimum_winning_day_numerator='1';v.minimum_winning_day_denominator='3';v.minimum_week_winning_days='1';v.maximum_week_losing_days='4';v.maximum_losing_day_streak='10';assert.strictEqual(validateIndexConsistencyPolicy(v).maximum_losing_day_streak,'10');}
- for(const change of [(/** @type {any} */ v) =>v.instruments.push('NSE-RELIANCE'),(/** @type {any} */ v) =>v.instruments.reverse(),(/** @type {any} */ v) =>v.minimum_winning_day_numerator='-1',(/** @type {any} */ v) =>v.minimum_winning_day_denominator=5,(/** @type {any} */ v) =>v.maximum_losing_day_streak='three',(/** @type {any} */ v) =>v.zero_days_reset_streak=true,(/** @type {any} */ v) =>v.costs_included=true,(/** @type {any} */ v) =>v.pnl_basis='net',(/** @type {any} */ v) =>delete v.evaluated_scope,(/** @type {any} */ v) =>v.evaluated_scope='later_only',(/** @type {any} */ v) =>v.policy_digest='0'.repeat(64),(/** @type {any} */ v) =>v.account_balance=100000]){const v=policy();change(v);assert.throws(()=>validateIndexConsistencyPolicy(v));}
+ for(const change of [(/** @type {any} */ v) =>v.instruments.push('NSE-RELIANCE'),(/** @type {any} */ v) =>v.instruments.reverse(),(/** @type {any} */ v) =>v.minimum_winning_day_numerator='-1',(/** @type {any} */ v) =>v.minimum_winning_day_denominator=5,(/** @type {any} */ v) =>v.maximum_losing_day_streak='three',(/** @type {any} */ v) =>v.zero_days_reset_streak=true,(/** @type {any} */ v) =>v.costs_included=true,(/** @type {any} */ v) =>v.pnl_basis='net',(/** @type {any} */ v) =>delete v.evaluated_scope,(/** @type {any} */ v) =>v.evaluated_scope='later_only',(/** @type {any} */ v) =>v.policy_digest='0'.repeat(64),(/** @type {any} */ v) =>v.account_balance=100000,(/** @type {any} */ v) =>v.day_rule='median',(/** @type {any} */ v) =>delete v.day_rule,(/** @type {any} */ v) =>v.ratio_basis='all_days',(/** @type {any} */ v) =>v.minimum_winning_day_denominator='0']){const v=policy();change(v);assert.throws(()=>validateIndexConsistencyPolicy(v));}
+});
+test('the rule text is read from the served policy, and a threshold that cannot bind reads as absent',()=>{
+ const v1=Object.fromEntries(indexConsistencyRules(policy()));
+ assert.match(v1['Winning trading days'],/^At least 3 in every 5 eligible trading days, counting flat and no-trade days$/);
+ assert.equal(v1['Every complete five-session week'],'At least 3 winning days and no more than 2 losing days');
+ assert.match(v1['Losing-day streak across weeks'],/^No more than 2 losing days/);assert.match(v1['How a day is judged'],/sign of its pessimistic total/);
+ const v4=Object.fromEntries(indexConsistencyRules({...policy(),minimum_winning_day_numerator:'1',minimum_winning_day_denominator:'4',minimum_week_winning_days:'0',maximum_week_losing_days:'5',maximum_losing_day_streak:'18446744073709551615',day_rule:'sign_under_both_readings',ratio_basis:'decided_days'}));
+ assert.equal(v4['Winning trading days'],'At least 1 in every 4 trading days that ended as a win or a loss');
+ assert.match(v4['Every complete five-session week'],/^No weekly rule/);assert.match(v4['Losing-day streak across weeks'],/^No cap/);assert.match(v4['How a day is judged'],/positive under its worst fills/);
+ // One binding threshold keeps the weekly rule stated: zero wins with a four-loss cap still binds.
+ assert.equal(Object.fromEntries(indexConsistencyRules({...policy(),minimum_week_winning_days:'0',maximum_week_losing_days:'4'}))['Every complete five-session week'],'At least 0 winning days and no more than 4 losing days');
+});
+test('a saved assessment carries the exact rule its digest names',()=>{
+ for(const change of [(/** @type {any} */ v) =>v.policy.policy_digest=hex(99),(/** @type {any} */ v) =>delete v.policy,(/** @type {any} */ v) =>v.policy=null,(/** @type {any} */ v) =>v.policy.day_rule='median']){const v=assessment();change(v);assert.throws(()=>validateIndexConsistency(v,context()));}
+ assert.throws(()=>validateIndexConsistency({...legacy(),policy:policy()},context()),/Older evidence/);
 });
 test('saved results bind exact qualification and preserve training, later, full and independent institutional verdicts',()=>{
  const value=assessment();assert.strictEqual(validateIndexConsistency(value,context()),value);assert.equal(indexCombinedLabel(value),'Both checks passed');
@@ -74,13 +89,18 @@ test('day and week requests bind exact saved setting, receipt and selected perio
  }
 });
 test('page pin, period, total, ordering and row schema cannot be replaced or silently truncated',async()=>{
- const v=assessment();const changes=[(/** @type {any} */ b) =>b.receipt.completion=hex(99),(/** @type {any} */ b) =>b.identity=hex(99),(/** @type {any} */ b) =>b.setting='481',(/** @type {any} */ b) =>b.period='training',(/** @type {any} */ b) =>b.total='11',(/** @type {any} */ b) =>b.limit='16',(/** @type {any} */ b) =>b.offset='1',(/** @type {any} */ b) =>b.rows.pop(),(/** @type {any} */ b) =>b.rows[1].index='0',(/** @type {any} */ b) =>b.rows[1].day=b.rows[0].day,(/** @type {any} */ b) =>b.rows[0].trades='0',(/** @type {any} */ b) =>b.rows[0].pessimistic_paisa=400,(/** @type {any} */ b) =>b.rows[0].extra=1,(/** @type {any} */ b) =>b.refusal='missing'];
+ const v=assessment();const changes=[(/** @type {any} */ b) =>b.receipt.completion=hex(99),(/** @type {any} */ b) =>b.identity=hex(99),(/** @type {any} */ b) =>b.setting='481',(/** @type {any} */ b) =>b.period='training',(/** @type {any} */ b) =>b.total='11',(/** @type {any} */ b) =>b.limit='16',(/** @type {any} */ b) =>b.offset='1',(/** @type {any} */ b) =>b.rows.pop(),(/** @type {any} */ b) =>b.rows[1].index='0',(/** @type {any} */ b) =>b.rows[1].day=b.rows[0].day,(/** @type {any} */ b) =>b.rows[0].trades='0',(/** @type {any} */ b) =>b.rows[0].pessimistic_paisa=400,(/** @type {any} */ b) =>b.rows[0].extra=1,(/** @type {any} */ b) =>b.refusal='missing',(/** @type {any} */ b) =>delete b.rows[0].class,(/** @type {any} */ b) =>b.rows[0].class='flat',(/** @type {any} */ b) =>b.rows[0].class='losing',(/** @type {any} */ b) =>b.rows[3].class='winning',(/** @type {any} */ b) =>b.rows[0].class='no_trade'];
  for(const change of changes){const b=page(v,'index-days');change(b);await assert.rejects(fetchIndexConsistencyPage(v,'index-days','0',16,reply(b)),String(change));}
- for(const change of [(/** @type {any} */ b) =>b.rows[0].kind='short',(/** @type {any} */ b) =>b.rows[0].state='failed',(/** @type {any} */ b) =>b.rows[0].winning_days='4',(/** @type {any} */ b) =>b.rows[0].monday='5',(/** @type {any} */ b) =>b.rows[1].monday='18']){const b=page(v);change(b);await assert.rejects(fetchIndexConsistencyPage(v,'index-weeks','0',16,reply(b)));}
+ for(const change of [(/** @type {any} */ b) =>b.rows[0].kind='short',(/** @type {any} */ b) =>b.rows[0].state='not_applicable',(/** @type {any} */ b) =>b.rows[0].state='refused',(/** @type {any} */ b) =>b.rows[0].winning_days='4',(/** @type {any} */ b) =>b.rows[0].monday='5',(/** @type {any} */ b) =>b.rows[1].monday='18']){const b=page(v);change(b);await assert.rejects(fetchIndexConsistencyPage(v,'index-weeks','0',16,reply(b)));}
 });
 test('partial, holiday, unknown and missing weeks preserve separate labels and never appear passed',async()=>{
  const v=assessment();const cases=[{kind:'partial',state:'not_applicable',weekday_days:'4',eligible_days:'4',observed_days:'4',losing_days:'1'}, {kind:'short',state:'not_applicable',eligible_days:'4',observed_days:'4',losing_days:'1',closed_weekdays:'1'}, {kind:'unmeasured',state:'unmeasured',eligible_days:'4',observed_days:'4',losing_days:'1',unmeasured_days:'1'}, {kind:'complete',state:'refused',observed_days:'4',losing_days:'1',missing_days:'1'}, {kind:'complete',state:'failed',winning_days:'2',losing_days:'3'}];
- for(const replacement of cases){const b=page(v);Object.assign(b.rows[0],replacement);const got=await fetchIndexConsistencyPage(v,'index-weeks','0',16,reply(b));assert.equal(got.rows[0].state,replacement.state);b.rows[0].state='passed';await assert.rejects(fetchIndexConsistencyPage(v,'index-weeks','0',16,reply(b)),/relabelled/);}
+ for(const replacement of cases){const b=page(v);Object.assign(b.rows[0],replacement);const got=await fetchIndexConsistencyPage(v,'index-weeks','0',16,reply(b));assert.equal(got.rows[0].state,replacement.state);
+  // A complete, fully observed week passes or fails by the policy's weekly
+  // numbers, applied natively; only the other states are the browser's to police.
+  if(replacement.kind==='complete'&&replacement.state==='failed'){b.rows[0].state='passed';assert.equal((await fetchIndexConsistencyPage(v,'index-weeks','0',16,reply(b))).rows[0].state,'passed');b.rows[0].state='not_applicable';}
+  else b.rows[0].state='passed';
+  await assert.rejects(fetchIndexConsistencyPage(v,'index-weeks','0',16,reply(b)),/relabelled/);}
 });
 test('invalid selections dispatch zero HTTP requests and read failures do not manufacture empty evidence',async()=>{
  let calls=0;const request=async()=>{calls++;return {ok:false,status:503,json:async()=>({schema_version:1,status:'refused',rows:[],refusal:'exact receipt unavailable'})};};
@@ -102,10 +122,11 @@ test('close during JSON decoding revokes ownership even when transport ignores a
 });
 test('presentation keeps original verdict, all three periods and original trade drilldown without eager page reads',()=>{
  const source=readFileSync(new URL('../src/lib/IndexConsistency.svelte',import.meta.url),'utf8');const ast=parse(source);
- assert.match(source,/Existing institutional checks/);assert.match(source,/Combined result/);assert.match(source,/full-span pass alone is insufficient/);assert.match(source,/Flat and no-trade days are included/);assert.match(source,/Only a winning day resets/);assert.match(source,/Inspect saved weeks/);assert.match(source,/Inspect saved days/);assert.match(source,/original saved trades remain available/);
+ assert.match(source,/Existing institutional checks/);assert.match(source,/Combined result/);assert.match(source,/full-span pass alone is insufficient/);assert.match(source,/Flat and no-trade days are included/);assert.match(source,/indexConsistencyRules\(checked\.value\.policy\)/);assert.doesNotMatch(source,/60%|at least 3 wins|no longer than 2/);assert.match(source,/Inspect saved weeks/);assert.match(source,/Inspect saved days/);assert.match(source,/original saved trades remain available/);
  const variable=(/** @type {any} */ name) =>ast.instance.content.body.filter((/** @type {any} */ n) =>n.type==='VariableDeclaration').flatMap((/** @type {any} */ n) =>n.declarations).find((/** @type {any} */ n) =>n.id.name===name);
  const day=variable('dayLabel').init;const classify=new Function(`return (${source.slice(day.start,day.end)});`)();
- assert.equal(classify({trades:'0',pessimistic_paisa:'0'}),'No trades');assert.equal(classify({trades:'2',pessimistic_paisa:'0'}),'Flat day');assert.equal(classify({trades:'2',pessimistic_paisa:'-9223372036854775808'}),'Losing day');assert.equal(classify({trades:'18446744073709551615',pessimistic_paisa:'9223372036854775807'}),'Winning day');
+ // The label is the server's class under the record's own day rule, never a sign test repeated here.
+ assert.equal(classify({class:'no_trade'}),'No trades');assert.equal(classify({class:'scratch',pessimistic_paisa:'5'}),'Neither: flat, or depends on fill order');assert.equal(classify({class:'losing'}),'Losing day');assert.equal(classify({class:'winning'}),'Winning day');assert.equal(classify({class:'bogus',pessimistic_paisa:'9'}),'Unclassified');
  const effect=ast.instance.content.body.find((/** @type {any} */ n) =>n.type==='ExpressionStatement'&&n.expression?.callee?.name==='$effect');assert.doesNotMatch(source.slice(effect.start,effect.end),/\.open\(/);assert.match(source,/onDestroy\(\(\) => pages\.dispose\(\)\)/);
  const tester=readFileSync(new URL('../src/lib/ResearchTester.svelte',import.meta.url),'utf8');assert.match(tester,/Daily \/ weekly rule/);assert.match(tester,/<IndexConsistency value=\{c\.consistency \?\? undefined\} context=\{c\.consistencyContext\}/);assert.match(tester,/List of trades/);
  const search=readFileSync(new URL('../src/lib/BooleanQualifiedSearch.svelte',import.meta.url),'utf8');assert.match(search,/consistency=\{c\.index_consistency\} institutionalStatus=\{c\.status\}/);

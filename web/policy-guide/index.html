@@ -60,7 +60,7 @@ const settings = [
     "field": "min_win_rate_ppm",
     "title": "Winning trade share",
     "limit": "At least 25%",
-    "why": "Counts completed trades, alongside the effective loss and reward/risk limits. The index workflow separately requires at least 60% winning eligible days.",
+    "why": "Counts completed trades, alongside the effective loss and reward/risk limits. The index workflow separately applies its day-consistency rule, whose exact version the launch page states.",
     "raw": "250000"
   },
   {
@@ -140,7 +140,7 @@ const settings = [
     "field": "max_session_concentration_ppm",
     "title": "Dependence on one day",
     "limit": "At most 25%",
-    "why": "One session cannot contribute more than a tenth of the trade count.",
+    "why": "One session cannot contribute more than a quarter of the trade count.",
     "raw": "250000"
   },
   {
@@ -172,7 +172,7 @@ const settings = [
     "field": "max_losing_trades",
     "title": "Total losing-trade count",
     "limit": "No extra absolute cap",
-    "why": "Explicit u64 maximum. The 60% rate and losing-streak limits still apply; long studies are not penalized only for being long.",
+    "why": "Explicit u64 maximum. The 75% rate and losing-streak limits still apply; long studies are not penalized only for being long.",
     "raw": "18446744073709551615"
   },
   {

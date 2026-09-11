@@ -343,7 +343,7 @@ fn days(reader: &Reader, asked: &Asked) -> Result<Value, String> {
             window(days, asked)?
                 .iter()
                 .enumerate()
-                .map(|(n, row)| consistency::day(asked.offset + n, *row))
+                .map(|(n, row)| consistency::day(asked.offset + n, *row, evaluation.policy))
                 .collect(),
         )
     };

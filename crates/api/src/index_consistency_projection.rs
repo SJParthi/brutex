@@ -14,7 +14,8 @@ pub(crate) fn policy(value: Policy) -> Value {
         "maximum_week_losing_days":value.max_weekly_losses().to_string(),
         "maximum_losing_day_streak":value.max_losing_day_streak().to_string(),
         "pnl_basis":"pessimistic_gross_paisa","zero_days_reset_streak":false,"costs_included":false,
-        "evaluated_scope":"training_and_later_with_calendar_gap_check"
+        "evaluated_scope":"training_and_later_with_calendar_gap_check",
+        "day_rule":value.day_rule().as_str(),"ratio_basis":value.ratio_basis().as_str()
     })
 }
 pub(super) fn setting(
@@ -26,7 +27,7 @@ pub(super) fn setting(
     let qualification = json!({"identity":hex(reader.identity()),"completion":hex(pin)});
     let Some(record) = reader.index_consistency(pin, index)? else {
         return Ok(
-            json!({"schema_version":1,"state":"not_assessed","policy_digest":null,"receipt":null,
+            json!({"schema_version":1,"state":"not_assessed","policy_digest":null,"policy":null,"receipt":null,
             "qualification":qualification,"setting_index":index.to_string(),"combined_qualifies":null,
             "evaluation":null,"days_count":"0","weeks_count":"0","evaluated_scope":null,"periods":null}),
         );
@@ -61,7 +62,7 @@ pub(crate) fn saved_record(
         .checked_sub(training_days)
         .ok_or("saved training day prefix exceeds full extent")?;
     Ok(
-        json!({"schema_version":1,"state":record.outcome().as_str(),"policy_digest":hex(evaluation.policy.digest()),
+        json!({"schema_version":1,"state":record.outcome().as_str(),"policy_digest":hex(evaluation.policy.digest()),"policy":policy(evaluation.policy),
             "receipt":{"identity":hex(receipt.identity),"completion":hex(receipt.completion)},"qualification":qualification,
             "setting_index":index.to_string(),"combined_qualifies":record.combined_qualifies(institutional),
             "evaluation":{"instrument":evaluation.family.instrument().to_string(),"first_day":evaluation.first_day.to_string(),"last_day":evaluation.last_day.to_string(),
@@ -164,7 +165,7 @@ pub(super) fn page(reader: &Qualification, asked: &Asked) -> Result<Value, Strin
             .ok_or("index day page outside saved extent")?
             .iter()
             .enumerate()
-            .map(|(n, row)| day(asked.offset + n, *row))
+            .map(|(n, row)| day(asked.offset + n, *row, evaluation.policy))
             .collect()
     };
     reader.require_current()?;
@@ -174,8 +175,19 @@ pub(super) fn page(reader: &Qualification, asked: &Asked) -> Result<Value, Strin
         "setting":setting.to_string(),"total":total.to_string(),"offset":asked.offset.to_string(),"limit":asked.limit,"rows":rows,"refusal":null}),
     )
 }
-pub(crate) fn day(index: usize, value: Session) -> Value {
-    json!({"index":index.to_string(),"day":value.day.to_string(),"pessimistic_paisa":value.pessimistic_paisa.to_string(),"trades":value.trades.to_string()})
+/// One saved day, with its class under the record's OWN day rule -- D-0605.
+/// The browser labelled days by V1's sign test because nothing else was sent.
+pub(crate) fn day(index: usize, value: Session, policy: Policy) -> Value {
+    let class = if value.trades == 0 {
+        "no_trade"
+    } else {
+        match policy.day_rule().classify(value) {
+            std::cmp::Ordering::Greater => "winning",
+            std::cmp::Ordering::Less => "losing",
+            std::cmp::Ordering::Equal => "scratch",
+        }
+    };
+    json!({"index":index.to_string(),"day":value.day.to_string(),"pessimistic_paisa":value.pessimistic_paisa.to_string(),"trades":value.trades.to_string(),"class":class})
 }
 pub(crate) fn week(index: usize, value: &Week) -> Value {
     json!({"index":index.to_string(),"monday":value.monday.to_string(),"kind":value.kind.as_str(),"state":value.outcome.as_str(),
@@ -223,6 +235,44 @@ mod tests {
             rendered.get("evaluated_scope"),
             Some(&json!("training_and_later_with_calendar_gap_check"))
         );
+        // D-0605: the day rule and ratio basis travel with the numbers, and the
+        // browser checks this exact key set.
+        assert_eq!(rendered.get("day_rule"), Some(&json!("pessimistic_sign")));
+        assert_eq!(rendered.get("ratio_basis"), Some(&json!("eligible_days")));
+        assert_eq!(rendered.as_object().map(serde_json::Map::len), Some(14));
+        let v4 = policy(Policy::V4);
+        assert_eq!(v4.get("day_rule"), Some(&json!("sign_under_both_readings")));
+        assert_eq!(v4.get("ratio_basis"), Some(&json!("decided_days")));
+        assert_eq!(
+            v4.get("maximum_losing_day_streak"),
+            Some(&json!(u64::MAX.to_string()))
+        );
+    }
+    #[test]
+    fn each_day_is_classed_under_its_own_record_s_rule() {
+        // D-0605: the page cannot class a day, because the rule that decides it
+        // belongs to the record's policy version.
+        let row = |pessimistic, optimistic, trades| Session {
+            day: 20_000,
+            pessimistic_paisa: pessimistic,
+            optimistic_paisa: optimistic,
+            trades,
+        };
+        for (value, v1, v3, v4) in [
+            (row(-5, 900, 2), "losing", "scratch", "scratch"),
+            (row(1, 201, 2), "winning", "scratch", "winning"),
+            (row(0, 0, 2), "scratch", "scratch", "scratch"),
+            (row(-500, -1, 2), "losing", "losing", "losing"),
+            (row(0, 0, 0), "no_trade", "no_trade", "no_trade"),
+        ] {
+            for (version, want) in [(Policy::V1, v1), (Policy::V3, v3), (Policy::V4, v4)] {
+                assert_eq!(
+                    day(0, value, version).get("class"),
+                    Some(&json!(want)),
+                    "{version:?}"
+                );
+            }
+        }
     }
     #[test]
     fn integer_projection_keeps_large_counts_signed_money_and_distinct_zeros_exact() {
@@ -248,6 +298,7 @@ mod tests {
                 optimistic_paisa: i64::MAX,
                 trades: u64::MAX,
             },
+            Policy::V1,
         );
         assert_eq!(
             value.get("pessimistic_paisa"),

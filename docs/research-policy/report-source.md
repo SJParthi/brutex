@@ -5,8 +5,8 @@ checks**, not 37 things the operator must calculate manually. There are 39
 policy settings in the existing engine: 37 values in the supplied profile and
 two settings resolved outside it (the run's maximum single-trade loss and the
 inherited worst-case reward/risk threshold, whose default is 3:1).
-That default is a research choice, not a threshold supplied by the weekly
-winning-day requirement. Intraday-only execution and the fixed **15:10 IST deadline** are
+That default is a research choice, not a threshold supplied by the index
+day-consistency rule. Intraday-only execution and the fixed **15:10 IST deadline** are
 additional mandatory execution rules, not numbers supplied by this profile.
 
 The operator explicitly delegated selecting the missing values. The supplied
@@ -47,7 +47,7 @@ representation; 50,000 ppm is 5%, and 1,500,000 ppm as a ratio is 1.5×.
 | Sample | min_independent_sessions | Enough trading days | At least 30 | Counts distinct qualifying sessions; that alone cannot prove statistical independence. |
 | Sample | min_trades | Enough completed trades | At least 40 | Avoids qualifying a strategy on a handful of outcomes. This is a screening floor, not a proof of adequate statistical power. At 200 it forced about 2.4 trades a week, which a setup meant to fire seldom cannot meet. |
 | Loss and return | max_mae_paisa | Worst movement against a trade | At most R | Measures adverse excursion even if the price later recovers. |
-| Loss and return | min_win_rate_ppm | Winning trade share | At least 25% | Counts completed trades, alongside the effective loss and reward/risk limits. The index workflow separately requires at least 60% winning eligible days. |
+| Loss and return | min_win_rate_ppm | Winning trade share | At least 25% | Counts completed trades, alongside the effective loss and reward/risk limits. The index workflow separately applies its day-consistency rule, whose exact version the launch page states. |
 | Loss and return | min_wilson_win_rate_ppm | Cautious win-rate estimate | At least 14% | Requires the Wilson lower bound to clear the floor; the method’s assumptions still matter. At 35%, and even at 20%, this bound was unsatisfiable at the profile’s own minimum trade count: forty trades at the 25% point floor give a Wilson lower bound of 141,871 ppm. |
 | Loss and return | min_return_drawdown_ppm | Return compared with drawdown | At least 2× | The pessimistic return must be at least twice the measured drawdown. |
 | Loss and return | min_weakest_period_return_paisa | Worst required period | At least −R | Allows a bounded losing period without hiding it behind a strong total. |
@@ -57,11 +57,11 @@ representation; 50,000 ppm is 5%, and 1,500,000 ppm as a ratio is 1.5×.
 | Later periods | min_decided_folds | Usable walk-forward windows | At least 6 | Enough historical train/test windows must produce an actual decision. |
 | Data and execution | max_ambiguous_fill_rate_ppm | Unclear candle event order | 0% | No admitted trade may rely on an ambiguous fill outcome. The sweep may still record rejected candidates. |
 | Data and execution | max_gap_affected_rate_ppm | Gap-affected outcomes | 0% | No admitted trade may be marked as affected by a gap. This does not replace source completeness checks. |
-| Concentration | max_session_concentration_ppm | Dependence on one day | At most 25% | One session cannot contribute more than a tenth of the trade count. |
+| Concentration | max_session_concentration_ppm | Dependence on one day | At most 25% | One session cannot contribute more than a quarter of the trade count. |
 | Concentration | max_largest_trade_profit_share_ppm | Dependence on one lucky trade | At most 50% | Limits the measured share of GROSS WIN attributable to the largest trade. At 10%, admitting a winner N times the typical one required 9N+1 winning trades, so a tenfold outlier needed 91 winners and the best trade was capped near the average win. |
 | Loss and return | max_drawdown_paisa | Largest accumulated setback | At most 3R | Caps the peak-to-trough loss in price units; not an account-percentage limit. |
 | Loss and return | max_losing_trade_rate_ppm | Losing trade share | At most 75% | A rate remains comparable across study lengths. |
-| Loss and return | max_losing_trades | Total losing-trade count | No extra absolute cap | Explicit u64 maximum. The 60% rate and losing-streak limits still apply; long studies are not penalized only for being long. |
+| Loss and return | max_losing_trades | Total losing-trade count | No extra absolute cap | Explicit u64 maximum. The 75% rate and losing-streak limits still apply; long studies are not penalized only for being long. |
 | Loss and return | min_pessimistic_profit_paisa | Conservative total result | At least 5R | Requires a positive result with a margin relative to the run's risk unit. Excluded costs remain excluded. |
 | Sample | min_winning_trades | Enough winning trades | At least 10 | Adds an absolute sample floor alongside the win-rate rule. |
 | Loss and return | min_average_win_paisa | Average winning amount | At least 1 paisa | Requires a positive measured average; stronger size checks come from reward/risk and profit factor. |
@@ -87,7 +87,7 @@ reward/risk threshold**. The inherited default ratio is 3; an explicit named
 override can change it. No observed loss leaves this ratio unmeasured, not an
 automatic pass. Backtest shows the effective value when the policy resolves.
 The supplied file intentionally cannot overwrite those two fields. The separate
-NIFTY/BANKNIFTY winning-day, weekly and loss-streak requirements still apply.
+NIFTY/BANKNIFTY day-consistency rule still applies; the launch page states its exact version.
 
 ## Why these values, and what the sources actually support
 
