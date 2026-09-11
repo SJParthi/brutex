@@ -108,12 +108,12 @@ fn receipt_reopens_exactly_reuses_bytes_and_keeps_independent_admission() {
     drop(first);
     let again = write(&temp, expected.clone());
     assert_eq!(again.receipt(), receipt);
-    let reopened = Reader::open(&temp.0, [8; 32], [9; 32], BUDGET, 1).unwrap();
+    let reopened = Reader::open(&temp.0, [8; 32], [9; 32], Policy::V1, BUDGET, 1).unwrap();
     assert_eq!(reopened.record([9; 32], 0).unwrap(), &expected);
     assert!(reopened.record([10; 32], 0).is_err());
     assert!(reopened.record([9; 32], 1).is_err());
-    assert!(Reader::open(&temp.0, [8; 32], [10; 32], BUDGET, 1).is_err());
-    assert!(Reader::open(&temp.0, [8; 32], [9; 32], BUDGET, 2).is_err());
+    assert!(Reader::open(&temp.0, [8; 32], [10; 32], Policy::V1, BUDGET, 1).is_err());
+    assert!(Reader::open(&temp.0, [8; 32], [9; 32], Policy::V1, BUDGET, 2).is_err());
 }
 
 #[test]
@@ -149,7 +149,7 @@ fn zero_trade_denominator_is_durable_and_never_promoted_by_institutional_pass() 
 #[test]
 fn receipt_missing_corrupt_changed_and_truncated_states_fail_closed() {
     let temp = Temp::new();
-    assert!(Reader::open(&temp.0, [8; 32], [9; 32], BUDGET, 1).is_err());
+    assert!(Reader::open(&temp.0, [8; 32], [9; 32], Policy::V1, BUDGET, 1).is_err());
     let reader = write(&temp, record(false, false));
     let path = temp
         .0
@@ -161,16 +161,25 @@ fn receipt_missing_corrupt_changed_and_truncated_states_fail_closed() {
     *corrupt.get_mut(72).unwrap() ^= 1;
     std::fs::write(&body, &corrupt).unwrap();
     assert!(reader.require_current().is_err());
-    assert!(Reader::open(&temp.0, [8; 32], [9; 32], BUDGET, 1).is_err());
+    assert!(Reader::open(&temp.0, [8; 32], [9; 32], Policy::V1, BUDGET, 1).is_err());
     std::fs::write(&body, &original).unwrap();
     std::fs::remove_file(path.join("complete.bin")).unwrap();
-    assert!(Reader::open(&temp.0, [8; 32], [9; 32], BUDGET, 1).is_err());
+    assert!(Reader::open(&temp.0, [8; 32], [9; 32], Policy::V1, BUDGET, 1).is_err());
     for length in [0, 7, 71, 143, original.len() - 1] {
-        assert!(decode(original.get(..length).unwrap(), [8; 32], [9; 32], 1).is_err());
+        assert!(
+            decode(
+                original.get(..length).unwrap(),
+                [8; 32],
+                [9; 32],
+                Policy::V1,
+                1
+            )
+            .is_err()
+        );
     }
     let mut extra = original;
     extra.push(0);
-    assert!(decode(&extra, [8; 32], [9; 32], 1).is_err());
+    assert!(decode(&extra, [8; 32], [9; 32], Policy::V1, 1).is_err());
 }
 
 #[test]
@@ -180,13 +189,13 @@ fn conflicting_reuse_budget_and_parent_failure_do_not_publish_success() {
     let changed = record(false, true);
     assert!(produce(&temp.0, [8; 32], [9; 32], vec![changed], BUDGET, || Ok(())).is_err());
     assert_eq!(
-        Reader::open(&temp.0, [8; 32], [9; 32], BUDGET, 1)
+        Reader::open(&temp.0, [8; 32], [9; 32], Policy::V1, BUDGET, 1)
             .unwrap()
             .receipt(),
         initial
     );
     assert!(encode([8; 32], [9; 32], &[record(false, false)], 100).is_err());
-    assert!(Reader::open(&temp.0, [8; 32], [9; 32], 112, 1).is_err());
+    assert!(Reader::open(&temp.0, [8; 32], [9; 32], Policy::V1, 112, 1).is_err());
     let failed = Temp::new();
     assert!(
         produce(

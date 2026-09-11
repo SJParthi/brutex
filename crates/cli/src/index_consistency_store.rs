@@ -118,12 +118,13 @@ impl Reader {
         root: &Path,
         parent: [u8; 32],
         pin: [u8; 32],
+        policy: Policy,
         max_bytes: u64,
         count: usize,
     ) -> Result<Self, String> {
-        let id = identity(parent, pin);
+        let id = identity(parent, pin, policy);
         let (observation, records) = Observation::open(root, NAMESPACE, id, max_bytes, |bytes| {
-            decode(bytes, parent, pin, count)
+            decode(bytes, parent, pin, policy, count)
         })?;
         Ok(Self {
             observation,
@@ -182,12 +183,12 @@ impl Reader {
     }
 }
 
-pub(crate) fn identity(parent: [u8; 32], pin: [u8; 32]) -> [u8; 32] {
+pub(crate) fn identity(parent: [u8; 32], pin: [u8; 32], policy: Policy) -> [u8; 32] {
     let mut state = Hasher::new();
     state.update(b"brutex-index-consistency-v1\0");
     state.update(&parent);
     state.update(&pin);
-    state.update(&Policy::V1.canonical_bytes());
+    state.update(&policy.canonical_bytes());
     state.finalize()
 }
 
@@ -200,7 +201,8 @@ pub(crate) fn produce(
     verify_parent: impl Fn() -> Result<(), String>,
 ) -> Result<Reader, String> {
     verify_parent()?;
-    let id = identity(parent, pin);
+    let policy = declared_policy(&records)?;
+    let id = identity(parent, pin, policy);
     let attempt =
         crate::sweep_evidence::begin(root, id, crate::sweep_evidence::Operation::IndexConsistency)?;
     let result = (|| {
@@ -214,7 +216,7 @@ pub(crate) fn produce(
         drop(pending);
         drop(body);
         verify_parent()?;
-        Reader::open(root, parent, pin, max_bytes, count)
+        Reader::open(root, parent, pin, policy, max_bytes, count)
     })();
     match result {
         Ok(reader) => {
@@ -231,28 +233,46 @@ pub(crate) fn produce(
     }
 }
 
+/// The policy a set of records was evaluated under, refusing a mixed set.
+///
+/// Read from the EVIDENCE rather than pinned to a constant. A constant here
+/// was `Policy::V1` at four sites, so the store could only ever hold the one
+/// version the day it was written, and pointing the live path at a newer policy
+/// failed inside the writer rather than at the caller that chose it. Deriving
+/// it keeps every shipped record readable as the version it was actually
+/// evaluated under, which is what §3 rule 8 asks for.
+fn declared_policy(records: &[Record]) -> Result<Policy, String> {
+    let mut found: Option<Policy> = None;
+    for record in records {
+        for evaluation in [&record.evaluation, &record.training, &record.later] {
+            if evaluation.week_count != evaluation.weeks.len() as u64
+                || *found.get_or_insert(evaluation.policy) != evaluation.policy
+            {
+                return Err(
+                    "index consistency requires one exact policy across every retained evaluation and its weekly rows"
+                        .into(),
+                );
+            }
+        }
+    }
+    found.ok_or_else(|| "index consistency requires at least one evaluated coordinate".into())
+}
+
 fn encode(
     parent: [u8; 32],
     pin: [u8; 32],
     records: &[Record],
     max_bytes: u64,
 ) -> Result<Vec<u8>, String> {
+    let policy = declared_policy(records)?;
     let mut bytes = Vec::new();
     bytes.extend_from_slice(MAGIC);
     bytes.extend_from_slice(&parent);
     bytes.extend_from_slice(&pin);
-    bytes.extend_from_slice(&Policy::V1.canonical_bytes());
+    bytes.extend_from_slice(&policy.canonical_bytes());
     bytes.extend_from_slice(&(records.len() as u64).to_le_bytes());
     for record in records {
         let evaluations = [&record.evaluation, &record.training, &record.later];
-        if evaluations.iter().any(|evaluation| {
-            evaluation.policy != Policy::V1
-                || evaluation.week_count != evaluation.weeks.len() as u64
-        }) {
-            return Err(
-                "index consistency requires exact current policy and retained weekly rows".into(),
-            );
-        }
         let week_count = evaluations
             .iter()
             .try_fold(0_usize, |n, value| n.checked_add(value.weeks.len()))
@@ -300,7 +320,7 @@ fn encode(
     }
     // Decoder enforces fixed canonical extents, retained week hashes and exact
     // parent/policy before any receipt may be published.
-    decode(&bytes, parent, pin, records.len())?;
+    decode(&bytes, parent, pin, policy, records.len())?;
     Ok(bytes)
 }
 
@@ -308,13 +328,14 @@ fn decode(
     bytes: &[u8],
     parent: [u8; 32],
     pin: [u8; 32],
+    policy: Policy,
     count: usize,
 ) -> Result<Vec<Record>, String> {
     let mut raw = Decoder { bytes, at: 0 };
     if raw.array::<8>()? != *MAGIC
         || raw.array::<32>()? != parent
         || raw.array::<32>()? != pin
-        || Policy::decode(raw.take(Policy::BYTE_LEN)?).map_err(display)? != Policy::V1
+        || Policy::decode(raw.take(Policy::BYTE_LEN)?).map_err(display)? != policy
         || raw.usize()? != count
     {
         return Err("index consistency version, parent, policy or coordinate count differs".into());

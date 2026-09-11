@@ -27,8 +27,9 @@ const WEEK_DOMAIN: &[u8] = b"brutex-index-consistency-weeks-v1\0";
 const SESSION_DOMAIN: &[u8] = b"brutex-index-consistency-sessions-v1\0";
 const CALENDAR_DOMAIN: &[u8] = b"brutex-index-consistency-calendar-v1\0";
 
-/// Approved policy: >=3/5 winning eligible days, >=3 wins/<=2 losses per
-/// complete Monday-Friday five-session week, and <=2 losing days per streak.
+/// Approved policy. V1 and V2 require >=3/5 winning eligible days, >=3 wins and
+/// <=2 losses per complete Monday-Friday five-session week, and <=2 losing days
+/// per streak; [`Policy::V3`] restates all five for the rare-winner shape.
 /// Flat and no-trade days preserve a streak; only a winning day resets it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Policy {
@@ -63,6 +64,41 @@ pub enum Policy {
     /// V1 is retained and is still the default everywhere; §3 rule 8 forbids
     /// mutating a shipped policy, and the two answer different questions.
     V2,
+    /// V2's magnitude test with all five thresholds restated for the operator's
+    /// stated objective: a setup that fires seldom, loses tiny, and pays
+    /// enormously.
+    ///
+    /// # Why V1's and V2's five numbers could not admit that shape
+    ///
+    /// Measured, not argued. A complete 60min sweep of 16,000 candidates over
+    /// 2024-05..2026-08 admitted NOTHING, and not one candidate was rejected on
+    /// financial grounds -- the entire leaderboard failed these four day rules
+    /// instead. Its best row earned +Rs 2,720.35 out of sample on data it had
+    /// never seen, won 220 of 577 eligible days, and ran an 11-day losing
+    /// streak. A strategy that pays in bursts is flat or slightly down on most
+    /// days BY CONSTRUCTION, so >=3/5 winning days and a 2-day streak cap do
+    /// not make the rare winner harder to find -- they make it unrepresentable.
+    ///
+    /// # Where these five numbers come from
+    ///
+    /// Not taste, and not the leaderboard: reverse-fitting a threshold to admit
+    /// a row already seen is the exact error this apparatus exists to refuse.
+    /// They are derived from thresholds the admission policy ALREADY carries.
+    /// `min_worst_reward_risk_ppm` demands the smallest win clear 3x the
+    /// largest loss, and `min_profit_factor_ppm` demands gross profit clear
+    /// 1.5x gross loss. One win at 3x against two losses at 1x is a profit
+    /// factor of exactly 1.5 -- so 1/3 is the single ratio at which the day
+    /// rule stops contradicting the two trade rules already in force. Below it
+    /// the day rule would admit what the profit-factor gate rejects anyway;
+    /// above it the day rule is stricter than the policy's own economics ask.
+    /// `min_weekly_wins` becomes 1 because 1/3 of a five-session week is 1.67,
+    /// `max_weekly_losses` becomes 4 as its complement, and the streak cap
+    /// becomes 10 to match `max_consecutive_losing_streak`, which the policy
+    /// already permits over TRADES -- the same tolerance at both granularities
+    /// rather than a sixth new number.
+    ///
+    /// V1 and V2 are untouched and still decode to their own frozen digests.
+    V3,
 }
 impl Policy {
     /// Fixed encoding width for callers storing the additive policy record.
@@ -70,40 +106,56 @@ impl Policy {
     /// Whether a day must clear its own bracket to count — false on [`Self::V1`].
     #[must_use]
     pub const fn magnitude_aware(self) -> bool {
-        matches!(self, Self::V2)
+        matches!(self, Self::V2 | Self::V3)
     }
-    /// The encoded version word: `1` or `2`.
+    /// The encoded version word: `1`, `2` or `3`.
     #[must_use]
     pub const fn version(self) -> u64 {
         match self {
             Self::V1 => 1,
             Self::V2 => 2,
+            Self::V3 => 3,
         }
     }
     /// Required winning-day ratio numerator.
     #[must_use]
     pub const fn winning_day_numerator(self) -> u64 {
-        3
+        match self {
+            Self::V1 | Self::V2 => 3,
+            Self::V3 => 1,
+        }
     }
     /// Required winning-day ratio denominator.
     #[must_use]
     pub const fn winning_day_denominator(self) -> u64 {
-        5
+        match self {
+            Self::V1 | Self::V2 => 5,
+            Self::V3 => 3,
+        }
     }
     /// Minimum winning days in a complete five-session week.
     #[must_use]
     pub const fn min_weekly_wins(self) -> u64 {
-        3
+        match self {
+            Self::V1 | Self::V2 => 3,
+            Self::V3 => 1,
+        }
     }
     /// Maximum losing days in a complete five-session week.
     #[must_use]
     pub const fn max_weekly_losses(self) -> u64 {
-        2
+        match self {
+            Self::V1 | Self::V2 => 2,
+            Self::V3 => 4,
+        }
     }
     /// Maximum losses before a winning day resets the streak.
     #[must_use]
     pub const fn max_losing_day_streak(self) -> u64 {
-        2
+        match self {
+            Self::V1 | Self::V2 => 2,
+            Self::V3 => 10,
+        }
     }
 
     /// Canonical version, thresholds, zero-day rule and existing calendar policy.
@@ -117,6 +169,14 @@ impl Policy {
                 // exactly as V1 states them -- what differs is which days reach
                 // the counters -- so the record stays 72 bytes and V1's bytes,
                 // and therefore V1's digest, are untouched. D-0596.
+                //
+                // V3 is the first version to move a threshold, and it moves
+                // five. That is precisely why it is a NEW WORD rather than an
+                // edit: the five numbers are already words two through six of
+                // this record, so a changed threshold is a changed digest and
+                // an old receipt can never silently acquire a new meaning. The
+                // width is still 72 bytes and V1's and V2's bytes are still
+                // exactly what they were.
                 self.version(),
                 self.winning_day_numerator(),
                 self.winning_day_denominator(),
@@ -133,6 +193,23 @@ impl Policy {
     pub fn digest(self) -> [u8; 32] {
         hash(&self.canonical_bytes())
     }
+    /// Every approved version, oldest first. Appending here is the ONLY step a
+    /// new version needs to become decodable everywhere.
+    pub const APPROVED: [Self; 3] = [Self::V1, Self::V2, Self::V3];
+
+    /// Recover the version a stored digest was written under.
+    ///
+    /// A caller that pinned a policy keeps its digest rather than its name, so
+    /// without this it must either hardcode a version -- which is how the store
+    /// came to carry `Policy::V1` at four sites that could not then read
+    /// anything else -- or refuse a record it can perfectly well authenticate.
+    #[must_use]
+    pub fn from_digest(digest: [u8; 32]) -> Option<Self> {
+        Self::APPROVED
+            .into_iter()
+            .find(|policy| policy.digest() == digest)
+    }
+
     /// Decode the approved version without accepting edited thresholds.
     ///
     /// # Errors
@@ -142,6 +219,8 @@ impl Policy {
             Ok(Self::V1)
         } else if raw == Self::V2.canonical_bytes() {
             Ok(Self::V2)
+        } else if raw == Self::V3.canonical_bytes() {
+            Ok(Self::V3)
         } else {
             Err(DecodeError::Format)
         }

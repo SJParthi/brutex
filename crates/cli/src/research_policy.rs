@@ -495,7 +495,10 @@ mod tests {
         let policy = ResearchPolicy::parse(PROFILE.as_bytes(), 5000).expect("complete profile");
         assert_eq!(policy.values.iter().flatten().count(), 37);
         assert_eq!(policy.value("max_mae_paisa"), Some("5000"));
-        assert_eq!(policy.value("max_drawdown_paisa"), Some("50000"));
+        // THREE risk units, not ten. The operator's defining criterion, and the
+        // number equals min_worst_reward_risk_ppm so one minimum win repays the
+        // worst admitted drawdown. Both figures below scale with the risk unit.
+        assert_eq!(policy.value("max_drawdown_paisa"), Some("15000"));
         assert_eq!(
             policy.value("min_weakest_period_return_paisa"),
             Some("-5000")
@@ -509,7 +512,7 @@ mod tests {
         assert_eq!(policy.value("min_worst_reward_risk_ppm"), None);
         assert_eq!(policy.value("unknown"), None);
         let other = ResearchPolicy::parse(PROFILE.as_bytes(), 10_000).expect("different risk");
-        assert_eq!(other.value("max_drawdown_paisa"), Some("100000"));
+        assert_eq!(other.value("max_drawdown_paisa"), Some("30000"));
         assert_ne!(policy.provenance(), other.provenance());
     }
 
@@ -650,7 +653,7 @@ mod tests {
             40
         );
         assert!(
-            report.contains("at least 200")
+            report.contains("at least 40")
                 && report.contains("profile BLAKE3(domain + exact file bytes)")
         );
         assert!(!crate::is_sweep_command("policy-check"));
@@ -659,7 +662,7 @@ mod tests {
         }
         std::fs::write(
             &path,
-            PROFILE.replace("min_win_rate_ppm = 400000", "min_win_rate_ppm = 1000001"),
+            PROFILE.replace("min_win_rate_ppm = 250000", "min_win_rate_ppm = 1000001"),
         )?;
         assert!(
             explain(&path, "50")

@@ -56,7 +56,7 @@ fn real_policy_file_mutations_inside_the_read_window_refuse_without_returning_a_
     std::fs::write(&path, PROFILE)?;
     assert_eq!(
         ResearchPolicy::read(&path, 5000)?.value("min_trades"),
-        Some("200")
+        Some("40")
     );
     Ok(())
 }
@@ -66,7 +66,7 @@ fn exact_file_bound_accepts_complete_text_and_one_extra_byte_refuses() {
     let mut exact = PROFILE.as_bytes().to_vec();
     exact.resize(usize::try_from(MAX_BYTES).expect("fixed input bound"), b' ');
     let policy = ResearchPolicy::parse(&exact, 5000).expect("complete exact-bound profile");
-    assert_eq!(policy.value("min_trades"), Some("200"));
+    assert_eq!(policy.value("min_trades"), Some("40"));
     exact.push(b' ');
     assert!(
         ResearchPolicy::parse(&exact, 5000)
@@ -92,11 +92,11 @@ fn loaded_profile_is_an_owned_snapshot_and_rereads_require_current_real_bytes()
     let replacement = scratch.0.join("replacement.toml");
     std::fs::write(
         &replacement,
-        PROFILE.replace("min_trades = 200", "min_trades = 301"),
+        PROFILE.replace("min_trades = 40", "min_trades = 301"),
     )?;
     std::fs::rename(&replacement, &path)?;
     let second = ResearchPolicy::read(&path, 5000)?;
-    assert_eq!(first.value("min_trades"), Some("200"));
+    assert_eq!(first.value("min_trades"), Some("40"));
     assert_eq!(first.provenance(), first_source);
     assert_eq!(second.value("min_trades"), Some("301"));
     assert_ne!(first.provenance(), second.provenance());
@@ -247,17 +247,17 @@ fn isolated_case(mode: &str, path: &Path) -> Result<(), Box<dyn std::error::Erro
         "invalid-file" => {
             for (line, invalid, knob) in [
                 (
-                    "min_support_hits = 200",
+                    "min_support_hits = 40",
                     "min_support_hits = 0",
                     "BRUTEX_ADMIT_MIN_SUPPORT_HITS",
                 ),
                 (
-                    "min_trades = 200",
+                    "min_trades = 40",
                     "min_trades = 0",
                     "BRUTEX_ADMIT_MIN_TRADES",
                 ),
                 (
-                    "min_win_rate_ppm = 400000",
+                    "min_win_rate_ppm = 250000",
                     "min_win_rate_ppm = 1000001",
                     "BRUTEX_ADMIT_MIN_WIN_RATE_PPM",
                 ),

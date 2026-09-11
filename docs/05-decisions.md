@@ -35555,3 +35555,88 @@ between them is an operator's decision with a run identity attached.
 
 Verified on this tree: `cargo fmt --all --check` clean, `cargo clippy --workspace
 --all-targets -D warnings` clean.
+
+### D-0597 — The five day thresholds could not express the objective this repo is for — 2026-09-11
+
+`Policy::V3`, appended beside a frozen V1 and V2.
+
+**The measurement.** A complete 60min sweep of 16,000 candidates over
+2024-05..2026-08 admitted NOTHING, and the shape of that zero is the finding:
+`rejected` was **0**. Not one candidate was measured and found wanting on money.
+6,674 were refused before the money was weighed and 4,102 were never measured.
+The entire leaderboard failed the four index-consistency DAY rules instead. Its
+best row earned +Rs 2,720.35 out of sample on data it had never seen, its third
++Rs 2,044.55 in total, and all three were discarded.
+
+**Why the numbers could not admit the objective.** `CLAUDE.md` §1 states the
+objective as the rare, massive winner: fires seldom, loses tiny, pays
+enormously. Such a strategy is flat or slightly down on most days BY
+CONSTRUCTION and makes its money in bursts, so it carries long quiet losing
+runs. V1 and V2 require >=3/5 winning days and cap the losing-day streak at 2.
+Those are not a filter the rare winner finds hard — they are one it cannot
+represent. The leaderboard's best row won 220 of 577 days and ran an 11-day
+streak.
+
+**Where V3's five numbers come from, and where they do not.** Not from the
+leaderboard: fitting a threshold to admit a row already seen is the exact error
+this apparatus exists to refuse. They are derived from thresholds the admission
+policy ALREADY carried. `min_worst_reward_risk_ppm` demands the smallest win
+clear 3x the largest loss and `min_profit_factor_ppm` demands 1.5x gross. One
+win at 3x against two losses at 1x IS a profit factor of 1.5, so **1/3 is the
+single ratio at which the day rule stops contradicting the two trade rules**.
+`min_weekly_wins` becomes 1 because a five-session week at 1/3 is 1.67,
+`max_weekly_losses` becomes 4 as its complement, and the losing-day streak
+becomes 10 to match `max_consecutive_losing_streak`, which the policy already
+permits over TRADES — the same tolerance at both granularities rather than a
+sixth invented number.
+
+V3 is also magnitude-aware, inheriting V2's test. V1 and V2 keep their bytes,
+their thresholds and their digests; `decode` accepts all three.
+
+### D-0598 — A store that names one policy can only ever hold one policy — 2026-09-11
+
+`index_consistency_store` hardcoded `Policy::V1` at **four** sites: the identity
+hash, the record header, the write-side verifier and the decoder. Pointing the
+live path at V3 therefore did not fail at the caller that chose it — it failed
+inside the writer, as *"index consistency requires exact current policy"*, on 14
+tests at once.
+
+The constant is now gone. `declared_policy` reads the version from the evidence
+and refuses a mixed set; `identity`, `open` and `decode` take it as a parameter;
+`Policy::from_digest` recovers a version for a caller that pinned only a digest,
+and `Policy::APPROVED` makes appending a future version one line. Every shipped
+record stays readable as the version it was actually evaluated under, which is
+what §3 rule 8 asks for and what four constants quietly prevented.
+
+### D-0599 — Four cadence floors mandated the grinder the search was told to avoid — 2026-09-11
+
+`min_support_hits` 200 -> 40, `min_trades` 200 -> 40,
+`min_independent_sessions` 60 -> 30, `min_winning_trades` 80 -> 10, and
+`max_drawdown_paisa` `risk*10` -> `risk*3`.
+
+**The arithmetic nobody had done at the swept window.** 413 training days at
+60min is 2,891 bars, so `min_support_hits = 200` is **69,180 ppm**: the
+combination had to fire on seven percent of all bars. `lib.rs` already records a
+real run pruned by a 20,000 ppm floor and calls it *"five times too strict ...
+the only combinations that could survive it fire on 2% of all bars -- better
+than five trades a week, which is a grinder by any reading."* 69,180 is three
+and a half times stricter again, and it is an ABSOLUTE COUNT, so its severity
+moves with the window while the number stays still.
+
+One intraday trade a week over 413 days is ~83 trades; a floor of 40 admits down
+to one a fortnight. `min_winning_trades = 80` was unreachable at any honest rare
+cadence once `min_trades` was 40. The win-rate floors moved for the same reason
+as V3's ratio: at 3:1 the breakeven win rate is 25%, so a 40% floor rejected
+strategies the engine's own payoff rule calls profitable.
+
+`max_drawdown_paisa` is the operator's stated defining criterion. `risk*3`
+equals `min_worst_reward_risk_ppm`, so the worst drawdown admitted is exactly
+what ONE minimum-sized win repays; paired with the ten-trade losing streak it
+also forces the average loss under three tenths of a risk unit, which makes
+"loses tiny" structural rather than hoped for.
+
+No statistical gate moved. PBO, FWER, SPA, White, Romano-Wolf, the fold counts
+and the out-of-sample requirements are exactly as they were.
+
+Verified on this tree: `cargo fmt --check` clean, `cargo test -p cli --lib`
+1,292 passed / 0 failed.

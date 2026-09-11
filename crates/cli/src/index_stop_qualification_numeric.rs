@@ -630,7 +630,7 @@ fn folds<S: Snapshot>(row: &S, facts: &Facts) -> Result<Vec<Fold>, String> {
             .ok_or("single-stop fold period extent differs")?;
         let sessions = sessions(periods)?;
         let calendar =
-            index_consistency::evaluate(Policy::V1, row.family(), first, last, &sessions, false);
+            index_consistency::evaluate(Policy::V3, row.family(), first, last, &sessions, false);
         let mut fold = Fold {
             first_day: first,
             last_day: last,
@@ -689,7 +689,7 @@ fn sessions(periods: &[runner::signal_candle_stop::Period]) -> Result<Vec<Sessio
 fn assessment<S: Snapshot>(row: &S, weeks: bool) -> Result<index_consistency::Evaluation, String> {
     let rows = sessions(row.periods())?;
     Ok(index_consistency::evaluate(
-        Policy::V1,
+        Policy::V3,
         row.family(),
         row.first(),
         row.last(),
@@ -732,7 +732,7 @@ pub(super) fn daily<S: Snapshot>(
                 coordinate: u64::try_from(index).map_err(display)?,
             },
             training: index_consistency::evaluate(
-                Policy::V1,
+                Policy::V3,
                 before.family(),
                 before.first(),
                 before.last(),
@@ -740,7 +740,7 @@ pub(super) fn daily<S: Snapshot>(
                 true,
             ),
             later: index_consistency::evaluate(
-                Policy::V1,
+                Policy::V3,
                 after.family(),
                 after.first(),
                 after.last(),
@@ -748,7 +748,7 @@ pub(super) fn daily<S: Snapshot>(
                 true,
             ),
             evaluation: index_consistency::evaluate(
-                Policy::V1,
+                Policy::V3,
                 before.family(),
                 before.first(),
                 after.last(),

@@ -98,11 +98,14 @@ impl Reader {
                 "qualification later full source identities differ from planned rung".into(),
             );
         }
-        let consistency = if plan.index_policy().is_some() {
+        let consistency = if let Some(pinned) = plan.index_policy() {
+            let policy = crate::index_consistency::Policy::from_digest(pinned)
+                .ok_or("qualification pinned an index consistency policy this build cannot name")?;
             let saved = crate::index_consistency_store::Reader::open(
                 root,
                 identity,
                 observation.completion_digest(),
+                policy,
                 remaining,
                 manifest.count,
             )?;
