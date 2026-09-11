@@ -23,6 +23,31 @@ use std::sync::Arc;
 #[path = "index_stop_source_context.rs"]
 pub mod source_context;
 
+/// Program/direction attempts begun, and later finished, per shared barrier.
+/// A group shares its journal and reservation-directory barriers; each
+/// attempt keeps its own reservation, lifecycle and identity barriers.
+///
+/// Measured 2026-09-12 on a generated 64-program catalog, release build, on a
+/// drive shared with a live sweep: 27.0 barriers per attempt before grouping;
+/// 10.0, 7.0, 6.5, 6.3 and 6.2 at groups of 1, 4, 8, 16 and 32. Sixteen keeps
+/// all but 0.3 of the 21 barriers grouping can remove, while a refused group
+/// leaves at most fifteen begun but unevaluated attempts, each recorded Refused.
+const ATTEMPT_GROUP: usize = 16;
+
+#[cfg(test)]
+std::thread_local! {
+    static ATTEMPT_GROUP_OVERRIDE: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn attempt_group() -> usize {
+    #[cfg(test)]
+    if let Some(group) = ATTEMPT_GROUP_OVERRIDE.with(std::cell::Cell::get) {
+        return group.max(1);
+    }
+    ATTEMPT_GROUP
+}
+
 /// Exact physical capture limits; none changes the trading rule.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
@@ -348,57 +373,22 @@ fn produce_catalog_inner(
     validate_catalog(programs, limits)?;
     validate_catalog_context(loaded, context, days, limits)?;
     let prepared = &context.native;
-    let legacy = catalog_identity(loaded, prepared, programs, days, limits)?;
+    let (legacy, run_ids) = catalog_identity(loaded, prepared, programs, days, limits)?;
     let identity = original.map_or(legacy, |value| {
         source_context::contextual_catalog(legacy, value.link())
     });
     let catalog = crate::sweep_evidence::begin(root, identity, Operation::IndexStop)?;
     let mut attempts = Vec::new();
     let result: Result<Committed, String> = (|| {
-        let count = programs
-            .len()
-            .checked_mul(2)
-            .ok_or("single-stop direction count overflow")?;
-        let mut evaluations = Vec::new();
-        evaluations.try_reserve_exact(count).map_err(display)?;
-        attempts.try_reserve_exact(count).map_err(display)?;
-        let mut records = 0_u64;
-        for program in programs {
-            for side in [Direction::Long, Direction::Short] {
-                let run_id = prepared
-                    .run_id_days(program, side, days.0, days.1)
-                    .map_err(display)?;
-                attempts.push(crate::sweep_evidence::begin(
-                    root,
-                    run_id,
-                    Operation::IndexStop,
-                )?);
-                let remaining = limits
-                    .records
-                    .checked_sub(records)
-                    .ok_or("single-stop evidence count overflow")?;
-                let evaluation = prepared
-                    .evaluate_days(program, side, remaining, days.0, days.1)
-                    .map_err(display)?;
-                if evaluation.run_id() != run_id {
-                    return Err(
-                        "single-stop execution identity differs from its durable start".into(),
-                    );
-                }
-                let added = evaluation
-                    .events()
-                    .len()
-                    .checked_add(evaluation.trades().len())
-                    .and_then(|value| value.checked_add(evaluation.periods().len()))
-                    .and_then(|value| u64::try_from(value).ok())
-                    .ok_or("single-stop complete row count overflow")?;
-                records = records
-                    .checked_add(added)
-                    .filter(|value| *value <= limits.records)
-                    .ok_or("single-stop complete evidence exceeds aggregate record admission")?;
-                evaluations.push(evaluation);
-            }
-        }
+        let evaluations = evaluate_grouped(
+            root,
+            prepared,
+            programs,
+            &run_ids,
+            days,
+            limits,
+            &mut attempts,
+        )?;
         if let Some(original) = original {
             original
                 .require_catalog_bytes(crate::index_stop_store::encoded_bytes(&evaluations)?)?;
@@ -426,10 +416,15 @@ fn produce_catalog_inner(
         // report a complete publication. Typed unavailable reference months are
         // saved visibly and do not alter any native result or qualification.
         vix.with_current(|_| {
-            for attempt in attempts.drain(..) {
-                attempt.finish(Completion::Completed)?;
+            // A refusal drops the undrained rest, each with its Refused terminal.
+            let mut pending = attempts.drain(..);
+            loop {
+                let group: Vec<Attempt> = pending.by_ref().take(attempt_group()).collect();
+                if group.is_empty() {
+                    return Ok(());
+                }
+                crate::sweep_evidence::finish_many(group, Completion::Completed)?;
             }
-            Ok(())
         })?;
         Ok(Committed {
             guard: Arc::clone(&loaded.guard),
@@ -449,6 +444,64 @@ fn produce_catalog_inner(
             Err(refuse(catalog, why))
         }
     }
+}
+
+/// Evaluate every program and direction in canonical order. A whole group of
+/// attempts is durably begun before any of its evaluations; when a start is
+/// refused, the durable prefix still evaluates first, so the refusal returned
+/// is the one sequential starts would have met first.
+fn evaluate_grouped(
+    root: &Path,
+    prepared: &Prepared<'_>,
+    programs: &[Expression],
+    run_ids: &[[u8; 32]],
+    days: (i64, i64),
+    limits: Limits,
+    attempts: &mut Vec<Attempt>,
+) -> Result<Vec<Evaluation>, String> {
+    let count = programs
+        .len()
+        .checked_mul(2)
+        .ok_or("single-stop direction count overflow")?;
+    let mut evaluations = Vec::new();
+    evaluations.try_reserve_exact(count).map_err(display)?;
+    attempts.try_reserve_exact(count).map_err(display)?;
+    let mut records = 0_u64;
+    let mut jobs = programs
+        .iter()
+        .flat_map(|program| [Direction::Long, Direction::Short].map(|side| (program, side)));
+    for identities in run_ids.chunks(attempt_group()) {
+        let before = attempts.len();
+        let started =
+            crate::sweep_evidence::begin_many(root, identities, Operation::IndexStop, attempts);
+        let admitted = attempts.len() - before;
+        for (&run_id, (program, side)) in identities.iter().zip(jobs.by_ref()).take(admitted) {
+            let remaining = limits
+                .records
+                .checked_sub(records)
+                .ok_or("single-stop evidence count overflow")?;
+            let evaluation = prepared
+                .evaluate_days(program, side, remaining, days.0, days.1)
+                .map_err(display)?;
+            if evaluation.run_id() != run_id {
+                return Err("single-stop execution identity differs from its durable start".into());
+            }
+            let added = evaluation
+                .events()
+                .len()
+                .checked_add(evaluation.trades().len())
+                .and_then(|value| value.checked_add(evaluation.periods().len()))
+                .and_then(|value| u64::try_from(value).ok())
+                .ok_or("single-stop complete row count overflow")?;
+            records = records
+                .checked_add(added)
+                .filter(|value| *value <= limits.records)
+                .ok_or("single-stop complete evidence exceeds aggregate record admission")?;
+            evaluations.push(evaluation);
+        }
+        started?;
+    }
+    Ok(evaluations)
 }
 
 fn validate_catalog_context(
@@ -501,14 +554,18 @@ fn publish_vix(
     )
 }
 
+/// The catalog identity and the exact run identities it binds, in canonical
+/// program then long/short order, computed once for both uses.
 fn catalog_identity(
     loaded: &Loaded,
     prepared: &Prepared<'_>,
     programs: &[Expression],
     days: (i64, i64),
     limits: Limits,
-) -> Result<[u8; 32], String> {
-    catalog_identity_for(loaded.source_binding, prepared, programs, days, limits)
+) -> Result<([u8; 32], Vec<[u8; 32]>), String> {
+    let runs = run_ids(prepared, programs, days)?;
+    let identity = catalog_identity_of(loaded.source_binding, &runs, days, limits);
+    Ok((identity, runs))
 }
 
 fn catalog_identity_for(
@@ -518,6 +575,34 @@ fn catalog_identity_for(
     days: (i64, i64),
     limits: Limits,
 ) -> Result<[u8; 32], String> {
+    let runs = run_ids(prepared, programs, days)?;
+    Ok(catalog_identity_of(source_binding, &runs, days, limits))
+}
+
+fn run_ids(
+    prepared: &Prepared<'_>,
+    programs: &[Expression],
+    days: (i64, i64),
+) -> Result<Vec<[u8; 32]>, String> {
+    let mut runs = Vec::with_capacity(programs.len().saturating_mul(2));
+    for program in programs {
+        for side in [Direction::Long, Direction::Short] {
+            runs.push(
+                prepared
+                    .run_id_days(program, side, days.0, days.1)
+                    .map_err(display)?,
+            );
+        }
+    }
+    Ok(runs)
+}
+
+fn catalog_identity_of(
+    source_binding: [u8; 32],
+    runs: &[[u8; 32]],
+    days: (i64, i64),
+    limits: Limits,
+) -> [u8; 32] {
     let mut identity = Hasher::new();
     identity.update(b"brutex-index-stop-catalog-v1\0");
     identity.update(&source_binding);
@@ -528,16 +613,10 @@ fn catalog_identity_for(
     for day in [days.0, days.1] {
         identity.update(&day.to_le_bytes());
     }
-    for program in programs {
-        for side in [Direction::Long, Direction::Short] {
-            identity.update(
-                &prepared
-                    .run_id_days(program, side, days.0, days.1)
-                    .map_err(display)?,
-            );
-        }
+    for run in runs {
+        identity.update(run);
     }
-    Ok(identity.finalize())
+    identity.finalize()
 }
 
 fn validate_limits(limits: Limits) -> Result<(), String> {

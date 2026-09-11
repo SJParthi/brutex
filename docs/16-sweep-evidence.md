@@ -116,10 +116,20 @@ compute. An older attempt finishing later cannot replace the newest start.
 
 Admission writes a global start, creates and syncs the immutable reservation,
 writes the private lifecycle start and appends the identity's start index before
-returning writer authority. Once reservation exists, an ordinary subsequent
-admission refusal attempts a Refused terminal. A disk failure or process death
-can prevent that terminal; missing/incomplete evidence remains a refusal or
-Running, never invented completion.
+returning writer authority. A group of starts (`begin_many`) keeps that order
+for every attempt and hands back none before its own start is durable: one
+global append and barrier allocate the group's tokens; the evidence directory is
+flushed before any reservation names one; each reservation is one
+header-and-row write under its own barrier; one directory barrier makes every
+reservation and identity-directory entry durable; then each lifecycle start
+precedes its identity start under separate barriers. A single start is the group
+of one. Once reservation exists, an ordinary subsequent admission refusal
+attempts a Refused terminal; a refused group hands back only its fully durable
+prefix, and an allocated token that was never reserved stays unused. A disk
+failure or process death can prevent that terminal; missing/incomplete evidence
+remains a refusal or Running, never invented completion. The evidence
+directory's ancestor chain is flushed once per process; any evidence I/O refusal
+forgets that, and a directory's existence alone never counts as durability.
 
 Each level append has a file durability barrier. Ranked rows are published once,
 including the legitimate empty case; a duplicate publication poisons the
@@ -130,7 +140,12 @@ attempt, complete content digest and unchanged file generation. Deletion,
 truncation, substitution, duplicate/swap or corruption of acknowledged bytes
 cannot be relabelled as a completed empty result.
 
-Terminal events seal the expected cardinalities and ranking availability.
+Terminal events seal the expected cardinalities and ranking availability. A
+group finish (`finish_many`) seals each lifecycle terminal after that attempt's
+own verification and barrier, then appends the sealed attempts' global
+terminals under one barrier; its first refusal stops the group, leaving every
+attempt as sequential finishes would. `index-stop` begins and finishes its
+per-program attempts in groups of sixteen.
 Subsequent metadata reads refuse deleted/shrunken children; page reads verify
 each requested row and the held/path file generation. Incremental writer hashes
 are used to validate publication and are not a separately stored authentication

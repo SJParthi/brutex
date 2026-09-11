@@ -36019,3 +36019,86 @@ and `lanes_run_every_timeframe_once_and_return_them_in_declared_order`; in
 `cli::index_stop_qualification`,
 `saved_statistics_are_the_three_separate_procedures_bit_for_bit` and
 `a_shared_walk_refusal_keeps_the_message_its_separate_procedure_produced`.
+
+### D-0607 — Every catalog attempt paid 27 drive flushes, one at a time — 2026-09-12
+
+**Measured first.** Once D-0606 cut the statistics stage to half a minute, the two
+catalog stages were nearly all of every batch: on 4ab2bd72's batch 0 (60min),
+training 8:19 and test window 9:04 against statistics 0:31, and across
+759ba45a's batches 0-6 each catalog stage took 6:15-9:55, moving with whatever
+else was writing to the drive. Each program/direction attempt paid 27
+sweep-evidence barriers -- 25 to begin, 2 to finish -- and on macOS every one is
+`F_FULLFSYNC`, serialized across the device. `durable_directory` re-flushed
+every ancestor up to `/`, once for the evidence directory (7 here) and again for
+the identity directory (8).
+
+**Grouped barriers.** `sweep_evidence` gains `begin_many` and `finish_many`;
+`begin` and `finish` are the group of one, so every other caller is unchanged. A
+group allocates its tokens in one journal append under one barrier, then flushes
+the evidence directory before any reservation names a token. That also closes
+an older gap: a journal entry left undurable by a writer that died before its
+parent barrier. Each reservation is one `create_new` header-and-row write under
+its own barrier; one directory barrier then makes every reservation and
+identity-directory entry durable (both live directly under the evidence
+directory); then each lifecycle start precedes its identity start, under
+separate barriers. A group hands back only attempts whose whole start is
+durable. A group finish seals each lifecycle terminal after that attempt's own
+children verification and barrier, then appends the sealed attempts' journal
+terminals under one barrier; its first refusal stops the group, leaving every
+attempt as sequential finishes would. The evidence directory's ancestor chain is
+flushed once per process and forgotten on any evidence I/O refusal; a
+directory's existence never counts as durability. `index-stop` begins and
+finishes its attempts sixteen at a time, evaluates the durable prefix first when
+a start is refused -- so the refusal returned is the one sequential starts meet
+first -- and computes each run identity once, for both the catalog identity and
+the starts.
+
+**Measured by the implementing agent**: release build, a generated 64-program
+catalog (129 attempts) under `/tmp`, seven directories deep like the live store,
+on the drive the live sweep was using, old and new binaries alternated in one
+window at a load average of 10-17.
+
+| Build | Group | Barriers per attempt | Attempts per second |
+|---|---|---|---|
+| 759ba45a | -- | 27.0 | 7.27-7.32 |
+| grouped | 1 | 10.0 | 12.5 |
+| grouped | 4 | 7.02 | 17.8 |
+| grouped | 8 | 6.53 | 18.5 |
+| grouped | 16 | 6.28 | 18.4-19.7 |
+| grouped | 32 | 6.16 | 19.6 |
+
+A probe on the same drive: a small write and `sync_all` 8.0-8.3 ms; an unchanged
+directory's barrier 2.1-2.3 ms, a quarter of a real flush rather than free; an
+unchanged file's 35-70 us. About six real barriers per attempt remain because
+the format is one file per attempt, so the gain is about 2.6x, not the 4.3x
+barrier ratio. Sixteen keeps all but 0.3 of the barriers grouping can remove.
+Catalog identity, completion digest and body bytes are pinned unchanged.
+
+**What changes on refusal.** A refused start or evaluation leaves up to fifteen
+begun but unevaluated attempts of its group recorded Refused, which sequential
+starts would never have begun; the refusal itself is unchanged. A failed group
+finish can leave earlier lifecycles Completed and then Refused, which reads as
+Refused, as a single failed finish already could. A lifecycle file already
+present for a freshly allocated token -- possible only by tampering -- skips the
+identity-directory barrier before the identity row; after a power loss that
+reads as no attempt, never Completed.
+
+**Not claimed.** Wall time per batch on the live search is unmeasured until a
+batch runs on this build. A power loss was modelled at every barrier -- the
+pending write present, missing or torn, un-flushed directory entries lost, one
+at a time and together -- but never performed. The on-disk format, the results
+ledger and the checkpoint protocol are unchanged.
+
+Tests: in `crates/cli/src/sweep_evidence_tests.rs`,
+`every_grouped_barrier_crash_leaves_only_harmless_states`,
+`a_refusal_at_any_grouped_barrier_is_loud_and_keeps_only_a_durable_prefix`,
+`the_directory_memo_skips_a_flushed_chain_and_forgets_it_after_an_io_refusal`,
+`eight_single_starts_and_one_group_of_eight_leave_the_same_evidence`,
+`a_superseded_start_inside_a_group_hands_back_only_the_durable_prefix`,
+`a_refused_attempt_stops_a_group_finish_in_sequential_order`,
+`a_refused_chain_barrier_refuses_the_start_and_is_not_remembered` and
+`attempts_from_two_roots_cannot_share_one_journal_barrier`; in
+`crates/cli/src/index_stop_tests.rs`,
+`grouped_catalogs_keep_the_ungrouped_bytes_and_terminals`,
+`a_refused_start_inside_a_group_keeps_the_sequential_first_refusal` and
+`refused_later_starts_and_finishes_leave_no_completion`.

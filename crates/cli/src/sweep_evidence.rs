@@ -6,11 +6,12 @@
 //! Initial file admission, one event/level append and bounded-page addressing
 //! use fixed work; writing or reading N candidate rows still costs O(N).
 
+use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 const HEADER: u64 = 16;
 const EVENTS: [u8; 8] = *b"BRSWAT01";
@@ -19,6 +20,33 @@ const RANKS: [u8; 8] = *b"BRSWRK01";
 const EVENT_BYTES: usize = 96;
 const DEPTH_BYTES: usize = 128;
 const RANK_BYTES: usize = 200;
+
+/// `EVENTS`, format version 1 and the 96-byte event stride, exactly as `shape`
+/// writes them. An event file this module starts carries it in its first write.
+const EVENT_HEADER: [u8; 16] = *b"BRSWAT01\x01\x00\x00\x00\x60\x00\x00\x00";
+
+/// Directories whose whole ancestor chain this process itself made durable.
+/// `exists()` is no substitute: it would trust a writer that died between a
+/// header barrier and its parent barrier. Only this process's barriers count.
+static FLUSHED: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+/// Advances each time an evidence I/O refusal forgets [`FLUSHED`].
+static FORGOTTEN: AtomicU64 = AtomicU64::new(0);
+
+/// Every file and directory durability barrier in this module passes here.
+fn barrier(
+    file: &File,
+    #[cfg_attr(
+        not(test),
+        allow(unused_variables, reason = "only the test observer reads it")
+    )]
+    path: &Path,
+) -> std::io::Result<()> {
+    #[cfg(test)]
+    if !tests::observe(path)? {
+        return Ok(());
+    }
+    file.sync_all()
+}
 
 /// The computation this attempt actually performs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -440,47 +468,93 @@ pub fn begin_with_validation(
     operation: Operation,
     validation_requested: Option<bool>,
 ) -> Result<Attempt, String> {
+    let mut begun = Vec::with_capacity(1);
+    begin_group(
+        root,
+        &[identity],
+        operation,
+        validation_requested,
+        &mut begun,
+    )?;
+    begun
+        .pop()
+        .ok_or("sweep evidence start admitted no attempt".to_owned())
+}
+
+/// Record a group of attempts durably before any of their computations begins.
+///
+/// One journal append and one barrier allocate the group's tokens, and one
+/// reservation-directory barrier covers every reservation; each reservation,
+/// lifecycle start and identity start keeps its own barrier. Attempts are
+/// appended to `begun` in `identities` order, each only after its complete
+/// start is durable. On refusal `begun` has gained exactly that durable prefix;
+/// every other reserved attempt of the group receives [`begin`]'s best-effort
+/// Refused terminal, and an allocated but unreserved token stays unused.
+///
+/// # Errors
+/// Every refusal of [`begin`], for the first attempt that meets one.
+pub fn begin_many(
+    root: &Path,
+    identities: &[[u8; 32]],
+    operation: Operation,
+    begun: &mut Vec<Attempt>,
+) -> Result<(), String> {
+    begin_group(root, identities, operation, None, begun)
+}
+
+fn begin_group(
+    root: &Path,
+    identities: &[[u8; 32]],
+    operation: Operation,
+    validation_requested: Option<bool>,
+    begun: &mut Vec<Attempt>,
+) -> Result<(), String> {
     if validation_requested.is_some() && operation != Operation::Audit {
         return Err("validation request metadata belongs only to an audit attempt".to_owned());
     }
+    if identities.is_empty() {
+        return Ok(());
+    }
     let timestamp = now()?;
-    let mut evidence = Evidence {
-        identity,
-        attempt: 0,
-        operation,
-        completion: Completion::Running,
-        started_micros: timestamp,
-        updated_micros: timestamp,
-        depth_rows: 0,
-        ranked_rows: 0,
-        ranked_available: false,
-        validation_requested,
-    };
+    let mut starts: Vec<Evidence> = identities
+        .iter()
+        .map(|identity| Evidence {
+            identity: *identity,
+            attempt: 0,
+            operation,
+            completion: Completion::Running,
+            started_micros: timestamp,
+            updated_micros: timestamp,
+            depth_rows: 0,
+            ranked_rows: 0,
+            ranked_available: false,
+            validation_requested,
+        })
+        .collect();
     let base = base(root);
     durable_directory(&base)?;
-    evidence.attempt = append_event(&base.join("attempts.bin"), evidence, true)?;
-    reserve_start(root, evidence)?;
-    // Once reservation is durable, every ordinary admission refusal gets the
-    // same best-effort Refused terminal as an interrupted admitted attempt.
-    // An I/O failure may still prevent that terminal; no completion is invented.
-    let attempt = Attempt {
-        root: root.to_path_buf(),
-        evidence,
-        failure: Mutex::new(None),
-        ranked_published: AtomicBool::new(false),
-        acknowledged_depths: AtomicU64::new(0),
-        acknowledged_ranks: AtomicU64::new(0),
-        acknowledged_ranking: AtomicBool::new(false),
-        depth_digest: Mutex::new(brutex_core::blake3::Hasher::new()),
-        ranked_digest: Mutex::new(brutex_core::blake3::Hasher::new()),
-        terminal: false,
-    };
-    let own = directory(root, &identity);
-    durable_directory(&own)?;
-    append_event(&lifecycle_path(root, &evidence), evidence, false)?;
-    append_identity_start(&own.join("starts.bin"), evidence)?;
-    emit(evidence);
-    Ok(attempt)
+    allocate(root, &mut starts)?;
+    // A writer that died before its parent barrier can leave the journal's own
+    // entry undurable; it is durable before any reservation names a token.
+    flush_directory(&base)?;
+    let mut reserved = Vec::with_capacity(starts.len());
+    for evidence in starts {
+        reserve_start(root, evidence)?;
+        // Once reservation exists, every ordinary admission refusal gets the
+        // same best-effort Refused terminal as an interrupted admitted attempt.
+        // An I/O failure may still prevent that terminal; no completion is invented.
+        reserved.push(Attempt::admitted(root, evidence));
+        fs::create_dir_all(directory(root, &evidence.identity)).map_err(io_error)?;
+    }
+    // One barrier makes every reservation and identity-directory entry durable
+    // before any lifecycle start can refer to them.
+    flush_directory(&base)?;
+    begun.reserve(reserved.len());
+    for attempt in reserved {
+        attempt.start()?;
+        begun.push(attempt);
+    }
+    Ok(())
 }
 
 impl Attempt {
@@ -553,7 +627,7 @@ impl Attempt {
                     file.write_all(&raw).map_err(io_error)?;
                     digest.update(&raw);
                 }
-                file.sync_all().map_err(io_error)
+                barrier(&file, &path).map_err(io_error)
             })();
             let released = file.unlock().map_err(io_error);
             result.and(released)
@@ -574,14 +648,8 @@ impl Attempt {
     ///
     /// # Errors
     /// Refuses `Running` as terminal, any earlier evidence failure or I/O failure.
-    pub fn finish(mut self, status: Completion) -> Result<(), String> {
-        if status == Completion::Running {
-            return Err("Running is not a terminal completion".to_owned());
-        }
-        self.check()?;
-        self.write_terminal(status)?;
-        self.terminal = true;
-        Ok(())
+    pub fn finish(self, status: Completion) -> Result<(), String> {
+        finish_many(vec![self], status)
     }
     fn detail(&self, kind: &str) -> PathBuf {
         directory(&self.root, &self.evidence.identity)
@@ -604,7 +672,49 @@ impl Attempt {
         }
         result
     }
+    fn admitted(root: &Path, evidence: Evidence) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            evidence,
+            failure: Mutex::new(None),
+            ranked_published: AtomicBool::new(false),
+            acknowledged_depths: AtomicU64::new(0),
+            acknowledged_ranks: AtomicU64::new(0),
+            acknowledged_ranking: AtomicBool::new(false),
+            depth_digest: Mutex::new(brutex_core::blake3::Hasher::new()),
+            ranked_digest: Mutex::new(brutex_core::blake3::Hasher::new()),
+            terminal: false,
+        }
+    }
+    /// Both terminal records are durable: Drop adds nothing.
+    fn recorded(mut self) {
+        self.terminal = true;
+    }
+    /// The private lifecycle start, then the identity's start index, each under
+    /// its own barrier. Starting a lifecycle file also flushes its directory, so
+    /// every entry already there is durable before the identity row is written.
+    fn start(&self) -> Result<(), String> {
+        let evidence = self.evidence;
+        append_events(&lifecycle_path(&self.root, &evidence), |_, _| {
+            Ok(event_bytes(evidence)?.to_vec())
+        })?;
+        append_identity_start(
+            &directory(&self.root, &evidence.identity).join("starts.bin"),
+            evidence,
+        )?;
+        emit(evidence);
+        Ok(())
+    }
+    /// The best-effort terminal of an attempt that was never finished.
     fn write_terminal(&self, status: Completion) -> Result<(), String> {
+        let evidence = self.seal(status)?;
+        journal(&self.root, &[evidence])?;
+        emit(evidence);
+        Ok(())
+    }
+    /// Verify every acknowledged child, then seal this attempt's lifecycle
+    /// terminal under its own barrier. Its journal terminal must follow it.
+    fn seal(&self, status: Completion) -> Result<Evidence, String> {
         let mut evidence = self.evidence;
         evidence = measured_details(&self.root, evidence, u64::MAX)?;
         if evidence.depth_rows != self.acknowledged_depths.load(Ordering::Acquire)
@@ -642,11 +752,87 @@ impl Attempt {
         }
         evidence.completion = status;
         evidence.updated_micros = now()?;
-        append_event(&lifecycle_path(&self.root, &evidence), evidence, false)?;
-        append_event(&base(&self.root).join("attempts.bin"), evidence, false)?;
-        emit(evidence);
-        Ok(())
+        append_events(&lifecycle_path(&self.root, &evidence), |_, _| {
+            Ok(event_bytes(evidence)?.to_vec())
+        })?;
+        Ok(evidence)
     }
+}
+
+/// Seal several attempts' terminals in order, sharing one journal barrier.
+///
+/// Each lifecycle terminal follows its own acknowledged-children verification
+/// and barrier; the sealed attempts' journal terminals are then one append and
+/// one barrier. The first refusal stops the group: every attempt sealed before
+/// it still journals its terminal, and it and every later attempt receive the
+/// best-effort Refused terminal, in that order, exactly as sequential
+/// [`Attempt::finish`] calls would leave them.
+///
+/// # Errors
+/// `Running` as terminal, attempts from different evidence roots, and every
+/// refusal of [`Attempt::finish`]. A journal refusal is reported first: in
+/// sequential order it precedes every later attempt's refusal.
+pub fn finish_many(attempts: Vec<Attempt>, status: Completion) -> Result<(), String> {
+    if status == Completion::Running {
+        return Err("Running is not a terminal completion".to_owned());
+    }
+    let mut sealed: Vec<(Attempt, Evidence)> = Vec::with_capacity(attempts.len());
+    let mut refused = None;
+    let mut rest = attempts.into_iter();
+    for attempt in rest.by_ref() {
+        let outcome = if sealed
+            .first()
+            .is_some_and(|(first, _)| first.root != attempt.root)
+        {
+            Err(
+                "attempts from different evidence roots cannot share one journal barrier"
+                    .to_owned(),
+            )
+        } else {
+            attempt.check().and_then(|()| attempt.seal(status))
+        };
+        match outcome {
+            Ok(terminal) => sealed.push((attempt, terminal)),
+            Err(why) => {
+                refused = Some((attempt, why));
+                break;
+            }
+        }
+    }
+    let journaled = match sealed.first() {
+        None => Ok(()),
+        Some((first, _)) => {
+            let terminals: Vec<Evidence> = sealed.iter().map(|(_, terminal)| *terminal).collect();
+            journal(&first.root, &terminals)
+        }
+    };
+    for (attempt, terminal) in sealed {
+        // A refused journal leaves each attempt unrecorded: its Drop then writes
+        // the best-effort Refused terminal, before any later attempt's.
+        if journaled.is_ok() {
+            emit(terminal);
+            attempt.recorded();
+        }
+    }
+    let refusal = refused.map(|(attempt, why)| {
+        drop(attempt);
+        why
+    });
+    drop(rest);
+    journaled?;
+    refusal.map_or(Ok(()), Err)
+}
+
+/// Append global terminal rows in order under one write and one barrier.
+fn journal(root: &Path, terminals: &[Evidence]) -> Result<(), String> {
+    append_events(&base(root).join("attempts.bin"), |_, _| {
+        let mut rows = Vec::with_capacity(terminals.len().saturating_mul(EVENT_BYTES));
+        for terminal in terminals {
+            rows.extend_from_slice(&event_bytes(*terminal)?);
+        }
+        Ok(rows)
+    })
+    .map(|_| ())
 }
 
 /// One final sequential verification, using one fixed-size row buffer.
@@ -834,10 +1020,7 @@ fn lifecycle_path(root: &Path, evidence: &Evidence) -> PathBuf {
 }
 
 fn append_identity_start(path: &Path, evidence: Evidence) -> Result<(), String> {
-    let mut file = open_append(path)?;
-    file.lock().map_err(io_error)?;
-    let result = (|| {
-        let count = shape::<EVENT_BYTES>(&mut file, path, EVENTS, true)?;
+    append_events(path, |file, count| {
         if count > 0 {
             let mut previous = [0_u8; EVENT_BYTES];
             file.seek(SeekFrom::Start(HEADER + (count - 1) * EVENT_BYTES as u64))
@@ -848,16 +1031,15 @@ fn append_identity_start(path: &Path, evidence: Evidence) -> Result<(), String> 
                 return Err("a newer same-identity attempt already started; this superseded attempt will not compute or replace it".to_owned());
             }
         }
-        let raw = event_bytes(evidence)?;
-        file.seek(SeekFrom::End(0))
-            .and_then(|_| file.write_all(&raw))
-            .and_then(|()| file.sync_all())
-            .map_err(io_error)
-    })();
-    let released = file.unlock().map_err(io_error);
-    result.and(released)
+        Ok(event_bytes(evidence)?.to_vec())
+    })
+    .map(|_| ())
 }
 
+/// Reserve one token with `create_new`. The file is private to that token, so
+/// its header and row are one write under one barrier and a torn prefix is
+/// refused by every reader. The caller's base barrier makes its entry durable
+/// before any lifecycle row can refer to the token.
 fn reserve_start(root: &Path, evidence: Evidence) -> Result<(), String> {
     let path = start_path(root, evidence.attempt);
     let mut file = OpenOptions::new()
@@ -866,17 +1048,18 @@ fn reserve_start(root: &Path, evidence: Evidence) -> Result<(), String> {
         .create_new(true)
         .open(&path)
         .map_err(|why| {
+            forget_flushed();
             format!(
                 "sweep attempt reservation refused at {}: {why}; existing history was not replaced",
                 path.display()
             )
         })?;
-    shape::<EVENT_BYTES>(&mut file, &path, EVENTS, true)?;
-    file.seek(SeekFrom::End(0))
-        .and_then(|_| file.write_all(&event_bytes(evidence).map_err(std::io::Error::other)?))
-        .and_then(|()| file.sync_all())
-        .map_err(io_error)?;
-    Ok(())
+    let mut raw = [0_u8; 16 + EVENT_BYTES];
+    raw[..16].copy_from_slice(&EVENT_HEADER);
+    raw[16..].copy_from_slice(&event_bytes(evidence)?);
+    file.write_all(&raw)
+        .and_then(|()| barrier(&file, &path))
+        .map_err(io_error)
 }
 
 fn require_start(root: &Path, evidence: Evidence, max_bytes: u64) -> Result<(), String> {
@@ -913,6 +1096,7 @@ fn hex(id: &[u8; 32]) -> String {
     text
 }
 fn io_error(why: impl std::fmt::Display) -> String {
+    forget_flushed();
     format!("sweep evidence I/O refused: {why}")
 }
 fn now() -> Result<i64, String> {
@@ -924,14 +1108,38 @@ fn now() -> Result<i64, String> {
     )
     .map_err(|why| format!("sweep evidence timestamp overflow: {why}"))
 }
+/// Create `path` and make its whole ancestor chain durable once per process;
+/// a later call is free until an evidence I/O refusal forgets it.
 fn durable_directory(path: &Path) -> Result<(), String> {
+    let epoch = FORGOTTEN.load(Ordering::Acquire);
+    if flushed().contains(path) {
+        return Ok(());
+    }
     fs::create_dir_all(path).map_err(io_error)?;
     for directory in path.ancestors() {
-        File::open(directory)
-            .and_then(|file| file.sync_all())
-            .map_err(io_error)?;
+        flush_directory(directory)?;
+    }
+    let mut remembered = flushed();
+    // A refusal anywhere while this chain was flushing keeps it unremembered.
+    if FORGOTTEN.load(Ordering::Acquire) == epoch {
+        remembered.insert(path.to_path_buf());
     }
     Ok(())
+}
+fn flush_directory(path: &Path) -> Result<(), String> {
+    File::open(path)
+        .and_then(|directory| barrier(&directory, path))
+        .map_err(io_error)
+}
+fn flushed() -> MutexGuard<'static, BTreeSet<PathBuf>> {
+    FLUSHED.lock().unwrap_or_else(PoisonError::into_inner)
+}
+/// Forget every remembered chain: after an evidence I/O refusal the next writer
+/// re-flushes rather than trust a barrier that may not have held.
+fn forget_flushed() {
+    let mut remembered = flushed();
+    FORGOTTEN.fetch_add(1, Ordering::AcqRel);
+    remembered.clear();
 }
 fn open_append(path: &Path) -> Result<File, String> {
     OpenOptions::new()
@@ -976,12 +1184,10 @@ fn shape<const N: usize>(
                 .to_le_bytes(),
         );
         file.write_all(&header)
-            .and_then(|()| file.sync_all())
+            .and_then(|()| barrier(file, path))
             .map_err(io_error)?;
         if let Some(parent) = path.parent() {
-            File::open(parent)
-                .and_then(|directory| directory.sync_all())
-                .map_err(io_error)?;
+            flush_directory(parent)?;
         }
         len = HEADER;
     }
@@ -1078,7 +1284,7 @@ fn append_row<const N: usize>(path: &Path, magic: [u8; 8], raw: &[u8; N]) -> Res
         let at = shape::<N>(&mut file, path, magic, true)?;
         file.seek(SeekFrom::End(0))
             .and_then(|_| file.write_all(raw))
-            .and_then(|()| file.sync_all())
+            .and_then(|()| barrier(&file, path))
             .map_err(io_error)?;
         Ok(at)
     })();
@@ -1149,28 +1355,61 @@ fn decode_event(raw: &[u8; EVENT_BYTES]) -> Result<Evidence, String> {
         validation_requested,
     })
 }
-fn append_event(path: &Path, mut e: Evidence, allocate: bool) -> Result<u64, String> {
+/// Append whole event rows under one lock, one write and one barrier, and
+/// return how many rows preceded them. A file this call starts receives its
+/// header in that same write, and its parent barrier follows before the lock
+/// is released, so no later row can depend on an undurable directory entry.
+fn append_events(
+    path: &Path,
+    encode: impl FnOnce(&mut File, u64) -> Result<Vec<u8>, String>,
+) -> Result<u64, String> {
     let mut file = open_append(path)?;
     file.lock().map_err(io_error)?;
     let result = (|| {
-        let index = shape::<EVENT_BYTES>(&mut file, path, EVENTS, true)?;
-        if allocate {
-            e.attempt = index
-                .checked_add(1)
-                .ok_or_else(|| "sweep attempt sequence exhausted".to_owned())?;
-        }
-        let bytes = event_bytes(e)?;
+        let started = file.metadata().map_err(io_error)?.len() == 0;
+        let count = if started {
+            0
+        } else {
+            shape::<EVENT_BYTES>(&mut file, path, EVENTS, false)?
+        };
+        let rows = encode(&mut file, count)?;
+        let bytes = if started {
+            [EVENT_HEADER.as_slice(), &rows].concat()
+        } else {
+            rows
+        };
         file.seek(SeekFrom::End(0))
             .and_then(|_| file.write_all(&bytes))
-            .and_then(|()| file.sync_all())
+            .and_then(|()| barrier(&file, path))
             .map_err(io_error)?;
-        Ok(e.attempt)
+        if started && let Some(parent) = path.parent() {
+            flush_directory(parent)?;
+        }
+        Ok(count)
     })();
     let released = file.unlock().map_err(io_error);
     match (result, released) {
-        (Ok(token), Ok(())) => Ok(token),
+        (Ok(count), Ok(())) => Ok(count),
         (Err(why), _) | (_, Err(why)) => Err(why),
     }
+}
+
+/// Allocate consecutive tokens with one journal append and one barrier: the
+/// journal is durable before any reservation can name one of them.
+fn allocate(root: &Path, starts: &mut [Evidence]) -> Result<(), String> {
+    append_events(&base(root).join("attempts.bin"), |_, index| {
+        let count = u64::try_from(starts.len()).unwrap_or(u64::MAX);
+        let last = index
+            .checked_add(count)
+            .ok_or("sweep attempt sequence exhausted")?;
+        let mut rows = Vec::with_capacity(starts.len().saturating_mul(EVENT_BYTES));
+        for (token, start) in (index.saturating_add(1)..=last).zip(starts.iter_mut()) {
+            start.attempt = token;
+            rows.extend_from_slice(&event_bytes(*start)?);
+        }
+        Ok(rows)
+    })
+    .map(|_| ())
 }
 fn last_event(path: &Path, max_bytes: u64) -> Result<Option<Evidence>, String> {
     let mut file = match File::open(path) {
@@ -1304,3 +1543,10 @@ fn page<const N: usize>(
         (Err(why), _) | (_, Err(why)) => Err(why),
     }
 }
+
+#[cfg(test)]
+pub(crate) use tests::flush_count;
+
+#[cfg(test)]
+#[path = "sweep_evidence_tests.rs"]
+pub(crate) mod tests;
