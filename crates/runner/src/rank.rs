@@ -209,6 +209,7 @@ enum Held {
     Detectability(Heap<Marked<Scored>>),
     Payoff(Heap<Marked<ByPayoff>>),
     Path(Heap<Marked<ByPath>>),
+    Asymmetry(Heap<Marked<ByAsymmetry>>),
 }
 
 impl Accumulator {
@@ -219,6 +220,7 @@ impl Accumulator {
             Lens::Detectability => Held::Detectability(Heap::with_capacity(keep)),
             Lens::Payoff => Held::Payoff(Heap::with_capacity(keep)),
             Lens::Path => Held::Path(Heap::with_capacity(keep)),
+            Lens::Asymmetry => Held::Asymmetry(Heap::with_capacity(keep)),
         };
         Self {
             keep,
@@ -290,6 +292,15 @@ impl Accumulator {
                 &redundant,
                 closure_known,
             ),
+            Held::Asymmetry(heap) => offer_part::<ByAsymmetry>(
+                heap,
+                &level.frequent,
+                column,
+                forward,
+                self.keep,
+                &redundant,
+                closure_known,
+            ),
         }
     }
 
@@ -300,6 +311,7 @@ impl Accumulator {
             Held::Detectability(heap) => ordered(heap),
             Held::Payoff(heap) => ordered(heap),
             Held::Path(heap) => ordered(heap),
+            Held::Asymmetry(heap) => ordered(heap),
         };
         Ranked {
             top,
@@ -389,6 +401,30 @@ pub enum Lens {
     /// entry, so two hits with two clean runs would otherwise outrank
     /// everything. `|t|` puts the better-evidenced of two equal ratios first.
     Path,
+    /// Rank by [`crate::outcome::Edge::worst_reward_risk_bp`] — the operator's
+    /// own rule — ties broken by the LARGEST win, then by `|t|`. D-0593.
+    ///
+    /// # The question no other lens here can ask
+    ///
+    /// The three lenses above are all built from counts, sums and `|t|`, so
+    /// none of them can state *"min(win) >= 3x max(loss)"*: an extremum is not
+    /// recoverable from a sum. [`Self::Payoff`] answers the nearest available
+    /// question — MEAN win over MEAN loss — which is the statistic the rule
+    /// names and rejects, because one catastrophic loss hides behind many small
+    /// ones in a denominator.
+    ///
+    /// The gap is not cosmetic. `grid::Cell::reward_to_risk_bp` already
+    /// computed the true min/max ratio, but a `Cell` exists only after an exit
+    /// grid is built, and the `|t|` cut that decides which combinations ever
+    /// reach a grid happens first. The rule was computable only downstream of
+    /// the gate it needed to pass, so a rare asymmetric winner was cut before
+    /// anything could notice it satisfied the rule.
+    ///
+    /// Not the default, and deliberately: `|t|` is the right cut when the
+    /// question is whether an edge is real, and this one is right when the
+    /// question is whether it is SHAPED correctly. Both are legitimate and they
+    /// order the same candidates differently.
+    Asymmetry,
 }
 
 /// One combination, ordered by payoff first and evidence second.
@@ -468,6 +504,67 @@ impl Ord for ByPath {
 }
 
 impl Ranked1 for ByPath {
+    fn wrap(scored: Scored) -> Self {
+        Self(scored)
+    }
+    fn unwrap(self) -> Scored {
+        self.0
+    }
+}
+
+/// One combination, ordered by the operator's own rule — D-0593.
+///
+/// A newtype for the reason [`ByPayoff`] is one: the historical orderings stay
+/// literally the same code and cannot drift while this one is edited.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ByAsymmetry(Scored);
+
+impl Eq for ByAsymmetry {}
+
+impl PartialOrd for ByAsymmetry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ByAsymmetry {
+    /// Smallest win over largest loss, then the SIZE of the largest win, then
+    /// `|t|`.
+    ///
+    /// # Why the second term is not `|t|`, unlike every other lens here
+    ///
+    /// [`ByPayoff`] and [`ByPath`] fall straight through to `|t|`, and for them
+    /// that is right: both keys saturate at [`i64::MAX`] on a sample that never
+    /// lost, so ties are the common case and evidence is the honest separator.
+    ///
+    /// This key saturates the same way and ties just as often — but falling to
+    /// `|t|` there would undo the whole lens. `|t|` is `mean / (sd / sqrt(n))`,
+    /// and a rare asymmetric winner is a large-dispersion, near-zero-mean
+    /// sample: the winners that make it valuable are exactly what inflates `sd`.
+    /// Two combinations tied at "never lost" would therefore be separated by
+    /// preferring the one whose wins are *smaller and more uniform*, which is
+    /// the opposite of the question being asked.
+    ///
+    /// `max_win_paisa` breaks that tie on the thing the operator is hunting —
+    /// how much it pays when it pays — and `|t|` remains the LAST term so the
+    /// order is still total and reproducible under §3 rule 5.
+    fn cmp(&self, other: &Self) -> Ordering {
+        let (mine, theirs) = (
+            self.0.edge.worst_reward_risk_bp(),
+            other.0.edge.worst_reward_risk_bp(),
+        );
+        mine.cmp(&theirs)
+            .then_with(|| {
+                self.0
+                    .edge
+                    .max_win_paisa
+                    .total_cmp(&other.0.edge.max_win_paisa)
+            })
+            .then_with(|| self.0.cmp(&other.0))
+    }
+}
+
+impl Ranked1 for ByAsymmetry {
     fn wrap(scored: Scored) -> Self {
         Self(scored)
     }
@@ -649,7 +746,7 @@ fn ordered<K: Ranked1>(heap: Heap<Marked<K>>) -> (Vec<Scored>, Vec<Scored>) {
     reason = "the exception every test module in this workspace takes."
 )]
 mod tests {
-    use super::{Accumulator, Lens, Scored, rank, rank_by};
+    use super::{Accumulator, ByAsymmetry, Lens, Scored, rank, rank_by};
     use crate::outcome::{Edge, Horizon, forward};
     use crate::{Sweeper, synthetic};
     use engine::Ladder;
@@ -1078,5 +1175,123 @@ mod tests {
             let b: Vec<_> = again.top.iter().map(|s| s.mask.words()).collect();
             assert_eq!(a, b, "two rankings of one input disagreed");
         }
+    }
+
+    /// One `Scored` carrying a stated edge, with a distinct mask per name.
+    fn shaped(bit: u32, edge: Edge) -> Scored {
+        Scored {
+            mask: ConditionMask::default().with_bit(bit),
+            hits: edge.n,
+            edge,
+        }
+    }
+
+    /// **The inversion this lens exists to correct — D-0593.**
+    ///
+    /// Two combinations, both real:
+    ///
+    /// * the RARE ASYMMETRIC WINNER — forty observations, twelve wins, the
+    ///   smallest of them 60 paisa against a largest loss of 20, and one win
+    ///   of 4,000. That is the operator's shape: min(win) = 3x max(loss).
+    /// * the GRINDER — a thousand observations, a tiny consistent mean, and a
+    ///   largest loss bigger than its smallest win.
+    ///
+    /// The grinder wins on `|t|` by construction, because `|t|` is
+    /// `mean / (sd / sqrt(n))` and the winner's own tail inflates its `sd`.
+    /// Under `Asymmetry` the order must invert. Both halves are asserted: a
+    /// test that only checked the new order would pass just as well if the old
+    /// one had never been a problem.
+    #[test]
+    fn the_asymmetry_lens_inverts_the_order_that_t_puts_a_rare_winner_in() {
+        let winner = Edge {
+            n: 40,
+            wins: 12,
+            win_sum: 5_000.0,
+            losses: 28,
+            loss_sum: -560.0,
+            min_win_paisa: 60.0,
+            max_win_paisa: 4_000.0,
+            max_loss_paisa: 20.0,
+            t: 1.10,
+            ..Edge::default()
+        };
+        let grinder = Edge {
+            n: 1_000,
+            wins: 600,
+            win_sum: 6_000.0,
+            losses: 400,
+            loss_sum: -3_600.0,
+            min_win_paisa: 5.0,
+            max_win_paisa: 30.0,
+            max_loss_paisa: 40.0,
+            t: 6.40,
+            ..Edge::default()
+        };
+
+        assert_eq!(
+            winner.worst_reward_risk_bp(),
+            300,
+            "60 paisa smallest win over a 20 paisa largest loss is exactly 3.00x"
+        );
+        assert_eq!(
+            grinder.worst_reward_risk_bp(),
+            12,
+            "5 over 40 is 0.12x -- the grinder fails the operator's rule outright"
+        );
+
+        // The mean-based statistic disagrees with the min/max one on this very
+        // pair, which is the whole reason `payoff_bp` could not stand in: the
+        // grinder's MEAN win over MEAN loss is 1.11x while its smallest win
+        // against its largest loss is 0.12x.
+        assert!(
+            grinder.payoff_bp() > grinder.worst_reward_risk_bp(),
+            "a mean ratio always flatters a dispersed sample: {} vs {}",
+            grinder.payoff_bp(),
+            grinder.worst_reward_risk_bp()
+        );
+
+        let (w, g) = (shaped(1, winner), shaped(2, grinder));
+
+        assert!(
+            g > w,
+            "under |t| the grinder outranks the rare winner -- this is the \
+             defect, and if it ever stops being true this test is measuring \
+             nothing"
+        );
+        assert!(
+            ByAsymmetry(w) > ByAsymmetry(g),
+            "under Asymmetry the rare winner must come first"
+        );
+    }
+
+    /// The two ends of the ratio, which are samples and not errors.
+    #[test]
+    fn the_asymmetry_ratio_reports_both_ends_rather_than_dividing() {
+        let never_lost = Edge {
+            n: 3,
+            wins: 3,
+            min_win_paisa: 10.0,
+            max_win_paisa: 900.0,
+            max_loss_paisa: 0.0,
+            ..Edge::default()
+        };
+        assert_eq!(
+            never_lost.worst_reward_risk_bp(),
+            i64::MAX,
+            "nothing lost is an unbounded ratio, reported rather than divided"
+        );
+
+        let never_won = Edge {
+            n: 9,
+            losses: 9,
+            min_win_paisa: 0.0,
+            max_loss_paisa: 500.0,
+            ..Edge::default()
+        };
+        assert_eq!(
+            never_won.worst_reward_risk_bp(),
+            0,
+            "nothing won is the floor -- it is not asymmetric, it is absent"
+        );
     }
 }

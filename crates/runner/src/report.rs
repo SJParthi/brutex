@@ -570,6 +570,9 @@ fn render_findings_at(
             crate::rank::Lens::Detectability => "best by |t|",
             crate::rank::Lens::Payoff => "best by payoff, then |t|",
             crate::rank::Lens::Path => "best by favourable/adverse excursion, then |t|",
+            crate::rank::Lens::Asymmetry => {
+                "best by smallest win / largest loss, then largest win, then |t|"
+            }
         },
     );
     row(

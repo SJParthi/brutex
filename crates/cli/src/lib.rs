@@ -9611,6 +9611,14 @@ fn policy_of(
             // -- §3 rule 3 wants a different identity, and reusing 0 or 1 would
             // collide a path-ranked run with a payoff-ranked one.
             runner::rank::Lens::Path => 2,
+            // APPENDED AS 3 for the reason 2 was appended, and the reason bites
+            // harder here: `Asymmetry` orders on the smallest win against the
+            // largest loss, which selects a DIFFERENT top `keep` than any of the
+            // three above on the same bars. Reusing a number would let two runs
+            // that swept the same span under opposite questions collide on one
+            // identity, and §3 rule 8 forbids renumbering the three that exist.
+            // D-0593.
+            runner::rank::Lens::Asymmetry => 3,
         },
         // The screen and both validation shapes receive this one caller-resolved
         // value. Keeping it in the historical third position preserves every

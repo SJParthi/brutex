@@ -900,6 +900,35 @@ pub struct Edge {
     /// Sum of the strictly negative forward moves, in paisa. **Negative or
     /// zero.**
     pub loss_sum: f64,
+    /// The SMALLEST strictly positive forward move, in paisa. Zero when none.
+    ///
+    /// # The rule this makes expressible — D-0593
+    ///
+    /// The operator's standing rule is *"min(win) >= 3x max(loss), never
+    /// mean/mean"*, and until this field existed **no ranking stage could state
+    /// it.** Every other field here is a count or a sum, and an extremum is
+    /// recoverable from neither, so [`crate::rank::Lens`] had exactly two money
+    /// keys and both were means: [`Self::payoff_bp`] is mean win over mean loss
+    /// — the statistic the rule names and rejects — and [`Self::path_ratio_bp`]
+    /// averages excursions the same way.
+    ///
+    /// `grid::Cell::reward_to_risk_bp` already computed the true min/max ratio,
+    /// but a `Cell` exists only AFTER the exit grid is built, and the `|t|` cut
+    /// that decides which combinations ever reach a grid happens before it. The
+    /// rule was computable only downstream of the gate it needed to pass.
+    pub min_win_paisa: f64,
+    /// The LARGEST strictly positive forward move, in paisa. Zero when none.
+    ///
+    /// The size of the right tail, which no other field carries: `win_sum`
+    /// spreads it across every winner and `mean_paisa` spreads it across every
+    /// observation. "Pays enormously when it pays" has no term in this struct
+    /// without it.
+    pub max_win_paisa: f64,
+    /// The largest losing forward move as a MAGNITUDE, in paisa. Non-negative.
+    ///
+    /// Zero when nothing lost — which is a real sample and not a missing one,
+    /// and [`Self::worst_reward_risk_bp`] says what it does about it.
+    pub max_loss_paisa: f64,
     /// Bars whose source index lay OUTSIDE the slice the `Forward` came from.
     ///
     /// Non-zero means the caller paired a `Column` with a `Forward` built from a
@@ -943,6 +972,54 @@ pub struct Edge {
 }
 
 impl Edge {
+    /// The SMALLEST win over the LARGEST loss, in hundredths. The operator's
+    /// own rule, stated verbatim — D-0593.
+    ///
+    /// `300` reads 3.00: the smallest winning move was three times the largest
+    /// losing one. Contrast [`Self::payoff_bp`], which is the same shape built
+    /// from two MEANS and is the statistic the rule exists to reject — since
+    /// `min_win <= mean_win` and `max_loss >= mean_loss`, this is ALWAYS at or
+    /// below that one, and the gap is exactly the dispersion a mean conceals.
+    ///
+    /// # The two ends, and why neither is a ratio
+    ///
+    /// **Nothing lost.** `max_loss_paisa` is zero, the ratio is unbounded, and
+    /// [`i64::MAX`] is returned. That is a real answer about a real sample and
+    /// not a division to make — `crates/cli`'s own report then has to decide
+    /// what to do with it, and `CLAUDE.md` §4 asks that the decision be visible
+    /// rather than folded into a sentinel here.
+    ///
+    /// **Nothing won.** `min_win_paisa` is zero, so the ratio is zero — the
+    /// floor, tying with the worst. A setup that never won is not asymmetric,
+    /// it is absent, and ranking it above anything would be the fallback that
+    /// hides a failure §4 bans.
+    #[must_use]
+    pub fn worst_reward_risk_bp(&self) -> i64 {
+        if self.min_win_paisa <= 0.0 {
+            return 0;
+        }
+        if self.max_loss_paisa <= 0.0 {
+            return i64::MAX;
+        }
+        // `as` is refused here for the same reason the excursion sums use
+        // `f64::from`: a ratio of two paisa magnitudes is bounded by the
+        // instrument's own range, and a value that somehow is not saturates
+        // rather than wrapping into a plausible number.
+        let ratio = self.min_win_paisa / self.max_loss_paisa * 100.0;
+        if !ratio.is_finite() || ratio <= 0.0 {
+            return 0;
+        }
+        if ratio >= 9_223_372_036_854_775_000.0 {
+            return i64::MAX;
+        }
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "clamped to i64's exactly-representable range on the line above"
+        )]
+        let out = ratio as i64;
+        out
+    }
+
     /// The average winning move over the average losing move, in hundredths.
     ///
     /// `300` reads 3.00 — the mean win was three times the mean loss.
@@ -1248,6 +1325,30 @@ struct Sides {
     losses: u64,
     /// Sum of the strictly negative observations. Negative or zero.
     loss_sum: f64,
+    /// The SMALLEST strictly positive observation, in paisa. Zero when none.
+    ///
+    /// # The three order statistics, and why sums could not stand in
+    ///
+    /// The operator's rule is *"min(win) >= 3x max(loss), never mean/mean"*, and
+    /// until D-0593 nothing on the ranking path could express it: every field
+    /// beside these three is a count or a sum, and an extremum is recoverable
+    /// from neither. [`Edge::payoff_bp`] answered the nearest available question
+    /// -- MEAN win over MEAN loss -- which is precisely the statistic the rule
+    /// names and rejects, because one catastrophic loss hides behind many small
+    /// ones in a denominator and one enormous win is diluted by the rest.
+    min_win: f64,
+    /// The LARGEST strictly positive observation, in paisa. Zero when none.
+    ///
+    /// Carried beside `min_win` because the two answer different halves of the
+    /// same objective: `min_win` decides whether the 3:1 rule HOLDS, and this
+    /// decides how much the setup PAYS when it pays. A rank on the first alone
+    /// prefers a setup whose wins are uniformly mediocre.
+    max_win: f64,
+    /// The largest strictly negative observation as a MAGNITUDE, in paisa.
+    ///
+    /// Non-negative, and zero when nothing lost. Stored positive so the ratio
+    /// against `min_win` is a division rather than a sign argument.
+    max_loss: f64,
 }
 
 impl Sides {
@@ -1258,13 +1359,28 @@ impl Sides {
     /// flat bars rather than by anything about the setup. A NaN is also neither
     /// — it fails both comparisons — which is the honest handling for a value
     /// that is not a move at all.
+    ///
+    /// The three extrema are maintained here rather than derived later for the
+    /// reason the field docs give: nothing downstream holds the observations.
+    /// `min_win` opens at zero and is replaced by the first win rather than
+    /// compared against it, because a zero sentinel would otherwise win every
+    /// comparison and pin the minimum at nothing.
     fn observe(&mut self, x: f64) {
         if x > 0.0 {
             self.wins = self.wins.saturating_add(1);
             self.win_sum += x;
+            if self.min_win == 0.0 || x < self.min_win {
+                self.min_win = x;
+            }
+            if x > self.max_win {
+                self.max_win = x;
+            }
         } else if x < 0.0 {
             self.losses = self.losses.saturating_add(1);
             self.loss_sum += x;
+            if -x > self.max_loss {
+                self.max_loss = -x;
+            }
         }
     }
 }
@@ -1587,6 +1703,9 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
         favourable_sum,
         losses: sides.losses,
         loss_sum: sides.loss_sum,
+        min_win_paisa: sides.min_win,
+        max_win_paisa: sides.max_win,
+        max_loss_paisa: sides.max_loss,
         t,
     };
 

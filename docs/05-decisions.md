@@ -35272,3 +35272,63 @@ Co-authored measurement: the band figures were produced by an independent
 re-implementation of the shipped Wilson bound that reproduces all five rows of
 `the_support_floor_is_twenty_nine_trades_and_a_fifty_percent_rule_is_untestable`
 exactly, and were then confirmed against the real code by the rewritten test.
+
+### D-0593 — The ranking could not state the operator's own rule — 2026-09-11
+
+The standing rule is `min(win) >= 3x max(loss)` — the SMALLEST win against the
+LARGEST loss, never mean against mean. Until this entry **no ranking stage could
+express it**, and an audit of 74 agents found the reason: `runner::outcome::Edge`
+carried eleven fields and every one was a count, a sum or a t-statistic. An
+extremum is recoverable from none of them.
+
+So the three lenses in `runner::rank` asked the three questions the fields
+allowed. `Detectability` ranks on `|t|`. `Payoff` ranks on `payoff_bp`, which is
+MEAN win over MEAN loss — the statistic the rule names and rejects, because one
+catastrophic loss hides behind many small ones in a denominator and one enormous
+win is diluted by the rest. `Path` averages excursions the same way.
+
+`grid::Cell::reward_to_risk_bp` did compute the true min/max ratio, and that is
+what makes the gap load-bearing rather than cosmetic: a `Cell` exists only after
+an exit grid is built, and the `|t|` cut that decides which combinations ever
+reach a grid happens first. **The rule was computable only downstream of the gate
+it needed to pass.** A rare asymmetric winner was cut before anything could
+notice it satisfied the rule.
+
+`Edge` gains three order statistics — `min_win_paisa`, `max_win_paisa` and
+`max_loss_paisa` — maintained in `Sides::observe` beside the sums that were
+already there, because nothing downstream holds the observations. `min_win` opens
+at zero and is REPLACED by the first win rather than compared against it; a zero
+sentinel would otherwise win every comparison and pin the minimum at nothing.
+
+`Edge::worst_reward_risk_bp` states the rule. Both ends are reported rather than
+divided: nothing lost is `i64::MAX` — a real answer about a real sample, left for
+the caller to decide about — and nothing won is zero, the floor, because a setup
+that never won is not asymmetric, it is absent.
+
+`Lens::Asymmetry` ranks on it, and its tie-break differs from every other lens
+here on purpose. The others fall straight through to `|t|`, which is right for
+them. This key saturates at `i64::MAX` on any sample that never lost, so ties are
+the common case — and falling to `|t|` there would undo the lens entirely, since
+`|t|` is `mean / (sd / sqrt(n))` and the winners that make a rare setup valuable
+are exactly what inflates its `sd`. Two combinations tied at "never lost" would
+be separated by preferring the one whose wins are smaller and more uniform. The
+second term is `max_win_paisa`, and `|t|` remains LAST so the order is still
+total and reproducible under §3 rule 5.
+
+It is appended as identity term `3` and the three existing lens numbers are
+untouched, per §3 rule 8. A lens decides which combinations reach the exit grid,
+so it decides the answer; reusing a number would collide two runs that swept one
+span under opposite questions.
+
+**Not the default, and deliberately.** `|t|` is the right cut when the question
+is whether an edge is REAL; this one is right when the question is whether it is
+SHAPED correctly. Both are legitimate and they order the same candidates
+differently. Nothing that ran before this entry changes: `rank` still passes
+`Lens::Detectability`, and the three historical orderings are the same code they
+always were.
+
+Verified: `cargo check --workspace --all-targets` clean, `cargo fmt --all --check`
+clean, and the pinning test asserts BOTH halves — that `|t|` really does place a
+rare asymmetric winner below a grinder, and that `Asymmetry` inverts it. A test
+that only checked the new order would pass just as well if the old one had never
+been a problem.
