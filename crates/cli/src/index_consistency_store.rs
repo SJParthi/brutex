@@ -201,7 +201,15 @@ pub(crate) fn produce(
     verify_parent: impl Fn() -> Result<(), String>,
 ) -> Result<Reader, String> {
     verify_parent()?;
-    let policy = declared_policy(&records)?;
+    // KEY the identity here; JUDGE the set inside the audited region below.
+    //
+    // `declared_policy` ran here and refused a mixed or empty set before
+    // `sweep_evidence::begin`, so those two refusals -- and only those two --
+    // produced no attempt row, no Refused terminal and nothing on /logs, while
+    // every other refusal in this function still recorded one. The strict check
+    // is unchanged and still runs, inside `encode`, which is inside the closure.
+    // D-0601.
+    let policy = keying_policy(&records)?;
     let id = identity(parent, pin, policy);
     let attempt =
         crate::sweep_evidence::begin(root, id, crate::sweep_evidence::Operation::IndexConsistency)?;
@@ -241,6 +249,18 @@ pub(crate) fn produce(
 /// failed inside the writer rather than at the caller that chose it. Deriving
 /// it keeps every shipped record readable as the version it was actually
 /// evaluated under, which is what §3 rule 8 asks for.
+/// The policy to address this artifact by, without judging the whole set.
+///
+/// Deliberately weaker than [`declared_policy`]: it answers "which content
+/// address does this belong at" so an attempt can be OPENED, and leaves "is
+/// this set coherent" to the strict check inside the audited region.
+fn keying_policy(records: &[Record]) -> Result<Policy, String> {
+    records
+        .first()
+        .map(|record| record.evaluation.policy)
+        .ok_or_else(|| "index consistency requires at least one evaluated coordinate".into())
+}
+
 fn declared_policy(records: &[Record]) -> Result<Policy, String> {
     let mut found: Option<Policy> = None;
     for record in records {
@@ -382,7 +402,7 @@ fn decode(
             let mut weeks = Vec::new();
             weeks.try_reserve_exact(count).map_err(display)?;
             for _ in 0..count {
-                weeks.push(Week::decode(raw.take(Week::BYTE_LEN)?).map_err(display)?);
+                weeks.push(Week::decode(raw.take(Week::BYTE_LEN)?, policy).map_err(display)?);
             }
             evaluations.push(Evaluation::decode(bytes, Some(&weeks)).map_err(display)?);
         }

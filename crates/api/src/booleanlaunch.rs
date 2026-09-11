@@ -412,7 +412,7 @@ fn metadata_value(root: &Path, query: Option<&str>) -> Value {
     let ready = failures.is_empty();
     json!({"schema_version":1,"model":"boolean-qualified-search-launch","command":COMMAND,
         "selected_timeframes_supported":true,
-        "index_consistency_policy":crate::booleanevidencejson::index_consistency_policy(),
+        "index_consistency_policy":crate::booleanevidencejson::index_consistency_policy(cli::index_consistency::Policy::V1),
         "work_model":work_model(),
         "timeframes":cli::EVERY_RUNG,"ready":ready,"refusal":if ready {None} else {Some(failures.join("; "))},
         "limits":{"max_symbols":cli::boolean_search_launch::max_symbols(),"request_bytes":REQUEST_BYTES,

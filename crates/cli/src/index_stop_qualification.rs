@@ -392,7 +392,7 @@ impl Reader {
             root,
             identity,
             observation.completion_digest(),
-            crate::index_consistency::Policy::V3,
+            crate::index_consistency::INDEX_STOP,
             remaining,
             body.facts.count,
         )?;
@@ -717,7 +717,7 @@ fn identity(facts: &Facts) -> [u8; 32] {
     }
     h.update(&Policy::V1.canonical_bytes());
     h.update(&facts.policy.canonical_bytes());
-    h.update(&crate::index_consistency::Policy::V3.canonical_bytes());
+    h.update(&crate::index_consistency::INDEX_STOP.canonical_bytes());
     h.update(&facts.allocation.digest());
     for word in facts.bounds.words().into_iter().chain([
         facts.procedure.draws(),

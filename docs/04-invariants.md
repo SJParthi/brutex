@@ -4997,3 +4997,21 @@ outside this estimate. Stored observation-body byte admission remains separate.
 Configuration validation does not attest historical OHLCV. The preview labels
 that boundary explicitly; native source admission and the operator's launch
 hold remain separate requirements.
+
+## One policy, one owner — D-0600, D-0601
+
+| Invariant | Executable proof |
+|---|---|
+| A complete week is classified by the policy being EVALUATED, not by a constant. A one-win four-loss week passes under V3, records no weekly reason, is counted as passing rather than failing, and its row survives the round trip; the same week fails under V1 with both weekly reasons set, and a V1 row does not decode as a valid V3 row | `a_one_win_four_loss_week_passes_under_v3_and_its_row_survives_the_round_trip` in `crates/cli/src/index_consistency_tests.rs` |
+| V1 and V2 keep identical thresholds and distinct digests, so a freeze test over those two alone cannot observe a policy-dependent classifier | `the shipped policies agree on every threshold and differ only in their version word` in `crates/cli/src/index_consistency_tests.rs` |
+| The consistency store addresses an artifact by the policy its evidence declares, refuses a mixed set, and opens an attempt before judging it so every refusal is audited | the mixed-set and empty-set arms of `declared_policy`, reached through `produce` in `crates/cli/src/index_consistency_store_tests.rs` |
+
+**Why these exist.** `Week::finish` read `Policy::V1`'s two weekly thresholds
+regardless of the policy in force. It was invisible for as long as it existed
+because V1 and V2 share all five numbers, so the freeze test compared two
+policies that agreed; `Policy::V3` moved them and made it live. The break band
+was exactly the shape V3 exists to admit, and the failure was not a wrong
+verdict but a refused artifact: the classifier said Failed, the reason-finder
+using V3's numbers found nothing to record, and the self-check then rejected
+bytes the same call had just produced. Before this row, `Policy::V3` appeared in
+zero test files and five production call sites.

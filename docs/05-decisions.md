@@ -35640,3 +35640,82 @@ and the out-of-sample requirements are exactly as they were.
 
 Verified on this tree: `cargo fmt --check` clean, `cargo test -p cli --lib`
 1,292 passed / 0 failed.
+
+### D-0600 — A policy named in six places is six policies — 2026-09-11
+
+Five adversarial agents were told to refuse to confirm anything. They found
+eleven defects in D-0597..D-0599, made the same day. This entry is the first of
+two that fix them.
+
+**The critical one.** `Week::finish` is the ONLY place a complete week becomes
+Passed or Failed, and it read `Policy::V1.min_weekly_wins()` and
+`Policy::V1.max_weekly_losses()` regardless of the policy being evaluated. That
+was harmless for as long as it existed -- V1 and V2 share all five thresholds,
+so `the shipped policies agree on every threshold` compared two policies that
+agreed and could not see it. D-0597 moved the numbers and made it live.
+
+The failure is not a wrong verdict, it is a refused artifact. A complete week
+with one win and four losses -- precisely the shape V3 exists to admit -- is
+classified Failed by V1's rule; `State::week` then looks for a reason using V3's
+thresholds and finds none; `validate_summary` sees a failing week with no
+weekly reason bit and returns `Inconsistent`, rejecting bytes the same call had
+just produced. Every single-stop qualification aborts on the good case.
+`Week::finish` and `Week::decode` now take the policy.
+
+**And five more sites named it independently.** D-0598 removed four hardcoded
+`Policy::V1` constants from the store and stopped there. The week classifier
+above, the API projection, the qualification body header, and the search
+declaration with its reader each named V1 on their own. Four of them kept
+describing V3 evidence with V1's numbers and NOTHING refused: a launch page
+advertising a two-day streak cap beside a record judged at ten, an artifact
+whose own pinned header said V1 while every evaluation inside it was V3, and a
+declaration guard that passed because both sides compared the same stale
+literal. `index_consistency::INDEX_STOP` is now the one place the single-stop
+path's policy is named.
+
+The four reason labels also stated V1's numbers verbatim
+(`..._below_three_fifths`, `..._exceeds_two`) and are served to the browser, so
+an eleven-day streak was reported as violating a two-day cap that was never
+applied. They are policy-neutral now; the persisted identity is the bit, not the
+label.
+
+**Why it shipped:** `grep -c "V3" crates/cli/src/index_consistency_tests.rs`
+returned 0. Five production call sites, no test. `docs/04-invariants.md` now
+carries the row and the test that proves it.
+
+### D-0601 — Three gates that could not fire, and a refusal that could not be audited — 2026-09-11
+
+**A vacuous guard hid a real bound.** `index_stop_search::validate` read
+`batch_programs > capture.programs`, and `index_stop_launch::request` assigns
+`capture.programs` FROM `batch_programs` -- so on every production path it read
+`x > x`. The real bound is in `Batch::prepare`:
+`batch_programs * ENCODED_LEN + HEADER <= capture.bytes / 4`, about 13.8 KB per
+program. Because the vacuous check looked like the bound, nothing enforced the
+real one at admission: the launch page reported ready, the POST returned 202,
+and the worker loaded every selected timeframe's training AND later sources and
+published their context archives before refusing -- repeated in full on every
+retry -- with a message naming neither the setting that was too large nor the
+one that bounds it, and not saying the ceiling is a QUARTER of the named
+variable. `batch_admission` now enforces it in `validate`, before any source is
+read, and names both settings and the affordable figure. The old comparison is
+retained: it is vacuous only for the caller that pairs the two.
+
+**A refusal stopped being auditable.** D-0598 moved the policy check ahead of
+`sweep_evidence::begin` because the identity now needs a policy. Mixed-set and
+empty-set refusals therefore produced no attempt row and nothing on `/logs`,
+while every other refusal in `produce` still recorded one. `keying_policy`
+answers only "which content address is this" so the attempt can be opened;
+`declared_policy` still judges the set, inside the closure.
+
+**A refusal named the wrong setting.** `boolean_search_command` refused with
+"exceeds configured replay-work admission" when `nodes > MAX_RECORDS`. The
+setting actually called a node allowance in this codebase is
+`BRUTEX_BOOLEAN_SEARCH_REPLAY_NODES`, and raising it never cleared this. The
+message now names `BRUTEX_CHECKSUM_MAX_RECORDS` and says so.
+
+**And a comment was 94 bits stale:** `engine` justified its `min_hits == 0`
+guard with "2^234 candidates" against a live vocabulary of 328. Nothing
+gate-checks that prose.
+
+Verified on this tree: `cargo fmt --check` clean, `cargo clippy` clean,
+`cargo test -p cli --lib` 1,293 passed / 0 failed.

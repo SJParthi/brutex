@@ -6,7 +6,9 @@ use runner::expression::{ENCODED_LEN, Expression};
 use vocab::expression_search::{CURSOR_BYTES, Cursor, Step};
 
 const MAGIC: &[u8; 8] = b"BRBGBP01";
-const HEADER: usize = 64 + 2 * CURSOR_BYTES;
+/// Fixed batch envelope. `pub(crate)` so admission can enforce the same bound
+/// this module does, BEFORE any source is loaded. D-0601.
+pub(crate) const HEADER: usize = 64 + 2 * CURSOR_BYTES;
 
 #[derive(Clone, Copy)]
 pub(crate) struct Budget {

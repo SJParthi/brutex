@@ -4,8 +4,7 @@ use cli::boolean_evidence::Qualification;
 use cli::index_consistency::{Evaluation, Policy, Reason, Session, Summary, Week};
 use serde_json::{Value, json};
 
-pub(crate) fn policy() -> Value {
-    let value = Policy::V1;
+pub(crate) fn policy(value: Policy) -> Value {
     json!({
         "schema_version":1,"policy_digest":hex(value.digest()),
         "instruments":["NSE-NIFTY","NSE-BANKNIFTY"],
@@ -195,8 +194,11 @@ mod tests {
     use super::*;
     #[test]
     fn policy_descriptor_reads_the_canonical_rust_policy_and_exact_scope() {
-        let rendered = policy();
+        // Rendered per POLICY, not from a constant inside the renderer: the same
+        // helper serves V1 on the boolean page and V3 on the single-stop page,
+        // and it described V3 evidence with V1 numbers until D-0600.
         let expected = Policy::V1;
+        let rendered = policy(expected);
         assert_eq!(
             rendered.get("policy_digest"),
             Some(&json!(hex(expected.digest())))

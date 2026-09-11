@@ -500,6 +500,40 @@ fn allocation_for(
     Ok(allocation)
 }
 
+/// Refuse an unaffordable `batch_programs` BEFORE any source is read.
+///
+/// # The check this replaces could never be true
+///
+/// Admission read `batch_programs > config.capture.programs`, and
+/// `capture.programs` is ASSIGNED from `batch_programs` -- so the guard was
+/// `x > x`. The real bound lives in `boolean_grammar_batch::Batch::prepare`,
+/// which refuses unless `batch_programs * ENCODED_LEN + HEADER <= bytes / 4`.
+///
+/// Because the vacuous guard looked like the bound, nothing enforced the real
+/// one at admission: the launch page reported ready, the POST returned 202, and
+/// the worker then loaded every selected timeframe's training AND later sources
+/// and published their context archives before refusing. Every retry repeated
+/// the whole load, and the message named neither the setting that was too large
+/// nor the one that bounds it -- nor that the effective ceiling is a QUARTER of
+/// the named variable, so an operator who raised it to the exact figure in the
+/// message was still refused. D-0601.
+fn batch_admission(batch_programs: u64, capture_bytes: u64) -> Result<(), String> {
+    let admitted = capture_bytes / 4;
+    let needed = batch_programs
+        .checked_mul(runner::expression::ENCODED_LEN as u64)
+        .and_then(|n| n.checked_add(crate::boolean_grammar_batch::HEADER as u64))
+        .ok_or("single-stop batch program capacity overflows its byte admission")?;
+    if needed > admitted {
+        let affordable = admitted.saturating_sub(crate::boolean_grammar_batch::HEADER as u64)
+            / runner::expression::ENCODED_LEN as u64;
+        return Err(format!(
+            "single-stop batch_programs {batch_programs} needs {needed} bytes but only {admitted} are admitted, which is ONE QUARTER of BRUTEX_CHECKSUM_MAX_BYTES. Either lower batch_programs to at most {affordable}, or raise BRUTEX_CHECKSUM_MAX_BYTES to at least {}",
+            needed.saturating_mul(4)
+        ));
+    }
+    Ok(())
+}
+
 fn validate(request: &Request<'_>) -> Result<(), String> {
     let config = request.configuration;
     if !matches!(request.index, "NSE-NIFTY" | "NSE-BANKNIFTY")
@@ -507,6 +541,12 @@ fn validate(request: &Request<'_>) -> Result<(), String> {
         || request.later.0 > request.later.1
         || request.later.0 <= request.training.1
         || request.batch_programs == 0
+        // Vacuous on the production path -- `index_stop_launch::request` assigns
+        // `capture.programs` FROM `batch_programs`, so this reads `x > x` there.
+        // Retained because it is not vacuous for a caller that supplies the two
+        // independently, and because removing it would weaken that caller for no
+        // gain. What it never did was bound the BYTES, which is `batch_admission`
+        // below. D-0601.
         || request.batch_programs > config.capture.programs
         || request.node_allowance == 0
         || request.node_allowance > config.capture.records
@@ -519,6 +559,7 @@ fn validate(request: &Request<'_>) -> Result<(), String> {
             "single-stop search declaration, period order or physical admission refused".into(),
         );
     }
+    batch_admission(request.batch_programs, config.capture.bytes)?;
     crate::parse_vendor(request.feed)?;
     month_days(request.training)?;
     month_days(request.later)?;
@@ -624,7 +665,7 @@ fn legacy_declaration(
     bytes.extend_from_slice(&Cursor::new(request.alphabet).map_err(debug)?.encode());
     bytes.extend_from_slice(&request.configuration.policy.digest());
     bytes.extend_from_slice(&runner::signal_candle_stop::Policy::V1.digest());
-    bytes.extend_from_slice(&crate::index_consistency::Policy::V1.digest());
+    bytes.extend_from_slice(&crate::index_consistency::INDEX_STOP.digest());
     let config = request.configuration;
     for value in [
         request.batch_programs,

@@ -37,7 +37,10 @@ fn round_trip(result: &Evaluation) {
         raw
     );
     for week in &result.weeks {
-        assert_eq!(Week::decode(&week.canonical_bytes()).unwrap(), *week);
+        assert_eq!(
+            Week::decode(&week.canonical_bytes(), Policy::V1).unwrap(),
+            *week
+        );
     }
     assert_eq!(
         Summary::decode(&result.summary.canonical_bytes()).unwrap(),
@@ -484,7 +487,7 @@ fn exact_versioned_codecs_refuse_truncation_changed_rules_and_forged_week_claims
     let mut week = *partial.weeks.first().unwrap();
     week.kind = WeekKind::Complete;
     week.outcome = Outcome::Passed;
-    assert!(Week::decode(&week.canonical_bytes()).is_err());
+    assert!(Week::decode(&week.canonical_bytes(), Policy::V1).is_err());
     let invalid_zero = Session {
         day: first,
         pessimistic_paisa: 1,
@@ -671,4 +674,70 @@ fn a_version_one_session_row_keeps_its_meaning_under_both_policies() {
     // And a no-trade day may not carry a return on either side.
     let busy = words::<40>(*b"BRICDY02", &[bits(d), bits(0), bits(5), 0]);
     assert!(Session::decode(&busy).is_err());
+}
+
+/// V3 classifies a week by V3's numbers, and the row it writes decodes back.
+///
+/// # The defect this pins, and why nothing else could have caught it
+///
+/// `Week::finish` read `Policy::V1.min_weekly_wins()` and
+/// `Policy::V1.max_weekly_losses()` regardless of the policy being evaluated.
+/// That was invisible for as long as it existed, because V1 and V2 share all
+/// five thresholds -- the existing freeze test compares exactly those two and
+/// therefore could not see it. `Policy::V3` moved the numbers and made it live.
+///
+/// The break band is precisely the shape V3 exists to admit: a complete week
+/// with one or two wins and four or fewer losses. V1's rule calls it Failed;
+/// `State::week` then looks for a reason using V3's thresholds, finds none,
+/// and `validate_summary` refuses the bytes `evaluate` has just produced --
+/// so the whole single-stop qualification aborts on the good case.
+///
+/// Every call site of this policy is production; before this test, `Policy::V3`
+/// appeared in zero test files. D-0600.
+#[test]
+fn a_one_win_four_loss_week_passes_under_v3_and_its_row_survives_the_round_trip() {
+    let monday = i64::from(Day::new(2025, 1, 6).unwrap().days_from_epoch());
+    let family =
+        ResearchFamilyV1::new(InstrumentKey::index(Exchange::Nse, "NIFTY").unwrap()).unwrap();
+    // Monday wins; Tuesday through Friday lose. One win, four losses.
+    let sessions: Vec<_> = (0..5)
+        .map(|offset| Session {
+            day: monday + offset,
+            pessimistic_paisa: if offset == 0 { 500 } else { -100 },
+            optimistic_paisa: if offset == 0 { 500 } else { -100 },
+            trades: 1,
+        })
+        .collect();
+
+    let v3 = evaluate(Policy::V3, family, monday, monday + 4, &sessions, true);
+    assert_eq!(v3.summary.winning_days, 1);
+    assert_eq!(v3.summary.losing_days, 4);
+    // V3 admits it: >=1 win, <=4 losses, ratio 1/5 >= 1/3 is false -- so the
+    // ratio is the ONLY thing that may fire, never the weekly pair.
+    assert_eq!(v3.reasons & Reason::WeeklyWins.mask(), 0);
+    assert_eq!(v3.reasons & Reason::WeeklyLosses.mask(), 0);
+    // The week must be counted as passing, not failing-with-no-reason.
+    assert_eq!(v3.summary.complete_weeks, 1);
+    assert_eq!(v3.summary.failing_weeks, 0);
+    assert_eq!(v3.summary.passing_weeks, 1);
+    // And the row it wrote must decode under V3 -- the round trip that the
+    // hardcoded V1 broke.
+    for week in &v3.weeks {
+        assert_eq!(
+            Week::decode(&week.canonical_bytes(), Policy::V3).unwrap(),
+            *week
+        );
+    }
+
+    // The same week under V1 fails, with both weekly reasons set. If these two
+    // halves ever agree, the policies have stopped differing and V3 is moot.
+    let v1 = evaluate(Policy::V1, family, monday, monday + 4, &sessions, true);
+    assert_eq!(v1.summary.failing_weeks, 1);
+    assert_ne!(v1.reasons & Reason::WeeklyWins.mask(), 0);
+    assert_ne!(v1.reasons & Reason::WeeklyLosses.mask(), 0);
+
+    // A row classified under one policy must not read as valid under another.
+    for week in &v1.weeks {
+        assert!(Week::decode(&week.canonical_bytes(), Policy::V3).is_err());
+    }
 }

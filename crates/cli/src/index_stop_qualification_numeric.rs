@@ -2,7 +2,7 @@
 use super::{
     DailyRecord, Facts, Fold, ReplayWork, Row, Snapshot, Split, Statistics, daily, display,
 };
-use crate::index_consistency::{self, Policy, Session};
+use crate::index_consistency::{self, INDEX_STOP, Session};
 use crate::population_observations_v1::{canonical_masks, derive_layout};
 use crate::population_statistics_v2::{cscv_placement, wilson_lower_bits};
 use brutex_core::blake3::Hasher;
@@ -630,7 +630,7 @@ fn folds<S: Snapshot>(row: &S, facts: &Facts) -> Result<Vec<Fold>, String> {
             .ok_or("single-stop fold period extent differs")?;
         let sessions = sessions(periods)?;
         let calendar =
-            index_consistency::evaluate(Policy::V3, row.family(), first, last, &sessions, false);
+            index_consistency::evaluate(INDEX_STOP, row.family(), first, last, &sessions, false);
         let mut fold = Fold {
             first_day: first,
             last_day: last,
@@ -689,7 +689,7 @@ fn sessions(periods: &[runner::signal_candle_stop::Period]) -> Result<Vec<Sessio
 fn assessment<S: Snapshot>(row: &S, weeks: bool) -> Result<index_consistency::Evaluation, String> {
     let rows = sessions(row.periods())?;
     Ok(index_consistency::evaluate(
-        Policy::V3,
+        INDEX_STOP,
         row.family(),
         row.first(),
         row.last(),
@@ -732,7 +732,7 @@ pub(super) fn daily<S: Snapshot>(
                 coordinate: u64::try_from(index).map_err(display)?,
             },
             training: index_consistency::evaluate(
-                Policy::V3,
+                INDEX_STOP,
                 before.family(),
                 before.first(),
                 before.last(),
@@ -740,7 +740,7 @@ pub(super) fn daily<S: Snapshot>(
                 true,
             ),
             later: index_consistency::evaluate(
-                Policy::V3,
+                INDEX_STOP,
                 after.family(),
                 after.first(),
                 after.last(),
@@ -748,7 +748,7 @@ pub(super) fn daily<S: Snapshot>(
                 true,
             ),
             evaluation: index_consistency::evaluate(
-                Policy::V3,
+                INDEX_STOP,
                 before.family(),
                 before.first(),
                 after.last(),

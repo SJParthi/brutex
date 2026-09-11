@@ -91,7 +91,7 @@ pub(super) fn value(root: &Path, query: Option<&str>) -> Value {
             "exits":["risk stop","15:10 IST"],"directions":["long","short"],
             "readings":["pessimistic","optimistic"],"costs_included":false,
             "maximum_open_positions_per_setting":1},
-        "index_consistency_policy":crate::booleanevidencejson::index_consistency_policy(),
+        "index_consistency_policy":crate::booleanevidencejson::index_consistency_policy(cli::index_consistency::INDEX_STOP),
         "configured":configured,"policy":policy,"procedure":procedure,
         "limits":{"request_bytes":REQUEST_BYTES,"max_loss_points_max":MAX_LOSS_POINTS.to_string(),"physical":limits},
         "field_help":{"max_loss_points":"Institutional research loss limit. It does not set the signal-candle stop or investment size.",

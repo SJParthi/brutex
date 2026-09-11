@@ -927,7 +927,8 @@ impl Ladder {
         // At `min_hits == 0` every candidate satisfies `hits >= 0`, including one with
         // support ZERO. So no level ever comes back empty, the ladder climbs until the
         // mask runs out of bits, and the walk becomes a full powerset enumeration that
-        // does not depend on the bars at all — 2^234 candidates, and extinction, the
+        // does not depend on the bars at all — 2^328 candidates on the live vocabulary
+        // (this comment said 2^234 for some time; nothing gate-checks it), and extinction, the
         // mechanism §6 puts in place of a depth parameter, is simply off.
         //
         // Worse, it contradicts this module's own D-0080 guard, which excludes a

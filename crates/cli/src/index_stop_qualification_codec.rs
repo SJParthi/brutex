@@ -59,7 +59,7 @@ pub(super) fn encode(id: [u8; 32], value: &Body) -> Result<Vec<u8>, String> {
     bytes.extend_from_slice(MAGIC);
     bytes.extend_from_slice(&id);
     bytes.extend_from_slice(&Policy::V1.canonical_bytes());
-    bytes.extend_from_slice(&crate::index_consistency::Policy::V1.canonical_bytes());
+    bytes.extend_from_slice(&crate::index_consistency::INDEX_STOP.canonical_bytes());
     let f = &value.facts;
     for id in [
         f.search,

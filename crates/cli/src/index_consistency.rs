@@ -100,6 +100,23 @@ pub enum Policy {
     /// V1 and V2 are untouched and still decode to their own frozen digests.
     V3,
 }
+/// The consistency policy the SINGLE-STOP research path evaluates under.
+///
+/// One named place, because naming it in many was the defect. D-0598 removed
+/// four hardcoded `Policy::V1` constants from the store and that was only half
+/// of them: the week classifier, the API projection, the qualification body
+/// header, and the search declaration with its reader each named V1
+/// independently. So "which policy is this run under?" had six answers that had
+/// to agree by hand, and the moment [`Policy::V3`] made them disagree, four of
+/// the six kept describing V3 evidence with V1's numbers and NOTHING refused --
+/// a page advertising a 2-day streak cap beside a record judged at 10, and an
+/// artifact whose own header said V1 while every evaluation inside it was V3.
+///
+/// A constant is the right shape here and a literal is not: this is one fact
+/// with one owner, so changing the path's policy is one edit that cannot leave
+/// a describer behind. D-0600.
+pub const INDEX_STOP: Policy = Policy::V3;
+
 impl Policy {
     /// Fixed encoding width for callers storing the additive policy record.
     pub const BYTE_LEN: usize = POLICY_BYTES;
@@ -409,10 +426,10 @@ impl Reason {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::WinningDayRatio => "winning_day_ratio_below_three_fifths",
-            Self::WeeklyWins => "complete_week_has_fewer_than_three_wins",
-            Self::WeeklyLosses => "complete_week_has_more_than_two_losses",
-            Self::LosingDayStreak => "losing_day_streak_exceeds_two",
+            Self::WinningDayRatio => "winning_day_ratio_below_policy_minimum",
+            Self::WeeklyWins => "complete_week_below_policy_minimum_wins",
+            Self::WeeklyLosses => "complete_week_above_policy_maximum_losses",
+            Self::LosingDayStreak => "losing_day_streak_above_policy_maximum",
             Self::NoCompleteWeek => "no_complete_five_session_week",
             Self::NoEligibleSession => "no_eligible_session",
             Self::MissingSession => "missing_expected_session",
@@ -685,7 +702,17 @@ impl Week {
             pessimistic_paisa: 0,
         }
     }
-    fn finish(mut self) -> Self {
+    /// Classify this week under an EXPLICIT policy.
+    ///
+    /// The two weekly thresholds were read from `Policy::V1` here regardless of
+    /// the policy the caller was evaluating under. That was invisible while V1
+    /// and V2 shared all five numbers, and became a live defect the moment
+    /// [`Policy::V3`] moved them: a week was classified by V1's 3-wins/2-losses
+    /// rule while `State::week` explained it with V3's 1-and-4, so a 1-win
+    /// 4-loss week — exactly the shape V3 exists to admit — was counted Failed
+    /// with no reason bit set, and `validate_summary` then refused the bytes
+    /// `evaluate` had just produced. D-0600.
+    fn finish(mut self, policy: Policy) -> Self {
         self.kind = if self.weekday_days < 5 {
             WeekKind::Partial
         } else if self.unmeasured_days > 0 {
@@ -701,8 +728,8 @@ impl Week {
             Outcome::Unmeasured
         } else if self.kind != WeekKind::Complete {
             Outcome::NotApplicable
-        } else if self.winning_days >= Policy::V1.min_weekly_wins()
-            && self.losing_days <= Policy::V1.max_weekly_losses()
+        } else if self.winning_days >= policy.min_weekly_wins()
+            && self.losing_days <= policy.max_weekly_losses()
         {
             Outcome::Passed
         } else {
@@ -743,9 +770,13 @@ impl Week {
     }
     /// Decode and reconcile the row's calendar class and weekly verdict.
     ///
+    /// Takes the policy because the reconciliation re-runs [`Self::finish`] and
+    /// compares: a row classified under one policy must not be readable as a
+    /// valid row of another. D-0600.
+    ///
     /// # Errors
     /// Invalid format, impossible counts, non-Monday keys or invented passes refuse.
-    pub fn decode(raw: &[u8]) -> Result<Self, DecodeError> {
+    pub fn decode(raw: &[u8], policy: Policy) -> Result<Self, DecodeError> {
         let [
             monday,
             kind,
@@ -801,7 +832,7 @@ impl Week {
                 closed_weekdays,
             ])? != weekday_days
             || trades < observed_days.saturating_sub(no_trade_days)
-            || row.finish() != row
+            || row.finish(policy) != row
         {
             return Err(DecodeError::Inconsistent);
         }
@@ -937,7 +968,7 @@ impl Evaluation {
         let mut hash = domain(WEEK_DOMAIN);
         let mut previous = None;
         for row in rows {
-            Week::decode(&row.canonical_bytes())?;
+            Week::decode(&row.canonical_bytes(), self.policy)?;
             if previous.is_some_and(|day: i64| day.checked_add(7) != Some(row.monday)) {
                 return Err(DecodeError::Inconsistent);
             }
@@ -1102,7 +1133,7 @@ pub fn evaluate(
             return state.finish();
         }
         if day == last_day || weekday(day) == 6 {
-            if let Err(reason) = state.week(week.finish(), retain_weeks) {
+            if let Err(reason) = state.week(week.finish(policy), retain_weeks) {
                 state.issue(reason, Some(day));
                 return state.finish();
             }

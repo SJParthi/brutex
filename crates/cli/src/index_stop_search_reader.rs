@@ -99,7 +99,7 @@ impl Declaration {
         let policy_digest = raw.array()?;
         if policy_digest == [0; 32]
             || raw.array::<32>()? != runner::signal_candle_stop::Policy::V1.digest()
-            || raw.array::<32>()? != crate::index_consistency::Policy::V1.digest()
+            || raw.array::<32>()? != crate::index_consistency::INDEX_STOP.digest()
         {
             return Err("single-stop declared execution or daily policy differs".into());
         }

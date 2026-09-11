@@ -179,7 +179,10 @@ fn execute_observed(
     let bytes = input.strict.max_bytes();
     let records = input.strict.max_records();
     if request.nodes > records {
-        return Err("search node allowance exceeds configured replay-work admission".into());
+        return Err(format!(
+            "search node allowance {} exceeds BRUTEX_CHECKSUM_MAX_RECORDS {records}. This is the RECORD ceiling, not BRUTEX_BOOLEAN_SEARCH_REPLAY_NODES -- raising that one will not clear this refusal",
+            request.nodes
+        ));
     }
     let first = Batch::prepare(
         request.initial.clone(),

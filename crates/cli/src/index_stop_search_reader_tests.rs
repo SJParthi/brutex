@@ -21,7 +21,7 @@ fn legacy(scope: u8) -> Result<Vec<u8>, String> {
     raw.extend_from_slice(&Cursor::new(&[0, 30]).map_err(debug)?.encode());
     raw.extend_from_slice(&policy().digest());
     raw.extend_from_slice(&runner::signal_candle_stop::Policy::V1.digest());
-    raw.extend_from_slice(&crate::index_consistency::Policy::V1.digest());
+    raw.extend_from_slice(&crate::index_consistency::INDEX_STOP.digest());
     for word in [
         2_u64, 100, 2, 1000, 1_000_000, 255, 0, 2, 4, 1000, 1000, 1_000_000, 1_000_000, 1_000_000,
         1000,
