@@ -452,13 +452,18 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    quality floor is measured off the bars, and the
                                    stop ladder is a percentile of the span.
        cli descend      VENDOR UNDERLYING RUNG FROM_Y FROM_M TO_Y TO_M
-                        CEILING_PPM PER_WEEK
+                        CEILING_PPM CADENCE
                                    sweep ONE rung at successively LOWER supports,
-                                   from CEILING_PPM down to the floor PER_WEEK
-                                   trades a week implies on that rung's own bar
-                                   count. A rare setup is pruned by a high
-                                   support before it is ever priced, so a fixed
-                                   threshold cannot find one -- this walks it.
+                                   from CEILING_PPM down to the floor CADENCE
+                                   implies on that rung's own bar count. A rare
+                                   setup is pruned by a high support before it is
+                                   ever priced, so a fixed threshold cannot find
+                                   one -- this walks it.
+                                   CADENCE is `3` for three trades a WEEK, or
+                                   `6/y` for six a YEAR. A bare number keeps its
+                                   old meaning, so nothing you have typed before
+                                   changes; `/y` is what makes a setup rarer than
+                                   one a week sayable at all -- `1` is 52 a year.
        cli range-all    VENDOR UNDERLYING FROM_Y FROM_M TO_Y TO_M SUPPORT_PPM
                                    sweep the span on ALL EIGHT INTRADAY RUNGS and
                                    table comparing them. SUPPORT_PPM is parts per
@@ -1548,19 +1553,19 @@ fn descend_arm(
         to.0.parse::<u16>(),
         to.1.parse::<u8>(),
         parse_support_ppm(ceiling_ppm),
-        per_week.parse::<u64>(),
+        parse_cadence(per_week),
     ) {
         (Ok(fy), Ok(fm), Ok(ty), Ok(tm), Ok(h), Ok(w)) => {
             // Checked HERE and not as a match guard: a guard on this arm makes
             // the match non-exhaustive, and the compiler is right -- the zero
             // case would fall through to a later arm that says nothing about
             // cadence.
-            if w == 0 {
+            if w.is_zero() {
                 return refuse(
                     out,
-                    "PER_WEEK must be a whole number of trades per week, at \
-                     least 1. A cadence of zero has no support floor and would \
-                     sweep every combination that fires even once.",
+                    "CADENCE must be at least one trade, in whichever unit it \
+                     is stated. A cadence of zero has no support floor and \
+                     would sweep every combination that fires even once.",
                 );
             }
             let text = descend(vendor, underlying, rung, (fy, fm), (ty, tm), h, w);
@@ -12835,11 +12840,108 @@ const WEEKS_PER_MONTH_CENTI: u64 = 435;
 /// is a division and not an answer.
 #[must_use]
 pub fn cadence_floor_ppm(bars: u64, months: u64, trades_per_week: u64) -> Option<u64> {
-    if bars == 0 || months == 0 || trades_per_week == 0 {
+    cadence_floor_ppm_of(bars, months, Cadence::PerWeek(trades_per_week))
+}
+
+/// Weeks in a year, for the per-year arm of [`Cadence`].
+const WEEKS_PER_YEAR: u64 = 52;
+
+/// How often an operator will accept a setup firing — D-0594.
+///
+/// # Why a week was not a fine enough unit
+///
+/// `descend`'s cadence was a whole number of trades per WEEK with a floor of
+/// one, and its refusal explained the floor correctly: *"a cadence of zero has
+/// no support floor and would sweep every combination that fires even once."*
+/// That argument is about ZERO and it is sound. It says nothing about the UNIT,
+/// and the unit was the problem — one trade a week is **fifty-two a year**, so
+/// the rarest cadence the command could express was already eight times more
+/// frequent than the objective it exists to serve.
+///
+/// Nothing about the floor is relaxed here. A cadence of zero is still refused
+/// on either arm, for the reason it always was. What changes is that "six times
+/// a year" is now sayable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cadence {
+    /// Trades per week, the historical unit, unchanged and bit-identical.
+    PerWeek(u64),
+    /// Trades per year, for a setup rarer than one a week.
+    PerYear(u64),
+}
+
+impl Cadence {
+    /// The trade count this cadence implies over `months`, never below one.
+    fn trades_over(self, months: u64) -> u64 {
+        let weeks = months.saturating_mul(WEEKS_PER_MONTH_CENTI) / 100;
+        match self {
+            Self::PerWeek(n) => weeks.saturating_mul(n).max(1),
+            // MULTIPLY BEFORE DIVIDING, the same discipline the ppm conversion
+            // below states its own reason for: `weeks / 52` is zero on any span
+            // under a year, and scaling a zero is still zero.
+            Self::PerYear(n) => (weeks.saturating_mul(n) / WEEKS_PER_YEAR).max(1),
+        }
+    }
+
+    /// Zero on either arm, which has no floor and sweeps everything.
+    const fn is_zero(self) -> bool {
+        matches!(self, Self::PerWeek(0) | Self::PerYear(0))
+    }
+
+    /// The cadence in the unit the operator typed it in.
+    ///
+    /// Reported rather than normalised to one unit, because "six a year" and
+    /// "0 a week" are the same number and only one of them is what he asked
+    /// for — `CLAUDE.md` §4 asks that a report name what it did, and silently
+    /// converting the rarest cadences to zero would be the failure it bans.
+    fn stated(self) -> String {
+        match self {
+            Self::PerWeek(n) => format!("{n} trade(s) per week"),
+            Self::PerYear(n) => format!("{n} trade(s) per year"),
+        }
+    }
+}
+
+/// One `CADENCE` word: `6` is six a week, `6/y` is six a YEAR — D-0594.
+///
+/// A bare number keeps its historical meaning exactly, so every command an
+/// operator has already typed means what it always did. The suffix is the only
+/// new spelling, and it is the one that makes a rare setup sayable: `1/y` is the
+/// rarest cadence this engine can now be asked for, against `1` — fifty-two a
+/// year — which was the rarest before.
+///
+/// # Errors
+///
+/// A word that is neither a number nor a number with a recognised unit. The
+/// sentence names both spellings rather than the one that failed, because an
+/// operator who typed the wrong unit cannot tell which one this accepts.
+fn parse_cadence(raw: &str) -> Result<Cadence, &'static str> {
+    const BAD: &str = "CADENCE must be a whole number of trades per week (`3`), \
+                       or per year with a `/y` suffix (`6/y`).";
+    let word = raw.trim();
+    if let Some(head) = word.strip_suffix("/y") {
+        return head
+            .trim()
+            .parse::<u64>()
+            .map(Cadence::PerYear)
+            .or(Err(BAD));
+    }
+    if let Some(head) = word.strip_suffix("/w") {
+        return head
+            .trim()
+            .parse::<u64>()
+            .map(Cadence::PerWeek)
+            .or(Err(BAD));
+    }
+    word.parse::<u64>().map(Cadence::PerWeek).or(Err(BAD))
+}
+
+/// [`cadence_floor_ppm`], for a cadence stated in either unit.
+#[must_use]
+pub fn cadence_floor_ppm_of(bars: u64, months: u64, cadence: Cadence) -> Option<u64> {
+    if bars == 0 || months == 0 || cadence.is_zero() {
         return None;
     }
-    let weeks = months.saturating_mul(WEEKS_PER_MONTH_CENTI) / 100;
-    let trades = weeks.saturating_mul(trades_per_week).max(1);
+    let trades = cadence.trades_over(months);
     // Multiply BEFORE dividing: `trades / bars` is zero for every cadence that
     // matters, and scaling a zero is still zero. At 1-minute resolution the
     // honest answer is 244 ppm and the naive order returns 0 ppm, which would
@@ -13750,6 +13852,36 @@ fn descent_line(support: u64, row: Result<crate::results::Record, String>) -> St
 ///
 /// `trades` falling toward the cadence and `all_mae` falling toward the stop
 /// ceiling is the signature being hunted. A row where `trades` stays in the
+/// The header [`descend`] leads with, carrying the provenance banner.
+///
+/// Lifted out for the reason [`descent_banner`] was — to keep `descend` inside
+/// its line budget — and because a banner is a rendering decision rather than
+/// part of the walk. It names the cadence in the unit the operator TYPED,
+/// never a normalised one: six a year and zero a week are the same integer,
+/// and only one of them was asked for.
+fn descend_banner(
+    vendor_word: &str,
+    underlying: &str,
+    known: &str,
+    from: (u16, u8),
+    to: (u16, u8),
+    months: u64,
+    cadence: Cadence,
+) -> String {
+    let mut out = String::from(STORED_PROVENANCE);
+    let _ = writeln!(
+        out,
+        "feed {vendor_word} · {underlying} · {known} · {}-{:02}..{}-{:02} · \
+         {months} months · descending to {}",
+        from.0,
+        from.1,
+        to.0,
+        to.1,
+        cadence.stated()
+    );
+    out
+}
+
 /// thousands is a grinder however good its total looks, and the descent prints
 /// both so the two cannot be confused.
 #[must_use]
@@ -13760,7 +13892,7 @@ pub fn descend(
     from: (u16, u8),
     to: (u16, u8),
     ceiling_ppm: u64,
-    per_week: u64,
+    cadence: Cadence,
 ) -> String {
     let Some(known) = EVERY_RUNG.iter().find(|r| **r == rung) else {
         return format!(
@@ -13770,13 +13902,7 @@ pub fn descend(
         );
     };
     let months = months_between(from, to);
-    let mut out = String::from(STORED_PROVENANCE);
-    let _ = writeln!(
-        out,
-        "feed {vendor_word} · {underlying} · {known} · {}-{:02}..{}-{:02} · \
-         {months} months · descending to {per_week} trade(s) per week",
-        from.0, from.1, to.0, to.1
-    );
+    let mut out = descend_banner(vendor_word, underlying, known, from, to, months, cadence);
 
     // THE FIRST STEP IS ALSO THE MEASUREMENT THE FLOOR NEEDS.
     //
@@ -13806,7 +13932,7 @@ pub fn descend(
         );
         return out;
     };
-    let Some(floor) = cadence_floor_ppm(seed.bars, months, per_week) else {
+    let Some(floor) = cadence_floor_ppm_of(seed.bars, months, cadence) else {
         let _ = writeln!(
             out,
             "\nrefused: the span reported {} bars over {months} months, so a \
@@ -23042,6 +23168,57 @@ mod tests {
     /// largest loss — which `grid::Cell::reward_to_risk_bp` already computes as
     /// a true min/max. Any future wiring of that rule must size the search from
     /// something satisfiable; the rows between show what a bound set below the
+    /// **A cadence rarer than one a week is now sayable — D-0594.**
+    ///
+    /// The refusal that guarded the old floor was right about ZERO and silent
+    /// about the UNIT: one trade a week is fifty-two a year, so the rarest
+    /// cadence the command could express was already eight times more frequent
+    /// than the objective it serves. Both halves are asserted — that a bare
+    /// number still means exactly what it meant, and that the suffix reaches
+    /// below what the old spelling could.
+    #[test]
+    fn a_cadence_rarer_than_one_a_week_is_expressible_and_a_bare_number_is_unchanged() {
+        use crate::{Cadence, cadence_floor_ppm, cadence_floor_ppm_of, parse_cadence};
+
+        // BACKWARD COMPATIBILITY, asserted rather than assumed: the historical
+        // entry point and the new one must agree on every bare number, or a
+        // command an operator has already typed quietly changed meaning.
+        for n in [1_u64, 2, 7, 40] {
+            assert_eq!(
+                cadence_floor_ppm(123_510, 80, n),
+                cadence_floor_ppm_of(123_510, 80, Cadence::PerWeek(n)),
+                "the per-week arm must be the function it replaced, at {n}"
+            );
+        }
+
+        // The 5-minute NIFTY span: 123,510 bars over 80 months.
+        let weekly = cadence_floor_ppm_of(123_510, 80, Cadence::PerWeek(1)).expect("bars exist");
+        let yearly = cadence_floor_ppm_of(123_510, 80, Cadence::PerYear(6)).expect("bars exist");
+        assert!(
+            yearly < weekly,
+            "six a year must reach BELOW one a week -- the whole point of the \
+             unit. weekly {weekly} ppm, yearly {yearly} ppm"
+        );
+
+        // Zero still has no floor, on either arm, for the reason it always did.
+        assert!(Cadence::PerWeek(0).is_zero() && Cadence::PerYear(0).is_zero());
+        assert_eq!(cadence_floor_ppm_of(123_510, 80, Cadence::PerYear(0)), None);
+
+        // The spellings.
+        assert_eq!(parse_cadence("3"), Ok(Cadence::PerWeek(3)));
+        assert_eq!(parse_cadence(" 3 "), Ok(Cadence::PerWeek(3)));
+        assert_eq!(parse_cadence("3/w"), Ok(Cadence::PerWeek(3)));
+        assert_eq!(parse_cadence("6/y"), Ok(Cadence::PerYear(6)));
+        assert!(parse_cadence("6/m").is_err(), "an unknown unit is refused");
+        assert!(parse_cadence("six").is_err());
+        assert!(parse_cadence("").is_err());
+
+        // The report names the unit it was given, never a normalised one: six a
+        // year and zero a week are the same integer and only one was asked for.
+        assert_eq!(Cadence::PerYear(6).stated(), "6 trade(s) per year");
+        assert_eq!(Cadence::PerWeek(3).stated(), "3 trade(s) per week");
+    }
+
     /// stated rate actually costs.
     #[test]
     fn the_support_floor_is_twenty_nine_trades_and_a_fifty_percent_rule_is_untestable() {

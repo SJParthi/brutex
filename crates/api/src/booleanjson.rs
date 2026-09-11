@@ -370,7 +370,7 @@ pub(crate) fn grid_summary(grid: &GridContext) -> Value {
         "stop_count":grid.stops.len().to_string(),"target_count":grid.targets.len().to_string(),"trail_count":grid.trails.len().to_string(),
         "requested_stop_count":policy.rungs().stop().len().to_string(),"requested_target_count":policy.rungs().target().len().to_string(),"requested_trail_count":policy.rungs().trail().len().to_string(),
         "execution_seconds":"60","horizon_bars":grid.horizon_bars.to_string(),"range_rounding":match policy.range_resolution(){RangeResolutionV1::PpmFloor=>"floor",RangeResolutionV1::PpmCeiling=>"ceiling"},
-        "selector":match policy.selector(){ExitGridSelectorV1::PessimisticTotal=>"pessimistic-total",ExitGridSelectorV1::EdgeThenPessimistic=>"edge-then-pessimistic",ExitGridSelectorV1::GuaranteedFloor=>"guaranteed-floor"},
+        "selector":match policy.selector(){ExitGridSelectorV1::PessimisticTotal=>"pessimistic-total",ExitGridSelectorV1::EdgeThenPessimistic=>"edge-then-pessimistic",ExitGridSelectorV1::GuaranteedFloor=>"guaranteed-floor",ExitGridSelectorV1::OperatorRule=>"operator-rule"},
         "ratio_min_hundredths":policy.ratios().min_hundredths().to_string(),"ratio_max_hundredths":policy.ratios().max_hundredths().to_string(),"max_pairs":policy.ratios().max_pairs().to_string(),"max_cells":policy.max_cells().to_string(),"max_levels_per_axis":policy.rungs().max_levels_per_axis().to_string(),
         "cost_model":crate::server::hex32(policy.cost_model_id()),"forced_stop":forced,"max_ambiguous_bars":policy.max_ambiguous_bars().to_string(),"max_gap_fills":policy.max_gap_fills().to_string()})
 }

@@ -35332,3 +35332,87 @@ clean, and the pinning test asserts BOTH halves — that `|t|` really does place
 rare asymmetric winner below a grinder, and that `Asymmetry` inverts it. A test
 that only checked the new order would pass just as well if the old one had never
 been a problem.
+
+### D-0594 — Two more places the rare asymmetric winner was unrepresentable — 2026-09-11
+
+A 74-agent audit of every hardcoded constant found four baked values that make
+the operator's target shape unrepresentable rather than merely unlikely. D-0593
+closed the first. This closes two more. **The remaining two are NOT closed here,
+and the reason is that closing them would require inventing policy** — see the
+end of this entry, because an undocumented invented threshold is exactly the
+silent policy §6 refuses.
+
+**1. The exit-grid selector priced every winner at the smallest winning outcome.**
+
+`ledger_all` selects with `ExitGridSelectorV1::GuaranteedFloor`, and that
+selector is honest, conservative and is NOT being corrected. `Cell::guaranteed_floor`
+computes `wins * min_win - losses * worst_loss`: *"what if each win had been my
+worst win and each loss my largest"*. For a risk-averse caller that is the right
+question.
+
+For a strategy whose value IS a fat right tail it is exactly the wrong one. The
+single enormous win is priced as though it were the smallest, so the tail
+contributes nothing to the choice, and among admitted cells the selector prefers
+the exit that makes wins UNIFORM — the opposite of the objective.
+
+`ExitGridSelectorV1::OperatorRule` is appended. It ranks on
+`Cell::reward_to_risk_bp` — `min_win / worst_loss`, the operator's rule stated
+verbatim — so the chosen exit is the one whose smallest win stands furthest above
+its largest loss. It is the cell-level twin of `rank::Lens::Asymmetry` (D-0593),
+which asks the same question one stage earlier at the cut that decides which
+combinations reach a grid at all.
+
+Appended as selector tag 4 in every codec that carries one, renumbering none of
+the three that exist, per §3 rule 8. Five codecs were found by the compiler's
+exhaustiveness check rather than by grep — `exit_grid_policy::selector_byte`,
+`execution_v3`, `execution_v4`, `execution_capability` (the only one with a
+DECODE side, so both halves moved together), `boolean_candidate_grid` (whose
+table is zero-based where the others are one-based; that difference is
+pre-existing and the numbers are never compared across codecs) and `api`'s JSON
+label. Neither selector is the default and no existing call site changed: a
+conservative floor and an asymmetric payoff are different objectives, and a
+caller that wants one must not silently receive the other.
+
+**2. `descend` could not be asked for a cadence rarer than one trade a week.**
+
+`PER_WEEK` was a whole number with a floor of one, and the refusal that guarded
+that floor was right about ZERO — *"a cadence of zero has no support floor and
+would sweep every combination that fires even once"*. That argument says nothing
+about the UNIT, and the unit was the defect: one trade a week is **fifty-two a
+year**, so the rarest cadence the command could express was already eight times
+more frequent than the objective it exists to serve.
+
+`Cadence` is `PerWeek(u64)` or `PerYear(u64)`, and `CADENCE` accepts `3` (a week,
+the historical meaning, bit-identical) or `6/y` (a year). `cadence_floor_ppm`
+keeps its signature and delegates, so every existing caller and test is
+unchanged; the per-year arm multiplies before dividing for the same reason the
+ppm conversion states its own. Zero is still refused on either arm. The banner
+reports the unit it was GIVEN rather than a normalised one, because six a year
+and zero a week are the same integer and only one of them was asked for.
+
+**What is NOT fixed, and why it is not mine to fix.**
+
+*The scratch-win collapse.* `min_win` is the smallest POSITIVE trade
+(`population_base_evidence_v2.rs:1046`), so a single +1 paisa scratch win sets it
+to 1 and the 3:1 ratio collapses however large the real winners are. That is not
+a defect — it is the rule working exactly as stated, because the smallest win
+genuinely WAS one paisa. Repairing it means declaring a magnitude below which a
+trade is a scratch and counted on neither side, and that threshold is a number
+this repository does not have and §3 rule 1 forbids inventing. The engine
+already treats an EXACT zero as neither side; extending that to a band is a
+research decision with a number attached, and it needs an operator's entry.
+
+*The day-consistency policy.* `index_consistency.rs` classifies a day win or loss
+by SIGN ALONE, so a day netting +1 paisa is the identical unit of evidence as one
+netting fifty thousand rupees. It then requires three winning days every complete
+week, at most two losing days in a row with no-trade days not resetting the
+streak, and it must pass on all three spans independently — and it vetoes, since
+`combined_qualifies` ANDs it with the institutional verdict. `Policy` is a unit
+struct whose digest is bound into run identity, so its thresholds cannot be moved
+without a V2 beside it under §3 rule 8. That much is mechanical. What is not is
+WHAT V2 should say: every threshold in it would be a new invented number, and a
+magnitude-aware day rule needs a stated magnitude. Both are the operator's to
+declare.
+
+Verified on this tree: `cargo check --workspace --all-targets` clean,
+`cargo fmt --all --check` clean.

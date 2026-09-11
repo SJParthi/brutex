@@ -1890,6 +1890,8 @@ fn parameter_from_population_source(
         ExitGridSelectorV1::PessimisticTotal => 1,
         ExitGridSelectorV1::EdgeThenPessimistic => 2,
         ExitGridSelectorV1::GuaranteedFloor => 3,
+        // APPENDED AS 4; the three above keep their numbers. D-0594.
+        ExitGridSelectorV1::OperatorRule => 4,
     };
     let forced_stop_policy_tag = match facts.forced_stop {
         ForcedStopV1::Disabled => FORCED_STOP_DISABLED_TAG,

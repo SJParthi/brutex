@@ -496,6 +496,30 @@ pub enum ExitGridSelectorV1 {
     EdgeThenPessimistic,
     /// Largest worst-case guaranteed floor, then total and simplicity.
     GuaranteedFloor,
+    /// Largest SMALLEST-win over LARGEST-loss, then total and simplicity — the
+    /// operator's own rule, applied at the cell. D-0594.
+    ///
+    /// # Why [`Self::GuaranteedFloor`] could not answer this
+    ///
+    /// That selector is honest and conservative and it is not being corrected
+    /// here: `Cell::guaranteed_floor` prices every win at `min_win` and every
+    /// loss at `worst_loss`, answering *"what if each win had been my worst
+    /// win"*. For a strategy whose value is a fat right tail that is exactly
+    /// the wrong question — the one enormous win is priced as though it were
+    /// the smallest, so the tail contributes nothing to the choice and the
+    /// selector prefers the exit that makes wins UNIFORM.
+    ///
+    /// This ranks on `Cell::reward_to_risk_bp` — `min_win / worst_loss`, the
+    /// operator's rule stated verbatim — so the chosen exit is the one whose
+    /// smallest win stands furthest above its largest loss. It is the
+    /// cell-level twin of `rank::Lens::Asymmetry` (D-0593), which answers the
+    /// same question one stage earlier, at the cut that decides which
+    /// combinations reach a grid at all.
+    ///
+    /// Both remain available and neither is the default: a conservative floor
+    /// and an asymmetric payoff are different objectives, and a caller that
+    /// wants one should not silently receive the other.
+    OperatorRule,
 }
 
 /// Whether an operator-specified stop is absent, offered, or mandatory.
@@ -2114,6 +2138,13 @@ impl ResolvedExitGridV1 {
             ExitGridSelectorV1::GuaranteedFloor => admitted.max_by_key(|cell| {
                 (
                     cell.guaranteed_floor(),
+                    cell.pessimistic,
+                    crate::grid::merit(cell),
+                )
+            }),
+            ExitGridSelectorV1::OperatorRule => admitted.max_by_key(|cell| {
+                (
+                    cell.reward_to_risk_bp(),
                     cell.pessimistic,
                     crate::grid::merit(cell),
                 )
@@ -3984,6 +4015,11 @@ const fn selector_byte(value: ExitGridSelectorV1) -> u8 {
         ExitGridSelectorV1::PessimisticTotal => 1,
         ExitGridSelectorV1::EdgeThenPessimistic => 2,
         ExitGridSelectorV1::GuaranteedFloor => 3,
+        // APPENDED AS 4, renumbering none of the three above. The selector
+        // decides WHICH exit a candidate is priced at, so it decides the
+        // recorded result -- §3 rule 3 wants a different identity, and §3 rule 8
+        // forbids moving the numbers that exist. D-0594.
+        ExitGridSelectorV1::OperatorRule => 4,
     }
 }
 

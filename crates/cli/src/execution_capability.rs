@@ -3454,6 +3454,10 @@ const fn selector_byte(value: ExitGridSelectorV1) -> u8 {
         ExitGridSelectorV1::PessimisticTotal => 1,
         ExitGridSelectorV1::EdgeThenPessimistic => 2,
         ExitGridSelectorV1::GuaranteedFloor => 3,
+        // APPENDED AS 4, and this is the one codec with a DECODE side, so the
+        // two halves move together or a record written today is unreadable
+        // tomorrow. D-0594.
+        ExitGridSelectorV1::OperatorRule => 4,
     }
 }
 
@@ -3462,6 +3466,7 @@ fn selector_from_byte(byte: u8) -> Result<ExitGridSelectorV1, ExecutionCapabilit
         1 => Ok(ExitGridSelectorV1::PessimisticTotal),
         2 => Ok(ExitGridSelectorV1::EdgeThenPessimistic),
         3 => Ok(ExitGridSelectorV1::GuaranteedFloor),
+        4 => Ok(ExitGridSelectorV1::OperatorRule),
         _ => Err(format!("exit-grid selector tag {byte} is unknown")),
     }
 }
@@ -3493,6 +3498,39 @@ fn forced_stop_from_parts(tag: u8, ppm: i64) -> Result<ForcedStopV1, ExecutionCa
 )]
 mod tests {
     use super::*;
+
+    /// **Every selector round-trips, and the numbers never move — D-0594.**
+    ///
+    /// This is the ONE selector codec with a decode side, so the two halves
+    /// have to move together or a record written today is unreadable tomorrow.
+    /// The tags are asserted as literals rather than compared to each other:
+    /// a round-trip alone would still pass if every number shifted by one, and
+    /// §3 rule 8 is about the numbers staying put, not merely being consistent.
+    #[test]
+    fn every_exit_grid_selector_round_trips_and_keeps_its_appended_tag() {
+        for (selector, tag) in [
+            (ExitGridSelectorV1::PessimisticTotal, 1_u8),
+            (ExitGridSelectorV1::EdgeThenPessimistic, 2),
+            (ExitGridSelectorV1::GuaranteedFloor, 3),
+            (ExitGridSelectorV1::OperatorRule, 4),
+        ] {
+            assert_eq!(
+                selector_byte(selector),
+                tag,
+                "{selector:?} must keep tag {tag}; §3 rule 8 forbids renumbering"
+            );
+            assert_eq!(
+                selector_from_byte(tag),
+                Ok(selector),
+                "tag {tag} must decode back to {selector:?}"
+            );
+        }
+        assert!(
+            selector_from_byte(5).is_err(),
+            "an unknown tag is refused rather than defaulted -- a silent \
+             fallback here would read a foreign record as a familiar one"
+        );
+    }
     use crate::population::{
         AdmissionStatusV1, AdmissionV1, ClosureV1, CompletionReconciliationV2, ExitCellsPerMaskV2,
         ExitCoordinateV1, LongShortExitGridIdentitiesV2, PopulationCommit, PopulationIdentitiesV2,

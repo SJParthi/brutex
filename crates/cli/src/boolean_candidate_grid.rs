@@ -158,6 +158,10 @@ fn policy(out: &mut Vec<u8>, policy: &ExitGridPolicyV1) {
             ExitGridSelectorV1::PessimisticTotal => 0,
             ExitGridSelectorV1::EdgeThenPessimistic => 1,
             ExitGridSelectorV1::GuaranteedFloor => 2,
+            // APPENDED AS 3. This table is zero-based where the others are
+            // one-based, and that difference is pre-existing -- the numbers are
+            // per-codec and never compared across them. D-0594.
+            ExitGridSelectorV1::OperatorRule => 3,
         },
     );
     out.extend_from_slice(&policy.cost_model_id());
