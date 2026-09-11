@@ -35416,3 +35416,79 @@ declare.
 
 Verified on this tree: `cargo check --workspace --all-targets` clean,
 `cargo fmt --all --check` clean.
+
+### D-0595 — A win inside its own pricing bracket is not the smallest win — 2026-09-11
+
+The operator's rule is `min(win) >= 3x max(loss)`, and `min_win` took the
+smallest STRICTLY POSITIVE trade. One trade that gained a single paisa therefore
+set the floor to one paisa and collapsed the ratio however large the real winners
+were. D-0594 recorded this and declined to repair it, on the ground that a repair
+needs a magnitude below which a trade is a scratch and §3 rule 1 forbids
+inventing one. **The operator has since delegated the decision, and the answer
+turns out not to be a number.**
+
+Every trade is already priced twice. `grid`'s `pess` and `opt`, and the
+`TradeRow::worst` and `TradeRow::best` that carry them, are ONE trade read under
+the worst and the best ordering of both legs, so their difference is that trade's
+own execution uncertainty. A gain no larger than that bracket is a win under one
+admissible reading and a loss under another. It cannot be the evidence a 3:1
+ratio rests on.
+
+So a win counts toward `min_win` when it EXCEEDS its own bracket, and is a
+scratch otherwise. The threshold is measured per trade rather than declared, it
+scales itself across instruments and rungs, and there is no constant anywhere in
+it — which is §6's argument about a settable parameter, honoured by having
+nothing to set.
+
+**It is the opposite test to `Rules::fills_hold`, and that is deliberate.** That
+rule demands `optimistic >= 2 * pessimistic` — that the uncertainty be LARGE
+beside the profit, which is an edge ceiling. This demands the profit be large
+beside the uncertainty. They are opposite tests and only one of them is about
+evidence.
+
+**FOUR SITES MOVED, and the test suite found the last two.** The rule is folded
+from trade rows in four places, three of which reconcile against each other:
+
+* `grid::tally_trade` — the `Cell`'s own value. It gained the optimistic reading
+  it did not previously receive; `opt` was already in scope at its one
+  production call site.
+* `population_base_evidence_v2::fold_trade_rows` — reconciles against
+  `expected.min_win` and returns *"same-pass TradeRows do not reproduce the
+  evaluated Cell"* on any disagreement.
+* `institutional_evidence` — reconciles again and returns *"chosen-cell trade
+  detail does not reconcile every P&L, count, extreme, drawdown and streak field
+  with its evaluated cell"*. **Changing the first two alone failed seven tests
+  with exactly that message**, which is the reconciliation doing its job.
+* `index_stop_qualification_metrics` — the single-stop route, not reconciled
+  against the others but folded from the same shape. Moved for consistency
+  rather than necessity: it carries `optimistic_paisa` and `pessimistic_paisa`
+  and already compares them to count ambiguous fills, so leaving one of four
+  paths on the old rule would have been a difference nothing enforced.
+
+`runner::outcome::Sides` is deliberately NOT among them. Its `min_win` is over
+forward MOVES rather than priced trades, and a forward move has no second
+reading — there is no bracket to compare against, so the rule does not apply.
+
+Nothing else changed. `wins`, `gross_win`, `best_trade` and both streaks are
+untouched, because a scratch really did win and `TradeAggregatesV2::validate`
+requires `losses == trades - wins`. Only the floor moves.
+
+**The counter that is NOT beside it, and why.** `min_win == 0` now carries two
+meanings — nothing won, or nothing won by more than its own uncertainty — and a
+`scratch_wins` field would separate them. It was written and then removed:
+`TradeAggregatesV2` has `encode_aggregates`/`decode_aggregates` at a FIXED width,
+so a new field is a new file version at its own stride under §4, and §3 rule 8
+forbids mutating a format in place. The ambiguity is documented on the field
+rather than paid for with a format version nothing else needs yet.
+
+**The day-consistency policy is still not repaired, and the reason has changed.**
+It is no longer that the number would be invented — the same bracket principle
+would answer it. It is that `index_consistency::Session` carries
+`pessimistic_paisa` alone, with no optimistic reading, in a record serialized at
+a fixed `SESSION_BYTES` behind the magic `BRICDY01` and bound into run identity.
+Applying this rule to days needs that record to carry both readings, which is a
+format version and a `Policy` V2 beside V1 — real work with real identity
+consequences, and not something to begin at the end of a long session.
+
+Verified on this tree: `cargo fmt --all --check` clean, `cargo clippy --workspace
+--all-targets -D warnings` clean.

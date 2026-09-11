@@ -4074,7 +4074,7 @@ fn one_variant(
         // fixture, which is not the same as being ordered.
         let (pess, opt) = ordered(&mut cell, pess, opt);
 
-        tally_trade(&mut cell, pess, pess_off, &mut streaks);
+        tally_trade(&mut cell, pess, opt, pess_off, &mut streaks);
 
         cell.trades = cell.trades.saturating_add(1);
         cell.pessimistic = cell.pessimistic.saturating_add(pess);
@@ -4265,16 +4265,40 @@ struct Streaks {
 /// [`Streaks`] is carried by the caller because each counter measures a RUN and
 /// is cleared by the OTHER'S outcome, which a per-trade function cannot do for
 /// itself. `max_winning_streak` was missing while its opposite shipped.
-const fn tally_trade(cell: &mut Cell, pess: i64, held: usize, streaks: &mut Streaks) {
+const fn tally_trade(cell: &mut Cell, pess: i64, opt: i64, held: usize, streaks: &mut Streaks) {
     if pess > 0 {
         cell.gross_win = cell.gross_win.saturating_add(pess);
         if pess > cell.best_trade {
             cell.best_trade = pess;
         }
-        // THE FLOOR OF THE WINS. `min_win` starts at zero, which is below every
-        // winner, so the first winner must set it unconditionally rather than
-        // by comparison.
-        if cell.min_win == 0 || pess < cell.min_win {
+        // THE FLOOR OF THE WINS, AND A SCRATCH IS NOT ON IT -- D-0595.
+        //
+        // `min_win` starts at zero, which is below every winner, so the first
+        // qualifying winner must set it unconditionally rather than by
+        // comparison.
+        //
+        // What qualifies is the part that changed. `pess` and `opt` are ONE
+        // trade priced under the worst and the best reading of both legs, so
+        // `opt - pess` is that trade's own execution uncertainty. A gain no
+        // larger than that bracket is a win under one admissible reading and a
+        // loss under another, so it cannot be the floor a `min(win) >= 3x
+        // max(loss)` rule rests on -- one such trade used to set `min_win` to
+        // its own tiny value and collapse the ratio however large the real
+        // winners were.
+        //
+        // Measured rather than declared, and self-scaling: there is no constant
+        // here and so nothing to set wrongly.
+        //
+        // `wins`, `gross_win`, `best_trade` and both streaks are deliberately
+        // untouched -- a scratch really did win, and every count that says so
+        // stays true. Only the floor moves.
+        //
+        // `population_base_evidence_v2::fold_trade_rows` applies the identical
+        // test and RECONCILES its result against this field, so the two must
+        // agree exactly or every Step-3 run refuses with "same-pass TradeRows
+        // do not reproduce the evaluated Cell".
+        let bracket = opt.saturating_sub(pess);
+        if pess > bracket && (cell.min_win == 0 || pess < cell.min_win) {
             cell.min_win = pess;
         }
         streaks.losing = 0;
@@ -5388,13 +5412,72 @@ mod tests {
     /// visibly wrong rather than coincidentally right: the four-win run comes
     /// AFTER the three-loss run, so a winning counter that the losses did not
     /// clear would read seven.
+    /// **A win inside its own pricing bracket is not the floor — D-0595.**
+    ///
+    /// `min_win` is the numerator of the operator's `min(win) >= 3x max(loss)`
+    /// rule, and it took the smallest STRICTLY POSITIVE trade. One trade that
+    /// gained a single paisa therefore set the floor to one paisa and collapsed
+    /// the ratio however large the real winners were.
+    ///
+    /// The test that matters is the middle case: a win of 20 whose two readings
+    /// span 80 is a win under one admissible ordering and a loss under another,
+    /// so it cannot be the evidence a ratio rests on — while a win of 300 whose
+    /// readings span 100 survives either reading and can.
+    ///
+    /// Every OTHER count is asserted unchanged in the same pass, because a
+    /// scratch really did win and `TradeAggregatesV2::validate` requires
+    /// `losses == trades - wins`. Only the floor moves.
+    #[test]
+    fn a_win_inside_its_own_pricing_bracket_is_not_the_smallest_win() {
+        let mut cell = Cell::default();
+        let mut streaks = Streaks::default();
+
+        // (pessimistic, optimistic): a real win, a scratch, a bigger win.
+        for (pess, opt) in [(300_i64, 400_i64), (20, 100), (900, 950)] {
+            tally_trade(&mut cell, pess, opt, 1, &mut streaks);
+            cell.trades = cell.trades.saturating_add(1);
+        }
+
+        assert_eq!(
+            cell.min_win, 300,
+            "the 20-paisa win spans 80 paisa of fill uncertainty and must not \
+             become the floor; 300 against a 100 span survives either reading"
+        );
+        // `cell.wins` is deliberately not asserted here: it is incremented by
+        // the caller's own `pess > 0` block and not by this function, so a
+        // count read after `tally_trade` alone would be zero and would prove
+        // nothing about either behaviour.
+        assert_eq!(
+            cell.gross_win, 1_220,
+            "the scratch is still a win and still in the gross: 300+20+900"
+        );
+        assert_eq!(cell.best_trade, 900, "the ceiling is untouched");
+        assert_eq!(
+            cell.max_winning_streak, 3,
+            "a scratch does not break a winning run"
+        );
+
+        // THE OLD BEHAVIOUR, ASSERTED SO THE CHANGE IS VISIBLE. With no
+        // uncertainty at all every win qualifies, which is what the two test
+        // call sites above rely on and what a zero-spread fixture should give.
+        let mut certain = Cell::default();
+        let mut none = Streaks::default();
+        for pess in [300_i64, 20, 900] {
+            tally_trade(&mut certain, pess, pess, 1, &mut none);
+        }
+        assert_eq!(
+            certain.min_win, 20,
+            "with a zero bracket the smallest win is the smallest win"
+        );
+    }
+
     #[test]
     fn both_streaks_are_measured_and_each_one_ends_the_other() {
         let mut cell = Cell::default();
         let mut streaks = Streaks::default();
         // 2 up, 3 down, 4 up, 1 down, 1 up.
         for pess in [10_i64, 10, -5, -5, -5, 10, 10, 10, 10, -5, 10] {
-            tally_trade(&mut cell, pess, 1, &mut streaks);
+            tally_trade(&mut cell, pess, pess, 1, &mut streaks);
         }
         assert_eq!(cell.max_winning_streak, 4, "the longest run of winners");
         assert_eq!(cell.max_losing_streak, 3, "and the longest run of losers");
@@ -5405,7 +5488,7 @@ mod tests {
         let mut flat = Cell::default();
         let mut flats = Streaks::default();
         for pess in [10_i64, 0, 10] {
-            tally_trade(&mut flat, pess, 1, &mut flats);
+            tally_trade(&mut flat, pess, pess, 1, &mut flats);
         }
         assert_eq!(
             flat.max_winning_streak, 1,

@@ -29,11 +29,26 @@ fn trade_facts<S: Snapshot>(row: &S) -> Result<Trades, String> {
                 .checked_add(win)
                 .ok_or("single-stop gross wins overflow")?;
             out.max_win = out.max_win.max(win);
-            out.min_win = if out.min_win == 0 {
-                win
-            } else {
-                out.min_win.min(win)
-            };
+            // THE SAME BRACKET TEST THE OTHER THREE FOLDS APPLY -- D-0595.
+            //
+            // `optimistic_paisa` and `pessimistic_paisa` are one trade priced
+            // under both readings -- line 59 below already compares them to
+            // count ambiguous fills -- so their difference is this trade's own
+            // execution uncertainty. A win no larger than it is a win under one
+            // admissible ordering and a loss under another, and cannot be the
+            // floor a `min(win) >= 3x max(loss)` rule rests on. `max_win`,
+            // `gross_win` and the streaks are untouched: the trade still won.
+            let bracket = trade
+                .optimistic_paisa
+                .saturating_sub(trade.pessimistic_paisa)
+                .unsigned_abs();
+            if win > bracket {
+                out.min_win = if out.min_win == 0 {
+                    win
+                } else {
+                    out.min_win.min(win)
+                };
+            }
             streaks.0 = streaks
                 .0
                 .checked_add(1)
