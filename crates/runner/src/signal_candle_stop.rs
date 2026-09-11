@@ -140,9 +140,11 @@ impl std::error::Error for Error {}
 pub enum Reason {
     /// No refusal: the event points to its exact trade.
     None = 0,
-    /// The immediate next minute is absent; no later entry is substituted.
+    /// The immediate next minute is absent before the 15:10 boundary; no later
+    /// entry is substituted. A real one-minute data hole.
     Unreachable = 1,
-    /// Its entry would open at or after the 15:10 boundary.
+    /// Its entry would open at or after the 15:10 boundary, whether or not that
+    /// minute exists: the session's last bucket lands here (D-0603).
     TooLate = 2,
     /// The actual entry open is at/beyond its stop, so no position is opened.
     GapInvalid = 3,
@@ -636,9 +638,11 @@ pub struct Metrics {
     pub favourable_paisa: i64,
     /// Summed occupied one-minute bars for actual trades.
     pub holding_minutes: u64,
-    /// Complete definite signals without an immediate entry minute.
+    /// Complete definite signals without an immediate entry minute before the
+    /// 15:10 boundary: real one-minute data holes, which refuse execution.
     pub unreachable: u64,
-    /// Signals whose entry would be at/after15:10.
+    /// Signals whose entry would be at/after 15:10, including every last bucket
+    /// of a session, whose close has no following minute at all (D-0603).
     pub too_late: u64,
     /// Gap-invalid entries deliberately skipped before opening.
     pub gap_invalid: u64,
@@ -1140,6 +1144,23 @@ impl<'a> Prepared<'a> {
             trade_index: None,
         };
         let Some(entry) = self.alignment.get(position).copied().flatten() else {
+            // NO ENTRY MINUTE IS NOT ALWAYS A MISSING OBSERVATION -- D-0603.
+            //
+            // `align::onto_execution` maps a signal to the minute stamped exactly
+            // at its close on the same day, or to nothing. The session's last
+            // bucket always gets nothing: it closes at or after 15:30 and no
+            // minute follows the market. Filed as `Unreachable`, that bucket made
+            // `execution_complete` refuse every setting whose condition could fire
+            // on the day's last bar -- 3,076 of 4,000 in one live 60min batch --
+            // for a signal that was only too late to trade.
+            //
+            // So an absent minute is judged exactly as a present one would be: an
+            // entry that would open after 15:09 is `TooLate` whether or not its
+            // minute exists. Only an absence at or before 15:09, which could have
+            // been traded, stays `Unreachable` -- a real one-minute data hole.
+            if close > forced_open(bar.ts_micros)? {
+                event.reason = Reason::TooLate;
+            }
             return Ok((event, None));
         };
         let entry_bar = self.source.series.bars().get(entry).ok_or(Error::Source)?;

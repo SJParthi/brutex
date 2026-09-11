@@ -308,3 +308,48 @@ fn reconciliation_checks_underlying_rows_even_after_the_observation_digest_is_up
     *encoded.get_mut(HEADER_BYTES + 96 + 128).unwrap() = 2;
     assert!(decode(&encoded, ID, 100_000).is_err());
 }
+#[test]
+fn only_a_data_hole_or_a_provably_late_signal_may_lack_an_entry() {
+    // D-0603. Each generated session's 15:29 signal closes at 15:30, where no
+    // minute exists: it is stored as late without an entry, and must round-trip.
+    let body = encode(ID, &evaluations(), BUDGET).unwrap();
+    let rows = decode(&body, ID, 100_000).unwrap();
+    assert!(
+        rows.iter()
+            .flat_map(|row| &row.events)
+            .any(|event| event.reason == Reason::TooLate && event.entry_bar.is_none())
+    );
+    // The rule at its boundary: a late event without an entry must close after
+    // its own day's 15:09, or it is a real hole wearing the wrong reason; an
+    // unreachable one never has an entry; nothing else may lack one.
+    let day = 20_000_i64;
+    let at =
+        |minute: i64| day * 86_400_000_000 - indicators::IST_OFFSET_MICROS + minute * 60_000_000;
+    let event = |reason, entry_bar: Option<u64>, close: i64| Event {
+        signal_bar: 0,
+        signal_micros: close - 60_000_000,
+        signal_close_micros: close,
+        stop_paisa: 1,
+        reason,
+        entry_bar,
+        entry_micros: entry_bar.map(|_| close),
+        occupied_through_micros: None,
+        trade_index: None,
+    };
+    for (reason, entry, minute, owned) in [
+        (Reason::TooLate, None, 15 * 60 + 30, true),
+        (Reason::TooLate, None, 15 * 60 + 10, true),
+        (Reason::TooLate, None, 15 * 60 + 9, false),
+        (Reason::TooLate, Some(1), 15 * 60 + 10, true),
+        (Reason::Unreachable, None, 11 * 60, true),
+        (Reason::Unreachable, Some(1), 11 * 60, false),
+        (Reason::None, None, 11 * 60, false),
+        (Reason::WhileOpen, None, 11 * 60, false),
+    ] {
+        assert_eq!(
+            entry_is_owned(&event(reason, entry, at(minute)), day).unwrap(),
+            owned,
+            "{reason:?} {entry:?} at minute {minute}"
+        );
+    }
+}

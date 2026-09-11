@@ -466,6 +466,28 @@ fn validate(record: &Record) -> Result<(), String> {
     }
     reconcile(record)
 }
+/// Whether an event's entry is present exactly when its reason needs one --
+/// D-0603. An entry is absent for two reasons only: a one-minute bar missing
+/// before 15:10 (`Unreachable`), or a signal whose close is after its own day's
+/// 15:09, which every session's last bucket is (`TooLate`). A late event without
+/// an entry must prove it, or a real hole could be filed as late and slip past
+/// `execution_complete`.
+fn entry_is_owned(event: &Event, signal_day: i64) -> Result<bool, String> {
+    Ok(match (event.reason, event.entry_bar) {
+        (Reason::Unreachable, entry) => entry.is_none(),
+        (Reason::TooLate, None) => {
+            let boundary = signal_day
+                .checked_mul(86_400_000_000)
+                .and_then(|day| day.checked_sub(indicators::IST_OFFSET_MICROS))
+                .and_then(|day| {
+                    day.checked_add((runner::outcome::FORCED_EXIT_MINUTE - 1) * 60_000_000)
+                })
+                .ok_or("single-stop forced-exit boundary overflow")?;
+            event.signal_close_micros > boundary
+        }
+        (_, entry) => entry.is_some(),
+    })
+}
 #[expect(
     clippy::too_many_lines,
     reason = "the ordered trade, event and day reconciliations share one occupancy and totals proof without skipping source rows"
@@ -536,7 +558,7 @@ fn reconcile(record: &Record) -> Result<(), String> {
             .checked_add(indicators::IST_OFFSET_MICROS)
             .ok_or("single-stop signal day overflow")?
             .div_euclid(86_400_000_000);
-        if (event.reason == Reason::Unreachable) != event.entry_bar.is_none()
+        if !entry_is_owned(event, signal_day)?
             || event.signal_close_micros.checked_sub(event.signal_micros)
                 != Some(crate::stored::rung_length_micros(record.timeframe)?)
             || signal_day < record.first_day

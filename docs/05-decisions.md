@@ -35784,3 +35784,84 @@ clean, `cargo test -p cli --lib` 1,294 passed / 0 failed, `-p runner --lib` 584
 passed / 0 failed, `web` suite 776 passed / 0 failed, policy guide 37 of 37
 limits matching. The p-value rounding change passes the suite, which proves
 nothing depended on the old floor; no test yet pins the new direction.
+
+### D-0603 — A signal too late to trade was filed as a missing observation — 2026-09-11
+
+**The session's last bucket can never be entered, and it was counted as an
+execution failure.** `runner::align::onto_execution` maps a signal to the
+one-minute bar stamped exactly at its close on the same IST day, or to nothing.
+The last bucket of every session closes at or after 15:30 -- a 1min bar at 15:29
+closes at 15:30, and on the IST clock grid the 30min and 60min buckets stamped
+15:00 close at 15:30 and 16:00 -- and no minute follows the market, so it always
+gets nothing. `signal_candle_stop::signal()`
+filed every such signal as `Reason::Unreachable` ("the immediate next minute is
+absent") and returned before its own 15:10 check.
+`index_stop_qualification_metrics::execution_complete` requires
+`unreachable == 0`, so any setting whose condition could fire on the day's last
+bar was refused as execution-incomplete.
+
+**Measured on the live search** (identity `604d0d93…`, batch 0, NSE-NIFTY,
+zerodha): 3,304 of 4,000 60min settings and 3,302 of 4,000 30min settings were
+refused on execution completeness, and 3,076 and 3,066 of those had no refusal
+counter other than `unreachable`. No setting had more than one unreachable signal
+per session -- the maximum was 225 of 225 later sessions -- which is the
+signature of one bar a day, not of holes in the data. Of the settings that
+passed, 542 of 696 (60min) and 488 of 698 (30min) had never traded.
+
+**The fix judges an absent minute exactly as a present one is judged.** If the
+would-be entry -- the signal's close -- is after `forced_open` of the signal's
+own day (15:09), the signal is `TooLate` whether or not that minute exists, which
+is the verdict a present 15:10 entry already received. An absence at or before
+15:09 could have been traded, so it stays `Unreachable`: a real hole in the
+one-minute data, still refused. No byte format changes -- both reasons already
+existed and decode unchanged. `index_stop_store`'s reconciliation, however,
+required `Unreachable` exactly when the entry is absent, so every new batch would
+have refused to write: the runner's own tests could not see it, because they
+round-trip only the runner's decoder. It now accepts an absent entry on `TooLate`
+only when the signal's close is after its own day's 15:09 -- the producer's rule
+-- so a real hole cannot be filed as late to slip past `execution_complete`.
+Catalogs written before this still reopen: their last buckets are `Unreachable`
+without an entry.
+
+**What it changes.** Every affected setting's events, metrics and evaluation
+digest change, and the commit is part of every run identity, so a search launched
+on this build starts from batch 0 (§3 rule 3). The same shape on the boolean and
+grid routes -- `trade.rs`'s alignment count and the `unreachable != 0`
+reconciliations in `global_replay*.rs` -- is under separate review and is not
+claimed fixed here.
+
+Tests: `a_signal_closing_after_the_last_entry_minute_is_too_late_even_with_no_minute_there`
+covers each of the eight rungs' last bucket on both sides, and the 15:09/15:10
+boundary with that minute removed.
+
+### D-0604 — Every CSCV split re-added the same segments — 2026-09-11
+
+**Half of every batch was the same additions, repeated.**
+`index_stop_qualification::numeric::cscv` built each of the 6,435 canonical
+splits of a 16-segment, 352-session training window by walking every row period
+by period and adding each value to that split's train or test total. A split only
+chooses WHICH contiguous segments are train, so a row's total per segment is the
+same in every split. At 4,000 settings that was 6,435 x 4,000 x 352 = 9.06e9
+checked additions -- the ranking endpoint's own `charged_required_split_work` --
+and the cold re-check in `Reader::open` repeats all of it. From the live
+telemetry: the institutional stage took 409-442 s for 60min alone with CSCV and
+11-13 s on a run whose odd session count skipped CSCV; on the live two-rung run it
+was about 7.3 min of each 20-minute batch, holding the api at ~199% CPU.
+
+**The fix sums each segment once.** `segment_sums` totals each row's contiguous
+blocks, and `split` then adds 16 totals per row per split instead of 352 values:
+22x fewer additions. It is exact. When a row's absolute total fits `i64`, no
+partial sum in any order can overflow, so both routes give identical totals,
+digest bytes and placements, and a saved body and its completion pin do not move.
+A row whose absolute total exceeds `i64::MAX` keeps the per-period loop, and with
+it the exact refusal it has always produced. `split` is the old loop body moved
+into a function unchanged, so that route is the same code.
+
+**Not claimed.** The wall-time gain is an estimate until a batch runs on this
+build. The bootstraps and the index-consistency hashing still run serially, and
+splits still run on one core per timeframe.
+
+Tests: `cscv_segment_totals_reproduce_every_per_period_split_exactly` compares
+both routes on all 462 splits of a 12-segment layout and pins both sides of the
+`i64::MAX` bound; the existing cold-replay tests compare recomputed statistics
+with saved bytes.

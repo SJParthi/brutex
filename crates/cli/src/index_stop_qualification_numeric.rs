@@ -422,46 +422,26 @@ fn cscv(returns: &[Vec<i64>], facts: &Facts) -> Result<CscvEvidence, String> {
     let mut splits = Vec::new();
     splits.try_reserve_exact(masks.len()).map_err(display)?;
     let width = usize::try_from(layout.periods_per_segment()).map_err(display)?;
+    // EVERY SPLIT RE-ADDS THE SAME SEGMENTS -- D-0604.
+    //
+    // A split only chooses which contiguous segments are train and which are
+    // test, so each row's total per segment is identical for all of them.
+    // Re-adding every period per split cost 6,435 x 4,000 x 352 = 9.06e9 checked
+    // additions per 4,000-setting batch -- about half of each batch's wall time,
+    // paid twice because the cold re-check replays it. Summing each segment once
+    // and adding 16 totals per split is 22x less work.
+    //
+    // Exact, not approximate: when a row's absolute total fits `i64`, no partial
+    // sum in ANY order can overflow, so both routes give identical sums, digests
+    // and placements. A row that could overflow keeps the per-period loop, and
+    // with it the exact refusal it has always produced.
+    let segments = segment_sums(returns, width)?;
+    let (rows, width) = match segments.as_deref() {
+        Some(totals) => (totals, 1),
+        None => (returns, width),
+    };
     for (train, test) in masks {
-        let mut trains = Vec::new();
-        let mut tests = Vec::new();
-        trains.try_reserve_exact(facts.count).map_err(display)?;
-        tests.try_reserve_exact(facts.count).map_err(display)?;
-        let mut digest = Hasher::new();
-        digest.update(b"brutex-index-stop-training-cscv-v1\0");
-        digest.update(&layout.digest());
-        digest.update(&train.to_le_bytes());
-        digest.update(&test.to_le_bytes());
-        for row in returns {
-            let mut sums = (0_i64, 0_i64);
-            for (index, &value) in row.iter().enumerate() {
-                let bit = 1_u64
-                    .checked_shl(u32::try_from(index / width).map_err(display)?)
-                    .ok_or("single-stop CSCV mask overflow")?;
-                let sum = if train & bit != 0 {
-                    &mut sums.0
-                } else if test & bit != 0 {
-                    &mut sums.1
-                } else {
-                    return Err("single-stop CSCV leaves an observation out".into());
-                };
-                *sum = sum
-                    .checked_add(value)
-                    .ok_or("single-stop CSCV money overflow")?;
-            }
-            trains.push(sums.0);
-            tests.push(sums.1);
-            digest.update(&sums.0.to_le_bytes());
-            digest.update(&sums.1.to_le_bytes());
-        }
-        let (bottom_half, rankable) = cscv_placement(&trains, &tests)?;
-        splits.push(Split {
-            train,
-            test,
-            bottom_half,
-            rankable,
-            scores: digest.finalize(),
-        });
+        splits.push(split(rows, width, layout.digest(), train, test)?);
     }
     Ok((
         Some([
@@ -473,6 +453,87 @@ fn cscv(returns: &[Vec<i64>], facts: &Facts) -> Result<CscvEvidence, String> {
         layout.digest(),
         splits,
     ))
+}
+
+/// One canonical split's train and test totals per row, their placement and the
+/// digest binding them. Each run of `width` consecutive values in a row is one
+/// segment bit; `width` is 1 when the rows are already segment totals.
+pub(super) fn split(
+    rows: &[Vec<i64>],
+    width: usize,
+    layout: [u8; 32],
+    train: u64,
+    test: u64,
+) -> Result<Split, String> {
+    let mut trains = Vec::new();
+    let mut tests = Vec::new();
+    trains.try_reserve_exact(rows.len()).map_err(display)?;
+    tests.try_reserve_exact(rows.len()).map_err(display)?;
+    let mut digest = Hasher::new();
+    digest.update(b"brutex-index-stop-training-cscv-v1\0");
+    digest.update(&layout);
+    digest.update(&train.to_le_bytes());
+    digest.update(&test.to_le_bytes());
+    for row in rows {
+        let mut sums = (0_i64, 0_i64);
+        for (index, &value) in row.iter().enumerate() {
+            let bit = 1_u64
+                .checked_shl(u32::try_from(index / width).map_err(display)?)
+                .ok_or("single-stop CSCV mask overflow")?;
+            let sum = if train & bit != 0 {
+                &mut sums.0
+            } else if test & bit != 0 {
+                &mut sums.1
+            } else {
+                return Err("single-stop CSCV leaves an observation out".into());
+            };
+            *sum = sum
+                .checked_add(value)
+                .ok_or("single-stop CSCV money overflow")?;
+        }
+        trains.push(sums.0);
+        tests.push(sums.1);
+        digest.update(&sums.0.to_le_bytes());
+        digest.update(&sums.1.to_le_bytes());
+    }
+    let (bottom_half, rankable) = cscv_placement(&trains, &tests)?;
+    Ok(Split {
+        train,
+        test,
+        bottom_half,
+        rankable,
+        scores: digest.finalize(),
+    })
+}
+
+/// Each row's total per `width`-period segment, or `None` when some row's
+/// absolute total exceeds `i64::MAX` -- the bound under which the order of its
+/// additions cannot change any sum, so a split built from these totals is
+/// identical to one built period by period.
+pub(super) fn segment_sums(
+    returns: &[Vec<i64>],
+    width: usize,
+) -> Result<Option<Vec<Vec<i64>>>, String> {
+    let mut rows = Vec::new();
+    rows.try_reserve_exact(returns.len()).map_err(display)?;
+    for row in returns {
+        let bounded = row
+            .iter()
+            .try_fold(0_u64, |total, value| {
+                total.checked_add(value.unsigned_abs())
+            })
+            .is_some_and(|total| total <= i64::MAX.unsigned_abs());
+        if !bounded {
+            return Ok(None);
+        }
+        let mut totals = Vec::new();
+        totals
+            .try_reserve_exact(row.len().div_ceil(width))
+            .map_err(display)?;
+        totals.extend(row.chunks(width).map(|block| block.iter().sum::<i64>()));
+        rows.push(totals);
+    }
+    Ok(Some(rows))
 }
 
 fn numeric(candidate: zero::Candidate) -> Result<[u64; 12], String> {

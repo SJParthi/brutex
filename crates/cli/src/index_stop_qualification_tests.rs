@@ -941,3 +941,36 @@ fn saved_limits_cannot_enlarge_current_cold_replay_work_or_memory_admission() {
     assert!(why.contains("bootstrap work"), "{why}");
     reader.require_current().unwrap();
 }
+
+#[test]
+fn cscv_segment_totals_reproduce_every_per_period_split_exactly() {
+    // D-0604. Summing each segment once must change no split, digest or
+    // placement, and a row whose absolute total could overflow keeps the
+    // per-period loop.
+    use crate::population_observations_v1::{canonical_masks, derive_layout};
+    let layout = derive_layout(24).unwrap();
+    let width = usize::try_from(layout.periods_per_segment()).unwrap();
+    assert_eq!(width, 2);
+    let rows: Vec<Vec<i64>> = (0..5_i64)
+        .map(|row| (0..24_i64).map(|p| (row * 37 + p * 11) % 23 - 11).collect())
+        .collect();
+    let totals = numeric::segment_sums(&rows, width).unwrap().unwrap();
+    assert!(totals.iter().all(|row| row.len() == 12));
+    let masks = canonical_masks(layout).unwrap();
+    assert_eq!(masks.len(), 462);
+    for (train, test) in masks {
+        assert_eq!(
+            numeric::split(&rows, width, layout.digest(), train, test).unwrap(),
+            numeric::split(&totals, 1, layout.digest(), train, test).unwrap()
+        );
+    }
+    // Both sides of the exactness bound.
+    let at_bound = [vec![i64::MAX - 1, 1, 0, 0]];
+    assert_eq!(
+        numeric::segment_sums(&at_bound, 2).unwrap(),
+        Some(vec![vec![i64::MAX, 0]])
+    );
+    for past in [vec![i64::MAX - 1, 2, 0, 0], vec![i64::MIN, 0, 0, 0]] {
+        assert_eq!(numeric::segment_sums(&[past], 2).unwrap(), None);
+    }
+}

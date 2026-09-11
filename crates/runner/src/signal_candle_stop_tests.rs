@@ -462,6 +462,53 @@ fn missing_immediate_entry_never_moves_to_a_later_open_and_duplicate_entry_block
 }
 
 #[test]
+fn a_signal_closing_after_the_last_entry_minute_is_too_late_even_with_no_minute_there() {
+    // D-0603. Each rung's last bucket closes at or after 15:30, where no minute
+    // exists, so alignment gives it none. That is "too late to trade today" --
+    // the verdict a present 15:10 entry gets -- never a missing observation,
+    // which refuses the whole setting's execution completeness. Buckets sit on
+    // the IST clock grid, so the last one starts at 15:29, 15:28, 15:27, 15:25,
+    // 15:20, 15:15, 15:00 and 15:00 respectively.
+    let last_buckets = [
+        (1, 374),
+        (2, 373),
+        (3, 372),
+        (5, 370),
+        (10, 365),
+        (15, 360),
+        (30, 345),
+        (60, 345),
+    ];
+    for side in [Direction::Long, Direction::Short] {
+        for (minutes, signal_minute) in last_buckets {
+            let result = Fixture::new(minutes, signal_minute).evaluate(side);
+            assert!(result.trades().is_empty(), "{minutes}min");
+            assert_eq!(result.metrics().too_late, 1, "{minutes}min");
+            assert_eq!(result.metrics().unreachable, 0, "{minutes}min");
+            let event = result.events().first().unwrap();
+            assert_eq!(event.reason, Reason::TooLate, "{minutes}min");
+            assert_eq!(event.entry_bar, None, "{minutes}min");
+            roundtrip(&result);
+        }
+        // The boundary. A 15:09 entry is allowed, so a missing 15:09 minute hid
+        // a tradeable entry: a real hole. A missing 15:10 minute hid nothing.
+        for (signal_minute, missing, unreachable, too_late) in [(353, 354, 1, 0), (354, 355, 0, 1)]
+        {
+            let mut fixture = Fixture::new(1, signal_minute);
+            fixture.bars.retain(|bar| bar.ts_micros != stamp(missing));
+            let result = fixture.evaluate(side);
+            assert!(result.trades().is_empty(), "signal minute {signal_minute}");
+            assert_eq!(
+                (result.metrics().unreachable, result.metrics().too_late),
+                (unreachable, too_late),
+                "signal minute {signal_minute}"
+            );
+            roundtrip(&result);
+        }
+    }
+}
+
+#[test]
 fn one_position_allows_sequential_reentry_but_never_the_same_exit_minute() {
     for side in [Direction::Long, Direction::Short] {
         let mut fixture = Fixture::new(1, 30);
