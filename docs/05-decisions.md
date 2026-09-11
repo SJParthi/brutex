@@ -35492,3 +35492,66 @@ consequences, and not something to begin at the end of a long session.
 
 Verified on this tree: `cargo fmt --all --check` clean, `cargo clippy --workspace
 --all-targets -D warnings` clean.
+
+### D-0596 — A day whose sign depends on the reading is evidence for neither side — 2026-09-11
+
+The last of the four baked findings. `index_consistency` classified a day a win
+or a loss by the SIGN of its pessimistic sum alone, so a day netting one paisa
+was the identical unit of evidence as a day netting fifty thousand rupees, and a
+day that lost a paisa under the worst reading while winning handsomely under the
+best was filed as a loss. Every threshold in `Policy` counts DAYS, so that
+classification is the entire input to the rule — and it vetoes, because
+`combined_qualifies` ANDs it with the institutional verdict.
+
+D-0594 declined this on the ground that a magnitude rule needs an invented
+magnitude. D-0595 removed that objection: the bracket principle answers it
+without a constant. What remained was mechanical, and it is done here.
+
+**`Session` carries both readings.** `BRICDY02`, four words, 40 bytes. The
+record had `pessimistic_paisa` alone; `signal_candle_stop::Period` already
+carried `optimistic_paisa` and `sessions()` simply was not copying it.
+
+**`BRICDY01` still decodes, and still means what it meant.** A three-word row
+decodes with `optimistic_paisa` set EQUAL to the pessimistic one — taken as
+equal, never invented — which gives a zero bracket, under which V2's test
+reduces to V1's sign test exactly. An existing row therefore says what it always
+said rather than acquiring a reading nobody measured. A V1 row re-encodes as
+`BRICDY02` and so hashes differently; **no such row exists in any store today**,
+and this entry records that rather than leaving it to be discovered.
+
+**`Policy` is now an enum, and V1 is frozen.** V1's bytes are unchanged to the
+byte and so is its digest — the literal version word became `self.version()`,
+which returns 1 for V1. All 44 existing `Policy::V1` call sites compile
+untouched, because an enum variant reads the same as the associated const it
+replaced. V2 keeps ALL FIVE thresholds and both rule codes exactly as V1 states
+them; the record does not grow. What differs is which days reach the counters,
+and the version word carries that.
+
+**The V2 rule, which introduces no number.** A day is a WIN when its pessimistic
+sum exceeds its own bracket — `optimistic - pessimistic`, the spread between the
+worst and best ordering of its own trades. It is a LOSS when even its optimistic
+sum is negative. Anything else is a scratch: its sign depends on which admissible
+ordering you read, so it is evidence for no side and falls to the existing
+zero-day arm, where it already preserves the streak exactly as a no-trade day
+does. The threshold is the day's own measurement uncertainty — the same
+principle D-0595 applied to one trade.
+
+**The boolean route is unchanged by V2, and says so.** `BooleanSessionV1`
+carries `return_paisa` alone. Its sessions are built with the two readings equal,
+giving a zero bracket, under which V2 reduces to V1 — so that route is not
+silently degraded by a policy it cannot serve. Making it magnitude-aware is its
+own record's version to bump.
+
+**Decode gained two refusals rather than two coercions.** An optimistic reading
+below the pessimistic one is refused, not sorted — the two are ends of a
+measurement interval and the one called pessimistic must be the low end. A
+no-trade day may not carry a return on EITHER side; it previously checked only
+one, and the stricter check immediately caught a test fixture that mutated the
+pessimistic sum of a no-trade day and left the optimistic one at 100.
+
+**V1 remains the default everywhere.** Nothing selects V2 yet: §3 rule 8 forbids
+mutating a shipped policy, the two answer different questions, and choosing
+between them is an operator's decision with a run identity attached.
+
+Verified on this tree: `cargo fmt --all --check` clean, `cargo clippy --workspace
+--all-targets -D warnings` clean.

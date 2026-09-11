@@ -524,6 +524,7 @@ mod tests {
             .map(|(day, pessimistic_paisa)| Session {
                 day,
                 pessimistic_paisa,
+                optimistic_paisa: pessimistic_paisa,
                 trades: 1,
             })
             .collect();

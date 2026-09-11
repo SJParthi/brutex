@@ -43,6 +43,7 @@ fn record(gap: bool, no_trades: bool) -> Record {
         .map(|day| Session {
             day,
             pessimistic_paisa: if no_trades { 0 } else { 100 },
+            optimistic_paisa: if no_trades { 0 } else { 100 },
             trades: if no_trades { 0 } else { 3 },
         })
         .collect();
@@ -206,8 +207,10 @@ fn loss_streak_crosses_training_boundary_and_flat_days_do_not_reset_it() {
     let mut value = record(false, false);
     for index in [3, 4, 5] {
         value.sessions.get_mut(index).unwrap().pessimistic_paisa = -100;
+        value.sessions.get_mut(index).unwrap().optimistic_paisa = -100;
     }
     value.sessions.get_mut(6).unwrap().pessimistic_paisa = 0;
+    value.sessions.get_mut(6).unwrap().optimistic_paisa = 0;
     value.sessions.get_mut(6).unwrap().trades = 0;
     let family = value.evaluation.family;
     value.training = evaluate(

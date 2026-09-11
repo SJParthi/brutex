@@ -681,6 +681,7 @@ fn sessions(periods: &[runner::signal_candle_stop::Period]) -> Result<Vec<Sessio
     rows.extend(periods.iter().map(|p| Session {
         day: p.day,
         pessimistic_paisa: p.pessimistic_paisa,
+        optimistic_paisa: p.optimistic_paisa,
         trades: p.trades,
     }));
     Ok(rows)
@@ -711,6 +712,7 @@ pub(super) fn daily<S: Snapshot>(
         days.extend(after.periods().iter().map(|p| Session {
             day: p.day,
             pessimistic_paisa: p.pessimistic_paisa,
+            optimistic_paisa: p.optimistic_paisa,
             trades: p.trades,
         }));
         let original = days

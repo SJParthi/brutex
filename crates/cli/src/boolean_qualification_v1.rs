@@ -268,9 +268,20 @@ fn consistency_records(
                 .periods()
                 .iter()
                 .chain(coordinate.periods())
+                // THE BOOLEAN ROUTE MEASURES ONE READING, AND SAYS SO -- D-0596.
+                //
+                // `BooleanSessionV1` carries `return_paisa` alone; it has no
+                // optimistic sum and inventing one would be worse than not
+                // having it. Setting the two equal gives a ZERO bracket, under
+                // which `Policy::V2`'s magnitude test reduces exactly to V1's
+                // sign test -- so this route is unchanged by V2 rather than
+                // silently degraded by it. Making it magnitude-aware needs
+                // `BooleanSessionV1` to carry the second reading, which is its
+                // own record's version to bump.
                 .map(|day| Session {
                     day: day.day(),
                     pessimistic_paisa: day.return_paisa(),
+                    optimistic_paisa: day.return_paisa(),
                     trades: day.trades(),
                 }),
         );

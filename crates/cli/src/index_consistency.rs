@@ -14,7 +14,7 @@ use std::fmt;
 /// Exact fixed widths of the additive version-one observations.
 pub const POLICY_BYTES: usize = 72;
 /// One explicit eligible-session observation.
-pub const SESSION_BYTES: usize = 32;
+pub const SESSION_BYTES: usize = 40;
 /// Fixed aggregate counters.
 pub const SUMMARY_BYTES: usize = 176;
 /// One civil week's counters, without a variable reason string.
@@ -31,12 +31,55 @@ const CALENDAR_DOMAIN: &[u8] = b"brutex-index-consistency-calendar-v1\0";
 /// complete Monday-Friday five-session week, and <=2 losing days per streak.
 /// Flat and no-trade days preserve a streak; only a winning day resets it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Policy;
+pub enum Policy {
+    /// The approved version-one rule: a day is a win or a loss by the SIGN of
+    /// its pessimistic sum alone. Its bytes, thresholds and digest are frozen.
+    V1,
+    /// The same thresholds, counting only days whose outcome survives BOTH
+    /// readings — D-0596.
+    ///
+    /// # What V1 could not say
+    ///
+    /// Every threshold here counts DAYS, and V1 classified a day by the sign of
+    /// one number. A day netting a single paisa was therefore the identical
+    /// unit of evidence as a day netting fifty thousand rupees, and a day that
+    /// lost a paisa under the worst reading while winning handsomely under the
+    /// best was filed as a loss. For a strategy that wins rarely and hugely
+    /// that is not a rounding — it is the whole input to the rule being blind
+    /// to the thing the strategy is made of.
+    ///
+    /// # What V2 says instead, and why it needs no new number
+    ///
+    /// A day is a WIN when its pessimistic sum exceeds its own
+    /// [`Session::bracket_paisa`], and a LOSS when even its optimistic sum is
+    /// negative. Anything else is a scratch day: its sign depends on which
+    /// admissible ordering of its own trades you read, so it is evidence for
+    /// neither side and is treated exactly as a no-trade day already is.
+    ///
+    /// The threshold is the day's own execution uncertainty, measured rather
+    /// than declared — the same principle D-0595 applied to a single trade. No
+    /// constant is introduced and none of the five thresholds moves.
+    ///
+    /// V1 is retained and is still the default everywhere; §3 rule 8 forbids
+    /// mutating a shipped policy, and the two answer different questions.
+    V2,
+}
 impl Policy {
-    /// Explicit policy version; no capital, cost or institutional value is altered.
-    pub const V1: Self = Self;
     /// Fixed encoding width for callers storing the additive policy record.
     pub const BYTE_LEN: usize = POLICY_BYTES;
+    /// Whether a day must clear its own bracket to count — false on [`Self::V1`].
+    #[must_use]
+    pub const fn magnitude_aware(self) -> bool {
+        matches!(self, Self::V2)
+    }
+    /// The encoded version word: `1` or `2`.
+    #[must_use]
+    pub const fn version(self) -> u64 {
+        match self {
+            Self::V1 => 1,
+            Self::V2 => 2,
+        }
+    }
     /// Required winning-day ratio numerator.
     #[must_use]
     pub const fn winning_day_numerator(self) -> u64 {
@@ -69,7 +112,12 @@ impl Policy {
         words(
             *b"BRICPO01",
             &[
-                1,
+                // THE VERSION WORD CARRIES THE SEMANTIC CHANGE, and no width
+                // does. V2 keeps all five thresholds and the two rule codes
+                // exactly as V1 states them -- what differs is which days reach
+                // the counters -- so the record stays 72 bytes and V1's bytes,
+                // and therefore V1's digest, are untouched. D-0596.
+                self.version(),
                 self.winning_day_numerator(),
                 self.winning_day_denominator(),
                 self.min_weekly_wins(),
@@ -92,19 +140,38 @@ impl Policy {
     pub fn decode(raw: &[u8]) -> Result<Self, DecodeError> {
         if raw == Self::V1.canonical_bytes() {
             Ok(Self::V1)
+        } else if raw == Self::V2.canonical_bytes() {
+            Ok(Self::V2)
         } else {
             Err(DecodeError::Format)
         }
     }
 }
 
-/// Saved sum of all actual pessimistic gross trade returns on one IST day.
+/// Saved gross trade returns on one IST day, under BOTH readings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Session {
     /// Civil IST day since 1970-01-01, not a UTC trade timestamp.
     pub day: i64,
     /// Sum of the day's pessimistic gross returns, in integer paisa.
     pub pessimistic_paisa: i64,
+    /// Sum of the day's OPTIMISTIC gross returns, in integer paisa — D-0596.
+    ///
+    /// Never below [`Self::pessimistic_paisa`]: the two are one day priced
+    /// under the worst and the best ordering of its trades, so the one called
+    /// pessimistic must be the low end. [`Self::decode`] refuses a record that
+    /// says otherwise rather than quietly ordering them.
+    ///
+    /// # Why the record grew
+    ///
+    /// A day was classified a win or a loss by the SIGN of the pessimistic sum
+    /// alone, so a day netting one paisa was the identical unit of evidence as
+    /// a day netting fifty thousand rupees, and a day that lost a paisa under
+    /// the worst reading and won handsomely under the best was filed as a loss.
+    /// Every threshold in [`Policy`] counts days, so that classification is the
+    /// whole input to the rule — and a magnitude-aware rule needs the second
+    /// reading, which this record did not carry.
+    pub optimistic_paisa: i64,
     /// Actual trades; zero requires a zero return.
     pub trades: u64,
 }
@@ -115,8 +182,13 @@ impl Session {
     #[must_use]
     pub fn canonical_bytes(self) -> [u8; SESSION_BYTES] {
         words(
-            *b"BRICDY01",
-            &[bits(self.day), bits(self.pessimistic_paisa), self.trades],
+            *b"BRICDY02",
+            &[
+                bits(self.day),
+                bits(self.pessimistic_paisa),
+                bits(self.optimistic_paisa),
+                self.trades,
+            ],
         )
     }
     /// Exact observation identity.
@@ -126,20 +198,53 @@ impl Session {
     }
     /// Decode an individual observation. Ordering/eligibility belong to evaluation.
     ///
+    /// # Both widths are accepted, and a V1 row keeps its meaning exactly
+    ///
+    /// `BRICDY01` carried three words and no optimistic reading. It decodes
+    /// with `optimistic_paisa` set EQUAL to the pessimistic one, which gives a
+    /// zero bracket — and a zero bracket reproduces the old sign-only
+    /// classification exactly, whichever [`Policy`] reads it. An existing row
+    /// therefore says what it always said rather than acquiring a reading
+    /// nobody measured. A V1 row re-encodes as `BRICDY02` and so hashes
+    /// differently; no such row exists in any store today, and D-0596 records
+    /// that rather than leaving it to be discovered.
+    ///
     /// # Errors
-    /// Bad civil days, widths, magic or zero-trade nonzero returns are refused.
+    /// Bad civil days, widths, magic, an optimistic reading below the
+    /// pessimistic one, or zero-trade nonzero returns are refused.
     pub fn decode(raw: &[u8]) -> Result<Self, DecodeError> {
-        let [day, pessimistic, trades] = read_words(raw, *b"BRICDY01")?;
-        let row = Self {
-            day: signed(day),
-            pessimistic_paisa: signed(pessimistic),
-            trades,
+        let row = if let Ok([day, pessimistic, optimistic, trades]) =
+            read_words::<4>(raw, *b"BRICDY02")
+        {
+            Self {
+                day: signed(day),
+                pessimistic_paisa: signed(pessimistic),
+                optimistic_paisa: signed(optimistic),
+                trades,
+            }
+        } else {
+            let [day, pessimistic, trades] = read_words::<3>(raw, *b"BRICDY01")?;
+            Self {
+                day: signed(day),
+                pessimistic_paisa: signed(pessimistic),
+                optimistic_paisa: signed(pessimistic),
+                trades,
+            }
         };
         valid_day(row.day)?;
-        if row.trades == 0 && row.pessimistic_paisa != 0 {
+        if row.optimistic_paisa < row.pessimistic_paisa {
+            return Err(DecodeError::Inconsistent);
+        }
+        if row.trades == 0 && (row.pessimistic_paisa != 0 || row.optimistic_paisa != 0) {
             return Err(DecodeError::Inconsistent);
         }
         Ok(row)
+    }
+
+    /// The day's own execution uncertainty, in paisa. Never negative.
+    #[must_use]
+    pub const fn bracket_paisa(self) -> i64 {
+        self.optimistic_paisa.saturating_sub(self.pessimistic_paisa)
     }
 }
 
@@ -1076,7 +1181,40 @@ impl State {
         if weekday {
             week.observed_days += 1;
         }
-        match row.pessimistic_paisa.cmp(&0) {
+        // WHICH DAYS ARE EVIDENCE, AND WHICH ONLY LOOK LIKE IT -- D-0596.
+        //
+        // V1 read the SIGN of the pessimistic sum, so a day netting one paisa
+        // counted exactly as much as a day netting fifty thousand rupees, and a
+        // day that lost a paisa under the worst reading while winning handsomely
+        // under the best was filed as a loss. Every threshold in `Policy` counts
+        // days, so that classification is the entire input to the rule.
+        //
+        // V2 asks whether the day's outcome survives BOTH readings. A win must
+        // clear the day's own bracket -- `optimistic - pessimistic`, the spread
+        // between the worst and best ordering of its own trades. A loss must
+        // still be a loss under the OPTIMISTIC reading. A day that satisfies
+        // neither is a scratch: its sign depends on which admissible ordering
+        // you read, so it is evidence for no side and falls to the `Equal` arm,
+        // where it is already counted as a zero day and already preserves the
+        // streak exactly as a no-trade day does.
+        //
+        // The threshold is the day's own measurement uncertainty, not a number
+        // anybody chose -- the same principle D-0595 applied to one trade. On a
+        // V1 record the bracket is zero, so this reduces to the sign test and
+        // every existing row means precisely what it always meant.
+        let ordering = if self.result.policy.magnitude_aware() {
+            let bracket = row.bracket_paisa();
+            if row.pessimistic_paisa > bracket {
+                std::cmp::Ordering::Greater
+            } else if row.optimistic_paisa < 0 {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        } else {
+            row.pessimistic_paisa.cmp(&0)
+        };
+        match ordering {
             std::cmp::Ordering::Greater => {
                 summary.winning_days += 1;
                 self.streak = 0;

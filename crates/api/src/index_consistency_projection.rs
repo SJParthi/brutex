@@ -243,6 +243,7 @@ mod tests {
             Session {
                 day: 20_000,
                 pessimistic_paisa: i64::MAX,
+                optimistic_paisa: i64::MAX,
                 trades: u64::MAX,
             },
         );

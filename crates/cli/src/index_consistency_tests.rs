@@ -19,6 +19,7 @@ fn span(first: i64, last: i64) -> Vec<Session> {
         .map(|day| Session {
             day,
             pessimistic_paisa: 100,
+            optimistic_paisa: 100,
             trades: 1,
         })
         .collect()
@@ -70,16 +71,19 @@ fn every_five_day_win_loss_flat_no_trade_sequence_obeys_the_declared_policy() {
                     streak += 1;
                     maximum = maximum.max(streak);
                     row.pessimistic_paisa = -100;
+                    row.optimistic_paisa = -100;
                     row.trades = 4;
                 }
                 2 => {
                     flats += 1;
                     row.pessimistic_paisa = 0;
+                    row.optimistic_paisa = 0;
                     row.trades = 3;
                 }
                 _ => {
                     no_trades += 1;
                     row.pessimistic_paisa = 0;
+                    row.optimistic_paisa = 0;
                     row.trades = 0;
                 }
             }
@@ -147,6 +151,7 @@ fn losses_cross_week_boundaries_even_when_both_individual_weeks_pass() {
     assert_eq!(rows.len(), 10);
     for index in [3, 4, 5] {
         rows.get_mut(index).unwrap().pessimistic_paisa = -100;
+        rows.get_mut(index).unwrap().optimistic_paisa = -100;
     }
     let result = run(first, last, &rows);
     assert_eq!(result.summary.passing_weeks, 2);
@@ -165,10 +170,13 @@ fn flat_and_no_trade_days_preserve_a_loss_streak_and_only_a_win_resets_it() {
     let mut rows = span(first, last);
     for index in [3, 4, 7] {
         rows.get_mut(index).unwrap().pessimistic_paisa = -100;
+        rows.get_mut(index).unwrap().optimistic_paisa = -100;
     }
     rows.get_mut(5).unwrap().pessimistic_paisa = 0;
+    rows.get_mut(5).unwrap().optimistic_paisa = 0;
     rows.get_mut(5).unwrap().trades = 0;
     rows.get_mut(6).unwrap().pessimistic_paisa = 0;
+    rows.get_mut(6).unwrap().optimistic_paisa = 0;
     rows.get_mut(6).unwrap().trades = 2;
     let result = run(first, last, &rows);
     assert_eq!(result.summary.longest_losing_streak, 3);
@@ -176,6 +184,7 @@ fn flat_and_no_trade_days_preserve_a_loss_streak_and_only_a_win_resets_it() {
     assert_eq!(result.summary.zero_days, 1);
     assert_eq!(result.first_issue_day, Some(day(2025, 1, 15)));
     rows.get_mut(6).unwrap().pessimistic_paisa = 1;
+    rows.get_mut(6).unwrap().optimistic_paisa = 1;
     let reset = run(first, last, &rows);
     assert_eq!(reset.summary.longest_losing_streak, 2);
     assert_eq!(reset.reasons & Reason::LosingDayStreak.mask(), 0);
@@ -191,6 +200,7 @@ fn long_loss_runs_are_counted_exactly_across_holidays_and_year_boundaries() {
     let mut rows = span(first, last);
     for row in &mut rows {
         row.pessimistic_paisa = -1;
+        row.optimistic_paisa = -1;
     }
     let result = run(first, last, &rows);
     assert_eq!(result.summary.longest_losing_streak, rows.len() as u64);
@@ -262,6 +272,7 @@ fn existing_excluded_sessions_and_real_weekend_sessions_remain_distinct() {
     for row in &mut rows {
         if [saturday, day(2025, 2, 3), day(2025, 2, 4)].contains(&row.day) {
             row.pessimistic_paisa = -1;
+            row.optimistic_paisa = -1;
         }
     }
     let result = run(first, last, &rows);
@@ -280,6 +291,7 @@ fn missing_calendar_authority_stays_unmeasured_even_when_rows_are_offered() {
     let rows = [Session {
         day: first,
         pessimistic_paisa: 100,
+        optimistic_paisa: 100,
         trades: 1,
     }];
     let result = run(first, last, &rows);
@@ -315,6 +327,7 @@ fn malformed_order_counts_returns_spans_and_unexpected_sessions_refuse() {
     closed.push(Session {
         day: last,
         pessimistic_paisa: 0,
+        optimistic_paisa: 0,
         trades: 0,
     });
     invalid_sets.push(closed);
@@ -340,6 +353,7 @@ fn malformed_order_counts_returns_spans_and_unexpected_sessions_refuse() {
         &[Session {
             day: excluded,
             pessimistic_paisa: 0,
+            optimistic_paisa: 0,
             trades: 0,
         }],
     );
@@ -355,11 +369,13 @@ fn count_and_both_paisa_overflow_directions_refuse_before_partial_day_updates() 
             Session {
                 day: first,
                 pessimistic_paisa: left,
+                optimistic_paisa: left,
                 trades,
             },
             Session {
                 day: first + 1,
                 pessimistic_paisa: right,
+                optimistic_paisa: right,
                 trades: 1,
             },
         ];
@@ -377,10 +393,14 @@ fn count_and_both_paisa_overflow_directions_refuse_before_partial_day_updates() 
     let mut rows = span(first, last);
     for row in &mut rows {
         row.pessimistic_paisa = 0;
+        row.optimistic_paisa = 0;
     }
     rows.first_mut().unwrap().pessimistic_paisa = -2;
+    rows.first_mut().unwrap().optimistic_paisa = -2;
     rows.get_mut(5).unwrap().pessimistic_paisa = i64::MAX;
+    rows.get_mut(5).unwrap().optimistic_paisa = i64::MAX;
     rows.get_mut(6).unwrap().pessimistic_paisa = 1;
+    rows.get_mut(6).unwrap().optimistic_paisa = 1;
     let result = run(first, last, &rows);
     assert_eq!(result.outcome, Outcome::Refused);
     assert_ne!(result.reasons & Reason::ArithmeticOverflow.mask(), 0);
@@ -395,6 +415,7 @@ fn count_and_both_paisa_overflow_directions_refuse_before_partial_day_updates() 
     // satisfy the weekly rule, isolating the next week's subtotal overflow.
     for (row, paisa) in rows.iter_mut().zip([-6, 1, 1, 1, 1]) {
         row.pessimistic_paisa = paisa;
+        row.optimistic_paisa = paisa;
     }
     let result = run(first, last, &rows);
     assert_eq!(result.outcome, Outcome::Refused);
@@ -467,6 +488,7 @@ fn exact_versioned_codecs_refuse_truncation_changed_rules_and_forged_week_claims
     let invalid_zero = Session {
         day: first,
         pessimistic_paisa: 1,
+        optimistic_paisa: 1,
         trades: 0,
     };
     assert!(Session::decode(&invalid_zero.canonical_bytes()).is_err());
@@ -479,4 +501,174 @@ fn exact_versioned_codecs_refuse_truncation_changed_rules_and_forged_week_claims
     ] {
         assert!(!outcome.as_str().is_empty());
     }
+}
+
+/// **A day whose sign depends on which reading you take is evidence for
+/// neither side — D-0596.**
+///
+/// V1 classified a day by the sign of its pessimistic sum alone, so a day that
+/// netted a single paisa counted exactly as much as one netting fifty thousand
+/// rupees. V2 asks whether the outcome survives BOTH readings: a win must clear
+/// the day's own bracket, a loss must still lose under the optimistic reading,
+/// and anything between is a scratch — treated as the zero day it already is.
+///
+/// The fixture is the discriminating one. Every day gains ONE paisa against a
+/// bracket of two hundred, so under V1 the span is a flawless run of winning
+/// days and under V2 not one of them is evidence of anything.
+#[test]
+fn a_day_inside_its_own_bracket_is_a_win_under_v1_and_a_scratch_under_v2() {
+    let (first, last) = (day(2024, 1, 1), day(2024, 2, 29));
+    let rows: Vec<Session> = (first..=last)
+        .filter(|&d| eligibility_of(d) == Eligibility::Eligible)
+        .map(|d| Session {
+            day: d,
+            pessimistic_paisa: 1,
+            optimistic_paisa: 201,
+            trades: 2,
+        })
+        .collect();
+    assert!(rows.len() > 20, "a real span, not a handful of days");
+
+    let one = evaluate(Policy::V1, family("NIFTY"), first, last, &rows, true);
+    let two = evaluate(Policy::V2, family("NIFTY"), first, last, &rows, true);
+
+    assert_eq!(
+        one.summary.winning_days,
+        rows.len() as u64,
+        "V1 counts every one-paisa day as a winning day"
+    );
+    assert_eq!(
+        two.summary.winning_days, 0,
+        "V2 counts none of them: a gain of 1 against a bracket of 200 is a win \
+         under one admissible ordering of the day's own trades and a loss under \
+         another"
+    );
+    assert_eq!(
+        two.summary.zero_days,
+        rows.len() as u64,
+        "they are scratch days, which is what the zero-day arm already means"
+    );
+    assert_eq!(
+        two.summary.losing_days, 0,
+        "and a scratch is not a loss either -- it is evidence for no side"
+    );
+
+    // THE THREE OUTCOMES V2 SEPARATES, on one day each.
+    let base = |pess, opt| Session {
+        day: first,
+        pessimistic_paisa: pess,
+        optimistic_paisa: opt,
+        trades: 2,
+    };
+    for (row, wins, losses, scratches, why) in [
+        (base(300, 400), 1, 0, 0, "300 clears a bracket of 100"),
+        (base(20, 100), 0, 0, 1, "20 does not clear a bracket of 80"),
+        (
+            base(-500, -100),
+            0,
+            1,
+            0,
+            "a loss under BOTH readings is a loss",
+        ),
+        (
+            base(-5, 900),
+            0,
+            0,
+            1,
+            "losing by 5 while the best reading wins 900",
+        ),
+    ] {
+        let out = evaluate(Policy::V2, family("NIFTY"), first, first, &[row], false);
+        assert_eq!(
+            (
+                out.summary.winning_days,
+                out.summary.losing_days,
+                out.summary.zero_days
+            ),
+            (wins, losses, scratches),
+            "{why}"
+        );
+    }
+}
+
+/// V1's bytes, thresholds and digest are frozen; V2 differs only in the version
+/// word and is a distinct identity — D-0596.
+#[test]
+fn the_two_policies_share_every_threshold_and_never_share_an_identity() {
+    let (one, two) = (Policy::V1, Policy::V2);
+    assert_eq!(one.version(), 1);
+    assert_eq!(two.version(), 2);
+    assert!(!one.magnitude_aware() && two.magnitude_aware());
+
+    for (name, a, b) in [
+        (
+            "winning day numerator",
+            one.winning_day_numerator(),
+            two.winning_day_numerator(),
+        ),
+        (
+            "winning day denominator",
+            one.winning_day_denominator(),
+            two.winning_day_denominator(),
+        ),
+        ("weekly wins", one.min_weekly_wins(), two.min_weekly_wins()),
+        (
+            "weekly losses",
+            one.max_weekly_losses(),
+            two.max_weekly_losses(),
+        ),
+        (
+            "losing streak",
+            one.max_losing_day_streak(),
+            two.max_losing_day_streak(),
+        ),
+    ] {
+        assert_eq!(a, b, "{name} must not move: V2 changes WHICH days count");
+    }
+
+    assert_eq!(
+        one.canonical_bytes().len(),
+        two.canonical_bytes().len(),
+        "the record does not grow -- the version word carries the change"
+    );
+    assert_ne!(
+        one.digest(),
+        two.digest(),
+        "two policies that order the same days differently must never share a \
+         run identity"
+    );
+    assert_eq!(Policy::decode(&one.canonical_bytes()).unwrap(), one);
+    assert_eq!(Policy::decode(&two.canonical_bytes()).unwrap(), two);
+}
+
+/// A `BRICDY01` row decodes with a zero bracket, so it means exactly what it
+/// always meant — D-0596.
+#[test]
+fn a_version_one_session_row_keeps_its_meaning_under_both_policies() {
+    let d = day(2024, 1, 2);
+    let legacy = words::<32>(*b"BRICDY01", &[bits(d), bits(1), 2]);
+    let row = Session::decode(&legacy).unwrap();
+    assert_eq!(row.pessimistic_paisa, 1);
+    assert_eq!(
+        row.optimistic_paisa, 1,
+        "an absent reading is taken as equal, never invented"
+    );
+    assert_eq!(row.bracket_paisa(), 0, "so the bracket is zero");
+
+    // With a zero bracket the V2 test reduces to the V1 sign test exactly.
+    for policy in [Policy::V1, Policy::V2] {
+        let out = evaluate(policy, family("NIFTY"), d, d, &[row], false);
+        assert_eq!(
+            out.summary.winning_days, 1,
+            "a one-paisa gain with no measured uncertainty is still a win"
+        );
+    }
+
+    // An optimistic reading below the pessimistic one is refused, not sorted.
+    let inverted = words::<40>(*b"BRICDY02", &[bits(d), bits(100), bits(50), 2]);
+    assert!(Session::decode(&inverted).is_err());
+
+    // And a no-trade day may not carry a return on either side.
+    let busy = words::<40>(*b"BRICDY02", &[bits(d), bits(0), bits(5), 0]);
+    assert!(Session::decode(&busy).is_err());
 }
