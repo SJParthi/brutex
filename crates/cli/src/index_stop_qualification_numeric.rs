@@ -11,7 +11,6 @@ use runner::admission::{
     AdmissionEvidenceValuesV1, AdmissionExactProbabilityV2, CompletenessV1, ObservedI64V1,
     ObservedU64V1,
 };
-use runner::bootstrap::{spa_receipt_v1, white_reality_check_receipt_v1};
 use runner::bootstrap_zero_v2::{self as zero, Classification};
 
 #[path = "index_stop_qualification_metrics.rs"]
@@ -291,7 +290,13 @@ pub(super) fn measure<S: Snapshot>(
     let returns = returns(later)?;
     let draws = usize::try_from(facts.procedure.draws()).map_err(display)?;
     let block = usize::try_from(facts.procedure.block_length()).map_err(display)?;
-    let romano = zero::evaluate(
+    // ONE WALK OVER THE DRAWS FOR ALL THREE PROCEDURES. Romano-Wolf, White and
+    // SPA resampled the same index vectors from the same seed in three separate
+    // passes. The shared walk computes each resampled mean once and reproduces
+    // all three receipts bit for bit, so a qualification saved by the
+    // three-pass build still re-verifies here byte for byte -- and `check()`,
+    // which replays this function, gets the same walk.
+    let tests = zero::evaluate_with_family_tests(
         &returns,
         draws,
         facts.procedure.seed(),
@@ -301,11 +306,8 @@ pub(super) fn measure<S: Snapshot>(
             max_bytes: facts.bounds.memory_bytes,
         },
     )
-    .map_err(|why| format!("single-stop complete later Romano-Wolf procedure refused: {why:?}"))?;
-    let white = white_reality_check_receipt_v1(&returns, draws, facts.procedure.seed(), block)
-        .ok_or("single-stop later White procedure refused")?;
-    let spa = spa_receipt_v1(&returns, draws, facts.procedure.seed(), block)
-        .ok_or("single-stop later SPA procedure refused")?;
+    .map_err(refusal)?;
+    let (romano, white, spa) = (tests.romano_wolf(), tests.white(), tests.spa());
     let statistics = Statistics {
         white: [
             white.statistic_bits(),
@@ -534,6 +536,17 @@ pub(super) fn segment_sums(
         rows.push(totals);
     }
     Ok(Some(rows))
+}
+
+/// The message each procedure's separate refusal has always produced here.
+pub(super) fn refusal(why: zero::FamilyRefusal) -> String {
+    match why {
+        zero::FamilyRefusal::RomanoWolf(why) => {
+            format!("single-stop complete later Romano-Wolf procedure refused: {why:?}")
+        }
+        zero::FamilyRefusal::White => "single-stop later White procedure refused".into(),
+        zero::FamilyRefusal::Spa => "single-stop later SPA procedure refused".into(),
+    }
 }
 
 fn numeric(candidate: zero::Candidate) -> Result<[u64; 12], String> {

@@ -16,7 +16,10 @@
 //! <https://www.econ.uzh.ch/apps/workingpapers/wp/econwp219.pdf>.
 //! Existing V1 bytes, receipts and behavior remain unchanged.
 
-use crate::bootstrap::{RomanoWolfAdjustedCandidateV1, romano_wolf_adjusted_p_values_v1};
+use crate::bootstrap::{
+    FamilyTestsRefusalV1, RomanoWolfAdjustedCandidateV1, RomanoWolfAdjustedReceiptV1, SpaReceiptV1,
+    WhiteRealityCheckReceiptV1, family_tests_v1, romano_wolf_adjusted_p_values_v1,
+};
 
 /// Additional requested numerical storage and complete resampling-work caps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -275,16 +278,7 @@ pub fn evaluate(
     block: usize,
     bounds: Bounds,
 ) -> Result<Receipt, Refusal> {
-    let periods = returns.first().map_or(0, Vec::len);
-    if periods < 2 || draws == 0 || block == 0 || returns.iter().any(|r| r.len() != periods) {
-        return Err(Refusal::Shape);
-    }
-    let denominator = u64::try_from(draws.checked_add(1).ok_or(Refusal::Arithmetic)?)
-        .map_err(|_| Refusal::Arithmetic)?;
-    let (work, bytes) = requirements(returns.len(), periods, draws)?;
-    if work > u128::from(bounds.max_work) || bytes > u128::from(bounds.max_bytes) {
-        return Err(Refusal::Bound);
-    }
+    let plan = admit(returns, draws, seed, block, bounds)?;
     let mut active = Vec::new();
     active
         .try_reserve_exact(returns.len())
@@ -301,7 +295,7 @@ pub fn evaluate(
             }
         } else {
             let mut copy = Vec::new();
-            copy.try_reserve_exact(periods)
+            copy.try_reserve_exact(plan.periods)
                 .map_err(|_| Refusal::Allocation)?;
             copy.extend_from_slice(series);
             active.push(copy);
@@ -316,6 +310,159 @@ pub fn evaluate(
                 .ok_or(Refusal::Numerical)?,
         )
     };
+    assemble(returns, plan, &positions, shared.as_ref())
+}
+
+/// [`evaluate`]'s receipt together with White's and Hansen's receipts for the
+/// same complete family, all three measured from ONE walk over the draws.
+///
+/// Byte for byte what `evaluate`,
+/// [`crate::bootstrap::white_reality_check_receipt_v1`] and
+/// [`crate::bootstrap::spa_receipt_v1`] return for the same inputs. The exact
+/// zero rows stay in White's and SPA's family and out of Romano--Wolf's, as
+/// those separate calls treat them, and the walk is
+/// [`crate::bootstrap::family_tests_v1`]. The Romano--Wolf rows are named by
+/// position rather than cloned, so `bounds` -- unchanged, because it is part of
+/// the family digest -- over-counts the buffers this path holds.
+///
+/// # Errors
+///
+/// The refusal of the first of the three separate calls that refuses, in the
+/// order the index-stop qualification has always made them: `evaluate`'s own,
+/// then White's, then SPA's.
+pub fn evaluate_with_family_tests(
+    returns: &[Vec<i64>],
+    draws: usize,
+    seed: u64,
+    block: usize,
+    bounds: Bounds,
+) -> Result<FamilyEvaluation, FamilyRefusal> {
+    let plan = admit(returns, draws, seed, block, bounds).map_err(FamilyRefusal::RomanoWolf)?;
+    let mut positions = Vec::new();
+    positions
+        .try_reserve_exact(returns.len())
+        .map_err(|_| FamilyRefusal::RomanoWolf(Refusal::Allocation))?;
+    for (strategy, series) in returns.iter().enumerate() {
+        let first = *series
+            .first()
+            .ok_or(FamilyRefusal::RomanoWolf(Refusal::Shape))?;
+        if series.iter().all(|&v| v == first) {
+            if first != 0 {
+                return Err(FamilyRefusal::RomanoWolf(Refusal::NonzeroConstant {
+                    strategy,
+                }));
+            }
+        } else {
+            positions.push(strategy);
+        }
+    }
+    let tests = family_tests_v1(returns, &positions, draws, seed, block).map_err(family_refusal)?;
+    let romano_wolf = assemble(returns, plan, &positions, tests.romano_wolf())
+        .map_err(FamilyRefusal::RomanoWolf)?;
+    Ok(FamilyEvaluation {
+        romano_wolf,
+        white: tests.white(),
+        spa: tests.spa(),
+    })
+}
+
+/// [`evaluate`]'s receipt with White's and Hansen's from the same draws.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FamilyEvaluation {
+    romano_wolf: Receipt,
+    white: WhiteRealityCheckReceiptV1,
+    spa: SpaReceiptV1,
+}
+impl FamilyEvaluation {
+    /// Exactly [`evaluate`]'s receipt for the same inputs.
+    #[must_use]
+    pub const fn romano_wolf(&self) -> &Receipt {
+        &self.romano_wolf
+    }
+    /// Exactly White's separate receipt for the complete family.
+    #[must_use]
+    pub const fn white(&self) -> WhiteRealityCheckReceiptV1 {
+        self.white
+    }
+    /// Exactly Hansen's separate receipt for the complete family.
+    #[must_use]
+    pub const fn spa(&self) -> SpaReceiptV1 {
+        self.spa
+    }
+}
+
+/// Which of the three separate calls refuses first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FamilyRefusal {
+    /// [`evaluate`] refuses, for this reason.
+    RomanoWolf(Refusal),
+    /// White's separate receipt refuses the complete family.
+    White,
+    /// Hansen's separate receipt refuses the complete family.
+    Spa,
+}
+
+/// Names the separate call a shared-walk refusal stands for. A row or walk
+/// failure belongs to this procedure's numerical step, which `evaluate`
+/// reports as [`Refusal::Numerical`].
+const fn family_refusal(why: FamilyTestsRefusalV1) -> FamilyRefusal {
+    match why {
+        FamilyTestsRefusalV1::White => FamilyRefusal::White,
+        FamilyTestsRefusalV1::Spa => FamilyRefusal::Spa,
+        FamilyTestsRefusalV1::Rows
+        | FamilyTestsRefusalV1::RomanoWolf
+        | FamilyTestsRefusalV1::Pass => FamilyRefusal::RomanoWolf(Refusal::Numerical),
+    }
+}
+
+/// The procedure terms every row shares, admitted before any row is read.
+#[derive(Clone, Copy)]
+struct Plan {
+    draws: usize,
+    seed: u64,
+    block: usize,
+    bounds: Bounds,
+    periods: usize,
+    denominator: u64,
+}
+
+/// Shape, exact denominator and physical admission, refused in that order.
+fn admit(
+    returns: &[Vec<i64>],
+    draws: usize,
+    seed: u64,
+    block: usize,
+    bounds: Bounds,
+) -> Result<Plan, Refusal> {
+    let periods = returns.first().map_or(0, Vec::len);
+    if periods < 2 || draws == 0 || block == 0 || returns.iter().any(|r| r.len() != periods) {
+        return Err(Refusal::Shape);
+    }
+    let denominator = u64::try_from(draws.checked_add(1).ok_or(Refusal::Arithmetic)?)
+        .map_err(|_| Refusal::Arithmetic)?;
+    let (work, bytes) = requirements(returns.len(), periods, draws)?;
+    if work > u128::from(bounds.max_work) || bytes > u128::from(bounds.max_bytes) {
+        return Err(Refusal::Bound);
+    }
+    Ok(Plan {
+        draws,
+        seed,
+        block,
+        bounds,
+        periods,
+        denominator,
+    })
+}
+
+/// Every caller row, conservative by default, with the shared Romano--Wolf
+/// facts of each nonconstant row laid over its caller position.
+fn assemble(
+    returns: &[Vec<i64>],
+    plan: Plan,
+    positions: &[usize],
+    shared: Option<&RomanoWolfAdjustedReceiptV1>,
+) -> Result<Receipt, Refusal> {
+    let denominator = plan.denominator;
     let mut rows = Vec::new();
     rows.try_reserve_exact(returns.len())
         .map_err(|_| Refusal::Allocation)?;
@@ -330,7 +477,7 @@ pub fn evaluate(
             shared: None,
         });
     }
-    if let Some(receipt) = &shared {
+    if let Some(receipt) = shared {
         for (at, &strategy) in positions.iter().enumerate() {
             let original = *receipt.candidate(at).ok_or(Refusal::Numerical)?;
             let row = rows.get_mut(strategy).ok_or(Refusal::Numerical)?;
@@ -346,15 +493,13 @@ pub fn evaluate(
     }
     Ok(Receipt {
         rows,
-        draws,
-        periods,
-        seed,
-        block,
-        bounds,
-        family_digest: digest(returns, draws, seed, block, bounds)?,
-        shared_digest: shared
-            .as_ref()
-            .map(crate::bootstrap::RomanoWolfAdjustedReceiptV1::family_digest),
+        draws: plan.draws,
+        periods: plan.periods,
+        seed: plan.seed,
+        block: plan.block,
+        bounds: plan.bounds,
+        family_digest: digest(returns, plan.draws, plan.seed, plan.block, plan.bounds)?,
+        shared_digest: shared.map(RomanoWolfAdjustedReceiptV1::family_digest),
     })
 }
 fn requirements(strategies: usize, periods: usize, draws: usize) -> Result<(u128, u128), Refusal> {

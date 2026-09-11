@@ -1307,8 +1307,19 @@ pub fn romano_wolf_adjusted_p_values_v1(
     })
 }
 
-pub(crate) fn romano_wolf_family_digest_v1(
-    returns: &[Vec<i64>],
+// ONE WALK OVER THE DRAWS FOR ALL THREE FAMILY-WISE TESTS. A child module, so
+// it reads this module's generator, resampler and receipt fields without
+// widening the visibility of any of them.
+#[path = "bootstrap_family_pass.rs"]
+mod family_pass;
+pub use family_pass::{FamilyTestsRefusalV1, FamilyTestsV1, family_tests_v1};
+
+/// Ordered Romano--Wolf family and procedure identity.
+///
+/// Generic over the row type only so a family named by position can be hashed
+/// without cloning it; the bytes hashed are unchanged.
+pub(crate) fn romano_wolf_family_digest_v1<R: AsRef<[i64]>>(
+    returns: &[R],
     draws: usize,
     seed: u64,
     block: usize,
@@ -1320,6 +1331,7 @@ pub(crate) fn romano_wolf_family_digest_v1(
     hasher.update(&u64::try_from(block).ok()?.to_le_bytes());
     hasher.update(&u64::try_from(returns.len()).ok()?.to_le_bytes());
     for (strategy, series) in returns.iter().enumerate() {
+        let series = series.as_ref();
         hasher.update(&u64::try_from(strategy).ok()?.to_le_bytes());
         hasher.update(&u64::try_from(series.len()).ok()?.to_le_bytes());
         for value in series {

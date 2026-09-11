@@ -35927,3 +35927,95 @@ admitted, and every V3 catalog also carries the last-bar misfiling D-0603 fixed.
 estimate (PBO 88.2% / 70.2% against 20%) and the multiple-testing p-values (raw
 0.61-0.998, displayed as 1.0 after the batch-0 alpha share of 1/16) reject every
 setting independently of this rule.
+
+### D-0606 — Three bootstraps resampled the same days three times, on two cores — 2026-09-12
+
+**Measured, across the whole stage this time.** Six 10-second `sample` snapshots a
+minute apart over batch 1's statistics stage of the live search (both timeframes,
+~195% CPU) found the time in Romano-Wolf (8,295, then 10,171 samples), White
+(4,947, then 14,952), SPA (15,027), then Romano-Wolf (15,172) and White (15,037)
+again for the cold re-check. CSCV appeared once, at 246. The stage -- about 6.7
+minutes per timeframe per batch -- is three 200,000-draw bootstraps over 4,000
+settings and 225 days, each about a minute, run twice: once by `measure`, once by
+`Reader::open`'s `check()`. D-0604's CSCV fix, genuinely 22x fewer additions, moved
+it 30 seconds; the ~48% attribution that motivated it came from one 3-second
+snapshot of a stage whose phases run one after another.
+
+**All three resampled the same days.** White, SPA and Romano-Wolf each start from
+`Rng::new(seed)` with the same seed and call `stationary_indices` once per draw, so
+draw m holds the same index vector in all three; each then recomputed every
+setting's resampled mean for itself. `runner::bootstrap::family_tests_v1` walks the
+draws once: it computes each resampled mean once and derives White's centred
+maximum, Hansen's gated studentized maximum and Romano-Wolf's per-rank suffix
+maxima from it. `bootstrap_zero_v2::evaluate_with_family_tests` wraps it with
+`evaluate`'s own admission, constant-row and assembly steps, and
+`index_stop_qualification::numeric::measure` uses it, so the producer and the
+cold re-check both get it.
+
+**Bit-identical, not merely close.** The one RNG stream is consumed serially in
+draw order; every float comes from the same operation on the same operands (`mean_at`,
+`summarise`, `studentized`, the same centring, the same gate, every running maximum
+folded in the same order -- strategy order for White and SPA, last rank first for
+Romano-Wolf); only integer counts cross threads, summed in task order. The receipts
+are built by the same constructors, so statistics, p-value bits and digests are
+unchanged, and a qualification saved by the three-pass build re-verifies byte for
+byte. Refusals keep their inputs, order and messages: Romano-Wolf, then White, then
+SPA; a non-finite observed statistic is still refused, by
+`exact_family_test_fields_v1`. Index vectors are generated in chunks of at most
+8 MiB (4,096 draws at 225 days), where Romano-Wolf used to hold all ~360 MB.
+
+**On every core, without widening the memory cap.** The sweep's pool was `lanes`
+threads wide and ran `prepared.par_iter()`, so nested work had no thread to use. It
+is now `available_parallelism()` threads, and `index_stop_search::live::schedule`
+broadcasts one job per thread: the first `lanes` pull timeframes from an atomic
+counter, the rest return at once and spend the batch stealing the draws those lanes
+spawn. At most `lanes` timeframes run at a time, and no timeframe is ever a queued
+job a waiting thread could steal onto its stack -- the two failure modes the design
+review named: resizing the pool under `par_iter` drops the `workers` cap, and a
+second pool entered by `install` can nest whole timeframes.
+
+**Measured by the implementing agent**: release build, 4,000 strategies x 225
+periods, block 10, fastest of two repeats, on this 14-core machine at a load
+average near 110, every run bit-identical to the three separate passes.
+
+| Draws | Three separate passes | Shared walk, 1 thread | Shared walk, 14 threads |
+|---|---|---|---|
+| 2,000 | 2.818 s (Romano-Wolf 0.781, White 1.019, SPA 1.018) | 0.776 s (3.63x) | 0.126 s (22.4x) |
+| 5,000 | 7.346 s | 2.273 s (3.23x) | 0.257 s (28.6x) |
+
+Scaled linearly to the production 200,000 draws that is roughly 294 s down to
+10 s per pass, paid twice per batch. That is an EXTRAPOLATION, not a
+measurement, from timings taken on a saturated machine, and the harness was not
+committed.
+
+**Not claimed.** The catalog stages are unchanged -- they are bound by drive
+flushes, not CPU -- and the cold re-check still runs, now cheaper. Wall time per
+batch on the live search is unmeasured until a batch runs on this build.
+
+**Left as it was.** The admission estimates -- bootstrap work times three, and
+the index memory -- are part of the run identity and still count three passes,
+so they now over-count. `boolean_qualification_v1` still runs the three
+separate passes. A `check()` outside a sweep -- an API read, a checkpoint
+recovery -- now spreads over rayon's global pool, every core, where it competes
+with a running sweep.
+
+**Gate 11.** `runner/bootstrap_family_pass.rs` is allowed 17 float lines and one
+sort, for the reasons `runner/bootstrap.rs` is: the statistics themselves, and
+the Romano-Wolf stepdown order.
+
+Tests: in `runner::bootstrap::family_pass`,
+`ties_zero_variance_zero_rows_and_hopeless_rows_match_the_separate_procedures`,
+`a_larger_family_matches_across_more_draws_than_one_chunk_holds`,
+`one_thread_and_many_threads_agree_bit_for_bit`,
+`neither_the_chunk_size_nor_the_task_split_moves_a_count`,
+`a_generation_step_holds_at_most_its_index_budget` and
+`refusals_name_the_first_separate_procedure_that_refuses`; in
+`runner::bootstrap_zero_v2`,
+`one_walk_reproduces_all_three_separate_calls_byte_for_byte` and
+`every_refusal_is_the_one_the_separate_calls_reach_first`; in
+`cli::index_stop_search::live`,
+`at_most_lanes_timeframes_run_at_once_while_nested_work_reaches_the_other_threads`
+and `lanes_run_every_timeframe_once_and_return_them_in_declared_order`; in
+`cli::index_stop_qualification`,
+`saved_statistics_are_the_three_separate_procedures_bit_for_bit` and
+`a_shared_walk_refusal_keeps_the_message_its_separate_procedure_produced`.

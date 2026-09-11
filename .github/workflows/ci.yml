@@ -4917,6 +4917,12 @@ jobs:
           #     again, and `value()` is a numerator over a denominator. A ratio of
           #     two counts has no paisa representation, which is the sentence this
           #     whole rule turns on.
+          #   runner/bootstrap_family_pass.rs 17 -- D-0606's one walk over the
+          #     bootstrap draws: the same resampled means, standard errors, White
+          #     and SPA maxima and Romano--Wolf statistics `runner/bootstrap.rs`
+          #     is allowed for, computed once for all three tests instead of once
+          #     each. Only integer exceedance counts cross threads, so no float is
+          #     ever summed in an order that depends on the thread count.
           allow_float='
           crates/api/src/ingest.rs 1
           crates/api/src/server.rs 4
@@ -4932,6 +4938,7 @@ jobs:
           crates/runner/src/significance.rs 21
           crates/runner/src/admission.rs 4
           crates/runner/src/bootstrap.rs 48
+          crates/runner/src/bootstrap_family_pass.rs 17
           crates/runner/src/outcome.rs 18
           crates/runner/src/report.rs 3
           crates/runner/src/validate.rs 1
@@ -5598,9 +5605,14 @@ jobs:
           #   runner/pbo.rs 1 -> 2 -- the second is the identical median over FOLD
           #     placements in the bottom-half rate, beside the one already listed.
           #     Folds are the operator's split count, a handful.
+          #   runner/bootstrap_family_pass.rs 1 -- the Romano--Wolf stepdown order
+          #     again (D-0606): `sort_unstable_by` on `total_cmp`, ties broken by
+          #     position, over the same slice of strategies and in the same
+          #     decreasing order as the first `runner/bootstrap.rs` entry.
           allow_sort='
           crates/runner/src/audit.rs 1
           crates/runner/src/bootstrap.rs 2
+          crates/runner/src/bootstrap_family_pass.rs 1
           crates/runner/src/outcome.rs 1
           crates/runner/src/pbo.rs 2
           crates/runner/src/excursion.rs 1

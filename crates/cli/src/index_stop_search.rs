@@ -194,13 +194,20 @@ fn execute_observed_with(
         &frame,
         request.rungs,
     )))?;
-    let lanes = request
-        .configuration
-        .workers
-        .min(prepared.len())
-        .min(std::thread::available_parallelism().map_err(display)?.get());
+    // ONE POOL OF EVERY CORE, AND `lanes` IS A JOB COUNT, NOT A THREAD COUNT.
+    //
+    // This pool used to be `lanes` threads wide and ran `prepared.par_iter()`,
+    // so when every lane was busy with a timeframe the statistics nested inside
+    // it had no thread to spread onto, and the cores above `lanes` sat idle.
+    // `live::parallel` now runs exactly `lanes` long-lived jobs on a pool of
+    // `cores` threads: the `workers` cap still bounds how many timeframes are
+    // in flight -- each needs gigabytes -- while nested parallel work reaches
+    // every core.
+    let cores = std::thread::available_parallelism().map_err(display)?.get();
+    let lanes = request.configuration.workers.min(prepared.len()).min(cores);
     let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(lanes)
+        .num_threads(cores)
+        .thread_name(|index| format!("index-stop-{index}"))
         .build()
         .map_err(display)?;
     let mut report = String::from(crate::STORED_PROVENANCE);
@@ -237,6 +244,7 @@ fn execute_observed_with(
                 request,
                 &prepared,
                 &pool,
+                lanes,
                 batch.programs(),
                 &mut current,
                 observe,

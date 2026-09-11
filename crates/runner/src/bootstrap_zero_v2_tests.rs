@@ -6,6 +6,7 @@
     reason = "independent statistical reference arithmetic; bounded three-period fixtures"
 )]
 use super::*;
+use crate::bootstrap::{spa_receipt_v1, white_reality_check_receipt_v1};
 const BOUNDS: Bounds = Bounds {
     max_work: 1_000_000,
     max_bytes: 64 * 1024 * 1024,
@@ -401,4 +402,166 @@ fn complete_small_integer_families_match_explicit_zero_floored_full_suffix_refer
         }
     }
     assert_eq!(checked, 1152);
+}
+
+/// The three separate calls, made as the index-stop qualification made them.
+fn separately(
+    returns: &[Vec<i64>],
+    draws: usize,
+    seed: u64,
+    block: usize,
+    bounds: Bounds,
+) -> Result<FamilyEvaluation, FamilyRefusal> {
+    let romano_wolf =
+        evaluate(returns, draws, seed, block, bounds).map_err(FamilyRefusal::RomanoWolf)?;
+    let white =
+        white_reality_check_receipt_v1(returns, draws, seed, block).ok_or(FamilyRefusal::White)?;
+    let spa = spa_receipt_v1(returns, draws, seed, block).ok_or(FamilyRefusal::Spa)?;
+    Ok(FamilyEvaluation {
+        romano_wolf,
+        white,
+        spa,
+    })
+}
+
+#[test]
+fn one_walk_reproduces_all_three_separate_calls_byte_for_byte() {
+    let mut state = 0x5eed;
+    let mut generated: Vec<Vec<i64>> = (0..30_i64)
+        .map(|row| match row % 6 {
+            0 => vec![0; 60],
+            _ => (0..60)
+                .map(|_| i64::try_from(next(&mut state) % 21).unwrap() - 10 + row % 5 - 2)
+                .collect(),
+        })
+        .collect();
+    // An exact duplicate: a tie in every statistic.
+    generated.push(item(&generated, 1).clone());
+    for returns in [
+        vec![
+            vec![0; 4],
+            vec![2, 5, 8, 11],
+            vec![0; 4],
+            vec![-11, -8, -5, -2],
+            vec![-3, -1, 1, 3],
+        ],
+        vec![vec![0; 4], vec![0; 4]],
+        vec![vec![1, 3, -2, 4], vec![-5, 0, 2, 0], vec![0; 4]],
+        vec![vec![-2, 0], vec![0, 0], vec![3, -1]],
+        generated,
+    ] {
+        for (draws, seed, block) in [(1, 0, 1), (19, 11, 2), (101, 3, 7)] {
+            let shared = evaluate_with_family_tests(&returns, draws, seed, block, BOUNDS);
+            assert_eq!(shared, separately(&returns, draws, seed, block, BOUNDS));
+            let shared = shared.unwrap();
+            assert_eq!(
+                shared.romano_wolf(),
+                &evaluate(&returns, draws, seed, block, BOUNDS).unwrap()
+            );
+            assert_eq!(
+                Some(shared.white()),
+                white_reality_check_receipt_v1(&returns, draws, seed, block)
+            );
+            assert_eq!(
+                Some(shared.spa()),
+                spa_receipt_v1(&returns, draws, seed, block)
+            );
+        }
+    }
+}
+
+#[test]
+fn every_small_integer_family_is_reproduced_by_the_one_walk() {
+    let mut vectors = Vec::new();
+    for a in [-2, 0, 3] {
+        for b in [-2, 0, 3] {
+            for c in [-2, 0, 3] {
+                if a != b || b != c {
+                    vectors.push(vec![a, b, c]);
+                }
+            }
+        }
+    }
+    let mut checked = 0;
+    for left in &vectors {
+        for right in &vectors {
+            for (seed, block) in [(0, 1), (11, 3)] {
+                let rows = vec![vec![0; 3], left.clone(), right.clone(), vec![0; 3]];
+                assert_eq!(
+                    evaluate_with_family_tests(&rows, 19, seed, block, BOUNDS),
+                    separately(&rows, 19, seed, block, BOUNDS),
+                    "{rows:?} seed={seed} block={block}"
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert_eq!(checked, 1152);
+}
+
+#[test]
+fn every_refusal_is_the_one_the_separate_calls_reach_first() {
+    let input = vec![vec![0; 3], vec![1, 2, 3]];
+    let (work, bytes) = requirements(2, 3, 17).unwrap();
+    let exact = Bounds {
+        max_work: u64::try_from(work).unwrap(),
+        max_bytes: u64::try_from(bytes).unwrap(),
+    };
+    let cases: Vec<(Vec<Vec<i64>>, usize, usize, Bounds)> = vec![
+        (vec![], 17, 2, BOUNDS),
+        (vec![vec![]], 17, 2, BOUNDS),
+        (vec![vec![0]], 17, 2, BOUNDS),
+        (vec![vec![0; 2], vec![0; 3]], 17, 2, BOUNDS),
+        (input.clone(), 0, 2, BOUNDS),
+        (input.clone(), 17, 0, BOUNDS),
+        (input.clone(), usize::MAX, 2, BOUNDS),
+        (
+            input.clone(),
+            17,
+            2,
+            Bounds {
+                max_work: exact.max_work - 1,
+                ..exact
+            },
+        ),
+        (
+            input.clone(),
+            17,
+            2,
+            Bounds {
+                max_bytes: exact.max_bytes - 1,
+                ..exact
+            },
+        ),
+        (vec![vec![0; 4], vec![1; 4]], 17, 2, BOUNDS),
+        (vec![vec![i64::MAX, i64::MAX - 1]], 17, 2, BOUNDS),
+    ];
+    for (returns, draws, block, bounds) in cases {
+        let refused = evaluate_with_family_tests(&returns, draws, 0, block, bounds);
+        assert!(refused.is_err(), "{returns:?} was not refused");
+        assert_eq!(refused, separately(&returns, draws, 0, block, bounds));
+    }
+    assert!(evaluate_with_family_tests(&input, 17, 0, 2, exact).is_ok());
+}
+
+#[test]
+fn every_shared_walk_refusal_names_the_separate_call_it_stands_for() {
+    assert_eq!(
+        family_refusal(FamilyTestsRefusalV1::White),
+        FamilyRefusal::White
+    );
+    assert_eq!(
+        family_refusal(FamilyTestsRefusalV1::Spa),
+        FamilyRefusal::Spa
+    );
+    for why in [
+        FamilyTestsRefusalV1::Rows,
+        FamilyTestsRefusalV1::RomanoWolf,
+        FamilyTestsRefusalV1::Pass,
+    ] {
+        assert_eq!(
+            family_refusal(why),
+            FamilyRefusal::RomanoWolf(Refusal::Numerical)
+        );
+    }
 }

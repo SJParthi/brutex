@@ -221,3 +221,97 @@ fn insufficient_fixed_draw_resolution_refuses_before_training_or_candidate_publi
     assert!(super::super::pricing_allocation(&configuration, 1, 0).is_err());
     Ok(())
 }
+
+fn pool(threads: usize) -> Result<rayon::ThreadPool, String> {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .map_err(display)
+}
+
+#[test]
+fn lanes_run_every_timeframe_once_and_return_them_in_declared_order() -> Result<(), String> {
+    let pool = pool(4)?;
+    let items: Vec<usize> = (0..11).collect();
+    let runs = AtomicUsize::new(0);
+    let results = schedule(&pool, 3, &items, |item| {
+        runs.fetch_add(1, Ordering::Relaxed);
+        item * 10
+    })?;
+    assert_eq!(
+        results,
+        items.iter().map(|item| item * 10).collect::<Vec<_>>()
+    );
+    assert_eq!(runs.load(Ordering::Relaxed), items.len());
+    assert_eq!(schedule(&pool, 4, &items, |item| *item)?, items);
+    assert!(schedule(&pool, 2, &[] as &[usize], |item| *item)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn at_most_lanes_timeframes_run_at_once_while_nested_work_reaches_the_other_threads()
+-> Result<(), String> {
+    use rayon::prelude::*;
+    use std::sync::atomic::AtomicU64;
+    let pool = pool(4)?;
+    let lanes = 2;
+    let items: Vec<usize> = (0..6).collect();
+    let active = AtomicUsize::new(0);
+    let peak = AtomicUsize::new(0);
+    let lane_threads = AtomicU64::new(0);
+    let nested_threads = AtomicU64::new(0);
+    schedule(&pool, lanes, &items, |_| {
+        let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+        peak.fetch_max(now, Ordering::SeqCst);
+        if let Some(index) = rayon::current_thread_index() {
+            lane_threads.fetch_or(1_u64 << index, Ordering::SeqCst);
+        }
+        (0..64_u32).into_par_iter().for_each(|_| {
+            if let Some(index) = rayon::current_thread_index() {
+                nested_threads.fetch_or(1_u64 << index, Ordering::SeqCst);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        });
+        active.fetch_sub(1, Ordering::SeqCst);
+    })?;
+    // The `workers` cap: never more timeframes in flight than lanes, and only
+    // the first `lanes` threads of the pool ever hold one.
+    assert!(peak.load(Ordering::SeqCst) <= lanes);
+    assert_eq!(lane_threads.load(Ordering::SeqCst) & !0b11, 0);
+    // The point of the one wide pool: nested work left the lane threads.
+    let helpers =
+        usize::try_from(nested_threads.load(Ordering::SeqCst).count_ones()).map_err(display)?;
+    assert!(
+        helpers > lanes,
+        "nested work ran on {helpers} threads, never beyond the {lanes} lanes"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_lane_count_the_pool_cannot_host_is_refused_before_any_timeframe_runs() -> Result<(), String> {
+    let pool = pool(2)?;
+    let runs = AtomicUsize::new(0);
+    for lanes in [0, 3] {
+        let why = schedule(&pool, lanes, &[1_usize, 2], |_| {
+            runs.fetch_add(1, Ordering::Relaxed)
+        })
+        .err()
+        .ok_or("an unhostable lane count was accepted")?;
+        assert!(why.contains("lanes"), "{why}");
+    }
+    assert_eq!(runs.load(Ordering::Relaxed), 0);
+    Ok(())
+}
+
+#[test]
+fn every_slot_is_filled_by_exactly_one_lane_or_the_batch_is_refused() -> Result<(), String> {
+    assert_eq!(
+        assemble(2, vec![vec![(1, 'b')], vec![(0, 'a')]])?,
+        vec!['a', 'b']
+    );
+    assert!(assemble(1, vec![vec![(1, 'a')]]).is_err());
+    assert!(assemble(1, vec![vec![(0, 'a')], vec![(0, 'b')]]).is_err());
+    assert!(assemble(2, vec![vec![(0, 'a')]]).is_err());
+    Ok(())
+}

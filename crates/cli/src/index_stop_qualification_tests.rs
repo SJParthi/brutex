@@ -974,3 +974,115 @@ fn cscv_segment_totals_reproduce_every_per_period_split_exactly() {
         assert_eq!(numeric::segment_sums(&[past], 2).unwrap(), None);
     }
 }
+
+#[test]
+fn a_shared_walk_refusal_keeps_the_message_its_separate_procedure_produced() {
+    use runner::bootstrap_zero_v2::{FamilyRefusal, Refusal};
+    assert_eq!(
+        numeric::refusal(FamilyRefusal::RomanoWolf(Refusal::NonzeroConstant {
+            strategy: 3
+        })),
+        "single-stop complete later Romano-Wolf procedure refused: NonzeroConstant { strategy: 3 }"
+    );
+    assert_eq!(
+        numeric::refusal(FamilyRefusal::White),
+        "single-stop later White procedure refused"
+    );
+    assert_eq!(
+        numeric::refusal(FamilyRefusal::Spa),
+        "single-stop later SPA procedure refused"
+    );
+}
+
+#[test]
+fn saved_statistics_are_the_three_separate_procedures_bit_for_bit() {
+    // A qualification written by the three-pass build must still re-verify:
+    // `check()` compares a fresh `measure` with the saved bytes. So every
+    // bootstrap-derived word `measure` saves is compared here with the same
+    // word taken from the three separate public procedures on the same
+    // returns, for a trading family and for an all-zero one.
+    use runner::bootstrap_zero_v2 as zero;
+    for fixture in [Fixture::new(false), Fixture::new(true)] {
+        let (statistics, rows) =
+            numeric::measure(&fixture.training, &fixture.later, &fixture.facts).unwrap();
+        let returns: Vec<Vec<i64>> = fixture
+            .later
+            .iter()
+            .map(|row| {
+                row.periods()
+                    .iter()
+                    .map(|day| day.pessimistic_paisa)
+                    .collect()
+            })
+            .collect();
+        let draws = usize::try_from(fixture.facts.procedure.draws()).unwrap();
+        let block = usize::try_from(fixture.facts.procedure.block_length()).unwrap();
+        let seed = fixture.facts.procedure.seed();
+        let romano = zero::evaluate(
+            &returns,
+            draws,
+            seed,
+            block,
+            zero::Bounds {
+                max_work: fixture.facts.bounds.bootstrap_work,
+                max_bytes: fixture.facts.bounds.memory_bytes,
+            },
+        )
+        .unwrap();
+        let white = runner::bootstrap::white_reality_check_receipt_v1(&returns, draws, seed, block)
+            .unwrap();
+        let spa = runner::bootstrap::spa_receipt_v1(&returns, draws, seed, block).unwrap();
+        let words = |bits: u64, p: u64, numerator: usize, denominator: usize, matched: usize| {
+            [
+                bits,
+                p,
+                u64::try_from(numerator).unwrap(),
+                u64::try_from(denominator).unwrap(),
+                u64::try_from(matched).unwrap(),
+            ]
+        };
+        assert_eq!(
+            statistics.white,
+            words(
+                white.statistic_bits(),
+                white.p_value_bits(),
+                white.exact_p_value().numerator(),
+                white.exact_p_value().denominator(),
+                white.matched_or_exceeded()
+            )
+        );
+        assert_eq!(
+            statistics.spa,
+            words(
+                spa.statistic_bits(),
+                spa.p_value_bits(),
+                spa.exact_p_value().numerator(),
+                spa.exact_p_value().denominator(),
+                spa.matched_or_exceeded()
+            )
+        );
+        assert_eq!(statistics.family, romano.family_digest());
+        assert_eq!(statistics.shared, romano.shared_digest());
+        assert_eq!(rows.len(), romano.strategies());
+        for (index, row) in rows.iter().enumerate() {
+            let candidate = romano.candidate(index).unwrap();
+            assert_eq!(row.romano[1], candidate.p_value().numerator());
+            assert_eq!(row.romano[2], candidate.p_value().denominator());
+            match candidate.shared() {
+                Some(shared) => {
+                    assert_eq!(row.romano[3], 1);
+                    assert_eq!(row.romano[6], shared.observed_statistic().to_bits());
+                    assert_eq!(
+                        row.romano[7],
+                        u64::try_from(shared.strict_exceedances()).unwrap()
+                    );
+                    assert_eq!(
+                        row.romano[10],
+                        u64::try_from(shared.adjusted_p_value().numerator()).unwrap()
+                    );
+                }
+                None => assert_eq!(row.romano[3], 0),
+            }
+        }
+    }
+}

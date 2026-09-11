@@ -1,7 +1,7 @@
 //! Bounded boundary observations; no event is emitted per bar or trade.
 use super::{Link, PreparedSources, Progress, Request, display, run_rung};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     mpsc::{SyncSender, sync_channel},
 };
 
@@ -67,15 +67,17 @@ pub(super) fn preparing(
 /// One coordinator drains at most one queued boundary per configured timeframe.
 /// Observer failure cancels at the next boundary and joins every worker before
 /// returning, so the outer execution lease cannot be released while work lives.
+/// At most `lanes` timeframes run at once, on a pool whose other threads take
+/// the statistics nested inside them; see [`schedule`].
 pub(super) fn parallel(
     request: &Request<'_>,
     prepared: &[PreparedSources<'_>],
     pool: &rayon::ThreadPool,
+    lanes: usize,
     programs: &[runner::expression::Expression],
     snapshot: &mut Progress,
     observe: &mut dyn FnMut(Observation) -> Result<(), String>,
 ) -> Result<Vec<Result<Link, String>>, String> {
-    use rayon::prelude::*;
     let batch = snapshot
         .current_batch
         .ok_or("single-stop worker lacks its reserved batch")?;
@@ -87,29 +89,23 @@ pub(super) fn parallel(
         let worker = std::thread::Builder::new()
             .name("index-stop-boundaries".into())
             .spawn_scoped(scope, move || {
-                pool.install(|| {
-                    prepared
-                        .par_iter()
-                        .map(|source| {
-                            let boundary = Boundary {
-                                sender: &sender,
-                                cancelled: cancelled_ref,
-                                rung: source.sources.rung,
-                            };
-                            let result =
-                                run_rung(request, source, identity, batch, programs, &boundary);
-                            let final_stage = if result.is_ok() {
-                                RungStage::Saved
-                            } else {
-                                RungStage::Refused
-                            };
-                            let recorded = boundary.send(final_stage);
-                            match (result, recorded) {
-                                (Ok(link), Ok(())) => Ok(link),
-                                (Err(why), _) | (_, Err(why)) => Err(why),
-                            }
-                        })
-                        .collect::<Vec<_>>()
+                schedule(pool, lanes, prepared, |source| {
+                    let boundary = Boundary {
+                        sender: &sender,
+                        cancelled: cancelled_ref,
+                        rung: source.sources.rung,
+                    };
+                    let result = run_rung(request, source, identity, batch, programs, &boundary);
+                    let final_stage = if result.is_ok() {
+                        RungStage::Saved
+                    } else {
+                        RungStage::Refused
+                    };
+                    let recorded = boundary.send(final_stage);
+                    match (result, recorded) {
+                        (Ok(link), Ok(())) => Ok(link),
+                        (Err(why), _) | (_, Err(why)) => Err(why),
+                    }
                 })
             })
             .map_err(display)?;
@@ -137,8 +133,80 @@ pub(super) fn parallel(
         if let Some(why) = failure {
             return Err(why);
         }
-        result
+        result?
     })
+}
+
+/// Runs `run` once for every item on exactly `lanes` long-lived jobs of `pool`,
+/// returning the results in item order.
+///
+/// # Why a broadcast, and not a parallel iterator
+///
+/// `items.par_iter()` on a pool of every core would start every timeframe at
+/// once and silently drop the `workers` cap, and each timeframe holds
+/// gigabytes. A pool only `lanes` wide keeps the cap but leaves the statistics
+/// nested inside a timeframe no thread to spread onto. Entering a second pool
+/// from inside a worker is worse: a thread waiting on the other pool keeps
+/// stealing from its own, and can pull a whole pending timeframe onto its
+/// stack.
+///
+/// A broadcast puts exactly one job on every thread of `pool`, and a broadcast
+/// job only ever runs on the thread it was sent to. The first `lanes` of them
+/// pull the next item from a shared counter until none is left; the rest return
+/// at once and spend the batch stealing the nested work those lanes spawn. No
+/// item is ever a queued job, so no waiting thread can steal one: at most
+/// `lanes` items run at a time, each at the base of its own thread's stack.
+///
+/// # Errors
+///
+/// A lane count of zero or wider than `pool`, and -- refused by name rather than
+/// assumed, although the counter makes it unreachable -- a result slot the lanes
+/// did not fill exactly once.
+fn schedule<T: Sync, R: Send>(
+    pool: &rayon::ThreadPool,
+    lanes: usize,
+    items: &[T],
+    run: impl Fn(&T) -> R + Sync,
+) -> Result<Vec<R>, String> {
+    if items.is_empty() {
+        return Ok(Vec::new());
+    }
+    let threads = pool.current_num_threads();
+    if lanes == 0 || lanes > threads {
+        return Err(format!(
+            "single-stop timeframe lanes must be between 1 and the pool's {threads} threads, not {lanes}"
+        ));
+    }
+    let next = AtomicUsize::new(0);
+    let produced = pool.broadcast(|context| {
+        let mut done = Vec::new();
+        if context.index() < lanes {
+            let mut at = next.fetch_add(1, Ordering::Relaxed);
+            while let Some(item) = items.get(at) {
+                done.push((at, run(item)));
+                at = next.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        done
+    });
+    assemble(items.len(), produced)
+}
+
+/// Results in item order, each slot filled by exactly one lane.
+fn assemble<R>(count: usize, produced: Vec<Vec<(usize, R)>>) -> Result<Vec<R>, String> {
+    let mut slots: Vec<Option<R>> = std::iter::repeat_with(|| None).take(count).collect();
+    for (at, result) in produced.into_iter().flatten() {
+        let slot = slots
+            .get_mut(at)
+            .ok_or("single-stop lane returned a timeframe outside its batch")?;
+        if slot.replace(result).is_some() {
+            return Err("single-stop lane ran one timeframe twice".into());
+        }
+    }
+    slots
+        .into_iter()
+        .map(|slot| slot.ok_or_else(|| "single-stop timeframe was never run by a lane".to_owned()))
+        .collect()
 }
 
 pub(super) struct Boundary<'a> {
