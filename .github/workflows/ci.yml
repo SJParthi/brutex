@@ -524,7 +524,23 @@ jobs:
           brutex-ssm-no-such-file-ever
           before broker censused declares indistinguishable mixed nested options
           too-deep u unused
+          ab archive-extra-second broker-clean broker-conflict broker-duplicate
+          broker-extra-second broker-shifted cash-cas cash-ordinary
+          cash-unknown-a cash-unknown-b cash-unmeasured-calendar ceiling client
+          coarse-unverified conflicting correction daily-midnight daily-open date
+          elsewhere five-minute flag fold-absent-bucket fold-absent-tail gap-receipt
+          gapfill headers historical-candidate-hole historical-incomplete
+          historical-partial historical-tail historical-unverified-schedule
+          incomplete local-ist loopback millisecond must-not-be-created not-a-date
+          not-a-price okay receipt record request request-cash-eligibility
+          request-derivative-exempt request-empty request-exception request-holiday
+          request-intervals request-span request-unmeasured request-unordered
+          response resume runtime runtime-truncated runtime-unverified shared-archive
+          short test trailing true unavailable unreadable-rows versioned whole width
           '
+          # D-0610: reviewed fixture symbols and version-refusal inputs.
+          scaffold="$scaffold abb forcemot irfc
+          brutex-nse-cash-session-v1 brutex-nse-cash-session-v2"
 
           # ---- group 6: granularity and session tokens. `Granularity::dir`
           # and `SessionKind::label` in crates/pull/src/vendor.rs. These name a
@@ -598,6 +614,7 @@ jobs:
           data from to candles
           status error code message
           symbol interval p success
+          duplicates
           '
 
           # ---- group 9: an HTTP HEADER NAME, not a value. One broker sends
@@ -625,6 +642,10 @@ jobs:
           # pattern let it past.
           bound_number='10000 1970 9999 28 29 4294967295 253402281000 48 750
           0 1e300'
+          # D-0610: fixture IDs, malformed dates/flags, timestamps and bounds.
+          bound_number="$bound_number 00000000 01 12345 1250640000 1296345600
+          1296345600000 1296345601 1333 1577923200 18446744073709551616
+          20210129 2029 2147483648 502070400 86400"
 
           # ---- group 11: FIELD LABELS IN A `Debug` RENDERING, not values.
           # `HttpSource`'s Debug impl is hand-written precisely so the token is

@@ -36133,3 +36133,19 @@ ignore policy to `web/saved-backtest/build/**/*.map`. Keep the JavaScript,
 HTML, source files, and credential-path gate unchanged. Verify the tracked
 tree against the gate's exact pattern and confirm the generated map is
 ignored. This removes the observed blocker, not a claim that all CI passes.
+
+### D-0610 — Declare reviewed pull-crate literals in gate 1d — 2026-09-19
+
+CI run 35458327561 reached gate 1d and rejected literals introduced by existing
+pull-crate tests and ingestion telemetry. Review each reported source location:
+scratch-directory labels and assertion messages are test scaffolding;
+`abb`, `forcemot` and `irfc` are fixture instrument symbols; the two
+`brutex-nse-cash-session` version strings are cache-version refusal inputs.
+The numeric additions are lifecycle timestamps, malformed date/flag inputs,
+fixture instrument identifiers, an HTTP body fixture, and overflow bounds.
+`duplicates` is an ingestion telemetry field, not a credential component.
+
+Declare those exact reviewed words in the existing named groups. Preserve the
+scanner, its length bound, its date exclusion, and its fail-closed result.
+No crate source or credential configuration changes. Gate 1d must pass with
+these declarations while an undeclared segment still fails membership.
