@@ -36175,3 +36175,20 @@ The dependency audit rejects locked Rustls 0.23.43 under RUSTSEC-2026-0285
 (TLS 1.3 handshake encryption-level validation). Update the lock to patched
 0.23.45 and its compatible rustls-webpki 0.103.15. Keep the existing crypto
 provider, dependency policy, and TLS configuration. No advisory is ignored.
+
+### D-0613 — Release checksum receipt leases at owner drop — 2026-09-20
+
+Linux CI run 35461284871 failed torn-prefix recovery with `WouldBlock` after a
+receipt read had ended. A deterministic duplicate-descriptor regression also
+fails locally: closing the original descriptor does not release a shared lock
+while its duplicate remains alive. Concurrent process-spawn inheritance is a
+possible trigger for the CI symptom, not a directly observed event in that run.
+
+Give the typed receipt an explicit unlock on drop, matching the existing read
+lease ownership pattern. Obtain initial generation metadata before taking the
+lock and revalidate it under the retained lock, so an initial metadata failure
+cannot leave an acquired lease without its typed owner. The regression retains
+a duplicate descriptor and a second independent reader: dropping the first
+owner must not release the second reader's lock; dropping both typed owners
+must allow publication even while the duplicate remains open. Publication still
+refuses a live reader, corrupted prefix, replacement, or extended receipt.

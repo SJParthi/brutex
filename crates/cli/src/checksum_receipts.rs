@@ -256,14 +256,25 @@ pub(crate) struct Receipt {
     generation: crate::result_set::FileGeneration,
     expected: [u8; BYTES],
 }
+impl Drop for Receipt {
+    fn drop(&mut self) {
+        // Closing this descriptor alone can leave the lock held by a duplicate
+        // inherited during a concurrent process spawn. The lease belongs to
+        // this typed owner; release it before the descriptor is closed.
+        let _ = self.file.unlock();
+    }
+}
 impl Receipt {
     fn open(path: &Path, expected: &[u8; BYTES]) -> Result<Self, String> {
         let file = open(path, false)?;
+        // Read before locking so a failed generation read owns no lease. The
+        // receipt revalidates this generation under its retained shared lock.
+        let generation = regular_generation(&file, path)?;
         // Retained for this authority's entire lifetime. Completed receipts are
         // reused through this same read door, so identical audits need no writer.
         file.try_lock_shared().map_err(error)?;
         let receipt = Self {
-            generation: regular_generation(&file, path)?,
+            generation,
             file,
             path: path.to_path_buf(),
             expected: *expected,

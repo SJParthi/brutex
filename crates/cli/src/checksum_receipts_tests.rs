@@ -258,6 +258,33 @@ fn visible_complete_bytes_are_not_durable_authority_while_a_publisher_holds_the_
 }
 
 #[test]
+fn dropping_receipt_releases_lock_even_when_a_duplicate_descriptor_survives() {
+    let fixture = Fixture::new(1);
+    let admitted = audit_month(fixture.request()).expect("audit");
+    // Model a descriptor retained across a concurrent process spawn. The
+    // duplicate owns no typed receipt authority and must not extend its lease.
+    let duplicate = admitted.receipt.file.try_clone().expect("duplicate handle");
+    let independent = Receipt::open(admitted.receipt_path(), &admitted.receipt.expected)
+        .expect("independent reader");
+    let writer = open(admitted.receipt_path(), true).expect("publication handle");
+    assert!(writer.try_lock().is_err(), "live receipt excludes writers");
+    drop(admitted);
+    assert!(
+        writer.try_lock().is_err(),
+        "independent reader keeps its lease"
+    );
+    drop(independent);
+    writer.try_lock().expect("receipt drop releases its lease");
+    assert!(
+        duplicate
+            .metadata()
+            .expect("duplicate remains open")
+            .is_file()
+    );
+    writer.unlock().expect("release publication lease");
+}
+
+#[test]
 fn receipt_fifo_cannot_block_either_read_or_publication() -> Result<(), Box<dyn std::error::Error>>
 {
     const PROBE: &str = "BRUTEX_CHECKSUM_RECEIPT_FIFO_PROBE";
