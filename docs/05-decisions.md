@@ -36102,3 +36102,20 @@ Tests: in `crates/cli/src/sweep_evidence_tests.rs`,
 `grouped_catalogs_keep_the_ungrouped_bytes_and_terminals`,
 `a_refused_start_inside_a_group_keeps_the_sequential_first_refusal` and
 `refused_later_starts_and_finishes_leave_no_completion`.
+
+### D-0608 — Keep CI executable below the workflow file-size limit — 2026-09-19
+
+The CI workflow at `19187a4e` was 515,779 bytes and GitHub rejected its run
+before jobs started. GitHub's documented 500 KB per-file limit is recorded in
+`docs/00-charter.md`. Main requires `ci-ok`; a workflow that never starts cannot
+produce it.
+
+Move the 285 standalone YAML comment lines indented two, four, or six spaces
+into `docs/34-ci-workflow-notes.md`, retaining their order and original line
+numbers. Keep shell-script comments, all jobs, commands, dependencies, and
+triggers unchanged. The resulting workflow is 497,119 bytes.
+
+Verification: remove precisely those comment lines from the original and the
+new documentation pointer from the revised workflow; the remaining bytes are
+identical. `git diff --check` is clean. Passing this check is not a claim that
+CI, coverage, mutation tests, or the pending main merge have passed.

@@ -1,57 +1,15 @@
+# Explanatory YAML comments: docs/34-ci-workflow-notes.md.
 name: CI
 
 on:
   push:
     branches: [main]
   pull_request:
-  # TWO EVENTS THAT ARE NOT A COMMIT, AND WHY A GATE SET NEEDS THEM.
-  #
-  # Every gate in this file was only ever executed by a push or a pull request,
-  # so `main` was validated exactly once -- at the instant it was written -- and
-  # never again. That is not the same as `main` being green, because half of
-  # what these gates read is not in the repository:
-  #
-  #   * `dtolnay/rust-toolchain@stable` resolves to whatever stable is TODAY, and
-  #     gate 6b runs clippy with `-D warnings`. A new lint turns a green tree red
-  #     with no commit.
-  #   * gate 3 runs `cargo deny check`, whose verdict is the RustSec advisory
-  #     database at fetch time. A disclosure published tomorrow is a real failure
-  #     of a tree nobody touched, and it is the one this repository most wants to
-  #     hear about early.
-  #   * `ubuntu-24.04` is an image that is rebuilt; gate 8's ratio and gate 18's
-  #     baseline are timings taken on it.
-  #
-  # `workflow_dispatch` is the manual half: an operator can ask the question
-  # "is main green right now" without inventing a commit to ask it with, which is
-  # what an empty commit on a shared tree amounts to.
-  #
-  # `schedule` is the unattended half. Weekly rather than daily, DELIBERATELY:
-  # gate 18 installs cargo-mutants from source and gate 8 runs the bench suite,
-  # so a run is expensive, and a cadence nobody reads is a cadence that gets
-  # switched off. Monday morning is before the week's work rather than after it.
-  #
-  # SCHEDULED RUNS ONLY EVER FIRE ON THE DEFAULT BRANCH. GitHub takes the cron
-  # from the workflow file on `main`, so this line does nothing at all until it
-  # is merged there -- said out loud because a cron that has never fired reads
-  # identically to one that is broken.
   workflow_dispatch:
   schedule:
-    # 03:17 UTC Monday. Not on the hour: GitHub queues cron runs and the ones on
-    # the hour queue longest, which for a job set this long is real delay.
     - cron: "17 3 * * 1"
 
 concurrency:
-  # THE EVENT NAME IS PART OF THE GROUP, AND IT HAS TO BE NOW THAT THERE ARE FOUR.
-  #
-  # `cancel-in-progress` cancels the older run whenever a newer one joins the
-  # group. Before the two events above, the group was one push-or-PR series per
-  # ref and cancelling the older member of it is exactly right. With a cron and a
-  # manual button added, `github.ref` for all three of push-to-main, the weekly
-  # run and a dispatch is `refs/heads/main` -- so a Monday 03:17 run landing on
-  # top of a push to main would CANCEL the push's validation, and the commit
-  # would carry a cancelled check for a reason that has nothing to do with it.
-  # Splitting by event keeps the "newest wins" behaviour inside each series and
-  # never across them.
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
@@ -60,25 +18,10 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
-  # ==========================================================================
-  # GATE 1 + 2 — the load-bearing gates. No toolchain, no cache, seconds.
-  # These run first so a violation fails before anything expensive starts.
-  # ==========================================================================
   language-purity:
     name: Gate 1+2 — one language
     runs-on: ubuntu-24.04
     steps:
-      # `fetch-depth: 0`, AND IT IS GATE 1E THAT NEEDS IT. This job used the
-      # default shallow clone for its whole life, which was fine while every
-      # step here read `git ls-files`. Gate 1e now runs `cargo test` under a
-      # shadowed PATH, and `crates/core/tests/findings.rs` asserts
-      # `rev-parse --is-shallow-repository` is not "true" — it refuses rather
-      # than pass vacuously, because on a shallow clone it cannot tell "this
-      # commit hash is wrong" from "this clone has no history". Without this
-      # line gate 1e would go red for a reason that has nothing to do with §2,
-      # which is the worst shape of failure: red for the wrong reason trains a
-      # reader to ignore the gate. The `build`, `coverage` and `mutants` jobs
-      # already check out this way and say so for the same reason.
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
 
@@ -2909,9 +2852,6 @@ jobs:
           echo "     (vocab, engine, indicators AND runner — the per-bar and"
           echo "      per-trial loops are in the last of those.)"
 
-  # ==========================================================================
-  # GATES 3-6 — the toolchain gates.
-  # ==========================================================================
       - name: Gate 23 — stderr is not a log, and a new crate is covered the day it appears
         run: |
           set -euo pipefail
@@ -7455,15 +7395,6 @@ jobs:
     runs-on: ubuntu-24.04
     needs: language-purity
     steps:
-      # `fetch-depth: 0`, BECAUSE TWO TESTS READ GIT HISTORY.
-      #
-      # `crates/core/tests/findings.rs` resolves the commit hashes named in the
-      # findings ledger and checks each is real and on this branch. On the
-      # default SHALLOW clone no commit resolves, so the tests cannot tell "this
-      # hash is wrong" from "this clone has no history" — and they refuse rather
-      # than pass vacuously, which is why CI went red with the fix printed in the
-      # assertion message. The `mutants` job already checks out this way for the
-      # same reason.
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
       - uses: dtolnay/rust-toolchain@stable
@@ -7472,12 +7403,6 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
 
-      # Cargo refuses a virtual workspace with no members, so between the
-      # automation commit and the first crate there is genuinely nothing to
-      # compile. This probe says so out loud rather than letting a green tick
-      # imply a build happened. It disarms itself permanently the moment
-      # crates/core lands, and it is checked against the tracked tree, not the
-      # manifest, so it cannot be satisfied by an untracked directory.
       - name: Is there a crate to build yet?
         id: probe
         run: |
@@ -7499,12 +7424,6 @@ jobs:
         if: steps.probe.outputs.has_crates == 'true'
         run: cargo fmt --all --check
 
-      # `--offline` only succeeds if every crate is already in CARGO_HOME.
-      # A newly added dependency has never been downloaded on a runner, so
-      # gate 4 structurally rejected the FIRST dependency the workspace ever
-      # gained -- it passed until now only because there were none. Fetching
-      # with --locked first preserves the whole point of the gate (build the
-      # EXACT locked versions, resolve nothing) while letting it actually run.
       - name: Gate 4a — fetch exactly what the lock names
         if: steps.probe.outputs.has_crates == 'true'
         run: cargo fetch --locked
@@ -7598,23 +7517,11 @@ jobs:
           [ -d crates/web ] || { echo "skip"; exit 0; }
           cargo build -p web --target wasm32-unknown-unknown --locked
 
-  # ==========================================================================
-  # Coverage — 100% line and branch, no omit list.
-  # ==========================================================================
   coverage:
     name: Coverage 100%
     runs-on: ubuntu-24.04
     needs: build
     steps:
-      # `fetch-depth: 0`, BECAUSE TWO TESTS READ GIT HISTORY.
-      #
-      # `crates/core/tests/findings.rs` resolves the commit hashes named in the
-      # findings ledger and checks each is real and on this branch. On the
-      # default SHALLOW clone no commit resolves, so the tests cannot tell "this
-      # hash is wrong" from "this clone has no history" — and they refuse rather
-      # than pass vacuously, which is why CI went red with the fix printed in the
-      # assertion message. The `mutants` job already checks out this way for the
-      # same reason.
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
       - uses: dtolnay/rust-toolchain@stable
@@ -7819,39 +7726,12 @@ jobs:
           fi
           echo "OK — every uncovered line in crates/telemetry is declared."
 
-  # ==========================================================================
-  # GATE 18 — no surviving mutant on what this change touched.
-  # ==========================================================================
   mutants:
     name: Gate 18 — no surviving mutant
     runs-on: ubuntu-24.04
     needs: build
-    # THIS JOB HAD NO CLOCK, AND A JOB WITH NO CLOCK DOES NOT FAIL — IT VANISHES.
-    #
-    # Without `timeout-minutes` a job inherits GitHub's 6-hour ceiling, and what
-    # happens at that ceiling is a CANCELLATION, not a failure: the step never
-    # reports, the log is cut mid-line, and the run page shows a grey square. Two
-    # runs ended exactly that way having tested ZERO mutants, and nothing
-    # distinguishes that from a gate that had nothing to do. `ci-ok` does catch
-    # it -- it refuses any `needs` result that is not `success` -- so the build
-    # went red, for a reason no reader could name. A gate whose failure mode is
-    # unreadable teaches people to re-run it rather than read it.
-    #
-    # 240 MINUTES, AND THE NUMBER IS DERIVED RATHER THAN PICKED. It has to be
-    # under the 6-hour ceiling so that THIS clock fires first and GitHub records
-    # a timeout against this job with the log intact. It has to be over the
-    # budget the step below computes, or the step's own arithmetic would be a
-    # lie. The step reserves 40 minutes of it for `cargo install cargo-mutants`
-    # (built from source; the toolchain cache does not cover `~/.cargo/bin`) and
-    # for the unmutated baseline, and spends the remaining 200 on mutants. If
-    # this number changes, JOB_MINUTES in the step must change with it — they are
-    # two halves of one statement and the step says so.
     timeout-minutes: 240
     steps:
-      # THE WHOLE HISTORY, because this gate's scope IS the diff. With the
-      # default shallow clone there is no merge base to diff against and the
-      # step would mutate nothing while reporting success — the exact silent
-      # pass CLAUDE.md §4 calls a fallback that hides a failure.
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
       - uses: dtolnay/rust-toolchain@stable
@@ -8036,23 +7916,10 @@ jobs:
           fi
           echo "OK — every mutation of the changed lines was caught by a test."
 
-  # ==========================================================================
-  # GATE 8 — per-operation cost stays constant as input grows.
-  # ==========================================================================
   complexity:
     name: Gate 8 — O(1) ratio
     runs-on: ubuntu-24.04
     needs: build
-    # THE BENCH BUDGET, WRITTEN DOWN. Gate 14 proves these benches exist and
-    # have the shape of a ratio measurement; this job is what executes them,
-    # and a bench is the one step in this file whose cost is chosen by the
-    # person writing the measurement rather than by the size of the tree. The
-    # Actions default is 360 minutes — six hours of a pinned runner for a loop
-    # that will never converge. Each bench takes a minimum over 60 trials and
-    # crates/core's worst case allocates a 4 MiB field per repetition, so the
-    # ceiling that matters is set here rather than discovered on a blocked
-    # queue. A breach of THIS is not a slow ratio, it is a bench that stopped
-    # terminating, and it should be read that way.
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -8086,30 +7953,6 @@ jobs:
           # C-07 through C-10 for the ratios and the ceiling.
           cargo bench --workspace --locked
 
-  # ==========================================================================
-  # Aggregate — this is the only required check on the branch rule.
-  # ==========================================================================
-  # The job NAME is what a branch-protection rule and the auto-merge workflow
-  # match on, so it is spelled exactly as the required check: `ci-ok`.
-  # ==========================================================================
-  # GATE W — THE BROWSER TREE.
-  #
-  # This job was `.github/workflows/web.yml`, on the reasoning that the engine's
-  # gates and the browser's gates should not be confused for one another. True,
-  # and beside the point: `needs:` CANNOT NAME A JOB IN ANOTHER WORKFLOW FILE.
-  # A separate workflow could only have been made blocking by adding a second
-  # required check in branch protection, which is a repository setting and not a
-  # file in this tree. `ci-ok` already lists its needs and branch protection
-  # already requires `ci-ok`, so moving the job here makes Gate W binding with
-  # no setting to change. The distinction survives in the job's name.
-  #
-  # IT INSTALLS NODE, AND THAT DOES NOT WEAKEN GATE 1E. Jobs do not share a
-  # machine. Gate 1e shadows twelve JS binaries with failing stubs on its own
-  # runner and proves cargo builds and tests without them there; a different job
-  # installing Node on a different runner cannot reach it. CLAUDE.md §2 forbids
-  # a CRATE depending on the front-end toolchain, not a CI file knowing it
-  # exists.
-  # ==========================================================================
   web:
     name: Gate W — the browser tree
     runs-on: ubuntu-24.04
@@ -8122,25 +7965,9 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
-      # `ci` and NOT `install`. `npm install` may rewrite the lockfile, which
-      # would make the rebuild below a comparison against a dependency set the
-      # repository never agreed to.
       - name: Install exactly the lockfile
         run: npm ci --prefix web
 
-      # ----------------------------------------------------------------------
-      # GATE W1 — THE COMMITTED BUNDLE IS THE ONE THIS SOURCE PRODUCES.
-      #
-      # This check is only possible because `svelte.config.js` sets
-      # `version.name` to a digest of the source rather than `Date.now()`.
-      # With the default clock version, rebuilding IDENTICAL source rewrote 18
-      # of 39 tracked files -- the timestamp enters the client manifest, which
-      # changes that chunk's content hash, which changes every filename that
-      # references it. A gate that failed on every run for a reason that was
-      # never the source would train a reader to ignore it.
-      #
-      # Source maps are gitignored, so they cannot enter this diff.
-      # ----------------------------------------------------------------------
       - name: Gate W1 — web/build matches web/src
         run: |
           npm --prefix web run build
@@ -8160,40 +7987,9 @@ jobs:
           echo "The bundle corresponds to the source. Fingerprint:"
           cat web/build/_app/version.json
 
-      # ----------------------------------------------------------------------
-      # GATE W2 — THE TESTS THAT EXIST ACTUALLY RUN.
-      #
-      # node's own runner, so this needs no dependency beyond the toolchain
-      # already installed above.
-      # ----------------------------------------------------------------------
       - name: Gate W2 — the front-end tests
         run: node --test web/tests/*.test.js
 
-      # ----------------------------------------------------------------------
-      # GATE W3 — TYPES DO NOT GET WORSE.
-      #
-      # IT IS A FLOOR AT ZERO NOW, AND IT ARRIVED THERE THE WAY A RATCHET IS
-      # MEANT TO. It began as a ratchet at 64, and this comment used to explain
-      # why: demanding zero would have meant either fixing 64 errors in the
-      # commit that added the gate -- unrelated work, badly scoped -- or
-      # shipping a gate that was red from birth, which is a gate nobody reads.
-      # "No worse than today" was enforceable then and got stricter each time
-      # somebody lowered the number: 64, then 61, and now 0.
-      #
-      # THE LAST 42 CAME OUT IN ONE PASS BECAUSE THEY WERE FOUR ROOTS, NOT 42
-      # FAULTS. `live`, `board`, `tradeList` and `combos` each declared
-      # `rungs: []` / `groups: []` / `rows: []` inside `$state(...)` with no
-      # type; TypeScript inferred `never[]`, and every downstream read of a
-      # property became its own error. One untyped `span(pick)` accounted for
-      # ten more the same way. That is the shape of this whole class -- the
-      # error is never reported at the line that causes it -- and it is exactly
-      # why a ratchet that only ever counts is worth keeping.
-      #
-      # A rise is now a refusal. If a legitimate change genuinely cannot reach
-      # zero, RAISE THIS NUMBER IN THIS FILE and say why in
-      # `docs/06-limits.md` -- do not delete the gate, and do not silence the
-      # file it is about.
-      # ----------------------------------------------------------------------
       - name: Gate W3 — svelte-check does not regress
         run: |
           CEILING=0
@@ -8242,86 +8038,6 @@ jobs:
             echo "the ratchet keeps its meaning."
           fi
 
-      # ----------------------------------------------------------------------
-      # GATE W4 — ORPHANED CSS DOES NOT GROW.
-      #
-      # The Svelte compiler already finds this and already prints it; nothing
-      # read it. 86 distinct selectors are styled in `db` and `ingest` for
-      # markup that no longer exists — a whole inline calendar superseded by
-      # `DayField`, an entire earlier generation of the view bar (`.viewbar`,
-      # `.vtab`, `.vbudget`, `.vsum`) superseded by `.segs`/`.seg`, and a month
-      # toggle. Each is a rule whose markup was deleted while the styling, and
-      # usually the reasoning in the comment beside it, stayed behind.
-      #
-      # That is not cosmetic. It is the measurable signature of the pattern
-      # that produced the worst findings on this page: safeguards that were
-      # written, argued for in a comment, and then orphaned by a later markup
-      # deletion, leaving the comment still asserting a guarantee the code no
-      # longer delivers. `.seg` is the proof it cuts both ways — the orphaned
-      # CSS is what let the removed view toggle be RESTORED to its original
-      # shape rather than guessed at.
-      #
-      # IT IS NOW A FLOOR AT ZERO, and it arrived there the way a ratchet is
-      # supposed to: 86 -> 35 -> 33 -> 10 -> 0, each step a set of rules the
-      # compiler had already proved could not match. From here the gate refuses
-      # the FIRST orphaned selector rather than the eighty-seventh.
-      #
-      # It began as a ratchet, for the same reason W3 is one: a floor of zero
-      # would mean clearing every one inside the commit that adds the gate.
-      # The ceiling has come down from 86 to 35 as the provably-dead rules were
-      # removed; what remains needs a judgement per selector, because each has
-      # a class token that DOES appear in the markup and only the combination
-      # is unmatchable. This gate keeps the number from climbing while that
-      # waits, and prints the new ceiling whenever it falls.
-      #
-      # Counted DISTINCT, because the client and server passes each report the
-      # same selector once.
-      # ----------------------------------------------------------------------
-      # ----------------------------------------------------------------------
-      # GATE W5 — A COMMENT DOES NOT SWALLOW THE RULE BENEATH IT.
-      #
-      # Three times in this tree a comment's closing `*/` and the selector line
-      # under it were deleted together, fusing the two:
-      #
-      #     /* The hint sits INSIDE the input's right padding{
-      #       margin-left: calc(-1 * var(--s6));
-      #
-      # The comment then runs to the next `*/` further down, so those
-      # declarations -- and every rule and comment between -- sit inside a
-      # comment. THE CSS STILL PARSES AND THE BUILD STAYS GREEN. The styling
-      # simply stops applying, `svelte-check` cannot see it, and Gate W4 cannot
-      # count it, because to every tool involved the text is prose. 36 lines in
-      # /db and a whole `.foothold` block in /ingest were inert this way.
-      #
-      # The shape test is that SOME LINE OF THE COMMENT BODY ends in a brace,
-      # and it used to be that the comment's FIRST line did. That narrower
-      # reading was measured and it misses the common case: the fusion happens
-      # wherever the `*/` was deleted, and a comment three prose lines long
-      # loses its closer on the THIRD line, not the first --
-      #
-      #     /* THE DAY AND MONTH FIELDS TAKE /INGEST BOX, for the same reason
-      #        ... two more lines of prose ...
-      #        a focus underline for the whole group{
-      #
-      # -- so the first line ends in a word and the gate walked past a rule
-      # that had been inert ever since. Widening it to any line found four such
-      # fusions in `web/src/routes/db/+page.svelte` on the day it was widened
-      # and NOTHING in the other twelve files, which is the discrimination the
-      # narrow test was claiming and did not have. A comment that merely
-      # CONTAINS a brace still cannot fool it: the test is that a line ENDS in
-      # one, which is what a selector does and what prose about a brace does
-      # not. Counting every `{` instead was measured too and it is not usable
-      # -- it fires on a dozen comments across four files that quote a brace
-      # mid-sentence.
-      #
-      # The `/*` against `*/` count below is printed and is NOT a failure, and
-      # it says so in the line it prints. It cannot be one: several of the `/*`
-      # in `/db` sit inside other comments, where CSS gives them no meaning, so
-      # that file is short of balanced with zero unterminated comments. No
-      # number is pinned here on purpose -- `web/` is edited by its own lane
-      # and the counts move under this file. The scan above is the check; the
-      # count is context printed beside it.
-      # ----------------------------------------------------------------------
       - name: Gate W5 — no comment swallows a CSS rule
         run: |
           set -euo pipefail

@@ -766,3 +766,12 @@ allocation of testing levels. This implementation adopts a finite, predeclared
 eight-timeframe scope, not an unbounded online acceptance guarantee. Equal
 allocation and the zero-conservative wrapper are explicit repository choices
 in D-0542 and D-0544; resampling assumptions remain necessary.
+
+## GitHub Actions workflow size — reviewed 2026-09-19
+
+[GitHub Actions limits](https://docs.github.com/en/actions/reference/limits#workflow-file-size)
+states that each workflow file must be 500 KB or smaller to trigger runs.
+The 515,779-byte CI workflow at `19187a4e` exceeded that limit. D-0608 moves
+explanatory YAML comments into a document, leaving the executable workflow
+unchanged at 497,119 bytes. This restores eligibility to run; it does not
+establish that the workflow's checks pass.
