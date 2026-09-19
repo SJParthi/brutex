@@ -188,6 +188,7 @@ pub fn days_with_interior_gaps(minutes: &[Candle]) -> Vec<i64> {
     days
 }
 
+/// UNVERIFIED performance: no named cost test or measured latency bound is established here.
 /// Remove every bar falling on one of `days`, counting what went.
 ///
 /// Returns the kept bars and the number removed.

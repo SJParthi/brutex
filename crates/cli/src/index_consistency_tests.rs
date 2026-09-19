@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Generated daily return observations only; these are not market performance.
 #![expect(
     clippy::unwrap_used,

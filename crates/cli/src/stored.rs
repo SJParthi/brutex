@@ -1866,6 +1866,7 @@ pub(crate) fn swept_index(underlying: &str) -> Result<InstrumentKey, Refusal> {
     Ok(as_cash)
 }
 
+/// UNVERIFIED performance: no named cost test or measured latency bound is established here.
 /// Whether VWAP can be computed on this instrument's bars: decided by WHAT
 /// the instrument is, never by reading its bars.
 ///

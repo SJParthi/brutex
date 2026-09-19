@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Finite clock/membership/price admission cases on generated candles.
 #![allow(clippy::expect_used)]
 

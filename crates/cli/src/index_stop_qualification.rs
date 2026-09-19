@@ -1,3 +1,4 @@
+//! UNVERIFIED performance: no named cost test or measured latency bound is established here.
 //! Source-bound qualification of the native signal-candle-stop policy.
 //!
 //! Every row in a complete program/side catalog enters the numerical family.

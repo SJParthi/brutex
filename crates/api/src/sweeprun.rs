@@ -3142,10 +3142,6 @@ pub async fn top_json(uri: axum::http::Uri) -> (axum::http::StatusCode, JsonHead
 
 #[cfg(test)]
 #[path = "sweeprun_admission_tests.rs"]
-#[expect(
-    clippy::expect_used,
-    reason = "private admission fixtures must fail loudly"
-)]
 mod admission_tests;
 
 #[cfg(test)]

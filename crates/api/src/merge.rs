@@ -180,6 +180,7 @@ pub struct Merged {
 }
 
 impl Merged {
+    /// UNVERIFIED performance: no named cost test or measured latency bound is established here.
     /// An unambiguous id for this vendor's exact original [`Listing::key`].
     /// One expected O(1) hash lookup; never scans assertions or resolves aliases.
     /// This is vendor-symbol evidence only, not independent identity evidence.

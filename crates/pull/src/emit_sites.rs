@@ -358,6 +358,46 @@ fn drive_request_minutes(scratch: &Scratch) {
     assert!(!done.balances());
 }
 
+fn drive_bad_candles(scratch: &Scratch, conflict: bool) {
+    let request = request_over(Window::new(window().from(), window().from()).expect("one day"));
+    let open = i64::from(request.window.from().days_from_epoch()) * 86_400
+        - crate::session::IST_OFFSET_SECS
+        + 555 * 60;
+    let row = RawRow {
+        timestamp: open + i64::from(!conflict),
+        open: 100,
+        high: 100,
+        low: 100,
+        close: 100,
+        volume: 1,
+        open_interest: None,
+    };
+    let mut rows = vec![row];
+    if conflict {
+        rows.push(RawRow { volume: 2, ..row });
+    }
+    let done = crate::ingest::from_window(
+        &RawWindow { rows },
+        INSTRUMENT,
+        "emit-sites",
+        &scratch.store(),
+        plan_over(&request),
+    );
+    assert_eq!(done.bars_committed, 0);
+    assert_eq!(done.failures.len(), 1);
+    assert!(
+        done.failures
+            .first()
+            .expect("one refusal")
+            .why
+            .contains(if conflict {
+                "conflicting vendor candles"
+            } else {
+                "off-grid broker candle"
+            })
+    );
+}
+
 impl SecretSource for Fixed {
     fn read(&self, _path: &CredentialPath<'_>) -> Result<Secret, SecretError> {
         self.answer.and_then(|value| Secret::new(value.to_owned()))
@@ -460,6 +500,33 @@ struct Site {
 /// Every `telemetry::emit` under `crates/pull/src` except the one the module
 /// header names, one row each.
 static SITES: &[Site] = &[
+    Site {
+        at: "ingest.rs off-grid candle refusal",
+        target: "pull.file",
+        message: "not filed",
+        says: (
+            "why",
+            Says::Holds("off-grid candle refused before fold or append"),
+        ),
+        drive: |scratch| drive_bad_candles(scratch, false),
+    },
+    Site {
+        at: "ingest.rs conflicting candle refusal",
+        target: "pull.file",
+        message: "not filed",
+        says: (
+            "why",
+            Says::Holds("conflicting candles refused before append"),
+        ),
+        drive: |scratch| drive_bad_candles(scratch, true),
+    },
+    Site {
+        at: "request_minutes.rs incomplete coverage refusal",
+        target: "pull.file",
+        message: "not filed",
+        says: ("stage", Says::Holds("minute coverage")),
+        drive: drive_request_minutes,
+    },
     Site {
         at: "crates/pull/src/ingest.rs — from_window request coverage warning",
         target: "pull.request_minutes",

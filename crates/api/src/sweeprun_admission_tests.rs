@@ -1,3 +1,8 @@
+#![cfg(test)]
+#![expect(
+    clippy::expect_used,
+    reason = "private admission fixtures must fail loudly"
+)]
 //! Admission must never be inferred by rewriting an old command's outcome.
 #![allow(clippy::indexing_slicing, reason = "assert exact JSON fixture fields")]
 use super::*;

@@ -1,3 +1,4 @@
+//! UNVERIFIED performance: no named cost test or measured latency bound is established here.
 //! Restart-safe progress for exact, caller-identified recovery work units.
 //!
 //! V1 is an append-only sequence of 1,024-byte records. Integers are little

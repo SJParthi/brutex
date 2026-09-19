@@ -1,3 +1,4 @@
+//! UNVERIFIED performance: no named cost test or measured latency bound is established here.
 //! Durable invocation history, separate from computation identity and admission.
 //!
 //! `audit/invocations-v1/index.bin` reserves monotonically increasing IDs under
@@ -451,6 +452,10 @@ impl Drop for Attempt {
                 Phase::Cancelled
             };
             if let Err(why) = self.finish(phase, 0) {
+                let _noted = telemetry::emit(
+                    &telemetry::Event::error("cli.audit", "terminal audit unconfirmed")
+                        .with("why", telemetry::Value::Str(&why)),
+                );
                 eprintln!("{why}; terminal audit is unconfirmed");
             }
         }
@@ -490,6 +495,10 @@ pub fn completed_boundary() {
                 .map_err(error)
                 .and_then(|mut state| state.update(Phase::Progress, 0, true));
             if let Err(why) = result {
+                let _noted = telemetry::emit(
+                    &telemetry::Event::error("cli.audit", "boundary audit unconfirmed")
+                        .with("why", telemetry::Value::Str(&why)),
+                );
                 eprintln!("{why}; this invocation cannot acknowledge a successful terminal audit");
             }
         }

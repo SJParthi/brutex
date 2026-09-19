@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Generated complete-calendar source authority through the actual search command.
 //! This proves finite recovery and observation contracts, not market performance.
 use super::*;

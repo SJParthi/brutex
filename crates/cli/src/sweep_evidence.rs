@@ -312,7 +312,7 @@ pub struct RankedRow {
     pub mismatched: u64,
     /// Positive outcomes.
     pub wins: u64,
-    /// Negative outcomes; flat outcomes are neither wins nor losses.
+    /// Negative outcomes; zero-return outcomes are neither wins nor losses.
     pub losses: u64,
     /// IEEE bits of summed positive moves.
     pub win_sum_bits: u64,

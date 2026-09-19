@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Exact field/state projection only; no policy or market authority is minted.
 #![expect(
     clippy::unwrap_used,

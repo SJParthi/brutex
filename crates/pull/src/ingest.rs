@@ -681,7 +681,7 @@ fn note_not_landed(member: &Member, why: &str) {
 /// At `error` rather than `warn`, for the reason [`note_derived_shortfall`]
 /// gives: the run REPORTS these as failures, so a line below the default floor
 /// would be the same silence in a different place.
-fn note_not_filed(instrument: &str, stage: &str, why: &str) {
+pub(super) fn note_not_filed(instrument: &str, stage: &str, why: &str) {
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::error("pull.file", "not filed")
             .with("instrument", telemetry::Value::Str(instrument))
@@ -1058,6 +1058,11 @@ pub fn from_window(
     let mut duplicates = 0;
     for row in &raw.rows {
         if !broker_stamp_on_grid(row.timestamp, plan.encoding, plan.request.granularity) {
+            note_not_filed(
+                instrument,
+                "broker timestamp",
+                "off-grid candle refused before fold or append",
+            );
             return Ingested {
                 members: 1,
                 rows_read: raw.rows.len(),
@@ -1075,6 +1080,11 @@ pub fn from_window(
         }
         if let Some(previous) = seen.insert(row.timestamp, *row) {
             if previous != *row {
+                note_not_filed(
+                    instrument,
+                    "broker timestamp",
+                    "conflicting candles refused before append",
+                );
                 return Ingested {
                     members: 1,
                     rows_read: raw.rows.len(),

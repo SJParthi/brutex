@@ -52,14 +52,12 @@ pub(crate) fn open(_path: &Path) -> std::io::Result<File> {
     ))
 }
 
-#[cfg(all(
-    test,
-    any(
-        target_os = "macos",
-        all(
-            target_os = "linux",
-            any(target_arch = "x86_64", target_arch = "aarch64")
-        )
+#[cfg(test)]
+#[cfg(any(
+    target_os = "macos",
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
     )
 ))]
 mod tests {

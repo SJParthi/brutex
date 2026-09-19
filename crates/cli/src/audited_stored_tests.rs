@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Generated finite storage fixtures; these are never presented as market research.
 #![allow(clippy::expect_used, clippy::indexing_slicing)]
 use super::*;

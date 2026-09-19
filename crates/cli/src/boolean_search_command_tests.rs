@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Public command refusals before source or output access.
 use super::*;
 

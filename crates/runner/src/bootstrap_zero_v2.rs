@@ -219,6 +219,7 @@ impl Receipt {
     pub fn rows(&self) -> &[Candidate] {
         &self.rows
     }
+    /// UNVERIFIED performance: no named cost test or measured latency bound is established here.
     /// O(1) lookup by the complete caller position.
     #[must_use]
     pub fn candidate(&self, strategy: usize) -> Option<&Candidate> {

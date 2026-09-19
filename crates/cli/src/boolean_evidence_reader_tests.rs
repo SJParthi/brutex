@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Generated complete-calendar fixtures; no arbitrary committed capability.
 use super::super::super::tests::Fixture;
 use super::super::{CommittedBooleanStatisticsV1, admission};

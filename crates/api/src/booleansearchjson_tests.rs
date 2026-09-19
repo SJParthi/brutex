@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Bounded selector/projection refusal tests; no market computation is fabricated.
 #![expect(
     clippy::unwrap_used,

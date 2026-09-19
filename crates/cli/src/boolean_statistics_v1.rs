@@ -1,3 +1,4 @@
+//! UNVERIFIED performance: no named cost test or measured latency bound is established here.
 //! Full-population statistics for an explicitly requested Boolean catalog.
 //!
 //! This is a new authority, never a legacy mask/statistics receipt. Every

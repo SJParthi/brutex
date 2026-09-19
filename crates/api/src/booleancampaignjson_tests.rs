@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Finite selector and projection tests; these are not generated market runs.
 #![expect(
     clippy::unwrap_used,

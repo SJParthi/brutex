@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Finite generated journal faults, not market or qualification-performance proof.
 #![expect(clippy::unwrap_used, reason = "exact bounded durable-state assertions")]
 use super::*;

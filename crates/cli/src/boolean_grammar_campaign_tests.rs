@@ -1,3 +1,4 @@
+#![cfg(test)]
 #![expect(
     clippy::unwrap_used,
     reason = "finite durable checkpoint fault assertions"

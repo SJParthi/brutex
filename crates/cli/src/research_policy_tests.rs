@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Independent finite configuration-boundary checks; no market or strategy evidence.
 #![allow(clippy::expect_used)]
 

@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Generated fixtures, never market or admission evidence.
 use super::super::super::ExpressionExecutionRunV1;
 use super::*;

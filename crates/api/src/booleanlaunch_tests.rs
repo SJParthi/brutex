@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Private protocol, status and production-router launch-boundary regressions.
 #![allow(
     clippy::unwrap_used,

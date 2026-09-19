@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Generated fixture checks for program-aware resolved-coordinate authority.
 use super::*;
 use crate::exit_grid_policy::{

@@ -1,3 +1,4 @@
+#![cfg(test)]
 use super::*;
 use crate::search_checkpoint::tests::Scratch;
 use crate::sweep_evidence::{self, Completion, Operation};

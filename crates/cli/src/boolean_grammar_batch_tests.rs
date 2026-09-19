@@ -1,3 +1,4 @@
+#![cfg(test)]
 #![expect(
     clippy::unwrap_used,
     reason = "exact finite grammar and corruption assertions"

@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Generated complete-calendar fixtures; these are source/authentication tests,
 //! never historical profitability evidence or an operator sweep.
 use super::*;

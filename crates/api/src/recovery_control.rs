@@ -1,3 +1,4 @@
+//! UNVERIFIED performance: no named cost test or measured latency bound is established here.
 //! Durable, per-plan STOP intent, separate from the locked recovery work journal.
 //!
 //! `audit/recovery-v1/<plan-id>.stop.bin` uses the existing 1024-byte versioned

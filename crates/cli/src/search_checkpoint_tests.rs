@@ -1,3 +1,4 @@
+#![cfg(test)]
 use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 

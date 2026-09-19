@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Real journal operations over generated payloads, without market/source authority.
 #![expect(clippy::unwrap_used, reason = "bounded generated journal assertions")]
 use super::*;

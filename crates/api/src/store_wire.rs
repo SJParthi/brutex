@@ -1,3 +1,4 @@
+//! UNVERIFIED performance: no named cost test or measured latency bound is established here.
 //! Census transfer formats cached for one immutable manifest snapshot.
 //! Cold encoding and retained bytes grow with the census; an unchanged poll
 //! reuses the exact body and validator. This is not a total O(1) inventory.
@@ -58,7 +59,7 @@ impl Cache {
         if !same {
             *held = Some(Snapshot {
                 source: Arc::downgrade(source),
-                bodies: HashMap::new(),
+                bodies: HashMap::with_capacity(2 * Vendor::ALL.len()),
             });
         }
         let current = held

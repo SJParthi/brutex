@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Generated boundary fixtures for the actual timestamp checks, not market evidence.
 #![allow(clippy::expect_used)]
 

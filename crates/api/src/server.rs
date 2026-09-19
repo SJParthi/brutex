@@ -5958,6 +5958,11 @@ impl BrokerRun {
     /// A transport refusal must also reach the receipt's failure accounting.
     /// Otherwise a different member's successful write makes the whole basket green.
     fn record_refusal(&mut self, instrument: &str, why: String) {
+        let _noted = telemetry::emit(
+            &telemetry::Event::error("api.pull", "broker request refused")
+                .with("instrument", telemetry::Value::Str(instrument))
+                .with("why", telemetry::Value::Str(&why)),
+        );
         self.total.failures.push(pull::ingest::Failure {
             instrument: instrument.to_owned(),
             why: why.clone(),
@@ -5968,6 +5973,10 @@ impl BrokerRun {
     /// Preserve partial writes, but never certify an interrupted basket.
     fn record_stop(&mut self) {
         if let Some(why) = &self.stopped {
+            let _noted = telemetry::emit(
+                &telemetry::Event::error("api.pull", "broker request stopped")
+                    .with("why", telemetry::Value::Str(why)),
+            );
             self.total.failures.push(pull::ingest::Failure {
                 instrument: "requested basket".to_owned(),
                 why: why.clone(),
@@ -6596,7 +6605,9 @@ async fn prepare_cash_schedule(
     pull::cash_session_cache::prepare_local_observed(&cache_root, &historical, dated).await?;
     // Historical entries have just been receipt-checked, including any date
     // repeated in this response. Do not decompress those masters twice.
-    days.retain(|day| historical.binary_search(day).is_err());
+    let mut historical_days = std::collections::HashSet::with_capacity(historical.len());
+    historical_days.extend(historical.iter().copied());
+    days.retain(|day| !historical_days.contains(day));
     pull::cash_session_cache::prepare_observed(&cache_root, &days, dated).await?;
     days.extend(historical);
     days.sort_unstable();
@@ -6642,6 +6653,10 @@ fn observed_cash_source_days(
     use pull::vendor::TimestampEncoding;
     let mut days = std::collections::HashSet::new();
     for (window, body) in bodies {
+        let count =
+            usize::try_from(window.to().days_from_epoch() - window.from().days_from_epoch() + 1)
+                .map_err(|why| why.to_string())?;
+        days.try_reserve(count).map_err(|why| why.to_string())?;
         for row in &body.rows {
             let epoch = match encoding {
                 TimestampEncoding::EpochMillisUtc => row.timestamp.div_euclid(1_000),
@@ -6694,15 +6709,21 @@ async fn land_spot(
                 schedule.as_ref(),
                 bodies,
             )),
-            Err(why) => done.absorb(pull::ingest::Ingested {
-                members: bodies.len(),
-                rows_read: bodies.iter().map(|(_, body)| body.rows.len()).sum(),
-                failures: vec![pull::ingest::Failure {
-                    instrument: instrument.underlying.to_string(),
-                    why,
-                }],
-                ..pull::ingest::Ingested::default()
-            }),
+            Err(why) => {
+                let _noted = telemetry::emit(
+                    &telemetry::Event::error("api.pull", "cash schedule refused")
+                        .with("why", telemetry::Value::Str(&why)),
+                );
+                done.absorb(pull::ingest::Ingested {
+                    members: bodies.len(),
+                    rows_read: bodies.iter().map(|(_, body)| body.rows.len()).sum(),
+                    failures: vec![pull::ingest::Failure {
+                        instrument: instrument.underlying.to_string(),
+                        why,
+                    }],
+                    ..pull::ingest::Ingested::default()
+                });
+            }
         }
     }
     done
@@ -6717,6 +6738,13 @@ fn note_cash_schedule_verified(days: usize, instruments: usize) {
                 "policy",
                 telemetry::Value::Str("NSE MII symbol+ISIN; continuous only; auction excluded"),
             ),
+    );
+}
+
+fn note_recovery_not_resumed(why: &str) {
+    let _noted = telemetry::emit(
+        &telemetry::Event::error("api.recovery", "recovery not resumed")
+            .with("why", telemetry::Value::Str(why)),
     );
 }
 
@@ -16049,6 +16077,7 @@ async fn run_in_over(
                 // status it publishes are the ones the routes read.
                 let flying = tokio::spawn(autopilot::fly(Loaded::clone(&site)));
                 if let Err(why) = crate::recovery::resume(Loaded::clone(&site)) {
+                    note_recovery_not_resumed(&why);
                     eprintln!("Recovery NOT resumed: {why}");
                 }
                 let code = stopped_over(
@@ -16614,6 +16643,7 @@ mod tests {
 
     #[test]
     fn a_partial_broker_basket_cannot_render_or_record_as_stored() {
+        let mark = crate::emitted::mark();
         let mut run = successful_basket_member();
         assert!(run.total.balances());
         run.record_refusal(
@@ -16621,6 +16651,15 @@ mod tests {
             "RELIANCE: vendor refused this member".to_owned(),
         );
         assert_eq!(run.refused.len(), 1);
+        assert!(
+            crate::emitted::landed(mark, "api.pull", "broker request refused")
+                .iter()
+                .any(|record| crate::emitted::says(
+                    record,
+                    "why",
+                    "RELIANCE: vendor refused this member"
+                ))
+        );
         assert_eq!(run.total.failures.len(), 1);
         assert_eq!(run.total.failures[0].instrument, "RELIANCE");
         assert_eq!(run.total.bars_committed, 1, "successful writes survive");
@@ -16653,6 +16692,7 @@ mod tests {
 
     #[test]
     fn an_interrupted_broker_basket_keeps_writes_but_fails_completion() {
+        let mark = crate::emitted::mark();
         let mut run = successful_basket_member();
         run.record_stop();
         assert!(
@@ -16661,6 +16701,15 @@ mod tests {
         );
         run.stopped = Some("operator stopped after one of two instruments".to_owned());
         run.record_stop();
+        assert!(
+            crate::emitted::landed(mark, "api.pull", "broker request stopped")
+                .iter()
+                .any(|record| crate::emitted::says(
+                    record,
+                    "why",
+                    "operator stopped after one of two instruments"
+                ))
+        );
         assert_eq!(run.total.failures.len(), 1);
         assert_eq!(
             run.total.failures[0].why,
@@ -16668,6 +16717,21 @@ mod tests {
         );
         assert!(!run.total.balances());
         assert_eq!(run.total.bars_committed, 1);
+    }
+
+    #[test]
+    fn recovery_resume_refusal_reaches_the_installed_log() {
+        let mark = crate::emitted::mark();
+        super::note_recovery_not_resumed("private resume refusal fixture");
+        assert!(
+            crate::emitted::landed(mark, "api.recovery", "recovery not resumed")
+                .iter()
+                .any(|record| crate::emitted::says(
+                    record,
+                    "why",
+                    "private resume refusal fixture"
+                ))
+        );
     }
 
     #[test]
@@ -17683,6 +17747,7 @@ mod tests {
 
     #[tokio::test]
     async fn cash_partial_month_replay_refuses_missing_or_corrupt_earlier_receipt() {
+        let mark = crate::emitted::mark();
         for (tag, missing) in [("cash-month-missing", true), ("cash-month-corrupt", false)] {
             let (site, landed, key) = cash_month_replay_fixture(tag).await;
             let mut dated = std::collections::HashMap::new();
@@ -17703,6 +17768,11 @@ mod tests {
             assert_eq!(done.derived_files, 0);
             assert_eq!(done.rows_read, 360);
             assert_eq!(done.failures.len(), 1);
+            assert!(
+                crate::emitted::landed(mark, "api.pull", "cash schedule refused")
+                    .iter()
+                    .any(|record| crate::emitted::says(record, "why", &done.failures[0].why))
+            );
             assert!(
                 done.failures[0]
                     .why
@@ -29722,7 +29792,7 @@ fn spot_months_by_identity(
     held: &[(census::Series, store::path::YearMonth)],
 ) -> std::collections::HashMap<SpotIdentity, Vec<store::path::YearMonth>> {
     let mut by_series: std::collections::HashMap<SpotIdentity, Vec<store::path::YearMonth>> =
-        std::collections::HashMap::new();
+        std::collections::HashMap::with_capacity(held.len());
     for (series, month) in held {
         if series.contract.is_some() {
             continue;

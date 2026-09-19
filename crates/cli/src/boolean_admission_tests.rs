@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Generated, source-bound tests; none of these thresholds is a research policy.
 use super::*;
 use runner::admission::{AdmissionPolicyDraftV1, AdmissionReasonV1};

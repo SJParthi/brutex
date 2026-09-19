@@ -194,7 +194,11 @@ mod tests {
         let asked = Asked::parse(&full)?;
         assert_eq!(asked.cursor.map(|value| value.sequence), Some(88));
         assert!(
-            render(&std::env::temp_dir(), &asked).is_err(),
+            render(
+                &crate::scratch::path("unadmitted-expression-snapshot"),
+                &asked
+            )
+            .is_err(),
             "unadmitted snapshot cannot splice a path"
         );
         Ok(())

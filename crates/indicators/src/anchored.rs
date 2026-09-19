@@ -693,6 +693,7 @@ pub fn overlay_exact_minute_gapfib(
     )
 }
 
+/// UNVERIFIED performance: no named cost test or measured latency bound is established here.
 /// Replace ORB positions 86..=105 and `GapFib` positions 132..=142 from real
 /// one-minute evidence, preserving all other signal-family truth and availability.
 ///

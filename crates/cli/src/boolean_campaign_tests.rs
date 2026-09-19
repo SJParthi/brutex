@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Finite generated orchestration and saved-observation fault tests, not market proof.
 #![expect(clippy::unwrap_used, reason = "finite generated fixture assertions")]
 use super::*;

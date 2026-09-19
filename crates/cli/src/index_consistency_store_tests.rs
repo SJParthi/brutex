@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Generated observations exercise persistence; none are market performance.
 #![expect(clippy::unwrap_used, reason = "named persistence invariant assertions")]
 use super::*;

@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Independent integer arithmetic and finite telescoping regression fixtures.
 #![expect(clippy::unwrap_used, reason = "finite exact arithmetic assertions")]
 use super::*;

@@ -36149,3 +36149,29 @@ Declare those exact reviewed words in the existing named groups. Preserve the
 scanner, its length bound, its date exclusion, and its fail-closed result.
 No crate source or credential configuration changes. Gate 1d must pass with
 these declarations while an undeclared segment still fails membership.
+
+### D-0611 — Repair integration gates and refusal observability — 2026-09-19
+
+Distinguish compiler-excluded test fixtures from production in the failure and
+construct scanners. Add explicit test-only file guards and retain scanning after
+inline test modules. Reconcile invariant identifiers and replace module-only
+proof references with named tests. Record reviewed production constructs and
+input-dependent costs in `docs/35-ci-integration-audit.md`; mark undocumented
+performance bounds UNVERIFIED rather than inventing measurements.
+
+Reserve maps before known-size insertions and replace historical-day binary
+search with pre-sized hash membership. Preserve deterministic ordering and
+integer execution prices. Log launch, broker, recovery, cash-schedule, audit,
+and ingestion refusals at their production boundaries. Extend durable event
+read-back tests for launch metadata, interrupted/partial broker baskets, recovery,
+cash receipts, and malformed/conflicting candle input. A direct minute audit and
+its outer ingestion receipt are separate events; neither silently loses failure
+context. These changes do not pull market data, modify credentials, change the
+research surface, or establish a whole-process constant-time guarantee.
+
+### D-0612 — Apply the Rustls security patch — 2026-09-19
+
+The dependency audit rejects locked Rustls 0.23.43 under RUSTSEC-2026-0285
+(TLS 1.3 handshake encryption-level validation). Update the lock to patched
+0.23.45 and its compatible rustls-webpki 0.103.15. Keep the existing crypto
+provider, dependency policy, and TLS configuration. No advisory is ignored.

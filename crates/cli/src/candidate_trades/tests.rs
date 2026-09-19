@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Adversarial tests against the public writer/readers and the real pricing pass.
 #![allow(clippy::expect_used, reason = "fixture failures must fail the test")]
 

@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Generated OHLCV fixtures only; never real market or profit evidence.
 #![expect(
     clippy::unwrap_used,

@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Generated publication resources, never statistical or market authority.
 use super::*;
 use crate::boolean_qualified_journal::{Reader, Slot};

@@ -1019,6 +1019,7 @@ async fn reconcile_pending(
     let today = ingest::today_ist().map_err(failure)?;
     let mut scopes: std::collections::HashMap<String, Vec<Window>> =
         std::collections::HashMap::new();
+    scopes.try_reserve(keys.len()).map_err(failure)?;
     for key in keys {
         let row = journal.latest.get(key).ok_or("missing scan scope")?;
         let asked = checked(&row.body, today)?;

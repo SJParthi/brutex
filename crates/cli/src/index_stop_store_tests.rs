@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Generated OHLCV tests validate observations only, never market performance.
 #![expect(clippy::unwrap_used, reason = "named fixture assertions")]
 use super::*;

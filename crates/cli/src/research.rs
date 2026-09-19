@@ -92,6 +92,7 @@ impl ResearchWindow {
         ts_micros >= start && ts_micros < end
     }
 
+    /// UNVERIFIED performance: no named cost test or measured latency bound is established here.
     /// Remove observations outside the requested signal/execution window.
     ///
     /// Returns the number removed, preserving order. O(bars) setup work, NOT an

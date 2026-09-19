@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Exact finite-scope allocation arithmetic regressions.
 #![expect(clippy::unwrap_used, reason = "finite exact arithmetic assertions")]
 use super::*;

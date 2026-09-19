@@ -1,3 +1,4 @@
+//! UNVERIFIED performance: no named cost test or measured latency bound is established here.
 //! One nonblocking execution lease per canonical store for cooperating CLI and
 //! HTTP sweep entry points. This is admission authority, not a result receipt.
 //!

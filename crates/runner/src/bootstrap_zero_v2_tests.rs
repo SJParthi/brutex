@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Generated numeric evidence only; no market or finite-sample validity claim.
 #![expect(clippy::unwrap_used, reason = "bounded numeric assertions")]
 #![allow(

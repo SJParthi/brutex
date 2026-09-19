@@ -166,6 +166,7 @@ impl Reader {
     pub fn records(&self) -> &[Record] {
         &self.records
     }
+    /// UNVERIFIED performance: no named cost test or measured latency bound is established here.
     /// Exact pinned O(1) record lookup after cold admission.
     /// # Errors
     /// Refuses foreign pins, changes or a setting outside the saved extent.

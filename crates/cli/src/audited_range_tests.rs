@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Finite generated fixtures for retained multi-month checksum authority.
 #![allow(clippy::expect_used, clippy::indexing_slicing)]
 use super::*;

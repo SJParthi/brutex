@@ -484,6 +484,7 @@ impl Forward {
     }
 }
 
+/// UNVERIFIED performance: no named cost test or measured latency bound is established here.
 /// Range maximum and minimum over any `[lo, hi]` in O(1), built once.
 ///
 /// # Why a sparse table and not a sliding deque

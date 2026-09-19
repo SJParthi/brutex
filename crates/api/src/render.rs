@@ -3113,21 +3113,25 @@ fn discover_folders() -> Vec<String> {
     found
 }
 
-#[test]
-fn disabled_archive_suggestions_never_enter_the_filesystem_discovery() {
-    let mut called = false;
-    let absent = folders_when(false, || {
-        called = true;
-        vec!["unexpected".to_owned()]
-    });
-    assert!(!called);
-    assert!(absent.is_empty());
-    let found = folders_when(true, || {
-        called = true;
-        vec!["fixture".to_owned()]
-    });
-    assert!(called);
-    assert_eq!(found, vec!["fixture".to_owned()]);
+#[cfg(test)]
+mod archive_suggestion_tests {
+    use super::*;
+    #[test]
+    fn disabled_archive_suggestions_never_enter_the_filesystem_discovery() {
+        let mut called = false;
+        let absent = folders_when(false, || {
+            called = true;
+            vec!["unexpected".to_owned()]
+        });
+        assert!(!called);
+        assert!(absent.is_empty());
+        let found = folders_when(true, || {
+            called = true;
+            vec!["fixture".to_owned()]
+        });
+        assert!(called);
+        assert_eq!(found, vec!["fixture".to_owned()]);
+    }
 }
 
 /// Directories at or under `dir` that directly contain a `.csv`.

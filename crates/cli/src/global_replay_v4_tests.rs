@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Finite scheduler/storage attacks plus a real stored-origin Runner witness.
 #![allow(clippy::expect_used, clippy::indexing_slicing)]
 use super::*;

@@ -424,6 +424,7 @@ pub fn read_saved(
     Ok((identity, expression, summary))
 }
 
+/// UNVERIFIED performance: no named cost test or measured latency bound is established here.
 /// Strictly validate and visit a saved expression signal file with bounded RAM.
 /// The file is scanned before any row is returned. This integrity scan is
 /// O(rows); it is not advertised as constant-time historical verification.

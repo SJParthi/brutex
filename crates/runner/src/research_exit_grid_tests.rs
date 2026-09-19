@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Defensive internal corruption injection, not a constructible public input.
 use super::*;
 use crate::excursion::Side;

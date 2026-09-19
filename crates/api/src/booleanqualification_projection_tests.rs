@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Serialization only; actual evidence admission is owned by the CLI reader.
 #![expect(
     clippy::unwrap_used,

@@ -15,13 +15,16 @@ pub(super) fn value(root: &Path, query: Option<&str>) -> Value {
     let configured = match configured(query, optional) {
         Ok(configured) => configured,
         Err(why) => {
-            failures.push(why);
+            crate::booleanlaunch::note_metadata_refusal(&mut failures, why);
             serde_json::Map::new()
         }
     };
     for (field, setting) in DEFAULTS {
         if configured.get(field).is_none_or(Value::is_null) {
-            failures.push(format!("{field} is not configured; set {setting}"));
+            crate::booleanlaunch::note_metadata_refusal(
+                &mut failures,
+                format!("{field} is not configured; set {setting}"),
+            );
         }
     }
     let number = |field| {
@@ -37,10 +40,13 @@ pub(super) fn value(root: &Path, query: Option<&str>) -> Value {
     let (policy, limits, parallel, procedure) = match &config {
         Ok(config) => {
             if number("node_allowance").is_some_and(|nodes| nodes > config.capture.records) {
-                failures.push("node_allowance exceeds the admitted native record bound".into());
+                crate::booleanlaunch::note_metadata_refusal(
+                    &mut failures,
+                    "node_allowance exceeds the admitted native record bound".into(),
+                );
             }
             if let Err(why) = observation_limits(config) {
-                failures.push(why);
+                crate::booleanlaunch::note_metadata_refusal(&mut failures, why);
             }
             let mut policy = crate::booleanevidencejson::search_policy(&config.policy);
             if let Some(fields) = policy.as_object_mut() {
@@ -65,7 +71,7 @@ pub(super) fn value(root: &Path, query: Option<&str>) -> Value {
             )
         }
         Err(why) => {
-            failures.push(why.clone());
+            crate::booleanlaunch::note_metadata_refusal(&mut failures, why.clone());
             (
                 json!({"ready":false,"digest":null,"values":[],"refusal":why}),
                 Value::Null,
@@ -75,7 +81,10 @@ pub(super) fn value(root: &Path, query: Option<&str>) -> Value {
         }
     };
     if !root.is_absolute() || !root.is_dir() {
-        failures.push("The serving store is not an existing absolute directory".into());
+        crate::booleanlaunch::note_metadata_refusal(
+            &mut failures,
+            "The serving store is not an existing absolute directory".into(),
+        );
     }
     let ready = failures.is_empty();
     json!({"schema_version":1,"model":"index-stop-qualified-search-launch","command":super::COMMAND,

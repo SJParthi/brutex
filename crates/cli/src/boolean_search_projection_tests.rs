@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Invented numeric observations test comparisons, never saved market authority.
 #![expect(clippy::unwrap_used, reason = "exact numeric comparison fixtures")]
 use super::*;

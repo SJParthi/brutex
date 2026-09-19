@@ -23559,26 +23559,15 @@ mod tests {
     /// once on a run where validation was off.
     #[test]
     fn a_section_is_found_by_its_own_line_and_ends_at_the_next_unindented_one() {
-        let report = "\
-HEADER
-  something
-
-WALK-FORWARD
-  folds     8
-  positive  5
-
-  side  train  test
-  long  100    50
-  A fold is ONE DRAW -- see OVERFITTING below.
-
-OVERFITTING
-  PBO       0.42
-
-  NON-AUTHORITATIVE: this is not CSCV/PBO.
-
-TRAILING
-  x         1
-";
+        let report = concat!(
+            "HEADER\n  something\n\n",
+            "WALK-FORWARD\n  folds     8\n  positive  5\n\n",
+            "  side  train  test\n  long  100    50\n",
+            "  A fold is ONE DRAW -- see OVERFITTING below.\n\n",
+            "OVERFITTING\n  PBO       0.42\n\n",
+            "  NON-AUTHORITATIVE: this is not CSCV/PBO.\n\n",
+            "TRAILING\n  x         1\n",
+        );
         let walk = crate::section_note(report, "WALK-FORWARD").expect("the block is present");
         assert!(
             walk.contains("side  train  test") && walk.contains("long  100"),

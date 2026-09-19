@@ -164,7 +164,9 @@ mod tests {
 
     #[test]
     fn explicit_physical_configuration_preserves_limits_and_refuses_unusable_fields() {
-        let root = std::env::temp_dir();
+        let root =
+            std::env::temp_dir().join(format!("brutex-strict-config-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("private configuration directory");
         let exact = StrictConfig::from_values(
             Some(root.clone().into()),
             Some(" 1 ".into()),

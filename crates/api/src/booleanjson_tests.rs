@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Finite wire fixtures test observation only; these bytes are not market proof.
 #![expect(
     clippy::unwrap_used,

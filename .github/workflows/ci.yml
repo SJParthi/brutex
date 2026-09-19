@@ -368,53 +368,6 @@ jobs:
       - name: Gate 1d — every segment-shaped literal in crates/pull is declared
         run: |
           set -euo pipefail
-          # WHY THIS EXISTS. crates/pull is the one crate whose safety argument
-          # is "every path segment written down here is invented", and until
-          # this gate that sentence was a comment. Gate 1c cannot check it: it
-          # only matches a slash-JOINED path with a well-known environment
-          # name, so a bare `const ORG: &str = "<the real org>";` passes it —
-          # demonstrated, not assumed. See docs/06-limits.md §18.
-          #
-          # WHAT IT CHECKS. Every double-quoted literal under crates/pull that
-          # could BE a parameter path segment — lower-case, [a-z0-9_-], at most
-          # MAX_SEGMENT_LEN bytes — must appear in the list below. Comments and
-          # doc examples are scanned too: a real segment pasted into a doc
-          # example publishes it exactly as effectively as a constant does.
-          #
-          # THE ONE SHAPE THAT IS NOT SCANNED, and why it is a tightening and
-          # not a hole: a literal that is EXACTLY `YYYY-MM-DD` is skipped. An
-          # ISO-8601 calendar date names no account, no environment, no vendor
-          # and no field — it carries zero bytes of the information this gate
-          # protects — and the crate's date arithmetic generates them without
-          # limit, one per boundary a test pins. Nine were on the list at the
-          # commit this exclusion was added: leap days, month rolls, a century
-          # non-leap year. Left in, they would have grown until the allowlist
-          # was a wall of dates and nobody read the words next to them, which
-          # is the failure mode of an allowlist. The exclusion is anchored at
-          # both ends and requires exactly four-two-two digits, so `2024-02`,
-          # `prod-2024-01-01` and any segment with a letter in it are still
-          # scanned. All-digit literals are still scanned — see group 10.
-          #
-          # WHAT IT CANNOT CHECK. That the words below are not themselves an
-          # operator's real segments. `groww` and `dhan` are on the list because
-          # crates/core has tracked them since its first commit, and an operator
-          # whose parameter path uses the broker's public name as its vendor
-          # segment has published that segment by their own choice. That is
-          # operator-side and docs/06-limits.md §18 says so.
-          #
-          # A NEW ENTRY IS A DELIBERATE ACT. Adding a word here is the moment to
-          # ask whether it is invented. That is the whole mechanism, and it is
-          # why the list is split into NAMED GROUPS with a comment over each
-          # rather than one undifferentiated block: a reviewer has to read which
-          # group a new word joined, and a word that fits no group is the
-          # question this gate exists to ask. The comments live BETWEEN the
-          # assignments and never inside them — `printf '%s\n' $allowed`
-          # word-splits, so a `#` inside a string would silently become an
-          # allowed word, and so would every word after it on that line.
-          #
-          # ---- group 1: the shape's own vocabulary, and the one real region.
-          # `/<org>/<env>/<vendor>/<field>` written out, plus `ap-south-1`,
-          # which CLAUDE.md §8 states in the clear.
           seg_shape='org env region vendor fields ap-south-1'
 
           # ---- group 2: vendor wire names. THE ONES THIS GATE EXISTS FOR.
@@ -3111,7 +3064,7 @@ jobs:
           declared='api/src/calendar_of.rs:println!:2
           api/src/constituents.rs:println!:2
           api/src/server.rs:println!:16
-          api/src/server.rs:eprintln!:8
+          api/src/server.rs:eprintln!:9
           api/src/server.rs:print!:1
           core/src/universe.rs:println!:2
           core/src/vendor.rs:println!:1
@@ -3125,6 +3078,15 @@ jobs:
           pull/src/http.rs:eprintln!:6
           telemetry/src/record.rs:eprintln!:1
           telemetry/src/sink.rs:eprintln!:1'
+          # Test-only measurements; production audit/recovery notices also emit.
+          declared="$declared api/src/booleanlaunch_tests.rs:println!:2
+          api/src/recovery.rs:println!:1
+          cli/src/boolean_candidate_tests.rs:eprintln!:2
+          cli/src/index_stop_qualification_tests.rs:eprintln!:2
+          cli/src/index_stop_tests.rs:println!:1
+          cli/src/operation_audit.rs:eprintln!:2
+          pull/src/cash_auction.rs:eprintln!:3
+          pull/src/cash_session_cache.rs:eprintln!:2"
 
           want=$(printf '%s\n' $declared | sort)
           got=$(sort /tmp/prints.txt)
@@ -4232,9 +4194,10 @@ jobs:
           # reason gate 11 gives: "I could not tell where this module ends" is a
           # thing a gate may say; quietly scanning half of it is not.
           #
-          # WHOLE-FILE TEST MODULES ARE DROPPED, decided by reading the CRATE
-          # ROOT and never the file's own name or contents, so a file cannot
-          # exempt itself. `pull/src/emit_sites.rs` and `api/src/emitted.rs` are
+          # WHOLE-FILE TEST MODULES ARE DROPPED only when compiler attributes
+          # exclude them from production, in the crate root or at file scope.
+          # A filename or ordinary comment never exempts a file.
+          # `pull/src/emit_sites.rs` and `api/src/emitted.rs` are
           # that shape. Neither records a failure today, so this changes no
           # count -- it is here so a `Failure` FIXTURE added to one of them is
           # not read as a production failure path.
@@ -4326,6 +4289,8 @@ jobs:
           # `grep -A 1` means the attribute has to sit immediately above the
           # declaration to count.
           whole_file_test_module() {
+            # The compiler excludes this entire file in every non-test build.
+            if head -1 "$1" | grep -qxF '#![cfg(test)]'; then return 0; fi
             stem="${1##*/}"; stem="${stem%.rs}"
             root="${1%/src/*}/src/lib.rs"
             [ -f "$root" ] \
@@ -4599,104 +4564,7 @@ jobs:
       - name: Gate 11 — banned constructs on the O(1) paths
         run: |
           set -euo pipefail
-          # WHY THIS EXISTS. Gate 8 measures a ratio at 1x/10x/100x, which
-          # catches a bound that has ALREADY broken on a path someone thought
-          # to write a bench for. The audit that produced this gate found four
-          # O(1) defects that no gate could see, because each was a *source
-          # construct* that is superlinear by nature and none of them had a
-          # bench: a map reserved to exactly its load so the next insert
-          # rehashed (2.4 ms at 50k entries), a page render that sorted the
-          # whole universe per request, an encoder nothing called, and a
-          # coverage gate that claimed 100% while exiting 1. Gate 8 says "this
-          # path got slower". Gate 11 says "this construct may not appear".
-          #
-          # WHAT IT SCANS. Tracked `crates/*/src/**.rs` only, and inside each
-          # file everything EXCEPT the `#[cfg(test)] mod NAME { ... }` blocks.
-          # Test code and benches are exempt on purpose: a test asserting that
-          # a refusal happens legitimately unwraps, sorts and panics.
-          #
-          # IT USED TO BE "THE REGION BEFORE THE FIRST `#[cfg(test)]`", AND
-          # THAT BOUNDARY WAS THE BUG IT WARNED ABOUT. Truncating at an
-          # attribute hides every line after it, and an attribute is not only
-          # ever a test module: `costs/src/trip.rs` carries `#[cfg(test)]` on a
-          # const fn 876 lines above its tests, `costs/src/dated.rs` on a const
-          # at line 55, `greeks/src/bsm.rs` on a STATEMENT inside the shipping
-          # body of `Checked::greeks`. One attribute shrank the scan exactly as
-          # silently as two, and the two-attribute check never fired on the
-          # single-attribute case — 790 lines of production code were invisible
-          # while the gate reported success, `render::json_string` and
-          # `server::universe_label` among them, both of which sit AFTER a test
-          # module where no truncation rule of any shape can reach them.
-          #
-          # So the boundary is a SUBTRACTION now, not a cut: from a
-          # `#[cfg(test)]`, skip blank lines, `//` comments and attributes to
-          # find the item it covers; if that item is an inline `mod NAME {`,
-          # drop through to the matching `}` at the same indent; otherwise keep
-          # the attribute and the item and carry on scanning. A file may hold
-          # as many test modules as it likes, in any position, and none of them
-          # hides a line. D-0065.
-          #
-          # NO UNTRUSTED INPUT REACHES THIS STEP. The inputs are `git ls-files`
-          # and the static patterns below, the same discipline gate 1c states.
-          # Nothing from the event payload is expanded. `git ls-files` also
-          # means an UNTRACKED file is invisible — which is right for CI, where
-          # the checkout holds only tracked files, but means a local run can
-          # disagree with CI until the file is added.
-          #
-          # WHAT IT CANNOT SEE, stated plainly because a gate that oversells
-          # itself is worse than no gate:
-          #   * Indirection. `.sort()` behind a trait, a `HashMap` arrived at
-          #     by `.collect()`, a float behind a type alias or a generic
-          #     `T: Float` — all invisible. This is a TEXT scan, not a type
-          #     check. It refuses the spelling, not the behaviour.
-          #   * Macro-generated code. Expanded after this gate has run.
-          #   * `/* ... */` block comments are NOT stripped; only whole lines
-          #     whose first non-blank characters are `//` (which covers `///`
-          #     and `//!`). A banned token inside a block comment or inside a
-          #     string literal is a false positive, and the allowlist is the
-          #     escape hatch for it.
-          #   * "Per-request" is not decidable from text. Rule 4 refuses every
-          #     sort in non-test source and leans on the allowlist to record,
-          #     one file at a time, WHY a given sort is bounded. The reasons
-          #     are written beside the entries and are the reviewable part.
-          #   * A test module whose closing `}` is not at the module keyword's
-          #     own indent — which `cargo fmt` cannot produce, and gate 6a
-          #     enforces `cargo fmt` — is not delimitable by this scanner, and
-          #     that is a HARD FAILURE rather than a guess. "I could not tell
-          #     where this module ends" is a thing a gate may say; quietly
-          #     scanning half of it is not.
-          #   * `#[cfg(test)] mod tests {` written on ONE line is not
-          #     recognised as a module and its body IS scanned. That direction
-          #     is loud — the test bodies refuse under rules 4 and 5 — never
-          #     silent, which is why it is left rather than pattern-matched at.
-          #
-          # THE ESCAPE HATCH IS HERE, NEVER IN THE CODE. No magic comment, no
-          # `// gate-11-ok` scattered through crates/. Each entry is
-          # `path max_occurrences`, and the count is pinned at what the file
-          # measures TODAY — so a legitimate existing use stays green while the
-          # NEXT one is a red build and a visible diff on this file. That is
-          # gate 1d's mechanism: adding a line here is the moment to ask
-          # whether the construct is really justified.
 
-          # ---- rule 1. No allowlist. docs/07 layer 4 is unconditional. ------
-          # AND IT STAYS EMPTY. The one candidate this rule ever had was
-          # `core::vendor::board_of`, which binary-searched three const tables
-          # of 6, 2 and 120 entries, once per equity master row. The audit that
-          # found it could have written the first entry here with a defensible
-          # reason — the tables are compile-time fixed and nothing per-bar
-          # reaches them — and did not, because `core::universe::MemberIndex`
-          # already exists for exactly this, was built to retire a
-          # `binary_search` over 750 entries, and is smaller machinery than the
-          # paragraph justifying an exemption would have been. D-0065.
-          # `partition_point` is the same O(log n) shape as `binary_search` and was
-          # outside rule 1 entirely -- an audit found it live at
-          # crates/store/src/file.rs:956 while this rule reported ZERO occurrences.
-          #
-          # That call is legitimate and the reason is checkable: it partitions the
-          # INCOMING BATCH at the last held timestamp, so the log is over a
-          # caller-supplied slice whose length is the append size, not over the
-          # stored history. `survey` has already proven the batch strictly
-          # increasing, which is what makes a partition correct there at all.
           allow_search='
           crates/store/src/file.rs 1
           '
@@ -4900,7 +4768,7 @@ jobs:
           crates/runner/src/admission.rs 4
           crates/runner/src/bootstrap.rs 48
           crates/runner/src/bootstrap_family_pass.rs 17
-          crates/runner/src/outcome.rs 18
+          crates/runner/src/outcome.rs 29
           crates/runner/src/report.rs 3
           crates/runner/src/validate.rs 1
           crates/store/src/format.rs 14
@@ -4914,6 +4782,10 @@ jobs:
           crates/cli/src/institutional_statistics.rs 19
           crates/cli/src/population_statistics_v2.rs 18
           crates/cli/src/population_statistics_v3.rs 11
+          crates/cli/src/boolean_statistics_reader.rs 3
+          crates/cli/src/boolean_qualification_wire.rs 5
+          crates/cli/src/boolean_qualification_reader.rs 1
+          crates/api/src/booleanevidencejson.rs 1
           '
 
           # ---- rule 3. docs/07 law 2: pre-size every map. -------------------
@@ -5101,7 +4973,7 @@ jobs:
           crates/pull/src/manifest.rs 1
           crates/api/src/autopilot.rs 1
           crates/api/src/ladder.rs 1
-          crates/api/src/server.rs 2
+          crates/api/src/server.rs 4
           crates/cli/src/admission_store.rs 5
           crates/cli/src/all_rung_selection_v5.rs 6
           crates/cli/src/anchored_search_lineage_v2.rs 1
@@ -5131,7 +5003,7 @@ jobs:
           crates/cli/src/population_statistics_v2.rs 3
           crates/cli/src/population_statistics_v3.rs 1
           crates/cli/src/population_v5.rs 2
-          crates/cli/src/population_v6.rs 3
+          crates/cli/src/population_v6.rs 4
           crates/cli/src/pre_admission_data.rs 4
           crates/cli/src/selection.rs 4
           crates/cli/src/selection_v3.rs 2
@@ -5143,6 +5015,21 @@ jobs:
           crates/runner/src/lib.rs 1
           crates/runner/src/outcome.rs 1
           crates/runner/src/rank.rs 1
+          crates/cli/src/pool.rs 1
+          crates/pull/src/cash_auction.rs 3
+          crates/engine/src/lib.rs 1
+          crates/cli/src/all_rung_selection_v6.rs 1
+          crates/cli/src/global_replay_v4.rs 1
+          crates/cli/src/boolean_candidate_v1.rs 1
+          crates/cli/src/index_stop.rs 1
+          crates/api/src/recovery.rs 1
+          crates/cli/src/boolean_catalog_command.rs 1
+          crates/engine/src/resume.rs 2
+          crates/cli/src/selection_v6_source.rs 2
+          crates/cli/src/boolean_candidate_reader.rs 1
+          crates/pull/src/cash_session_cache.rs 2
+          crates/cli/src/selection_v6.rs 1
+          crates/cli/src/index_stop_store.rs 1
           '
 
           # ---- rule 4. docs/07 layer 12: bounded page, never O(universe). ---
@@ -5580,22 +5467,22 @@ jobs:
           crates/pull/src/folder.rs 1
           crates/api/src/bars.rs 2
           crates/api/src/calendar_of.rs 3
-          crates/api/src/constituents.rs 2
+          crates/api/src/constituents.rs 3
           crates/api/src/logs.rs 1
           crates/cli/src/frontier.rs 1
           crates/cli/src/global_replay_v3.rs 1
           crates/cli/src/knobs.rs 1
           crates/cli/src/population_statistics_v3.rs 1
           crates/cli/src/trades.rs 1
-          crates/cli/src/live.rs 1
+          crates/cli/src/live.rs 2
           crates/api/src/coverage.rs 1
           crates/api/src/indexmap.rs 1
           crates/api/src/pullrun.rs 1
-          crates/api/src/server.rs 7
-          crates/cli/src/lib.rs 6
+          crates/api/src/server.rs 12
+          crates/cli/src/lib.rs 7
           crates/engine/src/lib.rs 2
           crates/pull/src/nseindex.rs 1
-          crates/runner/src/grid.rs 2
+          crates/runner/src/grid.rs 3
           crates/runner/src/exit_grid_policy.rs 3
           crates/runner/src/rank.rs 3
           crates/runner/src/significance.rs 1
@@ -5604,11 +5491,25 @@ jobs:
           crates/api/src/catalog.rs 2
           crates/api/src/census.rs 2
           crates/api/src/master.rs 1
-          crates/api/src/merge.rs 1
+          crates/api/src/merge.rs 4
           crates/api/src/render.rs 1
           crates/pull/src/archive.rs 1
           crates/pull/src/manifest.rs 1
           crates/store/src/catalog.rs 1
+          crates/cli/src/boolean_statistics_v1.rs 1
+          crates/pull/src/ingest.rs 1
+          crates/api/src/recovery.rs 2
+          crates/api/src/indexstopqualificationjson.rs 1
+          crates/runner/src/research_family.rs 1
+          crates/api/src/indexstoprankingjson.rs 1
+          crates/cli/src/index_stop_vix.rs 1
+          crates/cli/src/boolean_observation_file.rs 1
+          crates/cli/src/global_replay_v4.rs 1
+          crates/pull/src/cash_session_cache.rs 1
+          crates/cli/src/boolean_qualified_observer.rs 1
+          crates/cli/src/index_stop_vix_codec.rs 1
+          crates/cli/src/boolean_qualified_journal.rs 1
+          crates/cli/src/pool.rs 2
           '
 
           # ---- rule 5. CLAUDE.md section 4: refuse, never die. --------------
@@ -5912,8 +5813,8 @@ jobs:
           # a panic on an O(1) path than the ones under `tests/` this gate has
           # always skipped.
           #
-          # Decided by reading the CRATE ROOT, never the file's own name and
-          # never its own contents: a file must not be able to exempt itself.
+          # A crate-root test attribute or a file-wide #![cfg(test)] must
+          # exclude the file from production. Names and comments cannot do so.
           # `grep -A 1` means the attribute has to sit immediately above the
           # declaration to count.
           #
@@ -5922,6 +5823,8 @@ jobs:
           # "bad substitution: no closing `)'". The reasoning has to live
           # somewhere it can be read, so it lives here.
           whole_file_test_module() {
+            # The compiler excludes this entire file in every non-test build.
+            if head -1 "$1" | grep -qxF '#![cfg(test)]'; then return 0; fi
             stem="${1##*/}"; stem="${stem%.rs}"
             root="${1%/src/*}/src/lib.rs"
             [ -f "$root" ] \
@@ -6139,7 +6042,7 @@ jobs:
           crates/api/src/autopilot.rs 1
           crates/api/src/backtest.rs 1
           crates/api/src/server.rs 7
-          crates/cli/src/lib.rs 4
+          crates/cli/src/lib.rs 7
           crates/cli/src/population_admission_v2.rs 1
           crates/cli/src/population_finalization_v2.rs 1
           crates/cli/src/results.rs 1
@@ -6151,6 +6054,9 @@ jobs:
           crates/pull/src/vendor.rs 3
           crates/runner/src/exit_grid_policy.rs 1
           crates/runner/src/validate.rs 2
+          crates/pull/src/cash_auction.rs 1
+          crates/api/src/store_wire.rs 1
+          crates/api/src/sweeprun.rs 1
           '
 
           # ---- rule 7: the ambiguous membership test -----------------------
@@ -6269,7 +6175,7 @@ jobs:
           crates/api/src/calendar_of.rs 1
           crates/api/src/constituents.rs 2
           crates/api/src/coverage.rs 1
-          crates/api/src/merge.rs 1
+          crates/api/src/merge.rs 2
           crates/api/src/server.rs 4
           crates/api/src/sweeprun.rs 5
           crates/cli/src/batch.rs 1
@@ -6279,7 +6185,7 @@ jobs:
           crates/cli/src/global_replay_v3.rs 1
           crates/cli/src/institutional_evidence.rs 2
           crates/cli/src/institutional_statistics.rs 1
-          crates/cli/src/lib.rs 3
+          crates/cli/src/lib.rs 5
           crates/cli/src/population.rs 3
           crates/cli/src/population_admission_v2.rs 2
           crates/cli/src/population_admission_v3.rs 2
@@ -6308,6 +6214,46 @@ jobs:
           crates/runner/src/split.rs 1
           crates/telemetry/src/json.rs 3
           crates/telemetry/src/tail.rs 1
+          crates/cli/src/expression_search_reader.rs 2
+          crates/cli/src/boolean_qualified_observer.rs 1
+          crates/cli/src/index_stop_qualification.rs 1
+          crates/cli/src/boolean_qualification_plan.rs 2
+          crates/cli/src/index_stop_source_context.rs 1
+          crates/cli/src/boolean_qualified_journal.rs 1
+          crates/runner/src/expression_validation.rs 1
+          crates/cli/src/boolean_statistics_v1.rs 2
+          crates/cli/src/boolean_statistics_reader.rs 1
+          crates/api/src/indexstopvixjson.rs 1
+          crates/cli/src/boolean_qualification_wire.rs 1
+          crates/cli/src/boolean_catalog_prepared.rs 1
+          crates/cli/src/index_stop_qualification_codec.rs 2
+          crates/api/src/booleansearchjson.rs 1
+          crates/cli/src/candidate_trades.rs 1
+          crates/cli/src/boolean_candidate_v1.rs 1
+          crates/api/src/indexstopjson.rs 1
+          crates/cli/src/operation_audit.rs 2
+          crates/api/src/indexstoplaunch.rs 1
+          crates/cli/src/minute_gaps.rs 1
+          crates/api/src/indexstopqualificationjson.rs 1
+          crates/api/src/index_consistency_projection.rs 1
+          crates/cli/src/index_stop_search_reader.rs 1
+          crates/api/src/pullrun.rs 3
+          crates/cli/src/selection_v6_source.rs 1
+          crates/api/src/booleanjson.rs 1
+          crates/cli/src/audited_range.rs 1
+          crates/cli/src/index_consistency.rs 2
+          crates/cli/src/boolean_search_record.rs 1
+          crates/cli/src/boolean_campaign.rs 2
+          crates/api/src/recovery.rs 8
+          crates/api/src/booleanevidencejson.rs 1
+          crates/cli/src/index_stop.rs 2
+          crates/api/src/booleanoosjson.rs 1
+          crates/cli/src/index_stop_qualification_numeric.rs 1
+          crates/api/src/booleanlaunch.rs 1
+          crates/cli/src/index_stop_source_context_codec.rs 3
+          crates/api/src/expressionsearchjson.rs 1
+          crates/engine/src/resume.rs 1
+          crates/cli/src/index_stop_store.rs 1
           '
 
           check 1 '\.(binary_search|partition_point)' \

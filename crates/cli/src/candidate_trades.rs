@@ -1,3 +1,4 @@
+//! UNVERIFIED performance: no named cost test or measured latency bound is established here.
 //! Exact selected-cell trades for every evaluated screen candidate and side.
 //!
 //! Each visited policy tier retains its actual cap and inputs. Immutable child

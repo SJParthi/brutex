@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Pure codec fault probes with invented identities, never market authority.
 use super::super::{BooleanCoordinateV1, base_values};
 use super::*;

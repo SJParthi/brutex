@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Exact launch protocol and shared writer/audit boundary regressions.
 #![allow(
     clippy::unwrap_used,

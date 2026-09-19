@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Generated complete-calendar stored fixtures, never market profitability proof.
 use super::*;
 use runner::exit_grid_policy::{

@@ -8377,3 +8377,40 @@ It cannot certify the source files before the audited worker loads them. A
 saved qualification is also separate from a completed grammar or a guarantee
 that future weeks will satisfy the desired3-wins/2-losses pattern. A proposed
 chronological split does not erase earlier research on the same data.
+
+## CI integration cost-claim audit — 19 September 2026
+
+The following documentation blocks describe structural complexity or explicitly
+reject whole-operation constant time, but did not name a measured cost proof.
+They now disclose UNVERIFIED performance locally. No benchmark result or latency
+guarantee is inferred from a direct offset, a fixed-size value, or a hash lookup.
+Existing measured cost gates remain unchanged. These references identify the
+pre-edit block starts so the audit remains traceable after line shifts:
+
+- `crates/api/src/merge.rs`, prior block line 183.
+- `crates/api/src/recovery_control.rs`, prior block line 1.
+- `crates/api/src/recovery_journal.rs`, prior block line 1.
+- `crates/api/src/store_wire.rs`, prior block line 1.
+- `crates/cli/src/boolean_statistics_v1.rs`, prior block line 1.
+- `crates/cli/src/candidate_trades.rs`, prior block line 1.
+- `crates/cli/src/checksum_receipts.rs`, prior block line 1.
+- `crates/cli/src/execution_lease.rs`, prior block line 1.
+- `crates/cli/src/expression.rs`, prior block line 427.
+- `crates/cli/src/index_stop_qualification.rs`, prior block line 1.
+- `crates/cli/src/index_stop_search_reader.rs`, prior block line 357.
+- `crates/cli/src/index_stop_store.rs`, prior block line 169.
+- `crates/cli/src/minute_gaps.rs`, prior block line 191.
+- `crates/cli/src/operation_audit.rs`, prior block line 1.
+- `crates/cli/src/pool.rs`, prior block line 556.
+- `crates/cli/src/pool.rs`, prior block line 1.
+- `crates/cli/src/research.rs`, prior block line 95.
+- `crates/cli/src/stored.rs`, prior block line 1869.
+- `crates/core/src/instrument.rs`, prior block line 292.
+- `crates/core/src/instrument.rs`, prior block line 249.
+- `crates/engine/src/resume.rs`, prior block line 1.
+- `crates/indicators/src/anchored.rs`, prior block line 696.
+- `crates/pull/src/cash_auction.rs`, prior block line 1.
+- `crates/runner/src/bootstrap_zero_v2.rs`, prior block line 222.
+- `crates/runner/src/outcome.rs`, prior block line 487.
+- `crates/runner/src/research_family.rs`, prior block line 198.
+- `crates/store/src/repair.rs`, prior block line 213.

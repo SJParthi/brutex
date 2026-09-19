@@ -10,24 +10,34 @@ use crate::vendor::{Granularity, SessionKind, TimestampEncoding, Venue};
 use brutex_core::instrument::{Exchange, Segment};
 
 pub(super) fn audit(rows: &[RawRow], plan: Plan<'_>) -> Vec<String> {
+    let Some(venue) = audited_venue(plan) else {
+        return Vec::new();
+    };
+    audit_venue(rows, plan, venue)
+}
+
+fn audited_venue(plan: Plan<'_>) -> Option<Venue> {
     if plan.request.granularity != Granularity::Minute1
         || plan.contract.is_some()
         || plan.request.listing == crate::vendor::Listing::Derivative
     {
-        return Vec::new();
+        return None;
     }
     let venue = match (Exchange::parse(plan.exchange), Segment::parse(plan.segment)) {
         (Ok(exchange), Ok(segment)) => Venue::for_segment(exchange, segment),
         _ => None,
     };
-    let Some(venue @ (Venue::NseIndex | Venue::NseCash)) = venue else {
-        return Vec::new();
-    };
+    venue.filter(|venue| matches!(venue, Venue::NseIndex | Venue::NseCash))
+}
+
+fn audit_venue(rows: &[RawRow], plan: Plan<'_>, venue: Venue) -> Vec<String> {
     if rows
         .windows(2)
         .any(|pair| matches!(pair, [a, b] if a.timestamp > b.timestamp))
     {
-        return vec!["request minute coverage UNVERIFIED: unordered broker timestamps".to_owned()];
+        let why = "request minute coverage UNVERIFIED: unordered broker timestamps".to_owned();
+        crate::ingest::note_not_filed("requested window", "minute coverage", &why);
+        return vec![why];
     }
     let mut stamps = rows
         .iter()
@@ -38,32 +48,42 @@ pub(super) fn audit(rows: &[RawRow], plan: Plan<'_>) -> Vec<String> {
         plan.request.window.from().days_from_epoch()..=plan.request.window.to().days_from_epoch()
     {
         let Ok(day) = Day::from_days(number) else {
-            failures.push(format!(
-                "request minute coverage UNVERIFIED: invalid day {number}"
-            ));
+            note_request_failure(
+                &mut failures,
+                format!("request minute coverage UNVERIFIED: invalid day {number}"),
+            );
             continue;
         };
         match plan.calendar.kind_of(i64::from(number)) {
             DayKind::Closed => continue,
             DayKind::Open(session) if session == Session::full() => {}
             DayKind::Unmeasured => {
-                failures.push(format!(
-                    "request minute coverage UNVERIFIED on {day}: {}",
-                    plan.calendar.unverified_reason(i64::from(number))
-                ));
+                note_request_failure(
+                    &mut failures,
+                    format!(
+                        "request minute coverage UNVERIFIED on {day}: {}",
+                        plan.calendar.unverified_reason(i64::from(number))
+                    ),
+                );
                 continue;
             }
             _ => {
-                failures.push(format!("request minute coverage UNVERIFIED on {day}: exceptional or unmeasured calendar session"));
+                note_request_failure(
+                    &mut failures,
+                    format!(
+                        "request minute coverage UNVERIFIED on {day}: exceptional or unmeasured calendar session"
+                    ),
+                );
                 continue;
             }
         }
         let hours = match venue.hours_on(day) {
             Ok(hours) if hours.kind() == SessionKind::Continuous => hours,
             other => {
-                failures.push(format!(
-                    "request minute coverage UNVERIFIED on {day}: venue hours {other:?}"
-                ));
+                note_request_failure(
+                    &mut failures,
+                    format!("request minute coverage UNVERIFIED on {day}: venue hours {other:?}"),
+                );
                 continue;
             }
         };
@@ -78,9 +98,10 @@ pub(super) fn audit(rows: &[RawRow], plan: Plan<'_>) -> Vec<String> {
                 {
                     Ok(close) => u32::from(close),
                     Err(why) => {
-                        failures.push(format!(
-                            "request minute coverage UNVERIFIED on {day}: {why}"
-                        ));
+                        note_request_failure(
+                            &mut failures,
+                            format!("request minute coverage UNVERIFIED on {day}: {why}"),
+                        );
                         continue;
                     }
                 }
@@ -122,8 +143,23 @@ fn local_seconds(timestamp: i64, encoding: TimestampEncoding) -> i128 {
     }
 }
 
+fn note_request_failure(failures: &mut Vec<String>, why: String) {
+    crate::ingest::note_not_filed("requested window", "minute coverage", &why);
+    failures.push(why);
+}
+
 fn missing(failures: &mut Vec<String>, day: Day, base: i128, from: i128, to: i128) {
     let first = (from - base) / 60;
     let end = (to - base) / 60;
-    failures.push(format!("request minute coverage gap on {day}: {:02}:{:02}–{:02}:{:02} IST (end exclusive), {} missing scheduled minutes; no bars fabricated", first / 60, first % 60, end / 60, end % 60, (to - from) / 60));
+    note_request_failure(
+        failures,
+        format!(
+            "request minute coverage gap on {day}: {:02}:{:02}–{:02}:{:02} IST (end exclusive), {} missing scheduled minutes; no bars fabricated",
+            first / 60,
+            first % 60,
+            end / 60,
+            end % 60,
+            (to - from) / 60
+        ),
+    );
 }

@@ -260,6 +260,9 @@ where
 {
     let days = required_days(window)?;
     let mut result = HashMap::new();
+    result
+        .try_reserve(days.len())
+        .map_err(|why| why.to_string())?;
     let mut missing = Vec::new();
     for day in days {
         let _lock = lock_day(root, day)?;
@@ -300,6 +303,9 @@ where
     days.sort_unstable();
     days.dedup();
     let mut pending = HashMap::new();
+    pending
+        .try_reserve(days.len())
+        .map_err(|why| why.to_string())?;
     let mut missing = Vec::new();
     for day in days {
         let _lock = lock_day(root, day)?;
@@ -323,6 +329,9 @@ where
             .map_err(|why| format!("missing NSE cash eligibility for {day} ({url}): {why}"))?;
         pending.insert(day.days_from_epoch(), install_and_read(root, day, &bytes)?);
     }
+    cache
+        .try_reserve(pending.len())
+        .map_err(|why| why.to_string())?;
     cache.extend(pending);
     Ok(())
 }

@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Complete generated stored-data runs, never operator historical sweeps.
 use super::*;
 use crate::audited_range_command::StrictConfig;

@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Bounded generated-store boundary tests; no operator market history is read.
 use super::super::{Configuration, execute_observed_with};
 use super::*;

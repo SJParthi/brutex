@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Generated grammar and durable-fault fixtures, never historical sweep runs.
 #![expect(
     clippy::unwrap_used,

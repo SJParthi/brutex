@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Finite selector/projection tests. These do not price or attest market bars.
 #![expect(
     clippy::unwrap_used,

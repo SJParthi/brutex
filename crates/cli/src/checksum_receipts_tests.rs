@@ -1,3 +1,4 @@
+#![cfg(test)]
 #![allow(clippy::expect_used, clippy::indexing_slicing)]
 use super::*;
 use brutex_core::instrument::Exchange;

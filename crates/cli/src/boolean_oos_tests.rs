@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Generated complete-calendar stored comparison; no market-profitability claim.
 use super::super::tests::Fixture;
 use super::*;

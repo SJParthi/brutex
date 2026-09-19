@@ -1,3 +1,4 @@
+//! UNVERIFIED performance: no named cost test or measured latency bound is established here.
 //! Dated NSE MII cash-auction eligibility, parsed once from supplied CSV bytes.
 //!
 //! The caller authenticates the source and binds this value to the master date;
@@ -391,6 +392,13 @@ impl DailyEligibility {
         let columns = Columns::parse(&header)?;
         let mut by_symbol = HashMap::new();
         let mut by_native_id = HashMap::new();
+        let capacity = lines.clone().count().min(MAX_ROWS);
+        by_symbol
+            .try_reserve(capacity)
+            .map_err(|why| unknown(&why.to_string()))?;
+        by_native_id
+            .try_reserve(capacity)
+            .map_err(|why| unknown(&why.to_string()))?;
         for (index, line) in lines.enumerate() {
             if index >= MAX_ROWS {
                 return Err(unknown("master exceeds the data-record limit"));
@@ -507,6 +515,8 @@ struct Columns {
 impl Columns {
     fn parse(header: &[Cow<'_, str>]) -> Result<Self, String> {
         let mut seen = std::collections::HashSet::new();
+        seen.try_reserve(header.len())
+            .map_err(|why| unknown(&why.to_string()))?;
         for name in header {
             if name.is_empty() || !seen.insert(name.as_ref()) {
                 return Err(unknown("empty or duplicate header name"));

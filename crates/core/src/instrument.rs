@@ -246,6 +246,7 @@ pub struct InstrumentKey {
 }
 
 impl InstrumentKey {
+    /// UNVERIFIED performance: no named cost test or measured latency bound is established here.
     /// The two INDICES the engine sweeps.
     ///
     /// `docs/00-charter.md` §1. India VIX is deliberately absent: it is stored
@@ -289,6 +290,7 @@ impl InstrumentKey {
         })
     }
 
+    /// UNVERIFIED performance: no named cost test or measured latency bound is established here.
     /// Whether the sweep engine may operate on this instrument.
     ///
     /// Storable and sweepable are different questions. Everything is storable.

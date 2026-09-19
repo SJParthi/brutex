@@ -1,3 +1,4 @@
+//! UNVERIFIED performance: no named cost test or measured latency bound is established here.
 //! Opt-in historical checksum receipts, separate from every legacy run identity.
 //! Cold admission scans the complete bounded source. Warm reads check one format
 //! block and one fixed receipt; neither wall-clock latency nor a full audit is O(1).

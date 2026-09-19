@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Generated preflight observations; no market read or policy acceptance.
 use super::*;
 use crate::boolean_catalog_command::prepared::{Input, Prepared};

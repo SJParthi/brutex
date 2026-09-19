@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Generated references only. These tests do not pull or sweep market history.
 use super::*;
 use crate::candidate_universe::boolean_candidate_v1::tests::Fixture;

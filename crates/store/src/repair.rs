@@ -210,6 +210,7 @@ impl RevisionReader {
     }
 }
 
+/// UNVERIFIED performance: no named cost test or measured latency bound is established here.
 /// Publish a complete chronological merge as an explicit revision.
 ///
 /// `expected_source` is the original reader's header when the merge was made.

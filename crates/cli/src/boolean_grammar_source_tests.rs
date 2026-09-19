@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Generated complete-calendar sources, actual execution and actual cold readers.
 //! A test-only factory labels generated provenance; no clean commit is fabricated.
 use super::*;

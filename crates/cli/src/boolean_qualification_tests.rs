@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Complete generated-calendar fixtures; no real-market or admission-success claim.
 use super::*;
 use crate::boolean_qualification_plan::{GeneratedBindings, Plan, ordered_identities};

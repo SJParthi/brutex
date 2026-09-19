@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Generated numeric evidence only; no market data and no profit claim.
 //!
 //! Every equality below is against the three SEPARATE public procedures, which

@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Generated numeric fixtures only; no market-source capability is fabricated.
 use super::*;
 use crate::population_statistics_v2::{cscv_placement, wilson_lower_bits};

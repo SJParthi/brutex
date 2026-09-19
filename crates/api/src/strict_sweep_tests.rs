@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Explicit strict-command parsing, admission and terminal status regressions.
 #![allow(clippy::expect_used)]
 use super::*;
@@ -192,8 +193,10 @@ fn site(name: &str) -> crate::server::Loaded {
 }
 
 fn config() -> StrictConfig {
+    let root = crate::scratch::path("strict-command-receipt-config");
+    std::fs::create_dir_all(&root).expect("private receipt fixture");
     StrictConfig::from_values(
-        Some(std::env::temp_dir().into()),
+        Some(root.into()),
         Some("33554432".into()),
         Some("1000000".into()),
     )
@@ -233,7 +236,10 @@ fn request_paths_and_limits_cannot_replace_server_strict_configuration() {
     injected.push_str(r#", "receipt_root":"/tmp/injected", "max_bytes":1, "max_records":1, "BRUTEX_CHECKSUM_RECEIPTS":"/tmp/injected", "store_root":"/tmp/injected"}"#);
     assert_eq!(command_from(&injected), command_from(BODY));
     let resolved = config();
-    assert_eq!(resolved.receipt_root(), std::env::temp_dir());
+    assert_eq!(
+        resolved.receipt_root(),
+        crate::scratch::path("strict-command-receipt-config")
+    );
     assert_eq!(
         (resolved.max_bytes(), resolved.max_records()),
         (33_554_432, 1_000_000)
@@ -336,7 +342,7 @@ fn invalid_limits_are_refused_and_commit_gate_precedes_configuration() {
     let site = site("invalid");
     let (status, _, body) = command_with_configuration(&site, BODY, Some(STAMP), || {
         StrictConfig::from_values(
-            Some(std::env::temp_dir().into()),
+            Some(config().receipt_root().as_os_str().to_owned()),
             Some("0".into()),
             Some("overflow".into()),
         )

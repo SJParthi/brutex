@@ -354,6 +354,7 @@ pub struct Reader {
     projecting: AtomicBool,
 }
 impl Reader {
+    /// UNVERIFIED performance: no named cost test or measured latency bound is established here.
     /// Discover and authenticate the current acknowledged marker without
     /// redoing complete grammar or numerical replay. Directory discovery and
     /// this one payload read are bounded cold work, not a constant-time index.

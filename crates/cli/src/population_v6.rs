@@ -3176,6 +3176,8 @@ impl CommittedStoredPopulationV6 {
             .try_reserve_exact(strategies.len())
             .map_err(|why| why.to_string())?;
         let mut seen = std::collections::HashSet::new();
+        seen.try_reserve(strategies.len())
+            .map_err(|why| why.to_string())?;
         for strategy in strategies {
             if !seen.insert(*strategy) {
                 return Err("Population V6 replay repeats a strategy".to_owned());

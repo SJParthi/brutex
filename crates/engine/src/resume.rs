@@ -1,3 +1,4 @@
+//! UNVERIFIED performance: no named cost test or measured latency bound is established here.
 //! Versioned retained Apriori checkpoints at level boundaries.
 //!
 //! This codec does not authenticate bytes: the caller must seal its durable

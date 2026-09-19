@@ -195,6 +195,7 @@ fn classify(instrument: &InstrumentKey) -> Result<(u8, usize), ResearchFamilyErr
     }
 }
 
+/// UNVERIFIED performance: no named cost test or measured latency bound is established here.
 /// Identity of the two existing ordered membership tables, not a dated history.
 ///
 /// The first call hashes the finite tables once. Later calls copy 32 bytes;

@@ -1,3 +1,4 @@
+//! UNVERIFIED performance: no named cost test or measured latency bound is established here.
 //! **One combination across the whole stored surface: which stock, before it
 //! moves.**
 //!
@@ -453,6 +454,16 @@ fn union_of(
                     unread.push((s.symbol.clone(), why));
                     continue;
                 }
+                if let Err(why) = seen
+                    .try_reserve(rows.len())
+                    .and_then(|()| union.try_reserve(rows.len()))
+                {
+                    unread.push((
+                        s.symbol.clone(),
+                        format!("frontier allocation refused: {why}"),
+                    ));
+                    continue;
+                }
                 for row in rows {
                     let candidate = Candidate {
                         words: row.mask_words,
@@ -553,6 +564,7 @@ fn price_all(
         .collect())
 }
 
+/// UNVERIFIED performance: no named cost test or measured latency bound is established here.
 /// Pool every candidate's cells across the instruments that priced.
 ///
 /// One pass over `instruments × candidates` with O(1) work per cell. An

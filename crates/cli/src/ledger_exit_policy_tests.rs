@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Generated fixtures prove runtime resolution and identity wiring, not returns.
 use super::*;
 use crate::audited_range_command::StrictConfig;

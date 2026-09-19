@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Generated, finite later-period authority and exact replay regressions.
 use super::*;
 use crate::exit_grid_policy::{

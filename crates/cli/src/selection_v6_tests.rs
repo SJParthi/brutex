@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Structural storage attacks plus a genuine, opaque upstream authority test.
 #![allow(clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
 

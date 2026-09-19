@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Generated strict-source fixtures; never evidence of market profitability.
 use super::*;
 use crate::candidate_universe::boolean_candidate_v1::tests::Fixture;

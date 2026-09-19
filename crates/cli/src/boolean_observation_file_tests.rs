@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Shared sealed-byte observation faults; fixtures grant no authoring capability.
 #![allow(
     clippy::indexing_slicing,

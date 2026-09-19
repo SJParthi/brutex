@@ -1,3 +1,4 @@
+#![cfg(test)]
 #![allow(clippy::expect_used, clippy::indexing_slicing)]
 use super::*;
 use crate::path::{FileKind, StorePath, Timeframe, YearMonth};

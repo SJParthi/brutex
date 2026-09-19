@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Generated codec observations only: invented hashes never authorize market work.
 #![expect(
     clippy::unwrap_used,

@@ -218,7 +218,7 @@ struct Case {
 /// all three browser engine entry points. The marker is driven directly here;
 /// proving an audit site must not require launching the expensive sweep it
 /// brackets.
-const ROWS: usize = 29;
+const ROWS: usize = 30;
 
 /// How many distinct production emit sites those rows cover.
 ///
@@ -242,6 +242,19 @@ const SITES_HERE: usize = ROWS - 1;
 )]
 fn cases() -> Vec<Case> {
     let mut cases: Vec<Case> = Vec::new();
+    cases.push(Case {
+        site: "booleanlaunch.rs launch configuration refused",
+        target: "api.research",
+        message: "launch configuration refused",
+        level: telemetry::Level::Error,
+        drive: Box::new(|| {
+            let why = "private metadata refusal fixture";
+            let mut failures = Vec::new();
+            crate::booleanlaunch::note_metadata_refusal(&mut failures, why.to_owned());
+            assert_eq!(failures, [why]);
+        }),
+        mine: Box::new(|record| says(record, "why", "private metadata refusal fixture")),
+    });
 
     // crates/api/src/census.rs — the counter file's own state, per vendor.
     {
@@ -1510,7 +1523,9 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     /// the instrument and the reason made the proof a three-line call.
     /// 13 -> 14: `pull.cash_session dated eligibility verified`, driven by
     /// `server::tests::dated_cash_session_evidence_is_logged_with_resolved_counts`.
-    const REACHED_IN_SERVER_TESTS: usize = 14;
+    // Four additional refusal sites are read back by the partial/interrupted
+    // broker basket, recovery resume refusal, and partial cash replay tests.
+    const REACHED_IN_SERVER_TESTS: usize = 18;
     // Both production recovery boundaries are emitted and read back through
     // this installed sink by recovery::tests::
     // recovery_boundary_events_are_read_back_from_the_installed_sink.
@@ -1600,7 +1615,7 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // exactly what `cargo test` is and the row costs nothing to reach.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 52,
+        lib_sites, 57,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"

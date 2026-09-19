@@ -77,7 +77,7 @@ pub enum Policy {
     /// financial grounds -- the entire leaderboard failed these four day rules
     /// instead. Its best row earned +Rs 2,720.35 out of sample on data it had
     /// never seen, won 220 of 577 eligible days, and ran an 11-day losing
-    /// streak. A strategy that pays in bursts is flat or slightly down on most
+    /// streak. A strategy that pays in bursts has zero return or is slightly down on most
     /// days BY CONSTRUCTION, so >=3/5 winning days and a 2-day streak cap do
     /// not make the rare winner harder to find -- they make it unrepresentable.
     ///
@@ -169,7 +169,7 @@ impl DayRule {
 /// Which days a winning-day ratio divides by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RatioBasis {
-    /// V1 to V3: every eligible day, flat and no-trade days included.
+    /// V1 to V3: every eligible day, including zero-return and no-trade days.
     EligibleDays,
     /// V4: only days that ended as a win or a loss -- D-0605.
     DecidedDays,
@@ -570,7 +570,7 @@ const UNMEASURED: u64 = Reason::UnmeasuredCalendar.mask()
     | Reason::NoCompleteWeek.mask()
     | Reason::NoEligibleSession.mask();
 
-/// Disjoint day outcomes: winning + losing + flat-with-trades + no-trade = observed.
+/// Disjoint day outcomes: winning + losing + zero-return-with-trades + no-trade = observed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Summary {
     /// Civil days classified inside the inclusive requested span.

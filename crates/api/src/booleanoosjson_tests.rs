@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Independent sealed wire fixtures test observer projection, not market pricing.
 #![expect(
     clippy::unwrap_used,

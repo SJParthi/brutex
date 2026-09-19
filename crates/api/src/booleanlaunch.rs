@@ -319,7 +319,15 @@ pub async fn metadata(
     }
 }
 
-fn metadata_value(root: &Path, query: Option<&str>) -> Value {
+pub(crate) fn note_metadata_refusal(failures: &mut Vec<String>, why: String) {
+    let _noted = telemetry::emit(
+        &telemetry::Event::error("api.research", "launch configuration refused")
+            .with("why", telemetry::Value::Str(&why)),
+    );
+    failures.push(why);
+}
+
+fn metadata_configuration(query: Option<&str>) -> (serde_json::Map<String, Value>, Vec<String>) {
     let mut failures = Vec::new();
     let mut configured = serde_json::Map::new();
     for (field, setting, maximum) in [
@@ -350,16 +358,24 @@ fn metadata_value(root: &Path, query: Option<&str>) -> Value {
             Ok(Some(raw)) if positive(&raw).is_some_and(|value| value <= maximum) => Some(raw),
             Ok(None) => None,
             Ok(Some(_)) => {
-                failures.push(format!("{setting} or explicit {field} is invalid"));
+                note_metadata_refusal(
+                    &mut failures,
+                    format!("{setting} or explicit {field} is invalid"),
+                );
                 None
             }
             Err(why) => {
-                failures.push(why);
+                note_metadata_refusal(&mut failures, why);
                 None
             }
         };
         configured.insert(field.into(), value.map_or(Value::Null, Value::String));
     }
+    (configured, failures)
+}
+
+fn metadata_value(root: &Path, query: Option<&str>) -> Value {
+    let (configured, mut failures) = metadata_configuration(query);
     let points = configured
         .get("max_points")
         .and_then(Value::as_str)
@@ -372,7 +388,7 @@ fn metadata_value(root: &Path, query: Option<&str>) -> Value {
     let policy = match configuration.as_ref() {
         Ok(config) => resolved_policy(config),
         Err(why) => {
-            failures.push(why.clone());
+            note_metadata_refusal(&mut failures, why.clone());
             json!({"ready":false,"digest":null,"values":[],"refusal":why})
         }
     };
@@ -383,31 +399,34 @@ fn metadata_value(root: &Path, query: Option<&str>) -> Value {
             Some(strict.max_records().to_string()),
         ),
         Err(why) => {
-            failures.push(why.to_string());
+            note_metadata_refusal(&mut failures, why.to_string());
             (None, None)
         }
     };
     let observation = match crate::detail::BooleanObservationBudget::load() {
         Ok(value) => Some(value.bytes().to_string()),
         Err(why) => {
-            failures.push(why);
+            note_metadata_refusal(&mut failures, why);
             None
         }
     };
     let replay = match required("BRUTEX_BOOLEAN_SEARCH_REPLAY_NODES") {
         Ok(value) => Some(value.to_string()),
         Err(why) => {
-            failures.push(why);
+            note_metadata_refusal(&mut failures, why);
             None
         }
     };
     if let Ok(strict) = strict.as_ref()
         && let Err(why) = observation_limits(strict)
     {
-        failures.push(why);
+        note_metadata_refusal(&mut failures, why);
     }
     if !root.is_absolute() || !root.is_dir() {
-        failures.push("The serving store is not an existing absolute directory".into());
+        note_metadata_refusal(
+            &mut failures,
+            "The serving store is not an existing absolute directory".into(),
+        );
     }
     let ready = failures.is_empty();
     json!({"schema_version":1,"model":"boolean-qualified-search-launch","command":COMMAND,

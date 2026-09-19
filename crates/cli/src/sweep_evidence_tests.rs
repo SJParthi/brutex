@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Grouped-barrier, crash-order and directory-memo checks for sweep evidence.
 //! Every write targets a unique temporary fixture, never a market store.
 
