@@ -36119,3 +36119,17 @@ Verification: remove precisely those comment lines from the original and the
 new documentation pointer from the revised workflow; the remaining bytes are
 identical. `git diff --check` is clean. Passing this check is not a claim that
 CI, coverage, mutation tests, or the pending main merge have passed.
+
+### D-0609 — Keep saved-backtest debug source maps untracked — 2026-09-19
+
+CI run 35456940030 passed the engine build/test independence check and the
+browser gate, then refused a library development-module path embedded in the
+tracked saved-backtest source map at gate 1c. The match was not a credential.
+The saved-backtest Vite configuration already generates hidden source maps;
+the shipped JavaScript has no sourceMappingURL reference to this file.
+
+Remove that generated debug map and extend the existing build-source-map
+ignore policy to `web/saved-backtest/build/**/*.map`. Keep the JavaScript,
+HTML, source files, and credential-path gate unchanged. Verify the tracked
+tree against the gate's exact pattern and confirm the generated map is
+ignored. This removes the observed blocker, not a claim that all CI passes.

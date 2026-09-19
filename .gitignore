@@ -51,6 +51,7 @@
 # tree that already commits `web/build` under D-0068. `vite.config.js` sets
 # `sourcemap: 'hidden'` so nothing requests the files that are not here.
 web/build/**/*.map
+web/saved-backtest/build/**/*.map
 
 # SCRATCH AT THE REPOSITORY ROOT, WHICH GATE 1 CANNOT SURVIVE.
 #
