@@ -36192,3 +36192,21 @@ a duplicate descriptor and a second independent reader: dropping the first
 owner must not release the second reader's lock; dropping both typed owners
 must allow publication even while the duplicate remains open. Publication still
 refuses a live reader, corrupted prefix, replacement, or extended receipt.
+
+### D-0614 — Bound the consistency fixture and prove observable periods — 2026-09-20
+
+The consistency integration test used the host-derived search ceiling, although
+its proof needs a ranked candidate rather than exhaustive search. Pin this
+fixture's candidate admission to 4096 and retain the admitted ranking so a broad
+signal can be selected. Preserve its twenty-hit support threshold. Production
+ceilings, sweep behavior, and depth remain unchanged.
+
+The stronger daily-versus-yearly assertion exposed a second defect in the old
+proof: five sessions warm the evaluator, so six generated sessions leave only
+one observable day. Use eight generated sessions and select a ranked signal
+covering at least half the observable rows. Assert distinct daily/yearly bucket
+counts, exact yearly count and worst daily period, and exact shares for every
+entry in `stability::GRAINS` rather than a hardcoded six. The previous test could
+silently omit the seventh (hourly) grain. The focused revised test passed in
+0.08 seconds after compilation on this host; this is a fixture observation, not
+an application latency or whole-workspace timing claim.

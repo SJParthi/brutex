@@ -24915,18 +24915,28 @@ mod tests {
     /// `per_trade` returning `None`, or returning rows whose timestamps all land
     /// in one bucket, would both build cleanly and render a table of zeroes that
     /// looked like a measurement. This walks the real chain -- sweep, rank,
-    /// grid, chosen variant, per-trade rows, six grains -- and asserts the
+    /// grid, chosen variant, per-trade rows, every current grain -- and asserts the
     /// output could only come from actual bucketing.
     #[test]
     fn consistency_is_measured_from_real_bars_and_not_merely_wired() {
-        let bars = runner::synthetic::sessions(6);
+        // Five sessions warm the evaluator; leave three observable sessions.
+        let bars = runner::synthetic::sessions(8);
         let mut ev = evaluator().expect("the synthetic evaluator builds");
-        let ladder = ladder_for(20).expect("a ladder at twenty hits");
+        // This integration proof needs a genuinely ranked candidate, not an
+        // exhaustive search sized from the host or another test's knobs.
+        let candidate_budget = 4096;
+        let ladder =
+            crate::ladder_within(20, Some(candidate_budget)).expect("bounded twenty-hit fixture");
         let horizon = Horizon::DEFAULT;
-        let run = runner::Sweeper::new(ladder).run_ranked(&bars, &mut ev, horizon, 3);
+        let run =
+            runner::Sweeper::new(ladder).run_ranked(&bars, &mut ev, horizon, candidate_budget);
 
-        let Some(scored) = run.ranked.top.first() else {
-            panic!("this fixture must rank at least one combination");
+        // A top-scoring sparse signal can occupy only one day, which cannot
+        // prove cross-period bucketing. Choose a genuinely ranked broad signal.
+        let spanning_hits =
+            u64::try_from(run.column.bits().len().div_ceil(2)).expect("small observable fixture");
+        let Some(scored) = run.ranked.top.iter().find(|row| row.hits >= spanning_hits) else {
+            panic!("this fixture must rank a signal spanning multiple sessions");
         };
         let side = side_of_evidence(scored);
         let stop_rungs = crate::stop_ladder_derived(&bars, 1);
@@ -24953,21 +24963,49 @@ mod tests {
 
         let measured = consistency_of(&bars, &run.column, scored, horizon, side, &exits, &cell)
             .expect("a variant with trades must re-walk into per-trade rows");
+        let (_, rows) = grid::per_trade(
+            &bars,
+            &run.column,
+            &scored.mask,
+            horizon,
+            side,
+            runner::excursion::Ladders {
+                stops: &exits.stops,
+                targets: &exits.targets,
+                trails: &exits.trails,
+            },
+            grid::Chosen {
+                stop: cell.stop,
+                target: cell.target,
+                tsl: cell.tsl,
+                ttp: cell.ttp,
+            },
+        )
+        .expect("the selected variant has actual trade rows");
+        let days = crate::stability::at(&rows, crate::stability::Grain::Day);
+        let years = crate::stability::at(&rows, crate::stability::Grain::Year);
+        assert!(days.buckets.len() > years.buckets.len());
+        assert_eq!(measured.years, years.buckets.len());
+        assert_eq!(measured.worst_day, days.worst_period());
 
         // THE ASSERTION THAT PROVES BUCKETING HAPPENED.
         //
-        // Six synthetic sessions span six days, so the DAILY grain must
+        // Three observable sessions span three days, so the DAILY grain must
         // hold more periods than the yearly one. A chain that returned rows but
         // failed to bucket them -- every trade landing in one bucket, or the
         // timestamp arithmetic collapsing -- makes every grain identical, and
         // that is exactly the failure a compile cannot catch.
         assert!(
             measured.years >= 1,
-            "six sessions must fall in at least one year, got {}",
+            "observable sessions must fall in at least one year, got {}",
             measured.years
         );
-        for slot in 0..6 {
+        for (slot, grain) in crate::stability::GRAINS.iter().enumerate() {
             let share = measured.share_bp(slot);
+            assert_eq!(
+                share,
+                crate::stability::at(&rows, *grain).positive_share_bp()
+            );
             assert!(
                 (0..=10_000).contains(&share),
                 "grain {slot} reported {share}bp, outside the basis-point range \
@@ -24982,7 +25020,10 @@ mod tests {
         );
         assert_eq!(
             measured.weakest_bp(),
-            (0..6).map(|g| measured.share_bp(g)).min().unwrap_or(0),
+            (0..crate::stability::GRAINS.len())
+                .map(|g| measured.share_bp(g))
+                .min()
+                .unwrap_or(0),
             "WEAKEST must be the minimum across grains and not one of them"
         );
     }
