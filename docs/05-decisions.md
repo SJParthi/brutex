@@ -36446,3 +36446,14 @@ fails. This removes cross-run compiled/profile state from the next measurement
 and makes its actual missing lines inspectable. No file, function, test or
 coverage threshold is excluded or relaxed, and a missing report remains a
 failure rather than an empty success.
+
+### D-0633 — Prove telemetry scratch cleanup on a fresh filesystem — 2026-09-20
+
+The logger's test-only stale-scratch cleanup had no deterministic exercise on
+a clean CI worker. Supply its private helper with an explicit root and clock;
+prove that only owned entries older than one hour disappear, while the exact
+boundary, recent, future-dated and foreign entries retain their sentinels. An
+absent root stays absent. Classify a non-UTF-8 OS string directly: APFS refuses
+to create that filename, which must not turn a portable ownership assertion
+into a filesystem-dependent failure. No production logger behavior or coverage
+allowance changes. The full workspace measurement remains the gate authority.

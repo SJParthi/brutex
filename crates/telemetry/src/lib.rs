@@ -327,27 +327,89 @@ mod tests {
         use std::sync::Once;
         static ONCE: Once = Once::new();
         ONCE.call_once(|| {
-            let hour = std::time::Duration::from_hours(1);
-            let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
-                return;
-            };
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let Some(name) = name.to_str() else { continue };
-                if !name.starts_with("brutex-telemetry-") {
-                    continue;
-                }
-                let stale = entry
-                    .metadata()
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-                    .and_then(|t| t.elapsed().ok())
-                    .is_some_and(|age| age > hour);
-                if stale {
-                    let _ignored = std::fs::remove_dir_all(entry.path());
-                }
-            }
+            sweep_stale_scratch_in(&std::env::temp_dir(), std::time::SystemTime::now());
         });
+    }
+
+    /// Sweeps test scratch with explicit directory and clock inputs, so fresh
+    /// CI workers can prove the cleanup without inheriting old local files.
+    fn sweep_stale_scratch_in(root: &std::path::Path, now: std::time::SystemTime) {
+        let hour = std::time::Duration::from_hours(1);
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if !is_scratch_name(&name) {
+                continue;
+            }
+            let stale = entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| now.duration_since(t).ok())
+                .is_some_and(|age| age > hour);
+            if stale {
+                let _ignored = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+
+    fn is_scratch_name(name: &std::ffi::OsStr) -> bool {
+        name.to_str()
+            .is_some_and(|name| name.starts_with("brutex-telemetry-"))
+    }
+
+    #[test]
+    fn scratch_cleanup_uses_explicit_age_and_preserves_foreign_or_recent_entries() {
+        use std::time::{Duration, SystemTime};
+
+        let root = std::env::temp_dir().join(format!(
+            "brutex-telemetry-cleanup-proof-{}",
+            std::process::id()
+        ));
+        let _ignored = std::fs::remove_dir_all(&root);
+        std::fs::create_dir(&root).expect("create private cleanup fixture");
+        let now = SystemTime::UNIX_EPOCH + Duration::from_hours(2);
+        let entries = [
+            ("brutex-telemetry-old", 0, false),
+            ("brutex-telemetry-boundary", 1, true),
+            ("brutex-telemetry-fresh", 2, true),
+            ("brutex-telemetry-future", 3, true),
+            ("foreign-old", 0, true),
+        ];
+        for (name, hours, _) in entries {
+            let path = root.join(name);
+            std::fs::create_dir(&path).expect("create classified scratch entry");
+            std::fs::write(path.join("sentinel"), b"private fixture")
+                .expect("write cleanup sentinel");
+            let modified = SystemTime::UNIX_EPOCH + Duration::from_hours(hours);
+            std::fs::File::open(&path)
+                .expect("open scratch directory")
+                .set_times(std::fs::FileTimes::new().set_modified(modified))
+                .expect("set deterministic scratch age");
+        }
+        sweep_stale_scratch_in(&root, now);
+        for (name, _, retained) in entries {
+            assert_eq!(root.join(name).exists(), retained);
+            assert_eq!(root.join(name).join("sentinel").exists(), retained);
+        }
+        let absent = root.join("missing-root");
+        sweep_stale_scratch_in(&absent, now);
+        assert!(!absent.exists());
+        std::fs::remove_dir_all(root).expect("remove private cleanup fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scratch_cleanup_does_not_interpret_non_utf8_names_as_owned_entries() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let mut name = b"brutex-telemetry-".to_vec();
+        name.push(0xff);
+        // APFS cannot create this name; classify the OS string directly so the
+        // ownership rule is still proved on filesystems that refuse the bytes.
+        assert!(!is_scratch_name(&std::ffi::OsString::from_vec(name)));
     }
 
     /// The whole surface, exercised the way a caller uses it, end to end.
