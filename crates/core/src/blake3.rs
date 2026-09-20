@@ -507,13 +507,15 @@ mod tests {
     #[test]
     fn the_published_vectors_reproduce() {
         let cases: [(usize, &str); 12] = [
-            (
-                0,
-                "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
-            ),
+            // Check nonempty progress before empty input or large streaming
+            // vectors, so a broken update loop fails before it can hang them.
             (
                 1,
                 "2d3adedff11b61f14c886e35afa036736dcd87a74d27b5c1510225d0f592e213",
+            ),
+            (
+                0,
+                "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
             ),
             (
                 63,

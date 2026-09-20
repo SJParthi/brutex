@@ -36291,3 +36291,14 @@ receipt from a generated fixture. Reopen must not expose the orphaned replay;
 subsequent publication must retain all companion prefixes and append a new
 acknowledgement. A second generated replay must refuse an exhausted completion
 budget, then succeed only after reopening with an explicitly larger bound.
+
+### D-0620 — Check minimal hash progress before long vectors — 2026-09-20
+
+A mutation of the block-flush comparison hangs long streaming vectors, while the
+one-byte published vector detects its wrong digest immediately. Check that
+nonempty vector first, retaining all twelve published cases. Local nextest
+validation gives this existing test first scheduling priority and stops running
+mutated tests on the first observed assertion failure. No test is filtered out,
+no deadline is reduced, and interrupted cases are retried rather than credited
+as caught. Nextest remains optional local tooling; Cargo's ordinary test path
+and required CI gates remain unchanged.
