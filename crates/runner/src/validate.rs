@@ -5119,6 +5119,18 @@ mod tests {
         Sweeper::new(Ladder::with_min_hits(120).with_ceiling(20_000))
     }
 
+    fn long_walk_fixture() -> Validated {
+        // These read-only assertions inspect the same inputs and result.
+        // Share its construction, retaining every bar, candidate and fold.
+        // Each caller gets an owned clone, including under mutation testing.
+        static WALK: OnceLock<Validated> = OnceLock::new();
+        WALK.get_or_init(|| {
+            let bars = crate::synthetic::sessions(12);
+            walk_forward(&bars, h(15), 3, Direction::Long, &sweeper(), evaluator)
+        })
+        .clone()
+    }
+
     fn anchored_admission_run_v2(
         horizon: Horizon,
         splits: usize,
@@ -5934,8 +5946,7 @@ mod tests {
         // THE WHOLE POINT. Every fold's test window must start strictly after
         // its training end, with the purge between them -- otherwise the
         // out-of-sample figure is the in-sample figure under another name.
-        let bars = crate::synthetic::sessions(12);
-        let v = walk_forward(&bars, h(15), 3, Direction::Long, &sweeper(), evaluator);
+        let v = long_walk_fixture();
 
         assert_eq!(v.folds.len(), 3, "three splits must yield three folds");
         for f in &v.folds {
@@ -5963,8 +5974,7 @@ mod tests {
     fn the_out_of_sample_figure_is_a_different_number_from_the_in_sample_one() {
         // If these were ever equal across every fold, the test window would be
         // the training window and the whole module would be theatre.
-        let bars = crate::synthetic::sessions(12);
-        let v = walk_forward(&bars, h(15), 3, Direction::Long, &sweeper(), evaluator);
+        let v = long_walk_fixture();
 
         assert!(v.decided() > 0, "at least one fold must choose something");
         let differ = v
@@ -6078,8 +6088,7 @@ mod tests {
         // The property, stated so it cannot drift: every fold `held_up` counts
         // must have a POSITIVE figure for the variant it actually chose, and
         // every fold it excludes must not.
-        let bars = crate::synthetic::sessions(12);
-        let v = walk_forward(&bars, h(15), 3, Direction::Long, &sweeper(), evaluator);
+        let v = long_walk_fixture();
         assert!(v.decided() > 0, "no fold chose anything");
 
         let counted = v.held_up();
@@ -6145,8 +6154,7 @@ mod tests {
         //      figure computed with it;
         //   2. the figure is a DIFFERENT number from the level-less walk, or
         //      the levels made no difference and the field is decoration.
-        let bars = crate::synthetic::sessions(12);
-        let v = walk_forward(&bars, h(15), 3, Direction::Long, &sweeper(), evaluator);
+        let v = long_walk_fixture();
         assert!(v.decided() > 0, "no fold chose anything");
 
         let mut applied = 0_usize;
@@ -6204,7 +6212,7 @@ mod tests {
     #[test]
     fn the_fold_decides_the_side_and_the_caller_cannot() {
         let bars = crate::synthetic::sessions(12);
-        let long = walk_forward(&bars, h(15), 3, Direction::Long, &sweeper(), evaluator);
+        let long = long_walk_fixture();
         let short = walk_forward(&bars, h(15), 3, Direction::Short, &sweeper(), evaluator);
 
         assert_eq!(short.folds.len(), 3, "the walk must produce folds");
@@ -6271,8 +6279,7 @@ mod tests {
         // prefix cap of ANY size breaks that equality on ANY fixture where the
         // set outgrows it, immediately and by construction, with no dependence
         // on where the best candidate sits.
-        let bars = crate::synthetic::sessions(12);
-        let v = walk_forward(&bars, h(15), 3, Direction::Long, &sweeper(), evaluator);
+        let v = long_walk_fixture();
         assert!(!v.folds.is_empty(), "no folds, so this asserts nothing");
 
         let mut seen_any = false;
@@ -6308,7 +6315,7 @@ mod tests {
         // So comparing totals cannot see a tie-break change that alters which
         // combination is reported, which is the thing a caller acts on.
         let bars = crate::synthetic::sessions(12);
-        let v = walk_forward(&bars, h(15), 3, Direction::Long, &sweeper(), evaluator);
+        let v = long_walk_fixture();
         assert!(
             v.decided() > 0,
             "no fold chose anything, so this asserts nothing"
@@ -6439,8 +6446,7 @@ mod tests {
         // selection ever moved to the test window this field would still be
         // populated, so the test also pins the shape that makes that visible --
         // `chosen_exit` is `None` exactly when `chosen` is.
-        let bars = crate::synthetic::sessions(12);
-        let v = walk_forward(&bars, h(15), 3, Direction::Long, &sweeper(), evaluator);
+        let v = long_walk_fixture();
 
         assert!(v.decided() > 0, "at least one fold must choose something");
         for f in &v.folds {

@@ -5590,6 +5590,18 @@ mod tests {
     }
 
     #[test]
+    fn a_position_probe_keeps_a_member_at_the_exact_symbol_capacity() {
+        let longest = "ABCDEFGHIJKLMNOPQRSTUVWX";
+        assert_eq!(longest.len(), crate::symbol::SYMBOL_CAPACITY);
+        let index: MemberIndex<4> = MemberIndex::build(&["SHORT", longest]);
+        assert_eq!(index.position(longest), Some(1));
+        assert!(index.contains(longest));
+        assert_eq!(index.position("SHORT"), Some(0));
+        assert_eq!(index.position("ABCDEFGHIJKLMNOPQRSTUVWXY"), None);
+        assert_eq!(index.position("ABCDEFGHIJKLMNOPQRSTUVW"), None);
+    }
+
+    #[test]
     fn a_position_probe_finds_the_index_the_table_was_built_from() {
         // `contains` answers whether; `position` answers where, and the ISIN
         // arrays are useless without the second. Exhaustive over all six

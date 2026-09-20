@@ -1647,6 +1647,150 @@ mod tests {
         }
     }
 
+    fn write_generated_comparison_chain(root: &Path) -> Step3AuthorityRequestV1 {
+        use crate::execution_disposition_v2::v2_tests::canonical_execution_disposition_v2_fixture;
+        use crate::selection_v4_authority::SelectionAuthorityLedgerV4;
+        use runner::topn::{RankingPolicyV1, Weights};
+
+        fs::create_dir_all(root).expect("generated authority root");
+        let ranking = RankingPolicyV1::new(Weights::equal()).expect("ranking policy");
+        let mut execution = ExecutionDispositionLedgerV2::open(root).expect("execution ledger");
+        let mut fixtures = Vec::new();
+        for rung in GLOBAL_REPLAY_V2_RUNGS_SECONDS {
+            for family in [InstrumentFamilyV1::Nifty, InstrumentFamilyV1::BankNifty] {
+                let fixture = canonical_execution_disposition_v2_fixture(
+                    root,
+                    (fixtures.len() + 1) as u8,
+                    family,
+                    rung,
+                    0,
+                    ranking,
+                );
+                execution
+                    .append_complete(&fixture.prepared)
+                    .expect("execution completion");
+                fixtures.push(fixture);
+            }
+        }
+        drop(execution);
+        let population_ids = std::array::from_fn(|index| {
+            fixtures
+                .get(index)
+                .expect("canonical population")
+                .receipt
+                .population_id()
+        });
+        let mut selections = SelectionLedgerV4::open(root, 8).expect("selection ledger");
+        let mut selection_ids = [[0; 32]; SELECTION_COUNT];
+        for (index, selection_id) in selection_ids.iter_mut().enumerate() {
+            let nifty = fixtures.get(index * 2).expect("NIFTY fixture");
+            let bank = fixtures.get(index * 2 + 1).expect("BANKNIFTY fixture");
+            let (mut nifty_authority, mut bank_authority) =
+                SelectionAuthorityLedgerV4::open_pair_read(
+                    root,
+                    nifty.receipt.population_id(),
+                    bank.receipt.population_id(),
+                )
+                .expect("all three stored authorities");
+            let receipt = SelectionReceiptV4::from_authorities(
+                &mut nifty_authority,
+                &mut bank_authority,
+                ranking,
+            )
+            .expect("selection from generated authorities");
+            assert!(
+                receipt.top_twenty_five().is_empty(),
+                "generated V1 evidence cannot satisfy PBO admission"
+            );
+            *selection_id = receipt.selection_id();
+            selections
+                .append(&receipt)
+                .expect("durable selection receipt");
+        }
+        drop(selections);
+        drop(
+            StoredDataCompletenessLedgerV1::open(root, 16)
+                .expect("empty current stored-data ledger"),
+        );
+        drop(GlobalReplayLedgerV2::open(root, 1).expect("empty current replay ledger"));
+        let request = Step3AuthorityRequestV1::new(population_ids, selection_ids, id(254))
+            .expect("exact request");
+        assert_eq!(request.population_ids(), &population_ids);
+        assert_eq!(request.selection_ids(), &selection_ids);
+        assert_eq!(request.replay_completion_id(), id(254));
+        request
+    }
+
+    #[test]
+    fn complete_generated_authorities_reconcile_but_cannot_pretend_selection_is_ready() {
+        let root = temp_root("generated-chain");
+        let request = write_generated_comparison_chain(&root);
+        let report =
+            compare_step3_on_disk_v1(&root, &request, bounds()).expect("stored comparison");
+        assert_eq!(
+            report
+                .rows()
+                .iter()
+                .map(Step3ComparisonRowV1::status)
+                .collect::<Vec<_>>(),
+            [
+                Step3StatusV1::Ready,
+                Step3StatusV1::Ready,
+                Step3StatusV1::Ready,
+                Step3StatusV1::Unmeasured,
+                Step3StatusV1::Blocked,
+                Step3StatusV1::Unmeasured,
+            ]
+        );
+        assert!(!report.is_ready());
+        assert!(
+            report
+                .rows()
+                .get(4)
+                .expect("selection state")
+                .detail()
+                .contains("Top-25=200")
+        );
+        assert_eq!(
+            report.render_markdown(),
+            compare_step3_on_disk_v1(&root, &request, bounds())
+                .expect("repeat read")
+                .render_markdown()
+        );
+        let mut reordered = request.clone();
+        reordered.population_ids.swap(0, 1);
+        let wrong =
+            compare_step3_on_disk_v1(&root, &reordered, bounds()).expect("reordered report");
+        assert_eq!(
+            wrong.rows().first().expect("population").status(),
+            Step3StatusV1::Refused
+        );
+        for index in [1, 2, 4] {
+            assert_eq!(
+                wrong.rows().get(index).expect("dependent stage").status(),
+                Step3StatusV1::Blocked
+            );
+        }
+
+        let mut missing = request.clone();
+        *missing.selection_ids.last_mut().expect("last selection") = id(253);
+        let missing =
+            compare_step3_on_disk_v1(&root, &missing, bounds()).expect("missing receipt report");
+        assert_eq!(
+            missing.rows().get(4).expect("selection").status(),
+            Step3StatusV1::Unmeasured
+        );
+        let tiny = Step3ReadBoundsV1::new(1, 8, 16, 1).expect("explicit file bound");
+        let bounded = compare_step3_on_disk_v1(&root, &request, tiny).expect("bounded report");
+        assert!(
+            bounded
+                .rows()
+                .iter()
+                .all(|row| row.status() == Step3StatusV1::Refused)
+        );
+        fs::remove_dir_all(root).expect("remove generated chain");
+    }
+
     #[test]
     fn file_preflight_refuses_missing_nonfiles_and_oversize_without_reading_them() {
         let root = temp_root("file-bounds");

@@ -36344,3 +36344,33 @@ Check both option sides with a ten-digit strike filling all 24 bytes and an
 eleven-digit strike that must refuse. Correct the renderer's explanatory bound:
 the date, separators and side consume 14 bytes, leaving ten strike characters,
 not twelve. Stored identities and the capacity itself are unchanged.
+
+### D-0625 — Reopen the generated comparison chain end to end — 2026-09-20
+
+Drive the existing generated execution fixture through all sixteen canonical
+population/admission/execution authorities and all eight durable selections,
+then read the public on-disk comparison. Complete stored prerequisites can be
+ready while missing stored-data/replay receipts remain unmeasured and selections
+without full Top-25 admission remain blocked. Reordering population identities,
+requesting an absent selection and exhausting the file-size bound must preserve
+those distinctions. The test adds no public authority constructor and changes
+no admission policy or readiness requirement.
+
+### D-0626 — Test membership at the full symbol capacity — 2026-09-20
+
+The public membership probe admits Symbol's exact 24-byte maximum. Existing
+tables contained no name at that boundary, so changing the guard from greater
+than to greater than or equal to survived mutation testing. Add a private table
+with an exact-capacity generated member and check its ordinal, the ordinary
+member and adjacent-length misses. No exchange membership table is changed.
+
+### D-0627 — Share identical immutable walk-forward test results — 2026-09-20
+
+Eight validation tests recomputed the same twelve-session, three-fold long walk
+before inspecting independent properties. Cache that generated result once per
+test process with OnceLock and return an owned clone to each reader. Keep the
+full bar set, support, candidate ceiling, horizon, fold count and every existing
+assertion unchanged. Differently parameterized walks and independent winner
+reconstruction still execute separately. Every mutated test process constructs
+its own result from the mutated implementation; nothing persists across runs.
+This is test execution reuse, not a production result cache or a relaxed gate.
