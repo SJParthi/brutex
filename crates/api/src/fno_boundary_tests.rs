@@ -248,6 +248,60 @@ impl Fixture {
         .expect("the fixture's complete rolling answer remains reportable")
     }
 
+    fn prepare_rolling_receipt(&mut self) -> pull::vendor::RollingSpec {
+        self.enable_rolling_pricing();
+        let masters = self.root.join("masters");
+        fs::write(
+            masters.join("dhan_scrip.csv"),
+            "EXCH_ID,SEGMENT,ISIN,INSTRUMENT,UNDERLYING_SYMBOL,SYMBOL_NAME,\
+             INSTRUMENT_TYPE,SERIES,SM_EXPIRY_DATE,STRIKE_PRICE,OPTION_TYPE,SECURITY_ID\n\
+             NSE,I,NA,INDEX,NIFTY,NIFTY,INDEX,NA,0001-01-01,,,13\n",
+        )
+        .expect("owned generated underlying identity");
+        self.site = Arc::new(Site::load(&masters, &self.root));
+        let original = self.wire.spec.fno.by_offset().expect("rolling descriptor");
+        // A generated one-cell descriptor drives the same cross-product walk
+        // without spending time repeating unrelated offset/side combinations.
+        pull::vendor::RollingSpec {
+            index_offsets: &["ATM"],
+            stock_offsets: &["ATM"],
+            sides: &[("CALL", "ce")],
+            expiry_flags: &[("MONTH", pull::vendor::ExpiryCadence::Monthly)],
+            expiry_codes: &["1"],
+            ..original
+        }
+    }
+
+    async fn rolling_report(
+        &self,
+        rolling: pull::vendor::RollingSpec,
+    ) -> (StatusCode, String, audit::Record) {
+        let journal = self.site.journal();
+        let before = journal.look().records();
+        let page = FnoPage {
+            asked: &self.asked,
+            now: std::time::UNIX_EPOCH + Duration::from_mins(29_234_895),
+            today: self.today,
+            journal: &journal,
+            broker: Broker::Live,
+        };
+        let (status, body) = fno_roll(
+            &page,
+            Vec::new(),
+            &self.asked,
+            &self.site,
+            &self.wire,
+            rolling,
+        )
+        .await;
+        assert_eq!(journal.look().records(), before + 1);
+        let record = newest_record(&journal, &journal.look()).expect("durable rolling receipt");
+        for (path, original) in &self.originals {
+            assert_eq!(fs::read(path).expect("retained fixture bytes"), *original);
+        }
+        (status, body, record)
+    }
+
     fn symbol_id() -> u32 {
         let hash = brutex_core::universe::fnv1a("NIFTY").to_le_bytes();
         u32::from_le_bytes(hash[..4].try_into().expect("canonical symbol slot"))
@@ -848,21 +902,195 @@ async fn named_pricing_receipt_preserves_missing_and_corrupt_spot_reasons() {
 }
 
 fn rolling_session() -> String {
+    rolling_rows(375)
+}
+
+fn rolling_rows(count: usize) -> String {
     let first = i64::from(
         Day::new(2025, 7, 1)
             .expect("generated trading day")
             .days_from_epoch(),
     ) * 86_400
         + 13_500;
-    let stamps: Vec<_> = (0..375).map(|minute| first + minute * 60).collect();
+    let stamps: Vec<_> = (0..count)
+        .map(|minute| first + i64::try_from(minute).expect("small generated batch") * 60)
+        .collect();
     serde_json::json!({"data": {"ce": {
         "timestamp": stamps,
-        "open": vec![100; 375], "high": vec![110; 375],
-        "low": vec![90; 375], "close": vec![105; 375],
-        "volume": vec![1; 375], "oi": vec![0; 375],
-        "iv": vec![0.2; 375], "spot": vec![24_000; 375], "strike": vec![24_000; 375]
+        "open": vec![100; count], "high": vec![110; count],
+        "low": vec![90; count], "close": vec![105; count],
+        "volume": vec![1; count], "oi": vec![0; count],
+        "iv": vec![0.2; count], "spot": vec![24_000; count], "strike": vec![24_000; count]
     }, "pe": null}})
     .to_string()
+}
+
+#[tokio::test]
+async fn an_unnameable_rolling_answer_keeps_its_decoded_row_count() {
+    let mut fixture = Fixture::new(1);
+    let rolling = fixture.prepare_rolling_receipt();
+    let mut answer: serde_json::Value =
+        serde_json::from_str(&rolling_session()).expect("generated rolling answer");
+    let removed = answer["data"]["ce"]
+        .as_object_mut()
+        .expect("generated side object")
+        .remove("strike");
+    assert!(removed.is_some());
+    let transport = fixture.serve(answer.to_string()).await;
+    let (status, body, record) = fixture.rolling_report(rolling).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(record.outcome, audit::Outcome::Failed);
+    assert_eq!(
+        record.rows_read, 375,
+        "a missing contract key is after decoding"
+    );
+    assert_eq!(record.bars_stored, 0);
+    assert_eq!(record.failures, 1);
+    assert!(body.contains("the vendor sent no strike"), "{body}");
+    assert!(!fixture.root.join("bars").exists());
+    assert_eq!(transport.seen.load(std::sync::atomic::Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn rolling_plan_failure_is_explicit_before_any_request() {
+    let mut fixture = Fixture::new(1);
+    let rolling = pull::vendor::RollingSpec {
+        max_days_per_call: 0,
+        ..fixture.prepare_rolling_receipt()
+    };
+    let transport = fixture.serve(rolling_session()).await;
+    let (status, body, record) = fixture.rolling_report(rolling).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(record.outcome, audit::Outcome::Failed);
+    assert_eq!(record.rows_read, 0);
+    assert_eq!(record.bars_stored, 0);
+    assert_eq!(record.failures, 1);
+    assert!(body.contains("the window could not be split"), "{body}");
+    assert!(body.contains("no rolling request was sent"), "{body}");
+    assert_eq!(transport.seen.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert!(!fixture.root.join("bars").exists());
+}
+
+#[tokio::test]
+async fn rolling_reason_limits_do_not_truncate_failures_or_committed_counts() {
+    let mut fixture = Fixture::new(1);
+    let rolling = pull::vendor::RollingSpec {
+        index_offsets: &["ATM", "ATM+1", "ATM+2", "ATM+3", "ATM+4", "ATM+5", "ATM+6"],
+        ..fixture.prepare_rolling_receipt()
+    };
+    fixture.asked.rate = None;
+    let obstruction = fixture.root.join("manifest");
+    fs::write(&obstruction, b"owned census obstruction").expect("block only owned census");
+    let transport = fixture.serve(rolling_session()).await;
+    let (status, body, record) = fixture.rolling_report(rolling).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(record.outcome, audit::Outcome::Failed);
+    assert_eq!(record.rows_read, 7 * 375);
+    assert_eq!(record.bars_stored, 375, "six exact replies append nothing");
+    assert_eq!(record.failures, 7);
+    assert_eq!(body.matches("OPTIDX MONTH/1 ").count(), 5, "{body}");
+    assert!(!body.contains("OPTIDX MONTH/1 ATM+5"), "{body}");
+    assert!(!body.contains("OPTIDX MONTH/1 ATM+6"), "{body}");
+    assert_eq!(transport.seen.load(std::sync::atomic::Ordering::Relaxed), 7);
+    assert_eq!(
+        fs::read(obstruction).expect("unchanged obstruction"),
+        b"owned census obstruction"
+    );
+}
+
+#[tokio::test]
+async fn rolling_receipt_keeps_decoded_rows_distinct_from_committed_bars() {
+    let mut fixture = Fixture::new(1);
+    let rolling = fixture.prepare_rolling_receipt();
+    fixture.asked.rate = None;
+    let transport = fixture.serve(rolling_rows(385)).await;
+    let (status, body, record) = fixture.rolling_report(rolling).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(record.bars_stored, 375);
+    assert_eq!(record.rows_read, 385, "after-close rows were decoded too");
+    assert_eq!(record.failures, 0);
+    assert_eq!(transport.seen.load(std::sync::atomic::Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn rolling_receipt_does_not_claim_an_exact_replay_as_new_source_writes() {
+    let mut fixture = Fixture::new(1);
+    let rolling = fixture.prepare_rolling_receipt();
+    let transport = fixture.serve(rolling_session()).await;
+    let (status, body, record) = fixture.rolling_report(rolling).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(record.bars_stored, 375);
+    for kind in [FileKind::Bars, FileKind::Overlay, FileKind::Greeks] {
+        let path = fixture
+            .bar_path(0)
+            .with_file(kind)
+            .to_path_buf(&fixture.root);
+        fixture
+            .originals
+            .push((path.clone(), fs::read(path).expect("first committed bytes")));
+    }
+    let (status, body, record) = fixture.rolling_report(rolling).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(record.bars_stored, 0, "the real bar file was unchanged");
+    assert_eq!(record.rows_read, 375);
+    assert_eq!(record.outcome, audit::Outcome::Empty);
+    assert!(body.contains("no new source bars were committed"), "{body}");
+    assert_eq!(transport.seen.load(std::sync::atomic::Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn rolling_receipt_retains_committed_bars_after_a_census_failure() {
+    let mut fixture = Fixture::new(1);
+    let rolling = fixture.prepare_rolling_receipt();
+    fixture.asked.rate = None;
+    let obstruction = fixture.root.join("manifest");
+    fs::write(&obstruction, b"owned census obstruction").expect("block only owned census");
+    let transport = fixture.serve(rolling_session()).await;
+    let (status, body, record) = fixture.rolling_report(rolling).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    let file = store::file::BarFile::open_existing(
+        &fixture.root,
+        fixture.bar_path(0),
+        Fixture::symbol_id(),
+    )
+    .expect("the source append really happened");
+    assert_eq!(file.records(), 375);
+    assert_eq!(
+        record.bars_stored, 375,
+        "the later census cannot erase the append"
+    );
+    assert_eq!(record.rows_read, 375);
+    assert!(record.failures > 0);
+    assert_eq!(
+        fs::read(obstruction).expect("unchanged obstruction"),
+        b"owned census obstruction"
+    );
+    assert_eq!(transport.seen.load(std::sync::atomic::Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn rolling_greeks_only_describe_bars_the_source_session_accepts() {
+    let mut fixture = Fixture::new(1);
+    let rolling = fixture.prepare_rolling_receipt();
+    let transport = fixture.serve(rolling_rows(385)).await;
+    let (status, body, _) = fixture.rolling_report(rolling).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    for kind in [FileKind::Bars, FileKind::Overlay, FileKind::Greeks] {
+        let file = store::file::BarFile::open_existing(
+            &fixture.root,
+            fixture.bar_path(0).with_file(kind),
+            Fixture::symbol_id(),
+        )
+        .expect("the accepted rows are really filed");
+        assert_eq!(
+            file.records(),
+            375,
+            "{kind:?} cannot describe an unfiled after-close bar"
+        );
+    }
+    assert!(body.contains("375 confirmed stored"), "{body}");
+    assert!(!body.contains("385 confirmed stored"), "{body}");
+    assert_eq!(transport.seen.load(std::sync::atomic::Ordering::Relaxed), 1);
 }
 
 #[tokio::test]

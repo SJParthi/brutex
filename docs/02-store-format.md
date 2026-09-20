@@ -281,22 +281,37 @@ A file shorter than the header region is all tail, and is reported as such.
 
 Overlay fields — implied volatility, greeks, anything computed — do **not**
 widen this record. They live in a sibling file with their own version, their
-own stride, and their own commit counter, addressed by the same index *i*.
+own stride, and their own commit counter. Join record families by timestamp:
+an absent overlay or a pricing refusal can leave different row counts.
 
 | Extension | Holds |
 |---|---|
 | `.bin` | the bar records |
-| `.crc` | one block checksum per block index (§6) |
-| `.ovl` | computed overlay fields, at their own stride |
+| `.crc` | bar block checksums, one per bar block index (§6) |
+| `.ovl` | vendor spot and implied volatility, 24-byte records, version 9 |
+| `.ovl.crc` | overlay block checksums, using the overlay's own geometry |
+| `.grk` | computed Greeks and their provenance, 80-byte records, version 8 |
+| `.grk.crc` | Greek block checksums, using the Greek file's own geometry |
 | `.lock` | the advisory lock one writer holds for the month (§5, §9) |
 
 ```
-bars/<vendor>/NSE/FNO/<contract>/1min/2024-03.bin      56-byte stride, version 2
-bars/<vendor>/NSE/FNO/<contract>/1min/2024-03.ovl      its own stride, version 1
+bars/<vendor>/NSE/FNO/<underlying>/<contract>/1min/2024-03.bin
+bars/<vendor>/NSE/FNO/<underlying>/<contract>/1min/2024-03.ovl
+bars/<vendor>/NSE/FNO/<underlying>/<contract>/1min/2024-03.grk
 ```
 
 This keeps the base stride constant forever. A base file written in year one
 is readable in year ten by arithmetic that has not changed.
+
+Each record family owns its checksum file (D-0667). Sharing `.crc` between
+different strides overwrote the source bars' integrity evidence when an overlay
+or Greek file committed. The month-wide `.lock` remains shared, so writers stay
+serialized. The record bytes, format versions and bar checksum path do not
+change. A reader refuses an existing sealed derived file whose dedicated
+checksum sibling is missing; it does not borrow the bar checksum or fabricate
+proof. Writers may create a checksum sibling only for a stream with no
+committed records; a missing proof for existing sealed records refuses before
+creation. This change does not repair or reseal previously damaged history.
 
 Every one of those names is rendered by `store::path::StorePath` and nothing
 else. The vendor is the first segment (D-0019); every segment is

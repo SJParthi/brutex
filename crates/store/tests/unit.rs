@@ -2076,6 +2076,8 @@ fn the_sibling_files_of_a_month_share_every_segment_but_the_extension() {
             "bars/groww/NSE/INDEX/NIFTY/1min/2024-06.ovl".to_owned(),
             "bars/groww/NSE/INDEX/NIFTY/1min/2024-06.grk".to_owned(),
             "bars/groww/NSE/INDEX/NIFTY/1min/2024-06.lock".to_owned(),
+            "bars/groww/NSE/INDEX/NIFTY/1min/2024-06.ovl.crc".to_owned(),
+            "bars/groww/NSE/INDEX/NIFTY/1min/2024-06.grk.crc".to_owned(),
         ],
     );
 
@@ -2083,11 +2085,9 @@ fn the_sibling_files_of_a_month_share_every_segment_but_the_extension() {
     // concatenates -- docs/02 §9's "one writer per file, enforced by an
     // advisory lock" needs a name that cannot drift from the file it guards.
     assert_eq!(FileKind::Lock.extension(), ".lock");
-    // FIVE, since the computed greeks joined the family. Bars, their block
-    // checksums, the vendor-stated overlay, the computed greeks, and the lock.
-    // The count is asserted rather than the list alone so a sixth sibling added
-    // without a rendered path above fails here instead of silently.
-    assert_eq!(FileKind::ALL.len(), 5);
+    // Each of the three record families has an independent integrity file;
+    // the existing month lock still serializes their writers.
+    assert_eq!(FileKind::ALL.len(), 7);
 
     let bars = StorePath::new(base).expect("legal");
     assert_eq!(bars.timeframe(), Timeframe::MINUTE_1);
@@ -2220,11 +2220,9 @@ fn a_maximal_path_fits_the_declared_bound() {
     // Exactly, not merely within: the bound is the length of the longest legal
     // path, so a bound that drifted in either direction fails here.
     assert_eq!(path.to_string().len(), MAX_LEN);
-    // 107: MAX_VENDOR_LEN went 5 -> 8 when the archive feeds gained store
-    // prefixes, and MAX_TIMEFRAME_LEN went 4 -> 5 with D-0077's `15min`.
-    // MAX_LEN is derived from both. Asserted exactly, so the derivation cannot
-    // drift silently.
-    assert_eq!(MAX_LEN, 107);
+    // The independent .ovl.crc and .grk.crc siblings add three bytes to the
+    // previous 107-byte bound. Keep the exact maximum pinned to its derivation.
+    assert_eq!(MAX_LEN, 110);
     assert_eq!(
         path.to_string(),
         format!(

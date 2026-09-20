@@ -882,22 +882,14 @@ const OVERLAY_TABLE: &[Layout] = &[Layout::OVERLAY];
 /// The one geometry a `.grk` file can resolve to.
 const GREEKS_TABLE: &[Layout] = &[Layout::GREEKS];
 
-/// Whether this kind of file holds records at a declared geometry.
-///
-/// `.crc` and `.lock` do not: opening either through [`BarFile`] would read its
-/// first bytes as a header and its rest as records at whatever stride that
-/// header happened to name.
-const fn holds_records(kind: FileKind) -> bool {
-    matches!(kind, FileKind::Bars | FileKind::Overlay | FileKind::Greeks)
-}
-
 /// The geometry a file of this kind is BORN at.
 ///
 /// Decided once, from the kind, so creation and reopen cannot disagree — a file
 /// born at the overlay's geometry and reopened against the bar table reports
 /// `UnknownVersion(9)`, which is the resolver being right and the caller having
 /// handed it the wrong table. `Layout::CURRENT` for anything that is not a
-/// sidecar, which after [`holds_records`] can only be [`FileKind::Bars`].
+/// sidecar, which after [`FileKind::checksums`] admits it can only be
+/// [`FileKind::Bars`].
 const fn geometry_of(kind: FileKind) -> Layout {
     match kind {
         FileKind::Overlay => Layout::OVERLAY,
@@ -962,9 +954,10 @@ impl BarFile {
         // Asked of `FileKind` rather than spelled as a chain of `!=`. There are
         // three record kinds now and the chain had to be edited in two places
         // to add the third — two places that could have disagreed.
-        if !holds_records(path.file()) {
-            return Err(StoreError::NotABarPath { found: path.file() });
-        }
+        let checksum_kind = path
+            .file()
+            .checksums()
+            .ok_or(StoreError::NotABarPath { found: path.file() })?;
         let timeframe_secs = path.timeframe().secs();
         // THE GEOMETRY THIS FILE IS BORN AT AND RESOLVED AGAINST, decided once
         // from the file kind so creation and reopen cannot disagree.
@@ -1048,7 +1041,7 @@ impl BarFile {
         Self::validated(
             bars,
             bars_path,
-            Some(path.with_file(FileKind::Checksums).to_path_buf(root)),
+            Some(path.with_file(checksum_kind).to_path_buf(root)),
             Some(lock),
             len,
             symbol_id,
@@ -1109,9 +1102,10 @@ impl BarFile {
         // Asked of `FileKind` rather than spelled as a chain of `!=`. There are
         // three record kinds now and the chain had to be edited in two places
         // to add the third — two places that could have disagreed.
-        if !holds_records(path.file()) {
-            return Err(StoreError::NotABarPath { found: path.file() });
-        }
+        let checksum_kind = path
+            .file()
+            .checksums()
+            .ok_or(StoreError::NotABarPath { found: path.file() })?;
         let bars_path = path.to_path_buf(root);
         let lock_path = path.with_file(FileKind::Lock).to_path_buf(root);
 
@@ -1139,7 +1133,7 @@ impl BarFile {
         Self::validated(
             bars,
             bars_path,
-            Some(path.with_file(FileKind::Checksums).to_path_buf(root)),
+            Some(path.with_file(checksum_kind).to_path_buf(root)),
             lock,
             len,
             symbol_id,
@@ -1436,7 +1430,19 @@ impl BarFile {
             // `None` here and verification reports that it cannot check rather
             // than checking against zeros it just wrote.
             match access {
-                Access::Write => Some(fault(open_rw(at), at, Action::Open)?),
+                Access::Write => Some(fault(
+                    File::options()
+                        .read(true)
+                        .write(true)
+                        // Only a stream with no committed records can begin
+                        // a new checksum file. Missing existing evidence is
+                        // a refusal, never permission to seal history anew.
+                        .create(header.n_valid == 0)
+                        .truncate(false)
+                        .open(at),
+                    at,
+                    Action::Open,
+                )?),
                 Access::Read => match open_read(at) {
                     Ok(file) => Some(file),
                     Err(why) if why.kind() == io::ErrorKind::NotFound => None,
@@ -3744,3 +3750,7 @@ enum Access {
     /// `open_existing`: the reader's door, which creates nothing.
     Read,
 }
+
+#[cfg(test)]
+#[path = "sidecar_checksum_tests.rs"]
+mod sidecar_checksum_tests;

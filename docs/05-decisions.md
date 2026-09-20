@@ -37150,3 +37150,68 @@ transports are exclusively owned by the fixtures; no credential store or real
 vendor is used. The format, pricing model, rate source, engine surface and
 automatic pulling policy are unchanged. The added counters are constant work;
 month loading and batch filing retain their existing input-sized costs.
+
+### D-0667 — Isolate integrity evidence for each record family — 2026-09-20
+
+A generated rolling pull stored bars, vendor overlays and Greeks successfully,
+but its exact retry refused the original bars with a block-checksum mismatch.
+Both ordinary BarFile doors derived the same .crc sibling for all three record
+families. Each writer overwrote that file using its own stride and block
+geometry, so a derived append invalidated the source bar proof.
+
+FileKind now maps each record family to its own integrity sibling: .bin uses
+the existing .crc, .ovl uses .ovl.crc and .grk uses .grk.crc. Both ordinary
+doors use that mapping; checksum and lock paths cannot be opened as records.
+The shared month lock still serializes every writer. Record formats, versions,
+byte strides and the bar-only audited door are unchanged. The derived sibling
+names extend the maximum path bound by three bytes.
+
+There is no compatibility fallback to the shared checksum. A reader refuses
+a sealed derived file with no dedicated proof and does not write one. This
+repair prevents new collisions; it does not authenticate, rewrite or reseal
+previous history whose integrity evidence was already overwritten.
+
+A separate negative control found that the writer door created an empty
+checksum file when reopening those existing records. Creation is now allowed
+only while the sealed stream has zero committed records. A missing proof for
+an existing sealed stream refuses before creation. The generated missing-proof
+test checks both doors and retains the original bar checksum and derived bytes.
+
+Three generated filesystem tests exercise all six family write orders, exact
+byte-preserving retries, isolated checksum corruption and missing derived
+proofs. Each reads every generated row through the actual storage reader.
+They share the existing process-wide telemetry test guard, keeping unrelated
+emissions out of the exact logging proof. Path-bound and non-record rejection
+tests cover all seven sibling names. The original shared-checksum behavior
+failed the independent-family read before this repair.
+
+### D-0668 — Keep rolling receipts and Greeks aligned with source writes — 2026-09-20
+
+Generated rolling replies reproduced three accounting defects: 385 decoded
+rows were reported as 375 read after session filtering; exact source replays
+were credited as new writes; and a census failure after append erased the
+375 committed bars from the receipt. A fourth fixture found 385 Greek rows
+beside only 375 source bars because pricing preceded the session filter.
+
+Carry decoded rows independently through Rolled and the cross-product walk,
+including an answer that decoded but has no usable contract key. A grouping
+refusal stops that answer while preserving its reads and earlier committed
+groups instead of discarding the whole result.
+Use the ingest writer's bars_committed count for newly appended source bars.
+Retain those counts when census publication fails and report the failure
+alongside them. Empty rolling receipts explicitly say that no new source bars
+were committed; they do not claim that every contract was newly filed.
+
+Rolling pricing now uses the same Window::verdict, granularity cadence and
+derivative venue as source ingestion before building a quote. Session-dropped
+rows produce no derived records. Greek filing remains after source landing,
+and its acknowledged count remains distinct from new source writes. The
+canonical calendar policy, prices, rate input and pricing model are unchanged.
+Seven owned loopback fixtures assert the durable receipt, actual family record
+counts, exact replay bytes and retained census obstruction. They also prove
+that a malformed call-window cap sends no request and that five displayed
+reasons do not truncate seven actual failures or lose a completed source append.
+An answer with its strike array absent retains its decoded-row count while
+refusing to invent a contract or create source files.
+Each timestamp check is constant work; processing a reply remains proportional
+to its rows.

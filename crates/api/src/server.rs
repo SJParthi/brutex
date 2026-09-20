@@ -10270,20 +10270,6 @@ struct FnoCounts {
     failures: u64,
 }
 
-impl FnoCounts {
-    /// Existing filed-row accounting for the rolling walk and zero-row
-    /// refusals. The named walk supplies independently measured decoded-row
-    /// and committed-bar counts instead of deriving one from the other.
-    fn of(contracts: usize, stored: usize, failed: usize) -> Self {
-        Self {
-            contracts: contracts as u64,
-            rows_read: stored as u64,
-            bars_stored: stored as u64,
-            failures: failed as u64,
-        }
-    }
-}
-
 impl FnoPage<'_> {
     /// One outcome, recorded and rendered — for an arm that moved nothing.
     ///
@@ -11689,10 +11675,20 @@ async fn roll_one(
     // bound in hand rather than grown. `docs/07-o1-architecture.md` law 2.
     let mut census_rows: Vec<pull::manifest::Held> = Vec::with_capacity(rows.len());
     while at < rows.len() {
-        let (end, key) = next_group(&rows, at, &label, key_at)?;
-        let group = rows
-            .get(at..end)
-            .ok_or_else(|| format!("{label}: rows vanished"))?;
+        let next = next_group(&rows, at, &label, key_at).and_then(|(end, key)| {
+            rows.get(at..end)
+                .map(|group| (end, key, group))
+                .ok_or_else(|| format!("{label}: rows vanished"))
+        });
+        let (end, key, group) = match next {
+            Ok(group) => group,
+            Err(why) => {
+                // The reply was decoded even when a contract cannot be named.
+                // Keep its read count and any earlier acknowledged groups.
+                note_run_failure(&mut failed, &mut why_not, why);
+                break;
+            }
+        };
 
         let (expiry_day, strike) = key;
         // A RUN THAT RESOLVED TO AN UNSETTLED CONTRACT IS NOT FILED.
@@ -11764,6 +11760,8 @@ async fn roll_one(
                     rate,
                     vendor: wire.store_vendor,
                 },
+                window,
+                asked.granularity.cadence(),
                 &mut priced,
             ),
             _ => Vec::new(),
@@ -11832,9 +11830,10 @@ async fn roll_one(
     // ONE CENSUS CYCLE FOR THE WHOLE ANSWER — see `record_held`'s own note.
     if let Some(why) = pull::ingest::record_held(&site.store_root, wire.store_vendor, &census_rows)
     {
-        return Err(format!("{label}: {why}"));
+        note_run_failure(&mut failed, &mut why_not, format!("{label}: {why}"));
     }
     Ok(Rolled {
+        rows_read: rows.len(),
         stored: total,
         declined,
         failed,
@@ -12207,9 +12206,11 @@ where
 fn price_rolling_group(
     group: &[pull::rolling::Row],
     inputs: PriceInputs,
+    window: pull::session::Window,
+    cadence: pull::session::Cadence,
     into: &mut PricedCount,
 ) -> Vec<store::format::Greek> {
-    let done = price_group(group, inputs);
+    let done = price_group(group, inputs, window, cadence);
     into.absorb(&done);
     greek_records(&done)
 }
@@ -12311,7 +12312,12 @@ fn file_the_greeks(
     .err()
 }
 
-fn price_group(group: &[pull::rolling::Row], inputs: PriceInputs) -> pull::pricing::PricedAll {
+fn price_group(
+    group: &[pull::rolling::Row],
+    inputs: PriceInputs,
+    window: pull::session::Window,
+    cadence: pull::session::Cadence,
+) -> pull::pricing::PricedAll {
     let mut quotes: Vec<pull::pricing::Quote> = Vec::with_capacity(group.len());
     // PRE-SIZED FROM THE SAME BOUND THE LINE ABOVE USES. One entry per row at
     // most -- the key is the row's timestamp -- so `group.len()` is the exact
@@ -12325,6 +12331,18 @@ fn price_group(group: &[pull::rolling::Row], inputs: PriceInputs) -> pull::prici
 
     for row in group {
         let ts = row.bar.ts_micros;
+        // Use the source writer's canonical window/session decision. A
+        // derived row must not describe a source bar that ingestion drops.
+        if !matches!(
+            window.verdict(
+                ts.div_euclid(1_000_000),
+                cadence,
+                pull::vendor::Listing::Derivative.venue(),
+            ),
+            Ok(None)
+        ) {
+            continue;
+        }
         let Some(spot) = row.overlay.spot() else {
             out.refused = out.refused.saturating_add(1);
             note_price_refusal(
@@ -12423,6 +12441,8 @@ fn note_price_refusal(out: &mut pull::pricing::PricedAll, why: &str) {
 /// declined)` compile the same and report opposite things.
 #[derive(Debug, Default, PartialEq)]
 struct Rolled {
+    /// Decoded rows, including rows declined by the source session filter.
+    rows_read: usize,
     /// Bars written to disk.
     stored: usize,
     /// Runs the month gate declined — neither stored nor failed.
@@ -12900,7 +12920,7 @@ fn land_rolling_group(
     }
     // THE CENSUS ROW TRAVELS WITH THE COUNT. `from_rows` no longer writes it;
     // the caller collects every group's row and records them in one cycle.
-    Ok((done.bars_stored, done.pending, trouble))
+    Ok((done.bars_committed, done.pending, trouble))
 }
 
 /// Every request in the cross product, fetched and filed.
@@ -12939,13 +12959,9 @@ async fn roll_every(
     word: &'static str,
     offsets: &'static [&'static str],
     last_settled: Day,
-) -> (usize, usize, usize, Vec<String>, PricedCount) {
+) -> Rolled {
     let endpoint = pull::rolling::url(&rolling, wire.spec.base_url);
-    let mut stored = 0usize;
-    let mut failed = 0usize;
-    let mut declined = 0usize;
-    let mut priced = PricedCount::default();
-    let mut why: Vec<String> = Vec::new();
+    let mut out = Rolled::default();
 
     // THE PER-CALL CAP BINDS HERE, AND NOTHING BOUND IT.
     //
@@ -12967,17 +12983,15 @@ async fn roll_every(
         {
             Ok(chunks) => chunks,
             Err(refusal) => {
-                return (
-                    0,
-                    1,
-                    0,
-                    vec![format!(
+                return Rolled {
+                    failed: 1,
+                    why: vec![format!(
                         "the window could not be split to this feed's {}-day \
                      per-call cap, so no rolling request was sent: {refusal}",
                         rolling.max_days_per_call
                     )],
-                    PricedCount::default(),
-                );
+                    ..Rolled::default()
+                };
             }
         };
 
@@ -13026,7 +13040,7 @@ async fn roll_every(
         planned,
     );
 
-    for flag in &cadences {
+    'walk: for flag in &cadences {
         // EVERY ORDINAL THE VENDOR SERVES. THE NARROWING IS GONE.
         //
         // This read `.take(ORDINALS_ASKED)`, a `const usize = 1` carrying the
@@ -13059,7 +13073,7 @@ async fn roll_every(
         // CLAUDE.md section 5's rule that adding a broker is a row, applied to
         // a field of one. D-0231.
         for code in rolling.expiry_codes {
-            say_group_starting(asked, flag, code, stored, failed, declined);
+            say_group_starting(asked, flag, code, out.stored, out.failed, out.declined);
             for strike in offsets {
                 // THE REQUEST WORD, AND THE ANSWER KEY TRAVELS WITH IT.
                 // `sides` is a pair since D-0346: the word this vendor is ASKED
@@ -13081,8 +13095,8 @@ async fn roll_every(
                         // for the batch is a ceiling observed once — and now it is
                         // charged per CHUNK, because a chunk is a request.
                         if let Err(halt) = await_budget(asked.feed, site).await {
-                            why.push(halt);
-                            return (stored, failed.saturating_add(1), declined, why, priced);
+                            note_run_failure(&mut out.failed, &mut out.why, halt);
+                            break 'walk;
                         }
                         let one = roll_one(
                             asked,
@@ -13102,9 +13116,10 @@ async fn roll_every(
                         .await;
                         match one {
                             Ok(done) => {
-                                stored = stored.saturating_add(done.stored);
-                                declined = declined.saturating_add(done.declined);
-                                priced.absorb_count(&done.priced);
+                                out.rows_read = out.rows_read.saturating_add(done.rows_read);
+                                out.stored = out.stored.saturating_add(done.stored);
+                                out.declined = out.declined.saturating_add(done.declined);
+                                out.priced.absorb_count(&done.priced);
                                 // A RUN THAT PARTLY FAILED IS NOT AN `Err`, and
                                 // its failures must not vanish into `Ok`.
                                 //
@@ -13117,18 +13132,15 @@ async fn roll_every(
                                 // dropping them here would trade a run that
                                 // died loudly for one that succeeds quietly
                                 // while having lost groups.
-                                failed = failed.saturating_add(done.failed);
+                                out.failed = out.failed.saturating_add(done.failed);
                                 for said in done.why {
-                                    if why.len() < 5 {
-                                        why.push(said);
+                                    if out.why.len() < pull::pricing::REASONS_KEPT {
+                                        out.why.push(said);
                                     }
                                 }
                             }
                             Err(said) => {
-                                failed = failed.saturating_add(1);
-                                if why.len() < 5 {
-                                    why.push(said);
-                                }
+                                note_run_failure(&mut out.failed, &mut out.why, said);
                             }
                         }
                     }
@@ -13136,8 +13148,8 @@ async fn roll_every(
             }
         }
     }
-    say_walk_finished(asked, stored, failed, declined, planned);
-    (stored, failed, declined, why, priced)
+    say_walk_finished(asked, out.stored, out.failed, out.declined, planned);
+    out
 }
 
 /// Whether this underlying had contracts on that cadence at all over the window.
@@ -13412,7 +13424,7 @@ async fn fno_roll(
         }
     };
 
-    let (stored, failed, declined, why, priced) = roll_every(
+    let done = roll_every(
         asked,
         site,
         wire,
@@ -13423,15 +13435,38 @@ async fn fno_roll(
         last_settled,
     )
     .await;
+    rolling_receipt(page, facts, done, planned)
+}
+
+/// Render and durably record the rolling walk's independently measured counts.
+fn rolling_receipt(
+    page: &FnoPage<'_>,
+    mut facts: Vec<(&'static str, String)>,
+    done: Rolled,
+    planned: usize,
+) -> (axum::http::StatusCode, String) {
+    let Rolled {
+        rows_read,
+        stored,
+        declined,
+        failed,
+        why,
+        priced,
+    } = done;
+    facts.push(("Rows read", rows_read.to_string()));
     facts.push(("Bars stored", stored.to_string()));
-    facts.extend(greek_facts(&priced, asked.rate.is_none()));
+    facts.extend(greek_facts(&priced, page.asked.rate.is_none()));
     // A THIRD OUTCOME, AND IT NEEDS ITS OWN LINE. See `roll_one`'s gate.
     if declined > 0 {
         facts.push(("Contract runs declined", declined_note(declined)));
     }
 
-    // THE SAME NUMBERS THE NAME WALK RECORDS, through the same constructor.
-    let counted = FnoCounts::of(planned, stored, failed);
+    let counted = FnoCounts {
+        contracts: planned as u64,
+        rows_read: rows_read as u64,
+        bars_stored: stored as u64,
+        failures: failed as u64,
+    };
 
     if failed == 0 {
         return page.say_counted(
@@ -13442,8 +13477,12 @@ async fn fno_roll(
             } else {
                 audit::Outcome::Stored
             },
-            "every planned contract answered and was filed under its own \
-             expiry and strike",
+            if stored == 0 {
+                "the rolling walk completed; no new source bars were committed"
+            } else {
+                "the rolling walk completed; new source bars were committed under \
+                 their own expiry and strike"
+            },
             counted,
         );
     }
@@ -13586,7 +13625,10 @@ async fn fno_report(
                 audit::Outcome::Failed,
                 "discovery is incomplete; an unreadable expiry list or contract \
                  name cannot establish that this window has no contracts",
-                FnoCounts::of(0, 0, chain.unreadable.len()),
+                FnoCounts {
+                    failures: chain.unreadable.len() as u64,
+                    ..FnoCounts::default()
+                },
             );
         }
         return page.say(

@@ -249,12 +249,21 @@ fn a_zero_byte_file_is_initialised_rather_than_condemned() {
 #[test]
 fn a_sibling_that_holds_no_records_is_refused_and_the_overlay_is_not_one() {
     let scratch = Scratch::new("sibling");
-    for kind in [FileKind::Checksums, FileKind::Lock] {
+    for kind in [
+        FileKind::Checksums,
+        FileKind::Lock,
+        FileKind::OverlayChecksums,
+        FileKind::GreekChecksums,
+    ] {
         let path = StorePath::new(parts(kind)).expect("a legal path");
         assert_eq!(
             outcome(BarFile::open_or_create(scratch.root(), path, SYMBOL)),
             Err(StoreError::NotABarPath { found: kind }),
             "{kind:?} holds no records and must not be opened as though it did"
+        );
+        assert_eq!(
+            outcome(BarFile::open_existing(scratch.root(), path, SYMBOL)),
+            Err(StoreError::NotABarPath { found: kind }),
         );
     }
 

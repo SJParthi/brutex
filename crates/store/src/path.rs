@@ -167,15 +167,25 @@ const _: () = assert!(MAX_VENDOR_LEN <= MAX_SEGMENT_LEN);
 /// Checked against [`FileKind::ALL`] the same way and for the same reason: a
 /// new sibling file with a longer extension is a compile error here rather
 /// than a path that quietly exceeds [`MAX_LEN`].
-pub const MAX_EXTENSION_LEN: usize = 5;
+pub const MAX_EXTENSION_LEN: usize = 8;
 
 const _: () = {
-    let [bars, checksums, overlay, greeks, lock] = FileKind::ALL;
+    let [
+        bars,
+        checksums,
+        overlay,
+        greeks,
+        lock,
+        overlay_checksums,
+        greek_checksums,
+    ] = FileKind::ALL;
     assert!(bars.extension().len() <= MAX_EXTENSION_LEN);
     assert!(checksums.extension().len() <= MAX_EXTENSION_LEN);
     assert!(overlay.extension().len() <= MAX_EXTENSION_LEN);
     assert!(greeks.extension().len() <= MAX_EXTENSION_LEN);
     assert!(lock.extension().len() <= MAX_EXTENSION_LEN);
+    assert!(overlay_checksums.extension().len() <= MAX_EXTENSION_LEN);
+    assert!(greek_checksums.extension().len() <= MAX_EXTENSION_LEN);
 };
 
 /// The length of a rendered path, root excluded, when every segment is at its
@@ -582,8 +592,7 @@ impl fmt::Display for YearMonth {
 pub enum FileKind {
     /// The bar records.
     Bars,
-    /// The sidecar block checksums — one per [`crate::layout::Layout`] block,
-    /// at the same block index. See [`crate::block`].
+    /// Bar block checksums — one per [`crate::layout::Layout`] block.
     Checksums,
     /// Computed overlay fields, at their own stride.
     Overlay,
@@ -607,16 +616,22 @@ pub enum FileKind {
     /// derived the same way every other sibling is, rather than invented at
     /// the call site by string concatenation.
     Lock,
+    /// Overlay block checksums, isolated from bars and computed greeks.
+    OverlayChecksums,
+    /// Greek block checksums, isolated from bars and vendor overlays.
+    GreekChecksums,
 }
 
 impl FileKind {
     /// Every sibling file a month has.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 7] = [
         Self::Bars,
         Self::Checksums,
         Self::Overlay,
         Self::Greeks,
         Self::Lock,
+        Self::OverlayChecksums,
+        Self::GreekChecksums,
     ];
 
     /// The file extension, dot included.
@@ -628,6 +643,20 @@ impl FileKind {
             Self::Overlay => ".ovl",
             Self::Greeks => ".grk",
             Self::Lock => ".lock",
+            Self::OverlayChecksums => ".ovl.crc",
+            Self::GreekChecksums => ".grk.crc",
+        }
+    }
+
+    /// The integrity sibling for this record family. Non-record files have
+    /// no record checksum sibling and cannot be opened as a record stream.
+    #[must_use]
+    pub const fn checksums(self) -> Option<Self> {
+        match self {
+            Self::Bars => Some(Self::Checksums),
+            Self::Overlay => Some(Self::OverlayChecksums),
+            Self::Greeks => Some(Self::GreekChecksums),
+            Self::Checksums | Self::Lock | Self::OverlayChecksums | Self::GreekChecksums => None,
         }
     }
 }
