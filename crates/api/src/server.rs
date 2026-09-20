@@ -2671,13 +2671,14 @@ fn peer_calendar(site: &Loaded, asked: &Addressed) -> PeerCalendar {
         keys.sort_unstable();
         for key in keys {
             let (exchange, segment, symbol) = key;
+            // A stored calendar from another venue cannot decide which
+            // minutes this requested exchange and segment owed. D-0660.
+            if exchange.as_str() != asked.exchange || segment.as_str() != asked.segment {
+                continue;
+            }
             // THE AUDITED SERIES DOES NOT VOTE ON ITSELF. This one comparison
             // is the whole difference between a denominator and a tautology.
-            if vendor_census.vendor == asked.vendor
-                && symbol.as_str() == asked.symbol
-                && exchange.as_str() == asked.exchange
-                && segment.as_str() == asked.segment
-            {
+            if vendor_census.vendor == asked.vendor && symbol.as_str() == asked.symbol {
                 continue;
             }
             let months: Vec<store::path::YearMonth> =
@@ -30093,6 +30094,9 @@ mod bars_window_route_tests;
 
 #[path = "verification_route_tests.rs"]
 mod verification_route_tests;
+
+#[path = "gap_peer_route_tests.rs"]
+mod gap_peer_route_tests;
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic, reason = "test-only assertions")]

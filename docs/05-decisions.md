@@ -36938,3 +36938,23 @@ Repeated requests preserve the exact report. Restoring original generated
 bytes re-establishes verification without restarting the site. These tests do
 not read vendor credentials, contact a vendor, change operator storage or widen
 any coverage/mutation exclusion.
+
+### D-0660 — Keep gap-audit peers within their exchange and segment — 2026-09-20
+
+The existing peer-calendar decision requires the same exchange and segment,
+with the audited feed/symbol excluded from its own denominator. The actual
+loop grouped full identities but never filtered them to the requested venue.
+A generated negative control reproduced both unrelated votes: a BSE index
+and an NSE cash series changed an NSE index audit from the named table to
+peer evidence. In that finite fixture, the reported monthly loss fell from
+7,876 minutes to one, although no comparable peer had been added.
+
+Filter both exchange and segment before opening a peer calendar, then exclude
+the audited vendor/symbol. A different feed's copy of the same symbol and a
+different symbol within the same feed may still vote when both venue fields
+match. No market membership, calendar fact, storage format or sweep scope is
+changed. Existing unrelated stored data is retained and cannot supply this
+audit's denominator. The route regression proves both independent mismatch
+cases, exact preservation of the original response, current-census admission
+of valid peers, named votes, the known generated hole, identical cached reads
+and unchanged source bytes. All fixtures are generated and privately owned.
