@@ -36434,3 +36434,15 @@ Retain the small plan and text outcome artifacts for 35 days, the documented
 maximum workflow lifetime. One-day expiry could remove the plan before a later
 bounded job starts, or remove early outcomes before the complete matrix ends.
 Compiled targets, raw profiles and verbose per-case build logs are not uploaded.
+
+### D-0632 — Isolate coverage artifacts and retain the line report — 2026-09-20
+
+The completed Linux run at 2d684d4f reports 88.06% lines and 86.82% regions,
+below the unchanged 93%/94% floors, and warns that 3,525 functions have mismatched
+profiling data. That warning is not proof that the shortfall is only a cache
+problem. Measure in a unique per-run/per-attempt target directory without
+restoring compiled targets, and retain the full line report even when a gate
+fails. This removes cross-run compiled/profile state from the next measurement
+and makes its actual missing lines inspectable. No file, function, test or
+coverage threshold is excluded or relaxed, and a missing report remains a
+failure rather than an empty success.

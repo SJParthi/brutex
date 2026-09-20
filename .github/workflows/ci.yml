@@ -7491,9 +7491,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
+      - name: Use a fresh coverage target for this run and attempt
+        run: |
+          set -euo pipefail
+          coverage_target="$RUNNER_TEMP/brutex-coverage-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          test ! -e "$coverage_target"
+          mkdir -p "$coverage_target"
+          printf 'CARGO_TARGET_DIR=%s\n' "$coverage_target" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with: { components: llvm-tools-preview }
-      - uses: Swatinem/rust-cache@v2
       - name: Measure
         run: |
           set -euo pipefail
@@ -7692,6 +7698,15 @@ jobs:
             exit 1
           fi
           echo "OK — every uncovered line in crates/telemetry is declared."
+
+      - name: Retain the measured line report for diagnosis
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lines
+          path: /tmp/cov.txt
+          retention-days: 35
+          if-no-files-found: error
 
   mutant-plan:
     name: Gate 18 — enumerate every changed-line mutation
