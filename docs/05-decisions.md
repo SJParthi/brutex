@@ -36317,3 +36317,13 @@ ChunkState's start and end flags. The start flag can only be zero or one; the en
 flag is two. Add these disjoint fixed flags directly, avoiding an unobservable
 operator mutation while retaining all published hash vectors. This does not
 relax mutation selection or change any digest byte.
+
+### D-0622 — Bound completed-subtree counting directly — 2026-09-20
+
+Count completed BLAKE3 subtrees with u64::trailing_zeros instead of shifting a
+counter until an odd bit appears. The primitive returns at most 64 and removes
+the progress loop that a reversed-shift mutation could stall forever. The stack
+suffix fold remains unchanged. A boundary regression verifies the retained
+prefix and merged value through the 63-level counter boundary without allocating
+the corresponding input. Published hash vectors remain the digest authority;
+no timeout is credited as an assertion failure and no mutation is excluded.

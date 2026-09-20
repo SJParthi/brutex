@@ -394,12 +394,13 @@ impl Hasher {
     /// on the counter rather than a search of the stack.
     fn add_chunk(&mut self, mut cv: [u32; 8], total_chunks: u64) {
         // How many subtrees close at this chunk: one per trailing zero bit.
-        let mut merges: usize = 0;
-        let mut counter = total_chunks;
-        while counter & 1 == 0 {
-            merges = merges.saturating_add(1);
-            counter >>= 1;
-        }
+        // The count is bounded by 64, including zero, so it fits every usize.
+        // A fixed-width primitive also cannot stall while advancing the bits.
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "at most 64 trailing zero bits"
+        )]
+        let merges = total_chunks.trailing_zeros() as usize;
         // `drain(..).rev()` rather than repeated `pop()`, for the same reason
         // `update` zips: `pop()` yields an `Option` whose `None` arm cannot happen
         // here -- the stack always holds one entry per set bit of the count -- and
@@ -456,7 +457,9 @@ pub fn hash(input: &[u8]) -> [u8; OUT_LEN] {
 
 #[cfg(test)]
 mod tests {
-    use super::{CHUNK_END, CHUNK_LEN, CHUNK_START, Hasher, IV, Output, ROOT, compress, hash};
+    use super::{
+        CHUNK_END, CHUNK_LEN, CHUNK_START, Hasher, IV, Output, ROOT, compress, hash, parent_output,
+    };
 
     /// The reference test set's input: byte `i` is `i % 251`.
     fn vector_input(len: usize) -> Vec<u8> {
@@ -659,6 +662,39 @@ mod tests {
                     "distinct chunk counters {counter} and {previous} collapsed"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn chunk_folding_consumes_exactly_the_completed_subtree_suffix() {
+        // Stack sizes are the set-bit counts before the new chunk arrives.
+        // The largest boundary exercises the full merge path without an
+        // enormous input; published vectors still attest the digest bytes.
+        for (chunks, stack_len, merges) in [
+            (1_u64, 0_u32, 0_usize),
+            (2, 1, 1),
+            (3, 1, 0),
+            (4, 2, 2),
+            (6, 2, 1),
+            (8, 3, 3),
+            (1_u64 << 63, 63, 63),
+            (u64::MAX, 63, 0),
+        ] {
+            let mut hasher = Hasher::new();
+            hasher.stack = (1..=stack_len).map(|word| [word; 8]).collect();
+            let original = hasher.stack.clone();
+            let mut expected = [99; 8];
+            for left in original.iter().rev().take(merges) {
+                expected = parent_output(*left, expected).chaining_value();
+            }
+            let mut expected_stack: Vec<_> = original
+                .iter()
+                .take(original.len().saturating_sub(merges))
+                .copied()
+                .collect();
+            expected_stack.push(expected);
+            hasher.add_chunk([99; 8], chunks);
+            assert_eq!(hasher.stack, expected_stack, "completed chunks: {chunks}");
         }
     }
 
