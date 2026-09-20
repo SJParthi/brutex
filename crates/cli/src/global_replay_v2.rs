@@ -4284,7 +4284,8 @@ mod tests {
         ] {
             let original = fs::read(&path).expect("original companion");
             for length in [0, 1, LEDGER_HEADER_BYTES_USIZE_V2 - 1, original.len() - 1] {
-                fs::write(&path, &original[..length]).expect("inject torn companion");
+                fs::write(&path, original.get(..length).expect("bounded torn prefix"))
+                    .expect("inject torn companion");
                 assert!(
                     GlobalReplayLedgerV2::open_read(&root, 1).is_err(),
                     "accepted {} bytes in {}",
