@@ -212,6 +212,21 @@ fn assert_fold_command_case(case: &str) {
     assert!(text.contains(counts), "{case}: {text}");
     assert!(text.contains(detail), "{case}: {text}");
     assert_eq!(code, expected, "{case}: {text}");
+    assert_eq!(
+        text.contains("A DISAGREEING rung holds bars"),
+        case == "disagreement",
+        "disagreement advice must describe the measured findings: {text}"
+    );
+    assert_eq!(
+        text.contains("One or more requested files could not be audited"),
+        matches!(case, "missing-rung" | "bad-minutes" | "missing-month"),
+        "unreadable authority advice must describe the measured findings: {text}"
+    );
+    assert_eq!(
+        text.contains("Every stored coarse bar equals"),
+        case == "clean",
+        "only a complete agreeing comparison may claim agreement: {text}"
+    );
     for (feed, symbol, from, to) in [
         ("unknown", "NIFTY", ("2024", "6"), ("2024", "6")),
         ("zerodha", "UNSWEPT", ("2024", "6"), ("2024", "6")),

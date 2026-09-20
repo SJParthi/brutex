@@ -238,6 +238,48 @@ pub fn open(
     // absence is the signal `StorePath` branches on, per `Contract::of`.
     contract: Option<brutex_core::instrument::Contract>,
 ) -> Result<BarFile, String> {
+    open_classified(
+        store_root,
+        PathParts {
+            vendor,
+            exchange,
+            segment,
+            symbol,
+            contract,
+            timeframe,
+            month,
+            file: FileKind::Bars,
+        },
+    )
+    .map_err(|why| why.message)
+}
+
+enum OpenRefusalKind {
+    Invalid,
+    Absent,
+    Unreadable,
+}
+
+struct OpenRefusal {
+    kind: OpenRefusalKind,
+    message: String,
+}
+
+/// Preserve absence separately from invalid addresses and unreadable authority.
+fn open_classified(
+    store_root: &std::path::Path,
+    parts: PathParts<'_>,
+) -> Result<BarFile, OpenRefusal> {
+    let PathParts {
+        vendor,
+        exchange,
+        segment,
+        symbol,
+        contract,
+        timeframe,
+        month,
+        ..
+    } = parts;
     let path = StorePath::new(PathParts {
         vendor,
         exchange,
@@ -256,7 +298,10 @@ pub fn open(
         note_refused(
             vendor, exchange, segment, symbol, timeframe, month, &refusal,
         );
-        refusal
+        OpenRefusal {
+            kind: OpenRefusalKind::Invalid,
+            message: refusal,
+        }
     })?;
     // THE SYMBOL ID IS DERIVED THE WAY `pull::ingest` DERIVES IT. The store
     // stamps it into the header on create and verifies it on every reopen, so a
@@ -288,11 +333,21 @@ pub fn open(
         // arrive here as one string and all three are worth a line: the first is
         // ordinary, the second means the rung on the form does not match the rung
         // on disk, and the third means a file this build cannot read.
+        let kind = if matches!(&why, store::file::StoreError::Missing { path: missing, .. }
+            if *missing == path.to_path_buf(store_root))
+        {
+            OpenRefusalKind::Absent
+        } else {
+            OpenRefusalKind::Unreadable
+        };
         let refusal = why.to_string();
         note_refused(
             vendor, exchange, segment, symbol, timeframe, month, &refusal,
         );
-        refusal
+        OpenRefusal {
+            kind,
+            message: refusal,
+        }
     })
 }
 
@@ -795,8 +850,8 @@ fn seek_page(
 ///
 /// # Errors
 ///
-/// The range being inverted or too long, or every named month failing to open
-/// for a reason other than absence.
+/// The range being inverted or too long, an invalid address, or an unavailable
+/// store root. Unreadable months remain named faults alongside readable rows.
 #[expect(
     clippy::too_many_arguments,
     reason = "every argument names one coordinate of the same address — feed, \
@@ -843,23 +898,31 @@ pub fn window(
     /* OPENED ONCE, HELD FOR THE REQUEST. A month with no file is counted and
     skipped: a sparse store is legal and the count is what tells a reader a
     gap from a refusal. */
-    let mut files = Vec::with_capacity(ordered.len());
-    let mut missing = 0usize;
-    for month in ordered {
-        match open(
-            store_root, vendor, exchange, segment, symbol, timeframe, month, contract,
-        ) {
-            Ok(file) => files.push(file),
-            Err(_) => missing = missing.saturating_add(1),
-        }
-    }
+    let OpenedWindow {
+        files,
+        missing,
+        mut faults,
+    } = open_window_months(
+        store_root,
+        PathParts {
+            vendor,
+            exchange,
+            segment,
+            symbol,
+            contract,
+            timeframe,
+            month: from,
+            file: FileKind::Bars,
+        },
+        &ordered,
+    )?;
     if files.is_empty() {
         return Ok(Window {
             total: 0,
             months_read: 0,
             months_missing: missing,
             bars: Vec::new(),
-            faults: Vec::new(),
+            faults,
             extremes: want_extremes.then(Extremes::default),
         });
     }
@@ -870,7 +933,8 @@ pub fn window(
         .fold(0u64, u64::saturating_add);
 
     if !sort.scans() && !want_extremes {
-        let (bars, faults) = seek_page(&files, desc, offset, limit);
+        let (bars, mut record_faults) = seek_page(&files, desc, offset, limit);
+        faults.append(&mut record_faults);
         return Ok(Window {
             total,
             months_read: files.len(),
@@ -887,7 +951,6 @@ pub fn window(
     neighbours. Folding after the sort would compute each row against
     whichever row happened to land above it. */
     let mut all: Vec<WindowBar> = Vec::with_capacity(usize::try_from(total).unwrap_or(0));
-    let mut faults = Vec::new();
     for file in &files {
         let held = usize::try_from(file.header().n_valid).unwrap_or(usize::MAX);
         let (rows, mut bad) = page(file, 0, held);
@@ -965,6 +1028,48 @@ pub fn window(
         faults,
         extremes,
     })
+}
+
+struct OpenedWindow {
+    files: Vec<BarFile>,
+    missing: usize,
+    faults: Vec<String>,
+}
+
+fn open_window_months(
+    root: &std::path::Path,
+    parts: PathParts<'_>,
+    months: &[YearMonth],
+) -> Result<OpenedWindow, String> {
+    let metadata = std::fs::metadata(root)
+        .map_err(|why| format!("cannot read store root {}: {why}", root.display()))?;
+    if !metadata.is_dir() {
+        return Err(format!("store root {} is not a directory", root.display()));
+    }
+    let mut opened = OpenedWindow {
+        files: Vec::with_capacity(months.len()),
+        missing: 0,
+        faults: Vec::new(),
+    };
+    for month in months {
+        match open_classified(
+            root,
+            PathParts {
+                month: *month,
+                ..parts
+            },
+        ) {
+            Ok(file) => opened.files.push(file),
+            Err(why) => match why.kind {
+                OpenRefusalKind::Invalid => return Err(why.message),
+                OpenRefusalKind::Absent => opened.missing = opened.missing.saturating_add(1),
+                OpenRefusalKind::Unreadable => {
+                    opened.faults.push(format!("{month}: {}", why.message));
+                }
+            },
+        }
+    }
+    Ok(opened)
 }
 
 #[cfg(test)]

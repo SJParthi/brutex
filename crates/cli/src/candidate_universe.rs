@@ -7943,6 +7943,72 @@ mod tests {
     }
 
     #[test]
+    fn every_candidate_companion_byte_is_bound_after_outer_resealing() {
+        let root = test_dir();
+        let prepared = prepared(36);
+        let bounds = CandidateUniverseBoundsV1::new(32, 4).expect("finite fixture bounds");
+        let mut ledger = CandidateUniverseLedgerV1::open(root.path(), bounds)
+            .expect("owned fixture ledger initializes");
+        let audit = ledger
+            .append_complete(&prepared)
+            .expect("generated four-row family commits")
+            .audit();
+        assert_eq!(audit.row_count(), 4);
+        drop(ledger);
+
+        for (name, stride, domain) in [
+            (ROW_FILE, ROW_STRIDE_BYTES, ROW_SEAL_DOMAIN),
+            (RECEIPT_FILE, RECEIPT_STRIDE_BYTES, RECEIPT_CONTENT_DOMAIN),
+        ] {
+            let path = root.path().join(name);
+            let original = std::fs::read(&path).expect("committed companion bytes");
+            for offset in 0..original.len() {
+                let mut changed = original.clone();
+                changed[offset] ^= 1;
+                if offset < 32 {
+                    let seal = digest_domain(HEADER_DOMAIN, &changed[..32]);
+                    changed[32..HEADER_BYTES].copy_from_slice(&seal);
+                } else if offset >= HEADER_BYTES {
+                    let start = HEADER_BYTES + (offset - HEADER_BYTES) / stride * stride;
+                    let payload_end = start + stride - 32;
+                    if offset < payload_end {
+                        let seal = digest_domain(domain, &changed[start..payload_end]);
+                        changed[payload_end..start + stride].copy_from_slice(&seal);
+                    }
+                }
+                std::fs::write(&path, changed).expect("owned adversarial companion");
+                let result = CandidateUniverseLedgerV1::open_read(root.path(), bounds)
+                    .and_then(|reader| reader.complete_population_rows(&audit));
+                assert!(
+                    result.is_err(),
+                    "{name} byte {offset} changed under an original committed authority"
+                );
+            }
+            std::fs::write(&path, &original).expect("restore exact owned bytes");
+            let restored = CandidateUniverseLedgerV1::open_read(root.path(), bounds)
+                .expect("restored companion authenticates freshly");
+            assert_eq!(
+                restored
+                    .complete_population_rows(&audit)
+                    .expect("original complete family is available again")
+                    .len(),
+                prepared.rows().len()
+            );
+            assert_eq!(
+                restored
+                    .page(&audit.universe_id(), 0, 4)
+                    .expect("restored page")
+                    .rows(),
+                prepared.rows()
+            );
+            assert_eq!(
+                std::fs::read(&path).expect("read-only projection"),
+                original
+            );
+        }
+    }
+
+    #[test]
     fn complete_population_rows_returns_only_the_exact_audited_canonical_family() {
         let root = test_dir();
         let prepared = prepared(32);

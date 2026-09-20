@@ -36832,3 +36832,42 @@ matrix is a failure to satisfy that gate, never a mutation pass.
 
 The pinned tool's documented semantics are in [cargo-mutants timeouts](https://mutants.rs/timeouts.html).
 This supersedes only D-0629's fixed 900-second per-command deadline.
+
+### D-0655 — Verify complete Candidate authority against every resealed companion byte — 2026-09-20
+
+Commit a finite generated four-row, two-direction Candidate family and retain
+its original audit. Change one bit at every byte position of both complete
+companion files, including every row, the completion and both headers. When a
+payload changes, recompute its outer seal so the test reaches semantic and
+cross-record validation rather than stopping at a checksum alone. A fresh
+reader must still refuse the original complete Population authority. Restoring
+the exact bytes must recover every original row and preserve those bytes while
+reading. This uses only owned synthetic storage and changes no production format.
+
+### D-0656 — Keep unreadable bar-window authority distinct from missing months — 2026-09-20
+
+The bar-window loader discarded every month-open error as an absent month. An
+actual HTTP regression returned status 200 and three missing months for an
+invalid lowercase symbol, rather than refusing the invalid address. The same
+branch discarded non-absence storage errors. Preserve the store's typed
+classification behind the existing string-returning single-month API. Only a
+Missing error naming the requested bar file increments the missing-month count;
+invalid addresses refuse, and other failures remain named faults alongside the
+healthy rows. Both seeking and scanning retain those faults, including when no
+month can be opened, so the route returns partial content rather than success.
+
+Check that the selected store root exists as a directory before classifying
+individual missing months. A disconnected or obstructed root must refuse rather
+than look like empty history. All reads keep the existing read-only opener.
+Generated HTTP fixtures verify exact integer fields, zero/null open interest,
+per-file change provenance, sparse-month counts, page boundaries, all supported
+sort columns, explicit scan/extreme metadata, malformed requests and recovery
+after exact byte restoration. The corruption fixture truncates an owned file:
+changing only one header copy can legitimately recover through its redundant
+header and is not proof that the month is unreadable.
+
+The focused operator mutation run also found that its assertions checked fold
+counts and status but not whether the corresponding advice was present. Require
+disagreement advice only for disagreement, unreadable-authority advice only for
+unreadable inputs, and complete-agreement text only for the clean case. Mutation
+execution remains incomplete until every assigned outcome has reconciled.
