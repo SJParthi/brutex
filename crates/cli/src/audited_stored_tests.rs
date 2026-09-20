@@ -146,14 +146,20 @@ impl Fixture {
     }
 
     fn omit_owned_minutes(&self, holed_days: &[u8]) {
+        self.rewrite_owned_minutes(|day, rows| {
+            if holed_days.contains(&day) {
+                rows.remove(150);
+            }
+        });
+    }
+
+    fn rewrite_owned_minutes(&self, change: impl Fn(u8, &mut Vec<Bar>)) {
         let path = self.path(5, Timeframe::MINUTE_1);
         fs::remove_file(&path).expect("replace owned generated minute file");
         fs::remove_file(path.with_extension("crc")).expect("replace its owned proof");
         for day in [2, 5, 6, 7, 8, 9, 12, 13] {
             let mut rows = generated_session(5, day);
-            if holed_days.contains(&day) {
-                rows.remove(150);
-            }
+            change(day, &mut rows);
             self.write(5, Timeframe::MINUTE_1, &rows);
         }
     }
@@ -386,6 +392,44 @@ fn stored_screens_refuse_when_every_signal_session_is_withheld() {
             crate::sweep_evidence::latest(&fixture.root, 1_048_576).expect("no empty attempt"),
             None
         );
+    }
+    crate::knobs::clear_all();
+}
+
+#[test]
+fn stored_screens_reject_off_grid_execution_before_creating_an_attempt() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    let fixture = Fixture::warmed();
+    fixture.rewrite_owned_minutes(|day, rows| {
+        if day == 2 {
+            rows[0].ts_micros += 1;
+        }
+    });
+    let path = fixture.path(5, Timeframe::MINUTE_1);
+    let before = fs::read(&path).expect("owned off-grid execution stream");
+    let checksum = path.with_extension("crc");
+    let proof = fs::read(&checksum).expect("matching raw-record checksum");
+    for rung in ["1min", "5min"] {
+        let refusal = fixture
+            .screen(rung, 20_000)
+            .expect_err("off-grid execution is not a gap");
+        assert!(
+            refusal.starts_with("the 1min execution span is malformed:"),
+            "{refusal}"
+        );
+        assert!(refusal.contains("record 0"), "{refusal}");
+        assert!(
+            refusal.contains("off the exact one-minute grid"),
+            "{refusal}"
+        );
+        assert!(!crate::results::Results::path(&fixture.root).exists());
+        assert_eq!(
+            crate::sweep_evidence::latest(&fixture.root, 1_048_576).expect("no attempted screen"),
+            None
+        );
+        assert_eq!(fs::read(&path).expect("unaltered source"), before);
+        assert_eq!(fs::read(&checksum).expect("unaltered proof"), proof);
     }
     crate::knobs::clear_all();
 }
