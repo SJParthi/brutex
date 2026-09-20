@@ -3082,6 +3082,40 @@ mod tests {
     }
 
     #[test]
+    fn every_selection_v4_byte_is_bound_even_after_the_outer_seal_is_recomputed() {
+        let ranking = policy();
+        let shared = cohort(ranking.digest());
+        for count in [0, 3, 30] {
+            let specs: Vec<_> = (0..count)
+                .map(|index| RowSpec {
+                    metric_seed: index + 1,
+                    admission: AdmissionStatusV1::Admitted,
+                    execution: ExecutionSelectionStatusV2::Authorized,
+                })
+                .collect();
+            let mut nifty = authority(InstrumentFamilyV1::Nifty, &specs, &shared, 0);
+            let mut bank = authority(InstrumentFamilyV1::BankNifty, &[], &shared, 0);
+            let receipt = SelectionReceiptV4::from_authorities(&mut nifty, &mut bank, ranking)
+                .expect("canonical Selection V4 receipt");
+            let original = receipt.to_bytes().expect("encode Selection V4 receipt");
+            for offset in 0..SELECTION_V4_STRIDE_BYTES {
+                let mut changed = original;
+                *changed.get_mut(offset).expect("fixed record byte") ^= 1;
+                if offset < PAYLOAD_BYTES_V4 {
+                    let (payload, seal) = changed.split_at_mut(PAYLOAD_BYTES_V4);
+                    seal.copy_from_slice(&brutex_core::blake3::hash(payload));
+                }
+                assert!(
+                    SelectionReceiptV4::from_bytes(&changed).is_err(),
+                    "rows={count} accepted changed byte {offset}"
+                );
+            }
+            assert_eq!(SelectionReceiptV4::from_bytes(&original).unwrap(), receipt);
+            assert_eq!(receipt.to_bytes().unwrap(), original);
+        }
+    }
+
+    #[test]
     fn writable_ledger_refuses_missing_or_nondirectory_root_without_recreation() {
         let missing_root = temporary_path("missing-authority-root");
         assert!(!missing_root.exists());

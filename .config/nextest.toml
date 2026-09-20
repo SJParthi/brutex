@@ -4,3 +4,10 @@
 [[profile.default.overrides]]
 filter = 'test(the_published_vectors_reproduce)'
 priority = 100
+
+# Fast operator and sealed-record regressions fail before long statistical
+# suites when a mutant breaks those boundaries. Every test still runs unless
+# an actual failure triggers the mutation job's existing fail-fast behavior.
+[[profile.default.overrides]]
+filter = 'test(operator_boundary_tests::) | test(every_selection_v3_byte_is_bound) | test(every_selection_v4_byte_is_bound) | test(every_execution_v4_companion_byte_is_bound)'
+priority = 100

@@ -6312,6 +6312,66 @@ mod tests {
     }
 
     #[test]
+    fn every_execution_v4_companion_byte_is_bound_after_outer_resealing() {
+        let root = TestRoot::new("all-byte-reseal");
+        let prepared = prepared(30);
+        let committed = commit_prepared_for_test(&root.path, bounds(), &prepared)
+            .expect("commit generated Execution V4");
+        let receipt = committed.authority().structural_receipt();
+        drop(committed);
+        for (name, stride, domain) in [
+            (
+                PARAMETER_FILE,
+                EXECUTION_V4_PARAMETER_BYTES,
+                PARAMETER_SEAL_DOMAIN,
+            ),
+            (
+                PERCENTILE_FILE,
+                EXECUTION_V4_PERCENTILE_BYTES,
+                PERCENTILE_SEAL_DOMAIN,
+            ),
+            (
+                DISPOSITION_FILE,
+                EXECUTION_V4_DISPOSITION_BYTES,
+                DISPOSITION_SEAL_DOMAIN,
+            ),
+            (
+                COMPLETION_FILE,
+                EXECUTION_V4_COMPLETION_BYTES,
+                COMPLETION_SEAL_DOMAIN,
+            ),
+        ] {
+            let path = root.path.join(name);
+            let original = std::fs::read(&path).expect("read generated companion");
+            let payload_len = stride - SEAL_BYTES;
+            for offset in 0..stride {
+                let mut changed = original.clone();
+                *changed.get_mut(offset).expect("first fixed record byte") ^= 1;
+                if offset < payload_len {
+                    let record = changed.get_mut(..stride).expect("first complete record");
+                    let (payload, seal) = record.split_at_mut(payload_len);
+                    seal.copy_from_slice(&hash_parts(domain, &[payload]));
+                }
+                std::fs::write(&path, &changed).expect("write private corruption");
+                assert!(
+                    ExecutionV4Ledger::open_read(&root.path, bounds()).is_err(),
+                    "{name} accepted changed byte {offset}"
+                );
+            }
+            std::fs::write(&path, &original).expect("restore exact companion");
+            let reopened = ExecutionV4Ledger::open_read(&root.path, bounds())
+                .expect("restored ledger reopens");
+            assert_eq!(
+                reopened
+                    .structural_receipt(&receipt.population_id())
+                    .unwrap(),
+                Some(receipt)
+            );
+            assert_eq!(std::fs::read(path).unwrap(), original);
+        }
+    }
+
+    #[test]
     fn every_receipt_last_crash_prefix_resumes_only_exact_bytes() {
         let prepared = prepared(40);
         for (label, parameters, percentiles, dispositions) in [

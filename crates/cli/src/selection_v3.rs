@@ -2154,6 +2154,27 @@ mod tests {
     }
 
     #[test]
+    fn every_selection_v3_byte_is_bound_even_after_the_outer_seal_is_recomputed() {
+        for admitted in [0, 3, 30] {
+            let value = receipt(1, 60, admitted);
+            let original = value.to_bytes().expect("canonical V3 receipt");
+            for offset in 0..SELECTION_V3_STRIDE_BYTES {
+                let mut changed = original;
+                *changed.get_mut(offset).expect("fixed record byte") ^= 1;
+                if offset < PAYLOAD_BYTES_V3 {
+                    reseal(&mut changed);
+                }
+                assert!(
+                    SelectionReceiptV3::from_bytes(&changed).is_err(),
+                    "admitted={admitted} accepted changed byte {offset}"
+                );
+            }
+            assert_eq!(SelectionReceiptV3::from_bytes(&original).unwrap(), value);
+            assert_eq!(value.to_bytes().unwrap(), original);
+        }
+    }
+
+    #[test]
     fn authority_digest_changes_identity_and_top_ten_is_exact_prefix() {
         let original = receipt(3, 300, 30);
         assert_eq!(original.top_twenty_five().len(), 25);

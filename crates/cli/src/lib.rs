@@ -49,6 +49,8 @@ mod audited_stored;
 pub mod checksum_receipts;
 #[path = "../commit_stamp.rs"]
 mod commit_stamp;
+#[cfg(test)]
+mod operator_boundary_tests;
 mod readonly_file;
 
 #[cfg_attr(

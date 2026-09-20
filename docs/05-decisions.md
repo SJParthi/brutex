@@ -36457,3 +36457,46 @@ absent root stays absent. Classify a non-UTF-8 OS string directly: APFS refuses
 to create that filename, which must not turn a portable ownership assertion
 into a filesystem-dependent failure. No production logger behavior or coverage
 allowance changes. The full workspace measurement remains the gate authority.
+
+### D-0634 — Keep operator errors and qualifications observable — 2026-09-20
+
+Exercise the operator boundary without reading market files: malformed numeric
+arguments must refuse before store access; support cannot disable extinction;
+calibrated candidate limits retain the measured prefix and respect the available
+count. Assert exact report sections, cost and validation qualifications, retained
+failure reasons and digit-preserving count formatting. A missing or overflowing
+minute timestamp remains absent. These tests add evidence for existing behavior;
+they do not change screening policy or imply trading performance.
+
+### D-0635 — Bound the instrumented integration fixture's support workers — 2026-09-20
+
+The five-threshold ladder integration test now explicitly uses one support lane.
+It keeps the same twelve generated sessions, five support thresholds, shipped
+candidate ceiling, pair budget and assertions. The existing direct batch test
+compares four actual worker lanes with serial counting, including result order
+and infrequent counts; it remains part of the suite. This is test scheduling,
+not a change to the production default or a sampled search.
+
+On this M4 Pro, the revised three-test instrumented integration binary passed
+in 131.26 seconds. The previous full-coverage attempt's old ladder test remained
+unfinished after more than an hour of wall time, including explicit pauses for
+other checks; that incomplete run is not a coverage pass or a valid comparative
+latency measurement. Its diagnostic profiles are retained. Full coverage must be
+remeasured on an immutable snapshot containing the revised fixture.
+
+### D-0636 — Check complete selection and execution record integrity — 2026-09-20
+
+For Selection V3 and V4, flip one bit at every record-byte position for empty,
+partial and full winner sets, recomputing the outer seal for payload changes.
+Every changed receipt must refuse, and unchanged bytes must still reproduce the
+original receipt exactly. For Execution V4, apply the same operation to the first
+record of each of its four real generated ledger companions. Reopening the whole
+ledger must reject even otherwise canonical percentile changes whose authority
+is supplied by another companion. Restoring each exact original file must recover
+the same structural receipt and identical file bytes. The 23,152 cases are a
+finite corruption matrix, not a claim to enumerate all possible byte strings or
+to replace the source mutation gate.
+
+Run these fast receipt regressions and the operator boundary tests early in
+nextest's existing mutation test order, alongside the published hash vector.
+This changes priority only; no filter, retry, skip or expected failure is added.

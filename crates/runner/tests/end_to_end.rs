@@ -327,8 +327,13 @@ fn the_ladder_reaches_further_as_support_falls_unless_a_budget_stops_it_first() 
 
     // Falling support against the SHIPPED ceiling, so the figures describe the
     // engine an operator actually runs rather than one this test invented.
+    // One support lane keeps this integration fixture inside its own CPU
+    // budget under instrumentation. Candidate limits and all five thresholds
+    // stay unchanged; engine's batched-versus-single-lane test proves the
+    // scheduling choice preserves the answer.
     for min_hits in [1_500_u64, 1_000, 600, 300, 150] {
-        let swept = Sweeper::new(Ladder::with_min_hits(min_hits)).run(&bars, &mut evaluator());
+        let swept = Sweeper::new(Ladder::with_min_hits(min_hits).with_support_lanes(1))
+            .run(&bars, &mut evaluator());
         let depth = swept.sweep.depth();
         let frequent = swept.sweep.all_frequent().count();
         let generated: u64 = swept.sweep.levels.iter().map(|l| l.generated).sum();
