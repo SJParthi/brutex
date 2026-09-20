@@ -36245,3 +36245,9 @@ public 32-byte hash never consumes. Preserve the specified compression function
 and test all 64 output bytes against the official empty-input extended vector,
 verified from upstream and recorded in the charter. This adds independent
 expected-output evidence rather than an implementation-derived oracle.
+
+A ROOT flag union-to-XOR mutant is equivalent for current constructors, which
+defer that flag. Test the internal output operation with ROOT already present
+against the official empty digest: setting a flag must not toggle it off. This
+is a defensive internal contract; no claim is made that current public callers
+construct that state.

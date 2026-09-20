@@ -456,7 +456,7 @@ pub fn hash(input: &[u8]) -> [u8; OUT_LEN] {
 
 #[cfg(test)]
 mod tests {
-    use super::{CHUNK_END, CHUNK_LEN, CHUNK_START, Hasher, IV, ROOT, compress, hash};
+    use super::{CHUNK_END, CHUNK_LEN, CHUNK_START, Hasher, IV, Output, ROOT, compress, hash};
 
     /// The reference test set's input: byte `i` is `i % 251`.
     fn vector_input(len: usize) -> Vec<u8> {
@@ -602,6 +602,23 @@ mod tests {
             .map(|(i, byte)| if i == last { byte ^ 1 } else { *byte })
             .collect();
         assert_ne!(hash(&a), hash(&b), "a one-bit change must re-key");
+    }
+
+    #[test]
+    fn root_output_keeps_an_already_present_root_flag() {
+        // Internal flag composition must set ROOT, not toggle it. Current
+        // constructors defer ROOT; this additionally checks pre-marked output.
+        let output = Output {
+            chaining_value: IV,
+            block_words: [0; 16],
+            counter: 0,
+            block_len: 0,
+            flags: CHUNK_START | CHUNK_END | ROOT,
+        };
+        assert_eq!(
+            hex(&output.root_bytes()),
+            "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
+        );
     }
 
     #[test]
