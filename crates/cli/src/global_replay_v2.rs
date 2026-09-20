@@ -4192,6 +4192,125 @@ mod tests {
     }
 
     #[test]
+    fn generated_replay_ledger_round_trips_reuses_and_refuses_stale_or_read_only_writers() {
+        // Private generated authorities test persistence only, not admission
+        // of real strategies through the public PBO/selection boundary.
+        let root = test_root("durable-generated-roundtrip");
+        let manifest = manifest_fixture();
+        let streams = (0..MAX_STREAMS)
+            .map(|ordinal| controlled_manifest_stream(&manifest, ordinal))
+            .collect::<Vec<_>>();
+        let prepared = schedule_streams(manifest, streams).expect("generated scheduled replay");
+        let mut writer = GlobalReplayLedgerV2::open(&root, 1).expect("new writer");
+        let mut stale = GlobalReplayLedgerV2::open(&root, 1).expect("independent old snapshot");
+        assert_eq!(writer.completions(), 0);
+        assert_eq!(
+            writer.append_complete(&prepared),
+            Ok(GlobalReplayCommitV2::Written)
+        );
+        assert_eq!(writer.completions(), 1);
+        let id = *writer
+            .completion_ids()
+            .first()
+            .expect("completion identity");
+        assert_eq!(writer.replay(&prepared.replay_id), Some(&prepared));
+        let completion = *writer.completion(&id).expect("exact receipt");
+        assert_eq!(completion.stream_count, 200);
+        assert_eq!(completion.candidate_count, 200);
+        assert_eq!(completion.decision_count, 200);
+        let paths = [
+            GlobalReplayManifestV2::path(&root),
+            GlobalReplayLedgerV2::stream_path(&root),
+            GlobalReplayLedgerV2::candidate_path(&root),
+            GlobalReplayLedgerV2::decision_path(&root),
+            GlobalReplayLedgerV2::completion_path(&root),
+        ];
+        let before = paths
+            .iter()
+            .map(|path| fs::read(path).expect("recorded bytes"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            writer.append_complete(&prepared),
+            Ok(GlobalReplayCommitV2::Reused)
+        );
+        for (path, expected) in paths.iter().zip(&before) {
+            assert_eq!(fs::read(path).expect("reused bytes"), *expected);
+        }
+        assert!(
+            stale.append_complete(&prepared).is_err(),
+            "stale handle must not append"
+        );
+        drop(stale);
+        drop(writer);
+        let mut reader = GlobalReplayLedgerV2::open_read(&root, 1).expect("validated reopen");
+        assert_eq!(reader.completion_ids(), &[id]);
+        assert_eq!(reader.completion(&id), Some(&completion));
+        assert_eq!(reader.replay(&prepared.replay_id), Some(&prepared));
+        assert!(
+            reader
+                .append_complete(&prepared)
+                .expect_err("read-only refusal")
+                .contains("read-only")
+        );
+        drop(reader);
+        let mut reopened = GlobalReplayLedgerV2::open(&root, 1).expect("reopen writer");
+        assert_eq!(
+            reopened.append_complete(&prepared),
+            Ok(GlobalReplayCommitV2::Reused)
+        );
+        drop(reopened);
+        fs::remove_dir_all(root).expect("remove generated persistence fixture");
+    }
+
+    #[test]
+    fn generated_replay_ledger_refuses_torn_or_corrupt_records_in_every_companion() {
+        let root = test_root("durable-generated-corruption");
+        let manifest = manifest_fixture();
+        let streams = (0..MAX_STREAMS)
+            .map(|ordinal| controlled_manifest_stream(&manifest, ordinal))
+            .collect::<Vec<_>>();
+        let prepared = schedule_streams(manifest, streams).expect("generated scheduled replay");
+        let mut writer = GlobalReplayLedgerV2::open(&root, 1).expect("new writer");
+        writer
+            .append_complete(&prepared)
+            .expect("durable generated replay");
+        drop(writer);
+        for path in [
+            GlobalReplayManifestV2::path(&root),
+            GlobalReplayLedgerV2::stream_path(&root),
+            GlobalReplayLedgerV2::candidate_path(&root),
+            GlobalReplayLedgerV2::decision_path(&root),
+            GlobalReplayLedgerV2::completion_path(&root),
+        ] {
+            let original = fs::read(&path).expect("original companion");
+            for length in [0, 1, LEDGER_HEADER_BYTES_USIZE_V2 - 1, original.len() - 1] {
+                fs::write(&path, &original[..length]).expect("inject torn companion");
+                assert!(
+                    GlobalReplayLedgerV2::open_read(&root, 1).is_err(),
+                    "accepted {} bytes in {}",
+                    length,
+                    path.display()
+                );
+            }
+            let mut corrupt = original.clone();
+            *corrupt
+                .get_mut(LEDGER_HEADER_BYTES_USIZE_V2 + 40)
+                .expect("payload byte") ^= 1;
+            fs::write(&path, corrupt).expect("inject sealed-record corruption");
+            assert!(
+                GlobalReplayLedgerV2::open_read(&root, 1).is_err(),
+                "accepted corrupt {}",
+                path.display()
+            );
+            fs::write(&path, original).expect("restore exact companion");
+            let reader = GlobalReplayLedgerV2::open_read(&root, 1).expect("restored ledger");
+            assert_eq!(reader.replay(&prepared.replay_id), Some(&prepared));
+        }
+        assert!(GlobalReplayLedgerV2::open_read(&root, 0).is_err());
+        fs::remove_dir_all(root).expect("remove corruption fixture");
+    }
+
+    #[test]
     fn private_controlled_scheduler_preserves_eight_by_twenty_five_algebra_in_memory() {
         let manifest = manifest_fixture();
         let streams = (0..MAX_STREAMS)

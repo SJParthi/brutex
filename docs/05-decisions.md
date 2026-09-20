@@ -36276,3 +36276,12 @@ time assertion that capacity fits u8. Convert after those proofs directly,
 removing a second failure arm that no admitted input can reach. The boundary
 regression checks exact capacity and one byte beyond it. No IDs, bit positions,
 stored formats or validation thresholds change; no mutation is excluded.
+
+### D-0619 — Exercise generated V2 replay persistence and recovery — 2026-09-20
+
+Global replay V2's private generated fixture exercised scheduling but not its
+five-file durable ledger. Extend that fixture through append, idempotent reuse,
+read-only and writable reopen, retained completion/replay equality, stale writer
+refusal and every companion's torn/corrupt-record paths. Restoration must reopen
+the exact original replay. The generated authorities remain private test inputs;
+public PBO/selection refusal and real-market admission are not changed or claimed.
