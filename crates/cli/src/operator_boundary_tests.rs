@@ -22,6 +22,36 @@ fn operator_self_check_rejects_all_malformed_requests_before_claiming_provenance
 }
 
 #[test]
+fn causal_comparison_refuses_missing_short_or_changed_observations() {
+    let a = vocab::ConditionMask::ZERO.with_bit(0);
+    let b = vocab::ConditionMask::ZERO.with_bit(1);
+    for (whole, prefix, suffix, expected) in [
+        (vec![], vec![], 0, false),
+        (vec![a], vec![], 1, false),
+        (vec![], vec![a], 1, false),
+        (vec![a], vec![a, b], 1, false),
+        (vec![a], vec![a], 0, false),
+        (vec![a, b], vec![a, a], 1, false),
+        (vec![a, b], vec![a, b], 1, true),
+        (vec![a, b, a], vec![a, b], 1, true),
+        (vec![a, b, a], vec![b, b], 1, false),
+    ] {
+        let check = crate::compare_observed_prefix(&whole, &prefix, suffix);
+        assert_eq!(check.held, expected, "{}", check.evidence);
+    }
+    let missing = crate::compare_observed_prefix(&[a], &[a, b], 1);
+    assert_eq!(
+        missing.evidence,
+        "observable prefix rows 2; suffix bars 1; 0 differ; whole rows 1"
+    );
+    let changed = crate::compare_observed_prefix(&[a, a], &[b, b], 1);
+    assert_eq!(
+        changed.evidence,
+        "observable prefix rows 2; suffix bars 1; 2 differ; whole rows 2"
+    );
+}
+
+#[test]
 fn series_self_checks_require_observations_and_a_real_suffix()
 -> Result<(), Box<dyn std::error::Error>> {
     let _knobs = crate::knobs::serially();

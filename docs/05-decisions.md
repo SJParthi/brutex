@@ -36871,3 +36871,23 @@ counts and status but not whether the corresponding advice was present. Require
 disagreement advice only for disagreement, unreadable-authority advice only for
 unreadable inputs, and complete-agreement text only for the clean case. Mutation
 execution remains incomplete until every assigned outcome has reconciled.
+
+### D-0657 — Verify causal comparisons at the observation boundary — 2026-09-20
+
+Factor the suffix comparison into a private function over the two observed mask
+slices and the number of later source bars. Generated boundary cases now cover
+empty observations, a shorter whole-series result, no later suffix and actual
+bit disagreements, as well as equal and longer matching whole-series results.
+The report includes the whole-series row count so a missing row cannot appear
+as an unexplained failure beside zero differences. Production still builds both
+columns from the same causal prefix and complete slice; no evidence is invented
+or substituted.
+
+Apply the same completeness predicate to both repeatability runs through one
+fixed two-element iteration, then require equal report bytes. Both runs must
+still complete. The earlier boolean mutation changing their conjunction to a
+disjunction was observationally equivalent under equal complete report bytes:
+the report itself contains each run's completeness verdict. This refactoring
+preserves the stronger explicit requirement on both runs without retaining that
+duplicated expression. No mutant exclusion, outcome waiver or coverage change is
+introduced; the final source must be enumerated and verified afresh.

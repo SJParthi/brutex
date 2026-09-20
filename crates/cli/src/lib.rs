@@ -7028,9 +7028,12 @@ fn measured_series_checks(span: &stored::Span) -> Result<[Check; 2], String> {
         let second_run = Sweeper::new(ladder).run(&short, &mut second_evaluator);
         let first = runner::report::render(&first_run, None);
         let second = runner::report::render(&second_run, None);
+        let both_complete = [&first_run, &second_run]
+            .into_iter()
+            .all(runner::Outcome::is_complete);
         Check {
             claim: "two runs of one slice agree byte for byte",
-            held: first_run.is_complete() && second_run.is_complete() && first == second,
+            held: both_complete && first == second,
             evidence: format!(
                 "{} observable bars vs {}; complete {} vs {}; {} bytes vs {} bytes, {}",
                 first_run.census.swept,
@@ -7062,23 +7065,28 @@ fn measured_series_checks(span: &stored::Span) -> Result<[Check; 2], String> {
         let mut ev_b = ev_a;
         let on_whole = indicators::column::Column::build(&whole, &mut ev_a);
         let on_prefix = indicators::column::Column::build(&prefix, &mut ev_b);
-        let shared = on_prefix.len();
         let suffix = whole.len() - prefix.len();
-        let disagreements = on_prefix
-            .bits()
-            .iter()
-            .zip(on_whole.bits().iter().take(shared))
-            .filter(|(a, b)| a != b)
-            .count();
-        Check {
-            claim: "a bar's conditions do not change because later bars exist",
-            held: shared > 0 && suffix > 0 && on_whole.len() >= shared && disagreements == 0,
-            evidence: format!(
-                "observable prefix rows {shared}; suffix bars {suffix}; {disagreements} differ"
-            ),
-        }
+        compare_observed_prefix(on_whole.bits(), on_prefix.bits(), suffix)
     };
     Ok([determinism, causality])
+}
+
+/// A missing row or missing later suffix is not a successful causal comparison.
+fn compare_observed_prefix(
+    whole: &[vocab::ConditionMask],
+    prefix: &[vocab::ConditionMask],
+    suffix: usize,
+) -> Check {
+    let shared = prefix.len();
+    let disagreements = prefix.iter().zip(whole).filter(|(a, b)| a != b).count();
+    Check {
+        claim: "a bar's conditions do not change because later bars exist",
+        held: shared > 0 && suffix > 0 && whole.len() >= shared && disagreements == 0,
+        evidence: format!(
+            "observable prefix rows {shared}; suffix bars {suffix}; {disagreements} differ; whole rows {}",
+            whole.len()
+        ),
+    }
 }
 
 /// The two properties a joined span must have before anything is computed on it.
