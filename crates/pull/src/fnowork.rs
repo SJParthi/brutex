@@ -324,6 +324,9 @@ pub struct Owed {
     pub resume: Vec<Resume>,
     /// How many offered cells owe nothing more.
     pub complete: usize,
+    /// Complete cells whose month, window and expiry have no common day.
+    /// These require no fetch, but do not prove that any history is held.
+    pub outside_window: usize,
 }
 
 impl Owed {
@@ -406,12 +409,14 @@ where
     let mut out = Owed {
         resume: Vec::with_capacity(cells.len()),
         complete: 0,
+        outside_window: 0,
     };
     for cell in cells {
         // NOTHING FETCHABLE. Not a gap — a cell the window and the expiry
         // between them leave no day in.
         let Some((first, through)) = span_of(cell, window) else {
             out.complete = out.complete.saturating_add(1);
+            out.outside_window = out.outside_window.saturating_add(1);
             continue;
         };
         // ONE PROBE. Nothing here opens a file or lists a directory.
@@ -787,10 +792,40 @@ mod tests {
             "nothing traded after the 29th to ask for"
         );
         assert_eq!(out.complete, 1);
+        assert_eq!(out.outside_window, 1);
 
         // The window closes before the month opens.
         let out = owed(&cells.cells, (day(2025, 1, 1), day(2025, 6, 30)), |_| None);
         assert!(out.is_complete());
+        assert_eq!(out.outside_window, 1);
+    }
+
+    #[test]
+    fn complete_cells_distinguish_held_history_from_days_never_owed() {
+        let discovered = cells(
+            &[found("NIFTY", 29, 2_600_000)],
+            &[month(2025, 12), month(2026, 1), month(2026, 2)],
+            Timeframe::MINUTE_1,
+        );
+        let probes = std::cell::Cell::new(0);
+        for held in [None, Some(stamp(day(2026, 1, 29)))] {
+            probes.set(0);
+            let out = owed(
+                &discovered.cells,
+                (day(2026, 1, 1), day(2026, 2, 28)),
+                |key| {
+                    assert_eq!(key.month, month(2026, 1));
+                    probes.set(probes.get() + 1);
+                    held
+                },
+            );
+            assert_eq!(probes.get(), 1, "only a fetchable month probes history");
+            assert_eq!(out.offered(), 3);
+            assert_eq!(out.outside_window, 2);
+            assert_eq!(out.complete, if held.is_some() { 3 } else { 2 });
+            assert_eq!(out.resume.len(), usize::from(held.is_none()));
+            assert_eq!(out.is_complete(), held.is_some());
+        }
     }
 
     /// Every offered cell is accounted for, in either column.

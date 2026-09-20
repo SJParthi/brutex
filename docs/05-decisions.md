@@ -37029,3 +37029,40 @@ per-instance names, an unavailable request budget and a loopback-only transport
 with a synthetic placeholder; they cannot read vendor credentials or contact
 a real vendor. No storage layout, sweep eligibility or automatic pulling policy
 changes.
+
+### D-0664 — Preserve decoded rows and committed bars in named F&O receipts — 2026-09-20
+
+A generated loopback pull committed 375 source bars and then failed to publish
+its census. The old named-contract receipt recorded zero bars because it added
+the count only after the failure branch. A successful pull decoded 385 rows,
+including ten after-close rows, but recorded 375 rows read by copying its stored
+bar count. These are separate measurements and must not replace each other.
+
+Carry the decoded row count out of the chunk fetch even when a later chunk or
+budget refuses and the contract is deliberately not filed. Count
+Ingested::bars_committed before inspecting landing failures, so a failed census
+or derived rung cannot erase an acknowledged source append. An exact replay
+offers bars again but commits none. If filing and census reconciliation succeed
+without new source bars, record Empty and explain the replay; only a run with
+no decoded rows may say that no vendor was asked.
+
+The named path retains its all-or-nothing fetch rule, bounded first-reason
+list, full failed-contract count and prohibition on pricing an incomplete
+landing. Loopback regressions compare the durable receipt with actual bar
+headers and unchanged retry bytes; they exercise partial writes, exact replay,
+later chunk and budget faults, empty answers, continued contracts, and mixed
+held/replayed input. Every fixture owns its files and uses a synthetic token
+only against its own loopback server. This decision changes no storage version,
+sweep surface or automatic-pull policy. Rolling receipt accounting is unchanged.
+
+A requested window entirely after the discovered contracts' expiries owes no
+bars even without stored history. Its Empty receipt names that reason, rather
+than claiming either a fetch or an already-held month. The no-budget fixture
+proves this path needs no transport and creates no bar file.
+
+The planner's existing `complete` count includes cells with no fetchable day.
+Keep that contract and add `outside_window` as its explicitly counted subset;
+the receipt subtracts that subset before describing held history. A mixed
+planner fixture proves that only the fetchable month probes history and that
+held, missing and out-of-window cells remain fully accounted for. No extra
+store scan or per-cell lookup is introduced.

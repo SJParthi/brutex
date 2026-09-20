@@ -10271,16 +10271,9 @@ struct FnoCounts {
 }
 
 impl FnoCounts {
-    /// The three numbers both walks measure, in the one shape the journal takes.
-    ///
-    /// A constructor rather than a literal at each call site because the two
-    /// walks — name and offset — must record the same fact the same way. One
-    /// operator reads both journal rows, and a difference in how they were
-    /// filled in would read as a difference in the DATA.
-    ///
-    /// `rows_read` is the bar count deliberately: this route counts what it
-    /// FILED, and claiming a separate rows-read figure it never measured would
-    /// be the §3 rule 6 failure of stating a measurement nobody took.
+    /// Existing filed-row accounting for the rolling walk and zero-row
+    /// refusals. The named walk supplies independently measured decoded-row
+    /// and committed-bar counts instead of deriving one from the other.
     fn of(contracts: usize, stored: usize, failed: usize) -> Self {
         Self {
             contracts: contracts as u64,
@@ -10372,6 +10365,8 @@ struct Wire {
 // and is compared only in assertions. Nothing keys a map on this.
 #[derive(Debug, Default, PartialEq)]
 struct FnoLanded {
+    /// Successfully decoded rows, including chunks abandoned by a later fault.
+    rows_read: usize,
     /// Bars written to disk by this run.
     stored: usize,
     /// Contracts that asked for bars and did not get them.
@@ -10388,6 +10383,35 @@ struct FnoLanded {
     priced: PricedCount,
     /// The first few reasons, verbatim, capped at five.
     why: Vec<String>,
+}
+
+impl FnoLanded {
+    /// A failed census or derived rung does not undo a committed source append.
+    /// Exact retries offer bars again but commit none; count before deciding
+    /// whether the contract completed and may proceed to pricing.
+    fn record_landing(&mut self, symbol: &str, done: &pull::ingest::Ingested) -> bool {
+        self.stored = self.stored.saturating_add(done.bars_committed);
+        let why = done
+            .failures
+            .first()
+            .map(|failure| format!("{symbol}: {}", failure.why))
+            .or_else(|| {
+                (done.bars_stored == 0).then(|| {
+                    format!(
+                        "{symbol}: fetched {} row(s) and stored none",
+                        done.rows_read
+                    )
+                })
+            });
+        let Some(why) = why else {
+            return true;
+        };
+        self.failed = self.failed.saturating_add(1);
+        if self.why.len() < 5 {
+            self.why.push(why);
+        }
+        false
+    }
 }
 
 /// The windows one contract still owes, and how many of its months are done.
@@ -10451,7 +10475,8 @@ where
             pull::session::Window::new(one.from, one.through).unwrap_or(window),
         ));
     }
-    (chunks, owed.complete)
+    // An expired/out-of-window cell also owes nothing, but is not held history.
+    (chunks, owed.complete.saturating_sub(owed.outside_window))
 }
 
 /// A contract that will not fetch, or will not land, is counted and its first
@@ -10565,11 +10590,13 @@ async fn fno_land(
             // it as either would be false on a receipt an operator reads to
             // decide whether to run again: as a failure it invites a re-run
             // that cannot help, and as a success it claims bars this run did
-            // not write. It is already in `settled`.
+            // not write. Only months actually held are counted in `settled`.
             continue;
         }
 
-        let bodies = match fetch_chain_chunks(found, &chunks, asked, site, wire).await {
+        let fetched = fetch_chain_chunks(found, &chunks, asked, site, wire).await;
+        out.rows_read = out.rows_read.saturating_add(fetched.rows_read);
+        let bodies = match fetched.result {
             Fetched::Bodies(bodies) => bodies,
             Fetched::ContractRefused(refusal) => {
                 out.failed = out.failed.saturating_add(1);
@@ -10605,11 +10632,10 @@ async fn fno_land(
         // name here would file `NIFTY-30Sep25-24650-CE` as a symbol and leave
         // the underlying nowhere in the tree.
         let landed = BrokerWindow {
-            // A DERIVATIVE, WHICH `chain::request` HAS SAID SINCE D-0170 — and
-            // the landing then overrode it with `Equity`. NSE's derivatives
-            // session runs to 15:40 and cash to 15:30, so every bar of the last
-            // ten minutes was dropped as after-close, silently, into a census
-            // this loop does not read.
+            // Carry the contract's derivative listing into the canonical
+            // calendar policy. The listing alone is not a closing-time rule:
+            // the generated regular-session receipt test retains 375 bars and
+            // accounts separately for ten after-close rows.
             listing: pull::vendor::Listing::Derivative,
             bodies,
             // THE EXPIRED-F&O WALK KEEPS ITS ALL-OR-NOTHING CONTRACT.
@@ -10630,44 +10656,9 @@ async fn fno_land(
             contract: Some(found.contract),
         };
         let done = land_one(&landed, site);
-        // A PARTIAL LANDING IS A FAILURE, AND `bars_stored` CANNOT SEE ONE.
-        //
-        // This branched on `bars_stored == 0` alone and dropped
-        // `Ingested::failures` on the floor. Both siblings read it — the spot
-        // sweep calls `note_member_failure` for each, and `roll_one` returns
-        // `Err` on the first — so this was the one landing site that did not.
-        //
-        // The hole is exactly what `note_derived_shortfall` was built to close:
-        // a disk that filled, a lock lost, or a derived rung that did not land
-        // AFTER the pulled rung did. A contract lands 3,000 bars over eight
-        // chunks and chunk five's census write fails: `bars_stored` is 3,000,
-        // the zero branch is not taken, `failed` stays 0, and the page renders
-        // "every discovered contract fetched and filed" over a month whose
-        // census does not know about a file that exists. The ladder then reads
-        // that month as missing and re-fetches it forever.
-        //
-        // Checked BEFORE the empty case, because a run that both stored
-        // something and failed something is the case the old shape could not
-        // express at all.
-        if let Some(first) = done.failures.first() {
-            out.failed = out.failed.saturating_add(1);
-            if out.why.len() < 5 {
-                out.why
-                    .push(format!("{}: {}", found.vendor_symbol, first.why));
-            }
+        if !out.record_landing(&found.vendor_symbol, &done) {
             continue;
         }
-        if done.bars_stored == 0 {
-            out.failed = out.failed.saturating_add(1);
-            if out.why.len() < 5 {
-                out.why.push(format!(
-                    "{}: fetched {} row(s) and stored none",
-                    found.vendor_symbol, done.rows_read
-                ));
-            }
-            continue;
-        }
-        out.stored = out.stored.saturating_add(done.bars_stored);
 
         // AND NOW THE GREEKS, AFTER THE BARS THEY PRICE.
         //
@@ -10771,6 +10762,12 @@ enum Fetched {
     RunHalted(String),
 }
 
+/// A later chunk refusal cannot erase the rows decoded from earlier answers.
+struct FetchedBatch {
+    rows_read: usize,
+    result: Fetched,
+}
+
 /// Asks one contract for every chunk it still owes.
 ///
 /// # A partial contract is abandoned, not stored
@@ -10819,24 +10816,37 @@ async fn fetch_chain_chunks(
     asked: &ingest::FnoRequest,
     site: &Site,
     wire: &Wire,
-) -> Fetched {
+) -> FetchedBatch {
     let mut bodies = Vec::with_capacity(chunks.len());
+    let mut rows_read = 0usize;
     for chunk in chunks {
         if let Err(halt) = await_budget(asked.feed, site).await {
-            return Fetched::RunHalted(halt);
+            return FetchedBatch {
+                rows_read,
+                result: Fetched::RunHalted(halt),
+            };
         }
         let request = pull::chain::request(found, *chunk, asked.granularity);
         match with_retry(&wire.source, &request, asked.feed, site).await {
             // THE CHUNK'S OWN WINDOW TRAVELS WITH ITS ANSWER, exactly as the
             // spot path carries it — a body filed under the whole range would
             // claim months it does not hold.
-            Ok(body) => bodies.push((*chunk, body)),
+            Ok(body) => {
+                rows_read = rows_read.saturating_add(body.rows.len());
+                bodies.push((*chunk, body));
+            }
             Err(refusal) => {
-                return Fetched::ContractRefused(format!("{}: {refusal}", found.vendor_symbol));
+                return FetchedBatch {
+                    rows_read,
+                    result: Fetched::ContractRefused(format!("{}: {refusal}", found.vendor_symbol)),
+                };
             }
         }
     }
-    Fetched::Bodies(bodies)
+    FetchedBatch {
+        rows_read,
+        result: Fetched::Bodies(bodies),
+    }
 }
 
 /// One index month's spot levels per month, read once and shared.
@@ -13573,6 +13583,7 @@ async fn fno_report(
     // AND NOW THE BARS. Discovery said which contracts existed; this
     // fetches what they did and files it.
     let FnoLanded {
+        rows_read,
         stored,
         failed,
         settled,
@@ -13602,32 +13613,15 @@ async fn fno_report(
     // missing contracts. Keep the known contract count and the exact number
     // of recorded discovery/fetch faults separate on the receipt.
     let failures = failed.saturating_add(chain.unreadable.len());
-    let counted = FnoCounts::of(wanted.len(), stored, failures);
+    let counted = FnoCounts {
+        contracts: wanted.len() as u64,
+        rows_read: rows_read as u64,
+        bars_stored: stored as u64,
+        failures: failures as u64,
+    };
 
     if failures == 0 {
-        // A RUN THAT ASKED FOR NOTHING DID NOT FETCH ANYTHING, and saying it
-        // did is the §4 fallback wearing a success's clothes. `Outcome::Empty`
-        // rather than `Stored`, because a ladder reading this must not record a
-        // fetch that no vendor was asked for.
-        if stored == 0 && settled > 0 {
-            return page.say_counted(
-                facts,
-                axum::http::StatusCode::OK,
-                audit::Outcome::Empty,
-                "every contract-month asked for was already held through its \
-                 last owed day — its month end, this window's end, or the day \
-                 the contract expired, whichever came first — so no vendor was \
-                 asked and no bar was written",
-                counted,
-            );
-        }
-        return page.say_counted(
-            facts,
-            axum::http::StatusCode::OK,
-            audit::Outcome::Stored,
-            "every discovered contract fetched and filed",
-            counted,
-        );
+        return fno_complete(page, facts, counted, settled);
     }
 
     // A PARTIAL MONTH IS REPORTED AS ONE. It is neither a success to
@@ -13658,6 +13652,40 @@ async fn fno_report(
          incomplete and must not be read as held",
         counted,
     )
+}
+
+fn fno_complete(
+    page: &FnoPage<'_>,
+    facts: Vec<(&'static str, String)>,
+    counts: FnoCounts,
+    settled: usize,
+) -> (axum::http::StatusCode, String) {
+    let (outcome, why) = if counts.bars_stored > 0 {
+        (
+            audit::Outcome::Stored,
+            "every owed contract window completed; new source bars were committed",
+        )
+    } else if counts.rows_read == 0 {
+        (
+            audit::Outcome::Empty,
+            if settled > 0 {
+                "every contract-month with bars owed was already held through its \
+                 last owed day — its month end, this window's end, or the day \
+                 the contract expired, whichever came first — so no vendor was \
+                 asked and no bar was written"
+            } else {
+                "no contract has bars owed within this window before its expiry; \
+                 no vendor was asked and no bar was written"
+            },
+        )
+    } else {
+        (
+            audit::Outcome::Empty,
+            "the fetched bars were already stored byte for byte; the census \
+             was reconciled and no new source bar was committed",
+        )
+    };
+    page.say_counted(facts, axum::http::StatusCode::OK, outcome, why, counts)
 }
 
 /// Starting an expired-series pull. **POST only.**

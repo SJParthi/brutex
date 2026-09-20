@@ -7,13 +7,14 @@ use axum::http::StatusCode;
 use brutex_core::instrument::{Exchange, Expiry, Segment};
 use pull::manifest::{Closes, Entry, EntryKey, Held};
 use std::fs;
+use std::sync::Arc;
 use std::time::Duration;
 use store::format::{Bar, OI_NULL};
 use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
 
 struct Fixture {
     root: PathBuf,
-    site: Site,
+    site: Arc<Site>,
     wire: Wire,
     asked: ingest::FnoRequest,
     today: Day,
@@ -29,7 +30,7 @@ impl Fixture {
         fs::create_dir(&root).expect("exclusively claim generated root");
         let masters = root.join("masters");
         fs::create_dir(&masters).expect("offline empty masters");
-        let site = Site::load(&masters, &root);
+        let site = Arc::new(Site::load(&masters, &root));
         let today = Day::new(2025, 8, 2).expect("closed fixture month");
         let asked = ingest::parse_fno(
             "underlying=NIFTY&series=opt&vendor=groww&from=2025-07-01&to=2025-07-01",
@@ -136,8 +137,72 @@ impl Fixture {
         }
     }
 
+    async fn serve(&mut self, body: String) -> MockVendor {
+        self.serve_replies(vec![(StatusCode::OK, body)], None).await
+    }
+
+    async fn serve_replies(
+        &mut self,
+        replies: Vec<(StatusCode, String)>,
+        halt_after: Option<usize>,
+    ) -> MockVendor {
+        use std::sync::atomic::AtomicUsize;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("owned loopback listener");
+        let address = listener.local_addr().expect("loopback address");
+        let seen = Arc::new(AtomicUsize::new(0));
+        let requests = Arc::clone(&seen);
+        let site = Arc::clone(&self.site);
+        let feed = self.asked.feed;
+        let app = axum::Router::new().fallback(move || {
+            let index = requests.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if halt_after == Some(index + 1) {
+                site.budgets.lock().expect("owned fixture budget")[feed as usize] = None;
+            }
+            let (status, body) = replies
+                .get(index)
+                .or_else(|| replies.last())
+                .expect("nonempty scripted responses")
+                .clone();
+            async move {
+                (
+                    status,
+                    [(axum::http::header::CONTENT_TYPE, "application/json")],
+                    body,
+                )
+            }
+        });
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("loopback fixture");
+        });
+        self.wire.spec.base_url = Box::leak(format!("http://{address}").into_boxed_str());
+        self.wire.source = pull::http::HttpSource::new(
+            self.wire.spec,
+            pull::http::Credential::token("generated-offline-fixture".to_owned()),
+        )
+        .expect("loopback transport");
+        *self.site.budgets.lock().expect("owned budgets") = feed_budgets();
+        MockVendor { task, seen }
+    }
+
+    fn bar_path(&self, index: usize) -> StorePath<'_> {
+        StorePath::new(PathParts {
+            vendor: Vendor::Groww,
+            exchange: "NSE",
+            segment: "FNO",
+            symbol: "NIFTY",
+            contract: Some(self.chain.contracts[index].contract),
+            timeframe: Timeframe::MINUTE_1,
+            month: YearMonth::new(2025, 7).expect("fixture month"),
+            file: FileKind::Bars,
+        })
+        .expect("owned named-contract address")
+    }
+
     async fn report(&self) -> (StatusCode, String, audit::Record) {
         let journal = self.site.journal();
+        let before = journal.look().records();
         let page = FnoPage {
             asked: &self.asked,
             now: std::time::UNIX_EPOCH + Duration::from_mins(29_234_895),
@@ -155,16 +220,38 @@ impl Fixture {
         )
         .await;
         let records = journal.look().records();
-        assert_eq!(records, 1);
-        let record = journal.page(records, 0, 1).expect("actual durable receipt")[0]
-            .decoded
-            .clone()
-            .expect("readable durable receipt");
+        assert_eq!(records, before + 1);
+        let record = newest_record(&journal, &journal.look()).expect("actual durable receipt");
         for (path, original) in &self.originals {
             assert_eq!(fs::read(path).expect("retained bar bytes"), *original);
         }
         (status, body, record)
     }
+}
+
+struct MockVendor {
+    task: tokio::task::JoinHandle<()>,
+    seen: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Drop for MockVendor {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+fn complete_session() -> String {
+    let mut rows = Vec::new();
+    // 375 regular-session rows plus ten after-close rows: rows read and
+    // bars committed must remain different quantities on the receipt.
+    for minute in 9 * 60 + 15..15 * 60 + 40 {
+        rows.push(format!(
+            r#"["2025-07-01T{:02}:{:02}:00",100,110,90,105,1]"#,
+            minute / 60,
+            minute % 60
+        ));
+    }
+    format!(r#"{{"payload":{{"candles":[{}]}}}}"#, rows.join(","))
 }
 
 impl Drop for Fixture {
@@ -237,7 +324,7 @@ async fn unreadable_discovery_is_never_an_empty_or_complete_named_chain() {
         assert!(body.contains("generated unreadable discovery evidence"));
         assert!(body.contains(">FAILED<"));
         assert!(!body.contains("the walk succeeded"));
-        assert!(!body.contains("every contract-month asked for was already held"));
+        assert!(!body.contains("already held through its last owed day"));
     }
 }
 
@@ -305,4 +392,269 @@ fn an_unstarted_fno_receipt_retains_its_specific_refusal_reason() {
     assert_eq!(record.members, 0);
     assert_eq!(record.failures, 0);
     assert_eq!(record.bars_stored, 0);
+}
+
+#[tokio::test]
+async fn a_named_pull_reports_committed_bars_even_when_its_census_cannot_publish() {
+    let mut fixture = Fixture::new(1);
+    let transport = fixture.serve(complete_session()).await;
+    let manifest_directory = fixture.root.join("manifest");
+    fs::write(&manifest_directory, b"owned obstruction").expect("block only fixture census");
+    let (status, body, first) = fixture.report().await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(first.outcome, audit::Outcome::Failed);
+    assert_eq!(first.failures, 1);
+    let path = fixture.bar_path(0);
+    let hash = brutex_core::universe::fnv1a("NIFTY").to_le_bytes();
+    let symbol = u32::from_le_bytes(hash[..4].try_into().expect("symbol identity"));
+    let held = store::file::BarFile::open_existing(&fixture.root, path, symbol)
+        .expect("bars reached disk");
+    assert_eq!(held.records(), 375);
+    assert_eq!(
+        first.bars_stored,
+        held.records(),
+        "receipt must count actual writes"
+    );
+    assert_eq!(first.rows_read, 385);
+    assert!(body.contains("375"), "{body}");
+    drop(held);
+    let original = fs::read(path.to_path_buf(&fixture.root)).expect("committed bytes");
+    let (status, body, retry) = fixture.report().await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(retry.outcome, audit::Outcome::Failed);
+    assert_eq!(retry.bars_stored, 0, "a replay did not append bars again");
+    assert_eq!(retry.rows_read, 385);
+    assert_eq!(retry.failures, 1);
+    assert_eq!(
+        fs::read(path.to_path_buf(&fixture.root)).expect("retained bytes"),
+        original
+    );
+    assert_eq!(
+        fs::read(&manifest_directory).expect("obstruction retained"),
+        b"owned obstruction"
+    );
+    assert_eq!(transport.seen.load(std::sync::atomic::Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn a_named_pull_reuses_exact_bars_without_claiming_a_second_write() {
+    let mut fixture = Fixture::new(1);
+    let transport = fixture.serve(complete_session()).await;
+    let (status, body, first) = fixture.report().await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(first.outcome, audit::Outcome::Stored);
+    assert_eq!(first.bars_stored, 375);
+    assert!(
+        body.contains("every owed contract window completed"),
+        "{body}"
+    );
+    assert!(
+        !body.contains("every discovered contract fetched"),
+        "{body}"
+    );
+    assert_eq!(first.rows_read, 385);
+    let path = fixture.bar_path(0).to_path_buf(&fixture.root);
+    let original = fs::read(&path).expect("committed bytes");
+    let manifest = pull::manifest::manifest_path(&fixture.root, Vendor::Groww);
+    fs::remove_file(manifest).expect("hide only the fixture census to force exact replay");
+    let (status, body, replay) = fixture.report().await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(replay.outcome, audit::Outcome::Empty);
+    assert_eq!(replay.bars_stored, 0);
+    assert_eq!(replay.rows_read, 385);
+    assert_eq!(replay.failures, 0);
+    assert!(body.contains(">STORED NOTHING<"), "{body}");
+    assert_eq!(fs::read(path).expect("unchanged bar bytes"), original);
+    assert_eq!(transport.seen.load(std::sync::atomic::Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn a_later_named_chunk_refusal_preserves_read_counts_without_filing_a_partial_contract() {
+    let mut fixture = Fixture::new(1);
+    fixture.asked.window = pull::session::Window::new(
+        Day::new(2025, 7, 1).expect("from day"),
+        Day::new(2025, 7, 2).expect("through day"),
+    )
+    .expect("two generated days");
+    fixture.wire.spec.window_caps = &[(pull::vendor::Granularity::Minute1, 1)];
+    let transport = fixture
+        .serve_replies(
+            vec![
+                (StatusCode::OK, complete_session()),
+                (
+                    StatusCode::BAD_REQUEST,
+                    "generated permanent refusal".to_owned(),
+                ),
+            ],
+            None,
+        )
+        .await;
+    let (status, body, record) = fixture.report().await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(record.outcome, audit::Outcome::Failed);
+    assert_eq!(
+        record.rows_read, 385,
+        "decoded first chunk remains accounted for"
+    );
+    assert_eq!(
+        record.bars_stored, 0,
+        "a partial fetch must not file the contract"
+    );
+    assert_eq!(record.failures, 1);
+    assert!(!fixture.bar_path(0).to_path_buf(&fixture.root).exists());
+    assert_eq!(transport.seen.load(std::sync::atomic::Ordering::Relaxed), 2);
+    assert!(body.contains("generated permanent refusal"), "{body}");
+}
+
+#[tokio::test]
+async fn a_named_contract_refusal_does_not_hide_the_following_contracts_committed_bars() {
+    for first in [
+        (
+            StatusCode::BAD_REQUEST,
+            "generated permanent refusal".to_owned(),
+        ),
+        (StatusCode::OK, r#"{"payload":{"candles":[]}}"#.to_owned()),
+    ] {
+        let mut fixture = Fixture::new(2);
+        let transport = fixture
+            .serve_replies(vec![first, (StatusCode::OK, complete_session())], None)
+            .await;
+        let (status, body, record) = fixture.report().await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+        assert_eq!(record.outcome, audit::Outcome::Failed);
+        assert_eq!(record.members, 2);
+        assert_eq!(record.rows_read, 385);
+        assert_eq!(record.bars_stored, 375);
+        assert_eq!(record.failures, 1);
+        assert!(!fixture.bar_path(0).to_path_buf(&fixture.root).exists());
+        assert!(fixture.bar_path(1).to_path_buf(&fixture.root).is_file());
+        assert_eq!(transport.seen.load(std::sync::atomic::Ordering::Relaxed), 2);
+        assert!(body.contains("1 of 2"), "{body}");
+    }
+}
+
+#[tokio::test]
+async fn a_later_named_budget_halt_retains_answered_rows_and_leaves_the_contract_unfiled() {
+    let mut fixture = Fixture::new(1);
+    fixture.asked.window = pull::session::Window::new(
+        Day::new(2025, 7, 1).expect("from day"),
+        Day::new(2025, 7, 2).expect("through day"),
+    )
+    .expect("two generated days");
+    fixture.wire.spec.window_caps = &[(pull::vendor::Granularity::Minute1, 1)];
+    let transport = fixture
+        .serve_replies(vec![(StatusCode::OK, complete_session())], Some(1))
+        .await;
+    let (status, body, record) = fixture.report().await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(record.outcome, audit::Outcome::Failed);
+    assert_eq!(record.rows_read, 385);
+    assert_eq!(record.bars_stored, 0);
+    assert_eq!(record.failures, 1);
+    assert!(!fixture.bar_path(0).to_path_buf(&fixture.root).exists());
+    assert_eq!(transport.seen.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert!(body.contains("no rate budget"), "{body}");
+}
+
+#[tokio::test]
+async fn named_receipts_bound_reasons_without_losing_failed_contract_counts() {
+    let mut fixture = Fixture::new(7);
+    let transport = fixture
+        .serve(r#"{"payload":{"candles":[]}}"#.to_owned())
+        .await;
+    let (status, body, record) = fixture.report().await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(record.outcome, audit::Outcome::Failed);
+    assert_eq!(record.members, 7);
+    assert_eq!(record.failures, 7);
+    assert_eq!(record.rows_read, 0);
+    assert_eq!(record.bars_stored, 0);
+    for (index, found) in fixture.chain.contracts.iter().enumerate() {
+        assert_eq!(
+            body.contains(&found.vendor_symbol),
+            index < 5,
+            "{index}: {body}"
+        );
+        assert!(!fixture.bar_path(index).to_path_buf(&fixture.root).exists());
+    }
+    assert_eq!(transport.seen.load(std::sync::atomic::Ordering::Relaxed), 7);
+}
+
+#[tokio::test]
+async fn mixed_held_and_replayed_contracts_do_not_claim_that_no_fetch_happened() {
+    let mut fixture = Fixture::new(2);
+    fixture.hold_prefix(1);
+    let transport = fixture.serve(complete_session()).await;
+    let (status, body, first) = fixture.report().await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(first.outcome, audit::Outcome::Stored);
+    assert_eq!(first.bars_stored, 375);
+    let path = fixture.bar_path(1).to_path_buf(&fixture.root);
+    let original = fs::read(&path).expect("committed second contract");
+    fs::remove_file(pull::manifest::manifest_path(&fixture.root, Vendor::Groww))
+        .expect("hide only the fixture census");
+    fixture.hold_prefix(1);
+    let (status, body, replay) = fixture.report().await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(replay.outcome, audit::Outcome::Empty);
+    assert_eq!(replay.rows_read, 385);
+    assert_eq!(replay.bars_stored, 0);
+    assert_eq!(replay.failures, 0);
+    assert!(
+        body.contains("the fetched bars were already stored byte for byte"),
+        "{body}"
+    );
+    assert!(!body.contains("so no vendor was asked"), "{body}");
+    assert_eq!(fs::read(path).expect("unchanged second contract"), original);
+    assert_eq!(transport.seen.load(std::sync::atomic::Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn a_window_after_every_discovered_expiry_is_empty_without_claiming_a_fetch() {
+    for also_held in [false, true] {
+        let mut fixture = Fixture::new(usize::from(also_held));
+        let day = Day::new(2025, 7, 20).expect("generated requested day");
+        fixture.asked.window = pull::session::Window::new(day, day).expect("one closed day");
+        fixture.hold_prefix(usize::from(also_held));
+        let expiry = Expiry::new(2025, 7, 10).expect("earlier generated expiry");
+        fixture.chain.expiries = vec!["2025-07-10".to_owned()];
+        if also_held {
+            fixture.chain.expiries.push("2025-07-31".to_owned());
+        }
+        fixture.chain.contracts.push(
+            pull::fno::read_contract("NSE-NIFTY-10Jul25-24000-CE", expiry)
+                .expect("generated already expired contract"),
+        );
+        let (status, body, record) = fixture.report().await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(record.outcome, audit::Outcome::Empty);
+        assert_eq!(record.members, 1 + u64::from(also_held));
+        assert_eq!(record.rows_read, 0);
+        assert_eq!(record.bars_stored, 0);
+        assert_eq!(record.failures, 0);
+        if also_held {
+            assert!(body.contains("1, resumed rather than refetched"), "{body}");
+            assert!(
+                body.contains("every contract-month with bars owed"),
+                "{body}"
+            );
+        } else {
+            assert!(
+                body.contains("no contract has bars owed within this window"),
+                "{body}"
+            );
+            assert!(!body.contains("Contract-months already held"), "{body}");
+        }
+        assert!(
+            !body.contains("the fetched bars were already stored"),
+            "{body}"
+        );
+        assert!(body.contains("no vendor was asked"), "{body}");
+        assert!(
+            !fixture
+                .bar_path(usize::from(also_held))
+                .to_path_buf(&fixture.root)
+                .exists()
+        );
+    }
 }
