@@ -429,8 +429,9 @@ impl Contract {
     /// `YYYY-MM-DD-FUT` or `YYYY-MM-DD-<paisa>-CE`.
     ///
     /// Returns `None` only if the rendering would exceed
-    /// [`CONTRACT_CAPACITY`], which needs a strike above 999,999,999,999 paisa
-    /// — ten crore rupees a share. Refused rather than truncated: a truncated
+    /// [`CONTRACT_CAPACITY`], which admits at most ten strike characters after
+    /// the date and separators (9,999,999,999 paisa for a positive strike).
+    /// Refused rather than truncated: a truncated
     /// strike names a DIFFERENT contract and would merge two series into one
     /// file, which is the exact failure this type exists to prevent.
     fn render(expiry: Expiry, option: Option<(Paisa, OptionSide)>) -> Option<Self> {
@@ -551,6 +552,32 @@ impl fmt::Display for Contract {
     clippy::panic
 )]
 mod tests {
+
+    #[test]
+    fn contract_rendering_accepts_the_exact_capacity_and_refuses_the_next_digit() {
+        let expiry = Expiry::new(2025, 9, 30).expect("a real expiry");
+        for side in [OptionSide::Call, OptionSide::Put] {
+            let kind = Kind::Option {
+                expiry,
+                strike: crate::price::Paisa::from_raw(9_999_999_999),
+                side,
+            };
+            let contract = Contract::of(kind).expect("exactly 24 contract bytes fit");
+            let expected = format!("2025-09-30-9999999999-{}", side.as_str());
+            assert_eq!(contract.as_str(), expected);
+            assert_eq!(contract.as_str().len(), CONTRACT_CAPACITY);
+            assert_eq!(Contract::parse(&expected), Some(contract));
+            assert_eq!(
+                Contract::of(Kind::Option {
+                    expiry,
+                    strike: crate::price::Paisa::from_raw(10_000_000_000),
+                    side,
+                }),
+                None,
+                "a further digit must refuse without merging contract identities"
+            );
+        }
+    }
 
     /// EVERY GUARD ON `Contract` REFUSES, and each is asserted separately.
     ///

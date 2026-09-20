@@ -36327,3 +36327,20 @@ suffix fold remains unchanged. A boundary regression verifies the retained
 prefix and merged value through the 63-level counter boundary without allocating
 the corresponding input. Published hash vectors remain the digest authority;
 no timeout is credited as an assertion failure and no mutation is excluded.
+
+### D-0623 — Test authority comparison failures independently — 2026-09-20
+
+Exercise corruption independently in all six Step-3 authority stages and require
+the report to retain the other five states. Add exact file-size admission,
+foreign and incomplete authority, missing prerequisite and aggregate overflow
+cases. Generated private facts exercise reconciliation and exact displayed
+counts; they do not confer a real-market authority or remove the full-selection
+verification requirement.
+
+### D-0624 — Admit exact contract-name capacity — 2026-09-20
+
+The contract mutation audit exposed an untested exact-length rendering boundary.
+Check both option sides with a ten-digit strike filling all 24 bytes and an
+eleven-digit strike that must refuse. Correct the renderer's explanatory bound:
+the date, separators and side consume 14 bytes, leaving ten strike characters,
+not twelve. Stored identities and the capacity itself are unchanged.

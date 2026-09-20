@@ -1517,6 +1517,8 @@ mod tests {
     use std::io::Write as _;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    type RefusalCase<T> = (&'static str, fn(&mut T));
+
     fn id(value: u8) -> [u8; 32] {
         [value; 32]
     }
@@ -1580,6 +1582,240 @@ mod tests {
                 refused: 0,
             })
             .collect()
+    }
+
+    fn stored_facts(populations: &[PopulationFact]) -> Vec<StoredFact> {
+        populations
+            .iter()
+            .map(|population| StoredFact {
+                population_id: population.population_id,
+                population_digest: population.completion_digest,
+                receipt_digest: id(200),
+                data_digest: id(201),
+                signal_records: 2,
+                minute_context_records: 3,
+                execution_records: 4,
+                daily_records: 5,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn each_corrupt_stage_is_refused_without_hiding_the_other_five_states() {
+        let stages = [
+            Step3StageV1::PopulationV4,
+            Step3StageV1::Admission,
+            Step3StageV1::ExecutionV2,
+            Step3StageV1::StoredData,
+            Step3StageV1::SelectionV4,
+            Step3StageV1::GlobalReplayV2,
+        ];
+        for stage in stages {
+            let root = temp_root(stage.label());
+            let paths = match stage {
+                Step3StageV1::PopulationV4 => vec![PopulationLedger::receipt_v4_path(&root)],
+                Step3StageV1::Admission => vec![AdmissionAuthorityLedger::completion_path(&root)],
+                Step3StageV1::ExecutionV2 => execution_paths(&root).to_vec(),
+                Step3StageV1::StoredData => vec![StoredDataCompletenessLedgerV1::path(&root)],
+                Step3StageV1::SelectionV4 => vec![SelectionLedgerV4::path(&root)],
+                Step3StageV1::GlobalReplayV2 => global_replay_paths(&root).to_vec(),
+            };
+            for path in &paths {
+                fs::create_dir_all(path.parent().expect("stage parent")).expect("parent");
+                fs::write(path, b"corrupt authority").expect("corrupt stage fixture");
+            }
+            let report = compare_step3_on_disk_v1(&root, &request(), bounds()).expect("comparison");
+            assert_eq!(report.rows().len(), 6);
+            assert!(!report.is_ready());
+            for row in report.rows() {
+                let expected = if row.stage() == stage {
+                    Step3StatusV1::Refused
+                } else {
+                    Step3StatusV1::Unmeasured
+                };
+                assert_eq!(
+                    row.status(),
+                    expected,
+                    "corrupted {}: {}",
+                    stage.label(),
+                    row.detail()
+                );
+                assert!(!row.identities().is_empty());
+                assert!(row.counts().is_empty());
+            }
+            fs::remove_dir_all(root).expect("remove isolated stage fixture");
+        }
+    }
+
+    #[test]
+    fn file_preflight_refuses_missing_nonfiles_and_oversize_without_reading_them() {
+        let root = temp_root("file-bounds");
+        fs::create_dir_all(&root).expect("directory");
+        let path = root.join("authority.bin");
+        assert!(
+            preflight_files(std::slice::from_ref(&path), 3)
+                .expect_err("missing file")
+                .contains("metadata could not be read")
+        );
+        assert!(
+            preflight_files(std::slice::from_ref(&root), 3)
+                .expect_err("directory is not a file")
+                .contains("not a regular file")
+        );
+        fs::write(&path, [1, 2, 3]).expect("bounded bytes");
+        preflight_files(std::slice::from_ref(&path), 3).expect("exact bound");
+        assert!(
+            preflight_files(std::slice::from_ref(&path), 2)
+                .expect_err("one byte beyond bound")
+                .contains("above Step-3 bound 2")
+        );
+        assert_eq!(fs::read(&path).expect("retained bytes"), [1, 2, 3]);
+        fs::remove_dir_all(root).expect("remove preflight fixture");
+    }
+
+    #[test]
+    fn admission_reconciliation_refuses_foreign_incomplete_and_overflowed_evidence() {
+        let populations = population_facts(&request());
+        let population =
+            StageProbe::ready(populations.clone(), Vec::new(), Vec::new(), "generated");
+        let facts = admission_facts(&populations);
+        let mut good = admission_probe(facts.clone(), vec!["generated admission".to_owned()]);
+        reconcile_admission(&population, &mut good);
+        assert_eq!(good.status, Step3StatusV1::Ready);
+        assert_eq!(
+            good.counts
+                .iter()
+                .map(|count| (count.name(), count.value()))
+                .collect::<Vec<_>>(),
+            [
+                ("receipts", 16),
+                ("decisions", 32),
+                ("admitted", 16),
+                ("rejected", 16),
+                ("unmeasured", 0),
+                ("refused", 0)
+            ]
+        );
+
+        let cases: [RefusalCase<AdmissionFact>; 5] = [
+            ("foreign Population V4", |fact| fact.population_id = id(250)),
+            ("foreign Population V4", |fact| {
+                fact.population_digest = id(250);
+            }),
+            ("differs from Population V4 row count", |fact| {
+                fact.decision_count = 3;
+            }),
+            ("do not cover every decision", |fact| fact.admitted = 0),
+            ("overflowed u64", |fact| fact.admitted = u64::MAX),
+        ];
+        for (reason, change) in cases {
+            let mut changed = facts.clone();
+            change(changed.last_mut().expect("last admission"));
+            let mut probe = StageProbe::ready(changed, Vec::new(), Vec::new(), "generated");
+            reconcile_admission(&population, &mut probe);
+            assert_eq!(probe.status, Step3StatusV1::Refused);
+            assert!(probe.evidence.is_none());
+            assert!(probe.detail.contains(reason), "{}", probe.detail);
+        }
+        let mut short = facts.clone();
+        short.pop();
+        assert!(validate_admission_bindings(&populations, &short).is_err());
+        let absent: StageProbe<Vec<PopulationFact>> = StageProbe::unmeasured(Vec::new(), "absent");
+        let mut blocked = admission_probe(facts, Vec::new());
+        reconcile_admission(&absent, &mut blocked);
+        assert_eq!(blocked.status, Step3StatusV1::Blocked);
+        assert!(blocked.evidence.is_none());
+        let mut impossible: StageProbe<Vec<AdmissionFact>> =
+            StageProbe::ready(Vec::new(), Vec::new(), Vec::new(), "generated");
+        impossible.evidence = None;
+        reconcile_admission(&population, &mut impossible);
+        assert_eq!(impossible.status, Step3StatusV1::Refused);
+        assert!(impossible.detail.contains("no evidence"));
+    }
+
+    #[test]
+    fn aggregate_admission_and_stored_counts_never_wrap_into_ready_rows() {
+        let populations = population_facts(&request());
+        let admission_fields: [fn(&mut AdmissionFact) -> &mut u64; 5] = [
+            |fact| &mut fact.decision_count,
+            |fact| &mut fact.admitted,
+            |fact| &mut fact.rejected,
+            |fact| &mut fact.unmeasured,
+            |fact| &mut fact.refused,
+        ];
+        for field in admission_fields {
+            let mut facts = admission_facts(&populations);
+            *field(facts.first_mut().expect("first admission")) = u64::MAX;
+            *field(facts.last_mut().expect("last admission")) = 1;
+            let probe = admission_probe(facts, vec!["generated overflow".to_owned()]);
+            assert_eq!(probe.status, Step3StatusV1::Refused);
+            assert!(probe.detail.contains("overflowed"));
+            assert!(probe.counts.is_empty());
+        }
+        let stored_fields: [fn(&mut StoredFact) -> &mut u64; 4] = [
+            |fact| &mut fact.signal_records,
+            |fact| &mut fact.minute_context_records,
+            |fact| &mut fact.execution_records,
+            |fact| &mut fact.daily_records,
+        ];
+        for field in stored_fields {
+            let mut facts = stored_facts(&populations);
+            *field(facts.first_mut().expect("first stored receipt")) = u64::MAX;
+            let probe = stored_probe(facts, Vec::new(), 16);
+            assert_eq!(probe.status, Step3StatusV1::Refused);
+            assert!(probe.detail.contains("overflowed"));
+            assert!(probe.counts.is_empty());
+        }
+    }
+
+    #[test]
+    fn stored_reconciliation_binds_both_identities_and_retains_exact_counts() {
+        let populations = population_facts(&request());
+        let facts = stored_facts(&populations);
+        let population = StageProbe::ready(populations, Vec::new(), Vec::new(), "generated");
+        let mut good = stored_probe(facts.clone(), vec!["generated stored".to_owned()], 17);
+        reconcile_stored(&population, &mut good);
+        assert_eq!(good.status, Step3StatusV1::Ready);
+        assert_eq!(
+            good.counts
+                .iter()
+                .map(|count| (count.name(), count.value()))
+                .collect::<Vec<_>>(),
+            [
+                ("requested-receipts", 16),
+                ("ledger-receipts", 17),
+                ("signal-records", 32),
+                ("minute-context-records", 48),
+                ("execution-records", 64),
+                ("daily-reference-records", 80)
+            ]
+        );
+        let cases: [RefusalCase<StoredFact>; 4] = [
+            ("foreign Population V4", |fact| fact.population_id = id(250)),
+            ("foreign Population V4", |fact| {
+                fact.population_digest = id(250);
+            }),
+            ("stored receipt identity is zero", |fact| {
+                fact.receipt_digest = [0; 32];
+            }),
+            ("stored data identity is zero", |fact| {
+                fact.data_digest = [0; 32];
+            }),
+        ];
+        for (reason, change) in cases {
+            let mut changed = facts.clone();
+            change(changed.last_mut().expect("last stored receipt"));
+            let mut probe = stored_probe(changed, Vec::new(), 16);
+            reconcile_stored(&population, &mut probe);
+            assert_eq!(probe.status, Step3StatusV1::Refused);
+            assert!(probe.evidence.is_none());
+            assert!(probe.detail.contains(reason), "{}", probe.detail);
+        }
+        let absent: StageProbe<Vec<PopulationFact>> = StageProbe::unmeasured(Vec::new(), "absent");
+        let mut blocked = stored_probe(facts, Vec::new(), 16);
+        reconcile_stored(&absent, &mut blocked);
+        assert_eq!(blocked.status, Step3StatusV1::Blocked);
+        assert!(blocked.evidence.is_none());
     }
 
     #[test]
