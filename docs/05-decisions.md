@@ -36210,3 +36210,15 @@ entry in `stability::GRAINS` rather than a hardcoded six. The previous test coul
 silently omit the seventh (hourly) grain. The focused revised test passed in
 0.08 seconds after compilation on this host; this is a fixture observation, not
 an application latency or whole-workspace timing claim.
+
+### D-0615 — Bound instrumented generated search separately — 2026-09-20
+
+Linux CI at e7be8e08 passed ordinary workspace tests but its instrumented
+coverage suite killed the complete-calendar search recovery child at 360
+seconds. Give that test child a 900-second deadline when LLVM_PROFILE_FILE is
+present, retaining 360 seconds otherwise and the same 8 MiB log cap. This is a
+test harness deadline, not a production performance allowance. All eight rungs,
+source admission, exact recovery and missing-ancestry assertions still execute.
+On refusal, preserve elapsed time, observed log length and bounded child output
+in the returned error so fixture cleanup cannot erase the only failure detail.
+This change does not establish coverage thresholds or mutation completeness.

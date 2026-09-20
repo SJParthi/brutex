@@ -85,6 +85,13 @@ fn run_fixture_child(fixture: &Fixture, selected: bool) -> Result<(), String> {
     let mut command = std::process::Command::new(std::env::current_exe().map_err(display)?);
     command.args(["--exact", TEST, "--nocapture", "--test-threads=1"]);
     command.env_clear();
+    // Instrumented complete-calendar replay exceeded the ordinary deadline on
+    // the Linux CI runner. Keep the same assertions and finite log bound.
+    let timeout = if std::env::var_os("LLVM_PROFILE_FILE").is_some() {
+        std::time::Duration::from_secs(900)
+    } else {
+        std::time::Duration::from_secs(360)
+    };
     if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
         command.env("LLVM_PROFILE_FILE", profile);
     }
@@ -111,12 +118,20 @@ fn run_fixture_child(fixture: &Fixture, selected: bool) -> Result<(), String> {
         if let Some(status) = child.try_wait().map_err(display)? {
             break status;
         }
-        if started.elapsed() > std::time::Duration::from_mins(6)
-            || fs::metadata(&log).map_err(display)?.len() > 8 * 1024 * 1024
-        {
+        let log_bytes = fs::metadata(&log).map_err(display)?.len();
+        if started.elapsed() > timeout || log_bytes > 8 * 1024 * 1024 {
             child.kill().map_err(display)?;
             child.wait().map_err(display)?;
-            return Err("generated search child exceeded its 360s/8MiB bound".into());
+            let detail = if fs::metadata(&log).map_err(display)?.len() <= 8 * 1024 * 1024 {
+                fs::read_to_string(&log).map_err(display)?
+            } else {
+                "child log exceeded 8MiB; refusing to load it".into()
+            };
+            return Err(format!(
+                "generated search child exceeded its {}s/8MiB bound after {:.1}s ({log_bytes} bytes): {detail}",
+                timeout.as_secs(),
+                started.elapsed().as_secs_f64()
+            ));
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     };
