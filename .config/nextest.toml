@@ -11,3 +11,7 @@ priority = 100
 [[profile.default.overrides]]
 filter = 'test(operator_boundary_tests::) | test(every_selection_v3_byte_is_bound) | test(every_selection_v4_byte_is_bound) | test(every_execution_v4_companion_byte_is_bound)'
 priority = 100
+
+[[profile.default.overrides]]
+filter = 'test(folds_preserve_parent_worker_candidate_and_pair_limits) | test(every_global_replay_v2_companion_byte_is_bound)'
+priority = 100

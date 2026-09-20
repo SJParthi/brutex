@@ -1218,7 +1218,9 @@ mod tests {
     /// `a_warm_run_produces_a_complete_sweep` for why both are needed and what
     /// happened when neither was there.
     fn bounded() -> Ladder {
-        Ladder::with_min_hits(600).with_ceiling(50_000)
+        Ladder::with_min_hits(600)
+            .with_ceiling(50_000)
+            .with_support_lanes(1)
     }
 
     #[test]

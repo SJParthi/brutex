@@ -4312,6 +4312,69 @@ mod tests {
     }
 
     #[test]
+    fn every_global_replay_v2_companion_byte_is_bound_after_outer_resealing() {
+        let root = test_root("durable-generated-resealed-corruption");
+        let manifest = manifest_fixture();
+        let streams = (0..MAX_STREAMS)
+            .map(|ordinal| controlled_manifest_stream(&manifest, ordinal))
+            .collect::<Vec<_>>();
+        let prepared = schedule_streams(manifest, streams).expect("generated scheduled replay");
+        let mut writer = GlobalReplayLedgerV2::open(&root, 1).expect("new writer");
+        writer.append_complete(&prepared).expect("complete fixture");
+        let completion_ids = writer.completion_ids().to_vec();
+        drop(writer);
+        for (path, stride) in [
+            (
+                GlobalReplayManifestV2::path(&root),
+                GLOBAL_REPLAY_MANIFEST_STRIDE_V2,
+            ),
+            (
+                GlobalReplayLedgerV2::stream_path(&root),
+                GLOBAL_REPLAY_STREAM_STRIDE_V2,
+            ),
+            (
+                GlobalReplayLedgerV2::candidate_path(&root),
+                GLOBAL_REPLAY_CANDIDATE_STRIDE_V2,
+            ),
+            (
+                GlobalReplayLedgerV2::decision_path(&root),
+                GLOBAL_REPLAY_DECISION_STRIDE_V2,
+            ),
+            (
+                GlobalReplayLedgerV2::completion_path(&root),
+                GLOBAL_REPLAY_COMPLETION_STRIDE_V2,
+            ),
+        ] {
+            let original = fs::read(&path).expect("original companion");
+            let start = LEDGER_HEADER_BYTES_USIZE_V2;
+            let payload_end = start + stride - SEAL_BYTES;
+            for offset in 0..start + stride {
+                let mut changed = original.clone();
+                *changed.get_mut(offset).expect("bounded changed byte") ^= 1;
+                if (start..payload_end).contains(&offset) {
+                    let seal = blake3::hash(changed.get(start..payload_end).expect("payload"));
+                    changed
+                        .get_mut(payload_end..start + stride)
+                        .expect("seal")
+                        .copy_from_slice(&seal);
+                }
+                fs::write(&path, changed).expect("inject resealed companion change");
+                assert!(
+                    GlobalReplayLedgerV2::open_read(&root, 1).is_err(),
+                    "accepted byte {offset} in {} after recomputing the record seal",
+                    path.display()
+                );
+            }
+            fs::write(&path, &original).expect("restore original companion");
+            let reopened = GlobalReplayLedgerV2::open_read(&root, 1).expect("restored replay");
+            assert_eq!(reopened.completion_ids(), completion_ids);
+            assert_eq!(reopened.replay(&prepared.replay_id), Some(&prepared));
+            assert_eq!(fs::read(&path).expect("restored bytes"), original);
+        }
+        fs::remove_dir_all(root).expect("remove resealed corruption fixture");
+    }
+
+    #[test]
     fn generated_replay_ledger_preserves_unacknowledged_orphans_and_enforces_completion_budget() {
         let root = test_root("durable-generated-orphans");
         let make = |seed| {

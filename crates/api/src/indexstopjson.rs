@@ -254,6 +254,10 @@ fn hex(value: [u8; 32]) -> String {
     crate::server::hex32(value)
 }
 #[cfg(test)]
+#[path = "indexstop_projection_tests.rs"]
+mod projection_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     const ID: &str = "1111111111111111111111111111111111111111111111111111111111111111";

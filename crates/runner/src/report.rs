@@ -1199,7 +1199,9 @@ mod tests {
     }
 
     fn bounded() -> Ladder {
-        Ladder::with_min_hits(600).with_ceiling(50_000)
+        Ladder::with_min_hits(600)
+            .with_ceiling(50_000)
+            .with_support_lanes(1)
     }
 
     /// The VALUE cell of a labelled row — what a reader's eye lands on.

@@ -36500,3 +36500,50 @@ to replace the source mutation gate.
 Run these fast receipt regressions and the operator boundary tests early in
 nextest's existing mutation test order, alongside the published hash vector.
 This changes priority only; no filter, retry, skip or expected failure is added.
+
+### D-0637 — Authenticate saved single-stop pages before projecting them — 2026-09-20
+
+Exercise the single-stop HTTP projection with an independent, sealed wire
+fixture containing a long/short pair and its exact trade, event and observed-day
+records. The cold reader must admit the complete bytes before any page is
+rendered. Continuations retain the completion digest, setting and trade links;
+an exhausted page is empty, an out-of-range coordinate refuses, and a foreign
+pin or same-length body change cannot return a replacement page. Restoring the
+original bytes and reopening recovers the original completion. The view retains
+unknown feed metadata, excluded costs and unassessed institutional admission.
+Malformed HTTP requests return a structured refusal before accessing the store.
+These generated observations test the wire and projection contract; they are
+not market data or producer-authority evidence.
+
+### D-0638 — Bind every replay companion beyond its outer checksum — 2026-09-20
+
+The generated Global Replay V2 ledger integrity proof now changes one bit at
+each byte of each companion's header and first record: manifest, stream,
+candidate, decision and completion. Payload changes receive a recomputed outer
+BLAKE3 seal, so the full ledger must reject inconsistent identities, ordering,
+counts or joins instead of relying only on a checksum mismatch. All 4,912
+variants must refuse. Exact restoration must recover the same completion IDs,
+reconstructed replay and file bytes. The fixture remains private and generated;
+it does not bypass the public selection or admission prerequisites.
+
+### D-0639 — Carry the caller's worker budget into every training fold — 2026-09-20
+
+Both walk-forward paths reconstructed a fold ladder with the parent's candidate
+and pair limits but omitted its support-worker limit. A caller requesting one
+worker could therefore have each fold use all available cores. Construct both
+fold ladders through one helper that rescales support and retains all three
+resource bounds. Pin exact support rounding and limit preservation for serial,
+parallel, zero and oversized worker requests.
+
+The heavy runner unit-test fixtures now request one support worker, as the
+integration fixture already does. Their data, candidate and pair budgets,
+support thresholds and assertions are unchanged. The production default still
+uses available parallelism when no bound is requested, and the engine's serial
+versus parallel equivalence tests remain active. Instrumented test duration is
+a verification observation, not a production performance guarantee.
+
+In an isolated copy, restoring the omitted worker bound makes the new regression
+fail with 14 workers instead of the requested one. Restoring the fix passes;
+all 602 runner unit tests also pass. Run this fast budget check and the replay
+companion integrity proof early in mutation testing, retaining every test and
+the existing failure criteria.

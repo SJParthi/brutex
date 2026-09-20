@@ -1698,6 +1698,14 @@ fn scale_min_hits(whole_min_hits: u64, train: usize, whole: usize) -> u64 {
     u64::try_from(scaled).unwrap_or(u64::MAX).max(1)
 }
 
+/// Rescale support while preserving every parent search resource limit.
+fn fold_ladder(base: engine::Ladder, train: usize, whole: usize) -> engine::Ladder {
+    engine::Ladder::with_min_hits(scale_min_hits(base.min_hits(), train, whole))
+        .with_ceiling(base.ceiling())
+        .with_pair_budget(base.pair_budget())
+        .with_support_lanes(base.support_lanes())
+}
+
 /// Run an anchored walk-forward over `bars`.
 ///
 /// `splits` is the number of test periods. Each fold sweeps the training prefix,
@@ -2433,10 +2441,7 @@ fn walk_forward_exact_grid_v4(
         let coordinate_order_digest =
             authenticate_grid_pair_v4(train_series, &long, &short, false)?;
 
-        let scaled = scale_min_hits(base.min_hits(), train.len(), signal.len());
-        let per_fold = engine::Ladder::with_min_hits(scaled)
-            .with_ceiling(base.ceiling())
-            .with_pair_budget(base.pair_budget());
+        let per_fold = fold_ladder(base, train.len(), signal.len());
         let signal_train_column =
             builder(train).map_err(AnchoredSearchValidationRefusalV4::BuilderRefused)?;
         training_signal_cursor.authenticate(train, &signal_train_column, full_signal_column)?;
@@ -4355,14 +4360,9 @@ fn walk_forward_core(
         // `Ladder::with_min_hits` would raise anyway and which would silently
         // mean "every combination is frequent".
         let base = sweeper.ladder();
-        let scaled = scale_min_hits(base.min_hits(), train.len(), bars.len());
-        // `with_min_hits` is a CONSTRUCTOR, not a builder step, so the ceiling
-        // and the pair budget are carried across explicitly. Dropping either
-        // would give the folds a different memory bound from the run and turn a
-        // comparison into two unrelated searches.
-        let per_fold = engine::Ladder::with_min_hits(scaled)
-            .with_ceiling(base.ceiling())
-            .with_pair_budget(base.pair_budget());
+        // A new threshold must retain the caller's memory, work and worker
+        // limits. Reconstructing a default ladder would escape those bounds.
+        let per_fold = fold_ladder(base, train.len(), bars.len());
         let signal_train_column = match builder(train) {
             Ok(column) => column,
             Err(why) => {
@@ -5116,7 +5116,11 @@ mod tests {
     }
 
     fn sweeper() -> Sweeper {
-        Sweeper::new(Ladder::with_min_hits(120).with_ceiling(20_000))
+        Sweeper::new(
+            Ladder::with_min_hits(120)
+                .with_ceiling(20_000)
+                .with_support_lanes(1),
+        )
     }
 
     fn long_walk_fixture() -> Validated {
@@ -6349,7 +6353,8 @@ mod tests {
             let swept = Sweeper::new(
                 engine::Ladder::with_min_hits(scaled)
                     .with_ceiling(ladder.ceiling())
-                    .with_pair_budget(ladder.pair_budget()),
+                    .with_pair_budget(ladder.pair_budget())
+                    .with_support_lanes(ladder.support_lanes()),
             )
             .run(train, &mut evaluator());
             let closed = crate::closed::closed(&swept.sweep);
@@ -6457,6 +6462,23 @@ mod tests {
                  the two are chosen together on the same bars",
                 f.index
             );
+        }
+    }
+
+    #[test]
+    fn folds_preserve_parent_worker_candidate_and_pair_limits() {
+        for requested_lanes in [0, 1, 2, usize::MAX] {
+            let parent = Ladder::with_min_hits(251)
+                .with_ceiling(17_003)
+                .with_pair_budget(23_009)
+                .with_support_lanes(requested_lanes);
+            for (train, whole, expected_hits) in [(1, 3, 84), (3, 3, 251), (0, 3, 1)] {
+                let fold = super::fold_ladder(parent, train, whole);
+                assert_eq!(fold.min_hits(), expected_hits);
+                assert_eq!(fold.ceiling(), 17_003);
+                assert_eq!(fold.pair_budget(), 23_009);
+                assert_eq!(fold.support_lanes(), parent.support_lanes());
+            }
         }
     }
 
