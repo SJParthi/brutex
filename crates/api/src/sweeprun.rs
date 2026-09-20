@@ -4196,12 +4196,14 @@ mod tests {
 
     /* ==================== the outcome fields ==================== */
 
-    /// The refusal `cli::range_all` returns when nothing was read.
-    ///
-    /// Taken in SHAPE from that function's own `format!` rather than invented:
-    /// it opens with the word, names the rung count, and says outright that no
-    /// row was recorded.
-    const REFUSAL: &str = "refused: every one of the 9 rungs refused. Nothing was \
+    /// Current range refusal: no completed result is confirmed, with the
+    /// concrete reason retained even when source reads already happened.
+    const REFUSAL: &str = "refused: every one of the 8 rungs refused. No completed \
+                          result could be confirmed.\n  first reason: \
+                          `nosuchfeed` is not a feed this engine reads.\n";
+
+    /// Previously recorded refusal wording remains a refusal when replayed.
+    const LEGACY_REFUSAL: &str = "refused: every one of the 9 rungs refused. Nothing was \
                            read and no row was recorded.\n  first reason: \
                            `nosuchfeed` is not a feed this engine reads.\n";
 
@@ -4217,14 +4219,16 @@ mod tests {
 
     #[test]
     fn a_refused_sweep_is_a_refusal_and_never_a_report() {
-        let progress = settled(REFUSAL);
-        assert_eq!(progress.refusal.as_deref(), Some(REFUSAL));
-        assert!(
-            progress.report.is_none(),
-            "a refusal filed as a report is the green `Sweep finished` over an \
-             empty ledger that this split exists to prevent: {:?}",
-            progress.report
-        );
+        for text in [REFUSAL, LEGACY_REFUSAL] {
+            let progress = settled(text);
+            assert_eq!(progress.refusal.as_deref(), Some(text));
+            assert!(
+                progress.report.is_none(),
+                "a refusal filed as a report is the green `Sweep finished` over an \
+                 empty ledger that this split exists to prevent: {:?}",
+                progress.report
+            );
+        }
     }
 
     #[test]
@@ -4302,16 +4306,24 @@ mod tests {
 
     #[test]
     fn a_refusal_reaches_the_page_as_a_refusal_and_a_null_report() {
-        let json = settled(REFUSAL).to_json();
-        assert!(
-            json.contains(r#""report":null"#),
-            "a refusal must not also arrive as a report: {json}"
-        );
-        assert!(
-            json.contains(r#""refusal":"refused: every one of the 9 rungs"#),
-            "this is the field the page reads to decide it failed: {json}"
-        );
-        assert!(json.contains(r#""in_flight":false"#), "{json}");
+        for (text, field) in [
+            (REFUSAL, r#""refusal":"refused: every one of the 8 rungs"#),
+            (
+                LEGACY_REFUSAL,
+                r#""refusal":"refused: every one of the 9 rungs"#,
+            ),
+        ] {
+            let json = settled(text).to_json();
+            assert!(
+                json.contains(r#""report":null"#),
+                "a refusal must not also arrive as a report: {json}"
+            );
+            assert!(
+                json.contains(field),
+                "this is the field the page reads to decide it failed: {json}"
+            );
+            assert!(json.contains(r#""in_flight":false"#), "{json}");
+        }
     }
 
     /* ==================== the commit gate ==================== */

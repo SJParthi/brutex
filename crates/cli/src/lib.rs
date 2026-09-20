@@ -14459,8 +14459,8 @@ fn range_over_inner(
             .and_then(|r| r.outcome.as_ref().err())
             .map_or_else(|| "no rung produced a row".to_owned(), Clone::clone);
         return format!(
-            "refused: every one of the {} rungs refused. Nothing was read and no \
-             row was recorded.\n  first reason: {why}\n",
+            "refused: every one of the {} rungs refused. No completed result \
+             could be confirmed.\n  first reason: {why}\n",
             rows.len()
         );
     }

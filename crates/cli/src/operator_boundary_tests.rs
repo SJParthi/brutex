@@ -156,6 +156,66 @@ fn stored_self_check_reports_partial_history_and_missing_feed_as_failures()
 }
 
 #[test]
+fn a_failed_range_never_claims_that_no_source_was_read() -> Result<(), Box<dyn std::error::Error>> {
+    const CHILD: &str = "BRUTEX_TEST_FAILED_RANGE_DISCLOSURE";
+    if std::env::var_os(CHILD).is_some() {
+        let root = crate::store_root()?;
+        let path = store::path::StorePath::for_key(
+            brutex_core::vendor::Vendor::Zerodha,
+            &crate::stored::swept_index("NIFTY")?,
+            store::path::Timeframe::MINUTE_1,
+            store::path::YearMonth::new(2025, 5)?,
+            store::path::FileKind::Bars,
+        )?
+        .to_path_buf(&root);
+        let mut bytes = std::fs::read(&path)?;
+        let at = usize::try_from(store::format::HEADER_LEN)? + 10;
+        *bytes.get_mut(at).ok_or("generated first source record")? ^= 1;
+        std::fs::write(&path, &bytes)?;
+        let report = crate::range_over(
+            "zerodha",
+            "NIFTY",
+            &["1min"],
+            (2025, 5),
+            (2025, 5),
+            Some(50_000),
+        );
+        assert!(report.starts_with("refused:"), "{report}");
+        assert!(report.contains("block 0 was sealed"), "{report}");
+        assert!(report.contains(&path.display().to_string()), "{report}");
+        assert!(
+            report.contains("No completed result could be confirmed"),
+            "{report}"
+        );
+        assert!(!report.contains("Nothing was read"), "{report}");
+        assert!(!report.contains(crate::STORED_PROVENANCE), "{report}");
+        assert_eq!(std::fs::read(path)?, bytes);
+        assert!(!crate::results::Results::path(&root).exists());
+        return Ok(());
+    }
+    crate::audited_stored::with_warmed_store(|root| {
+        let result = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "operator_boundary_tests::a_failed_range_never_claims_that_no_source_was_read",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "generated")
+            .env("BRUTEX_STORE", root)
+            .output()?;
+        assert!(
+            result.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"));
+        Ok(())
+    })
+}
+
+#[test]
 fn ledger_self_checks_do_not_delete_an_existing_directory_and_can_run_concurrently()
 -> Result<(), Box<dyn std::error::Error>> {
     use std::fs;

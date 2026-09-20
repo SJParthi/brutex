@@ -37215,3 +37215,24 @@ An answer with its strike array absent retains its decoded-row count while
 refusing to invent a contract or create source files.
 Each timestamp check is constant work; processing a reply remains proportional
 to its rows.
+
+### D-0669 — Describe an unconfirmed range without claiming no reads — 2026-09-20
+
+The all-rungs refusal prefix said that nothing was read and no row was recorded.
+Those statements do not follow from every rung returning a refusal: a source
+checksum can fail after the reader opened and inspected the file, and a later
+publication check can refuse after earlier work. A generated damaged-source
+probe rendered that prefix immediately above the actual file and block read
+failure.
+
+The range refusal now says that no completed result could be confirmed and
+retains the first concrete failure. A child-process test uses an exclusively
+owned generated store, damages one source record and verifies the rendered
+refusal, preserved damaged bytes and absent results file. The command still
+refuses, carries no successful stored-data provenance banner and does not
+repair the file. This is a receipt correction, not a change to the sweep or
+stored evidence.
+
+The browser progress test carries both the corrected receipt and its legacy
+wording through the actual completion classifier. Both remain refusals with
+the complete reason retained and no successful report attached.
