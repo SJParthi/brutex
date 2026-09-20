@@ -37354,3 +37354,26 @@ and counts one initialization across concurrent readers. Calendar receipts for
 actual timestamp spans, data digests, source-file epochs and durable-ledger
 authentication are unchanged. No persisted record, format version, policy
 identity or runtime source check is replaced by this cache.
+
+### D-0675 — Refuse invalid single-month day filters — 2026-09-20
+
+D-0345 made a malformed optional day filter mean no filter. A generated HTTP
+regression demonstrated that `from=not-a-day` returned every stored bar with
+status 200. The supplied bound expressed a narrower request, so this fallback
+hid the invalid input and answered a different question.
+
+The single-month bars route now distinguishes absent or empty bounds from
+supplied malformed bounds, using the existing canonical civil-day parser.
+Malformed dates and reversed ranges return status 400 with the field named,
+before opening the addressed source. This supersedes D-0345's malformed-bound
+policy. Inclusive IST dates, missing-bound compatibility and valid windows
+outside the stored rows retain their existing meanings. The upper bound is
+still the next midnight, exclusive, so no final microsecond is lost.
+
+Generated route tests cover invalid shapes, impossible dates, reversed ranges,
+source-open precedence, valid empty windows and exact source/checksum byte
+preservation. A boundary probe checks both sides of the two IST midnights and
+the null-versus-zero open-interest distinction. Existing healthy-row and
+source-fault reporting remain in the read path; neither an optimisation
+failure nor invalid input removes a supplied valid bound. No store format,
+run identity, vendor scope or sweep policy changes.

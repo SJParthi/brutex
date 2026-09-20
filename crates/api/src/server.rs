@@ -1965,20 +1965,36 @@ fn bars_array(rows: &[store::format::Bar], from: Option<i64>, to: Option<i64>) -
     out
 }
 
-/// Midnight IST on an ISO day, as UTC microseconds — `None` for anything that
-/// is not a day.
+/// An optional ISO day as midnight IST in UTC microseconds.
 ///
 /// IST is UTC+05:30, so an IST day BEGINS `IST_OFFSET_SECS` before the UTC
 /// instant of the same date. Getting that sign wrong shifts every window by
 /// five and a half hours, which on a 09:15–15:29 session silently drops the
 /// morning and admits the previous evening.
 ///
-/// `None` for a malformed day is the caller's whole contract, not an oversight:
-/// this BOUNDS a request that is already valid without it, so an unreadable
-/// bound is no bound rather than a refusal of the whole month.
-fn ist_midnight_micros(text: &str) -> Option<i64> {
-    let day = ingest::parse_day("day", text).ok()?;
-    Some((i64::from(day.days_from_epoch()) * 86_400 - pull::session::IST_OFFSET_SECS) * 1_000_000)
+/// An absent or empty bound is unbounded. A supplied malformed bound refuses
+/// by field name: returning the whole month would answer a different request.
+fn ist_midnight_micros(field: &'static str, text: &str) -> Result<Option<i64>, String> {
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let day = ingest::parse_day(field, text).map_err(|why| why.to_string())?;
+    Ok(Some(
+        (i64::from(day.days_from_epoch()) * 86_400 - pull::session::IST_OFFSET_SECS) * 1_000_000,
+    ))
+}
+
+/// Inclusive civil-day bounds represented as a half-open timestamp window.
+/// Validate before opening the addressed source; a reversed range is a request
+/// error, while a valid range outside the file may still have no rows.
+fn day_window_bounds(query: &str) -> Result<(Option<i64>, Option<i64>), String> {
+    let from = ist_midnight_micros("from", &param(query, "from"))?;
+    let to = ist_midnight_micros("to", &param(query, "to"))?;
+    if from.zip(to).is_some_and(|(from, to)| from > to) {
+        return Err("from must be on or before to".to_owned());
+    }
+    // Four-digit ISO years fit in i64 microseconds, including the next midnight.
+    Ok((from, to.map(|at| at + 86_400 * 1_000_000)))
 }
 
 /// The rung a bars request names, defaulting to the one-minute grid.
@@ -2026,36 +2042,6 @@ fn timeframe_param(query: &str) -> Result<store::path::Timeframe, String> {
                     .join(" and ")
             )
         })
-}
-
-/// Open the one instrument-month a query addresses, or say why it cannot be.
-///
-/// # The five parameters, and why they are read in one place
-///
-/// `feed`, `month`, `rung`, `exchange`/`segment`/`symbol` and the optional
-/// `contract` address exactly one bar file. Two routes now ask that question —
-/// `/bars.json`, which draws it, and `/gaps.json`, which audits it — and a
-/// second hand-written copy of this parsing is a second set of refusal
-/// sentences that can drift from the first. An operator who gets
-/// `"is not a YYYY-MM month"` from one route and a 404 from the other for the
-/// same typo is being told two different things about one fact.
-///
-/// The month is handed back beside the file because the caller cannot recover
-/// it: `BarFile` knows its path, and the audit needs the month's FIRST and LAST
-/// day to state what the calendar owed — including the days at either end
-/// where a hole is invisible to anything derived from the bars themselves.
-///
-/// # Errors
-///
-/// The refusal sentence, ready to render. Every one names the parameter it
-/// could not read and what shape it wanted.
-fn open_addressed(
-    site: &Loaded,
-    query: &str,
-) -> Result<(store::file::BarFile, store::path::YearMonth), String> {
-    let asked = Addressed::parse(query)?;
-    let file = asked.open(site, asked.month)?;
-    Ok((file, asked.month))
 }
 
 /// A `YYYY-MM` parameter, or the first thing wrong with it.
@@ -2234,8 +2220,8 @@ async fn bars_json(
         )
     };
 
-    let (file, _month) = match open_addressed(&site, query) {
-        Ok(open) => open,
+    let asked = match Addressed::parse(query) {
+        Ok(asked) => asked,
         Err(why) => return refuse(why),
     };
 
@@ -2250,16 +2236,16 @@ async fn bars_json(
     // what "the page is stuck" was.
     //
     // The bound is INCLUSIVE at both ends and stated in IST days, because that
-    // is what the operator picked and what `Day` spells. A malformed date is
-    // ignored rather than refused: this is a narrowing filter on a request that
-    // is already valid without it, and refusing the whole month over a typo in
-    // an optional parameter would be the louder wrong answer.
-    let from_micros = ist_midnight_micros(&param(query, "from"));
-    // THE END IS THE START OF THE DAY AFTER, so the whole of `to` is inside the
-    // window without spelling 23:59:59.999999 and hoping the last bar is under
-    // it. A `to` before `from` yields an empty answer rather than a refusal —
-    // an empty day is a legal thing to ask for and the page renders it.
-    let to_micros = ist_midnight_micros(&param(query, "to")).map(|at| at + 86_400 * 1_000_000);
+    // is what the operator picked and what `Day` spells. Missing bounds remain
+    // unbounded; malformed or reversed bounds refuse before source-file I/O.
+    let (from_micros, to_micros) = match day_window_bounds(query) {
+        Ok(bounds) => bounds,
+        Err(why) => return refuse(why),
+    };
+    let file = match asked.open(&site, asked.month) {
+        Ok(file) => file,
+        Err(why) => return refuse(why),
+    };
 
     // THE WINDOW IS ADDRESSED, NOT FILTERED, and it used to be filtered.
     //
@@ -2277,11 +2263,9 @@ async fn bars_json(
     // second bisection: the rows have to be read to be returned, so a second
     // search would buy nothing. What it saves is everything BEFORE the window.
     //
-    // A bisection that refuses falls back to the whole month rather than to an
-    // error. The window is an optional narrowing on a request that is already
-    // valid without it, and the surrounding code makes the same choice for a
-    // malformed date — refusing the month over a failed optimisation would be
-    // the louder wrong answer.
+    // A bisection that refuses uses the full read path with the same validated
+    // date filter. The page reader retains healthy rows and reports source
+    // faults; an optimisation failure never removes the requested bounds.
     let held = usize::try_from(file.header().n_valid).unwrap_or(usize::MAX);
     // A BISECTION THAT LANDS PAST THE END FALLS BACK TO THE WHOLE MONTH.
     //
@@ -22148,10 +22132,9 @@ mod tests {
     /// the window is **inclusive at both ends** (a `to` day whose bars fell
     /// outside would silently lose the day the operator asked for); an
     /// **absent** bound means no bound (or every existing caller breaks); and a
-    /// **malformed** bound is ignored rather than refused, because this
-    /// narrows a request that is already valid without it.
+    /// **malformed** bound refuses rather than silently widening the request.
     #[tokio::test]
-    async fn bars_json_narrows_to_the_day_window_and_ignores_a_malformed_one() {
+    async fn bars_json_narrows_to_the_day_window_and_refuses_a_malformed_one() {
         let root = store_root("barsday");
         // THE MONTH AND THE STAMPS AGREE. `19_723` is 1970-01-01 plus 19,723
         // days, which is 2024-01-01, so the path says January 2024 and the bars
@@ -22223,16 +22206,11 @@ mod tests {
         let (_, _, tail) = read("&from=2024-01-02").await;
         assert_eq!(tail.matches("\"t\":").count(), 2, "the day and after it");
 
-        // AND A MALFORMED BOUND IS IGNORED, NOT REFUSED. This narrows a request
-        // that is already valid; refusing the whole month over a typo in an
-        // optional parameter would be the louder wrong answer.
+        // A malformed supplied bound cannot silently widen to the whole month.
         let (code, _, junk) = read("&from=not-a-day").await;
-        assert_eq!(code, axum::http::StatusCode::OK, "{junk}");
-        assert_eq!(
-            junk.matches("\"t\":").count(),
-            3,
-            "an unreadable bound is no bound: {junk}"
-        );
+        assert_eq!(code, axum::http::StatusCode::BAD_REQUEST, "{junk}");
+        assert!(junk.contains("from"), "named date refusal: {junk}");
+        assert_eq!(junk.matches("\"t\":").count(), 0, "no bar response: {junk}");
     }
 
     /// **A COMPLETE SESSION SCORES ZERO LOSSES, AND ONE MISSING MINUTE IS

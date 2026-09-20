@@ -83,12 +83,140 @@ impl Fixture {
     async fn get(&self, options: &str) -> (StatusCode, Value) {
         self.get_raw(&format!("{QUERY}&{options}")).await
     }
+
+    async fn get_month(&self, options: &str) -> (StatusCode, Value) {
+        let uri = format!(
+            "/bars.json?feed=dhan&exchange=NSE&segment=INDEX&symbol=NIFTY&month=2025-05&{options}"
+        )
+        .parse()
+        .expect("month URI");
+        let (status, headers, body) =
+            bars_json(axum::extract::State(Loaded::clone(&self.site)), uri).await;
+        assert_eq!(headers[0].1, "application/json; charset=utf-8");
+        (status, serde_json::from_str(&body).expect("month JSON"))
+    }
 }
 
 impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+#[tokio::test]
+async fn single_month_day_bounds_refuse_typos_and_reversed_ranges_before_open() {
+    let fixture = Fixture::new("month-date-refusals");
+    for (options, field) in [
+        ("from=not-a-day", "from"),
+        ("to=not-a-day", "to"),
+        ("from=2025-02-29", "from"),
+        ("to=2025-04-31", "to"),
+        ("from=2025-13-02", "from"),
+        ("to=2025-00-02", "to"),
+        ("from=2025-05-02&to=bad", "to"),
+        ("from=bad&to=2025-05-02", "from"),
+        ("from=2025-05-03&to=2025-05-02", "from"),
+    ] {
+        let (status, response) = fixture.get_month(options).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{options}: {response}");
+        assert!(
+            response["error"]
+                .as_str()
+                .expect("named refusal")
+                .contains(field)
+        );
+        assert!(response.get("bars").is_none());
+    }
+    let path = &fixture.paths[0];
+    let held = path.with_extension("held");
+    fs::rename(path, &held).expect("withhold owned source temporarily");
+    let (status, response) = fixture.get_month("from=bad").await;
+    fs::rename(held, path).expect("restore exact source");
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        response["error"]
+            .as_str()
+            .expect("date refusal")
+            .contains("from")
+    );
+    assert!(
+        !response["error"]
+            .as_str()
+            .expect("date refusal")
+            .contains("cannot open")
+    );
+}
+
+#[tokio::test]
+async fn single_month_day_windows_preserve_valid_rows_nulls_and_source_bytes() {
+    let fixture = Fixture::new("month-date-windows");
+    let originals: Vec<_> = fixture
+        .paths
+        .iter()
+        .flat_map(|path| [path.clone(), path.with_extension("crc")])
+        .map(|path| {
+            let bytes = fs::read(&path).expect("owned source or checksum");
+            (path, bytes)
+        })
+        .collect();
+    let (status, full) = fixture.get_month("").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(full.as_array().expect("bars").len(), 2);
+    assert!(full[0]["oi"].is_null());
+    assert_eq!(full[1]["oi"], 0);
+    assert_eq!(full[0]["o"], 100);
+    assert_eq!(full[1]["c"], 110);
+    for options in [
+        "from=&to=",
+        "from=2025-05-02&to=2025-05-02",
+        "from=2025-05-01&to=2025-05-02",
+        "from=2025-05-02",
+        "to=2025-05-02",
+    ] {
+        let (status, response) = fixture.get_month(options).await;
+        assert_eq!(status, StatusCode::OK, "{options}: {response}");
+        assert_eq!(response, full, "{options}");
+    }
+    for options in [
+        "from=2025-05-03",
+        "to=2025-05-01",
+        "from=2025-05-03&to=2025-05-04",
+    ] {
+        let (status, response) = fixture.get_month(options).await;
+        assert_eq!(status, StatusCode::OK, "{options}: {response}");
+        assert_eq!(response, serde_json::json!([]), "{options}");
+    }
+    for (path, bytes) in originals {
+        assert_eq!(fs::read(path).expect("unchanged source"), bytes);
+    }
+}
+
+#[test]
+fn single_day_window_checks_both_ist_midnights_at_microsecond_precision() {
+    // 2025-05-02 00:00 IST is 2025-05-01 18:30 UTC. These are literal UTC
+    // instants, independent of the parser's civil-day conversion arithmetic.
+    let first = 1_746_124_200_000_000;
+    let end = 1_746_210_600_000_000;
+    let bounds = day_window_bounds("from=2025-05-02&to=2025-05-02").expect("same day");
+    assert_eq!(bounds, (Some(first), Some(end)));
+    let rows: Vec<_> = [first - 1, first, end - 1, end]
+        .into_iter()
+        .map(|ts_micros| Bar {
+            ts_micros,
+            open: 100,
+            high: 110,
+            low: 90,
+            close: 100,
+            volume: 1,
+            open_interest: OI_NULL,
+        })
+        .collect();
+    let response: Value =
+        serde_json::from_str(&bars_array(&rows, bounds.0, bounds.1)).expect("exact window");
+    assert_eq!(response.as_array().expect("bars").len(), 2);
+    assert_eq!(response[0]["t"], first / 1_000_000);
+    assert_eq!(response[1]["t"], (end - 1) / 1_000_000);
+    assert!(response[0]["oi"].is_null());
 }
 
 #[tokio::test]
