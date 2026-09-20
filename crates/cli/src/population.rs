@@ -7221,6 +7221,84 @@ mod tests {
     }
 
     #[test]
+    fn every_population_companion_byte_preserves_the_original_authority_or_refuses() {
+        let root = root("v4-every-companion-byte");
+        std::fs::create_dir(&root).expect("exclusively owned population fixture");
+        let population_id = digest(132);
+        let rows = two_rows(population_id);
+        let receipt = receipt_v4(population_id, &rows);
+        let mut ledger = PopulationLedger::open(&root).expect("owned V4 ledger");
+        assert_eq!(
+            ledger.append_complete_v4(&rows, &receipt),
+            Ok(PopulationCommit::Written)
+        );
+        drop(ledger);
+
+        let mut changed_bytes = 0;
+        for (path, stride) in [
+            (PopulationLedger::row_path(&root), super::ROW_STRIDE_BYTES),
+            (
+                PopulationLedger::receipt_path(&root),
+                super::RECEIPT_STRIDE_BYTES,
+            ),
+            (
+                PopulationLedger::receipt_v3_path(&root),
+                super::RECEIPT_V3_STRIDE_BYTES,
+            ),
+            (
+                PopulationLedger::receipt_v4_path(&root),
+                super::RECEIPT_V4_STRIDE_BYTES,
+            ),
+        ] {
+            let original = std::fs::read(&path).expect("committed population companion");
+            for offset in 0..original.len() {
+                let mut changed = original.clone();
+                changed[offset] ^= 1;
+                if offset >= super::HEADER_BYTES {
+                    let start =
+                        super::HEADER_BYTES + (offset - super::HEADER_BYTES) / stride * stride;
+                    let seal_at = start + stride - super::SEAL_BYTES;
+                    if offset < seal_at {
+                        let seal = super::seal(&changed[start..seal_at]);
+                        changed[seal_at..start + stride].copy_from_slice(&seal);
+                    }
+                }
+                std::fs::write(&path, changed).expect("owned changed companion");
+                let accepted_original = match PopulationLedger::open_read(&root) {
+                    Ok(mut reader) if reader.receipt_v4(&population_id) == Some(receipt) => {
+                        matches!(
+                            reader.page_v4(&population_id, 0, 2),
+                            Ok(Some(page)) if page.rows == rows
+                        )
+                    }
+                    Ok(_) | Err(_) => false,
+                };
+                assert!(
+                    !accepted_original,
+                    "{} byte {offset} silently preserved the original authority",
+                    path.display()
+                );
+                changed_bytes += 1;
+            }
+            std::fs::write(&path, &original).expect("restore exact population companion");
+            let mut restored = PopulationLedger::open_read(&root)
+                .expect("restored population authenticates freshly");
+            assert_eq!(restored.receipt_v4(&population_id), Some(receipt));
+            assert_eq!(
+                restored
+                    .page_v4(&population_id, 0, 2)
+                    .expect("restored page reads")
+                    .expect("original authority exists")
+                    .rows,
+                rows
+            );
+            assert_eq!(std::fs::read(path).expect("read-only companion"), original);
+        }
+        assert_eq!(changed_bytes, 3_024);
+        std::fs::remove_dir_all(root).expect("remove only this owned fixture");
+    }
+
+    #[test]
     fn v4_commits_all_audit_layers_reuses_exactly_and_authorizes_bounded_pages() {
         let root = root("v4-commit-reopen");
         let _ = std::fs::remove_dir_all(&root);

@@ -64,7 +64,7 @@ use std::path::Path;
 
 use brutex_core::instrument::Contract;
 use brutex_core::vendor::Vendor;
-use store::file::BarFile;
+use store::file::{BarFile, StoreError};
 use store::path::{FileKind, PathParts, StorePath};
 
 use crate::manifest::Entry;
@@ -208,13 +208,15 @@ pub fn one(entry: &Entry, root: &Path, vendor: Vendor, symbol_id: u32) -> Findin
             // demand different action from an operator — one is "re-pull this
             // month", the other is "look at your disk" — and collapsing them
             // would be the fallback that hides a failure.
-            let text = why.to_string();
-            if text.contains("Missing") || text.contains("No such file") {
+            // Classify the typed storage refusal, not its rendered words. The
+            // Missing display says "does not exist", and a path can itself
+            // contain either of the old keywords without being absent.
+            if matches!(why, StoreError::Missing { .. }) {
                 return Finding::Missing { path: shown };
             }
             return Finding::Unreadable {
                 path: shown,
-                why: text,
+                why: why.to_string(),
             };
         }
     };
@@ -325,6 +327,113 @@ pub const fn contract_of(entry: &Entry) -> Option<Contract> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use brutex_core::instrument::{Exchange, Segment};
+    use brutex_core::symbol::Symbol;
+    use std::fs;
+    use store::format::{Bar, OI_NULL};
+    use store::path::{Timeframe, YearMonth};
+
+    #[test]
+    fn actual_file_findings_use_typed_failures_and_never_diagnostic_keywords()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!(
+            "brutex-scrub-Missing-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::create_dir(&root)?;
+        let ts = i64::from(crate::session::Day::new(2025, 5, 2)?.days_from_epoch())
+            * 86_400_000_000
+            + 21_600_000_000;
+        let entry = Entry {
+            key: crate::manifest::EntryKey {
+                contract: None,
+                exchange: Exchange::Nse,
+                segment: Segment::Index,
+                symbol: Symbol::new("NIFTY")?,
+                timeframe: Timeframe::DAY_1,
+                month: YearMonth::new(2025, 5)?,
+            },
+            rows: 1,
+            first_ts_micros: ts,
+            last_ts_micros: ts,
+        };
+        let path = StorePath::new(PathParts {
+            vendor: Vendor::Dhan,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: Timeframe::DAY_1,
+            month: entry.key.month,
+            file: FileKind::Bars,
+        })?;
+        let at = path.to_path_buf(&root);
+        assert_eq!(
+            one(&entry, &root, Vendor::Dhan, 7),
+            Finding::Missing {
+                path: at.display().to_string()
+            }
+        );
+        assert!(!at.exists(), "a scrub may not create the absent file");
+        drop(BarFile::open_or_create(&root, path, 7)?);
+        let empty = Entry {
+            rows: 0,
+            first_ts_micros: 0,
+            last_ts_micros: 0,
+            ..entry
+        };
+        assert_eq!(one(&empty, &root, Vendor::Dhan, 7), Finding::Agrees);
+        let mut writer = BarFile::open_or_create(&root, path, 7)?;
+        writer.append(&[Bar {
+            ts_micros: ts,
+            open: 100,
+            high: 110,
+            low: 90,
+            close: 105,
+            volume: 1,
+            open_interest: OI_NULL,
+        }])?;
+        drop(writer);
+        let original = fs::read(&at)?;
+        assert_eq!(one(&entry, &root, Vendor::Dhan, 7), Finding::Agrees);
+        let mut wrong = entry;
+        wrong.rows = 2;
+        assert_eq!(
+            one(&wrong, &root, Vendor::Dhan, 7),
+            Finding::Rows {
+                counted: 2,
+                held: 1
+            }
+        );
+        for counted in [
+            (ts - 60_000_000, ts),
+            (ts, ts + 60_000_000),
+            (ts + 60_000_000, ts + 60_000_000),
+        ] {
+            wrong = entry;
+            wrong.first_ts_micros = counted.0;
+            wrong.last_ts_micros = counted.1;
+            assert_eq!(
+                one(&wrong, &root, Vendor::Dhan, 7),
+                Finding::Bounds {
+                    counted,
+                    held: (ts, ts)
+                }
+            );
+        }
+        fs::write(&at, b"unreadable generated bar")?;
+        assert!(matches!(
+            one(&entry, &root, Vendor::Dhan, 7),
+            Finding::Unreadable { path, why } if path == at.display().to_string() && !why.is_empty()
+        ));
+        assert_eq!(fs::read(&at)?, b"unreadable generated bar");
+        fs::write(&at, &original)?;
+        assert_eq!(one(&entry, &root, Vendor::Dhan, 7), Finding::Agrees);
+        assert_eq!(fs::read(at)?, original);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
 
     /// Every finding says something an operator can act on, and no two say the
     /// same thing.

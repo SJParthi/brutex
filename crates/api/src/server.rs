@@ -30091,6 +30091,9 @@ mod calendar_route_tests;
 #[path = "bars_window_route_tests.rs"]
 mod bars_window_route_tests;
 
+#[path = "verification_route_tests.rs"]
+mod verification_route_tests;
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic, reason = "test-only assertions")]
 mod calendar_identity {

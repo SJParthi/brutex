@@ -36891,3 +36891,50 @@ the report itself contains each run's completeness verdict. This refactoring
 preserves the stronger explicit requirement on both runs without retaining that
 duplicated expression. No mutant exclusion, outcome waiver or coverage change is
 introduced; the final source must be enumerated and verified afresh.
+
+### D-0658 — Bind every persisted evidence byte beyond its outer seal — 2026-09-20
+
+Exercise the complete Pre-Admission V1 and V2 files with two committed logical
+rows apiece. V1 spans both index families; V2 contains a proven zero-candidate
+family and a nonzero family. Change one bit at every byte position in the
+header and both Data/Completion pairs, recomputing only the enclosing header
+or record seal when its payload changes. A fresh reader must refuse every
+changed file. Restore the exact original bytes and recover the original audits
+and values; V1 also compares its bounded page. These are generated fixtures
+in exclusively owned test directories, not modifications to operator data.
+
+Apply the same byte-level adversary to all four Population companions: rows,
+the V2 audit, V3 requested span and V4 calendar authority. Each changed file
+must either refuse or expose an authority different from the original held
+receipt; it may not retain that original receipt and its original rows. This
+distinguishes externally pinned authority from merely decoding a newly valid
+receipt after deliberate resealing. Each restored file must recover the exact
+original receipt and rows without any read-side mutation. No storage format,
+production authoring capability, validation floor or exclusion is changed.
+
+### D-0659 — Exercise the scrub's complete HTTP finding contract — 2026-09-20
+
+The route regression exposed a real classification defect: fifty-three absent
+files were reported as unreadable because `scrub::one` searched rendered error
+text for `Missing` or `No such file`, while the typed Missing error renders
+`does not exist`. A path containing either keyword could conversely turn an
+unreadable file into an apparent absence. Match the typed storage variant
+directly. The pull-crate regression uses real absent, healthy, miscounted,
+misbounded and corrupt files, including `Missing` in the owned fixture path.
+The feed parser's existing empty-value default remains Dhan and is tested as
+such; the first draft's assumption that an empty feed should refuse was wrong.
+
+Use generated stored bars and independently published census images to test
+the actual verification handler after the site has already loaded. A valid
+answer retains the selected feed and exact checked count. Missing files,
+unreadable files, incorrect row counts and different timestamp bounds remain
+distinct findings in status-200 answers with `verified=false`; none triggers
+repair, replacement or a counter rewrite. Missing or corrupted counters refuse
+with status 503 and an explicit reason. An unknown feed refuses before reading.
+
+A separate fixture has fifty-three missing entries: the route reports all
+fifty-three, names only fifty and discloses the three omitted descriptions.
+Repeated requests preserve the exact report. Restoring original generated
+bytes re-establishes verification without restarting the site. These tests do
+not read vendor credentials, contact a vendor, change operator storage or widen
+any coverage/mutation exclusion.

@@ -4192,6 +4192,119 @@ mod tests {
         )
     }
 
+    fn reject_each_resealed_byte(
+        path: &Path,
+        record_bytes: usize,
+        header_domain: &[u8],
+        record_domain: &[u8],
+        mut reopen: impl FnMut() -> TestResult,
+    ) -> TestResult<Vec<u8>> {
+        let original = must(std::fs::read(path), "committed fixture bytes")?;
+        for offset in 0..original.len() {
+            let mut changed = original.clone();
+            changed[offset] ^= 1;
+            if offset < HEADER_BYTES - SEAL_BYTES {
+                let seal = digest_domain(header_domain, &changed[..HEADER_BYTES - SEAL_BYTES]);
+                changed[HEADER_BYTES - SEAL_BYTES..HEADER_BYTES].copy_from_slice(&seal);
+            } else if offset >= HEADER_BYTES {
+                let start = HEADER_BYTES + (offset - HEADER_BYTES) / record_bytes * record_bytes;
+                let seal_at = start + record_bytes - SEAL_BYTES;
+                if offset < seal_at {
+                    let seal = digest_domain(record_domain, &changed[start..seal_at]);
+                    changed[seal_at..start + record_bytes].copy_from_slice(&seal);
+                }
+            }
+            must(std::fs::write(path, changed), "owned adversarial fixture")?;
+            assert!(
+                reopen().is_err(),
+                "resealed pre-admission byte {offset} must not authenticate"
+            );
+        }
+        must(
+            std::fs::write(path, &original),
+            "restore exact fixture bytes",
+        )?;
+        Ok(original)
+    }
+
+    #[test]
+    fn every_v1_pre_admission_byte_is_bound_beyond_its_outer_seal() -> TestResult {
+        let root = test_dir()?;
+        let configured = bounds(2)?;
+        let first = fixture(200)?;
+        let second = fixture(201)?;
+        let mut ledger = must(
+            PreAdmissionDataLedgerV1::open(root.path(), configured),
+            "V1 byte fixture initializes",
+        )?;
+        let first_audit = must(ledger.append_complete(&first), "first V1 pair commits")?.audit();
+        let second_audit = must(ledger.append_complete(&second), "second V1 pair commits")?.audit();
+        drop(ledger);
+        let path = root.path().join(DATA_FILE);
+        let original =
+            reject_each_resealed_byte(&path, RECORD_BYTES, HEADER_DOMAIN, RECORD_DOMAIN, || {
+                PreAdmissionDataLedgerV1::open_read(root.path(), configured).map(|_| ())
+            })?;
+        assert_eq!(original.len(), HEADER_BYTES + 4 * RECORD_BYTES);
+        let restored = must(
+            PreAdmissionDataLedgerV1::open_read(root.path(), configured),
+            "exactly restored V1 file authenticates",
+        )?;
+        for audit in [first_audit, second_audit] {
+            assert_eq!(
+                restored.reopen_audit(&audit.authority_id()),
+                Ok(Some(audit))
+            );
+        }
+        assert_eq!(
+            must(restored.page(0, 2), "restored V1 page")?.rows(),
+            &[first.with_sequence(0), second.with_sequence(1)]
+        );
+        assert_eq!(must(std::fs::read(path), "read-only V1 bytes")?, original);
+        Ok(())
+    }
+
+    #[test]
+    fn every_v2_pre_admission_byte_binds_zero_and_nonzero_candidate_families() -> TestResult {
+        let root = test_dir()?;
+        let configured = bounds_v2(2)?;
+        let zero = zero_fixture_v2(202)?;
+        let nonzero = observation_v2_nonzero_production_fixture(203)?.0.value;
+        let mut ledger = must(
+            PreAdmissionDataLedgerV2::open(root.path(), configured),
+            "V2 byte fixture initializes",
+        )?;
+        let zero_audit = must(ledger.append_complete(&zero), "zero V2 pair commits")?.audit();
+        let nonzero_audit =
+            must(ledger.append_complete(&nonzero), "nonzero V2 pair commits")?.audit();
+        drop(ledger);
+        let path = root.path().join(DATA_FILE_V2);
+        let original = reject_each_resealed_byte(
+            &path,
+            RECORD_BYTES_V2,
+            HEADER_DOMAIN_V2,
+            RECORD_DOMAIN_V2,
+            || PreAdmissionDataLedgerV2::open_read(root.path(), configured).map(|_| ()),
+        )?;
+        assert_eq!(original.len(), HEADER_BYTES_V2 + 4 * RECORD_BYTES_V2);
+        let restored = must(
+            PreAdmissionDataLedgerV2::open_read(root.path(), configured),
+            "exactly restored V2 file authenticates",
+        )?;
+        for (audit, expected) in [
+            (zero_audit, zero.with_sequence(0)),
+            (nonzero_audit, nonzero.with_sequence(1)),
+        ] {
+            assert_eq!(
+                restored.reopen_audit(&audit.authority_id()),
+                Ok(Some(audit))
+            );
+            assert_eq!(audit.value(), expected);
+        }
+        assert_eq!(must(std::fs::read(path), "read-only V2 bytes")?, original);
+        Ok(())
+    }
+
     #[test]
     fn exact_740_byte_data_and_completion_codecs_bind_every_semantic_field() -> TestResult {
         let value = fixture(10)?;
