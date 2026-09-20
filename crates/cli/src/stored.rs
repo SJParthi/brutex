@@ -696,6 +696,10 @@ const NSE_OPEN_MINUTE_V2: i64 = 555;
 const CALENDAR_POLICY_DIGEST_DOMAIN_V2: &[u8] = b"brutex.calendar-policy.v2\0";
 const CALENDAR_POLICY_RUNGS_V2: [u32; 8] = [60, 120, 180, 300, 600, 900, 1_800, 3_600];
 
+#[cfg(test)]
+static CALENDAR_POLICY_DIGEST_INITIALIZATIONS_V2: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 /// Canonical identity of the complete measured-calendar interpretation policy.
 ///
 /// A calendar *receipt* identifies one offered timestamp slice and requested
@@ -707,16 +711,26 @@ const CALENDAR_POLICY_RUNGS_V2: [u32; 8] = [60, 120, 180, 300, 600, 900, 1_800, 
 ///
 /// # Cost
 ///
-/// O(D) time for the D days in the measured calendar and O(1) auxiliary space.
-/// Each open day hashes at most [`MAX_WINDOWS`] windows.  This is run-boundary
-/// provenance work, not a sweep inner-loop primitive, and is deliberately not
-/// described as total O(1) work.
+/// The first call takes O(D) time for the D compiled calendar days and O(1)
+/// auxiliary space. Every later call copies the same 32-byte identity in O(1).
+/// Concurrent first callers share one initialization. Every input is compiled
+/// into this binary; no runtime calendar, source file, receipt, or file epoch
+/// is cached. Rebuilding with a changed policy recomputes its complete digest.
 ///
 /// **UNVERIFIED as a measured bound.** No bench in this workspace
 /// times this, so the shape above is read from the source rather
 /// than measured. `CLAUDE.md` §3 rule 6.
 #[must_use]
 pub fn calendar_policy_digest_v2() -> [u8; 32] {
+    static POLICY: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+    *POLICY.get_or_init(|| {
+        #[cfg(test)]
+        CALENDAR_POLICY_DIGEST_INITIALIZATIONS_V2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        build_calendar_policy_digest_v2()
+    })
+}
+
+fn build_calendar_policy_digest_v2() -> [u8; 32] {
     let mut hasher = brutex_core::blake3::Hasher::new();
     hasher.update(CALENDAR_POLICY_DIGEST_DOMAIN_V2);
     hasher.update(&CALENDAR_RECEIPT_SCHEMA_V2.to_le_bytes());
@@ -4848,6 +4862,34 @@ mod tests {
             one_hour_coverage.digest(),
             "policy and coverage remain separate at every rung"
         );
+    }
+
+    #[test]
+    fn calendar_policy_digest_initializes_once_and_preserves_the_existing_identity() {
+        // Recorded from the uncached implementation at ce734b5d. This pins
+        // the existing wire identity, not a second calendar implementation.
+        let expected = [
+            0x6b, 0x74, 0xf9, 0x1d, 0xae, 0x45, 0x00, 0x7f, 0x09, 0xb4, 0xca, 0xfb, 0xb2, 0xac,
+            0xde, 0x9b, 0x78, 0x22, 0x25, 0x9f, 0xb9, 0x0c, 0x24, 0xa0, 0x39, 0x5b, 0x1a, 0xc5,
+            0xa1, 0x6d, 0x80, 0x7c,
+        ];
+        std::thread::scope(|scope| {
+            let check = || {
+                for _ in 0..64 {
+                    assert_eq!(calendar_policy_digest_v2(), expected);
+                }
+            };
+            let first = scope.spawn(check);
+            let second = scope.spawn(check);
+            first.join().expect("first policy reader");
+            second.join().expect("second policy reader");
+        });
+        assert_eq!(
+            CALENDAR_POLICY_DIGEST_INITIALIZATIONS_V2.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "immutable compiled policy is digested once even across concurrent ledger readers"
+        );
+        assert_eq!(build_calendar_policy_digest_v2(), expected);
     }
 
     #[test]

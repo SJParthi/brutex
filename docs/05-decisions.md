@@ -37332,3 +37332,25 @@ also test 27 invalid source components, including calendar, feed, commit, grid,
 column and context identities. A valid checksum therefore cannot substitute
 for the semantic checks on the facts it encloses. All values and files used
 for these probes are generated test evidence, not market observations.
+
+### D-0674 — Reuse the immutable compiled calendar-policy digest — 2026-09-20
+
+Every calendar-policy comparison rebuilt a BLAKE3 digest over all 2,469 days
+in the compiled calendar, even while decoding successive ledger records under
+the same running binary. A generated concurrent-read regression measured 128
+initializations for 128 calls. The calendar function and all policy inputs are
+immutable compiled tables and constants; they do not consult runtime settings,
+the store or vendor services.
+
+One process-local `OnceLock` now initializes that digest once and returns its
+32 bytes for subsequent checks. The existing builder and exact hash framing
+are retained. The first call still scans the complete compiled calendar; this
+is not a claim that cold initialization or an entire ledger audit is O(1).
+Concurrent first callers share initialization. A rebuilt binary starts with
+an empty cell, so a changed compiled calendar or policy is hashed anew.
+
+The test pins the pre-cache digest, compares a fresh uncached recomputation,
+and counts one initialization across concurrent readers. Calendar receipts for
+actual timestamp spans, data digests, source-file epochs and durable-ledger
+authentication are unchanged. No persisted record, format version, policy
+identity or runtime source check is replaced by this cache.
