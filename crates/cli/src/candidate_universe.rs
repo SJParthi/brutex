@@ -5445,6 +5445,11 @@ fn validate_stream_facts(
             "candidate {name} stream runs backward: {first} is after {last}"
         ));
     }
+    if (count == 1) != (first == last) {
+        return Err(format!(
+            "candidate {name} stream count and timestamp bounds disagree: {count} records over {first}..={last}"
+        ));
+    }
     require_nonzero_digest(&format!("candidate {name} stream"), digest)
 }
 
@@ -7417,6 +7422,152 @@ mod tests {
             CandidateUniverseReceiptV1::decode(&resealed_record)
                 .expect_err("a re-sealed calendar interval foreign to the request must refuse")
                 .contains("requested month span")
+        );
+    }
+
+    fn resealed_fixture_receipt(
+        mut receipt: CandidateUniverseReceiptV1,
+    ) -> [u8; RECEIPT_STRIDE_BYTES] {
+        receipt.descriptor.universe_id = derive_universe_id(&receipt.descriptor);
+        let payload = receipt.payload_without_content_check();
+        let mut record = [0_u8; RECEIPT_STRIDE_BYTES];
+        record[..RECEIPT_PAYLOAD_BYTES].copy_from_slice(&payload);
+        record[RECEIPT_PAYLOAD_BYTES..]
+            .copy_from_slice(&digest_domain(RECEIPT_CONTENT_DOMAIN, &payload));
+        record
+    }
+
+    #[test]
+    fn resealed_candidate_stream_counts_must_agree_with_singleton_timestamp_bounds() {
+        let original = *prepared(11).receipt();
+        for signal in [true, false] {
+            for (count, first, last) in [(1, 1_000_000, 2_000_000), (2, 1_000_000, 1_000_000)] {
+                let mut changed = original;
+                if signal {
+                    changed.descriptor.signal_stream.count = count;
+                    changed.descriptor.signal_stream.first_ts_micros = first;
+                    changed.descriptor.signal_stream.last_ts_micros = last;
+                } else {
+                    changed.descriptor.execution_stream.count = count;
+                    changed.descriptor.execution_stream.first_ts_micros = first;
+                    changed.descriptor.execution_stream.last_ts_micros = last;
+                }
+                let record = resealed_fixture_receipt(changed);
+                let refusal = CandidateUniverseReceiptV1::decode(&record)
+                    .expect_err("resealing cannot make inconsistent stream bounds possible");
+                assert!(
+                    refusal.contains("count and timestamp bounds disagree"),
+                    "{refusal}"
+                );
+            }
+        }
+        let mut singleton = original;
+        singleton.descriptor.signal_stream.count = 1;
+        singleton.descriptor.signal_stream.last_ts_micros =
+            singleton.descriptor.signal_stream.first_ts_micros;
+        singleton.descriptor.execution_stream.count = 1;
+        singleton.descriptor.execution_stream.last_ts_micros =
+            singleton.descriptor.execution_stream.first_ts_micros;
+        let record = resealed_fixture_receipt(singleton);
+        let decoded =
+            CandidateUniverseReceiptV1::decode(&record).expect("coherent singleton facts");
+        assert_eq!(decoded.signal_stream().count(), 1);
+        assert_eq!(
+            decoded.signal_stream().first_ts_micros(),
+            decoded.signal_stream().last_ts_micros()
+        );
+        assert_eq!(decoded.execution_stream().count(), 1);
+        assert_eq!(
+            decoded.execution_stream().first_ts_micros(),
+            decoded.execution_stream().last_ts_micros()
+        );
+        assert_eq!(decoded.record().expect("canonical retry"), record);
+    }
+
+    #[test]
+    fn resealing_candidate_receipts_cannot_hide_invalid_source_components() {
+        type Damage = (&'static str, fn(&mut CandidateUniverseDescriptorV1));
+        let cases: &[Damage] = &[
+            ("zero horizon", |d| d.horizon_bars = 0),
+            ("unsupported rung", |d| d.rung_seconds = 61),
+            ("zero data", |d| d.identities.data_digest = [0; 32]),
+            ("zero feed", |d| d.identities.feed_digest = [0; 32]),
+            ("zero commit", |d| {
+                d.identities.source_commit_digest = [0; 32];
+            }),
+            ("zero vocabulary", |d| {
+                d.identities.vocabulary_digest = [0; 32];
+            }),
+            ("zero evaluation policy", |d| {
+                d.identities.evaluation_policy_digest = [0; 32];
+            }),
+            ("foreign calendar policy", |d| {
+                d.identities.calendar_policy_digest = [1; 32];
+            }),
+            ("zero prior reference", |d| {
+                d.identities.daily_reference_policy_digest = [0; 32];
+            }),
+            ("zero long policy", |d| {
+                d.identities.exit_grids.long.policy_digest = [0; 32];
+            }),
+            ("zero long grid", |d| {
+                d.identities.exit_grids.long.resolved_digest = [0; 32];
+            }),
+            ("zero short policy", |d| {
+                d.identities.exit_grids.short.policy_digest = [0; 32];
+            }),
+            ("zero short grid", |d| {
+                d.identities.exit_grids.short.resolved_digest = [0; 32];
+            }),
+            ("foreign signal cadence", |d| {
+                d.calendar_coverage.signal_rung_seconds = 180;
+            }),
+            ("coarse execution", |d| {
+                d.calendar_coverage.execution_rung_seconds = 180;
+            }),
+            ("backward calendar", |d| {
+                d.calendar_coverage.last_day = d.calendar_coverage.first_day - 1;
+            }),
+            ("shortened calendar", |d| d.calendar_coverage.last_day -= 1),
+            ("absent signal calendar", |d| {
+                d.calendar_coverage.signal_complete_receipt_digest = [0; 32];
+            }),
+            ("absent execution calendar", |d| {
+                d.calendar_coverage.execution_complete_receipt_digest = [0; 32];
+            }),
+            ("empty signal", |d| d.signal_stream.count = 0),
+            ("backward signal", |d| {
+                d.signal_stream.first_ts_micros = d.signal_stream.last_ts_micros + 1;
+            }),
+            ("absent signal digest", |d| d.signal_stream.digest = [0; 32]),
+            ("empty execution", |d| d.execution_stream.count = 0),
+            ("backward execution", |d| {
+                d.execution_stream.first_ts_micros = d.execution_stream.last_ts_micros + 1;
+            }),
+            ("absent execution digest", |d| {
+                d.execution_stream.digest = [0; 32];
+            }),
+            ("absent signal column", |d| d.signal_column_digest = [0; 32]),
+            ("absent execution column", |d| {
+                d.execution_column_digest = [0; 32];
+            }),
+        ];
+        let original = *prepared(12).receipt();
+        for &(name, damage) in cases {
+            let mut changed = original;
+            damage(&mut changed.descriptor);
+            let refusal = CandidateUniverseReceiptV1::decode(&resealed_fixture_receipt(changed))
+                .expect_err(name);
+            assert!(!refusal.is_empty(), "{name}");
+            assert!(
+                !refusal.contains("seal mismatch"),
+                "the actual {name} guard must reject: {refusal}"
+            );
+        }
+        let record = original.record().expect("unchanged original");
+        assert_eq!(
+            CandidateUniverseReceiptV1::decode(&record).expect("restored original"),
+            original
         );
     }
 

@@ -37311,3 +37311,24 @@ retry bytes, withheld samples, missing or corrupt authorities, and the refusal
 when no session remains. The fixture's explicit finite candidate budget is
 retained in its identity and terminal evidence; a halted test run is never
 asserted to be complete.
+
+### D-0673 — Refuse contradictory candidate stream bounds — 2026-09-20
+
+Candidate signal and execution stream facts carry a record count and exact
+first/last timestamps. Their common validation refused zero counts and reversed
+bounds but accepted a single record with different endpoints, or several
+records with the same endpoint. An owned generated receipt with its universe
+identity and full record seal recomputed demonstrated the first acceptance.
+
+The shared fixed-field check now requires a singleton exactly when the two
+endpoints are equal. The existing zero-count, reversed-bound and absent-digest
+refusals remain. This adds no scan, changes no record stride or version, and
+does not manufacture source authority: subsequent source and calendar checks
+still apply. Coherent singleton facts and existing distinct-endpoint streams
+retain byte-exact round trips.
+
+The tests corrupt each stream independently after recomputing both seals and
+also test 27 invalid source components, including calendar, feed, commit, grid,
+column and context identities. A valid checksum therefore cannot substitute
+for the semantic checks on the facts it encloses. All values and files used
+for these probes are generated test evidence, not market observations.
