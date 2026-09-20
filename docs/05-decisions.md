@@ -37114,3 +37114,39 @@ pricing-boundary test: reversing the completed-landing guard survived while
 every fixture omitted a rate. A rate-supplied loopback fixture now observes
 both sides: only a completed landing reaches pricing, and a census failure
 retains committed bars without starting it. No production pricing rule changes.
+
+### D-0666 — Report acknowledged Greek files and preserve pricing read refusals — 2026-09-20
+
+A generated named-contract pull wrote 375 Greek records to its existing .grk
+format while the receipt still said they were computed and dropped because
+the overlay could not hold them. Another successful source-bar pull retained a
+missing-spot pricing reason internally but rendered no pricing explanation:
+the reason arrived before any priced or refused row could be counted. The
+spot reader also discarded every read error into the same missing-file label,
+including a present but corrupt file.
+
+Cache Result<SpotBook, String> per month so successful joins and actual read
+refusals are each obtained once. Display retained pricing notes even when no
+per-row count is known; do not invent that count. Keep source-bar completion
+separate from pricing availability, and preserve the concrete file-read error
+instead of diagnosing corruption as absence.
+
+Count acknowledged Greek filing separately from computation. The named path
+credits rows only after its existing filing check; the rolling path credits
+them only after both source landing and Greek filing reach their success
+boundary. Aggregate that count across rolling groups. Receipts state how many
+rows were confirmed stored alongside their option bars in .grk files, or that
+no Greek rows were confirmed written. Exact replay acknowledgements are
+included and explicitly labelled; this is not a count of newly appended rows.
+An unaddressable Greek timeframe refuses instead of masquerading as a writer
+acknowledgement. Readable-day bounds currently make the month refusal
+unreachable, but its error also remains explicit.
+
+Generated loopback fixtures compare the named receipt with actual .grk headers
+and exercise missing/corrupt spot input and blocked Greek files. A rolling
+fixture separates successful computation from a blocked source file and a
+blocked Greek file, then checks aggregate confirmed counts. All files and
+transports are exclusively owned by the fixtures; no credential store or real
+vendor is used. The format, pricing model, rate source, engine surface and
+automatic pulling policy are unchanged. The added counters are constant work;
+month loading and batch filing retain their existing input-sized costs.

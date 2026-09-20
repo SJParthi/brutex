@@ -188,7 +188,7 @@ impl Fixture {
 
     fn bar_path(&self, index: usize) -> StorePath<'_> {
         StorePath::new(PathParts {
-            vendor: Vendor::Groww,
+            vendor: self.wire.store_vendor,
             exchange: "NSE",
             segment: "FNO",
             symbol: "NIFTY",
@@ -198,6 +198,100 @@ impl Fixture {
             file: FileKind::Bars,
         })
         .expect("owned named-contract address")
+    }
+
+    fn enable_pricing(&mut self) {
+        self.asked = ingest::parse_fno(
+            "underlying=NIFTY&series=opt&vendor=groww&from=2025-07-01&to=2025-07-01&rate=0",
+            self.today,
+        )
+        .expect("generated operator-supplied zero rate");
+        assert!(self.asked.rate.is_some());
+    }
+
+    fn enable_rolling_pricing(&mut self) {
+        self.asked = ingest::parse_fno(
+            "underlying=NIFTY&series=opt&vendor=dhan&from=2025-07-01&to=2025-07-01&rate=0",
+            self.today,
+        )
+        .expect("generated rolling request with an operator-supplied rate");
+        let spec = match self.asked.feed.descriptor().transport {
+            pull::vendor::Transport::Http(spec) => Some(spec),
+            pull::vendor::Transport::LocalArchive(_) => None,
+        }
+        .expect("the rolling fixture requires an HTTP descriptor");
+        self.wire.spec = pull::vendor::HttpSpec {
+            base_url: "http://127.0.0.1:0",
+            ..spec
+        };
+        self.wire.store_vendor = Vendor::Dhan;
+    }
+
+    async fn roll(&self) -> Rolled {
+        let rolling = self.wire.spec.fno.by_offset().expect("rolling descriptor");
+        roll_one(
+            &self.asked,
+            &self.site,
+            &self.wire,
+            "13",
+            "OPTIDX",
+            "MONTH",
+            "1",
+            "ATM",
+            "CALL",
+            &format!("{}/owned-rolling", self.wire.spec.base_url),
+            rolling,
+            self.asked.window,
+            self.today,
+        )
+        .await
+        .expect("the fixture's complete rolling answer remains reportable")
+    }
+
+    fn symbol_id() -> u32 {
+        let hash = brutex_core::universe::fnv1a("NIFTY").to_le_bytes();
+        u32::from_le_bytes(hash[..4].try_into().expect("canonical symbol slot"))
+    }
+
+    fn hold_spot(&mut self) -> PathBuf {
+        let path = StorePath::new(PathParts {
+            vendor: Vendor::Groww,
+            exchange: "NSE",
+            segment: Segment::Index.as_str(),
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: Timeframe::MINUTE_1,
+            month: YearMonth::new(2025, 7).expect("generated month"),
+            file: FileKind::Bars,
+        })
+        .expect("generated spot address");
+        let first = i64::from(
+            Day::new(2025, 7, 1)
+                .expect("generated day")
+                .days_from_epoch(),
+        ) * 86_400_000_000
+            + 13_500_000_000;
+        let bars: Vec<_> = (0..375)
+            .map(|minute| Bar {
+                ts_micros: first + minute * 60_000_000,
+                open: 2_400_000,
+                high: 2_400_000,
+                low: 2_400_000,
+                close: 2_400_000,
+                volume: 0,
+                open_interest: OI_NULL,
+            })
+            .collect();
+        let mut writer = store::file::BarFile::open_or_create(&self.root, path, Self::symbol_id())
+            .expect("owned generated spot writer");
+        writer
+            .append(&bars)
+            .expect("complete generated spot session");
+        drop(writer);
+        let path = path.to_path_buf(&self.root);
+        self.originals
+            .push((path.clone(), fs::read(&path).expect("spot bytes")));
+        path
     }
 
     async fn report(&self) -> (StatusCode, String, audit::Record) {
@@ -697,12 +791,208 @@ async fn named_pricing_requires_a_complete_landing_even_when_source_bars_committ
                     .priced
                     .why
                     .iter()
-                    .any(|why| why.contains("index month is not on disk")),
+                    .any(|why| why.contains("index month could not be read")),
                 "a completed landing must reach pricing and retain its actual missing-input reason: {:?}",
                 landed.priced
             );
         }
         assert!(fixture.bar_path(0).to_path_buf(&fixture.root).is_file());
+        assert_eq!(transport.seen.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+}
+
+#[tokio::test]
+async fn named_pricing_receipt_preserves_missing_and_corrupt_spot_reasons() {
+    for corrupt in [false, true] {
+        let mut fixture = Fixture::new(1);
+        fixture.enable_pricing();
+        if corrupt {
+            let path = fixture.hold_spot();
+            let damaged = b"owned invalid spot file".to_vec();
+            fs::write(&path, &damaged).expect("damage only the owned spot fixture");
+            fixture.originals = vec![(path, damaged)];
+        }
+        let actual_reason = read_month_bars(
+            &fixture.site,
+            &fixture.wire,
+            "NIFTY",
+            Segment::Index.as_str(),
+            None,
+            Timeframe::MINUTE_1,
+            YearMonth::new(2025, 7).expect("generated month"),
+        )
+        .expect_err("the fixture's spot input is absent or corrupt");
+        let transport = fixture.serve(complete_session()).await;
+        let (status, body, record) = fixture.report().await;
+        assert_eq!(status, StatusCode::OK, "the source bars completed: {body}");
+        assert_eq!(record.bars_stored, 375);
+        assert_eq!(record.rows_read, 385);
+        assert_eq!(record.failures, 0);
+        assert!(body.contains("Pricing notes"), "{body}");
+        assert!(body.contains("index month could not be read"), "{body}");
+        assert!(body.contains(&render::escape(&actual_reason)), "{body}");
+        assert!(!body.contains("index month is not on disk"), "{body}");
+        assert!(
+            body.contains("no Greek rows were confirmed written"),
+            "{body}"
+        );
+        assert!(
+            !fixture
+                .bar_path(0)
+                .with_file(FileKind::Greeks)
+                .to_path_buf(&fixture.root)
+                .exists()
+        );
+        assert_eq!(transport.seen.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+}
+
+fn rolling_session() -> String {
+    let first = i64::from(
+        Day::new(2025, 7, 1)
+            .expect("generated trading day")
+            .days_from_epoch(),
+    ) * 86_400
+        + 13_500;
+    let stamps: Vec<_> = (0..375).map(|minute| first + minute * 60).collect();
+    serde_json::json!({"data": {"ce": {
+        "timestamp": stamps,
+        "open": vec![100; 375], "high": vec![110; 375],
+        "low": vec![90; 375], "close": vec![105; 375],
+        "volume": vec![1; 375], "oi": vec![0; 375],
+        "iv": vec![0.2; 375], "spot": vec![24_000; 375], "strike": vec![24_000; 375]
+    }, "pe": null}})
+    .to_string()
+}
+
+#[tokio::test]
+async fn rolling_pricing_receipt_counts_only_acknowledged_greek_files() {
+    let mut combined = PricedCount::default();
+    for obstruction in [None, Some(FileKind::Bars), Some(FileKind::Greeks)] {
+        let mut fixture = Fixture::new(1);
+        fixture.enable_rolling_pricing();
+        if let Some(kind) = obstruction {
+            fs::create_dir_all(
+                fixture
+                    .bar_path(0)
+                    .with_file(kind)
+                    .to_path_buf(&fixture.root),
+            )
+            .expect("block only an owned fixture file");
+        }
+        let transport = fixture.serve(rolling_session()).await;
+        let done = fixture.roll().await;
+        assert_eq!(
+            done.priced.rows, 375,
+            "every generated quote priced: {done:?}"
+        );
+        assert_eq!(done.priced.solved, 0, "the fixture supplied volatility");
+        assert_eq!(done.failed, usize::from(obstruction.is_some()));
+        let facts = greek_facts(&done.priced, false);
+        let location = facts
+            .iter()
+            .find(|(name, _)| *name == "Where the greeks were stored")
+            .expect("the receipt states the filing outcome");
+        if obstruction.is_none() {
+            let file = store::file::BarFile::open_existing(
+                &fixture.root,
+                fixture.bar_path(0).with_file(FileKind::Greeks),
+                Fixture::symbol_id(),
+            )
+            .expect("the rolling Greek file was really committed");
+            assert_eq!(file.records(), 375);
+            assert_eq!(done.priced.filed, 375);
+            assert!(location.1.contains("375 confirmed stored"), "{facts:?}");
+        } else {
+            assert_eq!(done.priced.filed, 0);
+            assert!(
+                location.1.contains("no Greek rows were confirmed written"),
+                "{facts:?}"
+            );
+            assert!(!done.why.is_empty(), "the filing refusal is retained");
+            if obstruction == Some(FileKind::Bars) {
+                assert!(
+                    !fixture
+                        .bar_path(0)
+                        .with_file(FileKind::Greeks)
+                        .to_path_buf(&fixture.root)
+                        .exists()
+                );
+            }
+        }
+        combined.absorb_count(&done.priced);
+        assert_eq!(
+            combined.filed, 375,
+            "refused groups add no confirmed writes"
+        );
+        assert_eq!(transport.seen.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+    assert_eq!(combined.rows, 1_125);
+    assert_eq!(combined.filed, 375);
+}
+
+#[test]
+fn greek_filing_refuses_an_unaddressable_rung_without_claiming_a_write() {
+    let mut fixture = Fixture::new(1);
+    fixture.asked.granularity = pull::vendor::Granularity::Tick;
+    let why = file_the_greeks(
+        &[],
+        fixture.chain.contracts[0].contract,
+        &fixture.asked,
+        &fixture.site,
+        &fixture.wire,
+        fixture.asked.window,
+    )
+    .expect("an unaddressable Greek file must refuse rather than acknowledge");
+    assert!(why.contains("no Greek-file timeframe"), "{why}");
+    assert!(!fixture.root.join("dhan").exists());
+    assert!(!fixture.root.join("groww").exists());
+}
+
+#[tokio::test]
+async fn named_pricing_receipt_matches_the_greek_file_commit_or_its_refusal() {
+    for block_greeks in [false, true] {
+        let mut fixture = Fixture::new(1);
+        fixture.enable_pricing();
+        fixture.hold_spot();
+        let greek_path = fixture
+            .bar_path(0)
+            .with_file(FileKind::Greeks)
+            .to_path_buf(&fixture.root);
+        if block_greeks {
+            fs::create_dir_all(&greek_path).expect("block only the owned Greek file");
+        }
+        let transport = fixture.serve(complete_session()).await;
+        let (status, body, record) = fixture.report().await;
+        assert_eq!(status, StatusCode::OK, "the source bars completed: {body}");
+        assert_eq!(record.bars_stored, 375);
+        assert_eq!(record.failures, 0);
+        if block_greeks {
+            assert!(greek_path.is_dir());
+            assert!(body.contains("Rows that could not be priced"), "{body}");
+            assert!(body.contains("could not be filed"), "{body}");
+            assert!(
+                body.contains("no Greek rows were confirmed written"),
+                "{body}"
+            );
+        } else {
+            let file = store::file::BarFile::open_existing(
+                &fixture.root,
+                fixture.bar_path(0).with_file(FileKind::Greeks),
+                Fixture::symbol_id(),
+            )
+            .expect("actual committed Greek file");
+            assert_eq!(file.records(), 375);
+            assert!(
+                body.contains("375 (375 solved here, 0 sent by the vendor)"),
+                "{body}"
+            );
+            assert!(
+                body.contains("375 confirmed stored alongside their option bars in .grk files"),
+                "{body}"
+            );
+            assert!(!body.contains("computed, counted and dropped"), "{body}");
+        }
         assert_eq!(transport.seen.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 }

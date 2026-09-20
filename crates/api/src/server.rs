@@ -10743,6 +10743,9 @@ fn price_chain_contract(
             wire,
         );
         into.absorb(&priced);
+        // This path clears the rows when filing fails. Only an acknowledged
+        // append (including an exact replay) reaches this count.
+        into.filed = into.filed.saturating_add(priced.rows.len());
     }
 }
 
@@ -10858,10 +10861,9 @@ async fn fetch_chain_chunks(
 /// same 375 index bars two hundred times to answer the same question —
 /// `docs/07-o1-architecture.md` law 3.
 ///
-/// The inner `Option` is a **CACHED ABSENCE**, and that is the part worth
-/// naming: a month whose index is not on disk must be remembered as not on
-/// disk, or every contract re-opens a file that is not there and the miss costs
-/// more than the hit.
+/// The inner `Result` caches a read refusal as well as a book. Missing and
+/// corrupt months keep their actual reason without reopening the same failed
+/// file for every contract.
 ///
 /// # Cost
 ///
@@ -10871,7 +10873,8 @@ async fn fetch_chain_chunks(
 /// shape of the code and no bench in this workspace times it.
 /// `CLAUDE.md` §3 rule 6: a structural argument is not a
 /// measurement, however sound it is.
-type SpotBooks = std::collections::HashMap<store::path::YearMonth, Option<pull::pricing::SpotBook>>;
+type SpotBooks =
+    std::collections::HashMap<store::path::YearMonth, Result<pull::pricing::SpotBook, String>>;
 
 /// Turns one month of stored bars into quotes the model can take.
 ///
@@ -11028,14 +11031,18 @@ fn price_chain_month(
             )
         })
         .as_ref();
-    let Some(book) = book else {
-        note_price_refusal(
-            &mut out,
-            "the underlying's index month is not on disk, so no bar has a spot \
-             level to be priced against. Pull the spot series for this month \
-             first — nothing was invented in its place",
-        );
-        return out;
+    let book = match book {
+        Ok(book) => book,
+        Err(why) => {
+            note_price_refusal(
+                &mut out,
+                &format!(
+                    "the underlying's index month could not be read: {why}. \
+                      No spot level was invented in its place"
+                ),
+            );
+            return out;
+        }
     };
 
     let bars = match read_month_bars(
@@ -11809,10 +11816,13 @@ async fn roll_one(
         // are true and neither implies killing the other 251 runs.** The
         // consequence is scoped to THIS contract-month; scoping the reaction to
         // the whole walk was the same conflation the two `?` above made.
-        if !records.is_empty()
-            && let Some(why) = file_the_greeks(&records, contract, asked, site, wire, window)
-        {
-            note_run_failure(&mut failed, &mut why_not, format!("{label}: {why}"));
+        if !records.is_empty() {
+            match file_the_greeks(&records, contract, asked, site, wire, window) {
+                Some(why) => {
+                    note_run_failure(&mut failed, &mut why_not, format!("{label}: {why}"));
+                }
+                None => priced.filed = priced.filed.saturating_add(records.len()),
+            }
         }
         // COLLECTED, NOT WRITTEN PER GROUP.
         census_rows.extend(pending);
@@ -11854,7 +11864,7 @@ async fn roll_one(
 /// measurement, however sound it is.
 fn greek_facts(priced: &PricedCount, no_rate: bool) -> Vec<(&'static str, String)> {
     let mut rows = Vec::new();
-    if priced.ran() {
+    if priced.ran() || !priced.why.is_empty() {
         rows.push((
             "Rows priced",
             format!(
@@ -11869,6 +11879,8 @@ fn greek_facts(priced: &PricedCount, no_rate: bool) -> Vec<(&'static str, String
                 "Rows that could not be priced",
                 format!("{} — {}", priced.refused, priced.why.join(" · ")),
             ));
+        } else if !priced.why.is_empty() {
+            rows.push(("Pricing notes", priced.why.join(" · ")));
         }
         if priced.below_band > 0 {
             // NOT A WARNING, A FACT ABOUT THE ROWS. `crates/greeks` skips
@@ -11885,16 +11897,19 @@ fn greek_facts(priced: &PricedCount, no_rate: bool) -> Vec<(&'static str, String
                 ),
             ));
         }
-        // AND WHERE THEY WENT, WHICH IS NOWHERE YET. Saying "rows priced" and
-        // leaving an operator to find an empty directory is the §4 fallback
-        // that hides a failure; saying it here is the loud degrade it allows.
+        // Computation and acknowledged filing are separate facts. A rolling
+        // group can price successfully before its bars or Greek file refuse.
         rows.push((
             "Where the greeks were stored",
-            "nowhere — store::format::Overlay is exactly 24 bytes (stamp, \
-             spot, implied volatility) and five greeks do not fit. §4 makes a \
-             new field a new file version at its own stride, so these were \
-             computed, counted and dropped"
-                .to_owned(),
+            if priced.filed == 0 {
+                "no Greek rows were confirmed written".to_owned()
+            } else {
+                format!(
+                    "{} confirmed stored alongside their option bars in .grk files \
+                     (including exact replays)",
+                    priced.filed
+                )
+            },
         ));
     } else if no_rate {
         rows.push((
@@ -12078,8 +12093,8 @@ fn read_month_bars(
 /// vendor's own contract — no volatility and no spot — so the level has to come
 /// from the index bars this store already holds, joined by stamp.
 ///
-/// `None` when the index month is not held: the option bars then cannot be
-/// priced, which is reported as a refusal per row rather than guessed at.
+/// A read refusal retains its reason, including missing and corrupt input.
+/// No per-row refusal count is invented before the option bars are read.
 ///
 /// # Cost
 ///
@@ -12097,7 +12112,7 @@ fn spot_book_for(
     underlying: &str,
     timeframe: store::path::Timeframe,
     month: store::path::YearMonth,
-) -> Option<pull::pricing::SpotBook> {
+) -> Result<pull::pricing::SpotBook, String> {
     let bars = read_month_bars(
         site,
         wire,
@@ -12109,9 +12124,8 @@ fn spot_book_for(
         None,
         timeframe,
         month,
-    )
-    .ok()?;
-    Some(pull::pricing::SpotBook::of(&bars))
+    )?;
+    Ok(pull::pricing::SpotBook::of(&bars))
 }
 
 /// Counts one failed run and keeps its reason, capped.
@@ -12255,7 +12269,8 @@ fn greek_records(done: &pull::pricing::PricedAll) -> Vec<store::format::Greek> {
 ///
 /// # Cost
 ///
-/// One path build, one open, one append. O(1) per call.
+/// One path build, one open and one batch append: O(records) for the batch,
+/// with fixed-width work per record. Filesystem latency is not bounded here.
 ///
 /// **UNVERIFIED as a measurement.** The bound is argued from the
 /// shape of the code and no bench in this workspace times it.
@@ -12269,8 +12284,13 @@ fn file_the_greeks(
     wire: &Wire,
     window: pull::session::Window,
 ) -> Option<String> {
-    let timeframe = asked.granularity.store_timeframe()?;
-    let month = window.from().year_month().ok()?;
+    let Some(timeframe) = asked.granularity.store_timeframe() else {
+        return Some("the requested granularity has no Greek-file timeframe".to_owned());
+    };
+    let month = match window.from().year_month() {
+        Ok(month) => month,
+        Err(why) => return Some(format!("the Greek-file month could not be named: {why}")),
+    };
     pull::ingest::write_greeks(
         records,
         pull::ingest::GreekTarget {
@@ -12422,17 +12442,15 @@ struct Rolled {
 
 /// How many rows priced, how many refused, and why.
 ///
-/// Flattened out of `pull::pricing::PricedAll` because the rows themselves have
-/// nowhere to go yet: `store::format::Overlay` is exactly 24 bytes — stamp,
-/// spot, implied volatility — and five greeks do not fit. §4 says a new field
-/// is a new file version at its own stride, so persisting them is a
-/// `crates/store` change and not this one. **Until it lands the greeks are
-/// computed and counted and then dropped**, which is stated here rather than
-/// left for someone to discover from an empty directory.
+/// The Greek records themselves live in separate `.grk` files. Keep their
+/// acknowledged filing count apart from pricing: a rolling group is priced
+/// before its source bars land and either write can still refuse.
 #[derive(Debug, Default, PartialEq)]
 struct PricedCount {
     /// Rows that produced a volatility, five greeks and a moneyness.
     rows: usize,
+    /// Rows acknowledged by the Greek writer, including exact replays.
+    filed: usize,
     /// Rows that could not be priced.
     refused: usize,
     /// Rows whose volatility this build solved rather than the vendor sending.
@@ -12463,6 +12481,7 @@ impl PricedCount {
     /// Folds another run's counts in.
     fn absorb_count(&mut self, from: &Self) {
         self.rows = self.rows.saturating_add(from.rows);
+        self.filed = self.filed.saturating_add(from.filed);
         self.refused = self.refused.saturating_add(from.refused);
         self.solved = self.solved.saturating_add(from.solved);
         self.below_band = self.below_band.saturating_add(from.below_band);
