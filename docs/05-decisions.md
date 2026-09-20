@@ -37285,3 +37285,29 @@ The resolver defines ordinal position from that table, but the old eligibility
 probe supplied the literal `1`, silently excluding an otherwise valid table
 with different wire words. A generated `near`/`far` table makes two requests;
 an empty table makes none. Neither path invents a replacement ordinal.
+
+### D-0672 — Apply screen support to the retained signal sample — 2026-09-20
+
+The stored screen calculated its support hit count before withholding sessions
+whose execution minutes had gaps. A generated native-minute fixture retained
+2,625 bars but recorded a 2,999-hit threshold for 100% support. That required
+more hits than the sample contained and could falsely describe extinction at
+the operator's requested percentage.
+
+The hit count is now calculated after withholding. The screen receipt names
+the holed dates, removed signal bars and remaining support denominator. An
+entirely withheld signal span refuses before creating a sweep attempt. This
+does not change the requested percentage, substitute missing minutes, alter
+the swept instrument surface or repair source files. The threshold remains
+part of the run identity, and the existing stored data digest binds the actual
+signal and execution inputs.
+
+The public entry still verifies the rung and clean build stamp before reading
+the store. Its private transaction accepts the resolved inputs, following the
+existing stored-audit boundary, so generated tests can exercise native and
+coarse screens without changing the process environment or claiming a real
+market-data run. Tests compare recorded thresholds at 2%, 5% and 100%, exact
+retry bytes, withheld samples, missing or corrupt authorities, and the refusal
+when no session remains. The fixture's explicit finite candidate budget is
+retained in its identity and terminal evidence; a halted test run is never
+asserted to be complete.

@@ -14828,16 +14828,6 @@ pub struct Policy {
 }
 
 /// [`screen_range`]'s work, with its refusals unrendered.
-#[expect(
-    clippy::too_many_lines,
-    reason = "an unbroken chain of preconditions, each of which REFUSES. Rung, \
-              commit stamp, span, withheld holed days, daily context, exact \
-              minutes, column, ladder and horizon are established in one order \
-              and every step's `?` carries a reason naming what could not be \
-              read. Extracting a middle section would hide which precondition \
-              failed behind a helper's own error, and §4 requires the reason to \
-              reach the operator rather than be summarised on the way"
-)]
 fn screen_range_inner(
     vendor_word: &str,
     underlying: &str,
@@ -14848,12 +14838,6 @@ fn screen_range_inner(
     attempt: Option<u64>,
 ) -> Result<String, stored::Refusal> {
     swept_rung(rung)?;
-    let (from, to) = span;
-    let Policy {
-        rules,
-        lens,
-        validate,
-    } = policy;
     let commit = commit_stamp().ok_or_else(|| {
         "this build carries no verified commit stamp, so §3 rule 3's run identity \
          cannot be recorded and the screen will not run. Restore every Rust/Cargo \
@@ -14863,10 +14847,55 @@ fn screen_range_inner(
     })?;
     let vendor = parse_vendor(vendor_word)?;
     let root = store_root()?;
+    screen_range_kernel(StoredScreenRequest {
+        root,
+        vendor,
+        underlying,
+        rung,
+        span,
+        support_ppm,
+        policy,
+        attempt,
+        commit,
+    })
+}
+
+struct StoredScreenRequest<'a> {
+    root: std::path::PathBuf,
+    vendor: Vendor,
+    underlying: &'a str,
+    rung: &'a str,
+    span: ((u16, u8), (u16, u8)),
+    support_ppm: u64,
+    policy: Policy,
+    attempt: Option<u64>,
+    commit: &'static str,
+}
+
+/// Own the admitted screen inputs after the public boundary verifies the build.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the ordered source, execution, context, identity and publication preconditions form one screen transaction; every refusal retains its original reason"
+)]
+fn screen_range_kernel(request: StoredScreenRequest<'_>) -> Result<String, stored::Refusal> {
+    let StoredScreenRequest {
+        root,
+        vendor,
+        underlying,
+        rung,
+        span: (from, to),
+        support_ppm,
+        policy,
+        attempt,
+        commit,
+    } = request;
+    let Policy {
+        rules,
+        lens,
+        validate,
+    } = policy;
     let mut span = stored::load_span(&root, vendor, underlying, rung, from, to)?;
     let signal_length = stored::rung_length_micros(rung)?;
-    let bars = span.bars.len();
-    let min_hits = min_hits_for(bars, support_ppm);
 
     let execution_bars = if rung == EXECUTION_RUNG {
         None
@@ -14924,10 +14953,18 @@ fn screen_range_inner(
     // What changed is that the day is not swept. Substituting would answer a
     // question with the wrong bar; withholding declines to answer it, out loud.
     let holed_days = crate::minute_gaps::days_with_interior_gaps(execution_slice);
-    if !holed_days.is_empty() {
-        let (kept, _withheld) = crate::minute_gaps::withhold(&span.bars, &holed_days);
+    let withheld = if holed_days.is_empty() {
+        0
+    } else {
+        let (kept, withheld) = crate::minute_gaps::withhold(&span.bars, &holed_days);
         span.bars = kept;
+        withheld
+    };
+    if span.bars.is_empty() {
+        return Err("every signal session has a minute gap; no screenable bars remain".to_owned());
     }
+    // Support is a fraction of the admitted sample, which excludes holed days.
+    let min_hits = min_hits_for(span.bars.len(), support_ppm);
     let daily = stored::load_daily_context(&root, vendor, underlying, (from, to), &span.bars)?;
     let exact_minute =
         stored::load_exact_minute_context(&root, vendor, underlying, (from, to), &span.bars)?;
@@ -14954,6 +14991,23 @@ fn screen_range_inner(
         feed: span.vendor.as_str(),
     });
     let mut header = span_banner(&span, underlying, from, to, commit);
+    if withheld > 0 {
+        let dates = holed_days
+            .iter()
+            .map(|day| {
+                u32::try_from(*day)
+                    .ok()
+                    .and_then(|days| pull::session::Day::from_days(days).ok())
+                    .map_or_else(|| day.to_string(), |date| date.to_string())
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let _ = writeln!(
+            header,
+            "MINUTE-GAP SESSIONS WITHHELD: {withheld} signal bar(s); IST dates: {dates}. Support uses the remaining {} signal bars.",
+            span.bars.len(),
+        );
+    }
     header.push_str(&daily_reference_note(&daily, &exact_minute));
     Ok(audit_bars(
         &evaluator_stored(availability),

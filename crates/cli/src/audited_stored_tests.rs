@@ -126,6 +126,37 @@ impl Fixture {
             commit: "generated-stored-range-audit-fixture",
         })
     }
+
+    fn screen(&self, rung: &str, support_ppm: u64) -> Result<String, String> {
+        crate::screen_range_kernel(crate::StoredScreenRequest {
+            root: self.root.clone(),
+            vendor: Vendor::Zerodha,
+            underlying: "NIFTY",
+            rung,
+            span: ((2025, 5), (2025, 5)),
+            support_ppm,
+            policy: crate::Policy {
+                rules: crate::Rules::BASELINE,
+                lens: runner::rank::Lens::Detectability,
+                validate: false,
+            },
+            attempt: Some(13),
+            commit: "generated-stored-screen-fixture",
+        })
+    }
+
+    fn omit_owned_minutes(&self, holed_days: &[u8]) {
+        let path = self.path(5, Timeframe::MINUTE_1);
+        fs::remove_file(&path).expect("replace owned generated minute file");
+        fs::remove_file(path.with_extension("crc")).expect("replace its owned proof");
+        for day in [2, 5, 6, 7, 8, 9, 12, 13] {
+            let mut rows = generated_session(5, day);
+            if holed_days.contains(&day) {
+                rows.remove(150);
+            }
+            self.write(5, Timeframe::MINUTE_1, &rows);
+        }
+    }
 }
 
 fn generated_session(month: u8, date: u8) -> Vec<Bar> {
@@ -216,6 +247,182 @@ fn audited_month_publication_is_idempotent_and_stale_inputs_cannot_publish() {
 impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+#[test]
+fn stored_screens_scale_support_to_retained_bars_and_disclose_holed_sessions() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    // An explicit finite operator budget also keeps a generated constant-price
+    // vocabulary from consuming a machine if new always-true bits are added.
+    crate::knobs::set("BRUTEX_CEILING", "256");
+    for (rung, retained, withheld) in [("1min", 2_625, 374), ("5min", 525, 75)] {
+        let fixture = Fixture::warmed();
+        fixture.omit_owned_minutes(&[5]);
+        let source = fixture.path(5, Timeframe::MINUTE_1);
+        let source_bytes = fs::read(&source).expect("owned incomplete minute source");
+        let report = fixture.screen(rung, 1_000_000).expect("loaded screen");
+        assert!(report.contains("RESULT RECORDED"), "{report}");
+        let mut ledger = crate::results::Results::open_read(&fixture.root).expect("screen ledger");
+        assert_eq!(ledger.len().expect("parent count"), 1);
+        let row = ledger.read(0).expect("screen parent");
+        assert_eq!(row.bars, retained);
+        assert_eq!(
+            row.min_hits, retained,
+            "100% support must use the retained sample"
+        );
+        assert_eq!(crate::results::read_field(&row.timeframe), rung);
+        assert!(report.contains("MINUTE-GAP SESSIONS WITHHELD"), "{report}");
+        assert!(report.contains("2025-05-05"), "{report}");
+        assert!(
+            report.contains(&format!("{withheld} signal bar(s)")),
+            "{report}"
+        );
+        assert_eq!(fs::read(&source).expect("unmodified source"), source_bytes);
+    }
+    crate::knobs::clear_all();
+}
+
+#[test]
+fn stored_screen_support_and_exact_retries_bind_the_actual_sample() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    crate::knobs::set("BRUTEX_CEILING", "256");
+    for (rung, bars) in [("1min", 3_000), ("5min", 600)] {
+        let fixture = Fixture::warmed();
+        let mut identities = Vec::new();
+        for (index, support) in [20_000, 50_000, 1_000_000].into_iter().enumerate() {
+            let report = fixture.screen(rung, support).expect("screen request");
+            assert!(report.contains("RESULT RECORDED"), "{report}");
+            assert!(!report.contains("MINUTE-GAP SESSIONS WITHHELD"), "{report}");
+            let path = crate::results::Results::path(&fixture.root);
+            let saved = fs::read(&path).expect("parent ledger");
+            let mut ledger =
+                crate::results::Results::open_read(&fixture.root).expect("screen ledger");
+            assert_eq!(
+                ledger.len().expect("distinct support count"),
+                index as u64 + 1
+            );
+            let row = ledger.read(index as u64).expect("exact screen parent");
+            assert_eq!(row.bars, bars);
+            assert_eq!(row.min_hits, bars * support / 1_000_000);
+            assert_eq!((row.months_asked, row.months_found), (1, 1));
+            assert!(!identities.contains(&row.identity));
+            identities.push(row.identity);
+            drop(ledger);
+            let retry = fixture.screen(rung, support).expect("same screen again");
+            assert!(retry.contains("RESULT ALREADY RECORDED"), "{retry}");
+            assert_eq!(fs::read(&path).expect("retry bytes"), saved);
+            let attempt = crate::sweep_evidence::latest(&fixture.root, 1_048_576)
+                .expect("read durable attempt")
+                .expect("screen attempt exists");
+            assert_eq!(attempt.identity, row.identity);
+            assert_eq!(
+                attempt.completion == crate::sweep_evidence::Completion::Completed,
+                row.halted == 0
+            );
+        }
+    }
+    crate::knobs::clear_all();
+}
+
+#[test]
+fn stored_screens_refuse_missing_or_corrupt_authorities_before_recording() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    for (month, timeframe, corrupt) in [
+        (5, Timeframe::MINUTE_1, false),
+        (4, Timeframe::DAY_1, false),
+        (4, Timeframe::MINUTE_1, false),
+        (5, Timeframe::MINUTE_5, true),
+    ] {
+        let fixture = Fixture::warmed();
+        let path = fixture.path(month, timeframe);
+        let original = fs::read(&path).expect("owned authority");
+        let damaged = if corrupt {
+            let mut bytes = original;
+            bytes[24] ^= 1;
+            fs::write(&path, &bytes).expect("damage owned authority");
+            Some(bytes)
+        } else {
+            fs::remove_file(&path).expect("remove owned required source");
+            None
+        };
+        let refusal = fixture
+            .screen("5min", 1_000_000)
+            .expect_err("source must refuse");
+        assert!(!refusal.is_empty());
+        assert!(!crate::results::Results::path(&fixture.root).exists());
+        assert_eq!(
+            crate::sweep_evidence::latest(&fixture.root, 1_048_576).expect("no premature attempt"),
+            None
+        );
+        assert_eq!(
+            fs::read(&path).ok(),
+            damaged,
+            "no source repair or creation"
+        );
+    }
+    crate::knobs::clear_all();
+}
+
+#[test]
+fn stored_screens_refuse_when_every_signal_session_is_withheld() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    let fixture = Fixture::warmed();
+    fixture.omit_owned_minutes(&[2, 5, 6, 7, 8, 9, 12, 13]);
+    for rung in ["1min", "5min"] {
+        let refusal = fixture
+            .screen(rung, 20_000)
+            .expect_err("no retained session");
+        assert_eq!(
+            refusal,
+            "every signal session has a minute gap; no screenable bars remain"
+        );
+        assert!(!crate::results::Results::path(&fixture.root).exists());
+        assert_eq!(
+            crate::sweep_evidence::latest(&fixture.root, 1_048_576).expect("no empty attempt"),
+            None
+        );
+    }
+    crate::knobs::clear_all();
+}
+
+#[test]
+fn public_screen_admission_preserves_rung_and_build_or_feed_refusals() {
+    let policy = crate::Policy {
+        rules: crate::Rules::BASELINE,
+        lens: runner::rank::Lens::Detectability,
+        validate: false,
+    };
+    for rung in ["", "2min", "1day", "1min"] {
+        let plain = crate::screen_range(
+            "unknown-generated-feed",
+            "NIFTY",
+            rung,
+            (2025, 5),
+            (2025, 5),
+            20_000,
+            policy,
+        );
+        let attempted = crate::screen_range_for_attempt(
+            "unknown-generated-feed",
+            "NIFTY",
+            rung,
+            ((2025, 5), (2025, 5)),
+            20_000,
+            policy,
+            Some(13),
+        );
+        assert_eq!(plain, attempted);
+        assert!(plain.starts_with("refused: "), "{plain}");
+        assert!(!plain.contains(crate::STORED_PROVENANCE), "{plain}");
+        assert!(!plain.contains("RESULT RECORDED"), "{plain}");
+        if rung == "1min" && crate::commit_stamp().is_none() {
+            assert!(plain.contains("no verified commit stamp"), "{plain}");
+        }
     }
 }
 
