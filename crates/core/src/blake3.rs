@@ -456,7 +456,7 @@ pub fn hash(input: &[u8]) -> [u8; OUT_LEN] {
 
 #[cfg(test)]
 mod tests {
-    use super::{CHUNK_LEN, Hasher, hash};
+    use super::{CHUNK_LEN, CHUNK_START, Hasher, IV, compress, hash};
 
     /// The reference test set's input: byte `i` is `i % 251`.
     fn vector_input(len: usize) -> Vec<u8> {
@@ -602,6 +602,30 @@ mod tests {
             .map(|(i, byte)| if i == last { byte ^ 1 } else { *byte })
             .collect();
         assert_ne!(hash(&a), hash(&b), "a one-bit change must re-key");
+    }
+
+    #[test]
+    fn compression_preserves_both_halves_of_large_chunk_counters() {
+        // Small published inputs never reach a chunk counter above 32 bits.
+        // Exercise that boundary directly without allocating terabytes of data.
+        let counters = [
+            0,
+            1,
+            u64::from(u32::MAX),
+            1_u64 << 32,
+            (1_u64 << 32) + 1,
+            u64::MAX,
+        ];
+        for (index, counter) in counters.iter().enumerate() {
+            let actual = compress(&IV, &[0; 16], *counter, 64, CHUNK_START);
+            for previous in counters.iter().take(index) {
+                assert_ne!(
+                    actual,
+                    compress(&IV, &[0; 16], *previous, 64, CHUNK_START),
+                    "distinct chunk counters {counter} and {previous} collapsed"
+                );
+            }
+        }
     }
 
     #[test]

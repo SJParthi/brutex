@@ -36222,3 +36222,13 @@ source admission, exact recovery and missing-ancestry assertions still execute.
 On refusal, preserve elapsed time, observed log length and bounded child output
 in the returned error so fixture cleanup cannot erase the only failure detail.
 This change does not establish coverage thresholds or mutation completeness.
+
+### D-0616 — Exercise the upper half of hash chunk counters — 2026-09-20
+
+Local mutation testing found that replacing the compression counter's right
+shift by a left shift survived core's tests. Existing small published vectors
+never reach a nonzero upper counter word. Add a direct compression regression
+covering zero, one, the 32-bit boundary on both sides, a mixed high/low counter,
+and the largest counter. Distinct counters must not collapse for the fixed test
+block. This guards counter incorporation without allocating terabytes and does
+not replace the published digest vectors or claim cryptographic assurance.
