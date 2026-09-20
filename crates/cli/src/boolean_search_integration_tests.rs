@@ -88,9 +88,9 @@ fn run_fixture_child(fixture: &Fixture, selected: bool) -> Result<(), String> {
     // Instrumented complete-calendar replay exceeded the ordinary deadline on
     // the Linux CI runner. Keep the same assertions and finite log bound.
     let timeout = if std::env::var_os("LLVM_PROFILE_FILE").is_some() {
-        std::time::Duration::from_secs(900)
+        std::time::Duration::from_mins(15)
     } else {
-        std::time::Duration::from_secs(360)
+        std::time::Duration::from_mins(6)
     };
     if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
         command.env("LLVM_PROFILE_FILE", profile);
