@@ -150,6 +150,7 @@ mod tests {
             PriceError::NotFinite,
             PriceError::OutOfRange,
             PriceError::Overflow,
+            PriceError::NotDecimal,
         ];
         let rendered: Vec<String> = all.iter().map(ToString::to_string).collect();
         for (i, a) in rendered.iter().enumerate() {

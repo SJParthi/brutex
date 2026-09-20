@@ -3006,6 +3006,7 @@ mod tests {
     #[test]
     fn every_skip_reason_is_distinct_and_says_what_it_declined() {
         let all = [
+            Skip::NoVendorId,
             Skip::ForeignExchange,
             Skip::UnrecognisedExchange,
             Skip::TestInstrument,
@@ -3072,7 +3073,7 @@ mod tests {
     fn a_vendor_set_is_a_set_and_every_vendor_has_its_own_bit() {
         let mut s = VendorSet::EMPTY;
         assert!(s.is_empty());
-        for v in Vendor::MASTERED {
+        for v in Vendor::ALL {
             assert!(!s.contains(v));
             s = s.with(v);
             assert!(s.contains(v));
@@ -3084,6 +3085,91 @@ mod tests {
         let only_dhan = VendorSet::EMPTY.with(Vendor::Dhan);
         assert!(only_dhan.contains(Vendor::Dhan));
         assert!(!only_dhan.contains(Vendor::Groww));
+        for vendor in Vendor::ALL {
+            let single = VendorSet::EMPTY.with(vendor);
+            for other in Vendor::ALL {
+                assert_eq!(single.contains(other), vendor == other);
+            }
+        }
+    }
+
+    #[test]
+    fn archive_vendors_have_names_but_cannot_supply_master_metadata() {
+        for (vendor, name, master) in [
+            (Vendor::Groww, "groww", "groww_instruments.csv"),
+            (Vendor::Dhan, "dhan", "dhan_scrip.csv"),
+            (Vendor::TrueData, "truedata", "truedata_instruments.csv"),
+            (Vendor::Gdfl, "gdfl", "gdfl_instruments.csv"),
+            (Vendor::Zerodha, "zerodha", "zerodha_instruments.csv"),
+        ] {
+            assert_eq!(
+                vendor.as_str(),
+                name,
+                "persisted vendor namespace is stable"
+            );
+            assert_eq!(vendor.master_file(), master);
+            assert_eq!(
+                vendor.publishes_master(),
+                Vendor::MASTERED.contains(&vendor)
+            );
+        }
+        for archive in [Vendor::TrueData, Vendor::Gdfl] {
+            let columns = archive.master_columns();
+            for name in [
+                columns.vendor_id,
+                columns.exchange,
+                columns.segment,
+                columns.underlying,
+                columns.trading_symbol,
+                columns.instrument_type,
+                columns.listing_class,
+                columns.isin,
+                columns.expiry,
+                columns.strike,
+            ] {
+                assert!(name.is_empty(), "archive must not invent a master column");
+            }
+            assert_eq!(columns.option_side, None);
+            assert_eq!(archive.index_segment_word(), None);
+            for code in ["", "NSE", "INDEX", "EQ", "FUT", "CE", "PE"] {
+                assert_eq!(
+                    archive.segment_of(code).err(),
+                    Some(InstrumentError::Malformed)
+                );
+                assert_eq!(archive.type_of(code, "CE"), Err(InstrumentError::Malformed));
+            }
+        }
+        assert_eq!(
+            Vendor::Zerodha.master_columns().vendor_id,
+            "instrument_token"
+        );
+        for code in ["EQ", "FUT", "CE", "PE"] {
+            assert_eq!(Vendor::Zerodha.type_of(code, "ignored"), Ok(Some(code)));
+        }
+        assert_eq!(
+            Vendor::Zerodha.type_of("IDX", ""),
+            Err(InstrumentError::Malformed)
+        );
+    }
+
+    #[test]
+    fn vendor_ids_refuse_missing_and_oversized_values_before_a_listing_is_kept() {
+        for raw in ["", "   ", "\t\n"] {
+            assert_eq!(VendorId::new(raw), None);
+            let mut input = row("NSE", "CASH", "RELIANCE", "EQ", "", "");
+            input.vendor_id = raw;
+            assert_eq!(
+                groww(input).expect("explicit decline").skip(),
+                Some(Skip::NoVendorId)
+            );
+        }
+        let limit = "X".repeat(VENDOR_ID_CAPACITY);
+        assert_eq!(VendorId::new(&limit).expect("at capacity").as_str(), limit);
+        assert_eq!(VendorId::new(&format!("{limit}X")), None);
+        let value = VendorId::new("  A-19_é  ").expect("opaque UTF-8 identifier");
+        assert_eq!(value.as_str(), "A-19_é");
+        assert_eq!(value.to_string(), "A-19_é");
+        assert_eq!(format!("{value:?}"), "VendorId(\"A-19_é\")");
     }
 
     // =======================================================================

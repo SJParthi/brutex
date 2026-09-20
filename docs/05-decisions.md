@@ -36251,3 +36251,13 @@ defer that flag. Test the internal output operation with ROOT already present
 against the official empty digest: setting a flag must not toggle it off. This
 is a defensive internal contract; no claim is made that current public callers
 construct that state.
+
+### D-0617 — Complete core identity and refusal boundary tests — 2026-09-20
+
+The coverage report exposed unexercised archive-vendor metadata, opaque vendor
+identifier limits, contract classification/rendering, and two diagnostic enum
+variants. Extend the tests to cover all five vendor bits independently, stable
+vendor namespaces, archive refusal of master metadata, empty and oversized IDs,
+UTF-8 ID preservation, both contract kinds, NotDecimal and NoVendorId. These
+assertions lock the existing identity/refusal contracts; they do not change
+vendor capabilities, stored bytes or the swept instrument surface.

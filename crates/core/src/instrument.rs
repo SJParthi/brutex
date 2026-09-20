@@ -613,6 +613,10 @@ mod tests {
             },
         ] {
             let made = Contract::of(kind).expect("it renders");
+            assert_eq!(made.is_future(), matches!(kind, Kind::Future { .. }));
+            assert_eq!(made.is_option(), matches!(kind, Kind::Option { .. }));
+            assert_eq!(made.to_string(), made.as_str());
+            assert_eq!(format!("{made:?}"), format!("Contract({})", made.as_str()));
             assert_eq!(
                 Contract::parse(made.as_str()),
                 Some(made),
