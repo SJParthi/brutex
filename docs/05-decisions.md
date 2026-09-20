@@ -36674,3 +36674,70 @@ that fixture obstruction permits a fresh Completed attempt with the same run
 identity and exactly one saved parent. These tests retain existing production
 behavior and are not evidence of vendor data, profitable results or a complete
 workspace coverage/mutation pass.
+
+### D-0648 — Keep retained all-rung authority chains off the worker stack — 2026-09-20
+
+The generated eight-rung stored integration aborted with a stack overflow on
+the ordinary test worker. Its all-rung values retained eight complete upstream
+authority chains inline. Increasing the diagnostic worker stack allowed the
+same path to reach its warm-up refusal; that override is not the repair.
+
+Retain each Candidate pair, Population, Execution and Selection chain in a
+`Box` across the eight-rung coordinator boundaries. Consume one owned chain at
+each existing one-rung producer. Named rung fields, live topology checks,
+publication order, identities, policies and byte formats are unchanged. A
+regression limits each all-rung retained handle to 64 KiB. This is a size bound
+on those handles, not a measurement of total call-stack or heap use.
+
+The coordinator obtains one opaque clean-build proof before opening the store
+and shares it across its sixteen Candidate producers. Only the original
+Step 3 module can construct that type; callers cannot supply a raw commit.
+Its child test uses an explicitly generated identity to exercise the same
+transaction in dirty-tree and mutation builds.
+
+The integration uses five requested months of finite generated sessions and
+one prior month, so the first hourly training prefix can warm its indicators.
+Both generated families have identical prices while retaining distinct
+instrument identities. This does not remove candidates: the measured fixture
+still publishes 320 Candidate rows across the sixteen family/rung pairs.
+It requests one support worker and finite load, candidate, pair and publication
+ceilings. It verifies all eight publications, exact retry bytes, and a changed
+Selection completion refusal. The empty eligible cohort must refuse its replay
+successor before the first callback. It does not assert that any candidate qualifies,
+that all 200 successors exist, or that synthetic results establish market
+profitability. Coverage and complete mutation verification remain separate.
+
+Rewriting a completion changes its held file epoch even after exact bytes are
+restored. The corrupted authority is dropped before the cold retry. Positive
+topology checks already performed by every producer and successor are not
+repeated on unchanged inputs by the test; the retained corruption check remains.
+
+### D-0649 — Verify stored month and range audit publication through their transactions — 2026-09-20
+
+Keep the public monthly audit's rung, clean-build, vendor and existing-root
+admission in their original order. Move its admitted transaction into a private
+kernel using the existing stored request type. This gives generated tests the
+same publication path without changing the process environment or making a
+raw commit override available to production callers.
+
+Apply the same private admitted-request boundary to range audits. Condition
+preparation receives the range's already admitted build identity, so its
+preparation and result evidence name the same build. The ordinary preparation
+entry still requires a clean stamp, now before reading context. Its private
+kernel uses the existing explicit-commit attempt writer; no public override is
+added.
+
+The finite native and five-minute fixtures use maximal support to verify a
+completed empty search, its saved identity and zero trade count. Exact retries
+must retain the parent bytes while recording distinct completed attempts.
+Unreadable minute authority must refuse without changing that parent; restoring
+the bytes must recover exact reuse. Missing one-minute execution or prior daily
+context must refuse before any parent or attempt is created. A coarse audit
+must name the required one-minute series rather than silently substitute its
+signal bars. The generated fixture is not market or profitability evidence.
+
+Range tests cover both resolutions, exact parent reuse and distinct completed
+attempts. With mandatory reference and execution authority present, an absent
+coarse signal month must retain the exact requested and found month counts and
+explicitly name the shorter sample in the report. Missing execution, prior
+context or the requested next month's daily authority must refuse first.

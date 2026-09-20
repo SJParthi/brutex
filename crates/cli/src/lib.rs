@@ -875,8 +875,39 @@ fn column_withholding_unsourceable_days(
     // literals — and this only ever reads it to label an event.
     rung: &str,
 ) -> Result<(indicators::column::Column, [u8; 32]), String> {
+    let commit = commit_stamp().ok_or_else(|| {
+        "the build has no verified commit stamp; no stored condition preparation will run"
+            .to_owned()
+    })?;
+    column_withholding_at_build(
+        root,
+        vendor,
+        underlying,
+        span,
+        bars,
+        signal_length,
+        StoredPreparationBuild { rung, commit },
+    )
+}
+
+#[derive(Clone, Copy)]
+struct StoredPreparationBuild<'a> {
+    rung: &'a str,
+    commit: &'a str,
+}
+
+fn column_withholding_at_build(
+    root: &std::path::Path,
+    vendor: brutex_core::vendor::Vendor,
+    underlying: &str,
+    span: ((u16, u8), (u16, u8)),
+    bars: &mut Vec<indicators::Candle>,
+    signal_length: i64,
+    build: StoredPreparationBuild<'_>,
+) -> Result<(indicators::column::Column, [u8; 32]), String> {
     /// A span needing more than this withheld is a different defect.
     const ATTEMPTS: usize = 64;
+    let StoredPreparationBuild { rung, commit } = build;
     let (from, to) = span;
     let mut dropped: Vec<i64> = Vec::new();
     // ONCE, outside the retry loop: the verdict is a property of the key and
@@ -886,7 +917,8 @@ fn column_withholding_unsourceable_days(
         let daily = stored::load_daily_context(root, vendor, underlying, (from, to), bars)?;
         let exact = stored::load_exact_minute_context(root, vendor, underlying, (from, to), bars)?;
         let digest = stored_anchored_digest(bars, &exact, &daily)?;
-        let attempt = preparation_attempt(root, vendor, underlying, rung, digest)?;
+        let attempt =
+            preparation_attempt_with_commit(root, vendor, underlying, rung, digest, commit)?;
         let folded = stored_anchored_column(bars, &daily, &exact, signal_length, availability);
         attempt.finish(if folded.is_ok() {
             sweep_evidence::Completion::Completed
@@ -944,26 +976,7 @@ fn column_withholding_unsourceable_days(
     ))
 }
 
-/// The minute an overlay refusal says it could not source, if it says one.
-///
-/// Matches the `MissingClosingMinute` field name rather than the whole Debug
-/// shape: the surrounding text is a caller's prose and has already changed
-/// once, while the field name is the variant's own and changing it is a source
-/// edit this function's test would catch.
-fn preparation_attempt(
-    root: &std::path::Path,
-    vendor: brutex_core::vendor::Vendor,
-    underlying: &str,
-    rung: &str,
-    digest: [u8; 32],
-) -> Result<sweep_evidence::Attempt, String> {
-    let commit = commit_stamp().ok_or_else(|| {
-        "the build has no verified commit stamp; no stored condition preparation will run"
-            .to_owned()
-    })?;
-    preparation_attempt_with_commit(root, vendor, underlying, rung, digest, commit)
-}
-
+/// Records preparation under the same admitted build identity as its caller.
 fn preparation_attempt_with_commit(
     root: &std::path::Path,
     vendor: brutex_core::vendor::Vendor,
@@ -991,6 +1004,12 @@ fn preparation_attempt_with_commit(
     sweep_evidence::begin(root, id.bytes(), sweep_evidence::Operation::Preparation)
 }
 
+/// The minute an overlay refusal says it could not source, if it says one.
+///
+/// Matches the `MissingClosingMinute` field name rather than the whole Debug
+/// shape: the surrounding text is a caller's prose and has already changed
+/// once, while the field name is the variant's own and changing it is a source
+/// edit this function's test would catch.
 fn unsourceable_minute(refusal: &str) -> Option<i64> {
     let at = refusal.find("expected_ts_micros:")?;
     let rest = refusal.get(at.saturating_add("expected_ts_micros:".len())..)?;
@@ -5542,10 +5561,6 @@ pub fn audit_run_within(sessions: i64, min_hits: u64, ceiling: usize) -> String 
 /// reasons: an unstamped build first (§3 rule 3 — no computation without a
 /// recordable identity), then an unknown feed, then a store root that is not
 /// configured, then a month that is not held.
-#[expect(
-    clippy::too_many_lines,
-    reason = "one stored audit transaction keeps all three evidence streams and its identity visibly together"
-)]
 fn audit_stored_inner(
     vendor_word: &str,
     underlying: &str,
@@ -5568,6 +5583,36 @@ fn audit_stored_inner(
 
     let vendor = parse_vendor(vendor_word)?;
     let root = store_root()?;
+    audit_stored_kernel(StoredSweepRequest {
+        root,
+        vendor,
+        underlying,
+        rung,
+        year,
+        month,
+        min_hits,
+        commit,
+    })
+}
+
+/// The actual monthly audit after the operator's root and build are admitted.
+/// Private so generated tests can exercise publication without changing the
+/// process environment or adding a caller-authored production commit override.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one stored audit transaction keeps all three evidence streams and its identity visibly together"
+)]
+fn audit_stored_kernel(request: StoredSweepRequest<'_>) -> Result<String, stored::Refusal> {
+    let StoredSweepRequest {
+        root,
+        vendor,
+        underlying,
+        rung,
+        year,
+        month,
+        min_hits,
+        commit,
+    } = request;
     let loaded = stored::load(&root, vendor, underlying, rung, year, month)?;
     let signal_length = stored::rung_length_micros(rung)?;
     // A SINGLE-MONTH AUDIT HAS THE SAME EXECUTION CONTRACT AS A RANGE.
@@ -6128,10 +6173,18 @@ fn floors_measured_on<'a>(
     execution.map_or(signal, |exec| exec.bars)
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "the exact one-minute loading/validation block keeps identity, floors, and execution on one borrowed series; splitting it would recreate independently wired paths"
-)]
+struct StoredRangeAuditRequest<'a> {
+    root: std::path::PathBuf,
+    vendor: Vendor,
+    underlying: &'a str,
+    rung: &'a str,
+    from: (u16, u8),
+    to: (u16, u8),
+    min_hits: u64,
+    attempt: Option<u64>,
+    commit: &'static str,
+}
+
 fn audit_range_inner(
     vendor_word: &str,
     underlying: &str,
@@ -6154,6 +6207,36 @@ fn audit_range_inner(
 
     let vendor = parse_vendor(vendor_word)?;
     let root = store_root()?;
+    audit_range_kernel(StoredRangeAuditRequest {
+        root,
+        vendor,
+        underlying,
+        rung,
+        from,
+        to,
+        min_hits,
+        attempt,
+        commit,
+    })
+}
+
+/// Keeps the admitted span's identity and all execution inputs in one transaction.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the exact one-minute loading/validation block keeps identity, floors, and execution on one borrowed series; splitting it would recreate independently wired paths"
+)]
+fn audit_range_kernel(request: StoredRangeAuditRequest<'_>) -> Result<String, stored::Refusal> {
+    let StoredRangeAuditRequest {
+        root,
+        vendor,
+        underlying,
+        rung,
+        from,
+        to,
+        min_hits,
+        attempt,
+        commit,
+    } = request;
     let mut span = stored::load_span(&root, vendor, underlying, rung, from, to)?;
 
     note(
@@ -6275,14 +6358,14 @@ fn audit_range_inner(
     // identical `MissingClosingMinute`. Guarding only the first left the
     // symptom exactly as it was, which is how a correct fix looked like no fix
     // at all.
-    let (column, preparation_digest) = column_withholding_unsourceable_days(
+    let (column, preparation_digest) = column_withholding_at_build(
         &root,
         vendor,
         underlying,
         (from, to),
         &mut span.bars,
         signal_length,
-        rung,
+        StoredPreparationBuild { rung, commit },
     )?;
     // REBUILT FROM THE SURVIVING BARS. The helper above may have withheld days,
     // and both of these are keyed to the bars -- reading them from before it ran

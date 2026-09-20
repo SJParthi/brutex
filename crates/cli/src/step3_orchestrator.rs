@@ -339,10 +339,10 @@ struct ReopenedJoinFactsV1 {
 /// the post-stamp transaction without widening the public API to a caller-
 /// authored commit string.
 #[derive(Clone, Copy)]
-struct VerifiedBuildCommitV1<'a>(&'a str);
+pub(crate) struct VerifiedBuildCommitV1<'a>(&'a str);
 
 impl VerifiedBuildCommitV1<'static> {
-    fn current() -> Result<Self, Step3OrchestratorRefusal> {
+    pub(crate) fn current() -> Result<Self, Step3OrchestratorRefusal> {
         crate::commit_stamp().map(Self).ok_or_else(|| {
             "Step 3 stored orchestration refused before opening market data: this binary has no clean canonical build commit stamp"
                 .to_owned()
@@ -2963,14 +2963,14 @@ pub fn commit_stored_candidate_pre_admission_v1(
 
 /// Commit the same public stored request while retaining its opaque sources.
 ///
-/// This door adds no input. It is deliberately crate-private, accepts the exact
-/// public request unchanged, and owns a no-op progress observer, so a successor
-/// cannot inject bars, digests, calendars, commits, observer behavior, a network
-/// feed, a depth cap or a pre-resolved result.
+/// This crate-private door accepts the exact stored request and a build proof
+/// minted only from the clean process-free stamp. An all-rung transaction can
+/// retain one proof across its families. It owns a no-op progress observer;
+/// no caller-authored commit, bars, digest, calendar or result is admitted.
 pub(crate) fn commit_stored_candidate_pre_admission_authority_v1(
     request: StoredCandidatePreAdmissionRequestV1<'_>,
+    verified_commit: VerifiedBuildCommitV1<'_>,
 ) -> Result<CommittedStoredCandidatePreAdmissionV1, Step3OrchestratorRefusal> {
-    let verified_commit = VerifiedBuildCommitV1::current()?;
     let no_progress_observer = |_: &engine::Frontier, _: usize, _: u64| {};
     commit_stored_with_verified_build_v1(request, verified_commit, &no_progress_observer)
 }
@@ -4196,6 +4196,10 @@ pub(crate) use tests::{
 };
 
 #[cfg(test)]
+#[path = "step3_all_rung_tests.rs"]
+mod all_rung_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::population_admission_v3::AdmissionV3Status;
@@ -4213,17 +4217,17 @@ mod tests {
     use store::format::Bar;
     use store::path::{FileKind, StorePath, Timeframe, YearMonth};
 
-    const FIXTURE_FROM: (u16, u8) = (2025, 9);
-    const FIXTURE_TO: (u16, u8) = (2025, 9);
-    const FIXTURE_WARM_MONTH: (u16, u8) = (2025, 8);
+    pub(super) const FIXTURE_FROM: (u16, u8) = (2025, 9);
+    pub(super) const FIXTURE_TO: (u16, u8) = (2025, 9);
+    pub(super) const FIXTURE_WARM_MONTH: (u16, u8) = (2025, 8);
     const FIXTURE_OOS_MONTH: (u16, u8) = (2025, 10);
     const DAY_MICROS: i64 = 86_400_000_000;
     const MINUTE_MICROS: i64 = 60_000_000;
-    const FIXTURE_COMMIT: &str = "step3-stored-success-fixture-commit";
+    pub(super) const FIXTURE_COMMIT: &str = "step3-stored-success-fixture-commit";
 
-    struct StoredSuccessFixture {
-        base: PathBuf,
-        source: PathBuf,
+    pub(super) struct StoredSuccessFixture {
+        pub(super) base: PathBuf,
+        pub(super) source: PathBuf,
         observation: PathBuf,
         statistics: PathBuf,
         search_lineage: PathBuf,
@@ -4235,11 +4239,22 @@ mod tests {
     }
 
     impl StoredSuccessFixture {
-        fn new() -> Result<Self, Step3OrchestratorRefusal> {
+        pub(super) fn new() -> Result<Self, Step3OrchestratorRefusal> {
             Self::with_price_shift(0)
         }
 
         fn with_price_shift(price_shift: i64) -> Result<Self, Step3OrchestratorRefusal> {
+            let shift = |price: i64| {
+                price.checked_add(price_shift).ok_or_else(|| {
+                    "stored Step-3 success fixture price shift overflowed".to_owned()
+                })
+            };
+            Self::with_family_prices([shift(2_000_000)?, shift(4_000_000)?])
+        }
+
+        pub(super) fn with_family_prices(
+            prices: [i64; 2],
+        ) -> Result<Self, Step3OrchestratorRefusal> {
             let base = scratch_root("stored-observation-statistics-success");
             let source = base.join("source");
             let observation = base.join("observation");
@@ -4268,24 +4283,16 @@ mod tests {
                     )
                 })?;
             }
-            for (symbol, base_price) in [("NIFTY", 2_000_000_i64), ("BANKNIFTY", 4_000_000_i64)] {
-                let shifted_price = base_price.checked_add(price_shift).ok_or_else(|| {
-                    "stored Step-3 success fixture price shift overflowed".to_owned()
-                })?;
+            let [nifty, banknifty] = prices;
+            for (symbol, price) in [("NIFTY", nifty), ("BANKNIFTY", banknifty)] {
                 seed_stored_family_month(
                     &source,
                     Vendor::Zerodha,
                     symbol,
                     FIXTURE_WARM_MONTH,
-                    shifted_price,
+                    price,
                 )?;
-                seed_stored_family_month(
-                    &source,
-                    Vendor::Zerodha,
-                    symbol,
-                    FIXTURE_FROM,
-                    shifted_price,
-                )?;
+                seed_stored_family_month(&source, Vendor::Zerodha, symbol, FIXTURE_FROM, price)?;
             }
             Ok(Self {
                 base,
@@ -4568,7 +4575,7 @@ mod tests {
         clippy::cast_possible_truncation,
         reason = "the test writes the exact low-32-bit symbol id used by the production store writer and reader"
     )]
-    fn seed_stored_family_month(
+    pub(super) fn seed_stored_family_month(
         root: &Path,
         vendor: Vendor,
         symbol: &str,
@@ -4595,7 +4602,7 @@ mod tests {
         Ok(())
     }
 
-    fn exit_policy(side: Side) -> Result<ExitGridPolicyV1, Step3OrchestratorRefusal> {
+    pub(super) fn exit_policy(side: Side) -> Result<ExitGridPolicyV1, Step3OrchestratorRefusal> {
         let half = RationalPercentileV1::new(1, 2)
             .map_err(|why| format!("fixture percentile refused: {why}"))?;
         ExitGridPolicyV1::new(
@@ -4616,7 +4623,8 @@ mod tests {
         .map_err(|why| format!("fixture exit policy refused: {why}"))
     }
 
-    fn population_admission_policy() -> Result<AdmissionPolicyV1, Step3OrchestratorRefusal> {
+    pub(super) fn population_admission_policy()
+    -> Result<AdmissionPolicyV1, Step3OrchestratorRefusal> {
         AdmissionPolicyV1::new(AdmissionPolicyDraftV1 {
             min_support_hits: Some(100),
             min_independent_sessions: Some(20),
@@ -4661,7 +4669,8 @@ mod tests {
         .map_err(|why| format!("fixture Population Admission V3 policy refused: {why:?}"))
     }
 
-    fn fixture_bounds() -> Result<StoredCandidatePreAdmissionBoundsV1, Step3OrchestratorRefusal> {
+    pub(super) fn fixture_bounds()
+    -> Result<StoredCandidatePreAdmissionBoundsV1, Step3OrchestratorRefusal> {
         Ok(StoredCandidatePreAdmissionBoundsV1 {
             signal_records: StoredSpanLoadBoundV1::new(20_000)?,
             minute_records: StoredSpanLoadBoundV1::new(40_000)?,
@@ -4671,7 +4680,7 @@ mod tests {
         })
     }
 
-    fn fixture_request<'a>(
+    pub(super) fn fixture_request<'a>(
         root: &'a Path,
         underlying: &'a str,
         sweeper: &'a Sweeper,
@@ -4696,7 +4705,7 @@ mod tests {
         })
     }
 
-    fn maximum_fixture_singleton_support(
+    pub(super) fn maximum_fixture_singleton_support(
         request: &StoredCandidatePreAdmissionRequestV1<'_>,
     ) -> Result<u64, Step3OrchestratorRefusal> {
         let root = AdmittedRootV1::admit(request.root)?;
@@ -5146,8 +5155,9 @@ mod tests {
             CandidatePreAdmissionReopenIdentitiesV1,
             Step3OrchestratorRefusal,
         >;
-        type AuthorityEntry = for<'request> fn(
+        type AuthorityEntry = for<'request, 'commit> fn(
             StoredCandidatePreAdmissionRequestV1<'request>,
+            VerifiedBuildCommitV1<'commit>,
         ) -> Result<
             CommittedStoredCandidatePreAdmissionV1,
             Step3OrchestratorRefusal,

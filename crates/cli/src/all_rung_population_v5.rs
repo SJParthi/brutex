@@ -63,9 +63,10 @@ use crate::population_v5::{
 };
 use crate::step3_orchestrator::{
     CommittedStoredCandidatePreAdmissionV1, StoredCandidatePreAdmissionBoundsV1,
-    StoredCandidatePreAdmissionRequestV1, commit_stored_candidate_pre_admission_authority_v1,
-    commit_stored_observation_statistics_v2, commit_stored_population_admission_v3,
-    commit_stored_population_finalization_v3, commit_stored_search_lineage_v4,
+    StoredCandidatePreAdmissionRequestV1, VerifiedBuildCommitV1,
+    commit_stored_candidate_pre_admission_authority_v1, commit_stored_observation_statistics_v2,
+    commit_stored_population_admission_v3, commit_stored_population_finalization_v3,
+    commit_stored_search_lineage_v4,
 };
 
 const RUNG_COUNT: usize = 8;
@@ -269,7 +270,10 @@ impl From<&AllRungStoredExecutionV3Request<'_>> for CanonicalExecutionV3BoundsV1
 /// the wrapper after authenticating every rung and the complete live root
 /// topology.
 pub(crate) struct CommittedStoredAllRungPopulationV5 {
-    populations: [CommittedStoredPopulationV5; RUNG_COUNT],
+    // Each authority owns its retained upstream chain. Keep the eight chains
+    // on the heap so moving the coordinator does not copy them onto a worker's
+    // stack together. One-use ownership and live authentication stay intact.
+    populations: [Box<CommittedStoredPopulationV5>; RUNG_COUNT],
     roots: AdmittedAllRungRootsV1,
 }
 
@@ -294,14 +298,14 @@ impl CommittedStoredAllRungPopulationV5 {
 }
 
 struct CanonicalStoredExecutionV3AuthoritiesV1 {
-    one_minute: CommittedStoredExecutionV3,
-    two_minute: CommittedStoredExecutionV3,
-    three_minute: CommittedStoredExecutionV3,
-    five_minute: CommittedStoredExecutionV3,
-    ten_minute: CommittedStoredExecutionV3,
-    fifteen_minute: CommittedStoredExecutionV3,
-    thirty_minute: CommittedStoredExecutionV3,
-    sixty_minute: CommittedStoredExecutionV3,
+    one_minute: Box<CommittedStoredExecutionV3>,
+    two_minute: Box<CommittedStoredExecutionV3>,
+    three_minute: Box<CommittedStoredExecutionV3>,
+    five_minute: Box<CommittedStoredExecutionV3>,
+    ten_minute: Box<CommittedStoredExecutionV3>,
+    fifteen_minute: Box<CommittedStoredExecutionV3>,
+    thirty_minute: Box<CommittedStoredExecutionV3>,
+    sixty_minute: Box<CommittedStoredExecutionV3>,
 }
 
 /// Named one-use Execution V3 sources for the canonical Selection successor.
@@ -311,21 +315,21 @@ struct CanonicalStoredExecutionV3AuthoritiesV1 {
 /// successor door.
 pub(crate) struct AllRungExecutionV3SelectionSources {
     /// One-minute retained Execution source.
-    pub(crate) one_minute: CommittedStoredExecutionV3,
+    pub(crate) one_minute: Box<CommittedStoredExecutionV3>,
     /// Two-minute retained Execution source.
-    pub(crate) two_minute: CommittedStoredExecutionV3,
+    pub(crate) two_minute: Box<CommittedStoredExecutionV3>,
     /// Three-minute retained Execution source.
-    pub(crate) three_minute: CommittedStoredExecutionV3,
+    pub(crate) three_minute: Box<CommittedStoredExecutionV3>,
     /// Five-minute retained Execution source.
-    pub(crate) five_minute: CommittedStoredExecutionV3,
+    pub(crate) five_minute: Box<CommittedStoredExecutionV3>,
     /// Ten-minute retained Execution source.
-    pub(crate) ten_minute: CommittedStoredExecutionV3,
+    pub(crate) ten_minute: Box<CommittedStoredExecutionV3>,
     /// Fifteen-minute retained Execution source.
-    pub(crate) fifteen_minute: CommittedStoredExecutionV3,
+    pub(crate) fifteen_minute: Box<CommittedStoredExecutionV3>,
     /// Thirty-minute retained Execution source.
-    pub(crate) thirty_minute: CommittedStoredExecutionV3,
+    pub(crate) thirty_minute: Box<CommittedStoredExecutionV3>,
     /// Sixty-minute retained Execution source.
-    pub(crate) sixty_minute: CommittedStoredExecutionV3,
+    pub(crate) sixty_minute: Box<CommittedStoredExecutionV3>,
     /// Opaque retained proof covering upstream and Selection root topology.
     pub(crate) topology: AllRungSelectionTopologyToken,
 }
@@ -545,12 +549,20 @@ struct CandidateFamilyPairV1 {
 /// **UNVERIFIED as a measured bound.** No bench in this workspace
 /// times this, so the shape above is read from the source rather
 /// than measured. `CLAUDE.md` §3 rule 6.
+pub(crate) fn commit_all_rung_stored_population_v5(
+    request: &AllRungStoredPopulationV5Request<'_>,
+) -> Result<CommittedStoredAllRungPopulationV5, String> {
+    commit_all_rung_with_verified_build_v5(request, VerifiedBuildCommitV1::current()?)
+}
+
+/// Uses the same unforgeable build proof for every family in one transaction.
 #[allow(
     clippy::too_many_lines,
     reason = "the fixed two-phase eight-rung transaction is kept visible as one indivisible authority door"
 )]
-pub(crate) fn commit_all_rung_stored_population_v5(
+pub(crate) fn commit_all_rung_with_verified_build_v5(
     request: &AllRungStoredPopulationV5Request<'_>,
+    verified_commit: VerifiedBuildCommitV1<'_>,
 ) -> Result<CommittedStoredAllRungPopulationV5, String> {
     let roots = AdmittedAllRungRootsV1::admit(request.source_root, request.authority_root)?;
     roots.require_same("before the first all-rung write")?;
@@ -586,6 +598,7 @@ pub(crate) fn commit_all_rung_stored_population_v5(
                 short_exit_policy: request.short_exit_policy,
                 bounds: request.candidate_bounds,
             },
+            verified_commit,
         )
         .map_err(|why| format!("all-rung {rung_name} NIFTY refused: {why}"))?;
 
@@ -609,15 +622,16 @@ pub(crate) fn commit_all_rung_stored_population_v5(
                 short_exit_policy: request.short_exit_policy,
                 bounds: request.candidate_bounds,
             },
+            verified_commit,
         )
         .map_err(|why| format!("all-rung {rung_name} BANKNIFTY refused: {why}"))?;
         roots.require_same(&format!(
             "after {rung_name} BANKNIFTY Candidate/Pre-Admission commit"
         ))?;
-        candidate_pairs.push(CandidateFamilyPairV1 { nifty, banknifty });
+        candidate_pairs.push(Box::new(CandidateFamilyPairV1 { nifty, banknifty }));
     }
     let candidate_count = candidate_pairs.len();
-    let candidate_pairs: [CandidateFamilyPairV1; RUNG_COUNT] = candidate_pairs
+    let candidate_pairs: [Box<CandidateFamilyPairV1>; RUNG_COUNT] = candidate_pairs
         .try_into()
         .map_err(|_| format!("all-rung Candidate phase retained {candidate_count} pairs, not 8"))?;
 
@@ -631,11 +645,12 @@ pub(crate) fn commit_all_rung_stored_population_v5(
         .zip(CANDIDATE_SIGNAL_RUNGS_SECONDS_V1.iter())
         .zip(roots.rungs.iter())
     {
+        let CandidateFamilyPairV1 { nifty, banknifty } = *pair;
         let rung_root = rung_directory.path();
         roots.require_same(&format!("before {rung_name} Observation/Statistics commit"))?;
         let observations = commit_stored_observation_statistics_v2(
-            pair.nifty,
-            pair.banknifty,
+            nifty,
+            banknifty,
             rung_root,
             rung_root,
             request.observation_bounds,
@@ -672,10 +687,10 @@ pub(crate) fn commit_all_rung_stored_population_v5(
                 .map_err(|why| format!("all-rung {rung_name} Population V5 refused: {why}"))?;
         require_population_rung_topology_v1(&mut population, rung_seconds, rung_name)?;
         roots.require_same(&format!("after {rung_name} Population V5 authentication"))?;
-        populations.push(population);
+        populations.push(Box::new(population));
     }
     let population_count = populations.len();
-    let mut populations: [CommittedStoredPopulationV5; RUNG_COUNT] = populations
+    let mut populations: [Box<CommittedStoredPopulationV5>; RUNG_COUNT] = populations
         .try_into()
         .map_err(|_| format!("all-rung successor phase retained {population_count} V5s, not 8"))?;
     require_all_population_topology_v1(&mut populations)?;
@@ -842,14 +857,14 @@ pub(crate) fn commit_all_rung_stored_execution_v3(
 }
 
 fn commit_execution_rung_v1(
-    mut population: CommittedStoredPopulationV5,
+    mut population: Box<CommittedStoredPopulationV5>,
     population_roots: &AdmittedAllRungRootsV1,
     execution_roots: &AdmittedAllRungExecutionRootsV1,
     execution_root: &AdmittedDirectoryV1,
     bounds: ExecutionV3Bounds,
     expected_rung_seconds: u32,
     rung_name: &str,
-) -> Result<(CommittedStoredExecutionV3, RungExecutionV3ReceiptsV1), String> {
+) -> Result<(Box<CommittedStoredExecutionV3>, RungExecutionV3ReceiptsV1), String> {
     population_roots.require_same(&format!("before {rung_name} Execution V3 commit"))?;
     execution_roots.require_same(&format!("before {rung_name} Execution V3 commit"))?;
     let population_receipt = population.structural_receipt();
@@ -860,7 +875,7 @@ fn commit_execution_rung_v1(
         ));
     }
 
-    let mut execution = commit_stored_execution_v3(execution_root.path(), bounds, population)
+    let mut execution = commit_stored_execution_v3(execution_root.path(), bounds, *population)
         .map_err(|why| format!("all-rung {rung_name} Execution V3 refused: {why}"))?;
     let receipts = RungExecutionV3ReceiptsV1 {
         population: population_receipt,
@@ -875,7 +890,7 @@ fn commit_execution_rung_v1(
     )?;
     population_roots.require_same(&format!("after {rung_name} Execution V3 commit"))?;
     execution_roots.require_same(&format!("after {rung_name} Execution V3 commit"))?;
-    Ok((execution, receipts))
+    Ok((Box::new(execution), receipts))
 }
 
 fn require_committed_execution_rung_v1(
@@ -1107,7 +1122,7 @@ fn require_execution_disposition_topology_v1(
 }
 
 fn require_all_population_topology_v1(
-    populations: &mut [CommittedStoredPopulationV5; RUNG_COUNT],
+    populations: &mut [Box<CommittedStoredPopulationV5>; RUNG_COUNT],
 ) -> Result<(), String> {
     for ((population, &rung_seconds), &rung_name) in populations
         .iter_mut()

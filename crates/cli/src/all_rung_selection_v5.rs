@@ -128,14 +128,15 @@ impl From<&AllRungSelectionV5Request<'_>> for CanonicalSelectionV5Bounds {
 }
 
 struct CanonicalStoredSelectionV5Authorities {
-    one_minute: CommittedStoredSelectionV5,
-    two_minute: CommittedStoredSelectionV5,
-    three_minute: CommittedStoredSelectionV5,
-    five_minute: CommittedStoredSelectionV5,
-    ten_minute: CommittedStoredSelectionV5,
-    fifteen_minute: CommittedStoredSelectionV5,
-    thirty_minute: CommittedStoredSelectionV5,
-    sixty_minute: CommittedStoredSelectionV5,
+    // Retained upstream chains stay on the heap across all-rung handoffs.
+    one_minute: Box<CommittedStoredSelectionV5>,
+    two_minute: Box<CommittedStoredSelectionV5>,
+    three_minute: Box<CommittedStoredSelectionV5>,
+    five_minute: Box<CommittedStoredSelectionV5>,
+    ten_minute: Box<CommittedStoredSelectionV5>,
+    fifteen_minute: Box<CommittedStoredSelectionV5>,
+    thirty_minute: Box<CommittedStoredSelectionV5>,
+    sixty_minute: Box<CommittedStoredSelectionV5>,
 }
 
 #[derive(Clone, Copy)]
@@ -308,14 +309,14 @@ impl CommittedStoredAllRungSelectionV5 {
 /// The only operation authenticates every rung first, then visits exactly 200
 /// winners in rung-major, rank-major canonical order.
 pub(crate) struct AllRungSelectionV5SuccessorSetV1 {
-    one_minute: CommittedStoredSelectionV5,
-    two_minute: CommittedStoredSelectionV5,
-    three_minute: CommittedStoredSelectionV5,
-    five_minute: CommittedStoredSelectionV5,
-    ten_minute: CommittedStoredSelectionV5,
-    fifteen_minute: CommittedStoredSelectionV5,
-    thirty_minute: CommittedStoredSelectionV5,
-    sixty_minute: CommittedStoredSelectionV5,
+    one_minute: Box<CommittedStoredSelectionV5>,
+    two_minute: Box<CommittedStoredSelectionV5>,
+    three_minute: Box<CommittedStoredSelectionV5>,
+    five_minute: Box<CommittedStoredSelectionV5>,
+    ten_minute: Box<CommittedStoredSelectionV5>,
+    fifteen_minute: Box<CommittedStoredSelectionV5>,
+    thirty_minute: Box<CommittedStoredSelectionV5>,
+    sixty_minute: Box<CommittedStoredSelectionV5>,
     topology: AllRungSelectionTopologyToken,
 }
 
@@ -563,17 +564,17 @@ pub(crate) fn commit_all_rung_stored_selection_v5(
 }
 
 fn commit_selection_rung(
-    source: CommittedStoredExecutionV3,
+    source: Box<CommittedStoredExecutionV3>,
     topology: &AllRungSelectionTopologyToken,
     root: &Path,
     bounds: SelectionV5Bounds,
     policy: RankingPolicyV1,
     expected_rung: u32,
     rung_name: &str,
-) -> Result<(CommittedStoredSelectionV5, RungSelectionV5Receipts), String> {
+) -> Result<(Box<CommittedStoredSelectionV5>, RungSelectionV5Receipts), String> {
     topology.require_same(&format!("before {rung_name} Selection V5 commit"))?;
     let execution = source.structural_receipt();
-    let mut selection = commit_stored_selection_v5(root, bounds, source, policy)
+    let mut selection = commit_stored_selection_v5(root, bounds, *source, policy)
         .map_err(|why| format!("all-rung {rung_name} Selection V5 refused: {why}"))?;
     let receipts = RungSelectionV5Receipts {
         execution,
@@ -589,7 +590,7 @@ fn commit_selection_rung(
         rung_name,
     )?;
     topology.require_same(&format!("after {rung_name} Selection V5 commit"))?;
-    Ok((selection, receipts))
+    Ok((Box::new(selection), receipts))
 }
 
 #[derive(Clone)]

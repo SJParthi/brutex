@@ -99,6 +99,33 @@ impl Fixture {
             max_records: 10_000,
         }
     }
+
+    fn audit(&self, rung: &str) -> Result<String, String> {
+        crate::audit_stored_kernel(crate::StoredSweepRequest {
+            root: self.root.clone(),
+            vendor: Vendor::Zerodha,
+            underlying: "NIFTY",
+            rung,
+            year: 2025,
+            month: 5,
+            min_hits: u64::MAX,
+            commit: "generated-stored-audit-fixture",
+        })
+    }
+
+    fn audit_range(&self, rung: &str, to: (u16, u8)) -> Result<String, String> {
+        crate::audit_range_kernel(crate::StoredRangeAuditRequest {
+            root: self.root.clone(),
+            vendor: Vendor::Zerodha,
+            underlying: "NIFTY",
+            rung,
+            from: (2025, 5),
+            to,
+            min_hits: u64::MAX,
+            attempt: Some(7),
+            commit: "generated-stored-range-audit-fixture",
+        })
+    }
 }
 
 fn generated_session(month: u8, date: u8) -> Vec<Bar> {
@@ -190,6 +217,176 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+#[test]
+fn monthly_audits_publish_empty_extinction_and_exact_retry_identity_at_both_resolutions() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    for rung in ["1min", "5min"] {
+        let fixture = Fixture::warmed();
+        let report = fixture.audit(rung).expect("actual stored audit");
+        assert!(report.starts_with(crate::STORED_PROVENANCE), "{report}");
+        assert!(report.contains("generated-stored-audit-fixture"));
+        assert!(report.contains("RESULT RECORDED"), "{report}");
+        assert!(!report.contains(crate::NOT_RECORDED), "{report}");
+        assert!(!report.contains("NOTHING MEASURED"), "{report}");
+        let path = crate::results::Results::path(&fixture.root);
+        let original = fs::read(&path).expect("actual parent ledger");
+        let mut ledger = crate::results::Results::open_read(&fixture.root).expect("cold ledger");
+        assert_eq!(ledger.len().expect("parent count"), 1);
+        let row = ledger.read(0).expect("saved audit parent");
+        assert!(row.bars > 0);
+        assert_eq!((row.trades, row.combinations, row.halted), (0, 0, 0));
+        assert_eq!(row.min_hits, u64::MAX);
+        assert_eq!(crate::results::read_field(&row.timeframe), rung);
+        drop(ledger);
+        let first = crate::sweep_evidence::latest(&fixture.root, 1_048_576)
+            .expect("read first audit evidence")
+            .expect("durable audit attempt");
+        assert_eq!(first.identity, row.identity);
+        assert_eq!(
+            first.completion,
+            crate::sweep_evidence::Completion::Completed
+        );
+
+        let retry = fixture.audit(rung).expect("exact audit retry");
+        assert!(
+            retry.contains("RESULT ALREADY RECORDED AND VERIFIED"),
+            "{retry}"
+        );
+        assert_eq!(fs::read(&path).expect("retry ledger"), original);
+        let second = crate::sweep_evidence::latest(&fixture.root, 1_048_576)
+            .expect("read retry evidence")
+            .expect("durable retry");
+        assert!(second.attempt > first.attempt);
+        assert_eq!(second.identity, first.identity);
+        assert_eq!(
+            second.completion,
+            crate::sweep_evidence::Completion::Completed
+        );
+
+        let source = fixture.path(5, Timeframe::MINUTE_1);
+        let saved = fs::read(&source).expect("original minutes");
+        let mut corrupt = saved.clone();
+        corrupt[24] ^= 1;
+        fs::write(&source, corrupt).expect("corrupt owned minute authority");
+        assert!(fixture.audit(rung).is_err());
+        assert_eq!(fs::read(&path).expect("refused ledger"), original);
+        fs::write(&source, saved).expect("restore owned authority");
+        assert!(
+            fixture
+                .audit(rung)
+                .expect("restored audit")
+                .contains("RESULT ALREADY RECORDED")
+        );
+        assert_eq!(fs::read(&path).expect("restored ledger"), original);
+    }
+    crate::knobs::clear_all();
+}
+
+#[test]
+fn monthly_audit_missing_execution_or_prior_context_refuses_before_an_attempt() {
+    for (month, timeframe) in [(5, Timeframe::MINUTE_1), (4, Timeframe::DAY_1)] {
+        let fixture = Fixture::warmed();
+        fs::remove_file(fixture.path(month, timeframe)).expect("remove owned required context");
+        let refusal = fixture
+            .audit("5min")
+            .expect_err("required context is absent");
+        assert!(!refusal.is_empty());
+        if timeframe == Timeframe::MINUTE_1 {
+            assert!(refusal.contains("1min execution series"), "{refusal}");
+            assert!(refusal.contains("no coarse fallback"), "{refusal}");
+        }
+        assert!(fixture.audit_range("5min", (2025, 5)).is_err());
+        assert!(!crate::results::Results::path(&fixture.root).exists());
+        assert_eq!(
+            crate::sweep_evidence::latest(&fixture.root, 1_048_576).expect("no attempt ledger"),
+            None
+        );
+    }
+}
+
+#[test]
+fn range_audits_record_exact_requested_and_found_months_without_inventing_missing_bars() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    for (rung, end) in [
+        ("1min", (2025, 5)),
+        ("5min", (2025, 5)),
+        ("5min", (2025, 6)),
+    ] {
+        let fixture = Fixture::warmed();
+        if end.1 == 6 {
+            let refusal = fixture
+                .audit_range(rung, end)
+                .expect_err("required June context is absent");
+            assert!(refusal.contains("1day reference stream is incomplete: missing 2025-06"));
+            assert!(!crate::results::Results::path(&fixture.root).exists());
+            assert_eq!(
+                crate::sweep_evidence::latest(&fixture.root, 1_048_576)
+                    .expect("no premature attempt"),
+                None
+            );
+            // Supply the mandatory reference and execution authority while
+            // leaving June's five-minute signal file absent.
+            let context = generated_session(6, 2);
+            assert!(!context.is_empty());
+            fixture.write(6, Timeframe::MINUTE_1, &context);
+            fixture.write(6, Timeframe::DAY_1, &context[..1]);
+        }
+        let report = fixture
+            .audit_range(rung, end)
+            .expect("actual stored range audit");
+        assert!(report.starts_with(crate::STORED_PROVENANCE), "{report}");
+        assert!(report.contains("RESULT RECORDED"), "{report}");
+        assert!(!report.contains(crate::NOT_RECORDED), "{report}");
+        assert!(!report.contains("NOTHING MEASURED"), "{report}");
+        assert_eq!(
+            report.contains("MONTHS MISSING FROM THIS SPAN (1): 2025-06"),
+            end.1 == 6
+        );
+        let mut ledger =
+            crate::results::Results::open_read(&fixture.root).expect("cold range ledger");
+        assert_eq!(ledger.len().expect("one parent"), 1);
+        let row = ledger.read(0).expect("recorded range");
+        assert_eq!((row.from_year, row.from_month), (2025, 5));
+        assert_eq!((row.to_year, row.to_month), end);
+        assert_eq!(
+            (row.months_asked, row.months_found),
+            (u32::from(end.1) - 4, 1)
+        );
+        assert_eq!(crate::results::read_field(&row.timeframe), rung);
+        assert!(row.bars > 0);
+        assert_eq!((row.trades, row.combinations, row.halted), (0, 0, 0));
+        drop(ledger);
+        let first = crate::sweep_evidence::latest(&fixture.root, 1_048_576)
+            .expect("read range attempt")
+            .expect("range evidence");
+        assert_eq!(first.identity, row.identity);
+        assert_eq!(
+            first.completion,
+            crate::sweep_evidence::Completion::Completed
+        );
+        let path = crate::results::Results::path(&fixture.root);
+        let saved = fs::read(&path).expect("saved parent bytes");
+        let retry = fixture.audit_range(rung, end).expect("range retry");
+        assert!(
+            retry.contains("RESULT ALREADY RECORDED AND VERIFIED"),
+            "{retry}"
+        );
+        assert_eq!(fs::read(path).expect("retry parent bytes"), saved);
+        let second = crate::sweep_evidence::latest(&fixture.root, 1_048_576)
+            .expect("read retry")
+            .expect("range retry evidence");
+        assert!(second.attempt > first.attempt);
+        assert_eq!(second.identity, first.identity);
+        assert_eq!(
+            second.completion,
+            crate::sweep_evidence::Completion::Completed
+        );
+    }
+    crate::knobs::clear_all();
 }
 
 #[test]
