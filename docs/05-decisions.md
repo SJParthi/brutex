@@ -36232,3 +36232,10 @@ covering zero, one, the 32-bit boundary on both sides, a mixed high/low counter,
 and the largest counter. Distinct counters must not collapse for the fixed test
 block. This guards counter incorporation without allocating terabytes and does
 not replace the published digest vectors or claim cryptographic assurance.
+
+The same batch also retained a behaviorally equivalent mutation: changing the
+last-round permutation guard from `<` to `<=` only permutes an already-consumed
+message. Express compression as six round/permutation pairs followed by its
+seventh round, removing that dead-effect branch rather than suppressing a
+mutant. The published vectors and split-input tests retain the digest contract;
+compression still performs exactly seven fixed rounds.

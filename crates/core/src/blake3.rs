@@ -164,16 +164,16 @@ fn compress(
     ];
 
     let mut m = *block_words;
-    // Seven rounds. The permutation runs between rounds, not after the last, so
-    // the loop permutes on every iteration but the final one.
+    // Six rounds with a following permutation, then the seventh round. Keeping
+    // the final round outside the loop avoids a branch whose mutation only
+    // permutes an already-consumed message and cannot affect the digest.
     let mut r: u32 = 0;
-    while r < 7 {
+    while r < 6 {
         state = round(state, m);
-        if r < 6 {
-            m = permute(m);
-        }
+        m = permute(m);
         r = r.saturating_add(1);
     }
+    state = round(state, m);
 
     // The feed-forward. Written with literal indices for the same reason `round`
     // is: no runtime index means no lint and no bounds check to get wrong.
