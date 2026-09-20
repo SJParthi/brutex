@@ -426,6 +426,125 @@ fn public_screen_admission_preserves_rung_and_build_or_feed_refusals() {
     }
 }
 
+fn generated_public_command_flow(root: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    crate::knobs::set("BRUTEX_CEILING", "256");
+    crate::knobs::set("BRUTEX_VALIDATE", "0");
+    let commands: &[&[&str]] = &[
+        &[
+            "auto-stored",
+            "zerodha",
+            "NIFTY",
+            "1min",
+            "2025",
+            "5",
+            "2025",
+            "5",
+        ],
+        &[
+            "screen", "zerodha", "NIFTY", "1min", "2025", "5", "2025", "5", "1000000", "1", "200",
+            "1",
+        ],
+    ];
+    for words in commands {
+        let args = words.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let mut report = String::new();
+        let status = crate::dispatch(&args, &mut report);
+        if crate::commit_stamp().is_none() {
+            assert_eq!(status, crate::MISUSED, "{report}");
+            assert!(report.contains("no verified commit stamp"), "{report}");
+            assert!(!report.contains(crate::STORED_PROVENANCE), "{report}");
+            assert!(!crate::results::Results::path(root).exists());
+            continue;
+        }
+        assert_eq!(status, crate::OK, "{report}");
+        assert!(report.starts_with(crate::STORED_PROVENANCE), "{report}");
+        if words[0] == "auto-stored" {
+            for text in [
+                "BUDGET  256 candidates -- BRUTEX_CEILING",
+                "3000 bars over 1 of 1 months",
+                "SEARCH",
+                "threshold chosen",
+            ] {
+                assert!(report.contains(text), "missing {text}: {report}");
+            }
+            assert!(crate::sweep_evidence::latest(root, 1_048_576)?.is_some());
+        } else {
+            assert!(report.contains("RESULT RECORDED"), "{report}");
+            assert!(report.contains(crate::UNVALIDATED), "{report}");
+            let mut ledger = crate::results::Results::open_read(root)?;
+            assert_eq!(ledger.len()?, 1);
+            let row = ledger.read(0)?;
+            assert_eq!(
+                (row.bars, row.min_hits, row.months_asked, row.months_found),
+                (3_000, 3_000, 1, 1)
+            );
+            assert_eq!(row.halted, 0);
+            let attempt =
+                crate::sweep_evidence::latest(root, 1_048_576)?.ok_or("screen attempt")?;
+            assert_eq!(attempt.identity, row.identity);
+            assert_eq!(
+                attempt.completion,
+                crate::sweep_evidence::Completion::Completed
+            );
+            let path = crate::results::Results::path(root);
+            let saved = fs::read(&path)?;
+            let mut retry = String::new();
+            assert_eq!(crate::dispatch(&args, &mut retry), crate::OK, "{retry}");
+            assert!(retry.contains("RESULT ALREADY RECORDED"), "{retry}");
+            assert_eq!(fs::read(path)?, saved);
+        }
+    }
+    crate::knobs::clear_all();
+    Ok(())
+}
+
+#[test]
+fn public_generated_probe_and_screen_agree_with_durable_results()
+-> Result<(), Box<dyn std::error::Error>> {
+    const CHILD: &str = "BRUTEX_TEST_PUBLIC_SCREEN_PIPELINE";
+    if std::env::var_os(CHILD).is_some() {
+        return generated_public_command_flow(&crate::store_root()?);
+    }
+    let fixture = Fixture::warmed();
+    let mut original = Vec::new();
+    for (month, timeframe) in [
+        (4, Timeframe::MINUTE_1),
+        (4, Timeframe::DAY_1),
+        (5, Timeframe::MINUTE_1),
+        (5, Timeframe::MINUTE_5),
+        (5, Timeframe::DAY_1),
+    ] {
+        let path = fixture.path(month, timeframe);
+        original.push((path.clone(), fs::read(&path)?));
+        let checksum = path.with_extension("crc");
+        original.push((checksum.clone(), fs::read(checksum)?));
+    }
+    let child = std::process::Command::new(std::env::current_exe()?)
+        .args([
+            "--exact",
+            "audited_stored::tests::public_generated_probe_and_screen_agree_with_durable_results",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CHILD, "generated")
+        .env("BRUTEX_STORE", &fixture.root)
+        .env("BRUTEX_LOG_DIR", fixture.root.join("logs"))
+        .output()?;
+    assert!(
+        child.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&child.stdout),
+        String::from_utf8_lossy(&child.stderr)
+    );
+    assert!(String::from_utf8_lossy(&child.stdout).contains("1 passed"));
+    for (path, bytes) in original {
+        assert_eq!(fs::read(path)?, bytes);
+    }
+    Ok(())
+}
+
 #[test]
 fn monthly_audits_publish_empty_extinction_and_exact_retry_identity_at_both_resolutions() {
     let _knobs = crate::knobs::serially();
