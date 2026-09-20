@@ -354,6 +354,13 @@ pub struct Record {
 }
 
 impl Record {
+    /// Whether the ladder completed and measured a nonempty trade total.
+    /// Zero trades is an unpriced sentinel, even when its zero beats a loss.
+    #[must_use]
+    pub const fn has_complete_trade_total(&self) -> bool {
+        self.halted == 0 && self.trades > 0
+    }
+
     /// The record as its exact `STRIDE` bytes, little-endian throughout.
     #[must_use]
     #[expect(

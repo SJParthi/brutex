@@ -37066,3 +37066,51 @@ the receipt subtracts that subset before describing held history. A mixed
 planner fixture proves that only the fetchable month probes history and that
 held, missing and out-of-window cells remain fully accounted for. No extra
 store scan or per-cell lookup is introduced.
+
+### D-0665 — Keep legacy result selection and trade quality on one eligible run — 2026-09-20
+
+Generated ledgers reproduced three disagreements. The newest-first results
+listing used a last-on-tie maximum and selected the older run, while `top`
+selected the newer append. The listing footer excluded zero-trade runs but its
+quality block selected them, so a losing winner could be followed by risk
+figures from another row. Both the CLI top reader and its incremental HTTP
+cache could select an unpriced zero over an actual negative trade total.
+
+Record::has_complete_trade_total names the existing legacy comparison rule:
+the ladder completed and at least one trade was measured. Use it in the listing,
+CLI top reader and HTTP cache. The listing reverses its newest-first traversal
+before the last-on-tie maximum, selects once, and uses that same row for its
+footer and quality. Append order breaks exact total ties; wall-clock stamps
+are not assumed monotone. This is legacy profit comparison, not research
+qualification, complete-span attestation or a profitability assurance.
+
+All ledger rows remain available in the listing, including unpriced and halted
+ones. An all-ineligible ledger names why it has no winner and displays no trade
+quality. The listing remains a linear read of matching history, the cached
+refresh still consumes only new appends, and eligibility is two fixed-field
+comparisons. No overall O(1) timing is claimed. Storage versions, recorded bytes,
+engine scope and the 40-row display disclosure remain unchanged.
+
+Six owned-ledger tests exercise ties, losing totals, empty eligibility, each
+filter shape, winners outside the displayed prefix, absent/empty files, corrupt
+seals and ragged tails, with exact unchanged-byte assertions. The HTTP fixture
+tests cold and incremental admission, ignored appends and later ties for both
+global and pair selections; its renderer fixture carries a real generated
+trade and matching receipt count. Original behavior failed four CLI regressions
+and the HTTP zero-trade regression before the selection repair.
+
+The same quality block converted a trade count above i64::MAX into a divisor
+of one. Its generated boundary regression displayed the entire -1,000-paisa
+total as a per-trade -10.00 rupees for u64::MAX trades. Divide in i128 before
+the proven lossless i64 result conversion; a positive divisor cannot enlarge
+the original signed total. Multiply the mean-risk numerator in i128 too,
+avoiding saturation before division. A seventh test pins signed extremes, full
+u64 counts, ordinary signed truncation, equal large means and the zero guards.
+
+An eighth result test exercises the public environment-resolving command in a
+child process against its parent's exclusively owned ledger, with unchanged
+bytes asserted afterwards. The named-F&O mutation audit also exposed a missing
+pricing-boundary test: reversing the completed-landing guard survived while
+every fixture omitted a rate. A rate-supplied loopback fixture now observes
+both sides: only a completed landing reaches pricing, and a census failure
+retains committed bars without starting it. No production pricing rule changes.

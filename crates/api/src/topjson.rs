@@ -40,7 +40,7 @@ impl Selection {
         let end = self.ledger.len()?;
         for at in self.processed..end {
             let row = self.ledger.read(at)?;
-            if row.halted != 0 {
+            if !row.has_complete_trade_total() {
                 continue;
             }
             if self
@@ -155,7 +155,7 @@ fn report(root: &Path, pair: Option<&(String, String)>) -> Result<String, String
     );
     let row = match selected {
         Ok(Some(row)) => row,
-        Ok(None) => return Ok("  NO COMPLETE RUN matches. Every matching row halted on a budget, or nothing has been recorded yet — `cli results` lists what is there.\n".to_owned()),
+        Ok(None) => return Ok("  NO COMPLETE RUN matches. Every matching row halted on a budget or traded nothing, or nothing has been recorded yet — `cli results` lists what is there.\n".to_owned()),
         Err(why) if why.contains("nothing was created") || why.contains("nothing was written") => return Ok("  NO RUN HAS BEEN RECORDED YET. The ledger does not exist or holds nothing — sweep something and it appears here.\n".to_owned()),
         Err(why) => return Err(why),
     };
@@ -228,7 +228,7 @@ mod tests {
             combinations: 0,
             depth: 0,
             halted: 0,
-            trades: 0,
+            trades: 1,
             pessimistic: profit,
             optimistic: profit,
             worst_trade: 0,
@@ -280,6 +280,67 @@ mod tests {
     }
 
     #[test]
+    fn top_selection_never_ranks_zero_trade_totals_over_losses() {
+        struct Owned(std::path::PathBuf);
+        impl Drop for Owned {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let dir = crate::scratch::path("top-zero-trade-totals");
+        std::fs::create_dir(&dir).expect("exclusively claim generated ledger root");
+        let _owned = Owned(dir.clone());
+        let mut ledger = cli::results::Results::open(&dir).expect("owned ledger");
+        let unpriced = cli::results::Record {
+            trades: 0,
+            ..row(20, "NIFTY", 0)
+        };
+        ledger
+            .append(&unpriced)
+            .expect("recorded sweep without trades");
+        let mut cache = Selection::open(&dir).expect("cold selection");
+        let pair = ("zerodha".to_owned(), "NIFTY".to_owned());
+        assert_eq!(cache.processed, 1);
+        assert_eq!(cache.get(None), None);
+        assert_eq!(cache.get(Some(&pair)), None);
+        let empty_report = report(&dir, None).expect("unpriced report");
+        assert_eq!(empty_report, cli::top_at(&dir, None, None));
+        assert!(empty_report.contains("NO COMPLETE RUN"), "{empty_report}");
+        assert!(empty_report.contains("traded nothing"), "{empty_report}");
+
+        let loss = row(21, "NIFTY", -100);
+        ledger.append(&loss).expect("completed losing trade");
+        cache.refresh().expect("incremental loss");
+        assert_eq!(cache.get(None), Some(loss));
+        assert_eq!(cache.get(Some(&pair)), Some(loss));
+        ledger
+            .append(&cli::results::Record {
+                identity: [22; 32],
+                ..unpriced
+            })
+            .expect("later unpriced zero");
+        ledger
+            .append(&cli::results::Record {
+                halted: 1,
+                ..row(23, "NIFTY", 1_000)
+            })
+            .expect("later halted total");
+        cache.refresh().expect("ineligible rows are processed");
+        assert_eq!(cache.processed, 4);
+        assert_eq!(cache.get(None), Some(loss));
+        assert_eq!(cache.get(Some(&pair)), Some(loss));
+        let newer = row(24, "NIFTY", -100);
+        ledger.append(&newer).expect("later equal trade total");
+        let path = cli::results::Results::path(&dir);
+        let before = std::fs::read(&path).expect("original bytes");
+        cache.refresh().expect("newest tie");
+        assert_eq!(cache.get(None), Some(newer));
+        assert_eq!(cache.get(Some(&pair)), Some(newer));
+        assert_eq!(cache.processed, 5);
+        assert_eq!(std::fs::read(path).expect("unchanged bytes"), before);
+    }
+
+    #[test]
     fn top_queries_and_unreadable_files_refuse_without_creating_a_store() {
         for query in [
             "feed=zerodha",
@@ -314,12 +375,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let record = row(0x6a, "NIFTY", 0);
         cli::frontier::Frontier::open(&dir).expect("empty frontier header");
+        cli::trades::Trades::open(&dir)
+            .expect("chosen trade detail")
+            .append_all(&[cli::trades::Row {
+                identity: record.identity,
+                seq: 0,
+                direction: cli::trades::Direction::Long,
+                signal_bar: 0,
+                entry_bar: 1,
+                exit_bar: 2,
+                best: 0,
+                worst: 0,
+                entry_micros: 1_767_240_000_000_000,
+                exit_micros: 1_767_240_060_000_000,
+                adverse_ppm: 0,
+                adverse_paisa: 0,
+                favourable_ppm: 0,
+                favourable_paisa: 0,
+            }])
+            .expect("one generated break-even trade");
         cli::result_set::Receipts::open(&dir)
             .expect("receipts")
             .append_exact(cli::result_set::Receipt {
                 identity: record.identity,
                 frontier_rows: 0,
-                trade_rows: 0,
+                trade_rows: 1,
                 direction: cli::trades::Direction::Long,
                 trade_policy: cli::result_set::TradePolicy::ChosenGridV1,
             })
@@ -329,6 +409,7 @@ mod tests {
             .append(&record)
             .expect("commit parent last");
         let canonical = cli::top_at(&dir, None, None);
+        assert!(canonical.contains(&record.identity_hex()), "{canonical}");
         assert_eq!(report(&dir, None), Ok(canonical.clone()));
         assert_eq!(report(&dir, None), Ok(canonical));
         let _ = std::fs::remove_dir_all(dir);

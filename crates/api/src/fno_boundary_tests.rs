@@ -658,3 +658,51 @@ async fn a_window_after_every_discovered_expiry_is_empty_without_claiming_a_fetc
         );
     }
 }
+
+#[tokio::test]
+async fn named_pricing_requires_a_complete_landing_even_when_source_bars_committed() {
+    for blocked_census in [false, true] {
+        let mut fixture = Fixture::new(1);
+        fixture.asked = ingest::parse_fno(
+            "underlying=NIFTY&series=opt&vendor=groww&from=2025-07-01&to=2025-07-01&rate=0.0655",
+            fixture.today,
+        )
+        .expect("operator-supplied generated pricing input");
+        assert!(fixture.asked.rate.is_some());
+        let transport = fixture.serve(complete_session()).await;
+        let obstruction = fixture.root.join("manifest");
+        if blocked_census {
+            fs::write(&obstruction, b"owned obstruction").expect("block fixture census");
+        }
+        let landed = fno_land(
+            &fixture.chain.contracts,
+            &fixture.asked,
+            &fixture.site,
+            &fixture.wire,
+        )
+        .await;
+        assert_eq!(landed.rows_read, 385);
+        assert_eq!(landed.stored, 375);
+        assert_eq!(landed.failed, usize::from(blocked_census));
+        if blocked_census {
+            assert_eq!(landed.priced, PricedCount::default());
+            assert_eq!(
+                fs::read(&obstruction).expect("untouched obstruction"),
+                b"owned obstruction"
+            );
+        } else {
+            assert_eq!(landed.priced.rows, 0);
+            assert!(
+                landed
+                    .priced
+                    .why
+                    .iter()
+                    .any(|why| why.contains("index month is not on disk")),
+                "a completed landing must reach pricing and retain its actual missing-input reason: {:?}",
+                landed.priced
+            );
+        }
+        assert!(fixture.bar_path(0).to_path_buf(&fixture.root).is_file());
+        assert_eq!(transport.seen.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+}

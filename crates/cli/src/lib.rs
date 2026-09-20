@@ -52,6 +52,8 @@ mod commit_stamp;
 #[cfg(test)]
 mod operator_boundary_tests;
 mod readonly_file;
+#[cfg(test)]
+mod results_report_tests;
 
 #[cfg_attr(
     not(test),
@@ -6620,10 +6622,14 @@ fn audit_range_kernel(request: StoredRangeAuditRequest<'_>) -> Result<String, st
 /// five lakh over twelve. Division the reader should not have to do.
 fn quality_block(record: &crate::results::Record) -> String {
     let mut out = String::from("\n  TRADE QUALITY -- what it risked to make it\n");
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "division by a positive integer cannot enlarge the signed i64 numerator; i128 preserves every u64 trade count"
+    )]
     let per_trade = if record.trades == 0 {
         0
     } else {
-        record.pessimistic / i64::try_from(record.trades).unwrap_or(1)
+        (i128::from(record.pessimistic) / i128::from(record.trades)) as i64
     };
     for (label, value, note) in [
         // THESE THREE ARE MEANS, AND TWO OF THEM USED TO BE LABELLED AS BOUNDS.
@@ -6681,7 +6687,10 @@ fn quality_block(record: &crate::results::Record) -> String {
     let ratio = if record.winner_mae == 0 {
         "no winner dipped".to_owned()
     } else {
-        let tenths = record.winner_mfe.saturating_mul(10) / record.winner_mae;
+        // Multiplication in i64 saturated before division, changing even a
+        // ratio of two equal large means from 1.0 to 0.1. This fixed-width
+        // intermediate holds every i64 mean times ten exactly.
+        let tenths = i128::from(record.winner_mfe) * 10 / i128::from(record.winner_mae);
         format!("{}.{}x", tenths / 10, tenths % 10)
     };
     let _ = writeln!(
@@ -6777,13 +6786,13 @@ fn append_condition_names(out: &mut String, record: &crate::results::Record) {
     }
 }
 
-/// The best COMPLETE run among these rows, as the line the listing ends on.
+/// The best complete trade total among rows supplied newest first.
 ///
 /// Separate from the table because a reader scanning forty rows for the largest
 /// number is a reader who will miss it — and because `done: NO` rows must not
 /// win. A halted ladder's total is not comparable with a complete one's: it
 /// covers less of the search while its combination count looks larger.
-fn best_complete_line(rows: &[crate::results::Record]) -> String {
+fn best_complete_newest_first(rows: &[crate::results::Record]) -> Option<&crate::results::Record> {
     // AND `trades == 0` MUST NOT WIN EITHER, for the same reason `halted` must
     // not: it is not a worse total, it is NO total.
     //
@@ -6795,13 +6804,19 @@ fn best_complete_line(rows: &[crate::results::Record]) -> String {
     // a ledger where nothing profitable was found the BEST COMPLETE RUN line
     // would name a run that made no trade at all.
     //
-    // Latent today only because nothing writes an unpriced row yet. It is fixed
-    // before that changes rather than after.
-    let complete: Vec<&crate::results::Record> = rows
-        .iter()
-        .filter(|r| r.halted == 0 && r.trades > 0)
-        .collect();
-    let Some(best) = complete.iter().max_by_key(|r| r.pessimistic) else {
+    // The listing reads newest first, while `max_by_key` keeps the LAST tie.
+    // Reverse that traversal so its winner agrees with the append-order fold
+    // used by the CLI and cached HTTP top reports. Wall-clock stamps need not
+    // be monotone. No allocation or sort is needed.
+    rows.iter()
+        .rev()
+        .filter(|row| row.has_complete_trade_total())
+        .max_by_key(|row| row.pessimistic)
+}
+
+/// Describe exactly the selected row, which also supplies the quality block.
+fn best_complete_line(best: Option<&crate::results::Record>) -> String {
+    let Some(best) = best else {
         return "  NO COMPLETE RUN to rank: every matching row either halted on \
                 a budget or traded nothing, so no total here is comparable with \
                 another. Raise MIN_HITS and rerun.\n"
@@ -7345,8 +7360,8 @@ const LIST_ROWS: usize = 40;
 /// answer could be printed once, on the run that produced it, and never again.
 ///
 /// Which run: the **best complete** one matching the filter, chosen exactly as
-/// [`best_complete_line`] chooses it — highest `pessimistic` among rows that did
-/// not halt. A halted run's totals are not comparable with a complete one's, so
+/// [`best_complete_newest_first`] chooses it — highest `pessimistic` among rows
+/// that completed and traded. A halted run's totals are not comparable with a complete one's, so
 /// ranking them together would be the defect `range-all`'s `complete` column
 /// exists to prevent.
 ///
@@ -7424,7 +7439,7 @@ pub fn top_at(root: &std::path::Path, feed: Option<&str>, underlying: Option<&st
         }
         Ok(None) => {
             return "  NO COMPLETE RUN matches. Every matching row halted on a \
-                    budget, or nothing has been recorded yet — `cli results` \
+                    budget or traded nothing, or nothing has been recorded yet — `cli results` \
                     lists what is there.\n"
                 .to_owned();
         }
@@ -7551,7 +7566,7 @@ pub fn render_top_record(
     out
 }
 
-/// The best COMPLETE recorded run matching the filter, newest wins a tie.
+/// The best completed, traded run matching the filter; newest wins a tie.
 fn newest_complete(
     root: &std::path::Path,
     feed: Option<&str>,
@@ -7568,8 +7583,9 @@ fn newest_complete(
         let record = store.read(index)?;
         // HALTED ROWS ARE NOT CANDIDATES. A halted run's total covers less of
         // the ladder than its combination count suggests, so ranking it against
-        // a complete one compares two different searches.
-        if record.halted != 0 {
+        // a complete one compares two different searches. A zero-trade row
+        // has no measured total at all and cannot outrank a real loss.
+        if !record.has_complete_trade_total() {
             continue;
         }
         if feed.is_some_and(|f| crate::results::read_field(&record.feed) != f) {
@@ -7623,6 +7639,11 @@ pub fn results_list(feed: Option<&str>, underlying: Option<&str>) -> String {
         Ok(root) => root,
         Err(why) => return format!("refused: {why}\n"),
     };
+    results_at(&root, feed, underlying)
+}
+
+/// The same read-only listing against a caller-owned root.
+fn results_at(root: &std::path::Path, feed: Option<&str>, underlying: Option<&str>) -> String {
     // OPEN_READ, BECAUSE THIS IS A LISTING. `Results::open` calls
     // `create_dir_all` and makes the very ledger this command reports as
     // empty -- so `cli results` against a store with no `results/` printed
@@ -7630,7 +7651,7 @@ pub fn results_list(feed: Option<&str>, underlying: Option<&str>) -> String {
     // failed outright on a read-only store while `cli top` succeeded.
     // `open_read` exists for exactly this; `top_at` was moved to it and this,
     // the sibling the same comment calls "the third and last", was not.
-    let mut store = match crate::results::Results::open_read(&root) {
+    let mut store = match crate::results::Results::open_read(root) {
         Ok(store) => store,
         Err(why) => return format!("refused: {why}\n"),
     };
@@ -7643,7 +7664,7 @@ pub fn results_list(feed: Option<&str>, underlying: Option<&str>) -> String {
     let _ = writeln!(
         out,
         "  file                                    {}",
-        crate::results::Results::path(&root).display()
+        crate::results::Results::path(root).display()
     );
     let _ = writeln!(out, "  rows                                    {count}");
     if count == 0 {
@@ -7731,15 +7752,12 @@ pub fn results_list(feed: Option<&str>, underlying: Option<&str>) -> String {
 
     // THE BEST ROW, BY THE FIGURE SELECTION USES.
     let _ = writeln!(out);
-    out.push_str(&best_complete_line(&rows));
+    let best = best_complete_newest_first(&rows);
+    out.push_str(&best_complete_line(best));
     // AND WHAT IT RISKED, for the row just named. A total answers "how much did
     // it make" and nothing else; these answer "what did it risk to make it",
     // which is the question the exit grid exists to price.
-    if let Some(best) = rows
-        .iter()
-        .filter(|r| r.halted == 0)
-        .max_by_key(|r| r.pessimistic)
-    {
+    if let Some(best) = best {
         out.push_str(&quality_block(best));
     }
     out
@@ -22277,7 +22295,10 @@ mod tests {
             ..halted_but_huge
         };
 
-        let line = super::best_complete_line(&[halted_but_huge, complete_but_smaller]);
+        let line = super::best_complete_line(super::best_complete_newest_first(&[
+            halted_but_huge,
+            complete_but_smaller,
+        ]));
         assert!(
             line.contains("min_hits 500"),
             "the COMPLETE run must win even though the halted one shows a total \
@@ -22294,7 +22315,7 @@ mod tests {
 
         // AND WHEN NOTHING COMPLETED, IT SAYS SO rather than crowning the least
         // truncated row.
-        let none = super::best_complete_line(&[halted_but_huge]);
+        let none = super::best_complete_line(super::best_complete_newest_first(&[halted_but_huge]));
         assert!(
             none.contains("NO COMPLETE RUN"),
             "a table of only halted rows has no comparable winner:\n{none}"
