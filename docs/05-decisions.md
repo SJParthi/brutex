@@ -36741,3 +36741,12 @@ attempts. With mandatory reference and execution authority present, an absent
 coarse signal month must retain the exact requested and found month counts and
 explicitly name the shorter sample in the report. Missing execution, prior
 context or the requested next month's daily authority must refuse first.
+
+### D-0650 — Run small mutation contracts before the complete eight-rung transaction — 2026-09-20
+
+Give the generated all-rung stored transaction a lower nextest scheduling
+priority. Fast contract tests can then stop a mutant on an actual assertion
+failure before its expensive retained-chain reauthentication. Every test remains
+selected: an unmutated baseline and a mutant that survives the earlier tests
+still run the complete transaction. This changes neither Cargo test behavior,
+timeouts, mutation accounting nor any coverage threshold.

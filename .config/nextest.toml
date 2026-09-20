@@ -15,3 +15,10 @@ priority = 100
 [[profile.default.overrides]]
 filter = 'test(folds_preserve_parent_worker_candidate_and_pair_limits) | test(every_global_replay_v2_companion_byte_is_bound)'
 priority = 100
+
+# This complete stored transaction reauthenticates eight retained chains. Run
+# the smaller contract regressions first so mutation fail-fast can stop on a
+# real failure before paying for it. It is neither filtered out nor skipped.
+[[profile.default.overrides]]
+filter = 'test(all_eight_stored_rungs_publish_exact_selection_chains_and_reuse_every_byte)'
+priority = -100
