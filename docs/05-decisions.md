@@ -36239,3 +36239,9 @@ message. Express compression as six round/permutation pairs followed by its
 seventh round, removing that dead-effect branch rather than suppressing a
 mutant. The published vectors and split-input tests retain the digest contract;
 compression still performs exactly seven fixed rounds.
+
+Further survivors affected the second eight compression output words, which the
+public 32-byte hash never consumes. Preserve the specified compression function
+and test all 64 output bytes against the official empty-input extended vector,
+verified from upstream and recorded in the charter. This adds independent
+expected-output evidence rather than an implementation-derived oracle.

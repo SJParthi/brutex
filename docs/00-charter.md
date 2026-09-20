@@ -775,3 +775,11 @@ The 515,779-byte CI workflow at `19187a4e` exceeded that limit. D-0608 moves
 explanatory YAML comments into a document, leaving the executable workflow
 unchanged at 497,119 bytes. This restores eligibility to run; it does not
 establish that the workflow's checks pass.
+
+### BLAKE3 full compression reference — verified 2026-09-20
+
+The upstream [BLAKE3 test vectors](https://raw.githubusercontent.com/BLAKE3-team/BLAKE3/master/test_vectors/test_vectors.json)
+record extended unkeyed output for empty input. Core's
+`complete_compression_output_matches_the_official_empty_vector` compares the
+first 64 bytes, including the second half unused by its public 32-byte digest.
+The expected bytes come from upstream, not this implementation.

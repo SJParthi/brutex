@@ -456,7 +456,7 @@ pub fn hash(input: &[u8]) -> [u8; OUT_LEN] {
 
 #[cfg(test)]
 mod tests {
-    use super::{CHUNK_LEN, CHUNK_START, Hasher, IV, compress, hash};
+    use super::{CHUNK_END, CHUNK_LEN, CHUNK_START, Hasher, IV, ROOT, compress, hash};
 
     /// The reference test set's input: byte `i` is `i % 251`.
     fn vector_input(len: usize) -> Vec<u8> {
@@ -602,6 +602,21 @@ mod tests {
             .map(|(i, byte)| if i == last { byte ^ 1 } else { *byte })
             .collect();
         assert_ne!(hash(&a), hash(&b), "a one-bit change must re-key");
+    }
+
+    #[test]
+    fn complete_compression_output_matches_the_official_empty_vector() {
+        // First 64 output bytes of the upstream empty-input unkeyed vector;
+        // see docs/00-charter.md. The public digest uses only the first 32.
+        let words = compress(&IV, &[0; 16], 0, 0, CHUNK_START | CHUNK_END | ROOT);
+        let bytes: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        assert_eq!(
+            hex(&bytes),
+            concat!(
+                "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
+                "e00f03e7b69af26b7faaf09fcd333050338ddfe085b8cc869ca98b206c08243a"
+            )
+        );
     }
 
     #[test]
