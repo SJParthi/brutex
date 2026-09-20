@@ -2813,6 +2813,469 @@ mod tests {
         assert!(why.contains("misaligned in/out-of-sample candidate families"));
     }
 
+    fn generated_validation_fold() -> FoldResult {
+        FoldResult {
+            index: 0,
+            considered: 2,
+            priced: 2,
+            chosen: Some(
+                runner::replay_mask::from_stored_words([1, 0, 0, 0, 0, 0])
+                    .expect("canonical generated mask"),
+            ),
+            out_of_sample_exit: Some(10),
+            in_sample_all: vec![2, 1],
+            out_of_sample_all: vec![2, 1],
+            ..FoldResult::default()
+        }
+    }
+
+    #[test]
+    fn validation_refusals_truncation_and_missing_outcomes_never_become_measured_success() {
+        let complete = generated_validation_fold;
+        let measure = |folds, refused| {
+            ValidationEvidenceV1::from_runner(
+                digest(1),
+                digest(2),
+                &Validated { folds, refused },
+                None,
+            )
+        };
+        assert_eq!(
+            measure(vec![complete()], Some("upstream refused".into())),
+            Ok(EvidenceSourceV1::Refused)
+        );
+        assert_eq!(
+            measure(
+                vec![FoldResult {
+                    halted: Some(engine::Halt::default()),
+                    ..complete()
+                }],
+                None,
+            ),
+            Ok(EvidenceSourceV1::Refused)
+        );
+        for (fold, expected) in [
+            (
+                FoldResult {
+                    index: 1,
+                    ..complete()
+                },
+                "canonical sequence",
+            ),
+            (
+                FoldResult {
+                    priced: 1,
+                    ..complete()
+                },
+                "candidate truncation",
+            ),
+            (
+                FoldResult {
+                    considered: 3,
+                    priced: 3,
+                    ..complete()
+                },
+                "retains 2 candidate scores",
+            ),
+        ] {
+            let why = measure(vec![fold], None).expect_err("malformed fold must refuse");
+            assert!(why.contains(expected), "{why}");
+        }
+        for fold in [
+            FoldResult {
+                out_of_sample_exit: None,
+                ..complete()
+            },
+            FoldResult::default(),
+        ] {
+            let EvidenceSourceV1::Measured(value) =
+                measure(vec![fold], None).expect("explicit incomplete outcome")
+            else {
+                unreachable!("the supplied walk was measured");
+            };
+            assert_eq!(value.profitable_oos_folds, ObservedU64V1::Unmeasured);
+            assert_eq!(
+                value.oos_pessimistic_return_paisa,
+                ObservedI64V1::Unmeasured
+            );
+            for (population, ranking) in [(digest(9), digest(2)), (digest(1), digest(9))] {
+                assert!(
+                    validation_values(EvidenceSourceV1::Measured(value), population, ranking)
+                        .is_err()
+                );
+            }
+        }
+        for (first, second) in [(i64::MAX, 1), (i64::MIN, -1)] {
+            let why = measure(
+                vec![
+                    FoldResult {
+                        out_of_sample_exit: Some(first),
+                        ..complete()
+                    },
+                    FoldResult {
+                        index: 1,
+                        out_of_sample_exit: Some(second),
+                        ..complete()
+                    },
+                ],
+                None,
+            )
+            .expect_err("fold sum overflow must refuse");
+            assert!(why.contains("overflowed i64"), "{why}");
+        }
+    }
+
+    #[test]
+    fn family_statistics_refuse_nonfinite_values_invalid_probabilities_and_foreign_positions() {
+        let family = family_returns();
+        let receipt = romano_wolf_receipt(&family, 100, 7, DEFAULT_BLOCK, 50_000)
+            .expect("generated complete family");
+        let (white, spa) = family_verdicts();
+        let measure = |white: &Verdict, spa: &Verdict, candidate| {
+            FamilyTestEvidenceV1::from_runner(
+                digest(1),
+                digest(2),
+                digest(3),
+                candidate,
+                Some(white),
+                Some(spa),
+                Some(&receipt),
+            )
+        };
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for (left, right) in [
+                (
+                    Verdict {
+                        statistic: value,
+                        ..white
+                    },
+                    spa,
+                ),
+                (
+                    white,
+                    Verdict {
+                        statistic: value,
+                        ..spa
+                    },
+                ),
+            ] {
+                assert!(
+                    measure(&left, &right, 0)
+                        .expect_err("nonfinite source")
+                        .contains("non-finite")
+                );
+            }
+        }
+        for probability in [f64::NAN, -0.1, 1.1] {
+            for (left, right) in [
+                (
+                    Verdict {
+                        p_value: probability,
+                        ..white
+                    },
+                    spa,
+                ),
+                (
+                    white,
+                    Verdict {
+                        p_value: probability,
+                        ..spa
+                    },
+                ),
+            ] {
+                assert!(measure(&left, &right, 0).is_err());
+            }
+        }
+        for candidate in [family.len(), usize::MAX] {
+            assert!(
+                measure(&white, &spa, candidate)
+                    .expect_err("foreign position")
+                    .contains("outside")
+            );
+        }
+        for (population, ranking, strategy) in [
+            ([0; 32], digest(2), digest(3)),
+            (digest(1), [0; 32], digest(3)),
+            (digest(1), digest(2), [0; 32]),
+        ] {
+            assert!(
+                FamilyTestEvidenceV1::from_runner(
+                    population,
+                    ranking,
+                    strategy,
+                    0,
+                    Some(&white),
+                    Some(&spa),
+                    Some(&receipt),
+                )
+                .is_err()
+            );
+        }
+    }
+
+    fn generated_trade_rows() -> (Cell, Vec<TradeRow>) {
+        let rows = [10, -4, 0, 5]
+            .into_iter()
+            .enumerate()
+            .map(|(index, worst)| {
+                let slot = i64::try_from(index).expect("four generated trades");
+                let entry =
+                    1_746_157_500_000_000 + (slot / 2) * 86_400_000_000 + (slot % 2) * 120_000_000;
+                TradeRow {
+                    signal_bar: index * 2,
+                    entry_bar: index * 2 + 1,
+                    exit_bar: index * 2 + 2,
+                    entry_micros: entry,
+                    exit_micros: entry + 60_000_000,
+                    best: worst,
+                    worst,
+                    adverse: slot,
+                    adverse_paisa: slot,
+                    favourable: 0,
+                    favourable_paisa: 0,
+                }
+            })
+            .collect();
+        (
+            Cell {
+                trades: 4,
+                wins: 2,
+                pessimistic: 11,
+                optimistic: 11,
+                gross_win: 15,
+                gross_loss: -4,
+                best_trade: 10,
+                min_win: 5,
+                worst_trade: -4,
+                max_drawdown: 4,
+                max_winning_streak: 1,
+                max_losing_streak: 2,
+                timed_out: 4,
+                ..Cell::default()
+            },
+            rows,
+        )
+    }
+
+    #[test]
+    fn chosen_trade_evidence_reconciles_every_aggregate_and_empty_is_unmeasured() {
+        let (cell, rows) = generated_trade_rows();
+        let measured = super::reconcile_trade_rows(&cell, &rows).expect("exact generated ledger");
+        assert_eq!(measured.max_mae_paisa, ObservedU64V1::Measured(3));
+        assert_eq!(
+            measured.session_concentration_ppm,
+            ObservedU64V1::Measured(500_000)
+        );
+        assert_eq!(
+            measured.largest_trade_profit_share_ppm,
+            ObservedU64V1::Measured(666_666)
+        );
+        assert_eq!(
+            measured.weakest_period_return_paisa,
+            ObservedI64V1::Measured(5)
+        );
+        let changes: [fn(&mut Cell); 12] = [
+            |v| v.trades += 1,
+            |v| v.wins += 1,
+            |v| v.pessimistic += 1,
+            |v| v.optimistic += 1,
+            |v| v.gross_win += 1,
+            |v| v.gross_loss -= 1,
+            |v| v.best_trade += 1,
+            |v| v.min_win += 1,
+            |v| v.worst_trade -= 1,
+            |v| v.max_drawdown += 1,
+            |v| v.max_winning_streak += 1,
+            |v| v.max_losing_streak += 1,
+        ];
+        for (index, change) in changes.into_iter().enumerate() {
+            let mut foreign = cell;
+            change(&mut foreign);
+            assert!(
+                super::reconcile_trade_rows(&foreign, &rows).is_err(),
+                "aggregate {index}"
+            );
+        }
+        assert_eq!(super::reconcile_trade_rows(&cell, &rows), Ok(measured));
+        assert_eq!(
+            super::reconcile_trade_rows(&Cell::default(), &[]),
+            Ok(super::ReconciledTradeEvidenceV1::unmeasured())
+        );
+    }
+
+    #[test]
+    fn chosen_trade_rows_refuse_causal_order_overlap_and_negative_excursions() {
+        type RowChange = (fn(&mut TradeRow), &'static str);
+        let (cell, rows) = generated_trade_rows();
+        let changes: [RowChange; 7] = [
+            (|v| v.signal_bar = v.entry_bar + 1, "indices out of order"),
+            (|v| v.exit_micros = v.entry_micros - 1, "exits before"),
+            (|v| v.best = v.worst - 1, "pessimistic trade is better"),
+            (|v| v.adverse = -1, "negative excursion"),
+            (|v| v.adverse_paisa = -1, "negative excursion"),
+            (|v| v.favourable = -1, "negative excursion"),
+            (|v| v.favourable_paisa = -1, "negative excursion"),
+        ];
+        for (change, expected) in changes {
+            let mut corrupt = rows.clone();
+            change(corrupt.first_mut().expect("nonempty generated rows"));
+            let why = super::reconcile_trade_rows(&cell, &corrupt).expect_err("bad trade detail");
+            assert!(why.contains(expected), "{why}");
+        }
+        let first = *rows.first().expect("first trade");
+        for (entry, expected) in [
+            (first.entry_micros, "not strictly ordered"),
+            (first.exit_micros, "overlap"),
+        ] {
+            let mut corrupt = rows.clone();
+            corrupt.get_mut(1).expect("second trade").entry_micros = entry;
+            let why = super::reconcile_trade_rows(&cell, &corrupt).expect_err("causal collision");
+            assert!(why.contains(expected), "{why}");
+        }
+    }
+
+    #[test]
+    fn trade_aggregate_overflow_refuses_before_a_clamped_value_can_become_evidence() {
+        let (cell, rows) = generated_trade_rows();
+        for (amounts, expected) in [
+            (vec![i64::MAX, 1], "pessimistic row sum overflowed"),
+            (vec![i64::MIN, -1], "drawdown overflowed"),
+            (
+                vec![i64::MAX, -i64::MAX, i64::MAX],
+                "gross-win row sum overflowed",
+            ),
+            (
+                vec![-i64::MAX, i64::MAX, -2],
+                "gross-loss row sum overflowed",
+            ),
+            (vec![i64::MAX, -i64::MAX, -1], "drawdown overflowed"),
+        ] {
+            let mut changed = rows.clone();
+            changed.truncate(amounts.len());
+            for (row, value) in changed.iter_mut().zip(amounts) {
+                row.worst = value;
+                row.best = value;
+            }
+            let cell = Cell {
+                trades: u64::try_from(changed.len()).expect("bounded trades"),
+                ..cell
+            };
+            let why =
+                super::reconcile_trade_rows(&cell, &changed).expect_err("unrepresentable risk");
+            assert!(why.contains(expected), "{why}");
+        }
+        let mut changed = rows;
+        changed.truncate(2);
+        for (row, best) in changed.iter_mut().zip([i64::MAX, 1]) {
+            row.worst = 0;
+            row.best = best;
+        }
+        let cell = Cell { trades: 2, ..cell };
+        let why = super::reconcile_trade_rows(&cell, &changed).expect_err("optimistic overflow");
+        assert!(why.contains("optimistic row sum overflowed"), "{why}");
+    }
+
+    #[test]
+    fn direct_cell_measurements_refuse_impossible_counts_and_preserve_unmeasured_ratios() {
+        let (cell, _) = generated_trade_rows();
+        let changes: [fn(&mut Cell); 9] = [
+            |v| v.wins = v.trades + 1,
+            |v| v.max_drawdown = -1,
+            |v| v.gross_win = -1,
+            |v| v.min_win = -1,
+            |v| v.gross_loss = 1,
+            |v| v.timed_out -= 1,
+            |v| v.stopped = u64::MAX,
+            |v| v.ambiguous_bars = v.trades + 1,
+            |v| v.gapped = v.trades + 1,
+        ];
+        for (index, change) in changes.into_iter().enumerate() {
+            let mut invalid = cell;
+            change(&mut invalid);
+            assert!(
+                super::direct_cell_values(&invalid).is_err(),
+                "invalid cell {index}"
+            );
+        }
+        let actual = super::direct_cell_values(&cell).expect("coherent generated risk");
+        assert_eq!(actual.trades, 4);
+        assert_eq!(actual.win_rate_ppm, ObservedU64V1::Measured(500_000));
+        assert_eq!(
+            actual.worst_reward_risk_ppm,
+            ObservedU64V1::Measured(1_250_000)
+        );
+        assert_eq!(
+            actual.return_drawdown_ppm,
+            ObservedU64V1::Measured(2_750_000)
+        );
+        assert_eq!(actual.profit_factor_ppm, ObservedU64V1::Measured(3_750_000));
+        assert_eq!(actual.average_win_paisa, ObservedU64V1::Measured(7));
+        assert_eq!(actual.average_loss_paisa, ObservedU64V1::Measured(2));
+        let empty = super::direct_cell_values(&Cell::default()).expect("no trades is a state");
+        for value in [
+            empty.win_rate_ppm,
+            empty.wilson_win_rate_ppm,
+            empty.average_win_paisa,
+            empty.average_loss_paisa,
+            empty.return_drawdown_ppm,
+            empty.profit_factor_ppm,
+            empty.worst_reward_risk_ppm,
+            empty.consecutive_losing_streak,
+            empty.consecutive_winning_streak,
+        ] {
+            assert_eq!(value, ObservedU64V1::Unmeasured);
+        }
+    }
+
+    #[test]
+    fn explicit_refused_sources_remain_refused_at_the_public_admission_boundary() {
+        with_evidence_fixture(|context, _, _, _| {
+            let mut sources = missing_sources(&context);
+            sources.trade_rows = EvidenceSourceV1::Refused;
+            sources.independent_sessions = EvidenceSourceV1::Refused;
+            sources.validation = EvidenceSourceV1::Refused;
+            sources.family_tests = EvidenceSourceV1::Refused;
+            sources.completeness.population_authority = EvidenceSourceV1::Refused;
+            sources.completeness.data = DataCompletenessSourceV1::Refused;
+            sources.full_precision_statistics = FullPrecisionStatisticsSourceV1::Refused;
+            let evidence =
+                build_institutional_evidence_v1(sources).expect("typed refused evidence");
+            let values = evidence.values();
+            for state in [
+                values.execution_complete,
+                values.data_complete,
+                values.calendar_complete,
+                values.population_complete,
+                values.full_precision_statistics_complete,
+            ] {
+                assert_eq!(state, CompletenessV1::Refused);
+            }
+            for state in [
+                values.max_mae_paisa,
+                values.independent_sessions,
+                values.pbo_ppm,
+                values.fwer_p_value_ppm,
+                values.spa_p_value_ppm,
+                values.bootstrap_draws,
+                values.bootstrap_strategies,
+                values.bootstrap_periods,
+                values.decided_folds,
+                values.profitable_oos_folds,
+                values.white_reality_p_value_ppm,
+                values.romano_wolf_p_value_ppm,
+                values.session_concentration_ppm,
+                values.largest_trade_profit_share_ppm,
+            ] {
+                assert_eq!(state, ObservedU64V1::Refused);
+            }
+            assert_eq!(values.weakest_period_return_paisa, ObservedI64V1::Refused);
+            assert_eq!(values.oos_pessimistic_return_paisa, ObservedI64V1::Refused);
+            assert_eq!(values.white_reality_decision, HypothesisDecisionV1::Refused);
+            assert_eq!(values.romano_wolf_decision, HypothesisDecisionV1::Refused);
+            assert!(!relaxed_policy().evaluate(&evidence).is_admitted());
+        });
+    }
+
     #[test]
     fn invalid_probabilities_are_refused_instead_of_clamped() {
         assert!(probability_ppm("test", f64::NAN).is_err());
