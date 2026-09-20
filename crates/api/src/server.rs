@@ -29823,6 +29823,29 @@ fn spot_months_by_identity(
     by_series
 }
 
+fn calendar_conflict_json(
+    feed: Vendor,
+    symbol: &str,
+    first: (
+        brutex_core::instrument::Exchange,
+        brutex_core::instrument::Segment,
+    ),
+    second: (
+        brutex_core::instrument::Exchange,
+        brutex_core::instrument::Segment,
+    ),
+) -> String {
+    serde_json::json!({
+        "status": "refused",
+        "feed": feed.as_str(),
+        "symbol": symbol,
+        "refusal": format!(
+            "ambiguous stored symbol {symbol}: {}/{} and {}/{} are different calendar identities; no calendar was selected",
+            first.0.as_str(), first.1.as_str(), second.0.as_str(), second.1.as_str()
+        ),
+    }).to_string()
+}
+
 async fn calendar_json(
     axum::extract::State(site): axum::extract::State<Loaded>,
     uri: axum::http::Uri,
@@ -30018,7 +30041,13 @@ async fn calendar_json(
                 months.push(month);
             }
             Some(seen) if seen == identity => months.push(month),
-            Some(_) => {}
+            Some(seen) => {
+                return (
+                    axum::http::StatusCode::CONFLICT,
+                    [(axum::http::header::CONTENT_TYPE, json)],
+                    calendar_conflict_json(feed, &symbol, seen, identity),
+                );
+            }
         }
     }
 
@@ -30053,6 +30082,10 @@ async fn calendar_json(
         crate::calendar_of::json(&calendar),
     )
 }
+
+#[cfg(test)]
+#[path = "calendar_route_tests.rs"]
+mod calendar_route_tests;
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic, reason = "test-only assertions")]

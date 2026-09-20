@@ -7615,9 +7615,9 @@ jobs:
           declared='
           clock.rs 1
           level.rs 1
-          lib.rs 7
+          lib.rs 6
           record.rs 1
-          sink.rs 26
+          sink.rs 23
           tail.rs 3
           '
           cargo llvm-cov report --locked --text > /tmp/cov.txt

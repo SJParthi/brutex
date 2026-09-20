@@ -45,6 +45,11 @@ fn emitting_with_no_sink_installed_is_reported_and_is_not_a_panic() {
     // And it is still none afterwards: `emit` does not install one by
     // accident, which would make the first event decide where every later one
     // goes.
+    assert_eq!(telemetry::reserve_run_id(), None);
+    assert_eq!(
+        telemetry::emit_for_run(1, &Event::info("t", "no correlation sink")),
+        Emitted::NotInstalled
+    );
     assert!(telemetry::global().is_none());
     assert!(!Emitted::NotInstalled.is_written());
 }

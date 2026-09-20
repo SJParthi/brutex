@@ -3535,6 +3535,19 @@ The counts are per file rather than per line number on purpose. A line number
 is invalidated by editing a comment above it, and a declaration that rots every
 time somebody reformats is one nobody will keep honest.
 
+**2026-09-20 follow-up (D-0640).** The completed immutable workspace profile on
+219790b7 exposes a reachable global run-reservation wrapper with no direct test.
+Its exact text report counts `lib.rs` 9 and `sink.rs` 26, while gate 20 still
+declares 7 and 26. Test installed and absent logging explicitly, assert distinct
+nonzero reservations, preserve ambient correlation when emitting a named run,
+and sync the still-open renamed descriptor after a failed reopen. The targeted
+remeasurement then counts `lib.rs` 6 and `sink.rs` 23. Gate 20 is tightened to
+those counts: `clock.rs` 1, `level.rs` 1, `lib.rs` 6, `record.rs` 1, `sink.rs` 23,
+`tail.rs` 3, totaling 35. No new uncovered arm is declared. A complete workspace
+report must still reproduce this set; a targeted report alone is not a merge
+pass. The remaining install race and test-double/diagnostic arms retain the
+limits described above.
+
 **What this does not do.** It does not make the `coverage` job pass. That job
 also runs `--fail-under-lines 100` over the whole workspace, and the workspace
 is not at 100%. Gate 20 makes one crate's shortfall *declared and enforced*;

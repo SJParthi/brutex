@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Independent saved-observation bytes prove the HTTP projection contract.
 //! These generated records do not certify a market source or mint a producer.
 #![expect(

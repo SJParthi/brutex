@@ -3923,6 +3923,7 @@ mod tests {
         assert!(emit_fat().is_written());
         // And no roll is re-attempted, so the third lands the same way.
         assert!(emit_fat().is_written());
+        sink.sync().expect("the renamed descriptor remains durable");
 
         let health = sink.health();
         assert_eq!(

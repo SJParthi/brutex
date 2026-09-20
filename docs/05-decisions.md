@@ -36547,3 +36547,55 @@ fail with 14 workers instead of the requested one. Restoring the fix passes;
 all 602 runner unit tests also pass. Run this fast budget check and the replay
 companion integrity proof early in mutation testing, retaining every test and
 the existing failure criteria.
+
+### D-0640 — Exercise global correlation and failed-reopen durability — 2026-09-20
+
+The completed 219790b7 workspace coverage report found that the process-wide
+run-reservation wrapper was never called directly. Extend the existing isolated
+global-state tests to prove absence without installation, distinct nonzero ids
+after installation, and explicit event correlation without changing the ambient
+run. Extend the failed-reopen test to sync its renamed descriptor before checking
+that all three events remain readable and the rotation failure stays visible.
+
+The exact targeted text report reduces `lib.rs` from 9 uncovered lines to 6 and
+`sink.rs` from 26 to 23. Tighten their gate 20 declarations from 7/26 to 6/23;
+the other file declarations and the workspace coverage floors are unchanged.
+The full workspace must confirm the declaration before merge. These tests add
+no production fallback, credential access or market-data operation.
+
+### D-0641 — Test the complete audited stored-month publication boundary — 2026-09-20
+
+Extend the generated storage fixture with enough complete calendar sessions to
+warm both native one-minute and coarse five-minute signal columns. Exercise the
+real stored-month kernel with six-role checksum admission and maximal support.
+The result must truthfully contain no selected trade or frequent combination,
+publish one parent, and reuse that parent byte for byte on an exact rerun. A
+changed source must refuse before publishing; restoring its bytes and obtaining
+fresh checksum admission must recover the same parent. The prior-day and exact
+minute dependencies remain mandatory. The fixture's explicit test identity and
+generated prices are not evidence of vendor truth or trading performance.
+
+### D-0642 — Refuse an ambiguous symbol calendar instead of selecting a segment — 2026-09-20
+
+A symbol-only calendar request can match two stored exchange/segment identities.
+The handler previously kept the first identity and silently ignored the other,
+returning HTTP 200. Return HTTP 409 with both identities and an explicit refusal
+instead; do not return a partial session calendar. Repeated months of the same
+identity still aggregate normally, and feed separation is unchanged.
+
+The actual-handler regression first reproduced the incorrect HTTP 200 for a
+generated name stored under both CASH and INDEX. A second generated fixture
+starts the server view before publishing its first data, then proves fresh
+cash-path resolution, exchange-source attribution and separation from another
+feed's different calendar. Neither test contacts a vendor or changes sweep
+scope, and the detection adds only constant work to each existing census step.
+
+### D-0643 — Mark nested whole-file regressions as test-only at their own boundary — 2026-09-20
+
+The saved-stop projection fixture is included from a nested module behind
+`cfg(test)`, but gate 11 recognizes a whole-file exclusion only at a crate-root
+declaration or from the file's leading `#![cfg(test)]`. Add that compiler-enforced
+file attribute to the projection and calendar fixtures. Production source remains
+fully scanned, no assertion allowance is added, and gate 11 passes against the
+complete tracked working tree. Keep the calendar conflict encoding in a small
+helper so the route remains within the existing function-length lint.

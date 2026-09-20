@@ -465,6 +465,41 @@ mod tests {
         let found = tail(&dir, sink.keep_files(), &Query::last(10));
         assert_eq!(found.records.len(), 1);
         assert_eq!(found.records[0].message, "through the global");
+
+        let first = super::reserve_run_id().expect("installed sink reserves a run");
+        let second = super::reserve_run_id().expect("next reservation is distinct");
+        assert!(first > 0);
+        assert_eq!(second, first + 1);
+        assert_eq!(sink.run(), 0);
+        assert_eq!(
+            super::emit_for_run(first, &Event::info("t", "correlated")),
+            Emitted::Written
+        );
+        assert_eq!(sink.run(), 0);
+        assert_eq!(
+            super::emit(&Event::info("t", "ambient remains unchanged")),
+            Emitted::Written
+        );
+        let found = tail(&dir, sink.keep_files(), &Query::last(10));
+        assert_eq!(found.records.len(), 3);
+        assert_eq!(
+            found
+                .records
+                .iter()
+                .filter(|record| record.run == first)
+                .count(),
+            1
+        );
+        for record in found.records {
+            assert_eq!(
+                record.run,
+                if record.message == "correlated" {
+                    first
+                } else {
+                    0
+                }
+            );
+        }
         let _ignored = std::fs::remove_dir_all(&dir);
     }
 
