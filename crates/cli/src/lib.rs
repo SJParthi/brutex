@@ -7123,24 +7123,20 @@ fn refusal_surface(vendor_word: &str, underlying: &str) -> Check {
 /// that appended a fake row to the real history would corrupt the thing it
 /// exists to protect.
 ///
-/// # The directory names this process, and it used to be a constant
-///
-/// It read `temp_dir().join("brutex-verify-ledger")`, one fixed path shared by
-/// every `cli verify` on the machine — and the very next line is
-/// `remove_dir_all`. Two verifications running at once is not exotic: it is one
-/// operator in two terminals, or a terminal beside the server's own. The second
-/// to start would delete the first's scratch mid-write, and the first would
-/// report a round-trip failure against a ledger the second had removed. A
-/// self-check that fails because another self-check is running teaches the
-/// operator the opposite of what it exists to say.
-///
-/// `process::id()` is what makes them disjoint, and it is the discriminator
-/// rather than a clock because two processes CAN start in the same microsecond
-/// and cannot share a pid. Gate 23 clause C refuses a fixed temporary path for
-/// exactly this reason.
+/// Each invocation claims its own directory before writing. A process id alone
+/// does not separate concurrent calls within that process or protect leftovers
+/// after pid reuse. No existing path is deleted to make room for this check.
 fn ledger_round_trip() -> Check {
-    let dir = std::env::temp_dir().join(format!("brutex-verify-ledger-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = match verification_scratch() {
+        Ok(dir) => dir,
+        Err(why) => {
+            return Check {
+                claim: "a recorded run reads back exactly as written",
+                held: false,
+                evidence: why,
+            };
+        }
+    };
     let want = crate::results::Record {
         identity: [0xAB; 32],
         finished_micros: 1_787_000_000_000_000,
@@ -7192,6 +7188,26 @@ fn ledger_round_trip() -> Check {
             ),
         },
     }
+}
+
+fn verification_scratch() -> Result<std::path::PathBuf, String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    // Collisions can be old process leftovers. Only atomic create grants
+    // ownership; after a fixed number of collisions the check refuses loudly.
+    for _ in 0..16 {
+        let serial = NEXT.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "brutex-verify-ledger-{}-{serial}",
+            std::process::id()
+        ));
+        match std::fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(why) => return Err(format!("verification scratch creation refused: {why}")),
+        }
+    }
+    Err("verification scratch could not claim a private directory after 16 collisions".to_owned())
 }
 
 /// Rows the listing prints before it says how many it dropped.

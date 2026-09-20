@@ -5731,6 +5731,15 @@ mod tests {
                 && row.canonical_record().iter().any(|byte| *byte != 0)
         }));
         let execution_v3_bytes = directory_bytes(&fixture.execution_v3)?;
+        let selection_root = fixture.base.join("selection-v5");
+        fs::create_dir(&selection_root).map_err(|why| format!("selection fixture root: {why}"))?;
+        let (first_execution_v3, first_selection_receipt) =
+            crate::selection_v5::prove_stored_selection(
+                first_execution_v3,
+                &selection_root,
+                false,
+            )?;
+        let selection_bytes = directory_bytes(&selection_root)?;
         drop(first_execution_v3);
 
         let retry_nifty =
@@ -5839,7 +5848,7 @@ mod tests {
             directory_bytes(&fixture.population_v5)?,
             population_v5_bytes
         );
-        let mut retry_execution_v3 = crate::execution_v3::commit_stored_execution_v3(
+        let retry_execution_v3 = crate::execution_v3::commit_stored_execution_v3(
             &fixture.execution_v3,
             execution_bounds,
             retry_population_v5,
@@ -5850,6 +5859,10 @@ mod tests {
             first_execution_v3_receipt
         );
         assert_eq!(directory_bytes(&fixture.execution_v3)?, execution_v3_bytes);
+        let (mut retry_execution_v3, retry_selection_receipt) =
+            crate::selection_v5::prove_stored_selection(retry_execution_v3, &selection_root, true)?;
+        assert_eq!(retry_selection_receipt, first_selection_receipt);
+        assert_eq!(directory_bytes(&selection_root)?, selection_bytes);
         let finalization_row_path = fixture.finalization.join("population-finalization-v3.bin");
         let mut corrupted_finalization = fs::read(&finalization_row_path).map_err(|why| {
             format!(

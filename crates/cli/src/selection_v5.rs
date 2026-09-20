@@ -3456,6 +3456,9 @@ fn hex_nibble(value: u8) -> char {
 }
 
 #[cfg(test)]
+pub(crate) use tests::prove_stored_selection;
+
+#[cfg(test)]
 #[allow(
     clippy::expect_used,
     clippy::indexing_slicing,
@@ -3511,6 +3514,145 @@ mod tests {
 
     fn policy() -> RankingPolicyV1 {
         RankingPolicyV1::new(Weights::equal()).expect("equal policy is valid")
+    }
+
+    pub(crate) fn prove_stored_selection(
+        mut source: CommittedStoredExecutionV3,
+        root: &Path,
+        reused: bool,
+    ) -> Result<(CommittedStoredExecutionV3, SelectionV5StructuralReceipt), String> {
+        let execution = source.structural_receipt();
+        let dispositions = source.ordered_authenticated_dispositions()?;
+        assert!(!dispositions.is_empty());
+        let eligible = dispositions
+            .iter()
+            .filter(|row| {
+                row.admission_status() == ExecutionV3AdmissionStatus::Admitted
+                    && row.terminal() == ExecutionV3Terminal::Authorized
+            })
+            .count();
+        let mut committed = commit_stored_selection_v5(root, bounds(), source, policy())?;
+        assert_eq!(committed.was_written(), !reused);
+        assert_eq!(committed.bounds(), bounds());
+        assert_eq!(committed.rung_seconds(), 60);
+        assert_eq!(committed.ranking_policy_digest(), policy().digest());
+        let receipt = committed.structural_receipt();
+        assert_eq!(receipt.population_id(), execution.population_id());
+        assert_eq!(receipt.execution_completion_id(), execution.completion_id());
+        assert_ne!(receipt.selection_id(), [0; 32]);
+        assert_ne!(receipt.completion_id(), [0; 32]);
+        let top = committed.top_twenty_five()?;
+        assert_eq!(top.len(), eligible.min(25));
+        assert_eq!(
+            receipt.selected_count(),
+            u64::try_from(top.len()).expect("at most 25 rows")
+        );
+        assert_eq!(
+            receipt.top_ten_count(),
+            u32::try_from(top.len().min(10)).expect("at most ten rows")
+        );
+        assert_eq!(
+            committed.top_ten()?,
+            top.iter().take(10).copied().collect::<Vec<_>>()
+        );
+        let successors = committed.successor_winners()?;
+        assert_eq!(successors.len(), top.len());
+        for (rank, (row, successor)) in top.iter().zip(&successors).enumerate() {
+            assert_eq!(row.rank(), u32::try_from(rank).expect("bounded rank"));
+            assert_eq!(successor.row(), *row);
+            assert_eq!(row.execution_completion_id(), execution.completion_id());
+            let disposition = dispositions
+                .iter()
+                .find(|candidate| candidate.disposition_id() == row.disposition_id())
+                .expect("every selected row has an exact durable disposition");
+            assert_eq!(
+                disposition.admission_status(),
+                ExecutionV3AdmissionStatus::Admitted
+            );
+            assert_eq!(disposition.terminal(), ExecutionV3Terminal::Authorized);
+            assert_eq!(
+                successor.selected_exit_digest(),
+                disposition.selected_exit_digest()
+            );
+        }
+
+        let path = root.join(COMPLETION_FILE);
+        let saved = std::fs::read(&path).expect("saved Selection completion");
+        let mut corrupted = saved.clone();
+        *corrupted.last_mut().expect("nonempty Completion") ^= 1;
+        std::fs::write(&path, corrupted).expect("damage only the generated completion");
+        assert!(committed.top_twenty_five().is_err());
+        std::fs::write(&path, saved).expect("restore exact generated completion");
+        let CommittedStoredSelectionV5 {
+            source, selection, ..
+        } = committed;
+        drop(selection);
+        Ok((source, receipt))
+    }
+
+    #[test]
+    fn measured_ranking_evidence_cannot_disagree_with_direct_metrics_at_any_verdict() {
+        for status in [
+            AdmissionV3Status::Admitted,
+            AdmissionV3Status::Rejected,
+            AdmissionV3Status::Unmeasured,
+            AdmissionV3Status::Refused,
+        ] {
+            for exact in [0, 1, u64::MAX] {
+                assert!(
+                    require_observed_u64(
+                        17,
+                        status,
+                        "support",
+                        ObservedU64V1::Measured(exact),
+                        exact
+                    )
+                    .is_ok()
+                );
+                let why = require_observed_u64(
+                    17,
+                    status,
+                    "support",
+                    ObservedU64V1::Measured(exact.wrapping_add(1)),
+                    exact,
+                )
+                .expect_err("mismatched counts must refuse");
+                assert!(why.contains("row 17") && why.contains("support"));
+                for absent in [ObservedU64V1::Unmeasured, ObservedU64V1::Refused] {
+                    assert_eq!(
+                        require_observed_u64(17, status, "support", absent, exact).is_err(),
+                        status == AdmissionV3Status::Admitted
+                    );
+                }
+            }
+            for exact in [i64::MIN, -1, 0, 1, i64::MAX] {
+                assert!(
+                    require_observed_i64(
+                        19,
+                        status,
+                        "profit",
+                        ObservedI64V1::Measured(exact),
+                        exact
+                    )
+                    .is_ok()
+                );
+                let why = require_observed_i64(
+                    19,
+                    status,
+                    "profit",
+                    ObservedI64V1::Measured(exact.wrapping_add(1)),
+                    exact,
+                )
+                .expect_err("mismatched signed prices must refuse");
+                assert!(why.contains("row 19") && why.contains("profit"));
+                for absent in [ObservedI64V1::Unmeasured, ObservedI64V1::Refused] {
+                    assert_eq!(
+                        require_observed_i64(19, status, "profit", absent, exact).is_err(),
+                        status == AdmissionV3Status::Admitted
+                    );
+                }
+            }
+        }
     }
 
     fn metrics(value: u64) -> Metrics {

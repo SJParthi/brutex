@@ -5,6 +5,87 @@ use crate::{
     min_hits_for, retention_note, unsourceable_minute, validation_note,
 };
 
+struct ScratchCleanup(std::path::PathBuf);
+impl Drop for ScratchCleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn operator_self_check_rejects_all_malformed_requests_before_claiming_provenance() {
+    for feed in ["zerodha", "dhan", "groww"] {
+        let check = crate::refusal_surface(feed, "NIFTY");
+        assert!(check.held, "{feed}: {}", check.evidence);
+        assert_eq!(check.evidence, "6 of 6 refused cleanly");
+    }
+}
+
+#[test]
+fn ledger_self_checks_do_not_delete_an_existing_directory_and_can_run_concurrently()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::fs;
+    use std::sync::{Arc, Barrier};
+    let legacy = std::env::temp_dir().join(format!("brutex-verify-ledger-{}", std::process::id()));
+    fs::create_dir(&legacy)?;
+    let _owned = ScratchCleanup(legacy.clone());
+    let marker = legacy.join("held-by-another-check");
+    fs::write(&marker, b"keep these bytes")?;
+    let check = crate::ledger_round_trip();
+    assert!(check.held, "{}", check.evidence);
+    assert_eq!(fs::read(&marker)?, b"keep these bytes");
+    let start = Arc::new(Barrier::new(8));
+    let checks = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let start = Arc::clone(&start);
+                scope.spawn(move || {
+                    start.wait();
+                    crate::ledger_round_trip()
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .map(std::thread::ScopedJoinHandle::join)
+            .collect::<Vec<_>>()
+    });
+    for check in checks {
+        let check = check.map_err(|_| "self-check worker panicked")?;
+        assert!(check.held, "{}", check.evidence);
+        assert!(check.evidence.contains("all equal"));
+    }
+    assert_eq!(fs::read(marker)?, b"keep these bytes");
+
+    let first = crate::verification_scratch()?;
+    let _first = ScratchCleanup(first.clone());
+    let name = first
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("scratch name")?;
+    let (prefix, serial) = name.rsplit_once('-').ok_or("scratch serial")?;
+    let serial = serial.parse::<u64>()?;
+    let mut collisions = Vec::new();
+    for offset in 1..=16 {
+        let next = serial
+            .checked_add(offset)
+            .ok_or("scratch serial overflow")?;
+        let path = first.with_file_name(format!("{prefix}-{next}"));
+        fs::create_dir(&path)?;
+        collisions.push(ScratchCleanup(path.clone()));
+        fs::write(path.join("owner"), b"already held")?;
+    }
+    let refused = crate::ledger_round_trip();
+    assert!(!refused.held);
+    assert!(refused.evidence.contains("16 collisions"));
+    for held in &collisions {
+        assert_eq!(fs::read(held.0.join("owner"))?, b"already held");
+    }
+    let recovered = crate::ledger_round_trip();
+    assert!(recovered.held, "{}", recovered.evidence);
+    Ok(())
+}
+
 #[test]
 fn calibrated_caps_keep_measured_work_and_never_exceed_available_candidates() {
     for (sampled, nanos, budget, offered, expected) in [
