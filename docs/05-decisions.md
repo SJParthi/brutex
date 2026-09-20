@@ -37002,3 +37002,30 @@ admission/replay summaries with their actual refusal and private-fixture limits.
 Name current canonical-codec, Admission V3, Finalization V3, Selection V6 and
 consistency tests rather than changing production behavior to fit stale prose.
 No invariant row is deleted and no validation floor is lowered.
+
+### D-0663 — Keep named F&O interruptions and incomplete discovery visibly failed — 2026-09-20
+
+The named-contract driver increments its attempted count before requesting the
+current contract. Its budget-halt branch counted only the later suffix, so a
+halt on the final outstanding contract recorded zero failures and returned
+HTTP 200. Count that current contract as well. Already-held contracts remain
+resumed without a request, and their existing bytes remain unchanged.
+
+Discovery entries that cannot be read also prevent a complete or empty-history
+claim. Keep valid discovered contracts available for normal processing, but
+return HTTP 502 when any discovery refusal remains, including when no readable
+contract was found or every readable contract was already held. The audit keeps
+the known contract count; its failure count adds observed discovery faults and
+unfetched contracts. A failed expiry-list lookup does not reveal a number of
+missing contracts, so no such number is invented.
+
+FnoPage previously rendered every outcome through the NOT STARTED receipt,
+even when the durable record said EMPTY, STORED or FAILED. Render the actual
+terminal outcome and reason for completed attempts. A genuinely unstarted
+request retains its transport context and now shows its specific refusal too.
+The original generated regressions observed both false HTTP 200 responses and
+the incorrect receipt. The fixtures use exclusively owned roots, distinct
+per-instance names, an unavailable request budget and a loopback-only transport
+with a synthetic placeholder; they cannot read vendor credentials or contact
+a real vendor. No storage layout, sweep eligibility or automatic pulling policy
+changes.

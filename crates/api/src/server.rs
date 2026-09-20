@@ -5294,6 +5294,8 @@ fn stored_html(
         footnote: if good {
             "The bars named above ARE on the store root named above, and the \
              manifest counts them."
+        } else if verdict == audit::Outcome::Empty.label() {
+            "No new bars were stored. Existing stored data is retained."
         } else {
             "Whatever landed before the failure is on disk and is described \
              above; nothing beyond it is claimed."
@@ -10333,7 +10335,14 @@ impl FnoPage<'_> {
             counts.failures,
         );
         facts.push(recorded_fact(self.journal, &record));
-        (code, accepted_html("Expired F&O pull", facts, self.broker))
+        let body = if outcome == audit::Outcome::NotStarted {
+            facts.push(("Reason", why.to_owned()));
+            accepted_html("Expired F&O pull", facts, self.broker)
+        } else {
+            facts.push(("Status", outcome.label().to_owned()));
+            stored_html("Expired F&O pull", outcome.label(), why, &facts)
+        };
+        (code, body)
     }
 }
 
@@ -10580,8 +10589,12 @@ async fn fno_land(
                 // hundred reported no failures at all and the page rendered
                 // "every discovered contract fetched and filed" over 197
                 // contracts nothing had asked for.
+                // The current contract has already incremented `attempted`,
+                // but it has not fetched. Count it as well as the suffix;
+                // otherwise a halt on the final contract reports zero faults.
                 out.failed = out
                     .failed
+                    .saturating_add(1)
                     .saturating_add(wanted.len().saturating_sub(attempted));
                 break 'contracts;
             }
@@ -13537,6 +13550,16 @@ async fn fno_report(
     // call site. Wiring it back on the current shape would be a second silent
     // hole, which is worse than the honest refetch this restores.
     if wanted.is_empty() {
+        if !chain.whole() {
+            return page.say_counted(
+                facts,
+                axum::http::StatusCode::BAD_GATEWAY,
+                audit::Outcome::Failed,
+                "discovery is incomplete; an unreadable expiry list or contract \
+                 name cannot establish that this window has no contracts",
+                FnoCounts::of(0, 0, chain.unreadable.len()),
+            );
+        }
         return page.say(
             facts,
             axum::http::StatusCode::OK,
@@ -13575,9 +13598,13 @@ async fn fno_report(
     // WHAT THIS RUN MOVED, FOR THE JOURNAL. Built once and used by every
     // terminal arm below, so a reader of `/audit.json` sees the same numbers the
     // receipt shows rather than the structural zeroes this route used to write.
-    let counted = FnoCounts::of(wanted.len(), stored, failed);
+    // Discovery refusals are observed faults, not an inferred number of
+    // missing contracts. Keep the known contract count and the exact number
+    // of recorded discovery/fetch faults separate on the receipt.
+    let failures = failed.saturating_add(chain.unreadable.len());
+    let counted = FnoCounts::of(wanted.len(), stored, failures);
 
-    if failed == 0 {
+    if failures == 0 {
         // A RUN THAT ASKED FOR NOTHING DID NOT FETCH ANYTHING, and saying it
         // did is the §4 fallback wearing a success's clothes. `Outcome::Empty`
         // rather than `Stored`, because a ladder reading this must not record a
@@ -13627,8 +13654,8 @@ async fn fno_report(
         facts,
         axum::http::StatusCode::BAD_GATEWAY,
         audit::Outcome::Failed,
-        "some contracts did not land; the month is incomplete and must \
-         not be read as held",
+        "some contracts could not be identified or fetched; the month is \
+         incomplete and must not be read as held",
         counted,
     )
 }
@@ -30097,6 +30124,10 @@ mod verification_route_tests;
 
 #[path = "gap_peer_route_tests.rs"]
 mod gap_peer_route_tests;
+
+#[cfg(test)]
+#[path = "fno_boundary_tests.rs"]
+mod fno_boundary_tests;
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic, reason = "test-only assertions")]
