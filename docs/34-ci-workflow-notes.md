@@ -597,6 +597,7 @@ job requires both the planner and all mutation jobs to succeed.
 
 GitHub documents the [256-job matrix limit](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idstrategymatrix)
 and [standard runner billing](https://docs.github.com/en/actions/concepts/billing-and-usage).
-This public repository uses standard ubuntu-24.04 runners, with one-day
-retention for diagnostic assignment and outcome lists. No paid larger runner
-is introduced.
+This public repository uses standard ubuntu-24.04 runners. D-0631 retains the
+small plan and text outcome lists for the documented 35-day workflow lifetime,
+so early artifacts cannot expire during a long bounded matrix. No paid larger
+runner is introduced.

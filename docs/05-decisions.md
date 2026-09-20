@@ -36419,3 +36419,18 @@ checksum cannot replace semantic identity, source joins, counts, canonical tags,
 reserved bytes or the ordered winner digest. Restore the exact original bytes
 and verify the same 25-winner receipt reopens. These 2,048 corruption cases run
 only in a private generated test directory and do not alter a store version.
+
+### D-0631 — Validate cached mutation executables before installation — 2026-09-20
+
+The CI cache restores only the two pinned executable files, not Cargo's install
+registry. Repeating cargo install against such a binary can refuse because the
+registry does not identify its owner. Check the executable's exact version
+before reuse; install the pinned version with force only when it is absent or
+different. Print both observed versions. Installation failure remains fatal,
+and no user configuration, credential file or Cargo installation registry is
+added to the cache.
+
+Retain the small plan and text outcome artifacts for 35 days, the documented
+maximum workflow lifetime. One-day expiry could remove the plan before a later
+bounded job starts, or remove early outcomes before the complete matrix ends.
+Compiled targets, raw profiles and verbose per-case build logs are not uploaded.

@@ -7712,8 +7712,17 @@ jobs:
           key: mutation-tools-${{ runner.os }}-26.2.0-nextest-0.9.145-v1
       - name: Install pinned mutation tools
         run: |
-          cargo install cargo-mutants --version 26.2.0 --locked
-          cargo install cargo-nextest --version 0.9.145 --locked
+          set -euo pipefail
+          if [ "$(cargo mutants --version 2>/dev/null || true)" != 'cargo-mutants 26.2.0' ]; then
+            cargo install cargo-mutants --version 26.2.0 --locked --force
+          fi
+          nextest_version=$(cargo nextest --version 2>/dev/null || true)
+          case "$nextest_version" in
+            'cargo-nextest 0.9.145 '*) ;;
+            *) cargo install cargo-nextest --version 0.9.145 --locked --force ;;
+          esac
+          cargo mutants --version
+          cargo nextest --version
       - name: Test the planner and exact outcome reconciliation
         run: |
           rustc --edition=2024 --test -D warnings .github/mutation_gate.rs -o /tmp/mutation-gate-tests
@@ -7743,7 +7752,7 @@ jobs:
         with:
           name: mutation-plan
           path: /tmp/mutation-plan/
-          retention-days: 1
+          retention-days: 35
           if-no-files-found: error
 
   mutants:
@@ -7778,8 +7787,17 @@ jobs:
           path: /tmp/mutation-plan
       - name: Install pinned mutation tools
         run: |
-          cargo install cargo-mutants --version 26.2.0 --locked
-          cargo install cargo-nextest --version 0.9.145 --locked
+          set -euo pipefail
+          if [ "$(cargo mutants --version 2>/dev/null || true)" != 'cargo-mutants 26.2.0' ]; then
+            cargo install cargo-mutants --version 26.2.0 --locked --force
+          fi
+          nextest_version=$(cargo nextest --version 2>/dev/null || true)
+          case "$nextest_version" in
+            'cargo-nextest 0.9.145 '*) ;;
+            *) cargo install cargo-nextest --version 0.9.145 --locked --force ;;
+          esac
+          cargo mutants --version
+          cargo nextest --version
           rustc --edition=2024 -D warnings .github/mutation_gate.rs -o /tmp/mutation-gate
       - name: Test and reconcile every assigned mutation
         env:
@@ -7819,7 +7837,7 @@ jobs:
             mutants.out/unviable.txt
             mutants.out/missed.txt
             mutants.out/timeout.txt
-          retention-days: 1
+          retention-days: 35
           if-no-files-found: error
 
   complexity:
