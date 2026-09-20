@@ -338,7 +338,7 @@ impl ChunkState {
             block_words: words_of(&self.block),
             counter: self.counter,
             block_len: u32::try_from(self.block_len).unwrap_or(0),
-            flags: self.start_flag() | CHUNK_END,
+            flags: self.start_flag() + CHUNK_END,
         }
     }
 }

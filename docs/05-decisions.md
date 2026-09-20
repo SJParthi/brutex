@@ -36302,3 +36302,18 @@ mutated tests on the first observed assertion failure. No test is filtered out,
 no deadline is reduced, and interrupted cases are retried rather than credited
 as caught. Nextest remains optional local tooling; Cargo's ordinary test path
 and required CI gates remain unchanged.
+
+### D-0621 — Test negative rounding branches and retain absent vendor fields — 2026-09-20
+
+Branch instrumentation identified missing negative-decimal cases above and below
+half a paisa. Add exact text cases around the tie, including trailing nonzero
+digits and values near zero. Also exercise the master format that intentionally
+has no ISIN or listing-series column: cash identity must survive with None, and
+an index must still normalize through its declared segment/name mapping. These
+are existing contracts, not newly asserted vendor capabilities.
+
+The resumed mutation run also identified equivalent `OR`/`XOR` composition of
+ChunkState's start and end flags. The start flag can only be zero or one; the end
+flag is two. Add these disjoint fixed flags directly, avoiding an unobservable
+operator mutation while retaining all published hash vectors. This does not
+relax mutation selection or change any digest byte.

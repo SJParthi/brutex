@@ -3156,6 +3156,27 @@ mod tests {
     }
 
     #[test]
+    fn cash_without_published_isin_or_series_keeps_identity_without_inventing_either() {
+        let mut input = row("NSE", "NSE", "", "EQ", "", "");
+        input.trading_symbol = "RELIANCE";
+        input.listing_class = "";
+        input.isin = "";
+        let cash = listing(decode_master_row(Vendor::Zerodha, input).expect("cash decode"))
+            .expect("cash retained");
+        assert_eq!(cash.key.kind, Kind::Equity);
+        assert_eq!(cash.key.underlying.as_str(), "RELIANCE");
+        assert_eq!(cash.isin, None);
+        assert_eq!(cash.unsuffixed, None);
+        input.segment = "INDICES";
+        input.trading_symbol = "NIFTY 50";
+        let index = listing(decode_master_row(Vendor::Zerodha, input).expect("index decode"))
+            .expect("index retained");
+        assert_eq!(index.key.kind, Kind::Index);
+        assert_eq!(index.key.underlying.as_str(), "NIFTY");
+        assert_eq!(index.isin, None);
+    }
+
+    #[test]
     fn vendor_ids_refuse_missing_and_oversized_values_before_a_listing_is_kept() {
         for raw in ["", "   ", "\t\n"] {
             assert_eq!(VendorId::new(raw), None);

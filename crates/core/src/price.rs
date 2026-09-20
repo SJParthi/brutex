@@ -428,6 +428,26 @@ mod tests {
     }
 
     #[test]
+    fn negative_decimal_text_rounds_correctly_on_both_sides_of_the_half_paisa() {
+        for (text, paisa) in [
+            ("-1.234", -123),
+            ("-1.235", -123),
+            ("-1.2350", -123),
+            ("-1.2351", -124),
+            ("-1.236", -124),
+            ("-0.0001", 0),
+            ("-0.005", 0),
+            ("-0.0051", -1),
+        ] {
+            assert_eq!(
+                Paisa::from_rupee_text_half_up(text).map(Paisa::raw),
+                Ok(paisa),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
     fn converts_a_real_nifty_quote() {
         // The exact first bar of 2024-06-03, as it sits in the lake.
         let got = Paisa::from_rupees_half_up(23_109.55).expect("finite, in range");
