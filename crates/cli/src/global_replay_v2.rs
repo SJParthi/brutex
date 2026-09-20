@@ -4311,6 +4311,80 @@ mod tests {
     }
 
     #[test]
+    fn generated_replay_ledger_preserves_unacknowledged_orphans_and_enforces_completion_budget() {
+        let root = test_root("durable-generated-orphans");
+        let make = |seed| {
+            let mut manifest = manifest_fixture();
+            manifest.common_cohort_digest = digest(seed);
+            manifest.manifest_id = manifest.derived_id();
+            let streams = (0..MAX_STREAMS)
+                .map(|ordinal| controlled_manifest_stream(&manifest, ordinal))
+                .collect::<Vec<_>>();
+            schedule_streams(manifest, streams).expect("private generated replay")
+        };
+        let prepared = make(202);
+        let mut writer = GlobalReplayLedgerV2::open(&root, 1).expect("new ledger");
+        writer
+            .append_complete(&prepared)
+            .expect("first publication");
+        drop(writer);
+        // A crash before the final receipt leaves valid unacknowledged records.
+        OpenOptions::new()
+            .write(true)
+            .open(GlobalReplayLedgerV2::completion_path(&root))
+            .expect("completion file")
+            .set_len(LEDGER_HEADER_BYTES_V2)
+            .expect("remove fixture receipt");
+        let paths = [
+            GlobalReplayManifestV2::path(&root),
+            GlobalReplayLedgerV2::stream_path(&root),
+            GlobalReplayLedgerV2::candidate_path(&root),
+            GlobalReplayLedgerV2::decision_path(&root),
+        ];
+        let prefixes = paths
+            .iter()
+            .map(|path| fs::read(path).expect("orphan prefix"))
+            .collect::<Vec<_>>();
+        let mut recovered = GlobalReplayLedgerV2::open(&root, 1).expect("valid orphan recovery");
+        assert_eq!(recovered.completions(), 0);
+        assert!(
+            recovered.replay(&prepared.replay_id).is_none(),
+            "no receipt means no completion"
+        );
+        assert_eq!(
+            recovered.append_complete(&prepared),
+            Ok(GlobalReplayCommitV2::Written)
+        );
+        for (path, prefix) in paths.iter().zip(&prefixes) {
+            let actual = fs::read(path).expect("recovered companion");
+            assert!(actual.len() > prefix.len());
+            assert_eq!(actual.get(..prefix.len()), Some(prefix.as_slice()));
+        }
+        let second = make(203);
+        assert!(
+            recovered
+                .append_complete(&second)
+                .expect_err("finite completion budget")
+                .contains("exhausted")
+        );
+        assert_eq!(recovered.completions(), 1);
+        drop(recovered);
+        let mut larger = GlobalReplayLedgerV2::open(&root, 2).expect("larger explicit budget");
+        assert_eq!(
+            larger.append_complete(&second),
+            Ok(GlobalReplayCommitV2::Written)
+        );
+        drop(larger);
+        assert!(GlobalReplayLedgerV2::open_read(&root, 1).is_err());
+        let reader = GlobalReplayLedgerV2::open_read(&root, 2).expect("two complete replays");
+        assert_eq!(reader.completions(), 2);
+        assert_eq!(reader.replay(&prepared.replay_id), Some(&prepared));
+        assert_eq!(reader.replay(&second.replay_id), Some(&second));
+        drop(reader);
+        fs::remove_dir_all(root).expect("remove orphan fixture");
+    }
+
+    #[test]
     fn private_controlled_scheduler_preserves_eight_by_twenty_five_algebra_in_memory() {
         let manifest = manifest_fixture();
         let streams = (0..MAX_STREAMS)

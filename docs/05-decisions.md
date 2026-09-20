@@ -36285,3 +36285,9 @@ read-only and writable reopen, retained completion/replay equality, stale writer
 refusal and every companion's torn/corrupt-record paths. Restoration must reopen
 the exact original replay. The generated authorities remain private test inputs;
 public PBO/selection refusal and real-market admission are not changed or claimed.
+
+Also simulate interruption before the completion receipt by removing only that
+receipt from a generated fixture. Reopen must not expose the orphaned replay;
+subsequent publication must retain all companion prefixes and append a new
+acknowledgement. A second generated replay must refuse an exhausted completion
+budget, then succeed only after reopening with an explicitly larger bound.
