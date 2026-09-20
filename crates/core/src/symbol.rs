@@ -103,7 +103,7 @@ impl Symbol {
     /// documents the invariant rather than implying emptiness is reachable.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
-        self.len == 0
+        false
     }
 }
 

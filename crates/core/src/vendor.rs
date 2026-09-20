@@ -178,7 +178,7 @@ impl Vendor {
     /// This vendor's bit in a [`VendorSet`].
     const fn bit(self) -> u8 {
         match self {
-            Self::Groww => 1 << 0,
+            Self::Groww => 1,
             Self::Dhan => 1 << 1,
             // `VendorSet` is a u8 — eight feeds, and these are three and four.
             Self::TrueData => 1 << 2,
@@ -294,10 +294,13 @@ impl VendorId {
         // denies, and a `?` that no input can take is cheaper than the lint
         // exception it would otherwise need.
         bytes.get_mut(..raw.len())?.copy_from_slice(raw.as_bytes());
-        // `len` fits while VENDOR_ID_CAPACITY <= 255, pinned below.
-        let Ok(len) = u8::try_from(raw.len()) else {
-            return None;
-        };
+        // The guard bounds len by VENDOR_ID_CAPACITY, pinned below to <= 255.
+        // No second failure branch exists after that proof.
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "capacity checked above and pinned to u8 below"
+        )]
+        let len = raw.len() as u8;
         Some(Self { bytes, len })
     }
 

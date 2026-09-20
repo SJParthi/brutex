@@ -4012,7 +4012,7 @@ impl Universe {
     /// Belongs to no universe. Stored, never listed.
     pub const NONE: Self = Self(0);
     /// A spot index.
-    pub const INDEX: Self = Self(1 << 0);
+    pub const INDEX: Self = Self(1);
     /// Has listed futures or options.
     pub const FNO: Self = Self(1 << 1);
     /// A NIFTY Total Market constituent.

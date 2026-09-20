@@ -36261,3 +36261,18 @@ vendor namespaces, archive refusal of master metadata, empty and oversized IDs,
 UTF-8 ID preservation, both contract kinds, NotDecimal and NoVendorId. These
 assertions lock the existing identity/refusal contracts; they do not change
 vendor capabilities, stored bytes or the swept instrument surface.
+
+### D-0618 — Remove redundant core identity arithmetic — 2026-09-20
+
+The equivalent core mutations documented in limits section 85 arise from
+redundant arithmetic. Compute Luhn positions directly from the right by reversing
+the bounded expanded iterator, eliminating a second traversal and the `n-1-i`
+parity expression. Spell the first set bit as `1`, and make Symbol::is_empty
+return the invariant its constructor enforces. Existing check-digit, symbol
+constructor and independent vendor/universe bit tests preserve the contracts.
+
+VendorId's byte length is already bounded by its capacity guard and a compile-
+time assertion that capacity fits u8. Convert after those proofs directly,
+removing a second failure arm that no admitted input can reach. The boundary
+regression checks exact capacity and one byte beyond it. No IDs, bit positions,
+stored formats or validation thresholds change; no mutation is excluded.

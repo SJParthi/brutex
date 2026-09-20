@@ -145,16 +145,16 @@ fn expected_check_digit(isin: &[u8; ISIN_LEN]) -> u8 {
         })
     };
 
-    let n = digits().count();
     // Each term is at most 9 — a doubled 9 is 18, which folds to 1 + 8 — and
     // there are at most 22 terms, so the sum is at most 198 and an 8-bit
     // accumulator cannot overflow. Stated rather than assumed, because a cast
     // here would be a `cast_possible_truncation` the workspace denies.
     let sum: u8 = digits()
+        .rev()
         .enumerate()
         .map(|(i, d)| {
             // Position counts from the RIGHT of the expanded string.
-            if (n - 1 - i) % 2 == 0 {
+            if i % 2 == 0 {
                 let doubled = d * 2;
                 doubled / 10 + doubled % 10
             } else {
