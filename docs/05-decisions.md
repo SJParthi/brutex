@@ -36383,3 +36383,29 @@ report the requested V4 stage as unmeasured while its three completed upstream
 stages remain ready. Restoring the exact V4 bytes must recover the previous
 blocked selection state. This exercises the older derivation and persistence
 without permitting old-format evidence to satisfy the current-format contract.
+
+### D-0629 — Partition the complete mutation diff into verified jobs — 2026-09-20
+
+The serial mutation preflight refuses the full integration diff before testing:
+49,811 cases at this checkpoint, against its 100-case budget. Keep every case
+and the same changed-source diff, and partition it into a bounded round-robin
+matrix. Each job retains the 240-minute deadline, 40-minute setup reserve and
+900-second per-command timeout. Two isolated mutation workers admit at most
+200 cases per job using the existing 120-second estimate. That estimate is not
+a measured parallel throughput promise; exhaustion still fails. At most eight
+jobs run together, and more than 256 required jobs refuses without sampling.
+
+A dependency-free Rust CI helper verifies the exact assigned case list against
+the complete enumeration and reconciles it with disjoint caught/unviable lists.
+Missing, duplicate, foreign, surviving or timed-out cases, a failed baseline,
+and a nonzero tool exit all refuse. Unviable means the mutant did not compile;
+it is reported separately and is not represented as a caught test failure.
+The final protected check depends on the planner and every matrix job.
+
+Pin nextest 0.9.145 alongside cargo-mutants 26.2.0. A test failure stops that
+mutant's remaining tests immediately; no assertion is removed, no test is
+filtered and no timeout is credited as a catch. Prioritize the published hash
+vector before expensive hash cases, as the local audit already does. Keep the
+ordinary complete Cargo test job and coverage thresholds unchanged. Archive
+the exact assignment and terminal lists for diagnosis. This changes execution
+capacity and reconciliation, not the merge standard or engine behavior.

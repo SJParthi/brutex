@@ -1,0 +1,6 @@
+# Each mutant starts a fresh process. Prioritize the smallest published hash
+# vector so a broken compression loop fails before expensive long-input cases.
+# This changes order only: no test filter, skip, retry or ignored failure.
+[[profile.default.overrides]]
+filter = 'test(the_published_vectors_reproduce)'
+priority = 100

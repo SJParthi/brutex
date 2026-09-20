@@ -7693,195 +7693,134 @@ jobs:
           fi
           echo "OK — every uncovered line in crates/telemetry is declared."
 
-  mutants:
-    name: Gate 18 — no surviving mutant
+  mutant-plan:
+    name: Gate 18 — enumerate every changed-line mutation
     runs-on: ubuntu-24.04
     needs: build
+    timeout-minutes: 45
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-mutants
+            ~/.cargo/bin/cargo-nextest
+          key: mutation-tools-${{ runner.os }}-26.2.0-nextest-0.9.145-v1
+      - name: Install pinned mutation tools
+        run: |
+          cargo install cargo-mutants --version 26.2.0 --locked
+          cargo install cargo-nextest --version 0.9.145 --locked
+      - name: Test the planner and exact outcome reconciliation
+        run: |
+          rustc --edition=2024 --test -D warnings .github/mutation_gate.rs -o /tmp/mutation-gate-tests
+          /tmp/mutation-gate-tests
+          rustc --edition=2024 -D warnings .github/mutation_gate.rs -o /tmp/mutation-gate
+      - name: Plan bounded jobs without excluding any case
+        id: plan
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/mutation-plan
+          base="$BASE_REF"
+          if [ -z "$base" ]; then
+            base=$(git rev-parse --verify HEAD~1 2>/dev/null || true)
+          fi
+          if [ -n "$base" ]; then
+            git diff "$base"...HEAD -- 'crates/*/src/*.rs' > /tmp/mutation-plan/changed.diff
+          else
+            git diff-tree --no-commit-id --root -p HEAD -- 'crates/*/src/*.rs' > /tmp/mutation-plan/changed.diff
+          fi
+          cargo mutants --list --in-diff /tmp/mutation-plan/changed.diff --colors never > /tmp/mutation-plan/all.txt
+          matrix=$(/tmp/mutation-gate plan /tmp/mutation-plan/all.txt)
+          printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
+          git rev-parse HEAD > /tmp/mutation-plan/commit.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mutation-plan
+          path: /tmp/mutation-plan/
+          retention-days: 1
+          if-no-files-found: error
+
+  mutants:
+    name: Gate 18 — mutation shard ${{ matrix.shard }}
+    runs-on: ubuntu-24.04
+    needs: [build, mutant-plan]
     timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix: ${{ fromJSON(needs.mutant-plan.outputs.matrix) }}
+    env:
+      CARGO_BUILD_JOBS: 2
+      RUST_TEST_THREADS: 2
+      RAYON_NUM_THREADS: 2
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: No surviving mutant
+        with:
+          shared-key: mutation-shards
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-mutants
+            ~/.cargo/bin/cargo-nextest
+          key: mutation-tools-${{ runner.os }}-26.2.0-nextest-0.9.145-v1
+      - uses: actions/download-artifact@v4
+        with:
+          name: mutation-plan
+          path: /tmp/mutation-plan
+      - name: Install pinned mutation tools
+        run: |
+          cargo install cargo-mutants --version 26.2.0 --locked
+          cargo install cargo-nextest --version 0.9.145 --locked
+          rustc --edition=2024 -D warnings .github/mutation_gate.rs -o /tmp/mutation-gate
+      - name: Test and reconcile every assigned mutation
+        env:
+          SHARD: ${{ matrix.shard }}
+          EXPECTED: ${{ matrix.expected }}
         run: |
           set -euo pipefail
-          # WHY THIS EXISTS. CLAUDE.md §9 has required "no surviving mutant on
-          # touched modules" since before this file did, and NOTHING enforced
-          # it. `cargo-mutants` was installed on the operator's machine and a
-          # `mutants.out.old/` sat in the tree carrying **33 caught and 15
-          # missed** — fifteen mutations that survived, thirteen of them in one
-          # function, with no gate to say so. A clause in the definition of
-          # done that no step executes is a clause that is true by nobody
-          # checking.
-          #
-          # WHY --in-diff AND NOT THE WHOLE WORKSPACE. §9 says "on touched
-          # modules", and it says that because it has to: mutation testing runs
-          # the test suite once per mutant, so a full-workspace pass over this
-          # tree is hours. A gate that takes hours is a gate somebody disables,
-          # and a disabled gate is worse than an honest absence — it reads as
-          # protection. `--in-diff` mutates only the lines this change actually
-          # touched, which is both what the law asks for and what fits in CI.
-          #
-          # WHAT THAT MEANS, STATED PLAINLY: this gate does NOT prove the
-          # workspace is free of surviving mutants. It proves THIS CHANGE did
-          # not add one. The 15 already in `crates/lake` are not caught by it
-          # and are recorded in docs/06-limits.md rather than hidden behind a
-          # green tick.
-          #
-          # THE TOOL IS PINNED, for the reason D-0034 gives about cargo-deny
-          # and cargo-llvm-cov: a verdict that can change with no commit is a
-          # verdict nobody can read.
-          cargo install cargo-mutants --version 26.2.0 --locked
-
-          base="${{ github.event.pull_request.base.sha }}"
-          if [ -z "$base" ]; then
-            base=$(git rev-parse HEAD~1 2>/dev/null || true)
-          fi
-          if [ -z "$base" ]; then
-            echo "::warning title=Gate 18 mutated nothing::\
-          No base commit to diff against — the first commit of a history has \
-          no predecessor. Nothing was mutated and nothing is claimed."
+          test "$(git rev-parse HEAD)" = "$(cat /tmp/mutation-plan/commit.txt)"
+          cargo mutants --list --in-diff /tmp/mutation-plan/changed.diff \
+            --shard "$SHARD" --sharding round-robin --colors never > /tmp/mutation-plan/assigned.txt
+          /tmp/mutation-gate partition /tmp/mutation-plan/all.txt /tmp/mutation-plan/assigned.txt "$SHARD"
+          if [ "$EXPECTED" -eq 0 ]; then
+            test ! -s /tmp/mutation-plan/assigned.txt
+            echo "No changed source line generates a mutation. Nothing was tested or claimed."
             exit 0
           fi
-          git diff "$base"...HEAD -- 'crates/*/src/*.rs' > /tmp/changed.diff
-          if [ ! -s /tmp/changed.diff ]; then
-            echo "OK — no crate source changed, so there is nothing to mutate."
-            exit 0
-          fi
-          echo "Mutating only the lines this change touched, against $base."
-
-          # ── THE ARITHMETIC, BEFORE THE WORK AND NOT INSTEAD OF IT ─────────────
-          #
-          # `--in-diff` bounds WHICH lines are mutated. It does not bound HOW
-          # MANY, and the two are only loosely related: `crates/indicators`
-          # generates 1,404 mutants over eleven files, 527 of them in
-          # `pattern.rs` alone, so a single commit touching one dense function can
-          # produce more mutants than a whole sparse crate. An audit counted 8,499
-          # for a branch-length diff, which at the per-mutant cost below is 278.7
-          # hours -- 46x the ceiling. That run did not fail. It was cancelled,
-          # having tested nothing, which is the state this block exists to make
-          # impossible.
-          #
-          # So the count is taken FIRST, with `--list`, which builds nothing and
-          # runs no test. If the work does not fit, this step says so with the
-          # numbers on screen and exits 1. A gate that cannot finish enforces
-          # nothing; a gate that says "I cannot finish, here is the arithmetic"
-          # at least reports honestly, and CLAUDE.md section 3 rule 6 asks for
-          # exactly that rather than a bound quietly not met.
-          #
-          # THE PER-MUTANT FIGURE IS NOT MEASURED BY THIS GATE, and is labelled
-          # rather than presented as fact -- golden rule 6. 118 s is what the
-          # audit measured for this workspace's suite on this runner class, and
-          # 120 is that rounded up. It is an ESTIMATE used to decide whether to
-          # start, never a claim about a particular run. The real per-mutant cost
-          # is roughly the baseline suite time, so it moves with the suite; when
-          # it does, this constant is the thing to re-measure and the log below
-          # is where the disagreement will show.
-          JOB_MINUTES=240        # MUST match timeout-minutes on the job above.
-          RESERVE_MINUTES=40     # cargo install + the unmutated baseline.
-          PER_MUTANT_SECONDS=120 # the audit's 118 s, rounded up. NOT measured here.
-          MUTANT_TIMEOUT=900     # the --timeout below: the per-mutant HANG bound.
-
-          if ! cargo mutants --list --in-diff /tmp/changed.diff > /tmp/mutant-list.txt 2>/tmp/mutant-list.err; then
-            echo "GATE 18 FAILED — cargo-mutants could not even enumerate the"
-            echo "mutants for this diff. That is not an empty diff and it is not"
-            echo "a pass; something about the workspace or the diff is wrong."
-            cat /tmp/mutant-list.err
-            exit 1
-          fi
-          n=$( { grep -c . /tmp/mutant-list.txt || true; } | tr -d ' ')
-          budget_s=$(( (JOB_MINUTES - RESERVE_MINUTES) * 60 ))
-          ceiling=$(( budget_s / PER_MUTANT_SECONDS ))
-          est_s=$(( n * PER_MUTANT_SECONDS ))
-          worst_s=$(( n * MUTANT_TIMEOUT ))
-          echo
-          echo "  mutants in this diff        ${n}"
-          echo "  budget                      ${budget_s} s (${JOB_MINUTES} min job − ${RESERVE_MINUTES} min reserve)"
-          echo "  estimate at ${PER_MUTANT_SECONDS} s each     ${est_s} s"
-          echo "  worst case at ${MUTANT_TIMEOUT} s each   ${worst_s} s  (every mutant hangs; not expected)"
-          echo "  ceiling                     ${ceiling} mutant(s)"
-          echo
-          if [ "$n" -eq 0 ]; then
-            # Not the same as an empty diff, which was already handled above: the
-            # diff touched source that generates no mutant at all -- comments, a
-            # `use` line, a doc block. Saying nothing here would read as a pass
-            # over work that was never attempted.
-            echo "OK — the changed lines generate no mutant (comments, imports or"
-            echo "     documentation only). Nothing was tested and nothing is claimed."
-            exit 0
-          fi
-          if [ "$n" -gt "$ceiling" ]; then
-            echo "GATE 18 FAILED — this diff cannot be mutation-tested inside the"
-            echo "job's clock, and this step will not start work it knows will be"
-            echo "cancelled half-done."
-            echo
-            echo "  ${n} mutants x ${PER_MUTANT_SECONDS} s = ${est_s} s against a ${budget_s} s budget."
-            echo
-            echo "THE TWO WAYS FORWARD, in order of preference:"
-            echo "  1. Land the change in smaller commits. CLAUDE.md section 9"
-            echo "     asks for no surviving mutant ON TOUCHED MODULES, and that"
-            echo "     is a per-change obligation — a branch-length diff is many"
-            echo "     changes wearing one hat, which is why the number is this"
-            echo "     large. On a push to main the base is HEAD~1 and a normal"
-            echo "     commit measures well under the ceiling (18 for a recent"
-            echo "     three-commit span)."
-            echo "  2. If the change genuinely is one unit, run it locally —"
-            echo "     cargo mutants --in-diff <diff> --timeout ${MUTANT_TIMEOUT}"
-            echo "     — and record the result in the pull request, or shard this"
-            echo "     job across a matrix. Raising JOB_MINUTES is NOT one of the"
-            echo "     ways: 240 is already most of GitHub's 6-hour ceiling, and"
-            echo "     past it the job is cancelled rather than failed, which is"
-            echo "     the state this block was written to remove."
-            exit 1
-          fi
-
-          # `--test-tool=cargo` and the workspace's own suite. The timeout is
-          # generous per mutant because a mutant that hangs is a mutant the
-          # suite did NOT catch, and killing it early would score it as caught.
-          #
-          # 300 SECONDS WAS BELOW THIS WORKSPACE'S OWN BASELINE, so the gate could
-          # not pass at all. `--timeout` applies to the UNMUTATED run as well as to
-          # each mutant -- cargo-mutants 26.2.0 has no separate baseline bound -- and
-          # `runner::end_to_end::the_ladder_reaches_further_as_support_falls_unless_a_budget_stops_it_first`
-          # walks the combination ladder to extinction and legitimately takes
-          # minutes. At 300 s the BASELINE timed out, cargo-mutants exited 4 having
-          # tested ZERO mutants, and this step refused to call that a pass -- which
-          # is how the tightness was found instead of being scored green.
-          #
-          # 900 s is above the measured baseline with room, and the cost of raising
-          # it is bounded and one-directional: a mutant that HANGS now takes longer
-          # to be declared caught. It is still caught. A gate that cannot pass
-          # catches nothing at all, which is the worse trade.
+          # D-0629: same full diff, two isolated workers, bounded matrix.
+          # Early exit requires an actual failed test. Timeout remains a refusal.
           set +e
-          cargo mutants --in-diff /tmp/changed.diff \
-            --timeout 900 --no-shuffle --colors never
-          status=$?
+          cargo mutants --in-diff /tmp/mutation-plan/changed.diff \
+            --shard "$SHARD" --sharding round-robin \
+            --jobs 2 --jobserver-tasks 4 --timeout 900 \
+            --test-tool nextest --cargo-test-arg=--max-fail=1:immediate \
+            --cargo-test-arg=--test-threads=1 --no-shuffle --colors never 2>&1 | tee mutation-run.log
+          status=${PIPESTATUS[0]}
           set -e
-
-          # cargo-mutants exits 0 when every mutant was caught, and non-zero
-          # when any survived, was unviable in a way it could not classify, or
-          # timed out. The file is the authority either way, because it is what
-          # an operator reads.
-          missed=mutants.out/missed.txt
-          if [ -s "$missed" ]; then
-            echo
-            echo "GATE 18 FAILED — these mutations survived the test suite:"
-            cat "$missed"
-            echo
-            echo "Each line is a change to the source that NO test noticed."
-            echo "CLAUDE.md §4: a test that asserts nothing is banned, and a"
-            echo "surviving mutant is that test, found by experiment rather"
-            echo "than by review. Write the assertion that kills it."
-            exit 1
-          fi
-          if [ "$status" -ne 0 ]; then
-            echo "GATE 18 FAILED — cargo-mutants exited ${status} with no"
-            echo "missed list. Read the output above: a timeout or an unviable"
-            echo "mutant is not a pass, and this step will not call it one."
-            exit "$status"
-          fi
-          echo "OK — every mutation of the changed lines was caught by a test."
+          /tmp/mutation-gate verify /tmp/mutation-plan/assigned.txt mutants.out "$status"
+      - name: Retain exact assignments and terminal outcomes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-shard-${{ matrix.index }}
+          path: |
+            /tmp/mutation-plan/assigned.txt
+            mutation-run.log
+            mutants.out/caught.txt
+            mutants.out/unviable.txt
+            mutants.out/missed.txt
+            mutants.out/timeout.txt
+          retention-days: 1
+          if-no-files-found: error
 
   complexity:
     name: Gate 8 — O(1) ratio
@@ -8196,7 +8135,7 @@ jobs:
   ci-ok:
     name: ci-ok
     runs-on: ubuntu-24.04
-    needs: [language-purity, build, coverage, complexity, mutants, web]
+    needs: [language-purity, build, coverage, complexity, mutant-plan, mutants, web]
     if: always()
     steps:
       - name: Verify every gate went green

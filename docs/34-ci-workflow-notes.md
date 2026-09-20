@@ -579,3 +579,24 @@ The notes below retain their original order and line positions from commit `1918
 # Original line 8324
       # ----------------------------------------------------------------------
 ```
+
+## Mutation execution update — 20 September 2026
+
+D-0629 replaces the serial preflight described in the historical notes above.
+The complete changed-line enumeration is partitioned, not sampled. The planner
+and each bounded job independently verify its round-robin assignment, and the
+outcome checker refuses missing, duplicate, foreign, surviving and timed-out
+cases. Each job uses two isolated workers and at most 200 cases; at most eight
+jobs run together. A matrix requiring more than 256 jobs refuses before work.
+
+The same 240-minute deadline, 40-minute reserve and estimated 120 seconds per
+case now describe a two-worker job. These are admission arithmetic, not a
+throughput measurement. Each nonzero command exit still refuses. The ordinary
+workspace test job and coverage thresholds remain unchanged. The final ci-ok
+job requires both the planner and all mutation jobs to succeed.
+
+GitHub documents the [256-job matrix limit](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idstrategymatrix)
+and [standard runner billing](https://docs.github.com/en/actions/concepts/billing-and-usage).
+This public repository uses standard ubuntu-24.04 runners, with one-day
+retention for diagnostic assignment and outcome lists. No paid larger runner
+is introduced.
