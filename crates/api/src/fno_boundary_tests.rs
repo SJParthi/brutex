@@ -952,6 +952,225 @@ async fn an_unnameable_rolling_answer_keeps_its_decoded_row_count() {
 }
 
 #[tokio::test]
+async fn rolling_requests_spend_one_shared_permit_per_network_attempt() {
+    use pull::rate::{Governor, Verdict, WindowSpan};
+    for (replies, expected_status, expected_requests) in [
+        (vec![(StatusCode::OK, rolling_session())], StatusCode::OK, 1),
+        (
+            vec![
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "generated temporary failure".to_owned(),
+                ),
+                (StatusCode::OK, rolling_session()),
+            ],
+            StatusCode::OK,
+            2,
+        ),
+        (
+            vec![(
+                StatusCode::BAD_REQUEST,
+                "generated permanent refusal".to_owned(),
+            )],
+            StatusCode::BAD_GATEWAY,
+            1,
+        ),
+    ] {
+        let mut fixture = Fixture::new(1);
+        let rolling = fixture.prepare_rolling_receipt();
+        fixture.asked.rate = None;
+        let transport = fixture.serve_replies(replies, None).await;
+        let mut budget = Governor::new(None, None, Some(8)).expect("generated finite allowance");
+        // Fix the owned governor's cursor ahead of every real clock reading:
+        // no wall-clock refill can hide a second charge during this probe.
+        assert_eq!(budget.admit(u64::MAX), Verdict::Admit);
+        let before = budget
+            .credit_micro_permits(WindowSpan::Day)
+            .expect("day allowance");
+        let governor = Arc::new(std::sync::Mutex::new(budget));
+        fixture.site.budgets.lock().expect("owned budget table")[fixture.asked.feed as usize] =
+            Some(Arc::clone(&governor));
+        fixture.wire.source = pull::http::HttpSource::new(
+            fixture.wire.spec,
+            pull::http::Credential::token("generated-offline-fixture".to_owned()),
+        )
+        .expect("owned loopback source")
+        .sharing(Some(Arc::clone(&governor)));
+
+        let (status, body, record) = fixture.rolling_report(rolling).await;
+        assert_eq!(status, expected_status, "{body}");
+        assert_eq!(
+            transport.seen.load(std::sync::atomic::Ordering::Relaxed),
+            expected_requests
+        );
+        let held = governor.lock().expect("measured shared governor");
+        let after = held
+            .credit_micro_permits(WindowSpan::Day)
+            .expect("remaining day allowance");
+        assert_eq!(
+            before - after,
+            expected_requests as u64 * WindowSpan::Day.len_micros()
+        );
+        assert_eq!(held.cursor_micros(), u64::MAX);
+        assert_eq!(
+            record.failures,
+            u64::from(expected_status == StatusCode::BAD_GATEWAY)
+        );
+    }
+}
+
+#[tokio::test]
+async fn rolling_preflight_refusal_never_spends_a_network_permit() {
+    let mut fixture = Fixture::new(1);
+    let rolling = fixture.prepare_rolling_receipt();
+    fixture.asked.rate = None;
+    let transport = fixture.serve(rolling_session()).await;
+    fixture.wire.spec.granularity_tokens = &[];
+    let governor = shared_governor(&fixture.site, fixture.asked.feed).expect("owned budget");
+    let before = *governor.lock().expect("budget before preflight");
+    let (status, body, record) = fixture.rolling_report(rolling).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(record.members, 1);
+    assert_eq!(record.failures, 1);
+    assert_eq!(record.rows_read, 0);
+    assert_eq!(record.bars_stored, 0);
+    assert!(body.contains("no wire word for the 1min rung"), "{body}");
+    assert_eq!(transport.seen.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(*governor.lock().expect("budget after preflight"), before);
+    assert!(!fixture.root.join("bars").exists());
+}
+
+#[tokio::test]
+async fn rolling_budget_halt_counts_every_unreached_cell_and_retains_prior_writes() {
+    let mut fixture = Fixture::new(1);
+    let rolling = pull::vendor::RollingSpec {
+        index_offsets: &["ATM", "ATM+1", "ATM+2", "ATM+3"],
+        ..fixture.prepare_rolling_receipt()
+    };
+    fixture.asked.rate = None;
+    let transport = fixture
+        .serve_replies(vec![(StatusCode::OK, rolling_session())], Some(1))
+        .await;
+    let (status, body, record) = fixture.rolling_report(rolling).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(record.outcome, audit::Outcome::Failed);
+    assert_eq!(record.members, 4);
+    assert_eq!(record.rows_read, 375);
+    assert_eq!(record.bars_stored, 375);
+    assert_eq!(record.failures, 3);
+    assert!(body.contains("no rate budget"), "{body}");
+    assert!(body.contains("Failures during rolling requests"), "{body}");
+    assert_eq!(transport.seen.load(std::sync::atomic::Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn rolling_plan_and_receipt_count_only_eligible_cadence_chunks() {
+    for (symbol, from, to, expected) in [
+        ("NIFTY", "2025-07-01", "2025-07-03", 6),
+        ("BANKNIFTY", "2025-07-01", "2025-07-03", 3),
+        ("BANKNIFTY", "2024-11-12", "2024-11-14", 5),
+    ] {
+        let mut fixture = Fixture::new(1);
+        let rolling = pull::vendor::RollingSpec {
+            max_days_per_call: 1,
+            expiry_flags: &[
+                ("MONTH", pull::vendor::ExpiryCadence::Monthly),
+                ("WEEK", pull::vendor::ExpiryCadence::Weekly),
+            ],
+            ..fixture.prepare_rolling_receipt()
+        };
+        let master = fixture.root.join("masters/dhan_scrip.csv");
+        let generated = fs::read_to_string(&master).expect("owned generated master");
+        fs::write(&master, generated.replace("NIFTY", symbol)).expect("owned underlying alias");
+        fixture.site = Arc::new(Site::load(&fixture.root.join("masters"), &fixture.root));
+        fixture.asked = ingest::parse_fno(
+            &format!("underlying={symbol}&series=opt&vendor=dhan&from={from}&to={to}"),
+            fixture.today,
+        )
+        .expect("generated three-chunk request");
+        let transport = fixture.serve(rolling_rows(0)).await;
+        let (status, body, record) = fixture.rolling_report(rolling).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(record.outcome, audit::Outcome::Empty);
+        assert_eq!(record.members, expected);
+        assert_eq!(record.rows_read, 0);
+        assert_eq!(record.bars_stored, 0);
+        assert_eq!(record.failures, 0);
+        assert_eq!(
+            transport.seen.load(std::sync::atomic::Ordering::Relaxed) as u64,
+            expected
+        );
+        assert!(body.contains("Requests planned"), "{body}");
+        assert!(!fixture.root.join("bars").exists());
+    }
+}
+
+#[tokio::test]
+async fn rolling_cadence_planning_uses_the_descriptors_ordinal_words() {
+    const CASES: &[&[&str]] = &[&["near", "far"], &[]];
+    for codes in CASES {
+        let mut fixture = Fixture::new(1);
+        let rolling = pull::vendor::RollingSpec {
+            expiry_codes: codes,
+            ..fixture.prepare_rolling_receipt()
+        };
+        fixture.asked.rate = None;
+        let transport = fixture.serve(rolling_rows(0)).await;
+        let (status, body, record) = fixture.rolling_report(rolling).await;
+        let expected = codes.len() as u64;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(record.outcome, audit::Outcome::Empty);
+        assert_eq!(record.members, expected);
+        assert_eq!(record.failures, 0);
+        assert_eq!(record.rows_read, 0);
+        assert_eq!(record.bars_stored, 0);
+        assert_eq!(
+            transport.seen.load(std::sync::atomic::Ordering::Relaxed) as u64,
+            expected
+        );
+        assert!(
+            body.contains(&format!("<th>Requests planned</th><td>{expected}</td>")),
+            "{body}"
+        );
+        assert!(!fixture.root.join("bars").exists());
+    }
+}
+
+#[tokio::test]
+async fn rolling_group_failures_are_not_reported_as_a_fraction_of_requests() {
+    let mut fixture = Fixture::new(1);
+    let rolling = fixture.prepare_rolling_receipt();
+    fixture.asked.rate = None;
+    let obstruction = fixture.root.join("bars");
+    fs::write(&obstruction, b"owned source obstruction").expect("block only fixture source files");
+    let mut answer: serde_json::Value =
+        serde_json::from_str(&rolling_session()).expect("generated complete session");
+    answer["data"]["ce"]["strike"] = serde_json::json!(
+        (0..375)
+            .map(|row| 24_000 + (row / 125) * 50)
+            .collect::<Vec<_>>()
+    );
+    let transport = fixture.serve(answer.to_string()).await;
+    let (status, body, record) = fixture.rolling_report(rolling).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(record.members, 1);
+    assert_eq!(record.rows_read, 375);
+    assert_eq!(record.bars_stored, 0);
+    assert_eq!(record.failures, 3);
+    assert!(
+        body.contains("<th>Failures during rolling requests</th><td>3</td>"),
+        "{body}"
+    );
+    assert!(!body.contains("Requests that did not land"), "{body}");
+    assert!(!body.contains("3 of 1"), "{body}");
+    assert_eq!(transport.seen.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(
+        fs::read(obstruction).expect("retained obstruction"),
+        b"owned source obstruction"
+    );
+}
+
+#[tokio::test]
 async fn rolling_plan_failure_is_explicit_before_any_request() {
     let mut fixture = Fixture::new(1);
     let rolling = pull::vendor::RollingSpec {
@@ -962,6 +1181,7 @@ async fn rolling_plan_failure_is_explicit_before_any_request() {
     let (status, body, record) = fixture.rolling_report(rolling).await;
     assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
     assert_eq!(record.outcome, audit::Outcome::Failed);
+    assert_eq!(record.members, 0, "an invalid plan names no request cells");
     assert_eq!(record.rows_read, 0);
     assert_eq!(record.bars_stored, 0);
     assert_eq!(record.failures, 1);

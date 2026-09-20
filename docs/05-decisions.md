@@ -37236,3 +37236,52 @@ stored evidence.
 The browser progress test carries both the corrected receipt and its legacy
 wording through the actual completion classifier. Both remain refusals with
 the complete reason retained and no successful report attached.
+
+### D-0670 — Charge each rolling network attempt once — 2026-09-20
+
+The rolling cross-product loop spent a rate permit before calling `roll_one`.
+Its transport already enters `laddered`, which spends a permit before every
+attempt, including the first. An owned loopback probe measured two day permits
+withdrawn for one actual network request. Its shared governor cursor was held
+ahead of real clock readings so elapsed-time refill could not conceal the
+duplicate withdrawal.
+
+Only the transport retry ladder now charges a rolling attempt. Preflight
+refusals consume no network allowance. The fixtures check a successful call,
+a retried server error, a permanent refusal and an unspellable timeframe.
+The shared transport still records success and throttling feedback. No rate
+ceiling, retry policy or vendor descriptor changes.
+
+If the budget becomes unavailable after an earlier answer, each later cell
+receives the same explicit refusal through the normal transport boundary.
+There are no further network calls; earlier decoded rows and acknowledged
+writes remain counted. The former early break counted only the first lost
+cell and silently omitted the rest of the planned suffix.
+
+### D-0671 — Retain the actual rolling plan in its receipt — 2026-09-20
+
+The receipt multiplied offsets, sides, cadences and ordinals without the
+date-window chunks or cadence filter used by the walk. A split window was
+under-counted, while a withdrawn cadence was counted despite no request.
+`RollingWalk` retains the eligible request-cell count computed from the same
+chunks and cadence decisions as the walk. The durable receipt and page use
+that value. An invalid split produces zero planned cells and an explicit
+planning failure; retries remain additional attempts at an existing cell.
+
+Generated three-day fixtures compare the actual loopback request count with
+the durable receipt for both index families, including chunks on both sides of
+the existing weekly-withdrawal boundary. Failure events are displayed
+as a count rather than a fraction of requests, because one response can
+contain several independently refused contract groups. One generated answer
+tests this distinction with three contract
+groups, all blocked by an owned source-file obstruction, with three failures
+and zero committed rows. Counting the plan is
+proportional to its cadence/window chunks; each eligibility check and each
+permit withdrawal remains bounded work. No claim of constant total-walk cost
+or measured network throughput follows.
+
+Cadence eligibility now takes the first ordinal code from the descriptor.
+The resolver defines ordinal position from that table, but the old eligibility
+probe supplied the literal `1`, silently excluding an otherwise valid table
+with different wire words. A generated `near`/`far` table makes two requests;
+an empty table makes none. Neither path invents a replacement ordinal.

@@ -12460,6 +12460,15 @@ struct Rolled {
     priced: PricedCount,
 }
 
+/// The request plan belongs to the whole walk, independently of row outcomes.
+#[derive(Debug, Default, PartialEq)]
+struct RollingWalk {
+    /// Eligible rolling request cells after the window and cadence filters.
+    planned: usize,
+    /// Acknowledged rows and failures accumulated from the planned cells.
+    done: Rolled,
+}
+
 /// How many rows priced, how many refused, and why.
 ///
 /// The Greek records themselves live in separate `.grk` files. Keep their
@@ -12959,7 +12968,7 @@ async fn roll_every(
     word: &'static str,
     offsets: &'static [&'static str],
     last_settled: Day,
-) -> Rolled {
+) -> RollingWalk {
     let endpoint = pull::rolling::url(&rolling, wire.spec.base_url);
     let mut out = Rolled::default();
 
@@ -12983,14 +12992,17 @@ async fn roll_every(
         {
             Ok(chunks) => chunks,
             Err(refusal) => {
-                return Rolled {
-                    failed: 1,
-                    why: vec![format!(
-                        "the window could not be split to this feed's {}-day \
+                return RollingWalk {
+                    done: Rolled {
+                        failed: 1,
+                        why: vec![format!(
+                            "the window could not be split to this feed's {}-day \
                      per-call cap, so no rolling request was sent: {refusal}",
-                        rolling.max_days_per_call
-                    )],
-                    ..Rolled::default()
+                            rolling.max_days_per_call
+                        )],
+                        ..Rolled::default()
+                    },
+                    ..RollingWalk::default()
                 };
             }
         };
@@ -13030,7 +13042,18 @@ async fn roll_every(
         .map(|(word, _)| *word)
         .filter(|flag| cadence_has_contracts(asked, &rolling, flag))
         .collect();
-    let planned = planned_rolling_requests(cadences.len(), rolling, offsets.len(), chunks.len());
+    let planned = cadences.iter().fold(0_usize, |total, flag| {
+        let eligible_chunks = chunks
+            .iter()
+            .filter(|chunk| cadence_has_contracts_on(asked, &rolling, flag, chunk.from()))
+            .count();
+        total.saturating_add(planned_rolling_requests(
+            1,
+            rolling,
+            offsets.len(),
+            eligible_chunks,
+        ))
+    });
     say_walk_starting(
         asked,
         &endpoint,
@@ -13040,7 +13063,7 @@ async fn roll_every(
         planned,
     );
 
-    'walk: for flag in &cadences {
+    for flag in &cadences {
         // EVERY ORDINAL THE VENDOR SERVES. THE NARROWING IS GONE.
         //
         // This read `.take(ORDINALS_ASKED)`, a `const usize = 1` carrying the
@@ -13090,14 +13113,9 @@ async fn roll_every(
                         if !cadence_has_contracts_on(asked, &rolling, flag, chunk.from()) {
                             continue;
                         }
-                        // THE GOVERNOR BEFORE EACH ONE. A month is 252 requests
-                        // against a ceiling of five a second; a budget charged once
-                        // for the batch is a ceiling observed once — and now it is
-                        // charged per CHUNK, because a chunk is a request.
-                        if let Err(halt) = await_budget(asked.feed, site).await {
-                            note_run_failure(&mut out.failed, &mut out.why, halt);
-                            break 'walk;
-                        }
+                        // The retry ladder owns every actual attempt's permit.
+                        // Charging here too spends two permits on the first
+                        // request and spends one even if preflight refuses.
                         let one = roll_one(
                             asked,
                             site,
@@ -13149,7 +13167,7 @@ async fn roll_every(
         }
     }
     say_walk_finished(asked, out.stored, out.failed, out.declined, planned);
-    out
+    RollingWalk { planned, done: out }
 }
 
 /// Whether this underlying had contracts on that cadence at all over the window.
@@ -13165,8 +13183,8 @@ async fn roll_every(
 /// It is checked at the window's FIRST day because `next_weekly_expiry` answers
 /// "on or after" — no weekly on or after the window opens means none inside it.
 ///
-/// The ordinal is `"1"` because the question is whether the cadence exists at
-/// all, and the near contract is the one that exists if any does.
+/// The ordinal is the descriptor's first code: the near contract exists if
+/// any does, and its wire spelling belongs to the descriptor.
 ///
 /// # Cost
 ///
@@ -13194,16 +13212,17 @@ fn cadence_has_contracts(
 ///
 /// # Cost
 ///
-/// One dated-table lookup. It runs once per chunk per cadence considered, not
-/// once per request, and it replaces an HTTP round trip — so it is strictly
-/// cheaper than the thing it prevents.
+/// One dated-table lookup per call, while planning and before a request is
+/// issued. The full plan and walk remain proportional to their chunk counts.
 fn cadence_has_contracts_on(
     asked: &ingest::FnoRequest,
     rolling: &pull::vendor::RollingSpec,
     flag: &str,
     on: pull::session::Day,
 ) -> bool {
-    pull::rolling::expiry_of(asked.underlying.as_str(), rolling, flag, "1", on).is_ok()
+    rolling.expiry_codes.first().is_some_and(|code| {
+        pull::rolling::expiry_of(asked.underlying.as_str(), rolling, flag, code, on).is_ok()
+    })
 }
 
 /// How many vendor requests this walk will make, before it makes any of them.
@@ -13334,15 +13353,14 @@ fn say_walk_finished(
 /// without asking it anything first. The contract set is the descriptor's own
 /// cross product.
 ///
-/// That is also why its cost can be STATED rather than found out while running:
-/// 21 index offsets × 2 sides × 2 cadences × 3 ordinals is 252 requests for an
-/// index month and 84 for a stock month, and no answer from any vendor changes
-/// either number.
+/// The walk counts eligible cadence/window chunks and multiplies those by the
+/// descriptor's offsets, sides and ordinals. The receipt retains that exact
+/// plan; retries spend additional permits without inventing new planned cells.
 ///
 /// # Cost
 ///
-/// O(1) per request built and per row read. The request COUNT is fixed by the
-/// descriptor, never by an answer.
+/// O(1) per request built and per row read. The request count follows the
+/// descriptor, eligible cadences and operator window, never an answer.
 ///
 /// **UNVERIFIED as a measurement.** The bound is argued from the
 /// shape of the code and no bench in this workspace times it.
@@ -13402,11 +13420,6 @@ async fn fno_roll(
     // knows which shape it matched, so this costs no extra lookup. D-0349.
     let word = instrument_word(&rolling, is_index);
     let offsets = rolling.offsets_for(word);
-    let planned = offsets.len()
-        * rolling.sides.len()
-        * rolling.expiry_flags.len()
-        * rolling.expiry_codes.len();
-    facts.push(("Requests planned", planned.to_string()));
     facts.push((
         "Addressed by",
         format!("strike offset — {} offsets, ATM-relative", offsets.len()),
@@ -13435,16 +13448,16 @@ async fn fno_roll(
         last_settled,
     )
     .await;
-    rolling_receipt(page, facts, done, planned)
+    rolling_receipt(page, facts, done)
 }
 
 /// Render and durably record the rolling walk's independently measured counts.
 fn rolling_receipt(
     page: &FnoPage<'_>,
     mut facts: Vec<(&'static str, String)>,
-    done: Rolled,
-    planned: usize,
+    walk: RollingWalk,
 ) -> (axum::http::StatusCode, String) {
+    let RollingWalk { planned, done } = walk;
     let Rolled {
         rows_read,
         stored,
@@ -13453,6 +13466,7 @@ fn rolling_receipt(
         why,
         priced,
     } = done;
+    facts.push(("Requests planned", planned.to_string()));
     facts.push(("Rows read", rows_read.to_string()));
     facts.push(("Bars stored", stored.to_string()));
     facts.extend(greek_facts(&priced, page.asked.rate.is_none()));
@@ -13486,10 +13500,9 @@ fn rolling_receipt(
             counted,
         );
     }
-    facts.push((
-        "Requests that did not land",
-        format!("{failed} of {planned}"),
-    ));
+    // One response can contain several independently refused contract groups.
+    // Their failure count is not a fraction of the request-cell count.
+    facts.push(("Failures during rolling requests", failed.to_string()));
     if !why.is_empty() {
         facts.push(("First reasons", why.join(" · ")));
     }
