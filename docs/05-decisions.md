@@ -36409,3 +36409,13 @@ vector before expensive hash cases, as the local audit already does. Keep the
 ordinary complete Cargo test job and coverage thresholds unchanged. Archive
 the exact assignment and terminal lists for diagnosis. This changes execution
 capacity and reconciliation, not the merge standard or engine behavior.
+
+### D-0630 — Exercise every byte of sealed Selection V5 records — 2026-09-20
+
+Individually flip a bit at each byte of a generated committed winner record and
+its completion, recomputing the outer checksum for every payload mutation.
+Reopening the full ledger must refuse every inconsistent record: a valid outer
+checksum cannot replace semantic identity, source joins, counts, canonical tags,
+reserved bytes or the ordered winner digest. Restore the exact original bytes
+and verify the same 25-winner receipt reopens. These 2,048 corruption cases run
+only in a private generated test directory and do not alter a store version.

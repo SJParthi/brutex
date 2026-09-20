@@ -4156,4 +4156,53 @@ mod tests {
         std::fs::remove_dir(root.path()).expect("remove replacement root");
         std::fs::rename(&displaced, root.path()).expect("restore root for cleanup");
     }
+
+    #[test]
+    fn every_record_byte_is_checked_even_when_the_outer_seal_is_recomputed() {
+        let root = TestRoot::new("resealed-byte-corruption");
+        let fixture = prepared(30);
+        commit_prepared_for_test(root.path(), bounds(), &fixture).expect("fixture commits");
+
+        for (name, payload_bytes, domain) in [
+            (ROW_FILE, ROW_PAYLOAD_BYTES, ROW_SEAL_DOMAIN),
+            (
+                COMPLETION_FILE,
+                COMPLETION_PAYLOAD_BYTES,
+                COMPLETION_SEAL_DOMAIN,
+            ),
+        ] {
+            let path = root.path().join(name);
+            let original = std::fs::read(&path).expect("read committed fixture");
+            SelectionV5Ledger::open_read(root.path(), bounds())
+                .expect("the complete unmodified ledger opens");
+            for offset in 0..payload_bytes + SEAL_BYTES {
+                let mut changed = original.clone();
+                changed[offset] ^= 1;
+                if offset < payload_bytes {
+                    // Recompute only the outer checksum. The semantic identity,
+                    // complete-block digest, counts, tags and reserved bytes
+                    // must independently reject an inconsistent record.
+                    let seal = hash_parts(domain, &[&changed[..payload_bytes]]);
+                    changed[payload_bytes..payload_bytes + SEAL_BYTES].copy_from_slice(&seal);
+                }
+                std::fs::write(&path, changed).expect("write private corrupt fixture");
+                assert!(
+                    SelectionV5Ledger::open_read(root.path(), bounds()).is_err(),
+                    "resealed corruption of {name} byte {offset} must refuse"
+                );
+            }
+            std::fs::write(&path, &original).expect("restore exact committed bytes");
+            let restored = SelectionV5Ledger::open_read(root.path(), bounds())
+                .expect("exact restoration opens again");
+            assert_eq!(
+                restored
+                    .structural_receipt(&fixture.selection_id)
+                    .expect("restored completion reads")
+                    .expect("restored completion is visible")
+                    .selected_count(),
+                25
+            );
+            assert_eq!(std::fs::read(path).expect("reread restored file"), original);
+        }
+    }
 }

@@ -7802,7 +7802,7 @@ jobs:
           cargo mutants --in-diff /tmp/mutation-plan/changed.diff \
             --shard "$SHARD" --sharding round-robin \
             --jobs 2 --jobserver-tasks 4 --timeout 900 \
-            --test-tool nextest --cargo-test-arg=--max-fail=1:immediate \
+            --cargo-arg=--locked --test-tool nextest --cargo-test-arg=--max-fail=1:immediate \
             --cargo-test-arg=--test-threads=1 --no-shuffle --colors never 2>&1 | tee mutation-run.log
           status=${PIPESTATUS[0]}
           set -e
