@@ -9,6 +9,12 @@ use store::file::BarFile;
 use store::format::Bar;
 use store::path::{FileKind, StorePath};
 static NEXT: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn with_warmed_store<R>(run: impl FnOnce(&std::path::Path) -> R) -> R {
+    let fixture = Fixture::warmed();
+    run(&fixture.root)
+}
+
 struct Fixture {
     root: PathBuf,
 }

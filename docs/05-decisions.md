@@ -36638,3 +36638,39 @@ self-checks, preclaims the next sixteen directory names, checks explicit refusal
 and unchanged owner files, then verifies recovery at the next available name.
 The operator refusal-surface test also checks all six hostile requests against
 each supported broker label before any real-data provenance can be printed.
+
+### D-0646 — Preserve stored fold audit failures instead of inventing an empty fold — 2026-09-20
+
+`fold_audit::compare` discarded every folding error with `unwrap_or_default`.
+An out-of-order minute sequence therefore compared equal to an empty derived
+file. The regression reproduced this false agreement before the repair.
+
+Return a fallible comparison and retain the derived rung and underlying fold
+error in its refusal. The month audit propagates this through its existing
+per-rung result, so an unreadable or uncomputable rung cannot hide the verdicts
+for other rungs. Truly empty valid input may still agree with an empty file.
+No stored format, calendar rule, fold algorithm or sweep scope changes.
+
+Tests cover out-of-order minutes, unrepresentable timestamp anchors, each bar
+field, exact disagreement overflow counts and all seven actual derived files.
+Missing or corrupt minute authority refuses the month; missing or corrupt coarse
+files leave the later verdicts visible. Exact restoration recovers the audit,
+and repeated reads leave all source bytes unchanged. The generated fixture's
+opening timestamp is corrected from 08:45 to its documented 09:15 IST; it is
+not historical market evidence or proof of minute-session completeness.
+
+### D-0647 — Exercise batch publication through its actual stored boundary — 2026-09-20
+
+Reuse the finite generated warm-up fixture to drive the actual native and
+coarse batch paths. Assert the saved parent identity, bar count, empty result
+at maximal support, durable completion, new retry attempt and byte-identical
+parent reuse. A different feed's malformed file is counted by the catalog but
+does not enter the requested feed's work or refusal rows.
+
+Missing daily or exact-minute context refuses before a parent or attempt is
+created. An owned directory obstructing the result file forces publication to
+fail after computation; the durable attempt must say Refused. Removing only
+that fixture obstruction permits a fresh Completed attempt with the same run
+identity and exactly one saved parent. These tests retain existing production
+behavior and are not evidence of vendor data, profitable results or a complete
+workspace coverage/mutation pass.

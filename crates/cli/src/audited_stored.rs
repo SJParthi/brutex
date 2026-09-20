@@ -238,3 +238,6 @@ fn error(why: impl std::fmt::Display) -> String {
 #[cfg(test)]
 #[path = "audited_stored_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+pub(crate) use tests::with_warmed_store;

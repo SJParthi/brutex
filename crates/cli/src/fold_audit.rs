@@ -131,11 +131,16 @@ pub const MAX_REPORTED: usize = 8;
 /// Compare one coarse rung against the fold of the supplied minutes.
 ///
 /// Pure, so the comparison itself is testable without a store on disk.
-#[must_use]
-pub fn compare(rung: Timeframe, minutes: &[Bar], stored: &[Bar]) -> RungVerdict {
-    let folded = store_bucket(rung).map_or_else(Vec::new, |bucket| {
-        pull::fold::fold(minutes, bucket).unwrap_or_default()
-    });
+///
+/// # Errors
+///
+/// Refuses an invalid fold width or malformed minute sequence. A folding error
+/// cannot become an empty series that appears to agree with an empty file.
+pub fn compare(rung: Timeframe, minutes: &[Bar], stored: &[Bar]) -> Result<RungVerdict, String> {
+    let bucket =
+        store_bucket(rung).ok_or_else(|| format!("{} has no valid fold width", rung.as_str()))?;
+    let folded = pull::fold::fold(minutes, bucket)
+        .map_err(|why| format!("{} minute fold refused: {why}", rung.as_str()))?;
     let mut disagreements = Vec::new();
     let mut elided = 0_u64;
     let push = |d: Disagreement, found: &mut Vec<Disagreement>, elided: &mut u64| {
@@ -207,13 +212,13 @@ pub fn compare(rung: Timeframe, minutes: &[Bar], stored: &[Bar]) -> RungVerdict 
         }
     }
 
-    RungVerdict {
+    Ok(RungVerdict {
         rung: rung.as_str(),
         stored_bars: u64::try_from(stored.len()).unwrap_or(u64::MAX),
         folded_bars: u64::try_from(folded.len()).unwrap_or(u64::MAX),
         disagreements,
         elided,
-    }
+    })
 }
 
 /// The fold bucket for a rung, or `None` for a width of zero seconds.
@@ -276,8 +281,8 @@ pub fn read_month(
 ///
 /// # Errors
 ///
-/// Only the minute file's own refusal. A coarse rung that cannot be read is
-/// reported as a verdict carrying that reason rather than failing the month:
+/// The minute file's own refusal. A coarse rung that cannot be read or folded
+/// is reported as a verdict carrying that reason rather than failing the month:
 /// an absent `30min` file is a finding about the store, not a reason to stop
 /// auditing `60min`.
 pub fn audit_month(
@@ -291,10 +296,15 @@ pub fn audit_month(
     Ok(DERIVED_RUNGS
         .iter()
         .map(|rung| {
-            read_month(root, vendor, key, *rung, ym).map(|stored| compare(*rung, &minutes, &stored))
+            read_month(root, vendor, key, *rung, ym)
+                .and_then(|stored| compare(*rung, &minutes, &stored))
         })
         .collect())
 }
+
+#[cfg(test)]
+#[path = "fold_audit_io_tests.rs"]
+mod io_tests;
 
 #[cfg(test)]
 #[allow(
@@ -309,11 +319,46 @@ pub fn audit_month(
 mod tests {
     use super::*;
 
+    #[test]
+    fn malformed_minutes_cannot_agree_with_an_empty_derived_file() {
+        let minutes = [
+            minute_bar(1, 100, 110, 90, 105),
+            minute_bar(0, 100, 110, 90, 105),
+        ];
+        for rung in DERIVED_RUNGS {
+            for stored in [&[][..], &minutes[..1]] {
+                let why = compare(rung, &minutes, stored).expect_err("malformed source");
+                assert!(why.contains(rung.as_str()), "{why}");
+                assert!(why.contains("minute fold refused"), "{why}");
+                assert!(why.contains("snapshot 1"), "{why}");
+            }
+            let extremes = [Bar {
+                ts_micros: i64::MIN,
+                ..minutes[0]
+            }];
+            let why = compare(rung, &extremes, &[]).expect_err("unrepresentable intraday grid");
+            assert!(why.contains("minute fold refused"), "{why}");
+        }
+        let extremes = [Bar {
+            ts_micros: i64::MAX,
+            ..minutes[0]
+        }];
+        let why =
+            compare(Timeframe::DAY_1, &extremes, &[]).expect_err("unrepresentable daily grid");
+        assert!(why.contains("minute fold refused"), "{why}");
+        let empty = compare(Timeframe::MINUTE_5, &[], &[]).expect("empty valid input");
+        assert!(empty.agrees());
+        assert_eq!(
+            (empty.stored_bars, empty.folded_bars, empty.elided),
+            (0, 0, 0)
+        );
+    }
+
     /// A one-minute bar on the NSE open grid, `minute` minutes past 09:15 IST.
     fn minute_bar(minute: i64, open: i64, high: i64, low: i64, close: i64) -> Bar {
         // 2024-06-03 09:15 IST as micros, plus the offset. The exact day does
         // not matter to the fold; the grid position does.
-        const BASE: i64 = 1_717_384_500_000_000;
+        const BASE: i64 = 1_717_386_300_000_000;
         Bar {
             ts_micros: BASE + minute * 60_000_000,
             open,
@@ -334,7 +379,7 @@ mod tests {
         for rung in DERIVED_RUNGS {
             let bucket = store_bucket(rung).expect("every derived rung has a bucket");
             let folded = pull::fold::fold(&minutes, bucket).expect("a clean series folds");
-            let verdict = compare(rung, &minutes, &folded);
+            let verdict = compare(rung, &minutes, &folded).expect("valid fold");
             assert!(
                 verdict.agrees(),
                 "{} disagreed with its own fold: {:?}",
@@ -370,7 +415,7 @@ mod tests {
         assert_eq!(stored.len(), 1, "the bucket still exists");
         assert_eq!(truth.len(), 1, "and so does the correct one");
 
-        let verdict = compare(Timeframe::MINUTE_5, &complete, &stored);
+        let verdict = compare(Timeframe::MINUTE_5, &complete, &stored).expect("valid fold");
         assert_eq!(
             verdict.stored_bars, verdict.folded_bars,
             "THE COUNT AGREES, which is the whole reason a count check cannot \
@@ -404,7 +449,7 @@ mod tests {
         assert_eq!(full.len(), 2, "ten minutes make two five-minute buckets");
 
         let short = vec![full[0]];
-        let verdict = compare(Timeframe::MINUTE_5, &minutes, &short);
+        let verdict = compare(Timeframe::MINUTE_5, &minutes, &short).expect("valid fold");
         assert!(!verdict.agrees());
         assert_eq!(verdict.stored_bars, 1);
         assert_eq!(verdict.folded_bars, 2);
@@ -419,7 +464,7 @@ mod tests {
 
         let mut long = full.clone();
         long.push(minute_bar(99, 1, 1, 1, 1));
-        let other = compare(Timeframe::MINUTE_5, &minutes, &long);
+        let other = compare(Timeframe::MINUTE_5, &minutes, &long).expect("valid fold");
         assert!(!other.agrees());
         assert_eq!(
             other.disagreements.first().expect("one disagreement").field,
@@ -444,13 +489,76 @@ mod tests {
                 ..*bar
             })
             .collect();
-        let verdict = compare(Timeframe::MINUTE_2, &minutes, &wrong);
+        let verdict = compare(Timeframe::MINUTE_2, &minutes, &wrong).expect("valid fold");
         assert!(!verdict.agrees());
         assert_eq!(verdict.disagreements.len(), MAX_REPORTED);
-        assert!(
-            verdict.elided > 0,
+        assert_eq!(
+            verdict.elided, 52,
             "the rest are counted rather than dropped"
         );
+    }
+
+    #[test]
+    fn every_stored_field_disagreement_retains_its_exact_position_and_values() {
+        let minutes = [minute_bar(0, 100, 110, 90, 105)];
+        let truth = minutes[0];
+        for field in [
+            "ts_micros",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "open_interest",
+        ] {
+            let mut changed = truth;
+            let (stored, folded) = match field {
+                "ts_micros" => {
+                    changed.ts_micros += 1;
+                    (changed.ts_micros, truth.ts_micros)
+                }
+                "open" => {
+                    changed.open += 1;
+                    (changed.open, truth.open)
+                }
+                "high" => {
+                    changed.high += 1;
+                    (changed.high, truth.high)
+                }
+                "low" => {
+                    changed.low -= 1;
+                    (changed.low, truth.low)
+                }
+                "close" => {
+                    changed.close -= 1;
+                    (changed.close, truth.close)
+                }
+                "volume" => {
+                    changed.volume += 1;
+                    (changed.volume, truth.volume)
+                }
+                _ => {
+                    changed.open_interest += 1;
+                    (changed.open_interest, truth.open_interest)
+                }
+            };
+            let verdict = compare(Timeframe::MINUTE_5, &minutes, &[changed]).expect("valid fold");
+            assert!(!verdict.agrees());
+            assert_eq!(
+                (verdict.stored_bars, verdict.folded_bars, verdict.elided),
+                (1, 1, 0)
+            );
+            assert_eq!(
+                verdict.disagreements,
+                vec![Disagreement {
+                    at: 0,
+                    ts_micros: changed.ts_micros,
+                    field,
+                    stored,
+                    folded,
+                }]
+            );
+        }
     }
 
     /// `1day` is not in the audited set, and that is deliberate.

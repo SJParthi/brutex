@@ -746,6 +746,10 @@ fn render(
 }
 
 #[cfg(test)]
+#[path = "batch_stored_tests.rs"]
+mod stored_tests;
+
+#[cfg(test)]
 #[expect(
     clippy::expect_used,
     reason = "the exception every test module in this workspace takes — a test \
