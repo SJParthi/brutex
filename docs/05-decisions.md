@@ -36958,3 +36958,47 @@ audit's denominator. The route regression proves both independent mismatch
 cases, exact preservation of the original response, current-census admission
 of valid peers, named votes, the known generated hole, identical cached reads
 and unchanged source bytes. All fixtures are generated and privately owned.
+
+### D-0661 — Reauthenticate resealed Global Replay V3 record damage — 2026-09-20
+
+Retain the full eight-rung, two-hundred-witness generated replay topology while
+changing one bit at every byte of the first and last witness records and every
+Candidate, Decision, Money and Completion record. Those selected records span
+8,448 byte positions, six candidates, all three scheduling dispositions and
+two admitted money rows. For payload changes, recompute only the enclosing
+record's domain-separated seal; changes in the seal itself remain corrupted.
+
+Every changed record must refuse the original committed capability's fresh
+semantic audit, and the audit must leave the changed bytes untouched. Restore
+each file's original bytes before testing the next companion and recover the
+exact original audit. A final cold commit of the original prepared replay must
+reuse that same authority without appending another block. The generated root
+is exclusively claimed and removed only by its owning fixture. This extends
+verification of the existing format; no byte layout, production identity,
+validation floor, exclusion or measured complexity claim changes.
+
+### D-0662 — Resolve explicit invariant proof paths and deeper names — 2026-09-20
+
+Gate 10's exact three-component token expression omitted references with more
+module components, digits in a component and bare test names followed by a
+source path. Add the std-only Rust `invariant_paths.rs` checker to bind each
+explicitly named function to its exact tracked source file. Comma/semicolon
+lists share a path; a separately qualified proof before a semicolon retains its
+own namespace. Invalid names, paths or unclosed code spans refuse. The command
+also refuses a document containing no explicit path references. Expand the
+legacy token expression to check deeper qualified names and digit suffixes.
+
+The declaration index remains the existing comment-filtered source scanner.
+This is a function-existence check, not Rust parsing, proof of test registration
+or evidence that a test establishes its claimed invariant. Prose, headers,
+directory descriptions and unnamed module summaries do not become functions.
+Replace the affected module-only and file-context summaries with named cases.
+Existing pending-row exceptions remain explicit and unchanged.
+
+The stronger check exposed stale statements as well as renamed tests. Reconcile
+AU-01 with D-0128's opt-in pulling, ST-02/ST-05 with the current stored-target and
+D-0506 cash scope, R-05/R-06 with D-0249's independent trailing axes, and the V1
+admission/replay summaries with their actual refusal and private-fixture limits.
+Name current canonical-codec, Admission V3, Finalization V3, Selection V6 and
+consistency tests rather than changing production behavior to fit stale prose.
+No invariant row is deleted and no validation floor is lowered.

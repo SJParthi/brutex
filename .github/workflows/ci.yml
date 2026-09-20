@@ -4421,11 +4421,13 @@ jobs:
           #     be satisfied by an ordinary function of the right name in the
           #     right crate.
           #   * That the test proves the invariant. Nothing mechanical can.
-          #   * The module segment. `store::unit::x` and `store::fault::x` are
-          #     the same question to this gate.
+          #   * The module segment of a qualified token. `store::unit::x` and
+          #     `store::fault::x` are the same question to the legacy scanner.
+          #     An explicit `x` in `crates/store/src/file.rs` instead binds x
+          #     to that exact tracked source file through invariant_paths.rs.
           #   * A row whose "Proven by" cell is prose, a const assertion or a
-          #     CI gate rather than a `crate::module::name` token. Those rows
-          #     are not checked and never were.
+          #     CI gate rather than a qualified token or an explicit name in
+          #     a source file. Those prose-only rows are not checked.
           #
           # NO UNTRUSTED INPUT REACHES THIS STEP: `git ls-files`, the document,
           # and the static patterns below. Gate 1c's discipline.
@@ -4490,16 +4492,28 @@ jobs:
           # One file at a time rather than `xargs`, because the filter is
           # per-file. That is slower and it is 189 files.
           fns="$work/fns"; : > "$fns"
+          path_fns="$work/path-fns"; : > "$path_fns"
           for c in $(git ls-files 'crates/*/Cargo.toml' \
                      | sed 's|^crates/||; s|/Cargo.toml$||'); do
             while IFS= read -r one; do
               [ -n "$one" ] || continue
               { grep -vE '^[[:space:]]*(//|\*)' "$one" || true; } \
                 | { grep -ohE '\bfn [a-z_][a-z_0-9]*' || true; } \
-                | sed "s|^fn |${c} |" >> "$fns"
+                | sed 's|^fn ||' \
+                | while IFS= read -r fn; do
+                    printf '%s %s\n' "$c" "$fn" >> "$fns"
+                    printf '%s\t%s\n' "$one" "$fn" >> "$path_fns"
+                  done
             done < <(git ls-files "crates/$c/*.rs")
           done
           sort -u -o "$fns" "$fns"
+
+          # D-0662: bare test names followed by a source path are also proof
+          # references. The old qualified-token expression ignored them all.
+          rustc --edition=2024 --test -D warnings .github/invariant_paths.rs -o "$work/invariant-path-tests"
+          "$work/invariant-path-tests"
+          rustc --edition=2024 -D warnings .github/invariant_paths.rs -o "$work/invariant-paths"
+          "$work/invariant-paths" "$f" "$path_fns"
 
           rows=0; checked=0; missing=0; pending=0; exempt=0
           while IFS= read -r line; do
@@ -4507,7 +4521,7 @@ jobs:
             rows=$((rows + 1))
             id=$(printf '%s\n' "$line" | awk -F'|' '{print $2}' | tr -d ' ')
             for t in $( { printf '%s\n' "$line" \
-                          | grep -oE '`[a-z_]+::[a-z_]+::[a-z_0-9]+`' | tr -d '`' || true; } ); do
+                          | grep -oE '`[a-z_][a-z_0-9]*(::[a-z_][a-z_0-9]*){2,}`' | tr -d '`' || true; } ); do
               c="${t%%::*}"; fn="${t##*::}"
               # The ONLY reason a row is not checked: the crate it names is not
               # a tracked member of this workspace. That is what the legend's
@@ -4559,7 +4573,7 @@ jobs:
             echo "a status glyph no longer silences one."
             exit 1
           fi
-          echo "OK — every invariant in a tracked crate names a test that exists."
+          echo "OK — checked named invariant references resolve to tracked declarations."
 
       - name: Gate 11 — banned constructs on the O(1) paths
         run: |

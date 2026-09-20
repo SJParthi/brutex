@@ -3801,4 +3801,104 @@ mod tests {
         assert!(validate_prepared(&foreign_money).is_err());
         Ok(())
     }
+
+    fn assert_resealed_record_bytes_refuse<const N: usize>(
+        committed: &CommittedStoredGlobalReplayV3,
+        path: &Path,
+        domain: &[u8],
+        records: &[usize],
+    ) -> Result<usize, String> {
+        let original = std::fs::read(path).map_err(|why| why.to_string())?;
+        let authority = committed.audit()?;
+        let mut checked = 0;
+        for record in records {
+            let start = record
+                .checked_mul(N)
+                .ok_or_else(|| "fixture record offset overflowed".to_owned())?;
+            let end = start
+                .checked_add(N)
+                .ok_or_else(|| "fixture record end overflowed".to_owned())?;
+            for byte in 0..N {
+                let mut changed = original.clone();
+                let raw: &mut [u8; N] = changed
+                    .get_mut(start..end)
+                    .ok_or_else(|| "fixture record is absent".to_owned())?
+                    .try_into()
+                    .map_err(|why| format!("fixture record stride differs: {why}"))?;
+                *raw.get_mut(byte)
+                    .ok_or_else(|| "fixture byte is absent".to_owned())? ^= 1;
+                if byte < N - SEAL_BYTES {
+                    seal_record(domain, raw)?;
+                }
+                std::fs::write(path, &changed).map_err(|why| why.to_string())?;
+                assert!(
+                    committed.audit().is_err(),
+                    "{} record {record} byte {byte} retained its original authority",
+                    path.display()
+                );
+                assert_eq!(
+                    std::fs::read(path).map_err(|why| why.to_string())?,
+                    changed,
+                    "refusal cannot rewrite the corrupted record"
+                );
+                checked += 1;
+            }
+        }
+        std::fs::write(path, &original).map_err(|why| why.to_string())?;
+        assert_eq!(committed.audit()?, authority);
+        assert_eq!(
+            std::fs::read(path).map_err(|why| why.to_string())?,
+            original,
+            "reopening restored bytes is read-only"
+        );
+        Ok(checked)
+    }
+
+    #[test]
+    fn replay_v3_record_bytes_remain_bound_after_outer_resealing() -> Result<(), String> {
+        let (prepared, _) = prepared_fixture()?;
+        let root = TempRoot::new("resealed-record-bytes")?;
+        let bounds = GlobalReplayV3Bounds::new(400, 20, 20, 20, 2)?;
+        let committed = commit_prepared_global_replay_v3(root.path(), bounds, &prepared)?;
+        assert!(committed.was_written());
+        let authority = committed.audit()?;
+        let paths = GlobalReplayPathsV3::new(root.path());
+        // The complete 200-witness topology stays present. Exercise both
+        // boundary witness records and every record of the other four files.
+        let mut checked = assert_resealed_record_bytes_refuse::<GLOBAL_REPLAY_V3_WITNESS_BYTES>(
+            &committed,
+            &paths.witness,
+            WITNESS_SEAL_DOMAIN,
+            &[0, WITNESS_COUNT - 1],
+        )?;
+        checked += assert_resealed_record_bytes_refuse::<GLOBAL_REPLAY_V3_CANDIDATE_BYTES>(
+            &committed,
+            &paths.candidate,
+            CANDIDATE_SEAL_DOMAIN,
+            &(0..prepared.candidates.len()).collect::<Vec<_>>(),
+        )?;
+        checked += assert_resealed_record_bytes_refuse::<GLOBAL_REPLAY_V3_DECISION_BYTES>(
+            &committed,
+            &paths.decision,
+            DECISION_SEAL_DOMAIN,
+            &(0..prepared.decisions.len()).collect::<Vec<_>>(),
+        )?;
+        checked += assert_resealed_record_bytes_refuse::<GLOBAL_REPLAY_V3_MONEY_BYTES>(
+            &committed,
+            &paths.money,
+            MONEY_SEAL_DOMAIN,
+            &(0..prepared.money.len()).collect::<Vec<_>>(),
+        )?;
+        checked += assert_resealed_record_bytes_refuse::<GLOBAL_REPLAY_V3_COMPLETION_BYTES>(
+            &committed,
+            &paths.completion,
+            COMPLETION_SEAL_DOMAIN,
+            &[0],
+        )?;
+        assert_eq!(checked, 8_448);
+        let reopened = commit_prepared_global_replay_v3(root.path(), bounds, &prepared)?;
+        assert!(!reopened.was_written());
+        assert_eq!(reopened.audit()?, authority);
+        Ok(())
+    }
 }
