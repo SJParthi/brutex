@@ -14,6 +14,10 @@ type Response = (
 );
 const PAGE_ROWS: u64 = 256;
 
+#[cfg(test)]
+#[path = "indexstopvix_projection_tests.rs"]
+mod projection_tests;
+
 #[derive(Debug, PartialEq, Eq)]
 struct Asked {
     identity: [u8; 32],

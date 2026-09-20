@@ -22,6 +22,110 @@ fn operator_self_check_rejects_all_malformed_requests_before_claiming_provenance
 }
 
 #[test]
+fn series_self_checks_require_observations_and_a_real_suffix()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    let mut span = crate::stored::Span {
+        bars: Vec::new(),
+        vendor: brutex_core::vendor::Vendor::Zerodha,
+        key: crate::stored::swept_index("NIFTY")?,
+        timeframe: "1min",
+        asked: 1,
+        found: 1,
+        missing: Vec::new(),
+        excluded: crate::stored::CalendarExclusion::none(),
+    };
+    for bars in [Vec::new(), vec![runner::synthetic::bar(0, 0)]] {
+        span.bars = bars;
+        let [repeatability, causality] = crate::measured_series_checks(&span)?;
+        assert!(!repeatability.held, "{}", repeatability.evidence);
+        assert!(!causality.held, "{}", causality.evidence);
+        assert!(repeatability.evidence.contains("complete false vs false"));
+        assert!(causality.evidence.contains("observable prefix rows 0"));
+    }
+    // Seven generated short sessions warm the 200-bar indicator and the
+    // five-session ladder. Fewer than 120 observable bars makes the sweep
+    // finish by extinction, rather than exhaust a candidate budget.
+    span.bars = runner::synthetic::session_of(7, 40);
+    let [repeatability, causality] = crate::measured_series_checks(&span)?;
+    assert!(repeatability.held, "{}", repeatability.evidence);
+    assert!(repeatability.evidence.contains("complete true vs true"));
+    assert!(causality.held, "{}", causality.evidence);
+    assert!(causality.evidence.contains("suffix bars 1; 0 differ"));
+    assert!(!causality.evidence.contains("observable prefix rows 0;"));
+    Ok(())
+}
+
+#[test]
+fn stored_self_check_reports_partial_history_and_missing_feed_as_failures()
+-> Result<(), Box<dyn std::error::Error>> {
+    const CHILD: &str = "BRUTEX_TEST_STORED_SELF_CHECK";
+    if std::env::var_os(CHILD).is_some() {
+        let root = crate::store_root()?;
+        let key = crate::stored::swept_index("NIFTY")?;
+        let mut originals = Vec::new();
+        for month in [4, 5] {
+            let path = store::path::StorePath::for_key(
+                brutex_core::vendor::Vendor::Zerodha,
+                &key,
+                store::path::Timeframe::DAY_1,
+                store::path::YearMonth::new(2025, month)?,
+                store::path::FileKind::Bars,
+            )?
+            .to_path_buf(&root);
+            originals.push((path.clone(), std::fs::read(path)?));
+        }
+        let mut report = String::new();
+        assert_eq!(crate::verify_arm(&mut report, "zerodha", "NIFTY"), FAILED);
+        for text in [
+            "2 of 81 months",
+            "two runs of one slice agree byte for byte",
+            "identical",
+            "a bar's conditions do not change because later bars exist",
+            "0 observable bars vs 0; complete false vs false",
+            "observable prefix rows 0; suffix bars 1; 0 differ",
+            "3 of 6 checks passed",
+            "A FAILURE ABOVE",
+        ] {
+            assert!(report.contains(text), "missing {text}: {report}");
+        }
+        assert!(!report.contains("Every property above was MEASURED"));
+        let mut missing = String::new();
+        assert_eq!(crate::verify_arm(&mut missing, "dhan", "NIFTY"), FAILED);
+        assert!(missing.contains("the span loads at all"), "{missing}");
+        assert!(missing.contains("2 of 3 checks passed"), "{missing}");
+        let mut unknown = String::new();
+        assert_eq!(crate::verify_arm(&mut unknown, "unknown", "NIFTY"), FAILED);
+        assert!(unknown.starts_with("refused:"), "{unknown}");
+        for (path, bytes) in originals {
+            assert_eq!(std::fs::read(path)?, bytes);
+        }
+        return Ok(());
+    }
+    crate::audited_stored::with_warmed_store(|root| {
+        let result = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "operator_boundary_tests::stored_self_check_reports_partial_history_and_missing_feed_as_failures",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "generated")
+            .env("BRUTEX_STORE", root)
+            .output()?;
+        assert!(
+            result.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"));
+        Ok(())
+    })
+}
+
+#[test]
 fn ledger_self_checks_do_not_delete_an_existing_directory_and_can_run_concurrently()
 -> Result<(), Box<dyn std::error::Error>> {
     use std::fs;

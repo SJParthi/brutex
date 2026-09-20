@@ -255,7 +255,7 @@ fn hex(value: [u8; 32]) -> String {
 }
 #[cfg(test)]
 #[path = "indexstop_projection_tests.rs"]
-mod projection_tests;
+pub(crate) mod projection_tests;
 
 #[cfg(test)]
 mod tests {

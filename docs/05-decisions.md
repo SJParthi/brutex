@@ -36750,3 +36750,85 @@ failure before its expensive retained-chain reauthentication. Every test remains
 selected: an unmutated baseline and a mutant that survives the earlier tests
 still run the complete transaction. This changes neither Cargo test behavior,
 timeouts, mutation accounting nor any coverage threshold.
+
+### D-0651 — Fold-audit exits from measured findings, not report text — 2026-09-20
+
+A real stored-command regression removed the generated two-minute file. The
+report correctly counted six agreeing rungs and one unreadable rung, but the
+command returned success because it searched only for `DISAGREES` or a refusal
+marker. An unreadable authority is not a completed comparison.
+
+Keep a typed failure fact beside the rendered report. Any unreadable requested
+month or rung, or any disagreement, returns the existing failure exit code.
+Input admission errors also fail. Continue reading later verdicts and retain
+their counts. The report distinguishes unreadable authority from a measured
+disagreement and claims complete agreement only when both counts are zero.
+No source file is repaired or modified by this read-only command.
+
+The child-process regression uses an isolated configured scratch store. It
+covers all seven agreeing rungs, a missing coarse file, corrupt minute authority,
+a missing second month, twelve field disagreements with eight named and four
+counted, invalid declarations, and recovery after exact byte restoration.
+
+### D-0652 — Verify saved VIX pages against their independent complete companions — 2026-09-20
+
+Reuse the generated two-direction native observation catalog to construct
+independent documented VIX companion bytes in test-only scratch storage. Read
+them through the actual saved API projection for exact candles, exact absence
+and unavailable months. Preserve the complete integer prices, volumes and
+open-interest sentinel, native trade links, reference-only disclosure, parent
+completion and page bounds. An unavailable month retains its original reason.
+
+An invalid coordinate must refuse, a changed companion must evict stale
+admission, and restoring the original bytes permits a fresh authenticated retry.
+A foreign catalog completion never selects replacement evidence. No market
+store, vendor call, production constructor, run identity or wire format changes.
+
+### D-0653 — Refuse vacuous self-check proofs on unobservable data — 2026-09-20
+
+Run the actual verification command in a child process whose configured root is
+an owned generated fixture. Two present months cannot become complete history
+for its declared 81-month span. This regression also exposed two false proofs:
+identical reports from incomplete sweeps passed repeatability, and comparing
+zero observable prefix rows passed suffix independence. Require both sweeps to
+complete before identical rendered bytes can prove repeatability. Reserve at
+least one later source bar and require a nonempty observable prefix with enough
+whole-series rows before agreement can establish suffix independence. Retain
+the observed counts beside both verdicts.
+
+The partial fixture must fail all three properties while retaining its actual
+monotone-join, ledger and refusal checks. A different feed with no series and
+an unknown feed also fail; none may print the all-properties-passed conclusion.
+Verify that stored daily source bytes remain unchanged. These generated checks
+do not establish real-data completeness or research profitability.
+
+A separate finite seven-session fixture verifies the positive path: indicators
+warm, the search completes by extinction at its existing support floor, and
+observable prefix rows agree while one later source bar remains outside the
+prefix. Empty and one-bar inputs fail both proofs.
+
+### D-0654 — Calibrate mutation deadlines from a completed baseline — 2026-09-20
+
+GitHub run 35489557639 reached the fixed 900-second test-command deadline in
+its unmutated baseline. Shard zero had passed 4,950 of 5,405 selected tests;
+shard one had passed 2,200. Both exited before testing a single mutant. The
+same fixed deadline cannot establish an ordinary passing baseline on these
+workers, so retrying all 250 jobs under it provides no mutation evidence.
+
+Replace that fixed command cutoff with cargo-mutants' required-baseline
+calibration: a 900-second minimum and twice the measured baseline test time.
+The baseline still runs and must pass. Each job retains its outer 240-minute
+bound, complete assignment, two isolated workers, every selected test and exact
+terminal reconciliation. No timeout, skipped baseline or unfinished case is
+credited. The original 120-second case-throughput estimate remains explicitly
+unmeasured; a shard that cannot finish still fails. No coverage floor or branch
+protection changes.
+
+The expensive mutation matrix also waits for coverage to pass. Enumeration
+can still expose its full assignment after the build, but a commit already
+blocked by coverage does not consume hundreds of test jobs. The final `ci-ok`
+gate still requires both coverage and mutations to report success; a skipped
+matrix is a failure to satisfy that gate, never a mutation pass.
+
+The pinned tool's documented semantics are in [cargo-mutants timeouts](https://mutants.rs/timeouts.html).
+This supersedes only D-0629's fixed 900-second per-command deadline.

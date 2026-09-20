@@ -7773,7 +7773,10 @@ jobs:
   mutants:
     name: Gate 18 — mutation shard ${{ matrix.shard }}
     runs-on: ubuntu-24.04
-    needs: [build, mutant-plan]
+    # D-0654: a known coverage failure already blocks this commit. Do not
+    # start hundreds of expensive mutation jobs until that gate passes.
+    # ci-ok still requires both gates to succeed; skipped is never success.
+    needs: [build, coverage, mutant-plan]
     timeout-minutes: 240
     strategy:
       fail-fast: false
@@ -7829,12 +7832,15 @@ jobs:
             echo "No changed source line generates a mutation. Nothing was tested or claimed."
             exit 0
           fi
-          # D-0629: same full diff, two isolated workers, bounded matrix.
-          # Early exit requires an actual failed test. Timeout remains a refusal.
+          # D-0629/D-0654: same full diff, two isolated workers, bounded matrix.
+          # The clean baseline exceeded 900s on CI before any mutant ran. Let
+          # that required baseline calibrate the test timeout; the outer 240m
+          # job deadline still applies. Timeout is never credited as a catch.
           set +e
           cargo mutants --in-diff /tmp/mutation-plan/changed.diff \
             --shard "$SHARD" --sharding round-robin \
-            --jobs 2 --jobserver-tasks 4 --timeout 900 \
+            --jobs 2 --jobserver-tasks 4 \
+            --minimum-test-timeout 900 --timeout-multiplier 2 \
             --cargo-arg=--locked --test-tool nextest --cargo-test-arg=--max-fail=1:immediate \
             --cargo-test-arg=--test-threads=1 --no-shuffle --colors never 2>&1 | tee mutation-run.log
           status=${PIPESTATUS[0]}

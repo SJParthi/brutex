@@ -170,3 +170,135 @@ fn missing_or_corrupt_minute_authority_refuses_the_entire_audit() {
             .all(|result| result.expect("restored rung").agrees())
     );
 }
+
+fn assert_fold_command_case(case: &str) {
+    let mut text = String::new();
+    let through = if case == "missing-month" { "7" } else { "6" };
+    let code = crate::fold_audit_arm(
+        &mut text,
+        "zerodha",
+        "NIFTY",
+        ("2024", "6"),
+        ("2024", through),
+    );
+    let (expected, counts, detail) = match case {
+        "clean" => (
+            crate::OK,
+            "7 rung-month(s) agree, 0 DISAGREE, 0 unreadable",
+            "Every stored coarse bar equals",
+        ),
+        "missing-rung" => (
+            crate::FAILED,
+            "6 rung-month(s) agree, 0 DISAGREE, 1 unreadable",
+            "RUNG UNREADABLE",
+        ),
+        "bad-minutes" => (
+            crate::FAILED,
+            "0 rung-month(s) agree, 0 DISAGREE, 1 unreadable",
+            "MINUTE FILE UNREADABLE",
+        ),
+        "missing-month" => (
+            crate::FAILED,
+            "7 rung-month(s) agree, 0 DISAGREE, 1 unreadable",
+            "2024-07  MINUTE FILE UNREADABLE",
+        ),
+        "disagreement" => (
+            crate::FAILED,
+            "6 rung-month(s) agree, 1 DISAGREE, 0 unreadable",
+            "4 more not named",
+        ),
+        _ => unreachable!("unknown generated command case"),
+    };
+    assert!(text.contains(counts), "{case}: {text}");
+    assert!(text.contains(detail), "{case}: {text}");
+    assert_eq!(code, expected, "{case}: {text}");
+    for (feed, symbol, from, to) in [
+        ("unknown", "NIFTY", ("2024", "6"), ("2024", "6")),
+        ("zerodha", "UNSWEPT", ("2024", "6"), ("2024", "6")),
+        ("zerodha", "NIFTY", ("2024", "7"), ("2024", "6")),
+        ("zerodha", "NIFTY", ("2024", "0"), ("2024", "6")),
+    ] {
+        let mut report = String::new();
+        assert_eq!(
+            crate::fold_audit_arm(&mut report, feed, symbol, from, to),
+            crate::FAILED,
+            "{report}"
+        );
+        assert!(report.starts_with("refused:"), "{report}");
+    }
+}
+
+#[test]
+fn fold_command_fails_on_unreadable_authority_and_retains_every_later_verdict() {
+    const CASE: &str = "BRUTEX_TEST_FOLD_AUDIT_CASE";
+    if let Ok(case) = std::env::var(CASE) {
+        assert_fold_command_case(&case);
+        return;
+    }
+    let fixture = Fixture::new();
+    let run = |case: &str| {
+        let result = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "fold_audit::io_tests::fold_command_fails_on_unreadable_authority_and_retains_every_later_verdict",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CASE, case)
+            .env("BRUTEX_STORE", &fixture.root)
+            .output()
+            .expect("isolated command environment");
+        assert!(
+            result.status.success(),
+            "{case}: {}{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"));
+    };
+    run("clean");
+    let coarse = fixture.path(Timeframe::MINUTE_2).to_path_buf(&fixture.root);
+    let saved_coarse = fs::read(&coarse).expect("saved coarse bytes");
+    fs::remove_file(&coarse).expect("remove owned generated coarse file");
+    run("missing-rung");
+    fs::write(&coarse, &saved_coarse).expect("restore generated coarse file");
+
+    let minute = fixture.path(Timeframe::MINUTE_1).to_path_buf(&fixture.root);
+    let saved_minutes = fs::read(&minute).expect("saved minute bytes");
+    fs::write(&minute, b"unreadable generated source").expect("owned corruption");
+    run("bad-minutes");
+    fs::write(&minute, &saved_minutes).expect("restore generated minutes");
+    run("missing-month");
+
+    let five = fixture.path(Timeframe::MINUTE_5).to_path_buf(&fixture.root);
+    let saved_five = fs::read(&five).expect("saved five-minute bytes");
+    let checksums = fixture
+        .path(Timeframe::MINUTE_5)
+        .with_file(FileKind::Checksums)
+        .to_path_buf(&fixture.root);
+    let saved_checksums = fs::read(&checksums).expect("saved five-minute checksums");
+    let mut changed = pull::fold::fold(
+        &fixture.minutes,
+        store_bucket(Timeframe::MINUTE_5).expect("five-minute bucket"),
+    )
+    .expect("generated fold");
+    for bar in &mut changed {
+        bar.close += 1;
+    }
+    fs::remove_file(&five).expect("replace only generated five-minute source");
+    fixture.write(Timeframe::MINUTE_5, &changed);
+    run("disagreement");
+    fs::write(&five, &saved_five).expect("restore exact five-minute bytes");
+    fs::write(&checksums, &saved_checksums).expect("restore matching five-minute checksums");
+    run("clean");
+    assert_eq!(fs::read(coarse).expect("coarse after audit"), saved_coarse);
+    assert_eq!(
+        fs::read(minute).expect("minutes after audit"),
+        saved_minutes
+    );
+    assert_eq!(fs::read(five).expect("five-minute after audit"), saved_five);
+    assert_eq!(
+        fs::read(checksums).expect("checksums after audit"),
+        saved_checksums
+    );
+}

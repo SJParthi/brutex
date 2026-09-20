@@ -602,10 +602,21 @@ fn fold_audit_arm(
     let (Ok(fy), Ok(fm), Ok(ty), Ok(tm)) = parsed else {
         return refuse(out, "FROM_Y FROM_M TO_Y TO_M must all be whole numbers");
     };
-    let report = fold_audit_range(vendor, underlying, (fy, fm), (ty, tm));
-    let failed = report.contains("DISAGREES") || carries_refusal(&report);
-    out.push_str(&report);
-    if failed { FAILED } else { OK }
+    match fold_audit_range(vendor, underlying, (fy, fm), (ty, tm)) {
+        Ok(report) => {
+            out.push_str(&report.text);
+            if report.failed { FAILED } else { OK }
+        }
+        Err(why) => {
+            let _ = writeln!(out, "refused: {why}");
+            FAILED
+        }
+    }
+}
+
+struct FoldAuditReport {
+    text: String,
+    failed: bool,
 }
 
 /// [`fold_audit_arm`]'s report, over a span of instrument-months.
@@ -617,24 +628,16 @@ fn fold_audit_arm(
 /// A month whose MINUTE file cannot be read is named and skipped rather than
 /// ending the walk: the one-minute file is the authority here, so its absence
 /// is a finding about that month and says nothing about the next one.
-#[must_use]
-fn fold_audit_range(vendor_word: &str, underlying: &str, from: (u16, u8), to: (u16, u8)) -> String {
-    let vendor = match parse_vendor(vendor_word) {
-        Ok(vendor) => vendor,
-        Err(why) => return format!("refused: {why}\n"),
-    };
-    let key = match stored::swept_index(underlying) {
-        Ok(key) => key,
-        Err(why) => return format!("refused: {why}\n"),
-    };
-    let root = match store_root() {
-        Ok(root) => root,
-        Err(why) => return format!("refused: {why}\n"),
-    };
-    let months = match stored::months_between(from, to) {
-        Ok(months) => months,
-        Err(why) => return format!("refused: {why}\n"),
-    };
+fn fold_audit_range(
+    vendor_word: &str,
+    underlying: &str,
+    from: (u16, u8),
+    to: (u16, u8),
+) -> Result<FoldAuditReport, String> {
+    let vendor = parse_vendor(vendor_word)?;
+    let key = stored::swept_index(underlying)?;
+    let root = store_root()?;
+    let months = stored::months_between(from, to)?;
 
     let mut out = String::from(
         "FOLD AUDIT -- does each stored coarse rung equal the fold of the stored minutes?\n\n  \
@@ -716,15 +719,25 @@ fn fold_audit_range(vendor_word: &str, underlying: &str, from: (u16, u8), to: (u
 
     let _ = writeln!(
         out,
-        "\n  {agreeing} rung-month(s) agree, {disagreeing} DISAGREE, {unreadable} unreadable.{}",
-        if disagreeing == 0 && unreadable == 0 {
-            "\n  Every stored coarse bar equals the fold of the stored minutes."
-        } else {
-            "\n  A DISAGREEING rung holds bars the minute series does not support. \
-             Re-fold that month rather than sweeping it."
-        }
+        "\n  {agreeing} rung-month(s) agree, {disagreeing} DISAGREE, {unreadable} unreadable."
     );
-    out
+    if disagreeing > 0 {
+        out.push_str(
+            "  A DISAGREEING rung holds bars the minute series does not support. \
+             Re-fold that month rather than sweeping it.\n",
+        );
+    }
+    if unreadable > 0 {
+        out.push_str(
+            "  One or more requested files could not be audited. Restore readable \
+             authority and rerun the audit; no complete agreement is established.\n",
+        );
+    }
+    let failed = disagreeing > 0 || unreadable > 0;
+    if !failed {
+        out.push_str("  Every stored coarse bar equals the fold of the stored minutes.\n");
+    }
+    Ok(FoldAuditReport { text: out, failed })
 }
 
 fn verify_arm(out: &mut String, feed: &str, underlying: &str) -> u8 {
@@ -6961,70 +6974,13 @@ pub fn verify(vendor_word: &str, underlying: &str) -> String {
     let span = stored::load_span(&root, vendor, underlying, "1day", (2019, 12), (2026, 8));
     checks.extend(span_checks(&span));
 
-    // 2. DETERMINISM. §3 rule 5: same inputs, same outputs, byte for byte.
-    // Two sweeps of the same slice, compared as bytes.
+    // Completed, observable sweeps and a nonempty later suffix are required:
+    // matching empty outputs are not evidence of either property.
     if let Ok(span) = &span {
-        let short: Vec<indicators::Candle> = span.bars.iter().take(600).copied().collect();
-        // THIS IS THE SWEEP, NOT A TRADE AUDIT. The loaded series is daily and
-        // therefore cannot legally enter `audit_bars` without a separately
-        // stored one-minute execution path. Sending it through that door would
-        // compare two identical REFUSALS and report a vacuous determinism pass.
-        // The property named by this row is engine determinism, so run the exact
-        // engine twice and compare its rendered bytes directly.
-        let ladder = match ladder_for(120) {
-            Ok(ladder) => ladder,
+        match measured_series_checks(span) {
+            Ok(measured) => checks.extend(measured),
             Err(why) => return format!("refused: {why}\n"),
-        };
-        let mut first_evaluator = match evaluator_stored(stored::vwap_availability(&span.key)) {
-            Ok(evaluator) => evaluator,
-            Err(why) => return format!("refused: {why}\n"),
-        };
-        let mut second_evaluator = first_evaluator;
-        let first_run = Sweeper::new(ladder).run(&short, &mut first_evaluator);
-        let second_run = Sweeper::new(ladder).run(&short, &mut second_evaluator);
-        let first = runner::report::render(&first_run, None);
-        let second = runner::report::render(&second_run, None);
-        checks.push(Check {
-            claim: "two runs of one slice agree byte for byte",
-            held: first == second,
-            evidence: format!(
-                "{} bytes vs {} bytes, {}",
-                first.len(),
-                second.len(),
-                if first == second {
-                    "identical"
-                } else {
-                    "DIFFER"
-                }
-            ),
-        });
-    }
-
-    // 3. SUFFIX INDEPENDENCE -- the measurable face of no-look-ahead. A bar's
-    // conditions must not change because LATER bars exist, so a column built on
-    // a prefix must agree with the same rows of a column built on the whole.
-    if let Ok(span) = &span {
-        let whole: Vec<indicators::Candle> = span.bars.iter().take(900).copied().collect();
-        let prefix: Vec<indicators::Candle> = whole.iter().take(600).copied().collect();
-        let mut ev_a = match evaluator_stored(stored::vwap_availability(&span.key)) {
-            Ok(ev) => ev,
-            Err(why) => return format!("refused: {why}\n"),
-        };
-        let mut ev_b = ev_a;
-        let on_whole = indicators::column::Column::build(&whole, &mut ev_a);
-        let on_prefix = indicators::column::Column::build(&prefix, &mut ev_b);
-        let shared = on_prefix.len();
-        let disagreements = on_prefix
-            .bits()
-            .iter()
-            .zip(on_whole.bits().iter().take(shared))
-            .filter(|(a, b)| a != b)
-            .count();
-        checks.push(Check {
-            claim: "a bar's conditions do not change because later bars exist",
-            held: disagreements == 0,
-            evidence: format!("{disagreements} of {shared} rows differ"),
-        });
+        }
     }
 
     checks.push(ledger_round_trip());
@@ -7053,6 +7009,76 @@ pub fn verify(vendor_word: &str, underlying: &str) -> String {
         }
     );
     out
+}
+
+/// Matching refusals or empty columns cannot establish measured properties.
+fn measured_series_checks(span: &stored::Span) -> Result<[Check; 2], String> {
+    let determinism = {
+        let short: Vec<indicators::Candle> = span.bars.iter().take(600).copied().collect();
+        // THIS IS THE SWEEP, NOT A TRADE AUDIT. The loaded series is daily and
+        // therefore cannot legally enter `audit_bars` without a separately
+        // stored one-minute execution path. Sending it through that door would
+        // compare two identical REFUSALS and report a vacuous determinism pass.
+        // The property named by this row is engine determinism, so run the exact
+        // engine twice and compare its rendered bytes directly.
+        let ladder = ladder_for(120)?;
+        let mut first_evaluator = evaluator_stored(stored::vwap_availability(&span.key))?;
+        let mut second_evaluator = first_evaluator;
+        let first_run = Sweeper::new(ladder).run(&short, &mut first_evaluator);
+        let second_run = Sweeper::new(ladder).run(&short, &mut second_evaluator);
+        let first = runner::report::render(&first_run, None);
+        let second = runner::report::render(&second_run, None);
+        Check {
+            claim: "two runs of one slice agree byte for byte",
+            held: first_run.is_complete() && second_run.is_complete() && first == second,
+            evidence: format!(
+                "{} observable bars vs {}; complete {} vs {}; {} bytes vs {} bytes, {}",
+                first_run.census.swept,
+                second_run.census.swept,
+                first_run.is_complete(),
+                second_run.is_complete(),
+                first.len(),
+                second.len(),
+                if first == second {
+                    "identical"
+                } else {
+                    "DIFFER"
+                }
+            ),
+        }
+    };
+
+    // 3. SUFFIX INDEPENDENCE -- the measurable face of no-look-ahead. A bar's
+    // conditions must not change because LATER bars exist, so a column built on
+    // a prefix must agree with the same rows of a column built on the whole.
+    let causality = {
+        let whole: Vec<indicators::Candle> = span.bars.iter().take(900).copied().collect();
+        let prefix: Vec<indicators::Candle> = whole
+            .iter()
+            .take(whole.len().saturating_sub(1).min(600))
+            .copied()
+            .collect();
+        let mut ev_a = evaluator_stored(stored::vwap_availability(&span.key))?;
+        let mut ev_b = ev_a;
+        let on_whole = indicators::column::Column::build(&whole, &mut ev_a);
+        let on_prefix = indicators::column::Column::build(&prefix, &mut ev_b);
+        let shared = on_prefix.len();
+        let suffix = whole.len() - prefix.len();
+        let disagreements = on_prefix
+            .bits()
+            .iter()
+            .zip(on_whole.bits().iter().take(shared))
+            .filter(|(a, b)| a != b)
+            .count();
+        Check {
+            claim: "a bar's conditions do not change because later bars exist",
+            held: shared > 0 && suffix > 0 && on_whole.len() >= shared && disagreements == 0,
+            evidence: format!(
+                "observable prefix rows {shared}; suffix bars {suffix}; {disagreements} differ"
+            ),
+        }
+    };
+    Ok([determinism, causality])
 }
 
 /// The two properties a joined span must have before anything is computed on it.

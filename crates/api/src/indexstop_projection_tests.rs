@@ -17,6 +17,11 @@ const SOURCE: [u8; 32] = [0x62; 32];
 const DAY: i64 = 20_000;
 const MINUTE: i64 = 60_000_000;
 
+pub(crate) fn with_saved_stop_catalog<R>(run: impl FnOnce(&Path, [u8; 32]) -> R) -> R {
+    let fixture = fixture();
+    run(&fixture.root, ID)
+}
+
 struct Fixture {
     root: PathBuf,
     body: PathBuf,
