@@ -1792,6 +1792,63 @@ mod tests {
     }
 
     #[test]
+    fn a_valid_older_selection_cannot_replace_the_requested_current_format() {
+        use crate::admission_join::AdmissionAuthoritativeLedger;
+        use crate::selection_v3::{SelectionLedgerV3, SelectionReceiptV3};
+        use runner::topn::{RankingPolicyV1, Weights};
+
+        let root = temp_root("no-legacy-fallback");
+        let request = write_generated_comparison_chain(&root);
+        let ranking = RankingPolicyV1::new(Weights::equal()).expect("ranking policy");
+        let mut nifty = AdmissionAuthoritativeLedger::open_read(
+            &root,
+            *request.population_ids().first().expect("NIFTY identity"),
+        )
+        .expect("NIFTY admission authority");
+        let mut bank = AdmissionAuthoritativeLedger::open_read(
+            &root,
+            *request.population_ids().get(1).expect("BANKNIFTY identity"),
+        )
+        .expect("BANKNIFTY admission authority");
+        let old = SelectionReceiptV3::from_admission_authorities(&mut nifty, &mut bank, ranking)
+            .expect("a genuinely valid older receipt");
+        assert!(old.top_twenty_five().is_empty());
+        let mut legacy = SelectionLedgerV3::open(&root, 1).expect("legacy ledger");
+        legacy.append(&old).expect("persist older receipt");
+        drop(legacy);
+        let reopened = SelectionLedgerV3::open_read(&root, 1).expect("validate older bytes");
+        assert_eq!(reopened.receipt(&old.selection_id()), Some(&old));
+        drop(reopened);
+        drop(nifty);
+        drop(bank);
+
+        let current_path = SelectionLedgerV4::path(&root);
+        let retained_path = current_path.with_extension("retained");
+        fs::rename(&current_path, &retained_path).expect("retain current receipt separately");
+        let report = compare_step3_on_disk_v1(&root, &request, bounds())
+            .expect("report without current selections");
+        let selection = report.rows().get(4).expect("selection row");
+        assert_eq!(selection.status(), Step3StatusV1::Unmeasured);
+        assert!(selection.detail().contains("absent"));
+        assert!(!report.is_ready());
+        for row in report.rows().iter().take(3) {
+            assert_eq!(row.status(), Step3StatusV1::Ready);
+        }
+        fs::rename(&retained_path, &current_path).expect("restore exact current bytes");
+        let restored =
+            compare_step3_on_disk_v1(&root, &request, bounds()).expect("restored report");
+        assert_eq!(
+            restored
+                .rows()
+                .get(4)
+                .expect("restored selection row")
+                .status(),
+            Step3StatusV1::Blocked
+        );
+        fs::remove_dir_all(root).expect("remove legacy comparison fixture");
+    }
+
+    #[test]
     fn file_preflight_refuses_missing_nonfiles_and_oversize_without_reading_them() {
         let root = temp_root("file-bounds");
         fs::create_dir_all(&root).expect("directory");

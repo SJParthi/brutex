@@ -36374,3 +36374,12 @@ assertion unchanged. Differently parameterized walks and independent winner
 reconstruction still execute separately. Every mutated test process constructs
 its own result from the mutated implementation; nothing persists across runs.
 This is test execution reuse, not a production result cache or a relaxed gate.
+
+### D-0628 — Prove legacy selection bytes cannot act as a fallback — 2026-09-20
+
+Derive and persist a valid Selection V3 receipt through the actual generated
+admission ledgers, then retain the V4 file separately. The comparison must still
+report the requested V4 stage as unmeasured while its three completed upstream
+stages remain ready. Restoring the exact V4 bytes must recover the previous
+blocked selection state. This exercises the older derivation and persistence
+without permitting old-format evidence to satisfy the current-format contract.
