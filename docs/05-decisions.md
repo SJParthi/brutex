@@ -37478,3 +37478,21 @@ directory, and both tests pass on the Mac.
 Production behaviour is unchanged: `verification_scratch` and the all-rung
 canonical-spelling refusal are untouched, and every edited line is in a
 `#[cfg(test)]` module, which gate 18 does not mutate.
+
+### D-0679 — Pin immediate, row-free refusals on all fifteen saved-result HTTP handlers — 2026-09-23
+
+A saved-result handler must refuse a malformed or oversized selector before
+any background work can start. Two generated tests now call all fifteen
+handlers directly and poll each future once, with no runtime at all, so a
+handler that queued the request instead of refusing it fails by name.
+
+Ten malformed queries — empty, a bare or empty identity, an invalid or
+upper-case digest, a duplicated identity, an unexpected or percent-encoded
+parameter, a trailing separator and an unknown quoted parameter — must each
+return status 400 at once, with valid JSON at schema version 1, status
+`refused`, a non-empty named reason, zero rows and no saved authority. An exact
+retry must return identical bytes. A query one byte over `MAX_QUERY_BYTES`
+must name both byte counts before anything parses it.
+
+The tests pass against the existing handlers: they pin behaviour, they do not
+change it. CIRO-91.
