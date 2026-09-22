@@ -37451,3 +37451,30 @@ coverage job and the mutation matrix to succeed.
 
 D-0676 is deliberately unused here: a parked, unmerged change already holds
 that number and keeps it when it lands.
+
+### D-0678 — Give each concurrent test fixture its own scratch root, and resolve macOS temp paths — 2026-09-23
+
+A full `cargo test --workspace --no-fail-fast` on the operator's arm64 Mac on
+2026-09-22 failed four tests that Linux CI passes. None was caused by D-0677,
+and the two path tests also failed on the unmodified head `0d4fef13`.
+
+**Two raced over one directory.** `api`'s saved single-stop fixture named its
+root `scratch::path("single-stop-observation-pages")`. That module's own
+contract is uniqueness between PROCESSES, and every test in the `api` binary
+shares one process, so tests building this fixture concurrently shared one
+directory and the first `Fixture` to drop ran `remove_dir_all` under the
+others: `No such file or directory`, twice, in both full parallel runs. Each
+call now puts a process-wide counter into the name. The whole `api` lib suite
+then passed three consecutive parallel runs, 1,141 tests each.
+
+**Two compared two spellings of one path.** macOS returns `temp_dir()` under
+`/var`, a symlink to `/private/var`. `cli`'s results-report fixture compared a
+listing printed from the configured root, which the public listing resolves,
+against one printed from the unresolved spelling. The step-3 all-rung fixture
+handed admission an unresolved root, which admission deliberately refuses by
+naming both spellings. Both fixtures now start from the canonical temp
+directory, and both tests pass on the Mac.
+
+Production behaviour is unchanged: `verification_scratch` and the all-rung
+canonical-spelling refusal are untouched, and every edited line is in a
+`#[cfg(test)]` module, which gate 18 does not mutate.
