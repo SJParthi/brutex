@@ -1,5 +1,7 @@
-//! Public read-boundary probes. Generated invalid queries must finish before
+//! Public read-boundary probes. Hand-written invalid queries must finish before
 //! any background work can start, so these tests deliberately have no runtime.
+//! `/trades.json` and `/frontier.json` are not probed: they parse the selector
+//! inside the bounded blocking task (D-0679).
 use axum::http::{HeaderName, StatusCode, Uri, header::CONTENT_TYPE};
 use serde_json::Value;
 use std::future::Future;

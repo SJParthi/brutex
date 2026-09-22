@@ -138,18 +138,21 @@ enum Direction {
 /// Every rung on every ladder in this crate is a per-mille numerator applied to
 /// a session span, and the product is formed in `i128` so that no span can
 /// overflow it. Dividing that `i128` is a call into the compiler's runtime
-/// library — one `div_euclid` is a `__divti3` and a `__modti3` — while dividing
-/// an `i64` by the literal `1000` compiles to a multiply and a shift. A real
+/// library (`__divti3`), while dividing an `i64` by the literal `1000`
+/// compiles to a multiply and a shift. A real
 /// rung times a real session range fits `i64` by several orders of magnitude,
 /// so the wide division is kept only for the spans that need it.
 ///
 /// # Measured, because gate 8 refused the fold
 ///
 /// `runner`'s C-R-04 read 5,284 floors against a budget of 5,000 on CI on
-/// 2026-09-20. Sampling that fixture on an arm64 laptop put 17.8% of the
-/// column build in 128-bit division, reached from this module's ladders,
-/// [`crate::CurDayFib`] and [`crate::gap`]. Routing all three through here cut
-/// the build's per-bar cost by about 17% on the same machine. D-0677.
+/// 2026-09-20. Sampling that fixture on an arm64 laptop put 17.8% of all
+/// sampled time in 128-bit division, most of it reached from this module's
+/// ladders, [`crate::CurDayFib`] and [`crate::gap`], which now route through
+/// here; afterwards it was 2.3%. Together with [`crate::pattern`]'s
+/// compile-time masks this took C-R-04's own row from 959,919 to 703,513 ps
+/// per bar on that laptop, −26.7%. The split between the two changes was
+/// read from an unsaved scratch harness and is not claimed. D-0677, D-0680.
 ///
 /// # Exact on every input
 ///

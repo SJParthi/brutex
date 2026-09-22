@@ -37463,9 +37463,15 @@ root `scratch::path("single-stop-observation-pages")`. That module's own
 contract is uniqueness between PROCESSES, and every test in the `api` binary
 shares one process, so tests building this fixture concurrently shared one
 directory and the first `Fixture` to drop ran `remove_dir_all` under the
-others: `No such file or directory`, twice, in both full parallel runs. Each
-call now puts a process-wide counter into the name. The whole `api` lib suite
-then passed three consecutive parallel runs, 1,141 tests each.
+others. The first full run, which stops at the first failing crate, failed
+the VIX test with `No such file or directory (os error 2)`. The second, run
+with `--no-fail-fast`, failed it again and also failed
+`saved_stop_pages_keep_exact_links_pins_and_unassessed_policy`, whose
+candidate was `unavailable under` the shared
+`brutex-<pid>-single-stop-observation-pages` root. Run alone, the VIX test
+passed three times out of three. Each call now puts a process-wide counter
+into the name, and the whole `api` lib suite then passed three consecutive
+parallel runs, 1,141 tests each.
 
 **Two compared two spellings of one path.** macOS returns `temp_dir()` under
 `/var`, a symlink to `/private/var`. `cli`'s results-report fixture compared a
@@ -37479,12 +37485,14 @@ Production behaviour is unchanged: `verification_scratch` and the all-rung
 canonical-spelling refusal are untouched, and every edited line is in a
 `#[cfg(test)]` module, which gate 18 does not mutate.
 
-### D-0679 — Pin immediate, row-free refusals on all fifteen saved-result HTTP handlers — 2026-09-23
+### D-0679 — Pin immediate, row-free refusals on fifteen saved-result HTTP handlers — 2026-09-23
 
 A saved-result handler must refuse a malformed or oversized selector before
-any background work can start. Two generated tests now call all fifteen
-handlers directly and poll each future once, with no runtime at all, so a
-handler that queued the request instead of refusing it fails by name.
+any background work can start. Two hand-written tests now call fifteen
+saved-result handlers directly and poll each future once, with no runtime at
+all. A handler that returned `Pending` instead of refusing fails by name; one
+that reached for the blocking pool fails too, as a runtime panic that does
+not carry the handler's name.
 
 Ten malformed queries — empty, a bare or empty identity, an invalid or
 upper-case digest, a duplicated identity, an unexpected or percent-encoded
@@ -37496,3 +37504,68 @@ must name both byte counts before anything parses it.
 
 The tests pass against the existing handlers: they pin behaviour, they do not
 change it. CIRO-91.
+
+**Not covered, and not claimed.** `/trades.json` and `/frontier.json` refuse an
+oversized query at once, but parse the page and the identity inside the
+bounded blocking task (`crate::detail::run`, `trades.rs` and `frontierjson.rs`
+`respond`). A malformed selector there is queued, and while detail capacity is
+full it is answered 429 rather than 400. `/sweep-evidence.json` and
+`/top.json` answer under different contracts and are not in the list either.
+Moving the two parses ahead of `detail::run` is production work with its own
+mutation gate, and is recorded in `docs/06-limits.md` rather than done here.
+
+### D-0680 — Correct D-0677's claims, and stop `-D warnings` from hiding mutants — 2026-09-23
+
+An adversarial audit of D-0677 upheld the corrections below; every one had to
+survive independent skeptics checking the logs and the code themselves.
+D-0677 stays as written, and this entry is the correction.
+
+1. **The regression was reduced, not removed.** C-R-04's own row on the arm64
+   laptop went from 959,919 to 703,513 ps per bar, −26.7%. That is still 1.81
+   times the 388,075 ps that C-R-01 read for the same fixture and operation at
+   `a8814e64`. Of the known-mask projection only `Patterns::known` was
+   replaced. `daily::known`, `fib::prev_day_known`, `Prev5::known`,
+   `crossings_known` and the `CurDayFib`, `Orb` and `GapFib` `known`
+   functions still rebuild on every bar. The per-fix percentages first written
+   into the `per_mille` and `known_at` doc comments came from an unsaved
+   scratch harness; only the combined −26.7% is a bench-row measurement, and
+   those comments now say so. The 17.8% division share counted every sample,
+   the idle ladder's included, and part of it came from `trend`, not from the
+   Fibonacci ladders.
+2. **CI's Gate 8 pass does not by itself prove the fix on CI hardware.** Run
+   35767619936 read 1,908,097 ps per bar against a floor of 643 ps, 2,967.491
+   floors. The 20 September run read 1,632,774 ps against 309 ps, 5,284.058.
+   Between the two runners the numerator rose and the floor doubled, and the
+   floor is timed over only about 10 µs (five passes over 3,000 bars), so the
+   two readings cannot separate the fix from runner and floor noise. On the
+   laptop, where the machine held still, the fix is −26.7% per bar. Timing
+   the floor properly changes what 5,000 floors means, so it needs its own
+   calibration and entry. Until then a C-R-04 reading near the budget is not
+   evidence either way.
+3. **Only the Gate 18 base override expires. The coverage floor does not.**
+   `--fail-under-lines 90 --fail-under-regions 89` is the new ratchet baseline
+   for every later pull request. The regions margin at the reset was 0.10
+   percentage points.
+4. **The override follows ancestry, not the pull-request number.** Any pull
+   request whose head contains `0d4fef13` and whose base does not is planned
+   against `0d4fef13`, so a branch stacked on #13 is rebased onto `main`
+   (`git rebase --onto main e45fcaaa`) before it is opened. A push or
+   scheduled run on `main` while the #13 squash is its tip plans the whole
+   squash diff against its parent, about 49,870 cases in 250 jobs. That run is
+   expected red, is cancelled by hand, and stops recurring at the next merge.
+5. **An unviable mutant on CI proved nothing.** The mutants job inherits
+   `RUSTFLAGS: -D warnings`. Replacing the body of a function that takes
+   parameters left them unused, failed to compile, and was counted unviable,
+   which the gate accepts. Reproduced with cargo-mutants 26.2.0 on a
+   one-function crate: 5 caught without the flag, 2 caught and 3 unviable with
+   it, 5 caught with `--cap-lints true`, which this entry adds to the job.
+   Lints stay enforced by gate 6b. D-0677's local run, 37 caught and 3
+   unviable of 40, ran without `-D warnings` and is the reference for #13,
+   whose own shard runs before this fix lands.
+6. **Smaller corrections.** D-0677's 1,434 commits and 589,022 inserted lines
+   are counted at `0d4fef13`. Its "before" C-R-04 reading was taken at
+   `5defe402`, which does not touch the bench path. The test totals quoted
+   beside it counted the results of tests that re-run themselves in a child
+   process. Counting each of the 99 test binaries once: 5,587 passed and 4
+   failed before D-0678, and 5,593 passed and 0 failed after it, with 12
+   ignored both times.

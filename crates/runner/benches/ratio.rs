@@ -167,10 +167,12 @@ fn per_unit<T>(units: u128, reps: u32, mut f: impl FnMut() -> T) -> u128 {
 /// pass over the bars as nearly all of the work. The other half is not
 /// silently dropped — it is [`engine`]'s to bound, and `C-E-01` bounds it.
 ///
-/// **Nearly, and this said "nothing".** Sampled on 2026-09-22, the emptied
-/// ladder is about a tenth of this row: the walk still copies the column and
-/// tests every k=1 candidate before its frontier empties. The row times what it
-/// always timed; only the sentence was wrong. D-0677.
+/// **Nearly, and this said "nothing".** Sampled on 2026-09-22 on an arm64
+/// laptop, the emptied ladder was about a tenth of this row before D-0677 and a
+/// larger share after it, because the build it sits beside got cheaper: the
+/// walk still copies the column and tests every k=1 candidate before its
+/// frontier empties. The row times what it always timed; only the sentence was
+/// wrong. D-0677, D-0680.
 ///
 /// The per-bar floor: the cheapest possible walk over the same bars.
 ///
@@ -244,9 +246,15 @@ fn the_column_build_stays_within_its_budget() -> bool {
     /// budget's first reading off the laptop it was sized on. The overrun was a
     /// real regression rather than the machine: on the same arm64 laptop the
     /// same fixture read 2,436 floors, 1.9 to 2.5 times the three readings
-    /// above. D-0677 removed the two causes — a 128-bit division per Fibonacci
-    /// rung, and a known-mask table rebuilt on every bar — and did NOT touch
-    /// this number.
+    /// above. D-0677 reduced it with two exact fixes — a 128-bit division per
+    /// Fibonacci rung, and one known-mask table rebuilt on every bar — to 703,513
+    /// ps per bar on that laptop, −26.7%, still 1.81 times the 388,075 read at
+    /// `a8814e64`. It did NOT touch this number.
+    ///
+    /// CI then read 2,967.491 floors (run 35767619936), but over a floor of 643
+    /// ps against 309 ps on 20 September. This floor is timed over about 10 µs,
+    /// so across runners a reading near the budget cannot tell the code from the
+    /// machine. D-0680.
     const ALLOWED: u128 = 5_000;
 
     let bars = synthetic::sessions(8);

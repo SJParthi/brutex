@@ -78,9 +78,11 @@ fn fixture() -> Fixture {
     // ONE DIRECTORY PER CALL, NOT PER PROCESS. `scratch::path` separates
     // processes; the tests in this binary share one process and build this
     // fixture concurrently, so under a single fixed name the first `Fixture`
-    // to drop ran `remove_dir_all` beneath the others. Measured on 2026-09-22:
-    // two tests failed with "No such file or directory" under a parallel
-    // `cargo test --workspace` and passed when run alone.
+    // to drop ran `remove_dir_all` beneath the others. Seen on 2026-09-22 under
+    // a parallel `cargo test --workspace`: the VIX projection test failed with
+    // "No such file or directory (os error 2)" and the saved-stop test found
+    // its candidate "unavailable under" the shared root; the VIX test passed
+    // three times out of three alone. D-0678.
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let call = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let root = crate::scratch::path(&format!("single-stop-observation-pages-{call}"));
