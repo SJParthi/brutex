@@ -151,7 +151,7 @@ impl GapLeg {
     pub fn level(&self, p: i32) -> Option<i64> {
         let x1 = i128::from(self.x1);
         let x2 = i128::from(self.x2);
-        let step = (i128::from(p) * (x1 - x2)).div_euclid(1000);
+        let step = crate::fib::per_mille(p, x1 - x2);
         i64::try_from(x2 + step).ok()
     }
 

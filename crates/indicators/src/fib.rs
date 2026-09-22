@@ -132,6 +132,40 @@ enum Direction {
     Up,
 }
 
+/// `(p · span).div_euclid(1000)`, exactly, dividing in 64 bits whenever the
+/// product fits.
+///
+/// Every rung on every ladder in this crate is a per-mille numerator applied to
+/// a session span, and the product is formed in `i128` so that no span can
+/// overflow it. Dividing that `i128` is a call into the compiler's runtime
+/// library — one `div_euclid` is a `__divti3` and a `__modti3` — while dividing
+/// an `i64` by the literal `1000` compiles to a multiply and a shift. A real
+/// rung times a real session range fits `i64` by several orders of magnitude,
+/// so the wide division is kept only for the spans that need it.
+///
+/// # Measured, because gate 8 refused the fold
+///
+/// `runner`'s C-R-04 read 5,284 floors against a budget of 5,000 on CI on
+/// 2026-09-20. Sampling that fixture on an arm64 laptop put 17.8% of the
+/// column build in 128-bit division, reached from this module's ladders,
+/// [`crate::CurDayFib`] and [`crate::gap`]. Routing all three through here cut
+/// the build's per-bar cost by about 17% on the same machine. D-0677.
+///
+/// # Exact on every input
+///
+/// The divisor is a positive literal, so the narrow division cannot overflow,
+/// and Euclidean division has one answer whichever width computes it.
+/// `per_mille_is_the_wide_division_on_both_sides_of_the_narrow_range` pins it
+/// against the `i128` expression it replaced.
+#[must_use]
+pub(crate) fn per_mille(p: i32, span: i128) -> i128 {
+    let product = i128::from(p) * span;
+    match i64::try_from(product) {
+        Ok(narrow) => i128::from(narrow.div_euclid(1000)),
+        Err(_) => product.div_euclid(1000),
+    }
+}
+
 /// The price of rung `p` on this ladder — `anchor ∓ (p/1000)·R` — or `None` when
 /// it leaves `i64`.
 ///
@@ -150,7 +184,7 @@ enum Direction {
 /// round identically on every input this ladder can be reached with; naming the
 /// rounding settles the sign cases rather than leaving them to an operand.
 fn rung_level(anchor: i64, p: i32, range: i64, direction: Direction) -> Option<i64> {
-    let step = (i128::from(p) * i128::from(range)).div_euclid(1000);
+    let step = per_mille(p, i128::from(range));
     let level = match direction {
         Direction::Down => i128::from(anchor) - step,
         Direction::Up => i128::from(anchor) + step,
@@ -937,5 +971,50 @@ mod tests {
             !positions().contains(&0),
             "a slot was left at its zero initialiser, so the fill ran short of 27"
         );
+    }
+
+    /// `per_mille` is a speed change and nothing else: every answer must be the
+    /// `i128` expression it replaced, on both sides of the `i64` boundary where
+    /// it switches division widths.
+    #[test]
+    fn per_mille_is_the_wide_division_on_both_sides_of_the_narrow_range() {
+        let top = i128::from(i64::MAX);
+        let bottom = i128::from(i64::MIN);
+        let spans = [
+            0,
+            1,
+            -1,
+            999,
+            -999,
+            1_000,
+            -1_000,
+            1_001,
+            -1_001,
+            2_500_000,
+            -2_500_000,
+            top,
+            bottom,
+            top + 1,
+            bottom - 1,
+            top * 2,
+            bottom * 2,
+            top - bottom,
+        ];
+        let rungs = [0, 1, -1, 236, 618, 1_000, 4_236, -4_236, i32::MAX, i32::MIN];
+        for p in rungs {
+            for span in spans {
+                let wide = (i128::from(p) * span).div_euclid(1000);
+                assert_eq!(per_mille(p, span), wide, "p = {p}, span = {span}");
+            }
+        }
+        // A product exactly on either i64 bound is divided narrow, and one past
+        // it wide; both land on the same floor the wide expression gives.
+        assert_eq!(per_mille(1, top), 9_223_372_036_854_775);
+        assert_eq!(per_mille(1, top + 1), 9_223_372_036_854_775);
+        assert_eq!(per_mille(1, bottom), -9_223_372_036_854_776);
+        assert_eq!(per_mille(1, bottom - 1), -9_223_372_036_854_776);
+        // Floor, not truncation: a negative product rounds away from zero.
+        assert_eq!(per_mille(618, -1), -1);
+        assert_eq!(per_mille(-618, 1), -1);
     }
 }

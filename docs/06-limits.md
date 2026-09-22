@@ -8427,3 +8427,27 @@ pre-edit block starts so the audit remains traceable after line shifts:
 - `crates/runner/src/outcome.rs`, prior block line 487.
 - `crates/runner/src/research_family.rs`, prior block line 198.
 - `crates/store/src/repair.rs`, prior block line 213.
+
+## PR #13 integration exception: what was not measured — D-0677, 22 September 2026
+
+Recorded as gaps, not as results. The exception that let PR #13 merge closes
+none of them; each is what a gate would have measured had it been allowed to.
+
+- **49,870 mutation cases, never executed.** Gate 18 enumerated them for head
+  `0d4fef13` against `main` (run 35520698178), and D-0677 planned the matrix
+  against `0d4fef13` instead. How many survive is **UNMEASURED**. On that run
+  5,976 of 29,308 functions were never called and about a tenth of all lines
+  never executed, and every mutant on such a line survives by construction,
+  so the expectation is thousands. That figure is an extrapolation.
+- **Coverage: 90.64% lines and 89.10% regions** on that run, against 93.74%
+  and 94.60% on 2026-08-21. 30,451 lines and 55,399 regions are missed; `cli`
+  holds 22,172 of the lines and 40,649 of the regions, `api` 4,963 and 9,015.
+  The floor is now 90/89 and rises with the measurement, never the reverse.
+- **C-R-04 on CI hardware** read 5,284 floors against 5,000 before D-0677's
+  two exact fixes. Its reading after them is the next CI run's to report and
+  is not claimed here. On an arm64 laptop the row itself fell from 959,919 ps
+  per bar (2,436 floors) to 703,513 (1,546 floors), `cargo bench --workspace`
+  exit 0 with no row breached.
+- **Still divided in `i128` per bar:** `trend`'s EMA and ATR updates, whose
+  divisors are a period known only at run time. D-0677 did not touch them;
+  sampling put them near 1% of the column build.

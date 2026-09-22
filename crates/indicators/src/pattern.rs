@@ -248,6 +248,54 @@ const EMPTY_BAR: Candle = Candle {
     open_interest: i64::MIN,
 };
 
+/// How many same-session bars pattern position `position` reads.
+///
+/// The table [`Patterns::known`] used to walk on every bar, moved out so the
+/// compiler can walk it once. A position outside [`positions`] falls to the last
+/// arm and is never asked about.
+const fn lookback_of(position: u32) -> usize {
+    match position {
+        153 | 154 | 171..=175 | 204 | 205 | 224..=227 => 1,
+        155..=162 | 169 | 170 | 202 | 203 | 206..=212 | 228 | 229 => 2,
+        163..=168 | 198 | 199 | 213..=215 | 217 | 221 | 230..=234 => 3,
+        200 | 201 | 220 => 4,
+        _ => 5,
+    }
+}
+
+/// Every position of [`positions`] whose whole lookback fits in `depth` bars.
+///
+/// # Why this is evaluated at compile time
+///
+/// The answer depends on `depth` alone, and `depth` saturates at [`LOOKBACK`],
+/// so there are exactly six answers. Rebuilding one on every bar walked all 62
+/// positions through the `match` above, and sampling `runner`'s C-R-04 fixture
+/// on 2026-09-22 attributed about a quarter of the known-mask projection to it.
+/// Selecting a constant instead cut the column build's per-bar cost by a
+/// further 20% on an arm64 laptop. D-0677.
+///
+/// The two ranges are [`positions`]'s own, and
+/// `known_is_every_position_whose_whole_lookback_is_present` pins every
+/// answer against hand-written groups rather than against this function.
+const fn known_at(depth: usize) -> ConditionMask {
+    let mut known = ConditionMask::ZERO;
+    let mut position = 153;
+    while position <= 234 {
+        if (position <= 177 || position >= 198) && lookback_of(position) <= depth {
+            known = known.with_bit(position);
+        }
+        position += 1;
+    }
+    known
+}
+
+const KNOWN_AT_0: ConditionMask = known_at(0);
+const KNOWN_AT_1: ConditionMask = known_at(1);
+const KNOWN_AT_2: ConditionMask = known_at(2);
+const KNOWN_AT_3: ConditionMask = known_at(3);
+const KNOWN_AT_4: ConditionMask = known_at(4);
+const KNOWN_AT_5: ConditionMask = known_at(LOOKBACK);
+
 impl Patterns {
     /// A new detector with the given thresholds.
     #[must_use]
@@ -273,21 +321,18 @@ impl Patterns {
     }
 
     /// Pattern predicates whose complete same-session lookback is present.
+    ///
+    /// One of six masks fixed at compile time by [`known_at`]; a depth at or past
+    /// [`LOOKBACK`] certifies every position, exactly as the per-bar walk did.
     pub(crate) fn known(&self) -> ConditionMask {
-        let mut known = ConditionMask::ZERO;
-        for position in positions() {
-            let required = match position {
-                153 | 154 | 171..=175 | 204 | 205 | 224..=227 => 1,
-                155..=162 | 169 | 170 | 202 | 203 | 206..=212 | 228 | 229 => 2,
-                163..=168 | 198 | 199 | 213..=215 | 217 | 221 | 230..=234 => 3,
-                200 | 201 | 220 => 4,
-                _ => 5,
-            };
-            if self.depth >= required {
-                known = known.with_bit(u32::from(position));
-            }
+        match self.depth {
+            0 => KNOWN_AT_0,
+            1 => KNOWN_AT_1,
+            2 => KNOWN_AT_2,
+            3 => KNOWN_AT_3,
+            4 => KNOWN_AT_4,
+            _ => KNOWN_AT_5,
         }
-        known
     }
 
     /// Candle `n` back from the newest. `0` is the newest.
@@ -1731,6 +1776,65 @@ mod tests {
             ..Thresholds::CLASSICAL
         };
         assert_eq!(Patterns::new(custom).thresholds().doji_body, 50);
+    }
+
+    /// `known` selects a compile-time mask per depth. Each answer is pinned here
+    /// against groups written out by hand — not against `lookback_of`, since a
+    /// table checked against itself cannot fail — and past [`LOOKBACK`], where
+    /// the per-bar walk it replaced certified every position.
+    #[test]
+    fn known_is_every_position_whose_whole_lookback_is_present() {
+        let groups: [(usize, &[u32]); 5] = [
+            (
+                1,
+                &[
+                    153, 154, 171, 172, 173, 174, 175, 204, 205, 224, 225, 226, 227,
+                ],
+            ),
+            (
+                2,
+                &[
+                    155, 156, 157, 158, 159, 160, 161, 162, 169, 170, 202, 203, 206, 207, 208, 209,
+                    210, 211, 212, 228, 229,
+                ],
+            ),
+            (
+                3,
+                &[
+                    163, 164, 165, 166, 167, 168, 198, 199, 213, 214, 215, 217, 221, 230, 231, 232,
+                    233, 234,
+                ],
+            ),
+            (4, &[200, 201, 220]),
+            (5, &[176, 177, 216, 218, 219, 222, 223]),
+        ];
+        // The five groups partition exactly the positions this family owns.
+        let mut grouped: Vec<u32> = groups
+            .iter()
+            .flat_map(|(_, members)| members.iter().copied())
+            .collect();
+        grouped.sort_unstable();
+        let owned: Vec<u32> = positions().iter().map(|p| u32::from(*p)).collect();
+        assert_eq!(
+            grouped, owned,
+            "the groups are not the 62 pattern positions"
+        );
+
+        for depth in 0..=LOOKBACK + 2 {
+            let mut want = ConditionMask::ZERO;
+            for (lookback, members) in groups {
+                if lookback <= depth {
+                    for position in members {
+                        want = want.with_bit(*position);
+                    }
+                }
+            }
+            let detector = Patterns {
+                depth,
+                ..Patterns::new(Thresholds::CLASSICAL)
+            };
+            assert_eq!(detector.known(), want, "depth {depth}");
+        }
     }
 }
 

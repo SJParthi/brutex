@@ -163,9 +163,15 @@ fn per_unit<T>(units: u128, reps: u32, mut f: impl FnMut() -> T) -> u128 {
 /// join is O(|frontier|²) and states it rather than hiding it.
 ///
 /// So the row now measures the half of a run that IS per-bar. `min_hits` is set
-/// to `u64::MAX`, which empties the k=1 frontier and makes the ladder cost
-/// nothing, leaving the `Column::build` pass over the bars. The other half is
-/// not silently dropped — it is [`engine`]'s to bound, and `C-E-01` bounds it.
+/// to `u64::MAX`, which empties the k=1 frontier, leaving the `Column::build`
+/// pass over the bars as nearly all of the work. The other half is not
+/// silently dropped — it is [`engine`]'s to bound, and `C-E-01` bounds it.
+///
+/// **Nearly, and this said "nothing".** Sampled on 2026-09-22, the emptied
+/// ladder is about a tenth of this row: the walk still copies the column and
+/// tests every k=1 candidate before its frontier empties. The row times what it
+/// always timed; only the sentence was wrong. D-0677.
+///
 /// The per-bar floor: the cheapest possible walk over the same bars.
 ///
 /// # Why a ratio alone cannot see a regression
@@ -230,6 +236,17 @@ fn the_column_build_stays_within_its_budget() -> bool {
     ///
     /// A breach is NOT a column-length dependence; C-R-01 is that row. It means
     /// every bar got dearer at once, which a quotient cannot see.
+    ///
+    /// # It breached, and did exactly that job
+    ///
+    /// First read on CI's x86 runners on 2026-09-20: **5,284 floors, over.**
+    /// Every earlier run had failed before this job, so that was also this
+    /// budget's first reading off the laptop it was sized on. The overrun was a
+    /// real regression rather than the machine: on the same arm64 laptop the
+    /// same fixture read 2,436 floors, 1.9 to 2.5 times the three readings
+    /// above. D-0677 removed the two causes — a 128-bit division per Fibonacci
+    /// rung, and a known-mask table rebuilt on every bar — and did NOT touch
+    /// this number.
     const ALLOWED: u128 = 5_000;
 
     let bars = synthetic::sessions(8);

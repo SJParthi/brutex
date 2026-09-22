@@ -629,7 +629,7 @@ impl CurDayFib {
     /// One level and one test cannot disagree, which is why this returns the level
     /// rather than a verdict.
     fn rung_level(&self, anchor: i64, p: i32, r: i64) -> Option<i64> {
-        let step = (i128::from(p) * i128::from(r)).div_euclid(1000);
+        let step = crate::fib::per_mille(p, i128::from(r));
         let a = i128::from(anchor);
         let level = match self.leg {
             Leg::Up => a - step,

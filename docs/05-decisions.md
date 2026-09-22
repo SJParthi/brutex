@@ -37377,3 +37377,77 @@ the null-versus-zero open-interest distinction. Existing healthy-row and
 source-fault reporting remain in the read path; neither an optimisation
 failure nor invalid input removes a supplied valid bound. No store format,
 run identity, vendor scope or sweep policy changes.
+
+### D-0677 — Land PR #13 under a one-time, self-expiring gate exception, and fix the regression gate 8 found — 2026-09-22
+
+PR #13 (`feat/pull` into `main`) carries 1,434 commits and 589,022 inserted
+lines under `crates/*/src`. No CI run on it completed between 2026-09-02 and
+2026-09-20: runs failed gate 1+2 before any later job started, failed to
+start at all, or were cancelled by the next push under `cancel-in-progress`.
+The first run to reach the later gates, 35520698178 on head `0d4fef13`, failed
+two of them, and its mutation plan showed that a third could not pass:
+
+- **Coverage** read 90.64% lines and 89.10% regions against the 93/94 floor
+  measured on 2026-08-21. 73% of the 30,451 missed lines are in `cli`, and
+  287 source files are below 100% lines. The shortfall accumulated while
+  nothing measured it.
+- **Gate 8**: `runner`'s C-R-04 read 5,284 floors per bar against its budget
+  of 5,000. That is the budget's first reading on CI hardware: the row was
+  added on 2026-08-18, and every run since had failed before reaching this job.
+- **Gate 18** enumerated 49,870 mutation cases in 250 jobs of 200, planned
+  against `main`. On that run 5,976 of 29,308 functions were never called and
+  about a tenth of all lines never executed, and every mutant on such a line
+  survives by construction. An extrapolation, not a measurement: thousands of
+  survivors. D-0654 had already recorded a baseline over 900 seconds per job.
+
+On 2026-09-22 the operator chose a one-time exception scoped to this pull
+request, over restoring coverage first (days of work) or passing every gate
+as written (weeks, with no assurance the matrix fits its own job deadline):
+
+1. **Coverage floor 90 lines, 89 regions** — the 2026-09-20 measurement,
+   truncated exactly as the 2026-08-21 one was. It remains a ratchet.
+2. **Gate 18 plans against `0d4fef13`** for a pull request whose head
+   contains that commit and whose base does not, so only lines changed after
+   it are mutated. It expires by ancestry, not by date: #13 lands as a squash,
+   so the commit is never an ancestor of `main` or of a branch cut from it
+   afterwards, and every later pull request is planned against its own base
+   as before. The 49,870 cases were enumerated and never executed;
+   `docs/06-limits.md` records them as a gap.
+3. **Gate 8 is not widened.** C-R-04 keeps its 5,000 floors, and the
+   regression it found is removed instead.
+
+What C-R-04 found, sampled with `sample` on an arm64 laptop over the row's
+own fixture: the neutered run over the 3,000-bar column cost 388,075 ps per
+offered bar at `a8814e64` (read from C-R-01, the same fixture and operation,
+because C-R-04 did not yet print) and 959,919 at `0d4fef13` — about 2.5
+times. Two causes accounted for most of it:
+
+- 17.8% of samples were 128-bit division (`__divti3`, `__modti3`), reached
+  from every rung's `div_euclid(1000)` in `fib`, `CurDayFib` and `gap`.
+- The known-mask projection added for Boolean NOT, `Evaluator::known_after`,
+  was about 42% of the build. Within it `Patterns::known` rebuilt, from 62
+  positions on every bar, one of six possible answers.
+
+`fib::per_mille` now divides in `i64` whenever the product fits and in
+`i128` otherwise, and `Patterns::known` selects one of six masks the
+compiler evaluates. Both are exact: a positive literal divisor cannot
+overflow the narrow division and Euclidean division has one answer at any
+width, and the six masks are pinned against hand-written groups. No
+condition bit, mask, run identity or stored byte changes. On the same
+machine C-R-04 itself went from 959,919 ps per bar (2,436 floors) to 703,513
+(1,546 floors), and `cargo bench --workspace --locked` exited 0 with no row
+breached. CI's reading is the one gate 8 decides on, and it is not claimed
+here.
+
+Also measured, and left as it is: at `min_hits = u64::MAX` the ladder is not
+free. It still copies the column and tests every k=1 candidate before its
+frontier empties, about a tenth of C-R-04's row. The bench's comment said
+that ladder "costs nothing"; the sentence is corrected and the row still
+times exactly what it timed.
+
+`CLAUDE.md` §9's 100% coverage and no-surviving-mutant requirements are not
+withdrawn. Branch protection is unchanged, and `ci-ok` still requires the
+coverage job and the mutation matrix to succeed.
+
+D-0676 is deliberately unused here: a parked, unmerged change already holds
+that number and keeps it when it lands.

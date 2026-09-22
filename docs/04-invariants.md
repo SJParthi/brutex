@@ -2033,6 +2033,10 @@ fail there — a guard nobody has watched fail is not known to be a guard.
 
 | IF-22 | The market-structure latch advances from the **same** classification the mask was built from. `TrendState::emit` returns both and `step` shares one value, so there is exactly one `classify` on the library path — folding before the advance, or advancing on a different price, were each uncaught mutations and the second is now unwritable | `indicators::trend::bits_is_idempotent_across_a_break_and_a_change_of_character`, `indicators::trend::a_change_of_character_reaches_the_mask` | ✓ |
 
+| IF-23 | A rung's step is **exactly** the `i128` Euclidean division it replaced, on both sides of the `i64` boundary where `fib::per_mille` switches widths: a product on either bound and one past it land on the same floor, and a negative product rounds down, not toward zero. D-0677 moved every ladder's per-bar division onto the narrow path for speed, and a speed change that moved one rung by one paisa would move a condition bit | `indicators::fib::per_mille_is_the_wide_division_on_both_sides_of_the_narrow_range` | ✓ |
+
+| IF-24 | A pattern position is known **exactly** when its whole same-session lookback is present, at every depth from 0 to past `LOOKBACK`, and the five lookback groups partition the 62 pattern positions. D-0677 replaced the per-bar walk with six compile-time masks; the groups are written out by hand, because a table checked against itself cannot fail | `indicators::pattern::known_is_every_position_whose_whole_lookback_is_present` | ✓ |
+
 **I-18, I-19 and I-20 exist because a verification sweep applied mutations that nothing
 caught.** All three fixes were green, tested, and documented; three specific breaks passed
 undetected — a swapped direction mapping, a shifted calendar date, and a deleted conjunct.
