@@ -8998,22 +8998,40 @@ by `File::unlock`. What that does not cover, stated rather than implied away:
   (§41.3). A month holding an unadjusted split still ranks, and its fake
   overnight crash still fires every bar-shape and gap condition. The sentence
   tells the reader that. It does not protect them.
-- **Where the sentence is not.** The Boolean saved-evidence JSON views carry
-  `"cash": true` for a stock family, but no corporate-action statement, and
-  the web pages that render them were not changed. The browser's command
-  results and `/engine/top.json` carry the report text, so the sentence
-  reaches them through that text. Expression V1, which evaluates one named
-  expression and ranks nothing, is unchanged.
-- **A stock audit that renders says it twice.** Once in the provenance
-  banner, which every stored report over a stock carries, and once in the
-  audit's charge header. The banner is there because an audit that trades
-  nothing renders no header.
+- **Where the sentence is not.** No JSON projection carries it, as none
+  carries D-0681's gross label: `/frontier.json`, `/trades.json` and
+  `/backtest.json` serve a recorded stock run's figures with neither, and the
+  Boolean saved-evidence views carry `"cash": true` for a stock family and a
+  cost-excluded scope sentence, but no corporate-action statement. The web
+  pages that render them were not changed. `cli results` lists recorded runs,
+  a stock's among them, with their worst and best figures and no statement: it
+  is a listing of the ledger rather than a ranking or an audit, and it was
+  left as it was. Expression V1, which evaluates one named expression and
+  ranks nothing, is unchanged, and so are `fold-audit`, `checksum-audit-stored`
+  and `verify`, which check stored bytes rather than rank anything. The
+  browser's command results and `/engine/top.json` carry the report text, so
+  the sentence reaches them through that text.
+- **A stock report can say it up to three times.** A stored stock audit that
+  renders says it in the provenance banner, again at the end of its FINDINGS
+  block, and again at the end of its AUDIT header. A ranked `sweep-stored` over
+  a stock says it in the banner and in FINDINGS. Each copy serves a reader who
+  sees only that part: the banner covers the whole page, extinct or not; the
+  FINDINGS copy is what `range-all` and `pool` pass 1 keep when they lift a
+  ranking out of a report; and the header copy travels with a lifted AUDIT
+  block. That is repetition, not contradiction, and all three are the one
+  constant `runner::audit::CORPORATE_ACTIONS_UNCHECKED`.
 - **The ordinary `sweep-stored` door withholds holed sessions now.** Five doors
   withhold: `sweep-stored`, `auto-stored`, `audit-range`, `screen` and `pool`.
   The withholding costs what `crate::minute_gaps` already records: one pass
   over the execution minutes and one over the signal bars, O(bars) setup work
   and not one of the five operations `CLAUDE.md` §3 rule 4 bounds. UNVERIFIED
   as a measured figure. No bench times it.
+- **The execution minutes stay whole, as on the other four doors.** Only the
+  signal bars lose a holed day. That is enough because every trade closes by
+  15:10 IST on its own session (`runner::outcome::FORCED_EXIT_MINUTE`), so no
+  outcome reaches into the next day, and with no signal bar on a withheld day
+  none of that day's minutes is looked up. Read from the source, not
+  measured.
 - **Doors that still keep holed sessions.** `audit-stored`,
   `sweep-audited-stored`, `sweep-all`, the expression search and expression,
   and the Boolean research loaders never call `crate::minute_gaps`. On `1min`
@@ -9027,4 +9045,6 @@ by `File::unlock`. What that does not cover, stated rather than implied away:
   identity rather than matching the old one. The old rows stay valid under the
   identities they were recorded with, and nothing re-keys them. No field of a
   recorded row says which rule computed it. Only the identity differs, and a
-  hash cannot be read back for the term.
+  hash cannot be read back for the term. The other four doors bind no such
+  version: their identity moves only through the data digest over the bars
+  they kept, so a gap-free month keys the same under their rule as without it.

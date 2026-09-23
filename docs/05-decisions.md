@@ -39109,8 +39109,8 @@ text, and are recorded here verbatim as relayed:
    and then, for a stock only, the note. These are: `sweep-stored` and
    `sweep-audited-stored` (the shared `stored_month_kernel`), `audit-stored`
    (`month_banner`), `audit-range`, `screen`, the strict audited range
-   (`span_banner`), `auto-stored`, `range-all`/`range-over`/`range-rung`
-   (`range_opening`), `descend`, the elite descent, the `top` report and
+   (`span_banner`), `auto-stored`, `range-all` and `range-rung` (`range_over`,
+   through `range_opening`), `descend`, the elite descent, the `top` report and
    `/engine/top.json` (`render_top_record`), and the expression search. An
    audit's own charge header says it again when an audit renders. The banner
    carries it too because an audit that trades nothing renders no header, and
@@ -39121,10 +39121,53 @@ text, and are recorded here verbatim as relayed:
    stock. The pool prints the sentence after its own "NO COST OF ANY KIND IS
    CHARGED" paragraph when any symbol on its surface is a stock. The research
    inventory, which lists only stocks, prints it after its discovery policy.
-5. The browser's command results (`/engine/command` progress and
+5. **The FINDINGS label, reconciled.** After this change was drafted, the
+   FINDINGS block of every equity ranking gained its own gross label,
+   `EQUITY_RANKING_GROSS` (AF-31): an audit whose ladder halted, one that kept
+   rows and traded none, one that completed, and every ranked `sweep-stored`.
+   That block is what `range-all` and `pool` pass 1 keep when they lift
+   sections out of a report through `section_note`, and a lifted block
+   carries no banner. So `equity_ranking_statement` now follows the gross
+   label with the sentence, in the same indentation, and both call sites
+   (`ranked_opening` and `stored_month_kernel`) use it. An index ranking and an
+   extinct one still carry neither.
+6. **One wording.** Every surface takes the sentence from
+   `runner::audit::CORPORATE_ACTIONS_UNCHECKED`; no `cli` constant restates
+   it. It keeps the properties AF-60 and AF-61 pin for the charge statement,
+   checked on the sentence, the gross paragraph and the note on their own and
+   not only inside the audit header: every line is indented two spaces, no
+   line opens like a refusal, and its only digits are the references D-0018
+   and D-0694.
+7. The browser's command results (`/engine/command` progress and
    `/engine/top.json`) carry the report text, so the sentence reaches them
    through it. No JSON field carried D-0681's label, and none was added. See
    "not done".
+
+**A stock report can say it up to three times.** A stored stock audit that
+renders says it in the banner, at the end of FINDINGS and at the end of its
+AUDIT header; a ranked `sweep-stored` says it in the banner and in FINDINGS.
+Each copy serves a reader who sees only that part: the banner covers the whole
+page, extinct or not, the FINDINGS copy travels with a lifted ranking, and the
+header copy with a lifted AUDIT block. It is one constant each time, so the
+copies cannot disagree.
+
+**Two existing tests changed, and why.** Both were added by the FINDINGS-label
+change after this one was drafted.
+
+- `an_extinct_share_audit_prints_no_ranking_and_no_charge_statement` (AF-30)
+  asserted that an extinct share audit contains no "GROSS OF EVERY CHARGE"
+  anywhere, so it failed once this change's banner reached `audit-stored` and
+  `audit-range`. The banner is intended: the support counts that went extinct
+  were counted on a share's unadjusted bars. The test now pins that banner
+  byte for byte and runs its absence checks, extended to the corporate-action
+  sentence, on the page below it, where a ranking or an audit would be. The
+  checks no longer cover the banner itself, which is now asserted exactly
+  instead.
+- `a_halted_equity_ranking_is_labelled_gross_before_it_refuses` (AF-31)
+  compared the equity page with the index page after removing
+  `EQUITY_RANKING_GROSS`. It now removes the whole FINDINGS statement, so its
+  claim, that the scope changes the statement and nothing else, still holds
+  byte for byte.
 
 **Execution still refuses equities.** Verified rather than assumed: the
 execution chain resolves its instrument through
@@ -39133,8 +39176,8 @@ BANKNIFTY. `runner::exit_grid_policy::only_the_two_nse_spot_indices_resolve`
 (a RELIANCE cash key is `UnsupportedInstrument`) and
 `cash_uses_identical_observed_levels_without_becoming_a_legacy_index` in
 `crates/runner/tests/research_family_readiness.rs` (`resolve_attested`
-refuses a cash series) pass unchanged. The refusal was already pinned, so no
-new pin was needed.
+refuses a cash series) both pass on this tree. The refusal was already
+pinned, so no new pin was needed.
 
 **What changed: the ordinary stored sweep.**
 
@@ -39168,11 +39211,13 @@ new pin was needed.
    agree by luck are still two computations. So every month this door sweeps
    gets a new identity, and every row recorded before stays valid under its
    old one. The checksum-audited door keeps `Params::of(ladder)`.
-   - **Measured, the other four doors bind no version.** `screen`,
-     `audit-range`, `auto-stored` and `pool` move their identity only through
-     the data digest over the bars they kept, so a gap-free month keys the
-     same with or without the rule. This door binds the version as well, as
-     the operator's answer asks.
+   - **Read from the source, the other four doors bind no version.**
+     `MINUTE_GAP_POLICY` appears in no identity outside this door. On
+     `screen`, `audit-range`, `auto-stored` and `pool` the rule reaches the
+     identity only through the data digest over the bars they kept, so a
+     gap-free month keys the same with or without it. This door binds the
+     version as well, because the operator's answer asks that its identity
+     move, and a gap-free month's digest does not.
    - **`stored::EXACT_MINUTE_GAP_POLICY` was not bumped.** Its "gap" is the
      opening gap `GapFib` measures, and it versions the exact-minute overlay.
      Every stored door binds it, and Candidate Universe refuses a receipt
@@ -39188,13 +39233,15 @@ weekday position. `indicators::weekday_bit`'s figures, five sessions, 1,335
 bars and 0.21%, were the count the charter records as omitting 2024-01-20.
 They now read six sessions, 1,710 bars and 0.28%.
 
-**`CLAUDE.md` §1 is NOT amended by this change.** The task text asked for its
-gross-of-every-charge sentence to be extended. That instruction reached this
-change through an automated workflow, and a workflow message cannot authorize
-a `CLAUDE.md` edit. D-0681 records an implementing agent declining in the same
-position for the same reason. The code already does what the proposed wording
-says, and nothing in the current wording is contradicted. Proposed, for the
-operator to apply directly:
+**`CLAUDE.md` §1 is NOT amended by this change.** The fix workflow's task
+text said its gross-of-every-charge sentence may be extended, because the
+operator answered directly. That permission reached the implementing agent in
+an automated workflow's message, not from the operator, and an agent's message
+cannot authorize a `CLAUDE.md` edit. D-0681 records its implementing agent
+declining in the same position, and §1 was then amended on the operator's own
+answer. The code already does what the proposed wording says, and nothing in
+the current wording is contradicted. Proposed, for the operator to apply
+directly:
 
 > ... every such report stating it is gross of every charge (D-0509, D-0525,
 > D-0681) and that corporate actions are unchecked (D-0018, D-0694), and no
@@ -39206,8 +39253,9 @@ operator to apply directly:
   behaviour. With no sourced threshold it refuses every equity window forever,
   and ends the discovery the operator chose to keep.
 - **Document it only.** A paragraph in `docs/06-limits.md` and nothing on the
-  page. §41.3 already gives the reason this fails: a number travels and a
-  caveat does not. The statement has to sit beside the figures.
+  page. `docs/06-limits.md` §40.4 already gives the reason this fails: a
+  number travels and a caveat does not. The statement has to sit beside the
+  figures.
 - **Bump `EXACT_MINUTE_GAP_POLICY` for the sweep door.** Rejected above: it
   names a different rule, and every door and saved receipt shares it.
 - **Move the identity through the data digest alone.** That is what the other
@@ -39228,39 +39276,65 @@ operator to apply directly:
   `crate::minute_gaps` is called only from `lib.rs` and `pool.rs`. Whether
   those doors should withhold too needs its own answer, because each one's
   identity would move.
-- **JSON projections.** The Boolean saved-evidence views (`/boolean*.json`)
-  carry `"cash": true` for a stock family and a cost-excluded scope sentence,
-  but no corporate-action statement. The web pages that render them were not
-  changed.
-- **A stock audit that renders says it twice**, once in the banner and once
-  in the charge header. That is repetition, not a contradiction.
+- **JSON projections.** None carries the sentence, as none carries D-0681's
+  gross label. `/frontier.json`, `/trades.json` and `/backtest.json` serve a
+  recorded stock run's figures with neither. The Boolean saved-evidence views
+  (`/boolean*.json`) carry `"cash": true` for a stock family, but no
+  corporate-action statement. The web pages that render them were not changed.
+- **`cli results`** lists recorded runs, a stock's among them, with their
+  worst and best figures and no statement. It lists the ledger rather than
+  ranking or auditing, and it was left as it was.
 - **Expression V1**, which evaluates one named expression and ranks nothing,
+  `fold-audit`, `checksum-audit-stored` and `verify`, which check stored bytes,
   and the index-only surfaces (index-stop, the ledgers) are unchanged.
 
-**Tests.** AF-16 and AF-17. Each new test was run against its fix
-temporarily reverted, and it failed. Exactly one assertion group is the
-exception. The gap-free month's bars and masks are equal with or without the
-withholding: that is the idempotence being pinned, and the identity half of the
-same test fails without the params change.
+**Tests.** AF-16, AF-17 and AF-18. Every new test was run on this tree with
+its fix temporarily removed, and failed; the fix was then restored. One build
+per line below.
 
-- The statement: `an_equity_audit_states_corporate_actions_are_unchecked_and_an_index_audit_does_not`
-  and `a_report_note_is_gross_then_corporate_actions_for_a_stock_and_empty_for_an_index`
-  in `runner::audit`, and
-  `the_equity_note_is_decided_by_the_kind_and_an_index_or_contract_gets_none`
-  in `cli::stored`.
-- Each surface:
-  `every_stored_report_over_a_stock_states_corporate_actions_are_unchecked`
-  drives six stored doors end to end over one generated month, as RELIANCE and
-  as NIFTY. `every_one_instrument_banner_states_corporate_actions_for_a_stock_and_never_for_an_index`
-  and `a_stock_audit_states_corporate_actions_in_its_charge_header_and_an_index_audit_does_not`
-  cover the banners and the audit header. The pool, research-inventory,
-  `sweep-all`, expression-search and Boolean-header tests cover one surface
-  each. Each of the eight banner sites in `lib.rs` was reverted on its own,
-  and its test failed each time.
-- The door: `the_ordinary_stored_sweep_withholds_and_names_a_holed_session`,
-  `the_ordinary_stored_sweep_refuses_when_every_session_is_withheld`,
-  `a_gap_free_month_keeps_its_bars_and_masks_and_moves_its_identity` and
-  `the_ordinary_stored_sweep_withholds_in_the_screens_order`.
+- `runner`, `cargo test -p runner --lib audit::`:
+  - the sentence removed from the equity header:
+    `an_equity_audit_states_corporate_actions_are_unchecked_and_an_index_audit_does_not`
+    failed;
+  - the sentence dropped from `report_note`:
+    `a_report_note_is_gross_then_corporate_actions_for_a_stock_and_empty_for_an_index`
+    failed;
+  - "1:5" written into the sentence, one of its lines un-indented, and one of
+    its lines opened with "refused", each in its own build:
+    `the_corporate_action_sentence_keeps_the_charge_statement_properties_wherever_it_travels`
+    failed every time, beside whichever D-0681 header test the same break
+    reaches (`the_equity_charge_statement_names_no_rate`,
+    `every_charge_statement_line_is_indented_so_a_lifted_audit_block_keeps_it_whole`,
+    `no_charge_statement_line_reads_as_a_refusal`).
+- `cli`, the D-0694 nextest set plus the three AF-30 and AF-31 tests this
+  change touched:
+  - `stored::equity_note` returning nothing: the kind test, the banner test,
+    the six-door test, the expression-search test and the extinct-audit test
+    failed; both FINDINGS tests passed;
+  - the FINDINGS statement without the sentence: the two FINDINGS tests
+    failed, and nothing else;
+  - no withholding on the ordinary door: the three withholding tests failed,
+    and nothing else;
+  - the identity keeping the ladder alone: the gap-free test failed, and
+    nothing else;
+  - in one build, five surfaces whose tests share no code reverted (the pool,
+    the research inventory, `sweep-all`, the Boolean heading and the
+    expression search), `stored_month_kernel`'s FINDINGS call handed no scope,
+    and the ordinary door dropping one bar from a gap-free month: each
+    surface's own test failed, both sweep FINDINGS tests failed (the new one
+    and AF-31's), and the gap-free and holed-session tests failed;
+  - each of the eight banner sites in `lib.rs` put back to
+    `STORED_PROVENANCE` alone, one site per build: the six-door test failed
+    for `stored_month_kernel` (at `sweep-stored`), `auto_stored_kernel`,
+    `month_banner` (with the banner test) and `span_banner` (at
+    `audit-range`), and the banner test failed for `render_top_record`,
+    `descent_banner`, `descend_banner` and `range_opening`.
+- **One assertion group cannot fail without a regression, by design.** A
+  gap-free month's bars, reference contexts and masks equal the loads this
+  door made before D-0694 whether the withholding code is present or not;
+  that equality is the idempotence being pinned (`CLAUDE.md` §3 rule 5). The
+  one-bar break above is what shows it can fail.
 
-All new `cli` tests run under a priority-100 override in
-`.config/nextest.toml`. That changes their order only.
+All new `cli` tests run under the D-0694 priority-100 override in
+`.config/nextest.toml`, which names each of them. That changes their order
+only: nothing is filtered, skipped, retried or ignored.

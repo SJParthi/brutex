@@ -3,8 +3,8 @@
 //!
 //! The stored doors are driven end to end over a generated store in
 //! `audited_stored::tests`; this module holds the banners that need no store,
-//! the audit header as `audit_bars` receives it, and the order the ordinary
-//! sweep's preparation shares with the screen.
+//! the audit header and the FINDINGS statement as `audit_bars` renders them,
+//! and the order the ordinary sweep's preparation shares with the screen.
 #![allow(clippy::expect_used, reason = "a failed fixture must fail its test")]
 
 use super::{
