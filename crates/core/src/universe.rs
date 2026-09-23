@@ -5021,13 +5021,23 @@ mod tests {
     /// case was one step short, and both bound tests stayed green.
     ///
     /// The measurements are exact here. Every doc comment outside this test
-    /// module that quotes one is looked for: every row of this file's header
-    /// table and the sums drawn from it, `MemberIndex`,
-    /// `MemberIndex::position`, `nse_isin` and `InstrumentKey::is_sweepable`.
-    /// Each is searched with the number formatted in, so the sentence this
-    /// test searches for never appears in this file as a literal. A table
-    /// edit that moves a worst case fails here, and the message names the
-    /// prose to correct in the same change.
+    /// module that quotes a worst probe of one of the six tables, or of the
+    /// NIFTY 500 at the size it was refused at, is looked for, by this test or
+    /// the next. This one looks for every row of this file's header table and
+    /// the sums drawn from it, `MemberIndex`, `MemberIndex::position`,
+    /// `nse_isin`, and the measured pair in `InstrumentKey::is_sweepable`'s
+    /// cost section in `instrument.rs`. The next looks for both rows of
+    /// `NIFTY_500_INDEX`'s table, the header's NIFTY 500 figure and the
+    /// sentence in `is_sweepable`'s cost section that names `NTM_INDEX`'s
+    /// pair, and for the two plain comments in this module that quote one.
+    /// Not searched: the docs of the AF-51, AF-54 and AF-55 tests, which
+    /// narrate the figures they correct, and `MemberIndex`'s "under 1.5",
+    /// which is a mean and not a worst case. `vendor.rs`'s series tables are
+    /// other tables, with their own test. Each is searched with the number
+    /// formatted in, so the sentence these tests search for never appears in
+    /// this file as a literal. A table edit that moves a worst case fails
+    /// here or there, and the message names the prose to correct in the same
+    /// change.
     ///
     /// AF-53. This paragraph used to say "every sentence" while the list
     /// below held only the four named sites. The header, whose cost table
@@ -5035,6 +5045,10 @@ mod tests {
     /// `FNO_INDEX` row `NTM_INDEX`'s 6 and 11 left this test green. Each row
     /// is now formatted from the table it names: members from the array,
     /// slots from the index type, both figures from the measurement.
+    ///
+    /// AF-55. After AF-53 the "measurements are exact" paragraph still said
+    /// "every doc comment" while three that quote a figure were searched by no
+    /// test. The next test searches them.
     #[test]
     fn the_worst_probes_quoted_in_prose_are_the_measured_ones() {
         let rows = measured_cost_table();
@@ -5135,6 +5149,110 @@ mod tests {
             !instrument.contains(&foreign),
             "instrument.rs quotes NTM_INDEX's figures for FNO_INDEX: {foreign:?}"
         );
+    }
+
+    /// AF-55. THE NIFTY 500'S FIGURES AT BOTH SIZES, AND THE OTHER QUOTED
+    /// PROBES, ARE THE MEASURED ONES.
+    ///
+    /// After AF-53 the test above still said every doc comment quoting a worst
+    /// probe was looked for, while three were not: both rows of
+    /// `NIFTY_500_INDEX`'s table and the header's "13 hit steps". Giving the
+    /// shipped row a worst hit of 9 in place of 5 left it green.
+    ///
+    /// Those rows are formatted here the way the header's are: slots from the
+    /// index type, fill from the members over the slots, and the worst hit
+    /// from the walk. The 1024-slot table the refused row describes is built
+    /// here by the same `build` from the same array, and its worst hit must
+    /// exceed the hit bound of 8, since that is why it was refused. Two more
+    /// sites quote a measured figure and are searched for the same reason. The
+    /// second paragraph of `is_sweepable`'s cost section names six and eleven
+    /// as `NTM_INDEX`'s figures. The two plain comments in this module that
+    /// quote one are the miss test's headroom sentence and the NIFTY 500
+    /// figure in `the_hash_is_deterministic_and_the_tables_stay_half_empty`.
+    #[test]
+    fn the_nifty_500s_figures_at_both_sizes_and_the_other_quoted_probes_are_measured() {
+        const REFUSED: usize = 1024;
+        let rows = measured_cost_table();
+        let [(.., ntm_hit, ntm_miss), _, (_, members, slots, hit, _), ..] = rows;
+
+        // THE NIFTY 500 AT THE SIZE `build` PERMITS AND THE PROBE TEST REFUSED.
+        // `NIFTY_500_INDEX`'s doc sets that size against the one it ships at,
+        // and the header and the half-empty test quote the refused size's hit
+        // figure. So no column of either row is remembered.
+        let refused = MemberIndex::<REFUSED>::build(&NIFTY_500);
+        let refused_hit = worst_probe(&refused, &NIFTY_500);
+        assert!(
+            refused_hit > 8,
+            "NIFTY_500 in {REFUSED} slots measures {refused_hit}, inside the hit bound of 8, \
+             so NIFTY_500_INDEX's reason for shipping a quarter full is gone"
+        );
+        // Per mille, rounded half up, in integers: the fill column is printed
+        // to one decimal place and `float_arithmetic` is denied.
+        let fill = |slots: usize| {
+            let per_mille = (members * 2000 + slots) / (2 * slots);
+            format!("{}.{}%", per_mille / 10, per_mille % 10)
+        };
+        // The miss test's comment gives both bounds' headroom over the worst
+        // measured anywhere among the six.
+        let max_hit = rows.iter().fold(0, |most, &(.., hit, _)| most.max(hit));
+        let max_miss = rows.iter().fold(0, |most, &(.., miss)| most.max(miss));
+
+        let universe = include_str!("universe.rs");
+        let instrument = include_str!("instrument.rs");
+        for (site, text, sentence) in [
+            (
+                "universe.rs, NIFTY_500_INDEX, the refused row",
+                universe,
+                format!(
+                    "/// | NIFTY 500 | {REFUSED} | {} | **{refused_hit}** — over the bound of 8 |",
+                    fill(REFUSED)
+                ),
+            ),
+            (
+                "universe.rs, NIFTY_500_INDEX, the shipped row",
+                universe,
+                format!("/// | NIFTY 500 | {slots} | {} | {hit} |", fill(slots)),
+            ),
+            (
+                "universe.rs, the header",
+                universe,
+                format!(
+                    "//! bound was *measured* put the NIFTY 500 at {refused_hit} hit steps, and"
+                ),
+            ),
+            (
+                "universe.rs, the_hash_is_deterministic_and_the_tables_stay_half_empty",
+                universe,
+                format!("// {REFUSED} slots probed {refused_hit} times to prove"),
+            ),
+            (
+                "universe.rs, a_miss_probes_further_than_a_hit_and_its_bound_is_measured_too",
+                universe,
+                format!(
+                    "notice. 12 is {}",
+                    in_words(12_usize.saturating_sub(max_miss))
+                ),
+            ),
+            (
+                "universe.rs, a_miss_probes_further_than_a_hit_and_its_bound_is_measured_too",
+                universe,
+                format!("// bound of 8 leaves over its worst of {max_hit}."),
+            ),
+            (
+                "instrument.rs, InstrumentKey::is_sweepable",
+                instrument,
+                format!(
+                    "used to quote {} and {}, which are `NTM_INDEX`'s",
+                    in_words(ntm_hit),
+                    in_words(ntm_miss)
+                ),
+            ),
+        ] {
+            assert!(
+                text.contains(&sentence),
+                "{site} must quote the measured figure: {sentence:?}"
+            );
+        }
     }
 
     /// AF-54. D-0506 QUOTES `NTM_INDEX`'S PROBE FIGURES FOR `FNO_INDEX`, AND
