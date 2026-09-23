@@ -11,8 +11,10 @@
 //! that they are skipping and why. **They therefore prove nothing on CI.** The
 //! decode path that CI does exercise is `synthetic.rs`, which writes its own
 //! Parquet files covering the footer, the schema check, the definition levels,
-//! null expansion and the paisa conversion. What only this file can cover is
-//! the ZSTD page path and the actual recorded values, because both are
+//! null expansion and the paisa conversion — and which now also recompresses
+//! those files with `ruzstd`'s own encoder, so the ZSTD page path is driven end
+//! to end on every run. What only this file can cover is ZSTD frames as
+//! Polars' encoder wrote them and the actual recorded values, because both are
 //! properties of the operator's data rather than of this crate.
 //!
 //! That gap is real and is written down here rather than left for someone to
