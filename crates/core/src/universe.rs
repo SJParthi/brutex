@@ -4971,6 +4971,100 @@ mod tests {
         assert!(NIFTY_50_INDEX.position("RELIANCE").is_some());
     }
 
+    /// AF-51. THE WORST PROBES THIS CRATE'S PROSE QUOTES ARE THE MEASURED ONES.
+    ///
+    /// The two tests above pin BOUNDS, eight and twelve, with headroom on
+    /// purpose. The doc comments quote the MEASURED worst cases as numbers,
+    /// and nothing held those. `InstrumentKey::is_sweepable` quoted six on a
+    /// hit and eleven on a miss for `FNO_INDEX`. Those are `NTM_INDEX`'s
+    /// figures; `FNO_INDEX` measures seven and ten, so its stated hit worst
+    /// case was one step short, and both bound tests stayed green.
+    ///
+    /// The measurements are exact here. Every sentence that quotes one is
+    /// looked for with the number formatted in, so the sentence this test
+    /// searches for never appears in this file as a literal. A table edit
+    /// that moves a worst case fails here, and the message names the prose to
+    /// correct in the same change.
+    #[test]
+    fn the_worst_probes_quoted_in_prose_are_the_measured_ones() {
+        const WORDS: [&str; 13] = [
+            "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+            "eleven", "twelve",
+        ];
+        let word = |n: usize| {
+            *WORDS
+                .get(n)
+                .expect("a worst case above twelve breaks the bound")
+        };
+
+        let ntm_hit = worst_probe(&NTM_INDEX, &NIFTY_TOTAL_MARKET);
+        let ntm_miss = worst_miss_probe(&NTM_INDEX);
+        let fno_hit = worst_probe(&FNO_INDEX, &FNO_UNDERLYINGS);
+        let fno_miss = worst_miss_probe(&FNO_INDEX);
+        assert_eq!(
+            (ntm_hit, ntm_miss, fno_hit, fno_miss),
+            (6, 11, 7, 10),
+            "the measured worst cases moved: correct every sentence checked below"
+        );
+
+        let universe = include_str!("universe.rs");
+        let instrument = include_str!("instrument.rs");
+        for (file, text, sentence) in [
+            (
+                "universe.rs, MemberIndex",
+                universe,
+                format!("/// is {ntm_hit} on a hit and {ntm_miss} on a miss."),
+            ),
+            (
+                "universe.rs, MemberIndex::position",
+                universe,
+                format!("measures {ntm_hit} on 750 members and {fno_hit} on 213"),
+            ),
+            (
+                "universe.rs, MemberIndex::position",
+                universe,
+                format!("measures {ntm_miss} on 750 members and {fno_miss} on 213"),
+            ),
+            (
+                "universe.rs, nse_isin",
+                universe,
+                format!("at most {ntm_hit} steps when the"),
+            ),
+            (
+                "universe.rs, nse_isin",
+                universe,
+                format!("at most {ntm_miss} when it is not"),
+            ),
+            (
+                "instrument.rs, InstrumentKey::is_sweepable",
+                instrument,
+                format!(
+                    "{} probes on a hit and {} on a miss",
+                    word(fno_hit),
+                    word(fno_miss)
+                ),
+            ),
+        ] {
+            assert!(
+                text.contains(&sentence),
+                "{file} must quote the measured figure: {sentence:?}"
+            );
+        }
+
+        // `is_sweepable` probes `FNO_INDEX` and no other table, so the
+        // Total Market figures in its sentence are the defect this test
+        // exists for.
+        let foreign = format!(
+            "{} probes on a hit and {} on a miss",
+            word(ntm_hit),
+            word(ntm_miss)
+        );
+        assert!(
+            !instrument.contains(&foreign),
+            "instrument.rs quotes NTM_INDEX's figures for FNO_INDEX: {foreign:?}"
+        );
+    }
+
     #[test]
     fn the_probe_reaches_every_slot_only_because_n_is_a_power_of_two() {
         // WHAT THE COMPILE-TIME ASSERTION IN `build` IS FOR, PROVED ON THE

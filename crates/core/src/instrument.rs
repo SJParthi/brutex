@@ -330,13 +330,20 @@ impl InstrumentKey {
     /// # Cost
     ///
     /// The index arm is two comparisons. The equity arm is one probe into
-    /// `FNO_INDEX`, an open-addressed table built at compile time with a
-    /// test-pinned worst case of six probes on a hit and eleven on a miss --
-    /// the only true worst-case O(1) membership structure in the workspace --
-    /// and, on a hit, at most five string comparisons against
+    /// `FNO_INDEX`, an open-addressed table built at compile time. Over its 213
+    /// members the worst case measures seven probes on a hit and ten on a miss,
+    /// and the probe tests pin those at no more than eight and twelve. It is
+    /// the only true worst-case O(1) membership structure in the workspace. On
+    /// a hit there are then at most five string comparisons against
     /// `FNO_INDEX_UNDERLYINGS`, a fixed five-name array walked the way the
     /// index arm walks `SWEPT`'s two. No list is copied, and the 213-name
     /// list is not walked.
+    ///
+    /// This paragraph used to quote six and eleven, which are `NTM_INDEX`'s
+    /// figures over 750 members and not this table's.
+    /// `core::universe::the_worst_probes_quoted_in_prose_are_the_measured_ones`
+    /// now measures both tables and fails if the sentence above stops naming
+    /// `FNO_INDEX`'s own.
     #[must_use]
     pub fn is_sweepable(&self) -> bool {
         match (self.segment, &self.kind) {
@@ -1229,5 +1236,238 @@ mod tests {
             kind: Kind::Equity,
         };
         assert!(!other_way.is_sweepable());
+    }
+
+    /// The refusal `require_sweepable` owes a key, derived from the answer.
+    fn owed(sweepable: bool) -> Result<(), InstrumentError> {
+        if sweepable {
+            Ok(())
+        } else {
+            Err(InstrumentError::NotSweepable)
+        }
+    }
+
+    /// AF-50. SWEEPABILITY IS JUDGED ON THE CASE-FOLDED SYMBOL, BOTH WAYS.
+    ///
+    /// `Symbol::new` upper-cases its input, so `finnifty` and `FINNIFTY` are
+    /// one key and must get one answer. That folding was pinned only at the
+    /// `Symbol` level, and every `is_sweepable` test above spells its names
+    /// in upper case, so two regressions were invisible from here. A cash arm
+    /// that stopped refusing the five index names would let `finnifty`
+    /// through as a stock. A `Symbol` that stopped folding would drop every
+    /// lower-case share and index off the surface. The accepted spellings are
+    /// asserted beside the refused ones, so the second regression cannot hide
+    /// the first by refusing everything.
+    #[test]
+    fn every_case_spelling_of_an_fno_name_is_judged_as_its_upper_case_self() {
+        use crate::universe::{FNO_INDEX, FNO_INDEX_UNDERLYINGS, FNO_UNDERLYINGS};
+
+        // (spelling, sweepable as an NSE cash equity, sweepable as an NSE index)
+        let named = [
+            ("finnifty", false, false),
+            ("FinNifty", false, false),
+            ("fInNiFtY", false, false),
+            ("midcpnifty", false, false),
+            ("MidCpNifty", false, false),
+            ("niftynxt50", false, false),
+            ("NiftyNxt50", false, false),
+            ("nifty", false, true),
+            ("NiFtY", false, true),
+            ("banknifty", false, true),
+            ("BankNifty", false, true),
+            ("reliance", true, false),
+            ("Reliance", true, false),
+            ("hindalco", true, false),
+            ("m&m", true, false),
+            ("bajaj-auto", true, false),
+        ];
+        for (spelling, as_cash, as_index) in named {
+            let upper = spelling.to_ascii_uppercase();
+            assert_ne!(spelling, upper, "{spelling} must not already be canonical");
+            assert!(
+                FNO_INDEX.contains(&upper),
+                "{upper} must be an F&O name, or the answers below prove nothing"
+            );
+
+            let cash = InstrumentKey::cash(Exchange::Nse, spelling).expect("valid");
+            assert_eq!(cash.underlying.as_str(), upper, "{spelling} is folded");
+            assert_eq!(
+                cash,
+                InstrumentKey::cash(Exchange::Nse, &upper).expect("valid"),
+                "{spelling} and {upper} are one cash key"
+            );
+            assert_eq!(cash.is_sweepable(), as_cash, "{spelling} as a cash equity");
+            assert_eq!(cash.require_sweepable(), owed(as_cash), "{spelling} cash");
+            assert_eq!(cash.to_string(), format!("NSE-{upper}"));
+
+            let index = InstrumentKey::index(Exchange::Nse, spelling).expect("valid");
+            assert_eq!(index.underlying.as_str(), upper, "{spelling} is folded");
+            assert_eq!(index.is_sweepable(), as_index, "{spelling} as an index");
+            assert_eq!(
+                index.require_sweepable(),
+                owed(as_index),
+                "{spelling} index"
+            );
+        }
+
+        // EVERY F&O NAME, LOWER-CASED, GETS ITS UPPER-CASE ANSWER. The expected
+        // answers are stated from the two lists, not from `is_sweepable`.
+        let mut lower_cash_swept = 0_usize;
+        for name in FNO_UNDERLYINGS {
+            let lower = name.to_ascii_lowercase();
+            let share = !FNO_INDEX_UNDERLYINGS.contains(&name);
+            let cash = InstrumentKey::cash(Exchange::Nse, &lower).expect("valid");
+            assert_eq!(cash.is_sweepable(), share, "{lower} as a cash equity");
+            lower_cash_swept += usize::from(cash.is_sweepable());
+            let index = InstrumentKey::index(Exchange::Nse, &lower).expect("valid");
+            assert_eq!(
+                index.is_sweepable(),
+                matches!(name, "NIFTY" | "BANKNIFTY"),
+                "{lower} as an index"
+            );
+        }
+        assert_eq!(lower_cash_swept, 208, "213 less the five index names");
+    }
+
+    /// AF-50. A NEAR MISS OF A SURFACE NAME IS NEVER SWEEPABLE, IN ANY SHAPE.
+    ///
+    /// The only outsider fixture above is `ZZQXNOTFNO`, which is far from
+    /// every member. These are one character off an F&O name, or a real NSE
+    /// or BSE index that merely starts like one (`NIFTYIT`, `NIFTY50`), so a
+    /// prefix or truncated comparison in either arm would sweep them. Each
+    /// premise is checked against `FNO_INDEX` first, and the exact names they
+    /// surround are asserted to sweep, so the refusal is not a table that
+    /// refuses everything.
+    #[test]
+    fn a_near_miss_of_a_surface_name_is_never_sweepable_in_any_shape() {
+        use crate::universe::FNO_INDEX;
+
+        let near = [
+            "FINNIFT",
+            "FINNIFTYY",
+            "NIFTYNXT5",
+            "NIFTYNXT500",
+            "MIDCPNIFTY-",
+            "NIFTY50",
+            "NIFTYIT",
+            "INDIAVIX",
+            "SENSEX",
+            "BANKEX",
+            "NIFT",
+            "NIFTYY",
+            "NIFTY_",
+            "_NIFTY",
+            "BANKNIFT",
+            "BANKNIFTYY",
+            "RELIANC",
+            "RELIANCEE",
+            "HINDALC0",
+            "M&",
+            "M&MM",
+            "BAJAJAUTO",
+            "BAJAJ_AUTO",
+        ];
+        for name in near {
+            assert!(
+                !FNO_INDEX.contains(name),
+                "{name} must be OUTSIDE the F&O list, or this proves nothing"
+            );
+            for exchange in [Exchange::Nse, Exchange::Bse] {
+                for key in [
+                    InstrumentKey::cash(exchange, name).expect("valid shape"),
+                    InstrumentKey::index(exchange, name).expect("valid shape"),
+                ] {
+                    assert!(!key.is_sweepable(), "{key} is a near miss");
+                    assert_eq!(
+                        key.require_sweepable(),
+                        Err(InstrumentError::NotSweepable),
+                        "{key} is refused as storable but not sweepable"
+                    );
+                }
+            }
+        }
+
+        // THE NAMES THEY SURROUND DO SWEEP, each in its own shape only.
+        for (name, as_cash, as_index) in [
+            ("NIFTY", false, true),
+            ("BANKNIFTY", false, true),
+            ("RELIANCE", true, false),
+            ("HINDALCO", true, false),
+            ("M&M", true, false),
+            ("BAJAJ-AUTO", true, false),
+        ] {
+            let cash = InstrumentKey::cash(Exchange::Nse, name).expect("valid");
+            let index = InstrumentKey::index(Exchange::Nse, name).expect("valid");
+            assert_eq!(cash.is_sweepable(), as_cash, "{name} as a cash equity");
+            assert_eq!(index.is_sweepable(), as_index, "{name} as an index");
+        }
+    }
+
+    /// AF-50. EVERY (EXCHANGE, SEGMENT, KIND) SHAPE OVER EVERY F&O NAME, ASKED
+    /// THREE TIMES.
+    ///
+    /// The existing shape tests each pin a corner: `(Fno, Index)` and
+    /// `(Index, Equity)` on NIFTY, BSE on NIFTY and HINDALCO, contracts on two
+    /// names. None builds a `(Cash, Index)` key, and none walks the full
+    /// product. This one does: 213 names x 2 exchanges x 3 segments x 4
+    /// kinds, 5,112 keys. Exactly 210 sweep, the 208 shares as
+    /// `(NSE, Cash, Equity)` and NIFTY and BANKNIFTY as `(NSE, Index, Index)`,
+    /// and nothing else. `CLAUDE.md` section 3 rule 5: a key asked twice gets
+    /// the same answer, and `require_sweepable` agrees with it every time.
+    #[test]
+    fn every_shape_over_every_fno_name_sweeps_only_the_two_surface_shapes() {
+        use crate::universe::{FNO_INDEX_UNDERLYINGS, FNO_UNDERLYINGS};
+
+        let expiry = Expiry::new(2026, 9, 29).expect("valid");
+        let kinds = [
+            Kind::Index,
+            Kind::Equity,
+            Kind::Future { expiry },
+            Kind::Option {
+                expiry,
+                strike: Paisa::from_raw(2_280_000),
+                side: OptionSide::Call,
+            },
+        ];
+
+        let mut swept = Vec::new();
+        let mut asked = 0_usize;
+        for name in FNO_UNDERLYINGS {
+            let underlying = Symbol::new(name).expect("every F&O name is a symbol");
+            for exchange in [Exchange::Nse, Exchange::Bse] {
+                for segment in [Segment::Index, Segment::Cash, Segment::Fno] {
+                    for kind in kinds {
+                        let key = InstrumentKey {
+                            exchange,
+                            segment,
+                            underlying,
+                            kind,
+                        };
+                        let first = key.is_sweepable();
+                        assert_eq!(key.is_sweepable(), first, "{key} asked twice");
+                        assert_eq!(key.require_sweepable(), owed(first), "{key}");
+                        assert_eq!(key.is_sweepable(), first, "{key} asked again");
+                        asked += 1;
+                        if first {
+                            swept.push((exchange, segment, kind, name));
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(asked, 213 * 2 * 3 * 4, "the whole product was asked");
+
+        // Stated from the lists, in the loop's name-major order.
+        let mut expected = Vec::new();
+        for name in FNO_UNDERLYINGS {
+            if matches!(name, "NIFTY" | "BANKNIFTY") {
+                expected.push((Exchange::Nse, Segment::Index, Kind::Index, name));
+            }
+            if !FNO_INDEX_UNDERLYINGS.contains(&name) {
+                expected.push((Exchange::Nse, Segment::Cash, Kind::Equity, name));
+            }
+        }
+        assert_eq!(swept.len(), 210, "208 shares and 2 indices");
+        assert_eq!(swept, expected, "exactly the two surface shapes sweep");
     }
 }
