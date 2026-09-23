@@ -818,15 +818,25 @@ fn a_negative_chunk_offset_is_refused_by_name_from_either_field_it_can_come_from
 }
 
 // ---------------------------------------------------------------------------
-// THE ZSTD PATH, WHICH EVERY REAL LAKE FILE TAKES AND NO CI RUN USED TO.
+// THE ZSTD PATH THROUGH A WHOLE FILE, WHICH EVERY REAL LAKE FILE TAKES AND NO
+// CI RUN USED TO.
 //
 // Every lake file is Polars-written Parquet with ZSTD-compressed pages, so the
 // one decode path the operator's data always takes is the `Compression::ZSTD`
 // arm of `Columns::pages` and the `Codec::Zstd` arm of `LakePageReader::decode`.
 // Until this section the only tests that reached that path END TO END were the
-// `#[ignore]`d ones in `real_lake.rs`, which no CI runner runs: every fixture
-// above is UNCOMPRESSED, so the ZSTD arm could have been mapped to the wrong
-// codec, or stopped decoding, with the whole suite still green.
+// `#[ignore]`d ones in `real_lake.rs`, which no CI runner runs, and every
+// fixture above is UNCOMPRESSED. So `Columns::pages` could map
+// `Compression::ZSTD(_)` to a refusal, or to `Codec::Uncompressed`, and the
+// whole lake suite stayed green: both mutations were run against the reader
+// and its tests as they stood before this section, and neither failed a test.
+//
+// THE DECODE ARM WAS NOT THE GAP. The `Codec::Zstd` arm of `decode` was already
+// unit-tested in `src/page.rs`, on hand-built Raw and RLE frames, and returning
+// the body undecoded there fails four of those tests. What they did not do is
+// reach that arm through `LakeFile`, walk a chunk of more than one compressed
+// page, or hand it a Compressed block; this section and `page.rs`'s
+// `a_ruzstd_encoded_compressed_block_decodes_through_the_page_path` add those.
 //
 // `parquet`'s own writer cannot produce the fixture — its `zstd` feature is the
 // C binding `crates/lake/Cargo.toml` exists to keep out. `ruzstd` can: the
@@ -1032,8 +1042,8 @@ fn rows(file: &LakeFile) -> Vec<Bar> {
 /// `ruzstd`. The values both reads agree on are pinned by the test after this
 /// one.
 ///
-/// Mapping `Compression::ZSTD(_)` in `Columns::pages` to a refusal makes this
-/// test fail, and restoring it makes it pass.
+/// Mapping `Compression::ZSTD(_)` in `Columns::pages` to a refusal, or to
+/// `Codec::Uncompressed`, makes this test fail, and restoring it makes it pass.
 #[test]
 fn a_zstd_copy_decodes_to_exactly_what_the_uncompressed_original_does() {
     let plain_and_paged = write_with(
