@@ -401,6 +401,11 @@ fn opening(
          largest of instruments × candidates comparisons. It finds a candidate;\n\
          `range-rung` with validation on is the proof."
     );
+    // BESIDE THE CHARGE STATEMENT, WHENEVER A STOCK IS IN THE POOL. A pool of
+    // the two indices never carries it: an index never splits (D-0018). D-0694.
+    if stored::any_cash_equity(surface.iter().map(String::as_str)) {
+        let _ = writeln!(out, "{}", runner::audit::CORPORATE_ACTIONS_UNCHECKED);
+    }
     out
 }
 
@@ -1143,6 +1148,39 @@ mod tests {
             "(D-0506, D-0681)",
         ] {
             assert!(page.contains(claim), "missing {claim:?}:\n{page}");
+        }
+    }
+
+    /// **A pool holding a stock says corporate actions are unchecked, beside
+    /// its charge statement; a pool of the two indices never does.** D-0694.
+    #[test]
+    fn a_pool_with_a_stock_states_corporate_actions_are_unchecked_and_an_index_pool_does_not() {
+        let text = |surface: &[&str]| {
+            let owned: Vec<String> = surface.iter().map(|s| (*s).to_owned()).collect();
+            super::opening("zerodha", "60min", (2026, 1), (2026, 6), None, &owned)
+        };
+        for surface in [
+            &["NIFTY", "RELIANCE"][..],
+            &["RELIANCE"][..],
+            &["BANKNIFTY", "TCS", "NIFTY"][..],
+        ] {
+            let out = text(surface);
+            assert!(
+                out.contains(runner::audit::CORPORATE_ACTIONS_UNCHECKED),
+                "{surface:?}:\n{out}"
+            );
+            assert!(
+                out.find("NO COST OF ANY KIND IS CHARGED")
+                    < out.find(runner::audit::CORPORATE_ACTIONS_UNCHECKED),
+                "beside and after the charge statement:\n{out}"
+            );
+        }
+        for surface in [&["NIFTY", "BANKNIFTY"][..], &["NIFTY"][..], &[][..]] {
+            let out = text(surface);
+            assert!(
+                !out.contains("CORPORATE ACTIONS"),
+                "an index never splits, so an index pool never says so: {surface:?}\n{out}"
+            );
         }
     }
 

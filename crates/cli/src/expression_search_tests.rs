@@ -513,3 +513,39 @@ fn priced_report_retains_exact_execution_mapping_and_dropped_signal_note() -> Re
     assert!(report.contains("printed-fill amounts are not net trading profits"));
     Ok(())
 }
+
+/// A stock's expression search says what its figures are made of before any
+/// of them -- gross of every charge, corporate actions unchecked -- and an
+/// index's search is exactly the report it was. D-0694.
+#[test]
+fn a_stock_search_states_corporate_actions_are_unchecked_and_an_index_search_does_not()
+-> Result<(), String> {
+    let report = |underlying: &str| -> Result<String, String> {
+        let args = Args::parse(&[
+            "zerodha", underlying, "1min", "2026", "1", "0", "1", "1", "1",
+        ])?;
+        let state = State::new(Cursor::new(&args.live).map_err(debug)?);
+        Ok(render(&args, &state, [72; 32], 0, None))
+    };
+    let stock = report("RELIANCE")?;
+    assert!(
+        stock.starts_with(&format!(
+            "{}{}",
+            crate::STORED_PROVENANCE,
+            runner::audit::CostScope::CashEquity.report_note()
+        )),
+        "{stock}"
+    );
+    assert!(stock.contains(runner::audit::CORPORATE_ACTIONS_UNCHECKED));
+    let index = report("NIFTY")?;
+    assert!(
+        index.starts_with(&format!(
+            "{}EXPRESSION SEARCH V1\n",
+            crate::STORED_PROVENANCE
+        )),
+        "an index search is unchanged: {index}"
+    );
+    assert!(!index.contains("CORPORATE ACTIONS"), "{index}");
+    assert!(!index.contains("GROSS OF EVERY CHARGE"), "{index}");
+    Ok(())
+}

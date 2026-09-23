@@ -217,6 +217,10 @@ fn render(holdings: &Holdings, vendor: Vendor, window: ResearchWindow) -> String
         holdings.census.spot,
         holdings.census.with_contract
     );
+    // EVERY ROW ABOVE IS A STOCK, so the statement every report over a stock
+    // carries is carried here too, beside the no-charges discovery policy it
+    // qualifies. D-0694.
+    let _ = writeln!(out, "{}", runner::audit::CORPORATE_ACTIONS_UNCHECKED);
     out
 }
 
@@ -335,6 +339,23 @@ mod tests {
         assert!(text.contains("0/81"));
         assert!(text.contains("NOT A SWEEP OR A COMPLETENESS CERTIFICATE"));
         assert!(text.contains("No stock search was started"));
+    }
+
+    /// Every row of this inventory is a stock, so it carries the statement
+    /// every report over a stock carries, after the discovery policy. D-0694.
+    #[test]
+    fn the_stock_inventory_states_corporate_actions_are_unchecked() {
+        let window = ResearchWindow::at(clock(2026, 9, 5)).unwrap();
+        let text = render(&Holdings::default(), Vendor::Zerodha, window);
+        assert!(
+            text.ends_with(&format!("{}\n", runner::audit::CORPORATE_ACTIONS_UNCHECKED)),
+            "{text}"
+        );
+        assert!(
+            text.find("Discovery policy requested: no charges")
+                < text.find(runner::audit::CORPORATE_ACTIONS_UNCHECKED),
+            "{text}"
+        );
     }
 
     #[test]

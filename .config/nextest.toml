@@ -38,3 +38,11 @@ priority = 100
 [[profile.default.overrides]]
 filter = 'test(cash_inventory_never_relabels_an_index_as_a_stock) | test(an_fno_index_underlying_is_refused_by_the_surface_sentence) | test(every_knob_that_moves_the_answer_moves_the_identity)'
 priority = 100
+
+# D-0694: the stock statement on every stored report and the ordinary stored
+# sweep's minute-gap withholding. Pure renders and small generated stores, run
+# early so a cli mutant that breaks either fails before the long suites. This
+# changes order only: nothing is filtered, skipped, retried or ignored.
+[[profile.default.overrides]]
+filter = 'test(equity_statement_tests::) | test(the_ordinary_stored_sweep_) | test(a_gap_free_month_keeps_its_bars_and_masks_and_moves_its_identity) | test(every_stored_report_over_a_stock_states_corporate_actions_are_unchecked) | test(a_pool_with_a_stock_states_corporate_actions_are_unchecked) | test(the_stock_inventory_states_corporate_actions_are_unchecked) | test(the_equity_note_is_decided_by_the_kind) | test(a_walk_offering_a_stock_states_corporate_actions_are_unchecked) | test(a_stock_search_states_corporate_actions_are_unchecked) | test(a_stock_research_scope_states_corporate_actions_are_unchecked)'
+priority = 100

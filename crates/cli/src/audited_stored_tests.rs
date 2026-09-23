@@ -17,16 +17,22 @@ pub(crate) fn with_warmed_store<R>(run: impl FnOnce(&std::path::Path) -> R) -> R
 
 struct Fixture {
     root: PathBuf,
+    /// The swept instrument every file and request names. NIFTY unless a
+    /// test needs a cash equity, which D-0694's statement is about.
+    symbol: &'static str,
 }
 impl Fixture {
     fn new() -> Self {
+        Self::for_symbol("NIFTY")
+    }
+    fn for_symbol(symbol: &'static str) -> Self {
         let root = std::env::temp_dir().join(format!(
             "brutex-audited-input-fixture-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&root).expect("scratch");
-        let fixture = Self { root };
+        let fixture = Self { root, symbol };
         for (month, day) in [(4, 30), (5, 2)] {
             let rows = generated_session(month, day);
             assert!(!rows.is_empty());
@@ -43,7 +49,10 @@ impl Fixture {
         fixture
     }
     fn warmed() -> Self {
-        let fixture = Self::new();
+        Self::warmed_for("NIFTY")
+    }
+    fn warmed_for(symbol: &'static str) -> Self {
+        let fixture = Self::for_symbol(symbol);
         for day in 5..=13 {
             let rows = generated_session(5, day);
             if rows.is_empty() {
@@ -60,7 +69,7 @@ impl Fixture {
         fixture
     }
     fn path(&self, month: u8, timeframe: Timeframe) -> PathBuf {
-        let key = stored::swept_index("NIFTY").expect("key");
+        let key = stored::swept_index(self.symbol).expect("key");
         StorePath::for_key(
             Vendor::Zerodha,
             &key,
@@ -72,7 +81,7 @@ impl Fixture {
         .to_path_buf(&self.root)
     }
     fn write(&self, month: u8, timeframe: Timeframe, rows: &[Bar]) {
-        let key = stored::swept_index("NIFTY").expect("key");
+        let key = stored::swept_index(self.symbol).expect("key");
         let path = StorePath::for_key(
             Vendor::Zerodha,
             &key,
@@ -81,7 +90,7 @@ impl Fixture {
             FileKind::Bars,
         )
         .expect("path");
-        let hash = brutex_core::universe::fnv1a("NIFTY").to_le_bytes();
+        let hash = brutex_core::universe::fnv1a(self.symbol).to_le_bytes();
         let symbol = u32::from_le_bytes(hash[..4].try_into().expect("low32"));
         let mut file = BarFile::open_or_create(&self.root, path, symbol).expect("writer");
         file.append(rows).expect("generated fixture rows");
@@ -90,7 +99,7 @@ impl Fixture {
         Request {
             store_root: &self.root,
             vendor: Vendor::Zerodha,
-            underlying: "NIFTY",
+            underlying: self.symbol,
             rung,
             year: 2025,
             month: 5,
@@ -104,7 +113,7 @@ impl Fixture {
         crate::audit_stored_kernel(crate::StoredSweepRequest {
             root: self.root.clone(),
             vendor: Vendor::Zerodha,
-            underlying: "NIFTY",
+            underlying: self.symbol,
             rung,
             year: 2025,
             month: 5,
@@ -117,7 +126,7 @@ impl Fixture {
         crate::audit_range_kernel(crate::StoredRangeAuditRequest {
             root: self.root.clone(),
             vendor: Vendor::Zerodha,
-            underlying: "NIFTY",
+            underlying: self.symbol,
             rung,
             from: (2025, 5),
             to,
@@ -131,7 +140,7 @@ impl Fixture {
         crate::screen_range_kernel(crate::StoredScreenRequest {
             root: self.root.clone(),
             vendor: Vendor::Zerodha,
-            underlying: "NIFTY",
+            underlying: self.symbol,
             rung,
             span: ((2025, 5), (2025, 5)),
             support_ppm,
@@ -143,6 +152,36 @@ impl Fixture {
             attempt: Some(13),
             commit: "generated-stored-screen-fixture",
         })
+    }
+
+    /// The ordinary `sweep-stored` door over May 2025. D-0694.
+    fn sweep(&self, rung: &str) -> Result<String, String> {
+        crate::sweep_stored_kernel(self.month_request(rung))
+    }
+
+    fn month_request<'a>(&self, rung: &'a str) -> crate::StoredSweepRequest<'a> {
+        crate::StoredSweepRequest {
+            root: self.root.clone(),
+            vendor: Vendor::Zerodha,
+            underlying: self.symbol,
+            rung,
+            year: 2025,
+            month: 5,
+            min_hits: u64::MAX,
+            commit: "generated-stored-sweep-fixture",
+        }
+    }
+
+    /// The `auto-stored` threshold search over May 2025. D-0694.
+    fn auto(&self, rung: &str) -> Result<String, String> {
+        crate::auto_stored_kernel(
+            &self.root,
+            Vendor::Zerodha,
+            self.symbol,
+            rung,
+            ((2025, 5), (2025, 5)),
+            "generated-stored-auto-fixture",
+        )
     }
 
     fn omit_owned_minutes(&self, holed_days: &[u8]) {
@@ -1558,4 +1597,254 @@ fn a_contract_reaching_the_stored_screen_is_refused_before_it_is_recorded() {
     contract_is_refused_by("screen_range_kernel", |fixture| {
         fixture.screen("5min", 900_000)
     });
+}
+
+/// **The ordinary stored sweep withholds a holed session and names it, as
+/// `screen`, `audit-range`, `auto-stored` and `pool` do.** D-0694.
+///
+/// 2025-05-05 loses one interior minute. Before D-0694 this door kept the day:
+/// on `1min` the bar after the hole was folded as the neighbour of the bar
+/// before it, and on `5min` the exact-minute overlay refused the whole month.
+/// Now the day is out of the swept sample, no bar of it reaches the column,
+/// the report names it and the recorded bar count excludes it, and the source
+/// file is untouched.
+#[test]
+fn the_ordinary_stored_sweep_withholds_and_names_a_holed_session() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    crate::knobs::set("BRUTEX_CEILING", "256");
+    let holed = i64::from(
+        pull::session::Day::new(2025, 5, 5)
+            .expect("date")
+            .days_from_epoch(),
+    );
+    for (rung, retained, withheld) in [("1min", 2_625_u64, 374_u64), ("5min", 525, 75)] {
+        let fixture = Fixture::warmed();
+        fixture.omit_owned_minutes(&[5]);
+        let source = fixture.path(5, Timeframe::MINUTE_1);
+        let source_bytes = fs::read(&source).expect("owned incomplete minute source");
+
+        let inputs = crate::stored_sweep_inputs(&fixture.month_request(rung)).expect("inputs");
+        assert_eq!(inputs.loaded.bars.len() as u64, retained, "{rung}");
+        assert!(
+            inputs
+                .loaded
+                .bars
+                .iter()
+                .all(|bar| indicators::ist_day(bar.ts_micros) != holed),
+            "{rung}: no bar of the holed session may reach the column"
+        );
+        let gaps = inputs
+            .minute_gaps
+            .as_ref()
+            .expect("this door applies the minute-gap rule");
+        assert_eq!(gaps.day_numbers(), &[holed]);
+        assert_eq!(gaps.signal_bars(), withheld);
+        assert_eq!(gaps.minute_bars(), 0, "the execution minutes stay whole");
+
+        let report = fixture.sweep(rung).expect("the holed month sweeps");
+        assert!(
+            report.contains(&format!(
+                "MINUTE-GAP SESSIONS WITHHELD: {withheld} signal bar(s); IST dates: 2025-05-05. \
+                 The sweep uses the remaining {retained} signal bars."
+            )),
+            "{report}"
+        );
+        assert!(report.contains(&format!("· {retained} bars ·")), "{report}");
+        assert!(report.contains("RESULT RECORDED"), "{report}");
+        let mut ledger = crate::results::Results::open_read(&fixture.root).expect("sweep ledger");
+        assert_eq!(ledger.len().expect("one parent"), 1);
+        assert_eq!(ledger.read(0).expect("sweep parent").bars, retained);
+        drop(ledger);
+        assert_eq!(fs::read(&source).expect("unmodified source"), source_bytes);
+    }
+    crate::knobs::clear_all();
+}
+
+/// **A month with every session holed leaves nothing to sweep, and the
+/// ordinary door refuses before it opens an attempt.** D-0694.
+#[test]
+fn the_ordinary_stored_sweep_refuses_when_every_session_is_withheld() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    let fixture = Fixture::warmed();
+    fixture.omit_owned_minutes(&[2, 5, 6, 7, 8, 9, 12, 13]);
+    for rung in ["1min", "5min"] {
+        let refusal = fixture.sweep(rung).expect_err("no retained session");
+        assert_eq!(
+            refusal,
+            "every signal session has a minute gap; no sweepable bars remain"
+        );
+        assert!(!crate::results::Results::path(&fixture.root).exists());
+        assert_eq!(
+            crate::sweep_evidence::latest(&fixture.root, 1_048_576).expect("no empty attempt"),
+            None
+        );
+    }
+    crate::knobs::clear_all();
+}
+
+/// **A month with no hole keeps its bars and every mask, and moves its
+/// identity.** D-0694.
+///
+/// The minute-gap rule withholds nothing here, so the bars, both reference
+/// contexts and the anchored column must be byte-identical to the loads this
+/// door made before D-0694 (`CLAUDE.md` §3 rule 5). The rule is still a
+/// different computation from no rule, so the recorded identity binds its
+/// version and differs from the one the same month had before, while the
+/// checksum-audited door, which applies no rule, keeps the ladder alone.
+#[test]
+fn a_gap_free_month_keeps_its_bars_and_masks_and_moves_its_identity() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    crate::knobs::set("BRUTEX_CEILING", "256");
+    for rung in ["1min", "5min"] {
+        let fixture = Fixture::warmed();
+        let span = ((2025, 5), (2025, 5));
+        // The loads this door made before D-0694, in the same order.
+        let loaded =
+            stored::load(&fixture.root, Vendor::Zerodha, "NIFTY", rung, 2025, 5).expect("month");
+        let daily =
+            stored::load_daily_context(&fixture.root, Vendor::Zerodha, "NIFTY", span, &loaded.bars)
+                .expect("daily context");
+        let exact = stored::load_exact_minute_context(
+            &fixture.root,
+            Vendor::Zerodha,
+            "NIFTY",
+            span,
+            &loaded.bars,
+        )
+        .expect("exact-minute context");
+
+        let inputs = crate::stored_sweep_inputs(&fixture.month_request(rung)).expect("inputs");
+        assert!(
+            inputs
+                .minute_gaps
+                .as_ref()
+                .is_some_and(crate::minute_gaps::GapExclusion::is_empty),
+            "{rung}: a gap-free month withholds nothing"
+        );
+        assert_eq!(inputs.loaded.bars, loaded.bars, "{rung}: the same bars");
+        assert_eq!(inputs.daily.bars, daily.bars, "{rung}");
+        assert_eq!(inputs.daily.eligibility, daily.eligibility, "{rung}");
+        assert_eq!(inputs.exact_minute.bars, exact.bars, "{rung}");
+        let signal = stored::rung_length_micros(rung).expect("a swept rung");
+        let availability = stored::vwap_availability(&loaded.key);
+        let before =
+            crate::stored_anchored_column(&loaded.bars, &daily, &exact, signal, availability)
+                .expect("the column before D-0694");
+        let after = crate::stored_anchored_column(
+            &inputs.loaded.bars,
+            &inputs.daily,
+            &inputs.exact_minute,
+            signal,
+            availability,
+        )
+        .expect("the column after");
+        assert_eq!(after, before, "{rung}: every mask identical");
+
+        let report = fixture.sweep(rung).expect("the month sweeps");
+        assert!(!report.contains("MINUTE-GAP SESSIONS WITHHELD"), "{report}");
+        let mut ledger = crate::results::Results::open_read(&fixture.root).expect("sweep ledger");
+        let row = ledger.read(0).expect("sweep parent");
+        drop(ledger);
+        let execution = inputs
+            .execution_bars
+            .as_ref()
+            .map_or(loaded.bars.as_slice(), |minute| minute.bars.as_slice());
+        let digest = crate::stored_executed_digest(&loaded.bars, &exact, &daily, execution)
+            .expect("the same data term");
+        let ladder = crate::ladder_for(u64::MAX).expect("ladder");
+        let id = |params: runner::identity::Params| {
+            runner::identity::identity(&runner::identity::Run {
+                mask: vocab::ConditionMask::default(),
+                direction: runner::identity::Direction::Undirected,
+                instrument: &loaded.key,
+                timeframe: loaded.timeframe,
+                params,
+                data_digest: digest,
+                commit: "generated-stored-sweep-fixture",
+                feed: "zerodha",
+            })
+            .bytes()
+        };
+        let legacy = runner::identity::Params::of(ladder);
+        let gapped = legacy.with_policy(&[u64::from(crate::minute_gaps::MINUTE_GAP_POLICY)]);
+        assert_eq!(
+            crate::stored_month_params(ladder, Some(&crate::minute_gaps::GapExclusion::none())),
+            gapped
+        );
+        assert_eq!(
+            crate::stored_month_params(ladder, None),
+            legacy,
+            "the checksum-audited door keeps the ladder alone"
+        );
+        assert_eq!(
+            row.identity,
+            id(gapped),
+            "{rung}: the rule's version is bound"
+        );
+        assert_ne!(
+            row.identity,
+            id(legacy),
+            "{rung}: the identity this month had before D-0694 must not be reused"
+        );
+    }
+    crate::knobs::clear_all();
+}
+
+/// **Every stored report over a stock states corporate actions are
+/// unchecked, beside its gross-of-every-charge statement, and no report over
+/// an index does.** D-0694.
+///
+/// Drives each stored door end to end over the same generated month, once as
+/// RELIANCE's cash series and once as NIFTY: the ordinary and the
+/// checksum-audited sweep, the one-month audit, the range audit, the screen
+/// and the threshold search. The audits say it in their charge header; the
+/// others after the provenance banner.
+#[test]
+fn every_stored_report_over_a_stock_states_corporate_actions_are_unchecked() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    crate::knobs::set("BRUTEX_CEILING", "256");
+    for (symbol, stock) in [("RELIANCE", true), ("NIFTY", false)] {
+        let fixture = Fixture::warmed_for(symbol);
+        let audited = Inputs::load(fixture.request("5min")).expect("audited generated inputs");
+        let reports = [
+            ("sweep-stored", fixture.sweep("5min")),
+            (
+                "sweep-audited-stored",
+                crate::stored_month_kernel(
+                    fixture.month_request("5min"),
+                    audited.data(),
+                    Some(&audited),
+                ),
+            ),
+            ("audit-stored", fixture.audit("5min")),
+            ("audit-range", fixture.audit_range("5min", (2025, 5))),
+            ("screen", fixture.screen("5min", 1_000_000)),
+            ("auto-stored", fixture.auto("5min")),
+        ];
+        for (door, report) in reports {
+            let report = report.expect(door);
+            assert_eq!(
+                report.contains(runner::audit::CORPORATE_ACTIONS_UNCHECKED),
+                stock,
+                "{symbol} {door}:\n{report}"
+            );
+            assert_eq!(
+                report.contains("GROSS OF EVERY CHARGE"),
+                stock,
+                "{symbol} {door}:\n{report}"
+            );
+            if stock {
+                assert!(
+                    report.find("GROSS OF EVERY CHARGE")
+                        < report.find(runner::audit::CORPORATE_ACTIONS_UNCHECKED),
+                    "{door}: beside and after the charge statement:\n{report}"
+                );
+            }
+        }
+    }
+    crate::knobs::clear_all();
 }

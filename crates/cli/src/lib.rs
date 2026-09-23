@@ -50,6 +50,8 @@ pub mod checksum_receipts;
 #[path = "../commit_stamp.rs"]
 mod commit_stamp;
 #[cfg(test)]
+mod equity_statement_tests;
+#[cfg(test)]
 mod operator_boundary_tests;
 mod readonly_file;
 #[cfg(test)]
@@ -2624,6 +2626,32 @@ a file some earlier pull wrote, and the run identity beneath names the exact
 column they came from. A figure here describes that instrument and that month.
 ";
 
+/// [`STORED_PROVENANCE`], then what a stock's figures are made of. D-0694.
+///
+/// Every stored report that ranks or audits ONE instrument opens with this.
+/// For a cash equity it adds [`stored::equity_note`]: gross of every charge
+/// (`CLAUDE.md` §1, D-0681) and corporate actions unchecked (D-0018, D-0694),
+/// before any figure. For an index it adds nothing, so an index report is
+/// byte for byte what it was.
+///
+/// An audit's own charge header says both again, at length, when it renders.
+/// The banner carries them as well because an audit that trades nothing
+/// renders no header -- "no combination met the threshold, so there is
+/// nothing to trade" -- and its support counts are still made of a stock's
+/// unadjusted bars.
+fn stored_provenance_of(key: &brutex_core::instrument::InstrumentKey) -> String {
+    let mut out = String::from(STORED_PROVENANCE);
+    out.push_str(&stored::equity_note(key));
+    out
+}
+
+/// [`stored_provenance_of`] for a symbol as the operator typed it.
+pub(crate) fn stored_provenance(underlying: &str) -> String {
+    let mut out = String::from(STORED_PROVENANCE);
+    out.push_str(&stored::equity_note_for(underlying));
+    out
+}
+
 /// The commit this binary was BUILT from, if the build proved and stamped it.
 ///
 /// # Why `option_env!` plus a process-free build proof, and not runtime Git
@@ -2964,6 +2992,16 @@ pub(crate) struct StoredMonthInputs {
     pub(crate) execution_bars: Option<stored::Loaded>,
     pub(crate) daily: stored::DailyContext,
     pub(crate) exact_minute: stored::ExactMinuteContext,
+    /// The sessions this door withheld for an intraday minute hole, or `None`
+    /// for a door that applies no minute-gap rule. D-0694.
+    ///
+    /// `Some` is the ordinary `sweep-stored` door since D-0694: it withholds
+    /// exactly as `auto-stored`, `audit-range`, `screen` and `pool` do, and
+    /// binds [`crate::minute_gaps::MINUTE_GAP_POLICY`] into its identity even
+    /// when nothing was withheld. `None` is the checksum-audited door, which
+    /// the operator's answer did not reach; it withholds nothing and keeps the
+    /// identity it has always had.
+    pub(crate) minute_gaps: Option<crate::minute_gaps::GapExclusion>,
 }
 
 struct StoredSweepRequest<'a> {
@@ -3049,12 +3087,69 @@ fn sweep_stored_inner(
 
     let vendor = parse_vendor(vendor_word)?;
     let root = store_root()?;
-    let loaded = stored::load(&root, vendor, underlying, rung, year, month)?;
+    sweep_stored_kernel(StoredSweepRequest {
+        root,
+        vendor,
+        underlying,
+        rung,
+        year,
+        month,
+        min_hits,
+        commit,
+    })
+}
+
+/// The ordinary stored sweep after the operator's root and build are
+/// admitted. Private so generated tests can drive the door without the
+/// process environment, as [`audit_stored_kernel`] is.
+fn sweep_stored_kernel(request: StoredSweepRequest<'_>) -> Result<String, stored::Refusal> {
+    let inputs = stored_sweep_inputs(&request)?;
+    stored_month_kernel(request, &inputs, None)
+}
+
+/// The ordinary stored sweep's inputs, with every session whose one-minute
+/// series has an interior hole withheld. D-0694.
+///
+/// # The hole this closes
+///
+/// `auto-stored`, `audit-range`, `screen` and `pool` withhold such a day;
+/// this door did not. On a coarse rung the exact-minute overlay then refused
+/// the whole month on `MissingClosingMinute`. On `1min` it refused nothing:
+/// the evaluator folds one bar at a time, so the bar after a missing minute
+/// was compared with the bar before it -- every pattern, crossing and
+/// prior-bar position read two bars minutes apart as neighbours, and the
+/// masks it ranked were built on that.
+///
+/// # Exactly as the other four doors do it
+///
+/// The day list is MEASURED from the execution series with
+/// [`crate::minute_gaps::days_with_interior_gaps`] and never written down;
+/// [`crate::minute_gaps::withhold`] removes those days from the signal bars;
+/// and the daily and exact-minute contexts are derived afterwards, from the
+/// bars that remain, so all three agree. The execution series is left whole,
+/// as the other doors leave it: with no signal bar on a withheld day, none of
+/// its minutes is looked up. A month with no hole is copied unchanged.
+///
+/// The withheld sessions are carried to the report and named there, and
+/// [`crate::minute_gaps::MINUTE_GAP_POLICY`] enters the identity (see
+/// [`stored_month_params`]), so no run of this door shares an identity with
+/// one made before it withheld anything.
+fn stored_sweep_inputs(request: &StoredSweepRequest<'_>) -> Result<StoredMonthInputs, String> {
+    let StoredSweepRequest {
+        ref root,
+        vendor,
+        underlying,
+        rung,
+        year,
+        month,
+        ..
+    } = *request;
+    let mut loaded = stored::load(root, vendor, underlying, rung, year, month)?;
     let execution_bars = if rung == EXECUTION_RUNG {
         None
     } else {
         Some(stored::load(
-            &root,
+            root,
             vendor,
             underlying,
             EXECUTION_RUNG,
@@ -3072,39 +3167,68 @@ fn sweep_stored_inner(
             "the {EXECUTION_RUNG} execution series for {year}-{month:02} is malformed: {why}. Nothing was swept; repair or repull that exact feed/instrument/month"
         )
     })?;
+    let holed_days = crate::minute_gaps::days_with_interior_gaps(execution_slice);
+    let withheld = if holed_days.is_empty() {
+        0
+    } else {
+        let (kept, withheld) = crate::minute_gaps::withhold(&loaded.bars, &holed_days);
+        loaded.bars = kept;
+        withheld
+    };
+    if loaded.bars.is_empty() {
+        return Err("every signal session has a minute gap; no sweepable bars remain".to_owned());
+    }
     let daily = stored::load_daily_context(
-        &root,
+        root,
         vendor,
         underlying,
         ((year, month), (year, month)),
         &loaded.bars,
     )?;
     let exact_minute = stored::load_exact_minute_context(
-        &root,
+        root,
         vendor,
         underlying,
         ((year, month), (year, month)),
         &loaded.bars,
     )?;
-    stored_month_kernel(
-        StoredSweepRequest {
-            root,
-            vendor,
-            underlying,
-            rung,
-            year,
-            month,
-            min_hits,
-            commit,
-        },
-        &StoredMonthInputs {
-            loaded,
-            execution_bars,
-            daily,
-            exact_minute,
-        },
-        None,
-    )
+    Ok(StoredMonthInputs {
+        loaded,
+        execution_bars,
+        daily,
+        exact_minute,
+        minute_gaps: Some(crate::minute_gaps::GapExclusion::signal_only(
+            holed_days, withheld,
+        )),
+    })
+}
+
+/// The params term of a stored month's identity. D-0694.
+///
+/// `None` is the checksum-audited door, which applies no minute-gap rule: its
+/// params are the ladder alone, exactly as every run of it before D-0694.
+///
+/// `Some` is the ordinary door, which withholds holed sessions since D-0694.
+/// Its masks changed, so its identity must: the ladder is folded with
+/// [`crate::minute_gaps::MINUTE_GAP_POLICY`] through the same
+/// `Params::with_policy` every other door uses for a choice outside the
+/// ladder. The VERSION is bound and not only its consequence, the rule
+/// `runner::identity::DailyReferenceBinding::swept_series_calendar_policy`
+/// states: a month with no hole computes the same bars under both rules, and
+/// two runs that agree by luck are still two different computations. Rows
+/// recorded before it keep their own identities and stay valid under them.
+///
+/// It is NOT `stored::EXACT_MINUTE_GAP_POLICY`, whose "gap" is the opening
+/// gap `GapFib` measures: that versions the exact-minute overlay, every
+/// stored door and saved receipt binds it, and its meaning did not change.
+fn stored_month_params(
+    ladder: Ladder,
+    minute_gaps: Option<&crate::minute_gaps::GapExclusion>,
+) -> Params {
+    let params = Params::of(ladder);
+    minute_gaps.map_or(params, |_| {
+        params.with_policy(&[u64::from(crate::minute_gaps::MINUTE_GAP_POLICY)])
+    })
 }
 
 #[expect(
@@ -3131,6 +3255,7 @@ fn stored_month_kernel(
         execution_bars,
         daily,
         exact_minute,
+        minute_gaps,
     } = inputs;
     if let Some(guard) = integrity {
         guard.require_current()?;
@@ -3162,7 +3287,10 @@ fn stored_month_kernel(
         direction: RunDirection::Undirected,
         instrument: &loaded.key,
         timeframe: loaded.timeframe,
-        params: Params::of(ladder),
+        // THE LADDER, AND THE MINUTE-GAP RULE THIS DOOR APPLIED. D-0694: the
+        // ordinary door withholds holed sessions and binds that rule's version;
+        // the checksum-audited door applies none and keeps the ladder alone.
+        params: stored_month_params(ladder, minute_gaps.as_ref()),
         data_digest: digest,
         commit,
         // THE FEED, READ OFF THE LOAD RATHER THAN OFF THE ARGUMENT.
@@ -3225,7 +3353,10 @@ fn stored_month_kernel(
     attempt.check()?;
     save_ranked_evidence(&attempt, &ranked.top)?;
 
-    let mut out = String::from(STORED_PROVENANCE);
+    // A STOCK'S REPORT SAYS WHAT ITS FIGURES ARE MADE OF, BEFORE ANY OF THEM:
+    // gross of every charge, and corporate actions unchecked. An index's is
+    // unchanged. D-0694.
+    let mut out = stored_provenance_of(&loaded.key);
     let _ = writeln!(
         out,
         "feed {} · {} · {} · {year}-{month:02} · {} bars · built at {commit}",
@@ -3234,6 +3365,18 @@ fn stored_month_kernel(
         loaded.timeframe,
         loaded.bars.len(),
     );
+    // WITHHELD SESSIONS ARE NAMED, the way `screen` names them: a sweep over
+    // fewer sessions than the month holds must say which, or its bar count
+    // describes a month the column never saw. D-0694.
+    if let Some(gaps) = minute_gaps.as_ref().filter(|gaps| !gaps.is_empty()) {
+        let _ = writeln!(
+            out,
+            "MINUTE-GAP SESSIONS WITHHELD: {} signal bar(s); IST dates: {}. The sweep uses the remaining {} signal bars.",
+            gaps.signal_bars(),
+            gaps.day_names().join(" "),
+            loaded.bars.len(),
+        );
+    }
     out.push_str(&daily_reference_note(daily, exact_minute));
     if let Some(guard) = integrity {
         out.push_str(&guard.note());
@@ -3531,7 +3674,22 @@ fn auto_stored_inner(
     })?;
     let vendor = parse_vendor(vendor_word)?;
     let root = store_root()?;
-    let mut span = stored::load_span(&root, vendor, underlying, rung, from, to)?;
+    auto_stored_kernel(&root, vendor, underlying, rung, (from, to), commit)
+}
+
+/// [`auto_stored_inner`] after the operator's root and build are admitted.
+/// Private so generated tests can drive the search without the process
+/// environment, as [`audit_stored_kernel`] is.
+fn auto_stored_kernel(
+    root: &std::path::Path,
+    vendor: Vendor,
+    underlying: &str,
+    rung: &str,
+    months: ((u16, u8), (u16, u8)),
+    commit: &str,
+) -> Result<String, stored::Refusal> {
+    let (from, to) = months;
+    let mut span = stored::load_span(root, vendor, underlying, rung, from, to)?;
     let signal_length = stored::rung_length_micros(rung)?;
     // WITHHELD HERE TOO, AND LEAVING IT OUT MADE THE OTHER TWO USELESS.
     //
@@ -3547,15 +3705,15 @@ fn auto_stored_inner(
     // execution series. One extra span read on a sizing run is the right trade
     // against a refusal that stops the run dead. See `crate::minute_gaps` for
     // what is withheld and why it is measured rather than listed.
-    let minutes = stored::load_span(&root, vendor, underlying, EXECUTION_RUNG, from, to)?.bars;
+    let minutes = stored::load_span(root, vendor, underlying, EXECUTION_RUNG, from, to)?.bars;
     let holed_days = crate::minute_gaps::days_with_interior_gaps(&minutes);
     if !holed_days.is_empty() {
         let (kept, _withheld) = crate::minute_gaps::withhold(&span.bars, &holed_days);
         span.bars = kept;
     }
-    let daily = stored::load_daily_context(&root, vendor, underlying, (from, to), &span.bars)?;
+    let daily = stored::load_daily_context(root, vendor, underlying, (from, to), &span.bars)?;
     let exact_minute =
-        stored::load_exact_minute_context(&root, vendor, underlying, (from, to), &span.bars)?;
+        stored::load_exact_minute_context(root, vendor, underlying, (from, to), &span.bars)?;
     let (probe_ceiling, named) = match crate::knobs::var("BRUTEX_CEILING") {
         None => (SEARCH_CEILING, false),
         Some(_) => (ceiling_from_env()?, true),
@@ -3570,7 +3728,7 @@ fn auto_stored_inner(
         commit,
     );
     let id = identity(&run);
-    let attempt = sweep_evidence::begin(&root, id.bytes(), sweep_evidence::Operation::AutoSearch)?;
+    let attempt = sweep_evidence::begin(root, id.bytes(), sweep_evidence::Operation::AutoSearch)?;
     let availability = stored::vwap_availability(&span.key);
     let column = stored_anchored_column(
         &span.bars,
@@ -3615,13 +3773,13 @@ fn auto_stored_inner(
     // Honoured when named, `SEARCH_CEILING` when not -- and the report says
     // which, because a probe whose budget is invisible is a probe whose answer
     // cannot be read.
-    let found = auto_recorded(&root, &run, search_ladder, &column)?;
+    let found = auto_recorded(root, &run, search_ladder, &column)?;
     attempt.finish(sweep_completion(
         found.affordable && found.outcome.is_complete(),
         found.outcome.sweep.halted.as_ref(),
     ))?;
 
-    let mut out = String::from(STORED_PROVENANCE);
+    let mut out = stored_provenance_of(&span.key);
     // THE BUDGET THE ANSWER WAS FOUND UNDER, because the answer is meaningless
     // without it. This command's usage tells the operator to run it before
     // `range-all`, so its threshold is read as "what this machine can afford" --
@@ -5943,7 +6101,7 @@ fn month_banner(
     bars: usize,
     commit: &str,
 ) -> String {
-    let mut header = String::from(STORED_PROVENANCE);
+    let mut header = stored_provenance(underlying);
     let _ = writeln!(
         header,
         "feed {feed} · {underlying} · {timeframe} · {year}-{month:02} · {bars} bars · built at {commit}"
@@ -5989,7 +6147,7 @@ fn span_banner(
     to: (u16, u8),
     commit: &str,
 ) -> String {
-    let mut header = String::from(STORED_PROVENANCE);
+    let mut header = stored_provenance(underlying);
     let _ = writeln!(
         header,
         "feed {} · {underlying} · {} · {}-{:02}..{}-{:02} · {} of {} months · {} bars · built at {commit}",
@@ -7518,7 +7676,7 @@ pub fn render_top_record(
     damaged: Option<&str>,
     unreadable: &str,
 ) -> String {
-    let mut out = String::from(STORED_PROVENANCE);
+    let mut out = stored_provenance(&crate::results::read_field(&rows.underlying));
     out.push('\n');
     let _ = writeln!(
         out,
@@ -10511,7 +10669,7 @@ fn descent_banner(
     steps: usize,
 ) -> String {
     let ((fy, fm), (ty, tm)) = span;
-    let mut out = String::from(STORED_PROVENANCE);
+    let mut out = stored_provenance(underlying);
     let trades = floor.saturating_mul(bars) / 1_000_000;
     let _ = writeln!(
         out,
@@ -14134,7 +14292,7 @@ fn descend_banner(
     months: u64,
     cadence: Cadence,
 ) -> String {
-    let mut out = String::from(STORED_PROVENANCE);
+    let mut out = stored_provenance(underlying);
     let _ = writeln!(
         out,
         "feed {vendor_word} · {underlying} · {known} · {}-{:02}..{}-{:02} · \
@@ -14483,7 +14641,7 @@ fn range_opening(
     support_ppm: Option<u64>,
 ) -> String {
     let (from, to) = span;
-    let mut out = String::from(STORED_PROVENANCE);
+    let mut out = stored_provenance(underlying);
     let _ = writeln!(
         out,
         "feed {vendor_word} · {underlying} · {} · {}-{:02}..{}-{:02} · support {}",
@@ -26664,8 +26822,11 @@ mod derived_floor_tests {
         assert_common_month_digest(source);
         for (name, inputs) in [
             (
-                "sweep_stored_inner",
-                "},&StoredMonthInputs{loaded,execution_bars,daily,exact_minute,},None,)",
+                // D-0694 moved the ordinary door's loads into
+                // `stored_sweep_inputs`, which withholds holed sessions;
+                // `sweep_stored_inner` admits the build and root and calls this.
+                "sweep_stored_kernel",
+                "letinputs=stored_sweep_inputs(&request)?;stored_month_kernel(request,&inputs,None)",
             ),
             ("sweep_audited_stored", "},inputs.data(),Some(&inputs),)"),
         ] {

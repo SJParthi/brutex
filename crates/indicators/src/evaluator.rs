@@ -958,9 +958,15 @@ impl Evaluator {
         // structural difference no price condition can express. Until these bits
         // existed the sweep could not tell one weekday from another at all.
         //
-        // A weekend bar sets NOTHING rather than being folded into a neighbour:
-        // NSE does not trade Saturday or Sunday, so such a bar is a store defect
-        // and calling it Friday would hide the only symptom of it.
+        // A weekend bar sets NOTHING rather than being folded into a neighbour.
+        // It is NOT a store defect, and this comment used to say it was: NSE
+        // does trade on weekends, and `docs/00-charter.md` §3 records six such
+        // sessions on disk -- three Budget days, two disaster-recovery
+        // Saturdays and the full session of 2024-01-20. The vocabulary has no
+        // weekend position, so the honest reading is "no weekday", not a guess
+        // at Friday (`docs/03-vocabulary.md` §4). `crate::weekday_bit` states
+        // the cost: those bars sit in a weekday candidate's support
+        // denominator and never in its numerator.
         //
         // Cost: one integer division and a five-arm match, per bar. O(1) in the
         // sense §3 rule 4 means — it does not grow with bars or candidates.

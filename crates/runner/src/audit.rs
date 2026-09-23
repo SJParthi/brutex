@@ -111,7 +111,61 @@ impl CostScope {
             Kind::Future { .. } | Kind::Option { .. } => None,
         }
     }
+
+    /// The charge and corporate-action statement a report that is NOT an
+    /// audit carries for this scope, or nothing for an index. D-0694.
+    ///
+    /// An audit opens with the full header [`render`] prints. Every other
+    /// report that ranks a cash equity -- a stored sweep, a range table, a
+    /// descent, a threshold search, a saved top list -- carries this shorter
+    /// statement instead: the same GROSS OF EVERY CHARGE fact D-0681 put in
+    /// the audit, then [`CORPORATE_ACTIONS_UNCHECKED`]. `CLAUDE.md` §1 asks
+    /// for the first on every report that ranks an equity; the operator's
+    /// answer recorded in D-0694 asks for the second beside it.
+    ///
+    /// Empty for an index, and that is the point rather than an omission: an
+    /// index never splits (D-0018), and every index report stays byte for
+    /// byte what it was.
+    #[must_use]
+    pub fn report_note(self) -> String {
+        match self {
+            Self::IndexSpot => String::new(),
+            Self::CashEquity => format!("{CASH_EQUITY_GROSS}\n\n{CORPORATE_ACTIONS_UNCHECKED}\n\n"),
+        }
+    }
 }
+
+/// What a cash-equity report that is not an audit states about charges.
+/// D-0694.
+///
+/// The one-paragraph form of what [`equity_header`] says at length: every
+/// total is gross of every charge a share trade pays, and the result is
+/// cost-excluded research. It names no rate, for the reason the audit header
+/// names none: `docs/00-charter.md` records no source for one.
+pub const CASH_EQUITY_GROSS: &str = "  CASH EQUITY. EVERY TOTAL BELOW IS GROSS OF EVERY CHARGE: brokerage,\n  \
+     STT, stamp duty, exchange charges, the SEBI fee and GST apply to a\n  \
+     share trade and none is subtracted. This is cost-excluded research,\n  \
+     not a net result (D-0509, D-0525, D-0681).";
+
+/// What every report that ranks or audits a cash equity states about
+/// corporate actions. D-0694.
+///
+/// D-0018 requires a suspected split or bonus -- an unexplained overnight
+/// gap beyond a threshold -- to refuse its window and name the date.
+/// `docs/00-charter.md` names no verified split-and-bonus source and D-0018
+/// names no number, so no threshold exists and no detector runs
+/// (`docs/06-limits.md` §41.3). An unadjusted 1:5 split is a fake 80%
+/// overnight crash and every bar-shape condition fires on it.
+///
+/// The operator chose, on 2026-09-23, to keep ranking equities for discovery
+/// and to say so on every such report rather than refuse them. This is the
+/// sentence that says so. An index never splits, so no index report carries
+/// it.
+pub const CORPORATE_ACTIONS_UNCHECKED: &str = "  CORPORATE ACTIONS ARE UNCHECKED (D-0018, D-0694). No split, bonus or\n  \
+     demerger detection has run over these bars, so an overnight jump in\n  \
+     them can be a corporate action rather than a market move. D-0018\n  \
+     requires such a window to be refused with its date named; no\n  \
+     threshold for that detector is sourced, so none was applied.";
 
 /// The charge statement for an index-spot run, byte-identical to the header
 /// every run printed before D-0681.
@@ -154,6 +208,10 @@ fn index_header(out: &mut String) {
 /// equity charge rate, and quoting one would be the invention `CLAUDE.md` §3
 /// rule 1 forbids. The tick paragraph is the same fact the index header
 /// states, because both blocks fill at printed prices whatever the instrument.
+///
+/// It ends with [`CORPORATE_ACTIONS_UNCHECKED`], beside the charge statement
+/// and before any figure, because both are facts about what the totals below
+/// are made of. D-0694.
 fn equity_header(out: &mut String) {
     let _ = writeln!(
         out,
@@ -171,7 +229,8 @@ fn equity_header(out: &mut String) {
          fill at prices the bar actually printed -- the open on the kind\n  \
          reading, the printed extreme on the harsh one -- so every total is\n  \
          also GROSS OF THE SPREAD, and the cost of crossing the spread is\n  \
-         measured nowhere in this run."
+         measured nowhere in this run.\n\n\
+         {CORPORATE_ACTIONS_UNCHECKED}"
     );
 }
 
@@ -1321,7 +1380,10 @@ mod tests {
             "the better rung must sort above the saturated one:\n{out}"
         );
     }
-    use super::{CostScope, bootstrap, grid, overfitting, render_selected, trades, walk_forward};
+    use super::{
+        CASH_EQUITY_GROSS, CORPORATE_ACTIONS_UNCHECKED, CostScope, bootstrap, grid, overfitting,
+        render_selected, trades, walk_forward,
+    };
     use crate::pbo::{Placement, probability_of_overfitting};
     use crate::trade::{Trade, Trades};
     use crate::validate::Validated;
@@ -1905,6 +1967,91 @@ mod tests {
                 "{scope:?}: the statement must not depend on what the run produced"
             );
         }
+    }
+
+    /// A CASH-EQUITY AUDIT SAYS CORPORATE ACTIONS ARE UNCHECKED, BESIDE ITS
+    /// CHARGE STATEMENT, AND AN INDEX AUDIT NEVER DOES. D-0694.
+    ///
+    /// No split, bonus or demerger detector exists (D-0018 names no threshold
+    /// and the charter names no source), so an overnight jump in a stock's
+    /// bars can be a corporate action. The operator chose to keep ranking
+    /// stocks and to say so; an index never splits and says nothing.
+    #[test]
+    fn an_equity_audit_states_corporate_actions_are_unchecked_and_an_index_audit_does_not() {
+        for out in [
+            super::render(CostScope::CashEquity, None, None, None, None, None, 10),
+            populated_render(CostScope::CashEquity),
+        ] {
+            let header = out
+                .split_once("\nTRADES\n")
+                .map(|(header, _)| header)
+                .expect("an audit carries its TRADES section");
+            assert!(
+                header.ends_with(&format!("{CORPORATE_ACTIONS_UNCHECKED}\n")),
+                "the statement must close the charge header, before any figure:\n{out}"
+            );
+            for fact in [
+                "CORPORATE ACTIONS ARE UNCHECKED (D-0018, D-0694)",
+                "No split, bonus or\n  demerger detection has run",
+                "can be a corporate action rather than a market move",
+                "no\n  threshold for that detector is sourced",
+            ] {
+                assert!(header.contains(fact), "missing {fact:?}:\n{out}");
+            }
+            assert_eq!(
+                out.matches("CORPORATE ACTIONS").count(),
+                1,
+                "said once, in the header:\n{out}"
+            );
+        }
+        for out in [
+            super::render(CostScope::IndexSpot, None, None, None, None, None, 10),
+            populated_render(CostScope::IndexSpot),
+        ] {
+            for equity_only in ["CORPORATE ACTIONS", "D-0694", "demerger"] {
+                assert!(
+                    !out.contains(equity_only),
+                    "an index never splits, so {equity_only:?} is not its statement:\n{out}"
+                );
+            }
+        }
+    }
+
+    /// THE NON-AUDIT NOTE IS GROSS, THEN CORPORATE ACTIONS, FOR A STOCK, AND
+    /// NOTHING AT ALL FOR AN INDEX. D-0694.
+    #[test]
+    fn a_report_note_is_gross_then_corporate_actions_for_a_stock_and_empty_for_an_index() {
+        assert_eq!(
+            CostScope::IndexSpot.report_note(),
+            "",
+            "an index report must stay byte for byte what it was"
+        );
+        let note = CostScope::CashEquity.report_note();
+        assert_eq!(
+            note,
+            format!("{CASH_EQUITY_GROSS}\n\n{CORPORATE_ACTIONS_UNCHECKED}\n\n")
+        );
+        assert!(
+            note.starts_with("  CASH EQUITY. EVERY TOTAL BELOW IS GROSS OF EVERY CHARGE"),
+            "{note}"
+        );
+        for fact in [
+            "brokerage",
+            "STT",
+            "stamp duty",
+            "exchange charges",
+            "SEBI fee",
+            "GST",
+            "cost-excluded research",
+            "D-0681",
+            "CORPORATE ACTIONS ARE UNCHECKED (D-0018, D-0694)",
+        ] {
+            assert!(note.contains(fact), "missing {fact:?}:\n{note}");
+        }
+        assert!(
+            note.find("GROSS OF EVERY CHARGE") < note.find("CORPORATE ACTIONS"),
+            "the corporate-action statement sits beside and after the charge one:\n{note}"
+        );
     }
 
     /// A grid with real cells, a baseline and a survivor.

@@ -354,11 +354,19 @@ fn sweep_under(
         tally.fold(row);
     }
 
+    // A STOCK AMONG THE MONTHS OFFERED PUTS ITS STATEMENT ON THE REPORT: gross
+    // of every charge, corporate actions unchecked. D-0694.
+    let equity_note = if stored::any_cash_equity(wanted.iter().map(|h| h.symbol.as_str())) {
+        runner::audit::CostScope::CashEquity.report_note()
+    } else {
+        String::new()
+    };
     Ok(render(
         vendor_word,
         rung,
         min_hits,
         commit,
+        &equity_note,
         &holdings.census,
         &tally,
         &rows,
@@ -668,16 +676,26 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
 }
 
 /// The report. One line per instrument-month, then the arithmetic.
+///
+/// `equity_note` follows the provenance banner: empty when every month
+/// offered was an index, and gross of every charge with corporate actions
+/// unchecked when any was a stock. D-0694.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one report over the whole walk; each argument is a separate fact it states, and bundling them would hide which one a caller left out"
+)]
 fn render(
     vendor_word: &str,
     rung: &str,
     min_hits: u64,
     commit: &str,
+    equity_note: &str,
     walk: &catalog::Census,
     tally: &Tally,
     rows: &[Row],
 ) -> String {
     let mut out = String::from(crate::STORED_PROVENANCE);
+    out.push_str(equity_note);
     let _ = writeln!(
         out,
         "feed {vendor_word} · rung {rung} · min_hits {min_hits} · built at {commit}"
@@ -833,6 +851,40 @@ mod tests {
         );
     }
 
+    /// **A walk that offers a stock states corporate actions are unchecked;
+    /// a walk over indices alone does not.** D-0694.
+    ///
+    /// The statement follows the provenance banner whenever any month offered
+    /// is a cash equity, refused or not: the report names that month, and the
+    /// reader must know what a stock's figures are made of before reading one.
+    #[test]
+    fn a_walk_offering_a_stock_states_corporate_actions_are_unchecked_and_an_index_walk_does_not() {
+        let root = scratch("equity-note");
+        let index = root.join("bars/groww/NSE/INDEX/NIFTY/1min");
+        std::fs::create_dir_all(&index).expect("dirs are creatable");
+        std::fs::write(index.join("2026-08.bin"), b"not a bar file").expect("writable");
+        let indices = sweep_under(&root, "groww", "1min", 100, "deadbeef").expect("runs");
+        assert!(
+            indices.starts_with(&format!("{}feed groww", crate::STORED_PROVENANCE)),
+            "an index walk is unchanged: {indices}"
+        );
+        assert!(!indices.contains("CORPORATE ACTIONS"), "{indices}");
+
+        let stock = root.join("bars/groww/NSE/CASH/RELIANCE/1min");
+        std::fs::create_dir_all(&stock).expect("dirs are creatable");
+        std::fs::write(stock.join("2026-08.bin"), b"not a bar file").expect("writable");
+        let mixed = sweep_under(&root, "groww", "1min", 100, "deadbeef").expect("runs");
+        assert!(
+            mixed.starts_with(&format!(
+                "{}{}feed groww",
+                crate::STORED_PROVENANCE,
+                runner::audit::CostScope::CashEquity.report_note()
+            )),
+            "{mixed}"
+        );
+        assert!(mixed.contains("RELIANCE"), "{mixed}");
+    }
+
     /// The feed and rung filter, so a run sweeps what was asked for and no more.
     #[test]
     fn only_the_named_feed_and_rung_are_swept() {
@@ -979,6 +1031,7 @@ mod tests {
             "1min",
             100,
             "deadbeef",
+            "",
             &store::catalog::Census::default(),
             &broken,
             &[],
@@ -1007,6 +1060,7 @@ mod tests {
             "1min",
             100,
             "deadbeef",
+            "",
             &store::catalog::Census::default(),
             &tally,
             &[],

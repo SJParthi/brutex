@@ -1988,6 +1988,43 @@ impl Drop for CostScopeFault {
     }
 }
 
+/// What a stored report over this instrument states about its charges and
+/// corporate actions before any figure: decided by WHAT the instrument is,
+/// exactly as [`audit_cost_scope`] and [`vwap_availability`] are. D-0694.
+///
+/// A cash equity gets [`runner::audit::CostScope::report_note`] -- gross of
+/// every charge, then corporate actions unchecked. An index gets nothing, so
+/// every index report stays byte for byte what it was. A contract never
+/// heads a stored report, because [`swept_index`] refuses one first, and it
+/// gets nothing here rather than a statement written for something else.
+///
+/// One `match` on a `Copy` discriminant, and no bar is read, so the answer is
+/// the same before the first bar as after the last.
+pub(crate) fn equity_note(key: &InstrumentKey) -> String {
+    runner::audit::CostScope::of(key.kind)
+        .map_or_else(String::new, runner::audit::CostScope::report_note)
+}
+
+/// [`equity_note`] for a symbol as the operator typed it.
+///
+/// A symbol [`swept_index`] refuses gets nothing: the run it would head
+/// refuses by name before it prints a figure, so there is no report for the
+/// statement to stand beside.
+pub(crate) fn equity_note_for(underlying: &str) -> String {
+    swept_index(underlying).map_or_else(|_| String::new(), |key| equity_note(&key))
+}
+
+/// Whether any of these symbols is a swept cash equity. D-0694.
+///
+/// For a report over several instruments -- the pool, `sweep-all` -- which
+/// carries the corporate-action statement when any one of them can split and
+/// never when every one of them is an index.
+pub(crate) fn any_cash_equity<'a>(symbols: impl IntoIterator<Item = &'a str>) -> bool {
+    symbols
+        .into_iter()
+        .any(|symbol| swept_index(symbol).is_ok_and(|key| key.kind == Kind::Equity))
+}
+
 /// One instrument-month of real bars, or the reason there are none.
 ///
 /// # Errors
@@ -3746,6 +3783,55 @@ mod tests {
             assert!(why.ends_with(SURFACE_SENTENCE), "{tag}: {why}");
             let _ignored = std::fs::remove_dir_all(&r);
         }
+    }
+
+    /// **The corporate-action note is the KIND as well: a stock gets it, an
+    /// index and a contract never do.** D-0694.
+    ///
+    /// The note heads every stored report that ranks a stock and is not an
+    /// audit. An index report must stay byte for byte what it was, because an
+    /// index never splits (D-0018), and a contract never heads a report.
+    #[test]
+    fn the_equity_note_is_decided_by_the_kind_and_an_index_or_contract_gets_none() {
+        use brutex_core::instrument::{Expiry, Segment};
+        use brutex_core::symbol::Symbol;
+        use runner::audit::{CORPORATE_ACTIONS_UNCHECKED, CostScope};
+
+        for (_, symbol) in InstrumentKey::SWEPT {
+            let index = swept_index(symbol).expect("a swept index");
+            assert_eq!(equity_note(&index), "", "{symbol}");
+            assert_eq!(equity_note_for(symbol), "", "{symbol}");
+        }
+        for symbol in ["RELIANCE", "HINDALCO", "TCS"] {
+            let cash = swept_index(symbol).expect("an F&O cash equity");
+            assert_eq!(equity_note(&cash), CostScope::CashEquity.report_note());
+            assert_eq!(equity_note_for(symbol), CostScope::CashEquity.report_note());
+            assert!(equity_note(&cash).contains(CORPORATE_ACTIONS_UNCHECKED));
+        }
+        let future = InstrumentKey {
+            exchange: Exchange::Nse,
+            segment: Segment::Fno,
+            underlying: Symbol::new("RELIANCE").expect("valid"),
+            kind: Kind::Future {
+                expiry: Expiry::new(2026, 9, 29).expect("a real expiry"),
+            },
+        };
+        assert_eq!(
+            equity_note(&future),
+            "",
+            "a contract heads no stored report"
+        );
+        assert_eq!(
+            equity_note_for("ZZQXNOTFNO"),
+            "",
+            "a refused symbol heads no report"
+        );
+
+        assert!(!any_cash_equity([]), "an empty surface holds no stock");
+        assert!(!any_cash_equity(["NIFTY", "BANKNIFTY"]));
+        assert!(!any_cash_equity(["NIFTY", "ZZQXNOTFNO", "FINNIFTY"]));
+        assert!(any_cash_equity(["NIFTY", "RELIANCE"]));
+        assert!(any_cash_equity(["TCS"]));
     }
 
     /// **An unbounded argument is cut before it reaches the refusal.**

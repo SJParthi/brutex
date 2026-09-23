@@ -110,6 +110,22 @@ impl GapExclusion {
         }
     }
 
+    /// What a door that withholds from its SIGNAL bars alone removed. D-0694.
+    ///
+    /// `sweep-stored`, like `auto-stored`, `audit-range`, `screen` and `pool`,
+    /// removes the holed `days` from the signal series with [`withhold`] and
+    /// leaves its separately loaded execution minutes whole: with no signal
+    /// bar on a withheld day, none of that day's minutes is ever looked up. So
+    /// no minute bar was removed, and this says so rather than counting one.
+    #[must_use]
+    pub const fn signal_only(days: Vec<i64>, signal_bars: u64) -> Self {
+        Self {
+            days,
+            signal_bars,
+            minute_bars: 0,
+        }
+    }
+
     /// How many days were withheld.
     #[must_use]
     pub fn days(&self) -> usize {

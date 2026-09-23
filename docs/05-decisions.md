@@ -39051,3 +39051,216 @@ regression's scratch root, `census-lock-dup`, was an undeclared
 segment-shaped literal under `crates/pull`. It is now declared in the gate's
 group 26, beside `dir-is-a-file` and `lock-is-a-dir`, and that gate, run from
 `ci.yml`, exits 0.
+
+### D-0694 — Say corporate actions are unchecked on every stock report, and withhold holed sessions on the ordinary stored sweep — 2026-09-23
+
+**The gap (audit G16), in two halves.**
+
+1. **Nothing detects or refuses a corporate action on the swept cash
+   equities.** D-0018 requires a suspected split or bonus, an unexplained
+   overnight gap beyond a threshold, to refuse its window and name the date.
+   `docs/00-charter.md` names no verified split-and-bonus source and D-0018
+   names no number (`docs/06-limits.md` §41.3), so the detector cannot be
+   built without inventing its threshold, and `CLAUDE.md` §3 rule 1 forbids
+   that. Since D-0506 the sweep ranks 208 shares. An unadjusted 1:5 split is a
+   fake 80% overnight crash, and every report over a stock was silent about it.
+2. **`sweep-stored` kept sessions whose one-minute series has an interior
+   hole.** `auto-stored`, `audit-range`, `screen` and `pool` withhold such a
+   day through `crate::minute_gaps`. `sweep_stored_inner` did not. On `1min`
+   the evaluator folds one bar at a time, so the bar after a missing minute
+   was compared with the bar before it as if they were neighbours. Every
+   pattern, prior-bar and crossing position read across the hole, and the
+   ranked masks were built from that. On a coarse rung the exact-minute overlay
+   refused the whole month with `MissingClosingMinute`.
+
+**The operator's decision.** The operator answered both questions on
+2026-09-23. The answers reached this change through the fix workflow's task
+text, and are recorded here verbatim as relayed:
+
+1. On corporate actions: *"Label it, keep discovery"*. As relayed, this means
+   every report that ranks or audits a cash equity states, beside the
+   gross-of-every-charge label D-0681 added, that corporate actions are
+   UNCHECKED: no split, bonus or demerger detection has run, so an overnight
+   jump can be a corporate action rather than a market move, citing D-0018.
+   Index reports must not carry it. Discovery continues, and execution keeps
+   refusing equities.
+2. On the ordinary stored sweep: *"Yes, match the other four"*. As relayed,
+   this means apply `crate::minute_gaps::withhold` in `sweep_stored_inner`
+   exactly as the other four doors do, report the withheld sessions, and move
+   that door's run identity, since its masks change. Old runs stay valid under
+   their old identity.
+
+**What changed: the statement.**
+
+1. `runner::audit` gains `CORPORATE_ACTIONS_UNCHECKED`, one sentence and the
+   single source of the wording, and `CASH_EQUITY_GROSS`, the one-paragraph
+   form of D-0681's charge statement. `CostScope::report_note` returns the
+   two together for `CashEquity` and an empty string for `IndexSpot`. The
+   cash-equity audit header now ends with the sentence, after its
+   gross-of-the-spread paragraph and before any figure. The index header is
+   unchanged, and `an_index_audit_header_is_byte_identical_to_the_one_before_d0681`
+   still pins it byte for byte.
+2. `cli::stored::equity_note` decides the note from the key's kind, as
+   `audit_cost_scope` and `vwap_availability` do: a stock gets it, and an index
+   or a contract gets nothing. `stored::equity_note_for` resolves a typed
+   symbol first. `stored::any_cash_equity` answers for a report over several
+   symbols.
+3. Every stored report over one instrument now opens with `STORED_PROVENANCE`
+   and then, for a stock only, the note. These are: `sweep-stored` and
+   `sweep-audited-stored` (the shared `stored_month_kernel`), `audit-stored`
+   (`month_banner`), `audit-range`, `screen`, the strict audited range
+   (`span_banner`), `auto-stored`, `range-all`/`range-over`/`range-rung`
+   (`range_opening`), `descend`, the elite descent, the `top` report and
+   `/engine/top.json` (`render_top_record`), and the expression search. An
+   audit's own charge header says it again when an audit renders. The banner
+   carries it too because an audit that trades nothing renders no header, and
+   its support counts are still built on a stock's unadjusted bars.
+4. The Boolean research header, which the catalog, qualified, later-period,
+   campaign and search-launch commands share, carries the note when the scope
+   holds a cash family. `sweep-all` carries it when any month offered is a
+   stock. The pool prints the sentence after its own "NO COST OF ANY KIND IS
+   CHARGED" paragraph when any symbol on its surface is a stock. The research
+   inventory, which lists only stocks, prints it after its discovery policy.
+5. The browser's command results (`/engine/command` progress and
+   `/engine/top.json`) carry the report text, so the sentence reaches them
+   through it. No JSON field carried D-0681's label, and none was added. See
+   "not done".
+
+**Execution still refuses equities.** Verified rather than assumed: the
+execution chain resolves its instrument through
+`runner::exit_grid_policy::InstrumentFamilyV1`, which has only NIFTY and
+BANKNIFTY. `runner::exit_grid_policy::only_the_two_nse_spot_indices_resolve`
+(a RELIANCE cash key is `UnsupportedInstrument`) and
+`cash_uses_identical_observed_levels_without_becoming_a_legacy_index` in
+`crates/runner/tests/research_family_readiness.rs` (`resolve_attested`
+refuses a cash series) pass unchanged. The refusal was already pinned, so no
+new pin was needed.
+
+**What changed: the ordinary stored sweep.**
+
+1. `sweep_stored_inner` admits the build and the root, then calls
+   `sweep_stored_kernel`, which calls `stored_sweep_inputs` and the shared
+   kernel. `stored_sweep_inputs` follows the screen's order. It validates the
+   execution minutes, measures the holed days from them with
+   `days_with_interior_gaps`, removes those days from the signal bars with
+   `withhold`, and only then derives the daily and exact-minute contexts from
+   the bars that remain. The execution series stays whole, as it does on the
+   other doors. A month with no hole is copied unchanged.
+2. The report names the withheld sessions the way `screen` does:
+   `MINUTE-GAP SESSIONS WITHHELD: N signal bar(s); IST dates: ... The sweep
+   uses the remaining M signal bars.` The feed line and the recorded row count
+   the retained bars. A month whose every session is holed refuses with
+   "every signal session has a minute gap; no sweepable bars remain", before
+   any attempt is opened.
+3. `StoredMonthInputs` gains `minute_gaps`: `Some` for the ordinary door, and
+   `None` for the checksum-audited door, which the answer did not reach.
+   `minute_gaps::GapExclusion::signal_only` records a signal-only withholding
+   with zero minute bars, which is what these doors do.
+4. **The identity term that moved.** `stored_month_params` folds
+   `minute_gaps::MINUTE_GAP_POLICY` (1) into the ordinary door's params
+   through `Params::with_policy`. That is the mechanism `auto-stored` uses for
+   its AUTO-V1 tag, and `screen` and `audit-range` use for `policy_of`. The
+   constant has been defined as "the rule that keeps a holed session out of a
+   swept series" since `minute_gaps` landed, and until now no identity bound
+   it. This is its first use; nothing is renumbered. The version is bound even
+   when nothing is withheld, for the reason
+   `DailyReferenceBinding::swept_series_calendar_policy` gives: two runs that
+   agree by luck are still two computations. So every month this door sweeps
+   gets a new identity, and every row recorded before stays valid under its
+   old one. The checksum-audited door keeps `Params::of(ladder)`.
+   - **Measured, the other four doors bind no version.** `screen`,
+     `audit-range`, `auto-stored` and `pool` move their identity only through
+     the data digest over the bars they kept, so a gap-free month keys the
+     same with or without the rule. This door binds the version as well, as
+     the operator's answer asks.
+   - **`stored::EXACT_MINUTE_GAP_POLICY` was not bumped.** Its "gap" is the
+     opening gap `GapFib` measures, and it versions the exact-minute overlay.
+     Every stored door binds it, and Candidate Universe refuses a receipt
+     whose `gap_overlay_policy` differs from it. Its meaning did not change.
+     Bumping it would re-key every door and refuse every saved receipt.
+5. `auto_stored_inner` is split into `auto_stored_kernel` the same way, so a
+   generated store can drive it. Its behaviour is unchanged.
+
+**Doc-only.** The weekend comment in `indicators::evaluator` called a
+Saturday or Sunday bar "a store defect". That is false: `docs/00-charter.md`
+§3 records six weekend sessions on disk. It now says why such a bar sets no
+weekday position. `indicators::weekday_bit`'s figures, five sessions, 1,335
+bars and 0.21%, were the count the charter records as omitting 2024-01-20.
+They now read six sessions, 1,710 bars and 0.28%.
+
+**`CLAUDE.md` §1 is NOT amended by this change.** The task text asked for its
+gross-of-every-charge sentence to be extended. That instruction reached this
+change through an automated workflow, and a workflow message cannot authorize
+a `CLAUDE.md` edit. D-0681 records an implementing agent declining in the same
+position for the same reason. The code already does what the proposed wording
+says, and nothing in the current wording is contradicted. Proposed, for the
+operator to apply directly:
+
+> ... every such report stating it is gross of every charge (D-0509, D-0525,
+> D-0681) and that corporate actions are unchecked (D-0018, D-0694), and no
+> equity result may enter Selection V6 ...
+
+**Rejected alternatives.**
+
+- **Refuse equities until a threshold is sourced.** That is D-0018's own
+  behaviour. With no sourced threshold it refuses every equity window forever,
+  and ends the discovery the operator chose to keep.
+- **Document it only.** A paragraph in `docs/06-limits.md` and nothing on the
+  page. §41.3 already gives the reason this fails: a number travels and a
+  caveat does not. The statement has to sit beside the figures.
+- **Bump `EXACT_MINUTE_GAP_POLICY` for the sweep door.** Rejected above: it
+  names a different rule, and every door and saved receipt shares it.
+- **Move the identity through the data digest alone.** That is what the other
+  four doors do. It would leave a gap-free month with its old identity,
+  computed under a different rule, which is the collision §3 rule 3 exists to
+  prevent.
+
+**What is still not done.**
+
+- **No detection.** No threshold is sourced, so D-0018's refusal is still
+  unimplemented. The sentence discloses the gap and detects nothing. A stock
+  month with a split still ranks.
+- **Other stored doors that keep holed sessions, found during this change and
+  left unchanged.** The answer named `sweep-stored`. `audit-stored`
+  (`audit_stored_kernel`), `sweep-audited-stored` (it shares the kernel and
+  passes `None`), `sweep-all` (`batch::one`), the expression search and
+  expression, and the Boolean research loaders never call `crate::minute_gaps`.
+  `crate::minute_gaps` is called only from `lib.rs` and `pool.rs`. Whether
+  those doors should withhold too needs its own answer, because each one's
+  identity would move.
+- **JSON projections.** The Boolean saved-evidence views (`/boolean*.json`)
+  carry `"cash": true` for a stock family and a cost-excluded scope sentence,
+  but no corporate-action statement. The web pages that render them were not
+  changed.
+- **A stock audit that renders says it twice**, once in the banner and once
+  in the charge header. That is repetition, not a contradiction.
+- **Expression V1**, which evaluates one named expression and ranks nothing,
+  and the index-only surfaces (index-stop, the ledgers) are unchanged.
+
+**Tests.** AF-16 and AF-17. Each new test was run against its fix
+temporarily reverted, and it failed. Exactly one assertion group is the
+exception. The gap-free month's bars and masks are equal with or without the
+withholding: that is the idempotence being pinned, and the identity half of the
+same test fails without the params change.
+
+- The statement: `an_equity_audit_states_corporate_actions_are_unchecked_and_an_index_audit_does_not`
+  and `a_report_note_is_gross_then_corporate_actions_for_a_stock_and_empty_for_an_index`
+  in `runner::audit`, and
+  `the_equity_note_is_decided_by_the_kind_and_an_index_or_contract_gets_none`
+  in `cli::stored`.
+- Each surface:
+  `every_stored_report_over_a_stock_states_corporate_actions_are_unchecked`
+  drives six stored doors end to end over one generated month, as RELIANCE and
+  as NIFTY. `every_one_instrument_banner_states_corporate_actions_for_a_stock_and_never_for_an_index`
+  and `a_stock_audit_states_corporate_actions_in_its_charge_header_and_an_index_audit_does_not`
+  cover the banners and the audit header. The pool, research-inventory,
+  `sweep-all`, expression-search and Boolean-header tests cover one surface
+  each. Each of the eight banner sites in `lib.rs` was reverted on its own,
+  and its test failed each time.
+- The door: `the_ordinary_stored_sweep_withholds_and_names_a_holed_session`,
+  `the_ordinary_stored_sweep_refuses_when_every_session_is_withheld`,
+  `a_gap_free_month_keeps_its_bars_and_masks_and_moves_its_identity` and
+  `the_ordinary_stored_sweep_withholds_in_the_screens_order`.
+
+All new `cli` tests run under a priority-100 override in
+`.config/nextest.toml`. That changes their order only.

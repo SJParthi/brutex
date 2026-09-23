@@ -2940,6 +2940,12 @@ that is 31,282 of 31,493 keys (99.33%); on this machine's it is 205 of 206
 (99.5%). The refusal is the honest answer and it is also a severe limitation of
 the feature, and both halves of that sentence are true at once.
 
+*Extended 2026-09-23, D-0694.* The same missing threshold means no swept
+report can detect a split either. So every report that ranks or audits a cash
+equity now states, beside its gross-of-every-charge label, that corporate
+actions are unchecked. It detects nothing, and a stock month with a split still
+ranks. See the D-0694 section at the end of this file.
+
 ### 41.4 Even with a threshold, this field flags a month and cannot name a day
 
 D-0018 requires a suspected corporate action to be refused **with its date
@@ -8983,3 +8989,42 @@ by `File::unlock`. What that does not cover, stated rather than implied away:
 - **Only the test locks that a test's success depends on were converted.**
   Probes that expect `WouldBlock`, and fixtures that unlock by name, still use
   `File` directly.
+
+## Corporate actions are stated, not detected, and one more stored door withholds holed sessions — D-0694, 23 September 2026
+
+- **The statement detects nothing.** Every report that ranks or audits a cash
+  equity now says corporate actions are unchecked. No split, bonus or demerger
+  detector exists, because no threshold for D-0018's refusal is sourced
+  (§41.3). A month holding an unadjusted split still ranks, and its fake
+  overnight crash still fires every bar-shape and gap condition. The sentence
+  tells the reader that. It does not protect them.
+- **Where the sentence is not.** The Boolean saved-evidence JSON views carry
+  `"cash": true` for a stock family, but no corporate-action statement, and
+  the web pages that render them were not changed. The browser's command
+  results and `/engine/top.json` carry the report text, so the sentence
+  reaches them through that text. Expression V1, which evaluates one named
+  expression and ranks nothing, is unchanged.
+- **A stock audit that renders says it twice.** Once in the provenance
+  banner, which every stored report over a stock carries, and once in the
+  audit's charge header. The banner is there because an audit that trades
+  nothing renders no header.
+- **The ordinary `sweep-stored` door withholds holed sessions now.** Five doors
+  withhold: `sweep-stored`, `auto-stored`, `audit-range`, `screen` and `pool`.
+  The withholding costs what `crate::minute_gaps` already records: one pass
+  over the execution minutes and one over the signal bars, O(bars) setup work
+  and not one of the five operations `CLAUDE.md` §3 rule 4 bounds. UNVERIFIED
+  as a measured figure. No bench times it.
+- **Doors that still keep holed sessions.** `audit-stored`,
+  `sweep-audited-stored`, `sweep-all`, the expression search and expression,
+  and the Boolean research loaders never call `crate::minute_gaps`. On `1min`
+  they still compare the bars on either side of an intraday hole as
+  neighbours. On a coarse rung the exact-minute overlay refuses instead. The
+  operator's answer named one door. Each of these would need its own answer,
+  because each one's identity would move.
+- **Every ordinary `sweep-stored` identity moved, gap-free months included.**
+  The door folds `minute_gaps::MINUTE_GAP_POLICY` into its params, so a
+  rerun of a month recorded before D-0694 records a new row under a new
+  identity rather than matching the old one. The old rows stay valid under the
+  identities they were recorded with, and nothing re-keys them. No field of a
+  recorded row says which rule computed it. Only the identity differs, and a
+  hash cannot be read back for the term.

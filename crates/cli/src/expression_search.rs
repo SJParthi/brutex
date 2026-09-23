@@ -321,7 +321,9 @@ fn render(
     interrupted: u64,
     pricing: Option<&crate::expression_pricing::Prepared>,
 ) -> String {
-    let mut out = String::from(crate::STORED_PROVENANCE);
+    // A STOCK'S SEARCH SAYS WHAT ITS FIGURES ARE MADE OF FIRST: gross of every
+    // charge, and corporate actions unchecked. An index's is unchanged. D-0694.
+    let mut out = crate::stored_provenance(args.underlying);
     let _ = writeln!(
         out,
         "EXPRESSION SEARCH V1\n  identity: {}\n  status: {}\n  evaluated expressions: {}\n  expressions meeting support {}: {}\n  grammar work: {}\n  signal rows saved: {}\n  interrupted/uncommitted checkpoint reservations observed: {}\nRun the same command again to continue; CANDIDATES and NODES are work budgets, not a depth limit. Complete syntax enumeration may be enormous.",

@@ -427,6 +427,34 @@ mod tests {
         }
     }
 
+    /// A Boolean research scope holding a stock opens by saying its totals are
+    /// gross of every charge and corporate actions are unchecked; a scope of
+    /// the two indices opens exactly as it did before. D-0694.
+    #[test]
+    fn a_stock_research_scope_states_corporate_actions_are_unchecked_and_an_index_scope_does_not() {
+        const BEFORE: &str = "\nEXPLICIT BOOLEAN CATALOG RESEARCH. This is the complete supplied catalog, not exhaustive Boolean grammar search or Selection V6. Intraday only;15:10IST deadline.\n";
+        for symbols in ["NIFTY,RELIANCE", "RELIANCE", "BANKNIFTY,TCS"] {
+            let heading = prepared::research_heading(&scope(symbols).unwrap());
+            assert_eq!(
+                heading,
+                format!(
+                    "{}{}{BEFORE}",
+                    crate::STORED_PROVENANCE,
+                    runner::audit::CostScope::CashEquity.report_note()
+                ),
+                "{symbols}"
+            );
+            assert!(heading.contains(runner::audit::CORPORATE_ACTIONS_UNCHECKED));
+        }
+        for symbols in ["NIFTY,BANKNIFTY", "NIFTY"] {
+            assert_eq!(
+                prepared::research_heading(&scope(symbols).unwrap()),
+                format!("{}{BEFORE}", crate::STORED_PROVENANCE),
+                "an index scope is unchanged: {symbols}"
+            );
+        }
+    }
+
     #[test]
     fn scope_is_canonical_and_never_widens_into_references_or_derivatives() {
         let first = scope("RELIANCE,NIFTY,BANKNIFTY").unwrap();
