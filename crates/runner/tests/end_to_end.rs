@@ -298,6 +298,87 @@ fn the_pipeline_refuses_a_slice_it_cannot_measure_rather_than_inventing_one() {
     );
 }
 
+/// Bars to one audit, from nothing, under one charge scope.
+///
+/// Every stage is rebuilt on each call -- the bars, the column, the sweep, the
+/// closure, the trade walk and the grid -- so two calls share no state and a
+/// rerun is a rerun, not a second render of the same values.
+#[expect(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes."
+)]
+fn audited_from_nothing(scope: audit::CostScope) -> String {
+    let bars = synthetic::sessions(12);
+    let column = Column::build(&bars, &mut evaluator());
+    let swept = Sweeper::new(Ladder::with_min_hits(1_400).with_ceiling(50_000))
+        .run(&bars, &mut evaluator());
+    let mask = closed::closed(&swept.sweep)
+        .kept
+        .first()
+        .map(|kept| kept.mask)
+        .expect("the slice must keep a closed combination to trade");
+    let taken = trade::walk(&bars, &column, &mask, Horizon::DEFAULT, Direction::Long);
+    assert!(
+        !taken.trades.is_empty(),
+        "the kept combination must trade, so the report carries real figures"
+    );
+    let exits = grid::evaluate(
+        &bars,
+        &column,
+        &mask,
+        Horizon::DEFAULT,
+        Side::Long,
+        grid::Levels::derived(4),
+    );
+    audit::render(scope, Some(&taken), Some(&exits), None, None, None, 6)
+}
+
+/// A CASH-EQUITY AUDIT OF THE SAME BARS IS THE SAME BYTES ON A RERUN
+/// (`CLAUDE.md` §3 rule 5), AND IT DIFFERS FROM THE INDEX AUDIT OF THOSE BARS
+/// ONLY IN ITS CHARGE STATEMENT.
+///
+/// The unit tests render hand-built sections. This drives the real sequence --
+/// sweep, closure, trade walk, exit grid -- so a figure that came out of the
+/// sweep differently on a second run, or a figure the scope reached below the
+/// header, fails here even though every hand-built render agrees with itself.
+#[test]
+fn an_equity_audit_is_byte_identical_on_a_rerun_and_differs_from_the_index_one_only_in_its_statement()
+ {
+    let equity = audited_from_nothing(audit::CostScope::CashEquity);
+    assert_eq!(
+        equity,
+        audited_from_nothing(audit::CostScope::CashEquity),
+        "the same bars must audit to the same bytes"
+    );
+    assert!(
+        equity
+            .starts_with("AUDIT\n  CASH EQUITY run. EVERY TOTAL BELOW IS GROSS OF EVERY CHARGE.\n"),
+        "a stock audit must open with the gross statement:\n{equity}"
+    );
+
+    let index = audited_from_nothing(audit::CostScope::IndexSpot);
+    assert!(
+        index.starts_with("AUDIT\n  INDEX SPOT run."),
+        "an index audit keeps the index statement:\n{index}"
+    );
+    let below = |report: &str| {
+        report
+            .split_once("\nTRADES\n")
+            .map(|(_, rest)| rest.to_owned())
+    };
+    assert!(
+        below(&equity).is_some_and(|rest| {
+            !rest.starts_with("  NOT SUPPLIED") && rest.contains("variants evaluated")
+        }),
+        "the equity audit must carry the swept trades and a populated exit grid:\n{equity}"
+    );
+    assert_eq!(
+        below(&equity),
+        below(&index),
+        "no figure may differ between the scopes except by the bars"
+    );
+}
+
 /// The drill-down ladder: how deep the sweep reaches as support falls.
 ///
 /// # What this proves that a unit test cannot

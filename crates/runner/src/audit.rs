@@ -1737,6 +1737,176 @@ mod tests {
         );
     }
 
+    /// Both scopes, so a property of the charge statement is checked on the
+    /// statement every index run prints and on the one every stock run prints.
+    const SCOPES: [CostScope; 2] = [CostScope::IndexSpot, CostScope::CashEquity];
+
+    /// The charge statement alone: everything between the `AUDIT` heading and
+    /// the `TRADES` heading, which is exactly what the scope writes.
+    ///
+    /// Panics rather than answering an empty string, because an empty
+    /// statement has no lines and would satisfy every per-line assertion below
+    /// for the wrong reason.
+    fn charge_statement(out: &str) -> &str {
+        out.strip_prefix("AUDIT\n")
+            .and_then(|rest| rest.split_once("\nTRADES\n"))
+            .map(|(statement, _)| statement)
+            .filter(|statement| !statement.trim().is_empty())
+            .expect("a render opens with AUDIT, then its charge statement, then TRADES")
+    }
+
+    /// THE CHARGE STATEMENT IS ONE INDENTED BLOCK, SO A LIFTED `AUDIT`
+    /// SECTION KEEPS ALL OF IT.
+    ///
+    /// `range-all` and `pool` pass 1 discard the audit report and keep only
+    /// sections lifted out of it (`cli`'s `validation_note`, through
+    /// `section_note`), and that lift ends a section at its first unindented,
+    /// non-blank line. The equity statement is four paragraphs split by blank
+    /// lines. One line of it written at column zero would end the lift there,
+    /// and a `range-all` table would keep "GROSS OF EVERY CHARGE" while
+    /// dropping "COST-EXCLUDED RESEARCH, NOT A NET RESULT": a disclaimer cut
+    /// away from the figures it qualifies, which is the §4 shape the lift was
+    /// written to close.
+    #[test]
+    fn every_charge_statement_line_is_indented_so_a_lifted_audit_block_keeps_it_whole() {
+        for scope in SCOPES {
+            for out in [
+                super::render(scope, None, None, None, None, None, 10),
+                populated_render(scope),
+            ] {
+                let statement = charge_statement(&out);
+                assert!(
+                    statement.contains("\n\n  "),
+                    "{scope:?}: the statement must hold a blank line between \
+                     paragraphs, the case a blank-line terminator would cut:\n{out}"
+                );
+                for line in statement.lines() {
+                    assert!(
+                        line.is_empty() || line.starts_with("  "),
+                        "{scope:?}: {line:?} is not indented, so a lifted AUDIT \
+                         block would end on it:\n{out}"
+                    );
+                }
+                assert_eq!(
+                    out.lines()
+                        .skip(1)
+                        .find(|line| !line.trim().is_empty() && !line.starts_with(' ')),
+                    Some("TRADES"),
+                    "{scope:?}: the first unindented line after AUDIT must be the \
+                     next heading, so the lift ends exactly where the statement \
+                     does:\n{out}"
+                );
+            }
+        }
+    }
+
+    /// NO LINE OF EITHER CHARGE STATEMENT READS AS A REFUSAL.
+    ///
+    /// Nine `cli` command arms take their exit code from a scan of the rendered
+    /// page (`carries_refusal`): a line that starts `refused` at column zero,
+    /// or whose text after its indentation starts `REFUSED. `, `REFUSED -- ` or
+    /// `RESULT NOT RECORDED`. The equity statement is written in capitals on
+    /// purpose, which is the case that scan reads. A line of it beginning with
+    /// one of those words would give every completed stock audit a failing exit
+    /// code, and `cli audit ... && <next step>` would stop on a run that
+    /// finished. Checked after trimming and in either case -- stricter than
+    /// the scan -- so a spelling the scan learns later cannot start matching
+    /// this text unseen.
+    #[test]
+    fn no_charge_statement_line_reads_as_a_refusal() {
+        for scope in SCOPES {
+            let out = populated_render(scope);
+            let statement = charge_statement(&out);
+            for line in statement.lines() {
+                let opening = line.trim_start().to_ascii_lowercase();
+                for refusal in ["refused", "result not recorded"] {
+                    assert!(
+                        !opening.starts_with(refusal),
+                        "{scope:?}: {line:?} opens like a refusal, so a completed \
+                         audit would be read as a refused one:\n{out}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// THE EQUITY STATEMENT NAMES EVERY CHARGE AND QUOTES NO RATE.
+    ///
+    /// `docs/00-charter.md` records no source for an equity charge rate, so a
+    /// rate printed here would be the invention `CLAUDE.md` §3 rule 1 forbids,
+    /// however familiar the number. The only digits the statement may carry are
+    /// the decision references that justify it (`D-0509`) and the name of the
+    /// selection policy it withholds (`Selection V6`); no per cent sign, no
+    /// basis points and no currency may appear.
+    #[test]
+    fn the_equity_charge_statement_names_no_rate() {
+        let out = super::render(CostScope::CashEquity, None, None, None, None, None, 10);
+        let statement = charge_statement(&out);
+        assert!(
+            statement.contains("STT"),
+            "the fixture must be the statement that names the charges:\n{out}"
+        );
+        let lower = statement.to_ascii_lowercase();
+        for rate in [
+            "%",
+            "per cent",
+            "percent",
+            "basis point",
+            "bps",
+            "rupee",
+            "paisa",
+            "₹",
+        ] {
+            assert!(
+                !lower.contains(rate),
+                "{rate:?} states a charge rate the charter does not source:\n{out}"
+            );
+        }
+        let numbered: Vec<&str> = statement
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+            .filter(|token| token.bytes().any(|b| b.is_ascii_digit()))
+            .collect();
+        assert!(
+            numbered.contains(&"D-0681"),
+            "the statement must cite the decision that wrote it: {numbered:?}"
+        );
+        for token in numbered {
+            let decision = token
+                .strip_prefix("D-")
+                .is_some_and(|n| n.len() == 4 && n.bytes().all(|b| b.is_ascii_digit()));
+            assert!(
+                decision || token == "V6",
+                "{token:?} is a number that is neither a decision reference nor \
+                 the Selection V6 name, and could be read as a rate:\n{out}"
+            );
+        }
+    }
+
+    /// THE STATEMENT IS DECIDED BY THE SCOPE ALONE, AND A RERUN IS THE SAME
+    /// BYTES (`CLAUDE.md` §3 rule 5).
+    ///
+    /// [`CostScope`]'s own contract is that the statement is decided by what
+    /// the swept instrument IS, never by anything its bars say. So a render
+    /// given no section and one given every section open with the same
+    /// statement, and two renders of the same inputs are identical.
+    #[test]
+    fn the_charge_statement_depends_on_the_scope_alone_and_a_rerun_is_byte_identical() {
+        for scope in SCOPES {
+            let bare = super::render(scope, None, None, None, None, None, 10);
+            let first = populated_render(scope);
+            let second = populated_render(scope);
+            assert_eq!(
+                first, second,
+                "{scope:?}: the same inputs must render the same bytes"
+            );
+            assert_eq!(
+                charge_statement(&bare),
+                charge_statement(&first),
+                "{scope:?}: the statement must not depend on what the run produced"
+            );
+        }
+    }
+
     /// A grid with real cells, a baseline and a survivor.
     ///
     /// Built by hand rather than by sweeping, so the numbers are known and the
