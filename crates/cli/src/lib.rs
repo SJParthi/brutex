@@ -3456,8 +3456,9 @@ fn stored_month_kernel(
     out.push_str(&runner::report::render_ranked_findings(&ranked, &outcome));
     // A STOCK'S RANKING SAYS IT IS GROSS, as the audit's does. This verb has no
     // AUDIT block, so without it a ranked share table carried no charge
-    // statement at all. D-0681.
-    out.push_str(equity_ranking_note(
+    // statement at all. D-0681. And that its corporate actions are unchecked,
+    // beside that label, so a lifted FINDINGS block keeps both. D-0694.
+    out.push_str(&equity_ranking_note(
         audit::CostScope::of(loaded.key.kind),
         &ranked,
     ));
@@ -17966,17 +17967,35 @@ const EQUITY_RANKING_GROSS: &str = "  CASH EQUITY: EVERY FIGURE IN THIS RANKING 
      is on GROSS returns. COST-EXCLUDED RESEARCH, NOT A NET RESULT (D-0509,\n  \
      D-0525, D-0681).\n\n";
 
-/// [`EQUITY_RANKING_GROSS`] when a cash equity's ranking kept a row, else
-/// nothing: an index has no charge to be gross of, and an extinct sweep prints
-/// no ranking to qualify.
-fn equity_ranking_note(
-    scope: Option<audit::CostScope>,
-    ranked: &runner::rank::Ranked,
-) -> &'static str {
+/// What a ranked cash-equity table states in its FINDINGS block: the gross
+/// label, then [`audit::CORPORATE_ACTIONS_UNCHECKED`]. D-0694.
+///
+/// # Beside the label, because the lift keeps only the block
+///
+/// `range-all` and `pool` pass 1 discard the report and keep sections lifted
+/// out of it through [`section_note`]. A stock's banner says corporate actions
+/// are unchecked, but a lifted FINDINGS block does not carry the banner with
+/// it. So the statement sits inside the block, after the gross label it
+/// stands beside, in the same indentation, and a lifted ranking keeps both.
+///
+/// The wording is `runner::audit`'s constant and nothing else: the audit
+/// header, every stored banner and this block say the same sentence, so a
+/// change to it is one edit.
+fn equity_ranking_statement() -> String {
+    format!(
+        "{EQUITY_RANKING_GROSS}{}\n\n",
+        audit::CORPORATE_ACTIONS_UNCHECKED
+    )
+}
+
+/// [`equity_ranking_statement`] when a cash equity's ranking kept a row, else
+/// nothing: an index has no charge to be gross of and never splits, and an
+/// extinct sweep prints no ranking to qualify.
+fn equity_ranking_note(scope: Option<audit::CostScope>, ranked: &runner::rank::Ranked) -> String {
     if scope == Some(audit::CostScope::CashEquity) && !ranked.top.is_empty() {
-        EQUITY_RANKING_GROSS
+        equity_ranking_statement()
     } else {
-        ""
+        String::new()
     }
 }
 
@@ -17997,7 +18016,7 @@ fn ranked_opening(
     out.push_str(&runner::report::render_ranked_findings(ranked, outcome));
     // BEFORE EITHER EARLY EXIT BELOW AND IN `audit_bars_work`, so a halted or
     // untraded equity ranking carries its charge statement too. D-0681.
-    out.push_str(equity_ranking_note(Some(cost), ranked));
+    out.push_str(&equity_ranking_note(Some(cost), ranked));
     if outcome.is_complete() {
         Ok(out)
     } else {

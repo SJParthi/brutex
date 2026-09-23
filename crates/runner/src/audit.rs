@@ -2054,6 +2054,79 @@ mod tests {
         );
     }
 
+    /// THE CORPORATE-ACTION SENTENCE KEEPS THE CHARGE STATEMENT'S PROPERTIES
+    /// WHEREVER IT TRAVELS. D-0694.
+    ///
+    /// The four tests above pin the audit header, where
+    /// [`CORPORATE_ACTIONS_UNCHECKED`] closes the equity statement. It also
+    /// travels without that header: into every stored banner through
+    /// [`CostScope::report_note`], into a ranked stock's FINDINGS block, the
+    /// pool and the research inventory. So the sentence and the note are
+    /// checked on their own, for the same three properties: every line
+    /// indented, so a lifted block keeps it whole; no line opening like a
+    /// refusal, so no completed stock run exits as a failure; and no rate --
+    /// its only digits are the decision references D-0018 and D-0694, because
+    /// `docs/00-charter.md` sources no split threshold (`docs/06-limits.md`
+    /// §41.3) and no charge rate.
+    #[test]
+    fn the_corporate_action_sentence_keeps_the_charge_statement_properties_wherever_it_travels() {
+        let note = CostScope::CashEquity.report_note();
+        for (what, text) in [
+            ("the sentence", CORPORATE_ACTIONS_UNCHECKED),
+            ("the gross paragraph", CASH_EQUITY_GROSS),
+            ("the note", note.as_str()),
+        ] {
+            assert!(text.lines().count() > 1, "{what} spans lines:\n{text}");
+            for line in text.lines() {
+                assert!(
+                    line.is_empty() || line.starts_with("  "),
+                    "{what}: {line:?} is not indented, so a lifted block would end on it"
+                );
+                let opening = line.trim_start().to_ascii_lowercase();
+                for refusal in ["refused", "result not recorded"] {
+                    assert!(
+                        !opening.starts_with(refusal),
+                        "{what}: {line:?} opens like a refusal"
+                    );
+                }
+            }
+            let lower = text.to_ascii_lowercase();
+            for rate in [
+                "%",
+                "per cent",
+                "percent",
+                "basis point",
+                "bps",
+                "rupee",
+                "paisa",
+                "₹",
+            ] {
+                assert!(!lower.contains(rate), "{what} carries {rate:?}:\n{text}");
+            }
+            for token in text
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+                .filter(|token| token.bytes().any(|b| b.is_ascii_digit()))
+            {
+                assert!(
+                    token
+                        .strip_prefix("D-")
+                        .is_some_and(|n| n.len() == 4 && n.bytes().all(|b| b.is_ascii_digit())),
+                    "{what}: {token:?} is a number that is not a decision reference:\n{text}"
+                );
+            }
+        }
+        for cited in ["D-0018", "D-0694"] {
+            assert!(
+                CORPORATE_ACTIONS_UNCHECKED.contains(cited),
+                "the sentence cites {cited}"
+            );
+        }
+        assert!(
+            !CORPORATE_ACTIONS_UNCHECKED.ends_with('\n'),
+            "every caller ends the line itself, so the sentence carries no newline of its own"
+        );
+    }
+
     /// A grid with real cells, a baseline and a survivor.
     ///
     /// Built by hand rather than by sweeping, so the numbers are known and the

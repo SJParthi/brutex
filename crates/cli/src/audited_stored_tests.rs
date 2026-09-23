@@ -1493,17 +1493,69 @@ fn a_stored_sweep_of_a_share_says_its_ranking_is_gross_of_every_charge() {
     }
 }
 
+/// **A ranked stored sweep of a share says its corporate actions are
+/// unchecked inside FINDINGS, right after the gross label, and an index's
+/// sweep never does.** D-0694.
+///
+/// `stored_month_kernel` appends the FINDINGS label itself rather than through
+/// `ranked_opening`, so the audit-page proof in `equity_statement_tests` does
+/// not reach this call site. A lifted FINDINGS block carries no banner, so the
+/// sentence must be inside the block to travel with the ranking.
+#[test]
+fn a_ranked_stored_sweep_of_a_share_states_corporate_actions_inside_its_findings() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    for underlying in ["RELIANCE", "NIFTY"] {
+        let fixture = Traded::new(underlying);
+        let equity = underlying == "RELIANCE";
+        let page = fixture
+            .sweep("1min", 700)
+            .map_err(|why| format!("{underlying}: {why}"))
+            .expect("a generated traded sweep completes");
+        let findings = crate::section_note(&page, "FINDINGS").expect("the ranking");
+        assert!(
+            findings.contains("  rank "),
+            "premise: a ranked table:\n{findings}"
+        );
+        assert_eq!(
+            findings.contains(crate::equity_ranking_statement().trim_end()),
+            equity,
+            "{underlying}: the gross label and the sentence, together:\n{page}"
+        );
+        assert_eq!(
+            findings.contains(runner::audit::CORPORATE_ACTIONS_UNCHECKED),
+            equity,
+            "{underlying}:\n{page}"
+        );
+        assert!(!crate::carries_refusal(&page), "{page}");
+    }
+    crate::knobs::clear_all();
+}
+
 /// **An extinct share audit prints no ranking and so no charge statement.**
 ///
 /// `min_hits = u64::MAX` is the extinction path: nothing is kept, nothing is
 /// ranked, nothing is traded, and neither header is written. F1 adds no
 /// arithmetic, so the only edge is that the label must not qualify a table
 /// that does not exist.
+///
+/// D-0694 put one statement ABOVE the report: every stored report over a
+/// stock opens with the provenance banner, then gross of every charge, then
+/// corporate actions unchecked, because the support counts that went extinct
+/// were counted on a share's unadjusted bars. So the page is split at that
+/// banner. The banner must be exactly the stock's, and below it -- where the
+/// ranking and the audit would be -- neither header, no gross label and no
+/// corporate-action sentence may appear.
 #[test]
 fn an_extinct_share_audit_prints_no_ranking_and_no_charge_statement() {
     let _knobs = crate::knobs::serially();
     crate::knobs::clear_all();
     let fixture = Traded::new("RELIANCE");
+    let banner = format!(
+        "{}{}",
+        crate::STORED_PROVENANCE,
+        runner::audit::CostScope::CashEquity.report_note()
+    );
     for (verb, report) in [
         ("audit_stored_kernel", fixture.audit("1min", u64::MAX)),
         ("audit_range_kernel", fixture.range("1min", u64::MAX)),
@@ -1519,10 +1571,18 @@ fn an_extinct_share_audit_prints_no_ranking_and_no_charge_statement() {
             report.contains("This is extinction, not a failure."),
             "{report}"
         );
-        for absent in [EQUITY_HEADER, INDEX_HEADER, "GROSS OF EVERY CHARGE"] {
+        let below = report.strip_prefix(banner.as_str());
+        assert!(below.is_some(), "{verb}: a share's banner leads:\n{report}");
+        let below = below.expect("asserted above");
+        for absent in [
+            EQUITY_HEADER,
+            INDEX_HEADER,
+            "GROSS OF EVERY CHARGE",
+            runner::audit::CORPORATE_ACTIONS_UNCHECKED,
+        ] {
             assert!(
-                !report.contains(absent),
-                "{verb} printed {absent:?}:\n{report}"
+                !below.contains(absent),
+                "{verb} printed {absent:?} below its banner:\n{report}"
             );
         }
     }

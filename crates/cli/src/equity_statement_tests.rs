@@ -87,6 +87,12 @@ fn every_one_instrument_banner_states_corporate_actions_for_a_stock_and_never_fo
                 1,
                 "{surface} over {stock}:\n{text}"
             );
+            // Nine command arms take their exit code from this scan, so a
+            // banner line that read as a refusal would fail every stock run.
+            assert!(
+                !super::carries_refusal(&text),
+                "{surface} over {stock} reads as a refusal:\n{text}"
+            );
         }
     }
     for index in ["NIFTY", "BANKNIFTY"] {
@@ -116,27 +122,9 @@ fn every_one_instrument_banner_states_corporate_actions_for_a_stock_and_never_fo
 /// it, between the gross-of-every-charge paragraph and the first figure.
 #[test]
 fn a_stock_audit_states_corporate_actions_in_its_charge_header_and_an_index_audit_does_not() {
-    let run = |cost: CostScope| {
-        audit_bars(
-            &super::evaluator(),
-            runner::synthetic::sessions(12),
-            "GENERATED TEST FIXTURE",
-            1_400,
-            None,
-            AuditOptions {
-                prepared_column: None,
-                replay: None,
-                execution: None,
-                native_minute_execution: true,
-                recording: None,
-                rules: Rules::BASELINE,
-                lens: runner::rank::Lens::Detectability,
-                ceiling: Some(50_000),
-                validate: false,
-                cost,
-            },
-        )
-    };
+    let _knobs = super::knobs::serially();
+    super::knobs::clear_all();
+    let run = |cost: CostScope| generated_audit(cost, 50_000, 1_400);
     let stock = run(CostScope::CashEquity);
     let header = stock
         .split_once("\nAUDIT\n")
@@ -158,6 +146,93 @@ fn a_stock_audit_states_corporate_actions_in_its_charge_header_and_an_index_audi
         "{index}"
     );
     assert!(!index.contains("CORPORATE ACTIONS"), "{index}");
+    super::knobs::clear_all();
+}
+
+/// One unrecorded audit of `runner::synthetic` bars at `cost`, bounded by
+/// `ceiling`. Nothing is written anywhere. The caller holds
+/// `knobs::serially`, because the audit reads the knob store.
+fn generated_audit(cost: CostScope, ceiling: usize, min_hits: u64) -> String {
+    audit_bars(
+        &super::evaluator(),
+        runner::synthetic::sessions(12),
+        "GENERATED TEST FIXTURE",
+        min_hits,
+        None,
+        AuditOptions {
+            prepared_column: None,
+            replay: None,
+            execution: None,
+            native_minute_execution: true,
+            recording: None,
+            rules: Rules::BASELINE,
+            lens: runner::rank::Lens::Detectability,
+            ceiling: Some(ceiling),
+            validate: false,
+            cost,
+        },
+    )
+}
+
+/// **A ranked stock's FINDINGS block says corporate actions are unchecked,
+/// right after its gross label, and the rung note keeps both; an index's
+/// ranking and an extinct one never say it.** D-0694.
+///
+/// `range-all` and `pool` pass 1 keep only sections lifted out of a report,
+/// so a stock's banner does not travel with its ranking. The FINDINGS label
+/// D-0681's follow-up added is what does, and the sentence has to sit inside
+/// that block to survive the lift. Checked on a ladder that halts at ceiling
+/// 8 -- the page refuses to trade, after the ranking -- and on one that
+/// completes and renders its AUDIT header too, where the rung note carries
+/// the sentence once in each block.
+#[test]
+fn a_stock_ranking_states_corporate_actions_inside_its_findings_block() {
+    let _knobs = super::knobs::serially();
+    super::knobs::clear_all();
+    let gross = "CASH EQUITY: EVERY FIGURE IN THIS RANKING IS GROSS OF EVERY CHARGE.";
+    for (ceiling, completes) in [(8, false), (50_000, true)] {
+        let stock = generated_audit(CostScope::CashEquity, ceiling, 1_400);
+        assert_eq!(
+            super::carries_refusal(&stock),
+            !completes,
+            "premise: ceiling {ceiling}:\n{stock}"
+        );
+        let findings = super::section_note(&stock, "FINDINGS").expect("a ranking");
+        assert!(findings.contains("  rank "), "premise:\n{findings}");
+        let label = findings.find(gross).expect("the gross label");
+        let sentence = findings
+            .find(CORPORATE_ACTIONS_UNCHECKED)
+            .expect("the corporate-action sentence inside FINDINGS");
+        assert!(label < sentence, "beside and after the label:\n{findings}");
+        assert!(
+            findings.ends_with(CORPORATE_ACTIONS_UNCHECKED),
+            "the sentence closes the block, after every ranked row:\n{findings}"
+        );
+        if completes {
+            let lifted = super::validation_note(&stock).expect("the rung note");
+            assert_eq!(
+                lifted.matches(CORPORATE_ACTIONS_UNCHECKED).count(),
+                2,
+                "once in the lifted AUDIT header and once in the lifted FINDINGS:\n{lifted}"
+            );
+        }
+        let index = generated_audit(CostScope::IndexSpot, ceiling, 1_400);
+        assert!(!index.contains("CORPORATE ACTIONS"), "{index}");
+        assert_eq!(
+            stock
+                .replacen(&super::equity_ranking_statement(), "", 1)
+                .contains(CORPORATE_ACTIONS_UNCHECKED),
+            completes,
+            "ceiling {ceiling}: outside FINDINGS only a rendered AUDIT header says it:\n{stock}"
+        );
+    }
+    let extinct = generated_audit(CostScope::CashEquity, 50_000, u64::MAX);
+    assert!(
+        extinct.contains("nothing kept — the sweep produced no combination"),
+        "premise: extinct:\n{extinct}"
+    );
+    assert!(!extinct.contains("CORPORATE ACTIONS"), "{extinct}");
+    super::knobs::clear_all();
 }
 
 /// **The ordinary stored sweep prepares its month in the screen's order.**

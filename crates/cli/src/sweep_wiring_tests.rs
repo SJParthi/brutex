@@ -466,7 +466,7 @@ fn a_halted_equity_ranking_is_labelled_gross_before_it_refuses() {
         );
         let index = generated_audit(CostScope::IndexSpot, ceiling, 1_400, false);
         assert_eq!(
-            equity.replacen(super::EQUITY_RANKING_GROSS, "", 1),
+            equity.replacen(&super::equity_ranking_statement(), "", 1),
             index,
             "ceiling {ceiling}: the scope may change the charge statement and nothing else"
         );
