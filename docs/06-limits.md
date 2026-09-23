@@ -2139,8 +2139,66 @@ rows.
 `iterations` count from this crate must never enter the blake3 run identity of
 `CLAUDE.md` §3 rule 3 and must never be compared byte-for-byte across machines;
 a consumer that branches on `GreeksError` variant or records `method` must
-treat that as a property of the machine it ran on. Nothing in this repository
-does any of it today. Invariant G-10 is narrowed to what its test proves.
+treat that as a property of the machine it ran on. No run identity takes one.
+**One path does compare them across machines: the store's overlap check, when
+a `.grk` file is resumed on a target other than the one that began it.**
+Invariant G-10 is narrowed to what its test proves.
+
+**Until D-0692 this rule ended "Nothing in this repository does any of it
+today", and that had been false since D-0217 and D-0218.** The `.grk` sidecar
+persists target-dependent bits. `api`'s `greek_records` builds one
+`store::format::Greek` per priced row, and `pull::ingest::write_greeks` appends
+the batch through `BarFile::append`. The record holds the volatility, the five
+greeks and the rate as `f64`, and `Greek::image` writes each with
+`to_le_bytes`, unrounded, as `CLAUDE.md` §7 requires of a statistical value.
+All five greeks go through `d1`'s `ln` and through `exp` in the normal density
+or CDF, so their last bits depend on the libm, as the table above measures for
+prices and solved volatilities.
+
+**What a resume under a different libm then does.** A batch that does not
+follow the committed range fails `Header::advance` with
+`FormatError::TimestampsOutOfOrder`, and `append` asks `already_stored`, then
+`suffix_that_follows`, whether the overlap is already on disk. Both compare
+records with `!=`, and `Greek`'s `PartialEq` is derived: IEEE-754 equality per
+`f64` field, which on the finite values `Greek::is_sane` admits is bit equality
+except that `0.0 == -0.0`. On the target that wrote the file, a re-run
+recomputes the same bits and answers `AlreadyPresent`. Under a libm that rounds
+one `exp` or `ln` differently, one field of one overlapping row fails the
+comparison, and the whole batch is refused through the door `append`'s comment
+reserves for "a genuine conflict. The vendor restated history, or bars arrived
+out of order". The operator reads `<path>: timestamp <first offered> does not
+follow <last held>`: a timestamp fault, for timestamps the file already holds,
+when the difference is in an `f64`'s last bits. The new days in that batch are
+refused with the overlap. The Groww chain path counts the rows as refused ("the
+greeks were computed and could not be filed"); the Dhan rolling path records a
+failure for that contract-month. Re-running the refused window on the original
+target, before anything later is appended, files it, because within one target
+the bits reproduce. Once a later window is appended, the refused days are a gap
+the append-only file cannot fill.
+
+Not measured: no cross-libm `.grk` resume was run, so how often a real batch
+trips is unknown. D-0692 records the choice to keep the bits unrounded and two
+hardenings that were not made: naming the likely cause in the refusal, and
+stamping the target or libm into the `.grk` provenance.
+
+**Outside this crate `ln` and `exp` only set thresholds, and a libm moves a
+decision there only at an exact knife-edge.** Non-test source outside
+`crates/greeks` calls them at seven sites (grep, D-0692): Hansen's SPA
+keep-gate `−√(2 ln ln n)` in `runner::bootstrap::spa` and `spa_receipt_v1`
+(`bootstrap.rs` lines 543 and 713) and in the `family_pass` child module's
+`Family::new` (`bootstrap_family_pass.rs` line 269);
+`runner::significance::expected_max_t`; the tail quantile behind
+`bonferroni_t` and `expected_max_bailey`; the normal CDF behind
+`significance::p_value`; and `cli::live::expected_rewrites`. The last two have
+no non-test caller. No result of any of them is stored as `f64` bits. The gate
+decides which strategies the SPA bootstrap recentres; `bonferroni_t` decides
+which rows `runner::report` marks as clearing the bar and, as `bar_milli` in
+thousandths, which rows `/live.json` flags. Each decision can differ between
+two libms only for a statistic lying between the two libms' values of the same
+threshold. The G8 audit of 2026-09-23 reported, and this section did not
+re-measure, that 72 of the SPA gate values for n = 4..3,000 differ between two
+libms, that Apple's libm misrounds `ln(ln 389)`, and that neither the `{:.2}`
+rendered thresholds nor `bar_milli` changed on any of 1.97M inputs.
 
 One side effect worth recording: the repaired `Indeterminate` numerator also
 tightens cross-libm agreement, because the points it now refuses are the
@@ -2308,6 +2366,8 @@ Publishing the spot would not fix it: a 1% error in `S` moves `r` by only about
 - **Whether this crate's output is reproducible on x86_64 glibc.** Two libms
   were compared, both reachable from this machine. glibc's was not one of them,
   and no claim is made about it.
+- **How often a `.grk` resume under a different libm is refused.** The
+  mechanism is read from the code above; no such resume was run. D-0692.
 
 ### Mutation testing: 320 killed, 2 alive, and both are named
 

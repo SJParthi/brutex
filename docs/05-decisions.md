@@ -38680,3 +38680,112 @@ here came from a scratch crate outside the repository, holding the verbatim
 same hunks: 9 mutants, 7 caught, 0 missed, 2 unviable, 0 timeouts. The two
 unviable ones construct `Entry::default()`, which does not exist. That is a
 type error, not a lint.
+
+### D-0692 — Keep the `.grk` sidecar's target-dependent bits unrounded, and withdraw D-0046's "no consumer" premise — 2026-09-23
+
+**The premise, quoted.** D-0046's section "Reproducible within one target, and
+not across two" set the rule that a greek or an implied volatility "must never
+enter the blake3 run identity of `CLAUDE.md` §3 rule 3, and must never be
+compared byte-for-byte across machines". It then said: "Nothing in this
+repository does either today — `greeks` is a leaf with no consumer here — and
+this paragraph is what a future consumer has to read first." The first half
+still holds: no run identity takes a greek. The second half stopped holding
+when D-0217 gave `greeks` its caller in `pull::pricing`, the commits after it
+gave the computed greeks the `.grk` sidecar, and D-0218 made both feeds file
+there. The ledger is append-only, so D-0046 is not edited. This entry
+supersedes that sentence, and `docs/06-limits.md` §29, which repeated it, is
+corrected.
+
+**What the store does with the bits, read from the code at `b1d9ac70`.**
+`api`'s `greek_records` turns each priced row into a `store::format::Greek`,
+and `pull::ingest::write_greeks` appends the batch through `BarFile::append`.
+`Greek` holds the volatility, delta, gamma, vega, theta, rho and rate as `f64`,
+and `Greek::image` writes each with `to_le_bytes`. Each of the five greeks is
+computed from `d1`, which takes `ln(spot / strike)`, and from the normal
+density or CDF, which take `exp` (`crates/greeks/src/bsm.rs`, `normal.rs`). A
+solved volatility comes out of the same model. So their last bits depend on
+the libm, which D-0046 measured for prices and solved volatilities.
+
+The overlap check compares them. A batch that does not follow the committed
+range fails `Header::advance` with `TimestampsOutOfOrder`, and `append` asks
+`already_stored` and then `suffix_that_follows` whether the overlapping rows
+are already on disk. Both compare with `!=`. `Greek`'s `PartialEq` is derived,
+so each `f64` field is compared by IEEE-754 equality, and because
+`Greek::is_sane` admits finite values only, that is bit equality apart from
+`0.0 == -0.0`. On the target that wrote the file, a re-run recomputes the same
+bits and is `AlreadyPresent`, which is `CLAUDE.md` §3 rule 5 working. Under a
+libm that rounds one `exp` or `ln` differently, one differing field in one
+overlapping row sends the batch to the third case in `append`, which its
+comment calls "a genuine conflict. The vendor restated history, or bars
+arrived out of order". The refusal is `FormatError::TimestampsOutOfOrder`,
+displayed as `timestamp <next> does not follow <previous>`. The timestamps are
+the ones already held. The difference is in the last bits of an `f64`. The
+whole batch is refused, so any new days it carried are not filed either. The
+Groww chain path counts the rows as refused. The Dhan rolling path records a
+failure for that contract-month.
+
+**No cross-libm resume was run for this entry.** How often it trips is not
+measured. The only numbers are D-0046's: between Apple's libm and the
+pure-Rust `libm` crate, 63 of 1,344 grid prices and 140 of 1,344 solved
+volatilities differed. They show that the bits move. They do not say how many
+`.grk` rows would.
+
+**Decision: persist the bits as computed, unrounded.** `CLAUDE.md` §7 says
+statistical values "keep full precision and are never rounded for storage",
+and `store::format::Greek`'s own doc cites that sentence. The consequence is
+accepted and stated: a `.grk` series resumes on the target that began it.
+Resumed under a different libm, an overlapping batch whose recomputed bits
+differ is refused as above. Re-running the refused window on the original
+target, before anything later is appended, files it, because within one target
+the bits reproduce. Once a later window is appended, the refused days are a
+gap the append-only file cannot fill, the same shape as the gap D-0218 records
+for a rate supplied late.
+
+**Rejected.** (1) Rounding the greeks to a coarser grid before storing them.
+§7 forbids it, and it would not remove the hazard: a value near a rounding
+boundary still rounds to two different grid points on two libms, so refusals
+would become rarer, not impossible, and every stored greek would lose
+precision to pay for that. (2) Comparing only the timestamps of greek rows in
+the overlap check. That would accept a genuinely different row, such as one
+priced under another rate, as already present, which is the silent fallback
+`CLAUDE.md` §4 bans. (3) A target-independent `exp` and `ln`. D-0046 rejected
+it for reasons this entry does not change.
+
+**Not done. Each would need its own entry.**
+
+1. **Name the likely cause in the refusal.** When every offered timestamp in
+   the overlap matches a held record and only `f64` fields differ, the store
+   could say that the stored greeks differ in their floating-point bits, which
+   is what a different libm produces, instead of reporting a timestamp fault.
+   That needs a new error variant and a comparison specific to greeks, which
+   is a code change.
+2. **Stamp the target or libm into the `.grk` provenance.** Recording which
+   target wrote a file would let a resume on another one refuse up front, by
+   name, before anything is recomputed. The provenance word has bits 17 to 31
+   unused, but giving them a meaning changes what a version-8 record says, and
+   `CLAUDE.md` §3 rule 8 forbids mutating a format version in place. So this
+   is a new `.grk` version, by §4's "a new field is a new file version at its
+   own stride".
+
+**The thresholds, recorded because they are the rest of the finding.** Outside
+`crates/greeks`, a grep of non-test source at this commit finds `ln` or `exp`
+at seven sites. Three are Hansen's SPA keep-gate `−√(2 ln ln n)`:
+`crates/runner/src/bootstrap.rs` lines 543 and 713, and
+`crates/runner/src/bootstrap_family_pass.rs` line 269. Three are in
+`runner::significance`: `expected_max_t` (`√(2 ln n)`), the tail quantile
+behind `bonferroni_t` and `expected_max_bailey`, and the normal CDF behind
+`p_value`. The seventh is `cli::live::expected_rewrites`. `p_value` and
+`expected_rewrites` have no non-test caller. No result of any of them is
+stored as `f64` bits. The gate decides which strategies the SPA bootstrap
+recentres, and `bonferroni_t` decides which rows `runner::report` marks as
+clearing the bar and which rows `/live.json` flags against `bar_milli`. Each of
+those decisions can differ between two libms only for a statistic that lies
+between the two libms' values of the same threshold. The G8 audit of
+2026-09-23 reported, and this entry did not re-measure, that 72 of the SPA gate
+values for n = 4 to 3,000 differ between two libms, that Apple's libm
+misrounds `ln(ln 389)`, and that neither the `{:.2}` rendered thresholds nor
+`bar_milli` changed on any of 1.97 million inputs. `docs/06-limits.md` §29
+records the same.
+
+Only `docs/06-limits.md` and this ledger changed. No source changed, so there
+is no test to add and no mutant to run.
