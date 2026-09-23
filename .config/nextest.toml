@@ -29,3 +29,12 @@ priority = -100
 [[profile.default.overrides]]
 filter = 'test(released_despite_a_duplicated_descriptor) | test(dropping_receipt_releases_lock_even_when_a_duplicate_descriptor_survives) | test(a_refused_release_is_returned_naming_the_file) | test(a_contended_lock_is_refused_and_takes_nothing)'
 priority = 100
+
+# The three cli tests that caught mutants at positions 955, 1174 and 1309 of
+# 1,445 in the audit follow-up bundle's local Gate 18 run. Late in the order,
+# they left seven cli mutants alive for 13 to 25 minutes each before the one
+# failure that fail-fast stops on. Run first, a mutant they catch costs
+# seconds. This changes order only: every test still runs.
+[[profile.default.overrides]]
+filter = 'test(cash_inventory_never_relabels_an_index_as_a_stock) | test(an_fno_index_underlying_is_refused_by_the_surface_sentence) | test(every_knob_that_moves_the_answer_moves_the_identity)'
+priority = 100
