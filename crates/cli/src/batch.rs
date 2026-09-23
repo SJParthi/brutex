@@ -389,6 +389,29 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
         held.timeframe.as_str(),
         held.month
     );
+    // THE HOLDING'S OWN PATH, BEFORE ANY LOAD. `stored::load` takes a bare
+    // word and opens the path of the key that word resolves to, so a
+    // `BSE/CASH/RELIANCE` or `NSE/INDEX/RELIANCE` month swept the
+    // `NSE/CASH/RELIANCE` file under a label that omits the exchange: the same
+    // NSE month was counted once per such holding and nothing on the page
+    // said so. The rule is `pool`'s surface rule, `stored::misfiled`, and a
+    // misfiled month is refused by name here rather than skipped, because the
+    // census above already counted it as offered. A word that resolves to no
+    // swept key reaches `stored::load` and is refused there, as it always was.
+    // D-0696.
+    if let Ok(key) = stored::swept_index(&held.symbol)
+        && let Some(why) = stored::misfiled(&key, &held.exchange, &held.segment, &held.symbol)
+    {
+        return Row {
+            label,
+            bars: 0,
+            depth: 0,
+            kept: 0,
+            completed: false,
+            identity: None,
+            refused: Some(why),
+        };
+    }
     let loaded = match stored::load(
         root,
         held.vendor,
@@ -883,6 +906,60 @@ mod tests {
             "{mixed}"
         );
         assert!(mixed.contains("RELIANCE"), "{mixed}");
+    }
+
+    /// **A month held anywhere but its own key's path is refused by name, and
+    /// never swept as the NSE file it resolves to.** D-0696.
+    ///
+    /// `one` handed `held.symbol` to `stored::load`, which resolves the bare
+    /// word and opens that key's path. So a `BSE/CASH/RELIANCE` month and a
+    /// `NSE/INDEX/RELIANCE` month each swept `NSE/CASH/RELIANCE`, and the label
+    /// -- which omits the exchange -- printed the same NSE month three times.
+    /// Here only the canonical files are damaged, so a misfiled month that is
+    /// loaded refuses with the STORE's words about the NSE file; refused before
+    /// any load, it refuses with the misfiled sentence naming its own directory.
+    /// No two directories below differ only in case under one parent, so the
+    /// answer is the same on a case-insensitive filesystem.
+    #[test]
+    fn a_misfiled_month_is_refused_by_name_and_not_swept_as_its_nse_namesake() {
+        let root = scratch("misfiled");
+        for rel in [
+            "groww/NSE/CASH/RELIANCE/1min/2026-08.bin",
+            "groww/NSE/INDEX/RELIANCE/1min/2026-08.bin",
+            "groww/BSE/CASH/RELIANCE/1min/2026-08.bin",
+            "groww/NSE/CASH/NIFTY/1min/2026-08.bin",
+            "groww/NSE/INDEX/NIFTY/1min/2026-08.bin",
+        ] {
+            let full = root.join("bars").join(rel);
+            std::fs::create_dir_all(full.parent().expect("has a parent")).expect("creatable");
+            std::fs::write(&full, b"not a bar file").expect("writable");
+        }
+        let text = sweep_under(&root, "groww", "1min", 100, "deadbeef").expect("the run completes");
+        for (dir, word) in [
+            ("NSE/INDEX/RELIANCE", "RELIANCE"),
+            ("BSE/CASH/RELIANCE", "RELIANCE"),
+            ("NSE/CASH/NIFTY", "NIFTY"),
+        ] {
+            let (exchange, rest) = dir.split_once('/').expect("exchange");
+            let (segment, symbol) = rest.split_once('/').expect("segment");
+            let key = crate::stored::swept_index(word).expect("a swept key");
+            let why = crate::stored::misfiled(&key, exchange, segment, symbol).expect("misfiled");
+            assert!(
+                text.contains(&format!(
+                    "  REFUSED  groww {symbol} 1min 2026-08  — {why}\n"
+                )),
+                "{dir} must be refused by its own directory, before any load:\n{text}"
+            );
+        }
+        // The two canonical months ARE loaded, and the damage is what refuses
+        // them -- once each, not once per directory that resolves to them.
+        assert_eq!(
+            text.matches("could not be read from the store").count(),
+            2,
+            "{text}"
+        );
+        assert!(text.contains("0 swept · 5 refused"), "{text}");
+        assert!(!text.contains("DOES NOT RECONCILE"), "{text}");
     }
 
     /// The feed and rung filter, so a run sweeps what was asked for and no more.

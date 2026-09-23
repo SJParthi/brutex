@@ -96,7 +96,7 @@
 //! fold runs sequentially over the collected cells. §3 rule 5.
 
 use core::fmt::Write as _;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use rayon::prelude::*;
 use runner::grid;
@@ -232,14 +232,19 @@ fn run(
     let vendor = crate::parse_vendor(vendor_word)?;
     crate::swept_rung(rung)?;
     let root = crate::store_root()?;
-    let surface = surface_under(&root, vendor, rung)?;
+    let Surface {
+        symbols: surface,
+        elsewhere,
+    } = surface_under(&root, vendor, rung)?;
     let mut out = opening(vendor_word, rung, from, to, support_ppm, &surface);
+    not_on_the_surface(&mut out, &elsewhere);
     if surface.is_empty() {
         let _ = writeln!(
             out,
             "  0 instruments on the surface for {vendor_word} at {rung}. The store holds \
-             no month of any swept index or F&O cash equity on this feed and rung, so \
-             there is nothing to screen and nothing to pool. Nothing was read."
+             no month of any swept index or F&O cash equity at the path its own load \
+             reads on this feed and rung, so there is nothing to screen and nothing to \
+             pool. Nothing was read."
         );
         return Ok(out);
     }
@@ -333,7 +338,7 @@ fn count(n: usize) -> u64 {
 /// off the F&O list, a reference index, an F&O index other than the two, or a
 /// contract is skipped here without a second list.
 ///
-/// # One entry per instrument, and only where that instrument is read from
+/// # One entry per instrument, and only at the path its own load reads
 ///
 /// This kept `h.symbol`, the directory's own spelling, and asked `swept_index`
 /// only whether the WORD resolved. Two defects followed, both counted in the
@@ -347,29 +352,102 @@ fn count(n: usize) -> u64 {
 ///   read, and `swept_index` resolves the bare name to an NSE key. The opening
 ///   line counted it among the POOL's instruments while pass 1 read NSE paths.
 ///
-/// A holding now counts only when its exchange and segment directories are the
-/// ones the resolved key's own path names -- the file a load of that key opens
-/// -- and the entry is the key's canonical symbol, so one instrument is one
-/// entry however the store spelt it.
+/// The first repair compared the exchange and segment exactly and folded the
+/// symbol's case, and said it listed an instrument only where "the file a load
+/// of that key opens" is. That was false both ways (D-0696): on the
+/// case-sensitive filesystem CI runs, `NSE/CASH/Reliance` was listed as
+/// `RELIANCE` though the canonical load opens nothing there, and on a
+/// case-insensitive one `nse/CASH/RELIANCE` was dropped with no word though
+/// that load opens it.
+///
+/// So all three directories are now compared exactly with the resolved key's
+/// own path segments, through [`stored::misfiled`], the one rule `sweep-all`
+/// applies too. A holding at that path is the instrument, listed once by its
+/// canonical symbol. A holding whose symbol directory resolves to a swept key
+/// anywhere else -- another exchange, the other segment, another spelling --
+/// is not listed and is NAMED in [`Surface::elsewhere`], once per directory,
+/// so the report says what it did not read rather than dropping it silently.
+/// A holding whose word does not resolve at all -- an off-list equity, a
+/// reference index, an F&O index, a contract -- is skipped here without a
+/// word, as it always was: it is not an instrument this engine sweeps.
 fn surface_under(
     root: &std::path::Path,
     vendor: brutex_core::vendor::Vendor,
     rung: &str,
-) -> Result<Vec<String>, String> {
+) -> Result<Surface, String> {
     let holdings = catalog::walk(root).map_err(|why| why.to_string())?;
-    let symbols: BTreeSet<String> = holdings
+    let mut symbols = BTreeSet::new();
+    let mut elsewhere = BTreeMap::new();
+    for h in holdings
         .held
         .iter()
         .filter(|h| h.vendor == vendor && h.timeframe.as_str() == rung)
-        .filter_map(|h| {
-            stored::swept_index(&h.symbol).ok().filter(|key| {
-                h.exchange == key.exchange.as_str() && h.segment == key.segment.as_str()
-            })
-        })
-        .map(|key| key.underlying.as_str().to_owned())
-        .collect();
-    Ok(symbols.into_iter().collect())
+    {
+        let Ok(key) = stored::swept_index(&h.symbol) else {
+            continue;
+        };
+        match stored::misfiled(&key, &h.exchange, &h.segment, &h.symbol) {
+            None => {
+                symbols.insert(key.underlying.as_str().to_owned());
+            }
+            Some(why) => {
+                elsewhere
+                    .entry((h.exchange.as_str(), h.segment.as_str(), h.symbol.as_str()))
+                    .or_insert(why);
+            }
+        }
+    }
+    Ok(Surface {
+        symbols: symbols.into_iter().collect(),
+        elsewhere: elsewhere.into_values().collect(),
+    })
 }
+
+/// What one feed and rung of the store holds, split into what the pool reads
+/// and what it names without reading. D-0696.
+#[derive(Debug, PartialEq, Eq)]
+struct Surface {
+    /// One canonical symbol per swept instrument held at its own path, sorted.
+    symbols: Vec<String>,
+    /// One [`stored::misfiled`] sentence per held directory whose symbol names
+    /// a swept instrument at a path that instrument's load does not read,
+    /// sorted by directory.
+    elsewhere: Vec<String>,
+}
+
+/// The holdings the surface names and does not read, under the opening they
+/// qualify. Nothing when there are none, so a store whose every holding is at
+/// its own path renders exactly as it did before D-0696.
+fn not_on_the_surface(out: &mut String, elsewhere: &[String]) {
+    if elsewhere.is_empty() {
+        return;
+    }
+    let _ = writeln!(
+        out,
+        "\n  NOT ON THE SURFACE: {} held director(ies) name a swept instrument at a path \
+         its load does not read.\n  Nothing under them was screened or pooled:",
+        elsewhere.len()
+    );
+    for why in elsewhere {
+        let _ = writeln!(out, "    {why}");
+    }
+    out.push('\n');
+}
+
+/// The pool's charge statement, the opening's own lines. D-0696.
+///
+/// It quoted "STT alone is 0.025% of every sell -- D-0506", a rate
+/// `docs/00-charter.md` gives no source for, and D-0696 withdraws it. Its
+/// words are now the audit header's own charge list and cost-excluded
+/// sentence, and it names no rate. The test
+/// `sweep_wiring_tests::every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate`
+/// holds it to the header `runner::audit::render` prints.
+pub(crate) const EQUITY_TOTALS_GROSS: &str = "NO COST OF ANY KIND IS CHARGED. Correct on an index by charter; NOT correct on a\n\
+     cash equity, where brokerage, STT, stamp duty, exchange charges, the SEBI fee and\n\
+     GST all apply and none is subtracted: every equity total is GROSS OF EVERY CHARGE.\n\
+     COST-EXCLUDED RESEARCH, NOT A NET RESULT (D-0509, D-0525, D-0681). No equity result\n\
+     carries Selection V6 or execution authority until a charter-sourced equity charge\n\
+     stack exists.";
 
 fn opening(
     vendor_word: &str,
@@ -394,12 +472,10 @@ fn opening(
         out,
         "WHICH STOCK, BEFORE IT MOVES. Pass 1 screens every instrument alone; pass 2 prices\n\
          the union of their top combinations on every instrument and POOLS the trades.\n\
-         NO COST OF ANY KIND IS CHARGED. Correct on an index by charter; NOT correct on a\n\
-         cash equity, where brokerage, STT, stamp duty, exchange charges, the SEBI fee and\n\
-         GST all apply and none is subtracted: every equity total is GROSS OF EVERY CHARGE\n\
-         (D-0506, D-0681). Every total below is gross, in sample, unvalidated, and the\n\
-         largest of instruments × candidates comparisons. It finds a candidate;\n\
-         `range-rung` with validation on is the proof."
+         {EQUITY_TOTALS_GROSS}\n\
+         Every total below is gross, in sample, unvalidated, and the largest of\n\
+         instruments × candidates comparisons. It finds a candidate; `range-rung` with\n\
+         validation on is the proof."
     );
     // BESIDE THE CHARGE STATEMENT, WHENEVER A STOCK IS IN THE POOL. A pool of
     // the two indices never carries it: an index never splits (D-0018). D-0694.
@@ -999,7 +1075,10 @@ mod tests {
         std::fs::create_dir_all(&root).expect("scratch root");
         let surface = super::surface_under(&root, brutex_core::vendor::Vendor::Zerodha, "60min")
             .expect("an empty store is not an error");
-        assert!(surface.is_empty());
+        assert!(
+            surface.symbols.is_empty() && surface.elsewhere.is_empty(),
+            "{surface:?}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1037,10 +1116,17 @@ mod tests {
         }
         let surface = super::surface_under(&root, brutex_core::vendor::Vendor::Zerodha, "60min")
             .expect("listed");
-        assert_eq!(surface, vec!["NIFTY".to_owned(), "RELIANCE".to_owned()]);
+        assert_eq!(
+            surface.symbols,
+            vec!["NIFTY".to_owned(), "RELIANCE".to_owned()]
+        );
+        assert!(surface.elsewhere.is_empty(), "{surface:?}");
         let other_rung = super::surface_under(&root, brutex_core::vendor::Vendor::Zerodha, "15min")
             .expect("listed");
-        assert!(other_rung.is_empty(), "the rung filters too");
+        assert!(
+            other_rung.symbols.is_empty() && other_rung.elsewhere.is_empty(),
+            "the rung filters too"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1074,12 +1160,32 @@ mod tests {
         );
         let surface = super::surface_under(&root, brutex_core::vendor::Vendor::Zerodha, "60min")
             .expect("listed");
-        assert!(surface.is_empty(), "{surface:?}");
+        assert!(
+            surface.symbols.is_empty() && surface.elsewhere.is_empty(),
+            "no F&O index is a swept instrument, so none is named either: {surface:?}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// **One instrument is one surface entry, however many directories spell
-    /// it, and only the directory its own key reads counts.**
+    /// The surface of a scratch store holding `dirs`, and the store removed.
+    fn surface_of(tag: &str, dirs: &[&str]) -> super::Surface {
+        let root = store_holding(tag, dirs);
+        let surface = super::surface_under(&root, brutex_core::vendor::Vendor::Zerodha, "60min")
+            .expect("listed");
+        let _ = std::fs::remove_dir_all(&root);
+        surface
+    }
+
+    /// The exact sentence `pool` names a misfiled directory by.
+    fn named(dir: &str, key: &str) -> String {
+        let (exchange, rest) = dir.split_once('/').expect("exchange");
+        let (segment, symbol) = rest.split_once('/').expect("segment");
+        let key = crate::stored::swept_index(key).expect("a swept key");
+        crate::stored::misfiled(&key, exchange, segment, symbol).expect("misfiled")
+    }
+
+    /// **One instrument is one surface entry, and only the directory its own
+    /// key reads counts; every other directory naming it is named, not read.**
     ///
     /// The surface kept each directory's raw spelling, so `NSE/CASH/reliance`
     /// beside `NSE/INDEX/RELIANCE` listed `["RELIANCE", "reliance"]`: both
@@ -1087,43 +1193,141 @@ mod tests {
     /// summed that stock's trades, wins and net twice. `NSE/INDEX/RELIANCE` is
     /// not even the file a RELIANCE load opens, and `NSE/CASH/NIFTY` is not the
     /// file a NIFTY load opens.
+    ///
+    /// No store below holds two directories that differ only in case under one
+    /// parent. On a case-insensitive filesystem those are ONE directory, and
+    /// the catalog would list whichever spelling was created first -- the
+    /// first version of this test did exactly that, so its answer depended on
+    /// the filesystem it ran on.
     #[test]
     fn one_instrument_is_one_surface_entry_at_the_path_its_key_reads() {
-        let root = store_holding(
+        let surface = surface_of(
             "spellings",
             &[
-                "NSE/CASH/reliance",
                 "NSE/CASH/RELIANCE",
                 "NSE/INDEX/RELIANCE",
+                "BSE/CASH/RELIANCE",
                 "NSE/CASH/NIFTY",
-                "NSE/INDEX/banknifty",
+                "NSE/INDEX/BANKNIFTY",
             ],
         );
-        let surface = super::surface_under(&root, brutex_core::vendor::Vendor::Zerodha, "60min")
-            .expect("listed");
-        assert_eq!(surface, vec!["BANKNIFTY".to_owned(), "RELIANCE".to_owned()]);
-        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(
+            surface.symbols,
+            vec!["BANKNIFTY".to_owned(), "RELIANCE".to_owned()]
+        );
+        assert_eq!(
+            surface.elsewhere,
+            vec![
+                named("BSE/CASH/RELIANCE", "RELIANCE"),
+                named("NSE/CASH/NIFTY", "NIFTY"),
+                named("NSE/INDEX/RELIANCE", "RELIANCE"),
+            ],
+            "each misfiled directory is named once, in directory order"
+        );
 
-        // One spelling only, and it is not the canonical one: still one entry,
-        // named canonically, so pass 1 and the POOL line name the same thing.
-        let root = store_holding("one-spelling", &["NSE/CASH/reliance"]);
-        let surface = super::surface_under(&root, brutex_core::vendor::Vendor::Zerodha, "60min")
-            .expect("listed");
-        assert_eq!(surface, vec!["RELIANCE".to_owned()]);
-        let _ = std::fs::remove_dir_all(&root);
+        // One spelling only, and it is not the canonical one: not listed under
+        // a name it does not carry, and named instead.
+        let surface = surface_of("one-spelling", &["NSE/CASH/reliance"]);
+        assert!(surface.symbols.is_empty(), "{surface:?}");
+        assert_eq!(
+            surface.elsewhere,
+            vec![named("NSE/CASH/reliance", "RELIANCE")]
+        );
+    }
+
+    /// **A share held only under the index segment is not on the surface.**
+    /// D-0696.
+    ///
+    /// Beside `NSE/CASH/RELIANCE` a misfiled `NSE/INDEX/RELIANCE` maps to the
+    /// same canonical entry, so its exclusion cannot be seen: a surface that
+    /// skipped the segment check for equities alone passed every test above.
+    /// Held alone, it would list RELIANCE while pass 1 reads
+    /// `NSE/CASH/RELIANCE`, which is the defect the surface was changed for.
+    #[test]
+    fn a_share_held_only_under_the_index_segment_is_not_on_the_surface() {
+        for (tag, dir) in [
+            ("share-as-index", "NSE/INDEX/RELIANCE"),
+            ("share-as-index-lower", "NSE/INDEX/reliance"),
+        ] {
+            let surface = surface_of(tag, &[dir]);
+            assert!(surface.symbols.is_empty(), "{dir}: {surface:?}");
+            assert_eq!(surface.elsewhere, vec![named(dir, "RELIANCE")], "{dir}");
+            assert!(
+                surface.elsewhere.first().is_some_and(|why| {
+                    why.contains("a load of `NSE-RELIANCE` reads `NSE/CASH/RELIANCE`")
+                }),
+                "{dir}: the sentence names the path that is read: {surface:?}"
+            );
+        }
+    }
+
+    /// **A directory spelt otherwise than the writer spells it is not on the
+    /// surface, on any filesystem.** D-0696.
+    ///
+    /// The first repair compared the exchange and segment exactly and folded
+    /// the symbol's case, so `NSE/CASH/Reliance` was listed as RELIANCE -- and
+    /// on a case-sensitive filesystem the canonical load then refused it as
+    /// absent -- while `nse/CASH/RELIANCE` was dropped with no word although a
+    /// case-insensitive filesystem opens it under the canonical load. Each is
+    /// now held to the writer's spelling in all three directories and named.
+    #[test]
+    fn a_case_variant_directory_of_a_swept_instrument_is_named_and_not_read() {
+        for (tag, dir, word) in [
+            ("mixed-symbol", "NSE/CASH/Reliance", "RELIANCE"),
+            ("lower-exchange", "nse/CASH/RELIANCE", "RELIANCE"),
+            ("mixed-segment", "NSE/Cash/RELIANCE", "RELIANCE"),
+            ("lower-index", "NSE/INDEX/nifty", "NIFTY"),
+            ("lower-index-segment", "NSE/index/BANKNIFTY", "BANKNIFTY"),
+        ] {
+            let surface = surface_of(tag, &[dir]);
+            assert!(surface.symbols.is_empty(), "{dir}: {surface:?}");
+            assert_eq!(surface.elsewhere, vec![named(dir, word)], "{dir}");
+        }
     }
 
     /// **BSE is not on the surface.** `CLAUDE.md` §1: BSE is neither swept nor
     /// pulled. The exchange directory was never read, and `swept_index`
     /// resolves a bare name to an NSE key, so a store holding only BSE files
-    /// opened its report with `POOL over 2 instrument(s)`.
+    /// opened its report with `POOL over 2 instrument(s)`. Each is named as a
+    /// directory that is not where its NSE namesake is read from.
     #[test]
     fn a_bse_holding_is_not_on_the_surface() {
-        let root = store_holding("bse", &["BSE/CASH/RELIANCE", "BSE/INDEX/NIFTY"]);
-        let surface = super::surface_under(&root, brutex_core::vendor::Vendor::Zerodha, "60min")
-            .expect("listed");
-        assert!(surface.is_empty(), "{surface:?}");
-        let _ = std::fs::remove_dir_all(&root);
+        let surface = surface_of("bse", &["BSE/CASH/RELIANCE", "BSE/INDEX/NIFTY"]);
+        assert!(surface.symbols.is_empty(), "{surface:?}");
+        assert_eq!(
+            surface.elsewhere,
+            vec![
+                named("BSE/CASH/RELIANCE", "RELIANCE"),
+                named("BSE/INDEX/NIFTY", "NIFTY"),
+            ]
+        );
+    }
+
+    /// **The report names what the surface did not read, and says nothing
+    /// when every holding is at its own path.** D-0696.
+    #[test]
+    fn the_report_names_each_directory_the_surface_did_not_read() {
+        let mut quiet = String::new();
+        super::not_on_the_surface(&mut quiet, &[]);
+        assert!(quiet.is_empty(), "no block when nothing was left out");
+
+        let elsewhere = vec![
+            named("BSE/CASH/RELIANCE", "RELIANCE"),
+            named("NSE/INDEX/RELIANCE", "RELIANCE"),
+        ];
+        let mut page = String::new();
+        super::not_on_the_surface(&mut page, &elsewhere);
+        assert!(
+            page.starts_with("\n  NOT ON THE SURFACE: 2 held director(ies)"),
+            "{page}"
+        );
+        for why in &elsewhere {
+            assert!(page.contains(&format!("\n    {why}\n")), "{page}");
+        }
+        assert!(
+            !crate::carries_refusal(&page),
+            "naming a directory is not a refusal of the pool:\n{page}"
+        );
     }
 
     /// **The pool quotes no charge rate.** `CLAUDE.md` §3 rule 1: every claim
@@ -1145,9 +1349,25 @@ mod tests {
             "NO COST OF ANY KIND IS CHARGED",
             "brokerage, STT, stamp duty, exchange charges, the SEBI fee and\nGST",
             "every equity total is GROSS OF EVERY CHARGE",
-            "(D-0506, D-0681)",
+            "COST-EXCLUDED RESEARCH, NOT A NET RESULT (D-0509, D-0525, D-0681)",
+            "No equity result\ncarries Selection V6",
+            super::EQUITY_TOTALS_GROSS,
         ] {
             assert!(page.contains(claim), "missing {claim:?}:\n{page}");
+        }
+        // The paragraph is the same on every pool page, whatever the surface:
+        // an index-only surface and an empty one carry the equity sentence too.
+        for surface in [vec!["BANKNIFTY".to_owned(), "NIFTY".to_owned()], vec![]] {
+            let other = super::opening(
+                "zerodha",
+                "60min",
+                (2025, 1),
+                (2025, 2),
+                Some(20_000),
+                &surface,
+            );
+            let (_, same) = other.split_once("WHICH STOCK").expect("the paragraph");
+            assert_eq!(same, charges, "{surface:?}");
         }
     }
 

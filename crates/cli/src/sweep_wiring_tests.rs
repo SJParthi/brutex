@@ -532,3 +532,172 @@ fn an_extinct_equity_audit_is_the_index_page_byte_for_byte() {
         generated_audit(CostScope::IndexSpot, 50_000, u64::MAX, false)
     );
 }
+
+/// **An equity ranking that kept rows but traded none says it is gross before
+/// it refuses.** D-0696.
+///
+/// The third page `EQUITY_RANKING_GROSS` was written for, and the one no test
+/// reached: stripping the label on this exit alone left every other test
+/// green. No generated store reaches the exit -- `NoneClosedFault`'s own
+/// documentation gives the reason, read from the ranker's ordering -- so the
+/// guard makes `retained_to_trade` answer `None` on a real completed audit and
+/// the real `nothing_to_trade` branch prints the page. The AUDIT block there is
+/// the refusal, so the charge header is never rendered and the FINDINGS label
+/// is the page's only charge statement.
+#[test]
+fn an_untraded_equity_ranking_is_labelled_gross_before_it_refuses() {
+    use runner::audit::CostScope;
+    let _knobs = super::knobs::serially();
+    super::knobs::clear_all();
+    let (equity, index) = {
+        let _none_closed = super::NoneClosedFault::install();
+        (
+            generated_audit(CostScope::CashEquity, 50_000, 1_400, false),
+            generated_audit(CostScope::IndexSpot, 50_000, 1_400, false),
+        )
+    };
+    let refused = "\nAUDIT\n  REFUSED. The streamed sweep offered ";
+    assert!(
+        equity.contains(refused) && !equity.contains("NOT TRADED"),
+        "premise: a completed ladder refused at the untraded exit:\n{equity}"
+    );
+    assert!(super::carries_refusal(&equity), "{equity}");
+    let findings = super::section_note(&equity, "FINDINGS").expect("a ranking");
+    assert!(
+        findings.contains("  rank "),
+        "premise: ranked rows were kept:\n{findings}"
+    );
+    assert!(
+        findings.contains(super::EQUITY_RANKING_GROSS.trim_end()),
+        "the untraded ranking must say it is gross:\n{findings}"
+    );
+    let label = equity.find("GROSS OF EVERY CHARGE").expect("labelled");
+    assert!(
+        label < equity.find(refused).expect("refused"),
+        "the label qualifies the ranking above the refusal"
+    );
+    assert!(
+        !equity.contains("CASH EQUITY run."),
+        "premise: this exit renders no AUDIT header:\n{equity}"
+    );
+    assert_eq!(
+        equity.replacen(super::EQUITY_RANKING_GROSS, "", 1),
+        index,
+        "the scope may change the charge statement and nothing else"
+    );
+    let whole = generated_audit(CostScope::CashEquity, 50_000, 1_400, false);
+    assert!(
+        !super::carries_refusal(&whole) && whole.contains("CASH EQUITY run."),
+        "the seam is gone with its guard:\n{whole}"
+    );
+}
+
+/// `text` with every run of whitespace folded to one space, so two copies of a
+/// sentence wrapped or indented differently compare by their words.
+fn words(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Whether `text` carries a digit or a percent sign outside a decision number
+/// (`D-` and exactly four digits) and the name `Selection V6`, which is what
+/// quoting a rate needs.
+fn names_a_rate(text: &str) -> bool {
+    let text = text.replace("Selection V6", "Selection");
+    let mut pieces = text.split("D-");
+    let first = pieces.next().unwrap_or_default();
+    std::iter::once(first)
+        .chain(pieces.map(|piece| {
+            let number = piece.bytes().take(4).filter(u8::is_ascii_digit).count() == 4;
+            if number {
+                piece.get(4..).unwrap_or_default()
+            } else {
+                piece
+            }
+        }))
+        .any(|piece| piece.contains(|c: char| c.is_ascii_digit() || c == '%'))
+}
+
+/// **Every equity charge statement `cli` prints is the audit header's own,
+/// and none names a rate.** D-0696.
+///
+/// The FINDINGS label, `cli top`'s share legend and `pool`'s opening are three
+/// copies of what `runner::audit`'s equity header says, and the first version
+/// of each pinned only its own literal. They had already drifted: three sets
+/// of decision citations, and two copies without the header's Selection V6
+/// clause. So the charge list and the cost-excluded sentence are read out of
+/// the header `runner::audit::render` prints, and every copy must carry both
+/// word for word. A change to the header's charges -- the day a
+/// charter-sourced stack lands -- fails here until every copy follows it.
+///
+/// `CLAUDE.md` §3 rule 1: no copy may quote a rate, because
+/// `docs/00-charter.md` sources none. Asserted on the copies themselves, so a
+/// rate added to one of them fails whether or not a page test reads it.
+#[test]
+fn every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate() {
+    use runner::audit::CostScope;
+    let header = words(&runner::audit::render(
+        CostScope::CashEquity,
+        None,
+        None,
+        None,
+        None,
+        None,
+        0,
+    ));
+    let (before, _) = header
+        .split_once(" all apply to a share trade")
+        .expect("the header names what a share trade pays");
+    let (_, charges) = before.rsplit_once(" so ").expect("the charge list");
+    assert!(
+        charges.contains("STT") && charges.contains("GST"),
+        "premise: the list was read: {charges:?}"
+    );
+    let from = header
+        .find("COST-EXCLUDED RESEARCH, NOT A NET RESULT")
+        .expect("the header's cost-excluded sentence");
+    let to = header
+        .get(from..)
+        .and_then(|tail| tail.find("stack exists."))
+        .expect("which ends the Selection V6 clause");
+    let excluded = header
+        .get(from..from + to + "stack exists.".len())
+        .expect("a sentence of the header");
+    assert!(
+        excluded.contains("No equity result carries Selection V6"),
+        "premise: {excluded:?}"
+    );
+    assert!(
+        !names_a_rate(&header),
+        "premise: the header itself quotes no rate: {header}"
+    );
+
+    for (copy, text) in [
+        ("the FINDINGS label", super::EQUITY_RANKING_GROSS),
+        ("`cli top`'s share legend", super::SHARE_MEAN_LEGEND),
+        ("`pool`'s opening", super::pool::EQUITY_TOTALS_GROSS),
+    ] {
+        let said = words(text);
+        assert!(
+            said.contains(charges),
+            "{copy} must name the header's charges {charges:?}: {said}"
+        );
+        assert!(
+            said.contains(excluded),
+            "{copy} must carry the header's sentence {excluded:?}: {said}"
+        );
+        assert!(
+            said.contains("GROSS OF EVERY CHARGE"),
+            "{copy} must say it is gross: {said}"
+        );
+        assert!(!names_a_rate(text), "{copy} quotes a rate: {text}");
+    }
+
+    // The checker is not vacuous: a quoted rate trips it, a decision number
+    // does not, and a five-digit "decision" is a number like any other.
+    assert!(names_a_rate("STT alone is 0.025% of every sell"));
+    assert!(names_a_rate("brokerage of 20 rupees"));
+    assert!(names_a_rate("a rate in percent %"));
+    assert!(names_a_rate("(D-06961)"));
+    assert!(names_a_rate("Selection V7"));
+    assert!(!names_a_rate("(D-0509, D-0525, D-0681) Selection V6"));
+}

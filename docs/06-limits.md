@@ -9081,3 +9081,47 @@ by `File::unlock`. What that does not cover, stated rather than implied away:
   hash cannot be read back for the term. The other four doors bind no such
   version: their identity moves only through the data digest over the bars
   they kept, so a gap-free month keys the same under their rule as without it.
+
+## Every equity ranking is labelled gross, and a stored instrument is read only at its own path — D-0696, 23 September 2026
+
+- **The label reaches more surfaces than D-0681's header did, and not every
+  one.** The FINDINGS block of every ranked equity page carries it, `cli top`
+  and `api`'s `/engine/top.json` read a share's `mean` per ONE share, and every
+  `pool` page names the charges. That extends D-0681's "only the audit header
+  was corrected". The front end under `web/` was not examined for its own
+  copies of these texts, and no test there binds them.
+- **The three `cli` copies are bound to the header by a test, not built from
+  it.** `EQUITY_RANKING_GROSS`, `SHARE_MEAN_LEGEND` and
+  `pool::EQUITY_TOTALS_GROSS` are literals. One test reads the charge list and
+  the cost-excluded sentence out of `runner::audit::render` and fails when a
+  copy lacks either or quotes a rate. A copy can still differ from the header
+  in any other word and pass.
+- **One exit is reached only through a test seam.** A completed audit whose
+  ranker kept rows of which none is closed prints the label and then the AUDIT
+  refusal. No generated store reaches it: a retained non-closed row always has
+  a closed equal-support superset ranked above it, under every lens. That is
+  read from `runner::rank`'s orderings, not measured over every store and lens.
+  `NoneClosedFault` drives the real branch, and `CostScopeFault` does the same
+  for a contract reaching the four scope decisions. Both are `#[cfg(test)]`
+  and compiled out of every other build.
+- **A directory spelt otherwise than the writer spells it is named and not
+  read, even where the filesystem would open it.** `pool` and `sweep-all`
+  compare the exchange, segment and symbol directories byte for byte with the
+  resolved key's path. On a case-insensitive filesystem, a load of
+  `NSE-RELIANCE` would open `NSE/CASH/reliance`. It is still not read, so that
+  one store gives one surface wherever it is mounted. The writer never
+  produces such a directory. One made by hand holds months no sweep reads
+  until it is renamed. On a case-insensitive filesystem the writer's own
+  months can land in one too: if `NSE/CASH/reliance` already exists, a write
+  to `NSE/CASH/RELIANCE` is filed under the existing spelling. That case is
+  read from the code and was not reproduced.
+- **`sweep-all`'s row label still omits the exchange.** A misfiled month is
+  refused under the same label as the canonical month it resolves to. Only its
+  sentence, which names its own directory, tells the two rows apart.
+- **The NOT ON THE SURFACE block is listed whole.** It holds one line per
+  distinct held directory that names a swept instrument at a path its load
+  does not read, with no cap. A store holding BSE months of many F&O names
+  prints one line for each such directory on every `pool` page.
+- **Cost, unmeasured.** `stored::misfiled` is three string comparisons per
+  holding the catalog lists, paid once per `pool` or `sweep-all` run and never
+  per bar or per candidate. No bench times it.

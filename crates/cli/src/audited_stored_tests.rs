@@ -1443,11 +1443,7 @@ fn top_names_a_recorded_share_as_a_share_and_an_index_as_before() {
         let top = crate::top_at(&fixture.root, None, Some(underlying));
         assert!(top.contains("TOP COMBINATIONS"), "{top}");
         assert_eq!(
-            top.contains(
-                "per ONE share, GROSS OF EVERY CHARGE: brokerage, STT, stamp duty, exchange \
-                 charges, the SEBI fee and GST all apply to a share trade and none is \
-                 subtracted -- cost-excluded research, not a net result (D-0681)."
-            ),
+            top.contains(&format!("per {}\n", crate::SHARE_MEAN_LEGEND)),
             equity,
             "{underlying}: `cli top` must name a share as a share:\n{top}"
         );

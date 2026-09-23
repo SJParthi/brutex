@@ -3,7 +3,7 @@
 #![allow(clippy::expect_used, clippy::indexing_slicing)]
 use super::*;
 use std::fs::{self, File};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use store::file::BarFile;
 use store::format::Bar;
@@ -697,6 +697,37 @@ fn the_strict_range_kernel_heads_a_share_gross_and_an_index_as_before() {
     crate::knobs::clear_all();
 }
 
+/// Every file under `root`, recursively, as a sorted set: what a run wrote is
+/// the difference between two of these.
+fn files_under(root: &Path) -> std::collections::BTreeSet<PathBuf> {
+    let mut found = std::collections::BTreeSet::new();
+    let mut open = vec![root.to_path_buf()];
+    while let Some(dir) = open.pop() {
+        for entry in fs::read_dir(&dir).expect("a readable fixture directory") {
+            let path = entry.expect("a readable entry").path();
+            if path.is_dir() {
+                open.push(path);
+            } else {
+                found.insert(path);
+            }
+        }
+    }
+    found
+}
+
+/// The files under `root` that `before` did not hold, relative to `root` and
+/// sorted, so two fixtures' writes compare by name.
+fn written_since(root: &Path, before: &std::collections::BTreeSet<PathBuf>) -> Vec<PathBuf> {
+    files_under(root)
+        .difference(before)
+        .map(|path| {
+            path.strip_prefix(root)
+                .expect("under the fixture root")
+                .to_path_buf()
+        })
+        .collect()
+}
+
 /// **A contract reaching the strict audited range is refused by name before
 /// its column is prepared or a result recorded.**
 ///
@@ -704,6 +735,18 @@ fn the_strict_range_kernel_heads_a_share_gross_and_an_index_as_before() {
 /// key, so the kernel's `?` on `audit_cost_scope` never ran. The seam hands
 /// that decision a NIFTY future in place of the loaded key, on this thread
 /// only; the refusal is exactly the scope's own sentence.
+///
+/// # "Before its column is prepared" is what the file set checks
+///
+/// The first version asserted only that `results/runs.bin` was absent, so a
+/// scope check moved after `prepare` -- which writes durable preparation
+/// evidence under `results/sweep-evidence-v1/` and `audited-spans-v1/` --
+/// passed it (D-0696). The refusal is not free of writes: `RangeInputs::load`
+/// runs before the scope is asked and records its sources' checksum evidence
+/// in those same two namespaces and `checksum-receipts-v1/` (35 files on this
+/// fixture, measured). So a twin fixture is loaded and nothing else, and the
+/// refused run must have written exactly the files, by name, that loading its
+/// span writes -- not one that `prepare` adds.
 #[test]
 fn a_contract_reaching_the_strict_range_kernel_is_refused_before_it_is_recorded() {
     use brutex_core::instrument::{Expiry, InstrumentKey, Kind, Segment};
@@ -719,6 +762,9 @@ fn a_contract_reaching_the_strict_range_kernel_is_refused_before_it_is_recorded(
     };
     let named = stored::audit_cost_scope(&future).expect_err("a contract has no header");
     let fixture = Fixture::warmed();
+    let twin = Fixture::warmed();
+    let before = files_under(&fixture.root);
+    let twin_before = files_under(&twin.root);
     let refused = {
         let _contract = stored::CostScopeFault::install(future);
         crate::audited_range_command::run_for_test(fixture.request("5min"), 2000)
@@ -727,6 +773,23 @@ fn a_contract_reaching_the_strict_range_kernel_is_refused_before_it_is_recorded(
     assert!(
         !crate::results::Results::path(&fixture.root).exists(),
         "a refused contract recorded a result"
+    );
+    let loaded_only = {
+        let _span = RangeInputs::load(twin.request("5min")).expect("the twin's span loads");
+        written_since(&twin.root, &twin_before)
+    };
+    assert!(
+        !loaded_only.is_empty(),
+        "premise: loading a span records its checksum evidence"
+    );
+    assert_eq!(
+        written_since(&fixture.root, &before),
+        loaded_only,
+        "a refused contract wrote more than loading its span writes: it prepared a column"
+    );
+    assert!(
+        before.iter().all(|path| path.exists()),
+        "and removed nothing"
     );
     let whole = crate::audited_range_command::run_for_test(fixture.request("5min"), 2000)
         .expect("the seam is gone with its guard");

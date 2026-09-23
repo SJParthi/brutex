@@ -39359,3 +39359,282 @@ per line below.
 All new `cli` tests run under the D-0694 priority-100 override in
 `.config/nextest.toml`, which names each of them. That changes their order
 only: nothing is filtered, skipped, retried or ignored.
+
+### D-0696 — Label every equity ranking gross in the audit header's own words, and read a stored instrument only at its own path — 2026-09-23
+
+**Why this entry exists.** Commit c8c5383c ("Test the cli audit follow-ups
+on a share, and label every equity ranking gross") changed what an operator
+reads on four surfaces and changed which stored months `pool` reads. It
+recorded none of it: its own message, AF-31 and AF-32 each say "no decision
+entry yet". A review of that commit then upheld ten issues against it. This
+entry records every behaviour change the commit made, as corrected by the
+repair that answered those issues, and it is the entry `CLAUDE.md` §9 asks
+for. Numbered as reserved for it; D-0694 and D-0695 belong to other pieces of
+the same run.
+
+**1. Every page that ranks a cash equity says it is gross.** D-0681 put the
+charge statement at the head of the AUDIT block, and `runner::audit` is the
+only writer of that block. Three pages rank shares by `mean` and `t` and
+never reach it: an audit whose streamed ladder halted or was not
+certified (the refusal returns before the render), an audit whose ranker kept
+rows of which none is closed (`nothing_to_trade`), and every `sweep-stored`
+page, which has no AUDIT block at all. Each printed a ranked table of shares
+with no word that its figures carry every charge a share trade pays, which
+`CLAUDE.md` §1 requires of every equity ranking. The FINDINGS block of every
+ranked equity page now ends with an indented label:
+
+> CASH EQUITY: EVERY FIGURE IN THIS RANKING IS GROSS OF EVERY CHARGE. A share
+> trade pays brokerage, STT, stamp duty, exchange charges, the SEBI fee and
+> GST, and this engine subtracts none of them, so the ranking above is on
+> GROSS returns. COST-EXCLUDED RESEARCH, NOT A NET RESULT (D-0509, D-0525,
+> D-0681). No equity result carries Selection V6 or execution authority until
+> a charter-sourced equity charge stack exists.
+
+Where it lands, exit by exit:
+
+- *Halted or uncertified audit:* the label, then the `NOT TRADED` refusal. No
+  AUDIT block. The label is the only byte that differs from the same index
+  page.
+- *Kept rows, none closed:* the label, then the AUDIT refusal "REFUSED. The
+  streamed sweep offered N survivor(s), but no CLOSED combination survived
+  ...". No AUDIT header. The label is again the only byte that differs.
+- *Completed audit:* labelled twice, in FINDINGS and by the AUDIT header.
+- *`sweep-stored`:* FINDINGS only.
+- *An index page:* byte-identical on all four exits. *An extinct page:* no
+  ranking, so no label.
+
+`validation_note` lifts FINDINGS whole, so the rung notes that `range-all` and
+`pool` keep when they discard a report carry the label too. Every label line
+is indented two spaces, so no refusal scanner reads one as a refusal and no
+exit status changes.
+
+The second exit is one no generated store reaches, and the reason is read
+from `runner::rank`, not measured over every store. A retained row that is not
+closed has an immediate superset of equal support: the same hits, the same
+score under every lens, and larger mask words, which every ordering uses as
+its last tie-break. So that superset ranks above it, and so does the closed row
+its chain of such supersets ends in. A non-empty ranking of a complete run
+therefore holds a closed row. The exit still exists and still prints a ranked
+table of shares. c8c5383c said it was fixed "confirmed by failing tests
+first", yet no test reached it: the review reports stripping the label on that
+exit alone with all 23 of the commit's new tests still green. A test-only guard
+now drives it (item 6).
+
+**2. `cli top` reads a share's `mean` per ONE share.** The legend was one
+literal: "`mean` is the average forward move over the run's horizon, per ONE
+unit of the index, gross of the statutory charge stack". That was printed over
+a RELIANCE row: the wrong instrument, and a charge statement that names no
+charge. A row whose recorded underlying resolves to a cash equity now reads:
+
+> per ONE share, GROSS OF EVERY CHARGE: brokerage, STT, stamp duty, exchange
+> charges, the SEBI fee and GST all apply to a share trade and none is
+> subtracted. COST-EXCLUDED RESEARCH, NOT A NET RESULT (D-0509, D-0525,
+> D-0681). No equity result carries Selection V6 or execution authority until
+> a charter-sourced equity charge stack exists.
+
+Every other row keeps the index legend byte for byte. `api`'s
+`/engine/top.json` renders through `cli::render_top_record`
+(`crates/api/src/topjson.rs`), so its text for a share changes the same way.
+
+**3. One wording, bound to the audit header.** c8c5383c wrote three copies of
+the equity charge statement in `cli`: the FINDINGS label, the `top` legend and
+the `pool` opening. They cited three different sets of decisions — (D-0509,
+D-0525, D-0681), (D-0681) and (D-0506, D-0681) — and two of them left out the
+header's Selection V6 clause. Each test pinned its own literal, so a change to
+the header's charges, the day a charter-sourced stack lands, would have failed
+nothing in `cli`. All three copies now carry, word for word after whitespace is
+folded, the header's charge list ("brokerage, STT, stamp duty, exchange
+charges, the SEBI fee and GST") and the header's sentence "COST-EXCLUDED
+RESEARCH, NOT A NET RESULT (D-0509, D-0525, D-0681). No equity result carries
+Selection V6 or execution authority until a charter-sourced equity charge stack
+exists." The copies are the constants `EQUITY_RANKING_GROSS`,
+`SHARE_MEAN_LEGEND` and `pool::EQUITY_TOTALS_GROSS`. One test reads both
+strings out of `runner::audit::render(CostScope::CashEquity, ...)`. It fails if
+any copy lacks either, or carries a digit or `%` outside a decision number
+`D-dddd` and the name `Selection V6`. AF-31 claimed the label "names no rate",
+and until that test nothing asserted it: the review reports a rate written
+into the constant passing all ten tests the row cited.
+
+*Rejected:* one `pub` constant in `runner::audit` that all four texts compose
+from. It would change `runner`'s public surface in a repair of `cli`'s piece,
+and the header's own shape and wording are pinned in `runner` by AF-60 to
+AF-62. The `cli` test catches the same drift from `cli`'s side and leaves
+`runner` alone. *Also rejected:* building the `cli` texts at run time from the
+rendered header. That would tie the FINDINGS layout to the header's line
+wrapping.
+
+**4. The `pool` opening changed on every pool page, and a rate is withdrawn.**
+Every `pool` report opens with one paragraph, printed before the surface is
+examined, so the change reaches every pool page: a surface of shares, a
+surface of the two indices alone, and an empty one. It said "NOT correct on a
+cash equity, where STT alone is 0.025% of every sell -- D-0506". It now says
+that on a cash equity every charge in item 3's list applies and none is
+subtracted, that every equity total is GROSS OF EVERY CHARGE, and then gives
+item 3's sentence. The empty-surface line now says the store holds no swept
+month "at the path its own load reads" (item 5).
+
+The figure "0.025%" has no source in `docs/00-charter.md`, and `CLAUDE.md` §3
+rule 1 allows no claim about a cost without one. **This entry withdraws it
+wherever the ledger states it as a fact**: D-0506's "equity STT is 0.025% on
+every sell" and D-0509's "STT alone is 0.025% of every sell. The opening of
+every report states this". Both sentences stay where they are, as the record of
+what was said. Neither is a fact this repository asserts, and no report prints
+the rate any more. D-0681's "The `cli pool` report ... is unchanged" is also
+superseded: the pool report changed here.
+
+**5. A stored instrument is read only at its own path.** `stored::swept_index`
+resolves a bare word, and every loader opens the one path
+`StorePath::for_key` builds from the resulting key. A catalog holding has three
+directories. Asking only whether its symbol directory resolved answers a
+different question. `BSE/CASH/RELIANCE`, `NSE/INDEX/RELIANCE` and
+`NSE/CASH/reliance` all resolve to `NSE-RELIANCE`, and a load of that key opens
+`NSE/CASH/RELIANCE`.
+
+- *Before c8c5383c,* `pool` listed each such holding under its directory's own
+  spelling. One share could be pooled twice (`fold` summed its trades, wins and
+  net twice), and BSE holdings were counted on the surface.
+- *c8c5383c* compared the exchange and segment exactly, folded the symbol's
+  case, and listed the canonical symbol. Its comment and message said the
+  surface was "only where that key's own path is -- the file a load of that key
+  opens". That was false in both directions. `NSE/CASH/Reliance` was listed as
+  RELIANCE, and on the case-sensitive filesystem CI runs the canonical load
+  opens nothing there, so pass 1 would refuse it as absent (read from the
+  code; not run on Linux here). `nse/CASH/RELIANCE` was dropped with no word,
+  and on a case-insensitive filesystem that load opens it: the review measured
+  both on this Mac's filesystem. A share held only as `NSE/INDEX/RELIANCE` was
+  correctly left off, but no test could see it: every fixture that held it also
+  held `NSE/CASH/RELIANCE`.
+- *Now* one rule, `stored::misfiled`, compares all three directories byte for
+  byte with the resolved key's own path segments, the spelling the writer
+  writes. Compared exactly, one store lists one surface wherever it is mounted.
+  `research::render` already counts only the exact `NSE/CASH/<symbol>` spelling.
+
+What each verb does with a holding under that rule:
+
+- **`pool`** lists a holding at its own path once, by its canonical symbol.
+  Every other directory whose symbol resolves to a swept key is **named, once
+  per directory, and not read**, in a block after the opening:
+
+  > NOT ON THE SURFACE: N held director(ies) name a swept instrument at a
+  > path its load does not read. Nothing under them was screened or pooled:
+  > `BSE/CASH/RELIANCE` is not where `NSE-RELIANCE` is stored: a load of
+  > `NSE-RELIANCE` reads `NSE/CASH/RELIANCE`, spelt exactly as the writer
+  > writes it. Nothing under this directory was read (D-0696)
+
+  The block is not a refusal, the pool still runs, and a store whose every
+  holding is at its own path prints no block. A word that resolves to no swept
+  key (an off-list equity, a reference index, an F&O index, a contract) is
+  skipped without a word, as it always was.
+- **`sweep-all`** had the same defect and it predates c8c5383c. It offered
+  every held month for the feed and rung, loaded each by `held.symbol`, and
+  labelled the row without the exchange. So a `BSE/CASH/RELIANCE` or
+  `NSE/INDEX/RELIANCE` month swept the `NSE/CASH/RELIANCE` file under the same
+  label as the NSE row. Such a month is now refused by name, before any load,
+  with the same sentence: `REFUSED  <feed> <symbol> <rung> <month>  — <sentence>`.
+  It is still counted as offered and now as refused, so the census reconciles.
+  A word that resolves to no swept key reaches `stored::load` and is refused
+  there, as before. The exit status is unchanged: an indented `REFUSED` row was
+  never a command refusal.
+
+What did not change:
+
+- *The ledger:* pass 1 of `pool` records the symbol it was handed. Every
+  listed holding's directory is now spelt canonically, so the recorded
+  underlying is the directory's own spelling and the canonical one at once. A
+  non-canonical directory is no longer screened at all, where before c8c5383c
+  it was screened and recorded under its own spelling. Rows already written are
+  not rewritten.
+- *Run identity:* it hashes the resolved key, not the word, so no identity
+  changes.
+
+*Rejected:* folding case on all three directories. The surface would again
+depend on the filesystem, and on Linux a non-canonical directory would be
+listed and then refused as absent. *Rejected:* keeping c8c5383c's filter and
+restating it. That leaves the silent drop on one filesystem and the list-then-
+refuse on the other. *Rejected:* probing the filesystem for the canonical
+path of each holding. The answer would depend on the mount. *Rejected:*
+leaving `sweep-all` as it was. The same NSE month swept once per misfiled
+holding is the double counting this item exists to remove.
+
+On a case-insensitive filesystem, a directory spelt otherwise than the writer
+spells it is now named and not read, although the canonical load would open
+it. That is deliberate, and it is stated in `docs/06-limits.md`.
+
+**6. Two test seams sit inside production function bodies.**
+`stored::CostScopeFault` (c8c5383c) and `NoneClosedFault` (this repair) are
+`#[cfg(test)]` thread-locals, read at the top of `stored::audit_cost_scope` and
+`retained_to_trade` respectively. They are compiled out of every non-test
+build. Each guard acts only on the thread that installed it and resets when it
+drops. They exist because no store reaches the exit each one drives:
+`swept_index` refuses every contract before a kernel holds a key, and item 1
+gives the untraded exit's reason. Without them, the `?` each of the four
+kernels puts on `audit_cost_scope` and the untraded page's label would each be
+unexercised. *Rejected:* restructuring either path so a test could reach it
+from data. That would change production control flow to serve a test.
+
+**7. D-0681's "What no test pins" is answered.** That entry said no test
+drives a stored equity audit to the render, so the one line in each kernel
+that takes the scope from the loaded key was unpinned. A generated
+moving-price fixture now runs `audit-stored`, the stored range audit, the
+stored screen and the strict audited range on RELIANCE and on NIFTY. Each page
+must carry its own header and never the other's. A kernel passing a constant
+`IndexSpot` fails its own test (AF-30).
+
+**8. Two tests now check what their names claim.**
+
+- *`a_seeded_fno_index_file_is_refused_before_it_is_read_under_either_segment`*
+  seeded three valid bars. A loader that read every record and only then asked
+  `swept_index` passed it. Each month is now damaged after it is written, so
+  `BarFile::open_existing` refuses it. The refusal must then equal
+  `swept_index`'s surface sentence exactly, which it cannot do if any read comes
+  first.
+- *`a_contract_reaching_the_strict_range_kernel_is_refused_before_it_is_recorded`*
+  checked only that `results/runs.bin` was absent. Its doc said the contract is
+  refused "before its column is prepared", but a scope check moved after
+  `prepare` passed it. The refusal is not free of writes: `RangeInputs::load`
+  runs first and records its sources' checksum evidence, 35 files on that
+  fixture (measured). So a twin fixture is loaded and nothing else, and the
+  refused run must have written exactly the same files, by name.
+
+**Tests, and what each is proven against.** Each regression below was
+temporarily applied to the fixed tree and the named test was run and seen to
+fail. The fix was then restored.
+
+- *Read before the surface check.* A loader that opens and reads every
+  FINNIFTY record first fails the FINNIFTY test: the refusal became "no header
+  slot survived".
+- *Segment check skipped for equities.* This fails
+  `a_share_held_only_under_the_index_segment_is_not_on_the_surface` and two
+  other surface tests.
+- *c8c5383c's folded-symbol filter.* This fails
+  `a_case_variant_directory_of_a_swept_instrument_is_named_and_not_read` and
+  `one_instrument_is_one_surface_entry_at_the_path_its_key_reads`.
+- *The label stripped on the untraded exit only.* This fails
+  `an_untraded_equity_ranking_is_labelled_gross_before_it_refuses`.
+- *The strict range asking the scope after `prepare`.* This fails the strict
+  range refusal test with "wrote more than loading its span writes".
+- *`sweep-all` without the path check.* This fails
+  `a_misfiled_month_is_refused_by_name_and_not_swept_as_its_nse_namesake`.
+- *The FINDINGS label at c8c5383c's wording.* This fails
+  `every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate`.
+  So does the `top` legend at c8c5383c's wording, and so does the pool's
+  sentence at c8c5383c's citations (which also fails
+  `the_pool_report_names_the_equity_charges_and_quotes_no_rate`).
+- *"(STT alone is 0.025% of every sell)" written into the label, with the
+  charge list left intact.* This fails the same test with "quotes a rate". The
+  halted, completed and untraded page tests stayed green under it.
+- *`runner`'s equity header naming one more charge.* This fails it with "must
+  name the header's charges". `runner` was restored before anything else ran.
+
+Invariants AF-33 to AF-37. AF-33 replaces AF-31's clause that named the
+completed audit where the untraded one belongs. AF-34 is the no-rate
+assertion AF-31 claimed. AF-35 replaces AF-32's surface clause and its
+`NSE/CASH/reliance` example: on a case-insensitive filesystem that example is
+one directory, so its answer depended on the filesystem.
+
+**Not done here.** An equity charge stack: no charter source exists for any
+rate. The front end under `web/` was not examined for its own copies of these
+texts. The verbs that take an instrument word rather than a catalog holding
+(`sweep-stored`, the audit verbs, `range-rung`, `range-all`) are unaffected by
+item 5: they open the key's own path by construction. The `api` census routes
+that list stored symbols were not examined against item 5's rule.

@@ -7732,9 +7732,7 @@ pub fn render_top_record(
     let per_unit = if stored::swept_index(&crate::results::read_field(&rows.underlying))
         .is_ok_and(|key| key.kind == brutex_core::instrument::Kind::Equity)
     {
-        "ONE share, GROSS OF EVERY CHARGE: brokerage, STT, stamp duty, exchange \
-         charges, the SEBI fee and GST all apply to a share trade and none is \
-         subtracted -- cost-excluded research, not a net result (D-0681)."
+        SHARE_MEAN_LEGEND
     } else {
         "ONE unit of the index, gross of the statutory charge stack."
     };
@@ -17950,9 +17948,11 @@ fn opening(banner: &str, refused: Option<&str>) -> String {
 /// block. Three pages print a ranked table of equity combinations and never
 /// reach it: an audit whose ladder halted or was not certified (the refusal
 /// returns before the render), an audit that kept rows but traded none
-/// (`nothing_to_trade`), and every `sweep-stored` report. Each ranked shares by
-/// `mean` and `t` with no word that those figures carry every charge a share
-/// trade pays, which `CLAUDE.md` §1 requires of every equity ranking.
+/// (`nothing_to_trade`; no generated store reaches it, and its test drives it
+/// through the test-only `NoneClosedFault`), and every `sweep-stored` report.
+/// Each ranked shares by `mean` and `t` with no word that those figures carry
+/// every charge a share trade pays, which `CLAUDE.md` §1 requires of every
+/// equity ranking.
 ///
 /// # Indented, and inside FINDINGS
 ///
@@ -17961,11 +17961,37 @@ fn opening(banner: &str, refused: Option<&str>) -> String {
 /// `refused`, `REFUSED. `, `REFUSED -- ` or `RESULT NOT RECORDED`. No line
 /// names a rate, because `docs/00-charter.md` records no source for an equity
 /// charge (§3 rule 1).
+///
+/// # The audit header's own words, and a test that says so
+///
+/// This is one of three copies of the charge statement in this crate -- with
+/// [`SHARE_MEAN_LEGEND`] and `pool`'s opening -- and `runner::audit`'s equity
+/// header is the fourth. The first version of all three named their own
+/// decisions, and two dropped the header's Selection V6 clause (D-0696).
+/// `sweep_wiring_tests::every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate`
+/// now reads the charge list and the cost-excluded sentence out of the header
+/// `runner::audit::render` prints and fails if any copy here lacks either, or
+/// carries a digit or `%` outside its decision numbers and the name
+/// `Selection V6`.
 const EQUITY_RANKING_GROSS: &str = "  CASH EQUITY: EVERY FIGURE IN THIS RANKING IS GROSS OF EVERY CHARGE.\n  \
      A share trade pays brokerage, STT, stamp duty, exchange charges, the SEBI\n  \
      fee and GST, and this engine subtracts none of them, so the ranking above\n  \
      is on GROSS returns. COST-EXCLUDED RESEARCH, NOT A NET RESULT (D-0509,\n  \
-     D-0525, D-0681).\n\n";
+     D-0525, D-0681). No equity result carries Selection V6 or execution\n  \
+     authority until a charter-sourced equity charge stack exists.\n\n";
+
+/// What `cli top` says a share's `mean` is per. D-0696.
+///
+/// The index legend it replaces for a share said "per ONE unit of the index,
+/// gross of the statutory charge stack". This is the tail of the legend's
+/// first sentence, from the unit to its last full stop, and its continuation
+/// lines carry the legend's two-space indent. The same test that binds
+/// [`EQUITY_RANKING_GROSS`] to the audit header binds this.
+const SHARE_MEAN_LEGEND: &str = "ONE share, GROSS OF EVERY CHARGE: brokerage, STT, stamp duty, exchange \
+     charges, the SEBI fee and GST all apply to a share trade\n  and none is subtracted. \
+     COST-EXCLUDED RESEARCH, NOT A NET RESULT (D-0509, D-0525, D-0681). No equity result \
+     carries\n  Selection V6 or execution authority until a charter-sourced equity charge \
+     stack exists.";
 
 /// What a ranked cash-equity table states in its FINDINGS block: the gross
 /// label, then [`audit::CORPORATE_ACTIONS_UNCHECKED`]. D-0694.
@@ -18070,9 +18096,52 @@ fn prepare_audit(
 fn retained_to_trade(
     ranked: &runner::rank::Ranked,
 ) -> Option<(Vec<&runner::rank::Scored>, &runner::rank::Scored)> {
+    #[cfg(test)]
+    if NONE_CLOSED.with(std::cell::Cell::get) {
+        return None;
+    }
     let by_evidence = retained_by_evidence(ranked);
     let first = by_evidence.first().copied()?;
     Some((by_evidence, first))
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static NONE_CLOSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Test-only: [`retained_to_trade`] answers as if no retained row were
+/// closed, for as long as the guard lives, on this thread only. D-0696.
+///
+/// # Why a seam and not a fixture
+///
+/// The exit it opens -- a completed ladder whose ranker kept rows of which
+/// none is closed -- is one no fixture in this suite reaches, and the reason
+/// is read from `runner::rank` rather than measured over every store: a
+/// retained row that is not closed has an immediate superset of equal support,
+/// so the same hits, the same score under every lens, and larger mask words,
+/// which is the last tie-break of every ordering. That superset therefore
+/// ranks above it, and so does the closed row its chain of such supersets
+/// ends in. A non-empty `top` of a complete run holds a closed row. Yet the
+/// page that exit prints ranks shares, and a test that never reached it let
+/// its charge statement be stripped with every other test green. The guard
+/// drives the real exit in `audit_bars_work` on a real generated audit.
+#[cfg(test)]
+pub(crate) struct NoneClosedFault;
+
+#[cfg(test)]
+impl NoneClosedFault {
+    pub(crate) fn install() -> Self {
+        NONE_CLOSED.with(|held| held.set(true));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for NoneClosedFault {
+    fn drop(&mut self) {
+        NONE_CLOSED.with(|held| held.set(false));
+    }
 }
 
 /// Records the SWEEP HALF of a run that produced no tradeable answer, and says

@@ -1887,6 +1887,63 @@ pub(crate) fn swept_index(underlying: &str) -> Result<InstrumentKey, Refusal> {
     Ok(as_cash)
 }
 
+/// Why a stored holding whose symbol directory names `key` is not where `key`
+/// is read from, or `None` when it is. D-0696.
+///
+/// # A word is not a path
+///
+/// [`swept_index`] resolves a bare WORD, and every loader opens the one path
+/// [`StorePath::for_key`] builds from the key that word resolves to. A catalog
+/// holding carries three directories, and a caller that asked only whether
+/// its symbol directory resolved was answering a different question:
+/// `BSE/CASH/RELIANCE`, `NSE/INDEX/RELIANCE` and `NSE/CASH/reliance` all
+/// resolve to `NSE-RELIANCE`, and a load of that key opens
+/// `NSE/CASH/RELIANCE`. `pool` listed each as the instrument it was not, and
+/// `sweep-all` swept the NSE file once per such holding, under a label that
+/// could not tell the rows apart.
+///
+/// # Byte for byte, and on every filesystem the same
+///
+/// All three directories are compared exactly with the key's own path
+/// segments -- the spelling the writer writes. Folding case here would make
+/// the answer depend on the filesystem: on a case-insensitive one a load of
+/// `NSE-RELIANCE` opens `NSE/CASH/reliance`, and on the case-sensitive one CI
+/// runs it opens nothing. Compared exactly, one store lists one surface
+/// wherever it is mounted, and a directory spelt any other way is named by
+/// its caller rather than read under a name it does not carry.
+/// `research::render` already counts only the exact `NSE/CASH/<symbol>`
+/// spelling, for the same reason.
+///
+/// UNVERIFIED performance: no bench times this. Read from the source, it is
+/// three comparisons of strings no longer than a path segment, once per
+/// holding the caller lists and never per bar.
+pub(crate) fn misfiled(
+    key: &InstrumentKey,
+    exchange: &str,
+    segment: &str,
+    symbol: &str,
+) -> Option<Refusal> {
+    let own = (
+        key.exchange.as_str(),
+        key.segment.as_str(),
+        key.underlying.as_str(),
+    );
+    if (exchange, segment, symbol) == own {
+        return None;
+    }
+    Some(format!(
+        "`{}/{}/{}` is not where `{key}` is stored: a load of `{key}` reads `{}/{}/{}`, \
+         spelt exactly as the writer writes it. Nothing under this directory was read \
+         (D-0696)",
+        clipped(exchange),
+        clipped(segment),
+        clipped(symbol),
+        own.0,
+        own.1,
+        own.2
+    ))
+}
+
 /// UNVERIFIED performance: no named cost test or measured latency bound is established here.
 /// Whether VWAP can be computed on this instrument's bars: decided by WHAT
 /// the instrument is, never by reading its bars.
@@ -3748,10 +3805,23 @@ mod tests {
     /// The seeded-file guard was pinned for INDIAVIX only. FINNIFTY is the
     /// sharper case: it is an F&O underlying, and until D-0682 the cash arm
     /// accepted it -- so a store holding `NSE/CASH/FINNIFTY` was swept as a
-    /// share. Each file below exists and is readable, so absence cannot be
-    /// what refuses it.
+    /// share. Each file below exists, so absence cannot be what refuses it.
+    ///
+    /// # Why the file is damaged, which is what makes "before it is read" a
+    /// claim this test checks
+    ///
+    /// The first version seeded three valid bars. A loader that opened the
+    /// month, read every record and only then asked `swept_index` passed it
+    /// (D-0696): a valid file reads cleanly, so reading it first changed no
+    /// byte of the refusal. Each month below is written whole and then
+    /// overwritten with bytes no store reader admits, which the premise
+    /// proves through `BarFile::open_existing` itself. Any read before the
+    /// surface check therefore ends in the store's refusal, not in the surface
+    /// sentence -- so the refusal must be the surface sentence exactly, byte
+    /// for byte, and never a word about the file.
     #[test]
     fn a_seeded_fno_index_file_is_refused_before_it_is_read_under_either_segment() {
+        let surface = swept_index("FINNIFTY").expect_err("FINNIFTY is off the surface");
         for (tag, key) in [
             (
                 "finnifty-index",
@@ -3774,12 +3844,23 @@ mod tests {
                 .expect("a fresh month opens")
                 .append(&bars(3))
                 .expect("and takes its bars");
+            std::fs::write(&on_disk, b"NOT A BAR FILE: any reader refuses these bytes")
+                .expect("damage the seeded month");
             assert!(on_disk.is_file(), "fixture premise: {}", on_disk.display());
+            let reread =
+                StorePath::for_key(Vendor::Dhan, &key, Timeframe::MINUTE_1, ym, FileKind::Bars)
+                    .expect("the same path");
+            assert!(
+                BarFile::open_existing(&r, reread, id).is_err(),
+                "fixture premise: a read of {} must fail, so reading it first cannot \
+                 end in the surface sentence",
+                on_disk.display()
+            );
 
             let why = load(&r, Vendor::Dhan, "FINNIFTY", "1min", 2026, 8)
                 .expect_err("an F&O index never enters a sweep");
+            assert_eq!(why, surface, "{tag}: refused by the surface, not the file");
             assert!(why.contains("storable but not sweepable"), "{tag}: {why}");
-            assert!(!why.contains("does not exist"), "{tag}: {why}");
             assert!(why.ends_with(SURFACE_SENTENCE), "{tag}: {why}");
             let _ignored = std::fs::remove_dir_all(&r);
         }
