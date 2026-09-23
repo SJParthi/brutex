@@ -4900,7 +4900,13 @@ mod tests {
 
         static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
         let unique = NEXT_ROOT.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
+        // THE CANONICAL TEMP DIR. On macOS `temp_dir()` is under `/var`, a
+        // symlink to `/private/var`, and all-rung admission deliberately
+        // refuses a root spelled any way but its canonical one. Should the
+        // directory fail to resolve, the unresolved spelling is kept and that
+        // same refusal names both paths, so nothing is hidden.
+        let temp = std::env::temp_dir();
+        std::fs::canonicalize(&temp).unwrap_or(temp).join(format!(
             "brutex-step3-{tag}-{}-{unique}",
             std::process::id()
         ))

@@ -271,8 +271,10 @@ const fn lookback_of(position: u32) -> usize {
 /// so there are exactly six answers. Rebuilding one on every bar walked all 62
 /// positions through the `match` above, and sampling `runner`'s C-R-04 fixture
 /// on 2026-09-22 attributed about a quarter of the known-mask projection to it.
-/// Selecting a constant instead cut the column build's per-bar cost by a
-/// further 20% on an arm64 laptop. D-0677.
+/// Selecting a constant instead removed that share; the combined effect with
+/// [`crate::fib`]'s narrow division, measured by C-R-04's own row on an arm64
+/// laptop, is −26.7% per bar. The rest of the projection still rebuilds on
+/// every bar. D-0677, D-0680.
 ///
 /// The two ranges are [`positions`]'s own, and
 /// `known_is_every_position_whose_whole_lookback_is_present` pins every

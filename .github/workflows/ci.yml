@@ -7886,11 +7886,21 @@ jobs:
           # The clean baseline exceeded 900s on CI before any mutant ran. Let
           # that required baseline calibrate the test timeout; the outer 240m
           # job deadline still applies. Timeout is never credited as a catch.
+          #
+          # --cap-lints true, D-0680. This job inherits RUSTFLAGS=-D warnings,
+          # and replacing a function body leaves its parameters unused, so every
+          # "replace fn -> T with ..." mutant on a function WITH parameters
+          # failed to compile ("unused variable") and was counted unviable, which
+          # the gate accepts. Measured on a one-function crate with cargo-mutants
+          # 26.2.0: 5 caught without -D warnings, 2 caught + 3 unviable with it,
+          # 5 caught again with --cap-lints true. Lints are enforced by gate 6b;
+          # here they only hid mutants from the tests.
           set +e
           cargo mutants --in-diff /tmp/mutation-plan/changed.diff \
             --shard "$SHARD" --sharding round-robin \
             --jobs 2 --jobserver-tasks 4 \
             --minimum-test-timeout 900 --timeout-multiplier 2 \
+            --cap-lints true \
             --cargo-arg=--locked --test-tool nextest --cargo-test-arg=--max-fail=1:immediate \
             --cargo-test-arg=--test-threads=1 --no-shuffle --colors never 2>&1 | tee mutation-run.log
           status=${PIPESTATUS[0]}

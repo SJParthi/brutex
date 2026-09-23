@@ -8442,12 +8442,39 @@ none of them; each is what a gate would have measured had it been allowed to.
 - **Coverage: 90.64% lines and 89.10% regions** on that run, against 93.74%
   and 94.60% on 2026-08-21. 30,451 lines and 55,399 regions are missed; `cli`
   holds 22,172 of the lines and 40,649 of the regions, `api` 4,963 and 9,015.
-  The floor is now 90/89 and rises with the measurement, never the reverse.
-- **C-R-04 on CI hardware** read 5,284 floors against 5,000 before D-0677's
-  two exact fixes. Its reading after them is the next CI run's to report and
-  is not claimed here. On an arm64 laptop the row itself fell from 959,919 ps
-  per bar (2,436 floors) to 703,513 (1,546 floors), `cargo bench --workspace`
-  exit 0 with no row breached.
+  The floor is now 90/89 for every later pull request, not only #13 (D-0680),
+  and rises with the measurement, never the reverse.
+- **C-R-04 is reduced, not back to where it was.** On an arm64 laptop the row
+  fell from 959,919 ps per bar (2,436 floors) to 703,513 (1,546 floors), and
+  `cargo bench --workspace` exited 0 with no row breached. That is still 1.81
+  times the 388,075 ps read at `a8814e64`. Still rebuilt on every bar:
+  `daily::known`, `fib::prev_day_known`, `Prev5::known`, `crossings_known`,
+  and the `CurDayFib`, `Orb` and `GapFib` `known` functions.
+- **C-R-04 on CI cannot yet tell the fix from the machine.** Before the fix
+  (run 35520698178): 1,632,774 ps per bar over a 309 ps floor, 5,284.058
+  floors, over. After (run 35767619936): 1,908,097 ps over a 643 ps floor,
+  2,967.491 floors, within. The numerator rose and the floor doubled between
+  runners. The floor is timed over about 10 µs, five passes of 3,000 bars, and
+  no CPU model is logged, so a reading near 5,000 is not evidence either way
+  until the floor is timed properly and the budget recalibrated against it.
 - **Still divided in `i128` per bar:** `trend`'s EMA and ATR updates, whose
-  divisors are a period known only at run time. D-0677 did not touch them;
-  sampling put them near 1% of the column build.
+  divisor is a period known only at run time, and `Ema::value`,
+  `Atr::value` and `SuperTrend::fold`, whose divisors are compile-time
+  constants and could take the same exact narrow path. After D-0677's
+  division fix, 128-bit division was 199 of 8,519 sampled stacks, 2.3%
+  (arm64 laptop, the C-R-04 fixture).
+- **No Gate 8 row times the path cash equities run.** Every C-I and C-R row
+  uses `Availability::Absent`; production binds `Present` for equities, which
+  turns the VWAP family on. C-I-05 times `Evaluator::step`, which skips the
+  known-mask projection that `Column::build` pays for through `step_known`.
+  A slowdown confined to either would pass every row.
+- **The first `main` runs after the #13 squash plan the whole diff.** A push
+  or scheduled run whose tip is the squash is planned against its parent:
+  about 49,870 cases in 250 jobs, expected red. It is cancelled by hand and
+  stops recurring when the next pull request merges.
+- **`/trades.json` and `/frontier.json` queue a malformed selector** into the
+  bounded blocking pool instead of refusing it at once, so under full detail
+  capacity it is answered 429 rather than 400. See D-0679.
+- **Gate 1f reads each file only up to its first column-0 `#[cfg(test)]`.**
+  59 files have production items after that line, `server.rs` among them, so
+  browser code added there would pass the gate. No such code exists today.

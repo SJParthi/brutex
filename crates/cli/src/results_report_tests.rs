@@ -6,7 +6,12 @@ struct Fixture(std::path::PathBuf);
 
 impl Fixture {
     fn new(rows: &[Record]) -> Result<Self, Box<dyn std::error::Error>> {
-        let fixture = Self(crate::verification_scratch()?);
+        // CANONICAL FROM THE START. macOS hands out a temp dir under `/var`,
+        // a symlink to `/private/var`. The public listing resolves the root it
+        // is configured with and prints the resolved spelling, so a fixture
+        // named by the unresolved one compared two spellings of one file and
+        // failed on every Mac while passing on Linux.
+        let fixture = Self(std::fs::canonicalize(crate::verification_scratch()?)?);
         let mut ledger = Results::open(&fixture.0)?;
         for row in rows {
             ledger.append(row)?;
