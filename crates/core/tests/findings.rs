@@ -19,7 +19,7 @@
 //!
 //! * every row carries a disposition from a closed set — `OPEN` is allowed, silence is not;
 //! * the counts in the prose match the rows in the tables;
-//! * a `FIXED` row names a commit;
+//! * a `FIXED` row names a commit that exists, is in HEAD's history, and is on `main`;
 //! * ids are unique, and derived from the finding's own title rather than its position, so
 //!   reordering the table cannot renumber a row and a citation cannot come to mean
 //!   something else;
@@ -649,5 +649,100 @@ fn every_named_commit_is_in_this_branchs_history() {
     assert!(
         checked > 0,
         "no commit was checked for ancestry, so this test proves nothing"
+    );
+}
+
+/// A named commit is on `main`, not only on the branch being tested.
+///
+/// `every_named_commit_is_in_this_branchs_history` asks about HEAD, and on a pull request
+/// HEAD contains the branch's own commits. `main` takes squash merges, so none of those
+/// commits ever becomes an ancestor of `main`. A row that names one passes on the pull
+/// request and fails on `main` the moment it merges. That is not hypothetical: every
+/// `FIXED` row named a commit on #13's branch, all 26 passed there, and the post-merge run
+/// on `main` went red at gate 1e on the first of them (D-0680).
+///
+/// This test moves that failure to before the merge. `refs/remotes/origin/main` is the
+/// history the ledger is read against, and every CI job that runs this checks out with
+/// `fetch-depth: 0`, which fetches it. A clone without that ref is refused with the fetch
+/// that fixes it, for the same reason a shallow clone is: skipping would pass a ledger
+/// that `main` rejects.
+#[test]
+fn every_named_commit_is_on_main() {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("crates/core is two levels below the repository root")
+        .to_owned();
+
+    // The same three environments as the two tests above, with the same three answers.
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+    };
+    if git(&["rev-parse", "--git-dir"]).is_none() {
+        println!(
+            "SKIPPING: {} is not a git work tree, so no commit can be resolved. This is \
+             what `cargo-mutants` looks like -- it copies the tree without `.git`.",
+            repo.display()
+        );
+        return;
+    }
+    assert_ne!(
+        git(&["rev-parse", "--is-shallow-repository"]).as_deref(),
+        Some("true"),
+        "this is a SHALLOW clone, so no commit below can be resolved and this test would \
+         refuse commits that exist. The checkout needs `fetch-depth: 0`."
+    );
+    let main = "refs/remotes/origin/main";
+    assert!(
+        git(&["rev-parse", "--verify", "--quiet", main]).is_some(),
+        "{main} does not resolve, so no row can be checked against the history the ledger \
+         is read on. Run `git fetch origin main`. CI's `fetch-depth: 0` checkout fetches it."
+    );
+
+    let mut checked = 0_u32;
+    for row in rows().iter().filter(|r| r.disposition.contains("FIXED")) {
+        let after = row
+            .disposition
+            .split_once("FIXED")
+            .map_or("", |(_, rest)| rest.trim_start());
+        let sha: String = after.chars().take_while(char::is_ascii_hexdigit).collect();
+        if sha.len() < 7 {
+            continue; // the sha-presence test owns this case
+        }
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["merge-base", "--is-ancestor"])
+            .arg(&sha)
+            .arg(main)
+            .output();
+        let Ok(out) = out else {
+            println!(
+                "SKIPPED: git is not runnable here, so {} was not verified",
+                row.id
+            );
+            continue;
+        };
+        assert!(
+            out.status.success(),
+            "finding {} says it was fixed by {sha}, and that commit is not an ancestor of \
+             {main}. `main` takes squash merges, so a commit on a pull request's branch never \
+             reaches it. Mark the row IN PROGRESS naming {sha}, and name the squash commit \
+             once it merges. If the fix is already on `main`, fetch it: `git fetch origin \
+             main`.",
+            row.id
+        );
+        checked += 1;
+    }
+    assert!(
+        checked > 0,
+        "no commit was checked against {main}, so this test proves nothing"
     );
 }

@@ -37569,3 +37569,22 @@ D-0677 stays as written, and this entry is the correction.
    process. Counting each of the 99 test binaries once: 5,587 passed and 4
    failed before D-0678, and 5,593 passed and 0 failed after it, with 12
    ignored both times.
+7. **The squash also broke the findings ledger, and that is what took `main`
+   red.** Run 35800504096, the first on `main` after #13, failed at gate 1e
+   after 1 h 18 min. Gates 3–6, coverage, gate 8 and both gate 18 jobs were
+   skipped behind it, so item 4's matrix never ran. The failing test was
+   `every_named_commit_is_in_this_branchs_history`. All 26 `FIXED` and
+   `PARTLY FIXED` rows in `docs/11-findings.md` named commits on #13's
+   branch. Every one is an ancestor of the branch head `e45fcaaa` and none is
+   an ancestor of `main`, because a squash keeps the tree and drops the
+   parents. The tree of `ffa41c6d` is byte-identical to the tree of
+   `e45fcaaa`: `git diff --quiet` between the two exits 0. So each row now
+   names `ffa41c6d` and keeps its branch commit beside it. That is the same
+   claim as before, made against a commit `main` contains. The disposition
+   cell is outside the rows digest, so the digest is unchanged, and no row
+   was added or removed. `every_named_commit_is_on_main` (FL-01) now checks
+   each named commit against `refs/remotes/origin/main`. A row naming a
+   branch commit therefore fails on its own pull request, not on `main` after
+   the merge. A fix made on a branch stays `IN PROGRESS` until its squash
+   exists. Item 4 still stands for the gate 18 plan. Gate 1e simply failed
+   first.
