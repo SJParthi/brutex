@@ -348,7 +348,7 @@ fn stored_screens_refuse_missing_or_corrupt_authorities_before_recording() {
         let original = fs::read(&path).expect("owned authority");
         let damaged = if corrupt {
             let mut bytes = original;
-            bytes[24] ^= 1;
+            bytes[committed_record_byte()] ^= 1;
             fs::write(&path, &bytes).expect("damage owned authority");
             Some(bytes)
         } else {
@@ -370,6 +370,65 @@ fn stored_screens_refuse_missing_or_corrupt_authorities_before_recording() {
             "no source repair or creation"
         );
     }
+    crate::knobs::clear_all();
+}
+
+/// A byte inside the first committed record, which that record's block checksum covers.
+///
+/// Not byte 24. Byte 24 is the newest header slot's `n_valid`, and damaging it fails that
+/// slot's own checksum, which is exactly what a crash during the slot write leaves. The
+/// store reads such a file as the previous commit (D-0688), so it is a torn commit and not a
+/// corrupt authority. A committed record byte lies inside every extent the tail-block proof
+/// can try, so it is refused as the corruption it is.
+fn committed_record_byte() -> usize {
+    let first = store::layout::Layout::CURRENT
+        .offset_of(0)
+        .expect("record 0 has an offset");
+    usize::try_from(first).expect("the header region fits a usize") + 8
+}
+
+/// A damaged newest header slot is a torn commit, and it reads as the previous one.
+///
+/// `Fixture::warmed` commits eight sessions, so the 5min month's newest slot holds
+/// generation 8 over 600 bars and the other holds generation 7 over 525. Byte 24 is
+/// generation 8's `n_valid`. Flipping it fails that slot's checksum, which is byte for byte
+/// what a crash during the slot write leaves, and the store's crash table says a reader then
+/// sees generation 7. Before D-0688 the tail block, sealed over generation 8's records,
+/// refused that read, and this module's refusal tests leaned on the refusal. Now the screen
+/// reads 525 bars and records them under their own identity, never the 600-bar one, and the
+/// store logs both the fallback and the interrupted append.
+#[test]
+fn a_damaged_newest_header_slot_screens_as_the_previous_commit() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    let fixture = Fixture::warmed();
+    let path = fixture.path(5, Timeframe::MINUTE_5);
+    let whole = fixture.screen("5min", 1_000_000).expect("the whole month");
+    assert!(whole.contains("· 600 bars ·"), "{whole}");
+
+    let mut torn = fs::read(&path).expect("owned authority");
+    torn[24] ^= 1;
+    fs::write(&path, &torn).expect("tear the newest slot");
+    let previous = fixture
+        .screen("5min", 1_000_000)
+        .expect("the previous commit screens");
+    assert!(previous.contains("· 525 bars ·"), "{previous}");
+    assert!(previous.contains("RESULT RECORDED"), "{previous}");
+
+    let mut ledger = crate::results::Results::open_read(&fixture.root).expect("ledger");
+    assert_eq!(ledger.len().expect("two parents"), 2);
+    let (first, second) = (
+        ledger.read(0).expect("whole month"),
+        ledger.read(1).expect("previous commit"),
+    );
+    assert_eq!((first.bars, second.bars), (600, 525));
+    assert_ne!(first.identity, second.identity);
+    drop(ledger);
+    assert_eq!(
+        fs::read(&path).expect("unrepaired"),
+        torn,
+        "a read repairs nothing"
+    );
     crate::knobs::clear_all();
 }
 
@@ -639,7 +698,7 @@ fn monthly_audits_publish_empty_extinction_and_exact_retry_identity_at_both_reso
         let source = fixture.path(5, Timeframe::MINUTE_1);
         let saved = fs::read(&source).expect("original minutes");
         let mut corrupt = saved.clone();
-        corrupt[24] ^= 1;
+        corrupt[committed_record_byte()] ^= 1;
         fs::write(&source, corrupt).expect("corrupt owned minute authority");
         assert!(fixture.audit(rung).is_err());
         assert_eq!(fs::read(&path).expect("refused ledger"), original);

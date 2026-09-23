@@ -148,19 +148,38 @@ checksum rather than returning half of each image.
 
 ```
 1. pwrite the new records at offset  32768 + n_valid * 56
-2. pwrite the affected block checksums into the .crc sidecar
-3. fsync the data, through Commit::durable_through
+2. fsync the data, through Commit::durable_through
+3. pwrite the affected block checksums into the .crc sidecar, then fsync it
 4. pwrite the 64-byte header slot for generation g   <- one write
 5. fsync the header
 ```
 
+**This list used to put the sidecar before the data `fsync`.** The writer has
+always done it in the order above (`BarFile::append`: records, `sync_all`,
+`seal_committed`, header slot, `sync_all`), and the order matters to the next
+paragraph. D-0688.
+
 A reader treats records `0 .. n_valid` as the whole file. Bytes past `n_valid`
 are, by definition, not there yet.
 
+The writer also `fsync`s the month's directory after it creates the `.crc`
+sidecar, which it does only for a stream with no committed records. The
+sidecar's own `fsync` makes its bytes durable, not its name, and a sealed month
+that loses the name after its first commit is refused forever: a writer may
+not recreate proof for existing records (§8). D-0688.
+
 Consequences:
 
-* **A torn record is unobservable.** A crash between steps 1 and 4 leaves bytes
-  on disk that no reader will look at; the next append overwrites them.
+* **A torn record is never served, and it is not always unobservable.** This
+  bullet used to say "unobservable", and that was false for one window. A crash
+  between steps 1 and 3 leaves bytes on disk that no reader serves; the next
+  append overwrites them. A crash after step 3 has reached the disk and
+  before step 5 completes leaves the same bytes AND the tail block's sidecar
+  entry sealed over them, so the entry no longer matches the committed
+  extent. A reader admits that block only on the positive proof §6
+  describes, and logs the interrupted append. Until D-0688 it refused the
+  block, and every overlapping re-offer that read it first — a re-pull, or a
+  derived rung folded again — was refused with it.
 * **A torn header is unobservable.** Step 4 is one write of one self-checked
   64-byte unit, into the slot that does *not* hold the previous commit. A crash
   during it leaves a slot that fails its own checksum, and the reader takes the
@@ -170,7 +189,7 @@ Consequences:
   cannot support; the reader falls back to the previous generation rather than
   refusing the whole file.
 
-`Commit::durable_through` is the byte offset step 3 must cover. **It states the
+`Commit::durable_through` is the byte offset step 2 must cover. **It states the
 offset; `crates/store/src/file.rs` issues the barrier** — `sync_all` on the
 records before any slot that names them, and a second one after. This paragraph
 read "this repository performs no I/O yet, so it states the offset rather than
@@ -228,6 +247,29 @@ and never over the nominal 4088 — which for 72 of every 73 file states would
 name bytes past EOF. The writer recomputes the tail block's checksum on every
 commit that lands in it; the reader verifies against the `n_valid` it read from
 the header. Both sides derive the length from the same counter.
+
+### A tail entry sealed past the commit — D-0688
+
+The one exception to "the same counter" is a crash between §5 step 3 and step
+5: the sidecar entry for the tail block was sealed at `n_valid + k`, and the
+header still says `n_valid`. The format does not change. The reader, on a tail
+block whose entry does not match the committed extent, tries the longer
+extents: the committed bytes followed by 1, 2, … whole records the file really
+holds past `offset_of(n_valid)`, never past the block's nominal end. If one of
+them has the stored CRC-32C, the committed records are served and a
+`store.block` warning names the interrupted append and the extent matched.
+Every other mismatch is refused as before: a full block, a tail with no whole
+record past the commit, or records past it that match nothing.
+
+It is a proof and not a fallback, because the committed bytes are inside every
+candidate. A CRC-32C detects every error burst of up to 32 bits, so such a
+flip in a committed byte cannot match the extent that was really sealed. Any
+other candidate matches only by a 32-bit collision. A tail block with `k`
+whole records past its commit is compared `k + 1` times instead of once, and
+`k` is at most 72 at this geometry, so a random corruption of such a block is
+admitted with probability about `k + 1` in 2^32 instead of 1 in 2^32. A block
+with nothing past its commit is compared once, as before.
+`docs/06-limits.md` states the cost.
 
 Each block's CRC-32C lives in a sidecar at the same **block index**:
 

@@ -36,6 +36,11 @@
 //!   thirty-two bytes whatever produced it; hashing eight fixed-width terms
 //!   cannot see the column behind one of them.
 //!
+//! Two budget rows sit beside them. **C-R-04** prices the index column build in
+//! per-bar floors. **C-R-05** prices the column build a cash equity runs, with
+//! `Availability::Present` turning the VWAP family on, against a floor timed
+//! for long enough to hold still. D-0690.
+//!
 //! **Not measured here:** whether any of those costs is *small*. This file
 //! refuses a cost that GROWS. `docs/06-limits.md` is where absolute figures and
 //! the things nobody has timed are recorded.
@@ -45,9 +50,10 @@ use std::time::Instant;
 
 use brutex_core::instrument::{Exchange, InstrumentKey};
 use engine::Ladder;
+use indicators::column::Column;
 use indicators::evaluator::{Evaluator, Widths};
 use indicators::pattern::Thresholds;
-use indicators::vwap::Availability;
+use indicators::vwap::{Availability, Vwap};
 use runner::identity::{Direction, Params, Run, data_digest, identity};
 use runner::{Sweeper, report, synthetic};
 use vocab::ConditionMask;
@@ -95,13 +101,37 @@ const REPS_FAST: u32 = 20_000;
 /// bound until the measurement passes is how a gate stops meaning anything.
 const SUPPORT_PERMILLE: u64 = 500;
 
+/// Passes over the fixture per trial when timing the STABLE per-bar floor.
+///
+/// C-R-04's floor is five passes over 3,000 bars, about 10 µs, timed once: on
+/// CI it read 309 ps on one runner and 643 ps on another (D-0680). Two thousand
+/// passes is six million adds per trial, milliseconds rather than microseconds,
+/// and [`TRIALS`] of them are taken so the minimum can be kept. D-0690.
+const FLOOR_PASSES: u32 = 2_000;
+
+/// Whole sweeps per trial for a stable budget row's numerator.
+const BUILD_REPS: u32 = 10;
+
+/// Trials per stable measurement. The MINIMUM is kept: an interrupt, a
+/// migration to an efficiency core or a clock still ramping can only make a
+/// trial slower, so the fastest trial is the one nearest the code's own cost.
+const TRIALS: u32 = 15;
+
 fn evaluator() -> Evaluator {
+    evaluator_with(Availability::Absent)
+}
+
+/// A fresh evaluator whose VWAP family is on or off by `availability`.
+///
+/// `Present` is what `cli`'s `stored::vwap_availability` binds for a cash
+/// equity. Every index run, and every other row in this file, uses `Absent`.
+fn evaluator_with(availability: Availability) -> Evaluator {
     Evaluator::new(
         Widths::pinned().unwrap_or_else(|_| {
             eprintln!("the pinned widths are invalid, which is a defect in vocab");
             std::process::exit(2);
         }),
-        Availability::Absent,
+        availability,
         Thresholds::CLASSICAL,
     )
 }
@@ -148,6 +178,26 @@ fn per_unit<T>(units: u128, reps: u32, mut f: impl FnMut() -> T) -> u128 {
     }
     let ps = start.elapsed().as_nanos().saturating_mul(1_000);
     ps / u128::from(reps).max(1) / units.max(1)
+}
+
+/// Picosecond cost of `f` per unit, as the minimum over [`TRIALS`] trials.
+///
+/// [`per_unit`] times one trial and divides. That is enough for a ratio whose
+/// two legs are both whole sweeps, and not enough for a floor of one add per
+/// bar, which is what C-R-04's floor is. D-0690.
+fn per_unit_min<T>(units: u128, reps: u32, mut f: impl FnMut() -> T) -> u128 {
+    // One untimed pass, as in `per_unit`.
+    black_box(f());
+    let mut best = u128::MAX;
+    for _ in 0..TRIALS {
+        let start = Instant::now();
+        for _ in 0..reps {
+            black_box(f());
+        }
+        let ps = start.elapsed().as_nanos().saturating_mul(1_000);
+        best = best.min(ps / u128::from(reps).max(1) / units.max(1));
+    }
+    best
 }
 
 /// C-R-01 — the COLUMN BUILD costs the same per bar at every column length.
@@ -197,6 +247,28 @@ fn floor_ps_per_bar(bars: &[indicators::Candle]) -> u128 {
         }
         black_box(acc)
     })
+}
+
+/// The same per-bar floor, timed long enough to hold still.
+///
+/// The walk is the one [`floor_ps_per_bar`] times: one black-boxed
+/// `wrapping_add` per bar over the same slice. Only the timing differs:
+/// [`FLOOR_PASSES`] passes per trial instead of five, and the minimum of
+/// [`TRIALS`] trials instead of one. C-R-05 uses this floor. C-R-04 does not,
+/// because timing its floor this way changes what its 5,000 means, and that
+/// recalibration is its own decision (D-0680, D-0690).
+fn stable_floor_ps_per_bar(bars: &[indicators::Candle]) -> u128 {
+    per_unit_min(
+        u128::try_from(bars.len()).unwrap_or(1),
+        FLOOR_PASSES,
+        || {
+            let mut acc = 0_i64;
+            for b in black_box(bars) {
+                acc = acc.wrapping_add(black_box(b).ts_micros);
+            }
+            black_box(acc)
+        },
+    )
 }
 
 /// Prints one budget in floors and returns whether it held.
@@ -266,6 +338,109 @@ fn the_column_build_stays_within_its_budget() -> bool {
     });
     budget(
         "C-R-04 column build against the per-bar floor",
+        floor,
+        at,
+        ALLOWED,
+    )
+}
+
+/// C-R-05 — the column build a CASH EQUITY runs costs a bounded multiple of
+/// the stable per-bar floor.
+///
+/// # Why C-R-04 does not already cover it
+///
+/// Every other row in this file, and every row in `crates/indicators`' bench,
+/// builds with `Availability::Absent`. `cli`'s `stored::vwap_availability`
+/// binds `Present` for `Kind::Equity`, which turns the VWAP family on: three
+/// `i128` accumulators per bar, a square root for the bands, and the VWAP
+/// positions' known mask. A slowdown confined to that family passed every
+/// Gate 8 row. D-0690.
+///
+/// The fixture is C-R-04's, `synthetic::sessions(8)`, whose bars carry volume
+/// 1,000 to 1,010. Two setup checks run before anything is timed, because a
+/// row that silently timed the index path under an equity label would pass
+/// for the wrong reason: the fixture must carry volume, and the `Present`
+/// column must refuse no bar and differ from the `Absent` one.
+///
+/// The same build with VWAP off is printed beside it against the SAME floor,
+/// as context, not judged. It is C-R-04's numerator timed this row's way, and
+/// the calibration figure D-0680 said C-R-04 lacks.
+fn the_equity_column_build_stays_within_its_budget() -> bool {
+    /// Floors allowed per offered bar.
+    ///
+    /// Measured 2026-09-23 on an Apple M4 Pro laptop (Mac16,7, 10
+    /// performance and 4 efficiency cores), release bench profile, eight
+    /// runs, while other worktrees built and tested on the same machine. Runs
+    /// 1 to 5 sized the budget; runs 6 to 8 were verification runs with the
+    /// budget in place, at a much higher load:
+    ///
+    /// | run | load | stable floor | VWAP on, ps/bar | floors   | VWAP off, ps/bar | floors   |
+    /// |-----|------|--------------|-----------------|----------|------------------|----------|
+    /// | 1   | 11   | 336 ps       | 1,022,969       | 3044.550 | 710,334          | 2114.089 |
+    /// | 2   | 12   | 318 ps       | 1,002,681       | 3153.084 | 705,709          | 2219.210 |
+    /// | 3   | 12   | 325 ps       | 1,013,613       | 3118.809 | 702,776          | 2162.387 |
+    /// | 4   | 11   | 324 ps       | 1,011,191       | 3120.959 | 708,708          | 2187.370 |
+    /// | 5   | 11   | 321 ps       | 1,026,701       | 3198.445 | 720,666          | 2245.065 |
+    /// | 6   | 43   | 366 ps       | 1,178,744       | 3220.612 | 843,469          | 2304.560 |
+    /// | 7   | 42   | 383 ps       | 1,157,901       | 3023.240 | 862,020          | 2250.704 |
+    /// | 8   | 59   | 405 ps       | 1,472,309       | 3635.330 | 815,931          | 2014.644 |
+    ///
+    /// "load" is the one-minute load average on 14 cores. The stable floor
+    /// spread 1.057x over runs 1 to 5 and 1.274x over all eight. C-R-04's
+    /// floor, in the same eight runs, read 463, 452, 455, 513, 458, 1,275, 541
+    /// and 1,252 ps, a 2.82x spread, and 555 ps in a run before this row
+    /// existed.
+    ///
+    /// **14,500**, sized on the worst observed, 3,635.330 in run 8, with
+    /// roughly 4x left over (3.99x), the rule C-R-04's 5,000 was sized by. A
+    /// 174x uniform regression would read about 632,500 floors and be refused
+    /// by a factor of 43.
+    ///
+    /// **Not measured on CI.** Take the worst of both CI figures D-0680 records
+    /// for C-R-04: an index build of 1,908,097 ps per bar, 2.76 times the
+    /// 691,505 C-R-04 read here, and a floor as low as 309 ps. Scaled that way,
+    /// run 5's numerator, the worst of runs 1 to 5, would read about 9,170
+    /// floors, and run 8's about 13,150. Both are inside the budget, both are
+    /// extrapolations rather than readings, and the first CI run is the
+    /// calibration check.
+    const ALLOWED: u128 = 14_500;
+
+    let bars = synthetic::sessions(8);
+    if Vwap::availability_of(&bars) != Availability::Present {
+        println!("  C-R-05 UNMEASURABLE — the fixture carries no volume, so VWAP cannot run");
+        return false;
+    }
+    let equity = Column::build(&bars, &mut evaluator_with(Availability::Present));
+    let index = Column::build(&bars, &mut evaluator());
+    if equity.census().refused() != 0 || equity.bits() == index.bits() {
+        println!(
+            "  C-R-05 UNMEASURABLE — the Present build refused a bar or computed \
+             nothing the Absent build did not"
+        );
+        return false;
+    }
+
+    let units = u128::try_from(bars.len()).unwrap_or(1);
+    let floor = stable_floor_ps_per_bar(&bars);
+    println!(
+        "  the stable per-bar floor is {floor} ps — {FLOOR_PASSES} passes, minimum of {TRIALS} trials"
+    );
+    let neutered = Ladder::with_min_hits(u64::MAX);
+    let at = per_unit_min(units, BUILD_REPS, || {
+        Sweeper::new(neutered).run(black_box(&bars), &mut evaluator_with(Availability::Present))
+    });
+    let off = per_unit_min(units, BUILD_REPS, || {
+        Sweeper::new(neutered).run(black_box(&bars), &mut evaluator())
+    });
+    let off_floors = off.saturating_mul(1_000).checked_div(floor).unwrap_or(0);
+    println!(
+        "  {:<58} {off:>8} ps/bar = {}.{:03} floors (context, NOT judged)",
+        "C-R-05 context: index build (VWAP off), stable floor",
+        off_floors / 1_000,
+        off_floors % 1_000,
+    );
+    budget(
+        "C-R-05 equity column build (VWAP on), stable floor",
         floor,
         at,
         ALLOWED,
@@ -388,6 +563,7 @@ fn main() {
         the_report_costs_nothing_per_bar(),
         the_identity_does_not_depend_on_how_many_bars_the_digest_covered(),
         the_column_build_stays_within_its_budget(),
+        the_equity_column_build_stays_within_its_budget(),
     ];
     let breached = rows.iter().filter(|ok| !**ok).count();
     if breached > 0 {

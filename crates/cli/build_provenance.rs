@@ -728,10 +728,24 @@ fn walk_tree(
     true
 }
 
+/// Whether a repository-relative path lies under the front end, `web/`.
+///
+/// `CLAUDE.md` §2 forbids any crate to build from `web/`, so nothing there can
+/// be a compilation input. **This is the ONE statement of that boundary, and
+/// both halves of the proof ask it.** The tracked comparison used to spell it
+/// inline while the untracked walk did not spell it at all, so a tree whose
+/// tracked `web/` edits were correctly ignored still lost its stamp to an
+/// untracked `web/` build artifact, under the false reason "could affect
+/// compilation". Two copies of one boundary is the shape [`IgnoreRule`]'s own
+/// history already records going wrong. D-0691.
+fn front_end(path: &str) -> bool {
+    path.starts_with("web/")
+}
+
 fn relevant_entries(entries: &BTreeMap<String, Entry>) -> BTreeMap<String, Entry> {
     entries
         .iter()
-        .filter(|(path, _)| !path.starts_with("web/"))
+        .filter(|(path, _)| !front_end(path))
         .map(|(path, entry)| (path.clone(), entry.clone()))
         .collect()
 }
@@ -1003,6 +1017,15 @@ fn walk_untracked(
         }
         if is_directory {
             let child_base = format!("{word}/");
+            // The front end is outside the proof for the same reason the
+            // tracked comparison drops it, so nothing beneath it is listed.
+            // Asked of the directory's `word/` spelling, which is exactly the
+            // prefix every path beneath it carries: `web/` itself is skipped, a
+            // nested `crates/x/web/` or a sibling `webpack/` is not, and a
+            // plain FILE named `web` is still an ordinary untracked input.
+            if front_end(&child_base) {
+                continue;
+            }
             if let Some(found) = walk_untracked(root, &path, &child_base, tracked, rules) {
                 return Some(found);
             }
@@ -1685,6 +1708,63 @@ mod tests {
         assert!(
             fixture.verify(None).commit.is_none(),
             "!/.claude/launch.json un-ignores it, so untracked it must refuse"
+        );
+    }
+
+    /// **The untracked walk honours the same front-end boundary as the tracked
+    /// comparison.** A front-end rebuild writes new hashed chunks under
+    /// `web/build/` that are untracked until committed. No crate compiles from
+    /// `web/` (`CLAUDE.md` §2), and the tracked comparison already drops it, so
+    /// the walk refusing here was a false "could affect compilation" that
+    /// unstamped every build after a front-end rebuild. D-0691.
+    #[test]
+    fn an_untracked_front_end_build_artifact_keeps_the_stamp() {
+        let fixture = Fixture::new();
+        let chunks = fixture.root.join("web/build/_app/immutable/chunks");
+        fs::create_dir_all(&chunks).expect("front-end build directory");
+        fs::write(chunks.join("B9xQ2f7a.js"), b"export const chunk = 1;\n").expect("new chunk");
+        fs::write(fixture.root.join("web/new-page.rs"), b"fn main() {}\n").expect("web source");
+        let verification = fixture.verify(None);
+        assert_eq!(
+            verification.commit.as_deref(),
+            Some(&*fixture.head),
+            "nothing under web/ is a compilation input: {}",
+            verification.reason
+        );
+        assert_eq!(verification.reason, "verified clean HEAD");
+    }
+
+    /// And the boundary is exactly `web/` at the repository root, no wider:
+    /// the same prefix `relevant_entries` drops. A nested directory that is
+    /// merely NAMED `web`, a sibling whose name only starts with `web`, and a
+    /// plain file named `web` are all still untracked inputs, each refused by
+    /// name.
+    #[test]
+    fn an_untracked_file_outside_the_front_end_still_refuses() {
+        let fixture = Fixture::new();
+        for path in [
+            "crates/cli/web/build/chunk.js",
+            "webpack/build/chunk.js",
+            "web",
+        ] {
+            let full = fixture.root.join(path);
+            fs::create_dir_all(full.parent().expect("untracked parent")).expect("parent");
+            fs::write(&full, b"export const chunk = 1;\n").expect("untracked file");
+            let verification = fixture.verify(None);
+            assert!(
+                verification.commit.is_none(),
+                "{path} must refuse the stamp"
+            );
+            assert_eq!(
+                verification.reason,
+                format!("an untracked file could affect compilation: {path}")
+            );
+            fs::remove_file(&full).expect("remove untracked file");
+        }
+        assert_eq!(
+            fixture.verify(None).commit.as_deref(),
+            Some(&*fixture.head),
+            "with the strays removed the empty directories left behind hold no input"
         );
     }
 

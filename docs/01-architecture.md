@@ -22,7 +22,7 @@ core costs greeks store telemetry <-- pull
 core pull store telemetry cli vocab <-- api
 vocab         <-- indicators · engine
 core costs engine indicators vocab <-- runner
-core costs engine indicators pull runner store telemetry <-- cli
+core costs engine indicators pull runner store telemetry vocab <-- cli
 ```
 
 | Crate | Owns | Depends on, measured | Exists |
@@ -63,6 +63,11 @@ month identity uses `pull::session::IstMoment`. It does **not** authorize a
 vendor request or network fallback. Stored readers still fail closed on absent
 or invalid calendar/session evidence rather than calling ingest. D-0453 records
 the correction.
+
+The same gate then found `cli -> vocab` missing from the same row: the manifest
+gained `vocab` in the commit that gained `pull`, and D-0453's list omitted it.
+The row was fixed the same day. The ASCII diagram above, which the gate does
+not read, kept the omission until D-0683, which also corrects D-0453's list.
 
 The graph is **acyclic**, which is §5's actual requirement, and that much holds.
 
@@ -105,27 +110,35 @@ not have it for any of them.** Each of those three entries recorded the omission
 as outstanding rather than fixing it, because the crate that wrote them did not
 own this file. It is drawn now.
 
-It sits beside `store` and `vocab` as a direct child of `core`, and **its only
-arrow points at `core`** — one dependency, `brutex_core`, for three things it
-refuses to define twice: `Exchange` (the circulars are exchange-scoped),
-`Paisa` (`CLAUDE.md` §7 fixes money at integer paisa) and the calendar
-validator (`day::TradeDay` validates through `core`'s, rather than writing a
-second leap-year rule). The graph stays acyclic; nothing depends on `costs`.
+It is a direct child of `core`, and **its only arrow points at `core`** — one
+dependency, `brutex_core`, for three things it refuses to define twice:
+`Exchange` (the circulars are exchange-scoped), `Paisa` (`CLAUDE.md` §7 fixes
+money at integer paisa) and the calendar validator (`day::TradeDay` validates
+through `core`'s, rather than writing a second leap-year rule). This used to
+say it sat beside `vocab` as a child of `core`; `vocab` depends on nothing. The
+graph stays acyclic.
 
-**Nothing consumes it yet.** `grep 'costs' crates/*/Cargo.toml` returns only its
-own manifest. The intended consumer is the engine's trade-costing path, and
-`trip::price` is the single call it needs — so `engine` gains `costs` as a
-dependency when `engine` exists.
+**Three crates consume it, and `engine` is not one of them.** This section used
+to say nothing consumed it yet, and that `engine` would take `costs` for
+`trip::price` once `engine` existed. `engine` exists and cannot: gate 22 clause
+A pins its dependency set to `vocab` alone. The consumers are `pull`, for the
+expiry calendar in `costs::expiry` (D-0206) and, in `pricing.rs`, the venue,
+strike and trading-day tables; `runner`, which prices fills through
+`costs::fill::fills_at` anchored on the printed extreme
+(`Anchor::PrintedExtreme`), so no adverse tick is charged and every figure is
+gross of the spread; and `cli`, which names `costs::fill::Direction`.
+Corrected by D-0683.
 
-**`CLAUDE.md` §5 draws this same graph and still does not list `costs`.** That
-file is session law and is not edited from here. The correction it needs is
-recorded in D-0045 and reported to the operator.
+**`CLAUDE.md` §5 did not list `costs` when this section was written.** D-0045
+recorded the gap for the operator, and D-0161 closed it when §5 became the
+measured graph.
 
 ---
 
-**`api → pull` was added by D-0038**, and the diagram above still draws them as
-siblings. `/pull` and `/store` are the operator's window onto ingest, and every
-rule they render already has exactly one definition in `pull`: the validated
+**`api → pull` was added by D-0038**, and the diagram above draws it in `api`'s
+row. (This sentence used to say the diagram drew them as siblings.) `/pull`
+and `/store` are the operator's window onto ingest, and every rule they render
+already has exactly one definition in `pull`: the validated
 calendar (`session::Day`), the inclusive window and the vendor's non-inclusive
 `toDate` (`session::Window::wire_to`), the drop reasons and their tally
 (`session::{DropReason, DropCensus}`), and the per-vendor counter file
@@ -133,9 +146,11 @@ calendar (`session::Day`), the inclusive window and the vendor's non-inclusive
 Gregorian rule and a second answer to what goes on the wire. The graph is still
 acyclic — `pull` does not depend on `api` — and the build order is unchanged.
 
-`greeks` is a **leaf with no arrow into it and none out of it**, which is why
-it is not drawn in the diagram above. It is not part of the sweep. It is shared
-with the `tickvault` repository, which takes it by git URL, so it declares zero
+`greeks` is a **leaf with no arrow out of it**. It had none into it either until
+D-0217 made `pull` its one caller, and the diagram above draws it in the
+depends-on-nothing row and in `pull`'s. (This used to say it had no arrow in and
+was therefore not drawn.) It is not part of the sweep. It is shared with the
+`tickvault` repository, which takes it by git URL, so it declares zero
 dependencies for the same reason `core` does — and unlike `core`, its public
 surface mentions no type from this workspace at all, only `f64` and plain enums
 it owns. **Both halves of that are enforced by CI gate 9b**, in the same shape
@@ -147,12 +162,10 @@ paisa. Its `rust-version` is written literally rather than inherited, because
 the MSRV of a shared leaf crate is a property of the crate and not of the
 workspace hosting it. See `docs/05-decisions.md` D-0046.
 
-**`CLAUDE.md` §5 does not list it.** That is a real discrepancy and §10 makes
-`CLAUDE.md` the winner, so this row is the document running ahead of session
-law rather than the other way round. `greeks` adds no arrow to §5's graph, so
-it violates nothing in it; bringing §5 into line is an operator decision, and
-it is **still open** — see D-0046, "One discrepancy an operator has to settle",
-which carries the one-line repair.
+**`CLAUDE.md` §5 did not list it when this section was written**, and D-0046
+left bringing §5 into line open as an operator decision ("One discrepancy an
+operator has to settle"). D-0161 closed it: §5 became the measured graph and
+draws `greeks` in its depends-on-nothing row.
 
 ---
 

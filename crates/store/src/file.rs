@@ -106,27 +106,39 @@
 //! answer is not "there was nothing to verify against", it is "the thing that
 //! would have verified this is missing".
 //!
-//! # The one window in which a healthy file is called corrupt, stated plainly
+//! # The one window in which a healthy file used to be called corrupt
 //!
-//! This paragraph used to be a prediction and it is now a live limit, so it is
-//! kept rather than deleted. The tail block's checksum domain is a function of
-//! `n_valid` ([`crate::layout::Layout::covered_byte_range`]), and
-//! [`BarFile::append`] writes the records, then the sidecar, then the header —
-//! an ordering [`BarFile::append`] argues for at its own call site. A crash
-//! *between* the sidecar and the header therefore leaves the tail block's
-//! entry computed over a record count the header does not yet claim, and the
-//! next reader of that block computes over the shorter, older extent and gets
-//! a number that cannot match. It is a **false refusal**, loud and named, of
-//! one block of one month.
+//! The tail block's checksum domain is a function of `n_valid`
+//! ([`crate::layout::Layout::covered_byte_range`]), and [`BarFile::append`]
+//! writes the records, then the sidecar, then the header — an ordering
+//! [`BarFile::append`] argues for at its own call site. A crash *between* the
+//! sidecar and the header therefore leaves the tail block's entry computed over
+//! a record count the header does not yet claim, and a reader that computes
+//! over the shorter, committed extent gets a number that cannot match.
 //!
-//! It is not silent, it loses nothing, and it repairs itself: the next append
-//! writes at `offset_of(n_valid)` and `BarFile::seal_committed` re-seals from
-//! `block_of(first_index)` — which is that same tail block — so the sidecar and
-//! the header agree again. Closing it properly needs a sidecar entry that names
-//! the record count it covers, which is a `docs/02-store-format.md` change with
-//! a decision entry behind it, not something to slip into a writer. Refusing
-//! loudly in the meantime is `CLAUDE.md` §4's other arm; passing the block
-//! because a mismatch *might* be this case is the fallback it bans.
+//! **This paragraph used to end "it repairs itself", and that was false for
+//! every caller but one.** The claim was that the next append writes at
+//! `offset_of(n_valid)` and re-seals the tail block. That holds only for a
+//! batch that strictly FOLLOWS what is committed. A re-pull of the same day and
+//! a resumed backfill that overlaps reach `already_stored` or
+//! `suffix_that_follows` first, and both READ the tail block. `pull`'s
+//! derivation reads the whole minute month before it folds, and the whole held
+//! derived month (`reconcile_derived`) before it appends a re-fold. Every one
+//! of those reads was refused. So a minute month stayed refused until a
+//! strictly later bar arrived, and a derived rung in this state could not be
+//! repaired by the pull path at all, because its own history is read first.
+//!
+//! What closes it, with no format change, is a positive proof rather than a
+//! guess — D-0688. [`crate::block::verify_through`] admits a mismatching tail
+//! block only when the stored number is the CRC-32C of the committed bytes
+//! followed by one or more whole records the file really holds past the
+//! commit, inside the block. That is exactly what `BarFile::seal_committed`
+//! sealed before the crash, and a flipped committed byte is inside every such
+//! extent. It logs a `store.block` warning naming the interrupted append. Any
+//! other mismatch — a non-tail block, a tail block with nothing past the
+//! commit, or past records that prove nothing — is refused as before, so
+//! passing a block because a mismatch *might* be this case is still refused,
+//! as `CLAUDE.md` §4 requires.
 
 use std::fmt;
 use std::fs::{self, File, TryLockError};
@@ -1430,19 +1442,36 @@ impl BarFile {
             // `None` here and verification reports that it cannot check rather
             // than checking against zeros it just wrote.
             match access {
-                Access::Write => Some(fault(
-                    File::options()
-                        .read(true)
-                        .write(true)
-                        // Only a stream with no committed records can begin
-                        // a new checksum file. Missing existing evidence is
-                        // a refusal, never permission to seal history anew.
-                        .create(header.n_valid == 0)
-                        .truncate(false)
-                        .open(at),
-                    at,
-                    Action::Open,
-                )?),
+                Access::Write => {
+                    // Only a stream with no committed records can begin a new
+                    // checksum file. Missing existing evidence is a refusal,
+                    // never permission to seal history anew.
+                    let fresh = header.n_valid == 0;
+                    let sidecar = fault(
+                        File::options()
+                            .read(true)
+                            .write(true)
+                            .create(fresh)
+                            .truncate(false)
+                            .open(at),
+                        at,
+                        Action::Open,
+                    )?;
+                    // THE SIDECAR'S NAME IS DURABLE BEFORE ANY COMMIT NEEDS IT.
+                    //
+                    // `crc.sync_all` in `seal_committed` makes the sidecar's
+                    // BYTES durable, not its directory entry. Lose the entry
+                    // in a crash after the first commit and the month is
+                    // sealed, holds records, and has no `.crc` — which the
+                    // line above then refuses to recreate, forever. The bar
+                    // file's own name gets this in `open_or_create`; this is
+                    // the same flush for its sibling. Only a fresh stream can
+                    // have created one, so only a fresh stream pays it. D-0688.
+                    if fresh {
+                        fsync_dir(at.parent().unwrap_or(at))?;
+                    }
+                    Some(sidecar)
+                }
                 Access::Read => match open_read(at) {
                     Ok(file) => Some(file),
                     Err(why) if why.kind() == io::ErrorKind::NotFound => None,
@@ -1779,7 +1808,7 @@ impl BarFile {
             row.write_into(&mut image);
         }
 
-        // Step 1 and step 3 of §5: the records, then the barrier. Every byte
+        // Step 1 and step 2 of §5: the records, then the barrier. Every byte
         // below `commit.durable_through` is on stable storage when the second
         // write is issued.
         write_fully(&self.bars, &self.bars_path, at, &image)?;
@@ -2008,13 +2037,27 @@ impl BarFile {
     /// bounds the per-operation cost and this is bounded by the block, which is
     /// a constant of the format and not a function of the file.
     ///
+    /// The TAIL block adds one `fstat` ([`Self::past_the_commit`]), and when
+    /// the file holds whole records past the commit, one read of them and one
+    /// CRC extension over them. The covered bytes and those records together
+    /// never exceed the nominal block, so the bound is still the block.
+    ///
+    /// # A tail block sealed past the commit is admitted on proof — D-0688
+    ///
+    /// [`Self::append`] seals before it commits, so a crash between the two
+    /// leaves the tail entry sealed over records the header does not claim.
+    /// [`crate::block::verify_through`] serves that block only when the stored
+    /// number is the checksum of the committed bytes followed by records this
+    /// file really holds, and logs a `store.block` warning naming the
+    /// interrupted append. Any other mismatch is refused exactly as before.
+    ///
     /// # Errors
     ///
     /// [`StoreError::BlockChecksum`] naming the file, the block and both
     /// numbers. [`StoreError::ChecksumsMissing`] naming both files.
     /// [`StoreError::ShortRead`] for a sidecar too short to hold this block's
     /// entry, [`StoreError::Format`] if the geometry refuses the block, and
-    /// anything the host refuses reading either file.
+    /// anything the host refuses measuring or reading either file.
     fn verify_block_of(&self, index: u64) -> Result<(), StoreError> {
         // ASKED OF THE PATH, WHICH IS ASKED OF THE FLAG. `crc_path` is `Some`
         // exactly when `validated` saw `FLAG_CHECKSUMS`, so this is the header's
@@ -2059,12 +2102,21 @@ impl BarFile {
         read_fully(crc, at, block.saturating_mul(4), &mut sum)?;
         let stored = u32::from_le_bytes(sum);
 
-        // `block::verify` AND NOT A COMPARISON WRITTEN HERE. It is the function
-        // `crates/store/tests/fault.rs` walks every bit of every byte against,
-        // and it owns the `store.block` telemetry line that makes a mismatch
-        // visible in `/logs` as well as in the return value. A second comparison
-        // in this module would be a second answer to one question.
-        let checked = crate::block::verify(&self.header, self.layout, block, &bytes, stored);
+        // THE RECORDS PAST THE COMMIT, which only an interrupted append can
+        // have left and which only the tail block can hold. Empty for every
+        // other block and for a healthy file. `block::verify_through` uses them
+        // only to PROVE that a mismatching tail entry was sealed over the
+        // committed bytes plus some of these — see `Self::past_the_commit`.
+        let past = self.past_the_commit(block, end)?;
+
+        // `block::verify_through` AND NOT A COMPARISON WRITTEN HERE. It is the
+        // body of `block::verify`, the function `crates/store/tests/fault.rs`
+        // walks every bit of every byte against, and it owns the `store.block`
+        // telemetry lines that make a mismatch, or an interrupted append it
+        // admitted, visible in `/logs` as well as in the return value. A second
+        // comparison in this module would be a second answer to one question.
+        let checked =
+            crate::block::verify_through(&self.header, self.layout, block, &bytes, &past, stored);
         if let Err(FormatError::BlockChecksum { computed, .. }) = checked {
             return Err(StoreError::BlockChecksum {
                 path: self.bars_path.clone(),
@@ -2076,6 +2128,52 @@ impl BarFile {
         refused(checked, &self.bars_path)?;
         self.verified.store(block, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// The whole records this file holds past the commit counter, inside
+    /// `block` and never past its nominal end. `end` is `offset_of(n_valid)`,
+    /// where the covered range of the tail block stops.
+    ///
+    /// # Why they are read at all
+    ///
+    /// [`Self::append`] seals the sidecar BEFORE it writes the header slot, so
+    /// a crash between the two leaves the tail block's entry sealed over these
+    /// records as well as the committed ones. Without them that block can only
+    /// be refused, and so can every re-offer of an overlapping batch — a
+    /// re-pull, or a derived rung folded again from the whole month — because
+    /// each of them reads the tail block before it could re-seal it.
+    ///
+    /// # Cost
+    ///
+    /// Nothing for a block that is not the tail: it returns before any
+    /// syscall. For the tail block, one `fstat`, and a read of at most one
+    /// block less one record, which is zero bytes for a file whose length is
+    /// exactly its committed extent.
+    ///
+    /// # Errors
+    ///
+    /// Anything the host refuses measuring or reading the bar file.
+    fn past_the_commit(&self, block: u64, end: u64) -> Result<Vec<u8>, StoreError> {
+        let n_valid = self.header.n_valid;
+        if block.saturating_add(1) != self.layout.blocks_for(n_valid) {
+            return Ok(Vec::new());
+        }
+        let len = fault(self.bars.metadata(), &self.bars_path, Action::Measure)?.len();
+        let nominal_end = block
+            .saturating_add(1)
+            .saturating_mul(self.layout.records_per_block());
+        let held = self.layout.capacity_for(len).min(nominal_end);
+        let span = usize::try_from(
+            held.saturating_sub(n_valid)
+                .saturating_mul(self.layout.record_stride()),
+        )
+        .map_err(|_| StoreError::Format {
+            path: self.bars_path.clone(),
+            source: FormatError::OffsetOverflow,
+        })?;
+        let mut past = vec![0u8; span];
+        read_fully(&self.bars, &self.bars_path, end, &mut past)?;
+        Ok(past)
     }
 
     /// The part of `batch` that follows what is committed, when the part that
@@ -3722,6 +3820,210 @@ mod tests {
             "the commit dropped this handle's memory of block 0"
         );
         drop(file);
+        scrub_month(&path);
+    }
+
+    // =======================================================================
+    // A crash between the sidecar and the header — D-0688
+    //
+    // `append` seals the sidecar before it writes the header slot. These
+    // tests build the file a crash between the two leaves, on a real disk:
+    // commit `committed` bars, keep the header region, append `pending` more
+    // (records written, sidecar sealed at the larger count, header advanced),
+    // then put the header region back. The records past the commit and the
+    // sealed sidecar are left exactly as the dead append made them durable,
+    // and the header is the one it never replaced.
+    // =======================================================================
+
+    /// The file an append leaves when it dies after sealing and before its
+    /// header slot is durable.
+    fn crash_between_seal_and_commit(tag: &str, committed: i64, pending: i64) -> PathBuf {
+        let (path, mut file) = month(tag);
+        let held: Vec<Bar> = (0..committed).map(bar).collect();
+        assert!(
+            matches!(file.append(&held), Ok(Appended::Committed { .. })),
+            "the committed bars commit"
+        );
+        let region = std::fs::read(&path).expect("the month reads")[..32_768].to_vec();
+        let lost: Vec<Bar> = (committed..committed + pending).map(bar).collect();
+        assert!(
+            matches!(file.append(&lost), Ok(Appended::Committed { .. })),
+            "the append that is about to be interrupted"
+        );
+        drop(file);
+        let mut bytes = std::fs::read(&path).expect("the month reads");
+        bytes[..32_768].copy_from_slice(&region);
+        std::fs::write(&path, &bytes).expect("the month writes");
+        path
+    }
+
+    /// A tail block sealed past the commit reads, and the pull path repairs
+    /// it.
+    ///
+    /// Three shapes of the crash: an append inside the tail block, one that
+    /// crossed into the next block (so the tail entry is sealed over the
+    /// WHOLE block), and one that filled exactly the room left. In each the
+    /// sidecar entry is premised to be the checksum of the longer extent and
+    /// NOT of the committed one — so a read that succeeds had to prove it.
+    ///
+    /// The repair half is the one that used to be impossible: re-offering the
+    /// whole batch overlaps what is committed, so `suffix_that_follows` reads
+    /// the tail block before it can append, and that read was refused. It now
+    /// passes, the suffix is appended, and the tail is re-sealed at the new
+    /// commit — which a fresh reader then verifies directly.
+    #[test]
+    fn a_tail_block_sealed_past_the_commit_by_an_interrupted_append_still_reads() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+
+        for (committed, pending, sealed_through) in [(5i64, 3i64, 8u64), (70, 10, 73), (1, 72, 73)]
+        {
+            let tag = format!("pastcommit{committed}");
+            let path = crash_between_seal_and_commit(&tag, committed, pending);
+            let n_valid = u64::try_from(committed).expect("small");
+            let tail = Layout::V2.block_of(n_valid - 1);
+            let entry = usize::try_from(tail).expect("small");
+            assert_ne!(
+                sealed_sum(&path, entry),
+                live_sum(&path, tail, n_valid),
+                "the premise: the tail entry is not the committed extent's"
+            );
+            assert_eq!(
+                sealed_sum(&path, entry),
+                live_sum(&path, tail, sealed_through),
+                "the premise: it is the extent the dead append sealed"
+            );
+
+            let reader = reopen_readonly(&path).expect("the month opens");
+            assert_eq!(reader.records(), n_valid, "the header never moved");
+            for index in 0..committed {
+                let at = u64::try_from(index).expect("small");
+                assert_eq!(reader.read_record(at), Ok(bar(index)), "record {index}");
+            }
+            assert_eq!(
+                reader.read_record(n_valid),
+                Err(StoreError::NotCommitted {
+                    index: n_valid,
+                    n_valid
+                }),
+                "and nothing past the commit is served"
+            );
+            drop(reader);
+
+            let mut writer = reopen(&path).expect("the writer opens");
+            let whole: Vec<Bar> = (0..committed + pending).map(bar).collect();
+            let total = n_valid + u64::try_from(pending).expect("small");
+            assert_eq!(
+                writer.append(&whole),
+                Ok(Appended::Committed {
+                    first_index: n_valid,
+                    n_valid: total,
+                }),
+                "an overlapping re-offer reads the tail and appends the rest"
+            );
+            drop(writer);
+            assert_eq!(
+                sealed_sum(&path, entry),
+                live_sum(&path, tail, total),
+                "the tail is sealed at the new commit"
+            );
+            let fresh = reopen_readonly(&path).expect("the month opens");
+            for index in 0..committed + pending {
+                let at = u64::try_from(index).expect("small");
+                assert_eq!(fresh.read_record(at), Ok(bar(index)), "record {index}");
+            }
+            drop(fresh);
+            scrub_month(&path);
+        }
+    }
+
+    /// The proof admits the interrupted append and nothing else.
+    ///
+    /// Same crash state, three kinds of damage, and every one is still the
+    /// refusal it always was — naming the COMMITTED extent's checksum:
+    ///
+    /// * a flipped bit in a committed record of the tail block;
+    /// * a sidecar entry that is simply wrong, with records past the commit
+    ///   that therefore prove nothing;
+    /// * a flipped bit in a record past the commit, which breaks the proof.
+    ///   The committed bytes are intact and the block is still refused. That
+    ///   is the conservative direction and it is stated, not hidden.
+    #[test]
+    fn a_damaged_tail_is_refused_even_beside_records_an_interrupted_append_left() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+
+        let flip = |path: &Path, index: u64| {
+            let mut bytes = std::fs::read(path).expect("the month reads");
+            let at = usize::try_from(Layout::V2.offset_of(index).expect("an offset"))
+                .expect("an offset that fits");
+            bytes[at + 18] ^= 0b1000_0000;
+            std::fs::write(path, &bytes).expect("the month writes");
+        };
+        let refusal = |path: &Path| StoreError::BlockChecksum {
+            path: path.to_path_buf(),
+            block: 0,
+            stored: sealed_sum(path, 0),
+            computed: live_sum(path, 0, 5),
+        };
+
+        let committed_flip = crash_between_seal_and_commit("pastflipcommitted", 5, 3);
+        flip(&committed_flip, 1);
+        let reader = reopen_readonly(&committed_flip).expect("the month opens");
+        assert_eq!(reader.read_record(1), Err(refusal(&committed_flip)));
+        assert_eq!(reader.read_record(4), Err(refusal(&committed_flip)));
+        drop(reader);
+        scrub_month(&committed_flip);
+
+        let wrong_entry = crash_between_seal_and_commit("pastwrongentry", 5, 3);
+        std::fs::write(sidecar_of(&wrong_entry), 0xDEAD_BEEFu32.to_le_bytes())
+            .expect("the sidecar is writable");
+        let reader = reopen_readonly(&wrong_entry).expect("the month opens");
+        assert_eq!(reader.read_record(0), Err(refusal(&wrong_entry)));
+        drop(reader);
+        scrub_month(&wrong_entry);
+
+        let past_flip = crash_between_seal_and_commit("pastflippast", 5, 3);
+        flip(&past_flip, 6);
+        let reader = reopen_readonly(&past_flip).expect("the month opens");
+        assert_eq!(reader.read_record(0), Err(refusal(&past_flip)));
+        drop(reader);
+        scrub_month(&past_flip);
+    }
+
+    /// Only the tail block can have been sealed past the commit.
+    ///
+    /// Eighty committed records are a full block 0 and seven in block 1, and
+    /// the dead append sealed block 1 over ten. Block 1 reads on the proof;
+    /// block 0 is full, has no room for one, and a flipped bit in it is
+    /// refused by name exactly as before — the records past the commit are
+    /// not consulted for it at all.
+    #[test]
+    fn a_mismatch_outside_the_tail_block_is_refused_whatever_lies_past_the_commit() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+
+        let path = crash_between_seal_and_commit("pastnontail", 80, 3);
+        let mut bytes = std::fs::read(&path).expect("the month reads");
+        let at = usize::try_from(Layout::V2.offset_of(10).expect("an offset"))
+            .expect("an offset that fits");
+        bytes[at + 18] ^= 0b1000_0000;
+        std::fs::write(&path, &bytes).expect("the month writes");
+
+        let reader = reopen_readonly(&path).expect("the month opens");
+        assert_eq!(
+            reader.read_record(75),
+            Ok(bar(75)),
+            "the tail block reads on the proof"
+        );
+        assert_eq!(
+            reader.read_record(10),
+            Err(StoreError::BlockChecksum {
+                path: path.clone(),
+                block: 0,
+                stored: sealed_sum(&path, 0),
+                computed: live_sum(&path, 0, 80),
+            }),
+            "a full block's mismatch is refused, naming it"
+        );
+        drop(reader);
         scrub_month(&path);
     }
 }

@@ -47,8 +47,6 @@
 //! times this, so the shape above is read from the source rather
 //! than measured. `CLAUDE.md` §3 rule 6.
 
-use std::path::PathBuf;
-
 /// The headers every JSON route here answers with.
 type JsonHeaders = [(axum::http::header::HeaderName, &'static str); 1];
 
@@ -63,9 +61,14 @@ pub async fn trades_json(uri: axum::http::Uri) -> (axum::http::StatusCode, JsonH
     if let Err(why) = crate::detail::query_is_bounded(query) {
         return refuse(json_headers(), &why);
     }
-    let query = query.to_owned();
-    let root = crate::server::store_dir();
-    match crate::detail::run(move || respond(root, &query)).await {
+    // PARSED BEFORE ADMISSION, so a selector that can only be refused never
+    // takes a detail slot and is never answered 429 in place of its 400.
+    // D-0689; `detail::Selector` keeps the blocking path's order and words.
+    let asked = match crate::detail::Selector::parse(crate::server::store_dir(), query) {
+        Ok(asked) => asked,
+        Err(why) => return refuse(json_headers(), &why),
+    };
+    match crate::detail::run(move || respond(asked)).await {
         Ok(response) => response,
         Err(crate::detail::RunError::Saturated) => unavailable(
             axum::http::StatusCode::TOO_MANY_REQUESTS,
@@ -82,31 +85,13 @@ pub async fn trades_json(uri: axum::http::Uri) -> (axum::http::StatusCode, JsonH
     clippy::too_many_lines,
     reason = "one ordered receipt-child-validation-page transaction keeps every early refusal beside the operation it protects"
 )]
-fn respond(
-    root: Result<PathBuf, String>,
-    query: &str,
-) -> (axum::http::StatusCode, JsonHeaders, String) {
+fn respond(asked: crate::detail::Selector) -> (axum::http::StatusCode, JsonHeaders, String) {
     let json = json_headers();
-
-    let page = match crate::detail::Page::parse(query) {
-        Ok(page) => page,
-        Err(why) => return refuse(json, &why),
-    };
-
-    let root = match root {
-        Ok(root) => root,
-        Err(why) => return refuse(json, &why),
-    };
-
-    let raw = crate::server::param(query, "identity");
-    let Some(identity) = from_hex(&raw) else {
-        return refuse(
-            json,
-            "`identity` must be the 64 hex characters `/backtest.json` prints on \
-             every row. This file holds many runs, so which one is not a detail \
-             it can infer.",
-        );
-    };
+    let crate::detail::Selector {
+        root,
+        identity,
+        page,
+    } = asked;
 
     let ledger_path = cli::results::Results::path(&root);
     let receipt_path = cli::result_set::Receipts::path(&root);
@@ -536,7 +521,20 @@ const fn nibble(byte: u8) -> Option<u8> {
               test that cannot panic cannot fail."
 )]
 mod tests {
-    use super::{from_hex, respond, trades_json};
+    use super::{from_hex, trades_json};
+
+    /// A whole request against a chosen root: the selector `trades_json`
+    /// parses before admission, then the blocking read it admits. Every
+    /// fixture below drives both halves through this (D-0689).
+    fn respond(
+        root: Result<std::path::PathBuf, String>,
+        query: &str,
+    ) -> (axum::http::StatusCode, super::JsonHeaders, String) {
+        match crate::detail::Selector::parse(root, query) {
+            Ok(asked) => super::respond(asked),
+            Err(why) => super::refuse(super::json_headers(), &why),
+        }
+    }
 
     fn assert_body_identity(body: &str, expected: &str) {
         let prefix = format!(r#"{{"identity":"{expected}","#);
@@ -1069,6 +1067,19 @@ mod tests {
         assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
         assert!(body.contains("no blocking task was queued"), "{body}");
         assert!(body.contains(r#""complete":false"#), "{body}");
+
+        // A selector that can only be refused is refused 400 while the same
+        // capacity is full: it never asked for a slot (D-0689).
+        let malformed: axum::http::Uri =
+            format!("/trades.json?identity={}&limit=0", "85".repeat(32))
+                .parse()
+                .expect("valid uri");
+        let (status, _, body) = trades_json(malformed).await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body.contains("`limit` must be from 1 through 256"),
+            "{body}"
+        );
         drop(held);
     }
 }

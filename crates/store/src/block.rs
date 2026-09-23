@@ -27,6 +27,14 @@
 //! against the `n_valid` it read from the header. Same counter, same length,
 //! same answer — `CLAUDE.md` §3 rule 5.
 //!
+//! One exception to "same counter", and it is a crash: the writer seals the
+//! sidecar before it writes the header slot, so an append that dies between
+//! the two leaves the tail block's entry sealed over MORE records than the
+//! header claims. [`verify_through`] admits that block only when the stored
+//! number is proved to be the checksum of the committed bytes followed by
+//! records the file really holds, and says so on the log. Any other mismatch
+//! is still refused. D-0688.
+//!
 //! # No I/O
 //!
 //! This module takes bytes and returns numbers. The sidecar file it feeds is
@@ -182,21 +190,142 @@ pub fn verify(
     bytes: &[u8],
     stored: u32,
 ) -> Result<(), FormatError> {
+    verify_through(header, layout, block, bytes, &[], stored).map(|_| ())
+}
+
+/// A tail block whose stored checksum an interrupted append sealed past the
+/// commit, on the rolling log.
+///
+/// # What happened, and why this is a `Warn`
+///
+/// `crate::file::BarFile::append` writes the records, seals the sidecar, and
+/// only then writes the header slot that publishes them. A crash between the
+/// last two leaves the tail block's entry computed over more records than the
+/// header claims. Nothing is wrong with a committed byte: [`verify_through`]
+/// has just shown that the stored checksum is the checksum of these committed
+/// bytes followed by records the file really holds past the commit. The block
+/// is served, so the line is the only trace of the interrupted append. It is
+/// not an `Error`, because nothing is refused and nothing is lost.
+///
+/// One event per block verification that needed the proof, never per record.
+fn note_interrupted_append(header: &Header, block: u64, sealed_through: u64) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::warn(
+            "store.block",
+            "tail block sealed past the commit by an interrupted append",
+        )
+        .with("block", telemetry::Value::Uint(block))
+        .with("n_valid", telemetry::Value::Uint(header.n_valid))
+        .with("sealed_through", telemetry::Value::Uint(sealed_through))
+        .with(
+            "symbol_id",
+            telemetry::Value::Uint(u64::from(header.symbol_id)),
+        ),
+    );
+}
+
+/// Verifies one block, and admits a tail block whose checksum an interrupted
+/// append sealed past the commit, **only on a positive proof**.
+///
+/// `bytes` is exactly what [`verify`] takes: the range
+/// [`Layout::covered_byte_range`] names under `header.n_valid`. `past` is the
+/// whole records the file holds straight after them, in file order. An empty
+/// `past` makes this [`verify`], which is how [`verify`] is implemented.
+///
+/// Returns the record count the stored checksum covers: `header.n_valid`
+/// when it matches the committed extent, and a larger count when it matches
+/// one of the longer extents described below.
+///
+/// # Which longer extents count, and why a match is proof rather than hope
+///
+/// The candidates are the committed extent followed by one, two, … whole
+/// records of `past`, and never past the block's nominal end. A block that is
+/// already full has no room, so only a partial tail block can have one. A
+/// partial trailing record is never a candidate, because no writer seals one.
+///
+/// A candidate matches only if the stored number is the CRC-32C of the
+/// committed bytes **followed by** bytes the file holds. The committed bytes
+/// are inside every candidate, so a flipped committed byte changes every
+/// candidate's checksum. A CRC-32C detects every burst of up to 32 bits over
+/// any length, so a flip confined to 32 bits cannot match the extent that was
+/// really sealed. It can match another candidate only by a 32-bit collision.
+/// A block with `k` whole records past its commit is compared `k + 1` times
+/// instead of once, and `k` is at most 72 at the bar geometry. That is the
+/// price of the proof, and `docs/06-limits.md` states it.
+///
+/// # Cost
+///
+/// One CRC-32C over `bytes`, then one extension per candidate record, so
+/// every byte of the nominal block is read at most once. Bounded by
+/// [`Layout::block_len`], not by the file.
+///
+/// # Errors
+///
+/// Everything [`verify`] refuses, unchanged: [`FormatError::ChecksumsAbsent`],
+/// [`FormatError::BlockChecksum`] naming the checksum of the COMMITTED
+/// extent, and anything [`seal`] refuses.
+pub fn verify_through(
+    header: &Header,
+    layout: Layout,
+    block: u64,
+    bytes: &[u8],
+    past: &[u8],
+    stored: u32,
+) -> Result<u64, FormatError> {
     if !header.checksums_present() {
         note_unverifiable(header, block);
         return Err(FormatError::ChecksumsAbsent);
     }
     let computed = seal(layout, header.n_valid, block, bytes)?;
     if computed == stored {
-        Ok(())
-    } else {
-        note_block_mismatch(header, block, bytes, stored, computed);
-        Err(FormatError::BlockChecksum {
-            block,
-            stored,
-            computed,
-        })
+        return Ok(header.n_valid);
     }
+    if let Some(through) =
+        sealed_past_the_commit(layout, header.n_valid, bytes, past, computed, stored)
+    {
+        note_interrupted_append(header, block, through);
+        return Ok(through);
+    }
+    note_block_mismatch(header, block, bytes, stored, computed);
+    Err(FormatError::BlockChecksum {
+        block,
+        stored,
+        computed,
+    })
+}
+
+/// The longer extent `stored` was sealed over, when it was sealed over one.
+///
+/// `committed` is the checksum of `bytes`, which [`seal`] has already proved
+/// is the block's covered range. The room left in the block is its nominal
+/// length minus that range, so a full block has none and yields `None`
+/// without reading `past` at all.
+fn sealed_past_the_commit(
+    layout: Layout,
+    n_valid: u64,
+    bytes: &[u8],
+    past: &[u8],
+    committed: u32,
+    stored: u32,
+) -> Option<u64> {
+    // `unwrap_or(usize::MAX)` on both conversions is the same argument
+    // `byte_count` makes: each can fail only where `usize` cannot hold one
+    // block's length, and no target this workspace builds for is that narrow.
+    // Where the stride saturated, `chunks_exact` would yield no record and the
+    // answer would be `None`, the refusal.
+    let stride = usize::try_from(layout.record_stride()).unwrap_or(usize::MAX);
+    let room = usize::try_from(layout.block_len())
+        .unwrap_or(usize::MAX)
+        .saturating_sub(bytes.len());
+    let within = past.get(..room).unwrap_or(past);
+    let mut running = committed;
+    for (record, through) in within.chunks_exact(stride).zip(n_valid.saturating_add(1)..) {
+        running = crate::crc::crc32c_extend(running, record);
+        if running == stored {
+            return Some(through);
+        }
+    }
+    None
 }
 
 /// How many bytes `block` covers under `n_valid`.

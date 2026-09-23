@@ -207,6 +207,22 @@ pub fn crc32c_split(head: &[u8], tail: &[u8]) -> u32 {
     !update(update(u32::MAX, head), tail)
 }
 
+/// CRC-32C of a run whose first part had checksum `crc`, continued by `bytes`.
+///
+/// `crc32c_extend(crc32c(a), b) == crc32c(a ‖ b)`, without reading `a` again.
+/// The finished checksum is the inverted register, so inverting it back
+/// resumes the computation exactly where [`crc32c`] stopped.
+///
+/// It exists for one caller, `crate::block::verify_through`, which asks
+/// whether a tail block's stored checksum was sealed over a LONGER extent than
+/// the one the header commits. It extends one record at a time and compares
+/// after each, so the whole search reads each byte of the block once instead
+/// of re-reading the committed prefix per candidate.
+#[must_use]
+pub(crate) fn crc32c_extend(crc: u32, bytes: &[u8]) -> u32 {
+    !update(!crc, bytes)
+}
+
 #[cfg(test)]
 #[allow(
     clippy::indexing_slicing,
@@ -215,7 +231,36 @@ pub fn crc32c_split(head: &[u8], tail: &[u8]) -> u32 {
     clippy::panic
 )]
 mod tests {
-    use super::{LANES, POLYNOMIAL, TABLE, build_table};
+    use super::{CHECK_VALUE, LANES, POLYNOMIAL, TABLE, build_table, crc32c, crc32c_extend};
+
+    /// Extending a finished checksum is the checksum of the concatenation.
+    ///
+    /// Every split of the published check input, including the two empty
+    /// ends, so a register that was resumed wrongly — not inverted back, or
+    /// not inverted again — fails on the published constant rather than on a
+    /// number this test computed itself.
+    #[test]
+    fn extending_a_checksum_is_the_checksum_of_the_concatenation() {
+        let whole = b"123456789";
+        for split in 0..=whole.len() {
+            let (head, tail) = whole.split_at(split);
+            assert_eq!(
+                crc32c_extend(crc32c(head), tail),
+                CHECK_VALUE,
+                "split at {split}"
+            );
+        }
+        assert_eq!(
+            crc32c_extend(0, whole),
+            CHECK_VALUE,
+            "the empty run's checksum is zero"
+        );
+        assert_eq!(
+            crc32c_extend(CHECK_VALUE, &[]),
+            CHECK_VALUE,
+            "extending by nothing changes nothing"
+        );
+    }
 
     /// Folds one byte through the bit loop, un-inverted, from a given register.
     fn fold(mut crc: u32, byte: u8) -> u32 {

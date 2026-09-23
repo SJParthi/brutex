@@ -3,7 +3,7 @@
 //!
 //! # What was unproven
 //!
-//! This crate holds seven emit sites and, until this module, not one of them
+//! This crate holds eight emit sites and, until this module, not one of them
 //! was asserted to reach a file. Each could have been deleted outright — the
 //! whole body replaced with `()` — and `cargo test`, `cargo clippy` and the
 //! mutation gate would all have stayed green, because nothing anywhere read
@@ -11,19 +11,20 @@
 //! untested branch is worth, which is what `CLAUDE.md` §4's ban on a test that
 //! asserts nothing says in the other direction.
 //!
-//! It is worse than an ordinary coverage hole. Six of these seven fire only
+//! It is worse than an ordinary coverage hole. Seven of these eight fire only
 //! once something has already gone wrong — a header region of zeros, a commit
 //! walked back a generation, a block whose bytes are not the bytes that were
 //! sealed, an append that died before its header slot reached the disk — so
 //! the run that needs them is the run nobody can repeat afterwards. A line
 //! that was never proved to be written is not evidence.
 //!
-//! One of those six is not a refusal, and it is the newest of the seven:
-//! `store.open` **accepts** the month and names the damage. The other five
-//! hand the caller a `FormatError` as well as writing a line, so a lost emit
-//! still leaves a trace somewhere. That one hands back a working file, so the
-//! line is the only trace there is — it is the single site in this crate whose
-//! deletion is invisible from outside the log.
+//! Two of those seven are not refusals. `store.open` **accepts** the month and
+//! names the damage, and since D-0688 the `store.block` interrupted-append line
+//! accepts a tail block whose entry was sealed past the commit and names the
+//! append that died. The other five hand the caller a `FormatError` as well as
+//! writing a line, so a lost emit still leaves a trace somewhere. Those two hand
+//! back working data, so the line is the only trace there is — they are the
+//! two sites in this crate whose deletion is invisible from outside the log.
 //!
 //! # Why the emits are driven and never built
 //!
@@ -281,6 +282,36 @@ fn drive_block_mismatch(_root: &Path) {
     );
 }
 
+/// A tail block whose entry an interrupted append sealed past the commit:
+/// `note_interrupted_append`. D-0688.
+///
+/// The second site in this crate that **accepts** rather than refuses, and so
+/// the second whose deletion is invisible outside the log: the block is
+/// served, and this line is the only trace of the append that died between
+/// sealing the sidecar and writing its header slot. Driven through the public
+/// [`block::verify_through`] with bytes laid out here, so it reaches this site
+/// and no neighbour — a real file would also fire `store.append` and
+/// `store.open`, which this table already drives once each.
+fn drive_block_sealed_past_the_commit(_root: &Path) {
+    let header = Header::genesis(SYMBOL, 60, FLAG_CHECKSUMS)
+        .advance(1, T0, T0)
+        .expect("one record commits");
+    let committed = [7u8; RECORD_LEN];
+    let past = [8u8; RECORD_LEN];
+    let mut sealed_over_two = committed.to_vec();
+    sealed_over_two.extend_from_slice(&past);
+    let through = block::verify_through(
+        &header,
+        Layout::CURRENT,
+        0,
+        &committed,
+        &past,
+        crate::crc::crc32c(&sealed_over_two),
+    )
+    .expect("the entry is proved to cover the committed record and one more");
+    assert_eq!(through, 2, "the proof names the extent it matched");
+}
+
 /// A batch that reached stable storage: the `store.append` emit in
 /// `crate::file`.
 ///
@@ -414,15 +445,15 @@ fn scratch(tag: &str) -> PathBuf {
 
 /// EVERY EMIT IN THIS CRATE REACHES A FILE, through the call that owns it.
 ///
-/// Seven production sites, seven production calls, one sink, and one read of
-/// the bytes on disk. Deleting any one of the seven emits fails this test; so
-/// does changing a target, a sentence or a level, and so does adding an eighth
+/// Eight production sites, eight production calls, one sink, and one read of
+/// the bytes on disk. Deleting any one of the eight emits fails this test; so
+/// does changing a target, a sentence or a level, and so does adding a ninth
 /// emit on a path this table already drives.
 ///
 /// # The count is an assertion, not a formality
 ///
 /// `assert_eq!(records.len(), SITES.len())` is what pins the **absence** half.
-/// Six of these seven sites sit beside a success path that is documented to be
+/// Seven of these eight sites sit beside a success path that is documented to be
 /// silent — the ordinary header read, the commit that succeeds, the block that
 /// verifies, the month with nothing past its counter — and a per-file or
 /// per-record emit added there would not fail any presence check. It fails this
@@ -438,13 +469,13 @@ fn scratch(tag: &str) -> PathBuf {
 ///
 /// # Each drive gets its own store root
 ///
-/// Two of the seven touch a real filesystem, and both render the *same*
+/// Two of the eight touch a real filesystem, and both render the *same*
 /// [`StorePath`] — one vendor, one symbol, one month, because that is the
 /// fixture the module already had. Handed one root they would share a file, and
 /// whichever ran second would open what the first left behind: a drive firing a
 /// site it does not own, which is the exact failure this count exists to catch,
 /// arriving from inside the test rather than from the crate. Each drive is
-/// handed `<root>/site-<n>` and never learns the others exist. The five that
+/// handed `<root>/site-<n>` and never learns the others exist. The six that
 /// never open a file are handed one too, so no drive can start depending on
 /// which of them is the one with a disk.
 ///
@@ -462,7 +493,7 @@ fn scratch(tag: &str) -> PathBuf {
 /// a sink. Plenty else *emits* into it.
 #[test]
 fn every_emit_in_this_crate_reaches_the_log_through_its_production_call() {
-    const SITES: [Site; 7] = [
+    const SITES: [Site; 8] = [
         Site {
             target: "store.header",
             message: "no committed header",
@@ -492,6 +523,12 @@ fn every_emit_in_this_crate_reaches_the_log_through_its_production_call() {
             message: "checksum mismatch",
             level: telemetry::Level::Error,
             drive: drive_block_mismatch,
+        },
+        Site {
+            target: "store.block",
+            message: "tail block sealed past the commit by an interrupted append",
+            level: telemetry::Level::Warn,
+            drive: drive_block_sealed_past_the_commit,
         },
         Site {
             target: "store.open",
