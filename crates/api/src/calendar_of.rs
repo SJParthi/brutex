@@ -433,6 +433,7 @@ fn ist(ts_micros: i64) -> (i64, u16) {
 #[allow(clippy::expect_used, clippy::panic, reason = "test-only assertions")]
 mod tests {
     use super::*;
+    use pull::calendar::{DayKind, Session};
 
     /// **THE COUNTER SHORT-CIRCUIT IS THE WHOLE COST ARGUMENT, SO IT IS TESTED.**
     ///
@@ -444,6 +445,14 @@ mod tests {
     /// The test drives it through a real store rather than a mock, because the
     /// claim being made is about `BarFile::records()` and a mock would only
     /// prove this module can count its own fixture.
+    ///
+    /// **Until 2026-09-23 it did not.** It passed `&[]` as the months, so no
+    /// file was opened, no counter was read, and `months_by_counter == 0` was
+    /// asserted of a derivation that had nothing to count. The empty case is
+    /// kept below — an absent store still has to claim nothing — but the claim
+    /// the name makes is now made against a month on disk: two full sessions,
+    /// 750 minute bars, a counter that matches, and a report that says the
+    /// counter decided and no walk was made.
     #[test]
     fn a_month_that_matches_its_counter_is_never_walked() {
         let root = crate::scratch::path("calendar-of-counter");
@@ -456,6 +465,248 @@ mod tests {
         assert_eq!(cal.sessions(), 0);
         assert_eq!(report.months_by_counter, 0);
         assert_eq!(report.months_walked, 0);
+
+        // THE CLAIM ITSELF. Two sessions the daily rung proves, and exactly
+        // 2 x 375 minute bars beside them.
+        let month = YearMonth::new(2026, 1).expect("a real month");
+        let (monday, tuesday) = (epoch_day(2026, 1, 5), epoch_day(2026, 1, 6));
+        write_bars(
+            &root,
+            Timeframe::DAY_1,
+            month,
+            &[stamp(monday, OPEN), stamp(tuesday, OPEN)],
+        );
+        let mut minutes = minutes_of(monday, &[(OPEN, LAST)]);
+        minutes.extend(minutes_of(tuesday, &[(OPEN, LAST)]));
+        assert_eq!(minutes.len(), 750, "the premise: 2 x 375");
+        write_bars(&root, Timeframe::MINUTE_1, month, &minutes);
+
+        let (cal, report) = derive(&root, Vendor::Zerodha, "NSE", "INDEX", "NIFTY", &[month]);
+        assert_eq!(
+            (report.months_by_counter, report.months_walked),
+            (1, 0),
+            "750 held against 2 x 375 owed: the counter decides and no record is walked"
+        );
+        assert!(
+            report.unreadable.is_empty(),
+            "both rungs opened: {:?}",
+            report.unreadable
+        );
+        assert_eq!(cal.sessions(), 2);
+        for day in [monday, tuesday] {
+            assert_eq!(
+                cal.kind_of(day),
+                DayKind::Open(Session::full()),
+                "day {day} is the full 09:15-15:29 session the arithmetic proves"
+            );
+            assert_eq!(cal.expected_bars(day), Some(375));
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A MONTH WHOSE MINUTE COUNT IS NOT `sessions × 375` IS WALKED, AND THE
+    /// WALK RECORDS EACH DAY AS IT TRADED.**
+    ///
+    /// The other half of the counter test above, and until it existed no test
+    /// in this module reached the walk at all: every derivation here either
+    /// opened nothing or read a daily rung with no minute file beside it. It is
+    /// the half the operator's store takes for 14 of its 81 months, and it is
+    /// the only place a short session or an interior hole is measured rather
+    /// than assumed.
+    ///
+    /// January holds four days the daily rung proves — a full session, a
+    /// 60-minute one, one with a six-minute hole at 12:00, and one with no
+    /// minute bars at all — and 810 minute bars against the 1,500 four full
+    /// sessions would owe, so it is walked. Five of those minutes sit on a day
+    /// with NO daily bar, which is the store contradicting itself; the walk must
+    /// not turn them into a session. February holds one full session, matches
+    /// its counter, and is not walked, so one derivation shows the decision
+    /// being made per month rather than once per call.
+    #[test]
+    fn a_month_whose_minutes_are_not_sessions_times_375_is_walked_into_its_runs() {
+        let root = crate::scratch::path("calendar-of-walked");
+        let _ = std::fs::remove_dir_all(&root);
+
+        let january = YearMonth::new(2026, 1).expect("a real month");
+        let february = YearMonth::new(2026, 2).expect("a real month");
+        let full = epoch_day(2026, 1, 5);
+        let short = epoch_day(2026, 1, 6);
+        let stray = epoch_day(2026, 1, 7);
+        let holed = epoch_day(2026, 1, 8);
+        let no_minutes = epoch_day(2026, 1, 9);
+        let whole = epoch_day(2026, 2, 2);
+
+        write_bars(
+            &root,
+            Timeframe::DAY_1,
+            january,
+            &[
+                stamp(full, OPEN),
+                stamp(short, OPEN),
+                stamp(holed, OPEN),
+                stamp(no_minutes, OPEN),
+            ],
+        );
+        let mut minutes = minutes_of(full, &[(OPEN, LAST)]);
+        minutes.extend(minutes_of(short, &[(OPEN, 614)]));
+        minutes.extend(minutes_of(stray, &[(OPEN, 559)]));
+        minutes.extend(minutes_of(holed, &[(OPEN, 719), (725, LAST)]));
+        assert_eq!(
+            minutes.len(),
+            375 + 60 + 5 + 370,
+            "the premise: 810 held, which is not 4 x 375"
+        );
+        write_bars(&root, Timeframe::MINUTE_1, january, &minutes);
+
+        write_bars(&root, Timeframe::DAY_1, february, &[stamp(whole, OPEN)]);
+        write_bars(
+            &root,
+            Timeframe::MINUTE_1,
+            february,
+            &minutes_of(whole, &[(OPEN, LAST)]),
+        );
+
+        let (cal, report) = derive(
+            &root,
+            Vendor::Zerodha,
+            "NSE",
+            "INDEX",
+            "NIFTY",
+            &[january, february],
+        );
+        assert_eq!(
+            report.months_walked, 1,
+            "January is walked: 810 held against 4 x 375 = 1,500 owed"
+        );
+        assert_eq!(
+            report.months_by_counter, 1,
+            "February is not: 375 held against 1 x 375"
+        );
+        assert!(
+            report.unreadable.is_empty(),
+            "every file opened and every record read: {:?}",
+            report.unreadable
+        );
+
+        assert_eq!(
+            cal.sessions(),
+            5,
+            "the four January days the daily rung proves and February's one; \
+             the stray minutes add none"
+        );
+        assert_eq!(windows_of(&cal, full), [(OPEN, LAST)]);
+        assert_eq!(cal.expected_bars(full), Some(375));
+        assert_eq!(
+            windows_of(&cal, short),
+            [(OPEN, 614)],
+            "a short session is measured at its own length, not rounded up to 375"
+        );
+        assert_eq!(cal.expected_bars(short), Some(60));
+        assert_eq!(
+            windows_of(&cal, holed),
+            [(OPEN, 719), (725, LAST)],
+            "an interior hole splits the day into two runs, not one outer span"
+        );
+        assert_eq!(cal.expected_bars(holed), Some(370));
+        assert_eq!(
+            cal.kind_of(no_minutes),
+            DayKind::OpenLengthUnmeasured,
+            "a day the daily rung proves and the minute rung never reached is \
+             open and unsized — not closed, and not 375"
+        );
+        assert_eq!(cal.expected_bars(no_minutes), None);
+        assert_eq!(
+            cal.kind_of(stray),
+            DayKind::Closed,
+            "minute bars on a day with no daily bar invent no session"
+        );
+        assert_eq!(cal.expected_bars(stray), Some(0));
+        assert_eq!(
+            cal.kind_of(whole),
+            DayKind::Open(Session::full()),
+            "February's counter decided it"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 09:15 IST, the first minute of a session.
+    const OPEN: u16 = pull::calendar::OPEN_MINUTE;
+    /// 15:29 IST, the last.
+    const LAST: u16 = pull::calendar::LAST_MINUTE;
+
+    /// Days since the epoch of a civil date, by the `Day` the store's months
+    /// are named from.
+    fn epoch_day(year: u16, month: u8, day: u8) -> i64 {
+        i64::from(
+            pull::session::Day::new(year, month, day)
+                .expect("a real date")
+                .days_from_epoch(),
+        )
+    }
+
+    /// The UTC micros stamp of minute-of-day `minute` on IST day `day` — the
+    /// inverse of [`ist`], which is the reading `derive` applies.
+    fn stamp(day: i64, minute: u16) -> i64 {
+        const IST_OFFSET_SECS: i64 = 5 * 3600 + 30 * 60;
+        (day * 86_400 + i64::from(minute) * 60 - IST_OFFSET_SECS) * 1_000_000
+    }
+
+    /// One stamp per minute of every inclusive run, in order.
+    fn minutes_of(day: i64, runs: &[(u16, u16)]) -> Vec<i64> {
+        runs.iter()
+            .flat_map(|&(from, to)| (from..=to).map(move |minute| stamp(day, minute)))
+            .collect()
+    }
+
+    /// The windows an open day was given, as `(from, to)` pairs.
+    fn windows_of(cal: &Calendar, day: i64) -> Vec<(u16, u16)> {
+        match cal.kind_of(day) {
+            DayKind::Open(session) => session
+                .windows
+                .iter()
+                .take(usize::from(session.count))
+                .map(|window| (window.from, window.to))
+                .collect(),
+            other => panic!("day {day} is {other:?}, not an open session"),
+        }
+    }
+
+    /// Appends one legal bar per stamp to `NSE/INDEX/NIFTY`'s `rung` file for
+    /// `month`, the way `segments::write_day` writes its one daily bar.
+    fn write_bars(root: &Path, rung: Timeframe, month: YearMonth, stamps: &[i64]) {
+        let path = store::path::StorePath::new(store::path::PathParts {
+            vendor: Vendor::Zerodha,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: rung,
+            month,
+            file: store::path::FileKind::Bars,
+        })
+        .expect("a legal path");
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the id is the cross-check `open` folds; any 32 bits serve"
+        )]
+        let symbol_id = brutex_core::universe::fnv1a("NIFTY") as u32;
+        let mut file =
+            store::file::BarFile::open_or_create(root, path, symbol_id).expect("a bar file");
+        let rows: Vec<store::format::Bar> = stamps
+            .iter()
+            .map(|&ts_micros| store::format::Bar {
+                ts_micros,
+                open: 100,
+                high: 110,
+                low: 90,
+                close: 105,
+                volume: 1,
+                open_interest: i64::MIN,
+            })
+            .collect();
+        file.append(&rows).expect("legal bars in timestamp order");
     }
 
     /// **A MONTH THAT WILL NOT OPEN IS NAMED, NOT COUNTED AS HOLIDAYS.**
