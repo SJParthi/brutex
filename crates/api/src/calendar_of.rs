@@ -516,13 +516,14 @@ mod tests {
     /// than assumed.
     ///
     /// January holds four days the daily rung proves — a full session, a
-    /// 60-minute one, one with a six-minute hole at 12:00, and one with no
-    /// minute bars at all — and 810 minute bars against the 1,500 four full
-    /// sessions would owe, so it is walked. Five of those minutes sit on a day
-    /// with NO daily bar, which is the store contradicting itself; the walk must
-    /// not turn them into a session. February holds one full session, matches
-    /// its counter, and is not walked, so one derivation shows the decision
-    /// being made per month rather than once per call.
+    /// 60-minute one, one with a five-minute hole from 12:00 to 12:04 IST
+    /// (minutes 720 to 724, so 370 of 375 held), and one with no minute bars
+    /// at all — and 810 minute bars against the 1,500 four full sessions would
+    /// owe, so it is walked. Five of those minutes sit on a day with NO daily
+    /// bar, which is the store contradicting itself; the walk must not turn
+    /// them into a session. February holds one full session, matches its
+    /// counter, and is not walked, so one derivation shows the decision being
+    /// made per month rather than once per call.
     #[test]
     fn a_month_whose_minutes_are_not_sessions_times_375_is_walked_into_its_runs() {
         let root = crate::scratch::path("calendar-of-walked");

@@ -17,8 +17,10 @@
 //! requires the copy to decode to exactly what the original does. That section
 //! says what it does not prove — its frames are `ruzstd`'s, not the ones Polars
 //! wrote — and the real frames and the real column values are still covered
-//! only by `real_lake.rs`, which reads the actual 40 GB lake when it is
-//! present and is `#[ignore]`d everywhere else.
+//! only by `real_lake.rs`. Every test there is `#[ignore]`d on every machine,
+//! so `cargo test` and CI never run one; they read the lake — the 40 GB at
+//! `~/.brutex/lake` that D-0056 describes — only when started explicitly with
+//! `--ignored` on a machine that has it.
 
 // The same exceptions every test module in this workspace takes: a test that
 // cannot panic cannot fail, and the lints that forbid panicking exist to keep
@@ -76,6 +78,19 @@ fn write(cols: &[(&str, PhysicalType, Col)]) -> Vec<u8> {
 /// and several pages to a chunk — so the properties are a parameter rather than
 /// a second copy of the column loop below.
 fn write_with(cols: &[(&str, PhysicalType, Col)], props: WriterProperties) -> Vec<u8> {
+    write_groups(&[cols], props)
+}
+
+/// As [`write_with`], one row group per element of `groups`, in order.
+///
+/// `SerializedFileWriter` opens a row group when `next_row_group` is called
+/// and at no other time. `WriterProperties`' row-group row limit does not
+/// split one: in `parquet` 59.2 the only code that splits a group on it is
+/// the Arrow writer, which this crate's `default-features = false` leaves
+/// out. So several row groups are several calls, and every group must name
+/// the same columns in the same order — the schema is taken from the first.
+fn write_groups(groups: &[&[(&str, PhysicalType, Col)]], props: WriterProperties) -> Vec<u8> {
+    let cols = groups.first().expect("a file has at least one row group");
     let fields: Vec<Arc<Type>> = cols
         .iter()
         .map(|(name, ty, _)| {
@@ -97,32 +112,34 @@ fn write_with(cols: &[(&str, PhysicalType, Col)], props: WriterProperties) -> Ve
     let mut out: Vec<u8> = Vec::new();
     {
         let mut writer = SerializedFileWriter::new(&mut out, schema, props).expect("writer");
-        let mut group = writer.next_row_group().expect("row group");
-        let mut at = 0;
-        while let Some(mut column) = group.next_column().expect("column") {
-            let (_, _, source) = cols.get(at).expect("column count matches schema");
-            match (column.untyped(), source) {
-                (ColumnWriter::Int64ColumnWriter(typed), Col::I64(vals, defs)) => {
-                    typed
-                        .write_batch(vals, Some(defs), None)
-                        .expect("write i64");
+        for cols in groups {
+            let mut group = writer.next_row_group().expect("row group");
+            let mut at = 0;
+            while let Some(mut column) = group.next_column().expect("column") {
+                let (_, _, source) = cols.get(at).expect("column count matches schema");
+                match (column.untyped(), source) {
+                    (ColumnWriter::Int64ColumnWriter(typed), Col::I64(vals, defs)) => {
+                        typed
+                            .write_batch(vals, Some(defs), None)
+                            .expect("write i64");
+                    }
+                    (ColumnWriter::Int32ColumnWriter(typed), Col::I32(vals, defs)) => {
+                        typed
+                            .write_batch(vals, Some(defs), None)
+                            .expect("write i32");
+                    }
+                    (ColumnWriter::DoubleColumnWriter(typed), Col::F64(vals, defs)) => {
+                        typed
+                            .write_batch(vals, Some(defs), None)
+                            .expect("write f64");
+                    }
+                    _ => panic!("writer type does not match the column"),
                 }
-                (ColumnWriter::Int32ColumnWriter(typed), Col::I32(vals, defs)) => {
-                    typed
-                        .write_batch(vals, Some(defs), None)
-                        .expect("write i32");
-                }
-                (ColumnWriter::DoubleColumnWriter(typed), Col::F64(vals, defs)) => {
-                    typed
-                        .write_batch(vals, Some(defs), None)
-                        .expect("write f64");
-                }
-                _ => panic!("writer type does not match the column"),
+                column.close().expect("close column");
+                at += 1;
             }
-            column.close().expect("close column");
-            at += 1;
+            group.close().expect("close row group");
         }
-        group.close().expect("close row group");
         writer.close().expect("close writer");
     }
     out
@@ -969,36 +986,51 @@ fn zstd_copy(original: &[u8]) -> Recompressed {
     }
 }
 
-/// Every row of every group, in order — the whole of what a file decodes to.
-fn rows(file: &LakeFile) -> Vec<Bar> {
+/// Every group's rows, group by group — the whole of what a file decodes to,
+/// with the row-group boundaries it was decoded across still in place.
+fn groups(file: &LakeFile) -> Vec<Vec<Bar>> {
     file.read_all()
         .expect("every group decodes")
         .iter()
-        .flat_map(|group| group.iter().collect::<Vec<Bar>>())
+        .map(|group| group.iter().collect())
         .collect()
+}
+
+/// Every row of every group, in order, with the boundaries flattened away.
+fn rows(file: &LakeFile) -> Vec<Bar> {
+    groups(file).into_iter().flatten().collect()
 }
 
 /// **A ZSTD copy of a file decodes to exactly what the UNCOMPRESSED original
 /// does, through the codec arm every real lake file takes.**
 ///
-/// Two fixtures, because the two shapes take different paths through the page
-/// walk. `sound_cash_file` is what the writer's defaults produce: every column
-/// dictionary-encoded, so each chunk opens with a `DICTIONARY_PAGE` and the
-/// chunk start comes from `dictionary_page_offset`. The second turns the
+/// Three fixtures, because the three shapes take different paths through the
+/// reader. `sound_cash_file` is what the writer's defaults produce: every
+/// column dictionary-encoded, so each chunk opens with a `DICTIONARY_PAGE` and
+/// the chunk start comes from `dictionary_page_offset`. The second turns the
 /// dictionary off and caps a page at one row: PLAIN values, no dictionary page,
 /// so the start falls back to `data_page_offset`, and four compressed pages per
 /// chunk, so the walk has to land each header exactly where the previous
 /// compressed body ended. It carries a null open interest beside a real zero,
 /// so definition levels cross the codec as well.
 ///
+/// The third is THREE row groups, of 2, 3 and 1 rows, under the writer's
+/// defaults. The first two are one row group each, and one row group never
+/// asks the rewrite to move a second group's chunk offsets, or the reader to
+/// find a compressed chunk that starts where another group's compressed bytes
+/// end. Its null sits in the middle group, so a definition level crosses the
+/// codec past the first group too. The two reads are compared group by group,
+/// not flattened, so a row that came back in the wrong group fails.
+///
 /// **The equality is the claim, and the rest of the test is what stops it being
 /// vacuous.** Two reads that both fail the same way, or a copy that was never
 /// actually compressed, would compare equal too. So the rewrite must have
 /// reached every page it should; every chunk of the copy is asserted to be
-/// labelled ZSTD; the row count is pinned; and the same copy relabelled
-/// UNCOMPRESSED must be REFUSED, which proves the bodies really are frames and
-/// that the label is what routes them through `ruzstd`. The values both reads
-/// agree on are pinned by the test after this one.
+/// labelled ZSTD; the group count and each group's row count are pinned; and
+/// the same copy relabelled UNCOMPRESSED must be REFUSED, which proves the
+/// bodies really are frames and that the label is what routes them through
+/// `ruzstd`. The values both reads agree on are pinned by the test after this
+/// one.
 ///
 /// Mapping `Compression::ZSTD(_)` in `Columns::pages` to a refusal makes this
 /// test fail, and restoring it makes it pass.
@@ -1018,16 +1050,33 @@ fn a_zstd_copy_decodes_to_exactly_what_the_uncompressed_original_does() {
             .set_data_page_row_count_limit(1)
             .build(),
     );
+    let (first, second, third) = (
+        cash_columns(&[1, 2], &[10.0, 11.0], &[100, 200], &[Some(7), Some(8)]),
+        cash_columns(
+            &[3, 4, 5],
+            &[12.0, 13.5, 14.25],
+            &[300, 400, 500],
+            &[None, Some(0), Some(9)],
+        ),
+        cash_columns(&[6], &[15.0], &[600], &[Some(10)]),
+    );
+    let three_groups = write_groups(
+        &[first.as_slice(), second.as_slice(), third.as_slice()],
+        WriterProperties::builder()
+            .set_compression(Compression::UNCOMPRESSED)
+            .build(),
+    );
 
-    for (label, original, want_rows, want_dictionary_pages, want_data_pages) in [
-        ("dictionary-encoded", sound_cash_file(), 3, 7, 7),
-        ("PLAIN, one row per page", plain_and_paged, 4, 0, 28),
+    for (label, original, want_group_rows, want_dictionary_pages, want_data_pages) in [
+        ("dictionary-encoded", sound_cash_file(), &[3][..], 7, 7),
+        ("PLAIN, one row per page", plain_and_paged, &[4][..], 0, 28),
+        ("three row groups", three_groups, &[2, 3, 1][..], 21, 21),
     ] {
         let copy = zstd_copy(&original);
         assert_eq!(
             (copy.dictionary_pages, copy.data_pages),
             (want_dictionary_pages, want_data_pages),
-            "{label}: the rewrite reached every page of all seven chunks"
+            "{label}: the rewrite reached every page of every chunk"
         );
         let (meta, _) = read_footer(&copy.bytes);
         assert!(
@@ -1041,14 +1090,24 @@ fn a_zstd_copy_decodes_to_exactly_what_the_uncompressed_original_does() {
             "{label}: every chunk of the copy is labelled ZSTD"
         );
 
-        let want = rows(&LakeFile::from_bytes(original).expect("the original opens"));
+        let want = groups(&LakeFile::from_bytes(original).expect("the original opens"));
         let zstd = LakeFile::from_bytes(copy.bytes.clone()).expect("the ZSTD copy opens");
         assert_eq!(zstd.layout(), Layout::Cash, "{label}");
-        let got = rows(&zstd);
-        assert_eq!(got.len(), want_rows, "{label}: every row came back");
+        assert_eq!(
+            zstd.row_groups(),
+            want_group_rows.len(),
+            "{label}: the copy holds every row group the original does"
+        );
+        let got = groups(&zstd);
+        let got_group_rows: Vec<usize> = got.iter().map(Vec::len).collect();
+        assert_eq!(
+            got_group_rows, want_group_rows,
+            "{label}: every row came back, in the row group it was written to"
+        );
         assert_eq!(
             got, want,
-            "{label}: the ZSTD copy decodes to the uncompressed original, bar for bar"
+            "{label}: the ZSTD copy decodes to the uncompressed original, \
+             group for group and bar for bar"
         );
 
         // THE LABEL IS WHAT ROUTES THE BODIES THROUGH `ruzstd`. The same bytes

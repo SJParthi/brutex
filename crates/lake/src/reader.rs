@@ -964,8 +964,15 @@ mod tests {
     /// Writes an uncompressed seven-column cash file of `rows` rows, every
     /// value present.
     ///
-    /// Uncompressed because the codec is not what is under test here and the
-    /// ZSTD path is exercised by `tests/real_lake.rs` against the real lake.
+    /// Uncompressed because the codec is not what is under test here. The ZSTD
+    /// path is driven on every `cargo test` run, CI's included, by
+    /// `a_zstd_copy_decodes_to_exactly_what_the_uncompressed_original_does`
+    /// and `a_zstd_copy_carries_paisa_nulls_and_zeros_to_the_right_rows` in
+    /// `tests/synthetic.rs`, which recompress a file like this one with
+    /// `ruzstd`'s encoder, and by
+    /// `a_ruzstd_encoded_compressed_block_decodes_through_the_page_path` in
+    /// `page.rs`. Frames as Polars wrote them are reached only by the
+    /// `#[ignore]`d `tests/real_lake.rs`, on a machine that has the lake.
     fn cash_file(rows: usize) -> Vec<u8> {
         let fields: Vec<Arc<Type>> = CASH
             .iter()
