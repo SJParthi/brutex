@@ -581,7 +581,7 @@ fn an_untraded_equity_ranking_is_labelled_gross_before_it_refuses() {
         "premise: this exit renders no AUDIT header:\n{equity}"
     );
     assert_eq!(
-        equity.replacen(super::EQUITY_RANKING_GROSS, "", 1),
+        equity.replacen(&super::equity_ranking_statement(), "", 1),
         index,
         "the scope may change the charge statement and nothing else"
     );
