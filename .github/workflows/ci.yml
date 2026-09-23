@@ -1181,6 +1181,10 @@ jobs:
           #   dir-is-a-file lock-is-a-dir  scratch roots in `ingest.rs`, each
           #     named for the filesystem shape it puts in the writer's way -- a
           #     directory where a file belongs and the reverse.
+          #   census-lock-dup              a scratch root in `ingest.rs`, named
+          #     for the duplicated census-lock descriptor it arranges: a second
+          #     reference to the lock's open file description, the model of a
+          #     spawned child's copy (D-0693).
           #   interleaved                  a word asserted to appear IN a refusal
           #     sentence, so the message keeps naming the condition it refused.
           #   feed                         a scratch subdirectory in
@@ -1197,7 +1201,8 @@ jobs:
           # None is an org, an env, a vendor or a field of a credential. They are
           # listed because the scanner is shape-based, and a short lowercase word
           # has the same shape as a path segment whatever it means.
-          pull_fixture='dir-is-a-file lock-is-a-dir interleaved feed t z zzz'
+          pull_fixture='dir-is-a-file lock-is-a-dir census-lock-dup interleaved
+          feed t z zzz'
 
           # SIXTY-SEVEN MORE, IN FOUR GROUPS, ALL OF THEM ACCUMULATED WHILE THIS
           # GATE COULD NOT RUN. It sits behind gate 1e in the same job, so every
