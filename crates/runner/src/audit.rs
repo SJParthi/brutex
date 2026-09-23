@@ -1729,14 +1729,7 @@ mod tests {
                      share trade:\n{out}"
                 );
             }
-            for charge in [
-                "brokerage",
-                "STT",
-                "stamp duty",
-                "exchange charges",
-                "SEBI fee",
-                "GST",
-            ] {
+            for charge in SHARE_TRADE_CHARGES {
                 assert!(
                     out.contains(charge),
                     "{charge} applies to a share trade and must be named:\n{out}"
@@ -1807,6 +1800,54 @@ mod tests {
     /// Both scopes, so a property of the charge statement is checked on the
     /// statement every index run prints and on the one every stock run prints.
     const SCOPES: [CostScope; 2] = [CostScope::IndexSpot, CostScope::CashEquity];
+
+    /// Every charge the equity statement says a share trade pays, as it names
+    /// them.
+    const SHARE_TRADE_CHARGES: [&str; 6] = [
+        "brokerage",
+        "STT",
+        "stamp duty",
+        "exchange charges",
+        "SEBI fee",
+        "GST",
+    ];
+
+    /// The first rate unit or currency `text` names, or `None`.
+    ///
+    /// `docs/00-charter.md` sources no equity charge rate, so none may be
+    /// printed (`CLAUDE.md` §3 rule 1). A rate in digits is caught by the
+    /// digit checks each caller makes; a rate written in words carries no
+    /// digit, and "Rs twenty an order" passed every test in this module until
+    /// this function named the currency as the rupee, the paisa and its
+    /// plural, the sign, `Rs` and `INR`. The last two are matched as whole
+    /// words, not substrings, because as substrings they sit inside ordinary
+    /// words: `rs` in "harsh", which the equity statement says, and in "bars",
+    /// which [`CORPORATE_ACTIONS_UNCHECKED`] says, and `inr` in "inroad".
+    ///
+    /// Outside this check: a currency not named above, and a number spelled
+    /// out with no unit and no named currency beside it. The statement's own
+    /// "the harsh one" rules out banning number words.
+    fn rate_named(text: &str) -> Option<&'static str> {
+        let lower = text.to_ascii_lowercase();
+        [
+            "%",
+            "per cent",
+            "percent",
+            "basis point",
+            "bps",
+            "rupee",
+            "paisa",
+            "paise",
+            "₹",
+        ]
+        .into_iter()
+        .find(|unit| lower.contains(unit))
+        .or_else(|| {
+            lower
+                .split(|c: char| !c.is_ascii_alphanumeric())
+                .find_map(|word| ["rs", "inr"].into_iter().find(|currency| word == *currency))
+        })
+    }
 
     /// The charge statement alone: everything between the `AUDIT` heading and
     /// the `TRADES` heading, which is exactly what the scope writes.
@@ -1905,30 +1946,46 @@ mod tests {
     /// the decision references that justify it (`D-0509`) and the name of the
     /// selection policy it withholds (`Selection V6`); no per cent sign, no
     /// basis points and no currency may appear.
+    ///
+    /// Both halves of that heading are checked here. This test once checked a
+    /// single charge, `STT`, as a guard that the fixture was the right
+    /// statement, so a statement that dropped "the SEBI fee" still passed it;
+    /// each of [`SHARE_TRADE_CHARGES`] is required now. "No currency" is checked
+    /// as the forms [`rate_named`] names, whose own comment states what that
+    /// leaves out, and the phrases below prove the check is not vacuous.
     #[test]
     fn the_equity_charge_statement_names_no_rate() {
         let out = super::render(CostScope::CashEquity, None, None, None, None, None, 10);
         let statement = charge_statement(&out);
-        assert!(
-            statement.contains("STT"),
-            "the fixture must be the statement that names the charges:\n{out}"
-        );
-        let lower = statement.to_ascii_lowercase();
-        for rate in [
-            "%",
-            "per cent",
-            "percent",
-            "basis point",
-            "bps",
-            "rupee",
-            "paisa",
-            "₹",
-        ] {
+        for charge in SHARE_TRADE_CHARGES {
             assert!(
-                !lower.contains(rate),
-                "{rate:?} states a charge rate the charter does not source:\n{out}"
+                statement.contains(charge),
+                "{charge} applies to a share trade, so the statement must name \
+                 it:\n{out}"
             );
         }
+        assert_eq!(
+            rate_named(statement),
+            None,
+            "the statement names a charge rate the charter does not source:\n{out}"
+        );
+        for (rate, unit) in [
+            ("a charge of 1% a side", "%"),
+            ("three basis points a side", "basis point"),
+            ("twenty rupees an order", "rupee"),
+            ("ten paise a share", "paise"),
+            ("Rs twenty an order", "rs"),
+            ("Rs. twenty an order", "rs"),
+            ("twenty INR an order", "inr"),
+            ("₹20 an order", "₹"),
+        ] {
+            assert_eq!(rate_named(rate), Some(unit), "{rate:?} names a rate");
+        }
+        assert_eq!(
+            rate_named("the harsh fill over these bars made no inroad"),
+            None,
+            "a currency abbreviation inside an ordinary word is not a currency"
+        );
         let numbered: Vec<&str> = statement
             .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
             .filter(|token| token.bytes().any(|b| b.is_ascii_digit()))
@@ -2071,14 +2128,16 @@ mod tests {
     /// travels without that header: into every stored banner through
     /// [`CostScope::report_note`], into a ranked stock's FINDINGS block, the
     /// pool and the research inventory. So the sentence and the note are
-    /// checked on their own, for the same three properties: every line
-    /// indented, so a lifted block keeps it whole; no line opening like a
+    /// checked on their own, for the same three properties: every line blank
+    /// or indented, so a lifted block keeps it whole; no line opening like a
     /// refusal, so no completed stock run exits as a failure; and no rate --
-    /// its only digits are decision references, D-0018 and D-0694 in the
-    /// sentence, and the name Selection V6 in the gross paragraph, because
-    /// `docs/00-charter.md` sources no split threshold (`docs/06-limits.md`
-    /// §41.3) and no charge rate. The name is the one D-0696's rate check in
-    /// `cli` also allows; the gross paragraph carries it since AF-19.
+    /// no unit or currency that [`rate_named`] finds, the check the equity
+    /// statement gets, and its only digits are decision references, D-0018
+    /// and D-0694 in the sentence, and the name Selection V6 in the gross
+    /// paragraph, because `docs/00-charter.md` sources no split threshold
+    /// (`docs/06-limits.md` §41.3) and no charge rate. The name is the one
+    /// D-0696's rate check in `cli` also allows; the gross paragraph carries
+    /// it since AF-19.
     #[test]
     fn the_corporate_action_sentence_keeps_the_charge_statement_properties_wherever_it_travels() {
         let note = CostScope::CashEquity.report_note();
@@ -2101,19 +2160,7 @@ mod tests {
                     );
                 }
             }
-            let lower = text.to_ascii_lowercase();
-            for rate in [
-                "%",
-                "per cent",
-                "percent",
-                "basis point",
-                "bps",
-                "rupee",
-                "paisa",
-                "₹",
-            ] {
-                assert!(!lower.contains(rate), "{what} carries {rate:?}:\n{text}");
-            }
+            assert_eq!(rate_named(text), None, "{what} names a rate:\n{text}");
             for token in text
                 .replace("Selection V6", "Selection")
                 .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
