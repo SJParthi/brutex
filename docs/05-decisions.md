@@ -39025,3 +39025,29 @@ touched code (`candidate_trades`, `execution_lease`, `expression`,
 `boolean_candidate_v1`), not the whole `cli` suite. A filtered run can only miss
 a kill the full suite would make, never invent one. Before the three release
 wrappers above were removed, their `Ok(())` mutants would have been equivalent.
+
+**Correction, entered the same day this was written.** "Sites deliberately
+unchanged" says the bracket sites "already unlock by name on every path a
+release binary can take, because the release profile sets `panic = "abort"`".
+That is true of a release binary and understates the gap, and it is withdrawn
+as a statement of the risk. Only `[profile.release]` sets `panic = "abort"`.
+The dev profile unwinds, and so does every test build. `Cargo.toml`'s own
+`[profile.dev]` comment records that the operator's IntelliJ Run button builds
+and runs `target/debug/api` under `dev`, where `overflow-checks` is on, so an
+arithmetic panic inside a bracket's closure unwinds past the unlock in the
+binary the operator runs. Where the file is local to the unwound frames, the
+lock is released by close, which is the case the paragraph above named. Where
+a longer-lived owner holds the file, the unwind does not close it. The api
+survives a panicking `spawn_blocking` task as `RunError::Join`, so the lock
+stays on the owner's own descriptor until that owner drops, not merely until
+close. `api::detail::FRONTIER` keeps one `Frontier` for the process, recovers a
+poisoned cache with the same handle, and `Frontier`'s reads bracket a shared
+lock, so it is one such owner. Both consequences are read from the code and
+neither was reproduced. `docs/06-limits.md` states them. The site list and the
+follow-up are unchanged.
+
+The first commit of this change also left CI Gate 1d red. The census
+regression's scratch root, `census-lock-dup`, was an undeclared
+segment-shaped literal under `crates/pull`. It is now declared in the gate's
+group 26, beside `dir-is-a-file` and `lock-is-a-dir`, and that gate, run from
+`ci.yml`, exits 0.

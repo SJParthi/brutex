@@ -8927,12 +8927,34 @@ further indicators run, at 51, verified them.
 by `File::unlock`. What that does not cover, stated rather than implied away:
 
 - **About 150 bracket sites still call `File::lock` and `File::unlock`
-  directly.** Each takes a lock, runs a closure or one call, unlocks, and only
-  then combines the two results, so it unlocks by name on every path a
-  release binary can take. The release profile sets `panic = "abort"`. A test
-  build unwinds, so a panic between the lock and the unlock at one of those
-  sites releases by close, and a duplicate descriptor in a child can then
-  hold the lock. D-0693 lists the sites. Converting them is a follow-up.
+  directly, and only a release binary is sure to reach the unlock.** Each takes
+  a lock, runs a closure or one call, unlocks, and only then combines the two
+  results. The release profile sets `panic = "abort"`, so there a panic
+  between the lock and the unlock ends the process. **The dev profile does not
+  set it and unwinds, and so does every test build.** The dev build is not
+  only for tests: `Cargo.toml`'s `[profile.dev]` comment records that the
+  operator's IntelliJ Run button builds and runs `target/debug/api` under
+  `dev`. `overflow-checks` is on there, so an arithmetic overflow inside a
+  bracket's closure is a panic that unwinds past the unlock in the binary the
+  operator actually runs. What the unwind leaves depends on who owns the file:
+  - *A file local to the unwound frames* closes as they unwind. The lock is
+    released by close, and a duplicate descriptor in a child can then hold it
+    until the child execs.
+  - *A file a longer-lived owner holds* is not closed by the unwind. Tokio
+    reports a panicking task as a `JoinError`, `api::detail::run` turns it
+    into `RunError::Join`, and the api keeps serving, so the lock stays held
+    on the owner's own descriptor until that owner drops, not merely until
+    close. `api::detail::FRONTIER` is one such owner: it keeps one
+    `cli::frontier::Frontier` for the process, `with_verified` recovers a
+    poisoned cache with `PoisonError::into_inner` and keeps the same handle,
+    and `Frontier`'s reads bracket `self.file.lock_shared()` and
+    `self.file.unlock()`. A panic inside that bracket, on the
+    `spawn_blocking` path `/frontier.json` runs on, would leave the shared
+    lock on the cached handle, and `append_all`'s blocking exclusive `lock()`
+    in a sweep would wait until the cache let the handle go. That consequence
+    is read from the code. It has not been reproduced.
+
+  D-0693 lists the sites. Converting them is a follow-up.
 - **The race was never reproduced here with a real spawn.** macOS applies
   `CLOEXEC` inside `posix_spawn` atomically, so no child ever holds a
   duplicate there. Every regression uses `File::try_clone` as the duplicate.
