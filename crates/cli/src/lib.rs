@@ -3311,6 +3311,13 @@ fn stored_month_kernel(
     // evidence for each and the bar that evidence must clear. Without it the
     // whole ladder is a counter.
     out.push_str(&runner::report::render_ranked_findings(&ranked, &outcome));
+    // A STOCK'S RANKING SAYS IT IS GROSS, as the audit's does. This verb has no
+    // AUDIT block, so without it a ranked share table carried no charge
+    // statement at all. D-0681.
+    out.push_str(equity_ranking_note(
+        audit::CostScope::of(loaded.key.kind),
+        &ranked,
+    ));
     Ok(out)
 }
 
@@ -7557,10 +7564,25 @@ pub fn render_top_record(
         );
     }
 
+    // A SHARE IS NOT A UNIT OF THE INDEX. This legend was one literal, so a
+    // RELIANCE run was told its mean was "per ONE unit of the index, gross of the
+    // statutory charge stack" -- the wrong instrument, and a charge statement
+    // that names no charge. The underlying is resolved exactly as the sweep
+    // resolved it; a cash equity is labelled as D-0681 labels its audit, and
+    // every other row keeps the index legend byte for byte.
+    let per_unit = if stored::swept_index(&crate::results::read_field(&rows.underlying))
+        .is_ok_and(|key| key.kind == brutex_core::instrument::Kind::Equity)
+    {
+        "ONE share, GROSS OF EVERY CHARGE: brokerage, STT, stamp duty, exchange \
+         charges, the SEBI fee and GST all apply to a share trade and none is \
+         subtracted -- cost-excluded research, not a net result (D-0681)."
+    } else {
+        "ONE unit of the index, gross of the statutory charge stack."
+    };
     let _ = writeln!(
         out,
-        "\n  `mean` is the average forward move over the run's horizon, per ONE \
-         unit of the index, gross of the statutory charge stack.\n  `payoff` is \
+        "\n  `mean` is the average forward move over the run's horizon, per \
+         {per_unit}\n  `payoff` is \
          the mean WIN over the mean LOSS, in hundredths -- 300 reads 3.00. It \
          carries no stop, no target and no path,\n  so it does not say what a \
          stop would have done: it says which combinations are worth asking. \
@@ -17759,6 +17781,47 @@ fn opening(banner: &str, refused: Option<&str>) -> String {
     out
 }
 
+/// The charge statement a ranked cash-equity table carries on the page that
+/// prints it.
+///
+/// # The ranking was printed where the label was not
+///
+/// D-0681 labelled a stock audit GROSS OF EVERY CHARGE at the head of its
+/// AUDIT block, and `runner::audit::render_selected` is the only writer of that
+/// block. Three pages print a ranked table of equity combinations and never
+/// reach it: an audit whose ladder halted or was not certified (the refusal
+/// returns before the render), an audit that kept rows but traded none
+/// (`nothing_to_trade`), and every `sweep-stored` report. Each ranked shares by
+/// `mean` and `t` with no word that those figures carry every charge a share
+/// trade pays, which `CLAUDE.md` §1 requires of every equity ranking.
+///
+/// # Indented, and inside FINDINGS
+///
+/// Every line starts with two spaces, so [`section_note`] lifts it as part of
+/// the FINDINGS block it qualifies and no refusal scanner reads it: none starts
+/// `refused`, `REFUSED. `, `REFUSED -- ` or `RESULT NOT RECORDED`. No line
+/// names a rate, because `docs/00-charter.md` records no source for an equity
+/// charge (§3 rule 1).
+const EQUITY_RANKING_GROSS: &str = "  CASH EQUITY: EVERY FIGURE IN THIS RANKING IS GROSS OF EVERY CHARGE.\n  \
+     A share trade pays brokerage, STT, stamp duty, exchange charges, the SEBI\n  \
+     fee and GST, and this engine subtracts none of them, so the ranking above\n  \
+     is on GROSS returns. COST-EXCLUDED RESEARCH, NOT A NET RESULT (D-0509,\n  \
+     D-0525, D-0681).\n\n";
+
+/// [`EQUITY_RANKING_GROSS`] when a cash equity's ranking kept a row, else
+/// nothing: an index has no charge to be gross of, and an extinct sweep prints
+/// no ranking to qualify.
+fn equity_ranking_note(
+    scope: Option<audit::CostScope>,
+    ranked: &runner::rank::Ranked,
+) -> &'static str {
+    if scope == Some(audit::CostScope::CashEquity) && !ranked.top.is_empty() {
+        EQUITY_RANKING_GROSS
+    } else {
+        ""
+    }
+}
+
 /// Render the streamed result and refuse before trading a partial frontier.
 fn ranked_opening(
     banner: &str,
@@ -17767,12 +17830,16 @@ fn ranked_opening(
     outcome: &runner::RankedOutcome,
     ranked: &runner::rank::Ranked,
     id: Option<&runner::identity::RunId>,
+    cost: audit::CostScope,
 ) -> Result<String, String> {
     let mut out = opening(banner, refused);
     out.push_str(execution_note);
     out.push_str(&runner::report::render_ranked(outcome, id));
     out.push_str(&streaming_note(ranked, outcome));
     out.push_str(&runner::report::render_ranked_findings(ranked, outcome));
+    // BEFORE EITHER EARLY EXIT BELOW AND IN `audit_bars_work`, so a halted or
+    // untraded equity ranking carries its charge statement too. D-0681.
+    out.push_str(equity_ranking_note(Some(cost), ranked));
     if outcome.is_complete() {
         Ok(out)
     } else {
@@ -18218,6 +18285,7 @@ fn audit_bars_work(
         &outcome,
         &ranked,
         id,
+        cost,
     ) {
         Ok(out) => out,
         Err(mut refusal) => {
@@ -19869,6 +19937,13 @@ mod tests {
         // streamed frontier correctly refuses before every stage below.
         let text = audit_run_within(12, 1_400, 50_000);
         assert!(text.starts_with(PROVENANCE), "provenance leads it too");
+        // GENERATED BARS NAME NO INSTRUMENT, so `audit_with` keeps the index
+        // header under the PROVENANCE banner, and no share's label. D-0681.
+        assert!(
+            text.contains("\nAUDIT\n  INDEX SPOT run. There is no brokerage"),
+            "the generated audit keeps the index header:\n{text}"
+        );
+        assert!(!text.contains("GROSS OF EVERY CHARGE"), "{text}");
         assert!(text.contains("BARS"), "the sweep report is still there");
         for section in [
             "TRADES",

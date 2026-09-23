@@ -13,22 +13,27 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 
 struct Fixture {
     root: PathBuf,
+    underlying: &'static str,
 }
 impl Fixture {
     fn new() -> Self {
-        Self::with_sessions(false)
+        Self::with_sessions(false, "NIFTY")
     }
     fn warmed() -> Self {
-        Self::with_sessions(true)
+        Self::with_sessions(true, "NIFTY")
     }
-    fn with_sessions(warmed: bool) -> Self {
+    /// The warmed sessions filed under another swept instrument.
+    fn warmed_for(underlying: &'static str) -> Self {
+        Self::with_sessions(true, underlying)
+    }
+    fn with_sessions(warmed: bool, underlying: &'static str) -> Self {
         let root = std::env::temp_dir().join(format!(
             "brutex-audited-range-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&root).expect("unique generated fixture");
-        let result = Self { root };
+        let result = Self { root, underlying };
         let may: &[u8] = if warmed {
             &[2, 5, 6, 7, 8, 30]
         } else {
@@ -55,7 +60,7 @@ impl Fixture {
         result
     }
     fn path(&self, month: u8, timeframe: Timeframe, kind: FileKind) -> PathBuf {
-        let key = stored::swept_index("NIFTY").expect("fixture key");
+        let key = stored::swept_index(self.underlying).expect("fixture key");
         StorePath::for_key(
             Vendor::Zerodha,
             &key,
@@ -67,7 +72,7 @@ impl Fixture {
         .to_path_buf(&self.root)
     }
     fn write(&self, month: u8, timeframe: Timeframe, rows: &[Bar]) {
-        let key = stored::swept_index("NIFTY").expect("fixture key");
+        let key = stored::swept_index(self.underlying).expect("fixture key");
         let path = StorePath::for_key(
             Vendor::Zerodha,
             &key,
@@ -76,7 +81,7 @@ impl Fixture {
             FileKind::Bars,
         )
         .expect("source path");
-        let hash = brutex_core::universe::fnv1a("NIFTY").to_le_bytes();
+        let hash = brutex_core::universe::fnv1a(key.underlying.as_str()).to_le_bytes();
         let symbol = u32::from_le_bytes(hash[..4].try_into().expect("low32"));
         let mut file = BarFile::open_or_create(&self.root, path, symbol).expect("fixture writer");
         file.append(rows).expect("exact generated records");
@@ -85,7 +90,7 @@ impl Fixture {
         RangeRequest {
             store_root: &self.root,
             vendor: Vendor::Zerodha,
-            underlying: "NIFTY",
+            underlying: self.underlying,
             rung,
             from: (2025, 5),
             to: (2025, 6),
@@ -662,4 +667,69 @@ fn inject_terminal_fault(
             fs::remove_file(path).expect("remove acknowledged ranking");
         }
     }
+}
+
+/// **The strict audited range heads a share GROSS OF EVERY CHARGE and an
+/// index as it always has, from the key it loaded.** D-0681.
+///
+/// Every fixture here was NIFTY, so `audited_range_command::run` computing
+/// `audit_cost_scope(&span.key)` and a constant `IndexSpot` were
+/// indistinguishable to the suite. The same generated sessions are filed once
+/// under a share and once under an index.
+#[test]
+fn the_strict_range_kernel_heads_a_share_gross_and_an_index_as_before() {
+    let _serial = crate::knobs::serially();
+    crate::knobs::clear_all();
+    // Bounded to what the header needs; both are settings a strict run admits.
+    crate::knobs::set("BRUTEX_VALIDATE", "0");
+    crate::knobs::set("BRUTEX_GRID_RUNGS", "2");
+    let index = "\nAUDIT\n  INDEX SPOT run. There is no brokerage";
+    let equity = "\nAUDIT\n  CASH EQUITY run. EVERY TOTAL BELOW IS GROSS OF EVERY CHARGE.\n";
+    for (underlying, header, foreign) in [("RELIANCE", equity, index), ("NIFTY", index, equity)] {
+        let fixture = Fixture::warmed_for(underlying);
+        let report = crate::audited_range_command::run_for_test(fixture.request("5min"), 220)
+            .map_err(|why| format!("{underlying}: {why}"))
+            .expect("the strict generated kernel completes");
+        assert!(!crate::carries_refusal(&report), "{underlying}:\n{report}");
+        assert!(report.contains(header), "{underlying}:\n{report}");
+        assert!(!report.contains(foreign), "{underlying}:\n{report}");
+    }
+    crate::knobs::clear_all();
+}
+
+/// **A contract reaching the strict audited range is refused by name before
+/// its column is prepared or a result recorded.**
+///
+/// `swept_index` refuses every contract before `RangeInputs::load` holds a
+/// key, so the kernel's `?` on `audit_cost_scope` never ran. The seam hands
+/// that decision a NIFTY future in place of the loaded key, on this thread
+/// only; the refusal is exactly the scope's own sentence.
+#[test]
+fn a_contract_reaching_the_strict_range_kernel_is_refused_before_it_is_recorded() {
+    use brutex_core::instrument::{Expiry, InstrumentKey, Kind, Segment};
+    let _serial = crate::knobs::serially();
+    crate::knobs::clear_all();
+    let future = InstrumentKey {
+        exchange: brutex_core::instrument::Exchange::Nse,
+        segment: Segment::Fno,
+        underlying: brutex_core::symbol::Symbol::new("NIFTY").expect("valid"),
+        kind: Kind::Future {
+            expiry: Expiry::new(2025, 6, 26).expect("a real expiry"),
+        },
+    };
+    let named = stored::audit_cost_scope(&future).expect_err("a contract has no header");
+    let fixture = Fixture::warmed();
+    let refused = {
+        let _contract = stored::CostScopeFault::install(future);
+        crate::audited_range_command::run_for_test(fixture.request("5min"), 2000)
+    };
+    assert_eq!(refused, Err(named.clone()));
+    assert!(
+        !crate::results::Results::path(&fixture.root).exists(),
+        "a refused contract recorded a result"
+    );
+    let whole = crate::audited_range_command::run_for_test(fixture.request("5min"), 2000)
+        .expect("the seam is gone with its guard");
+    assert!(!crate::carries_refusal(&whole), "{whole}");
+    assert!(!whole.contains(&named), "{whole}");
 }

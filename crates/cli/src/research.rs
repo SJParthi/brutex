@@ -353,6 +353,26 @@ mod tests {
         );
     }
 
+    /// **The cash inventory is exactly the 208 F&O shares, in list order, and
+    /// the same list every time it is asked.** D-0682.
+    ///
+    /// The test above pins five exclusions and two inclusions, so a filter that
+    /// dropped any other share -- or let a sixth index through -- passed it.
+    /// This pins the whole list against core's two constants.
+    #[test]
+    fn cash_inventory_is_exactly_the_fno_underlyings_less_the_index_names() {
+        use brutex_core::universe::{FNO_INDEX_UNDERLYINGS, FNO_UNDERLYINGS};
+        let expected: Vec<&str> = FNO_UNDERLYINGS
+            .iter()
+            .copied()
+            .filter(|name| !FNO_INDEX_UNDERLYINGS.contains(name))
+            .collect();
+        assert_eq!(expected.len(), 208, "213 underlyings less 5 index names");
+        let first = cash_symbols();
+        assert_eq!(first, expected);
+        assert_eq!(cash_symbols(), first, "a rerun lists the same shares");
+    }
+
     #[test]
     fn inventory_deduplicates_paths_and_separates_feed_segment_and_month() {
         use store::path::{Timeframe, YearMonth};

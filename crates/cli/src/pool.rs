@@ -46,8 +46,10 @@
 //! # What is NOT charged, and why that is stated on every report
 //!
 //! No cost of any kind. On the indices that is correct by charter — an index
-//! is not tradeable. On a cash equity it is NOT correct: STT is 0.025% of every
-//! sell and brokerage, exchange, SEBI and stamp charges are real. The operator
+//! is not tradeable. On a cash equity it is NOT correct: brokerage, STT, stamp
+//! duty, exchange charges, the SEBI fee and GST are real, and no rate for any of
+//! them is quoted here because `docs/00-charter.md` records no source for an
+//! equity charge (`CLAUDE.md` §3 rule 1; D-0681). The operator
 //! asked for this pass without costs so that the rare tail is visible before
 //! anything is subtracted from it, and D-0506 records the cost model as
 //! necessary before any stock result is acted on. Every report this verb
@@ -330,6 +332,25 @@ fn count(n: usize) -> u64 {
 /// cash equities by `FNO_INDEX` less its five index names — so a stored equity
 /// off the F&O list, a reference index, an F&O index other than the two, or a
 /// contract is skipped here without a second list.
+///
+/// # One entry per instrument, and only where that instrument is read from
+///
+/// This kept `h.symbol`, the directory's own spelling, and asked `swept_index`
+/// only whether the WORD resolved. Two defects followed, both counted in the
+/// pooled totals rather than refused:
+///
+/// * `NSE/CASH/reliance` beside `NSE/CASH/RELIANCE` (or `NSE/INDEX/RELIANCE`)
+///   listed `["RELIANCE", "reliance"]`. Both resolve to `NSE-RELIANCE`, pass 1
+///   loads the same canonical bars twice, and `fold` sums that instrument's
+///   trades, wins and net twice.
+/// * A `BSE/...` holding was listed, because the exchange directory was never
+///   read, and `swept_index` resolves the bare name to an NSE key. The opening
+///   line counted it among the POOL's instruments while pass 1 read NSE paths.
+///
+/// A holding now counts only when its exchange and segment directories are the
+/// ones the resolved key's own path names -- the file a load of that key opens
+/// -- and the entry is the key's canonical symbol, so one instrument is one
+/// entry however the store spelt it.
 fn surface_under(
     root: &std::path::Path,
     vendor: brutex_core::vendor::Vendor,
@@ -340,8 +361,12 @@ fn surface_under(
         .held
         .iter()
         .filter(|h| h.vendor == vendor && h.timeframe.as_str() == rung)
-        .filter(|h| stored::swept_index(&h.symbol).is_ok())
-        .map(|h| h.symbol.clone())
+        .filter_map(|h| {
+            stored::swept_index(&h.symbol).ok().filter(|key| {
+                h.exchange == key.exchange.as_str() && h.segment == key.segment.as_str()
+            })
+        })
+        .map(|key| key.underlying.as_str().to_owned())
         .collect();
     Ok(symbols.into_iter().collect())
 }
@@ -370,9 +395,11 @@ fn opening(
         "WHICH STOCK, BEFORE IT MOVES. Pass 1 screens every instrument alone; pass 2 prices\n\
          the union of their top combinations on every instrument and POOLS the trades.\n\
          NO COST OF ANY KIND IS CHARGED. Correct on an index by charter; NOT correct on a\n\
-         cash equity, where STT alone is 0.025% of every sell -- D-0506. Every total below\n\
-         is gross, in sample, unvalidated, and the largest of instruments × candidates\n\
-         comparisons. It finds a candidate; `range-rung` with validation on is the proof."
+         cash equity, where brokerage, STT, stamp duty, exchange charges, the SEBI fee and\n\
+         GST all apply and none is subtracted: every equity total is GROSS OF EVERY CHARGE\n\
+         (D-0506, D-0681). Every total below is gross, in sample, unvalidated, and the\n\
+         largest of instruments × candidates comparisons. It finds a candidate;\n\
+         `range-rung` with validation on is the proof."
     );
     out
 }
@@ -1010,6 +1037,113 @@ mod tests {
             .expect("listed");
         assert!(other_rung.is_empty(), "the rung filters too");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A scratch store holding one empty `2026-07` file under each
+    /// `bars/zerodha/<dir>/60min` directory named, for `surface_under` to list.
+    fn store_holding(tag: &str, dirs: &[&str]) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("brutex-pool-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for dir in dirs {
+            let at = root.join(format!("bars/zerodha/{dir}/60min"));
+            std::fs::create_dir_all(&at).expect("dirs");
+            std::fs::write(at.join("2026-07.bin"), b"").expect("a file the catalog lists");
+        }
+        root
+    }
+
+    /// **An F&O index filed under a case variant is still not on the surface.**
+    ///
+    /// `swept_index` folds case before core's predicate, so `finnifty` is
+    /// refused exactly as `FINNIFTY` is. D-0682 pinned only upper-case
+    /// directories here.
+    #[test]
+    fn a_case_variant_fno_index_directory_is_not_on_the_surface() {
+        let root = store_holding(
+            "index-case",
+            &[
+                "NSE/CASH/finnifty",
+                "NSE/INDEX/NiftyNxt50",
+                "NSE/CASH/midcpnifty",
+            ],
+        );
+        let surface = super::surface_under(&root, brutex_core::vendor::Vendor::Zerodha, "60min")
+            .expect("listed");
+        assert!(surface.is_empty(), "{surface:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **One instrument is one surface entry, however many directories spell
+    /// it, and only the directory its own key reads counts.**
+    ///
+    /// The surface kept each directory's raw spelling, so `NSE/CASH/reliance`
+    /// beside `NSE/INDEX/RELIANCE` listed `["RELIANCE", "reliance"]`: both
+    /// resolve to `NSE-RELIANCE`, pass 1 loaded the same bars twice, and `fold`
+    /// summed that stock's trades, wins and net twice. `NSE/INDEX/RELIANCE` is
+    /// not even the file a RELIANCE load opens, and `NSE/CASH/NIFTY` is not the
+    /// file a NIFTY load opens.
+    #[test]
+    fn one_instrument_is_one_surface_entry_at_the_path_its_key_reads() {
+        let root = store_holding(
+            "spellings",
+            &[
+                "NSE/CASH/reliance",
+                "NSE/CASH/RELIANCE",
+                "NSE/INDEX/RELIANCE",
+                "NSE/CASH/NIFTY",
+                "NSE/INDEX/banknifty",
+            ],
+        );
+        let surface = super::surface_under(&root, brutex_core::vendor::Vendor::Zerodha, "60min")
+            .expect("listed");
+        assert_eq!(surface, vec!["BANKNIFTY".to_owned(), "RELIANCE".to_owned()]);
+        let _ = std::fs::remove_dir_all(&root);
+
+        // One spelling only, and it is not the canonical one: still one entry,
+        // named canonically, so pass 1 and the POOL line name the same thing.
+        let root = store_holding("one-spelling", &["NSE/CASH/reliance"]);
+        let surface = super::surface_under(&root, brutex_core::vendor::Vendor::Zerodha, "60min")
+            .expect("listed");
+        assert_eq!(surface, vec!["RELIANCE".to_owned()]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **BSE is not on the surface.** `CLAUDE.md` §1: BSE is neither swept nor
+    /// pulled. The exchange directory was never read, and `swept_index`
+    /// resolves a bare name to an NSE key, so a store holding only BSE files
+    /// opened its report with `POOL over 2 instrument(s)`.
+    #[test]
+    fn a_bse_holding_is_not_on_the_surface() {
+        let root = store_holding("bse", &["BSE/CASH/RELIANCE", "BSE/INDEX/NIFTY"]);
+        let surface = super::surface_under(&root, brutex_core::vendor::Vendor::Zerodha, "60min")
+            .expect("listed");
+        assert!(surface.is_empty(), "{surface:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **The pool quotes no charge rate.** `CLAUDE.md` §3 rule 1: every claim
+    /// about a cost traces to `docs/00-charter.md`, which records no source for
+    /// an equity charge. The report said "STT alone is 0.025% of every sell".
+    /// It still says every equity total is gross of every charge, and names
+    /// the charges.
+    #[test]
+    fn the_pool_report_names_the_equity_charges_and_quotes_no_rate() {
+        let page = super::opening("zerodha", "60min", (2025, 1), (2025, 2), Some(20_000), &[]);
+        // The support word above it is a percentage of bars, not a charge.
+        let (_, charges) = page.split_once("WHICH STOCK").expect("the paragraph");
+        assert!(
+            !charges.contains('%'),
+            "no rate without a charter source:\n{charges}"
+        );
+        assert!(!charges.contains("0.025"), "{charges}");
+        for claim in [
+            "NO COST OF ANY KIND IS CHARGED",
+            "brokerage, STT, stamp duty, exchange charges, the SEBI fee and\nGST",
+            "every equity total is GROSS OF EVERY CHARGE",
+            "(D-0506, D-0681)",
+        ] {
+            assert!(page.contains(claim), "missing {claim:?}:\n{page}");
+        }
     }
 
     /// **The pool prepares a span exactly as the screen does.**

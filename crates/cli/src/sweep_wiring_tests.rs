@@ -401,3 +401,134 @@ fn the_audit_header_is_the_scope_the_caller_supplied() {
         );
     }
 }
+
+/// One generated-bar audit at `cost`, unrecorded, on the bounded fixture the
+/// header test above uses. Nothing is written anywhere.
+fn generated_audit(
+    cost: runner::audit::CostScope,
+    ceiling: usize,
+    min_hits: u64,
+    validate: bool,
+) -> String {
+    audit_bars(
+        &super::evaluator(),
+        runner::synthetic::sessions(12),
+        "GENERATED TEST FIXTURE",
+        min_hits,
+        None,
+        AuditOptions {
+            prepared_column: None,
+            replay: None,
+            execution: None,
+            native_minute_execution: true,
+            recording: None,
+            rules: Rules::BASELINE,
+            lens: runner::rank::Lens::Detectability,
+            ceiling: Some(ceiling),
+            validate,
+            cost,
+        },
+    )
+}
+
+/// **A halted equity ranking says it is gross before it refuses to trade.**
+///
+/// D-0681 put the charge statement in the AUDIT block, and a halted or
+/// uncertified ladder returns before that block is rendered -- after printing
+/// a ranked FINDINGS table of shares (`rank, hits, mean paisa, t, clears`).
+/// Measured before this: at ceilings 8, 64 and 512 the equity page carried no
+/// "gross" anywhere. The label is the ONLY difference from the index page.
+#[test]
+fn a_halted_equity_ranking_is_labelled_gross_before_it_refuses() {
+    use runner::audit::CostScope;
+    let _knobs = super::knobs::serially();
+    super::knobs::clear_all();
+    for ceiling in [8, 64, 512] {
+        let equity = generated_audit(CostScope::CashEquity, ceiling, 1_400, false);
+        assert!(
+            super::carries_refusal(&equity) && equity.contains("NOT TRADED"),
+            "premise: ceiling {ceiling} halts:\n{equity}"
+        );
+        let findings = super::section_note(&equity, "FINDINGS").expect("a ranking");
+        assert!(
+            findings.contains("  rank "),
+            "premise: ranked rows:\n{findings}"
+        );
+        assert!(
+            findings.contains(super::EQUITY_RANKING_GROSS.trim_end()),
+            "ceiling {ceiling}: the ranking must say it is gross:\n{findings}"
+        );
+        let label = equity.find("GROSS OF EVERY CHARGE").expect("labelled");
+        let refusal = equity.find("NOT TRADED").expect("refused");
+        assert!(
+            label < refusal,
+            "the label qualifies the ranking above the refusal"
+        );
+        let index = generated_audit(CostScope::IndexSpot, ceiling, 1_400, false);
+        assert_eq!(
+            equity.replacen(super::EQUITY_RANKING_GROSS, "", 1),
+            index,
+            "ceiling {ceiling}: the scope may change the charge statement and nothing else"
+        );
+    }
+}
+
+/// **A completed equity audit is labelled in FINDINGS and in AUDIT, carries no
+/// refusal, and reruns byte for byte.** §3 rule 5, on the scope D-0681 added.
+///
+/// The rung note `range-all` and `pool` keep when they discard the report
+/// lifts the AUDIT block whole: the header's paragraphs are separated by blank
+/// lines, and every line is indented, so none of them ends the lift.
+#[test]
+fn a_completed_equity_audit_is_labelled_twice_and_reruns_byte_for_byte() {
+    use runner::audit::CostScope;
+    let _knobs = super::knobs::serially();
+    super::knobs::clear_all();
+    let first = generated_audit(CostScope::CashEquity, 50_000, 1_400, false);
+    assert_eq!(
+        generated_audit(CostScope::CashEquity, 50_000, 1_400, false),
+        first,
+        "the same equity audit must render byte for byte"
+    );
+    assert!(!super::carries_refusal(&first), "{first}");
+    let findings = super::section_note(&first, "FINDINGS").expect("a ranking");
+    assert!(
+        findings.contains(super::EQUITY_RANKING_GROSS.trim_end()),
+        "{findings}"
+    );
+    let lifted = super::validation_note(&first).expect("the rung note");
+    for paragraph in [
+        "AUDIT\n  CASH EQUITY run. EVERY TOTAL BELOW IS GROSS OF EVERY CHARGE.",
+        "chose this combination is on GROSS returns.",
+        "COST-EXCLUDED RESEARCH, NOT A NET RESULT",
+        "No equity result carries Selection V6",
+        "GROSS OF THE SPREAD",
+        "CASH EQUITY: EVERY FIGURE IN THIS RANKING IS GROSS OF EVERY CHARGE.",
+    ] {
+        assert!(
+            lifted.contains(paragraph),
+            "missing {paragraph:?}:\n{lifted}"
+        );
+    }
+    for index_claim in ["INDEX SPOT run", "no brokerage"] {
+        assert!(!lifted.contains(index_claim), "{lifted}");
+    }
+}
+
+/// **An extinct equity audit prints no ranking, so nothing to label.**
+#[test]
+fn an_extinct_equity_audit_is_the_index_page_byte_for_byte() {
+    use runner::audit::CostScope;
+    let _knobs = super::knobs::serially();
+    super::knobs::clear_all();
+    let equity = generated_audit(CostScope::CashEquity, 50_000, u64::MAX, false);
+    assert!(
+        equity.contains("nothing kept — the sweep produced no combination"),
+        "premise: extinct:\n{equity}"
+    );
+    assert!(!equity.contains("GROSS OF EVERY CHARGE"), "{equity}");
+    assert_eq!(
+        equity,
+        generated_audit(CostScope::IndexSpot, 50_000, u64::MAX, false)
+    );
+}

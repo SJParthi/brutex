@@ -1941,12 +1941,51 @@ pub(crate) const fn vwap_availability(key: &InstrumentKey) -> Availability {
 /// makes a claim about charges that is false of a contract. So this refuses
 /// by name rather than borrowing a label.
 pub(crate) fn audit_cost_scope(key: &InstrumentKey) -> Result<runner::audit::CostScope, Refusal> {
+    #[cfg(test)]
+    let substituted = COST_SCOPE_KEY.with(std::cell::Cell::get);
+    #[cfg(test)]
+    let key = substituted.as_ref().unwrap_or(key);
     runner::audit::CostScope::of(key.kind).ok_or_else(|| {
         format!(
             "`{key}` is a futures or options contract: the sweep surface holds \
              none (CLAUDE.md section 1), and no audit header states its charges"
         )
     })
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static COST_SCOPE_KEY: std::cell::Cell<Option<InstrumentKey>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Test-only: the key [`audit_cost_scope`] judges in place of the one it is
+/// handed, for as long as the guard lives, on this thread only.
+///
+/// # Why a seam and not a fixture
+///
+/// [`swept_index`] refuses every contract before any caller holds a key, so no
+/// store, however it is seeded, can bring a contract to the four kernels that
+/// ask for the charge statement. Their `?` on this refusal therefore never ran
+/// in a test, and a kernel that swallowed it -- or that asked before a durable
+/// write it should not make -- would pass every fixture. The guard lets a test
+/// drive the refusal through each real call site on a real generated store.
+#[cfg(test)]
+pub(crate) struct CostScopeFault;
+
+#[cfg(test)]
+impl CostScopeFault {
+    pub(crate) fn install(key: InstrumentKey) -> Self {
+        COST_SCOPE_KEY.with(|held| held.set(Some(key)));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for CostScopeFault {
+    fn drop(&mut self) {
+        COST_SCOPE_KEY.with(|held| held.set(None));
+    }
 }
 
 /// One instrument-month of real bars, or the reason there are none.
@@ -3531,6 +3570,182 @@ mod tests {
             refused.contains(&future.to_string()) && refused.contains("contract"),
             "the refusal must name the key and say why: {refused}"
         );
+    }
+
+    /// The one sentence every refused instrument word ends in.
+    const SURFACE_SENTENCE: &str = "The sweep surface is the NSE spot indices NIFTY, BANKNIFTY \
+         and the NSE cash equities of the 208 F&O underlyings that are shares, not indices \
+         (D-0506, D-0682). Nothing was read.";
+
+    /// **Every spelling of an instrument word lands on one charge scope or on
+    /// the one surface sentence -- and a lower-case SHARE is still a share.**
+    ///
+    /// D-0681 decides the audit header from the key `swept_index` resolves, so
+    /// case folding is what keeps `reliance` from being labelled anything but a
+    /// cash equity. Whitespace is never trimmed into a match: an instrument
+    /// word with a stray space is a different word, refused as malformed rather
+    /// than guessed at. Names that are not F&O shares -- the three F&O indices,
+    /// the reference index, a near-miss spelling, a vendor suffix -- are
+    /// refused as storable but not sweepable.
+    #[test]
+    fn every_spelling_of_an_instrument_word_lands_on_one_scope_or_the_surface_sentence() {
+        use runner::audit::CostScope;
+
+        let scope = |word: &str| swept_index(word).and_then(|key| audit_cost_scope(&key));
+        for word in ["nifty", "Nifty", "NIFTY", "banknifty", "BankNifty"] {
+            assert_eq!(scope(word), Ok(CostScope::IndexSpot), "{word:?}");
+        }
+        for word in [
+            "reliance",
+            "Reliance",
+            "RELIANCE",
+            "m&m",
+            "M&M",
+            "bajaj-auto",
+            "BAJAJ-AUTO",
+        ] {
+            assert_eq!(scope(word), Ok(CostScope::CashEquity), "{word:?}");
+        }
+        for (word, why) in [
+            (" NIFTY", "malformed"),
+            ("NIFTY ", "malformed"),
+            ("NIFTY\n", "malformed"),
+            ("\tRELIANCE", "malformed"),
+            ("", "malformed"),
+            ("FINNIFTY", "storable but not sweepable"),
+            ("finnifty", "storable but not sweepable"),
+            ("MIDCPNIFTY", "storable but not sweepable"),
+            ("NIFTYNXT50", "storable but not sweepable"),
+            ("INDIAVIX", "storable but not sweepable"),
+            ("NIFTY50", "storable but not sweepable"),
+            ("RELIANCE-EQ", "storable but not sweepable"),
+            ("NIFTY_BANK", "storable but not sweepable"),
+        ] {
+            let refused = scope(word).expect_err("not on the engine surface");
+            assert!(
+                refused.starts_with(&format!(
+                    "`{word}` is not an instrument this engine sweeps: "
+                )),
+                "the refusal quotes the raw word first: {refused}"
+            );
+            assert!(
+                refused.contains(why),
+                "{word:?} must be refused as {why}: {refused}"
+            );
+            assert!(refused.ends_with(SURFACE_SENTENCE), "{word:?}: {refused}");
+        }
+    }
+
+    /// **A case variant of an F&O index underlying is refused like its
+    /// canonical spelling, quoting what was typed; a case variant of a swept
+    /// index is that index.** D-0682.
+    ///
+    /// `Symbol::new` upper-cases before core's sweep predicate runs, so
+    /// `finnifty` reached the same refusal as `FINNIFTY` -- but only the
+    /// canonical spellings were pinned, and a folding step moved after the
+    /// predicate would have let every lower-case index through as a share.
+    /// The refusal is a pure function of its argument, so it is also asked
+    /// twice and must not change (§3 rule 5).
+    #[test]
+    fn case_variants_of_an_fno_index_are_refused_and_of_a_swept_index_are_that_index() {
+        for word in [
+            "finnifty",
+            "FinNifty",
+            "fInNiFtY",
+            "midcpnifty",
+            "MidCpNifty",
+            "niftynxt50",
+            "NiftyNxt50",
+        ] {
+            let refused = swept_index(word).expect_err("an F&O index has no cash equity");
+            assert!(
+                refused.starts_with(&format!(
+                    "`{word}` is not an instrument this engine sweeps: instrument is \
+                     storable but not sweepable"
+                )),
+                "{refused}"
+            );
+            assert!(refused.ends_with(SURFACE_SENTENCE), "{refused}");
+        }
+        for (word, canonical) in [
+            ("nifty", "NIFTY"),
+            ("NiFtY", "NIFTY"),
+            ("banknifty", "BANKNIFTY"),
+            ("BankNifty", "BANKNIFTY"),
+        ] {
+            let key = swept_index(word).expect("a swept index in any case");
+            assert_eq!(
+                key,
+                InstrumentKey::index(Exchange::Nse, canonical).expect("valid"),
+                "{word}"
+            );
+            assert_eq!(key.kind, Kind::Index, "{word}");
+        }
+        for word in [
+            "FINNIFTY",
+            "INDIAVIX",
+            "SENSEX",
+            "ZZQXNOTFNO",
+            "finnifty",
+            "FINNIFT",
+            "FINNIFTYY",
+            "NIFTYNXT5",
+            "NIFTYNXT500",
+            "MIDCPNIFTY-",
+            "NIFTYIT",
+            "BANKEX",
+        ] {
+            let first = swept_index(word).expect_err("not on the engine surface");
+            assert!(first.contains("storable but not sweepable"), "{first}");
+            assert_eq!(
+                swept_index(word),
+                Err(first),
+                "{word}: a rerun must refuse byte for byte"
+            );
+        }
+    }
+
+    /// **A real FINNIFTY file is refused before it is read, under either
+    /// segment.** D-0682.
+    ///
+    /// The seeded-file guard was pinned for INDIAVIX only. FINNIFTY is the
+    /// sharper case: it is an F&O underlying, and until D-0682 the cash arm
+    /// accepted it -- so a store holding `NSE/CASH/FINNIFTY` was swept as a
+    /// share. Each file below exists and is readable, so absence cannot be
+    /// what refuses it.
+    #[test]
+    fn a_seeded_fno_index_file_is_refused_before_it_is_read_under_either_segment() {
+        for (tag, key) in [
+            (
+                "finnifty-index",
+                InstrumentKey::index(Exchange::Nse, "FINNIFTY"),
+            ),
+            (
+                "finnifty-cash",
+                InstrumentKey::cash(Exchange::Nse, "FINNIFTY"),
+            ),
+        ] {
+            let r = root(tag);
+            let key = key.expect("FINNIFTY is a valid stored key");
+            let ym = YearMonth::new(2026, 8).expect("a real month");
+            let path =
+                StorePath::for_key(Vendor::Dhan, &key, Timeframe::MINUTE_1, ym, FileKind::Bars)
+                    .expect("a path for a stored key");
+            let on_disk = path.to_path_buf(&r);
+            let id = brutex_core::universe::fnv1a("FINNIFTY") as u32;
+            BarFile::open_or_create(&r, path, id)
+                .expect("a fresh month opens")
+                .append(&bars(3))
+                .expect("and takes its bars");
+            assert!(on_disk.is_file(), "fixture premise: {}", on_disk.display());
+
+            let why = load(&r, Vendor::Dhan, "FINNIFTY", "1min", 2026, 8)
+                .expect_err("an F&O index never enters a sweep");
+            assert!(why.contains("storable but not sweepable"), "{tag}: {why}");
+            assert!(!why.contains("does not exist"), "{tag}: {why}");
+            assert!(why.ends_with(SURFACE_SENTENCE), "{tag}: {why}");
+            let _ignored = std::fs::remove_dir_all(&r);
+        }
     }
 
     /// **An unbounded argument is cut before it reaches the refusal.**

@@ -1097,3 +1097,465 @@ fn recorded_runs_refuse_a_screen_budget_before_reading_or_writing()
     );
     Ok(())
 }
+
+/// The index header's opening words, as every index audit prints them.
+const INDEX_HEADER: &str = "\nAUDIT\n  INDEX SPOT run. There is no brokerage";
+/// The cash-equity header's opening line. D-0681.
+const EQUITY_HEADER: &str =
+    "\nAUDIT\n  CASH EQUITY run. EVERY TOTAL BELOW IS GROSS OF EVERY CHARGE.\n";
+
+/// Generated sessions whose prices MOVE, filed under any swept instrument.
+///
+/// [`Fixture`] writes one constant bar shape under NIFTY. That is right for the
+/// provenance tests above and can never select a trade, and the audit's charge
+/// statement is written only on a page that ranks and trades. These fixtures
+/// carry `runner::synthetic`'s drifting, wobbling bars under the instrument a
+/// test names -- a share or an index -- so a kernel's header can be read off
+/// its real output.
+struct Traded {
+    root: PathBuf,
+    underlying: &'static str,
+}
+
+impl Traded {
+    fn new(underlying: &'static str) -> Self {
+        let root = std::env::temp_dir().join(format!(
+            "brutex-audited-traded-fixture-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).expect("scratch");
+        let fixture = Self { root, underlying };
+        for (index, (month, day)) in
+            (0_i64..).zip([(4, 30), (5, 2), (5, 5), (5, 6), (5, 7), (5, 8), (5, 9)])
+        {
+            let rows = moving_session(month, day, index);
+            assert!(
+                !rows.is_empty(),
+                "2025-{month:02}-{day:02} must be an open session"
+            );
+            fixture.write(month, Timeframe::MINUTE_1, &rows);
+            fixture.write(month, Timeframe::DAY_1, &[aggregate(&rows)]);
+            if month == 5 {
+                fixture.write(
+                    month,
+                    Timeframe::MINUTE_5,
+                    &rows.chunks(5).map(aggregate).collect::<Vec<_>>(),
+                );
+            }
+        }
+        fixture
+    }
+
+    fn write(&self, month: u8, timeframe: Timeframe, rows: &[Bar]) {
+        let key = stored::swept_index(self.underlying).expect("a swept fixture key");
+        let path = StorePath::for_key(
+            Vendor::Zerodha,
+            &key,
+            timeframe,
+            YearMonth::new(2025, month).expect("month"),
+            FileKind::Bars,
+        )
+        .expect("path");
+        let hash = brutex_core::universe::fnv1a(key.underlying.as_str()).to_le_bytes();
+        let symbol = u32::from_le_bytes(hash[..4].try_into().expect("low32"));
+        let mut file = BarFile::open_or_create(&self.root, path, symbol).expect("writer");
+        file.append(rows).expect("generated fixture rows");
+    }
+
+    fn audit(&self, rung: &str, min_hits: u64) -> Result<String, String> {
+        crate::audit_stored_kernel(crate::StoredSweepRequest {
+            root: self.root.clone(),
+            vendor: Vendor::Zerodha,
+            underlying: self.underlying,
+            rung,
+            year: 2025,
+            month: 5,
+            min_hits,
+            commit: "generated-traded-audit-fixture",
+        })
+    }
+
+    fn range(&self, rung: &str, min_hits: u64) -> Result<String, String> {
+        crate::audit_range_kernel(crate::StoredRangeAuditRequest {
+            root: self.root.clone(),
+            vendor: Vendor::Zerodha,
+            underlying: self.underlying,
+            rung,
+            from: (2025, 5),
+            to: (2025, 5),
+            min_hits,
+            attempt: None,
+            commit: "generated-traded-range-fixture",
+        })
+    }
+
+    fn screen(&self, rung: &str, support_ppm: u64) -> Result<String, String> {
+        crate::screen_range_kernel(crate::StoredScreenRequest {
+            root: self.root.clone(),
+            vendor: Vendor::Zerodha,
+            underlying: self.underlying,
+            rung,
+            span: ((2025, 5), (2025, 5)),
+            support_ppm,
+            policy: crate::Policy {
+                rules: crate::Rules::BASELINE,
+                lens: runner::rank::Lens::Detectability,
+                validate: false,
+            },
+            attempt: None,
+            commit: "generated-traded-screen-fixture",
+        })
+    }
+
+    fn sweep(&self, rung: &str, min_hits: u64) -> Result<String, String> {
+        let input = Inputs::load(Request {
+            store_root: &self.root,
+            vendor: Vendor::Zerodha,
+            underlying: self.underlying,
+            rung,
+            year: 2025,
+            month: 5,
+            receipt_root: &self.root,
+            max_bytes: 16_777_216,
+            max_records: 100_000,
+        })?;
+        crate::stored_month_kernel(
+            crate::StoredSweepRequest {
+                root: self.root.clone(),
+                vendor: Vendor::Zerodha,
+                underlying: self.underlying,
+                rung,
+                year: 2025,
+                month: 5,
+                min_hits,
+                commit: "generated-traded-sweep-fixture",
+            },
+            input.data(),
+            Some(&input),
+        )
+    }
+}
+
+impl Drop for Traded {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+/// One coarser bar from consecutive finer ones: first open and stamp, extreme
+/// high and low, last close, summed volume -- what a vendor's own rung prints.
+fn aggregate(rows: &[Bar]) -> Bar {
+    let first = rows.first().expect("a nonempty generated aggregation");
+    Bar {
+        ts_micros: first.ts_micros,
+        open: first.open,
+        high: rows.iter().map(|row| row.high).max().expect("high"),
+        low: rows.iter().map(|row| row.low).min().expect("low"),
+        close: rows.last().expect("close").close,
+        volume: rows.iter().map(|row| row.volume).sum(),
+        open_interest: i64::MIN,
+    }
+}
+
+/// One open session of `runner::synthetic` bars on its real IST minute grid.
+fn moving_session(month: u8, date: u8, index: i64) -> Vec<Bar> {
+    let civil = pull::session::Day::new(2025, month, date).expect("date");
+    let day = i64::from(civil.days_from_epoch());
+    let pull::calendar::DayKind::Open(session) = pull::calendar::kind_of(day) else {
+        return Vec::new();
+    };
+    session
+        .windows
+        .iter()
+        .take(usize::from(session.count))
+        .flat_map(|window| window.from..=window.to)
+        .enumerate()
+        .map(|(minute_of_session, minute)| {
+            let bar = runner::synthetic::bar(index, minute_of_session);
+            Bar {
+                ts_micros: day * 86_400_000_000 + i64::from(minute) * 60_000_000
+                    - indicators::IST_OFFSET_MICROS,
+                open: bar.open,
+                high: bar.high,
+                low: bar.low,
+                close: bar.close,
+                volume: bar.volume,
+                open_interest: i64::MIN,
+            }
+        })
+        .collect()
+}
+
+/// Bounded to what a header needs: no validation stack and the smallest exit
+/// grid a strict run admits. Neither changes which header is written. The
+/// caller holds `knobs::serially` and clears them after.
+fn bounded_header_knobs() {
+    crate::knobs::clear_all();
+    crate::knobs::set("BRUTEX_VALIDATE", "0");
+    crate::knobs::set("BRUTEX_GRID_RUNGS", "2");
+}
+
+/// One stored kernel over the same generated sessions filed under a share and
+/// under an index: each page carries its own header and never the other's, the
+/// share's FINDINGS carry the ranking's own gross statement, and the rung note
+/// lifts the whole AUDIT header.
+fn kernel_heads_by_kind(verb: &str, run: impl Fn(&Traded) -> Result<String, String>) {
+    for (underlying, header, foreign) in [
+        ("RELIANCE", EQUITY_HEADER, INDEX_HEADER),
+        ("NIFTY", INDEX_HEADER, EQUITY_HEADER),
+    ] {
+        let fixture = Traded::new(underlying);
+        let equity = underlying == "RELIANCE";
+        let report = run(&fixture)
+            .map_err(|why| format!("{underlying} {verb}: {why}"))
+            .expect("a generated traded kernel run completes");
+        assert!(
+            !crate::carries_refusal(&report),
+            "{underlying} {verb}:\n{report}"
+        );
+        assert!(
+            report.contains(header),
+            "{underlying} {verb} must carry its own header:\n{report}"
+        );
+        assert!(
+            !report.contains(foreign),
+            "{underlying} {verb} carries the other instrument's header:\n{report}"
+        );
+        let findings = crate::section_note(&report, "FINDINGS").expect("a ranking");
+        assert_eq!(
+            findings.contains(crate::EQUITY_RANKING_GROSS.trim_end()),
+            equity,
+            "{underlying} {verb}: the ranking's charge statement:\n{findings}"
+        );
+        let lifted = crate::validation_note(&report).expect("the rung note");
+        assert!(lifted.contains(header.trim_start_matches('\n')), "{lifted}");
+        if equity {
+            for paragraph in [
+                "COST-EXCLUDED RESEARCH, NOT A NET RESULT",
+                "No equity result carries Selection V6",
+                "GROSS OF THE SPREAD",
+            ] {
+                assert!(
+                    lifted.contains(paragraph),
+                    "{verb}: the lift must keep every paragraph of the header, \
+                     missing {paragraph:?}:\n{lifted}"
+                );
+            }
+        }
+    }
+}
+
+/// **`audit-stored` heads a share GROSS OF EVERY CHARGE and an index exactly
+/// as it always has, from the key it loaded.** D-0681.
+///
+/// Every stored-kernel fixture was NIFTY, so replacing any kernel's
+/// `stored::audit_cost_scope(&key)?` with a constant `IndexSpot` passed the
+/// whole suite -- and a mutation tool does not mutate call-site arguments, so
+/// it could not see that either. This and the two tests below run one kernel
+/// each on a generated share and a generated index, so a regression names the
+/// kernel it is in.
+#[test]
+fn the_stored_month_audit_heads_a_share_gross_and_an_index_as_before() {
+    let _knobs = crate::knobs::serially();
+    bounded_header_knobs();
+    kernel_heads_by_kind("audit_stored_kernel", |fixture| fixture.audit("1min", 700));
+    crate::knobs::clear_all();
+}
+
+/// **A stored range audit heads a share GROSS OF EVERY CHARGE.** D-0681.
+#[test]
+fn the_stored_range_audit_heads_a_share_gross_and_an_index_as_before() {
+    let _knobs = crate::knobs::serially();
+    bounded_header_knobs();
+    kernel_heads_by_kind("audit_range_kernel", |fixture| fixture.range("1min", 700));
+    crate::knobs::clear_all();
+}
+
+/// **A stored screen heads a share GROSS OF EVERY CHARGE.** D-0681.
+#[test]
+fn the_stored_screen_heads_a_share_gross_and_an_index_as_before() {
+    let _knobs = crate::knobs::serially();
+    bounded_header_knobs();
+    kernel_heads_by_kind("screen_range_kernel", |fixture| {
+        fixture.screen("1min", 311_111)
+    });
+    crate::knobs::clear_all();
+}
+
+/// **`cli top` names a recorded share as a share, gross of every charge, and
+/// an index exactly as before.**
+///
+/// The legend was one literal: a RELIANCE run read "`mean` is the average
+/// forward move ... per ONE unit of the index, gross of the statutory charge
+/// stack" -- the wrong instrument, and a charge statement naming no charge.
+#[test]
+fn top_names_a_recorded_share_as_a_share_and_an_index_as_before() {
+    let _knobs = crate::knobs::serially();
+    bounded_header_knobs();
+    for underlying in ["RELIANCE", "NIFTY"] {
+        let fixture = Traded::new(underlying);
+        let equity = underlying == "RELIANCE";
+        let recorded = fixture
+            .audit("1min", 700)
+            .map_err(|why| format!("{underlying}: {why}"))
+            .expect("a recorded generated audit");
+        assert!(recorded.contains("RESULT RECORDED"), "premise:\n{recorded}");
+        let top = crate::top_at(&fixture.root, None, Some(underlying));
+        assert!(top.contains("TOP COMBINATIONS"), "{top}");
+        assert_eq!(
+            top.contains(
+                "per ONE share, GROSS OF EVERY CHARGE: brokerage, STT, stamp duty, exchange \
+                 charges, the SEBI fee and GST all apply to a share trade and none is \
+                 subtracted -- cost-excluded research, not a net result (D-0681)."
+            ),
+            equity,
+            "{underlying}: `cli top` must name a share as a share:\n{top}"
+        );
+        assert_eq!(
+            top.contains("per ONE unit of the index, gross of the statutory charge stack."),
+            !equity,
+            "{underlying}: an index keeps its legend byte for byte:\n{top}"
+        );
+        if equity {
+            assert!(!top.contains("unit of the index"), "{top}");
+        }
+    }
+    crate::knobs::clear_all();
+}
+
+/// **`sweep-stored` on a share says its ranking is gross of every charge.**
+///
+/// The verb renders FINDINGS and stops -- it has no AUDIT block, so D-0681's
+/// header never reached it, and a ranked share table (for example `mean 45
+/// paisa, t 103.04, clears`) carried no charge statement at all. An index's
+/// sweep is unchanged.
+#[test]
+fn a_stored_sweep_of_a_share_says_its_ranking_is_gross_of_every_charge() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    for underlying in ["RELIANCE", "NIFTY"] {
+        let fixture = Traded::new(underlying);
+        let page = fixture
+            .sweep("1min", 700)
+            .map_err(|why| format!("{underlying}: {why}"))
+            .expect("a generated traded sweep completes");
+        let findings = crate::section_note(&page, "FINDINGS").expect("the ranking");
+        assert!(
+            findings.contains("  rank "),
+            "premise: a ranked table:\n{findings}"
+        );
+        assert_eq!(
+            findings.contains(crate::EQUITY_RANKING_GROSS.trim_end()),
+            underlying == "RELIANCE",
+            "{underlying}:\n{page}"
+        );
+        assert!(!crate::carries_refusal(&page), "{page}");
+    }
+}
+
+/// **An extinct share audit prints no ranking and so no charge statement.**
+///
+/// `min_hits = u64::MAX` is the extinction path: nothing is kept, nothing is
+/// ranked, nothing is traded, and neither header is written. F1 adds no
+/// arithmetic, so the only edge is that the label must not qualify a table
+/// that does not exist.
+#[test]
+fn an_extinct_share_audit_prints_no_ranking_and_no_charge_statement() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    let fixture = Traded::new("RELIANCE");
+    for (verb, report) in [
+        ("audit_stored_kernel", fixture.audit("1min", u64::MAX)),
+        ("audit_range_kernel", fixture.range("1min", u64::MAX)),
+    ] {
+        let report = report
+            .map_err(|why| format!("{verb}: {why}"))
+            .expect("an extinct generated audit completes");
+        assert!(
+            report.contains("nothing kept — the sweep produced no combination"),
+            "{verb}:\n{report}"
+        );
+        assert!(
+            report.contains("This is extinction, not a failure."),
+            "{report}"
+        );
+        for absent in [EQUITY_HEADER, INDEX_HEADER, "GROSS OF EVERY CHARGE"] {
+            assert!(
+                !report.contains(absent),
+                "{verb} printed {absent:?}:\n{report}"
+            );
+        }
+    }
+}
+
+/// A NIFTY future: a key `swept_index` can never hand a kernel.
+fn a_contract() -> brutex_core::instrument::InstrumentKey {
+    use brutex_core::instrument::{Exchange, Expiry, InstrumentKey, Kind, Segment};
+    InstrumentKey {
+        exchange: Exchange::Nse,
+        segment: Segment::Fno,
+        underlying: brutex_core::symbol::Symbol::new("NIFTY").expect("valid"),
+        kind: Kind::Future {
+            expiry: Expiry::new(2025, 5, 29).expect("a real expiry"),
+        },
+    }
+}
+
+/// One stored kernel handed a contract through the scope seam: refused with
+/// exactly the scope's own sentence, and no result recorded. Once the guard
+/// drops, the same kernel on the same store is whole again.
+fn contract_is_refused_by(verb: &str, run: impl Fn(&Fixture) -> Result<String, String>) {
+    let future = a_contract();
+    let named = stored::audit_cost_scope(&future).expect_err("a contract has no header");
+    let fixture = Fixture::warmed();
+    let refused = {
+        let _contract = stored::CostScopeFault::install(future);
+        run(&fixture)
+    };
+    assert_eq!(refused, Err(named.clone()), "{verb}");
+    assert!(
+        !crate::results::Results::path(&fixture.root).exists(),
+        "{verb}: a refused contract recorded a result"
+    );
+    let whole = run(&fixture)
+        .map_err(|why| format!("{verb}: {why}"))
+        .expect("the seam is gone with its guard");
+    assert!(whole.contains("RESULT RECORDED"), "{verb}:\n{whole}");
+    assert!(!whole.contains(&named), "{verb}:\n{whole}");
+}
+
+/// **A contract reaching `audit-stored` is refused by name before a result is
+/// recorded.**
+///
+/// `swept_index` refuses every contract first, so the `?` each kernel puts on
+/// `audit_cost_scope` could not run from any store: a kernel that swallowed
+/// the refusal and borrowed a header would have passed. The seam hands the
+/// scope decision a NIFTY future in place of the loaded key, on this thread
+/// only. This and the two tests below cover one kernel each.
+#[test]
+fn a_contract_reaching_the_stored_month_audit_is_refused_before_it_is_recorded() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    contract_is_refused_by("audit_stored_kernel", |fixture| fixture.audit("5min"));
+}
+
+/// **A contract reaching a stored range audit is refused by name.**
+#[test]
+fn a_contract_reaching_the_stored_range_audit_is_refused_before_it_is_recorded() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    contract_is_refused_by("audit_range_kernel", |fixture| {
+        fixture.audit_range("5min", (2025, 5))
+    });
+}
+
+/// **A contract reaching a stored screen is refused by name.**
+#[test]
+fn a_contract_reaching_the_stored_screen_is_refused_before_it_is_recorded() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    contract_is_refused_by("screen_range_kernel", |fixture| {
+        fixture.screen("5min", 900_000)
+    });
+}
