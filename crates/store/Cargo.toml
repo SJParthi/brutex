@@ -16,6 +16,20 @@ description  = "The fixed-stride bar file: bytes on disk, addressed by arithmeti
 # crates/core itself, once here.
 brutex_core = { path = "../core", package = "core", version = "0.1.0" }
 
+# THE EVENT SINK. This crate wrote every bar in the store and said nothing
+# about any of them: a file created, a header committed, a generation advanced
+# were all invisible, so "the bars are on disk" was a claim only the store
+# itself could make and only to its own caller.
+#
+# NO CYCLE. `crates/telemetry` names no workspace member — it is a leaf like
+# `core` — so `store -> telemetry` keeps the graph acyclic.
+#
+# EVERYTHING HERE IS `Debug` OR QUIETER. `append` is the per-member write path
+# and the sink's floor is `Info`, so a normal run pays one relaxed atomic load
+# per append and writes nothing. See D-0075 for why the level, not the call
+# cost, is what keeps a 64 MiB rolling window from eating its own evidence.
+telemetry = { path = "../telemetry", version = "0.1.0" }
+
 # ---------------------------------------------------------------------------
 # There is no checksum dependency, on purpose.
 #

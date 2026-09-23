@@ -1,0 +1,28 @@
+{
+  "name": "brutex-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev --port 5173",
+    "prebuild": "node policy-guide/build-guide.mjs --check",
+    "build": "vite build",
+    "preview": "vite preview",
+    "precheck": "node policy-guide/build-guide.mjs --check",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "pretest": "node policy-guide/build-guide.mjs --check",
+    "test": "node --test \"tests/*.test.js\""
+  },
+  "devDependencies": {
+    "@sveltejs/adapter-static": "^3.0.8",
+    "@sveltejs/kit": "^2.20.0",
+    "@sveltejs/vite-plugin-svelte": "^7.3.0",
+    "@types/node": "26.2.0",
+    "svelte": "^5.56.9",
+    "svelte-check": "^4.7.6",
+    "typescript": "^5.8.2",
+    "vite": "^8.2.1"
+  },
+  "dependencies": {
+    "lightweight-charts": "^5.0.5"
+  }
+}

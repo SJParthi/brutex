@@ -1,0 +1,22 @@
+node_modules/
+.svelte-kit/
+
+# `build/` USED TO BE HERE AND IS DELIBERATELY NOT.
+#
+# It is generated output, and generated output is normally not committed. This
+# one is, for a reason that is not about tidiness: the Rust binary serves it,
+# and the operator's requirement is `git clone`, open the project, press Run —
+# with no package manager on the machine and no second process. An ignored
+# `build/` means a fresh clone has nothing to serve, and the only way back is a
+# command, which is the thing being removed.
+#
+# D-0053 already licenses this in as many words: "If a build step is
+# introduced, its OUTPUT is committed under `web/`, so a clone with no Node
+# still builds a working binary." D-0064 is the entry that takes it up.
+#
+# `crates/api` still does not depend on this directory to BUILD — it is read at
+# run time and its absence is a page that says so. See `crates/api/src/assets.rs`.
+
+# The dev server's dependency cache. Build output, and it reappears whenever
+# `vite dev` runs.
+.vite/

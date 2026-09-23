@@ -16,7 +16,11 @@
 //!
 //! Every field is fixed-width and every one derives [`Hash`], so a key hashes
 //! in a constant number of machine words no matter which vendor it came from.
-//! That is what makes the O(1) dedup claim true rather than aspirational.
+//! That is what makes the O(1) dedup claim true rather than aspirational — and
+//! `core::symbol::hashing_feeds_the_same_number_of_bytes_however_long_the_input_was`
+//! is what makes it checked: it builds an [`InstrumentKey`] from a
+//! one-character underlying and one from a full-width underlying, and asserts
+//! both feed a hasher the identical number of bytes.
 //!
 //! # Storable is not sweepable
 //!
@@ -242,11 +246,19 @@ pub struct InstrumentKey {
 }
 
 impl InstrumentKey {
-    /// The two instruments the engine sweeps.
+    /// UNVERIFIED performance: no named cost test or measured latency bound is established here.
+    /// The two INDICES the engine sweeps.
     ///
     /// `docs/00-charter.md` §1. India VIX is deliberately absent: it is stored
     /// and stamped onto trades, but it never enters the condition vocabulary,
     /// ranking, or run identity.
+    ///
+    /// This is no longer the whole sweep surface. D-0506 widened it to the
+    /// F&O cash equities as well, and those are not listed here: they are the
+    /// 213 names `crate::universe::FNO_UNDERLYINGS` already holds, probed in
+    /// O(1) through `FNO_INDEX`. Copying them into a second list is how two
+    /// lists drift, and the audit that found seven stale counts in this
+    /// crate's own prose is the argument against it. See [`Self::is_sweepable`].
     pub const SWEPT: [(Exchange, &'static str); 2] =
         [(Exchange::Nse, "NIFTY"), (Exchange::Nse, "BANKNIFTY")];
 
@@ -264,19 +276,61 @@ impl InstrumentKey {
         })
     }
 
+    /// Builds a cash-equity key: the stock's own price series, not a contract.
+    ///
+    /// # Errors
+    ///
+    /// [`InstrumentError::Malformed`] if the symbol is not valid.
+    pub fn cash(exchange: Exchange, underlying: &str) -> Result<Self, InstrumentError> {
+        Ok(Self {
+            exchange,
+            segment: Segment::Cash,
+            underlying: Symbol::new(underlying)?,
+            kind: Kind::Equity,
+        })
+    }
+
+    /// UNVERIFIED performance: no named cost test or measured latency bound is established here.
     /// Whether the sweep engine may operate on this instrument.
     ///
-    /// Storable and sweepable are different questions. Everything is storable;
-    /// exactly two things are sweepable, and widening that set requires a
-    /// `docs/05-decisions.md` entry rather than a different argument here.
+    /// Storable and sweepable are different questions. Everything is storable.
+    /// Sweepable is exactly two shapes, and widening either requires a
+    /// `docs/05-decisions.md` entry rather than a different argument here:
+    ///
+    /// 1. An NSE spot INDEX named in [`Self::SWEPT`] -- NIFTY and BANKNIFTY.
+    /// 2. An NSE CASH EQUITY whose symbol is one of the 213 F&O underlyings
+    ///    in `crate::universe::FNO_UNDERLYINGS`. Added by D-0506: the operator's
+    ///    objective is the rare, massive winner, and those moves exist in
+    ///    single stocks and are averaged away in an index.
+    ///
+    /// # What is deliberately NOT sweepable
+    ///
+    /// Futures and options CONTRACTS, on any underlying. They expire, and
+    /// `docs/00-charter.md` §7 records that NSE reuses instrument tokens across
+    /// an expiry boundary -- a contract is a moving target and a sweep over one
+    /// would stitch two instruments into one series. The cash equity is the
+    /// stock's own price, the same thing NIFTY's spot level is for the index,
+    /// and it does not expire.
+    ///
+    /// # Cost
+    ///
+    /// The index arm is two comparisons. The equity arm is one probe into
+    /// `FNO_INDEX`, an open-addressed table built at compile time with a
+    /// test-pinned worst case of six probes on a hit and eleven on a miss --
+    /// the only true worst-case O(1) membership structure in the workspace.
+    /// No list is copied and no list is scanned.
     #[must_use]
     pub fn is_sweepable(&self) -> bool {
-        if self.segment != Segment::Index || self.kind != Kind::Index {
-            return false;
+        match (self.segment, &self.kind) {
+            (Segment::Index, Kind::Index) => Self::SWEPT
+                .iter()
+                .any(|&(ex, sym)| ex == self.exchange && self.underlying.as_str() == sym),
+            (Segment::Cash, Kind::Equity) => {
+                self.exchange == Exchange::Nse
+                    && crate::universe::FNO_INDEX.contains(self.underlying.as_str())
+            }
+            _ => false,
         }
-        Self::SWEPT
-            .iter()
-            .any(|&(ex, sym)| ex == self.exchange && self.underlying.as_str() == sym)
     }
 
     /// Refuses an instrument the engine may not sweep.
@@ -315,6 +369,181 @@ impl fmt::Display for InstrumentKey {
     }
 }
 
+/// The longest a rendered contract segment can be.
+///
+/// Deliberately equal to `SYMBOL_CAPACITY`: a contract is a PATH SEGMENT in the
+/// store exactly as a symbol is, and `store::path::MAX_SEGMENT_LEN` is pinned
+/// to that same number by a `const` assertion. One bound, three places, and a
+/// widening in one of them cannot silently outgrow the others.
+pub const CONTRACT_CAPACITY: usize = 24;
+
+/// One derivative contract, rendered as the store files it.
+///
+/// # Why this is a segment of its OWN and not part of the symbol
+///
+/// D-0019 files a future or an option under its CONTRACT, because `NIFTY`
+/// alone would put every expiry of every strike in one directory. The obvious
+/// implementation appends the contract to the symbol — and it does not fit.
+/// `Symbol` holds 24 bytes and so does a path segment, while the real names run
+/// longer than that: `BANKNIFTY-30Sep25-24650-CE` is 26 and `MIDCPNIFTY` is 27.
+/// A capacity that holds NIFTY and drops BANKNIFTY is the worst of both, since
+/// the failure appears only on some underlyings.
+///
+/// So the underlying stays the symbol and the contract is the segment BELOW it:
+/// `.../FNO/BANKNIFTY/2025-09-30-2465000-CE/1min/2026-08.bin`. Each part is
+/// independently inside the bound, the directory tree groups every contract
+/// under its own underlying, and neither field had to grow.
+///
+/// # The strike is PAISA, and it is not a decimal
+///
+/// `CLAUDE.md` §7: prices are `i64` paisa and never a float. A strike rendered
+/// as `24650.00` puts a `.` in a path segment and invites a reader to parse it
+/// back as a float; rendered as `2465000` it is the integer the store already
+/// holds, and it round-trips exactly.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Contract {
+    bytes: [u8; CONTRACT_CAPACITY],
+    len: u8,
+}
+
+impl Contract {
+    /// The contract segment for `kind`, or [`None`] where the kind has none.
+    ///
+    /// `None` for [`Kind::Index`] and [`Kind::Equity`] is the whole point: a
+    /// spot instrument has no expiry and no strike, so it has no contract
+    /// directory and its path is one level shallower. That absence is the
+    /// signal the path builder branches on, rather than a flag beside it.
+    #[must_use]
+    pub fn of(kind: Kind) -> Option<Self> {
+        match kind {
+            Kind::Index | Kind::Equity => None,
+            Kind::Future { expiry } => Self::render(expiry, None),
+            Kind::Option {
+                expiry,
+                strike,
+                side,
+            } => Self::render(expiry, Some((strike, side))),
+        }
+    }
+
+    /// `YYYY-MM-DD-FUT` or `YYYY-MM-DD-<paisa>-CE`.
+    ///
+    /// Returns `None` only if the rendering would exceed
+    /// [`CONTRACT_CAPACITY`], which admits at most ten strike characters after
+    /// the date and separators (9,999,999,999 paisa for a positive strike).
+    /// Refused rather than truncated: a truncated
+    /// strike names a DIFFERENT contract and would merge two series into one
+    /// file, which is the exact failure this type exists to prevent.
+    fn render(expiry: Expiry, option: Option<(Paisa, OptionSide)>) -> Option<Self> {
+        use std::fmt::Write as _;
+        let mut text = String::with_capacity(CONTRACT_CAPACITY);
+        // `write!` to a String cannot fail; the capacity check below is the
+        // real bound and it is checked explicitly rather than trusted.
+        let _ = write!(
+            text,
+            "{:04}-{:02}-{:02}",
+            expiry.year(),
+            expiry.month(),
+            expiry.day()
+        );
+        match option {
+            None => {
+                let _ = write!(text, "-FUT");
+            }
+            Some((strike, side)) => {
+                let _ = write!(text, "-{}-{}", strike.raw(), side.as_str());
+            }
+        }
+        if text.len() > CONTRACT_CAPACITY {
+            return None;
+        }
+        let mut bytes = [0u8; CONTRACT_CAPACITY];
+        // `get_mut` and not an index: the capacity check above already refused
+        // an over-long rendering, so this cannot be `None` — and writing it as
+        // a fallible lookup means a future change to that check cannot turn
+        // this line into a panic without the compiler saying so.
+        bytes
+            .get_mut(..text.len())?
+            .copy_from_slice(text.as_bytes());
+        Some(Self {
+            bytes,
+            len: u8::try_from(text.len()).ok()?,
+        })
+    }
+
+    /// The contract this text names, or [`None`] where it cannot hold it.
+    ///
+    /// The inverse of [`Self::as_str`], and the reason the census can store a
+    /// contract as TEXT rather than as three decoded fields: what goes to disk
+    /// is exactly what goes in the path, so the two can never disagree about
+    /// which contract a month belongs to.
+    ///
+    /// Refuses anything over [`CONTRACT_CAPACITY`] or holding a byte a path
+    /// segment may not — a `/` here would escape the directory it names, and a
+    /// truncated contract is a DIFFERENT contract, so neither is repaired.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        if text.is_empty() || text.len() > CONTRACT_CAPACITY {
+            return None;
+        }
+        if !text
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-')
+        {
+            return None;
+        }
+        let mut bytes = [0u8; CONTRACT_CAPACITY];
+        bytes
+            .get_mut(..text.len())?
+            .copy_from_slice(text.as_bytes());
+        Some(Self {
+            bytes,
+            len: u8::try_from(text.len()).ok()?,
+        })
+    }
+
+    /// Whether this names a FUTURES contract.
+    ///
+    /// A future renders `<expiry>-FUT` and an option `<expiry>-<strike>-<side>`,
+    /// so the suffix is the whole test and it reads off the same text the store
+    /// path uses. No second encoding of the same fact, and therefore nothing
+    /// that can disagree with the directory the bars are in.
+    #[must_use]
+    pub fn is_future(&self) -> bool {
+        self.as_str().ends_with("-FUT")
+    }
+
+    /// Whether this names an OPTIONS contract.
+    #[must_use]
+    pub fn is_option(&self) -> bool {
+        !self.is_future()
+    }
+
+    /// The rendered contract.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        let n = usize::from(self.len);
+        // Same shape as `Symbol::as_str`, and for the same reason: the
+        // constructor admits only ASCII, and ASCII is valid UTF-8. `get` and
+        // `unwrap_or` rather than an index and an `expect`, because this runs
+        // on the write path for every derivative bar file and a slice index
+        // there is a panic in the one place a panic must not be.
+        core::str::from_utf8(self.bytes.get(..n).unwrap_or(&[])).unwrap_or("")
+    }
+}
+
+impl fmt::Debug for Contract {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Contract({})", self.as_str())
+    }
+}
+
+impl fmt::Display for Contract {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::indexing_slicing,
@@ -323,6 +552,109 @@ impl fmt::Display for InstrumentKey {
     clippy::panic
 )]
 mod tests {
+
+    #[test]
+    fn contract_rendering_accepts_the_exact_capacity_and_refuses_the_next_digit() {
+        let expiry = Expiry::new(2025, 9, 30).expect("a real expiry");
+        for side in [OptionSide::Call, OptionSide::Put] {
+            let kind = Kind::Option {
+                expiry,
+                strike: crate::price::Paisa::from_raw(9_999_999_999),
+                side,
+            };
+            let contract = Contract::of(kind).expect("exactly 24 contract bytes fit");
+            let expected = format!("2025-09-30-9999999999-{}", side.as_str());
+            assert_eq!(contract.as_str(), expected);
+            assert_eq!(contract.as_str().len(), CONTRACT_CAPACITY);
+            assert_eq!(Contract::parse(&expected), Some(contract));
+            assert_eq!(
+                Contract::of(Kind::Option {
+                    expiry,
+                    strike: crate::price::Paisa::from_raw(10_000_000_000),
+                    side,
+                }),
+                None,
+                "a further digit must refuse without merging contract identities"
+            );
+        }
+    }
+
+    /// EVERY GUARD ON `Contract` REFUSES, and each is asserted separately.
+    ///
+    /// These are the arms a mutation survives in: a capacity check deleted, a
+    /// comparison flipped, a byte filter removed. Each one lets a name through
+    /// that would either be TRUNCATED — naming a different contract, merging
+    /// two series into one file — or would carry a byte a path segment may not.
+    #[test]
+    fn a_contract_refuses_what_it_cannot_hold_and_what_a_path_may_not_carry() {
+        // AT THE BOUND, and one past it. `parse` is the inverse of `as_str`,
+        // so the two must agree about exactly where the edge is.
+        let at = "A".repeat(CONTRACT_CAPACITY);
+        assert_eq!(
+            Contract::parse(&at).map(|c| c.as_str().len()),
+            Some(CONTRACT_CAPACITY),
+            "{CONTRACT_CAPACITY} bytes is inside"
+        );
+        assert_eq!(
+            Contract::parse(&"A".repeat(CONTRACT_CAPACITY + 1)),
+            None,
+            "one past it is refused, never truncated: a truncated contract \
+             names a DIFFERENT contract"
+        );
+        assert_eq!(Contract::parse(""), None, "and empty is not a contract");
+
+        // A BYTE A PATH SEGMENT MAY NOT CARRY. `/` would escape the directory
+        // it names; lower case and a dot are simply not this grammar.
+        for bad in [
+            "2025-09-30/FUT",
+            "2025-09-30-fut",
+            "2025-09-30-24650.5-CE",
+            "a b",
+        ] {
+            assert_eq!(Contract::parse(bad), None, "must refuse: {bad}");
+        }
+
+        // AND THE RENDERER'S OWN BOUND. A strike large enough to overflow the
+        // segment is refused rather than written short — the same rule from the
+        // other direction, and the only way to reach `render`'s length check.
+        let huge = Kind::Option {
+            expiry: Expiry::new(2025, 9, 30).expect("a real expiry"),
+            strike: crate::price::Paisa::from_raw(i64::MAX),
+            side: OptionSide::Call,
+        };
+        assert_eq!(
+            Contract::of(huge),
+            None,
+            "a strike that cannot fit the segment is refused, not truncated"
+        );
+
+        // THE ROUND TRIP HOLDS for every shape this build files.
+        for kind in [
+            Kind::Future {
+                expiry: Expiry::new(2025, 9, 30).expect("a real expiry"),
+            },
+            Kind::Option {
+                expiry: Expiry::new(2024, 1, 4).expect("a real expiry"),
+                strike: crate::price::Paisa::from_raw(1_920_000),
+                side: OptionSide::Put,
+            },
+        ] {
+            let made = Contract::of(kind).expect("it renders");
+            assert_eq!(made.is_future(), matches!(kind, Kind::Future { .. }));
+            assert_eq!(made.is_option(), matches!(kind, Kind::Option { .. }));
+            assert_eq!(made.to_string(), made.as_str());
+            assert_eq!(format!("{made:?}"), format!("Contract({})", made.as_str()));
+            assert_eq!(
+                Contract::parse(made.as_str()),
+                Some(made),
+                "as_str and parse are inverses"
+            );
+        }
+
+        // AND SPOT HAS NO CONTRACT AT ALL, which is what the path branches on.
+        assert_eq!(Contract::of(Kind::Index), None);
+        assert_eq!(Contract::of(Kind::Equity), None);
+    }
     use super::*;
     use std::collections::HashMap;
 
@@ -442,18 +774,28 @@ mod tests {
     }
 
     #[test]
-    fn an_nse_equity_is_storable_and_not_swept() {
-        // D-0018: every NSE instrument is STORED, and the sweep stays at the
-        // two indices until a two-instrument sweep earns the widening. This
-        // test is what would fail if someone widened the surface silently.
+    fn an_nse_equity_sweeps_iff_it_is_an_fno_underlying() {
+        // D-0018: every NSE instrument is STORED, and the sweep stayed at the
+        // two indices "until a two-instrument sweep earns the widening". This
+        // test was what would fail if someone widened the surface silently --
+        // and it did fail, on the day D-0506 widened it deliberately. It now
+        // pins the widened rule from the same three names: an NSE cash equity
+        // sweeps exactly when `FNO_INDEX` holds its symbol, and every one of
+        // these three is an F&O underlying. The outsider case, with a
+        // self-checking fixture, is in
+        // `the_sweep_surface_is_the_two_indices_and_the_fno_cash_equities`.
         for s in ["RELIANCE", "HINDALCO", "TCS"] {
+            assert!(
+                crate::universe::FNO_INDEX.contains(s),
+                "{s} is an F&O underlying, or this fixture is wrong"
+            );
             let eq = InstrumentKey {
                 exchange: Exchange::Nse,
                 segment: Segment::Cash,
                 underlying: Symbol::new(s).expect("valid"),
                 kind: Kind::Equity,
             };
-            assert!(!eq.is_sweepable(), "{s} must not be swept yet");
+            assert!(eq.is_sweepable(), "{s} is on the surface since D-0506");
         }
     }
 
@@ -532,16 +874,44 @@ mod tests {
         let e1 = Expiry::new(2025, 7, 3).expect("valid");
         let e2 = Expiry::new(2025, 7, 10).expect("valid");
 
-        let mut seen = std::collections::HashSet::new();
-        for k in [
+        let keys = [
             base(e1, 2_280_000, OptionSide::Call),
             base(e1, 2_280_000, OptionSide::Put), // side differs
             base(e1, 2_285_000, OptionSide::Call), // strike differs
             base(e2, 2_280_000, OptionSide::Call), // expiry differs
-        ] {
+        ];
+
+        let mut seen = std::collections::HashSet::new();
+        for k in keys {
             seen.insert(k);
         }
-        assert_eq!(seen.len(), 4, "every field must participate in identity");
+        assert_eq!(seen.len(), 4, "every field must participate in EQUALITY");
+
+        // And in the HASH, which the assertion above cannot see. An audit pointed out
+        // that a `Hash` skipping `kind` still yields four distinct set entries, because
+        // the derived `Eq` keeps them apart -- they simply all land in ONE BUCKET. That
+        // turns a `HashMap<InstrumentKey, _>` lookup into a linear scan of every option
+        // on the same underlying, which is exactly the §3 rule 4 defect this test's own
+        // doc comment forbids, and it is invisible to a length check.
+        //
+        // `DefaultHasher` is seeded with zeros rather than randomly, so these digests are
+        // reproducible within and across runs -- which is what makes comparing them a
+        // test rather than a coin toss.
+        let digest = |k: &InstrumentKey| -> u64 {
+            use core::hash::{Hash as _, Hasher as _};
+            let mut h = std::hash::DefaultHasher::new();
+            k.hash(&mut h);
+            h.finish()
+        };
+        let digests: std::collections::BTreeSet<u64> = keys.iter().map(digest).collect();
+        assert_eq!(
+            digests.len(),
+            4,
+            "two of these four keys hash alike, so a field is missing from `Hash` while \
+             still present in `Eq`. They stay distinct in a HashSet and collide into one \
+             bucket, which makes an instrument lookup O(n) in the options on that \
+             underlying: {digests:?}"
+        );
     }
 
     #[test]
@@ -571,16 +941,87 @@ mod tests {
         assert_eq!(opt.to_string(), "BSE-SENSEX-2025-07-03-8140000-PE");
     }
 
+    /// THE SURFACE IS TWO SHAPES, AND EACH EDGE OF EACH SHAPE IS PINNED.
+    ///
+    /// This test was `an_equity_is_storable_and_not_sweepable`, built on
+    /// HINDALCO, and asserted `!is_sweepable()`. HINDALCO is one of the 213 F&O
+    /// underlyings, so D-0506 flipped that assertion -- which is the widening
+    /// doing exactly what it says. The old name survives here so a reader
+    /// following it from a decision entry lands on the test that replaced it.
+    ///
+    /// Every fixture proves its own premise first, in the repository's idiom:
+    /// a non-member that turned out to be a member would make the refusal
+    /// assertion vacuous, so the test checks the index before trusting it.
     #[test]
-    fn an_equity_is_storable_and_not_sweepable() {
-        let eq = InstrumentKey {
+    fn the_sweep_surface_is_the_two_indices_and_the_fno_cash_equities() {
+        // AN F&O CASH EQUITY IS SWEEPABLE.
+        let member = InstrumentKey::cash(Exchange::Nse, "HINDALCO").expect("valid");
+        assert!(
+            crate::universe::FNO_INDEX.contains("HINDALCO"),
+            "the fixture must be an F&O member, or the assertion below proves nothing"
+        );
+        assert!(
+            member.is_sweepable(),
+            "an F&O cash equity is on the surface"
+        );
+        assert_eq!(member.require_sweepable(), Ok(()));
+        assert_eq!(member.to_string(), "NSE-HINDALCO");
+
+        // A CASH EQUITY OUTSIDE THE F&O UNIVERSE IS NOT. The symbol is shaped
+        // like a real one and is checked against the index rather than assumed.
+        let outsider = InstrumentKey::cash(Exchange::Nse, "ZZQXNOTFNO").expect("valid shape");
+        assert!(
+            !crate::universe::FNO_INDEX.contains("ZZQXNOTFNO"),
+            "the fixture must be OUTSIDE the F&O universe, or this proves nothing"
+        );
+        assert!(
+            !outsider.is_sweepable(),
+            "a non-F&O equity is storable, never swept"
+        );
+        assert_eq!(
+            outsider.require_sweepable(),
+            Err(InstrumentError::NotSweepable)
+        );
+
+        // AN F&O CONTRACT ON A MEMBER IS STILL NOT SWEEPABLE. The widening is
+        // the cash series, never the expiring instrument.
+        let contract = InstrumentKey {
             exchange: Exchange::Nse,
-            segment: Segment::Cash,
+            segment: Segment::Fno,
             underlying: Symbol::new("HINDALCO").expect("valid"),
-            kind: Kind::Equity,
+            kind: Kind::Future {
+                expiry: Expiry {
+                    year: 2026,
+                    month: 9,
+                    day: 30,
+                },
+            },
         };
-        assert!(!eq.is_sweepable());
-        assert_eq!(eq.to_string(), "NSE-HINDALCO");
+        assert!(
+            !contract.is_sweepable(),
+            "a contract expires; the cash series does not"
+        );
+
+        // A MEMBER ON THE WRONG EXCHANGE IS NOT. The surface is NSE only.
+        let bse = InstrumentKey::cash(Exchange::Bse, "HINDALCO").expect("valid");
+        assert!(
+            !bse.is_sweepable(),
+            "BSE is not swept and not pulled (D-0017)"
+        );
+
+        // AND THE TWO INDICES ARE EXACTLY AS THEY WERE.
+        assert!(nifty().is_sweepable());
+        assert!(
+            InstrumentKey::index(Exchange::Nse, "BANKNIFTY")
+                .expect("valid")
+                .is_sweepable()
+        );
+        assert!(
+            !InstrumentKey::index(Exchange::Nse, "INDIAVIX")
+                .expect("valid")
+                .is_sweepable(),
+            "India VIX is reference only and never enters the sweep"
+        );
     }
 
     #[test]
@@ -595,9 +1036,30 @@ mod tests {
         );
     }
 
+    /// Was `require_sweepable_accepts_the_three`, which tested one. It now
+    /// tests both indices and an equity from each side of the F&O boundary,
+    /// so the name says what the body does.
     #[test]
-    fn require_sweepable_accepts_the_three() {
+    fn require_sweepable_accepts_both_indices_and_fno_equities_and_refuses_the_rest() {
         assert_eq!(nifty().require_sweepable(), Ok(()));
+        assert_eq!(
+            InstrumentKey::index(Exchange::Nse, "BANKNIFTY")
+                .expect("valid")
+                .require_sweepable(),
+            Ok(())
+        );
+        assert_eq!(
+            InstrumentKey::cash(Exchange::Nse, "HINDALCO")
+                .expect("valid")
+                .require_sweepable(),
+            Ok(())
+        );
+        assert_eq!(
+            InstrumentKey::cash(Exchange::Nse, "ZZQXNOTFNO")
+                .expect("valid shape")
+                .require_sweepable(),
+            Err(InstrumentError::NotSweepable)
+        );
     }
 
     /// A writer that fails on first use, to exercise the `?` in `Display`.

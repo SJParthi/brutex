@@ -1,0 +1,1 @@
+function e(e){let t=new Map;for(let n of e){let e=n.symbol;if(typeof e==`string`)for(let r=1;r<=Math.min(4,e.length);r+=1){let i=e.slice(0,r),a=t.get(i);a||t.set(i,a=[]),a.push(n)}}return t}function t(e,t,n){let r=(n??``).trim().toUpperCase();return r?r.length<=4?e.get(r)??[]:(e.get(r.slice(0,4))??[]).filter(e=>e.symbol.startsWith(r)):t}export{t as n,e as t};

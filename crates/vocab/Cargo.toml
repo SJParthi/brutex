@@ -1,0 +1,52 @@
+[package]
+name         = "vocab"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+publish      = { workspace = true }
+description  = "The condition bit table and the 384-bit mask. Bit index is identity. Depends on nothing."
+
+# ---------------------------------------------------------------------------
+# THIS SECTION IS DELIBERATELY EMPTY AND STAYS EMPTY.
+#
+# `CLAUDE.md` §5 gives this crate one permitted arrow, `vocab -> core`, and it
+# is not taken: nothing here needs a price, a symbol or a calendar. A bit is a
+# `u16` position and a name is a `&'static str`. The whole crate is the table,
+# the mask and the four operations over them.
+#
+# The consequence worth stating is the one §5 cares about: with no arrow at
+# all this crate cannot participate in a cycle, and it compiles anywhere
+# `core` does.
+#
+# A CLAUSE PREDICTING A wasm32 BROWSER BUILD HAS BEEN REMOVED. It read:
+# "-- including `wasm32-unknown-unknown`, where the browser will eventually
+# need the same bit names the sweep used." Nothing in this workspace targets
+# wasm32, and the browser does not need those names through a wasm build: it
+# reads them from `/vocab.json`, which CLAUDE.md section 5 records as the whole
+# reason `api` depends on `vocab` at all -- one vocabulary served once, rather
+# than a second copy that goes stale the first time a bit is appended. D-0298.
+#
+# Adding a line below requires an entry in docs/05-decisions.md naming what it
+# replaces.
+# ---------------------------------------------------------------------------
+[dependencies]
+
+[lints]
+workspace = true
+
+# ---------------------------------------------------------------------------
+# THE BOUND IS RE-MEASURED, NOT ASSERTED. Gate 14 refuses a crate that claims a
+# constant cost and never measures it, and `ConditionMask::hits` is the sweep's
+# inner loop -- the one operation called more often than everything else in the
+# workspace combined. See `benches/ratio.rs` and D-0103.
+#
+# THIS IS NOT A DEPENDENCY AND GATE 9 IS UNAFFECTED. A [[bench]] target links
+# this crate's own lib and std, and nothing else -- the [dependencies] and
+# [dev-dependencies] tables stay empty, which is what the graph gates read. A
+# consumer taking this crate by git URL does not build benches.
+# ---------------------------------------------------------------------------
+[[bench]]
+name    = "ratio"
+harness = false
+test    = false

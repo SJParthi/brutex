@@ -1,0 +1,153 @@
+[package]
+name         = "pull"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+publish      = { workspace = true }
+description  = "Vendor ingest: the credential path configuration, the read-only secret source, and the per-vendor manifest."
+
+# docs/01-architecture.md gives `pull` exactly `core` and `store`. Both are
+# taken, and nothing else is.
+#
+# THERE IS NO AWS SDK DEPENDENCY IN THIS CHANGE, and that is a decision rather
+# than an omission. `aws-config` and `aws-sdk-ssm` sit in the workspace
+# dependency table unused. Taking them here would add roughly a hundred
+# transitive crates to `Cargo.lock` for a change that makes no live call, and CI
+# gate 3 (`cargo deny check`) would then be verifying a licence and advisory
+# surface that nothing in this repository exercises. `src/secret.rs` defines the
+# port the SDK plugs into — one method, `get_parameter` — so the adapter that
+# takes the dependency is a single `impl` block in the change that first makes a
+# live call. See docs/05-decisions.md D-0035.
+[dependencies]
+# THE EXPIRY CALENDAR, AND NOTHING ELSE FROM IT. D-0206.
+#
+# Dhan's rolling-option answer names a strike and a timestamp and NO EXPIRY
+# DATE -- the request asked by cadence and ordinal (`expiryFlag` WEEK|MONTH,
+# `expiryCode` 1|2|3), never by date. But `store::path` files a contract under
+# `Kind::Option { expiry, strike, side }`, so the date has to be computed:
+# "the near weekly as of this bar's day".
+#
+# That calendar already exists, once, in `costs::expiry`, with its regimes and
+# its verified-from citations. A second copy here would be a second answer to
+# "when did that contract expire", and the one that drifts is always the copy
+# nobody remembers exists.
+#
+# The graph stays acyclic: `costs` declares `brutex_core` alone, so this is
+# pull -> costs -> core beside the pull -> core that already exists.
+costs = { path = "../costs", version = "0.1.0" }
+# THE FIRST ARROW ANY CRATE HAS EVER POINTED AT `greeks`. D-0217.
+#
+# Measured with `cargo metadata --no-deps` before this line existed: thirteen
+# crates, and not one named `greeks`. It was complete -- Black-Scholes-Merton, a
+# bounded implied-volatility solver, moneyness, 100% covered -- and every greek
+# in this repository was computed by nobody.
+#
+# The graph stays acyclic and gate 9b stays true: `greeks` declares NO
+# dependencies at all, so this is a leaf being pointed at, not a cycle being
+# closed. `pull` is the caller because it already holds the other four BSM
+# inputs -- the strike from `fno`, the spot from Dhan's overlay, the tenor from
+# `tenor`, and a carry of zero for an index -- and because it is where the
+# overlay is written.
+greeks = { path = "../greeks", version = "0.1.0" }
+# The lib target is `brutex_core` and it MUST be referred to by that name: a
+# dependency key of `core` shadows the sysroot crate inside rustdoc's generated
+# doc-test harness. Proven three times now -- in core itself, in store, and the
+# reason this line is spelled the way it is.
+brutex_core = { path = "../core", package = "core", version = "0.1.0" }
+
+# A version is required alongside the path: deny.toml sets wildcards = "deny",
+# and a path dependency with no version IS a wildcard.
+#
+# Taken for `store::crc` and for `store::path::{Timeframe, YearMonth}`. The
+# manifest reuses the bar file's checksum, its two-slot header geometry and its
+# commit-counter argument rather than paraphrasing them -- see
+# `src/manifest.rs`, which also names the one thing it deliberately does not
+# reuse.
+store = { path = "../store", version = "0.1.0" }
+
+# THE EVENT SINK, AND WHY THIS EDGE IS NEW.
+#
+# Every `telemetry::emit` in this workspace used to sit in `crates/api`, and
+# all of them on a REFUSAL path. So the crate that does the actual work — the
+# fetch, the decode, the fold, the census, the write — could not say anything
+# at all. A live run refused 10 of 16 members in 18 seconds and wrote ZERO log
+# lines; the cause was recovered by decoding bar files by hand. That is not a
+# diagnostic procedure, and no amount of care in `api` fixes it, because the
+# facts worth logging only exist inside these loops.
+#
+# NO CYCLE. `crates/telemetry` names no workspace member — it is a leaf, like
+# `core` — so `pull -> telemetry` keeps CLAUDE.md section 5's graph acyclic.
+# Recorded in D-0075 and the section 5 table.
+#
+# AND IT IS CHEAP WHEN IT IS OFF. `Sink::emit` filters on one relaxed atomic
+# load and a comparison; a filtered event touches no clock, no lock and no
+# buffer. So a Trace event on a per-row path costs a load when the operator is
+# not asking for it, which is what makes instrumenting every corner affordable.
+telemetry = { path = "../telemetry", version = "0.1.0" }
+
+# THE SOCKET. Taken now and not before, because until this change nothing in
+# this crate could reach a vendor: `pull::fetch::BarSource` had exactly one
+# implementor and it answered from memory. `default-features = false` with
+# `rustls-tls` keeps **OpenSSL** out.
+#
+# IT DOES NOT KEEP C OUT, AND THIS COMMENT USED TO SAY IT DID.
+#
+# `rustls` needs a crypto provider and reaches `ring` 0.17.14, which vendors 17
+# `.c`, 28 `.h`, 73 `.S` and 17 `.asm` files and compiles them through a
+# `build.rs` calling `cc::Build::compile`. Measured on this tree:
+# `nm target/release/api` returns **72 `ring_core` symbols in the shipped
+# binary**. The claim that this line kept "OpenSSL and its C toolchain" out was
+# half true and read as wholly true; `crates/lake/Cargo.toml` states the same
+# fact correctly and the two manifests contradicted each other.
+#
+# CI gate 13 does NOT catch this: it walks `Cargo.lock` for interpreted-runtime
+# names, and `ring` is not one. Whether a cargo dependency that builds native
+# code is the "vendored binding" CLAUDE.md §2 bans is an operator ruling — §2
+# scopes its allowlist to *tracked* files and `ring`'s `build.rs` is not
+# tracked, which is the only reading under which this passes. Recorded in
+# D-0071 and registered in docs/06-limits.md; §2 itself is untouched.
+reqwest = { workspace = true }
+rustls-graviola = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+
+# THE CREDENTIAL READ, IN RUST AND NOTHING ELSE.
+#
+# `aws-sdk-ssm` was tried first and refused, on measurement rather than taste.
+# It reaches rustls through `aws-smithy-http-client`, which hard-enables the
+# `aws-lc-rs` backend, which vendors `aws-lc-sys` — a C library. Cargo features
+# are additive, so no `default-features = false` downstream can switch it off.
+# The tree went **145 crates to 232**, and `aws-lc-sys` appeared in the lock:
+# 87 extra crates AND the exact shape `CLAUDE.md` §2 bans, which CI gate 13
+# walks `Cargo.lock` to catch.
+#
+# The AWS *API* needs none of it. `GetParameter` is one HTTPS POST carrying a
+# SigV4 signature, and SigV4 is HMAC-SHA256 over a canonical string. `reqwest`
+# is already here for the broker; these two are pure-Rust RustCrypto crates
+# with no `asm` feature. Two crates instead of eighty-seven, and **these two
+# add no C** — which is a claim about `hmac` and `sha2` only. The binary is not
+# free of C: `ring` arrives through the `reqwest` line above. See `src/ssm.rs`,
+# D-0051 and D-0071.
+hmac = { workspace = true }
+sha2 = { workspace = true }
+# Dated NSE MII security masters are gzip CSVs; pure-Rust default backend.
+flate2 = { workspace = true }
+# TOTP is HMAC-SHA1 (RFC 6238 default). Declared in the workspace manifest
+# since before this crate needed it; `crates/pull/src/totp.rs` is the first
+# and only user.
+sha1 = { workspace = true }
+
+[lints]
+workspace = true
+
+# ---------------------------------------------------------------------------
+# GATE 8 — the O(1) ratio harness. `harness = false` so it is a plain binary
+# with no benchmarking framework and therefore no dependency; `test = false`
+# because `cargo test` must not run a timing loop, and the coverage gate must
+# not measure one. See D-0034 and crates/core/Cargo.toml.
+# ---------------------------------------------------------------------------
+[[bench]]
+name    = "ratio"
+harness = false
+test    = false

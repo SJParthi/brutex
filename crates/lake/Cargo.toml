@@ -1,0 +1,94 @@
+[package]
+name         = "lake"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+publish      = { workspace = true }
+description  = "Reads the Parquet lake into paisa integers and full-precision greeks. Pure Rust, no C, no vendored binding."
+
+# ---------------------------------------------------------------------------
+# WHY THIS CRATE EXISTS, AND WHY ITS DEPENDENCIES LOOK LIKE THIS.
+#
+# ~/.brutex/lake holds 40 GB of 1-minute option and cash bars written by an
+# earlier collector. Both live vendor masters purge a contract on expiry, so
+# for every expired contract in there — 116,086 contract directories under
+# bars/NSE/FNO, 61,075 of them NIFTY — the lake is the ONLY copy. It cannot be
+# re-pulled. Reading it is therefore not a convenience; nothing else can.
+#
+# The files are Parquet with ZSTD-compressed pages, written by Polars.
+#
+# THE TRAP, and why the obvious dependency is absent. The obvious chain is
+#     parquet -> zstd -> zstd-safe -> zstd-sys
+# and `zstd-sys` is a binding to C: 101 vendored .c/.h/.S files and a build.rs
+# that runs `cc::Build` and `bindgen`. CLAUDE.md section 2 forbids "any
+# vendored binding to another language" and "any build.rs that invokes an
+# external process" WITHOUT EXCEPTION. `zstd` is a DEFAULT feature of the
+# `parquet` crate, so the violation arrives by simply writing the dependency
+# down. Hence `default-features = false` below, which is load-bearing and not
+# tidiness — restoring the defaults reintroduces the C compiler.
+#
+# `encryption` is the other fatal feature (it pulls `ring`, which vendors C and
+# assembly). It is not a default and is not enabled here.
+#
+# See docs/05-decisions.md D-0056 for the full purity proof.
+# ---------------------------------------------------------------------------
+[dependencies]
+# The lib target is `brutex_core` and it MUST be referred to by that name: a
+# dependency key of `core` shadows the sysroot crate inside rustdoc's generated
+# doc-test harness. Proven five times now -- in core itself, in store, in pull,
+# in costs, and here.
+#
+# A version is required alongside the path: deny.toml sets wildcards = "deny",
+# and a path dependency with no version IS a wildcard.
+brutex_core = { path = "../core", package = "core", version = "0.1.0" }
+
+# THE EVENT SINK. This crate reads the operator's 40 GB parquet lake and said
+# nothing about any of it: a file opened, a row group decoded, a schema
+# refused were all invisible, so "the lake is empty" and "the lake would not
+# open" reached a page as the same silence.
+#
+# NO CYCLE. `crates/telemetry` names no workspace member — a leaf, like
+# `core` — so `lake -> telemetry` keeps CLAUDE.md section 5's graph acyclic.
+#
+# EVERY EVENT HERE IS PER FILE OR PER ROW GROUP, never per row. A parquet row
+# group holds tens of thousands of rows and the lake holds millions; a per-row
+# event would roll the run out of a 64 MiB window long before it finished.
+# D-0075.
+telemetry = { path = "../telemetry", version = "0.1.0" }
+
+# Footer/metadata parsing and column VALUE decoding (RLE definition levels,
+# PLAIN, RLE_DICTIONARY). `default-features = false` drops all eight defaults;
+# the two that matter are `zstd` (C, above) and `arrow`, which we do not want
+# because this crate yields plain Rust values and not an Arrow array.
+parquet = { version = "59.2", default-features = false }
+
+# Page HEADERS. arrow-rs removed the public `parquet::format` module in 59.x
+# and `parquet_thrift` is private, so the page header cannot be parsed through
+# `parquet` itself. This crate is thrift-generated RUST with ZERO dependencies
+# and no build.rs. Generated Rust is not "generated source in another
+# language"; section 2 is unbothered by it.
+parquet-format-safe = { version = "0.2", default-features = false }
+
+# ZSTD page bodies, in Rust. No build.rs, no C. The `zstd` crate appears in
+# ruzstd's manifest only as a DEV-dependency, so it is not built by us --
+# confirmed absent from `cargo tree -p lake --no-dedupe`.
+ruzstd = { version = "0.8", default-features = false, features = ["std", "hash"] }
+
+# The buffer type `parquet`'s page and column readers are written against.
+bytes = { version = "1", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true
+
+# ---------------------------------------------------------------------------
+# GATE 14 — a crate that claims a bound must re-measure it. `harness = false`
+# so the bench is a plain binary whose `process::exit` reaches cargo; the
+# default harness links libtest, supplies its own `main`, and swallows the
+# exit code. `test = false` because `cargo test` must not run a timing loop.
+# See D-0034 and crates/core/Cargo.toml.
+# ---------------------------------------------------------------------------
+[[bench]]
+name    = "ratio"
+harness = false
+test    = false

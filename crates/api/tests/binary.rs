@@ -25,18 +25,48 @@
 use std::process::Command;
 
 const GROWW_HEAD: &str = "exchange,segment,underlying_symbol,trading_symbol,instrument_type,\
-                          series,isin,expiry_date,strike_price\n";
+                          series,isin,expiry_date,strike_price,groww_symbol\n";
 const DHAN_HEAD: &str = "EXCH_ID,SEGMENT,ISIN,INSTRUMENT,UNDERLYING_SYMBOL,SYMBOL_NAME,\
-                         SERIES,SM_EXPIRY_DATE,STRIKE_PRICE,OPTION_TYPE\n";
+                         SERIES,SM_EXPIRY_DATE,STRIKE_PRICE,OPTION_TYPE,SECURITY_ID\n";
+
+/// Zerodha's master, header only — the vendor read cleanly and listed nothing.
+///
+/// # Why every fixture below gets one
+///
+/// The binary reads THREE masters. This file knew about two, so every run
+/// through [`masters`] was missing one and the binary was right to call it
+/// `DEGRADED` — which is exactly what
+/// [`the_binary_reports_what_it_read_and_exits_zero`] then failed on. The
+/// vendor list is `core::vendor`, and a test fixture that enumerates vendors by
+/// hand goes stale the moment one is added.
+///
+/// Header only, and deliberately so: an empty master is a state this build must
+/// handle, and it keeps the read clean so a test about something else stays
+/// about that. Zero rows also means no merge count moves. The same fixture in
+/// `api::server`'s unit tests is header-only for the same reason.
+///
+/// The columns are `core::vendor::MasterColumns` for this vendor, in the order
+/// the exchange publishes them — twelve, and no ISIN among them.
+const ZERODHA_HEAD: &str = "instrument_token,exchange_token,tradingsymbol,name,last_price,\
+                            expiry,strike,tick_size,lot_size,instrument_type,segment,exchange\n";
 
 /// A directory holding the given vendor masters, named after the test.
 ///
 /// A `None` deletes that vendor's file, so a test can drive the
 /// vendor-was-never-read path deliberately rather than by accident.
 fn masters(name: &str, groww: Option<&str>, dhan: Option<&str>) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("brutex-binary-{name}"));
+    // THE PROCESS ID IS PART OF THE NAME. A fixed name in the shared temporary
+    // directory is a fixture two concurrent test processes both claim, and
+    // `crates/api/src/scratch.rs` records the intermittent failure that came
+    // of it. This file is an integration test and cannot see that module, so
+    // it spells the same rule out.
+    let dir = std::env::temp_dir().join(format!("brutex-{}-binary-{name}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("mkdir");
-    for (file, body) in [("groww_instruments.csv", groww), ("dhan_scrip.csv", dhan)] {
+    for (file, body) in [
+        ("groww_instruments.csv", groww),
+        ("dhan_scrip.csv", dhan),
+        ("zerodha_instruments.csv", Some(ZERODHA_HEAD)),
+    ] {
         let path = dir.join(file);
         match body {
             Some(text) => std::fs::write(&path, text).expect("write"),
@@ -53,6 +83,11 @@ fn run(dir: &std::path::Path, arg: &str) -> (Option<i32>, String, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_api"))
         .arg(arg)
         .env("BRUTEX_MASTERS", dir)
+        // NO WINDOW ON THE OPERATOR'S DESKTOP. This spawns the REAL
+        // binary, which opens the browser at its own address on start.
+        // The port guard in `run_in` already covers `:0`, and this
+        // covers every other address a future case might pass.
+        .env(brutex_api_no_open(), "1")
         .output()
         .expect("the binary must run");
     (
@@ -70,14 +105,14 @@ fn the_binary_reports_what_it_read_and_exits_zero() {
         "report",
         Some(&format!(
             "{GROWW_HEAD}\
-             NSE,CASH,,NIFTY,IDX,,NIFTY,,\n\
-             NSE,CASH,,RELIANCE,EQ,EQ,INE002A01018,,\n\
+             NSE,CASH,,NIFTY,IDX,,NIFTY,,,NSE-NIFTY\n\
+             NSE,CASH,,RELIANCE,EQ,EQ,INE002A01018,,,NSE-RELIANCE\n\
              NSE,CASH,,SOMEBOND,EQ,N2,INE121A08PJ0,,\n"
         )),
         Some(&format!(
             "{DHAN_HEAD}\
-             NSE,I,NA,INDEX,NIFTY,NIFTY,NA,0001-01-01,,\n\
-             NSE,E,INE002A01018,EQUITY,RELIANCE,RELIANCE INDUSTRIES LTD,EQ,,,\n\
+             NSE,I,NA,INDEX,NIFTY,NIFTY,NA,0001-01-01,,,1333\n\
+             NSE,E,INE002A01018,EQUITY,RELIANCE,RELIANCE INDUSTRIES LTD,EQ,,,,1333\n\
              NSE,E,INE121A08PJ0,EQUITY,SOMEBOND,SOME BOND,N2,,,\n"
         )),
     );
@@ -105,11 +140,11 @@ fn the_binary_reports_what_it_read_and_exits_zero() {
     // numbers differ, so together they say WHICH pair survived and not merely
     // that two did -- swap either instrument for the bond and one of them moves.
     assert!(
-        text.contains("F&O underlyings: 2 resolved, 2 confirmed by both vendors"),
+        text.contains("F&O underlyings: 2 resolved, 2 confirmed by every master read"),
         "both NIFTY and RELIANCE are F&O underlyings: {text}",
     );
     assert!(
-        text.contains("NIFTY Total Market: 1 resolved, 1 confirmed by both vendors"),
+        text.contains("NIFTY Total Market: 1 resolved, 1 confirmed by every master read"),
         "RELIANCE alone is a Total Market constituent -- the index is not: {text}",
     );
 }
@@ -121,7 +156,9 @@ fn the_binary_exits_non_zero_when_a_vendor_was_never_read() {
     // the universe had never been opened. D-0026.
     let dir = masters(
         "unavailable",
-        Some(&format!("{GROWW_HEAD}NSE,CASH,,NIFTY,IDX,,NIFTY,,\n")),
+        Some(&format!(
+            "{GROWW_HEAD}NSE,CASH,,NIFTY,IDX,,NIFTY,,,NSE-NIFTY\n"
+        )),
         None,
     );
     let (code, text, _) = run(&dir, "report");
@@ -143,4 +180,10 @@ fn the_binary_refuses_an_argument_it_does_not_understand() {
     assert_eq!(code, Some(2), "a misuse is not a failure");
     assert!(err.contains("unknown argument"), "{err}");
     assert!(err.contains("usage:"), "{err}");
+}
+
+/// The variable name that suppresses the browser, read from the crate rather
+/// than spelled again here so a rename cannot leave this test opening windows.
+fn brutex_api_no_open() -> &'static str {
+    api::server::NO_OPEN_ENV
 }

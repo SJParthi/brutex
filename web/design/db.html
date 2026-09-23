@@ -1,0 +1,1492 @@
+<title>Brutex Store Console</title>
+
+<!--
+  /db — THE DESIGN REFERENCE.
+
+  Same system as web/design/ingest.html: theme.css's ramp, a strict alignment
+  grid, layered surfaces, one orchestrated load sequence. Every control sits on
+  one baseline because each strip is a GRID with three named tracks (label,
+  control, note), so a refusal note can never change the height of a control
+  beside it.
+
+  The bars grid's 24 column widths are BAR_COLS' own, read off
+  db/+page.svelte:2715. They sum to 2,420px, so the grid scrolls inside its own
+  container and the page body never goes sideways with it.
+
+  All motion respects prefers-reduced-motion.
+-->
+
+<style>
+  /* ====================================================================== 1
+     THE RAMP — web/src/lib/theme.css, verbatim, plus this reference's depth.
+     =================================================================== */
+  :root {
+    --n0: #e9edf5;
+    --n1: #f5f7fb;
+    --n2: #ffffff;
+    --n3: #ffffff;
+    --n4: #eef1f7;
+    --n5: #edf0f6;
+    --n6: #dee3ed;
+    --n7: #c7cfdd;
+    --n8: #8b95a8;
+    --n9: #5a6478;
+    --n10: #38415a;
+    --n11: #0d1220;
+    --n12: #000814;
+    --up: #00875a;
+    --down: #d3143f;
+    --warn: #a86a06;
+    --info: #6d45d9;
+    --acc: #0e7f96;
+    --on-acc: #ffffff;
+    --acc-soft: rgba(14, 127, 150, 0.1);
+    --up-soft: rgba(0, 135, 90, 0.12);
+    --down-soft: rgba(211, 20, 63, 0.11);
+    --warn-soft: rgba(168, 106, 6, 0.13);
+    --info-soft: rgba(109, 69, 217, 0.11);
+    --focus: #0b6376;
+    --e1: 0 1px 2px rgba(16, 24, 40, 0.07);
+    --e2: 0 6px 16px rgba(16, 24, 40, 0.1), 0 0 0 1px rgba(16, 24, 40, 0.05);
+    --glass: rgba(255, 255, 255, 0.78);
+    --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0));
+    --gridline: rgba(13, 18, 32, 0.045);
+    --fade: linear-gradient(90deg, transparent, var(--n3));
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme='light']) {
+      --n0: #070a11;
+      --n1: #0b0e14;
+      --n2: #11151f;
+      --n3: #141924;
+      --n4: #1a2030;
+      --n5: #1b212e;
+      --n6: #232a3a;
+      --n7: #333c51;
+      --n8: #5c6679;
+      --n9: #8a95ab;
+      --n10: #b3bdd0;
+      --n11: #e6ebf5;
+      --n12: #fbfcff;
+      --up: #00e19b;
+      --down: #ff4d6a;
+      --warn: #f0b429;
+      --info: #9d7cf5;
+      --acc: #22d3ee;
+      --on-acc: #04060c;
+      --acc-soft: rgba(34, 211, 238, 0.14);
+      --up-soft: rgba(0, 225, 155, 0.16);
+      --down-soft: rgba(255, 77, 106, 0.16);
+      --warn-soft: rgba(240, 180, 41, 0.16);
+      --info-soft: rgba(157, 124, 245, 0.16);
+      --focus: #67e8f9;
+      --e1: 0 1px 2px rgba(0, 0, 0, 0.5);
+      --e2: 0 4px 14px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.04);
+      --glass: rgba(17, 21, 31, 0.72);
+      --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0));
+      --gridline: rgba(230, 235, 245, 0.045);
+    }
+  }
+  :root[data-theme='dark'] {
+    --n0: #070a11;
+    --n1: #0b0e14;
+    --n2: #11151f;
+    --n3: #141924;
+    --n4: #1a2030;
+    --n5: #1b212e;
+    --n6: #232a3a;
+    --n7: #333c51;
+    --n8: #5c6679;
+    --n9: #8a95ab;
+    --n10: #b3bdd0;
+    --n11: #e6ebf5;
+    --n12: #fbfcff;
+    --up: #00e19b;
+    --down: #ff4d6a;
+    --warn: #f0b429;
+    --info: #9d7cf5;
+    --acc: #22d3ee;
+    --on-acc: #04060c;
+    --acc-soft: rgba(34, 211, 238, 0.14);
+    --up-soft: rgba(0, 225, 155, 0.16);
+    --down-soft: rgba(255, 77, 106, 0.16);
+    --warn-soft: rgba(240, 180, 41, 0.16);
+    --info-soft: rgba(157, 124, 245, 0.16);
+    --focus: #67e8f9;
+    --e1: 0 1px 2px rgba(0, 0, 0, 0.5);
+    --e2: 0 4px 14px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.04);
+    --glass: rgba(17, 21, 31, 0.72);
+    --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0));
+    --gridline: rgba(230, 235, 245, 0.045);
+  }
+
+  /* ====================================================================== 2
+     MAPPING + SCALES. The three heights alignment depends on.
+     =================================================================== */
+  :root {
+    --bg: var(--n1);
+    --bg-2: var(--n2);
+    --panel: var(--n3);
+    --panel-2: var(--n4);
+    --line: var(--n6);
+    --line-soft: var(--n5);
+    --line-hard: var(--n7);
+    --well: var(--n0);
+    --ink: var(--n11);
+    --ink-hi: var(--n12);
+    --ink-2: var(--n10);
+    --dim: var(--n9);
+    --faint: var(--n8);
+
+    --mono: ui-monospace, 'SF Mono', SFMono-Regular, 'JetBrains Mono', Menlo, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', system-ui, sans-serif;
+
+    --fs-micro: 9.5px;
+    --fs-mini: 10px;
+    --fs-xs: 11px;
+    --fs-sm: 12px;
+    --fs-base: 13px;
+    --fs-md: 14px;
+    --fs-lg: 17px;
+    --fs-xl: 22px;
+    --fs-2xl: 30px;
+    --fs-3xl: 46px;
+    --track-caps: 0.1em;
+
+    --s1: 2px;
+    --s2: 4px;
+    --s3: 6px;
+    --s4: 8px;
+    --s5: 12px;
+    --s6: 16px;
+    --s7: 24px;
+    --s8: 32px;
+    --s9: 48px;
+    --r1: 4px;
+    --r2: 6px;
+    --r: 8px;
+    --r4: 12px;
+    --r5: 16px;
+    --r-full: 999px;
+
+    --lab-h: 14px;
+    --ctl-h: 34px;
+    --row-h: 34px;
+    --topbar-h: 54px;
+
+    --gutter: var(--s7);
+    --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+    --ease-spring: cubic-bezier(0.2, 0.9, 0.3, 1.25);
+  }
+
+  /* Load-bearing: without it a 34px control with a 1px border measures 36 and
+     a row of controls sharing one track still does not share one edge. */
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: var(--fs-base);
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    background-image: linear-gradient(var(--gridline) 1px, transparent 1px),
+      linear-gradient(90deg, var(--gridline) 1px, transparent 1px);
+    background-size: 100% 34px, 34px 100%;
+  }
+  :focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+    border-radius: var(--r1);
+  }
+  button {
+    font: inherit;
+    cursor: pointer;
+  }
+
+  /* ====================================================================== 3
+     MOTION.
+     =================================================================== */
+  @keyframes rise {
+    from {
+      opacity: 0;
+      transform: translateY(14px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  @keyframes drop {
+    from {
+      opacity: 0;
+      transform: translateY(-100%);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  @keyframes pop {
+    0% {
+      opacity: 0;
+      transform: scale(0.82);
+    }
+    100% {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  @keyframes fill {
+    from {
+      transform: scaleX(0);
+    }
+    to {
+      transform: none;
+    }
+  }
+  @keyframes grow {
+    from {
+      transform: scaleY(0);
+    }
+    to {
+      transform: none;
+    }
+  }
+  @keyframes pulse-dot {
+    0%,
+    100% {
+      opacity: 1;
+      transform: scale(1);
+    }
+    50% {
+      opacity: 0.45;
+      transform: scale(0.78);
+    }
+  }
+  @keyframes nudge {
+    0%,
+    100% {
+      transform: translateX(0);
+      opacity: 0.55;
+    }
+    50% {
+      transform: translateX(5px);
+      opacity: 1;
+    }
+  }
+  .rise {
+    opacity: 0;
+    animation: rise 620ms var(--ease) forwards;
+  }
+  .topbar {
+    animation: drop 520ms var(--ease) both;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 1ms !important;
+      animation-delay: 0ms !important;
+      transition-duration: 1ms !important;
+    }
+    .rise {
+      opacity: 1;
+    }
+  }
+
+  /* ====================================================================== 4
+     THE GLOBAL BAR.
+     =================================================================== */
+  .topbar {
+    height: var(--topbar-h);
+    display: flex;
+    align-items: center;
+    gap: var(--s7);
+    padding: 0 var(--gutter);
+    background: var(--glass);
+    backdrop-filter: blur(14px) saturate(1.6);
+    -webkit-backdrop-filter: blur(14px) saturate(1.6);
+    border-bottom: 1px solid var(--line);
+    position: sticky;
+    top: 0;
+    z-index: 40;
+  }
+  .topbar::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -1px;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--acc), transparent);
+    opacity: 0.55;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: var(--s4);
+    font-family: var(--mono);
+    font-weight: 700;
+    font-size: var(--fs-md);
+    letter-spacing: -0.02em;
+    color: var(--ink-hi);
+  }
+  .brand .mark {
+    width: 22px;
+    height: 22px;
+    border-radius: var(--r2);
+    background: linear-gradient(140deg, var(--acc), var(--info));
+    display: grid;
+    place-items: center;
+    color: var(--on-acc);
+    font-size: 12px;
+    font-weight: 800;
+    box-shadow: 0 0 0 1px var(--acc-soft), 0 4px 12px var(--acc-soft);
+  }
+  .navs {
+    display: flex;
+    gap: var(--s1);
+  }
+  .navs a {
+    font-size: var(--fs-sm);
+    padding: var(--s3) var(--s5);
+    border-radius: var(--r-full);
+    color: var(--dim);
+    text-decoration: none;
+    transition: color 140ms var(--ease), background 140ms var(--ease);
+  }
+  .navs a:hover {
+    color: var(--ink);
+    background: var(--panel-2);
+  }
+  .navs a.on {
+    background: var(--acc-soft);
+    color: var(--acc);
+    font-weight: 600;
+  }
+  .topright {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: var(--s5);
+  }
+  .clock {
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+    color: var(--faint);
+    font-variant-numeric: tabular-nums;
+    display: flex;
+    align-items: center;
+    gap: var(--s3);
+  }
+  .live {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--up);
+    animation: pulse-dot 2.1s ease-in-out infinite;
+  }
+  .tog {
+    display: inline-flex;
+    border: 1px solid var(--line);
+    border-radius: var(--r-full);
+    overflow: hidden;
+    background: var(--well);
+  }
+  .tog button {
+    font-family: var(--mono);
+    font-size: var(--fs-mini);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 5px 12px;
+    border: 0;
+    background: transparent;
+    color: var(--dim);
+    transition: color 140ms var(--ease), background 140ms var(--ease);
+  }
+  .tog button[aria-pressed='true'] {
+    background: var(--acc);
+    color: var(--on-acc);
+    font-weight: 700;
+  }
+
+  /* ====================================================================== 5
+     SHELL.
+     =================================================================== */
+  main {
+    max-width: 1560px;
+    margin: 0 auto;
+    padding: var(--s8) var(--gutter) var(--s9);
+    display: flex;
+    flex-direction: column;
+    gap: var(--s7);
+  }
+  .head {
+    display: flex;
+    align-items: flex-end;
+    gap: var(--s6);
+    flex-wrap: wrap;
+  }
+  .head h1 {
+    font-size: var(--fs-2xl);
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    color: var(--ink-hi);
+    margin: 0;
+    line-height: 1.05;
+  }
+  .head .sub {
+    font-size: var(--fs-md);
+    color: var(--dim);
+    padding-bottom: 3px;
+  }
+  .feedchip {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s4);
+    height: var(--ctl-h);
+    padding: 0 var(--s5);
+    border-radius: var(--r-full);
+    background: var(--panel);
+    border: 1px solid var(--line);
+    box-shadow: var(--e1);
+    font-size: var(--fs-sm);
+  }
+  .feedchip b {
+    color: var(--ink-hi);
+  }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--r5);
+    box-shadow: var(--e2);
+    overflow: hidden;
+    position: relative;
+  }
+  .panel::before {
+    content: '';
+    position: absolute;
+    inset: 0 0 auto 0;
+    height: 56px;
+    background: var(--sheen);
+    pointer-events: none;
+  }
+  .panel-h {
+    display: flex;
+    align-items: center;
+    gap: var(--s5);
+    padding: var(--s5) var(--s6);
+    border-bottom: 1px solid var(--line-soft);
+    position: relative;
+  }
+  .ttl {
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: 700;
+  }
+  .spacer {
+    margin-left: auto;
+  }
+
+  /* ====================================================================== 6
+     THE STRIPS — grid with three named tracks. Two of them, stacked.
+     =================================================================== */
+  .strip {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(158px, 1fr));
+    grid-template-rows: var(--lab-h) var(--ctl-h) auto;
+    gap: var(--s2) var(--s4);
+    padding: var(--s6);
+    align-items: start;
+  }
+  .strip + .strip {
+    padding-top: 0;
+  }
+  .strip .field {
+    display: grid;
+    grid-template-rows: subgrid;
+    grid-row: span 3;
+    gap: var(--s2);
+    min-width: 0;
+  }
+  .strip .field.go .lab,
+  .strip .field.go .note {
+    visibility: hidden;
+  }
+  .strip .field.go .btn {
+    width: 100%;
+  }
+  .lab {
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: 600;
+    line-height: var(--lab-h);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .ctl {
+    height: var(--ctl-h);
+    display: flex;
+    align-items: center;
+    gap: var(--s4);
+    padding: 0 var(--s5);
+    background: var(--bg-2);
+    border: 1px solid var(--line-hard);
+    border-radius: var(--r2);
+    font-size: var(--fs-sm);
+    color: var(--ink);
+    white-space: nowrap;
+    box-shadow: var(--e1);
+    transition: border-color 140ms var(--ease), box-shadow 140ms var(--ease);
+    min-width: 0;
+  }
+  .ctl > span:first-child {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .ctl:hover {
+    border-color: var(--acc);
+    box-shadow: 0 0 0 3px var(--acc-soft);
+  }
+  .ctl .caret {
+    color: var(--faint);
+    font-size: 9px;
+    margin-left: auto;
+    flex: none;
+  }
+  .ctl.off {
+    background: repeating-linear-gradient(
+      -45deg,
+      var(--well),
+      var(--well) 6px,
+      transparent 6px,
+      transparent 12px
+    );
+    color: var(--faint);
+    border-color: var(--line);
+    border-style: dashed;
+    box-shadow: none;
+    cursor: not-allowed;
+  }
+  .ctl.off:hover {
+    border-color: var(--warn);
+    box-shadow: none;
+  }
+  .note {
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    line-height: 1.35;
+    color: var(--warn);
+    display: flex;
+    align-items: flex-start;
+    gap: var(--s2);
+    min-height: 13px;
+  }
+  .note::before {
+    content: '▲';
+    font-size: 7px;
+    line-height: 1.9;
+    flex: none;
+  }
+  .note.quiet {
+    color: var(--faint);
+  }
+  .note.quiet::before {
+    content: '·';
+    font-size: 11px;
+    line-height: 1;
+  }
+  .btn {
+    height: var(--ctl-h);
+    padding: 0 var(--s6);
+    border-radius: var(--r2);
+    border: 1px solid var(--line-hard);
+    background: var(--bg-2);
+    color: var(--ink);
+    font-size: var(--fs-sm);
+    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--s3);
+    box-shadow: var(--e1);
+    white-space: nowrap;
+    transition: transform 140ms var(--ease), box-shadow 140ms var(--ease);
+  }
+  .btn:hover {
+    transform: translateY(-1px);
+    box-shadow: var(--e2);
+  }
+  .btn.ghost {
+    background: transparent;
+    box-shadow: none;
+    border-color: var(--line);
+    color: var(--dim);
+    font-weight: 500;
+  }
+  .btn.sm {
+    height: 28px;
+    padding: 0 var(--s5);
+    font-size: var(--fs-xs);
+  }
+
+  /* ====================================================================== 7
+     THE ANCHOR — the one number, how it was arrived at, and its shape.
+     =================================================================== */
+  .anchor {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    gap: var(--s5) var(--s7);
+    padding: var(--s7) var(--s8);
+  }
+  .anchor .big {
+    font-family: var(--mono);
+    font-size: var(--fs-3xl);
+    font-weight: 700;
+    letter-spacing: -0.035em;
+    color: var(--ink-hi);
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+  }
+  .anchor .of {
+    display: flex;
+    flex-direction: column;
+    gap: var(--s2);
+  }
+  .anchor .of .what {
+    font-size: var(--fs-md);
+    color: var(--ink-2);
+  }
+  .anchor .of .who {
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+    color: var(--faint);
+  }
+  .pills {
+    display: flex;
+    gap: var(--s3);
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+  .pill {
+    font-family: var(--mono);
+    font-size: var(--fs-mini);
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    font-weight: 700;
+    padding: 4px 10px;
+    border-radius: var(--r-full);
+    opacity: 0;
+    animation: pop 380ms var(--ease-spring) forwards;
+  }
+  .pill.mea {
+    background: var(--up-soft);
+    color: var(--up);
+  }
+  .pill.abs {
+    background: var(--warn-soft);
+    color: var(--warn);
+  }
+  .pill.inf {
+    background: var(--info-soft);
+    color: var(--info);
+  }
+  .histo {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: flex-end;
+    gap: 2px;
+    height: 46px;
+  }
+  .histo i {
+    flex: 1;
+    background: linear-gradient(180deg, var(--acc), var(--acc-soft));
+    border-radius: 1px 1px 0 0;
+    transform-origin: bottom;
+    animation: grow 800ms var(--ease) both;
+    min-height: 2px;
+  }
+
+  /* ====================================================================== 8
+     THE VIEW BAR — a sliding indicator, not a repaint.
+     =================================================================== */
+  .viewbar {
+    display: flex;
+    align-items: center;
+    gap: var(--s6);
+    padding: var(--s5) var(--s6);
+    border-top: 1px solid var(--line-soft);
+    border-bottom: 1px solid var(--line-soft);
+    flex-wrap: wrap;
+  }
+  .views {
+    position: relative;
+    display: inline-flex;
+    background: var(--well);
+    border: 1px solid var(--line);
+    border-radius: var(--r2);
+    padding: 3px;
+    gap: 3px;
+  }
+  .views .ind {
+    position: absolute;
+    top: 3px;
+    bottom: 3px;
+    border-radius: var(--r1);
+    background: var(--panel);
+    box-shadow: var(--e1);
+    transition: left 260ms var(--ease-spring), width 260ms var(--ease-spring);
+    z-index: 0;
+  }
+  .vtab {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    padding: var(--s3) var(--s5);
+    border: 0;
+    border-radius: var(--r1);
+    background: transparent;
+    font-size: var(--fs-sm);
+    color: var(--dim);
+    line-height: 1.2;
+    transition: color 160ms var(--ease);
+  }
+  .vtab i {
+    font-style: normal;
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+  .vtab[aria-selected='true'] {
+    color: var(--ink-hi);
+    font-weight: 600;
+  }
+  .vsay {
+    font-size: var(--fs-sm);
+    color: var(--dim);
+  }
+  .vsay b {
+    color: var(--ink);
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+  }
+  .vbudget {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s3);
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+    color: var(--faint);
+  }
+  .vbudget select {
+    height: 28px;
+    border-radius: var(--r1);
+    border: 1px solid var(--line-hard);
+    background: var(--bg-2);
+    color: var(--ink);
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+    padding: 0 var(--s3);
+  }
+  .vsum {
+    margin-left: auto;
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+    color: var(--dim);
+  }
+  .vsum b {
+    color: var(--ink-hi);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ====================================================================== 9
+     GRIDS. The bars table scrolls in its own container, with a fade and a
+     nudge arrow saying there is more to the right.
+     =================================================================== */
+  .tblwrap {
+    position: relative;
+  }
+  .tbl-scroll {
+    overflow-x: auto;
+    overflow-y: visible;
+  }
+  .tblwrap::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    right: 0;
+    width: 56px;
+    background: var(--fade);
+    pointer-events: none;
+    opacity: 0.9;
+  }
+  .more {
+    position: absolute;
+    right: var(--s5);
+    top: 50%;
+    transform: translateY(-50%);
+    font-family: var(--mono);
+    font-size: var(--fs-mini);
+    color: var(--acc);
+    animation: nudge 1.8s ease-in-out infinite;
+    pointer-events: none;
+    z-index: 2;
+  }
+  table.grid {
+    border-collapse: collapse;
+    font-size: var(--fs-sm);
+    white-space: nowrap;
+  }
+  table.grid.full {
+    width: 100%;
+  }
+  /* STICKY AT ZERO, NOT AT THE TOPBAR'S HEIGHT. `.tbl-scroll` sets
+     `overflow-x: auto`, and CSS computes an `overflow-y: visible` beside it to
+     `auto` — so the wrapper IS the scroll container, and `top: 54px` offset the
+     header 54px down INSIDE it, rendering the column names below the first row
+     of data. Measured: the header sat under row one until this was 0. */
+  table.grid th {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    background: var(--panel);
+    text-align: left;
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: 600;
+    padding: var(--s4) var(--s5);
+    border-bottom: 1px solid var(--line-hard);
+    transition: color 130ms var(--ease);
+  }
+  table.grid th:hover {
+    color: var(--acc);
+  }
+  table.grid th.dead {
+    color: var(--line-hard);
+    cursor: not-allowed;
+  }
+  table.grid th.dead:hover {
+    color: var(--line-hard);
+  }
+  table.grid th.n,
+  table.grid td.n {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  table.grid td {
+    height: var(--row-h);
+    padding: 0 var(--s5);
+    border-bottom: 1px solid var(--line-soft);
+    color: var(--ink);
+  }
+  table.grid td.mono,
+  table.grid td.n {
+    font-family: var(--mono);
+  }
+  table.grid tbody tr {
+    transition: background 130ms var(--ease);
+  }
+  table.grid tbody tr:hover td {
+    background: var(--panel-2);
+  }
+  .sortmark {
+    color: var(--acc);
+  }
+  .nosrc {
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    color: var(--faint);
+    font-style: italic;
+  }
+  .na {
+    color: var(--line-hard);
+  }
+  .up {
+    color: var(--up);
+    font-weight: 600;
+  }
+  .down {
+    color: var(--down);
+    font-weight: 600;
+  }
+  .cov {
+    display: inline-flex;
+    gap: 2px;
+  }
+  .cov i {
+    width: 8px;
+    height: 14px;
+    border-radius: 1px;
+    background: var(--line-hard);
+    transform-origin: bottom;
+    animation: grow 700ms var(--ease) both;
+  }
+  .cov i.q1 {
+    background: var(--down);
+  }
+  .cov i.q2 {
+    background: var(--warn);
+  }
+  .cov i.q3 {
+    background: color-mix(in srgb, var(--up) 55%, var(--warn));
+  }
+  .cov i.q4 {
+    background: var(--up);
+  }
+  .pgbar {
+    display: flex;
+    align-items: center;
+    gap: var(--s5);
+    padding: var(--s5) var(--s6);
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+    color: var(--dim);
+    flex-wrap: wrap;
+    border-top: 1px solid var(--line-soft);
+  }
+  .pgbar select {
+    height: 26px;
+    border-radius: var(--r1);
+    border: 1px solid var(--line-hard);
+    background: var(--bg-2);
+    color: var(--ink);
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+  }
+  footer {
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+    color: var(--faint);
+    display: flex;
+    gap: var(--s7);
+    flex-wrap: wrap;
+    padding-top: var(--s6);
+    border-top: 1px solid var(--line);
+  }
+</style>
+
+<header class="topbar">
+  <span class="brand"><span class="mark">X</span>bruteX</span>
+  <nav class="navs">
+    <a href="#top">Markets</a><a href="#top">Ingest</a><a class="on" href="#top">DB</a
+    ><a href="#top">Autopilot</a><a href="#top">Audit</a>
+  </nav>
+  <span class="topright">
+    <span class="clock"><i class="live"></i>IST 15:31:04</span>
+    <span class="tog" role="group" aria-label="Theme">
+      <button type="button" data-t="light" aria-pressed="true">Light</button>
+      <button type="button" data-t="dark" aria-pressed="false">Dark</button>
+    </span>
+  </span>
+</header>
+
+<main id="top">
+  <div class="head rise" style="animation-delay:60ms">
+    <h1>Store</h1>
+    <span class="sub">What is actually on disk, counted — never estimated.</span>
+    <span class="feedchip">Feed <b>Groww</b> · 1 minute · 2026-08</span>
+  </div>
+
+  <!-- THE QUERY, IN TWO STRIPS. -->
+  <section class="panel rise" style="animation-delay:140ms" aria-label="Query">
+    <div class="panel-h">
+      <span class="ttl">Query</span>
+      <span class="spacer"></span>
+      <span class="ttl" style="color:var(--acc)">1 instrument-month matched</span>
+    </div>
+    <div class="strip">
+      <div class="field">
+        <span class="lab" id="q-uni">Universe</span>
+        <span class="ctl" role="button" tabindex="0" aria-labelledby="q-uni"
+          ><span>NIFTY Total Market</span><span class="caret">▾</span></span
+        >
+        <span class="note quiet">750 members</span>
+      </div>
+      <div class="field">
+        <span class="lab" id="q-tf">Bar length</span>
+        <span class="ctl" role="button" tabindex="0" aria-labelledby="q-tf"
+          ><span>1 minute</span><span class="caret">▾</span></span
+        >
+        <span class="note quiet">375 per session</span>
+      </div>
+      <div class="field">
+        <span class="lab" id="q-mo">Month</span>
+        <span class="ctl" role="button" tabindex="0" aria-labelledby="q-mo"
+          ><span>2026-08</span><span class="caret">▾</span></span
+        >
+        <span class="note quiet">one file per month</span>
+      </div>
+      <div class="field">
+        <span class="lab" id="q-find">Find</span>
+        <span class="ctl" role="button" tabindex="0" aria-labelledby="q-find"
+          ><span>RELIANCE</span><span class="caret">▾</span></span
+        >
+        <span class="note quiet">1 of 1,813</span>
+      </div>
+      <div class="field go">
+        <span class="lab" aria-hidden="true">Go</span>
+        <button class="btn" type="button">Refresh</button>
+        <span class="note quiet" aria-hidden="true">.</span>
+      </div>
+    </div>
+
+    <div class="strip" aria-label="Contract">
+      <div class="field">
+        <span class="lab" id="c-exp">Expiry</span>
+        <span class="ctl off" aria-labelledby="c-exp" aria-disabled="true"
+          ><span>—</span><span class="caret">✕</span></span
+        >
+        <span class="note">spot has no expiry</span>
+      </div>
+      <div class="field">
+        <span class="lab" id="c-str">Strike</span>
+        <span class="ctl off" aria-labelledby="c-str" aria-disabled="true"
+          ><span>—</span><span class="caret">✕</span></span
+        >
+        <span class="note">spot has no strike</span>
+      </div>
+      <div class="field">
+        <span class="lab" id="c-mny">Moneyness</span>
+        <span class="ctl off" aria-labelledby="c-mny" aria-disabled="true"
+          ><span>—</span><span class="caret">✕</span></span
+        >
+        <span class="note">no spot reference on this wire</span>
+      </div>
+      <div class="field">
+        <span class="lab" id="c-side">Type</span>
+        <span class="ctl off" aria-labelledby="c-side" aria-disabled="true"
+          ><span>—</span><span class="caret">✕</span></span
+        >
+        <span class="note">spot is neither CE nor PE</span>
+      </div>
+      <div class="field go">
+        <span class="lab" aria-hidden="true">.</span>
+        <span class="note quiet" aria-hidden="true">.</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- THE ANCHOR + THE GRID. -->
+  <section class="panel rise" style="animation-delay:220ms" aria-label="Bars">
+    <div class="anchor">
+      <span class="big" data-count="375">0</span>
+      <span class="of">
+        <span class="what">bars · RELIANCE · 1 minute · 2026-08-13</span>
+        <span class="who">counted from the month file — not estimated, not extrapolated</span>
+      </span>
+      <span class="pills">
+        <span class="pill mea" style="animation-delay:520ms">measured</span>
+        <span class="pill abs" style="animation-delay:600ms">10 of 24 columns unsourced</span>
+      </span>
+      <span class="histo" aria-label="Bars per session, last 20 sessions">
+        <i style="height:82%;animation-delay:400ms"></i><i style="height:100%;animation-delay:420ms"></i
+        ><i style="height:97%;animation-delay:440ms"></i><i style="height:100%;animation-delay:460ms"></i
+        ><i style="height:64%;animation-delay:480ms"></i><i style="height:100%;animation-delay:500ms"></i
+        ><i style="height:100%;animation-delay:520ms"></i><i style="height:88%;animation-delay:540ms"></i
+        ><i style="height:100%;animation-delay:560ms"></i><i style="height:100%;animation-delay:580ms"></i
+        ><i style="height:41%;animation-delay:600ms"></i><i style="height:100%;animation-delay:620ms"></i
+        ><i style="height:100%;animation-delay:640ms"></i><i style="height:100%;animation-delay:660ms"></i
+        ><i style="height:73%;animation-delay:680ms"></i><i style="height:100%;animation-delay:700ms"></i
+        ><i style="height:100%;animation-delay:720ms"></i><i style="height:96%;animation-delay:740ms"></i
+        ><i style="height:100%;animation-delay:760ms"></i><i style="height:100%;animation-delay:780ms"></i>
+      </span>
+    </div>
+
+    <div class="viewbar">
+      <div class="views" role="tablist" aria-label="What one row of the grid is">
+        <span class="ind" aria-hidden="true"></span>
+        <button class="vtab" type="button" role="tab" aria-selected="false">
+          Census<i>one row per instrument</i>
+        </button>
+        <button class="vtab" type="button" role="tab" aria-selected="true">
+          Bars<i>one row per bar</i>
+        </button>
+      </div>
+      <span class="vsay">Showing <b>375</b> bars from <b>1</b> instrument-month</span>
+      <label class="vbudget">
+        <span>Months to read</span>
+        <select aria-label="Instrument-months to read">
+          <option>1 newest</option>
+          <option selected>4 newest</option>
+          <option>16 newest</option>
+          <option>every match — 80</option>
+        </select>
+      </label>
+      <span class="vsum"><b>4</b> read + <b>76</b> over budget = <b>80</b> matched</span>
+    </div>
+
+    <div class="tblwrap">
+      <span class="more" aria-hidden="true">14 more →</span>
+      <div class="tbl-scroll">
+        <table class="grid" style="width:2420px">
+          <thead>
+            <tr>
+              <th style="width:172px">Date / time <span class="sortmark">▾</span></th>
+              <th style="width:68px">TF</th>
+              <th class="n" style="width:104px">Open</th>
+              <th class="n" style="width:104px">High</th>
+              <th class="n" style="width:104px">Low</th>
+              <th class="n" style="width:108px">Close</th>
+              <th class="n" style="width:116px">Volume</th>
+              <th class="n dead" style="width:102px">Pre-mkt %</th>
+              <th class="n" style="width:102px">Change %</th>
+              <th class="n" style="width:124px">Open interest</th>
+              <th class="n" style="width:100px">OI chg %</th>
+              <th style="width:116px">Expiry</th>
+              <th class="n" style="width:106px">Days to exp</th>
+              <th style="width:72px">Type</th>
+              <th class="n" style="width:96px">Strike</th>
+              <th class="dead" style="width:106px">Moneyness</th>
+              <th class="n dead" style="width:100px">Intrinsic</th>
+              <th class="n dead" style="width:100px">Extrinsic</th>
+              <th class="n dead" style="width:86px">IV %</th>
+              <th class="n dead" style="width:86px">Delta</th>
+              <th class="n dead" style="width:90px">Gamma</th>
+              <th class="n dead" style="width:88px">Theta</th>
+              <th class="n dead" style="width:86px">Vega</th>
+              <th class="n dead" style="width:84px">Rho</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="mono">2026-08-13 09:15:00</td>
+              <td class="mono">1min</td>
+              <td class="n">1,412.35</td>
+              <td class="n">1,414.80</td>
+              <td class="n">1,411.90</td>
+              <td class="n">1,414.05</td>
+              <td class="n">184,206</td>
+              <td class="n"><span class="nosrc">no source</span></td>
+              <td class="n up">+0.12</td>
+              <td class="n"><span class="nosrc">unknown</span></td>
+              <td class="n"><span class="nosrc">unknown</span></td>
+              <td class="mono na">—</td>
+              <td class="n na">—</td>
+              <td class="mono na">—</td>
+              <td class="n na">—</td>
+              <td><span class="nosrc">no source</span></td>
+              <td class="n"><span class="nosrc">no source</span></td>
+              <td class="n"><span class="nosrc">no source</span></td>
+              <td class="n"><span class="nosrc">no source</span></td>
+              <td class="n"><span class="nosrc">no source</span></td>
+              <td class="n"><span class="nosrc">no source</span></td>
+              <td class="n"><span class="nosrc">no source</span></td>
+              <td class="n"><span class="nosrc">no source</span></td>
+              <td class="n"><span class="nosrc">no source</span></td>
+            </tr>
+            <tr>
+              <td class="mono">2026-08-13 09:16:00</td>
+              <td class="mono">1min</td>
+              <td class="n">1,414.05</td>
+              <td class="n">1,415.60</td>
+              <td class="n">1,413.20</td>
+              <td class="n">1,413.45</td>
+              <td class="n">96,411</td>
+              <td class="n"><span class="nosrc">no source</span></td>
+              <td class="n down">−0.04</td>
+              <td class="n"><span class="nosrc">unknown</span></td>
+              <td class="n"><span class="nosrc">unknown</span></td>
+              <td class="mono na">—</td>
+              <td class="n na">—</td>
+              <td class="mono na">—</td>
+              <td class="n na">—</td>
+              <td><span class="nosrc">no source</span></td>
+              <td class="n"><span class="nosrc">no source</span></td>
+              <td class="n"><span class="nosrc">no source</span></td>
+              <td class="n"><span class="nosrc">no source</span></td>
+              <td class="n"><span class="nosrc">no source</span></td>
+              <td class="n"><span class="nosrc">no source</span></td>
+              <td class="n"><span class="nosrc">no source</span></td>
+              <td class="n"><span class="nosrc">no source</span></td>
+              <td class="n"><span class="nosrc">no source</span></td>
+            </tr>
+            <tr>
+              <td class="mono">2026-08-13 09:17:00</td>
+              <td class="mono">1min</td>
+              <td class="n">1,413.45</td>
+              <td class="n">1,413.95</td>
+              <td class="n">1,409.05</td>
+              <td class="n">1,409.70</td>
+              <td class="n">142,880</td>
+              <td class="n"><span class="nosrc">no source</span></td>
+              <td class="n down">−0.27</td>
+              <td class="n"><span class="nosrc">unknown</span></td>
+              <td class="n"><span class="nosrc">unknown</span></td>
+              <td class="mono na">—</td>
+              <td class="n na">—</td>
+              <td class="mono na">—</td>
+              <td class="n na">—</td>
+              <td><span class="nosrc">no source</span></td>
+              <td class="n"><span class="nosrc">no source</span></td>
+              <td class="n"><span class="nosrc">no source</span></td>
+              <td class="n"><span class="nosrc">no source</span></td>
+              <td class="n"><span class="nosrc">no source</span></td>
+              <td class="n"><span class="nosrc">no source</span></td>
+              <td class="n"><span class="nosrc">no source</span></td>
+              <td class="n"><span class="nosrc">no source</span></td>
+              <td class="n"><span class="nosrc">no source</span></td>
+            </tr>
+            <tr>
+              <td class="mono">2026-08-13 09:18:00</td>
+              <td class="mono">1min</td>
+              <td class="n">1,409.70</td>
+              <td class="n">1,411.15</td>
+              <td class="n">1,409.05</td>
+              <td class="n">1,410.90</td>
+              <td class="n">78,332</td>
+              <td class="n"><span class="nosrc">no source</span></td>
+              <td class="n up">+0.09</td>
+              <td class="n"><span class="nosrc">unknown</span></td>
+              <td class="n"><span class="nosrc">unknown</span></td>
+              <td class="mono na">—</td>
+              <td class="n na">—</td>
+              <td class="mono na">—</td>
+              <td class="n na">—</td>
+              <td><span class="nosrc">no source</span></td>
+              <td class="n"><span class="nosrc">no source</span></td>
+              <td class="n"><span class="nosrc">no source</span></td>
+              <td class="n"><span class="nosrc">no source</span></td>
+              <td class="n"><span class="nosrc">no source</span></td>
+              <td class="n"><span class="nosrc">no source</span></td>
+              <td class="n"><span class="nosrc">no source</span></td>
+              <td class="n"><span class="nosrc">no source</span></td>
+              <td class="n"><span class="nosrc">no source</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="pgbar">
+      <button class="btn ghost sm" type="button">‹ Prev</button>
+      <span>Page 1 of 2</span>
+      <button class="btn ghost sm" type="button">Next ›</button>
+      <span class="spacer">Rows 1–200 of 375</span>
+      <select aria-label="Rows per page">
+        <option selected>200 / page</option>
+        <option>500 / page</option>
+      </select>
+    </div>
+  </section>
+
+  <!-- THE CENSUS VIEW. -->
+  <section class="panel rise" style="animation-delay:300ms" aria-label="Census">
+    <div class="anchor">
+      <span class="big" data-count="4812375">0</span>
+      <span class="of">
+        <span class="what">bars stored · Groww · 1 day · all months</span>
+        <span class="who">1,813 instruments · 80 month files each</span>
+      </span>
+      <span class="pills"><span class="pill mea" style="animation-delay:680ms">measured</span></span>
+    </div>
+
+    <div class="tblwrap" style="--fade:none">
+      <div class="tbl-scroll">
+        <table class="grid full">
+          <thead>
+            <tr>
+              <th style="width:140px">Symbol</th>
+              <th>Name</th>
+              <th class="n" style="width:92px">Months</th>
+              <th class="n" style="width:116px">Bars <span class="sortmark">▾</span></th>
+              <th style="width:124px">Oldest</th>
+              <th style="width:124px">Newest</th>
+              <th style="width:112px">Coverage</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="mono">NIFTY50</td>
+              <td>NIFTY 50</td>
+              <td class="n">80</td>
+              <td class="n">1,631</td>
+              <td class="mono">2020-01-01</td>
+              <td class="mono">2026-08-13</td>
+              <td>
+                <span class="cov"
+                  ><i class="q4" style="animation-delay:700ms"></i
+                  ><i class="q4" style="animation-delay:740ms"></i
+                  ><i class="q4" style="animation-delay:780ms"></i
+                  ><i class="q4" style="animation-delay:820ms"></i
+                ></span>
+              </td>
+            </tr>
+            <tr>
+              <td class="mono">BANKNIFTY</td>
+              <td>NIFTY BANK</td>
+              <td class="n">80</td>
+              <td class="n">1,631</td>
+              <td class="mono">2020-01-01</td>
+              <td class="mono">2026-08-13</td>
+              <td>
+                <span class="cov"
+                  ><i class="q4" style="animation-delay:720ms"></i
+                  ><i class="q4" style="animation-delay:760ms"></i
+                  ><i class="q4" style="animation-delay:800ms"></i
+                  ><i class="q4" style="animation-delay:840ms"></i
+                ></span>
+              </td>
+            </tr>
+            <tr>
+              <td class="mono">RELIANCE</td>
+              <td>Reliance Industries Limited</td>
+              <td class="n">80</td>
+              <td class="n">1,628</td>
+              <td class="mono">2020-01-01</td>
+              <td class="mono">2026-08-13</td>
+              <td>
+                <span class="cov"
+                  ><i class="q4" style="animation-delay:740ms"></i
+                  ><i class="q4" style="animation-delay:780ms"></i
+                  ><i class="q3" style="animation-delay:820ms"></i
+                  ><i class="q4" style="animation-delay:860ms"></i
+                ></span>
+              </td>
+            </tr>
+            <tr>
+              <td class="mono">HDFCBANK</td>
+              <td>HDFC Bank Limited</td>
+              <td class="n">62</td>
+              <td class="n">1,204</td>
+              <td class="mono">2021-06-01</td>
+              <td class="mono">2026-08-13</td>
+              <td>
+                <span class="cov"
+                  ><i class="q2" style="animation-delay:760ms"></i
+                  ><i class="q3" style="animation-delay:800ms"></i
+                  ><i class="q4" style="animation-delay:840ms"></i
+                  ><i class="q4" style="animation-delay:880ms"></i
+                ></span>
+              </td>
+            </tr>
+            <tr>
+              <td class="mono">TATAMOTORS</td>
+              <td>Tata Motors Limited</td>
+              <td class="n">3</td>
+              <td class="n">61</td>
+              <td class="mono">2026-05-01</td>
+              <td class="mono">2026-08-13</td>
+              <td>
+                <span class="cov"
+                  ><i class="q1" style="animation-delay:780ms"></i
+                  ><i style="animation-delay:820ms"></i><i style="animation-delay:860ms"></i
+                  ><i class="q2" style="animation-delay:900ms"></i
+                ></span>
+              </td>
+            </tr>
+            <!-- ZERO IS A NUMBER. "NEVER PULLED" IS NOT. -->
+            <tr>
+              <td class="mono">AGL</td>
+              <td>No exchange ISIN — withheld, not guessed</td>
+              <td class="n">0</td>
+              <td class="n">0</td>
+              <td><span class="nosrc">never pulled</span></td>
+              <td><span class="nosrc">never pulled</span></td>
+              <td>
+                <span class="cov"
+                  ><i style="animation-delay:800ms"></i><i style="animation-delay:840ms"></i
+                  ><i style="animation-delay:880ms"></i><i style="animation-delay:920ms"></i
+                ></span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="pgbar">
+      <button class="btn ghost sm" type="button">‹ Prev</button>
+      <span>Page 1 of 10</span>
+      <button class="btn ghost sm" type="button">Next ›</button>
+      <span class="spacer">Rows 1–200 of 1,813</span>
+      <select aria-label="Rows per page">
+        <option selected>200 / page</option>
+        <option>500 / page</option>
+      </select>
+    </div>
+  </section>
+
+  <footer class="rise" style="animation-delay:380ms">
+    <span>24 bar columns · 14 sourced · 10 not · 2,420px, scrolling in its own container</span>
+    <span>no source ≠ unknown ≠ — · three absences, three words</span>
+    <span>Control 34px · label 14px · row 34px</span>
+  </footer>
+</main>
+
+<script>
+  document.querySelector('.tog').addEventListener('click', function (event) {
+    var btn = event.target.closest('button[data-t]');
+    if (!btn) return;
+    document.documentElement.setAttribute('data-theme', btn.dataset.t);
+    this.querySelectorAll('button').forEach(function (b) {
+      b.setAttribute('aria-pressed', String(b === btn));
+    });
+  });
+
+  // The view indicator follows the selected tab rather than each tab painting
+  // its own background — one moving object reads as one control.
+  var views = document.querySelector('.views');
+  var ind = views.querySelector('.ind');
+  function place(tab) {
+    ind.style.left = tab.offsetLeft + 'px';
+    ind.style.width = tab.offsetWidth + 'px';
+  }
+  place(views.querySelector('[aria-selected="true"]'));
+  views.addEventListener('click', function (event) {
+    var tab = event.target.closest('.vtab');
+    if (!tab) return;
+    views.querySelectorAll('.vtab').forEach(function (t) {
+      t.setAttribute('aria-selected', String(t === tab));
+    });
+    place(tab);
+  });
+  window.addEventListener('resize', function () {
+    place(views.querySelector('[aria-selected="true"]'));
+  });
+
+  // Count-up.
+  var still = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  document.querySelectorAll('[data-count]').forEach(function (el, i) {
+    var target = Number(el.dataset.count);
+    var fmt = function (v) {
+      return v.toLocaleString('en-IN');
+    };
+    if (still) {
+      el.textContent = fmt(target);
+      return;
+    }
+    var start = null;
+    setTimeout(function () {
+      requestAnimationFrame(function step(t) {
+        if (start === null) start = t;
+        var p = Math.min(1, (t - start) / 1200);
+        el.textContent = fmt(Math.round(target * (1 - Math.pow(1 - p, 3))));
+        if (p < 1) requestAnimationFrame(step);
+      });
+    }, 300 + i * 140);
+  });
+</script>

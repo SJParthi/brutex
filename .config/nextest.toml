@@ -1,0 +1,24 @@
+# Each mutant starts a fresh process. Prioritize the smallest published hash
+# vector so a broken compression loop fails before expensive long-input cases.
+# This changes order only: no test filter, skip, retry or ignored failure.
+[[profile.default.overrides]]
+filter = 'test(the_published_vectors_reproduce)'
+priority = 100
+
+# Fast operator and sealed-record regressions fail before long statistical
+# suites when a mutant breaks those boundaries. Every test still runs unless
+# an actual failure triggers the mutation job's existing fail-fast behavior.
+[[profile.default.overrides]]
+filter = 'test(operator_boundary_tests::) | test(every_selection_v3_byte_is_bound) | test(every_selection_v4_byte_is_bound) | test(every_execution_v4_companion_byte_is_bound)'
+priority = 100
+
+[[profile.default.overrides]]
+filter = 'test(folds_preserve_parent_worker_candidate_and_pair_limits) | test(every_global_replay_v2_companion_byte_is_bound)'
+priority = 100
+
+# This complete stored transaction reauthenticates eight retained chains. Run
+# the smaller contract regressions first so mutation fail-fast can stop on a
+# real failure before paying for it. It is neither filtered out nor skipped.
+[[profile.default.overrides]]
+filter = 'test(all_eight_stored_rungs_publish_exact_selection_chains_and_reuse_every_byte)'
+priority = -100

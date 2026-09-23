@@ -1,0 +1,50 @@
+[package]
+name         = "indicators"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+publish      = { workspace = true }
+description  = "Bars in, condition bits out. The only crate that computes a vocabulary position."
+
+# ---------------------------------------------------------------------------
+# ONE ARROW, AND CLAUDE.md §5 DRAWS A DIFFERENT ONE.
+#
+# §5's graph lists `indicators` as a child of `core`. It is not: the only line
+# below is `vocab`, taken for `ConditionMask`, `Tolerance` and `table::set_near` --
+# the position numbers and the band are that crate's to own, and duplicating them
+# here is exactly the silent divergence §3.8 exists to prevent.
+#
+# `store` USED to be the second arrow, taken for `store::format::Bar`. It is gone:
+# `indicators::Candle` replaces it, so the condition layer no longer links this
+# repository's on-disk file format and a live consumer can feed it ticks off a
+# socket. See D-0095. `cargo tree -p indicators --edges normal` is the proof, and
+# it prints exactly one dependency.
+#
+# The graph gap is REPORTED, not quietly taken: §5 also omits `costs`, `greeks`,
+# `lake` and `telemetry` entirely, and does not draw `store -> telemetry`,
+# `lake -> telemetry`, `pull -> telemetry`, `api -> telemetry`, `api -> pull`,
+# `api -> store`, `costs -> core` or `engine -> vocab`. D-0095 records the measured
+# graph in full. §5 is law and stays a human's edit.
+# ---------------------------------------------------------------------------
+[dependencies]
+vocab = { path = "../vocab", version = "0.1.0" }
+
+[lints]
+workspace = true
+
+# ---------------------------------------------------------------------------
+# THE BOUND IS RE-MEASURED, NOT ASSERTED. Gate 14 refuses a crate that claims a
+# constant cost and never measures it. This crate made twelve cost claims and
+# measured none of them until `benches/ratio.rs`. The compile-time
+# `size_of::<Evaluator>()` assertion bounds the STATE; only the bench bounds the
+# WORK done over it. See D-0103.
+#
+# THIS IS NOT A DEPENDENCY. A [[bench]] target links this crate's own lib and
+# std. The [dependencies] table above still names `vocab` and nothing else,
+# which is what D-0095 and `cargo tree` assert.
+# ---------------------------------------------------------------------------
+[[bench]]
+name    = "ratio"
+harness = false
+test    = false

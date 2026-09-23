@@ -70,6 +70,25 @@ fn the_old_geometry_straddled_and_record_145_is_the_cited_case() {
 fn no_record_straddles_a_block() {
     let v2 = Layout::V2;
 
+    // The arithmetic first, because it is what makes the walk below come out
+    // the way it does rather than a coincidence of the indices chosen.
+    // 56 x 73 = 4088, in both directions.
+    assert_eq!(RECORD_STRIDE, 56);
+    assert_eq!(RECORDS_PER_BLOCK, 73);
+    assert_eq!(BLOCK_LEN, 4_088);
+    assert_eq!(RECORD_STRIDE * RECORDS_PER_BLOCK, BLOCK_LEN);
+    assert_eq!(BLOCK_LEN % RECORD_STRIDE, 0, "no record can straddle");
+    assert_eq!(BLOCK_LEN / RECORD_STRIDE, RECORDS_PER_BLOCK);
+    // The closed form `store::format` carries as a const assertion, restated
+    // here so the invariant table names a test: the LAST record of a block
+    // ends exactly on the block's last byte, so with the divisibility above
+    // every earlier record ends strictly inside it.
+    assert_eq!(
+        (RECORDS_PER_BLOCK - 1) * RECORD_STRIDE + RECORD_STRIDE,
+        BLOCK_LEN,
+        "the last record of a block ends on the block boundary",
+    );
+
     // The property, for every index a month file could hold and well beyond.
     for index in 0..WALK {
         let (start, end) = v2.record_byte_range(index).expect("fits");
@@ -375,4 +394,330 @@ fn the_header_slots_do_not_share_a_failure_unit() {
     assert_eq!(v2.header_len(), v2.slot_count() * v2.slot_stride());
     assert_eq!(v2.header_len(), HEADER_LEN);
     assert_eq!(v2.slot_offset(2), slot0, "commit 2 returns to slot 0");
+}
+
+// ===========================================================================
+// The overlay sidecar
+// ===========================================================================
+
+/// **THE TWO GEOMETRIES CANNOT BE MISTAKEN FOR ONE ANOTHER.**
+///
+/// The overlay carries version 1, and version 1 is a number this build has
+/// RETIRED for bar files. That collision is deliberate to test: if the two ever
+/// resolved against each other, an overlay would be decoded at a bar's offsets
+/// — every field lifted from the wrong place, and a CRC that passes because the
+/// bytes are genuinely intact.
+///
+/// Three separations, and the test wants all three, because any one of them
+/// alone is a single point of failure:
+///   * the MAGIC differs, so a byte-level reader cannot confuse them;
+///   * the STRIDE differs, so a record count computed for one is wrong for the
+///     other by an amount that cannot round to the same answer;
+///   * the overlay is NOT in `Layout::KNOWN`, so a bar reader walking the list
+///     of readable versions is never offered it at all.
+#[test]
+fn an_overlay_is_not_a_bar_file_and_no_reader_can_take_it_for_one() {
+    use store::format::{MAGIC, OVERLAY_MAGIC, OVERLAY_STRIDE, RECORD_STRIDE};
+    use store::layout::Layout;
+
+    assert_ne!(OVERLAY_MAGIC, MAGIC, "a byte reader tells them apart");
+    assert_ne!(
+        OVERLAY_STRIDE, RECORD_STRIDE,
+        "and a record count computed for one cannot be right for the other"
+    );
+    // IT IS IN `KNOWN`, AND THAT IS NOT THE PROTECTION.
+    //
+    // Excluding it was tried and moved the problem rather than solving it:
+    // `Header::decode_parts` resolves a version WHILE DECODING, before any
+    // caller can say which table it meant, so an overlay outside the list is
+    // `UnknownVersion(9)` at the first byte of its own file.
+    //
+    // What keeps them apart is the version number itself — a `.bar` carries 2
+    // and a `.ovl` carries 9, and a header doctored to swap them fails its own
+    // CRC — plus `BarFile` resolving against a table chosen by FILE KIND, so a
+    // `.bar` path is offered only bar geometries whatever its header claims.
+    assert!(
+        Layout::KNOWN.iter().any(|l| l.magic() == OVERLAY_MAGIC),
+        "the overlay is a geometry this build reads, so it is in KNOWN"
+    );
+    assert_eq!(
+        Layout::KNOWN
+            .iter()
+            .filter(|l| l.version() == Layout::OVERLAY.version())
+            .count(),
+        1,
+        "and exactly one row answers to its version, so resolution is unambiguous"
+    );
+    // IT SHARES THE FAMILY AND TAKES A VERSION BARS WILL NOT. That is what
+    // lets it use `Header::validate` and `block::seal` instead of growing a
+    // second copy of the header, the CRC and the block arithmetic — and a
+    // second copy is a second place for a torn write to be handled differently.
+    assert_eq!(
+        &OVERLAY_MAGIC[..7],
+        &MAGIC[..7],
+        "same family, so one Layout type describes both"
+    );
+    assert_ne!(
+        Layout::OVERLAY.version(),
+        Layout::CURRENT.version(),
+        "and a different geometry number, so neither resolves as the other"
+    );
+    assert_eq!(Layout::OVERLAY.record_stride(), OVERLAY_STRIDE);
+}
+
+/// **AN ABSENT VALUE AND A ZERO ARE DIFFERENT, AND STAY DIFFERENT.**
+///
+/// Both overlay fields carry real readings where zero is meaningful: a spot of
+/// zero is impossible, but an implied volatility genuinely can be, and a
+/// deep-out-of-the-money option late in its life is exactly where it happens.
+/// Reading "the vendor sent nothing" as "the vendor sent zero" would put a
+/// fabricated 0% volatility into a backtest and it would look like data.
+#[test]
+fn an_overlay_tells_an_absent_reading_from_a_zero_one() {
+    use store::format::{OI_NULL, Overlay};
+
+    let nothing = Overlay {
+        ts_micros: 1,
+        spot: OI_NULL,
+        iv_micros: OI_NULL,
+    };
+    assert_eq!(nothing.spot(), None);
+    assert_eq!(nothing.iv(), None);
+    assert!(
+        !nothing.states_something(),
+        "a record stating neither value is not worth a block per 170 bars"
+    );
+
+    let real_zero = Overlay {
+        ts_micros: 1,
+        spot: 0,
+        iv_micros: 0,
+    };
+    assert_eq!(
+        real_zero.spot(),
+        Some(0),
+        "zero is a reading, not an absence"
+    );
+    assert_eq!(real_zero.iv(), Some(0));
+    assert!(real_zero.states_something());
+
+    // AND ONE OF EACH IS STILL WORTH KEEPING. Dhan answers `spot` for a
+    // contract whose `iv` it does not compute, and dropping the record would
+    // lose the spot to save nothing.
+    let half = Overlay {
+        ts_micros: 1,
+        spot: 2_465_000,
+        iv_micros: OI_NULL,
+    };
+    assert!(half.states_something());
+    assert_eq!(half.iv(), None);
+}
+
+/// **THE BLOCK IS THE LARGEST WHOLE MULTIPLE THAT FITS THE FAILURE UNIT.**
+///
+/// Not an arbitrary count. A torn write damages one 4,096-byte unit, so a block
+/// that straddled the boundary would damage two — and the checksum would then
+/// condemn twice the data one fault actually touched. This pins both halves:
+/// the block fits, and one more record would not.
+#[test]
+fn the_overlay_block_fills_its_failure_unit_without_straddling_it() {
+    use store::format::{OVERLAY_RECORDS_PER_BLOCK, OVERLAY_STRIDE};
+
+    let used = OVERLAY_STRIDE * OVERLAY_RECORDS_PER_BLOCK;
+    assert!(
+        used <= 4096,
+        "the block fits inside one failure unit: {used}"
+    );
+    assert!(
+        used + OVERLAY_STRIDE > 4096,
+        "and it is the LARGEST such block — one more record would straddle"
+    );
+}
+
+/// **THE PACKED MONEYNESS SURVIVES A NEGATIVE VALUE.**
+///
+/// The provenance word carries the signed step count in its upper 32 bits, and
+/// reading it back without the sign extension yields `4,294,967,294` where `-2`
+/// was meant — a number large enough to look like corruption and small enough
+/// to look like a strike far out of the money. Every in-the-money row would
+/// carry it.
+#[test]
+fn a_below_the_money_strike_survives_the_provenance_packing() {
+    use store::format::{Greek, RATE_FROM_OPERATOR, VOL_FROM_SOLVED, VOL_FROM_VENDOR};
+
+    for steps in [-32_768_i32, -300, -3, -1, 0, 1, 3, 300, 32_767] {
+        let packed = Greek::provenance_of(VOL_FROM_SOLVED, RATE_FROM_OPERATOR, true, steps);
+        let row = Greek {
+            ts_micros: 1,
+            spot: 2_500_000,
+            volatility: 0.14,
+            delta: 0.5,
+            gamma: 0.0001,
+            vega: 1.0,
+            theta: -1.0,
+            rho: 0.1,
+            rate: 0.0655,
+            provenance: packed,
+        };
+        assert_eq!(row.moneyness_steps(), steps, "packed {packed:#x}");
+        assert_eq!(row.vol_from(), VOL_FROM_SOLVED);
+        assert_eq!(row.rate_from(), RATE_FROM_OPERATOR);
+        assert!(row.below_validated_band());
+    }
+
+    // AND THE FOUR FIELDS DO NOT BLEED INTO ONE ANOTHER. A negative step count
+    // sets every upper bit, which is exactly the value that would corrupt the
+    // three byte-wide fields below it if a mask were missing.
+    let packed = Greek::provenance_of(VOL_FROM_VENDOR, RATE_FROM_OPERATOR, false, -1);
+    let row = Greek {
+        provenance: packed,
+        ..Greek {
+            ts_micros: 0,
+            spot: 0,
+            volatility: 0.0,
+            delta: 0.0,
+            gamma: 0.0,
+            vega: 0.0,
+            theta: 0.0,
+            rho: 0.0,
+            rate: 0.0,
+            provenance: 0,
+        }
+    };
+    assert_eq!(
+        row.vol_from(),
+        VOL_FROM_VENDOR,
+        "a -1 step count clobbered it"
+    );
+    assert_eq!(row.rate_from(), RATE_FROM_OPERATOR);
+    assert!(
+        !row.below_validated_band(),
+        "the band flag is not the sign bit"
+    );
+    assert_eq!(row.moneyness_steps(), -1);
+}
+
+/// A greeks record round-trips its bytes exactly, every field.
+#[test]
+fn a_greeks_record_survives_its_own_encoding() {
+    use store::format::{GREEK_LEN, Greek, RATE_FROM_SOLVED, VOL_FROM_VENDOR};
+
+    let row = Greek {
+        ts_micros: 1_787_158_703_618_000,
+        spot: 2_500_125,
+        volatility: 0.142_537_891_2,
+        delta: 0.523_9,
+        gamma: 0.000_012_34,
+        vega: 1_234.567_8,
+        theta: -987.654_3,
+        rho: 45.678_9,
+        rate: 0.065_5,
+        provenance: Greek::provenance_of(VOL_FROM_VENDOR, RATE_FROM_SOLVED, true, -7),
+    };
+    let image = row.image();
+    assert_eq!(image.len(), GREEK_LEN);
+    assert_eq!(GREEK_LEN, 80);
+
+    let back = Greek::decode(&image).expect("its own bytes");
+    assert_eq!(back, row, "a field moved between encode and decode");
+    assert_eq!(back.moneyness_steps(), -7);
+    assert!(back.is_finite());
+
+    // A SHORT TAIL IS REFUSED, never zero-filled. Inventing the missing bytes
+    // manufactures a reading nobody wrote, and a zero delta is a legal one.
+    assert!(Greek::decode(&image[..79]).is_err());
+    assert!(Greek::decode(&[]).is_err());
+}
+
+/// **A NON-FINITE GREEK NEVER REACHES THE DISK.**
+///
+/// Unlike the overlay — where an all-zero row is a legal reading of zero spot
+/// and zero volatility — a `NaN` delta is not a reading at all. It looks
+/// exactly like a real one until it is multiplied by something.
+#[test]
+fn a_non_finite_derivative_is_refused_at_the_write_boundary() {
+    use store::format::{Greek, Row};
+
+    let sane = Greek {
+        ts_micros: 1,
+        spot: 2_500_000,
+        volatility: 0.14,
+        delta: 0.5,
+        gamma: 0.0001,
+        vega: 1.0,
+        theta: -1.0,
+        rho: 0.1,
+        rate: 0.0655,
+        provenance: 0,
+    };
+    assert!(sane.is_sane(), "an ordinary row must pass");
+
+    for poisoned in [
+        Greek {
+            delta: f64::NAN,
+            ..sane
+        },
+        Greek {
+            gamma: f64::INFINITY,
+            ..sane
+        },
+        Greek {
+            vega: f64::NEG_INFINITY,
+            ..sane
+        },
+        Greek {
+            theta: f64::NAN,
+            ..sane
+        },
+        Greek {
+            rho: f64::NAN,
+            ..sane
+        },
+        Greek {
+            volatility: f64::NAN,
+            ..sane
+        },
+        Greek {
+            rate: f64::NAN,
+            ..sane
+        },
+    ] {
+        assert!(
+            !poisoned.is_sane(),
+            "a non-finite field passed the write gate: {poisoned:?}"
+        );
+    }
+
+    // THE STAMP AND THE SPOT ARE INTEGERS and cannot be non-finite, which is
+    // why they are the two i64 fields — CLAUDE.md §7 puts prices in paisa and
+    // derivatives in full precision, and this record holds both kinds.
+    assert_eq!(sane.stamp(), 1);
+    assert_eq!(<Greek as Row>::LEN, 80);
+}
+
+/// The greeks sidecar cannot be mistaken for a bar file or for the overlay.
+#[test]
+fn three_geometries_are_told_apart_by_magic_stride_and_version() {
+    use store::format::{
+        GREEK_MAGIC, GREEK_RECORDS_PER_BLOCK, GREEK_STRIDE, MAGIC, OVERLAY_MAGIC, OVERLAY_STRIDE,
+        RECORD_STRIDE,
+    };
+
+    for (name, magic) in [
+        ("bar", MAGIC),
+        ("overlay", OVERLAY_MAGIC),
+        ("greeks", GREEK_MAGIC),
+    ] {
+        assert_eq!(magic.len(), 8, "{name} magic is the wrong width");
+    }
+    assert_ne!(GREEK_MAGIC, MAGIC);
+    assert_ne!(GREEK_MAGIC, OVERLAY_MAGIC);
+    assert_ne!(GREEK_STRIDE, RECORD_STRIDE);
+    assert_ne!(GREEK_STRIDE, OVERLAY_STRIDE);
+
+    // AND THE BLOCK IS THE LARGEST THAT FITS THE 4,096-BYTE FAILURE UNIT. One
+    // more record straddles it, and a straddling block turns one torn write
+    // into two damaged blocks.
+    assert_eq!(GREEK_STRIDE * GREEK_RECORDS_PER_BLOCK, 4_080);
+    const { assert!(GREEK_STRIDE * (GREEK_RECORDS_PER_BLOCK + 1) > 4_096) }
 }

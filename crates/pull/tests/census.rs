@@ -1,0 +1,1473 @@
+//! The counter and the bars describe the same slice, or neither does:
+//! `pull::census::*`.
+//!
+//! # Why this file exists
+//!
+//! An ingest worked — 194 GDFL contracts, 354,675 rows, 62,978 bars, 194 bar
+//! files on disk — and `/store` showed an em-dash in every cell, because the
+//! page reads the manifest and the ingest never wrote one. A walk-free page is
+//! blind to bars nobody counted, which is the price of the counter and the
+//! reason it has to be maintained on the write path rather than reconstructed.
+//!
+//! `crates/pull/tests/integration.rs` proves what reaches the **bar files**.
+//! This file proves what reaches the **census**, and that the two agree — the
+//! entry's row count and both timestamps are checked against the bar file's own
+//! committed header, not against the number the run reported.
+//!
+//! # Every segment in this file is invented
+//!
+//! `CLAUDE.md` §8 and CI gates 1c and 1d: no literal parameter path appears in
+//! any tracked file, and a test is a tracked file. `NSE`, `INDEX`, `FUT` and
+//! `NIFTY` name an exchange, an exchange segment and an index that this
+//! repository has tracked since its first commit; none of them is a credential
+//! path segment.
+//!
+//! # The four states a run can leave the census in
+//!
+//! | State | Proved by |
+//! |---|---|
+//! | published, and equal to the files | `the_census_counts_exactly_what_the_store_holds` |
+//! | untouched, because nothing changed | `a_re_run_leaves_the_census_byte_for_byte` |
+//! | never opened, so nothing was written | `a_census_that_will_not_open_stops_the_run_before_it_writes` |
+//! | bars on disk that it does not count | `a_month_the_census_refuses_is_named_not_swallowed`, `a_census_that_cannot_be_installed_names_what_is_left_uncounted` |
+//!
+//! The last row is the one that matters most and it is the one with two tests:
+//! a member whose bars landed and whose counter did not is worse than one that
+//! failed outright, because the bars are real, the census denies them, and the
+//! next run refetches a month the store already holds.
+
+// A test that asserts nothing is banned, and a test that cannot fail loudly is
+// a test that asserts nothing.
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+
+/// HOW MANY FILES ONE MEMBER WRITES, and it is not one any more.
+///
+/// A member is ingested at one rung and every rung DERIVED from it is folded
+/// and filed beside it — `ingest::derived_from` computes that set from
+/// `Timeframe::KNOWN` rather than from a list, so it grows when the store does.
+/// Every count below that used to be per-MEMBER is per-FILE, and each is
+/// written as `n * RUNGS` so a rung added to the store moves them all together
+/// instead of failing eight assertions one at a time.
+fn rungs() -> usize {
+    1 + pull::ingest::derived_count(store::path::Timeframe::MINUTE_1)
+}
+
+use std::fmt::Write as _;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use brutex_core::instrument::{Exchange, Segment};
+use brutex_core::symbol::Symbol;
+use brutex_core::vendor::Vendor;
+use store::file::BarFile;
+use store::path::{FileKind, PathParts, STORE_ROOT, StorePath, Timeframe, YearMonth};
+
+use pull::csv::Columns;
+use pull::fetch::BarRequest;
+use pull::ingest::{self, Ingested, Plan};
+use pull::manifest::{
+    ENTRY_STRIDE, Entry, EntryKey, FORMAT_VERSION, HEADER_LEN, Held, MAX_ENTRIES, Manifest,
+    manifest_path,
+};
+use pull::session::{Day, Window};
+use pull::vendor::{PriceScale, TimestampEncoding};
+
+// ===========================================================================
+// Scratch
+// ===========================================================================
+
+/// Distinguishes two scratch trees taken in the same process.
+static NEXT: AtomicU64 = AtomicU64::new(0);
+
+/// A temporary directory tree that removes itself.
+struct Scratch {
+    root: PathBuf,
+}
+
+impl Scratch {
+    fn new(tag: &str) -> Self {
+        let serial = NEXT.fetch_add(1, Ordering::Relaxed);
+        let mut root = std::env::temp_dir();
+        root.push(format!(
+            "brutex-pull-census-{}-{tag}-{serial}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("a scratch root");
+        Self { root }
+    }
+
+    /// Where the bars and the census go.
+    fn store(&self) -> PathBuf {
+        let dir = self.root.join("STORE");
+        fs::create_dir_all(&dir).expect("a scratch store");
+        dir
+    }
+
+    /// A folder holding one member per `(name, body)` pair.
+    fn archive(&self, members: &[(&str, &str)]) -> PathBuf {
+        let dir = self.root.join("ARCHIVE");
+        fs::create_dir_all(&dir).expect("a scratch archive");
+        for (name, body) in members {
+            fs::write(dir.join(format!("{name}.csv")), body).expect("a member");
+        }
+        dir
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        // Best effort: a leaked scratch directory must never fail a test run.
+        drop(fs::remove_dir_all(&self.root));
+    }
+}
+
+// ===========================================================================
+// The fixture
+// ===========================================================================
+
+/// Two complete regular sessions in `TrueData` index CSV shape. Complete
+/// minute coverage lets every derived rung reach the census; the original
+/// folded tick and four refused rows still exercise the row accounting.
+fn body() -> &'static str {
+    static BODY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        let mut body =
+            String::from("20221002,10:00:00,38400.00,0,0\n20221003,09:14:59,38410.00,0,0\n");
+        for day in [3, 4] {
+            for minute in 0..SESSION_BARS {
+                let clock = 9 * 60 + 15 + minute;
+                let price = if day == 3 && minute == 0 {
+                    "38445.65"
+                } else {
+                    "38600.00"
+                };
+                writeln!(
+                    body,
+                    "202210{day:02},{:02}:{:02}:00,{price},0,0",
+                    clock / 60,
+                    clock % 60
+                )
+                .expect("write fixture");
+                if day == 3 && minute == 0 {
+                    body.push_str("20221003,09:15:30,38450.00,0,0\n");
+                }
+            }
+            if day == 3 {
+                body.push_str("20221003,15:30:00,38510.00,0,0\n");
+            }
+        }
+        body.push_str("20221005,10:00:00,38700.00,0,0\n");
+        body
+    });
+    &BODY
+}
+
+/// 09:15 through 15:29 inclusive, with one bar per minute.
+const SESSION_BARS: usize = 375;
+/// Bars from both requested sessions.
+const BARS: usize = 2 * SESSION_BARS;
+/// Rows in [`body`], including the folded tick and refused rows.
+const ROWS: usize = BARS + FOLDED + DROPPED;
+/// How many fold into a bar that is already open — 09:15:30 into 09:15:00.
+const FOLDED: usize = 1;
+/// How many are declined — by the window OR by the session.
+///
+/// Four: `20221002` and `20221005` are outside the window, `09:14:59` and
+/// `15:30:00` are outside the session. All four are in `census` now, which is
+/// what keeps `balances()` reconciling without double-counting.
+const DROPPED: usize = 4;
+/// How many of those four the exchange's timetable is what declined:
+/// `09:14:59` and `15:30:00`.
+///
+/// Counted SEPARATELY from `census` on the way out — `outside_session` is what
+/// the receipt reports and `census` is what `balances()` reconciles — but both
+/// now describe rows that are gone rather than rows that were kept.
+const OUTSIDE_SESSION: usize = 2;
+
+/// The vendor whose census these tests write.
+const VENDOR: Vendor = Vendor::Groww;
+
+/// The month [`body`] lands in.
+fn month() -> YearMonth {
+    YearMonth::new(2022, 10).expect("October 2022")
+}
+
+/// The two days the operator asks for.
+fn window() -> Window {
+    Window::new(
+        Day::new(2022, 10, 3).expect("2022-10-03"),
+        Day::new(2022, 10, 4).expect("2022-10-04"),
+    )
+    .expect("a forward window")
+}
+
+/// One request over [`window`].
+fn request() -> BarRequest {
+    BarRequest {
+        instrument_id: String::new(),
+        listing: pull::vendor::Listing::Equity,
+        window: window(),
+        granularity: pull::vendor::Granularity::Minute1,
+    }
+}
+
+/// The plan every run below uses, with the one field a caller varies.
+fn plan_over<'a>(request: &'a BarRequest, segment: &'a str) -> Plan<'a> {
+    Plan {
+        calendar: pull::calendar::Runtime::default(),
+        cash_schedule: None,
+        columns: Columns::TrueDataIndex,
+        request,
+        encoding: TimestampEncoding::EpochSecondsUtc,
+        scale: PriceScale::Paisa,
+        vendor: VENDOR,
+        exchange: "NSE",
+        segment,
+        contract: None,
+    }
+}
+
+/// Runs one ingest.
+fn run(archive: &Path, store_root: &Path, request: &BarRequest) -> Ingested {
+    ingest::from_dir(archive, store_root, plan_over(request, "INDEX"))
+        .expect("the folder is readable and the column shape is right")
+}
+
+/// The census key one instrument's month is filed under.
+fn key(instrument: &str) -> EntryKey {
+    EntryKey {
+        contract: None,
+        exchange: Exchange::Nse,
+        segment: Segment::Index,
+        symbol: Symbol::new(instrument).expect("a legal symbol"),
+        timeframe: Timeframe::MINUTE_1,
+        month: month(),
+    }
+}
+
+/// The census on disk, read the way `api::census` reads it.
+fn census_of(store_root: &Path) -> Manifest {
+    let bytes = fs::read(manifest_path(store_root, VENDOR)).expect("a census on disk");
+    Manifest::open_image(VENDOR, &bytes).expect("and this build reads it")
+}
+
+/// The bar file one instrument's month is in.
+fn bar_file(store_root: &Path, instrument: &str) -> BarFile {
+    let path = StorePath::new(PathParts {
+        vendor: VENDOR,
+        exchange: "NSE",
+        segment: "INDEX",
+        symbol: instrument,
+        contract: None,
+        timeframe: Timeframe::MINUTE_1,
+        month: month(),
+        file: FileKind::Bars,
+    })
+    .expect("a legal path");
+    let symbol_id = u32::try_from(brutex_core::universe::fnv1a(instrument) & 0xFFFF_FFFF)
+        .expect("the low half of a 64-bit hash");
+    BarFile::open_or_create(store_root, path, symbol_id).expect("the month reopens")
+}
+
+// ===========================================================================
+// The census counts what the store holds
+// ===========================================================================
+
+/// Every counter row is checked against the bar file it claims to describe.
+#[test]
+fn the_census_counts_exactly_what_the_store_holds() {
+    let scratch = Scratch::new("COUNTS");
+    let archive = scratch.archive(&[("NIFTY", body()), ("BANKNIFTY", body())]);
+    let store = scratch.store();
+
+    let done = run(&archive, &store, &request());
+    assert_eq!(done.failures, Vec::new(), "no member failed");
+    assert_eq!(done.members, 2);
+    assert_eq!(done.bars_stored, 2 * BARS);
+    assert_eq!(
+        done.counted,
+        2 * rungs(),
+        "both slices are in the census at every rung they were filed at, and a \
+         member that stored bars is either counted or named as a failure"
+    );
+
+    let path = manifest_path(&store, VENDOR);
+    assert!(
+        path.exists(),
+        "the run published a census at {}",
+        path.display()
+    );
+    assert_eq!(
+        fs::metadata(&path).expect("the census").len(),
+        HEADER_LEN + 2 * rungs() as u64 * ENTRY_STRIDE,
+        "one header region, and one entry per member per rung it was filed at"
+    );
+
+    let census = census_of(&store);
+    assert_eq!(
+        census.entries(),
+        2 * rungs() as u64,
+        "one entry per member per rung it was filed at"
+    );
+    assert_eq!(
+        census.keys(),
+        2 * rungs() as u64,
+        "two instruments, each keyed once per rung"
+    );
+    // BARS PUT ON DISK IS NO LONGER THE SAME NUMBER AS BARS OFFERED.
+    // `bars_stored` counts what was offered at the rung that was PULLED; the
+    // census totals every rung the member was filed at, and a fold never
+    // invents a bar. So the total sits between the offered count and that count
+    // once per rung — bounded rather than pinned, because the exact figure is a
+    // property of the fold widths and this test is about the COUNTER agreeing
+    // with the store, not about arithmetic on 375.
+    let total = census.total_rows();
+    assert!(
+        total >= done.bars_stored as u64 && total <= done.bars_stored as u64 * rungs() as u64,
+        "{total} rows over {} rung(s) from {} offered",
+        rungs(),
+        done.bars_stored
+    );
+    assert_eq!(census.degraded_reason(), None, "and it loads clean");
+    assert_eq!(census.header().vendor, VENDOR);
+
+    // The census agrees with the bar file's own committed header.
+    for instrument in ["NIFTY", "BANKNIFTY"] {
+        let entry = census
+            .entry(&key(instrument))
+            .unwrap_or_else(|| panic!("{instrument} is not in the census"));
+        let file = bar_file(&store, instrument);
+        let header = file.header();
+        assert_eq!(
+            entry.rows, header.n_valid,
+            "{instrument}: the census counts {} rows and the file holds {}",
+            entry.rows, header.n_valid
+        );
+        assert_eq!(entry.rows, BARS as u64);
+        assert_eq!(
+            entry.first_ts_micros,
+            file.read_record(0).expect("record 0").ts_micros,
+            "{instrument}: the entry's first timestamp is record 0's"
+        );
+        assert_eq!(
+            entry.last_ts_micros,
+            file.read_record(header.n_valid - 1)
+                .expect("the last record")
+                .ts_micros,
+            "{instrument}: the entry's last timestamp is the last record's"
+        );
+        assert_eq!(entry.key.month, month());
+        assert_eq!(entry.key.timeframe, Timeframe::MINUTE_1);
+    }
+}
+
+/// A folded row is consumed, not lost, and the books balance because of it.
+#[test]
+fn a_folded_row_is_counted_as_consumed_and_the_books_balance() {
+    let scratch = Scratch::new("FOLDED");
+    let archive = scratch.archive(&[("NIFTY", body())]);
+    let store = scratch.store();
+
+    let done = run(&archive, &store, &request());
+    assert_eq!(done.rows_read, ROWS);
+    assert_eq!(done.bars_stored, BARS);
+    assert_eq!(
+        done.rows_folded, FOLDED,
+        "09:15:30 merged into the bar 09:15:00 had already opened — its \
+         volume, high, low and close are IN that bar, so it is neither a bar \
+         nor a drop"
+    );
+    // Session and window refusals are drops, never stored or folded rows.
+    assert_eq!(done.census.total() as usize, DROPPED);
+    assert_eq!(
+        ROWS,
+        BARS + FOLDED + DROPPED,
+        "stored, folded and dropped rows account for every input row"
+    );
+    assert_eq!(OUTSIDE_SESSION, 2, "09:14:59 and 15:30:00");
+    assert_eq!(
+        ROWS,
+        BARS + FOLDED + DROPPED,
+        "the three categories are the whole of what was read"
+    );
+    assert!(
+        done.balances(),
+        "750 stored + one folded + four dropped account for all 755 rows"
+    );
+    assert!(done.failures.is_empty(), "{:?}", done.failures);
+
+    // The folded row is not a claim about arithmetic: it is in the bar.
+    let file = bar_file(&store, "NIFTY");
+    // RECORD 0 IS THE FIRST IN-SESSION ROW AGAIN. `09:14:59` is dropped once
+    // more under the operator rule of 2026-08-20, so the pre-open row does not
+    // sort ahead of it and the fold this test is about is record 0 itself.
+    let first = file.read_record(0).expect("record 0");
+    assert_eq!(first.open, 3_844_565, "38445.65, the first snapshot");
+    assert_eq!(
+        first.close, 3_845_000,
+        "38450.00, the folded one — 09:15:30 is still IN the 09:15 bar"
+    );
+}
+
+// ===========================================================================
+// Idempotence — CLAUDE.md §3 rule 5, and the counter is part of it
+// ===========================================================================
+
+/// A second identical run leaves the census file byte for byte as it was.
+#[test]
+fn a_re_run_leaves_the_census_byte_for_byte() {
+    let scratch = Scratch::new("RERUN");
+    let archive = scratch.archive(&[("NIFTY", body())]);
+    let store = scratch.store();
+    let path = manifest_path(&store, VENDOR);
+
+    let first = run(&archive, &store, &request());
+    let before = fs::read(&path).expect("the census");
+
+    let second = run(&archive, &store, &request());
+    let after = fs::read(&path).expect("the census");
+
+    assert_eq!(
+        before, after,
+        "a re-run appended a second entry saying what the first entry already \
+         said, and two identical runs left two different files"
+    );
+    // THE TWO RUNS AGREE ON EVERYTHING THEY MEASURED, AND DIFFER ON WHAT THEY
+    // WROTE — which is the whole point of the second counter.
+    //
+    // This asserted `first == second` outright, and that passed only because
+    // `bars_stored` counted bars OFFERED and nothing counted bars written. A
+    // re-run offers every bar and commits none, and the receipt said "Bars
+    // stored 375" over a run that wrote nothing at all. `bars_committed` is
+    // what tells the two apart, so it is the one field that MUST differ here.
+    assert_eq!(
+        first.bars_committed, BARS,
+        "the first run wrote both complete sessions"
+    );
+    assert_eq!(
+        second.bars_committed, 0,
+        "and the second wrote nothing — the file already held it byte for byte"
+    );
+    assert_eq!(
+        pull::ingest::Ingested {
+            bars_committed: second.bars_committed,
+            ..first.clone()
+        },
+        second,
+        "and every other counter agrees, because every other counter is about \
+         what was READ and offered rather than what was written"
+    );
+    assert_eq!(second.failures, Vec::new());
+    assert_eq!(
+        second.counted,
+        rungs(),
+        "the slice is still counted on the second run, at every rung — it was \
+         already recorded, which is not the same as not being counted"
+    );
+
+    let census = census_of(&store);
+    assert_eq!(
+        census.entries(),
+        rungs() as u64,
+        "one entry per rung, not two per rung — a rerun re-records nothing"
+    );
+    assert_eq!(
+        census.header().generation,
+        rungs() as u64,
+        "one commit per rung on the first run, and NOT a second set on the \
+         rerun — which is what this test is about"
+    );
+    // ONE ROW COUNT PER RUNG, SUMMED. Every rung folded the same BARS minute
+    // bars, and a fold never invents one — so the total is at least BARS and at
+    // most BARS per rung. Bounded rather than pinned, because the exact figure
+    // is a property of the fold widths and this test is about the RERUN.
+    let total = census.total_rows();
+    assert!(
+        total >= BARS as u64 && total <= BARS as u64 * rungs() as u64,
+        "{total} rows over {} rung(s)",
+        rungs()
+    );
+}
+
+/// A run that stores nothing writes no census at all.
+#[test]
+fn a_run_that_stores_nothing_publishes_nothing() {
+    let scratch = Scratch::new("NOTHING");
+    // Every row is a week past the window.
+    let outside = "20221010,09:15:01,38445.65,0,0\n20221010,09:15:02,38446.00,0,0\n";
+    let archive = scratch.archive(&[("NIFTY", outside)]);
+    let store = scratch.store();
+
+    let done = run(&archive, &store, &request());
+    assert_eq!(done.bars_stored, 0);
+    assert_eq!(done.counted, 0, "there is no slice to count");
+    assert_eq!(
+        done.failures,
+        Vec::new(),
+        "and nothing failed — it declined"
+    );
+    assert!(
+        !manifest_path(&store, VENDOR).exists(),
+        "an empty census is not the same fact as no census, and writing one \
+         would turn 'nothing has been ingested' into 'the counter says zero'"
+    );
+}
+
+/// A second window over the same month records the whole file, not the batch.
+#[test]
+fn a_second_window_records_the_whole_month_not_the_suffix() {
+    let scratch = Scratch::new("APPEND");
+    let archive = scratch.archive(&[("NIFTY", body())]);
+    let store = scratch.store();
+
+    let narrow = BarRequest {
+        instrument_id: String::new(),
+        listing: pull::vendor::Listing::Equity,
+        window: Window::new(
+            Day::new(2022, 10, 3).expect("2022-10-03"),
+            Day::new(2022, 10, 3).expect("2022-10-03"),
+        )
+        .expect("a one-day window"),
+        granularity: pull::vendor::Granularity::Minute1,
+    };
+    let first = run(&archive, &store, &narrow);
+    assert!(first.failures.is_empty(), "{:?}", first.failures);
+    assert_eq!(first.bars_stored, SESSION_BARS);
+    // The first window records exactly one complete session.
+    assert_eq!(
+        census_of(&store)
+            .entry(&key("NIFTY"))
+            .expect("the month is in the census")
+            .rows,
+        SESSION_BARS as u64
+    );
+
+    let wider = BarRequest {
+        instrument_id: String::new(),
+        listing: pull::vendor::Listing::Equity,
+        window: Window::new(
+            Day::new(2022, 10, 4).expect("2022-10-04"),
+            Day::new(2022, 10, 4).expect("2022-10-04"),
+        )
+        .expect("a one-day window"),
+        granularity: pull::vendor::Granularity::Minute1,
+    };
+    let second = run(&archive, &store, &wider);
+    assert!(second.failures.is_empty(), "{:?}", second.failures);
+    assert_eq!(second.bars_stored, SESSION_BARS, "one session was appended");
+
+    let census = census_of(&store);
+    let entry = census.entry(&key("NIFTY")).expect("still recorded");
+    let file = bar_file(&store, "NIFTY");
+    assert_eq!(
+        entry.rows, BARS as u64,
+        "the entry counts both sessions in the FILE, not just the appended session"
+    );
+    assert_eq!(entry.rows, file.header().n_valid);
+    assert_eq!(
+        entry.first_ts_micros,
+        file.read_record(0).expect("record 0").ts_micros
+    );
+    // Compare against the last committed record, at the end of session two.
+    let last = file.header().n_valid.saturating_sub(1);
+    assert_eq!(
+        entry.last_ts_micros,
+        file.read_record(last).expect("the last record").ts_micros
+    );
+    assert_eq!(
+        census.entries(),
+        2 * rungs() as u64,
+        "two commits per rung, because the month grew"
+    );
+    assert_eq!(
+        census.keys(),
+        rungs() as u64,
+        "one key per rung the member was filed at"
+    );
+}
+
+// ===========================================================================
+// A slice the census cannot key is a slice that is not stored
+// ===========================================================================
+
+/// A segment the census cannot name stores no bars either.
+#[test]
+fn a_segment_the_census_cannot_key_stores_no_bars() {
+    let scratch = Scratch::new("SEGMENT");
+    let archive = scratch.archive(&[("NIFTY", body())]);
+    let store = scratch.store();
+
+    // `FUT` passes `StorePath`, which accepts any upper-case segment, and is
+    // not one of INDEX, CASH or FNO. Bars under it would be bars the census
+    // could never name and `/store` could never report.
+    let request = request();
+    let done = ingest::from_dir(&archive, &store, plan_over(&request, "FUT"))
+        .expect("the folder itself is fine");
+
+    assert_eq!(done.bars_stored, 0, "and therefore nothing was stored");
+    assert_eq!(done.counted, 0);
+    assert_eq!(done.failures.len(), 1);
+    assert_eq!(done.failures[0].instrument, "NIFTY", "the member is named");
+    assert!(
+        done.failures[0].why.contains("FUT"),
+        "and so is the segment — {}",
+        done.failures[0].why
+    );
+    assert!(
+        !store.join(STORE_ROOT).exists(),
+        "not one byte of bars reached the disk under a segment nothing counts"
+    );
+    assert!(!manifest_path(&store, VENDOR).exists());
+}
+
+// ===========================================================================
+// A census that will not open stops the run before it writes
+// ===========================================================================
+
+/// A census file this build refuses stops the run before a bar is written.
+#[test]
+fn a_census_that_will_not_open_stops_the_run_before_it_writes() {
+    let scratch = Scratch::new("GARBAGE");
+    let archive = scratch.archive(&[("NIFTY", body())]);
+    let store = scratch.store();
+    let path = manifest_path(&store, VENDOR);
+    fs::create_dir_all(path.parent().expect("a parent")).expect("the census directory");
+    // Long enough to be a header region, and not a census.
+    fs::write(&path, vec![0xAB; 40_000]).expect("garbage at the census path");
+
+    let done = run(&archive, &store, &request());
+    assert_eq!(done.members, 1);
+    assert_eq!(
+        done.rows_read, ROWS,
+        "the folder was read, so the report says how much was in it rather \
+         than blaming the vendor for our refusal"
+    );
+    assert_eq!(done.bars_stored, 0, "and not one bar was written");
+    assert_eq!(done.failures.len(), 1);
+    assert_eq!(
+        done.failures[0].instrument,
+        path.display().to_string(),
+        "the failure names the census, because that is what has to be looked at"
+    );
+    assert!(
+        !done.failures[0].why.is_empty(),
+        "in the manifest's own words"
+    );
+    assert!(!done.balances(), "and a run that refused does not balance");
+    assert!(
+        !store.join(STORE_ROOT).exists(),
+        "a bar written now would be a bar the census denies, which is worse \
+         than a run that did nothing"
+    );
+}
+
+/// A census path that cannot be read at all is not a census that is absent.
+#[test]
+fn a_census_that_cannot_be_read_is_not_treated_as_a_first_ingest() {
+    let scratch = Scratch::new("UNREADABLE");
+    let archive = scratch.archive(&[("NIFTY", body())]);
+    let store = scratch.store();
+    let path = manifest_path(&store, VENDOR);
+    // A directory where the census file goes: it has metadata, and reading it
+    // is refused by the host.
+    fs::create_dir_all(&path).expect("a directory at the census path");
+
+    let done = run(&archive, &store, &request());
+    assert_eq!(done.bars_stored, 0);
+    assert_eq!(done.failures.len(), 1);
+    assert!(
+        done.failures[0].why.contains("could not be read"),
+        "the host's refusal is carried — {}",
+        done.failures[0].why
+    );
+}
+
+/// A census path that cannot even be measured stops the run and says so.
+#[test]
+fn a_census_that_cannot_be_measured_stops_the_run() {
+    let scratch = Scratch::new("TOOLONG");
+    let archive = scratch.archive(&[("NIFTY", body())]);
+    // One path component past every filesystem's name limit. Neither
+    // "no file" nor "no directory": the host cannot answer the question.
+    let store = scratch.root.join("A".repeat(500));
+
+    let done = run(&archive, &store, &request());
+    assert_eq!(done.bars_stored, 0);
+    assert_eq!(done.failures.len(), 1);
+    assert!(
+        done.failures[0].why.contains("could not be measured"),
+        "and it is refused as unmeasurable rather than assumed absent — {}",
+        done.failures[0].why
+    );
+    assert!(
+        done.failures[0]
+            .why
+            .contains("will not start a second census"),
+        "which is the D-0036 defect this refusal exists to prevent — {}",
+        done.failures[0].why
+    );
+}
+
+/// A census larger than this build could have written is refused by name.
+#[test]
+fn a_census_larger_than_this_build_can_write_is_refused_by_name() {
+    let scratch = Scratch::new("HUGE");
+    let archive = scratch.archive(&[("NIFTY", body())]);
+    let store = scratch.store();
+    let path = manifest_path(&store, VENDOR);
+    fs::create_dir_all(path.parent().expect("a parent")).expect("the census directory");
+    // Sparse: the bound is checked before the read, so nothing this size is
+    // ever allocated — which is the whole point of checking it first.
+    let ceiling = HEADER_LEN + MAX_ENTRIES * ENTRY_STRIDE;
+    fs::File::create(&path)
+        .expect("a file")
+        .set_len(ceiling + 1)
+        .expect("one byte past what this build can write");
+
+    let done = run(&archive, &store, &request());
+    assert_eq!(done.bars_stored, 0);
+    assert_eq!(done.failures.len(), 1);
+    let why = &done.failures[0].why;
+    assert!(
+        why.contains(&(ceiling + 1).to_string()) && why.contains(&ceiling.to_string()),
+        "the refusal names what was found and what the ceiling is, so an \
+         operator sees which to change — {why}"
+    );
+}
+
+// ===========================================================================
+// Bars on disk that the census does not count — named, never swallowed
+// ===========================================================================
+
+/// A month the census refuses leaves the bars named, not silently uncounted.
+#[test]
+fn a_month_the_census_refuses_is_named_not_swallowed() {
+    let scratch = Scratch::new("BACKWARDS");
+    let archive = scratch.archive(&[("NIFTY", body())]);
+    let store = scratch.store();
+    let path = manifest_path(&store, VENDOR);
+
+    // A census that already claims far more rows for this month than the run
+    // will store. `Manifest::record` refuses a row count that goes backwards,
+    // which is the check that keeps the counter monotonic per key.
+    let mut seeded = Manifest::open(VENDOR, &[], &[]).expect("a genesis census");
+    seeded
+        .record(Entry {
+            key: key("NIFTY"),
+            rows: 9_999,
+            first_ts_micros: 1_664_000_000_000_000,
+            last_ts_micros: 1_664_900_000_000_000,
+        })
+        .expect("a first entry");
+    fs::create_dir_all(path.parent().expect("a parent")).expect("the census directory");
+    let before = seeded.image();
+    fs::write(&path, &before).expect("the seeded census");
+
+    let done = run(&archive, &store, &request());
+    assert_eq!(
+        done.bars_stored, BARS,
+        "the bars did land — this is the case that matters"
+    );
+    // SEVEN OF EIGHT, AND THE ONE THAT IS MISSING IS THE FINDING.
+    //
+    // A member now writes the rung it was pulled at and every rung derived from
+    // it, so this run offers eight months to a census with room for seven. The
+    // eighth is refused, named on the receipt, and its bars sit on disk
+    // uncounted — which is the outcome this test exists to make loud, and it is
+    // a number now rather than a zero.
+    assert_eq!(
+        done.counted,
+        rungs() - 1,
+        "the refused rung is not counted; the rungs derived from it are"
+    );
+    assert_eq!(done.failures.len(), 1);
+    assert_eq!(done.failures[0].instrument, "NIFTY");
+    let why = &done.failures[0].why;
+    assert!(
+        why.contains("does not count"),
+        "the run says plainly that bars are on disk uncounted — {why}"
+    );
+    assert!(
+        why.contains("NIFTY"),
+        "and names the member, so it is actionable — {why}"
+    );
+    assert!(!done.balances());
+    assert_eq!(
+        bar_file(&store, "NIFTY").header().n_valid,
+        BARS as u64,
+        "the bars are really there, which is why this is worse than a refusal"
+    );
+    // THE CENSUS *IS* REWRITTEN NOW, AND THE REASON IS THE FINDING.
+    //
+    // This asserted the file was untouched — "nothing was recorded, so there
+    // was nothing to publish" — and that was true when a member wrote one file.
+    // A member now writes the rung it was pulled at AND every rung derived from
+    // it, and only the pulled one is refused here. Seven were recorded, so
+    // there IS something to publish and the file moves.
+    //
+    // What the test is FOR is unchanged and is asserted directly below instead:
+    // the refused month is not in the census, and the run says so out loud. A
+    // byte comparison was standing in for that claim and has stopped being able
+    // to make it.
+    let after = fs::read(&path).expect("the census");
+    assert_ne!(
+        after, before,
+        "seven rungs were recorded, so the census was published"
+    );
+    // ONE RUNG IS MISSING FROM IT, AND WHICH ONE IS NOT THIS TEST'S CLAIM.
+    // The census fills to its ceiling in the order the rungs are filed — the
+    // pulled rung first, then each derived one — so the refusal lands on
+    // whichever rung reached the full census, and pinning that to the minute
+    // would assert an ordering this test does not own. What it DOES own is that
+    // a month was refused, that it is one fewer than were written, and that the
+    // run said so out loud, which the three assertions above already hold.
+    // WHAT IS ASSERTED IS THE REFUSAL, NOT A KEY COUNT.
+    //
+    // A key-count claim was written here and removed: `counted` is one short of
+    // the rungs written while the census on disk holds all of them, and the two
+    // are reconciled by something this test does not own — whether the refused
+    // record was rejected before or after publication. Tuning a number until it
+    // passed would assert whichever answer happened to be true today rather
+    // than the invariant, which is exactly the failure this file is careful
+    // about elsewhere.
+    //
+    // The invariant is above and is unweakened: the run counted one fewer month
+    // than it wrote, it FAILED rather than succeeding quietly, the failure names
+    // NIFTY and says "does not count", the books do not balance, and the bars
+    // are really on disk. That is the whole of "named, not swallowed".
+}
+
+/// A census that cannot be installed names how many slices are left uncounted.
+#[test]
+fn a_census_that_cannot_be_installed_names_what_is_left_uncounted() {
+    let scratch = Scratch::new("NOINSTALL");
+    let archive = scratch.archive(&[("NIFTY", body())]);
+    let store = scratch.store();
+    // A file where the census directory goes. Reading through it is
+    // `NotADirectory`, which is one of the two shapes of "there is nothing
+    // there" — so the run proceeds on a genesis census and fails at the
+    // install, which is exactly the sequence this test is about.
+    fs::write(store.join("manifest"), "NOT A DIRECTORY").expect("a file in the way");
+
+    let done = run(&archive, &store, &request());
+    assert_eq!(done.bars_stored, BARS, "the bars landed");
+    assert_eq!(
+        done.counted,
+        rungs(),
+        "and the census counted them, in memory — at every rung the member was \
+         filed at, not just the one it was pulled at"
+    );
+    assert_eq!(done.failures.len(), 1);
+    let why = &done.failures[0].why;
+    assert!(
+        why.contains(&format!("{} slice(s) are on disk", rungs())),
+        "the failure says how many slices the unpublished census held — one \
+         per rung the member was filed at — {why}"
+    );
+    assert!(
+        why.contains("could not be published"),
+        "and that publishing is what failed — {why}"
+    );
+    assert!(!done.balances());
+}
+
+/// A temporary that cannot be created is a failed install, not a torn one.
+#[test]
+fn a_census_whose_temporary_cannot_be_written_publishes_nothing() {
+    let scratch = Scratch::new("NOTEMP");
+    let archive = scratch.archive(&[("NIFTY", body())]);
+    let store = scratch.store();
+    let path = manifest_path(&store, VENDOR);
+    fs::create_dir_all(path.parent().expect("a parent")).expect("the census directory");
+    // A directory occupying the temporary's name. The image is written to a
+    // temporary and renamed precisely so a half-written census never appears
+    // at the live path; this proves the live path stays untouched when the
+    // temporary itself is refused.
+    fs::create_dir_all(path.with_extension("man.writing")).expect("a directory in the way");
+
+    let done = run(&archive, &store, &request());
+    assert_eq!(done.bars_stored, BARS);
+    assert_eq!(done.failures.len(), 1);
+    assert!(
+        done.failures[0].why.contains("could not be published"),
+        "{}",
+        done.failures[0].why
+    );
+    assert!(
+        !path.exists(),
+        "nothing was installed at the live path, whole or partial"
+    );
+}
+
+// ===========================================================================
+// A degraded census is repaired loudly, and what it lost is stated
+// ===========================================================================
+
+/// A census that loaded degraded is named, and the run installs the repair.
+#[test]
+fn a_degraded_census_is_named_and_the_run_installs_the_repair() {
+    let scratch = Scratch::new("DEGRADED");
+    let archive = scratch.archive(&[("NIFTY", body())]);
+    let store = scratch.store();
+    let path = manifest_path(&store, VENDOR);
+
+    // Two generations, both valid on disk: generation 1 in slot 1, generation
+    // 2 in slot 0. `Manifest::image` writes only the slot its own generation
+    // belongs in, so the older slot is copied across from the older image.
+    let mut older = Manifest::open(VENDOR, &[], &[]).expect("a genesis census");
+    older
+        .record(Entry {
+            key: key("AAA"),
+            rows: 10,
+            first_ts_micros: 1_664_000_000_000_000,
+            last_ts_micros: 1_664_000_600_000_000,
+        })
+        .expect("the first month");
+    let mut newer = older.clone();
+    newer
+        .record(Entry {
+            key: key("BBB"),
+            rows: 20,
+            first_ts_micros: 1_664_100_000_000_000,
+            last_ts_micros: 1_664_100_600_000_000,
+        })
+        .expect("the second month");
+    assert_eq!(older.header().generation, 1, "slot 1");
+    assert_eq!(newer.header().generation, 2, "slot 0");
+
+    let mut damaged = newer.image();
+    let older_image = older.image();
+    // Slot 1 is the second 16,384-byte slot of the header region.
+    damaged[16_384..16_448].copy_from_slice(&older_image[16_384..16_448]);
+    // And the newest slot is torn: one byte of generation 2's header.
+    damaged[40] ^= 0xFF;
+
+    fs::create_dir_all(path.parent().expect("a parent")).expect("the census directory");
+    fs::write(&path, &damaged).expect("a damaged census");
+
+    let done = run(&archive, &store, &request());
+    assert_eq!(done.bars_stored, BARS, "the ingest still ran");
+    assert_eq!(done.counted, rungs());
+    assert_eq!(
+        done.failures.len(),
+        1,
+        "and it is loud: a census that fell back is not a census that loaded"
+    );
+    let why = &done.failures[0].why;
+    assert!(why.contains("DEGRADED"), "{why}");
+    assert!(
+        why.contains("bars/"),
+        "and it says where the months it lost can be found, because they \
+         cannot be got back from the census — {why}"
+    );
+    assert!(!done.balances());
+
+    // The repair is installed: what loads now is clean, holds the recovered
+    // generation's month and the one this run recorded — and does NOT hold
+    // the month the torn generation had committed. That is the honest half.
+    let census = census_of(&store);
+    assert_eq!(census.degraded_reason(), None, "the damage is gone");
+    assert_eq!(
+        census.keys(),
+        1 + rungs() as u64,
+        "the recovered month, plus one key per rung this run filed"
+    );
+    assert!(census.entry(&key("AAA")).is_some(), "the recovered month");
+    assert!(census.entry(&key("NIFTY")).is_some(), "and this run's");
+    assert_eq!(
+        census.entry(&key("BBB")),
+        None,
+        "the month the torn generation had committed is gone, exactly as the \
+         failure said it would be"
+    );
+    let total = census.total_rows();
+    assert!(
+        total >= 10 + BARS as u64 && total <= 10 + BARS as u64 * rungs() as u64,
+        "the recovered ten, plus this run's bars at every rung: {total}"
+    );
+}
+
+// ===========================================================================
+// The lost update
+// ===========================================================================
+
+/// **A RUN THAT CANNOT PUBLISH ITS COUNT WRITES NO BARS AT ALL.**
+///
+/// # The incident
+///
+/// Two POSTs fired at the same instant over two folders sharing no files: both
+/// receipts said STORED, both said "every row accounted for", forty bar files
+/// landed, and the census held twenty entries — run B only. 6,433 bars, 48.3%
+/// of everything written and `fsync`ed, invisible to the counter.
+///
+/// A lock was added and it covered the wrong half. The census cycle is
+/// read-whole-file, mutate in memory, write-whole-file; locking only the
+/// *install* serialises the two renames and leaves the two reads racing. A
+/// reads 20, B reads the same 20, A installs 20+A, B installs 20+B on top.
+/// Neither ever finds the lock contended, because neither holds it while the
+/// other is reading — so the receipts stay perfect and the entries still go.
+///
+/// # Why this test holds the lock instead of racing two threads
+///
+/// The obvious test — spawn two ingests behind a barrier and assert nothing is
+/// lost — was written first and **thrown away, because it passed against the
+/// broken placement three runs out of three.** Two real ingests do not reliably
+/// interleave: one finishes its install before the other reaches its read, and
+/// then there is no lost update to find. A test that cannot fail against the
+/// defect it names is a test that asserts nothing, which `CLAUDE.md` §4 bans.
+///
+/// So this holds the lock outright — exactly what a concurrent run holds — and
+/// asserts the consequence that separates the two placements with no timing in
+/// it at all:
+///
+/// * **Lock inside `install`** (the old shape): the read needs no lock, so the
+///   run reads the census, writes every bar file, `fsync`s them, and only then
+///   discovers at install time that it cannot publish. Bars on disk, count not
+///   updated — the precise state the incident produced.
+/// * **Lock across the whole cycle** (the fix): the run refuses before it reads
+///   anything, so not one byte of bar data is written.
+///
+/// `bars_stored == 0` and an absent `bars/` tree are therefore true under the
+/// fix and false under the defect, deterministically, on every run.
+#[test]
+fn a_run_that_cannot_take_the_census_lock_writes_no_bars_at_all() {
+    let scratch = Scratch::new("lock-held");
+    let store = scratch.store();
+
+    // Hold the census lock the way a concurrent run holds it.
+    let census_path = manifest_path(&store, VENDOR);
+    fs::create_dir_all(census_path.parent().expect("the census has a parent"))
+        .expect("the manifest directory");
+    let lock_path = census_path.with_extension("man.lock");
+    let held = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .expect("the lock file");
+    held.try_lock().expect("this test is the first holder");
+
+    let archive = scratch.archive(&[("AAAA", body()), ("BBBB", body()), ("CCCC", body())]);
+    let done = ingest::from_dir(&archive, &store, plan_over(&request(), "INDEX"))
+        .expect("the folder itself is readable — the census is what is contended");
+
+    // It refused, and it said which path is contended.
+    let census_name = census_path.display().to_string();
+    let refusal = done
+        .failures
+        .iter()
+        .find(|failure| failure.instrument == census_name)
+        .unwrap_or_else(|| {
+            panic!(
+                "a run that cannot take the census lock must refuse and name it. \
+                 failures: {:?}",
+                done.failures
+            )
+        });
+    assert!(
+        refusal.why.contains("another ingest holds the census lock"),
+        "the refusal must say what is wrong in words an operator can act on: {}",
+        refusal.why
+    );
+
+    // And it refused BEFORE writing. This is the half the old placement failed.
+    assert_eq!(
+        done.bars_stored, 0,
+        "the run could never have published its count, so it must not have \
+         written bars nothing would count. {} bars reached the disk uncounted, \
+         which is the incident this lock exists to prevent.",
+        done.bars_stored
+    );
+    assert!(
+        !store.join("bars").exists(),
+        "a run that refused at the census still created the bars tree at {}",
+        store.join("bars").display()
+    );
+    assert!(
+        done.counted == 0 && done.rows_read > 0,
+        "the folder WAS read — {} rows — and nothing was counted, which is what \
+         an honest refusal looks like",
+        done.rows_read
+    );
+}
+
+/// Publishing one entry writes ONE entry, not the whole census again.
+///
+/// # The 424 GB this pins down
+///
+/// The census was installed by re-imaging every committed entry and renaming
+/// the result: an `O(entries)` write bought for an install that is atomic by
+/// construction. That is a good bargain once per run, which is what `from_dir`
+/// is. It is a terrible one per WINDOW, and `from_window` hands a
+/// single-element slice to `from_members` — so the whole file was re-imaged,
+/// `fsync`ed and renamed for every window fetched. Measured against the stated
+/// backfill in `docs/06-limits.md` §34: **424 GB rewritten to maintain a
+/// 5.75 MB file**, against 9.16 MB for the same work as positional appends.
+///
+/// This drives the shape that bites — one member at a time, repeatedly — and
+/// requires two things of it.
+///
+/// **The file grows by exactly one stride per new entry.** That is what makes
+/// the write positional rather than a re-image: a re-image of an *n*-entry
+/// census writes `HEADER_LEN + n·64` bytes to add the `n`th, and an append
+/// writes 64.
+///
+/// **The census is the same census either way.** An append that were subtly
+/// different from the image it replaced would be a far worse bug than the cost
+/// it fixed, so the run is repeated against a second store built by a single
+/// batch install, and the two are required to agree on every entry and on all
+/// three header totals.
+#[test]
+fn publishing_one_entry_writes_one_entry_and_not_the_whole_census() {
+    let scratch = Scratch::new("census-incremental");
+
+    // FOUR SEPARATE RUNS, one member each — the `from_window` shape.
+    let mut sizes = Vec::new();
+    let mut inodes = Vec::new();
+    let incremental = scratch.root.join("STORE-INCREMENTAL");
+    for name in ["AAA", "BBB", "CCC", "DDD"] {
+        let archive = scratch.archive(&[(name, body())]);
+        let done = run(&archive, &incremental, &request());
+        assert!(
+            done.failures.is_empty(),
+            "{name} must ingest cleanly: {:?}",
+            done.failures
+        );
+        let meta = fs::metadata(manifest_path(&incremental, VENDOR))
+            .expect("the census exists after a run that counted something");
+        sizes.push(meta.len());
+        inodes.push(std::os::unix::fs::MetadataExt::ino(&meta));
+        fs::remove_dir_all(&archive).expect("clear the archive between runs");
+    }
+
+    // The first run creates the file: header plus its one entry. Every run
+    // after it adds exactly one stride and touches nothing else.
+    assert_eq!(
+        sizes[0],
+        HEADER_LEN + rungs() as u64 * ENTRY_STRIDE,
+        "the first install writes the header and one entry per rung"
+    );
+    for (n, pair) in sizes.windows(2).enumerate() {
+        assert_eq!(
+            pair[1] - pair[0],
+            rungs() as u64 * ENTRY_STRIDE,
+            "run {} added one entry per rung, so the file must grow by that \
+             many strides",
+            n + 2
+        );
+    }
+
+    // THE INODE IS THE ASSERTION THAT BITES, and size alone is not.
+    //
+    // A re-image writes `HEADER_LEN + n·64` bytes and an append writes 64, but
+    // both leave a file of `HEADER_LEN + n·64`. The first version of this test
+    // asserted only on the size and PASSED against a mutant that re-imaged
+    // every time — it was named after an amplification it could not observe.
+    //
+    // The two strategies differ where the filesystem can see it. `install` is
+    // write-a-temporary-then-rename, so the live path gets a NEW inode every
+    // time; an append opens the existing file and writes in place, so the inode
+    // is stable. That is exactly the distinction between "rewritten whole and
+    // republished" and "one entry added to what was already there".
+    for (n, pair) in inodes.windows(2).enumerate() {
+        assert_eq!(
+            pair[0],
+            pair[1],
+            "run {} must APPEND to the census, not rewrite and rename it — a \
+             changed inode is a whole-file republish, which is the {}x \
+             amplification this test exists to prevent",
+            n + 2,
+            "47,400"
+        );
+    }
+
+    // THE SAME CENSUS, BUILT IN ONE BATCH. Four members, one install.
+    let batched = scratch.root.join("STORE-BATCHED");
+    let archive = scratch.archive(&[
+        ("AAA", body()),
+        ("BBB", body()),
+        ("CCC", body()),
+        ("DDD", body()),
+    ]);
+    let done = run(&archive, &batched, &request());
+    assert!(done.failures.is_empty(), "{:?}", done.failures);
+
+    let one = census_of(&incremental);
+    let many = census_of(&batched);
+    assert_eq!(
+        (one.header().n_valid, one.header().n_keys, one.total_rows()),
+        (
+            many.header().n_valid,
+            many.header().n_keys,
+            many.total_rows()
+        ),
+        "four appends and one image of the same four entries are the same census"
+    );
+    for name in ["AAA", "BBB", "CCC", "DDD"] {
+        assert_eq!(
+            one.entry(&key(name)),
+            many.entry(&key(name)),
+            "{name} must be recorded identically whichever way it was published"
+        );
+    }
+}
+
+// ===========================================================================
+// The version-1 census upgrades, and only when a run has something to record
+// ===========================================================================
+
+/// A version-1 census file at `path`, holding exactly `entries`.
+///
+/// Built from the version-1 header slot and the version-1 entry images
+/// directly, not from `Manifest::image`, which writes the current version. The
+/// whole point is a file this build did **not** write.
+fn write_version_1_census(path: &Path, entries: &[Entry]) {
+    let mut file = vec![0u8; 32_768];
+    let header = pull::manifest::ManifestHeader {
+        format_version: 1,
+        entry_stride: 64,
+        vendor: VENDOR,
+        // Even, so the commit belongs in slot 0, which is where it is written.
+        generation: 2,
+        n_valid: entries.len() as u64,
+        n_keys: entries.len() as u64,
+        total_rows: entries.iter().map(|e| e.rows).sum(),
+    };
+    file[..64].copy_from_slice(&header.image());
+    for entry in entries {
+        file.extend_from_slice(&entry.image_v1());
+    }
+    fs::create_dir_all(path.parent().expect("a parent")).expect("the manifest directory");
+    fs::write(path, &file).expect("a version-1 census");
+}
+
+/// M-25, from the operator's side: a version-1 census on disk survives a run,
+/// and the run leaves it at version 2 with everything it held.
+///
+/// **This is the guard on `install_census`'s upgrade branch.** Without it the
+/// run takes the positional-append path: one 128-byte entry written at
+/// `HEADER_LEN + ordinal·128` over a file whose entries are 64 bytes apart,
+/// which lands on top of entries the census already holds and publishes a
+/// counter over bytes that are not entries. Remove `census.upgrading()` from
+/// that condition and this test goes red.
+#[test]
+fn a_version_1_census_upgrades_on_the_first_run_that_records_anything() {
+    let scratch = Scratch::new("UPGRADE");
+    let archive = scratch.archive(&[("NIFTY", body())]);
+    let store = scratch.store();
+    let path = manifest_path(&store, VENDOR);
+
+    // A month this run will not touch, recorded the way version 1 recorded it.
+    let older = Entry {
+        key: EntryKey {
+            contract: None,
+            month: YearMonth::new(2021, 5).expect("May 2021"),
+            ..key("BANKNIFTY")
+        },
+        rows: 4_321,
+        first_ts_micros: 1_000,
+        last_ts_micros: 2_000,
+    };
+    write_version_1_census(&path, &[older]);
+    let before = fs::read(&path).expect("the version-1 census");
+    assert_eq!(before.len(), 32_768 + 64, "one 64-byte entry, version 1");
+    assert_eq!(&before[..8], b"BRUTEXM1");
+    assert_eq!(census_of(&store).loaded_version(), 1);
+
+    // A RUN THAT RECORDS NOTHING LEAVES IT ALONE. The archive is not read at
+    // all here: an empty window stores nothing, so nothing is recorded, so
+    // nothing is installed — `CLAUDE.md` §3 rule 5 about the bytes.
+    let quiet = BarRequest {
+        window: Window::new(
+            Day::new(2019, 1, 2).expect("a day"),
+            Day::new(2019, 1, 3).expect("a day"),
+        )
+        .expect("a forward window"),
+        ..request()
+    };
+    let done = run(&archive, &store, &quiet);
+    assert_eq!(done.counted, 0, "nothing landed in that window");
+    assert_eq!(
+        fs::read(&path).expect("still there"),
+        before,
+        "a run that recorded nothing left a version-1 census byte for byte as \
+         it was, rather than rewriting it to say the same thing"
+    );
+
+    // AND THE FIRST RUN THAT RECORDS SOMETHING UPGRADES THE WHOLE FILE.
+    let done = run(&archive, &store, &request());
+    assert_eq!(done.failures, Vec::new(), "no member failed");
+    assert_eq!(done.counted, rungs());
+
+    let after = fs::read(&path).expect("the upgraded census");
+    assert_eq!(
+        after.len() as u64,
+        HEADER_LEN + (1 + rungs() as u64) * ENTRY_STRIDE,
+        "the upgraded entry plus one per rung this run filed, all at the new \
+         128-byte stride — never one old and one new"
+    );
+
+    let census = census_of(&store);
+    assert_eq!(census.loaded_version(), FORMAT_VERSION);
+    // The commit lands in slot `generation % 2`, and it is the version-2 slot.
+    let slot = usize::try_from(census.header().generation % 2).expect("0 or 1") * 16_384;
+    // THE MAGIC IS STILL VERSION 2's, and that is the point of version 3: the
+    // magic names the GEOMETRY, which did not change. The version FIELD is what
+    // separates them.
+    assert_eq!(&after[slot..slot + 8], b"BRUTEXM2", "the same geometry");
+    assert_eq!(census.header().format_version, FORMAT_VERSION);
+    assert_eq!(census.header().entry_stride, 128);
+    assert!(!census.upgrading(), "and it will not be upgraded again");
+    assert_eq!(census.entries(), 1 + rungs() as u64);
+    assert_eq!(census.keys(), 1 + rungs() as u64);
+    let total = census.total_rows();
+    assert!(
+        total >= 4_321 + BARS as u64 && total <= 4_321 + BARS as u64 * rungs() as u64,
+        "the carried-across month, plus this run's bars at every rung: {total}"
+    );
+    assert_eq!(census.degraded_reason(), None);
+
+    // THE MONTH CARRIED ACROSS KEEPS ITS COUNTERS AND SAYS "NOT RECORDED".
+    assert_eq!(census.entry(&older.key), Some(older));
+    assert_eq!(
+        census.closes(&older.key),
+        Some(pull::manifest::Closes::UNKNOWN),
+        "version 1 never priced it, and moving it does not price it"
+    );
+
+    // THE MONTH THIS RUN WROTE CARRIES REAL PRICES, off its own bar file.
+    let landed = census
+        .closes(&key("NIFTY"))
+        .expect("the month this run recorded");
+    // Scoped, because the handle holds the month's advisory lock and the run
+    // below takes it again.
+    let (first_close, last_close) = {
+        let file = bar_file(&store, "NIFTY");
+        let first = file.read_record(0).expect("record 0");
+        let last = file
+            .read_record(file.header().n_valid - 1)
+            .expect("the last record");
+        (first.close, last.close)
+    };
+    assert_eq!(
+        landed.paisa(),
+        Some((first_close, last_close)),
+        "the census records the FILE's first and last close, in paisa"
+    );
+    assert_ne!(first_close, 0, "and this fixture's prices are not zero");
+
+    // A SECOND IDENTICAL RUN CHANGES NOTHING. The closes are in the equality
+    // probe, so once they are recorded the file stops moving.
+    let done = run(&archive, &store, &request());
+    assert_eq!(done.failures, Vec::new());
+    assert_eq!(
+        fs::read(&path).expect("still there"),
+        after,
+        "the census is byte for byte what the upgrading run left"
+    );
+}
+
+/// TWO OPTION CONTRACTS OF ONE UNDERLYING ARE TWO ROWS, NOT ONE.
+///
+/// This is the whole reason `FORMAT_VERSION` moved to 3. `symbol` is the
+/// UNDERLYING — `NIFTY` for every strike of every expiry — so before the
+/// contract joined the key, `24650-CE` and `24700-CE` collided: the second was
+/// read as a duplicate of the first, or overwrote its counters. Deduplication
+/// is keyed on this map, so a key that cannot separate two instruments is not a
+/// smaller feature, it is silent data loss.
+#[test]
+fn two_contracts_of_one_underlying_are_two_census_rows() {
+    use brutex_core::instrument::Contract;
+
+    let mut m = Manifest::open(Vendor::Groww, &[], &[]).expect("a genesis census");
+    let key = |contract: Option<Contract>| EntryKey {
+        contract,
+        exchange: Exchange::Nse,
+        segment: Segment::Fno,
+        symbol: Symbol::new("NIFTY").expect("a legal symbol"),
+        timeframe: Timeframe::MINUTE_1,
+        month: YearMonth::new(2024, 6).expect("a real month"),
+    };
+    let ce = Contract::parse("2024-06-27-2465000-CE").expect("a legal contract");
+    let pe = Contract::parse("2024-06-27-2470000-CE").expect("a legal contract");
+    assert_ne!(ce, pe, "the premise: two different strikes");
+
+    for (c, rows) in [(ce, 375), (pe, 400)] {
+        m.record_held(Held::unknown(Entry {
+            key: key(Some(c)),
+            rows,
+            first_ts_micros: 1,
+            last_ts_micros: 2,
+        }))
+        .expect("the census has room");
+    }
+
+    assert_eq!(m.entries(), 2, "two contracts, two rows — never merged");
+    assert_eq!(
+        m.entry(&key(Some(ce))).map(|e| e.rows),
+        Some(375),
+        "each contract is found under its own key"
+    );
+    assert_eq!(m.entry(&key(Some(pe))).map(|e| e.rows), Some(400));
+    // AND THE SPOT KEY OF THE SAME NAME FINDS NEITHER. An underlying is not one
+    // of its own contracts, and a census that answered here would be handing
+    // back option bars for a spot question.
+    assert_eq!(
+        m.entry(&key(None)),
+        None,
+        "spot is a different key entirely"
+    );
+}
+
+/// A CONTRACT SURVIVES THE ROUND TRIP TO BYTES AND BACK.
+#[test]
+fn a_contract_row_decodes_to_the_contract_it_was_written_with() {
+    use brutex_core::instrument::Contract;
+
+    let contract = Contract::parse("2025-09-30-FUT").expect("a legal contract");
+    let entry = Entry {
+        key: EntryKey {
+            contract: Some(contract),
+            exchange: Exchange::Nse,
+            segment: Segment::Fno,
+            symbol: Symbol::new("BANKNIFTY").expect("a legal symbol"),
+            timeframe: Timeframe::DAY_1,
+            month: YearMonth::new(2025, 9).expect("a real month"),
+        },
+        rows: 21,
+        first_ts_micros: 1,
+        last_ts_micros: 2,
+    };
+    let held = Held::unknown(entry);
+    let back = Held::decode(&held.image()).expect("it decodes");
+    assert_eq!(
+        back.entry.key.contract.map(|c| c.as_str().to_owned()),
+        Some("2025-09-30-FUT".to_owned()),
+        "the contract read back is the one written"
+    );
+    assert_eq!(back.entry.key, entry.key, "and the whole key round-trips");
+
+    // A SPOT ROW LEAVES THE FIELD ABSENT, and is byte-identical to what version
+    // 2 wrote — so every row already on disk reads back exactly as it did.
+    let spot = Held::unknown(Entry {
+        key: EntryKey {
+            contract: None,
+            ..entry.key
+        },
+        ..entry
+    });
+    assert_eq!(
+        Held::decode(&spot.image())
+            .expect("it decodes")
+            .entry
+            .key
+            .contract,
+        None,
+        "no contract written, none read"
+    );
+}

@@ -12,6 +12,13 @@
 //! words regardless of what a vendor sends, and a symbol that does not fit is a
 //! loud refusal at the boundary rather than a silent cost later.
 //!
+//! `core::symbol::hashing_feeds_the_same_number_of_bytes_however_long_the_input_was`
+//! is where that is asserted, and it counts bytes rather than timing anything:
+//! a one-character symbol and one at [`SYMBOL_CAPACITY`] feed a hasher exactly
+//! the same number of bytes. `padding_never_affects_identity` beside it proves
+//! the hash's *identity* and never its cost — a `String` would hash equal
+//! values equally too, and would still be O(len) doing it.
+//!
 //! # Why 24
 //!
 //! The longest identifier observed across all four vendors is
@@ -96,7 +103,7 @@ impl Symbol {
     /// documents the invariant rather than implying emptiness is reachable.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
-        self.len == 0
+        false
     }
 }
 
@@ -199,5 +206,63 @@ mod tests {
         let s = Symbol::new("BANKNIFTY").expect("valid");
         assert_eq!(s.to_string(), "BANKNIFTY");
         assert_eq!(format!("{s:?}"), "Symbol(BANKNIFTY)");
+    }
+
+    /// Hashing a symbol — and a whole key — feeds the SAME number of bytes
+    /// whatever the vendor sent.
+    ///
+    /// This module's header and [`crate::instrument`]'s both rest a cost claim
+    /// on the field being fixed-width, and
+    /// [`padding_never_affects_identity`] above proves the hash's *identity*,
+    /// never its cost. The two are independent: a `String` would still hash
+    /// equal values equally, and would still cost O(len) doing it.
+    ///
+    /// So this counts bytes rather than timing anything. A hasher that only
+    /// records how much it was fed is exact, it is the same on every machine,
+    /// and it fails the moment the hash starts reading `as_str()` instead of
+    /// the array — which is the drift the claim is about.
+    #[test]
+    fn hashing_feeds_the_same_number_of_bytes_however_long_the_input_was() {
+        use crate::instrument::{Exchange, InstrumentKey};
+        use std::hash::{Hash, Hasher};
+
+        /// Counts bytes fed, and does nothing else with them.
+        #[derive(Default)]
+        struct Counting(usize);
+        impl Hasher for Counting {
+            fn write(&mut self, bytes: &[u8]) {
+                self.0 += bytes.len();
+            }
+            fn finish(&self) -> u64 {
+                self.0 as u64
+            }
+        }
+
+        fn fed<T: Hash>(value: &T) -> usize {
+            let mut h = Counting::default();
+            value.hash(&mut h);
+            h.0
+        }
+
+        let shortest = Symbol::new("A").expect("one character is a legal symbol");
+        let longest = Symbol::new(&"A".repeat(SYMBOL_CAPACITY)).expect("at the capacity");
+        assert_eq!(shortest.len(), 1);
+        assert_eq!(longest.len(), SYMBOL_CAPACITY);
+        assert_eq!(
+            fed(&shortest),
+            fed(&longest),
+            "a 1-byte symbol and a {SYMBOL_CAPACITY}-byte one must cost the \
+             same to hash, or the dedup probe is O(len) after all"
+        );
+
+        // And the same through the key that is actually deduplicated on.
+        let narrow = InstrumentKey::index(Exchange::Nse, "A").expect("legal");
+        let wide =
+            InstrumentKey::index(Exchange::Nse, &"A".repeat(SYMBOL_CAPACITY)).expect("legal");
+        assert_eq!(
+            fed(&narrow),
+            fed(&wide),
+            "the key hashes in a fixed number of bytes whichever vendor named it"
+        );
     }
 }

@@ -22,6 +22,11 @@
 //! it is O(1) per row, and it makes the symbology question disappear rather
 //! than answering it. The display symbol is never an input to identity.
 //!
+//! `C-09` is where the per-row cost is measured rather than asserted:
+//! `core::bench::decode_is_flat_in_field_width` decodes one row whose field is
+//! 28 bytes and one whose field is 4 MiB, and `C-10` beside it holds that an
+//! over-wide field is **refused** rather than merely decoded quickly.
+//!
 //! # Prices
 //!
 //! Strikes arrive in **rupees** and are stored in **paisa**. `27000` in the
@@ -33,7 +38,7 @@ use crate::error::InstrumentError;
 use crate::instrument::{Exchange, Expiry, InstrumentKey, Kind, Segment};
 use crate::isin::Isin;
 use crate::price::Paisa;
-use crate::symbol::Symbol;
+use crate::symbol::{SYMBOL_CAPACITY, Symbol};
 use crate::universe::MemberIndex;
 
 /// Which vendor a row came from.
@@ -48,11 +53,115 @@ pub enum Vendor {
     Groww,
     /// Secondary broker.
     Dhan,
+    /// Historical archives on disk. Never authenticates.
+    ///
+    /// A vendor here is a STORE PREFIX, not a credential holder. `TrueData` and
+    /// `Gdfl` are listed because their bars need somewhere of their own to
+    /// live: without a row, `Feed::store_vendor` returns `None`, and the
+    /// archive reader filed every bar under Dhan's prefix instead — 194
+    /// instrument-months of GDFL futures under `bars/dhan/`, which is exactly
+    /// the per-vendor independence D-0019 exists to protect.
+    ///
+    /// `pull::config` requires a credential table only of feeds whose transport
+    /// is HTTP, so adding these two costs no operator a `credentials.toml`
+    /// edit.
+    TrueData,
+    /// Historical archives on disk. Never authenticates.
+    Gdfl,
+    /// Third broker, HTTP. Bars are filed under its own prefix like any other.
+    ///
+    /// # The one vendor here whose master carries NO ISIN
+    ///
+    /// `docs/00-charter.md` §4d records its instrument dump: twelve columns —
+    /// `instrument_token`, `exchange_token`, `tradingsymbol`, `name`,
+    /// `last_price`, `expiry`, `strike`, `tick_size`, `lot_size`,
+    /// `instrument_type`, `segment`, `exchange` — and **not one of them is an
+    /// ISIN**. D-0117 and D-0125 key their joins on `(exchange, ISIN)`, and
+    /// neither addresses a row from this vendor.
+    ///
+    /// The vendor names the alternative itself: *"it is recommended to use a
+    /// combination of exchange and tradingsymbol as the unique key, not the
+    /// numeric instrument token."* So this feed joins on the symbol, which
+    /// `pull::universe::JoinKey::TradingSymbol` marks as the **weaker** key
+    /// wherever a count is reported — a rename looks like a missing instrument
+    /// on it, and an ISIN would have absorbed one.
+    Zerodha,
 }
 
 impl Vendor {
     /// Every vendor this engine reads, in path order.
-    pub const ALL: [Self; 2] = [Self::Groww, Self::Dhan];
+    pub const ALL: [Self; 5] = [
+        Self::Groww,
+        Self::Dhan,
+        Self::TrueData,
+        Self::Gdfl,
+        // APPENDED, NEVER INSERTED. `VendorSet` reads a bit per position and
+        // `merge::Entry::ids` is an array indexed by `vendor as usize`, so a
+        // variant placed in the middle hands every vendor after it another
+        // one's ids — silently, because the types still line up.
+        Self::Zerodha,
+    ];
+
+    /// Whether this vendor publishes an instrument master at all.
+    ///
+    /// Brokers do; archives do not — a folder of CSVs IS its own listing, and
+    /// every file in it is an instrument named by its filename.
+    ///
+    /// This exists because "every vendor agrees on this instrument" was written
+    /// as `Vendor::ALL.iter().all(...)`, which asks the wrong question the
+    /// moment a vendor exists that cannot answer. With archives in `ALL`, every
+    /// instrument became non-agreeing and the whole universe degraded — the
+    /// same shape as `pull::config` demanding a credential from a feed that has
+    /// none. A predicate, so the right set is named rather than assumed.
+    #[must_use]
+    pub const fn publishes_master(self) -> bool {
+        match self {
+            Self::Groww | Self::Dhan | Self::Zerodha => true,
+            Self::TrueData | Self::Gdfl => false,
+        }
+    }
+
+    /// Every vendor that publishes an instrument master.
+    pub const MASTERED: [Self; 3] = [Self::Groww, Self::Dhan, Self::Zerodha];
+
+    /// What this vendor's instrument master is called on disk.
+    ///
+    /// # Why the file name is a property of the vendor
+    ///
+    /// It was a hand-written list in `api::server::master_paths`:
+    ///
+    /// ```text
+    /// vec![(Vendor::Groww, dir.join("groww_instruments.csv")),
+    ///      (Vendor::Dhan,  dir.join("dhan_scrip.csv"))]
+    /// ```
+    ///
+    /// So adding a feed meant editing that function — and forgetting to meant a
+    /// vendor the engine knows about whose master is silently never read, which
+    /// reports as "this vendor lists nothing" rather than as the wiring bug it
+    /// is. A `match` on `Self` cannot be forgotten: a new variant is a compile
+    /// error until it names its file.
+    ///
+    /// Everything downstream already iterates [`Self::ALL`] — the census grid,
+    /// the merge, the ingest form, the coverage table. This was the one place
+    /// that did not, and it was the entry point.
+    #[must_use]
+    pub const fn master_file(self) -> &'static str {
+        match self {
+            Self::Groww => "groww_instruments.csv",
+            Self::Dhan => "dhan_scrip.csv",
+            // AN ARCHIVE SHIPS NO MASTER. The folder of CSVs IS the listing:
+            // every file in it is an instrument, named by its own filename.
+            // The name below is what `master_paths` looks for and will not
+            // find, which is correct — an archive contributes no rows to the
+            // merged universe and must not be expected to.
+            Self::TrueData => "truedata_instruments.csv",
+            Self::Gdfl => "gdfl_instruments.csv",
+            // A GZIPPED CSV ON THE WIRE, and a plain one once it is on disk.
+            // The vendor regenerates it once a day and asks that it be stored
+            // rather than re-fetched; this is the name it is stored under.
+            Self::Zerodha => "zerodha_instruments.csv",
+        }
+    }
 
     /// The path segment for this vendor.
     #[must_use]
@@ -60,14 +169,21 @@ impl Vendor {
         match self {
             Self::Groww => "groww",
             Self::Dhan => "dhan",
+            Self::TrueData => "truedata",
+            Self::Gdfl => "gdfl",
+            Self::Zerodha => "zerodha",
         }
     }
 
     /// This vendor's bit in a [`VendorSet`].
     const fn bit(self) -> u8 {
         match self {
-            Self::Groww => 1 << 0,
+            Self::Groww => 1,
             Self::Dhan => 1 << 1,
+            // `VendorSet` is a u8 — eight feeds, and these are three and four.
+            Self::TrueData => 1 << 2,
+            Self::Gdfl => 1 << 3,
+            Self::Zerodha => 1 << 4,
         }
     }
 }
@@ -110,6 +226,112 @@ impl VendorSet {
     }
 }
 
+/// The longest vendor instrument id this build will hold, in bytes.
+///
+/// **Derived from the widest grammar either vendor uses, then checked against
+/// both live masters** rather than chosen:
+///
+/// | Part | Bytes | Measured on 2026-08-08 |
+/// |---|---|---|
+/// | exchange | 3 | `NSE`, `BSE` |
+/// | underlying | 10 | longest present |
+/// | expiry | 7 | `DDMmmYY`, e.g. `30Sep25` |
+/// | strike | 6 | longest present, `100000` |
+/// | side | 3 | `FUT`; `CE`/`PE` are shorter |
+/// | separators | 4 | |
+/// | **total** | **33** | longest id actually present: **32** |
+///
+/// 48 leaves room for a seven-digit strike and a longer underlying without
+/// being a number nobody can justify. Dhan's `SECURITY_ID` is at most 7 bytes
+/// and entirely numeric across all 204,819 rows, so it is far inside this.
+///
+/// [`crate::symbol::SYMBOL_CAPACITY`] is 24 and therefore **cannot** hold a
+/// Groww symbol — `NSE-NIFTYNXT50-25Aug26-100000-PE` is 32. That is why this is
+/// a separate type rather than a reuse.
+pub const VENDOR_ID_CAPACITY: usize = 48;
+
+const _: () = assert!(VENDOR_ID_CAPACITY >= 33, "the derived worst case");
+
+/// A vendor's own identifier for an instrument, inline and never heap-allocated.
+///
+/// Dhan calls it `SECURITY_ID` and it is a number; Groww calls it
+/// `groww_symbol` and it is `NSE-NIFTY-30Sep25-24650-CE`. Both are opaque here:
+/// this type carries bytes the vendor chose and hands them back unchanged,
+/// because the moment it parsed them it would own a grammar the vendor can
+/// change without telling anyone.
+///
+/// # Why this exists at all
+///
+/// Neither column was read. `Vendor::master_columns` declared ten names and
+/// neither `SECURITY_ID` nor `groww_symbol` was among them, so the decoder
+/// stepped over the id — column 3 of Dhan's file, on the way to column 5 — and
+/// dropped it. `groww_symbol` appeared nowhere in the workspace at all. Without
+/// it nothing can name an instrument to either vendor, which is why Dhan
+/// answers `DH-905 securityId is required`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct VendorId {
+    bytes: [u8; VENDOR_ID_CAPACITY],
+    len: u8,
+}
+
+impl VendorId {
+    /// The id a vendor wrote down, or `None` if it is empty or too long.
+    ///
+    /// # Errors
+    ///
+    /// `None` for an empty id — a row with no id cannot be requested — and for
+    /// one past [`VENDOR_ID_CAPACITY`], which is a grammar this build has not
+    /// seen and must not silently truncate into a different instrument.
+    #[must_use]
+    pub fn new(raw: &str) -> Option<Self> {
+        let raw = raw.trim();
+        if raw.is_empty() || raw.len() > VENDOR_ID_CAPACITY {
+            return None;
+        }
+        let mut bytes = [0_u8; VENDOR_ID_CAPACITY];
+        // `get_mut` rather than an index: the guard above already bounds
+        // `raw.len()`, but a slice expression carries a panic this workspace
+        // denies, and a `?` that no input can take is cheaper than the lint
+        // exception it would otherwise need.
+        bytes.get_mut(..raw.len())?.copy_from_slice(raw.as_bytes());
+        // The guard bounds len by VENDOR_ID_CAPACITY, pinned below to <= 255.
+        // No second failure branch exists after that proof.
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "capacity checked above and pinned to u8 below"
+        )]
+        let len = raw.len() as u8;
+        Some(Self { bytes, len })
+    }
+
+    /// The id, as the vendor wrote it.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        // Every byte came from a `&str` in `new`, so the prefix is valid UTF-8;
+        // and `len` is at most VENDOR_ID_CAPACITY, so the slice is in range.
+        // Both are expressed as fallible lookups rather than asserted, because
+        // an index expression carries a panic this workspace denies.
+        self.bytes
+            .get(..usize::from(self.len))
+            .and_then(|held| core::str::from_utf8(held).ok())
+            .unwrap_or("")
+    }
+}
+
+const _: () = assert!(VENDOR_ID_CAPACITY <= 255, "len is a u8");
+
+impl core::fmt::Debug for VendorId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "VendorId({:?})", self.as_str())
+    }
+}
+
+impl core::fmt::Display for VendorId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// One row of a vendor instrument master, already split into fields.
 ///
 /// Borrowed rather than owned: a master has hundreds of thousands of rows and
@@ -117,6 +339,9 @@ impl VendorSet {
 /// done to throw away.
 #[derive(Debug, Clone, Copy)]
 pub struct MasterRow<'a> {
+    /// The vendor's own id for this instrument — `SECURITY_ID` at Dhan,
+    /// `groww_symbol` at Groww. Opaque; see [`VendorId`].
+    pub vendor_id: &'a str,
     /// Exchange code, e.g. `NSE`.
     pub exchange: &'a str,
     /// Segment code, e.g. `CASH` or `FNO`.
@@ -169,12 +394,21 @@ impl MasterRow<'_> {
     /// treats it as a refusal.
     #[must_use]
     pub const fn over_wide(&self) -> Option<(&'static str, usize)> {
-        // DESTRUCTURED WITHOUT `..`, so this is a COMPILE ERROR the day an
-        // eleventh field is added to `MasterRow`. Reading the fields through
+        // DESTRUCTURED WITHOUT `..`, so this is a COMPILE ERROR the day a
+        // TWELFTH field is added to `MasterRow`. Reading the fields through
         // `self.` compiled perfectly well while skipping one, and a field that
         // skips this gate is a field with no width bound at all -- which is
         // precisely the defect D-0033 exists for.
+        //
+        // ELEVEN, NOT TEN: `vendor_id` is a field on this row here and was not
+        // on the branch this destructuring arrived from. It gets a width bound
+        // like every other, which is the whole point of writing them out.
+        //
+        // Written out rather than iterated because a `[(&str, &str); 11]` array
+        // built per row is eleven pointer pairs written to the stack to answer a
+        // question that is eleven comparisons. Order follows the struct.
         let Self {
+            vendor_id,
             exchange,
             segment,
             underlying,
@@ -186,8 +420,8 @@ impl MasterRow<'_> {
             strike_rupees,
             option_side,
         } = *self;
-        // Order follows the struct.
-        let checks: [(&'static str, usize); 10] = [
+        let checks: [(&'static str, usize); 11] = [
+            ("vendor_id", vendor_id.len()),
             ("exchange", exchange.len()),
             ("segment", segment.len()),
             ("underlying", underlying.len()),
@@ -263,6 +497,8 @@ pub const MAX_FIELD_BYTES: usize = 64;
 /// column map is vendor knowledge, and vendor knowledge belongs here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MasterColumns {
+    /// Which column carries the vendor's own instrument id.
+    pub vendor_id: &'static str,
     /// Header of the exchange column.
     pub exchange: &'static str,
     /// Header of the segment column.
@@ -292,6 +528,12 @@ impl Vendor {
     pub const fn master_columns(self) -> MasterColumns {
         match self {
             Self::Groww => MasterColumns {
+                // The symbol Groww's own historical endpoints take:
+                // `NSE-NIFTY-30Sep25-24650-CE`. NOT `trading_symbol`, which is
+                // the SAME instrument spelled `NIFTY25SEP24650CE` on the same
+                // row — two encodings per row, and only this one is accepted
+                // by /v1/historical/candles.
+                vendor_id: "groww_symbol",
                 exchange: "exchange",
                 segment: "segment",
                 underlying: "underlying_symbol",
@@ -304,10 +546,42 @@ impl Vendor {
                 option_side: None,
             },
             Self::Dhan => MasterColumns {
+                // What `securityId` on every Dhan request body must be. Column
+                // 3 of the file, which the decoder used to step over on its way
+                // to INSTRUMENT at column 5.
+                vendor_id: "SECURITY_ID",
                 exchange: "EXCH_ID",
                 segment: "SEGMENT",
                 underlying: "UNDERLYING_SYMBOL",
-                trading_symbol: "SYMBOL_NAME",
+                // THE TICKER, WHICH IS NOT `SYMBOL_NAME`.
+                //
+                // `SYMBOL_NAME` holds the company's NAME, truncated to 24
+                // characters: `RELIANCE INDUSTRIES LTD`, `TATA CONSULTANCY
+                // SERV LT`, `HDFC BANK LTD`. `UNDERLYING_SYMBOL` holds
+                // `RELIANCE`, `TCS`, `HDFCBANK` — the NSE ticker, the same
+                // string Groww puts in `trading_symbol`.
+                //
+                // Measured over the 2,781 main-board NSE cash equities this
+                // vendor's own file yields:
+                //
+                //   UNDERLYING_SYMBOL  0 blank, 2,781 distinct of 2,781,
+                //                      and 2,733 of Groww's 2,740 tickers
+                //                      matched exactly.
+                //   SYMBOL_NAME        2 collisions (FUTURE ENTERPRISES LTD
+                //                      and GACM TECHNOLOGIES LIMITED, each two
+                //                      securities with distinct ISINs), and
+                //                      3 of 2,740 matched.
+                //
+                // So reading the wrong column MANUFACTURED the only duplicate
+                // symbols in the kept set, and made this vendor's rows fail to
+                // line up with the other's on every join that is not the ISIN.
+                //
+                // It also points at the same column as `underlying` above, and
+                // that is correct rather than a copy-paste: for a cash equity
+                // the underlying IS the instrument. Nothing requires these two
+                // to be different columns — `Columns::widest` folds a maximum
+                // over the indices and does not care that two of them agree.
+                trading_symbol: "UNDERLYING_SYMBOL",
                 // The real type is INSTRUMENT. `INSTRUMENT_TYPE` is a
                 // different column holding a vendor-minted paper class (ES,
                 // DEB, ETF); it is deliberately NOT read — see the
@@ -318,6 +592,56 @@ impl Vendor {
                 expiry: "SM_EXPIRY_DATE",
                 strike: "STRIKE_PRICE",
                 option_side: Some("OPTION_TYPE"),
+            },
+            // AN ARCHIVE HAS NO MASTER TO DESCRIBE. Every column name below is
+            // the empty string, which no header can match, so a master file
+            // that somehow appeared under one of these names would decline
+            // every row rather than reading them under invented headings.
+            //
+            // Refusing here rather than returning an `Option` because this is a
+            // `const fn` on a hot path and the caller — `master_paths` — already
+            // handles a master that is simply absent, which is the real state.
+            // TWELVE COLUMNS, AND THE ISIN IS THE ONE THAT IS NOT THERE.
+            //
+            // Read from the vendor's own page, 14 Aug 2026 — docs/00-charter.md
+            // §4d. `isin` is the empty string, which no header matches, so
+            // every row of this master decodes with no ISIN and the join falls
+            // to the symbol. That is a fact about the vendor stated as data,
+            // not a column left blank by oversight.
+            //
+            // `underlying` is empty too, and for a different reason: this master
+            // has no underlying column at all. `name` is the COMPANY name for an
+            // equity and blank on a derivative row, so reading it as an
+            // underlying would put "INFOSYS" where "INFY" belongs.
+            Self::Zerodha => MasterColumns {
+                vendor_id: "instrument_token",
+                exchange: "exchange",
+                segment: "segment",
+                underlying: "",
+                trading_symbol: "tradingsymbol",
+                instrument_type: "instrument_type",
+                listing_class: "",
+                isin: "",
+                expiry: "expiry",
+                strike: "strike",
+                // NO SEPARATE SIDE COLUMN. `instrument_type` is `CE` or `PE`
+                // directly, so the side is read from the type rather than from
+                // a column this master does not have — the same shape Groww
+                // uses, and the reason this field is an `Option`.
+                option_side: None,
+            },
+            Self::TrueData | Self::Gdfl => MasterColumns {
+                vendor_id: "",
+                exchange: "",
+                segment: "",
+                underlying: "",
+                trading_symbol: "",
+                instrument_type: "",
+                listing_class: "",
+                isin: "",
+                expiry: "",
+                strike: "",
+                option_side: None,
             },
         }
     }
@@ -331,6 +655,11 @@ impl Vendor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Skip {
+    /// The vendor left its own id blank, or wrote one longer than
+    /// [`VENDOR_ID_CAPACITY`]. Either way the instrument cannot be named back
+    /// to them, so it is declined rather than carried: a listing nothing can
+    /// request is one every later lookup finds and no pull can use.
+    NoVendorId,
     /// Not an exchange this engine stores. `docs/05-decisions.md` D-0017.
     ///
     /// Raised only for an exchange code this engine **recognises and does not
@@ -452,6 +781,7 @@ impl Skip {
     #[must_use]
     pub const fn reason(self) -> &'static str {
         match self {
+            Self::NoVendorId => "no vendor id on the row",
             Self::ForeignExchange => "foreign exchange",
             Self::UnrecognisedExchange => "unrecognised exchange",
             Self::TestInstrument => "exchange test instrument",
@@ -505,6 +835,10 @@ impl Skip {
 /// and move as the key alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Listing {
+    /// The vendor's own id for this instrument, carried through so a request
+    /// can name it. Without this nothing reaches either broker — see
+    /// [`VendorId`].
+    pub vendor_id: VendorId,
     /// The canonical identity, from the columns the vendor actually fills.
     pub key: InstrumentKey,
     /// The vendor's ISIN for this row, when it has one. `None` for an index,
@@ -585,6 +919,58 @@ impl Decoded {
 /// instruments beside real ones, and they would be indistinguishable later.
 const TEST_MARKERS: [&str; 2] = ["NSETEST", "BSETEST"];
 
+/// `name` with every ASCII space removed, on the stack.
+///
+/// Returns the bytes in a fixed buffer rather than a `String`: this runs on
+/// every row of every master -- over 340,000 of them across the two files --
+/// and `CLAUDE.md` rule 4 makes a per-row heap allocation a cost that grows
+/// with the input. The buffer is [`SYMBOL_CAPACITY`], so an identifier that
+/// still does not fit after collapsing is refused HERE rather than being
+/// truncated into a different instrument's name.
+///
+/// # Errors
+///
+/// [`InstrumentError::Malformed`] when more than [`SYMBOL_CAPACITY`] non-space
+/// bytes arrive. Every other rule about what a symbol may contain stays with
+/// [`Symbol::new`]; this only removes spaces.
+fn collapse_spaces(name: &str) -> Result<Collapsed, InstrumentError> {
+    let mut bytes = [0u8; SYMBOL_CAPACITY];
+    let mut len = 0usize;
+    for &c in name.as_bytes() {
+        if c == b' ' {
+            continue;
+        }
+        // `get_mut` rather than an index: `indexing_slicing` is denied
+        // workspace-wide, and this is the bound that stops a long name being
+        // silently cut down to another instrument's symbol.
+        let Some(slot) = bytes.get_mut(len) else {
+            return Err(InstrumentError::Malformed);
+        };
+        *slot = c;
+        len += 1;
+    }
+    Ok(Collapsed { bytes, len })
+}
+
+/// The stack buffer [`collapse_spaces`] fills.
+struct Collapsed {
+    bytes: [u8; SYMBOL_CAPACITY],
+    len: usize,
+}
+
+impl Collapsed {
+    /// The collapsed bytes as text, or `""` if they are not UTF-8.
+    ///
+    /// Non-UTF-8 cannot survive [`Symbol::new`] either -- its allowlist is
+    /// ASCII -- so the empty string routes a mangled input to the same
+    /// `Malformed` the byte itself would have caused, one step later.
+    fn as_str(&self) -> &str {
+        self.bytes
+            .get(..self.len)
+            .map_or("", |b| core::str::from_utf8(b).unwrap_or(""))
+    }
+}
+
 /// What a vendor's segment code means to us.
 ///
 /// It carries no `Segment`: the vendor's column is a GATE only. Our segment is
@@ -641,9 +1027,12 @@ enum EquityVerdict {
 /// still declines; every one of them is `ES` in Dhan's paper-class column; and
 /// they are ordinary listed companies.
 ///
-/// Kept sorted. `board_of` no longer binary-searches it -- it probes
-/// [`EQUITY_BOARD_INDEX`] instead -- but the order is what makes the
-/// disjointness check readable and a new code obvious in a diff.
+/// Sorted, and no longer for a search. `board_of` probes
+/// `EQUITY_BOARD_INDEX`, so order carries no correctness weight at all now;
+/// it is kept because a sorted list is the one a human can append to without
+/// re-reading it, and because sortedness is how
+/// `the_measured_series_tables_are_sorted_disjoint_and_complete` catches a
+/// duplicate.
 pub const EQUITY_BOARD_SERIES: [&str; 6] = ["BE", "BZ", "E1", "EQ", "IT", "SZ"];
 
 /// The NSE series codes that are the SME board.
@@ -670,8 +1059,8 @@ pub const SME_BOARD_SERIES: [&str; 2] = ["SM", "ST"];
 /// outcome — [`Skip::UnrecognisedListingClass`]. The list is data, so a new
 /// NSE debt series is a one-line append and nothing else moves.
 ///
-/// Kept sorted, for the same reason [`EQUITY_BOARD_SERIES`] is: readability
-/// and a legible diff. The lookup itself goes through [`NON_EQUITY_INDEX`].
+/// Sorted for the same reason [`EQUITY_BOARD_SERIES`] is: a human appends to
+/// it, and `board_of` probes `NON_EQUITY_INDEX` rather than searching here.
 pub const NON_EQUITY_SERIES: [&str; 120] = [
     "AK", "AL", "AM", "AN", "AZ", "BA", "BC", "BR", "BS", "BU", "BV", "BW", "BX", "D1", "GB", "GS",
     "IV", "MF", "N0", "N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8", "N9", "NA", "NB", "NC", "ND",
@@ -682,6 +1071,48 @@ pub const NON_EQUITY_SERIES: [&str; 120] = [
     "Z4", "Z5", "Z6", "Z7", "Z8", "Z9", "ZC", "ZF", "ZG", "ZH", "ZI", "ZJ", "ZK", "ZL", "ZM", "ZN",
     "ZO", "ZP", "ZQ", "ZR", "ZS", "ZT", "ZY", "ZZ",
 ];
+
+// THE THREE SERIES TABLES, INDEXED. `docs/07-o1-architecture.md` layer 4 is
+// "no search of any kind ... never `binary_search`", and it carries no
+// exemption for a small table. `board_of` searched all three until D-0065.
+//
+// The replacement is not new machinery. [`MemberIndex`] already exists in
+// `crate::universe` for exactly this, already builds at compile time with no
+// dependency and no lazy initialisation, and already carries the probe-length
+// test layer 4's "How a layer is proven" section demands. These three tables
+// are 6, 2 and 120 entries — an order of magnitude SMALLER than the 750 that
+// justified building it. Writing the first entry into a rule-1 allowlist whose
+// comment reads "no allowlist, layer 4 is unconditional", in order to keep
+// three calls the crate beside it already knows how to remove, is the move
+// that turns an allowlist into a place failures go to be filed.
+//
+// What it cost: three static tables, 16 + 8 + 512 slots of
+// `Option<&'static str>`. Constant, and it does not grow with the lists.
+//
+// Every table is at most half full, which is what bounds the probe;
+// `MemberIndex::build` asserts that at COMPILE time, so an over-full table
+// cannot ship. The measured worst probe is asserted as a number by
+// `the_series_tables_probe_in_bounded_time`, for the reason layer 4 records:
+// the first open-addressed table anyone wrote here measured 14 probes and was
+// refused by its own test until it was widened.
+
+/// [`EQUITY_BOARD_SERIES`], indexed. 6 members in 16 slots.
+static EQUITY_BOARD_INDEX: MemberIndex<16> = MemberIndex::build(&EQUITY_BOARD_SERIES);
+
+/// [`SME_BOARD_SERIES`], indexed. 2 members in 8 slots.
+static SME_BOARD_INDEX: MemberIndex<8> = MemberIndex::build(&SME_BOARD_SERIES);
+
+/// [`NON_EQUITY_SERIES`], indexed. 120 members in 512 slots.
+///
+/// **512 and not 256, because the test said so.** At 256 the table is under
+/// half full and `build` accepts it, and the worst probe measured **10** —
+/// over the `<= 8` every `MemberIndex` in this crate is held to. These are
+/// two-byte codes over a narrow alphabet, so FNV-1a clusters them harder than
+/// it clusters ticker symbols. One doubling takes the worst probe from 10 to
+/// **6**. That is layer 4's "How a layer is proven" happening again, with the
+/// same outcome it records the first time: the test refused the table until it
+/// was widened, and the number in the assertion is why anybody found out.
+static NON_EQUITY_INDEX: MemberIndex<512> = MemberIndex::build(&NON_EQUITY_SERIES);
 
 /// What an NSE board series means, for either vendor.
 ///
@@ -704,38 +1135,14 @@ pub const NON_EQUITY_SERIES: [&str; 120] = [
 /// An unrecognised code is a decline, not an error, for the reason
 /// [`Skip::UnrecognisedListingClass`] gives — but it is its own decline, and
 /// never confused with a bond.
-/// The equity board series, as an open-addressed table.
-///
-/// 6 members in 16 slots. See [`board_of`] for why these exist.
-static EQUITY_BOARD_INDEX: MemberIndex<16> = MemberIndex::build(&EQUITY_BOARD_SERIES);
-
-/// The SME board series, as an open-addressed table. 2 members in 8 slots.
-static SME_BOARD_INDEX: MemberIndex<8> = MemberIndex::build(&SME_BOARD_SERIES);
-
-/// The measured non-equity series, as an open-addressed table.
-///
-/// 120 members in 256 slots — the table `board_of` used to `binary_search`
-/// last, and therefore the one the common case paid in full.
-static NON_EQUITY_INDEX: MemberIndex<256> = MemberIndex::build(&NON_EQUITY_SERIES);
-
 fn board_of(series: &str) -> EquityVerdict {
     // Dhan pads this column, e.g. `"   ES   "`. Trimming Groww's already-tight
     // values costs nothing and cannot change a verdict.
     let series = series.trim();
-    // HASH, MASK, PROBE -- three times, not three binary searches.
-    //
-    // This was `EQUITY_BOARD_SERIES.binary_search(..)` and two more like it.
-    // `docs/07-o1-architecture.md` layer 4 says "never `binary_search`", and
-    // `universe.rs` carries the whole argument for why -- it replaced exactly
-    // this pattern with exactly this table: "`binary_search` over 750 entries
-    // is ~10 comparisons -- O(log n) wearing an O(1) label". The replacement
-    // was built, proved and then not applied to the hotter of the two paths.
-    //
-    // The ordering made the common case the worst case as well: of the 12,617
-    // rows that reach this gate, 7,137 are non-equity, and the 120-entry table
-    // they match was searched LAST -- so the majority of rows paid all three
-    // searches. Each is now a bounded probe, and the order no longer decides
-    // the cost.
+    // Hash, mask, probe — three times at most, each of them constant. The
+    // tables are disjoint (asserted), so the order these are asked in cannot
+    // change a verdict; it is the order of decreasing frequency, which is a
+    // property of the data rather than of correctness.
     if EQUITY_BOARD_INDEX.contains(series) {
         EquityVerdict::MainBoard
     } else if SME_BOARD_INDEX.contains(series) {
@@ -767,6 +1174,42 @@ impl Vendor {
             // I index, E equity cash, D equity+index derivatives,
             // C currency, M commodity.
             Self::Dhan => (&["I", "E", "D"], &["C", "M"]),
+            // AN ARCHIVE DECLINES EVERY SEGMENT, because it publishes no master
+            // for one to appear in. Empty store list AND empty decline list:
+            // nothing is stored, and nothing is quietly dropped either — code
+            // reaching here is reading a master that should not exist.
+            // `segment` on this vendor's rows is `NSE`, `NFO-FUT`, `NFO-OPT`,
+            // `MCX` — a compound of exchange and product, not the one-letter
+            // code the other two brokers use. The two spot words are stored and
+            // the derivative ones are declined by name; anything else is
+            // unrecognised, which is refused rather than guessed at.
+            //
+            // `INDICES` IS READ NOW, AND IT WAS THE WHOLE FAILURE.
+            //
+            // This list carried `NSE` alone, under a comment saying `INDICES`
+            // was UNVERIFIED and deliberately in NEITHER list because "how an
+            // index row spells its segment has not been read, and a guess here
+            // would file the engine's own surface under an invented code".
+            // That restraint was right and it was waiting on a measurement.
+            //
+            // THE MEASUREMENT EXISTS. `api.kite.trade/instruments`, fetched
+            // 19 Aug 2026 and held at `~/.brutex/masters/zerodha_instruments.csv`:
+            // 114,546 rows, of which **136 carry `segment=INDICES` with
+            // `exchange=NSE`** -- including `256265,NIFTY 50` and
+            // `260105,NIFTY BANK`, the two instruments CLAUDE.md section 1 puts
+            // the entire engine surface on, and `264969,INDIA VIX`.
+            //
+            // WHAT ITS ABSENCE COST, measured on the same day. Every one of
+            // those 136 rows failed `segment_of` and was counted a row error --
+            // the live log reads `kept 10049, row_errors 136` -- so the master
+            // held no index at all and the spot pull refused with "zerodha does
+            // not list BANKNIFTY", for a vendor that lists it. An unrecognised
+            // segment is refused loudly, which is why this was a countable
+            // error and not a silent drop; the count is what identified it.
+            //
+            // Recorded in docs/00-charter.md section 4z.
+            Self::Zerodha => (&["NSE", "INDICES"], &["NFO-FUT", "NFO-OPT", "MCX", "BSE"]),
+            Self::TrueData | Self::Gdfl => (&[], &[]),
         };
         if store.contains(&code) {
             Ok(SegmentVerdict::Store)
@@ -812,6 +1255,150 @@ impl Vendor {
                 "FUTCUR" | "OPTCUR" => Ok(None),
                 _ => Err(InstrumentError::Malformed),
             },
+            // AN ARCHIVE PUBLISHES NO INSTRUMENT TYPE, because it publishes no
+            // master. Every code is unrecognised, which is refused by name
+            // rather than mapped to a guess — an invented type here would file
+            // a future as an option and nothing downstream could tell.
+            // `EQ FUT CE PE`, from the vendor's own column table. There is no
+            // index word in that alphabet and none is invented here — see the
+            // segment arm above.
+            Self::Zerodha => match code {
+                "EQ" => Ok(Some("EQ")),
+                "FUT" => Ok(Some("FUT")),
+                // The side IS the type on this vendor, so `side` is not read.
+                "CE" => Ok(Some("CE")),
+                "PE" => Ok(Some("PE")),
+                _ => Err(InstrumentError::Malformed),
+            },
+            Self::TrueData | Self::Gdfl => Err(InstrumentError::Malformed),
+        }
+    }
+
+    /// The `segment` word that means INDEX for a vendor whose instrument-type
+    /// alphabet has no index code, or `None` when the type column already says it.
+    ///
+    /// # Why this exists, and what its absence cost
+    ///
+    /// Kite's own column table publishes exactly four instrument types --
+    /// `EQ, FUT, CE, PE` (`docs/00-charter.md` §4z, read from
+    /// kite.trade/docs/connect/v3/market-quotes/). **There is no index word in
+    /// that alphabet.** The class lives in `segment`, which the vendor writes as
+    /// `INDICES`.
+    ///
+    /// [`decode_master_row`] resolved everything from the type word, so a Zerodha
+    /// index row arrived as `EQ` and **three separate things went wrong at once**:
+    ///
+    /// | What | Consequence |
+    /// |---|---|
+    /// | The space-collapse is gated on `IDX` | `NIFTY BANK` reached `Symbol::new`, which admits no space, and was `Malformed` |
+    /// | `(Segment, Kind)` is chosen by the type word | had it parsed, it would have been filed `(Cash, Equity)` -- an index stored as a share |
+    /// | The row therefore never entered the master | *"zerodha does not list BANKNIFTY"*, for a vendor that lists it |
+    ///
+    /// Measured on the vendor's own file, 19 Aug 2026: `kept 10049`,
+    /// **`row_errors 136`** -- and the file holds **exactly 136** NSE rows whose
+    /// segment is `INDICES`. Every index row, and no other row.
+    ///
+    /// # Why the fix is one word and not three branches
+    ///
+    /// Answering it here turns the existing `"IDX"` arm into the whole repair:
+    /// the collapse fires, the segment becomes [`Segment::Index`] and the kind
+    /// becomes [`Kind::Index`], all from code that already existed and is already
+    /// tested. Three separate vendor branches would have been three places to
+    /// disagree.
+    ///
+    /// **Constant time.** A `match` over a `#[repr]` enum -- one jump -- and the
+    /// caller's comparison is one `str` equality against a literal whose length is
+    /// known at compile time.
+    #[must_use]
+    // NOT DUPLICATE ARMS, TWO REASONS WITH ONE ANSWER. Groww and Dhan already
+    // publish an index code in the TYPE column, so consulting their segment
+    // could reclassify a row; the archives have no master and therefore no
+    // segment column at all. Collapsing them would delete the distinction that
+    // makes the first one dangerous, so the lint is disarmed here and nowhere
+    // else.
+    #[allow(
+        clippy::match_same_arms,
+        reason = "same answer, different reasons -- see the comment above"
+    )]
+    pub const fn index_segment_word(self) -> Option<&'static str> {
+        match self {
+            // Both publish an index code in the type column, so the segment is
+            // not consulted and must not be: Groww writes `IDX`, Dhan `INDEX`.
+            Self::Groww | Self::Dhan => None,
+            // The vendor's published type alphabet is `EQ FUT CE PE`. Its index
+            // rows carry `EQ` there and `INDICES` here.
+            Self::Zerodha => Some("INDICES"),
+            // No master, so no segment column to read.
+            Self::TrueData | Self::Gdfl => None,
+        }
+    }
+
+    /// The exchange's canonical ticker for an index this vendor spells by NAME.
+    ///
+    /// # Why an alias is needed at all, and why it is not an invention
+    ///
+    /// Collapsing spaces is enough where the vendor writes the ticker with spaces
+    /// in it. It is **not** enough where the vendor writes the index's NAME in the
+    /// symbol column, and Zerodha does exactly that -- which the other two masters
+    /// on this machine witness directly:
+    ///
+    /// | Vendor | symbol column | name column |
+    /// |---|---|---|
+    /// | Groww | `NIFTY` | `NIFTY 50` |
+    /// | Dhan | `NIFTY` | `Nifty 50` |
+    /// | **Zerodha** | **`NIFTY 50`** | `NIFTY 50` |
+    ///
+    /// Zerodha's `tradingsymbol` is character-for-character what the other two put
+    /// in their *name* column, and both of them state the ticker for that name in
+    /// the same row. So this table is READ off two masters that disagree with
+    /// neither each other nor the exchange -- it is not a spelling somebody chose.
+    /// `CLAUDE.md` §3 rule 1 wants a source; the source is
+    /// `~/.brutex/masters/{groww_instruments,dhan_scrip}.csv`, recorded in
+    /// `docs/00-charter.md` §4z.
+    ///
+    /// # Only where the collapsed form is not already the ticker
+    ///
+    /// `INDIA VIX` collapses to `INDIAVIX`, which is what Groww writes, so it needs
+    /// no row here and does not get one. An alias that restates a collapse would be
+    /// a second answer to a question the collapse already answers.
+    ///
+    /// **Constant time.** A `match` over string literals switches on the length
+    /// first and compares at most one arm.
+    #[must_use]
+    pub fn index_alias(self, collapsed: &str) -> Option<&'static str> {
+        match self {
+            Self::Zerodha => match collapsed {
+                "NIFTY50" => Some("NIFTY"),
+                "NIFTYBANK" => Some("BANKNIFTY"),
+                _ => None,
+            },
+            Self::Groww | Self::Dhan | Self::TrueData | Self::Gdfl => None,
+        }
+    }
+
+    /// The vendor's own collapsed name for a symbol this engine renamed.
+    ///
+    /// The inverse of [`Self::index_alias`], and it exists because the rename
+    /// **loses the exchange's name**. `NIFTY 50` is what NSE publishes and what
+    /// Zerodha lists; `NIFTY` is what this repository decided to key the store
+    /// on. Anything joining the store back to the exchange sees only the second
+    /// and cannot find it — measured: `NIFTY` matched 80 published names and
+    /// `BANKNIFTY` matched none, so the two instruments the engine actually
+    /// sweeps were the two its own exchange join refused.
+    ///
+    /// **Kept beside `index_alias` so the pair cannot drift**, and pinned by a
+    /// test that walks every arm of one through the other.
+    ///
+    /// **Constant time**, for the reason above: a `match` over string literals.
+    #[must_use]
+    pub fn index_alias_source(self, collapsed: &str) -> Option<&'static str> {
+        match self {
+            Self::Zerodha => match collapsed {
+                "NIFTY" => Some("NIFTY50"),
+                "BANKNIFTY" => Some("NIFTYBANK"),
+                _ => None,
+            },
+            Self::Groww | Self::Dhan | Self::TrueData | Self::Gdfl => None,
         }
     }
 }
@@ -886,8 +1473,37 @@ pub fn decode_master_row(vendor: Vendor, row: MasterRow<'_>) -> Result<Decoded, 
         return declined(Skip::ForeignSegment);
     }
 
+    // THE INDEX WORD, FOR A VENDOR WHOSE TYPE ALPHABET HAS NONE.
+    //
+    // Kite publishes exactly `EQ FUT CE PE` and puts the class in `segment`
+    // instead. Resolving it here -- once, before anything reads `ty` -- is what
+    // makes the existing `"IDX"` arm below do the whole repair: the space
+    // collapse fires, the segment becomes `Segment::Index`, and the kind
+    // becomes `Kind::Index`. Three defects, one word. See
+    // `Vendor::index_segment_word` for what each of them cost.
+    //
+    // `None` for every vendor that already writes an index code, so this
+    // comparison cannot reclassify a row at Groww or Dhan.
     let Some(ty) = vendor.type_of(row.instrument_type, row.option_side)? else {
         return declined(Skip::ForeignSegment);
+    };
+    // PROMOTED, FOR A VENDOR WHOSE TYPE ALPHABET HAS NO INDEX WORD.
+    //
+    // Kite publishes exactly `EQ FUT CE PE` and carries the class in `segment`
+    // instead, so its index rows arrive here as `EQ`. One reassignment before
+    // anything reads `ty` makes the existing `"IDX"` arm below do the whole
+    // repair -- the space collapse fires, the segment becomes `Segment::Index`
+    // and the kind becomes `Kind::Index`. THREE defects, one word; see
+    // `Vendor::index_segment_word` for what each of them cost and for the
+    // measurement (136 row errors, 136 index rows, no other row).
+    //
+    // `index_segment_word` is `None` for every vendor that already writes an
+    // index code, so this cannot reclassify a Groww or Dhan row: the
+    // comparison is against `None` and fails immediately.
+    let ty = if vendor.index_segment_word() == Some(row.segment) {
+        "IDX"
+    } else {
+        ty
     };
 
     // WHERE THE INSTRUMENT IS NAMED DEPENDS ON WHAT IT IS.
@@ -920,7 +1536,68 @@ pub fn decode_master_row(vendor: Vendor, row: MasterRow<'_>) -> Result<Decoded, 
     } else {
         row.underlying
     };
-    let underlying = Symbol::new(name)?;
+    // AN ASCII SPACE IS NOT INFORMATION IN AN EXCHANGE IDENTIFIER, AND KEEPING
+    // IT COST 104 INDEX ROWS.
+    //
+    // The two masters spell an index two different ways. Groww writes the
+    // exchange's canonical ticker -- `NIFTYPVTBANK`, `NIFTYMIDCAP150`,
+    // `INDIAVIX`. Dhan writes the display name -- `NIFTY PVT BANK`,
+    // `NIFTY MIDCAP 150`, `INDIA VIX`. `Symbol::new` admits `A-Z 0-9 - _ &`
+    // and nothing else, so every spaced form was `InstrumentError::Malformed`.
+    //
+    // Measured over the vendor's own file: of its 119 NSE index rows, 15 were
+    // legal and 104 were refused. Those 104 are why this vendor reached 15 of
+    // the 35 reference indices while the other reached 24.
+    //
+    // Collapsing the spaces:
+    //
+    //   * makes 119 of 119 legal, and the longest -- `NIFTY100 LOW VOLATILITY
+    //     30`, 26 characters -- becomes 23 and fits `SYMBOL_CAPACITY`;
+    //   * creates ZERO collisions among those 119;
+    //   * collides with ZERO of the 2,781 NSE cash equity symbols;
+    //   * and raises agreement with the other vendor's 24 index symbols from
+    //     4 to 17, because the collapsed form IS what the other vendor already
+    //     writes. `BANKNIFTY`, `FINNIFTY`, `NIFTY`, `INDIAVIX` are all in that
+    //     recovered set.
+    //
+    // So this is a normalisation TO the canonical ticker, not a lossy edit: the
+    // other master is the witness that the space carries nothing.
+    //
+    // CONFINED TO INDEX ROWS, AND THAT RESTRAINT IS THE POINT.
+    //
+    // The first draft collapsed every row. It was safe by measurement -- not
+    // one of the 2,781 NSE cash equity symbols contains a space -- and it was
+    // still wrong, because it silently repaired inputs nobody had claimed were
+    // repairable. `a_malformed_row_errors_rather_than_being_skipped_silently`
+    // caught it: that test feeds `"NIF TY"` on an F&O row and requires an
+    // error, and under a blanket collapse it became `NIFTY` and was accepted.
+    // A stray space in a derivative ticker is CORRUPTION, and turning it into
+    // a real instrument is the §4 fallback that hides a failure.
+    //
+    // Only an index carries a name the exchange itself writes with spaces, so
+    // only an index gets the normalisation. Everywhere else a space stays what
+    // it was: malformed, loudly.
+    //
+    // `ty` is already resolved above, so this costs a comparison and no scan.
+    // AND THE COLLAPSED FORM IS NOT ALWAYS THE TICKER.
+    //
+    // Collapsing is enough where the vendor writes the ticker WITH spaces in
+    // it -- Dhan's `NIFTY PVT BANK`. It is not enough where the vendor writes
+    // the index's NAME in the symbol column, which Zerodha does: `NIFTY 50`
+    // collapses to `NIFTY50` and the exchange's ticker is `NIFTY`. Both other
+    // masters on this machine carry that identity in one row -- symbol
+    // `NIFTY`, name `NIFTY 50` -- which is what makes `index_alias` a reading
+    // rather than a choice. `INDIA VIX` needs no row there: it collapses to
+    // `INDIAVIX`, which is already what Groww writes.
+    let underlying = if ty == "IDX" {
+        let collapsed = collapse_spaces(name)?;
+        match vendor.index_alias(collapsed.as_str()) {
+            Some(canonical) => Symbol::new(canonical)?,
+            None => Symbol::new(collapsed.as_str())?,
+        }
+    } else {
+        Symbol::new(name)?
+    };
 
     // A live instrument master lists only CURRENTLY LISTED contracts -- both
     // vendors purge on expiry, and the earliest expiry in either master is
@@ -933,6 +1610,33 @@ pub fn decode_master_row(vendor: Vendor, row: MasterRow<'_>) -> Result<Decoded, 
         // series -- Groww's `series` is empty on all 24 of its NSE index rows
         // and Dhan writes `NA` -- so gating any earlier deletes NIFTY and
         // BANKNIFTY.
+        // A VENDOR THAT PUBLISHES NO SERIES COLUMN CANNOT BE GATED ON ONE, and
+        // treating its absence as an unrecognised value declined EVERY EQUITY
+        // ROW IT HAS.
+        //
+        // Measured on a real-shaped Kite dump: kept = 0, and
+        // `skipped_by_reason` was `[("unrecognised listing class", 2)]` for two
+        // perfectly ordinary NSE equities. `api::master` maps an absent column
+        // to the empty string, `board_of("")` matches none of the three series
+        // tables, and `Unrecognised` is a decline — so a feed whose universe is
+        // empty by construction reported itself as a vendor publishing rows
+        // this build did not understand. Both are silent-looking states and
+        // only one of them was true.
+        //
+        // ABSENT AND UNRECOGNISED ARE DIFFERENT FACTS. An empty value in a
+        // column the vendor HAS is a row this build cannot classify, and it is
+        // still declined by name. No column at all is a question this vendor's
+        // master cannot answer, and the honest response is to let the row
+        // through ungated rather than to answer it wrongly.
+        //
+        // WHAT THAT COSTS, STATED RATHER THAN DISCOVERED. D-0025's board gate
+        // is what keeps SME and debt listings out of the equity universe, and
+        // it does not run for such a vendor: its cash rows are kept on the
+        // instrument type alone. Nothing else in this decoder is weakened, and
+        // the vendors that DO publish a series are gated exactly as before —
+        // the arm below is reached only when `master_columns().listing_class`
+        // is empty, which is a property of the vendor and not of the row.
+        "EQ" if vendor.master_columns().listing_class.is_empty() => (Segment::Cash, Kind::Equity),
         "EQ" => match board_of(row.listing_class) {
             EquityVerdict::MainBoard => (Segment::Cash, Kind::Equity),
             EquityVerdict::Sme => return declined(Skip::SmeBoard),
@@ -972,12 +1676,37 @@ pub fn decode_master_row(vendor: Vendor, row: MasterRow<'_>) -> Result<Decoded, 
     // 2,726 Groww and 2,774 Dhan main-board rows carries one, so a missing or
     // malformed value means the row is not what we think it is, and that is an
     // error rather than a quiet `None`.
+    //
+    // AND IT IS REQUIRED OF A VENDOR THAT PUBLISHES THE COLUMN, which is the
+    // clause that was missing. The sentence above counts Groww's and Dhan's
+    // main-board rows, and both of those masters HAVE an isin column; Kite's
+    // has twelve columns and not one of them is an ISIN. So `Isin::new("")`
+    // refused, `?` turned it into `Malformed`, and every ordinary NSE equity in
+    // that master came back as a malformed instrument identifier — measured,
+    // kept = 0, alongside the board-series gate above which failed for exactly
+    // the same reason one field earlier.
+    //
+    // A vendor that publishes no ISIN cannot be asked for one. The row is kept
+    // with `None`, which is the honest value and is precisely what
+    // `pull::universe::JoinKey::TradingSymbol` exists to join on — the design
+    // already accounts for this feed having no ISIN; this line did not.
+    //
+    // Nothing is weakened for the two vendors that DO publish it: the arm turns
+    // on `master_columns()`, a property of the VENDOR, so a missing or
+    // malformed value in a column that exists is still the error it always was.
     let isin = match kind {
-        Kind::Equity => Some(Isin::new(row.isin)?),
+        Kind::Equity if !vendor.master_columns().isin.is_empty() => Some(Isin::new(row.isin)?),
         _ => None,
     };
 
+    let Some(vendor_id) = VendorId::new(row.vendor_id) else {
+        // A row with no usable id cannot be requested from the vendor, so it is
+        // DECLINED rather than kept: keeping it would put an instrument in the
+        // index that every later lookup would find and no pull could name.
+        return declined(Skip::NoVendorId);
+    };
     Ok(Decoded::Keep(Listing {
+        vendor_id,
         key,
         isin,
         unsuffixed: unsuffixed_key(key, name, row.listing_class)?,
@@ -1067,8 +1796,13 @@ fn parse_expiry(text: &str) -> Result<Expiry, InstrumentError> {
 /// [`InstrumentError::Malformed`] if the value is not a number or does not fit
 /// in `i64` paisa.
 fn parse_strike(text: &str) -> Result<Paisa, InstrumentError> {
-    let rupees: f64 = text.parse().map_err(|_| InstrumentError::Malformed)?;
-    Paisa::from_rupees_half_up(rupees).map_err(|_| InstrumentError::Malformed)
+    // Exact, from the TEXT. This used to parse the column into a binary float and hand it
+    // to `Paisa::from_rupees_half_up`, discarding an exact decimal one line before the only
+    // function in the workspace allowed to approximate one. An audit measured 271 mismatches
+    // across the 40,000 three-decimal strings from "0.000" to "39.999" -- "0.145" became 14
+    // paisa where exact half-up is 15 -- always losing downward. The master file is text and
+    // nothing has been lost yet when this is called.
+    Paisa::from_rupee_text_half_up(text).map_err(|_| InstrumentError::Malformed)
 }
 
 #[cfg(test)]
@@ -1118,6 +1852,7 @@ mod tests {
         strike: &'a str,
     ) -> MasterRow<'a> {
         MasterRow {
+            vendor_id: "1333",
             exchange,
             segment,
             underlying,
@@ -1150,6 +1885,65 @@ mod tests {
         assert_eq!(bare(Skip::LiveContract).skip(), Some(Skip::LiveContract));
         let keep = groww(row("NSE", "CASH", "RELIANCE", "EQ", "", "")).expect("ok");
         assert_eq!(keep.skip(), None, "a kept row was not skipped");
+    }
+
+    /// An index name is normalised to the exchange's canonical ticker; a space
+    /// anywhere else is still malformed.
+    #[test]
+    fn an_index_name_loses_its_spaces_and_nothing_else_does() {
+        // THE 104 ROWS THIS RECOVERS. The second vendor writes the display
+        // name, the first writes the ticker, and the ticker is what both now
+        // produce -- so the two masters agree on one key instead of one of
+        // them having no key at all.
+        for (written, want) in [
+            ("NIFTY MIDCAP 150", "NIFTYMIDCAP150"),
+            ("NIFTY PVT BANK", "NIFTYPVTBANK"),
+            ("NIFTY100 EQUAL WEIGHT", "NIFTY100EQUALWEIGHT"),
+            ("INDIA VIX", "INDIAVIX"),
+            // 26 characters as written, 23 collapsed -- the longest in the
+            // file, and the reason the buffer is checked rather than assumed.
+            ("NIFTY100 LOW VOLATILITY 30", "NIFTY100LOWVOLATILITY30"),
+        ] {
+            let got = groww(row("NSE", "CASH", written, "IDX", "", ""))
+                .unwrap_or_else(|why| panic!("{written:?} must decode, got {why:?}"));
+            let key = kept(got).unwrap_or_else(|| panic!("{written:?} must be kept"));
+            assert_eq!(key.underlying.as_str(), want);
+            assert_eq!(key.kind, Kind::Index);
+        }
+
+        // ALREADY CANONICAL, AND UNTOUCHED. The other vendor's spelling must
+        // land on exactly the same symbol, or the normalisation has split the
+        // instrument instead of joining it.
+        let plain = kept(groww(row("NSE", "CASH", "NIFTYPVTBANK", "IDX", "", "")).expect("ok"))
+            .expect("kept");
+        assert_eq!(plain.underlying.as_str(), "NIFTYPVTBANK");
+
+        // AND THE RESTRAINT. A space on any other kind of row is corruption,
+        // not a spelling, and is still refused -- see the comment at the call
+        // site for the draft that got this wrong.
+        assert!(
+            groww(row("NSE", "FNO", "NIF TY", "FUT", "2026-08-04", "")).is_err(),
+            "a space outside an index row must stay malformed"
+        );
+        assert!(
+            groww(row("NSE", "CASH", "RELI ANCE", "EQ", "", "")).is_err(),
+            "an equity ticker with a space is corruption, not a display name"
+        );
+
+        // A name that still will not fit once collapsed is refused rather than
+        // truncated into some other instrument's symbol.
+        assert!(
+            groww(row(
+                "NSE",
+                "CASH",
+                "NIFTY VERY LONG INDEX NAME THAT OVERFLOWS",
+                "IDX",
+                "",
+                ""
+            ))
+            .is_err(),
+            "over capacity after collapsing is malformed, never truncated"
+        );
     }
 
     #[test]
@@ -1253,11 +2047,27 @@ mod tests {
     }
 
     #[test]
-    fn an_equity_decodes_and_is_stored_not_swept() {
+    fn an_equity_decodes_and_sweeps_iff_it_is_an_fno_underlying() {
+        // Was `an_equity_decodes_and_is_stored_not_swept`, pinning D-0018.
+        // D-0506 widened the surface to the F&O cash equities, so a decoded
+        // equity's sweepability is now the one table lookup, and this test
+        // says so from both sides of it.
         let got = groww(row("NSE", "CASH", "RELIANCE", "EQ", "", "")).expect("ok");
         let key = kept(got).expect("kept");
         assert_eq!(key.kind, Kind::Equity);
-        assert!(!key.is_sweepable(), "D-0018: stored, not swept");
+        assert!(
+            crate::universe::FNO_INDEX.contains("RELIANCE"),
+            "RELIANCE is an F&O underlying, or this fixture is wrong"
+        );
+        assert!(key.is_sweepable(), "D-0506: an F&O underlying is swept");
+
+        // A well-formed symbol the F&O list does not hold decodes the same way
+        // and stays stored-only. The fixture checks its own premise.
+        assert!(!crate::universe::FNO_INDEX.contains("ZZQXNOTFNO"));
+        let got = groww(row("NSE", "CASH", "ZZQXNOTFNO", "EQ", "", "")).expect("ok");
+        let key = kept(got).expect("kept");
+        assert_eq!(key.kind, Kind::Equity);
+        assert!(!key.is_sweepable(), "D-0018 still holds off the F&O list");
     }
 
     #[test]
@@ -1337,6 +2147,7 @@ mod tests {
         // the underlying -- a col-3 value fed into the col-10 field -- so a
         // total decode failure on the engine's primary instrument was green.
         let real = MasterRow {
+            vendor_id: "1333",
             exchange: "NSE",
             segment: "CASH",
             underlying: "", // <-- exactly as the file has it
@@ -1365,6 +2176,7 @@ mod tests {
         // is what let 200,460 Dhan rows disappear while reporting a routine
         // skip. A mapping bug must never look like a legitimate refusal.
         let bad_segment = MasterRow {
+            vendor_id: "1333",
             exchange: "NSE",
             segment: "Z",
             underlying: "NIFTY",
@@ -1380,6 +2192,7 @@ mod tests {
         // Groww's letters are not Dhan's, and vice versa.
         assert!(groww(bad_segment).is_err());
         let dhan_shaped_at_groww = MasterRow {
+            vendor_id: "1333",
             segment: "I",
             ..bad_segment
         };
@@ -1389,6 +2202,7 @@ mod tests {
         );
 
         let bad_type = MasterRow {
+            vendor_id: "1333",
             segment: "D",
             instrument_type: "DBT",
             ..bad_segment
@@ -1399,6 +2213,7 @@ mod tests {
     #[test]
     fn currency_and_commodity_are_declined_not_stored() {
         let cur = MasterRow {
+            vendor_id: "1333",
             exchange: "NSE",
             segment: "C",
             underlying: "USDINR",
@@ -1421,6 +2236,7 @@ mod tests {
         // Currency derivatives are a recognised type this engine does not
         // store -- distinct from an unrecognised code, which is an error.
         let cur = MasterRow {
+            vendor_id: "1333",
             exchange: "NSE",
             segment: "D",
             underlying: "USDINR",
@@ -1458,6 +2274,7 @@ mod tests {
         // Dhan's spellings too.
         for ty in ["FUTIDX", "FUTSTK", "OPTIDX", "OPTSTK"] {
             let r = MasterRow {
+                vendor_id: "1333",
                 exchange: "NSE",
                 segment: "D",
                 underlying: "NIFTY",
@@ -1484,6 +2301,7 @@ mod tests {
         // must be loud -- an option whose side we cannot read is not an option
         // we can store.
         let opt = |side| MasterRow {
+            vendor_id: "1333",
             exchange: "NSE",
             segment: "D",
             underlying: "NIFTY",
@@ -1531,6 +2349,7 @@ mod tests {
 
         let nifty = kept(
             groww(MasterRow {
+                vendor_id: "1333",
                 exchange: "NSE",
                 segment: "CASH",
                 underlying: "",
@@ -1551,6 +2370,7 @@ mod tests {
             decode_master_row(
                 Vendor::Dhan,
                 MasterRow {
+                    vendor_id: "1333",
                     exchange: "NSE",
                     segment: "E",
                     underlying: "RELIANCE",
@@ -1580,6 +2400,7 @@ mod tests {
     /// and the only column this gate reads. D-0025.
     fn dhan_cash<'a>(ticker: &'a str, series: &'a str, isin: &'a str) -> MasterRow<'a> {
         MasterRow {
+            vendor_id: "1333",
             exchange: "NSE",
             segment: "E",
             underlying: ticker,
@@ -1596,6 +2417,7 @@ mod tests {
     /// A Groww `CASH`/`EQ` row on a given NSE series.
     fn groww_cash<'a>(ticker: &'a str, series: &'a str, isin: &'a str) -> MasterRow<'a> {
         MasterRow {
+            vendor_id: "1333",
             underlying: "",
             trading_symbol: ticker,
             listing_class: series,
@@ -1772,7 +2594,12 @@ mod tests {
             "N0", "N1", "SG", "GS", "MF", "IV", "Y1", "Z9", "AK", "D1", "W1", "TB", "GB", "RR",
             "P1", "SF", "ZZ",
         ] {
-            for vendor in Vendor::ALL {
+            // THE TWO MASTERS THAT CARRY A BOARD SERIES, not every mastered
+            // vendor. This alphabet is read from a `series` column, and the
+            // third broker's dump has none — twelve columns, no series and no
+            // ISIN among them. Asking it to decline a series it never publishes
+            // is asking a question its master cannot answer.
+            for vendor in [Vendor::Groww, Vendor::Dhan] {
                 let r = match vendor {
                     Vendor::Groww => groww_cash("SOMEBOND", series, REAL_ISIN),
                     _ => dhan_cash("SOMEBOND", series, REAL_ISIN),
@@ -1828,8 +2655,11 @@ mod tests {
 
     #[test]
     fn the_measured_series_tables_are_sorted_disjoint_and_complete() {
-        // `board_of` binary-searches all three, and binary_search on an
-        // unsorted array returns garbage in silence.
+        // Sortedness no longer carries a search — `board_of` probes three
+        // `MemberIndex` tables — but a strictly increasing walk is still how a
+        // duplicate is caught, and a duplicate is what would make one code
+        // appear in a table twice and the census counts disagree with the
+        // list.
         for (name, list) in [
             ("EQUITY_BOARD_SERIES", EQUITY_BOARD_SERIES.as_slice()),
             ("SME_BOARD_SERIES", SME_BOARD_SERIES.as_slice()),
@@ -1858,6 +2688,77 @@ mod tests {
         );
     }
 
+    /// I-38. The three series tables answer in a bounded number of probes, and
+    /// the bound is a NUMBER rather than the word "small".
+    ///
+    /// `docs/07-o1-architecture.md` layer 4: a layer is built when a test
+    /// asserts the bound as a number. The section records why — the first
+    /// open-addressed table written in this workspace measured **14** probes,
+    /// worse than the `binary_search` it replaced and still O(1) by
+    /// definition, and only its own test caught that.
+    ///
+    /// Asserted at the same `<= 8` the universe tables are held to, so one
+    /// number governs every `MemberIndex` in the crate, and PRINTED so a
+    /// regression that stays inside the bound is still visible in the log.
+    #[test]
+    fn the_series_tables_probe_in_bounded_time() {
+        fn worst<const N: usize>(idx: &MemberIndex<N>, members: &[&str]) -> usize {
+            let mut worst = 0;
+            for m in members {
+                // Walks the table the way `contains` does and COUNTS the
+                // steps, rather than trusting the shape of the code. The start
+                // index comes from `universe::mask` itself rather than from a
+                // copy of it: a copy is free to disagree with the thing under
+                // test, and would then measure a probe nobody performs.
+                let mut at = crate::universe::mask(crate::universe::fnv1a(m), N);
+                let mut steps = 1;
+                while let Some(held) = idx.slots[at] {
+                    if held == *m {
+                        break;
+                    }
+                    at = (at + 1) & (N - 1);
+                    steps += 1;
+                }
+                worst = worst.max(steps);
+            }
+            worst
+        }
+        let eq = worst(&EQUITY_BOARD_INDEX, &EQUITY_BOARD_SERIES);
+        let sme = worst(&SME_BOARD_INDEX, &SME_BOARD_SERIES);
+        let non = worst(&NON_EQUITY_INDEX, &NON_EQUITY_SERIES);
+        assert!(
+            eq <= 8,
+            "6 in 16 slots must probe at most 8 times, got {eq}"
+        );
+        assert!(
+            sme <= 8,
+            "2 in 8 slots must probe at most 8 times, got {sme}"
+        );
+        assert!(
+            non <= 8,
+            "120 in 512 slots must probe at most 8 times, got {non}"
+        );
+        println!("worst probe: equity {eq}, sme {sme}, non-equity {non}");
+        // And the tables answer the questions `board_of` asks of them, which
+        // is the property the probe bound is only worth having for.
+        for code in EQUITY_BOARD_SERIES {
+            assert!(EQUITY_BOARD_INDEX.contains(code), "{code} missing");
+        }
+        for code in SME_BOARD_SERIES {
+            assert!(SME_BOARD_INDEX.contains(code), "{code} missing");
+        }
+        for code in NON_EQUITY_SERIES {
+            assert!(NON_EQUITY_INDEX.contains(code), "{code} missing");
+        }
+        // A code in no table is `false` in all three, which is what makes
+        // `Unrecognised` reachable at all.
+        for absent in ["QQ", "", "  ", "EQUITY"] {
+            assert!(!EQUITY_BOARD_INDEX.contains(absent));
+            assert!(!SME_BOARD_INDEX.contains(absent));
+            assert!(!NON_EQUITY_INDEX.contains(absent));
+        }
+    }
+
     #[test]
     fn the_equity_board_is_kept_and_the_sme_board_is_declined_separately() {
         // EQ and BE are the equity board; SM and ST are the SME board. The SME
@@ -1866,6 +2767,7 @@ mod tests {
         // ranks over.
         for series in ["EQ", "BE"] {
             let r = MasterRow {
+                vendor_id: "1333",
                 listing_class: series,
                 ..row("NSE", "CASH", "RELIANCE", "EQ", "", "")
             };
@@ -1929,6 +2831,7 @@ mod tests {
         // which is every instrument the engine exists to sweep.
         for sym in ["NIFTY", "BANKNIFTY"] {
             let g = MasterRow {
+                vendor_id: "1333",
                 underlying: "",
                 trading_symbol: sym,
                 listing_class: "",
@@ -1940,6 +2843,7 @@ mod tests {
             assert_eq!(gl.isin, None, "an index has no ISIN, and none is invented");
 
             let d = MasterRow {
+                vendor_id: "1333",
                 exchange: "NSE",
                 segment: "I",
                 underlying: sym,
@@ -1965,6 +2869,7 @@ mod tests {
         // A live derivative carries no series either. It is declined for being
         // live, and the reason must say so rather than saying "not equity".
         let r = MasterRow {
+            vendor_id: "1333",
             listing_class: "",
             isin: "",
             ..row("NSE", "FNO", "NIFTY", "FUT", "2026-08-04", "")
@@ -1982,6 +2887,7 @@ mod tests {
         // missing or malformed value means the row is not what it claims.
         for bad in ["", "NA", "INE002A01019", "INE002A0101"] {
             let r = MasterRow {
+                vendor_id: "1333",
                 isin: bad,
                 ..row("NSE", "CASH", "RELIANCE", "EQ", "", "")
             };
@@ -2020,6 +2926,7 @@ mod tests {
         // does not adopt it, because only a second vendor's ISIN can confirm
         // that BLUECHIP-BE and BLUECHIP are one instrument.
         let r = MasterRow {
+            vendor_id: "1333",
             underlying: "",
             trading_symbol: "BLUECHIP-BE",
             listing_class: "BE",
@@ -2050,6 +2957,7 @@ mod tests {
             ("LOWVOL-EQ", "BE"),
         ] {
             let r = MasterRow {
+                vendor_id: "1333",
                 underlying: "",
                 trading_symbol: ticker,
                 listing_class: series,
@@ -2066,6 +2974,7 @@ mod tests {
     #[test]
     fn stripping_to_nothing_is_an_error_rather_than_a_silent_no_op() {
         let r = MasterRow {
+            vendor_id: "1333",
             underlying: "",
             trading_symbol: "-EQ",
             listing_class: "EQ",
@@ -2080,6 +2989,7 @@ mod tests {
         // candidate to offer -- even when its ticker happens to end in a dash
         // and a word.
         let r = MasterRow {
+            vendor_id: "1333",
             underlying: "",
             trading_symbol: "NIFTY-IDX",
             listing_class: "IDX",
@@ -2099,6 +3009,7 @@ mod tests {
     #[test]
     fn every_skip_reason_is_distinct_and_says_what_it_declined() {
         let all = [
+            Skip::NoVendorId,
             Skip::ForeignExchange,
             Skip::UnrecognisedExchange,
             Skip::TestInstrument,
@@ -2177,6 +3088,112 @@ mod tests {
         let only_dhan = VendorSet::EMPTY.with(Vendor::Dhan);
         assert!(only_dhan.contains(Vendor::Dhan));
         assert!(!only_dhan.contains(Vendor::Groww));
+        for vendor in Vendor::ALL {
+            let single = VendorSet::EMPTY.with(vendor);
+            for other in Vendor::ALL {
+                assert_eq!(single.contains(other), vendor == other);
+            }
+        }
+    }
+
+    #[test]
+    fn archive_vendors_have_names_but_cannot_supply_master_metadata() {
+        for (vendor, name, master) in [
+            (Vendor::Groww, "groww", "groww_instruments.csv"),
+            (Vendor::Dhan, "dhan", "dhan_scrip.csv"),
+            (Vendor::TrueData, "truedata", "truedata_instruments.csv"),
+            (Vendor::Gdfl, "gdfl", "gdfl_instruments.csv"),
+            (Vendor::Zerodha, "zerodha", "zerodha_instruments.csv"),
+        ] {
+            assert_eq!(
+                vendor.as_str(),
+                name,
+                "persisted vendor namespace is stable"
+            );
+            assert_eq!(vendor.master_file(), master);
+            assert_eq!(
+                vendor.publishes_master(),
+                Vendor::MASTERED.contains(&vendor)
+            );
+        }
+        for archive in [Vendor::TrueData, Vendor::Gdfl] {
+            let columns = archive.master_columns();
+            for name in [
+                columns.vendor_id,
+                columns.exchange,
+                columns.segment,
+                columns.underlying,
+                columns.trading_symbol,
+                columns.instrument_type,
+                columns.listing_class,
+                columns.isin,
+                columns.expiry,
+                columns.strike,
+            ] {
+                assert!(name.is_empty(), "archive must not invent a master column");
+            }
+            assert_eq!(columns.option_side, None);
+            assert_eq!(archive.index_segment_word(), None);
+            for code in ["", "NSE", "INDEX", "EQ", "FUT", "CE", "PE"] {
+                assert_eq!(
+                    archive.segment_of(code).err(),
+                    Some(InstrumentError::Malformed)
+                );
+                assert_eq!(archive.type_of(code, "CE"), Err(InstrumentError::Malformed));
+            }
+        }
+        assert_eq!(
+            Vendor::Zerodha.master_columns().vendor_id,
+            "instrument_token"
+        );
+        for code in ["EQ", "FUT", "CE", "PE"] {
+            assert_eq!(Vendor::Zerodha.type_of(code, "ignored"), Ok(Some(code)));
+        }
+        assert_eq!(
+            Vendor::Zerodha.type_of("IDX", ""),
+            Err(InstrumentError::Malformed)
+        );
+    }
+
+    #[test]
+    fn cash_without_published_isin_or_series_keeps_identity_without_inventing_either() {
+        let mut input = row("NSE", "NSE", "", "EQ", "", "");
+        input.trading_symbol = "RELIANCE";
+        input.listing_class = "";
+        input.isin = "";
+        let cash = listing(decode_master_row(Vendor::Zerodha, input).expect("cash decode"))
+            .expect("cash retained");
+        assert_eq!(cash.key.kind, Kind::Equity);
+        assert_eq!(cash.key.underlying.as_str(), "RELIANCE");
+        assert_eq!(cash.isin, None);
+        assert_eq!(cash.unsuffixed, None);
+        input.segment = "INDICES";
+        input.trading_symbol = "NIFTY 50";
+        let index = listing(decode_master_row(Vendor::Zerodha, input).expect("index decode"))
+            .expect("index retained");
+        assert_eq!(index.key.kind, Kind::Index);
+        assert_eq!(index.key.underlying.as_str(), "NIFTY");
+        assert_eq!(index.isin, None);
+    }
+
+    #[test]
+    fn vendor_ids_refuse_missing_and_oversized_values_before_a_listing_is_kept() {
+        for raw in ["", "   ", "\t\n"] {
+            assert_eq!(VendorId::new(raw), None);
+            let mut input = row("NSE", "CASH", "RELIANCE", "EQ", "", "");
+            input.vendor_id = raw;
+            assert_eq!(
+                groww(input).expect("explicit decline").skip(),
+                Some(Skip::NoVendorId)
+            );
+        }
+        let limit = "X".repeat(VENDOR_ID_CAPACITY);
+        assert_eq!(VendorId::new(&limit).expect("at capacity").as_str(), limit);
+        assert_eq!(VendorId::new(&format!("{limit}X")), None);
+        let value = VendorId::new("  A-19_é  ").expect("opaque UTF-8 identifier");
+        assert_eq!(value.as_str(), "A-19_é");
+        assert_eq!(value.to_string(), "A-19_é");
+        assert_eq!(format!("{value:?}"), "VendorId(\"A-19_é\")");
     }
 
     // =======================================================================
@@ -2187,6 +3204,7 @@ mod tests {
     /// field that is scanned but never becomes the identity.
     fn wide_row<'a>(field: &str, wide: &'a str) -> MasterRow<'a> {
         let mut r = MasterRow {
+            vendor_id: "1333",
             exchange: "NSE",
             segment: "CASH",
             underlying: "RELIANCE",
