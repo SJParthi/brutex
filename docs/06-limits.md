@@ -2180,15 +2180,23 @@ that recovery is not available. Once a later window is appended, the refused
 days are a gap the append-only file cannot fill.
 
 **A resume that does not overlap is not checked at all.** Nothing records or
-compares the libm build: the provenance word has no field for it, and
-`Header::advance` accepts a batch whose first timestamp follows the last one
-committed without comparing a field of any row. A plain forward append under
-another libm, or after an OS update, is accepted without comment, and the file
-then holds rows from two libm builds with nothing saying which rows came from
-which. Re-offering a window written before the switch is then refused under the
-new build whenever its bits differ. D-0692 keys a `.grk` resume to the libm
-build that began the series as an operating rule, not an enforced one, and the
-second hardening it records is what would enforce it.
+compares the libm build: neither the header nor the provenance word has a field
+for it, and `Header::advance` accepts a batch whose first timestamp follows the
+last one committed without comparing a field of any row. A plain forward append
+under another libm, or after an OS update, is accepted without comment, and the
+file then holds rows from two libm builds with nothing saying which rows came
+from which. Re-offering a window written before the switch is then refused
+under the new build whenever its bits differ, and one written after it is
+refused under the old build the same way. D-0692 keys a `.grk` resume to the
+libm build that began the series as an operating rule, not an enforced one, and
+the second hardening it records is what would enforce it. Pinned by
+`crates/store/tests/libm_key.rs`, with a second libm modelled as a one-ulp move
+in `delta`: `a_forward_append_under_another_libm_is_committed_and_names_no_build`
+fails the day the store refuses that append, or writes a byte outside the moved
+`delta` fields that tells the two builds apart, and
+`after_a_mixed_resume_neither_libm_build_re_files_the_whole_month` drives the
+two refusals. A stamp a caller packs into the provenance word would not be seen
+by either, because the tests build the provenance themselves.
 
 **"Within one target" above means within one libm build, and the target triple
 does not fix that.** Measured on this machine (macOS 26.6.2, aarch64), from

@@ -38775,16 +38775,17 @@ are a gap the append-only file cannot fill, the same shape as the gap D-0218
 records for a rate supplied late.
 
 **That rule is operational, and nothing enforces it.** No code records or
-checks the libm build. The provenance word has no field for it, and
-`Header::advance` accepts any batch whose first timestamp follows the last one
-committed without comparing a field of any row. So a resume that does not
-overlap, a plain forward append under another libm or after an OS update, is
-accepted without comment, and the file then holds rows from two libm builds
-with nothing recording which rows came from which. From then on no one libm
-build is expected to re-file every held window: re-offering a window written
-before the switch is refused under the new build whenever its bits differ, and
-the build that wrote it may be gone. Hardening 2 below is what would close
-this.
+checks the libm build. Neither the header nor the provenance word has a field
+for it, and `Header::advance` accepts any batch whose first timestamp follows
+the last one committed without comparing a field of any row. So a resume that
+does not overlap, a plain forward append under another libm or after an OS
+update, is accepted without comment, and the file then holds rows from two libm
+builds with nothing recording which rows came from which. From then on no one
+libm build is expected to re-file every held window: re-offering a window
+written before the switch is refused under the new build whenever its bits
+differ, a window written after it is refused under the old build the same way,
+and the build that wrote the earlier windows may be gone. Hardening 2 below is
+what would close this.
 
 **Rejected.** (1) Rounding the greeks to a coarser grid before storing them.
 §7 forbids it, and it would not remove the hazard: a value near a rounding
@@ -38854,8 +38855,16 @@ misrounds `ln(ln 389)`, and that neither the `{:.2}` rendered thresholds nor
 `bar_milli` changed on any of 1.97 million inputs. `docs/06-limits.md` §29
 records the same.
 
-Only `docs/06-limits.md` and this ledger changed. No source changed, so there
-is no test to add and no mutant to run.
+No source changed, so there is no mutant to run.
+`crates/store/tests/libm_key.rs` checks this entry against the store it
+describes. Two of its tests drive a `.grk` file through a forward append under
+a second libm, modelled as a one-ulp move in `delta`: the append commits, the
+file differs from a single-build file only in that window's `delta` bytes, and
+afterwards each build re-files its own window and refuses the other's. The
+other two read this entry and `docs/06-limits.md` §29: that the paragraph
+saying nothing enforces the key follows the rule it qualifies, and that the
+glibc CI target is cited to §29, which states it, rather than to D-0046, which
+does not. No second libm is linked or run by those tests.
 
 ### D-0693 — Release every advisory file lock by `File::unlock`, through one guard in `store` — 2026-09-23
 
