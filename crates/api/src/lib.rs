@@ -127,6 +127,13 @@ pub mod verify;
 #[cfg(test)]
 pub(crate) mod scratch;
 
+/// One test of this binary re-run in a child process with a chosen
+/// environment. Compiled only under `cfg(test)`: it is how a test reaches a
+/// route that reads its configuration from the environment, which no test may
+/// set in its own process.
+#[cfg(test)]
+pub(crate) mod isolated;
+
 /// The one telemetry sink this test binary installs, and the proof that every
 /// reachable `telemetry::emit` site in this crate reaches a file. Compiled only
 /// under `cfg(test)` — `telemetry::install` is a process singleton, so the sink

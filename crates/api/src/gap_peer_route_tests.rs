@@ -160,6 +160,7 @@ async fn gap_audit_peers_must_match_both_exchange_and_segment() {
     let baseline = fixture.get().await;
     assert_eq!(baseline["calendar"]["source"], "table");
     assert_eq!(baseline["calendar"]["voted_by"], serde_json::json!([]));
+    assert_eq!(baseline["calendar"]["unreadable"], serde_json::json!([]));
 
     fixture.write(
         Vendor::Groww,
@@ -220,6 +221,31 @@ async fn gap_audit_peers_must_match_both_exchange_and_segment() {
     assert_eq!(voters, ["dhan:COMPARABLE", "groww:SUBJECT"]);
     assert_eq!(another["lost_minutes"], 1);
     assert_eq!(fixture.get().await, another, "stable native voter order");
+
+    // A PEER CENSUS THAT CANNOT BE READ IS NAMED, and the vote is otherwise
+    // what it was: Zerodha held only an off-venue series, so it never voted.
+    let zerodha = pull::manifest::manifest_path(&fixture.root, Vendor::Zerodha);
+    fs::write(&zerodha, [0xFF_u8; 16]).expect("damage Zerodha's census");
+    fs::File::options()
+        .write(true)
+        .open(&zerodha)
+        .expect("the damaged manifest")
+        .set_modified(
+            std::time::SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_secs(1_700_000_000)
+                + std::time::Duration::from_mins(fixture.stamps + 1),
+        )
+        .expect("a filesystem that carries modified times");
+    let damaged = fixture.get().await;
+    assert_eq!(
+        damaged["calendar"]["unreadable"],
+        serde_json::json!(["zerodha"])
+    );
+    assert_eq!(
+        damaged["calendar"]["voted_by"],
+        another["calendar"]["voted_by"]
+    );
+    assert_eq!(damaged["lost_minutes"], 1);
     for (path, original) in &fixture.originals {
         assert_eq!(&fs::read(path).expect("read-only source"), original);
     }

@@ -1082,4 +1082,75 @@ mod tests {
         );
         drop(held);
     }
+
+    /// The child half of the test below reads its store root from this.
+    const ADMITTED_CHILD: &str = "BRUTEX_API_TRADES_ADMITTED_CHILD";
+
+    /// A WELL-FORMED SELECTOR IS ADMITTED, AND THE READ IT NAMES ANSWERS IT.
+    ///
+    /// Every other test here calls the two halves of `trades_json` directly --
+    /// `Selector::parse`, then `respond` -- or saturates admission so the
+    /// admitted closure never runs. This one sends a good request through
+    /// `trades_json` itself, so its `Ok(asked)` arm and the admitted
+    /// `move || respond(asked)` both run, and it requires the route's answer to
+    /// be byte-identical to the two halves called directly. A route that parsed
+    /// one selector and served another, or answered a good selector with a
+    /// refusal, fails here and nowhere else (D-0689).
+    ///
+    /// In a child process because `trades_json` takes its root from
+    /// `BRUTEX_STORE` and a test cannot set its own environment; see
+    /// `crate::isolated`.
+    #[tokio::test]
+    async fn an_admitted_selector_is_answered_by_the_read_it_names() {
+        if let Some(root) = std::env::var_os(ADMITTED_CHILD) {
+            admitted_child(std::path::Path::new(&root)).await;
+            return;
+        }
+        let root = crate::scratch::path("trades-admitted-selector");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("the child's store root");
+        let out = crate::isolated::rerun(
+            "trades::tests::an_admitted_selector_is_answered_by_the_read_it_names",
+            &[
+                (ADMITTED_CHILD, root.as_os_str()),
+                ("BRUTEX_STORE", root.as_os_str()),
+            ],
+        );
+        assert!(out.contains("TRADES-ADMITTED 206 seq0"), "{out}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    async fn admitted_child(root: &std::path::Path) {
+        assert_eq!(
+            crate::server::store_dir(),
+            Ok(root.to_path_buf()),
+            "the route reads the root this child was given"
+        );
+        let identity = [0x86; 32];
+        cli::trades::Trades::open(root)
+            .expect("trade store")
+            .append_all(&[trade_row(identity, 0), trade_row(identity, 1)])
+            .expect("two rows of one run");
+        commit_trade_fixture(root, identity, 2);
+
+        let query = format!("identity={}&limit=1", "86".repeat(32));
+        let uri: axum::http::Uri = format!("/trades.json?{query}").parse().expect("uri");
+        let routed = trades_json(uri).await;
+        let direct = respond(Ok(root.to_path_buf()), &query);
+        assert_eq!(
+            routed.0,
+            axum::http::StatusCode::PARTIAL_CONTENT,
+            "one page of two rows is a partial answer: {}",
+            routed.2
+        );
+        assert_eq!(routed, direct, "the route serves what the read answers");
+        assert_body_identity(&routed.2, &"86".repeat(32));
+        assert!(routed.2.contains(r#""seq":0"#), "page 0 row: {}", routed.2);
+        assert!(
+            !routed.2.contains(r#""seq":1"#),
+            "`limit=1` was parsed before admission and still bounds the page: {}",
+            routed.2
+        );
+        println!("TRADES-ADMITTED {} seq0", routed.0.as_u16());
+    }
 }

@@ -141,6 +141,10 @@ fn persistent_projection_keeps_zero_missing_and_foreign_origins_distinct() {
 
 #[tokio::test]
 async fn successful_and_refused_handlers_leave_durable_separate_request_records() {
+    // `request_audited` journals through a detail slot, so a test holding
+    // every slot at the same moment answered this one 429. Observed once in a
+    // full run; kept apart from the slot owners as the admission tests are.
+    let _apart = crate::detail::apart_from_slot_owners().await;
     let root = Scratch::new();
     for (status, expected) in [
         (StatusCode::OK, Phase::Completed),

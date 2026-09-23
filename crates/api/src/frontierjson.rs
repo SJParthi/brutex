@@ -1087,4 +1087,73 @@ mod tests {
         assert!(!body.contains(r#""rank":1"#), "foreign row leaked: {body}");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// The child half of the test below reads its store root from this.
+    const ADMITTED_CHILD: &str = "BRUTEX_API_FRONTIER_ADMITTED_CHILD";
+
+    /// A WELL-FORMED SELECTOR IS ADMITTED, AND THE READ IT NAMES ANSWERS IT.
+    ///
+    /// The fixtures above call `Selector::parse` and `respond` directly; no
+    /// test sent a good selector through `frontier_json`, so its `Ok(asked)`
+    /// arm and the admitted `move || respond(asked)` had never run. This one
+    /// does, and requires the route's answer to be byte-identical to the two
+    /// halves called directly, with the parsed `limit` still bounding the page
+    /// the admitted read renders (D-0689).
+    ///
+    /// In a child process because `frontier_json` takes its root from
+    /// `BRUTEX_STORE` and a test cannot set its own environment; see
+    /// `crate::isolated`.
+    #[tokio::test]
+    async fn an_admitted_selector_is_answered_by_the_read_it_names() {
+        if let Some(root) = std::env::var_os(ADMITTED_CHILD) {
+            admitted_child(std::path::Path::new(&root)).await;
+            return;
+        }
+        let root = crate::scratch::path("frontier-admitted-selector");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("the child's store root");
+        let out = crate::isolated::rerun(
+            "frontierjson::tests::an_admitted_selector_is_answered_by_the_read_it_names",
+            &[
+                (ADMITTED_CHILD, root.as_os_str()),
+                ("BRUTEX_STORE", root.as_os_str()),
+            ],
+        );
+        assert!(out.contains("FRONTIER-ADMITTED 206 rank1"), "{out}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    async fn admitted_child(root: &std::path::Path) {
+        assert_eq!(
+            crate::server::store_dir(),
+            Ok(root.to_path_buf()),
+            "the route reads the root this child was given"
+        );
+        let identity = [0x95; 32];
+        cli::frontier::Frontier::open(root)
+            .expect("frontier")
+            .append_all(&[verdict_row(identity, 1), verdict_row(identity, 2)])
+            .expect("two ranked rows of one run");
+        commit_frontier_fixture(root, identity, 2);
+
+        let query = format!("identity={}&limit=1", "95".repeat(32));
+        let uri: axum::http::Uri = format!("/frontier.json?{query}").parse().expect("uri");
+        let routed = super::frontier_json(uri).await;
+        let direct = respond(Ok(root.to_path_buf()), &query);
+        assert_eq!(
+            routed.0,
+            axum::http::StatusCode::PARTIAL_CONTENT,
+            "one page of two rows is a partial answer: {}",
+            routed.2
+        );
+        assert_eq!(routed, direct, "the route serves what the read answers");
+        assert_body_identity(&routed.2, &"95".repeat(32));
+        assert!(routed.2.contains(r#""rank":1"#), "page 0 row: {}", routed.2);
+        assert!(
+            !routed.2.contains(r#""rank":2"#),
+            "`limit=1` was parsed before admission and still bounds the page: {}",
+            routed.2
+        );
+        println!("FRONTIER-ADMITTED {} rank1", routed.0.as_u16());
+    }
 }
