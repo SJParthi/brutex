@@ -4301,7 +4301,7 @@ mod route_tests {
         let get = |path: &str| {
             exchange(
                 addr,
-                format!("GET {path} HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n"),
+                format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"),
             )
         };
         let post = |path: &str, form: &'static str| {

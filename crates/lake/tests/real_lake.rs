@@ -1,18 +1,29 @@
 //! Decodes the **real** lake and asserts values read out of it.
 //!
-//! # Why this test can be skipped, and why that is stated rather than hidden
+//! # Why these tests are ignored, and why that is stated rather than hidden
 //!
-//! The fixture is `~/.brutex/lake`, 40 GB of operator data. It cannot be
-//! committed: CI gate 1 allows exactly `.rs .toml .md .lock .html .css .yml`
+//! The fixture is `~/.brutex/lake`, 40 GB of operator data (D-0056). It cannot
+//! be committed: CI gate 1 allows exactly `.rs .toml .md .lock .html .css .yml`
 //! outside `web/`, so a tracked `.parquet` is a build failure by design, and
 //! 40 GB would not belong in git regardless.
 //!
-//! So when the lake is absent — which is every CI runner — these tests print
-//! that they are skipping and why. **They therefore prove nothing on CI.** The
-//! decode path that CI does exercise is `synthetic.rs`, which writes its own
+//! So every test here is `#[ignore]`d, on every machine. `cargo test` — and so
+//! every CI run — lists each one as `ignored`, with the reason its attribute
+//! gives, and executes none of its body. **They therefore prove nothing on
+//! CI.** They run only when started explicitly with `--ignored`, and without
+//! the lake they then split in two. The two sample-file tests panic `MISSING
+//! FIXTURE`, because `ok` there would be a test that asserted nothing. The two
+//! directory walks, `a_real_contract_directory_name_parses_and_round_trips`
+//! and `a_spread_of_real_files_decodes_with_no_failures`, still print
+//! `SKIPPING` and return `ok` having asserted nothing — the very result the
+//! other two refuse to give.
+//!
+//! The decode path that CI does exercise is `synthetic.rs`, which writes its own
 //! Parquet files covering the footer, the schema check, the definition levels,
-//! null expansion and the paisa conversion. What only this file can cover is
-//! the ZSTD page path and the actual recorded values, because both are
+//! null expansion and the paisa conversion — and which now also recompresses
+//! those files with `ruzstd`'s own encoder, so the ZSTD page path is driven end
+//! to end on every run. What only this file can cover is ZSTD frames as
+//! Polars' encoder wrote them and the actual recorded values, because both are
 //! properties of the operator's data rather than of this crate.
 //!
 //! That gap is real and is written down here rather than left for someone to

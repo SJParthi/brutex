@@ -135,6 +135,54 @@ impl Page {
     }
 }
 
+/// The refusal `/trades.json` and `/frontier.json` give a missing, short, long
+/// or non-hex `identity`. One copy, because both routes key on one identity.
+const IDENTITY_REFUSAL: &str = "`identity` must be the 64 hex characters `/backtest.json` prints on \
+     every row. This file holds many runs, so which one is not a detail \
+     it can infer.";
+
+/// One `/trades.json` or `/frontier.json` selector, parsed before admission.
+///
+/// Both routes used to parse this inside [`run`], so a selector that could
+/// only be refused still took a detail slot, and while every slot was held it
+/// was answered 429 instead of 400. Parsing it on the async path first means a
+/// malformed selector never reaches admission (D-0689).
+///
+/// The order is the one the blocking path used -- page, then store root, then
+/// identity -- so a request with more than one fault is refused for the same
+/// one, in the same words, as before.
+pub(crate) struct Selector {
+    /// The store root the blocking read opens.
+    pub(crate) root: std::path::PathBuf,
+    /// The run whose detail rows are asked for.
+    pub(crate) identity: [u8; 32],
+    /// The one page of those rows asked for.
+    pub(crate) page: Page,
+}
+
+impl Selector {
+    /// Parses `page`/`limit`, then takes the store root, then decodes `identity`.
+    ///
+    /// # Errors
+    ///
+    /// The first of: [`Page::parse`]'s refusal, the store-root refusal passed
+    /// in, or the identity refusal. Each is returned verbatim.
+    pub(crate) fn parse(
+        root: Result<std::path::PathBuf, String>,
+        query: &str,
+    ) -> Result<Self, String> {
+        let page = Page::parse(query)?;
+        let root = root?;
+        let identity = crate::trades::from_hex_public(&crate::server::param(query, "identity"))
+            .ok_or_else(|| IDENTITY_REFUSAL.to_owned())?;
+        Ok(Self {
+            root,
+            identity,
+            page,
+        })
+    }
+}
+
 fn integer_param(query: &str, name: &str) -> Result<Option<u64>, String> {
     let value = crate::server::param(query, name);
     if value.is_empty() {
@@ -235,6 +283,13 @@ pub fn window(total: usize, page: Page) -> Result<Window, String> {
 
 #[cfg(test)]
 static TEST_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Keeps a test that sends admitted requests through these shared slots from
+/// running while [`hold_every_slot`] must own all of them.
+#[cfg(test)]
+pub(crate) async fn apart_from_slot_owners() -> tokio::sync::MutexGuard<'static, ()> {
+    TEST_SERIAL.lock().await
+}
 
 #[cfg(test)]
 pub(crate) struct HeldSlots {
@@ -426,8 +481,47 @@ pub fn committed_receipt(
 )]
 mod tests {
     use super::{
-        Cached, MAX_PAGE_ROWS, MAX_QUERY_BYTES, MAX_SCAN_BYTES, Page, preflight, run, window,
+        Cached, IDENTITY_REFUSAL, MAX_PAGE_ROWS, MAX_QUERY_BYTES, MAX_SCAN_BYTES, Page, Selector,
+        preflight, run, window,
     };
+
+    /// THE BLOCKING TASK'S ORDER, KEPT: PAGE, THEN STORE ROOT, THEN IDENTITY.
+    ///
+    /// A request with several faults is refused for the one the blocking task
+    /// named, so moving the parse ahead of admission changed no refusal text.
+    /// The valid case pins the parsed values, upper-case hex included: the
+    /// detail grammar is unchanged (D-0689).
+    #[test]
+    fn a_detail_selector_refuses_page_then_root_then_identity() {
+        let unset = || Err::<std::path::PathBuf, _>("no store root".to_owned());
+        let set = || Ok(std::path::PathBuf::from("/selector-fixture"));
+        assert_eq!(
+            Selector::parse(unset(), "identity=x&page=banana").err(),
+            Some("`page` must be an unsigned decimal integer".to_owned())
+        );
+        assert_eq!(
+            Selector::parse(unset(), "identity=x").err(),
+            Some("no store root".to_owned())
+        );
+        assert_eq!(
+            Selector::parse(set(), "identity=x").err(),
+            Some(IDENTITY_REFUSAL.to_owned())
+        );
+        let asked = Selector::parse(
+            set(),
+            &format!("identity={}&page=2&limit=3", "Ab".repeat(32)),
+        )
+        .expect("a valid selector");
+        assert_eq!(asked.root, std::path::PathBuf::from("/selector-fixture"));
+        assert_eq!(asked.identity, [0xab; 32]);
+        assert_eq!(
+            asked.page,
+            Page {
+                number: 2,
+                limit: 3
+            }
+        );
+    }
 
     #[test]
     fn verified_cache_exposes_refresh_refusal_before_any_later_reopen() {

@@ -19,6 +19,8 @@ struct Fixture {
     site: Loaded,
     day: i64,
     originals: Vec<(PathBuf, Vec<u8>)>,
+    /// How many manifest publications this fixture has stamped. See `write`.
+    stamps: u64,
 }
 
 impl Fixture {
@@ -42,6 +44,7 @@ impl Fixture {
             root,
             day,
             originals: Vec::new(),
+            stamps: 0,
         }
     }
 
@@ -108,6 +111,22 @@ impl Fixture {
             self.originals
                 .push((path.clone(), fs::read(path).expect("original source")));
         }
+        // STAMPED EXPLICITLY, NOT LEFT TO THE CLOCK. The peer vote reads the
+        // census through `census_now`, keyed on this manifest's modified time
+        // (D-0686), and a filesystem's timestamp resolution is not this test's
+        // to assume: two publications inside one tick would share a stamp and
+        // the audit after the second would not see it.
+        self.stamps += 1;
+        fs::File::options()
+            .write(true)
+            .open(pull::manifest::manifest_path(&self.root, vendor))
+            .expect("the manifest just published")
+            .set_modified(
+                std::time::SystemTime::UNIX_EPOCH
+                    + std::time::Duration::from_secs(1_700_000_000)
+                    + std::time::Duration::from_mins(self.stamps),
+            )
+            .expect("a filesystem that carries modified times");
     }
 
     async fn get(&self) -> Value {

@@ -1645,6 +1645,174 @@ fn a_block_outside_the_commit_is_refused_by_both_doors() {
     );
 }
 
+/// `count` distinct 56-byte records, laid end to end as the file holds them.
+fn records(count: usize) -> Vec<u8> {
+    (0..count * RECORD_LEN)
+        .map(|at| u8::try_from((at * 31 + at / RECORD_LEN) % 251).expect("below 251"))
+        .collect()
+}
+
+/// A sealed header at `n_valid` records, for `verify_through`.
+fn sealed_at(n_valid: u64) -> Header {
+    Header::genesis(7, 60, FLAG_CHECKSUMS)
+        .advance(n_valid, 100, 100 + i64::try_from(n_valid).expect("small"))
+        .expect("fits")
+}
+
+/// A tail entry sealed past the commit is admitted only on a positive proof.
+///
+/// Every checksum below is `crc32c` over bytes this test lays out itself, never
+/// a number the function under test produced, so an acceptance is only ever the
+/// stored number being the checksum of the committed bytes FOLLOWED BY records
+/// handed in as `past`. D-0688.
+#[test]
+fn a_tail_checksum_sealed_past_the_commit_is_admitted_only_on_proof() {
+    let v2 = Layout::V2;
+    let file = records(80);
+    let committed = &file[..2 * RECORD_LEN];
+    let past = &file[2 * RECORD_LEN..5 * RECORD_LEN];
+    let header = sealed_at(2);
+
+    // THE COMMITTED EXTENT, and the interrupted append's two longer ones.
+    assert_eq!(
+        block::verify_through(&header, v2, 0, committed, past, crc32c(committed)),
+        Ok(2),
+        "a match at the commit needs no proof and names the commit"
+    );
+    for through in 3..=5usize {
+        assert_eq!(
+            block::verify_through(
+                &header,
+                v2,
+                0,
+                committed,
+                past,
+                crc32c(&file[..through * RECORD_LEN])
+            ),
+            Ok(u64::try_from(through).expect("small")),
+            "sealed over {through} records, two of them committed"
+        );
+    }
+
+    // `verify` is `verify_through` with nothing past the commit, so the same
+    // entry that a proof admits is still refused there, and the number it
+    // names is the COMMITTED extent's.
+    let sealed_through_four = crc32c(&file[..4 * RECORD_LEN]);
+    let refusal = Err(FormatError::BlockChecksum {
+        block: 0,
+        stored: sealed_through_four,
+        computed: crc32c(committed),
+    });
+    assert_eq!(
+        block::verify(&header, v2, 0, committed, sealed_through_four),
+        refusal
+    );
+    assert_eq!(
+        block::verify_through(
+            &header,
+            v2,
+            0,
+            committed,
+            &past[..RECORD_LEN],
+            sealed_through_four
+        ),
+        refusal.map(|()| 0),
+        "records the file does not hold prove nothing"
+    );
+}
+
+/// What the proof refuses: a torn record, a damaged committed byte, anything
+/// past the block's nominal end, and a file born without checksums. D-0688.
+#[test]
+fn a_tail_checksum_the_proof_cannot_reach_is_still_refused() {
+    let v2 = Layout::V2;
+    let file = records(80);
+    let committed = &file[..2 * RECORD_LEN];
+    let past = &file[2 * RECORD_LEN..5 * RECORD_LEN];
+    let header = sealed_at(2);
+    let sealed_through_four = crc32c(&file[..4 * RECORD_LEN]);
+
+    // A PARTIAL RECORD IS NEVER A CANDIDATE: no writer seals one.
+    let torn = crc32c(&file[..3 * RECORD_LEN + 10]);
+    assert!(
+        matches!(
+            block::verify_through(&header, v2, 0, committed, &past[..RECORD_LEN + 10], torn),
+            Err(FormatError::BlockChecksum { .. })
+        ),
+        "a checksum over a torn record is refused"
+    );
+
+    // A FLIPPED COMMITTED BYTE is inside every candidate, so the extent that
+    // was really sealed cannot match and the refusal names the damaged bytes.
+    let mut damaged = committed.to_vec();
+    damaged[20] ^= 0b0000_0100;
+    assert_eq!(
+        block::verify_through(&header, v2, 0, &damaged, past, sealed_through_four),
+        Err(FormatError::BlockChecksum {
+            block: 0,
+            stored: sealed_through_four,
+            computed: crc32c(&damaged),
+        })
+    );
+
+    // NEVER PAST THE BLOCK'S NOMINAL END. 72 committed leaves room for one
+    // record, so a checksum over 74 is refused although the bytes are there,
+    // and a FULL block — the non-tail case — has no room at all.
+    let at_72 = sealed_at(72);
+    let first_block = &file[..72 * RECORD_LEN];
+    let beyond = &file[72 * RECORD_LEN..74 * RECORD_LEN];
+    assert_eq!(
+        block::verify_through(
+            &at_72,
+            v2,
+            0,
+            first_block,
+            beyond,
+            crc32c(&file[..73 * RECORD_LEN])
+        ),
+        Ok(73),
+        "the last record of the block is inside it"
+    );
+    assert!(
+        matches!(
+            block::verify_through(
+                &at_72,
+                v2,
+                0,
+                first_block,
+                beyond,
+                crc32c(&file[..74 * RECORD_LEN])
+            ),
+            Err(FormatError::BlockChecksum { .. })
+        ),
+        "a checksum reaching into the next block is not this block's"
+    );
+    let full = sealed_at(80);
+    assert!(
+        matches!(
+            block::verify_through(
+                &full,
+                v2,
+                0,
+                &file[..73 * RECORD_LEN],
+                &file[73 * RECORD_LEN..74 * RECORD_LEN],
+                crc32c(&file[..74 * RECORD_LEN])
+            ),
+            Err(FormatError::BlockChecksum { .. })
+        ),
+        "a full block has no room past its end"
+    );
+
+    // AND NO FLAG, NO VERIFICATION, whatever is past the commit.
+    let plain = Header::genesis(7, 60, 0)
+        .advance(2, 100, 102)
+        .expect("fits");
+    assert_eq!(
+        block::verify_through(&plain, v2, 0, committed, past, crc32c(committed)),
+        Err(FormatError::ChecksumsAbsent)
+    );
+}
+
 // ===========================================================================
 // Paths
 // ===========================================================================

@@ -4074,6 +4074,51 @@ jobs:
             exit 1
           fi
           echo "OK — ${n} rows, all ids unique."
+      - name: Gate 27b — every decision number heads exactly one entry
+        run: |
+          # pipefail: an awk that fails must fail the step, not empty `bad`.
+          set -euo pipefail
+          # Gate 27's rule, applied to docs/05-decisions.md. Five numbers were
+          # issued twice and a merge moved main's D-0035..D-0037 to
+          # D-0329..D-0331, because nothing read the ledger back (D-0104,
+          # D-0684). Entries are never edited, so the five stay, pinned at
+          # their EXACT counts: a third copy fails, and so does a removed one.
+          # Every other number must head exactly one entry.
+          # WHAT IT CANNOT SEE: a heading outside the pattern below, which
+          # entry a citation means, or two unmerged branches that pick one
+          # number -- that fails only in a tree holding both. docs/06-limits.md.
+          # NO UNTRUSTED INPUT: one tracked document and the list below.
+          f=docs/05-decisions.md
+          allow='D-0076:2 D-0077:2 D-0078:2 D-0370:2 D-0372:2'
+          nums=$( { grep -E '^#{2,4} +D-[0-9]{4}' "$f" || true; } \
+                  | sed -E 's/^#+ +(D-[0-9]{4}).*/\1/')
+          n=$( { printf '%s\n' "$nums" | grep -c . || true; } )
+          if [ "$n" -eq 0 ]; then
+            echo "GATE 27B FOUND NO DECISION HEADINGS. Either the document moved"
+            echo "or the pattern stopped matching. A silent zero is not a pass."
+            exit 1
+          fi
+          bad=$(printf '%s\n' "$nums" | sort | uniq -c | awk -v allow="$allow" '
+            BEGIN { k = split(allow, a, " ")
+                    for (i = 1; i <= k; i++) { split(a[i], p, ":"); want[p[1]] = p[2] + 0 } }
+            { seen[$2] = 1; w = ($2 in want) ? want[$2] : 1
+              if ($1 + 0 != w) printf "%s %d %d\n", $2, $1, w }
+            END { for (d in want) if (!(d in seen)) printf "%s 0 %d\n", d, want[d] }' | sort)
+          echo "read ${n} decision heading(s) in ${f}"
+          if [ -n "$bad" ]; then
+            echo
+            echo "A DECISION NUMBER HEADS THE WRONG NUMBER OF ENTRIES:"
+            printf '%s\n' "$bad" | while read -r d c w; do
+              printf '  %s: %s heading(s), allowed %s\n' "$d" "$c" "$w"
+              { grep -nE "^#{2,4} +${d}([^0-9]|\$)" "$f" || true; } \
+                | cut -c1-110 | sed 's/^/      /'
+            done
+            echo
+            echo "Never renumber or delete an entry. Give the NEWER one the next"
+            echo "free number, max(existing) + 1 read from the merged tree. D-0684."
+            exit 1
+          fi
+          echo "OK — ${n} headings; every number heads one entry, the five pinned by D-0684 aside."
       - name: Gate 26 — every HTTPS client installs the TLS provider
         run: |
           set -eu
@@ -7065,9 +7110,9 @@ jobs:
           telemetry crates/telemetry/benches/ratio.rs 6  C-T-01 C-T-01b C-T-02 C-T-03 C-T-04
           greeks    crates/greeks/benches/ratio.rs    6  C-G-01 C-G-02 C-G-03 C-G-05
           vocab     crates/vocab/benches/ratio.rs     7  C-V-01 C-V-02 C-V-03 C-V-04 C-V-05 C-V-06
-          indicators crates/indicators/benches/ratio.rs 5  C-I-01 C-I-02 C-I-03 C-I-04 C-I-05 C-I-06
+          indicators crates/indicators/benches/ratio.rs 5  C-I-01 C-I-02 C-I-03 C-I-04 C-I-05 C-I-06 C-I-07
           engine    crates/engine/benches/ratio.rs    4  C-E-01 C-E-02 C-E-03 C-E-04 C-E-05 C-E-06 C-E-07 C-E-08 C-E-09 C-E-10 C-E-11
-          runner    crates/runner/benches/ratio.rs    3  C-R-01 C-R-02 C-R-03 C-R-04
+          runner    crates/runner/benches/ratio.rs    3  C-R-01 C-R-02 C-R-03 C-R-04 C-R-05
           cli       crates/cli/benches/ratio.rs       4  C-CLI-01 C-CLI-02 C-CLI-03 C-CLI-04 C-CLI-05 C-CLI-06
           '
 

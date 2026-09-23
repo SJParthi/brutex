@@ -37588,3 +37588,786 @@ D-0677 stays as written, and this entry is the correction.
    the merge. A fix made on a branch stays `IN PROGRESS` until its squash
    exists. Item 4 still stands for the gate 18 plan. Gate 1e simply failed
    first.
+
+### D-0683 — Correct the crate graph and D-0453's list: `cli` has nine arrows, not seven — 2026-09-23
+
+`CLAUDE.md` §5 drew `cli` with seven arrows and said so in its prose. The
+manifest declares nine, and `cargo metadata --no-deps` and
+`cargo tree -p cli --edges normal --depth 1` both print them: `core`, `costs`,
+`engine`, `indicators`, `pull`, `runner`, `store`, `telemetry` and `vocab`.
+`crates/cli/Cargo.toml` gained `pull` and `vocab` in one commit, `36f2350b`, on
+2026-09-01. §5 was never updated for either. This follows D-0208: the
+manifests are right, nothing in them changes, and the documents are the stale
+copies.
+
+**D-0453 is corrected here, not edited.** It gives `cli`'s direct dependencies,
+as measured by `cargo tree -p cli --edges normal --depth 1`, as eight crates,
+and leaves out `vocab`. The commit
+that added D-0453 also added `vocab` to the manifest, so the list was already
+short when it was written. D-0453 also says the two documents it names, the
+`docs/01-architecture.md` table and `AGENTS.md`, were the copies it corrected.
+`CLAUDE.md` §5 is a third copy, and D-0453 did not touch it. The same day,
+`core/tests/graph.rs` failed on `vocab` in the table and `baf880cb` fixed the
+row. That commit said a ledger entry correcting D-0453's list was still owed.
+This is that entry.
+
+**Why `cli` names `vocab` directly.** These are production uses, checked in the
+source rather than inferred:
+
+* the resumable expression and Boolean-grammar searches checkpoint a
+  `vocab::expression_search::Cursor` and size their records by `CURSOR_BYTES`
+  (`expression_search.rs`, `boolean_grammar_batch.rs`,
+  `boolean_search_record.rs`, `index_stop_search.rs`);
+* candidate trades, the pool and `cli::verify`'s suffix-independence check
+  carry `vocab::ConditionMask` (`candidate_trades.rs`, `pool.rs`, `lib.rs`);
+* the search-sizing model checks its lower bound against
+  `vocab::expression::MAX_INSTRUCTIONS` (`boolean_search_sizing.rs`);
+* the candidate-universe vocabulary digest hashes `vocab::VOCAB_VERSION` and
+  every row of `vocab::table::TABLE` (`candidate_universe.rs`).
+
+`vocab` depends on nothing, so the arrow cannot cycle. Gate 22 clause A pins
+`vocab`'s own dependency set, not who may name it, and `cli` is on no gate-22
+list. The arrow arrived with no ledger entry and no manifest comment. This entry
+records what it carries. It does not decide the arrow again.
+
+**The `pull` reasons are D-0453's, checked again.** `pull::calendar::kind_of`
+is the session authority in `stored.rs`; the calls in
+`stored_data_completeness.rs` and `admission_join.rs` are in test modules and
+are not counted. `pull::session::Day` bounds Population V4's requested civil
+span in `population.rs`. `pull::session::IstMoment` gives month identity in
+`global_replay_v4.rs`, `index_stop_vix.rs` and `vix_reference.rs`. The
+re-check first missed one production use, found in review:
+`cli::fold_audit` calls `pull::fold::fold` (`fold_audit.rs` line 142, above its
+test module), so the edge also carries the fold authority. `Day` is used in
+many more `cli` modules than `population.rs`. The reasons above are the
+principal ones, not a complete list.
+
+The first draft of this entry's `docs/01-architecture.md` correction said
+`runner` prices fills through `costs::fill::worst_case_fills`. That was false:
+`runner` calls `costs::fill::fills_at` with `Anchor::PrintedExtreme`
+(`grid.rs`), and `runner::trade`'s own test asserts `worst_case_fills(` never
+appears in it. Review caught it before it landed, and the text now says so.
+
+**What changed.**
+
+* `CLAUDE.md` §5 and `AGENTS.md` §5: the `cli` row now ends `pull runner store
+  telemetry vocab`. The count is now nine. "`telemetry` is the seventh" is now
+  "`telemetry` remains direct". `CLAUDE.md` gains the `pull` paragraph that
+  `AGENTS.md` already had. Both gain a `vocab` paragraph. "Drifted once" and
+  "drifted twice" are now "at least four times", with each drift named. "It was
+  once deliberately *not*" now names `store`: it sat under the `telemetry`
+  paragraph, which it was never about, and the new paragraphs moved it further
+  from the `store` sentence it meant.
+* `docs/01-architecture.md` §1: the diagram's `cli` row, plus a note that the
+  gate found `vocab` after `pull`. Seven stale present-tense claims below the
+  table are corrected, and each says what it used to say. §1a said `costs` sat
+  beside `vocab` as a child of `core`; `vocab` depends on nothing. It said
+  nothing consumed `costs`; `pull`, `runner` and `cli` do. It said `engine`
+  would take `costs`; gate 22 forbids that. It said §5 omitted `costs`; D-0161
+  fixed that. The note on `api → pull` said the diagram drew them as siblings,
+  and it does not. The note on `greeks` said nothing pointed at it, and D-0217
+  made `pull` its caller. It also said §5 omitted `greeks` and the discrepancy
+  was still open; D-0161 closed it.
+* `docs/06-limits.md`: a new section on the unchecked pictures.
+  `core/tests/graph.rs` says that gap is recorded there, and until now it was
+  not.
+
+**The drift count comes from history.** `git log -G'<--' -- CLAUDE.md` lists
+every commit that changed an arrow line in §5. Matching each against the
+manifest commits gives four drifts:
+
+1. D-0208 (`c40ba728`, 2026-08-19), five statements.
+2. `pull -> greeks`: D-0217 (`582d9fb6`) added it, and `2a5d7cc6` drew it the
+   same day.
+3. `api -> cli`: added by `f73fac40` on 2026-08-22, drawn by `e40f854a` (D-0288)
+   on 2026-08-25.
+4. `cli -> pull` and `cli -> vocab`: added by `36f2350b` on 2026-09-01, drawn by
+   this entry.
+
+It is "at least" four because that search sees only arrow lines, not prose.
+
+**Not changed.** No manifest, source file or gate. `cargo fmt --all --check`
+passes and `git diff --stat` lists only `.md` files. `crates/api/Cargo.toml`
+says §5 was "amended in the same commit" as `api`'s `cli` line. Item 3 shows it
+was not. That comment is inside a crate, and fixing it belongs to a change
+that may touch one. `HANDOVER-web-backtest.md` still quotes §5 as "drifted
+once". It is a dated handover and is left as written. D-0208 left a gate that
+derives these pictures from `cargo metadata` open, and it is still open.
+
+### D-0684 — Reconcile the ledger's renumbered, duplicated and unwritten decision numbers, and gate uniqueness from here — 2026-09-23
+
+Measured at `79b9a1d5` over the heading pattern `^#{2,4} +D-[0-9]{4}`: 683
+headings carry 678 distinct numbers. Every number from D-0001 to D-0680 heads
+an entry except D-0051 and D-0676. Five numbers head two entries each. Three
+entries that `main` numbers D-0035, D-0036 and D-0037 are numbered D-0329,
+D-0330 and D-0331 here. No heading sits inside a code fence.
+
+Nothing is renumbered or edited. This file's header forbids it, `CLAUDE.md`
+§3 rule 8 forbids it, and D-0104 gave the reason that still holds: a moved
+number silently redirects every citation of it. The #15 commit message, which
+cites main's numbers, cannot be edited at all. This entry is the lookup table
+instead, keyed by subject, because the subject is the one thing both copies
+share.
+
+#### The renumbering: main's D-0035, D-0036 and D-0037
+
+PR #13's merge of `main` (`64457de5`, #15) found those three numbers taken by
+`feat/pull` and moved the incoming side. The blockquote above D-0329 records
+the move. A `diff` of `git show 64457de5:docs/05-decisions.md` lines 1342 to
+1560 against D-0329 to D-0331 here differs in the three heading lines only, by
+number and by level (`##` to `###`). The bodies are byte-identical and cite
+none of the three numbers, so each subject resolves exactly, and the
+blockquote's rewritten internal cross-references were none.
+
+| Subject, the heading text in both copies | Dated | On `main` at `64457de5` | Here |
+|---|---|---|---|
+| A refusal that nothing gates on is not a refusal | 2026-08-28 | D-0035 | **D-0329** |
+| The order is taken once, and the header is a row | 2026-08-28 | D-0036 | **D-0330** |
+| Tests that agreed with the code instead of checking it | 2026-08-28 | D-0037 | **D-0331** |
+
+Here the same three numbers head `feat/pull` entries that never reached `main`:
+
+| Here | Subject | Dated |
+|---|---|---|
+| D-0035 | `crates/pull` is three things and no vendor call: the path configuration, the read-only secret port, and the manifest | 2026-08-01 |
+| D-0036 | The pull crate's bounds, its redactions and its fall-backs are made real, and three claims that were not measured are withdrawn | 2026-08-01 |
+| D-0037 | The rate governor is AIMD over integer permits, it never trusts a published figure, and it holds no clock | 2026-08-07 |
+
+**Where main's history uses the old numbers.** The #15 commit message closes
+three sections with `Decision: D-0035`, `D-0036` and `D-0037`. At `64457de5`,
+`.github/workflows/ci.yml` gate 10b cites D-0035 twice. `docs/04-invariants.md`
+I-31, `docs/06-limits.md` §13 and `docs/07-o1-architecture.md` layers 4 and 9
+and its layer-12 correction under the measurement table cite D-0036, and its
+layer 13 cites D-0035. Read in main's history, each resolves through the first
+table. In this tree gate 10b and four comments in `crates/api` (`master.rs`,
+`server.rs`) cite D-0329. Every other citation of D-0035 to D-0037 here was
+read at `79b9a1d5`. Each concerns `crates/pull` or its rate governor and
+resolves through the second table, except those that name the D-0046
+collision over the number D-0037 itself (`Cargo.toml`,
+`docs/01-architecture.md`, D-0046).
+
+Two earlier moves never reached `main` and are recorded where they happened:
+`feat/greeks` took D-0036, then D-0037, and landed as D-0046 (D-0046). D-0102
+was drafted as D-0101 (D-0104).
+
+#### The duplicated numbers
+
+File order is the order below. D-0104 already tabled the first three and set
+the convention of citing the number with its subject. At `79b9a1d5` the tree
+held 63 occurrences of those three numbers in 17 files, headings and D-0104
+included, against D-0104's forty. The newer citations are not re-audited here.
+
+**D-0076**
+
+| Copy | Subject | Dated |
+|---|---|---|
+| first | The `near_*` band is one hundredth of the anchor's range, and the base is the range and not the level | 2026-08-10 |
+| second | Groww can serve indices and daily bars, and both words came from the vendor | 2026-08-10 |
+
+**D-0077**
+
+| Copy | Subject | Dated |
+|---|---|---|
+| first | Five intraday rungs join the table, and three of them do not start a session on time | 2026-08-10 |
+| second | A vendor declares what it MEANS by a bar, because isolation is not the same as agreement | 2026-08-10 |
+
+**D-0078**
+
+| Copy | Subject | Dated |
+|---|---|---|
+| first | The vocabulary implements the CPR script's R3 ladder, and the workbook's is refused | 2026-08-10 |
+| second | The mutation clause in §9 finally has a gate, and it scopes to the diff | 2026-08-10 |
+
+D-0370 and D-0372 were issued twice on 2026-08-29, eighteen days after D-0104
+asked every appender to check that a number was free. Both headings of each are
+bare, so the subject below is the entry's opening sentence and the commit is
+the one that wrote the heading.
+
+**D-0370**
+
+| Copy | Subject | Written by |
+|---|---|---|
+| first | The ingest census draws every column's arithmetic, and the four-bucket coverage is retired | `1f42d123`, 2026-08-29 |
+| second | The two census failure events are gated, and the first fixture failed for a reason worth recording | `fb9361b7`, 2026-08-29 |
+
+D-0371's "D-0370 took it to seven" and commit `71274b14`'s message both mean
+the second copy.
+
+**D-0372**
+
+| Copy | Subject | Written by |
+|---|---|---|
+| first | Gates W3 and W4 are floors at zero: the browser tree types clean and styles nothing it does not draw | `704c5a05`, 2026-08-29 |
+| second | The read-only door created a file on every miss, and it had been invisible because the module header describes a flag that changed under it | `64d0cb3f`, 2026-08-29 |
+
+Before this entry no tracked file cited D-0372 outside its two headings. Each
+writing commit's message cites its own copy.
+
+#### Cited, never written
+
+* **D-0051.** At `79b9a1d5`, cited 9 times in 6 tracked files: `Cargo.toml`,
+  `crates/pull/Cargo.toml`, `crates/pull/tests/broker.rs`,
+  `crates/api/src/server.rs`, `docs/06-limits.md` and four times in this file
+  (D-0071, twice in D-0074, D-0211). No commit on any local ref ever wrote
+  its heading: the query below finds nothing, and the same query finds
+  D-0050's heading and D-0676's.
+
+  `git log --all -E -G '^#{2,4} +D-0051' -- docs/05-decisions.md`
+
+  Every citation concerns the credential read: `aws-sdk-ssm` refused because
+  it brings `aws-lc-sys`, which is C, and SigV4 signed by hand over `hmac` and
+  `sha2`. The measurement the citations lean on, 145 crates in the lock before
+  and 232 with the SDK, is in the message of `59ae585d` (2026-08-07), the
+  commit that added the first citations. A citation of D-0051 resolves to that
+  message. The number is not reissued.
+* **D-0676.** Cited once, by D-0677, which leaves it to a parked change that
+  has not merged. `perf/reuse-run-binding` (`913ca7e8`) carries its heading,
+  "Share immutable data validation within a Candidate replay batch", dated
+  2026-09-20. It is reserved, not missing, and heads one entry when it lands.
+
+D-0681 to D-0683 were pre-assigned to other follow-ups of the same audit and
+head nothing in this tree when this entry is written.
+
+#### From here
+
+**From D-0684 on, every decision number heads exactly one entry.** Gate 27b,
+in the `language-purity` job beside gate 27, holds the whole file to it and
+not only the numbers from here on. It reads every heading the pattern above
+matches. It fails when any number other than D-0076, D-0077, D-0078, D-0370
+and D-0372 heads more than one entry, and when any of those five heads other
+than exactly two, so a third copy fails and so does a removed one. It prints
+each offending number with its heading lines, and it fails on zero headings
+rather than passing. The five are an exact, closed list. Widening it is an
+entry in this file, not an edit to the gate alone.
+
+Verified by running the step's body, extracted from the parsed workflow, with
+`bash -e` in an empty environment. This file exits 0 with 684 headings, and
+the file at `79b9a1d5` exits 0 with 683. Each of these copies of this file
+exits 1 and names the number, or says it found no heading: a second
+`### D-0684` heading appended, a third `## D-0076`, a level-four
+`#### D-0001`, one `D-0370` heading removed, both `D-0372` headings removed,
+every heading removed, and the file missing. An `awk` that fails exits 2
+rather than passing with an empty result, because the step sets `pipefail`. A
+level-five `##### D-0001` passes. Run locally with BSD `grep` 2.6.0 and macOS
+`awk` 20200816. The runner's GNU tools are exercised only when CI runs it.
+
+What it cannot see, the level-five heading among it, is recorded in
+`docs/06-limits.md`. D-0046 said §19 of that file recorded this hole. At
+`33c858f3`, the commit that wrote that sentence, the file ended at §18. At
+`79b9a1d5` no section of it records the hole, and §19 is the secret port.
+
+**Rejected: renumbering either side.** That is forbidden and would redirect
+citations silently, which is the worse failure.
+
+**Rejected: a set without counts.** It would let a third D-0076 pass.
+
+**Rejected: walking every unmerged branch's ledger, as D-0046 proposed.** A run
+checks one tree. Reading other refs would make a verdict depend on work that is
+not part of the change under test, and a parked branch that never lands would
+hold its numbers forever. The per-tree gate, plus `max(existing) + 1` read from
+the merged tree, is what can be enforced.
+
+**Rejected: a Rust test beside `core`'s findings check.** No crate reads the
+ledger, and gates 10b and 27 already hold identifier uniqueness for the sibling
+document as workflow steps. This is the same check on the next document.
+
+No crate, test, stored byte, condition bit or run identity changes.
+
+### D-0686 — Census-backed GET routes take the stamped census, not a fresh manifest read — 2026-09-23
+
+**The defect.** `census_now` has been cached on the manifests' modified times
+since commit `1f77d220`, whose own message counted `/calendar.json` among the
+paths that read the whole store per request. Three GET paths kept calling
+`census::read_all` directly after that cache existed: both branches of
+`calendar_json`, `peer_calendar` (every `/gaps.json` audit other than an NSE
+cash spot series), and `locate_series` (`/bars` with `?exchange=` or
+`?segment=` left out). Each request did one `metadata` and one `std::fs::read`
+of every vendor's whole manifest plus a decode, so its cost grew with the store,
+and `docs/06-limits.md` did not say so.
+
+**The decision.** All four call sites take `census_now(site)`. A request
+against an unchanged store costs five `stat` calls and two `Arc` clones for the
+census; the first request after a manifest's modified time moves re-reads it
+once, and every `census_now` caller shares that read. D-0318's freshness is
+kept: a pull that writes a manifest is visible on the next request.
+
+Two smaller parts, both output-preserving:
+
+1. `locate_series` still walks the census **per vendor, in `Vendor::ALL`
+   order**, and does not use the cached merged `entries`. Those are sorted
+   newest-month-first across all vendors, so a name held under two identities
+   by two vendors could resolve to the other one. Keeping the walk keeps the
+   answer.
+2. The exchange branch of `calendar_json` cloned the asked feed's
+   `VendorCensus`, and so its whole boxed `Manifest`, on every request, only to
+   pass it to `held_entries`. It now calls `held_entries` on the borrowed
+   census. `read_all` returns one census per `Vendor::ALL`, so at most one
+   matches and the list is the same. This is the same copy D-0171 removed from
+   `/store`.
+
+**Proof.** `census::manifest_reads` is a test-only ledger of manifest byte
+reads by path, compiled out of every non-test build. `api::server::census_request_tests::census_backed_get_routes_read_an_unchanged_manifest_once_and_a_rewrite_again`
+sets each manifest's modified time explicitly and checks two things. A warm
+call on each route reads nothing. Each route, in turn, is the first to meet a
+rewrite and reads it exactly once. The answers change with the rewrites: `/bars`
+finds a newly held name and then loses it, and `/calendar.json?symbol=` goes
+from 200 to 409 and back as a second identity appears and goes. Reverting any
+one of the four call sites to `read_all` fails the test at that route's warm
+assertion. Checked before commit. Invariant AF-06.
+
+`gap_peer_route_tests` now sets its manifests' modified times explicitly too.
+It rewrites a manifest between two audits, and the peer vote now depends on
+that manifest's stamp moving; left to the clock, two writes inside one tick of
+a coarse filesystem would share a stamp and the second audit would miss the
+new peer.
+
+**Rejected.**
+
+* **Adding the manifest's length to the cache key.** It would narrow the
+  same-modified-time window below. But it changes the key of a cache that other
+  routes and the pull run's progress count already rely on, so it needs its
+  own decision.
+* **Routing the pull paths too.** `broker_answer`, `recovery_spot` and
+  `fno_land` still call `read_all` once per pull. The census they read decides
+  what is fetched, and a stale answer there could cost a vendor request or a
+  skipped month. Changing their freshness is not needed to fix a GET-path cost and is
+  not done here.
+
+**Honest limits**, recorded in `docs/06-limits.md`'s D-0686 section. The work
+each route does over the census is in memory but still grows with the store:
+`held_entries` sorts per request on all three routes, over every vendor's
+entries on the `/gaps.json` peer vote. The cache key is the modified time
+alone. A rewrite that keeps the stamp is missed until the next write, and the
+operator volume's timestamp resolution is UNMEASURED. An absent manifest and an
+unreachable store root share the stamp `None`. Both gaps already applied to
+every `census_now` caller. No latency was measured before or after this change.
+Three stale sentences in `docs/06-limits.md` (§40.5, §41.1, and the D-0171
+paragraph) said `census_now` re-reads per request or that `/bars` went through
+it. Each now carries a dated correction.
+
+### D-0687 — Refuse framing, hold every read to the listener's `Host`, and admit before the journal — 2026-09-23
+
+Three defects on the browser-facing HTTP surface, all in
+`crates/api/src/server.rs`, fixed together because they share one layer
+stack.
+
+1. **No response forbade framing or sniffing.** A hostile page could load the
+   dashboard or the ingest form in an invisible frame and steer the
+   operator's clicks onto it. One `map_response` layer, `never_framed`, now
+   sets `X-Frame-Options: DENY`, `Content-Security-Policy: frame-ancestors
+   'none'` and `X-Content-Type-Options: nosniff` on every answer either
+   router builds. It is the outermost layer of `admitted`, the function both
+   routers now end in. So the fallback, every `403`, `405` and `413`, and the
+   audit layer's own `503` and `429` carry the headers too. The policy header
+   is appended rather than inserted: browsers enforce every policy header, so
+   an append can only add a restriction. No handler sets any of the three
+   today, and the front end contains no frame. `nosniff` is safe because
+   `assets::content_type` already names every extension `web/build` ships.
+2. **`Host` was checked only for writes.** D-0182 let `GET` and `HEAD` through
+   untouched because they change nothing, and D-0433 kept that. The reasoning
+   holds against another tab, which cannot read a cross-origin answer. It
+   fails against DNS rebinding: a page whose hostname has been rebound to
+   `127.0.0.1` is same-origin with its own reads, so it could read every
+   stored bar and saved result while sending `Host: hostile.example`. Every
+   method must now carry exactly one `Host` naming `localhost` or the bound
+   loopback IP, on the bound port. `Origin`, `Sec-Fetch-Site` and the
+   forwarded-authority refusals are still checked on writes only, because on
+   a read the server acts on none of them. This supersedes the `GET`/`HEAD`
+   half of D-0182 and D-0433 for `Host` only.
+3. **The journal ran before admission.** `audited_router_serving` wrapped the
+   finished `router_serving` with `operation_audit::note_request`, so
+   `journal::begin` made a durable write before `Host` or fetch metadata had
+   been read. A DNS-rebound `POST /backtest/run` left a `Refused` invocation
+   behind its `403`, and a cross-site `<img src=…/backtest.json>` on any open
+   page left a completed one. The route table is now built once
+   (`route_table`); the audited router adds `/inspection.json` and the
+   journal to it, and `admitted` wraps the result with admission, the request
+   log, the body limit and the headers, in that order from the inside out.
+   Admission therefore runs outside the journal. `/inspection.json` used to
+   sit outside every layer except the journal; it now crosses all of them.
+   A journaled route (the list is `operation_audit::audited_route`, now
+   `pub(crate)`) also refuses a read whose `Sec-Fetch-Site` is present and is
+   not `same-origin` or `none`, including `same-site`, unknown tokens and
+   repeated or unreadable values. Absent metadata is admitted and journaled,
+   as a non-browser client's request. Other reads accept a cross-site request
+   that names this listener, because a link from elsewhere to a page here is
+   ordinary navigation. The rule is keyed on the path, so a journaled route
+   answers the same way from the read-only router, which has no journal.
+
+**The operator's browser keeps working.** `loopback_serve_addr` refuses every
+non-loopback bind, so a browser on this machine reaches the server as
+`localhost:PORT` or as the bound IP (`.claude/launch.json` opens
+`http://127.0.0.1:8080`). Both are admitted by the unchanged
+`local_host_authority`, and each is proved answered with no, `none`,
+`same-origin` and `cross-site` fetch metadata. `api::server::router`
+answers as `DEFAULT_ADDR` whatever port it is served on, so its one test now
+sends `Host: localhost:8080`. **UNVERIFIED:** whether the Vite dev proxy in
+`web/vite.config.js` rewrites `Host` to the target. It uses the string
+shorthand and this checkout has no `node_modules` to read. If it does not,
+every proxied read now answers `403` in development. Proxied writes already
+did, because their `Origin` names the dev server's port.
+
+**Refusal text.** The `403` body used to say "A refusal audit may be
+recorded" and "These routes are POST-only". Neither holds any more. It now
+says no invocation audit record was written, and that the check covers a
+rebound hostname as well as another tab.
+
+**Tests.** The test `get` helper and two raw requests sent the placeholder
+`Host: t`, which only a read could send. They now send the bound address.
+HS-03's test `only_a_same_origin_write_passes_and_a_read_always_does` was
+renamed `only_a_same_origin_write_passes_and_a_local_read_does`, because a read
+under a missing or foreign `Host` is now refused. It checks both spellings
+and forwarded or cross-site metadata on a local read, and missing, foreign,
+wrong-port and other-loopback hosts on `GET` and `HEAD`. HS-03's statement
+about writes is unchanged, and AF-07 carries the new invariant.
+`api::server::http_admission_tests` proves the three fixes over real
+sockets. The three tests there that reach the journal take the new test-only
+`detail::apart_from_slot_owners`, so they never overlap `hold_every_slot`.
+They retry only the pre-dispatch `429` that carries no audit id, which begins
+no record. `cargo mutants --in-diff` over the source diff, with `nextest` and
+`--cap-lints true`: 21 mutants, 17 caught, 0 missed, 0 timed out, 4 unviable.
+All four unviable ones replace `route_table` with an unqualified `Router`
+constructor, which does not resolve there. The empty router they aim at is
+`admitted` replaced by `Default::default()`, and that one is caught.
+
+**Measured while doing this, not fixed.** Run one filtered set of tests in one
+process: the server origin tests, the audit, boolean-launch and trades tests.
+At `79b9a1d5`, before this change, all eight runs failed. Each failed
+`trades::tests::concurrent_detail_saturation_returns_429_without_queuing_work`
+and one of the three existing audited-router socket tests. This change,
+without its new tests, failed the same way in eight runs of eight. With them
+it failed one run of eight, with an audit test answered `429`. The failures
+read `429` or "the test did not own every detail slot". That points at the
+process-wide `detail::MAX_CONCURRENT` slots, but it is an inference, not a
+traced cause. Under `cargo nextest`, one process per test, the same 43
+baseline tests pass.
+
+### D-0688 — Admit a tail block sealed past the commit only on a positive proof, and make the sidecar's name durable — 2026-09-23
+
+**The defect, confirmed by the write order.** `BarFile::append` writes the
+records, `sync_all`s them, seals the sidecar (`seal_committed`, which re-seals
+the tail block over the NEW `n_valid` and `sync_all`s the `.crc`), and only
+then writes and syncs the header slot. A crash after the sidecar sync and
+before the header sync leaves the old header naming `n` records while the tail
+block's entry is the CRC-32C of `n + k`. `verify_block_of` computed over the
+committed `n` and refused the block as `BlockChecksum`: intact committed bars
+reported as corrupt.
+
+`crates/store/src/file.rs` said this "repairs itself" because the next append
+re-seals the tail block. That held only for a batch that strictly follows the
+commit. A re-pull or an overlapping resume reaches `already_stored` or
+`suffix_that_follows`, which read the tail block first. `pull`'s derivation
+reads the whole minute month before folding and the whole held derived month
+(`reconcile_derived`) before appending. Every one of those reads was refused,
+so a derived rung in this state could not be repaired by the pull path.
+`docs/02-store-format.md` §5 called a torn record "unobservable", and listed
+the sidecar write before the data `fsync`, which is not the order the writer
+uses.
+
+**The choice: a proof, with no format change.** `block::verify_through` is now
+the body of `block::verify`. It takes the committed covered bytes and, as
+`past`, the whole records the file holds after them. When the committed
+extent does not match the stored number, it extends the CRC one record at a
+time (`crc::crc32c_extend`) up to the block's nominal end. If the stored
+number equals one of those longer extents, it returns that record count and
+emits `store.block` / "tail block sealed past the commit by an interrupted
+append" at `Warn`. Otherwise it refuses exactly as before, naming the
+committed extent's checksum. `BarFile::past_the_commit` supplies `past`: empty
+for every non-tail block with no syscall, and for the tail block one `fstat`
+and a read of the whole records between `offset_of(n_valid)` and
+`min(capacity, nominal block end)`. The committed bytes and those records
+never exceed one block, so a verification still reads at most one block.
+
+It is a proof and not a fallback because the committed bytes are inside every
+candidate. A flip within a 32-bit burst cannot match the extent that was really
+sealed, and any other candidate matches only by a 32-bit collision. The
+honest cost is that a tail block with `k` whole records past its commit is
+compared `k + 1` times, with `k` at most 72.
+
+**Rejected.** (1) Accepting any tail mismatch while the file has bytes past
+the commit: that is the fallback `CLAUDE.md` §4 bans, and it would serve a
+flipped committed byte. (2) Writing the header before the sidecar: a crash
+between them would publish records no checksum covers, which is worse and is
+argued against at `append`'s call site. (3) A sidecar entry that names the
+record count it covers: a store format change, larger than this defect needs.
+(4) Checking the extension only after `block::verify` failed: that logs an
+`Error` "checksum mismatch" for a block that is then served.
+
+**The sidecar's directory entry.** `crc.sync_all` makes the sidecar's bytes
+durable, not its name. The writer's door creates the `.crc` only for a stream
+with `n_valid == 0` and never recreates it once records exist (D-0667), so a
+name lost in a crash after the first commit left the month refusing every
+read, permanently. `validated` now `fsync`s the sidecar's directory after the
+writer opens it with `create` allowed, which is only for an empty stream. No
+test can observe a directory `fsync`, and none claims to.
+
+**What still refuses, stated.** A second crash that rewrites the records past
+the commit with different bytes before re-sealing leaves an entry no extent
+matches, so the block is refused until a strictly following append re-seals it.
+A flipped bit in a record past the commit breaks the proof and the block is
+refused, although its committed bytes are intact. The strict audit door
+(`open_existing_audited`, D-0525) refuses any file with bytes past its commit
+and is unchanged. Invariant AF-08; `docs/06-limits.md` records the costs.
+
+**What changed for a damaged newest header slot, found after integration.**
+Two `cli` tests went red on this change:
+`stored_screens_refuse_missing_or_corrupt_authorities_before_recording` and
+`monthly_audits_publish_empty_extinction_and_exact_retry_identity_at_both_resolutions`.
+Both damaged a month by flipping byte 24, and that byte is the newest slot's
+`n_valid`. The fixture commits eight sessions, so the newest slot is generation
+8 over 600 bars and the other slot is generation 7 over 525, measured on the
+fixture's own file. The flip fails generation 8's slot checksum, so the reader
+takes generation 7, whose tail block was sealed over generation 8's records.
+Before this change that block was refused, and the tests passed only because
+of the refusal this entry removes. Now it is proved and served. A flipped
+newest slot is byte for byte what a crash during the slot write leaves, and
+`header.rs`'s crash table says the reader then sees *g−1*. The store cannot
+tell bit rot in that slot from a torn write, so it treats both as the torn
+write. The degrade is loud: `store.header` warns that it fell back to an older
+generation, and `store.block` warns of the interrupted append. The screen or
+audit then runs on generation 7's bars, under an identity distinct from the
+whole month's, because the data digest differs.
+
+A bisect with the one-line `cost` fix applied at each step put the change
+exactly here: `01ede7e7` passes and this commit fails. The two tests now damage
+a committed record byte, which every candidate extent covers, so it is still
+refused before anything is recorded. CIRO-38 and CIRO-77 claim that corrupt
+authority refuses, and they hold unchanged.
+`a_damaged_newest_header_slot_screens_as_the_previous_commit` (AF-12) pins
+the torn-slot read at the `cli` boundary: 600 bars whole, 525 after the flip,
+two distinct identities, and the file left unrepaired.
+
+### D-0689 — Parse `/trades.json` and `/frontier.json` selectors before detail admission — 2026-09-23
+
+Both routes refused an oversized query at once, then parsed the page, the
+store root and the identity inside the bounded blocking task
+(`crate::detail::run`). A selector that could only be refused still took one of
+the four detail slots. While every slot was held it was answered 429 instead of
+400. D-0679 recorded this as not covered.
+
+`detail::Selector::parse` now runs on the async path, before `detail::run`. It
+keeps the blocking task's order: page, then store root, then identity. A
+request with more than one fault is refused for the same one, in the same
+words. Each refusal keeps its status, 400, and its bytes. Only the remainder,
+from the file-size preflight on, is admitted. The oversized-query check still
+runs first, before the store root is read. The two copies of the identity
+refusal text are now one constant.
+
+**Response bytes, measured.** A scratch test sent 18 queries per route through
+the old `respond` at `79b9a1d5` and through the new parse-then-respond
+composition, once against an absent store and once with a missing store root.
+All 72 bodies, statuses and headers were byte-identical. The scratch test was
+not kept. What is kept are the exact bodies pinned in AF-09's test.
+
+**Tests.** The two D-0679 boundary tests now probe seventeen handlers. Each
+carries its own contract. The fifteen saved-result handlers keep the strict
+grammar, the schema-1 envelope and the ten D-0679 queries. `/trades.json` and
+`/frontier.json` keep their own envelope: `trades` or `rows` is `null`,
+`complete` is `false`, and the content type carries `charset=utf-8`. They are
+probed with the four shared identity faults, a 63-character digest and four
+page or limit violations. The oversized-query test passed before this entry
+and still does. The malformed-query test fails under the old ordering: polled
+with no runtime, the handler reaches `spawn_blocking` and panics.
+`detail_selectors_are_refused_before_admission_with_the_blocking_paths_bytes`
+pins the exact refusal bodies for both routes, and fails the same way under
+the old ordering. The trades saturation test now also sends a malformed
+selector while every slot is held, and expects 400. The old ordering answers
+it 429. `a_detail_selector_refuses_page_then_root_then_identity` in
+`detail.rs` pins the refusal order and the parsed values. CIRO-91 now says
+seventeen; AF-09 is new.
+
+**Mutation, and what it did not prove.** cargo-mutants 26.2.0 over this diff,
+with `--cap-lints true`, generated 9 mutants and all 9 were unviable:
+`Selector` and `HeaderName` have no `Default`, so no replacement body
+compiled. That run exercised no logic. Two mutants applied by hand were each
+caught: dropping the identity refusal failed five tests, and reading the root
+before the page failed the ordering test.
+
+**Not changed, and not claimed.** The detail grammar is not the strict one. It
+accepts upper-case hex, takes the first of a repeated `identity`, and ignores
+unknown keys, a percent-encoded key and a trailing separator. The six D-0679
+queries that test those are therefore not probed on these two routes. Making
+the grammar strict would turn requests that answer 200 today into 400s. That
+is a change to the public contract, and it needs its own entry. This entry
+supersedes D-0679's "Not covered" paragraph for these two routes only. D-0679
+stays as written. `/sweep-evidence.json` and `/top.json` answer under their own
+contracts and are still outside the list. The `docs/06-limits.md` bullet under
+D-0677 is removed.
+
+### D-0690 — Time the equity column build and the known-mask step in Gate 8, against floors that hold still — 2026-09-23
+
+An audit confirmed three gaps in Gate 8, and D-0680 and `docs/06-limits.md`
+had already recorded two of them:
+
+1. **No row timed the per-bar work a cash equity pays.** Every C-I and C-R row
+   built with `Availability::Absent`. `cli`'s `stored::vwap_availability`
+   binds `Present` for `Kind::Equity`, which turns the VWAP family on, so a
+   slowdown confined to VWAP passed every row.
+2. **C-I-05 times `Evaluator::step`.** `Column::build` calls `step_known`,
+   which also computes the known mask, so a slowdown confined to that
+   projection passed C-I-05. D-0677 found part of a regression there.
+3. **C-R-04's floor is timed over about 10 µs**, five passes over 3,000 bars,
+   once, and read 309 ps and 643 ps on two CI runners (D-0680).
+
+**Decision.** Two budget rows are added, and each divides by a floor timed
+over milliseconds with the minimum of several trials kept.
+
+- **C-R-05** (`crates/runner/benches/ratio.rs`,
+  `the_equity_column_build_stays_within_its_budget`). C-R-04's fixture,
+  `synthetic::sessions(8)`, whose bars carry volume 1,000 to 1,010, swept
+  with the ladder neutered exactly as C-R-04 is, but built with `Present`.
+  Before anything is timed the row checks that the fixture carries volume and
+  that the `Present` column refuses no bar and differs from the `Absent` one.
+  If either check fails it reports UNMEASURABLE and fails, so it cannot time
+  the index path under an equity label. The floor is C-R-04's walk, one
+  black-boxed `wrapping_add` per bar, at 2,000 passes per trial with the
+  minimum of 15 trials. The numerator is the minimum of 15 trials of 10
+  sweeps. The same build with VWAP off is printed beside it on the same floor
+  as context and is not judged.
+- **C-I-07** (`crates/indicators/benches/ratio.rs`,
+  `a_known_step_stays_within_its_budget`). C-I-05's fixture and evaluator,
+  timed through `step_known`. The floor is C-I-05's one add, two million per
+  trial with the minimum of 24 trials. The row runs last in `main`, after
+  every other row, so the clock is already warm. `ROWS` is now 7.
+
+**Measured** on 2026-09-23 on an Apple M4 Pro laptop (MacBook Pro Mac16,7,
+10 performance and 4 efficiency cores, 48 GB, macOS 26.6.2, rustc 1.97.1),
+`cargo bench -p <crate> --bench ratio --locked --offline`. Other worktrees
+were building and testing on the same machine throughout. Runs 1 to 5 of each
+bench sized the budgets; the later runs verified them with the budgets in
+place, at a much higher load. "Load" is the one-minute load average on 14
+cores; floors and picoseconds are as printed.
+
+| run | load | C-R-05 floor | VWAP on, ps/bar | floors | VWAP off, ps/bar | floors | C-R-04 floor |
+|---|---|---|---|---|---|---|---|
+| 1 | 11 | 336 | 1,022,969 | 3044.550 | 710,334 | 2114.089 | 463 |
+| 2 | 12 | 318 | 1,002,681 | 3153.084 | 705,709 | 2219.210 | 452 |
+| 3 | 12 | 325 | 1,013,613 | 3118.809 | 702,776 | 2162.387 | 455 |
+| 4 | 11 | 324 | 1,011,191 | 3120.959 | 708,708 | 2187.370 | 513 |
+| 5 | 11 | 321 | 1,026,701 | 3198.445 | 720,666 | 2245.065 | 458 |
+| 6 | 43 | 366 | 1,178,744 | 3220.612 | 843,469 | 2304.560 | 1,275 |
+| 7 | 42 | 383 | 1,157,901 | 3023.240 | 862,020 | 2250.704 | 541 |
+| 8 | 59 | 405 | 1,472,309 | 3635.330 | 815,931 | 2014.644 | 1,252 |
+
+| run | load | C-I-07 floor | `step_known`, ps | floors | C-I-05 `step`, ps | C-I-05 floor |
+|---|---|---|---|---|---|---|
+| 1 | 11 | 527 | 672,014 | 1275.168 | 415,979 | 527 |
+| 2 | 13 | 500 | 625,743 | 1251.486 | 405,106 | 518 |
+| 3 | 11 | 508 | 633,027 | 1246.116 | 407,508 | 529 |
+| 4 | 9 | 501 | 644,027 | 1285.483 | 404,052 | 518 |
+| 5 | 8 | 512 | 648,889 | 1267.361 | 405,018 | 539 |
+| 6 | 51 | 583 | 753,431 | 1292.334 | 496,491 | 1,158 |
+
+The stable floors spread 1.274x and 1.166x across the runs in the tables; the
+old ones spread 2.82x and 2.24x. Before these rows existed C-R-04's floor read 555 ps
+and C-I-05's 1,156 ps once each.
+
+Runner runs 6 and 7 exited 1, and neither for a new row. Run 6's printed
+tail showed C-R-04 and C-R-05 within budget and one of C-R-01 to C-R-03
+breached; run 7, the same binary a minute later, printed C-R-01 at 2.889x
+against its 2.5x ceiling. C-R-01 is unchanged by this entry and times one
+trial of five sweeps per leg. Run 8 read it at 1.384x and exited 0, and it
+read 0.731x at load 5 before this change, so the breach is load on this
+machine rather than a regression. Indicators run 6 exited 0.
+
+**After the budgets were final**, at load 45 to 52, runner runs 9 and 10 read
+C-R-05 at 2991.142 and 3040.543 floors, within budget, and both exited 1 on
+rows this entry does not touch. Run 9 read C-R-03 at 6.364x. Run 10 read
+C-R-03 at 0.365x and put **C-R-04 over its budget at 5,050.433 floors**, a
+2,717,133 ps numerator from its single trial over a 538 ps floor, while
+C-R-05's index build on the stable floor read 837,359 ps and 2136.119 floors
+in the same run. Indicators run 7, at load 47, read C-I-07 at 1279.151
+floors and exited 0. None of these moves a worst-observed figure.
+
+**Budgets**, each sized on the worst observed with roughly 4x left over, the
+rule C-R-04's 5,000 was sized by:
+
+- C-R-05: **14,500** floors, 3.99x over 3,635.330, the load-59 run. A 174x
+  uniform regression would read about 632,500 and be refused by a factor
+  of 43.
+- C-I-07: **5,200** floors, 4.02x over 1,292.334, the load-51 run. A 174x
+  regression would read about 224,900 and be refused by a factor of 43.
+
+**Two findings the rows record.** On these fixtures, in the sizing runs, the
+VWAP family adds 42% to 44% to a bar's column build, and `step_known` costs
+1.52 to 1.62 times `step` across all six indicators runs.
+
+**Not measured on CI.** The only CI comparison on record is C-R-04's: an
+index build of 1,908,097 ps per bar (run 35767619936), 2.76 times the 691,505
+C-R-04 read on this laptop, with a CI floor as low as 309 ps. With both of
+those at their worst, C-R-05 would read about 9,170 floors from its worst
+sizing run and about 13,150 from its load-59 run. If C-I-07's numerator moved
+by the same 2.76 and its floor stayed where it is here, it would read about
+3,570. All are extrapolations, and the first CI run of Gate 8 is the
+calibration check. A breach there is a reason for a new entry, not for
+widening a budget without one.
+
+**Not changed.** C-R-04 and C-I-05 keep their floors and their budgets.
+Timed on C-R-05's stable floor, C-R-04's numerator reads 2114.089 to 2245.065
+floors in the sizing runs, the calibration figure D-0680 asked for. Moving
+C-R-04 onto that floor with a budget sized by the same rule, about 9,000
+floors of about 325 ps, would allow more per bar on this machine than 5,000
+floors of about 470 ps. That would loosen C-R-04, and loosening needs its own
+decision. Gap 3 is therefore closed for the new rows and still open for
+C-R-04.
+
+**Where the rows are declared.** `core`'s
+`every_measured_cost_invariant_is_declared` test (RC-01) requires every id a
+bench prints to be a row in `docs/04-invariants.md`. Run against the
+unchanged document it fails naming `C-I-07` and `C-R-05`. So both are rows
+beside `C-I-06` and `C-R-04`, and AF-10, under "Audit follow-ups", states the
+invariant the two rows hold together. Gate 14's coverage table lists both
+ids, the rule D-0209 set for every printed id that has a row.
+`docs/06-limits.md` marks the D-0677 bullet about the equity path closed and
+the C-R-04 floor bullet still open.
+
+Only benches, documents and one gate table changed. No production source
+changed, so the changed-line mutation run generated no mutant.
+
+### D-0691 — Exclude `web/` from the commit stamp's untracked walk, as the tracked comparison already does — 2026-09-23
+
+`crates/cli/build_provenance.rs` excluded the front end from only half of its
+proof. `relevant_entries` drops every `web/` path before comparing HEAD, the
+index and the working tree. `walk_untracked` had no such exclusion. It skipped
+`.git` and whatever the `.gitignore` files ignore, and nothing else. An
+untracked file under `web/` that no `.gitignore` covered, such as a new hashed
+chunk under `web/build/` after a front-end rebuild, therefore disabled the cli
+commit stamp. It did so with the false reason "an untracked file could affect
+compilation". That contradicted `docs/06-limits.md` §122, which already said
+untracked discovery excludes `web/`, and it made tracked and untracked front-end
+changes disagree about the same boundary.
+
+**Premise checked, not assumed.** `CLAUDE.md` §2 forbids any crate to build from
+the front end. Under `crates/`, the only `include_str!`, `include_bytes!`,
+`include!` or `#[path]` text naming `web/` is a doc comment in
+`crates/api/src/assets.rs` about a former include; the file is now read at run
+time. The `.rs` files tracked under `web/` belong to no workspace member, and
+`web/` holds no Cargo manifest. `crates/cli/build.rs` is the only build script.
+
+**Decision.** One predicate, `front_end(path)`, true for a path beginning
+`web/`, is the single statement of the boundary. `relevant_entries` filters on
+it, and the walker asks it of each directory's `word/` spelling before
+descending, so nothing beneath the root `web/` directory is listed. The
+exclusion is exactly as wide as the tracked one and no wider. A nested
+`crates/x/web/`, a sibling `webpack/` and a plain file named `web` are still
+untracked inputs and still refuse by name. No other refusal changes. The tracked
+proof, ignore handling, and watched files and directories are untouched.
+
+`an_untracked_front_end_build_artifact_keeps_the_stamp` fails without the
+walker change: the stamp comes back `None`.
+`an_untracked_file_outside_the_front_end_still_refuses` pins the boundary from
+the other side. AF-11. `docs/06-limits.md` §122 now records that its `web/`
+sentence was false until this entry.
+
+**Mutation evidence, and how it was collected.** `cargo mutants` does not
+discover `crates/cli/build_provenance.rs`. The file is reachable only from
+`build.rs` and from a `#[path]` include in `tests/build_provenance.rs`, and
+cargo-mutants walks only the library and binary targets. Filtered to
+`crates/*/src/*.rs` the diff is empty ("Diff file is empty"). Given this file's
+own diff, the tool still finds no mutants ("No mutants to filter"). So gate 18
+checks nothing in this file, for this change or any earlier one. The evidence
+here came from a scratch crate outside the repository, holding the verbatim
+`build_provenance.rs` and `commit_stamp.rs` as library modules, run against the
+same hunks: 9 mutants, 7 caught, 0 missed, 2 unviable, 0 timeouts. The two
+unviable ones construct `Entry::default()`, which does not exist. That is a
+type error, not a lint.

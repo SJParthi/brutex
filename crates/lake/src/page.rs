@@ -536,9 +536,14 @@ mod tests {
     /// short page and the reader fabricates the rest.
     ///
     /// The frame below is a minimal zstd frame built BY HAND — magic, a
-    /// single-segment header, one last raw block — because `ruzstd` decodes and
-    /// does not encode, and adding an encoder to reach one branch would be a
-    /// dependency bought for a test.
+    /// single-segment header, one last raw block — so that every byte of it can
+    /// be annotated and the length it decodes to is known without running an
+    /// encoder. It is NOT hand-built for want of one. This comment used to say
+    /// `ruzstd` "decodes and does not encode", and that was false: `ruzstd` 0.8
+    /// exports a public encoder, `ruzstd::encoding`, behind no cargo feature,
+    /// and `a_ruzstd_encoded_compressed_block_decodes_through_the_page_path`
+    /// below uses it to reach the Compressed-block path a raw block never
+    /// touches.
     #[test]
     fn a_zstd_page_that_decodes_to_the_wrong_length_is_refused() {
         // 28 B5 2F FD  magic
@@ -830,6 +835,89 @@ mod tests {
             "and it must NOT have materialised all 131,072 bytes to find that \
              out — that number in the message means the cap did nothing: {text}"
         );
+    }
+
+    /// **A FRAME `ruzstd` ITSELF ENCODED, CARRYING A COMPRESSED BLOCK, DECODES
+    /// THROUGH THE PAGE PATH.**
+    ///
+    /// Every other ZSTD fixture in this module is built by hand, and each is
+    /// one of the two block types that carry their bytes more or less as they
+    /// are: [`SMALL_FRAME`] is a Raw block and [`BOMB_FRAME`] an RLE one. A page
+    /// that compresses as anything other than a run of one byte is carried in a
+    /// Compressed block — `Block_Type` 2, RFC 8878 §3.1.1.2.2 — whose literals
+    /// and sequences the decoder has to execute rather than copy. Until this
+    /// test and the ZSTD round trip in `tests/synthetic.rs`, no test that CI
+    /// runs handed `decode` one.
+    ///
+    /// `ruzstd::encoding` wrote this frame. The first block's type is read back
+    /// out of it BEFORE anything is decoded, because the claim is about a
+    /// Compressed block specifically: were a later encoder to store this input
+    /// as a Raw block, the equality at the end would still hold and the test
+    /// would be proving the hand-built case over again without saying so.
+    ///
+    /// The input is compressible and deliberately NOT one repeated byte:
+    /// `ruzstd`'s `Fastest` level stores a single-byte run as an RLE block,
+    /// which is [`BOMB_FRAME`]'s case.
+    #[test]
+    fn a_ruzstd_encoded_compressed_block_decodes_through_the_page_path() {
+        let plain = b"timestamp open high low close volume open_interest ".repeat(64);
+        let frame = ruzstd::encoding::compress_to_vec(
+            plain.as_slice(),
+            ruzstd::encoding::CompressionLevel::Fastest,
+        );
+        assert!(
+            frame.len() < plain.len(),
+            "the premise: the encoder compressed, {} bytes from {}",
+            frame.len(),
+            plain.len()
+        );
+
+        // RFC 8878 §3.1.1: the magic, then a frame header descriptor whose
+        // flags say how long the rest of the header is — a window descriptor
+        // unless the frame is single-segment, a dictionary id of 0/1/2/4
+        // bytes, and a content size of 0/1/2/4/8. The first block header is
+        // three little-endian bytes after that, bit 0 `Last_Block` and bits
+        // 1-2 `Block_Type`.
+        assert_eq!(frame[..4], [0x28, 0xB5, 0x2F, 0xFD], "a ZSTD frame");
+        let descriptor = frame[4];
+        let single_segment = descriptor & 0x20 != 0;
+        let content_size = match descriptor >> 6 {
+            0 => usize::from(single_segment),
+            1 => 2,
+            2 => 4,
+            _ => 8,
+        };
+        let dictionary_id = match descriptor & 0x03 {
+            0 => 0,
+            1 => 1,
+            2 => 2,
+            _ => 4,
+        };
+        let block = 5 + usize::from(!single_segment) + dictionary_id + content_size;
+        assert_eq!(
+            (frame[block] >> 1) & 0x03,
+            2,
+            "the first block is Compressed, not Raw (0) or RLE (1)"
+        );
+
+        let chunk = one_page_chunk(
+            i32::try_from(plain.len()).expect("a test page fits an i32"),
+            &frame,
+        );
+        let mut reader = LakePageReader::new(chunk, 1, Codec::Zstd);
+        match reader.get_next_page().expect("the encoded page decodes") {
+            Some(Page::DataPage {
+                buf, num_values, ..
+            }) => {
+                assert_eq!(
+                    &buf[..],
+                    plain.as_slice(),
+                    "decoded to exactly the bytes that were encoded"
+                );
+                assert_eq!(num_values, 1);
+            }
+            other => panic!("expected a data page, got {other:?}"),
+        }
     }
 
     #[test]

@@ -2791,6 +2791,14 @@ say "a corporate action may fall in this month", never "split on 2024-06-14".
   term. What it removes is a route that would have been quadratic in practice —
   31,951 requests and ~17.5 GB to extract 492 KB.
 
+  *Corrected 2026-09-23, D-0686.* The whole-file read and the whole-census
+  walk are no longer paid on every `/store.json` request. `census_now` has since
+  been cached on the manifests' modified times and the encoded body on the
+  census snapshot it was built from, so a request against an unchanged store
+  reads no manifest and walks no entry. Both are paid once per manifest change,
+  by the first request that meets it. See the D-0686 section at the end of this
+  file.
+
 ---
 
 ## 41. The percentage columns: what is O(1), what is not, and what the store actually holds today
@@ -2813,6 +2821,13 @@ request — §32's bargain, restated because a page that now shows prices invite
 the assumption that the prices were the expensive part. They are not. At the
 census D-0067 measured, the read is 5.56 MB and the walk is 43,422 entries, and
 the two probes per row are lost in it.
+
+*Corrected 2026-09-23, D-0686.* "Per request" stopped being true when
+`census_now` was cached on the manifests' modified times: it now re-reads a
+manifest only after that manifest's modified time moves, and otherwise shares
+the census it already holds. The 5.56 MB read and the 43,422-entry walk are paid
+once per manifest change rather than once per request. The two probes per row
+are unchanged.
 
 ### 41.2 Nothing renders a number on this machine's store, and that is correct
 
@@ -4695,6 +4710,14 @@ entry the manifest holds, per request, to read the four header scalars
 exactly that reason. This clone was the **sole** O(entries) term on the HTML path
 and put back the cost D-0039 removed. Now borrowed.
 
+*Corrected 2026-09-23, D-0686.* Two parts of the first sentence were wrong.
+`/bars` never went through `census_now`: when `?exchange=` or `?segment=` was
+left out, its segment lookup called `census::read_all` itself and read every
+vendor's manifest on every such request. `store_html` does call `census_now`
+now. Since D-0686 all three go through the cache, which re-reads a manifest
+only after its modified time moves. See the D-0686 section at the end of this
+file.
+
 ### The 23 disagreements are documentation drift, not slow code
 
 Every one is a case where the cost is genuinely constant and the number written
@@ -6543,6 +6566,28 @@ future tracked source that deliberately reads an excluded untracked artifact
 would invalidate that premise and needs a new decision rather than inheriting
 this proof silently.
 
+**Until D-0691 the `web/` half of that paragraph was false.** The tracked
+comparison dropped `web/`, but the untracked walk skipped only `.git` and what
+the `.gitignore` files ignore. So any untracked file under `web/` that those
+files did not cover, such as a new hashed chunk under `web/build/` after a
+front-end rebuild, removed the stamp with the false reason "an untracked file
+could affect compilation". Both halves now ask one predicate,
+`build_provenance::front_end`. It excludes exactly the root `web/` directory:
+a nested directory that is only named `web`, a sibling such as `webpack/`, and
+a plain file named `web` are still untracked inputs. AF-11 pins both
+directions. Checked when this changed: no crate reads anything under `web/` at
+compile time. No `include_str!`, `include_bytes!`, `include!` or `#[path]`
+under `crates/` names it. The `.rs` files tracked under `web/` belong to no
+workspace member.
+
+**Gate 18 cannot mutate this verifier.** `build_provenance.rs` is reachable only
+from `build.rs` and a `#[path]` test include, and `cargo mutants` walks only
+library and binary targets. An in-diff run over this file therefore finds no
+mutants and reports no failure. D-0691's mutation evidence came from a scratch
+crate outside the repository that holds the verbatim file. Until the gate
+reaches it, a change here has mutation evidence only if its author collects it
+that way.
+
 The verifier checks Git's SHA-1 object ids and index checksum. SHA-1 gives the
 repository's own object identity, not modern collision-proof authentication;
 the proof does not authenticate the repository owner, filesystem, compiler,
@@ -6588,6 +6633,24 @@ resolving that reserved name locally; arbitrary loopback IPs are accepted only
 when they are the listener's actual bound address. D-0433 and HS-03 prove the
 header and router boundary, not operator identity, CSRF tokens, remote-proxy
 safety, million-user isolation or a network service-level guarantee.
+
+D-0687 extends the `Host` rule to `GET` and `HEAD`. It also refuses a
+journaled read whose `Sec-Fetch-Site` names another site, and it moves
+admission outside the invocation journal. What that does not close:
+
+- A cross-site request that carries no `Sec-Fetch-Site` is treated as a
+  non-browser client. On a journaled route it is still admitted, and it still
+  appends one invocation record. That current browsers send fetch metadata
+  on such a request is a claim about the world, not a measurement here. The
+  request log (`logs::note_request`) sits outside admission, so it still sees
+  every refusal, at `Warn`.
+- The anti-framing and `nosniff` headers are set on responses the router
+  builds. A request `hyper` rejects before routing never reaches a layer, so
+  its answer carries none of them.
+- A development proxy that forwards the browser's own `Host` unchanged is
+  refused on every read. Whether `web/vite.config.js`'s string-shorthand
+  proxy does that is UNVERIFIED, because no `node_modules` was available to
+  read.
 
 ### §124 — required audit admission can refuse healthy computation
 
@@ -8457,6 +8520,9 @@ none of them; each is what a gate would have measured had it been allowed to.
   runners. The floor is timed over about 10 µs, five passes of 3,000 bars, and
   no CPU model is logged, so a reading near 5,000 is not evidence either way
   until the floor is timed properly and the budget recalibrated against it.
+  **Still open after D-0690**, which times a stable floor for its new rows
+  only and leaves C-R-04's floor and budget unchanged; see the D-0690
+  section below.
 - **Still divided in `i128` per bar:** `trend`'s EMA and ATR updates, whose
   divisor is a period known only at run time, and `Ema::value`,
   `Atr::value` and `SuperTrend::fold`, whose divisors are compile-time
@@ -8467,14 +8533,224 @@ none of them; each is what a gate would have measured had it been allowed to.
   uses `Availability::Absent`; production binds `Present` for equities, which
   turns the VWAP family on. C-I-05 times `Evaluator::step`, which skips the
   known-mask projection that `Column::build` pays for through `step_known`.
-  A slowdown confined to either would pass every row.
+  A slowdown confined to either would pass every row. **Closed by D-0690**:
+  C-R-05 times the `Present` build and C-I-07 times `step_known`; see the
+  D-0690 section below.
 - **The first `main` runs after the #13 squash plan the whole diff.** A push
   or scheduled run whose tip is the squash is planned against its parent:
   about 49,870 cases in 250 jobs, expected red. It is cancelled by hand and
   stops recurring when the next pull request merges.
-- **`/trades.json` and `/frontier.json` queue a malformed selector** into the
-  bounded blocking pool instead of refusing it at once, so under full detail
-  capacity it is answered 429 rather than 400. See D-0679.
 - **Gate 1f reads each file only up to its first column-0 `#[cfg(test)]`.**
   59 files have production items after that line, `server.rs` among them, so
   browser code added there would pass the gate. No such code exists today.
+
+## The hand-drawn crate graphs are checked by nothing — D-0683, 23 September 2026
+
+`core/tests/graph.rs` parses only the table in `docs/01-architecture.md` §1. Its
+own header says the ASCII diagram above that table is deliberately not parsed
+and that this file records the gap; until this section, it did not. Three
+pictures of one graph are hand-maintained: `CLAUDE.md` §5, `AGENTS.md` §5 and
+that diagram. Gates 9 and 9b pin one arrow each, and gate 22 clause A pins three
+crates' dependency sets. Nothing else ties the pictures to the manifests.
+
+The cost is measured, not estimated. `cli` declared `pull` and `vocab` on
+2026-09-01. The checked table carried both the same day. `vocab` was missing
+from all three pictures, and `pull` from `CLAUDE.md`, until D-0683. A gate that
+derives the pictures from `cargo metadata --no-deps` would close this. D-0208
+recorded that option as open, and it is still not built.
+
+## Decision numbers are unique in one tree, not across unmerged branches — D-0684
+
+Gate 27b fails a tree in which a decision number heads more than one entry,
+except D-0076, D-0077, D-0078, D-0370 and D-0372, each of which must head
+exactly two. It also fails on a tree with no decision heading at all. That is
+all it proves.
+
+- **Two unmerged branches can take the same number and both pass.** A run
+  reads one tree, so the collision fails only in a run whose tree holds both
+  entries, which may be the first run after the second merge. This is how
+  main's D-0035 to D-0037 became D-0329 to D-0331 and how D-0046 moved twice.
+  D-0104's rule, read the file and take `max(existing) + 1`, is still the
+  only guard before that run, and it holds only if the file read is the one
+  the entry will merge into.
+- **A heading the pattern `^#{2,4} +D-[0-9]{4}` does not match is not read.**
+  An entry headed `#` or `#####`, or with its number in bold, is invisible to
+  the gate.
+- **It checks uniqueness, not contiguity.** A number that heads nothing is not
+  reported: D-0051 was never written, D-0676 is held by a parked change, and
+  numbers issued to unmerged work head nothing until it lands.
+- **It does not check what a citation means.** A bare citation of a duplicated
+  number resolves only through D-0104's and D-0684's tables and the subject
+  written beside it, and a citation of main's D-0035 to D-0037 in `main`'s
+  history resolves only through D-0684's mapping.
+
+## Census-backed GET routes: a `stat` per vendor when nothing changed, not a manifest read — D-0686, 23 September 2026
+
+**What changed.** Three GET paths called `census::read_all` directly and so read
+every vendor's whole manifest on every request, beside a cache (`census_now`)
+that already answered the same question from the manifests' modified times:
+
+* `/calendar.json`, both branches (with and without `?symbol=`);
+* `/gaps.json`, through `peer_calendar`, for every audit it runs other than
+  an NSE cash spot series;
+* `/bars`, through `locate_series`, whenever `?exchange=` or `?segment=` is
+  left out.
+
+Each read was one `metadata` of the store root, then one `metadata` and one
+`std::fs::read` per existing manifest (each up to
+`census::MAX_MANIFEST_BYTES`, 268,468,224 bytes) plus a decode, so the cost of
+these requests grew with the store. All three now call
+`census_now`. `api::server::census_request_tests::census_backed_get_routes_read_an_unchanged_manifest_once_and_a_rewrite_again`
+counts the manifest reads: none on a request against an unchanged manifest,
+exactly one on the first request after a rewrite, whichever route meets it.
+
+**What a request against an unchanged store still costs.** The census itself is
+five `stat` calls (one per `Vendor::ALL` manifest), one mutex acquisition
+and two `Arc` reference-count increments. No manifest bytes are read. The work
+each route then does over that census is in memory and **still grows with the
+store**; D-0686 did not change it:
+
+* `/calendar.json` with no symbol: `census::held_entries` over the asked
+  feed's census, which collects, sorts and dedups that feed's entries; the
+  grouping in `spot_months_by_identity`; a sort of the spot series; for each
+  spot series one `calendar_of::cached` lookup (one more `stat`, three `String`
+  allocations for the key, and a deep clone of that series' cached calendar);
+  then `calendar_of::agree` over every reading. D-0686 removed one deep copy
+  from this branch: it cloned the feed's whole `VendorCensus`, and so its
+  `Manifest`, on every request, which is the copy D-0171 removed from `/store`.
+* `/calendar.json?symbol=`: the same `held_entries` over the asked feed's
+  census, a pass over it for the one name, and one `calendar_of::cached`.
+* `/gaps.json` peer vote: `held_entries` and the grouping for **every**
+  vendor's census, so a pass and a sort over the whole store's entries, then
+  one `calendar_of::cached` and one calendar clone per peer series on the asked
+  exchange and segment. The audit that follows reads bar files and is not
+  changed.
+* `/bars` segment lookup: `held_entries` per vendor, in `Vendor::ALL` order,
+  until a vendor holds the name as a spot series. A name nobody holds sorts
+  every vendor's entries before it is refused.
+
+The whole-store read moved to the first request after a manifest changes. That
+request pays one `census::read_all` and one `held_entries` over all five
+censuses, and every `census_now` caller shares the result until a stamp moves
+again. The lock is released during that read by design, so requests that miss
+at the same moment may each read; the first result published is kept.
+
+**Freshness, and the two places it can still be wrong.** A manifest whose
+modified time moved is re-read on the next request, which keeps D-0318: a
+server started before its first pull does not answer from an empty census for
+life. The test above sets modified times explicitly and checks this for every
+route. Two gaps remain. Both applied before D-0686 to every `census_now` caller
+(`/store.json`, `/instruments.json`, `/verify.json`, `/audit.json`, the store
+page, and the pull run's progress count in `pullrun::rows_now`) and to
+`calendar_of::cached`. D-0686 adds these three routes to that list:
+
+* **The key is the modified time and nothing else.** A manifest rewritten with
+  the same modified time as the cached one is not re-read until a later write
+  moves the stamp. That happens when two writes land inside one tick of the
+  filesystem's timestamp resolution and a request comes between them. The
+  resolution of the operator's store volume is **UNMEASURED**.
+* **No manifest and no store root share one stamp.** `manifest_stamps` records
+  `None` both when a manifest does not exist and when its directory cannot be
+  reached, while `census::read_all` tells an unavailable root apart. So a
+  census cached as "absent" is served as "absent" after the root goes away, and
+  the reverse also holds, until a manifest is seen again. The three D-0686
+  routes answer the same either way, because neither state contributes an
+  entry. A caller that reports the state, such as `/store.json`'s 503 for an
+  unreadable census, can report the older one. This was found by reading
+  `manifest_stamps`; no test drives it, and it is not changed here.
+
+**Still a full manifest read per call, and not changed.** The pull paths
+`broker_answer`, `recovery_spot` and `fno_land` each call `census::read_all`
+once per pull. The census they read decides what is fetched, and the read comes
+just before a network pull; nothing here measures one against the other. The
+autopilot's `round` and `tick` read it once per pass, which is not a request.
+`Site::load` reads it once at startup.
+
+**Not measured.** No latency was taken for any of the three routes before or
+after this change. The byte ceiling above is the reader's refusal limit, not a
+size seen on the operator's disk. The 5.56 MB §41.1 quotes is D-0067's
+measurement, not a new one.
+
+## A tail block sealed past the commit is admitted on proof, at a stated cost — D-0688
+
+- **The tail block's first verification per handle adds one `fstat`.** It is
+  how the reader learns whether the file holds whole records past the commit.
+  Other blocks pay nothing new. Not timed: no bench row covers this path.
+- **When records lie past the commit, the reader also reads them and extends
+  the CRC over them.** Together with the committed covered bytes that is at
+  most one 4,088-byte block, so the CRC work per verification is still bounded
+  by the block (§14 has the per-block measurement).
+- **More comparisons, so a slightly larger chance to admit a corruption.** A
+  tail block with `k` whole records past its commit (`k` at most 72) is
+  compared `k + 1` times. A random corruption of it passes with probability
+  about `k + 1` in 2^32, against 1 in 2^32 before. A flip within a 32-bit
+  burst in a committed byte cannot match the extent that was really sealed. A
+  block with nothing past its commit is compared once, as before.
+- **Still refused, and a false refusal.** A second interrupted append that
+  wrote different records past the commit and died before sealing, and a
+  damaged record past the commit, leave an entry no extent matches. The
+  committed bars are refused until a strictly following append re-seals the
+  block. The strict audit door (D-0525) refuses any bytes past the commit and
+  is unchanged.
+- **The directory `fsync` after creating a `.crc` is not observable by any
+  test.** It runs on each writer open of a month with no committed records, so
+  a month reopened while still empty pays one directory flush each time.
+- **Bit rot in the newest header slot cannot be told from a torn slot write,
+  and is read as the previous commit.** Both fail that slot's own checksum.
+  Before D-0688 the previous commit's tail block, sealed over the newer
+  records, was refused, so the damage surfaced as a refusal. Now the reader
+  serves the previous commit's bars. It warns twice, `store.header` for the
+  fallback and `store.block` for the interrupted append, and the run records
+  under that smaller sample's own identity. In the `cli` fixture that is 525
+  of 600 bars (AF-12). Nothing marks the report itself: the fallback is visible
+  in `/logs` and in the bar count, not as a line in the screen or the audit.
+  Closing that would need `BarFile` to expose the generation it fell back
+  from, and a report line naming it.
+
+## Gate 8 rows for the equity build and the known-mask step — D-0690, 23 September 2026
+
+Two budget rows were added, each divided by a floor timed over milliseconds
+with the minimum of several trials kept. The readings are from an Apple M4
+Pro laptop (Mac16,7, 10 performance and 4 efficiency cores, macOS 26.6.2,
+rustc 1.97.1), taken while other worktrees were building and testing on the
+same machine. Five runs of each bench, at one-minute load averages of 8 to
+13, sized the budgets. Three further runner runs, at 42 to 59, and one
+further indicators run, at 51, verified them.
+
+- **C-R-05, the cash-equity column build.** `synthetic::sessions(8)` built
+  with `Availability::Present`: 1,002,681 to 1,026,701 ps per offered bar,
+  3044.550 to 3198.445 floors over a stable floor of 318 to 336 ps in the
+  five sizing runs, and up to 1,472,309 ps and 3635.330 floors in the loaded
+  runs. Budget 14,500. The same build with VWAP off read 702,776 to 720,666
+  ps in the sizing runs, so on this fixture the VWAP family adds about 42% to
+  44% per bar.
+- **C-I-07, one `step_known`.** 625,743 to 672,014 ps, 1246.116 to 1285.483
+  floors over a stable floor of 500 to 527 ps in the sizing runs, and
+  753,431 ps, 1292.334 floors, in the loaded run. Budget 5,200. `step` on
+  the same fixture (C-I-05) read 404,052 to 496,491 ps in the same six runs,
+  so the known-mask projection makes a bar cost 1.52 to 1.62 times what
+  `step` costs.
+- **Neither budget has been read on CI.** The only CI comparison on record
+  is C-R-04's, where D-0680's index build read 1,908,097 ps per bar, 2.76
+  times the 691,505 C-R-04 read on this laptop, with a floor as low as 309
+  ps. Scaled that way, C-R-05 would read about 9,170 floors from its worst
+  sizing run and about 13,150 from its worst loaded run, and C-I-07 about
+  3,570 if its floor held. All three are extrapolations, and the first CI
+  run is the calibration check.
+- **The stable floors held better under load than the old ones.** Across
+  all eight runner runs C-R-05's floor spread 1.274x and C-R-04's 2.82x, 452
+  to 1,275 ps. Across all six indicators runs C-I-07's spread 1.166x and
+  C-I-05's 2.24x, 518 to 1,158 ps.
+- **C-R-04 and C-I-05 are unchanged.** Their floors are still timed the old
+  way, and C-R-04's numerator is still one trial. In a later run at load 45,
+  after the budgets were final, C-R-04 read 5,050.433 floors, over its
+  5,000, from a 2,717,133 ps numerator, while C-R-05 in the same run read
+  3040.543 and its index build 837,359 ps. Timed on C-R-05's stable floor,
+  C-R-04's numerator reads 2114.089 to 2245.065 floors in the sizing runs.
+  That is the calibration figure D-0680 asked for. Moving C-R-04 onto that
+  floor with a budget sized by the same rule, about 9,000 floors of about
+  325 ps, would allow more per bar on this machine than 5,000 floors of
+  about 470 ps do, so it would loosen C-R-04 and needs its own decision.
+- **The fixtures are synthetic.** C-R-05's volume is 1,000 to 1,010 on every
+  bar. A real equity month with zero-volume bars or wider prices is not
+  timed.

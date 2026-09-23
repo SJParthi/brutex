@@ -45,7 +45,9 @@ fn read_failure(why: &str, busy: bool) -> Response {
 
 /// Only these fixed public route names enter audit labels. Unknown paths,
 /// assets, queries, request bodies and headers are never copied into records.
-fn audited_route(path: &str) -> Option<&'static str> {
+/// The server's admission layer reads the same list, so a cross-site read of
+/// any of these is refused before [`note_request`] can journal it. D-0687.
+pub(crate) fn audited_route(path: &str) -> Option<&'static str> {
     match path {
         "/backtest/run" => Some("/backtest/run"),
         "/backtest/descend" => Some("/backtest/descend"),

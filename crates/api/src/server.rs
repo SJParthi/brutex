@@ -2644,9 +2644,14 @@ struct PeerCalendar {
 fn peer_calendar(site: &Loaded, asked: &Addressed) -> PeerCalendar {
     // A FRESH CENSUS, for the reason D-0318 records: a list captured before the
     // store had anything in it reports a complete store as short.
-    let fresh = census::read_all(&site.store_root);
+    //
+    // FRESH ON THE MANIFESTS' STAMPS, NOT RE-READ PER REQUEST. `census_now`
+    // re-reads a manifest whose modified time moved and shares the cached
+    // census otherwise, so a pull is still visible on the next audit and a
+    // steady-state audit reads no manifest bytes. D-0686.
+    let (fresh, _) = census_now(site);
     let mut readings: Vec<(String, pull::calendar::Calendar)> = Vec::new();
-    for vendor_census in &fresh {
+    for vendor_census in fresh.as_slice() {
         let by_series =
             spot_months_by_identity(&census::held_entries(std::slice::from_ref(vendor_census)));
         let mut keys: Vec<_> = by_series.keys().copied().collect();
@@ -3291,7 +3296,15 @@ pub(crate) fn census_now(site: &Site) -> CensusNow {
     // -- capped at 256 MiB each -- and `held_entries` then sorts and dedups
     // every entry it found. `census.rs` says so against itself: "O(entries log
     // entries), ON FOUR PER-REQUEST PATHS", and names them. `/calendar.json`
-    // reaches the same work by its own `read_all`, which makes five.
+    // reached the same work by its own `read_all`, which made five.
+    //
+    // AND THREE MORE GET ROUTES STILL CALLED `read_all` DIRECTLY after this
+    // cache existed: both branches of `/calendar.json`, `/gaps.json` through
+    // `peer_calendar`, and `/bars` through `locate_series` whenever `?exchange=`
+    // or `?segment=` is omitted. Each read every vendor's whole manifest on
+    // every request, so their cost grew with the store. They come through here
+    // now. D-0686, and `docs/06-limits.md`'s D-0686 section for what a request
+    // still costs after it.
     //
     // MEASURED consequence, recorded in `store_json`'s own doc: 377,735 bytes
     // for one feed, on a page the console polls every five seconds.
@@ -4502,9 +4515,13 @@ pub struct Site {
     /// `census_now` calls `census::read_all`, which reads every vendor's entire
     /// manifest, and `held_entries`, which sorts and dedups every entry in it.
     /// `census.rs` records the shape against itself -- "O(entries log entries),
-    /// ON FOUR PER-REQUEST PATHS" -- and `/calendar.json` makes a fifth by its
+    /// ON FOUR PER-REQUEST PATHS" -- and `/calendar.json` made a fifth by its
     /// own `read_all`. `store_json`'s doc measures the result at 377,735 bytes
     /// for one feed, on a page the console polls every five seconds.
+    ///
+    /// `/calendar.json`, `/gaps.json`'s peer vote and `/bars`' segment lookup
+    /// kept their own `read_all` after this cache existed, and read every
+    /// manifest per request until D-0686 routed them through `census_now`.
     ///
     /// Keyed on the manifests' modified times, exactly as `calendars` is keyed
     /// on one manifest's: a manifest is the only thing that can change what a
@@ -14336,7 +14353,12 @@ fn locate_series(site: &Site, query: &str, symbol: &str) -> Option<(String, Stri
     if !asked_exchange.is_empty() && !asked_segment.is_empty() {
         return Some((asked_exchange, asked_segment));
     }
-    let located = census::read_all(&site.store_root)
+    // THE CACHED CENSUS, walked per vendor in `Vendor::ALL` order exactly as
+    // the direct `read_all` was, so the first holder found is the same one.
+    // What changed is only that an unchanged manifest is not re-read for every
+    // hand-typed `/bars` URL. D-0686.
+    let (censuses, _) = census_now(site);
+    let located = censuses
         .iter()
         .flat_map(|c| census::held_entries(std::slice::from_ref(c)))
         .find(|(series, _)| series.contract.is_none() && series.symbol.as_str() == symbol)
@@ -14584,17 +14606,26 @@ pub fn router(site: Loaded) -> axum::Router {
 /// Production HTTP surface with durable sweep-control and result-read auditing.
 /// The full server uses this entry point. Read-only evidence adapters use
 /// [`router_serving`] so reading an immutable source cannot write into it.
+///
+/// **The journal sits INSIDE admission, not around it.** It used to wrap the
+/// finished [`router_serving`], so every request to a journaled route opened a
+/// durable invocation record before `Host` or fetch metadata had been read: a
+/// DNS-rebound write left a `Refused` record behind its `403`, and a cross-site
+/// `<img>` pointed at `/backtest.json` left a completed one. Now [`admitted`]
+/// wraps this table, the journal and `/inspection.json` alike, so a request the
+/// origin layer refuses never reaches the audit layer at all. D-0687.
 pub fn audited_router_serving(
     site: Loaded,
     front: std::sync::Arc<assets::Assets>,
     local_addr: SocketAddr,
 ) -> axum::Router {
-    router_serving(std::sync::Arc::clone(&site), front, local_addr)
+    let journaled = route_table(front)
         .route("/inspection.json", axum::routing::get(application_mode))
         .layer(axum::middleware::from_fn_with_state(
-            site,
+            std::sync::Arc::clone(&site),
             crate::operation_audit::note_request,
-        ))
+        ));
+    admitted(journaled, site, local_addr)
 }
 
 /// Native application capabilities, distinct from legacy compatibility and
@@ -14630,6 +14661,81 @@ async fn application_mode() -> (
 /// set an environment variable — `set_var` is `unsafe` under edition 2024 and
 /// this crate forbids `unsafe`. Every routing-order and traversal test drives
 /// this one over a scratch directory it owns.
+pub fn router_serving(
+    site: Loaded,
+    assets: std::sync::Arc<assets::Assets>,
+    local_addr: SocketAddr,
+) -> axum::Router {
+    admitted(route_table(assets), site, local_addr)
+}
+
+/// The layers every router this server builds carries, outermost last.
+///
+/// One function for both routers, so the audited one cannot drift out of the
+/// order the plain one proves. A later `.layer` on an `axum::Router` wraps the
+/// earlier ones, and it applies to every route and to the fallback already
+/// registered on `table`:
+///
+/// 1. [`same_origin_writes_only`] — admission, innermost of these four and
+///    OUTSIDE anything `table` already carries, which is how the audited
+///    router's journal ends up behind it.
+/// 2. [`crate::logs::note_request`] — sees every answer, the `403` included.
+/// 3. `DefaultBodyLimit` — configures the handlers' body extractors.
+/// 4. [`never_framed`] — outermost, so no answer leaves without its headers:
+///    not the `403`, not an audit `503`, not the fallback.
+fn admitted(table: axum::Router<Loaded>, site: Loaded, local_addr: SocketAddr) -> axum::Router {
+    table
+        // WHO ASKED, NOT ONLY WHICH VERB. `post` stops a crawler; it does not
+        // stop the other tab in the operator's browser. Registered INSIDE
+        // `note_request` so the log sees the 403. `DefaultBodyLimit` is
+        // enforced when a handler extracts its `String`; this middleware may
+        // therefore answer a cross-origin request before body extraction. An
+        // otherwise admitted oversized body still answers 413 before its
+        // parser. See [`same_origin_writes_only`] for what this stops and what
+        // it does not.
+        .layer(axum::middleware::from_fn(move |request, next| {
+            same_origin_writes_only(local_addr, request, next)
+        }))
+        .layer(axum::middleware::from_fn(crate::logs::note_request))
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_FORM_BYTES))
+        .layer(axum::middleware::map_response(never_framed))
+        .with_state(site)
+}
+
+/// Every answer refuses to be framed and refuses to be content-sniffed.
+///
+/// No page this server renders is meant to sit inside another page, and none
+/// does: the front end carries no frame of any kind. Without these headers a
+/// hostile page could load the dashboard or the ingest form invisibly in a
+/// frame and steer the operator's clicks onto it. `X-Frame-Options` is the
+/// older spelling and `frame-ancestors` the current one; both are sent because
+/// neither costs anything and each covers a browser the other may not.
+///
+/// `nosniff` holds the browser to the `Content-Type` this server states —
+/// [`assets::content_type`] already refuses to guess, and this stops the
+/// browser from guessing in its place.
+///
+/// The policy is APPENDED rather than inserted: several
+/// `Content-Security-Policy` headers are each enforced, so appending can only
+/// add a restriction to a policy a handler someday sets, never remove one. No
+/// handler sets any of the three today.
+async fn never_framed(mut response: axum::response::Response) -> axum::response::Response {
+    use axum::http::{HeaderValue, header};
+    let headers = response.headers_mut();
+    headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    headers.append(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("frame-ancestors 'none'"),
+    );
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    response
+}
+
+/// The route table itself: every path this build serves and the fallback,
+/// with no layer and no state. [`admitted`] adds both.
 #[expect(
     clippy::too_many_lines,
     reason = "a route TABLE, one line per route plus the reason each exists. \
@@ -14638,11 +14744,7 @@ async fn application_mode() -> (
               build serves — and shortening the comments to fit would delete \
               the reasons rather than the length."
 )]
-pub fn router_serving(
-    site: Loaded,
-    assets: std::sync::Arc<assets::Assets>,
-    local_addr: SocketAddr,
-) -> axum::Router {
+fn route_table(assets: std::sync::Arc<assets::Assets>) -> axum::Router<Loaded> {
     let typeahead = std::sync::Arc::clone(&assets);
     let masters_js = std::sync::Arc::clone(&assets);
     axum::Router::new()
@@ -14946,20 +15048,6 @@ pub fn router_serving(
             let assets = std::sync::Arc::clone(&assets);
             async move { assets.respond(request.method(), request.uri().path()) }
         })
-        // WHO ASKED, NOT ONLY WHICH VERB. `post` stops a crawler; it does not
-        // stop the other tab in the operator's browser. Registered INSIDE
-        // `note_request` — a later `.layer` on an `axum::Router` wraps the
-        // earlier one, so the log sees the 403. `DefaultBodyLimit` is enforced
-        // when a handler extracts its `String`; this middleware may therefore
-        // answer a cross-origin request before body extraction. An otherwise
-        // admitted oversized body still answers 413 before its parser. See
-        // [`same_origin_writes_only`] for what this stops and what it does not.
-        .layer(axum::middleware::from_fn(move |request, next| {
-            same_origin_writes_only(local_addr, request, next)
-        }))
-        .layer(axum::middleware::from_fn(crate::logs::note_request))
-        .layer(axum::extract::DefaultBodyLimit::max(MAX_FORM_BYTES))
-        .with_state(site)
 }
 
 /// The fetch-metadata header a browser stamps on every request it issues.
@@ -14971,6 +15059,10 @@ const SEC_FETCH_SITE: &str = "sec-fetch-site";
 
 /// The one `Sec-Fetch-Site` value that is this server's own page.
 const SEC_FETCH_SAME_ORIGIN: &str = "same-origin";
+
+/// The `Sec-Fetch-Site` value for a request no page initiated: an address the
+/// operator typed, a bookmark. Admitted on a journaled read, never on a write.
+const SEC_FETCH_USER_INITIATED: &str = "none";
 
 /// Proxy assertions this direct-loopback server never trusts.
 ///
@@ -15013,15 +15105,36 @@ const FORWARDED_AUTHORITY_HEADERS: [&str; 5] = [
 ///
 /// # The rule
 ///
-/// `GET` and `HEAD` pass untouched. They change nothing, and refusing them
-/// would take down every page and every JSON route on the site.
+/// **Every request, whatever its method, must name this listener in `Host`**:
+/// exactly `localhost` or the bound loopback IP literal, on the bound port. A
+/// read used to pass untouched on the ground that it changes nothing, and that
+/// ground held against another tab — a cross-origin page cannot see the answer
+/// — but not against DNS rebinding. A page whose own hostname has been rebound
+/// to `127.0.0.1` is SAME-origin with the answer, so it could read every
+/// stored bar and saved result over `GET` while sending `Host:
+/// hostile.example`. The listener is loopback-only, so the operator's browser
+/// reaches it as `localhost:PORT` or as the bound IP and sends exactly that;
+/// nothing it asks for is refused by this. D-0687.
 ///
-/// Anything else needs **both** a local authority and browser same-origin
-/// evidence. `Host` must be exactly `localhost` or the bound loopback IP
-/// literal, with the bound port. This half is load-bearing: a hostile page can resolve its
-/// own name to `127.0.0.1`, and its browser will truthfully stamp
-/// `Sec-Fetch-Site: same-origin` while sending `Host: hostile.example`. Trusting
-/// the fetch token alone is therefore a DNS-rebinding bypass.
+/// **A read of a journaled route must also not come from another site.** The
+/// routes [`crate::operation_audit`] journals write a durable invocation record
+/// per request, so for them a `GET` is not free: an `<img>` on any page the
+/// operator has open would append to the journal. `Sec-Fetch-Site` may be
+/// absent (a non-browser client), `same-origin` (this server's own page) or
+/// `none` (a typed address or a bookmark); `cross-site`, `same-site`, any
+/// token this build has never heard of and a repeated or unreadable value are
+/// refused. Every other read accepts a cross-site request with a local `Host`,
+/// because a link from elsewhere to a page here is ordinary navigation. The
+/// rule is keyed on the path, so a journaled route answers the same way in the
+/// read-only router that has no journal.
+///
+/// Anything other than `GET` and `HEAD` needs **both** a local authority and
+/// browser same-origin evidence. `Host` must be exactly `localhost` or the
+/// bound loopback IP literal, with the bound port. This half is load-bearing:
+/// a hostile page can resolve its own name to `127.0.0.1`, and its browser
+/// will truthfully stamp `Sec-Fetch-Site: same-origin` while sending
+/// `Host: hostile.example`. Trusting the fetch token alone is therefore a
+/// DNS-rebinding bypass.
 ///
 /// The local host must carry the listener's bound port, and every write must
 /// carry an exact `http` `Origin` authority match. This listener has no TLS, so
@@ -15048,7 +15161,11 @@ async fn same_origin_writes_only(
     // DECIDED WHILE THE BORROW IS LIVE. `Next::run` takes the request by value,
     // so the verdict is an owned `String` and nothing of the request is held
     // across the move.
-    let Some(why) = cross_origin_refusal(local_addr, request.method(), request.headers()) else {
+    let refusal =
+        cross_origin_refusal(local_addr, request.method(), request.headers()).or_else(|| {
+            journaled_read_refusal(request.method(), request.uri().path(), request.headers())
+        });
+    let Some(why) = refusal else {
         return next.run(request).await;
     };
     (
@@ -15072,21 +15189,23 @@ fn cross_origin_refusal(
     method: &axum::http::Method,
     headers: &axum::http::HeaderMap,
 ) -> Option<String> {
-    // A READ IS NEVER REFUSED. `HEAD` rides with `GET` for the reason
-    // `assets::respond` pairs them: it is a `GET` whose body is dropped.
-    if method == axum::http::Method::GET || method == axum::http::Method::HEAD {
-        return None;
-    }
-    for name in FORWARDED_AUTHORITY_HEADERS {
-        if headers.contains_key(name) {
-            let value = sole_visible_header(headers, name)
-                .ok()
-                .flatten()
-                .unwrap_or("<malformed-or-repeated>");
-            return Some(cross_origin_sentence(method, name, value));
+    // `HEAD` rides with `GET` for the reason `assets::respond` pairs them: it
+    // is a `GET` whose body is dropped.
+    let read = method == axum::http::Method::GET || method == axum::http::Method::HEAD;
+    if !read {
+        for name in FORWARDED_AUTHORITY_HEADERS {
+            if headers.contains_key(name) {
+                let value = sole_visible_header(headers, name)
+                    .ok()
+                    .flatten()
+                    .unwrap_or("<malformed-or-repeated>");
+                return Some(cross_origin_sentence(method, name, value));
+            }
         }
     }
 
+    // EVERY METHOD, NOT ONLY A WRITE. A read under a rebound hostname is the
+    // same-origin read this check exists to stop; see the rule above. D-0687.
     let host = match sole_visible_header(headers, axum::http::header::HOST.as_str()) {
         Ok(Some(host)) if local_host_authority(host, local_addr) => host,
         Ok(Some(host)) => return Some(cross_origin_sentence(method, "Host", host)),
@@ -15099,6 +15218,11 @@ fn cross_origin_refusal(
             ));
         }
     };
+    // A LOCAL READ IS NOT REFUSED HERE. Its fetch metadata matters only on a
+    // journaled route, which [`journaled_read_refusal`] decides by path.
+    if read {
+        return None;
+    }
 
     let Ok(site) = sole_visible_header(headers, SEC_FETCH_SITE) else {
         return Some(cross_origin_sentence(
@@ -15128,6 +15252,30 @@ fn cross_origin_refusal(
         return Some(cross_origin_sentence(method, "Origin", origin));
     }
     None
+}
+
+/// Why a request to a journaled route is refused as another site's, or `None`.
+///
+/// Runs after [`cross_origin_refusal`] has admitted the request, and in the
+/// same layer, which is outside the audit journal: a refusal here writes no
+/// invocation record. Only reads can reach a refusal — a write has already had
+/// to say `same-origin` or nothing — so it is written for any method rather
+/// than restating that test.
+fn journaled_read_refusal(
+    method: &axum::http::Method,
+    path: &str,
+    headers: &axum::http::HeaderMap,
+) -> Option<String> {
+    crate::operation_audit::audited_route(path)?;
+    match sole_visible_header(headers, SEC_FETCH_SITE) {
+        Ok(None | Some(SEC_FETCH_SAME_ORIGIN | SEC_FETCH_USER_INITIATED)) => None,
+        Ok(Some(site)) => Some(cross_origin_sentence(method, "Sec-Fetch-Site", site)),
+        Err(()) => Some(cross_origin_sentence(
+            method,
+            "Sec-Fetch-Site",
+            "<malformed-or-repeated>",
+        )),
+    }
 }
 
 /// The one visible value for a security header.
@@ -15191,16 +15339,22 @@ fn origin_matches_host(origin: &str, host: &str) -> bool {
 /// reducer to visible ASCII with a 400-character ceiling. It is echoed because
 /// an operator debugging a reverse proxy needs to see what arrived, not because
 /// it is trusted; the content type is `text/plain`, so nothing here is markup.
+///
+/// It says no invocation audit record was written, and that is now true in
+/// both routers: admission runs outside the audit journal (D-0687). It used to
+/// say one "may be recorded", because the journal ran first.
 fn cross_origin_sentence(method: &axum::http::Method, header: &str, value: &str) -> String {
     format!(
-        "REFUSED — a {method} on this server is answered only for its own \
-         pages, and {header} says this one came from somewhere else: {}.\n\
+        "REFUSED — a {method} on this server must name this loopback listener \
+         and, for a write or a journaled read, come from this server's own \
+         pages; {header} says this one came from somewhere else: {}.\n\
          \n\
-         No vendor was contacted, no autopilot state moved, and no requested \
-         market-data or engine work was dispatched. A refusal audit may be \
-         recorded. These routes are POST-only so a crawler cannot start them \
-         (D-0128); this check is for the other tab in your browser, which \
-         POST-only does not stop.\n",
+         No vendor was contacted, no autopilot state moved, no requested \
+         market-data or engine work was dispatched, and no invocation audit \
+         record was written. Writes are POST-only so a crawler cannot start \
+         them (D-0128); this check is for the other tab in your browser, which \
+         POST-only does not stop, and for a hostname rebound onto this port \
+         (D-0687).\n",
         note_alphabet(value)
     )
 }
@@ -19147,8 +19301,17 @@ mod tests {
     /// A blocking client on a blocking thread, deliberately: it needs nothing
     /// from `tokio` that this crate's feature set does not already have, and
     /// awaiting it yields the runtime to the server task under test.
+    ///
+    /// `Host` is the bound address, because that is what a browser at
+    /// `http://127.0.0.1:PORT` sends and every method is now held to it
+    /// (D-0687). It used to be a placeholder `t`, which only a read could send.
     async fn get(addr: SocketAddr, path: &str) -> String {
-        let request = format!("GET {path} HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n");
+        get_as(addr, &addr.to_string(), path).await
+    }
+
+    /// [`get`], naming the `Host` it claims.
+    async fn get_as(addr: SocketAddr, host: &str, path: &str) -> String {
+        let request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
         tokio::task::spawn_blocking(move || {
             use std::io::Read as _;
             let mut s = std::net::TcpStream::connect(addr).expect("connect");
@@ -19611,11 +19774,23 @@ mod tests {
             assert!(bare.contains("403 Forbidden"), "{bare}");
             assert!(bare.contains("Origin"), "{bare}");
 
-            // AND A READ IS NEVER REFUSED, whoever asked for it. A page that
-            // could not be fetched cross-origin would break nothing an attacker
-            // can see and everything a link can.
+            // AND A LOCAL READ IS NOT REFUSED. A page that could not be
+            // fetched cross-origin would break nothing an attacker can see and
+            // everything a link can. It must still name this listener: a
+            // rebound hostname is refused on a read too (D-0687).
             let read = get(addr, "/store.json?feed=groww").await;
             assert!(!read.contains("403 Forbidden"), "{read}");
+            let rebound = get_as(
+                addr,
+                &format!("evil.example:{}", addr.port()),
+                "/store.json?feed=groww",
+            )
+            .await;
+            assert!(rebound.contains("403 Forbidden"), "{rebound}");
+            assert!(
+                rebound.contains("Host says this one came from somewhere else"),
+                "{rebound}"
+            );
         })
         .await;
     }
@@ -19630,7 +19805,7 @@ mod tests {
         reason = "one same-origin decision table whose passing and refusing cases must stay \
                   together so every authority branch is checked against the same setup"
     )]
-    fn only_a_same_origin_write_passes_and_a_read_always_does() {
+    fn only_a_same_origin_write_passes_and_a_local_read_does() {
         let head = |pairs: &[(&str, &str)]| {
             let mut headers = axum::http::HeaderMap::new();
             for &(name, value) in pairs {
@@ -19643,17 +19818,50 @@ mod tests {
         };
         let post = axum::http::Method::POST;
 
-        // A READ IS NEVER REFUSED, whatever it says about itself.
+        // A READ THAT NAMES THIS LISTENER IS NOT REFUSED HERE, whatever its
+        // fetch metadata or forwarding headers say: neither is read on a GET.
+        // Whether a JOURNALED read may come from another site is decided by
+        // path, in `journaled_read_refusal`.
         for method in [axum::http::Method::GET, axum::http::Method::HEAD] {
+            for host in ["localhost:8080", "127.0.0.1:8080"] {
+                assert!(
+                    cross_origin_refusal(
+                        DEFAULT_ADDR,
+                        &method,
+                        &head(&[
+                            ("host", host),
+                            ("sec-fetch-site", "cross-site"),
+                            ("x-forwarded-host", "evil.example"),
+                        ]),
+                    )
+                    .is_none(),
+                    "{method} from {host} changes nothing and must not be gated"
+                );
+            }
+            // BUT IT MUST NAME THIS LISTENER. A missing, foreign, wrong-port or
+            // other-loopback `Host` is refused on a read as on a write: a
+            // rebound page is same-origin with what it reads. D-0687.
+            let missing = cross_origin_refusal(DEFAULT_ADDR, &method, &head(&[]))
+                .expect("a read naming no host is refused");
             assert!(
-                cross_origin_refusal(
+                missing.contains("Host says this one came from somewhere else: <missing>"),
+                "{missing}"
+            );
+            for host in ["evil.example:8080", "localhost:8081", "127.0.0.2:8080"] {
+                let why = cross_origin_refusal(
                     DEFAULT_ADDR,
                     &method,
-                    &head(&[("sec-fetch-site", "cross-site")]),
+                    &head(&[("host", host), ("sec-fetch-site", "same-origin")]),
                 )
-                .is_none(),
-                "{method} changes nothing and must not be gated"
-            );
+                .expect("a read under another authority is refused");
+                assert!(
+                    why.contains(&format!(
+                        "Host says this one came from somewhere else: {host}"
+                    )),
+                    "{why}"
+                );
+                assert!(why.contains(&format!("a {method} on this server")), "{why}");
+            }
         }
 
         // THE BROWSER'S OWN WORD. One value passes and every other refuses,
@@ -22032,7 +22240,9 @@ mod tests {
             Box::pin(async move { stopper.accept().await.map(|_| ()) }),
         ));
 
-        let health = get(addr, "/health").await;
+        // `router` answers as `DEFAULT_ADDR`, whatever port this test bound,
+        // so the request names that authority rather than the socket's.
+        let health = get_as(addr, "localhost:8080", "/health").await;
         assert!(health.contains("503"), "{health}");
         assert!(health.contains("DEGRADED"), "{health}");
         assert!(health.contains("dhan: UNAVAILABLE"), "{health}");
@@ -22059,7 +22269,7 @@ mod tests {
             let head = tokio::task::spawn_blocking(move || {
                 use std::io::Read as _;
                 let mut socket = std::net::TcpStream::connect(addr).expect("connect");
-                socket.write_all(b"HEAD /store.json?feed=groww HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n").expect("write");
+                socket.write_all(format!("HEAD /store.json?feed=groww HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n").as_bytes()).expect("write");
                 let mut text = String::new();
                 socket.read_to_string(&mut text).expect("read");
                 text
@@ -30014,7 +30224,13 @@ async fn calendar_json(
         // which is a workaround for a bug."* It was fixed there by taking a
         // fresh census; this is the same fix, on the route that reports rather
         // than the one that gates. D-0318.
-        let fresh = census::read_all(&site.store_root);
+        //
+        // FRESH ON THE MANIFESTS' STAMPS, which keeps D-0318 and drops the
+        // per-request manifest read. This was a direct `read_all` -- every
+        // vendor's whole manifest, read on every request -- beside a cache
+        // that already answered the same question from one `stat` per vendor.
+        // A rewritten manifest moves its stamp and is re-read. D-0686.
+        let (fresh, _) = census_now(&site);
         let mut readings: Vec<(String, pull::calendar::Calendar)> = Vec::new();
         // THE SAME FRESH READING, WALKED ONCE. Filtering `site.entries` here
         // would have re-introduced the staleness two lines after fixing it —
@@ -30062,12 +30278,20 @@ async fn calendar_json(
         //
         // `VendorCensus::vendor` is right there; filtering by it is one
         // comparison per census, of which there are five.
-        let mine: Vec<census::VendorCensus> = fresh
+        //
+        // BORROWED FROM THE SHARED CENSUS, NOT CLONED OUT OF IT. `VendorCensus`
+        // boxes a whole `Manifest`, so the `.cloned()` that stood here
+        // deep-copied this feed's every entry on every request -- the copy
+        // D-0171 removed from `/store` -- and would have undone what sharing
+        // the cached census by `Arc` saves. `read_all` answers one census per
+        // `Vendor::ALL`, so at most one matches and this is the same list
+        // `held_entries` built from the clone. D-0686.
+        let mine: Vec<(census::Series, store::path::YearMonth)> = fresh
             .iter()
             .filter(|census| census.vendor == feed)
-            .cloned()
+            .flat_map(|census| census::held_entries(std::slice::from_ref(census)))
             .collect();
-        let by_series = spot_months_by_identity(&census::held_entries(&mine));
+        let by_series = spot_months_by_identity(&mine);
         // SORTED SO THE ANSWER IS REPRODUCIBLE. A `HashMap`'s iteration order
         // varies per process, and `agree` ships the names it derived from —
         // an unsorted walk would reorder `from` between two identical requests.
@@ -30130,7 +30354,12 @@ async fn calendar_json(
     // for the same measured reason: `Series` carries no vendor, so without it
     // Zerodha's months (back to 2015) are probed against Dhan's store (a
     // rolling five years) and every one refuses into the log.
-    for (series, month) in census::read_all(&site.store_root)
+    //
+    // THE SAME STAMPED CENSUS the exchange branch reads, so the two branches
+    // still agree about what the store holds and neither re-reads an unchanged
+    // manifest per request. D-0686.
+    let (censuses, _) = census_now(&site);
+    for (series, month) in censuses
         .iter()
         .filter(|census| census.vendor == feed)
         .flat_map(|c| census::held_entries(std::slice::from_ref(c)))
@@ -30194,6 +30423,10 @@ async fn calendar_json(
 #[cfg(test)]
 #[path = "calendar_route_tests.rs"]
 mod calendar_route_tests;
+
+#[cfg(test)]
+#[path = "census_request_tests.rs"]
+mod census_request_tests;
 
 #[cfg(test)]
 #[path = "bars_window_route_tests.rs"]
@@ -30338,3 +30571,7 @@ mod calendar_identity {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "http_admission_tests.rs"]
+mod http_admission_tests;

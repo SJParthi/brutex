@@ -222,7 +222,7 @@ vocab         <-- indicators · engine
 core costs greeks store telemetry <-- pull
 core pull store telemetry cli vocab <-- api
 core costs engine indicators vocab         <-- runner
-core costs engine indicators runner store telemetry <-- cli
+core costs engine indicators pull runner store telemetry vocab <-- cli
 ```
 
 Thirteen members, and the root `Cargo.toml` `members` list is exactly the
@@ -230,11 +230,17 @@ thirteen directories under `crates/`. The graph is acyclic and CI proves the two
 arrows that carry a rule: gate 9 that `core` depends on nothing, gate 9b that
 `greeks` does.
 
-**This block is hand-maintained and has drifted once.** D-0208 corrected five
-statements in this section against `cargo metadata --no-deps`: the member count,
-a missing `cli` row, `pull`'s `costs` arrow (decided by D-0206 and never drawn
-here), `cli`'s dependency set, and the banner sentence below. Gates 9 and 9b pin
-one arrow each; **nothing pins this block as a whole**, so check it against the
+**This block is hand-maintained and has drifted at least four times.** D-0208
+corrected five statements in this section against `cargo metadata --no-deps`:
+the member count, a missing `cli` row, `pull`'s `costs` arrow (decided by D-0206
+and never drawn here), `cli`'s dependency set, and the banner sentence below.
+`pull`'s `greeks` arrow (D-0217) and `api`'s `cli` arrow were each drawn here
+only after their manifests took them. `cli`'s `pull` and `vocab` arrows, both
+declared on 2026-09-01, were missing here until D-0683: D-0453 drew `pull` in
+`AGENTS.md` and `docs/01-architecture.md` but not in this file, and its own list
+left out `vocab`. Gates 9 and 9b pin one arrow each, and `core/tests/graph.rs`
+checks the table in `docs/01-architecture.md` against all thirteen manifests;
+**nothing parses this block as a whole**, so check it against that gate and the
 manifests rather than trusting it.
 
 **`indicators` and `engine` may not name each other.** Gate 22 clause A pins both
@@ -270,10 +276,34 @@ only binary was `api`, whose dependency set is `core`, `pull`, `store` and
 unreachable from any entry point, and the three render surfaces that display it
 had no caller at all.
 
-`cli` depends on `runner`, `engine`, `indicators`, `costs`, `store`, `core` and
-`telemetry` — **seven arrows, and `store` is one of them.**
+`cli` depends on `runner`, `engine`, `indicators`, `costs`, `store`, `core`,
+`pull`, `telemetry` and `vocab` — **nine arrows, and `store`, `pull` and `vocab`
+are among them.**
 
-**`telemetry` is the seventh, and gate 17 is why it is here rather than one crate
+**`pull` is the calendar-attestation edge, not a vendor-network fallback.** The
+stored-run boundary calls `pull::calendar::kind_of` as the canonical IST session
+authority, Population V4 civil bounds use `pull::session::Day`, and global
+replay/VIX month identity uses `pull::session::IstMoment`, and `cli::fold_audit`
+folds minutes into rung bars with `pull::fold`, the one fold authority. These are
+the principal uses, not an exhaustive list: `pull::session::Day` also appears in
+the boolean and candidate modules. Repeating those types or rules in `cli` would
+create a second calendar or fold authority. No stored reader uses this edge to
+fetch vendor data or silently replace missing evidence; those paths still
+refuse. The edge is acyclic because `pull` does not depend on `cli`. D-0453,
+D-0683.
+
+**`vocab` is named directly because `cli` stores and checks the vocabulary's own
+types.** The resumable expression and Boolean-grammar searches checkpoint a
+`vocab::expression_search::Cursor` and size their records by its
+`CURSOR_BYTES`; candidate trades, the pool and `cli::verify`'s
+suffix-independence check carry `vocab::ConditionMask`; the search-sizing model
+checks its lower bound against `vocab::expression::MAX_INSTRUCTIONS`; and the
+candidate-universe vocabulary digest hashes `vocab::VOCAB_VERSION` and every row
+of `vocab::table::TABLE`. `vocab` depends on nothing, so the arrow cannot cycle,
+and gate 22 clause A pins `vocab`'s own dependency set, not who may name it.
+D-0683.
+
+**`telemetry` remains direct, and gate 17 is why it is here rather than one crate
 deeper.** Until D-0226 a `sweep-stored` or `sweep-all` run produced no event of
 any kind — not the file it opened, not the bars it read, not a refusal — so the
 `/logs` page covered the pull half of the data path and nothing of the read half.
@@ -283,14 +313,15 @@ all". `cli` holds no loop over bars and none over candidates: it is the
 structural boundary, one event per run and one per instrument-month, which is the
 granularity gate 17's own comment prescribes as the affordable one. D-0226.
 
-It was once deliberately *not*, on the reasoning that the operator's standing
-rule forbade both a vendor pull and the bars already on disk, leaving
-`runner::synthetic` as the only honest input. **That is no longer what the crate
-does, and the sentence is not merely stale — it argued for an absence that has
-been filled.** `cli sweep-stored` loads one real instrument-month through
-`store::file::BarFile` and sweeps it. The arrow is what makes the run identity
-§3 rule 3 demands recordable at all: a synthetic bar has no instrument to name,
-and naming one would be the invention §3 rule 1 forbids. D-0208.
+`cli` once deliberately had no `store` arrow, on the reasoning that the
+operator's standing rule forbade both a vendor pull and the bars already on
+disk, leaving `runner::synthetic` as the only honest input. **That is no longer
+what the crate does, and the sentence is not merely stale — it argued for an
+absence that has been filled.** `cli sweep-stored` loads one real
+instrument-month through `store::file::BarFile` and sweeps it. The arrow is
+what makes the run identity §3 rule 3 demands recordable at all: a synthetic
+bar has no instrument to name, and naming one would be the invention §3 rule 1
+forbids. D-0208.
 
 What survives from that reasoning is the half about gate 22, and it is the half
 that carries the rule: `cli` declines to be a *swept* crate, not to be a caller.

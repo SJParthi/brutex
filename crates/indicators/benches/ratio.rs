@@ -239,6 +239,99 @@ fn a_candle_stays_within_its_budget(floor: u128) -> bool {
     budget("C-I-05 step: one bar, every family", floor, at, ALLOWED)
 }
 
+/// Adds per trial for the STABLE floor [`a_known_step_stays_within_its_budget`]
+/// divides by.
+///
+/// [`floor_ps`] times 20,000 adds per trial, 10 to 25 µs, as the first thing
+/// `main` does. C-I-05's own row records what that gives: 397.533 and 963.263
+/// floors an hour apart on one machine, because the floor moved. Two million
+/// adds per trial, the minimum of [`TRIALS`] trials, times milliseconds per
+/// trial instead. D-0690.
+const STABLE_FLOOR_REPS: u32 = 2_000_000;
+
+/// The same one-add floor as [`floor_ps`], timed long enough to hold still.
+///
+/// C-I-05 keeps [`floor_ps`]. Changing the floor under an existing budget
+/// changes what that budget means, and that is its own decision.
+fn stable_floor_ps() -> u128 {
+    cost_ps(STABLE_FLOOR_REPS, || {
+        black_box(1u64).wrapping_add(black_box(1))
+    })
+}
+
+/// C-I-07 — one bar through `step_known`, the call `Column::build` makes, costs
+/// a bounded multiple of the stable floor.
+///
+/// # Why C-I-05 does not already cover it
+///
+/// C-I-05 times [`Evaluator::step`], which computes the truth mask and nothing
+/// else. `Column::build` calls [`Evaluator::step_known`], which also computes the
+/// known mask: the clock positions, the pattern, trend, daily, previous-day
+/// Fibonacci, `Prev5`, VWAP, ORB, session, current-day and gap `known`
+/// functions, and `crossings_known`. D-0677 fixed part of a regression there,
+/// and D-0680 recorded that most of the projection still rebuilds every bar. A
+/// slowdown in it passed C-I-05. D-0690.
+///
+/// Same fixture as C-I-05, one warmed evaluator and the wandering candle, so the
+/// two readings differ only by the known-mask projection. Run last, so the
+/// stable floor is timed on a clock the other rows have already warmed.
+fn a_known_step_stays_within_its_budget() -> bool {
+    /// Floors allowed for one `step_known`.
+    ///
+    /// Measured 2026-09-23 on an Apple M4 Pro laptop (Mac16,7, 10
+    /// performance and 4 efficiency cores), release bench profile, six runs,
+    /// while other worktrees built and tested on the same machine. Runs 1 to 5
+    /// sized the budget; run 6 was a verification run with the budget in
+    /// place, at a much higher load:
+    ///
+    /// | run | load | stable floor | `step_known` | floors   | C-I-05 `step` | C-I-05 floor |
+    /// |-----|------|--------------|--------------|----------|---------------|--------------|
+    /// | 1   | 11   | 527 ps       | 672,014 ps   | 1275.168 | 415,979 ps    | 527 ps       |
+    /// | 2   | 13   | 500 ps       | 625,743 ps   | 1251.486 | 405,106 ps    | 518 ps       |
+    /// | 3   | 11   | 508 ps       | 633,027 ps   | 1246.116 | 407,508 ps    | 529 ps       |
+    /// | 4   | 9    | 501 ps       | 644,027 ps   | 1285.483 | 404,052 ps    | 518 ps       |
+    /// | 5   | 8    | 512 ps       | 648,889 ps   | 1267.361 | 405,018 ps    | 539 ps       |
+    /// | 6   | 51   | 583 ps       | 753,431 ps   | 1292.334 | 496,491 ps    | 1,158 ps     |
+    ///
+    /// "load" is the one-minute load average on 14 cores. The known-mask
+    /// projection is the difference: `step_known` costs 1.52x to 1.62x of
+    /// `step` on this fixture. The stable floor spread 1.054x over runs 1 to 5
+    /// and 1.166x over all six; [`floor_ps`] spread 2.24x over the same six,
+    /// and read 1,156 ps in a run before this row existed.
+    ///
+    /// **5,200**, sized on the worst observed, 1,292.334 in run 6, with
+    /// roughly 4x left over (4.02x), the rule `runner`'s C-R-04 budget was
+    /// sized by. A 174x uniform regression would read about 224,900 floors and
+    /// be refused by a factor of 43.
+    ///
+    /// **Not measured on CI.** How far a CI runner sits from this machine is
+    /// known only for `runner`'s C-R-04, whose index build read 1,908,097 ps
+    /// per bar on CI (D-0680), 2.76 times the 691,505 C-R-04 read here. If
+    /// this row's numerator moved the same way and CI's floor were no lower
+    /// than this machine's, it would read about 3,570 floors. Neither half is
+    /// measured for this row: that is an extrapolation, not a reading, and the
+    /// first CI run is the calibration check.
+    const ALLOWED: u128 = 5_200;
+
+    let floor = stable_floor_ps();
+    println!(
+        "  the stable floor is {floor} ps — {STABLE_FLOOR_REPS} adds, minimum of {TRIALS} trials"
+    );
+    let mut state = warmed(1_000);
+    let mut m = 1_000_i64;
+    let at = cost_ps(20_000, || {
+        m += 1;
+        let c = wandering(m);
+        black_box(state.step_known(black_box(&c)))
+    });
+    budget(
+        "C-I-07 step_known: one bar, every family, known mask",
+        floor,
+        at,
+        ALLOWED,
+    )
+}
+
 /// `n` consecutive candles, one per minute, for a whole-column build.
 fn column_bars(n: i64) -> Vec<Candle> {
     let mut out = Vec::with_capacity(usize::try_from(n).unwrap_or(0));
@@ -626,7 +719,7 @@ fn a_session_rollover_costs_what_an_ordinary_candle_costs() -> bool {
 /// How many rows this bench judges.
 ///
 /// The array in `main` is annotated with it, so removing a row is a type error rather than
-/// a quiet loss of coverage. That was worth a line here because two of the six — `C-I-05`
+/// a quiet loss of coverage. That was worth a line here because two of the first six — `C-I-05`
 /// and `C-I-06`, see their own doc blocks — were named by no invariant row and by no entry
 /// in gate 14's coverage table, so nothing else in CI would have noticed their removal.
 /// **Both are named in both places now**, by D-0298 and by gate 14's `indicators` row, so
@@ -635,7 +728,9 @@ fn a_session_rollover_costs_what_an_ordinary_candle_costs() -> bool {
 /// it at COMPILE time rather than at gate time, which is why it stays. Gate 14's
 /// measurement-point floor for this crate is five against the several this file carries,
 /// and it counts measurements rather than ids, so it moved for neither.
-const ROWS: usize = 6;
+///
+/// Seven since D-0690 added `C-I-07`.
+const ROWS: usize = 7;
 
 fn main() {
     println!("indicators — gate 8, ceiling {CEILING_PERMILLE} permille");
@@ -656,6 +751,7 @@ fn main() {
         the_integer_square_root_is_bounded_and_flat_per_iteration(),
         a_session_rollover_costs_what_an_ordinary_candle_costs(),
         the_column_costs_the_same_per_bar_however_long_it_is(),
+        a_known_step_stays_within_its_budget(),
     ];
     if verdicts.contains(&false) {
         println!("A RATIO BREACHED ITS CEILING — see the lines marked BREACH.");

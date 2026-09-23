@@ -19,11 +19,15 @@
 //! *printed*, so a before-and-after comparison of two `--nocapture` runs is a
 //! diff rather than an opinion.
 //!
-//! # Why this can be skipped
+//! # Why this is ignored
 //!
-//! The same reason `tests/real_lake.rs` can: the fixture is `~/.brutex/lake`
-//! and it cannot be committed. On a machine without it this test prints that
-//! it is skipping and proves nothing. That is stated rather than hidden.
+//! The same reason `tests/real_lake.rs` is: the fixture is `~/.brutex/lake`
+//! and it cannot be committed. So the test is `#[ignore]`d on every machine,
+//! and `cargo test` — every CI run included — lists it as `ignored` and
+//! executes none of it; **it proves nothing on CI**. Started explicitly with
+//! `--ignored` on a machine without the lake, it does not skip: it panics
+//! `MISSING FIXTURE`, because reporting `ok` there would be a test that
+//! asserted nothing. That is stated rather than hidden.
 
 // The same exceptions every test module in this workspace takes: a test that
 // cannot panic cannot fail, and the lints that forbid panicking exist to keep

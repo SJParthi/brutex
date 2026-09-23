@@ -350,7 +350,13 @@ fn sized(path: &Path) -> std::io::Result<Result<Vec<u8>, String>> {
              {MAX_MANIFEST_BYTES} and this reader refuses more"
         )));
     }
-    Ok(Ok(std::fs::read(path)?))
+    let bytes = std::fs::read(path)?;
+    // COUNTED IN TEST BUILDS ONLY, so a request path can be shown not to read
+    // manifest bytes it already holds. The ledger is keyed by path, because
+    // tests run concurrently and each owns its own scratch root. D-0686.
+    #[cfg(test)]
+    manifest_reads::note(path);
+    Ok(Ok(bytes))
 }
 
 /// Every vendor's manifest, read off disk once.
@@ -722,6 +728,14 @@ pub fn held_series(censuses: &[VendorCensus]) -> Vec<Series> {
 /// What is genuinely bounded here is the row count, and that is the point of
 /// the function: 194 rows instead of 7,056. What is not bounded is the number
 /// of entries it walks and sorts to produce them, which grows with the store.
+///
+/// **Where it runs now, D-0686.** `census_now` caches its result on the
+/// manifests' modified times, so its callers — the four paths above among
+/// them — pay this on a cache miss and not per request. It still runs per
+/// request in `/calendar.json`, in `/gaps.json`'s peer vote and in `/bars`'
+/// segment lookup. Those group or search one vendor's entries at a time, so
+/// they call it on one cached vendor census at a time rather than reading the
+/// cached merged list. `docs/06-limits.md`'s D-0686 section records that cost.
 ///
 /// Sorted newest month first, then by series, because a store is read the way a
 /// bank statement is: the recent end matters most. Deterministic for the reason
@@ -1628,5 +1642,42 @@ mod tests {
             "a filter that narrows genuinely needs to own its selection"
         );
         assert_eq!(narrowed.len(), 1);
+    }
+}
+
+/// Which manifests this process has read the bytes of, in test builds only.
+///
+/// # Why it exists
+///
+/// `server::census_now` caches the census on each manifest's modified time, so
+/// a steady-state request costs one `stat` per vendor and no manifest read.
+/// That claim is about bytes NOT read, and an answer that happens to match
+/// cannot show it: a request that re-read an unchanged manifest answers exactly
+/// what a cached one does. This ledger is the observable that distinguishes
+/// them. `api::server::census_request_tests` reads it. D-0686.
+///
+/// Compiled out of every non-test build, so production pays nothing for it.
+#[cfg(test)]
+pub(crate) mod manifest_reads {
+    use std::path::{Path, PathBuf};
+
+    /// Every successful manifest byte read, in order, by path.
+    static READ: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+    /// Record one whole-manifest read of `path`.
+    pub(crate) fn note(path: &Path) {
+        READ.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(path.to_path_buf());
+    }
+
+    /// How many times this process has read the bytes of `path`.
+    #[must_use]
+    pub(crate) fn of(path: &Path) -> usize {
+        READ.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|read| read.as_path() == path)
+            .count()
     }
 }
