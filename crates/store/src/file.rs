@@ -4422,6 +4422,15 @@ mod tests {
     /// a read. Then the single-entry cache is made to miss on every read, by
     /// alternating between a full block and the tail block, so the tail's
     /// proof is re-run on each touch and must answer the same each time.
+    ///
+    /// Equal answers cannot show that the proof ran again, so the last half
+    /// proves it. A cache widened to keep every block it has passed proves the
+    /// tail once per handle, answers the alternation identically and writes
+    /// nothing, and this test passed with it (AF-47). The same handle walks the
+    /// same alternation with the tail's sidecar entry damaged before each touch
+    /// of the tail. Each of those six touches must be refused, which a proof
+    /// that did not run again cannot do. The same record must then read again
+    /// once the entry is put back.
     #[test]
     fn reads_of_a_month_an_interrupted_append_left_are_idempotent_and_write_nothing() {
         let _sink_is_mine = crate::emits::hold_the_sink();
@@ -4472,6 +4481,48 @@ mod tests {
                     reader.read_record(at),
                     Ok(bar(index)),
                     "round {round}, record {index}"
+                );
+            }
+        }
+        assert_eq!(std::fs::read(&path).expect("the month reads"), bin);
+        assert_eq!(
+            std::fs::read(sidecar_of(&path)).expect("the sidecar reads"),
+            crc
+        );
+
+        // THE PROOF RAN AGAIN, NOT MERELY THE SAME ANSWER. Block 1's entry is
+        // bytes 4..8 of the sidecar. It is damaged under the open handle after
+        // each touch of block 0, so a touch of the tail that is still served
+        // came from a cache, and one that is refused ran the proof again. The
+        // refusal names the damaged entry and the committed extent's checksum,
+        // which is what the proof computes first.
+        let mut damaged = crc.clone();
+        damaged[4] ^= 0b0000_0001;
+        let refusal = StoreError::BlockChecksum {
+            path: path.clone(),
+            block: 1,
+            stored: u32::from_le_bytes([damaged[4], damaged[5], damaged[6], damaged[7]]),
+            computed: live_sum(&path, 1, 80),
+        };
+        for round in 0..3i64 {
+            for (full, tail) in [(round, 73 + round), (72 - round, 79 - round)] {
+                let at = u64::try_from(tail).expect("small");
+                assert_eq!(
+                    reader.read_record(u64::try_from(full).expect("small")),
+                    Ok(bar(full)),
+                    "round {round}, record {full}"
+                );
+                std::fs::write(sidecar_of(&path), &damaged).expect("the sidecar writes");
+                assert_eq!(
+                    reader.read_record(at),
+                    Err(refusal.clone()),
+                    "round {round}, record {tail}: the tail's proof ran again"
+                );
+                std::fs::write(sidecar_of(&path), &crc).expect("the sidecar writes");
+                assert_eq!(
+                    reader.read_record(at),
+                    Ok(bar(tail)),
+                    "round {round}, record {tail}: and again with the entry back"
                 );
             }
         }
