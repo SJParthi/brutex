@@ -103,7 +103,15 @@ pub async fn note_request(
     request_audited(root, label, next.run(request)).await
 }
 
-async fn request_audited(
+/// [`note_request`]'s journal around one handler, with the route label already
+/// chosen.
+///
+/// `pub(crate)` so a sweep route's own tests can drive their handler through
+/// the journal the production router wraps it in, and assert what the journal
+/// holds after a refusal: a refusal sentence that says what was written must
+/// be checked against the store as the operator's server leaves it, not as a
+/// bare handler call does. D-0695.
+pub(crate) async fn request_audited(
     root: std::path::PathBuf,
     label: String,
     handler: impl std::future::Future<Output = axum::response::Response>,

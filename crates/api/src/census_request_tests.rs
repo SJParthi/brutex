@@ -230,8 +230,19 @@ impl Fixture {
     }
 
     /// Where `/bars` would read `symbol` from, with no exchange or segment given.
+    ///
+    /// `None` means exactly "no census holds it and every census was read". An
+    /// ambiguity or an unreadable census is a different answer, and folding it
+    /// into `None` let a `== None` assertion here pass on a refusal it never
+    /// meant. D-0695.
     fn locate(&self, symbol: &str) -> Option<(String, String)> {
-        locate_series(&self.site, &format!("symbol={symbol}"), symbol).ok()
+        let located = locate_series(&self.site, &format!("symbol={symbol}"), symbol);
+        assert!(
+            located.is_ok()
+                || matches!(located, Err(Unlocated::NotHeld(ref unreadable)) if unreadable.is_empty()),
+            "{symbol} was refused, not merely unheld: {located:?}"
+        );
+        located.ok()
     }
 }
 
@@ -674,29 +685,39 @@ fn another_feeds_rewrite_rereads_every_manifest_once() {
 }
 
 /// COLD, WARM AND COLD AGAIN ANSWER THE SAME BYTES. `CLAUDE.md` §3 rule 5.
+///
+/// "Cold" empties BOTH caches the route reads through: the census and the
+/// per-series calendars. Emptying the census alone left every calendar cached,
+/// so the second cold request was a calendar hit and could not tell a
+/// derivation that differs on a miss from one that does not. D-0695.
 #[tokio::test]
 async fn cold_warm_and_cold_again_calendars_are_byte_identical() {
     let fixture = Fixture::new("census-request-idempotent");
     fixture.bar(Vendor::Dhan, Segment::Index, "NIFTY", 2);
     fixture.bar(Vendor::Dhan, Segment::Cash, "ADANIENT", 5);
     fixture.publish(&[(Segment::Index, "NIFTY"), (Segment::Cash, "ADANIENT")], 0);
+    let chill = || {
+        *fixture
+            .site
+            .census
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        fixture
+            .site
+            .calendars
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    };
     for query in [
         "feed=dhan",
         "feed=dhan&symbol=ADANIENT",
         "feed=dhan&symbol=NIFTY",
     ] {
-        *fixture
-            .site
-            .census
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        chill();
         let cold = fixture.calendar_answer(query).await;
         let warm = fixture.calendar_answer(query).await;
-        *fixture
-            .site
-            .census
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        chill();
         let again = fixture.calendar_answer(query).await;
         assert_eq!(cold.0, axum::http::StatusCode::OK, "{query}: {}", cold.1);
         assert!(!cold.1.contains(r#""sessions":0"#), "{query}: {}", cold.1);
@@ -885,4 +906,227 @@ async fn query_edges_on_bars_and_calendar_are_pinned() {
         axum::http::StatusCode::OK,
         "the first value wins: {page}"
     );
+}
+
+/// THE STAMPS ARE TAKEN BEFORE THE READ: A MANIFEST INSTALLED BETWEEN THE READ
+/// AND THE CACHE WRITE IS SEEN ON THE NEXT REQUEST. D-0695.
+///
+/// `concurrent_installs_and_readers_never_see_a_torn_census` asks for this by
+/// racing, and a race lands a rename in that window only sometimes: a review
+/// took the stamps after the read and that test failed 7 of 20 runs. Here the
+/// read itself installs the next image once it has read, so the window is hit
+/// on every run.
+#[test]
+fn a_manifest_installed_after_the_read_is_seen_on_the_next_request() {
+    let fixture = Fixture::new("census-request-stamp-before-read");
+    fixture.publish(&[(Segment::Cash, "RELIANCE")], 0);
+    let (_, entries) = census_now_reading(&fixture.site, |root| {
+        let read = census::read_all(root);
+        fixture.publish(&[(Segment::Cash, "ITC")], 1);
+        read
+    });
+    let names: Vec<&str> = entries
+        .iter()
+        .map(|(series, _)| series.symbol.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        ["RELIANCE"],
+        "the read saw the image before the install"
+    );
+    assert_eq!(
+        fixture.locate("ITC"),
+        Some(("NSE".to_owned(), "CASH".to_owned())),
+        "the next request reads the image installed after the read"
+    );
+    assert_eq!(fixture.locate("RELIANCE"), None);
+}
+
+/// A MANIFEST DIRECTORY THAT IS A FILE IS REFUSED, NOT MISSING -- and one put
+/// back is missing again, each on the next request. D-0695.
+///
+/// The key folded every `stat` error into the stamp a missing manifest has, so
+/// `manifest/` as a regular file (`ENOTDIR` for every manifest) keyed exactly
+/// as an empty store: a census cached "absent" was served "absent" while a
+/// fresh read said "unreadable", and `/calendar.json` answered 200 with no
+/// sessions -- the empty answer AF-24 refuses, reached through the cache.
+#[tokio::test]
+async fn a_manifest_directory_that_is_a_file_is_not_served_as_absent() {
+    let fixture = Fixture::new("census-request-manifest-file");
+    assert_eq!(fixture.states(), vec!["absent"; 5]);
+    let dir = fixture.root.join("manifest");
+    fs::write(&dir, b"not a directory").expect("a file where the manifests go");
+    assert_eq!(fixture.fresh_states(), vec!["unreadable"; 5]);
+    assert_eq!(fixture.states(), vec!["unreadable"; 5], "the fault is seen");
+    let (status, body) = fixture.calendar_answer("feed=dhan").await;
+    assert_eq!(
+        status,
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "{body}"
+    );
+    assert!(body.contains(r#""census":"unreadable""#), "{body}");
+
+    fs::remove_file(&dir).expect("take the file away");
+    assert_eq!(fixture.fresh_states(), vec!["absent"; 5]);
+    assert_eq!(fixture.states(), vec!["absent"; 5], "and so is the repair");
+    let (status, body) = fixture.calendar_answer("feed=dhan").await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+}
+
+/// Makes a directory unsearchable, and searchable again when dropped, so a
+/// failed assertion still leaves a fixture its own `Drop` can remove.
+#[cfg(unix)]
+struct Unsearchable<'a>(&'a Path);
+
+#[cfg(unix)]
+impl<'a> Unsearchable<'a> {
+    fn new(dir: &'a Path) -> Self {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o000))
+            .expect("a directory with no permissions");
+        Self(dir)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Unsearchable<'_> {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _restored = fs::set_permissions(self.0, fs::Permissions::from_mode(0o755));
+    }
+}
+
+/// A MANIFEST DIRECTORY THIS PROCESS MAY NOT SEARCH IS REFUSED, NOT MISSING,
+/// warm or cold, and its repair is seen on the next request. D-0695.
+///
+/// `EACCES` from every manifest `stat` keyed as an empty store, as `ENOTDIR`
+/// did. Warm on "absent", the refusal was served "absent" and `/calendar.json`
+/// answered 200. Cold on the refusal, "unreadable" was cached and outlived the
+/// restored permission, answering 503 over an empty store. Both directions are
+/// driven here. Like `folder`'s unreadable-folder test, this needs a process
+/// the permission binds, which a root process is not.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_manifest_directory_this_process_may_not_search_is_not_served_as_absent() {
+    let fixture = Fixture::new("census-request-manifest-unsearchable");
+    let dir = fixture.root.join("manifest");
+    fs::create_dir_all(&dir).expect("an empty manifest directory");
+    assert_eq!(
+        fixture.states(),
+        vec!["absent"; 5],
+        "warm on an empty store"
+    );
+    {
+        let _denied = Unsearchable::new(&dir);
+        assert_eq!(
+            fixture.fresh_states(),
+            vec!["unreadable"; 5],
+            "the permission binds this process"
+        );
+        assert_eq!(fixture.states(), vec!["unreadable"; 5], "warm: seen");
+        let (status, body) = fixture.calendar_answer("feed=dhan").await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "{body}"
+        );
+    }
+    assert_eq!(fixture.states(), vec!["absent"; 5], "the repair is seen");
+
+    // COLD ON THE REFUSAL, then repaired.
+    *fixture
+        .site
+        .census
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    {
+        let _denied = Unsearchable::new(&dir);
+        assert_eq!(fixture.states(), vec!["unreadable"; 5], "cold: seen");
+    }
+    assert_eq!(fixture.fresh_states(), vec!["absent"; 5]);
+    assert_eq!(
+        fixture.states(),
+        vec!["absent"; 5],
+        "the cached refusal does not outlive the repair"
+    );
+    let (status, body) = fixture.calendar_answer("feed=dhan").await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+}
+
+/// A ROOT THAT IS A FILE AND A MANIFEST DIRECTORY THAT IS A FILE ARE TWO KEYS,
+/// and so are a missing root and a root that is a file. D-0695.
+///
+/// Each pair is one census STATE (unreadable) with two different notes, and
+/// `read_all` words each its own way. Keyed alike, the note cached first was
+/// served for the other: a root replaced by a file kept saying the root was
+/// "unavailable: No such file or directory".
+#[test]
+fn a_root_and_a_manifest_directory_that_are_files_keep_their_own_notes() {
+    let fixture = Fixture::new("census-request-root-kinds");
+    let notes = || -> Vec<String> {
+        census_now(&fixture.site)
+            .0
+            .iter()
+            .map(census::VendorCensus::note)
+            .collect()
+    };
+    let fresh = || -> Vec<String> {
+        census::read_all(&fixture.site.store_root)
+            .iter()
+            .map(census::VendorCensus::note)
+            .collect()
+    };
+    fs::remove_dir_all(&fixture.root).expect("detach the store root");
+    assert_eq!(notes(), fresh(), "missing root");
+    fs::write(&fixture.root, b"not a directory").expect("a file where the root was");
+    assert_eq!(notes(), fresh(), "a root that is a file");
+    fs::remove_file(&fixture.root).expect("take the file away");
+    fs::create_dir_all(&fixture.root).expect("the root again");
+    fs::write(fixture.root.join("manifest"), b"not a directory").expect("a manifest file");
+    assert_eq!(notes(), fresh(), "a manifest directory that is a file");
+}
+
+/// `/bars` REFUSES WHEN THE ASKED FEED'S OWN CENSUS IS UNREADABLE, rather than
+/// stepping over it to another feed's identity. D-0695.
+///
+/// With Dhan's manifest damaged and Groww holding `ADANIENT` as INDEX,
+/// `/bars?symbol=ADANIENT&vendor=dhan` stepped over Dhan's census, took Groww's
+/// identity and opened Dhan's file at `NSE/INDEX/ADANIENT` -- the other-feed
+/// guess `locate_series` exists to refuse -- and dropped the note, because
+/// notes surfaced only when nothing was found. The page said the month did not
+/// exist with no word that Dhan's counter could not be read. A half the caller
+/// gave still leaves the other half to that census, so it is refused too.
+#[tokio::test]
+async fn bars_refuses_when_the_asked_feeds_own_census_is_unreadable() {
+    let fixture = Fixture::new("census-request-asked-unreadable");
+    fixture.publish_for(Vendor::Groww, &[(Segment::Index, "ADANIENT")], 0);
+    fixture.publish_bytes(Vendor::Dhan, &[0xFF; 16], 0);
+    for query in [
+        "symbol=ADANIENT&vendor=dhan&month=2025-05&timeframe=1day",
+        "symbol=ADANIENT&month=2025-05&timeframe=1day",
+        "symbol=ADANIENT&vendor=dhan&month=2025-05&segment=INDEX",
+    ] {
+        let (status, page) = fixture.bars(query);
+        assert_eq!(
+            status,
+            axum::http::StatusCode::BAD_REQUEST,
+            "{query}: {page}"
+        );
+        assert!(
+            page.contains("own census could not be read"),
+            "{query}: {page}"
+        );
+        assert!(page.contains("dhan.man"), "names the file: {query}: {page}");
+        assert!(
+            !page.contains("INDEX/ADANIENT"),
+            "no path was opened at Groww's identity: {query}: {page}"
+        );
+    }
+    // Groww's own request still resolves Groww's identity: its census is fine.
+    let (_, groww) = fixture.bars("symbol=ADANIENT&vendor=groww&month=2025-05&timeframe=1day");
+    assert!(groww.contains("INDEX/ADANIENT"), "{groww}");
+    // An explicit pair consults no census and still wins outright.
+    let (_, page) =
+        fixture.bars("symbol=ADANIENT&vendor=dhan&month=2025-05&exchange=NSE&segment=CASH");
+    assert!(page.contains("NSE/CASH/ADANIENT"), "{page}");
 }

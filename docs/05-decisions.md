@@ -40077,3 +40077,258 @@ texts. The verbs that take an instrument word rather than a catalog holding
 (`sweep-stored`, the audit verbs, `range-rung`, `range-all`) are unaffected by
 item 5: they open the key's own path by construction. The `api` census routes
 that list stored symbols were not examined against item 5's rule.
+
+### D-0695 — Refuse the screen budget on every body route and before the run slot, and name an unreadable census on every census-backed GET route — 2026-09-24
+
+**Why this entry exists.** Commit `950ead28` ("Test the api half of the audit
+follow-ups, and fix what the attacks confirmed", cherry-picked from
+`11a6e380`) changed what six HTTP routes answer and what the census cache is
+keyed on. It took no decision number: its message leaves the entries "to the
+integrator". `CLAUDE.md` §9 asks for one per locked choice. Two reviews of that
+commit then upheld blocking and should-fix issues against it. This entry
+records every behaviour change the commit made, and the repair that answers
+those reviews, which lands with this entry. The number was reserved for it.
+D-0694 and D-0696 belong to other pieces of the same run and sit above it only
+because they were written first.
+
+**What did not change.** No run identity: `KNOBS` is unchanged, a budget never
+reached an accepted body's identity, and no term of `policy_of` moved. No store
+format. The only change to stored bytes is that an environment-budget refusal
+no longer writes an execution lease (`.sweep-execution-v1.lock`) or a run
+invocation record. The HTTP request journal (D-0568) still records the request.
+Every change is in `crates/api`, apart from one `pub` in `crates/cli`.
+
+**The screen budget (D-0685), as `950ead28` left it.**
+
+1. *Any JSON value of `screen_budget_ms` is refused by name.* The field decodes
+   as `serde::de::IgnoredAny`. `null`, `1.5`, `[5000]`, `{}` and an integer past
+   `u64::MAX` used to fail the scalar decode and get the decoder's sentence
+   ("the request body must be one complete JSON object with no duplicate known
+   field: …"). They now get 400 with the budget's own sentence, which begins
+   "`screen_budget_ms` is refused".
+2. *Every body route refuses it.* `POST /backtest/descend` and the ordinary
+   `POST /engine/command` words `audit-range`, `screen`, `auto-stored`,
+   `sweep-stored` and `sweep-all` decoded the field and dropped it, and the run
+   started. They now answer 400 with that sentence, as `POST /backtest/run` and
+   `audit-audited-range` already did.
+3. *A usable `BRUTEX_SCREEN_BUDGET_MS` in the server's environment is refused
+   before the run slot.* `POST /backtest/run` answered 202, took the execution
+   lease and wrote a run invocation record, and only then did `cli::one_rung`
+   refuse. A new `Refusal::Environment` now answers 503 before the slot, the
+   lease and that record, on `/backtest/run`, `/backtest/descend` and the
+   `audit-range` and `screen` words. On each route the order is the body's own
+   refusal (400), then an unstamped build (503), then this. It does not apply to
+   `auto-stored`, `sweep-stored` and `sweep-all`, whose runs price no screen, or
+   to the two declared searches. The strict word still refuses the budget at
+   every value through its own admission (`strict_runtime_settings_invalid`,
+   503).
+
+**Repaired here, on the budget.**
+
+- *The rule was restated. It is now called.* `api` decided "usable" with its
+  own copy of `cli`'s rule: the same reader, trim, `u64` parse and positivity.
+  That is a second authority for one fact. The first change to `cli`'s
+  `positive_count` would have left it behind, and a route would then answer 503
+  to a value the engine accepts. `cli::recorded_budget_refusal` is `pub` now,
+  as `is_canonical_commit_stamp` already is for the stamp gate, and
+  `environment_budget_refusal` asks it. The route keeps its own sentence,
+  because the sentence names this server's environment and a restart, which
+  `cli`'s cannot.
+- *The trim was not pinned.* The parity table set each value through
+  `cli::knobs::set`, which trims before it stores, so its padded value reached
+  the rule already trimmed. The only environment value a child ever saw was an
+  unpadded `5000`, and a review removed the route's trim with the suite still
+  green. The child test now runs once per ENVIRONMENT spelling, `5000`,
+  ` 5000\t` and `\u{a0}5000`, with no knob set, and all four routes and
+  `cli::range_over` must refuse each. With the route restating the rule minus
+  its trim, `run` answered `202 {"accepted":true,…}` under a padded budget, and
+  the test failed.
+- *The slot assertion could not fail.* The child installed no telemetry sink,
+  so a route past the guard took the lease, wrote the record and refused as
+  `Unobservable` before it filled the slot. The child now installs a sink, as a
+  server always has one. With the run route's guard removed and every other
+  assertion in that loop switched off, the test failed with "run occupied the
+  slot".
+- *Nothing checked that the route consults `prices_a_screen`.* With the guard
+  applied to every word, the suite stayed green. The child now plants a run in
+  the slot and sends `auto-stored`, `sweep-stored` and `sweep-all` under a usable
+  budget. Each must answer 409, which means it reached the slot.
+  `audit-audited-range` must refuse through its own
+  `strict_runtime_settings_invalid`. With the guard on every word, the test
+  failed at `auto-stored`. The planted run also tightens the unusable-knob check
+  (`0`): all four routes must answer 409, where before they had only to answer
+  something other than the budget sentence.
+- *The sentence claimed a write that did not happen and denied one that did.*
+  It said "Refused before any slot, lease or audit record was taken; nothing was
+  written." On the production router, `operation_audit::note_request` journals
+  the request's start before the handler runs and its 503 after. The sentence
+  now reads: "… Refused before the run slot, the execution lease and the run's
+  invocation record were taken, so no run started; this server's HTTP request
+  journal still records the request itself (D-0568). Unset it and restart the
+  server, and bound the screen with BRUTEX_SCREEN_CAP, a stated count." The
+  child drives the run route through `operation_audit::request_audited`, the
+  journal the router uses, which is now `pub(crate)` for that purpose. It
+  requires exactly one journal row (`Origin::Http`, `POST /backtest/run`,
+  `Failed`, 503), no run invocation, and nothing else new under the store. With
+  the old sentence the test failed.
+- *AF-21's value list reached one route.* Each of its twelve values now goes to
+  all three parsers, with each of the six ordinary words, and to all three
+  route handlers. The test fails at "descend -1" against a descent parser that
+  refuses non-numeric budgets with the decoder's sentence. The old tests pass
+  against that parser.
+- *AF-21's order was wrong.* It said the budget is refused "before any other
+  field", and that only a body that is not one complete JSON object is refused
+  before it. `wire_body` checks every known field's JSON type first, so a
+  wrong-typed known field beside the budget (`"feed":5`, `"from_year":[1]`,
+  `"rungs":"5min"`) is refused as malformed. The order is: JSON syntax and every
+  known field's type, then the budget, then everything else.
+  `a_wrong_typed_known_field_beside_the_budget_is_refused_as_malformed_first`
+  pins it on all three parsers, and a lenient pre-decode that names the budget
+  first fails it. **Rejected:** decoding every field leniently so that the
+  budget really does come first. That costs a second decode of every body for
+  one ordering, and the current order already gives a named 400.
+
+**The census (D-0686), as `950ead28` left it.**
+
+4. *The cache key carries the store root's reachability.* The root is asked
+   only when no manifest answered, which is a sixth `stat`. A detached root is no
+   longer served as absent, and a reattached empty one is no longer served as
+   unreadable.
+5. *`/calendar.json` refuses an unreadable census.* Both branches answer 503
+   with `{"status":"refused","feed":…,"census":"unreadable","refusal":…}`. The
+   refusal is the census note followed by "This feed's census could not be
+   read, so which series it holds is unknown and no calendar was derived; an
+   empty one would claim the store holds no bars." Before, it answered 200 with
+   zero sessions, which is the answer for a feed that holds nothing. An absent
+   census still answers 200. The census is now taken once, above both branches.
+6. *`/bars` reads the asked feed's identity and refuses a name held twice.* It
+   walks the census of `?vendor=` (Dhan when absent) first, then the others in
+   `Vendor::ALL` order. Before, it took the first vendor in that order that held
+   the name, so Groww's INDEX `ADANIENT` sent a Dhan request to Dhan's INDEX
+   path. A name the walked feed would place under two identities is refused
+   with 400 "ambiguous stored symbol: …", naming both. Only the halves the
+   census supplies are compared, and the half the caller gave is not used to
+   filter. `/calendar.json` answers the same census fact with 409. Every
+   `/bars` refusal goes through `bars_refusal`, which answers 400, and that is
+   left as it is. A name that no readable census holds is refused naming the
+   unreadable censuses, where before it said "no feed holds". The refusal
+   sentences now end "… address a series the census does not place.", where
+   they ended "carry".
+7. *Symbol case is folded* to the stored case through `Symbol::new`, on `/bars`
+   and `/calendar.json` only. `/bars.json`, `/bars/window.json` and `/gaps.json`
+   still compare the parameter as written, so one lowercase name can get two
+   answers across routes.
+8. *`/gaps.json` names unreadable peers.* The calendar object gains
+   `unreadable`: the feeds whose census could not be read, in `Vendor::ALL`
+   order, the audited feed's own included. It is always present. It is empty
+   when no census is unreadable, and always empty for an NSE cash stock series,
+   which consults no peer.
+
+**Repaired here, on the census.**
+
+- *The key still served "absent" over two faults.* `manifest_stamps` folded
+  every `stat` error into the stamp a missing manifest has, while
+  `census::read_vendor` answers `NotFound` as absent and every other error as
+  unreadable. So a `manifest/` that is a regular file (`ENOTDIR`) or one the
+  process may not search (`EACCES`) keyed exactly as an empty store. Warm on
+  "absent", the fault was served as absent and `/calendar.json` answered 200.
+  Cold on the fault, "unreadable" outlived the repair and answered 503 over an
+  empty store. Each manifest is now keyed on what its one `stat` said:
+  `ManifestStamp::At(time)`, `Missing` or `Faulted(kind)`. The root is asked
+  when no manifest answered with a time, which is the condition it was asked on
+  before, so this adds no syscall. Folding faults back into `Missing` fails
+  both directory tests.
+- *Two root states shared a key.* A missing root and a root that is a file both
+  keyed as "no manifest, root not a directory", so the note cached first was
+  served for the other. Their manifest `stat`s differ (`NotFound` against
+  `NotADirectory`), so they are now two keys, and so are a root that is a file
+  and a manifest directory that is a file.
+  `a_root_and_a_manifest_directory_that_are_files_keep_their_own_notes` fails
+  with the faults folded.
+- *Taking the stamps before the read was pinned only by a race.* A review took
+  the stamps after the read, and the concurrency test caught it in 7 of 20
+  runs. `census_now` is now `census_now_reading(site, census::read_all)`, and
+  `a_manifest_installed_after_the_read_is_seen_on_the_next_request` passes a
+  read that installs the next manifest after it has read. With the stamps
+  re-taken after the read, it fails on every run.
+- *`/bars` stepped over the asked feed's own unreadable census.* It then took
+  another feed's identity, opened the asked feed's file at it, and dropped the
+  note, because notes were shown only when nothing was found. That is the
+  other-feed guess `locate_series` refuses, and the fallback that hides a
+  failure `CLAUDE.md` §4 bans. `Unlocated::AskedUnreadable` now refuses it with
+  400: "the asked feed's own census could not be read: <note>. … No path was
+  guessed.", whenever the caller did not give both an exchange and a segment.
+  With the check removed, the test got Dhan's 404 at Groww's INDEX path.
+- *The tests' `locate` helper folded refusals into "not held".* It returned
+  `locate_series(..).ok()`, so a `== None` assertion also passed on an
+  ambiguity or an unreadable census. It now fails the test on either. A
+  `locate_series` that answers `AskedUnreadable` for a name nothing holds passes
+  every test under the old helper and fails five under the new one.
+- *AF-26's "cold again" was a calendar hit.* It emptied the census cache and
+  left the per-series calendars cached. Both are emptied now. No mutant was
+  built that only the strengthened test catches, so this is recorded as a
+  strengthening, not as a proven fix.
+
+**Gates.** Gate 11 rule 6 allows `crates/api/src/server.rs` 8 occurrences, up
+from 7. The eighth is `unreadable_calendar`'s search for the asked feed's
+census, over `census_now`'s rows, which `census::read_all` and
+`unreadable_root` always yield as exactly one per `Vendor::ALL` entry. It is
+bounded by `FEED_COUNT`, as the other nine census searches the rule's comment
+names are, and it runs once per `/calendar.json` request. It is declared rather
+than respelt, because `.filter().next()` would hide it from the rule at the
+same cost. Gate 23 declares the three test-only `println!` `950ead28` added,
+one each in `frontierjson.rs`, `sweeprun.rs` and `trades.rs`. Each is the
+stdout proof line of a child process under `crate::isolated::rerun`, inside
+`#[cfg(test)]`, and not a diagnostic.
+
+**Recorded, not done.**
+
+- *The browser.* `web/src/routes/gaps/+page.svelte` does not read
+  `calendar.unreadable`. It still names only the peers that voted, or "the
+  typed calendar table", with no word that a peer census could not be read.
+  `/ingest` shows "/calendar.json answered 503" and drops the refusal the body
+  now carries. So the failure is named on the wire, and not yet on the pages
+  the operator reads. This change is backend only, and CI Gate W1 requires
+  `web/build` to be rebuilt in the same change as any `web/src` edit. A
+  front-end follow-up should render both. `docs/06-limits.md` records it, as
+  D-0685 recorded the budget control.
+- *`prices_a_screen` is still a restatement* of which `cli` kernels refuse a
+  budget. It cannot be one call: asking a `cli` entry point from here would run
+  it. It is pinned at the route, and a kernel that starts or stops refusing a
+  budget must change it.
+- *The environment-budget refusal emits no telemetry event,* unlike the
+  unstamped-build refusal beside it on `/backtest/run`. A new emit site needs a
+  row in `crate::emitted`'s one-sink table, which runs in the parent test
+  binary, whose environment cannot carry the budget.
+- *A permission change on a manifest FILE* keeps its modified time, so it is
+  served stale like any same-stamp rewrite (D-0686's limit).
+- *An unreadable census of a feed other than the asked one* is still stepped
+  over. When a third feed places the name, its identity is used and the note is
+  not shown. The asked feed's own census was read and does not hold the name,
+  so this is D-0339's resolution, not the other-feed guess refused above. It is
+  recorded here rather than changed.
+- *The 400 against 409, the scope of the case fold, and the unfiltered
+  ambiguity check* stand as item 6 and item 7 describe them.
+- No latency was measured for any route before or after this change.
+
+**Verified**, on this tree (arm64 laptop, `CARGO_BUILD_JOBS=2`, `--locked
+--offline`). `cargo fmt --all --check` is clean, and so is `cargo clippy
+--workspace --all-targets -- -D warnings`. The `api` suite ran outside the
+command sandbox, which refuses the loopback binds some of its tests make. Its
+lib has 1,181 passed, 0 failed and 2 ignored; `src/main.rs` 2 passed,
+`tests/binary.rs` 3 and the doctest 1. The `cli` lib has 1,454 passed, 1 failed
+and 1 ignored. The failure is
+`sweep_wiring_tests::an_untraded_equity_ranking_is_labelled_gross_before_it_refuses`:
+the equity page carries D-0694's "CORPORATE ACTIONS ARE UNCHECKED" paragraph,
+and the test allows the scope to change nothing but the gross label. The
+integration tree's own test build of `eecca4da` fails it the same way, at the
+same assertion. `29025433` on the integration branch repairs that test, and
+this change does not touch it. `cli`'s other targets pass (`binary` 5,
+`build_provenance` 18, `sweep_evidence` 15, doctest 1). The tests that read
+these documents pass: `core`'s whole suite and `store`'s `libm_key`. Every shell
+gate of CI's Gate 1+2 job except 1e passes, Gates 11 and 23 among them.
+
+Each repair above was proven by breaking it and running the named test. The
+breaks were built into one test binary, each selected by an environment
+variable, and removed afterwards. Every break failed its test for the reason
+stated above, and the unbroken build passed all 64 tests the filter selected.

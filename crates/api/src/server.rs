@@ -3313,6 +3313,24 @@ pub type CensusNow = (
 );
 
 pub(crate) fn census_now(site: &Site) -> CensusNow {
+    census_now_reading(site, census::read_all)
+}
+
+/// [`census_now`], with the read a miss rebuilds from passed in.
+///
+/// Production passes [`census::read_all`] and nothing else. The parameter is
+/// here so a test can install a newer manifest AFTER the read and before the
+/// cache is written -- the one interleaving that decides whether the stamps
+/// must be taken BEFORE the read -- on every run, rather than by racing threads
+/// and meeting it only when the scheduler happens to: a review measured the
+/// racing test catching stamps-after-the-read in 7 of 20 runs. Taken after the
+/// read, the stamps would name the newer image while the census held the older
+/// one, and every later request would hit the stale census for as long as the
+/// manifest stayed unchanged. D-0695.
+fn census_now_reading(
+    site: &Site,
+    read: impl FnOnce(&std::path::Path) -> Vec<census::VendorCensus>,
+) -> CensusNow {
     // CACHED ON THE MANIFESTS' OWN STAMPS, because this is FIVE per-request
     // paths and it reads the whole store on every one of them.
     //
@@ -3364,7 +3382,13 @@ pub(crate) fn census_now(site: &Site) -> CensusNow {
         }
     }
 
-    let censuses = std::sync::Arc::new(census::read_all(&site.store_root));
+    // THE STAMPS ABOVE ARE OLDER THAN THIS READ, AND MUST BE. A manifest
+    // installed between the two keys a newer census under an older stamp, which
+    // the next request's stamp no longer matches, so it reads again: stale for
+    // at most that one request. The other order keys an older census under a
+    // newer stamp, which is stale until the manifest next changes. See
+    // `census_now_reading`'s doc.
+    let censuses = std::sync::Arc::new(read(&site.store_root));
     let entries = std::sync::Arc::new(census::held_entries(&censuses));
     {
         let mut held = site
@@ -3392,7 +3416,7 @@ pub(crate) fn census_now(site: &Site) -> CensusNow {
     (censuses, entries)
 }
 
-/// Every vendor manifest's modified time, in a fixed order.
+/// What every vendor manifest's `stat` said, in a fixed order.
 ///
 /// # Why a vector and not one stamp
 ///
@@ -3400,8 +3424,9 @@ pub(crate) fn census_now(site: &Site) -> CensusNow {
 /// stale. `calendar_of::manifest_stamp` takes a single vendor because a calendar
 /// is derived per vendor; this is the same idea over the set.
 ///
-/// A vendor whose manifest does not exist contributes `None` rather than being
-/// skipped, so a manifest APPEARING changes the key. Skipping it would make the
+/// A vendor whose manifest does not exist contributes a stamp (`None`, and
+/// since D-0695 [`ManifestStamp::Missing`]) rather than being skipped, so a
+/// manifest APPEARING changes the key. Skipping it would make the
 /// first pull for a new vendor invisible to every cached page.
 ///
 /// # And whether the store root answered, because `None` alone cannot say
@@ -3415,17 +3440,38 @@ pub(crate) fn census_now(site: &Site) -> CensusNow {
 /// `read_all` asks first. A manifest that answered already proves the root did,
 /// so a store that holds anything pays nothing for this: five `stat` calls, and
 /// a sixth only when all five found nothing.
+///
+/// # And WHY a manifest did not answer, because "missing" and "refused" differ
+///
+/// The key above still folded every `stat` error into the one `None` a missing
+/// manifest has, while [`census::read_vendor`] answers `NotFound` "absent" and
+/// every other error "unreadable". A manifest directory that is a regular file
+/// (`ENOTDIR`) or one this process may not search (`EACCES`) therefore keyed
+/// exactly as an empty store: a census cached "absent" was served "absent"
+/// over the fault and `/calendar.json` answered 200 with no sessions, and a
+/// census cached "unreadable" outlived the repair and answered 503 over an
+/// empty store. Each manifest is now keyed on what its one `stat` said -- a
+/// time, missing, or the kind of fault -- so the same call per vendor draws the
+/// three lines `read_vendor` draws. The root is still asked only when no
+/// manifest answered with a time, exactly the condition it was asked on
+/// before, so this costs no syscall. D-0695.
 fn manifest_stamps(store_root: &std::path::Path) -> CensusStamps {
     let dir = store_root.join("manifest");
-    let manifests: Vec<Option<std::time::SystemTime>> = brutex_core::vendor::Vendor::ALL
+    let manifests: Vec<ManifestStamp> = brutex_core::vendor::Vendor::ALL
         .iter()
         .map(|vendor| {
-            std::fs::metadata(dir.join(format!("{}.man", vendor.as_str())))
-                .ok()
-                .and_then(|meta| meta.modified().ok())
+            match std::fs::metadata(dir.join(format!("{}.man", vendor.as_str())))
+                .and_then(|meta| meta.modified())
+            {
+                Ok(at) => ManifestStamp::At(at),
+                Err(why) if why.kind() == std::io::ErrorKind::NotFound => ManifestStamp::Missing,
+                Err(why) => ManifestStamp::Faulted(why.kind()),
+            }
         })
         .collect();
-    let root_is_dir = manifests.iter().any(Option::is_some)
+    let root_is_dir = manifests
+        .iter()
+        .any(|stamp| matches!(stamp, ManifestStamp::At(_)))
         || std::fs::metadata(store_root).is_ok_and(|meta| meta.is_dir());
     CensusStamps {
         manifests,
@@ -3433,18 +3479,35 @@ fn manifest_stamps(store_root: &std::path::Path) -> CensusStamps {
     }
 }
 
-/// What [`census_now`]'s cache is keyed on: each vendor manifest's modified
-/// time, and whether the store root was a directory. See [`manifest_stamps`].
+/// What [`census_now`]'s cache is keyed on: what each vendor manifest's `stat`
+/// said, and whether the store root was a directory. See [`manifest_stamps`].
 ///
 /// An equality key, not an ordering: a stamp that moves backwards -- an older
 /// image restored with its older time -- is a different key and is re-read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CensusStamps {
-    /// One per `Vendor::ALL` entry, `None` where no manifest answered.
-    manifests: Vec<Option<std::time::SystemTime>>,
+    /// One per `Vendor::ALL` entry.
+    manifests: Vec<ManifestStamp>,
     /// Whether the root is a directory; `true` without asking when any
-    /// manifest answered.
+    /// manifest answered with a modified time.
     root_is_dir: bool,
+}
+
+/// One vendor manifest's part of [`CensusStamps`]: what its `stat` said.
+///
+/// Three outcomes because [`census::read_vendor`] draws the same three lines
+/// from the same call: a file it goes on to read, `NotFound` it calls absent,
+/// and any other error it calls unreadable. Two outcomes sharing one key are two
+/// census states the cache cannot tell apart. D-0695.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ManifestStamp {
+    /// It exists, last modified then.
+    At(std::time::SystemTime),
+    /// `NotFound`: no manifest, or no directory or root on the way to one.
+    Missing,
+    /// Any other error, by kind: `NotADirectory` where a directory on the way
+    /// is a file, `PermissionDenied` where one may not be searched.
+    Faulted(std::io::ErrorKind),
 }
 
 /// Why one percentage is not a number.
@@ -14421,6 +14484,18 @@ fn bars_refusal(
 /// An unreadable census holds nothing this can see, so it is stepped over as
 /// before, and its note is carried to the refusal: "no feed holds that name" is
 /// not the true reason when one feed's counter could not be read.
+///
+/// # Except the ASKED feed's own, which is refused, not stepped over. D-0695.
+///
+/// Stepping over it walked on to the other feeds, and when one of them held the
+/// name its identity was returned and the ASKED feed's file opened at it --
+/// exactly the other-feed guess the paragraph above refuses -- and the note was
+/// dropped, because notes surfaced only when nothing was found. The page then
+/// answered for a path nothing placed, with no word that the feed's own counter
+/// could not be read: the fallback that hides a failure `CLAUDE.md` §4 bans.
+/// Only that census can say where that feed filed the name, so when it cannot
+/// be read and the caller did not give the pair, the route refuses and names
+/// it, as `/calendar.json` does.
 fn locate_series(site: &Site, query: &str, symbol: &str) -> Result<(String, String), Unlocated> {
     let asked_exchange = param(query, "exchange");
     let asked_segment = param(query, "segment");
@@ -14454,6 +14529,10 @@ fn locate_series(site: &Site, query: &str, symbol: &str) -> Result<(String, Stri
     let mut unreadable = Vec::new();
     for vendor_census in asked_first.chain(the_rest) {
         if matches!(vendor_census.state, census::Census::Unreadable { .. }) {
+            // THE ASKED FEED'S OWN COUNTER IS THE ONLY AUTHORITY FOR ITS PATH.
+            if Some(vendor_census.vendor) == asked_vendor {
+                return Err(Unlocated::AskedUnreadable(vendor_census.note()));
+            }
             unreadable.push(vendor_census.note());
             continue;
         }
@@ -14503,6 +14582,9 @@ enum Unlocated {
     /// census that could NOT be read is carried as its note, because a name one
     /// of them holds is invisible from here.
     NotHeld(Vec<String>),
+    /// The census of the feed whose file this route opens could not be read,
+    /// carried as its note. Another feed's identity would be a guess. D-0695.
+    AskedUnreadable(String),
     /// The first feed walked that holds the name would supply two different
     /// identities for it.
     Ambiguous {
@@ -14558,6 +14640,13 @@ fn unlocatable(site: &Site, symbol: &str, why: &Unlocated) -> (axum::http::Statu
              no path was guessed. {EXPLICIT}",
             unreadable.len(),
             unreadable.join(" · ")
+        ),
+        Unlocated::AskedUnreadable(ref note) => format!(
+            "the asked feed's own census could not be read: {note}. This page opens \
+             that feed's file, and only its census says which exchange and segment \
+             it filed the name under; another feed's answer would be a guessed path, \
+             and a guessed path answers \"does not exist\" for a reason that is not \
+             the true one. No path was guessed. {EXPLICIT}"
         ),
         Unlocated::Ambiguous {
             vendor,

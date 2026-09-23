@@ -8902,6 +8902,38 @@ after this change. The byte ceiling above is the reader's refusal limit, not a
 size seen on the operator's disk. The 5.56 MB §41.1 quotes is D-0067's
 measurement, not a new one.
 
+**Corrected 24 September 2026 (D-0695).** Four statements above are stale.
+Commit `950ead28` changed them, and the repair D-0695 records changed them
+again. The text above is kept as it was written.
+
+* *"The census itself is five `stat` calls."* It is five, or six when no
+  manifest answered with a modified time: the store root is then asked whether
+  it is a directory.
+* *"No manifest and no store root share one stamp … it is not changed here."*
+  Both halves are closed. The key carries whether the root is a directory, and
+  since D-0695 each manifest is keyed on what its `stat` said: a time,
+  `NotFound`, or the error's kind. So a missing root, a root that is a file, a
+  manifest directory that is a file (`ENOTDIR`) and an unsearchable manifest
+  directory (`EACCES`) are each told apart from an empty store and from one
+  another. One same-stamp case remains: a permission change on an existing
+  manifest FILE keeps its modified time, so a census cached "held" is served
+  held after the file becomes unreadable, until the stamp moves. That is the
+  same-modified-time gap in the first bullet.
+* *"The three D-0686 routes answer the same either way, because neither state
+  contributes an entry."* No longer. `/calendar.json` answers 503 naming an
+  unreadable census and 200 for an absent one. `/bars` names unreadable
+  censuses in its refusal, and refuses outright when the asked feed's own
+  census is unreadable. `/gaps.json` lists unreadable peers under
+  `calendar.unreadable`.
+* *"`/bars` segment lookup: `held_entries` per vendor, in `Vendor::ALL` order,
+  until a vendor holds the name."* The asked feed's census (`?vendor=`, Dhan
+  when absent) is walked first, then the others in `Vendor::ALL` order, until a
+  feed holds the name. Within a feed, every entry is now compared with the name,
+  not only those up to the first match, so that a name held under two
+  identities is refused. `held_entries` had already built and sorted that whole
+  list, so the cost class is unchanged: per request, it grows with the entries
+  of the feeds walked.
+
 ## A tail block sealed past the commit is admitted on proof, at a stated cost — D-0688
 
 - **The tail block's first verification per handle adds one `fstat`.** It is
@@ -9209,3 +9241,46 @@ by `File::unlock`. What that does not cover, stated rather than implied away:
 - **Cost, unmeasured.** `stored::misfiled` is three string comparisons per
   holding the catalog lists, paid once per `pool` or `sweep-all` run and never
   per bar or per candidate. No bench times it.
+
+## Screen-budget refusals and census faults on the api routes — D-0695, 24 September 2026
+
+- **The pages do not show the new census facts yet.** `/gaps.json` lists
+  unreadable peer censuses under `calendar.unreadable`, and
+  `web/src/routes/gaps/+page.svelte` does not read the field: the page names
+  only the peers that voted, or "the typed calendar table". `/ingest` shows
+  "/calendar.json answered 503" and drops the refusal and census note the body
+  carries. The failure is named on the wire and not yet where the operator
+  reads it. D-0695 was backend only. Rendering both is front-end work, and it
+  must rebuild `web/build` in the same change (Gate W1).
+- **Which command words refuse a server budget is a list `api` keeps.**
+  `Command::prices_a_screen` names `audit-range` and `screen`, because those are
+  the words whose `cli` kernels call `recorded_budget_refusal`. The rule for
+  whether a budget is usable is `cli`'s, called. The list of words is not, and
+  cannot be one call, because asking a `cli` entry point from `api` would run
+  it. A kernel that starts or stops refusing a budget must change the list.
+  Tests pin `api`'s side of it at the route, not `cli`'s.
+- **The environment-budget refusal writes no telemetry event.** The
+  unstamped-build refusal beside it on `/backtest/run` writes one. The HTTP
+  request journal records the 503 (D-0568), so the refusal is not lost, but
+  `/logs` does not show it.
+- **One census fault is still served stale.** A permission change on an
+  existing manifest file keeps its modified time, so the cache key does not
+  move and a census cached "held" is served after the file becomes unreadable,
+  until the next write moves the stamp. This is D-0686's same-stamp gap.
+- **`/bars` still steps over an unreadable census of a feed other than the
+  asked one.** When the asked feed's census was read and does not hold the
+  name, and a later feed places it, that feed's identity is used and the
+  unreadable census's note is not shown. This is D-0339's resolution of a
+  hand-typed URL, not a guess at the asked feed's own filing, and it is not
+  changed.
+- **One census fact, two statuses, and a case fold on two routes of five.**
+  `/bars` refuses a name held under two identities with 400, and
+  `/calendar.json` refuses the same fact with 409. `/bars` and `/calendar.json`
+  fold `symbol` to its stored case. `/bars.json`, `/bars/window.json` and
+  `/gaps.json` do not, so `adanient` can be found on one route and not on
+  another. The ambiguity check compares only the halves the census supplies and
+  does not filter by the half the caller gave, so `?exchange=NSE` over a feed
+  holding a name as `BSE/CASH` and `NSE/INDEX` is refused as ambiguous.
+- **Not measured.** No latency was taken for any route. The census key's cost
+  is counted from the code (five `stat` calls, and a sixth when no manifest
+  answered with a time), not timed.

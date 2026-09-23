@@ -9923,7 +9923,24 @@ const SCREEN_BUDGET_NOT_RECORDABLE: &str = "BRUTEX_SCREEN_BUDGET_MS is set, and 
 ///
 /// The unrecorded generated-bar `audit` still honours the budget. It has no
 /// identity and writes no record, so there is nothing for the timing to split.
-fn recorded_budget_refusal() -> Result<(), String> {
+///
+/// # Why `pub`
+///
+/// `api` refuses a budget in the SERVER's environment on its sweep routes
+/// before it claims the run slot, takes the execution lease or writes the run's
+/// invocation record: the value is fixed for the life of the process, so taking
+/// all three for a refusal no wait can fix would be the waste `api`'s
+/// `stamp_refusal` already refuses for an unstamped build. It decided "usable"
+/// by restating this rule -- the same reader, trim, parse and positivity --
+/// which is a second authority for one fact, correct until the first change to
+/// [`knobs::positive_count`]. It calls this instead, as it calls
+/// [`is_canonical_commit_stamp`] rather than restating the stamp rule. D-0695.
+///
+/// # Errors
+///
+/// [`SCREEN_BUDGET_NOT_RECORDABLE`] when `BRUTEX_SCREEN_BUDGET_MS`, read through
+/// [`knobs::var`] (the knob store, then the environment), is a usable budget.
+pub fn recorded_budget_refusal() -> Result<(), String> {
     let usable = crate::knobs::var("BRUTEX_SCREEN_BUDGET_MS")
         .as_deref()
         .and_then(crate::knobs::positive_count);
