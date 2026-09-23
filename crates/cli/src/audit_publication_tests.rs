@@ -94,6 +94,7 @@ fn options(root: &Path) -> crate::AuditOptions<'_> {
         lens: runner::rank::Lens::Detectability,
         ceiling: Some(64),
         validate: false,
+        cost: runner::audit::CostScope::IndexSpot,
     }
 }
 

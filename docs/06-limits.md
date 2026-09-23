@@ -8544,6 +8544,46 @@ none of them; each is what a gate would have measured had it been allowed to.
   59 files have production items after that line, `server.rs` among them, so
   browser code added there would pass the gate. No such code exists today.
 
+## Cash-equity audits are gross of every charge — D-0681, 23 September 2026
+
+- **Every figure in a cash-equity audit is gross of every charge.** That
+  covers the trades, the exit grid and the ranking that chose the
+  combination. Brokerage, STT, stamp duty, exchange charges, the SEBI fee and
+  GST all apply to a share trade, and none is subtracted: no equity charge
+  path exists (`costs::scope::Segment` has no equity variant), and
+  `docs/00-charter.md` records no rate to build one from. How much this
+  leaves out is UNMEASURED. The audit now says so in its first lines. Until
+  D-0681 it said the opposite: that there was no brokerage, STT, stamp or
+  GST.
+- **Generated-bar audits keep the index header.** They name no instrument,
+  and the `PROVENANCE` banner above them already says every figure describes
+  the generator.
+- **Only the audit header was corrected.** Other surfaces that print stock
+  results were not checked for their cost statements in this change. The
+  `cli pool` report already states that it charges nothing (D-0509).
+- **Equities are ranked gross, by the operator's decision.** `CLAUDE.md` §1
+  now allows labelled, cost-excluded ranking of equities as research. No
+  equity result may enter Selection V6 or execution authority until a
+  charter-sourced equity charge stack exists, and none exists. So a ranking
+  that would reorder once charges apply is disclosed, not prevented. D-0681.
+
+## The cash half of the sweep surface is 208 shares, not 213 names — D-0682
+
+- **The count changed.** `is_sweepable` refuses a cash key named after any of
+  the five F&O index underlyings (`core::universe::FNO_INDEX_UNDERLYINGS`).
+  The cash half of the surface is 208 shares. Any figure that multiplies the
+  search by 213 now overstates it by five names. D-0506's roughly 2.5 billion
+  trials is one such figure, and it was not recomputed here.
+- **The split is a snapshot.** Index or share is read from the transcribed F&O
+  list's ISIN column, at the same 213-name snapshot as `FNO_UNDERLYINGS`. A
+  refresh that adds an index underlying fails
+  `core::universe::the_fno_index_underlyings_are_exactly_the_fno_names_with_no_isin`
+  until the constant names it. Nothing updates it automatically.
+- **The added comparisons are not timed.** On an `FNO_INDEX` hit the cash arm
+  walks the fixed five-name array: at most five string comparisons. No bench
+  row times `is_sweepable`, so this is a count taken from the code, not a
+  measurement.
+
 ## The hand-drawn crate graphs are checked by nothing — D-0683, 23 September 2026
 
 `core/tests/graph.rs` parses only the table in `docs/01-architecture.md` §1. Its
@@ -8583,6 +8623,40 @@ all it proves.
   number resolves only through D-0104's and D-0684's tables and the subject
   written beside it, and a citation of main's D-0035 to D-0037 in `main`'s
   history resolves only through D-0684's mapping.
+
+## Screen budget refused on recorded runs — D-0685, 23 September 2026
+
+- **A budget never reaches a recorded run.** `BRUTEX_SCREEN_BUDGET_MS` derives
+  the number of candidates the exit grid prices from a wall-clock calibration.
+  The run identity folds the budget and the stated `screen_cap`, never the
+  derived cap, so one identity could record two answers. Every run that records
+  now refuses a usable budget by name before it reads its source or writes
+  anything, and the HTTP routes refuse a body that names `screen_budget_ms`.
+  `BRUTEX_SCREEN_CAP` is the deterministic way to bound the screen.
+- **The unrecorded generated-bar `audit` still honours the budget, and its
+  output is not reproducible when it does.** Two runs at one budget can price
+  512 candidates on one machine state and 1,024 on another: one nanosecond
+  across a power of two halves the cap
+  (`quantised_caps_split_at_a_power_of_two_however_close_the_timings`). That
+  report has no identity and writes no record, so nothing is recorded under a
+  false claim. Its figures still depend on timing.
+- **A value the budget reader cannot parse is not refused on the non-strict
+  recorded paths.** It is not a budget: the cap stays `screen_cap`, identity
+  term sixteen stays `0`, and the report names the value under `KNOB REFUSED`.
+  The strict range audit refuses it anyway, as it refuses every unusable
+  setting.
+- **The browser still offers the field.** `web/src/routes/backtest/+page.svelte`,
+  `web/src/lib/receipt-batch.js` and the built bundle still render
+  `screen_budget_ms`. Filling it now returns the named 400 refusal instead of
+  starting a run. Removing the control is front-end work not done here.
+- **A rung swept alone and the same rung inside `range-all` are two run
+  identities.** `ceiling_asked`'s doc said they were one piece of work keyed
+  once. They are not: `Params::of(ladder)` hashes the ceiling the ladder was
+  given, which `range-all` divides by the number of rungs sharing the machine,
+  and that ceiling decides whether the walk halts
+  (`the_run_identity_still_folds_the_divided_ceiling_the_ladder_was_given`).
+  The ledger therefore records them separately. That is correct for the answer,
+  but a result's identity can depend on how many rungs ran beside it.
 
 ## Census-backed GET routes: a `stat` per vendor when nothing changed, not a manifest read — D-0686, 23 September 2026
 

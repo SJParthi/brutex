@@ -183,6 +183,7 @@ fn run(
     guard.require_current()?;
     let signal_length = crate::stored::rung_length_micros(request.rung)?;
     let availability = crate::stored::vwap_availability(&span.key);
+    let cost = crate::stored::audit_cost_scope(&span.key)?;
     let execution = execution_bars.as_ref().map(|span| crate::Execution {
         bars: &span.bars,
         signal_length_micros: signal_length,
@@ -252,6 +253,7 @@ fn run(
             lens,
             ceiling: None,
             validate,
+            cost,
         },
         Some(&check),
     ))

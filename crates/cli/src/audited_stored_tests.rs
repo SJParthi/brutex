@@ -904,3 +904,196 @@ fn strict_input_caps_and_missing_prior_context_refuse_without_fallback() {
     fs::remove_file(fixture.path(4, Timeframe::DAY_1)).expect("remove required prior daily source");
     assert!(Inputs::load(fixture.request("1min")).is_err());
 }
+
+/// Every directory under `root`, and every file's bytes.
+fn tree(root: &std::path::Path) -> std::collections::BTreeMap<PathBuf, Option<Vec<u8>>> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory).expect("readable fixture directory") {
+            let path = entry.expect("fixture entry").path();
+            if path.is_dir() {
+                out.insert(path.clone(), None);
+                pending.push(path);
+            } else {
+                let bytes = fs::read(&path).expect("readable fixture file");
+                out.insert(path, Some(bytes));
+            }
+        }
+    }
+    out
+}
+
+/// What each recorded verb must answer with a usable budget in its environment.
+fn budgeted_recorded_runs_refuse(root: &std::path::Path) -> Result<(), String> {
+    let named = crate::SCREEN_BUDGET_NOT_RECORDABLE;
+    assert_eq!(crate::recorded_budget_refusal(), Err(named.to_owned()));
+    // THE THREE STORED KERNELS: refused as admission errors, before the source.
+    let audit = crate::audit_stored_kernel(crate::StoredSweepRequest {
+        root: root.to_path_buf(),
+        vendor: Vendor::Zerodha,
+        underlying: "NIFTY",
+        rung: "5min",
+        year: 2025,
+        month: 5,
+        min_hits: u64::MAX,
+        commit: "generated-stored-audit-fixture",
+    });
+    assert_eq!(audit, Err(named.to_owned()));
+    let range = crate::audit_range_kernel(crate::StoredRangeAuditRequest {
+        root: root.to_path_buf(),
+        vendor: Vendor::Zerodha,
+        underlying: "NIFTY",
+        rung: "5min",
+        from: (2025, 5),
+        to: (2025, 5),
+        min_hits: u64::MAX,
+        attempt: Some(7),
+        commit: "generated-stored-range-audit-fixture",
+    });
+    assert_eq!(range, Err(named.to_owned()));
+    let screen = crate::screen_range_kernel(crate::StoredScreenRequest {
+        root: root.to_path_buf(),
+        vendor: Vendor::Zerodha,
+        underlying: "NIFTY",
+        rung: "5min",
+        span: ((2025, 5), (2025, 5)),
+        support_ppm: 20_000,
+        policy: crate::Policy {
+            rules: crate::Rules::BASELINE,
+            lens: runner::rank::Lens::Detectability,
+            validate: false,
+        },
+        attempt: Some(13),
+        commit: "generated-stored-screen-fixture",
+    });
+    assert_eq!(screen, Err(named.to_owned()));
+    // A RANGE RUNG, whose support derivation would write before `audit_range`.
+    // `BRUTEX_STORE` names this fixture, so without the refusal it would.
+    let rung = crate::one_rung("zerodha", "NIFTY", "5min", (2025, 5), (2025, 5), None, None);
+    assert_eq!(rung.outcome.err().as_deref(), Some(named));
+    let table = crate::range_over("zerodha", "NIFTY", &["5min"], (2025, 5), (2025, 5), None);
+    assert!(table.starts_with("refused: "), "{table}");
+    assert!(table.contains(named), "{table}");
+    budgeted_audit_transaction_refuses_only_a_recording(root)
+}
+
+/// The shared audit transaction under a usable budget: refused with a recording
+/// target, not refused without one, and the generated-bar verb still runs.
+fn budgeted_audit_transaction_refuses_only_a_recording(
+    root: &std::path::Path,
+) -> Result<(), String> {
+    let named = crate::SCREEN_BUDGET_NOT_RECORDABLE;
+    let key = stored::swept_index("NIFTY")?;
+    let id = crate::identity(&runner::identity::Run {
+        mask: vocab::ConditionMask::default(),
+        direction: runner::identity::Direction::Undirected,
+        instrument: &key,
+        timeframe: "5min",
+        params: runner::identity::Params::of(engine::Ladder::with_min_hits(1)),
+        data_digest: [7; 32],
+        commit: "generated-budget-fixture",
+        feed: "zerodha",
+    });
+    let options = |recording| crate::AuditOptions {
+        prepared_column: None,
+        replay: None,
+        execution: None,
+        native_minute_execution: true,
+        recording,
+        rules: crate::Rules::BASELINE,
+        lens: runner::rank::Lens::Detectability,
+        ceiling: Some(64),
+        validate: false,
+        cost: runner::audit::CostScope::IndexSpot,
+    };
+    let recorded = crate::audit_bars(
+        &Err("EVALUATOR_WAS_REACHED"),
+        Vec::new(),
+        "fixture",
+        1,
+        Some(&id),
+        options(Some(crate::Recording {
+            root,
+            feed: "zerodha",
+            underlying: "NIFTY",
+            timeframe: "5min",
+            from: (2025, 5),
+            to: (2025, 5),
+            attempt: None,
+            months_asked: 1,
+            months_found: 1,
+        })),
+    );
+    assert_eq!(recorded, format!("refused: {named}\n"));
+    // AN UNRECORDED AUDIT IS NOT REFUSED: it passes the guard and reaches its
+    // evaluator, and the generated-bar verb still runs under the budget.
+    let unrecorded = crate::audit_bars(
+        &Err("EVALUATOR_WAS_REACHED"),
+        Vec::new(),
+        "fixture",
+        1,
+        None,
+        options(None),
+    );
+    assert!(unrecorded.contains("EVALUATOR_WAS_REACHED"), "{unrecorded}");
+    let generated = crate::audit_run(1, u64::MAX);
+    assert!(generated.starts_with(crate::PROVENANCE), "{generated}");
+    assert!(!generated.contains(named), "{generated}");
+    assert!(!generated.contains("KNOB REFUSED"), "{generated}");
+    Ok(())
+}
+
+/// Every run that RECORDS refuses a usable screen budget by name before it reads
+/// its source or writes anything: the three stored kernels, a range rung and
+/// the shared audit transaction. The unrecorded generated-bar audit still runs,
+/// and the same range audit with a stated screen cap records. D-0685.
+///
+/// The budget is stated in a CHILD process's environment, not in the process
+/// knob store, so no concurrently running recorded test can observe it.
+#[test]
+fn recorded_runs_refuse_a_screen_budget_before_reading_or_writing()
+-> Result<(), Box<dyn std::error::Error>> {
+    const CHILD: &str = "BRUTEX_TEST_RECORDED_SCREEN_BUDGET";
+    if std::env::var_os(CHILD).is_some() {
+        return Ok(budgeted_recorded_runs_refuse(&crate::store_root()?)?);
+    }
+    let fixture = Fixture::warmed();
+    let before = tree(&fixture.root);
+    let child = std::process::Command::new(std::env::current_exe()?)
+        .args([
+            "--exact",
+            "audited_stored::tests::recorded_runs_refuse_a_screen_budget_before_reading_or_writing",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CHILD, "budgeted")
+        .env("BRUTEX_STORE", &fixture.root)
+        .env("BRUTEX_SCREEN_BUDGET_MS", "5000")
+        .output()?;
+    assert!(
+        child.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&child.stdout),
+        String::from_utf8_lossy(&child.stderr)
+    );
+    assert!(String::from_utf8_lossy(&child.stdout).contains("1 passed"));
+    assert_eq!(
+        tree(&fixture.root),
+        before,
+        "a refused budget wrote under the store"
+    );
+
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    crate::knobs::set("BRUTEX_SCREEN_CAP", "7");
+    let capped = fixture.audit_range("5min", (2025, 5));
+    crate::knobs::clear_all();
+    let capped = capped.expect("a stated screen cap is recordable");
+    assert!(capped.contains("RESULT RECORDED"), "{capped}");
+    assert!(
+        !capped.contains(crate::SCREEN_BUDGET_NOT_RECORDABLE),
+        "{capped}"
+    );
+    Ok(())
+}

@@ -213,7 +213,10 @@ fn the_whole_pipeline_runs_and_every_stage_feeds_the_next() {
     );
 
     // ---- 8. everything -> one report ------------------------------------
+    // GENERATED BARS NAME NO INSTRUMENT, so they keep the index header every
+    // generated audit has always carried. D-0681 changed only the stock one.
     let report = audit::render(
+        audit::CostScope::IndexSpot,
         Some(&taken),
         Some(&exits),
         Some(&folds),
@@ -280,7 +283,15 @@ fn the_pipeline_refuses_a_slice_it_cannot_measure_rather_than_inventing_one() {
     );
     assert_eq!(folds.held_up(), 0);
 
-    let report = audit::render(Some(&taken), None, Some(&folds), None, None, 6);
+    let report = audit::render(
+        audit::CostScope::IndexSpot,
+        Some(&taken),
+        None,
+        Some(&folds),
+        None,
+        None,
+        6,
+    );
     assert!(
         report.contains("NOT SUPPLIED"),
         "sections that were not supplied must say so rather than reading as empty"

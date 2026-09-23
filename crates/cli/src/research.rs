@@ -150,8 +150,9 @@ fn cash_symbols() -> Vec<&'static str> {
         .copied()
         // F&O membership includes index underlyings. Positively identify cash
         // equities through the existing total-market index before resolving a
-        // sweep key; swept_index's fallback alone can construct a cash key for
-        // an index outside the two swept spot indices.
+        // sweep key. swept_index's cash fallback accepted an index outside the
+        // two swept spot indices until D-0682 made core refuse it; this filter
+        // stays as a second, independent check that the name is a share.
         .filter(|symbol| brutex_core::universe::NTM_INDEX.contains(symbol))
         .filter(|symbol| {
             crate::stored::swept_index(symbol).is_ok_and(|key| key.kind == Kind::Equity)

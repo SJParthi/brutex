@@ -283,6 +283,25 @@ fn strict_command_preserves_supported_knobs_and_refuses_irrelevant_support_contr
     }
 }
 
+/// The strict audit records, so a screen budget is refused by name at every
+/// value; `screen_cap` is still carried, as the test above asserts. D-0685.
+#[test]
+fn strict_command_refuses_a_screen_budget_by_name_at_every_value() {
+    for written in ["5000", "\"5000\"", "\"\"", "\"not-a-budget\""] {
+        let body = format!(
+            "{},\"screen_budget_ms\":{written}}}",
+            BODY.trim_end_matches('}')
+        );
+        let why = command_from(&body).expect_err("a recorded strict run cannot take a budget");
+        assert!(
+            why.why().starts_with("`screen_budget_ms` is refused"),
+            "{written}: {}",
+            why.why()
+        );
+        assert!(why.why().contains("No setting was ignored"));
+    }
+}
+
 #[test]
 fn missing_strict_configuration_is_structured_503_before_attempt_or_slot() {
     let site = site("missing");

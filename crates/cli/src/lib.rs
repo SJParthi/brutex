@@ -5628,6 +5628,8 @@ fn audit_stored_kernel(request: StoredSweepRequest<'_>) -> Result<String, stored
         min_hits,
         commit,
     } = request;
+    // REFUSED BEFORE THE MONTH IS READ, as every recorded kernel does. D-0685.
+    recorded_budget_refusal()?;
     let loaded = stored::load(&root, vendor, underlying, rung, year, month)?;
     let signal_length = stored::rung_length_micros(rung)?;
     // A SINGLE-MONTH AUDIT HAS THE SAME EXECUTION CONTRACT AS A RANGE.
@@ -5789,6 +5791,8 @@ fn audit_stored_kernel(request: StoredSweepRequest<'_>) -> Result<String, stored
     // The stop is no longer forced at 2,000 ppm. An operator who wants one says
     // so -- and `BRUTEX_MAX_STOP_POINTS` now states it in index points, which
     // 2,000 ppm never did on a span whose reference is not 25,000.
+    // THE HEADER'S CHARGE STATEMENT COMES FROM THE SAME KEY. D-0681.
+    let cost = stored::audit_cost_scope(&loaded.key)?;
     let report = audit_bars(
         &evaluator_stored(availability),
         loaded.bars,
@@ -5856,6 +5860,7 @@ fn audit_stored_kernel(request: StoredSweepRequest<'_>) -> Result<String, stored
             // candidate can never be mistaken for a finding.
             validate,
             lens,
+            cost,
         },
     );
     // THE IDENTITY REACHES THE LOG, which is the half section 3 rule 3 cares
@@ -6252,6 +6257,10 @@ fn audit_range_kernel(request: StoredRangeAuditRequest<'_>) -> Result<String, st
         attempt,
         commit,
     } = request;
+    // BEFORE THE SPAN IS READ, as every recorded kernel does, and here it is
+    // load-bearing: `column_withholding_at_build` below writes a preparation
+    // attempt long before `audit_bars` could refuse. D-0685.
+    recorded_budget_refusal()?;
     let mut span = stored::load_span(&root, vendor, underlying, rung, from, to)?;
 
     note(
@@ -6505,6 +6514,7 @@ fn audit_range_kernel(request: StoredRangeAuditRequest<'_>) -> Result<String, st
     }
     header.push_str(&daily_reference_note(&daily, &exact_minute));
     let availability = stored::vwap_availability(&span.key);
+    let cost = stored::audit_cost_scope(&span.key)?;
     Ok(audit_bars(
         &evaluator_stored(availability),
         span.bars,
@@ -6595,6 +6605,7 @@ fn audit_range_kernel(request: StoredRangeAuditRequest<'_>) -> Result<String, st
             // day this changed: ranking by it before that fix would have
             // ordered by a wrong number, so the two changes belong together.
             lens,
+            cost,
         },
     ))
 }
@@ -9491,7 +9502,9 @@ fn screen_cap() -> usize {
 /// Returns [`screen_cap`] unchanged when no budget is named, so every existing
 /// caller and every existing run is unaffected. With `BRUTEX_SCREEN_BUDGET_MS`
 /// set, a fixed prefix is priced and timed, and [`cap_within_budget`] turns that
-/// throughput into a count.
+/// throughput into a count. Only the unrecorded generated-bar audit reaches this
+/// with a budget: every run that records refuses the knob first, because the
+/// count this returns is decided by timing. D-0685.
 ///
 /// # The calibration is real work, and doing it twice is the cheaper mistake
 ///
@@ -9583,12 +9596,52 @@ const CALIBRATION_CANDIDATES: usize = 256;
 /// The operator's wall-clock target for one rung's exit grid, in milliseconds.
 ///
 /// `None` when unset, which keeps [`screen_cap`] exactly as it was -- a stated
-/// count rather than a derived one.
+/// count rather than a derived one. A run that records never reaches this with a
+/// value: [`recorded_budget_refusal`] refuses the knob first. D-0685.
 fn screen_budget_ms() -> Option<u64> {
     // THROUGH `knobs::count`. Same rule, same reason: it is the sixteenth term
     // of `policy_of` precisely because it moves the answer, and a budget that
     // did not parse silently became "no budget at all".
     crate::knobs::count("BRUTEX_SCREEN_BUDGET_MS")
+}
+
+/// The refusal every run that RECORDS gives when `BRUTEX_SCREEN_BUDGET_MS` is set.
+const SCREEN_BUDGET_NOT_RECORDABLE: &str = "BRUTEX_SCREEN_BUDGET_MS is set, and a run that records refuses it: the budget derives how many candidates are priced from a wall-clock calibration, so one run identity could record different answers (CLAUDE.md §3 rules 3 and 5). Nothing was recorded. Unset it and bound the screen with BRUTEX_SCREEN_CAP, a stated count the identity folds. D-0685.";
+
+/// Refuses `BRUTEX_SCREEN_BUDGET_MS` on a run that records, by name.
+///
+/// # Why a recorded run cannot take a budget at all -- D-0685
+///
+/// [`cap_for_budget`] times a calibration prefix and derives the priced cap from
+/// that wall-clock reading, so the candidates a budget prices depend on how busy
+/// the machine was. The identity folds the BUDGET (the sixteenth term of
+/// [`policy_of`]) and the STATED [`screen_cap`], never the derived cap, so two
+/// runs at one budget could price different candidate sets, record different
+/// answers and share one `RunId`. Folding the derived cap instead would not
+/// help: the same question would then record different answers under different
+/// identities, decided by timing.
+///
+/// So every run that records calls this before it reads or writes anything, and
+/// an operator who wants a bounded screen states the count with
+/// `BRUTEX_SCREEN_CAP`, which is deterministic and in the identity.
+///
+/// A value [`screen_budget_ms`] cannot use is NOT refused here. It is no budget:
+/// the cap stays the stated [`screen_cap`], the identity term stays `0`, and the
+/// report names the value under `KNOB REFUSED` -- the policy `knobs::refusals`
+/// documents for every count knob. The strict range audit refuses it anyway,
+/// because strict admission refuses every unusable setting.
+///
+/// The unrecorded generated-bar `audit` still honours the budget. It has no
+/// identity and writes no record, so there is nothing for the timing to split.
+fn recorded_budget_refusal() -> Result<(), String> {
+    let usable = crate::knobs::var("BRUTEX_SCREEN_BUDGET_MS")
+        .as_deref()
+        .and_then(crate::knobs::positive_count);
+    if usable.is_some() {
+        Err(SCREEN_BUDGET_NOT_RECORDABLE.to_owned())
+    } else {
+        Ok(())
+    }
 }
 
 /// How many candidates a measured throughput says will fit in the budget.
@@ -9603,26 +9656,44 @@ fn screen_budget_ms() -> Option<u64> {
 /// six hundred and twenty-five, and that product is a POLICY number rather than
 /// a physical one.
 ///
-/// # It cannot be a wall-clock cut on the search itself
+/// # It cannot be a wall-clock cut on the search itself, and the cap still is one
 ///
 /// Stopping the loop when a timer expires would make the answer depend on how
 /// busy the machine was, and §3 rule 5 requires the same inputs to give the same
-/// outputs byte for byte. So the budget decides a CAP, the cap is fixed before
-/// the search starts, and the search is then exactly as deterministic as it was.
+/// outputs byte for byte. So the budget decides a CAP, fixed before the search
+/// starts, and the search GIVEN that cap is deterministic.
 ///
-/// # The cap is QUANTISED, and that is not cosmetic
+/// **This section used to claim the search "is then exactly as deterministic as
+/// it was". It is not.** The cap is computed FROM a wall-clock reading, so which
+/// candidates are priced, and therefore the answer, still depends on how busy
+/// the machine was. Moving the timer from the loop to the cap moved the
+/// dependence one step earlier; it did not remove it. That is why a run that
+/// records refuses the knob -- [`recorded_budget_refusal`], D-0685.
 ///
-/// `screen_cap` is folded into the run identity, so a cap that moved with every
-/// millisecond of timing jitter would give the same question a new identity on
-/// every run and fill the ledger with near-duplicates that are not duplicates to
-/// the dedup. Rounding down to a power of two means an idle machine and a busy
-/// one land on the same rung unless they differ by a factor of two -- at which
-/// point they really are different searches and deserve different identities.
+/// # The cap is QUANTISED, and that does NOT make it stable
+///
+/// This section claimed that, because `screen_cap` is folded into the run
+/// identity, a jittering cap would re-key every run, and that rounding down to a
+/// power of two kept an idle and a busy machine on one rung "unless they differ
+/// by a factor of two -- at which point they really are different searches and
+/// deserve different identities". Each part was false:
+///
+/// * the identity folds the STATED [`screen_cap`] and the budget, never the cap
+///   this function returns, so two caps at one budget shared one `RunId`;
+/// * two readings either side of a power of two land on different rungs however
+///   close they are: `quantised_caps_split_at_a_power_of_two_however_close_the_timings`
+///   halves the cap on a one-nanosecond difference; and
+/// * the two resulting searches did NOT get different identities.
+///
+/// What the quantisation does bound is the spread: readings within a factor of
+/// two land on the same rung or on adjacent ones. A bound on the spread is not
+/// equality, so it cannot make a budgeted run recordable.
 ///
 /// # Cost
 ///
-/// One multiply and one shift. The measurement it reads is taken once per rung,
-/// from a fixed-size calibration prefix, so nothing here is per candidate.
+/// One multiply, one divide, one `ilog2` and one shift. The measurement it reads
+/// is taken once per rung, from a fixed-size calibration prefix, so nothing here
+/// is per candidate.
 fn cap_within_budget(sampled: usize, elapsed_nanos: u128, budget_ms: u64, offered: usize) -> usize {
     if sampled == 0 || elapsed_nanos == 0 {
         return offered;
@@ -9875,6 +9946,14 @@ fn policy_of(
         //
         // Unset is `0`, which cannot collide with any budget an operator names
         // -- `screen_budget_ms` filters `n > 0`.
+        //
+        // AND FOLDING THE BUDGET WAS NOT ENOUGH. The budget decides the cap
+        // through a wall-clock calibration, so two runs at ONE budget could
+        // still price different candidate sets under one identity. Every run
+        // that records now refuses the knob before it reads or writes anything
+        // (`recorded_budget_refusal`, D-0685), so on a recorded run this term
+        // is always `0`. It stays, at this position, because positional
+        // identity is append-only.
         screen_budget_ms().unwrap_or(0),
         // THE SEVENTEENTH: THE RUNG COUNT THE WALK-FORWARD ACTUALLY PRICED.
         //
@@ -12615,6 +12694,18 @@ fn one_rung(
     attempt: Option<u64>,
 ) -> RungRow {
     let first_line = |why: String| why.lines().next().unwrap_or(&why).to_owned();
+    // BEFORE THE STORE IS RESOLVED: the support derivation below writes
+    // preparation and probe evidence before `audit_range` is reached. D-0685.
+    if let Err(why) = recorded_budget_refusal() {
+        return RungRow {
+            rung,
+            outcome: Err(why),
+            missing: Vec::new(),
+            excluded: stored::CalendarExclusion::none(),
+            retention: None,
+            validation: None,
+        };
+    }
     let root = match store_root() {
         Ok(root) => root,
         Err(why) => {
@@ -14894,6 +14985,9 @@ fn screen_range_kernel(request: StoredScreenRequest<'_>) -> Result<String, store
         lens,
         validate,
     } = policy;
+    // REFUSED BEFORE THE SPAN IS READ, as every recorded kernel does. Each step
+    // of an `elite` descent arrives here. D-0685.
+    recorded_budget_refusal()?;
     let mut span = stored::load_span(&root, vendor, underlying, rung, from, to)?;
     let signal_length = stored::rung_length_micros(rung)?;
 
@@ -14969,6 +15063,7 @@ fn screen_range_kernel(request: StoredScreenRequest<'_>) -> Result<String, store
     let exact_minute =
         stored::load_exact_minute_context(&root, vendor, underlying, (from, to), &span.bars)?;
     let availability = stored::vwap_availability(&span.key);
+    let cost = stored::audit_cost_scope(&span.key)?;
 
     let ladder = ladder_for(min_hits)?;
     let horizon = horizon_for(&span.bars, rung != EXECUTION_RUNG);
@@ -15041,6 +15136,7 @@ fn screen_range_kernel(request: StoredScreenRequest<'_>) -> Result<String, store
             // The environment's ceiling -- see `AuditOptions::ceiling`.
             ceiling: None,
             validate,
+            cost,
         },
     ))
 }
@@ -15129,6 +15225,11 @@ fn audit_with(
             ceiling,
             validate: true,
             lens: runner::rank::Lens::Detectability,
+            // GENERATED BARS NAME NO INSTRUMENT, so they keep the index header
+            // every generated audit has always carried, byte for byte; the
+            // PROVENANCE banner above it already says every figure describes
+            // the generator and not any market. D-0681 changed only the stock one.
+            cost: audit::CostScope::IndexSpot,
         },
     )
 }
@@ -15232,6 +15333,14 @@ struct AuditOptions<'a> {
     /// absence for every unsupplied stage rather than a zero, so a page made
     /// this way states which questions it did not ask.
     validate: bool,
+    /// Which charge statement heads the audit. D-0681.
+    ///
+    /// A stored run takes it from its swept key through
+    /// [`stored::audit_cost_scope`]: an index keeps the header it has always
+    /// printed, and an F&O cash equity is labelled GROSS OF EVERY CHARGE
+    /// instead of being told, as every stock audit was until this field
+    /// existed, that there is no brokerage, STT, stamp or GST.
+    cost: audit::CostScope,
 }
 
 /// Borrowed causal evidence for stored walk-forward column rebuilds.
@@ -15677,25 +15786,33 @@ fn ceiling_from_env() -> Result<usize, String> {
 
 /// The ceiling BEFORE it is divided among concurrent sweeps.
 ///
-/// # Why the identity uses this one and the ladder uses the other
+/// # The identity folds this one AND the one the ladder was given
 ///
-/// [`policy_of`] folds the ceiling into the run identity, because a halted
-/// search and an exhaustive one over the same span are different answers and
-/// must not collide in the ledger. [`shared_out`] reads
-/// [`SWEEPS_SHARING_THIS_MACHINE`], which is a property of THIS PROCESS at THIS
-/// MOMENT and not of the run -- `range_over` raises it while its eight rungs are
-/// in flight and drops it after.
+/// [`policy_of`] folds this figure as its sixth term, because a halted search
+/// and an exhaustive one over the same span are different answers and must not
+/// collide in the ledger. [`shared_out`] reads [`SWEEPS_SHARING_THIS_MACHINE`],
+/// which `range_over` raises while its rungs are in flight and drops after, so
+/// this undivided figure is the half of the identity that names what the
+/// OPERATOR ASKED FOR and does not move with that counter.
 ///
-/// Folding the shared value into the identity therefore made one logical run key
-/// two different ways: `audit-range 60min` alone resolved 134,217,720 while the
-/// same rung inside `range-all` resolved 14,913,080, so the ledger's duplicate
-/// refusal stopped recognising them as the same run and the same work could be
-/// recorded twice. That is a regression introduced by the sharing fix and caught
-/// by an adversarial pass over it.
+/// **This doc used to go further, and two of its claims were false (D-0685).**
+/// It said that folding the shared value made "the same work" recordable twice
+/// -- `audit-range 60min` alone at 134,217,720 against the same rung inside
+/// `range-all` at 14,913,080 -- and that the divided figure is "a scheduling
+/// fact rather than a description of the search". Neither holds:
 ///
-/// The identity names what the OPERATOR ASKED FOR. What the ladder is given is
-/// that figure divided by however many sweeps are sharing the machine, which is
-/// a scheduling fact rather than a description of the search.
+/// * the divided figure is the ceiling the ladder is GIVEN, and it decides
+///   whether the walk halts. `range_rung_arm`'s doc says so: a rung inside the
+///   eight can halt where the same rung alone completes. The two runs are not
+///   the same work.
+/// * the identity still folds the divided figure, through `Params::of(ladder)`,
+///   whose `ceiling` is `ladder.ceiling()`. So the rung alone and the rung inside
+///   `range-all` still key differently, and they should.
+///   `the_run_identity_still_folds_the_divided_ceiling_the_ladder_was_given`
+///   pins it.
+///
+/// So the identity carries both: this figure for what was asked, and
+/// `Params::ceiling` for what the ladder actually had.
 fn ceiling_asked() -> Result<usize, String> {
     match crate::knobs::var("BRUTEX_CEILING") {
         None => Ok(whole_machine_ceiling()),
@@ -17872,6 +17989,13 @@ fn audit_bars_guarded(
     opts: AuditOptions<'_>,
     source_check: Option<AuditSourceCheck<'_>>,
 ) -> String {
+    // EVERY RECORDED AUDIT PASSES HERE, so the screen budget is refused here
+    // before its attempt begins -- whichever verb called. D-0685.
+    if opts.recording.is_some()
+        && let Err(why) = recorded_budget_refusal()
+    {
+        return format!("refused: {why}\n");
+    }
     let attempt = match (opts.recording, id) {
         (Some(into), Some(run_id)) => match sweep_evidence::begin_with_validation(
             into.root,
@@ -17946,6 +18070,7 @@ fn audit_bars_work(
         lens,
         ceiling,
         validate,
+        cost,
     } = opts;
     let prepared_column = match (prepared_column, replay) {
         (None, Some(replay)) => match stored_anchored_column(
@@ -18534,6 +18659,7 @@ fn audit_bars_work(
     let (report, _committed) = record_and_finish(recording, id, &recorded, live);
     out.push_str(&report);
     out.push_str(&audit::render_selected(
+        cost,
         Some(&chosen.taken),
         Some(&chosen.exits),
         Some(&chosen.cell),
@@ -21268,6 +21394,13 @@ mod tests {
     /// of it. The ledger's duplicate refusal stopped recognising them as the same
     /// run, and the same work became recordable twice. Caught by an adversarial
     /// pass over the fix that introduced it.
+    ///
+    /// **Narrower than it reads (D-0685).** This pins the POLICY term only. The
+    /// `RunId` still folds the divided ceiling through `Params::of(ladder)`, so
+    /// the two runs do key differently, and correctly: the divided ceiling can
+    /// halt a walk the undivided one completes, so they are not the same work.
+    /// `the_run_identity_still_folds_the_divided_ceiling_the_ladder_was_given`
+    /// pins that half.
     #[test]
     fn the_identity_ceiling_does_not_move_when_sweeps_share_the_machine() {
         let _guard = crate::knobs::serially();
@@ -21290,6 +21423,73 @@ mod tests {
         assert_eq!(
             alone, 134_217_720,
             "and it is the operator's own figure, undivided"
+        );
+    }
+
+    /// The ceiling the LADDER is given still reaches the `RunId`, and it moves
+    /// with sharing. The test above pins only the policy term.
+    ///
+    /// `ceiling_asked`'s doc once said the divided figure is "a scheduling fact
+    /// rather than a description of the search". It decides whether the walk
+    /// halts, and `Params::of(ladder)` hashes it, so a rung alone and the same
+    /// rung inside `range-all` key differently. D-0685.
+    ///
+    /// Run in a CHILD process: the sharing counter is process-wide, and batch
+    /// and range tests raise and reset it without the knob lock.
+    #[test]
+    fn the_run_identity_still_folds_the_divided_ceiling_the_ladder_was_given() {
+        const CHILD: &str = "BRUTEX_TEST_DIVIDED_CEILING_IDENTITY";
+        if std::env::var_os(CHILD).is_none() {
+            let child = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args([
+                    "--exact",
+                    "tests::the_run_identity_still_folds_the_divided_ceiling_the_ladder_was_given",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(CHILD, "isolated")
+                .env("BRUTEX_CEILING", "134217720")
+                .output()
+                .expect("isolated sharing child");
+            assert!(
+                child.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&child.stdout),
+                String::from_utf8_lossy(&child.stderr)
+            );
+            assert!(String::from_utf8_lossy(&child.stdout).contains("1 passed"));
+            return;
+        }
+        let alone = ladder_for(1).expect("a positive ceiling");
+        let shared = {
+            let _many = crate::SharedBy::these(8);
+            ladder_for(1).expect("a positive ceiling")
+        };
+
+        assert_eq!(alone.ceiling(), 134_217_720, "alone, the operator's figure");
+        assert_eq!(
+            shared.ceiling(),
+            134_217_720 / 8,
+            "inside eight sharing sweeps, an eighth of it"
+        );
+        let key = crate::stored::swept_index("NIFTY").expect("known key");
+        let keyed = |ladder| {
+            runner::identity::identity(&runner::identity::Run {
+                mask: vocab::ConditionMask::default(),
+                direction: runner::identity::Direction::Undirected,
+                instrument: &key,
+                timeframe: "60min",
+                params: runner::identity::Params::of(ladder).with_policy(&[7]),
+                data_digest: [3; 32],
+                commit: "generated-identity-fixture",
+                feed: "zerodha",
+            })
+        };
+        assert_ne!(
+            keyed(alone),
+            keyed(shared),
+            "one policy slice, two ladder ceilings: the identity must differ, \
+             because a walk that halts and one that completes are two answers"
         );
     }
 

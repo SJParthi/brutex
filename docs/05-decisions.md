@@ -37589,6 +37589,203 @@ D-0677 stays as written, and this entry is the correction.
    exists. Item 4 still stands for the gate 18 plan. Gate 1e simply failed
    first.
 
+### D-0681 — Label every cash-equity audit gross of every charge, and supersede D-0506's rank-after-costs wording — 2026-09-23
+
+**The defect.** `runner::audit::render_selected` took no instrument, so every
+audit opened with the same header: *"INDEX SPOT run. There is no brokerage,
+STT, stamp or GST, because an INDEX is not tradeable"*. That is true of an
+index level. D-0506 widened the sweep to the cash equities of the 213 F&O
+underlyings, and all four stored audit paths — `audit_stored_kernel`,
+`audit_range_kernel`, `screen_range_kernel` and `audited_range_command::run` —
+use that render. So every stock audit, over real share trades that pay every
+one of those charges, told its reader that none of them existed. The header's
+own last paragraph had said it would be *"WRONG the day a stock is swept"*.
+
+**The operator's decision, as relayed to this change.** It arrived through
+the fix workflow's task text, dated 2026-09-23, and is recorded here as
+relayed: *"keep cost-excluded discovery for F&O cash equities, label it
+honestly, keep execution refusing equities, and amend CLAUDE.md §1 to
+match."*
+
+**What changed.**
+
+1. `runner::audit::CostScope` has two variants, `IndexSpot` and
+   `CashEquity`. `CostScope::of` maps `Kind::Index` and `Kind::Equity` to
+   them and returns `None` for a futures or options contract: a contract is
+   never swept, and neither header describes one. `render` and
+   `render_selected` now take the scope as their first argument, and the
+   scope changes only the header.
+2. `IndexSpot` prints the old header byte for byte. This was checked against
+   a render captured at `79b9a1d5` (`cmp` found no difference), and a test now
+   pins the header.
+3. `CashEquity` prints a header that says every total is **GROSS OF EVERY
+   CHARGE**. It says that brokerage, STT, stamp duty, exchange charges, the
+   SEBI fee and GST apply to a share trade; that this engine has no equity
+   charge path (`costs::scope::Segment` has no equity variant); that the
+   ranking is on gross returns; that the result is cost-excluded research,
+   not a net result; and that no equity result carries Selection V6 or
+   execution authority until a charter-sourced equity charge stack exists. It
+   then states the same no-tick, gross-of-the-spread fact as the index
+   header. It names no rate, because `docs/00-charter.md` records no source
+   for an equity charge.
+4. `cli::stored::audit_cost_scope` takes the scope from the swept key, the
+   same way `vwap_availability` takes the VWAP verdict. It refuses a contract
+   by name rather than giving it either header. `AuditOptions` now carries
+   `cost`, and all four stored paths take it from `loaded.key` or `span.key`.
+   The generated-bar path (`audit_with`) passes `IndexSpot`: generated bars
+   name no instrument, and they keep the header they have always printed,
+   below a `PROVENANCE` banner that already says every figure describes the
+   generator.
+5. The `runner::trade` module doc said nothing is charged because *"the
+   sweep runs on spot indices"*. That has not been the whole surface since
+   D-0506. It now gives the reason for each kind: an index cannot be bought,
+   and a stock can be but no equity charge path exists, so a stock's figures
+   are gross of real charges rather than free of them.
+
+**Execution still refuses equities; nothing here changes that.** The
+execution chain's instrument family is `runner::exit_grid_policy::InstrumentFamilyV1`,
+which has only NIFTY and BANKNIFTY. `runner::exit_grid_policy::only_the_two_nse_spot_indices_resolve`
+already pins a RELIANCE cash key as refused.
+
+**D-0506's wording is superseded.** D-0506 said the cost model *"becomes
+necessary rather than optional before any stock result is ranked"*. That was
+not the rule the code followed: D-0509 ranked equities with no costs, on the
+operator's instruction, and D-0525 kept research cost-excluded. From this
+entry on the rule is: **equities may be ranked cost-excluded, as labelled
+research (D-0509, D-0525), and every such report says it is gross of every
+charge. No equity result may enter Selection V6 or execution authority until
+a charter-sourced equity charge stack exists.** D-0506's other consequence,
+that a pooled in-sample result means nothing until it is validated out of
+sample, stands unchanged.
+
+**CLAUDE.md §1 is amended to match, on the operator's own answer.** It said a
+stock's costs *"must be charged before ranking, not after"*. The implementing
+agent rightly declined to change the session law on an instruction relayed
+through an automated workflow. The operator then chose this directly in the
+session on 2026-09-23, answering the question "which rule should the engine
+follow?" with *"Label it, keep discovery"*: keep ranking stocks gross for
+discovery, fix the false header, keep execution refusing stocks, and amend
+CLAUDE.md §1 to match. The label this entry adds is correct under either
+wording, because it makes the report say what the engine already does. §1's
+sentence now reads:
+
+> Two consequences follow and neither is optional: a stock CAN be bought, so
+> its costs are real — equities may be ranked cost-excluded only as labelled
+> research, every such report stating it is gross of every charge (D-0509,
+> D-0525, D-0681), and no equity result may enter Selection V6 or execution
+> authority until a charter-sourced equity charge stack exists; and 213
+> instruments multiply the search by 213, so an in-sample result across the
+> pool is the largest of billions and means nothing until it is validated out
+> of sample.
+
+**Tests.** The invariant is `AF-01`. `runner::audit::an_equity_audit_is_gross_of_every_charge_and_never_labelled_an_index`,
+`runner::audit::an_index_audit_header_is_byte_identical_to_the_one_before_d0681`,
+`runner::audit::the_scope_changes_only_the_header`,
+`runner::audit::the_cost_scope_is_decided_by_the_kind_and_a_contract_has_none`,
+`cli::stored::the_audit_cost_scope_is_decided_by_the_kind_and_refuses_a_contract`
+and `cli::sweep_wiring_tests::the_audit_header_is_the_scope_the_caller_supplied`.
+The last one runs a whole audit over generated bars with each scope, so a
+constant anywhere between `AuditOptions` and the render fails it.
+
+**Not done here.** An equity charge stack. It needs charter-sourced rates for
+brokerage, STT, stamp duty, exchange charges, the SEBI fee and GST on a cash
+trade, and none is recorded. The `cli pool` report, which already states
+that no cost of any kind is charged (D-0509), is unchanged.
+
+**What no test pins, stated rather than implied.** Each of the four stored
+kernels takes its scope from `stored::audit_cost_scope(&key)` in one line, and
+no test drives a stored equity audit all the way to the render. The generated
+store fixture in `audited_stored_tests` has constant prices, so its ladder
+halts at the ceiling before anything is traded. A version of that test using
+RELIANCE was written and discarded for that reason. The key-to-scope mapping
+and the path from `AuditOptions` to the render are both pinned; the one line
+in each kernel is not.
+
+**Verification.** `cargo fmt --all --check` is clean. `cargo clippy -p runner`
+and `cargo clippy -p cli`, with `--all-targets -D warnings`, are clean. The
+full `runner` suite is green. For `cli`, 171 lib tests matching the stored,
+audit, sweep-wiring, audit-publication, candidate-trades and audited-range
+modules ran green, as did its three integration test binaries. The full `cli`
+suite was not run in one pass. `cargo mutants --in-diff` found 21 mutants:
+19 caught, 0 missed, 2 unviable (`CostScope` has no `Default`), 0 timed out.
+It ran with `--cap-lints true` under nextest, on the full `runner` suite plus
+146 `cli` tests from those same modules.
+
+One unrelated `cli` test,
+`boolean_search_command::integration_tests::generated_search_recovers_same_ordinal_and_refuses_missing_ancestry`,
+hits its own 360-second child bound on this machine. It failed that way when
+run alone in this worktree, and again on an archived copy of `79b9a1d5` (that
+run partly overlapped a build). It touches no code this entry changes, and it
+was left out of the mutation run's test set.
+
+### D-0682 — Refuse a cash-equity key named after an F&O index underlying — 2026-09-23
+
+**The defect.** `InstrumentKey::is_sweepable` accepted an NSE `(Cash, Equity)`
+key for any member of `FNO_INDEX`. Five of the 213 F&O underlyings are
+indices: `BANKNIFTY`, `FINNIFTY`, `MIDCPNIFTY`, `NIFTY` and `NIFTYNXT50`. An
+index has no cash equity, so a cash key named after one describes no
+instrument, yet it was sweepable. `cli::stored::swept_index` tries the two
+swept indices first and then the cash shape, so `FINNIFTY`, `MIDCPNIFTY` and
+`NIFTYNXT50` came back as sweepable stocks. `cli::pool::surface_under` put a
+stored `FINNIFTY` or `MIDCPNIFTY` on the pool surface, whichever segment
+directory held it. Three callers had already worked around the gap on their
+own: `cli::research::cash_symbols` filters through the Total Market index,
+`runner::research_family` does the same, and `api::recovery` keeps its own
+list of index names.
+
+**The membership is not new.** The note above `FNO_UNDERLYINGS` already names
+these five as the indices. `FNO_UNDERLYINGS_ISIN` carries `ISIN_ABSENT` at
+exactly their positions, because no numbering agency issues an index an ISIN,
+and `the_absent_isins_are_exactly_these_six_names` already pins them.
+`core::universe::FNO_INDEX_UNDERLYINGS` gives those facts one name.
+`the_fno_index_underlyings_are_exactly_the_fno_names_with_no_isin` fails the
+build if the constant stops being the ISIN-less F&O names in list order. It
+also requires every other F&O name to carry a well-formed ISIN, so the split
+between index and share covers the whole list.
+
+**The fix.** The cash arm now also requires that the symbol is none of the five
+names. `SWEPT` is untouched, so `NIFTY` and `BANKNIFTY` still sweep through the
+index arm, as the indices they are. `FINNIFTY`, `MIDCPNIFTY` and `NIFTYNXT50`
+sweep in neither shape. The surface's cash half is 208 shares, not 213 names.
+This does not narrow what `CLAUDE.md` §1 describes: §1 names "the cash equities
+of the 213 F&O underlyings — the stock's own price series", and the five
+indices have none. It corrects an implementation that let a made-up key
+through. `CLAUDE.md` is not edited here; the scope row in `docs/00-charter.md`
+§1 now states the count.
+
+**Cost.** On an `FNO_INDEX` hit the cash arm adds at most five string
+comparisons against a fixed five-element array, the same shape as the index
+arm's walk of `SWEPT`. It is spelled `all(|&index| index != symbol)` because
+clippy rewrites `any(==)` to the `.contains(&` spelling that gate 11 refuses.
+No bench times `is_sweepable`; its doc says UNVERIFIED, as before.
+
+**Messages.** `InstrumentError::NotSweepable` rendered *"the engine surface is
+fixed at two"*. That was true of two instruments until D-0506 and has been
+stale since. It now names both shapes and keeps the phrase "storable but not
+sweepable" that callers match on. `swept_index`'s refusal said *"the NSE cash
+equities of the 213 F&O underlyings (D-0506)"*, which a refusal of `FINNIFTY`
+would contradict. It now says "the 208 F&O underlyings that are shares, not
+indices (D-0506, D-0682)", with 208 derived from core's two lists rather than
+written into the CLI.
+
+**Tests.** `core::instrument::an_fno_index_underlying_is_never_a_sweepable_cash_equity`
+refuses all five as cash, accepts exactly the other 208, and sweeps only
+`NIFTY` and `BANKNIFTY` as indices.
+`cli::stored::an_fno_index_underlying_is_refused_by_the_surface_sentence`
+refuses the three by the surface sentence and walks all 213 through
+`swept_index`: 2 indices, 208 shares, 3 refused.
+`cli::pool::the_surface_is_the_swept_index_and_not_everything_stored` now seeds
+a `CASH/FINNIFTY` and an `INDEX/MIDCPNIFTY` directory, and both stay off the
+surface. `core::error::not_sweepable_names_both_shapes_of_the_surface_and_no_stale_count`
+pins the message. The core and CLI surface tests fail with the old cash arm
+restored and pass with the fix. AF-02.
+
+**Not changed.** `universe::of_equity` still stamps `FNO` on any of the five,
+because that answers membership, not sweepability. The workarounds in `cli`,
+`runner` and `api` stay as independent checks. `api::recovery`'s hand-kept
+list also names `NIFTYNEXT50`, a spelling `FNO_UNDERLYINGS` does not hold, and
+folding it into this constant is a separate change.
+
 ### D-0683 — Correct the crate graph and D-0453's list: `cli` has nine arrows, not seven — 2026-09-23
 
 `CLAUDE.md` §5 drew `cli` with seven arrows and said so in its prose. The
@@ -37872,6 +38069,118 @@ ledger, and gates 10b and 27 already hold identifier uniqueness for the sibling
 document as workflow steps. This is the same check on the next document.
 
 No crate, test, stored byte, condition bit or run identity changes.
+
+### D-0685 — Refuse the screen budget on every run that records — 2026-09-23
+
+**The defect (§3 rules 3 and 5).** With `BRUTEX_SCREEN_BUDGET_MS` set,
+`cap_for_budget` times a 256-candidate calibration prefix, and
+`cap_within_budget` turns that wall-clock reading into the number of
+candidates the exit grid prices. `policy_of` folds the budget (term sixteen)
+and the stated `screen_cap` (term three), but never the cap actually used. Two
+runs at one budget over the same bars could therefore price different
+candidate sets and record different answers under one `RunId`. The results
+ledger then refuses the second as a conflicting duplicate, or keeps whichever
+landed first.
+
+**Decision.** Every run that records refuses a usable budget by name before it
+reads its source or writes anything. `recorded_budget_refusal` returns
+`SCREEN_BUDGET_NOT_RECORDABLE` and is called:
+
+- in `audit_bars_guarded` whenever the audit has a recording target, before
+  its sweep-evidence attempt begins. Every recorded audit passes through here,
+  so this is the backstop for any caller.
+- at the top of `audit_stored_kernel`, `audit_range_kernel` and
+  `screen_range_kernel`, before they read bars. This covers `audit-stored`,
+  `audit-range`, `screen` and every `elite` step. Without it,
+  `audit_range_kernel` writes a preparation attempt before `audit_bars` could
+  refuse.
+- at the top of `one_rung`, before the store is resolved. Its support
+  derivation writes preparation and probe evidence before it reaches
+  `audit_range`. This covers `range-all`, `range-rung`, `descend` and
+  `POST /backtest/run`.
+
+The strict range audit refuses `BRUTEX_SCREEN_BUDGET_MS` at every value
+through strict admission (`strict_range_knobs::value`). That refusal comes
+before source admission and preparation, and on HTTP before a slot is
+claimed. The HTTP allowlist `KNOBS` no longer contains `screen_budget_ms`.
+`refuse_screen_budget` answers 400 to a `POST /backtest/run` or
+`audit-audited-range` body that names it, instead of dropping the field. serde
+would otherwise ignore the member, and a budget the operator typed would
+silently do nothing.
+
+**Kept as it was.** `BRUTEX_SCREEN_CAP` is unchanged, because it is a stated
+count that the identity folds. The unrecorded generated-bar `audit` still
+honours the budget: it has no identity and writes no record. A value
+`screen_budget_ms` cannot parse is not a budget. On the non-strict recorded
+paths it keeps the existing knob policy: the cap stays `screen_cap`, term
+sixteen stays `0`, and `KNOB REFUSED` names the value. Term sixteen stays in
+its position, because positional identity is append-only, and on a recorded
+run it is now always `0`. No existing identity changes. A run that used to
+record with a usable budget is now refused, and every other run keys exactly
+as before.
+
+**Why the derived cap is not folded instead.** The cap is decided by timing.
+Folding it would give one question a different identity from run to run. That
+moves the reproducibility failure instead of removing it.
+
+**Documentation corrected.**
+
+- `cap_within_budget` said the search "is then exactly as deterministic as it
+  was". It also said a jittering cap would re-key every run because
+  `screen_cap` is in the identity, and that quantising kept an idle and a busy
+  machine on one rung "unless they differ by a factor of two". The derived cap
+  is not in the identity. One nanosecond across a power of two halves it:
+  1,024 candidates at 1,000,000,000 ns and 512 at 1,000,000,001 ns, for a
+  4,000 ms budget over 256 sampled
+  (`quantised_caps_split_at_a_power_of_two_however_close_the_timings`). Its
+  cost line also left out the divide and the `ilog2`.
+- `ceiling_asked` said a rung swept alone and the same rung inside `range-all`
+  were "the same work". It also said the divided ceiling is "a scheduling fact
+  rather than a description of the search". The divided ceiling is the one
+  the ladder is given, and it decides whether the walk halts, as
+  `range_rung_arm`'s doc already said. `Params::of(ladder)` still hashes that
+  ceiling, so the two runs key differently, which is correct
+  (`the_run_identity_still_folds_the_divided_ceiling_the_ladder_was_given`).
+  The sibling test `the_identity_ceiling_does_not_move_when_sweeps_share_the_machine`
+  pins only the policy term. Its doc now says so.
+
+**Verified.** `recorded_runs_refuse_a_screen_budget_before_reading_or_writing`
+(AF-05) states the budget in a child process's environment, not in the
+process-wide knob store, so concurrently running recorded tests cannot see it.
+The three kernels, `one_rung`, `range_over` and a recorded `audit_bars` are
+each refused by name, and the fixture store stays byte-identical. An
+unrecorded `audit_bars` and `audit_run` still run under the budget, and a
+stated screen cap still records. Removing any one of the five call sites fails
+that test; each was checked by hand before commit. The strict path is pinned by
+`strict_admission_refuses_every_screen_budget_and_keeps_the_screen_cap` and
+by a new case in
+`strict_invalid_runtime_settings_refuse_before_real_source_admission_or_preparation`.
+`boolean_rejects_each_unused_legacy_setting_without_changing_ordinary_validation`
+used to assert that every strict name has some valid value on the ordinary
+path. It now asserts that the budget has none, and that the Boolean path still
+refuses it as an unused setting.
+
+Measured on this commit's tree (arm64 laptop): `cargo fmt --all --check` is
+clean. `cargo clippy -p cli -p api --all-targets --locked --offline -- -D
+warnings` is clean. `cargo nextest run -p cli -p api --locked --offline
+--no-fail-fast` ran 2,589 tests: 2,589 passed, 3 skipped, 0 failed. It ran
+outside the command sandbox, because the sandbox refuses the loopback binds
+that 52 api tests make. `cargo mutants --in-diff` over the changed Rust
+sources found 28 mutants: 24 caught, 0 missed, 4 unviable, 0 timed out. The
+four unviable mutants construct `Default` values for types that have none, or
+turn a let-chain `&&` into `||`, which does not parse. The baseline was
+skipped because the unmutated suite had just passed. Tests ran in parallel
+under nextest with `--max-fail=1:immediate`, not single-threaded as CI runs
+them.
+The HTTP paths are pinned by
+`a_screen_budget_is_refused_by_name_and_the_screen_cap_still_applies` and
+`strict_command_refuses_a_screen_budget_by_name_at_every_value`.
+
+**Not done.** The browser still renders a `screen_budget_ms` control in
+`web/src/routes/backtest/+page.svelte`, `web/src/lib/receipt-batch.js` and the
+built bundle. Filling it now returns the named 400 refusal. Removing the
+control is front-end work for a separate change and is recorded in
+`docs/06-limits.md`.
 
 ### D-0686 — Census-backed GET routes take the stamped census, not a fresh manifest read — 2026-09-23
 

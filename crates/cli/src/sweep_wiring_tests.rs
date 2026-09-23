@@ -54,6 +54,7 @@ fn options(root: &Path) -> AuditOptions<'_> {
         lens: runner::rank::Lens::Detectability,
         ceiling: Some(64),
         validate: false,
+        cost: runner::audit::CostScope::IndexSpot,
     }
 }
 
@@ -343,4 +344,60 @@ fn a_real_candidate_budget_halt_and_certified_completion_keep_opposite_terminal_
         classified(census, Some(0), finished, false),
         (Completion::Completed, Completion::Refused)
     );
+}
+
+/// THE AUDIT HEADER FOLLOWS THE CALLER'S COST SCOPE THROUGH THE WHOLE AUDIT.
+///
+/// D-0681. `render_selected` used to print the index header for every run,
+/// so a stored stock audit told its reader there was no brokerage, STT, stamp
+/// or GST. `runner::audit` proves each header renders; this proves the scope a
+/// caller puts in `AuditOptions` is the one the final render receives, rather
+/// than a constant somewhere between the two. Generated bars and no recording:
+/// the header is the only thing under test, and nothing is written anywhere.
+#[test]
+fn the_audit_header_is_the_scope_the_caller_supplied() {
+    use runner::audit::CostScope;
+
+    let run = |cost: CostScope| {
+        audit_bars(
+            &super::evaluator(),
+            runner::synthetic::sessions(12),
+            "GENERATED TEST FIXTURE",
+            1_400,
+            None,
+            AuditOptions {
+                prepared_column: None,
+                replay: None,
+                execution: None,
+                native_minute_execution: true,
+                recording: None,
+                rules: Rules::BASELINE,
+                lens: runner::rank::Lens::Detectability,
+                ceiling: Some(50_000),
+                validate: false,
+                cost,
+            },
+        )
+    };
+
+    let index = run(CostScope::IndexSpot);
+    assert!(
+        index.contains("\nAUDIT\n  INDEX SPOT run. There is no brokerage"),
+        "an index audit keeps the header it has always printed:\n{index}"
+    );
+    assert!(!index.contains("GROSS OF EVERY CHARGE"), "{index}");
+
+    let equity = run(CostScope::CashEquity);
+    assert!(
+        equity
+            .contains("\nAUDIT\n  CASH EQUITY run. EVERY TOTAL BELOW IS GROSS OF EVERY CHARGE.\n"),
+        "an equity audit must be labelled gross of every charge:\n{equity}"
+    );
+    for index_claim in ["INDEX SPOT run", "no brokerage"] {
+        assert!(
+            !equity.contains(index_claim),
+            "{index_claim:?} is false of a share trade and must not reach an \
+             equity audit:\n{equity}"
+        );
+    }
 }

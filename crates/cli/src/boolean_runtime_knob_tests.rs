@@ -19,11 +19,23 @@ fn valid_legacy_value(name: &str) -> &'static str {
 fn boolean_rejects_each_unused_legacy_setting_without_changing_ordinary_validation() {
     for name in NAMES {
         let raw = valid_legacy_value(name);
-        assert!(
-            value(name, raw),
-            "fixture is valid on ordinary audit path: {name}"
-        );
-        assert_eq!(validate_with(&[(name, raw.to_owned())], |_| None), Ok(()));
+        if name == "BRUTEX_SCREEN_BUDGET_MS" {
+            // NO VALUE IS VALID ON THE ORDINARY PATH ANY MORE: the strict range
+            // audit records, and a budget's cap is decided by timing. D-0685.
+            assert!(!value(name, raw), "a budget cannot reach a recorded audit");
+            assert_eq!(
+                validate_with(&[(name, raw.to_owned())], |_| None),
+                Err(KnobRefusal {
+                    invalid: vec![name]
+                })
+            );
+        } else {
+            assert!(
+                value(name, raw),
+                "fixture is valid on ordinary audit path: {name}"
+            );
+            assert_eq!(validate_with(&[(name, raw.to_owned())], |_| None), Ok(()));
+        }
         let observed = validate_boolean_read(|key| (key == name).then(|| raw.to_owned()));
         if name == "BRUTEX_GRID_RUNGS" {
             assert_eq!(observed, Ok(()));

@@ -591,6 +591,9 @@ fn strict_invalid_runtime_settings_refuse_before_real_source_admission_or_prepar
         ("BRUTEX_HORIZON_BARS", "4294967296"),
         ("BRUTEX_TOP", "9223372036854775808"),
         ("BRUTEX_SCREEN_CAP", "10000001"),
+        // USABLE, AND STILL REFUSED: the strict audit records, and a budget's
+        // cap is decided by timing the identity cannot name. D-0685.
+        ("BRUTEX_SCREEN_BUDGET_MS", "5000"),
         ("BRUTEX_GRID_RUNGS", "1"),
         ("BRUTEX_GRID_RESOLUTION", "bad"),
         ("BRUTEX_MAX_STOP_POINTS", "bad"),

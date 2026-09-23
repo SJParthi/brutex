@@ -1127,6 +1127,29 @@ pub const FNO_UNDERLYINGS: [&str; 213] = [
     "ZYDUSLIFE",
 ];
 
+/// The members of [`FNO_UNDERLYINGS`] that are INDICES, not shares.
+///
+/// Not [`FNO_INDEX`], which is the membership table over all 213 names. These
+/// five are the underlyings of index futures and options, and nothing here is
+/// new information: the note above [`FNO_UNDERLYINGS`] already names them as
+/// the five that are indices, and [`FNO_UNDERLYINGS_ISIN`] carries
+/// [`ISIN_ABSENT`] at exactly their positions, because no numbering agency
+/// issues an index an ISIN. This constant gives those two facts one name, and
+/// `core::universe::the_fno_index_underlyings_are_exactly_the_fno_names_with_no_isin`
+/// fails the build if it ever stops being the ISIN-less positions of the F&O
+/// list, in the same order.
+///
+/// # Why it exists
+///
+/// An index has no cash equity. [`InstrumentKey::is_sweepable`]'s cash arm
+/// accepted every [`FNO_INDEX`] member, so a made-up `(NSE, Cash, Equity)` key
+/// named `FINNIFTY` passed as a sweepable stock. The cash arm refuses these
+/// five now. `NIFTY` and `BANKNIFTY` stay on the surface through the index
+/// arm, as [`InstrumentKey::SWEPT`], which is the shape they actually have.
+/// D-0682.
+pub const FNO_INDEX_UNDERLYINGS: [&str; 5] =
+    ["BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTY", "NIFTYNXT50"];
+
 /// The 50 NIFTY 50 constituents.
 ///
 /// Transcribed from
@@ -5563,6 +5586,58 @@ mod tests {
             absent, expected,
             "the absent set is a MEASUREMENT and it changed"
         );
+    }
+
+    /// AF-02. `FNO_INDEX_UNDERLYINGS` is READ from the F&O list's own ISIN
+    /// column, not typed from memory: the F&O names NSE prints no ISIN beside
+    /// are the indices, and every other name carries a well-formed one and is
+    /// therefore a share. The two halves together make the split exhaustive,
+    /// so the cash arm of `is_sweepable` refuses exactly the index names and
+    /// no share. D-0682.
+    #[test]
+    fn the_fno_index_underlyings_are_exactly_the_fno_names_with_no_isin() {
+        let isin_less: Vec<&str> = FNO_UNDERLYINGS
+            .iter()
+            .zip(FNO_UNDERLYINGS_ISIN.iter())
+            .filter(|(_, isin)| **isin == ISIN_ABSENT)
+            .map(|(name, _)| *name)
+            .collect();
+        assert_eq!(
+            isin_less, FNO_INDEX_UNDERLYINGS,
+            "the index underlyings are the ISIN-less F&O names, in list order"
+        );
+
+        let mut shares = 0_usize;
+        for (name, isin) in FNO_UNDERLYINGS.iter().zip(FNO_UNDERLYINGS_ISIN.iter()) {
+            if FNO_INDEX_UNDERLYINGS.contains(name) {
+                continue;
+            }
+            assert!(
+                Isin::new(isin).is_ok(),
+                "{name} is not an index, so it must carry a real ISIN: {isin:?}"
+            );
+            shares += 1;
+        }
+        assert_eq!(shares, 208, "213 F&O underlyings less 5 indices");
+        assert_eq!(
+            FNO_UNDERLYINGS.len() - FNO_INDEX_UNDERLYINGS.len(),
+            shares,
+            "every index name is an F&O underlying, so the difference is the share count"
+        );
+
+        for index in FNO_INDEX_UNDERLYINGS {
+            assert!(FNO_INDEX.contains(index), "{index} is an F&O underlying");
+            assert!(
+                !NTM_INDEX.contains(index),
+                "{index} is an index, not a Total Market share"
+            );
+        }
+        for (_, swept) in InstrumentKey::SWEPT {
+            assert!(
+                FNO_INDEX_UNDERLYINGS.contains(&swept),
+                "{swept} is swept as an index, and is one of the F&O index underlyings"
+            );
+        }
     }
 
     #[test]

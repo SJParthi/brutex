@@ -15,11 +15,14 @@ pulled), then widened by D-0506 to the cash equities of the F&O universe.
 |---|---|---|---|
 | `NSE-NIFTY` | NSE | INDEX | — |
 | `NSE-BANKNIFTY` | NSE | INDEX | — |
-| the 213 F&O underlyings, e.g. `NSE-HINDALCO` | NSE | CASH | D-0506 |
+| the 208 F&O underlyings that are shares, e.g. `NSE-HINDALCO` | NSE | CASH | D-0506, D-0682 |
 
 The third row is not a list here and must not become one: the names are
 `core::universe::FNO_UNDERLYINGS`, derived from NSE's own F&O list with an
 ISIN beside each, and `InstrumentKey::is_sweepable` probes that index in O(1).
+The five F&O underlyings that are indices, and so carry no ISIN, are
+`core::universe::FNO_INDEX_UNDERLYINGS` and are refused as cash: an index has no
+cash equity (D-0682). NIFTY and BANKNIFTY are swept as the indices above.
 The cash equity is the stock's own price series — what the spot level is for an
 index. It does not expire.
 

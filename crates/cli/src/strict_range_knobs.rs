@@ -57,11 +57,10 @@ pub fn request_value(name: &str, raw: &str) -> bool {
 }
 
 fn value(name: &str, raw: &str) -> bool {
-    use crate::knobs::{machine_count, nonnegative_floor, positive_count};
+    use crate::knobs::{machine_count, nonnegative_floor};
     match name {
         "BRUTEX_CEILING" => machine_count(raw, crate::ceiling_limit()).is_some(),
         "BRUTEX_SCREEN_CAP" => machine_count(raw, crate::SCREEN_CAP_CEILING).is_some(),
-        "BRUTEX_SCREEN_BUDGET_MS" => positive_count(raw).is_some(),
         "BRUTEX_TOP" => nonnegative_floor(raw)
             .and_then(|count| usize::try_from(count).ok())
             .is_some_and(|count| count > 0),
@@ -84,6 +83,11 @@ fn value(name: &str, raw: &str) -> bool {
         | "BRUTEX_PROTECTED_EXITS"
         | "BRUTEX_MIN_FILL_HEADROOM_BP"
         | "BRUTEX_MIN_AVG_RR_BP" => nonnegative_floor(raw).is_some(),
+        // `BRUTEX_SCREEN_BUDGET_MS` IS IN `NAMES` AND REACHES THIS ARM ON
+        // PURPOSE: it is never usable, whatever it says. The strict range audit
+        // records, and a budget derives the priced cap from a wall-clock
+        // calibration the identity cannot name, so any stated value is refused
+        // before source admission, preparation or a slot claim. D-0685.
         _ => false,
     }
 }
@@ -206,11 +210,6 @@ mod tests {
                 crate::ceiling_limit().saturating_add(1).to_string(),
             ),
             (
-                "BRUTEX_SCREEN_BUDGET_MS",
-                u64::MAX.to_string(),
-                "18446744073709551616".to_owned(),
-            ),
-            (
                 "BRUTEX_GRID_RESOLUTION",
                 i64::MAX.to_string(),
                 "9223372036854775808".to_owned(),
@@ -253,5 +252,28 @@ mod tests {
             Ok(())
         );
         assert_eq!(validate_with(&[], |_| None), Ok(()));
+    }
+
+    /// The strict range audit records, so a screen budget is refused at every
+    /// value while the stated screen cap stays usable. D-0685.
+    #[test]
+    fn strict_admission_refuses_every_screen_budget_and_keeps_the_screen_cap() {
+        for raw in ["1", "5000", &u64::MAX.to_string(), "", "abc"] {
+            assert!(!value("BRUTEX_SCREEN_BUDGET_MS", raw), "{raw:?}");
+            assert!(!request_value("BRUTEX_SCREEN_BUDGET_MS", raw), "{raw:?}");
+            let refusal = validate_with(&[("BRUTEX_SCREEN_BUDGET_MS", raw.to_owned())], |_| None)
+                .expect_err("a recorded strict run cannot take a budget");
+            assert_eq!(refusal.invalid, ["BRUTEX_SCREEN_BUDGET_MS"]);
+            let from_environment = validate_with(&[], |name| {
+                (name == "BRUTEX_SCREEN_BUDGET_MS").then(|| raw.to_owned())
+            })
+            .expect_err("the process environment is refused the same way");
+            assert_eq!(from_environment.invalid, ["BRUTEX_SCREEN_BUDGET_MS"]);
+        }
+        assert!(request_value("BRUTEX_SCREEN_CAP", "7"));
+        assert_eq!(
+            validate_with(&[("BRUTEX_SCREEN_CAP", "7".to_owned())], |_| None),
+            Ok(())
+        );
     }
 }

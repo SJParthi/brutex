@@ -327,8 +327,9 @@ fn count(n: usize) -> u64 {
 /// surface, sorted and deduplicated.
 ///
 /// `swept_index` is the one authority — the two indices by name and the F&O
-/// cash equities by `FNO_INDEX` — so a stored equity off the F&O list, a
-/// reference index or a contract is skipped here without a second list.
+/// cash equities by `FNO_INDEX` less its five index names — so a stored equity
+/// off the F&O list, a reference index, an F&O index other than the two, or a
+/// contract is skipped here without a second list.
 fn surface_under(
     root: &std::path::Path,
     vendor: brutex_core::vendor::Vendor,
@@ -971,8 +972,12 @@ mod tests {
     }
 
     /// **The surface is `swept_index`, not the catalog: a stored equity off the
-    /// F&O list and a reference index are listed by the store and skipped
-    /// here.**
+    /// F&O list, a reference index and an F&O index other than the two are
+    /// listed by the store and skipped here.**
+    ///
+    /// `FINNIFTY` and `MIDCPNIFTY` are F&O underlyings, and until D-0682 each
+    /// reached this surface through the cash arm — as a stock that does not
+    /// exist — whichever segment directory the store filed it under.
     #[test]
     fn the_surface_is_the_swept_index_and_not_everything_stored() {
         let mut root = std::env::temp_dir();
@@ -983,12 +988,21 @@ mod tests {
             ("INDEX", "INDIAVIX"),
             ("CASH", "RELIANCE"),
             ("CASH", "ZZQXNOTFNO"),
+            ("CASH", "FINNIFTY"),
+            ("INDEX", "MIDCPNIFTY"),
         ] {
             let dir = root.join(format!("bars/zerodha/NSE/{segment}/{symbol}/60min"));
             std::fs::create_dir_all(&dir).expect("dirs");
             std::fs::write(dir.join("2026-07.bin"), b"").expect("a file the catalog lists");
         }
         assert!(!brutex_core::universe::FNO_INDEX.contains("ZZQXNOTFNO"));
+        for index in ["FINNIFTY", "MIDCPNIFTY"] {
+            assert!(
+                brutex_core::universe::FNO_INDEX.contains(index)
+                    && brutex_core::universe::FNO_INDEX_UNDERLYINGS.contains(&index),
+                "{index} must be an F&O index underlying, or its absence below proves nothing"
+            );
+        }
         let surface = super::surface_under(&root, brutex_core::vendor::Vendor::Zerodha, "60min")
             .expect("listed");
         assert_eq!(surface, vec!["NIFTY".to_owned(), "RELIANCE".to_owned()]);

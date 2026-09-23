@@ -300,6 +300,21 @@ fn calibrated_caps_keep_measured_work_and_never_exceed_available_candidates() {
     }
 }
 
+/// Quantising to a power of two does NOT keep two close timings on one cap.
+///
+/// `cap_within_budget`'s doc once said an idle and a busy machine "land on the
+/// same rung unless they differ by a factor of two". One nanosecond across a
+/// power of two halves the cap, so one budget can price 1,024 candidates on one
+/// run and 512 on the next -- the reason a run that records refuses the budget.
+/// D-0685.
+#[test]
+fn quantised_caps_split_at_a_power_of_two_however_close_the_timings() {
+    // 4,000 ms over 256 candidates timed at exactly one second fits 1,024.
+    assert_eq!(cap_within_budget(256, 1_000_000_000, 4_000, 10_000), 1_024);
+    // One nanosecond slower fits 1,023.99..., which quantises to 512.
+    assert_eq!(cap_within_budget(256, 1_000_000_001, 4_000, 10_000), 512);
+}
+
 #[test]
 fn support_is_scaled_in_ppm_and_cannot_disable_extinction() {
     for (bars, support, expected) in [

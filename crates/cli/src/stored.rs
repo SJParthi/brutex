@@ -1819,15 +1819,19 @@ fn clipped(word: &str) -> String {
 /// belonging to the sweep surface. Every stored-sweep entry door comes through
 /// this helper so the authoritative allow-list remains
 /// [`InstrumentKey::is_sweepable`] -- [`InstrumentKey::SWEPT`] for the indices
-/// and `FNO_INDEX` for the equities -- not a second string list in the CLI or
-/// API.
+/// and `FNO_INDEX` less `FNO_INDEX_UNDERLYINGS` for the equities -- not a
+/// second string list in the CLI or API.
 ///
 /// # How one word resolves to one of two shapes
 ///
 /// The two indices are tried first, by name. A word that is not one of them is
 /// tried as a cash equity. Both keys are built and both are checked, so the
 /// refusal a reader sees names the surface as it actually is rather than
-/// "not an index".
+/// "not an index". An F&O underlying that is an index -- `FINNIFTY`,
+/// `MIDCPNIFTY`, `NIFTYNXT50` -- fails both: it is not one of the two, and core
+/// refuses a cash key named after an index (D-0682). The refusal's share count
+/// is derived from core's two lists rather than written here, so it cannot
+/// drift from the predicate it describes.
 ///
 /// Every refusal is ONE SENTENCE, whatever the word did wrong. A malformed
 /// word, a well-formed word off the surface and a contract are three causes
@@ -1857,10 +1861,13 @@ pub(crate) fn swept_index(underlying: &str) -> Result<InstrumentKey, Refusal> {
             .map(|(_, symbol)| *symbol)
             .collect::<Vec<_>>()
             .join(", ");
+        let shares = brutex_core::universe::FNO_UNDERLYINGS.len()
+            - brutex_core::universe::FNO_INDEX_UNDERLYINGS.len();
         format!(
             "`{named}` is not an instrument this engine sweeps: {why}. \
              The sweep surface is the NSE spot indices {indices} and the NSE \
-             cash equities of the 213 F&O underlyings (D-0506). Nothing was read."
+             cash equities of the {shares} F&O underlyings that are shares, not \
+             indices (D-0506, D-0682). Nothing was read."
         )
     };
     // THE INDEX FIRST, BY NAME. NIFTY and BANKNIFTY are indices and nothing
@@ -1871,7 +1878,7 @@ pub(crate) fn swept_index(underlying: &str) -> Result<InstrumentKey, Refusal> {
         return Ok(as_index);
     }
     // THEN THE CASH EQUITY. Same word, the stock's own price series. Sweepable
-    // only when the symbol is one of the 213 F&O underlyings.
+    // only when the symbol is an F&O underlying that is a share, not an index.
     let as_cash =
         InstrumentKey::cash(Exchange::Nse, underlying).map_err(|why| refuse(why.to_string()))?;
     as_cash
@@ -1916,6 +1923,30 @@ pub(crate) const fn vwap_availability(key: &InstrumentKey) -> Availability {
         Kind::Equity => Availability::Present,
         Kind::Index | Kind::Future { .. } | Kind::Option { .. } => Availability::Absent,
     }
+}
+
+/// Which charge statement heads this instrument's audit: decided by WHAT the
+/// instrument is, exactly as [`vwap_availability`] is. D-0681.
+///
+/// An index is [`runner::audit::CostScope::IndexSpot`] -- no charge exists.
+/// A cash equity is [`runner::audit::CostScope::CashEquity`] -- every charge
+/// exists and none is subtracted, so the report says GROSS OF EVERY CHARGE
+/// rather than the index's "there is no brokerage".
+///
+/// # Errors
+///
+/// A futures or options contract. [`swept_index`] refuses one before any
+/// caller holds its key, and neither header describes one; unlike the VWAP
+/// verdict there is no harmless answer to fall back to, because each header
+/// makes a claim about charges that is false of a contract. So this refuses
+/// by name rather than borrowing a label.
+pub(crate) fn audit_cost_scope(key: &InstrumentKey) -> Result<runner::audit::CostScope, Refusal> {
+    runner::audit::CostScope::of(key.kind).ok_or_else(|| {
+        format!(
+            "`{key}` is a futures or options contract: the sweep surface holds \
+             none (CLAUDE.md section 1), and no audit header states its charges"
+        )
+    })
 }
 
 /// One instrument-month of real bars, or the reason there are none.
@@ -3278,6 +3309,59 @@ mod tests {
         );
     }
 
+    /// AF-02. An F&O underlying that is an INDEX, other than the two swept
+    /// ones, is refused by the surface sentence -- it used to come back as a
+    /// cash equity. The sentence's share count is core's, and every share is
+    /// still accepted as a cash equity. D-0682.
+    #[test]
+    fn an_fno_index_underlying_is_refused_by_the_surface_sentence() {
+        use brutex_core::universe::{FNO_INDEX, FNO_INDEX_UNDERLYINGS, FNO_UNDERLYINGS};
+
+        for name in ["FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50"] {
+            assert!(
+                FNO_INDEX.contains(name) && FNO_INDEX_UNDERLYINGS.contains(&name),
+                "{name} must be an F&O index underlying, or this proves nothing"
+            );
+            let why = swept_index(name).expect_err("an index has no cash equity to sweep");
+            assert!(
+                why.contains(&format!("`{name}` is not an instrument this engine sweeps")),
+                "{why}"
+            );
+            assert!(why.contains("storable but not sweepable"), "{why}");
+            assert!(
+                why.contains("The sweep surface is the NSE spot indices NIFTY, BANKNIFTY"),
+                "{why}"
+            );
+            assert!(
+                why.contains(
+                    "cash equities of the 208 F&O underlyings that are shares, not indices \
+                     (D-0506, D-0682). Nothing was read."
+                ),
+                "the share count is 213 less 5: {why}"
+            );
+        }
+
+        let mut indices = 0_usize;
+        let mut shares = 0_usize;
+        let mut refused = Vec::new();
+        for name in FNO_UNDERLYINGS {
+            match swept_index(name) {
+                Ok(key) if key.kind == Kind::Index => indices += 1,
+                Ok(key) => {
+                    assert_eq!(key.kind, Kind::Equity, "{name}");
+                    shares += 1;
+                }
+                Err(_) => refused.push(name),
+            }
+        }
+        assert_eq!(
+            (indices, shares),
+            (2, 208),
+            "NIFTY, BANKNIFTY and the shares"
+        );
+        assert_eq!(refused, ["FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50"]);
+    }
+
     #[test]
     fn exactly_the_two_core_sweep_keys_cross_the_stored_loader_guard() {
         assert_eq!(
@@ -3401,6 +3485,52 @@ mod tests {
             },
         };
         assert_eq!(vwap_availability(&option), Availability::Absent);
+    }
+
+    /// **The audit's charge statement is the KIND too, and a contract gets none.**
+    ///
+    /// D-0681. Every stored audit printed the index header -- "There is no
+    /// brokerage, STT, stamp or GST" -- over a stock. The scope now comes from
+    /// the same key `swept_index` resolved: an index keeps its header, an F&O
+    /// cash equity is labelled gross of every charge, and a contract is refused
+    /// by name, because both headers make a charge claim that is false of one.
+    #[test]
+    fn the_audit_cost_scope_is_decided_by_the_kind_and_refuses_a_contract() {
+        use brutex_core::instrument::{Expiry, Segment};
+        use brutex_core::symbol::Symbol;
+        use runner::audit::CostScope;
+
+        for (_, symbol) in InstrumentKey::SWEPT {
+            let index = swept_index(symbol).expect("a swept index");
+            assert_eq!(
+                audit_cost_scope(&index),
+                Ok(CostScope::IndexSpot),
+                "{symbol}: an index level has no charge to be gross of"
+            );
+        }
+        for symbol in ["RELIANCE", "HINDALCO", "TCS"] {
+            let cash = swept_index(symbol).expect("an F&O cash equity");
+            assert_eq!(cash.kind, Kind::Equity, "{symbol}: fixture premise");
+            assert_eq!(
+                audit_cost_scope(&cash),
+                Ok(CostScope::CashEquity),
+                "{symbol}: a share trade pays every charge, and none is subtracted"
+            );
+        }
+
+        let future = InstrumentKey {
+            exchange: Exchange::Nse,
+            segment: Segment::Fno,
+            underlying: Symbol::new("NIFTY").expect("valid"),
+            kind: Kind::Future {
+                expiry: Expiry::new(2026, 9, 29).expect("a real expiry"),
+            },
+        };
+        let refused = audit_cost_scope(&future).expect_err("a contract has no audit header");
+        assert!(
+            refused.contains(&future.to_string()) && refused.contains("contract"),
+            "the refusal must name the key and say why: {refused}"
+        );
     }
 
     /// **An unbounded argument is cut before it reaches the refusal.**

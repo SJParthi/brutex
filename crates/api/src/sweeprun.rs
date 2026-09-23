@@ -432,11 +432,20 @@ pub struct Asked {
 ///
 /// Ordered as an operator reads them: what to search, how much of it to price,
 /// how much to keep, then the admission rules.
-const KNOBS: [(&str, &str); 16] = [
+///
+/// # `screen_budget_ms` was here, and is now refused by name -- D-0685
+///
+/// Every run these routes start records. A screen budget derives how many
+/// candidates are priced from a wall-clock calibration that the run identity
+/// cannot name, so one identity could record two different answers. The field
+/// is therefore not in this table, and [`refuse_screen_budget`] refuses a body
+/// that names it rather than letting serde drop it: a budget the operator typed
+/// that silently did nothing would be the fallback `CLAUDE.md` §4 bans.
+/// `screen_cap` remains, because it is a stated count the identity folds.
+const KNOBS: [(&str, &str); 15] = [
     ("support_ppm", "BRUTEX_SUPPORT_PPM"),
     ("ceiling", "BRUTEX_CEILING"),
     ("screen_cap", "BRUTEX_SCREEN_CAP"),
-    ("screen_budget_ms", "BRUTEX_SCREEN_BUDGET_MS"),
     ("top", "BRUTEX_TOP"),
     ("validate", "BRUTEX_VALIDATE"),
     ("horizon_bars", "BRUTEX_HORIZON_BARS"),
@@ -579,7 +588,6 @@ impl WireBody {
             "support_ppm" => self.support_ppm.as_ref(),
             "ceiling" => self.ceiling.as_ref(),
             "screen_cap" => self.screen_cap.as_ref(),
-            "screen_budget_ms" => self.screen_budget_ms.as_ref(),
             "top" => self.top.as_ref(),
             "validate" => self.validate.as_ref(),
             "horizon_bars" => self.horizon_bars.as_ref(),
@@ -595,6 +603,26 @@ impl WireBody {
             _ => None,
         }
     }
+}
+
+/// Refuses a body that names `screen_budget_ms`, whatever its value. D-0685.
+///
+/// Kept in [`WireBody`] only so that it can be refused: dropped from the schema,
+/// serde would ignore it and a budget the operator typed would silently do
+/// nothing. Any value refuses, an empty one included, because this setting
+/// cannot be set at all -- naming it is the error.
+fn refuse_screen_budget(body: &WireBody) -> Result<(), Refusal> {
+    if body.screen_budget_ms.as_ref().is_some() {
+        return Err(Refusal::Malformed(
+            "`screen_budget_ms` is refused: every run this route starts is recorded, \
+             and a screen budget derives how many candidates are priced from a \
+             wall-clock calibration the run identity cannot name, so one identity \
+             could record different answers. Omit it and bound the screen with \
+             `screen_cap`, a stated count. No setting was ignored."
+                .to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /// Parse exactly one complete JSON object before reading any field from it.
@@ -779,6 +807,9 @@ fn list_field(body: &WireBody, name: &str) -> Option<Vec<String>> {
 /// `from`, a support threshold of zero, or a rung the engine does not sweep.
 pub fn asked_from(body: &str) -> Result<Asked, Refusal> {
     let body = wire_body(body)?;
+    // THIS ROUTE APPLIES THE BODY'S KNOBS, so it is where a budget is refused.
+    // Descents and `sweep-all` share `asked_from_wire` but apply none. D-0685.
+    refuse_screen_budget(&body)?;
     asked_from_wire(&body)
 }
 
@@ -3073,6 +3104,7 @@ fn strict_request<'a>(
 }
 
 fn strict_knobs(body: &WireBody) -> Result<Vec<(&'static str, String)>, Refusal> {
+    refuse_screen_budget(body)?;
     for field_name in ["support_ppm", "sizing_rate_bp"] {
         if body.scalar(field_name).is_some() {
             return Err(Refusal::Malformed(format!(
@@ -3537,6 +3569,46 @@ mod tests {
                 "`{written}` must reach the engine as the only string it reads as off"
             );
         }
+    }
+
+    /// The screen budget is refused by name rather than dropped: every run this
+    /// route starts records, and a budget's cap is decided by timing the run
+    /// identity cannot name. The stated screen cap still reaches the engine.
+    /// D-0685.
+    #[test]
+    fn a_screen_budget_is_refused_by_name_and_the_screen_cap_still_applies() {
+        assert!(
+            KNOBS
+                .iter()
+                .all(|(asked, name)| *asked != "screen_budget_ms"
+                    && *name != "BRUTEX_SCREEN_BUDGET_MS"),
+            "no request may set the budget"
+        );
+        for written in ["5000", "\"5000\"", "\"\"", "\"not-a-budget\""] {
+            let raw = format!(
+                r#"{{"feed":"zerodha","underlying":"NIFTY",{SPAN},"screen_budget_ms":{written}}}"#
+            );
+            let why = asked_from(&raw).expect_err("a budget cannot reach a recorded run");
+            assert_eq!(why.status(), axum::http::StatusCode::BAD_REQUEST);
+            assert!(
+                why.why().starts_with("`screen_budget_ms` is refused"),
+                "{written}: {}",
+                why.why()
+            );
+            assert!(
+                why.why().contains("No setting was ignored"),
+                "{}",
+                why.why()
+            );
+        }
+        let capped =
+            format!(r#"{{"feed":"zerodha","underlying":"NIFTY",{SPAN},"screen_cap":"7"}}"#);
+        assert_eq!(
+            asked_from(&capped)
+                .expect("a stated cap is a good body")
+                .knobs,
+            vec![("BRUTEX_SCREEN_CAP", "7".to_owned())]
+        );
     }
 
     /// Every knob in the table is reachable from a body, so a control the page

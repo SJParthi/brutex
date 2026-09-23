@@ -35,10 +35,13 @@ stored and are never swept.
 objective is the rare, massive winner — a setup that fires seldom, loses tiny
 when it loses, and pays enormously when it pays. Those moves exist in single
 stocks and are averaged away in an index. Two consequences follow and neither
-is optional: a stock CAN be bought, so its costs are real and must be charged
-before ranking, not after; and 213 instruments multiply the search by 213, so
-an in-sample result across the pool is the largest of billions and means
-nothing until it is validated out of sample.
+is optional: a stock CAN be bought, so its costs are real — equities may be
+ranked cost-excluded only as labelled research, every such report stating it
+is gross of every charge (D-0509, D-0525, D-0681), and no equity result may
+enter Selection V6 or execution authority until a charter-sourced equity
+charge stack exists; and 213 instruments multiply the search by 213, so an
+in-sample result across the pool is the largest of billions and means nothing
+until it is validated out of sample.
 
 ---
 

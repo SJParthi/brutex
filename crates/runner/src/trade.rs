@@ -63,10 +63,21 @@
 //!
 //! Brokerage, STT, stamp duty, exchange charges and GST. `costs::trip::price`
 //! computes all of them and needs a [`costs::trip::Contract`], a broker and a
-//! quantity. The sweep runs on **spot indices**, and a spot index is not
-//! tradeable: the contract that would actually be bought is a future or an
-//! option, and choosing which is a decision `CLAUDE.md` §3 rule 1 forbids this
-//! module from making up.
+//! quantity. **This paragraph used to say the sweep runs on spot indices, and
+//! that stopped being the whole surface at D-0506.** The swept surface is two
+//! kinds, and the reason nothing is charged differs between them:
+//!
+//! * **A spot index** is not tradeable: the contract that would actually be
+//!   bought is a future or an option, and choosing which is a decision
+//!   `CLAUDE.md` §3 rule 1 forbids this module from making up.
+//! * **An F&O cash equity** IS tradeable -- the shares themselves are bought --
+//!   and every one of those charges applies. `costs` holds no equity charge
+//!   path (`costs::scope::Segment` has no equity variant) and
+//!   `docs/00-charter.md` records no source for an equity rate, so nothing is
+//!   charged here either. A stock's trades are therefore GROSS of real charges
+//!   rather than free of them, the ranking built on them is cost-excluded
+//!   research (D-0509, D-0525), and `crate::audit::CostScope::CashEquity` is
+//!   what makes the report say so. D-0681.
 //!
 //! Slippage is no longer applied either -- see above. So every figure here is
 //! **gross of charges AND gross of slippage**: a fill at a price the bar

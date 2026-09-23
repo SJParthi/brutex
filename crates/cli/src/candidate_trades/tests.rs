@@ -643,6 +643,7 @@ fn actual_audit_refuses_a_failed_capture_before_publishing_its_parent() {
             lens: runner::rank::Lens::Detectability,
             ceiling: Some(50_000),
             validate: false,
+            cost: runner::audit::CostScope::IndexSpot,
         },
     );
     crate::knobs::clear_all();

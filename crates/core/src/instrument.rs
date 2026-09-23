@@ -255,10 +255,13 @@ impl InstrumentKey {
     ///
     /// This is no longer the whole sweep surface. D-0506 widened it to the
     /// F&O cash equities as well, and those are not listed here: they are the
-    /// 213 names `crate::universe::FNO_UNDERLYINGS` already holds, probed in
-    /// O(1) through `FNO_INDEX`. Copying them into a second list is how two
-    /// lists drift, and the audit that found seven stale counts in this
-    /// crate's own prose is the argument against it. See [`Self::is_sweepable`].
+    /// names `crate::universe::FNO_UNDERLYINGS` already holds, probed in
+    /// O(1) through `FNO_INDEX`, less the five that are indices and so have
+    /// no cash equity -- `crate::universe::FNO_INDEX_UNDERLYINGS`, D-0682.
+    /// Both of this table's names are among those five. Copying the shares
+    /// into a second list is how two lists drift, and the audit that found
+    /// seven stale counts in this crate's own prose is the argument against
+    /// it. See [`Self::is_sweepable`].
     pub const SWEPT: [(Exchange, &'static str); 2] =
         [(Exchange::Nse, "NIFTY"), (Exchange::Nse, "BANKNIFTY")];
 
@@ -298,10 +301,22 @@ impl InstrumentKey {
     /// `docs/05-decisions.md` entry rather than a different argument here:
     ///
     /// 1. An NSE spot INDEX named in [`Self::SWEPT`] -- NIFTY and BANKNIFTY.
-    /// 2. An NSE CASH EQUITY whose symbol is one of the 213 F&O underlyings
-    ///    in `crate::universe::FNO_UNDERLYINGS`. Added by D-0506: the operator's
-    ///    objective is the rare, massive winner, and those moves exist in
-    ///    single stocks and are averaged away in an index.
+    /// 2. An NSE CASH EQUITY whose symbol is one of the F&O underlyings in
+    ///    `crate::universe::FNO_UNDERLYINGS` and is a SHARE: 208 of the 213.
+    ///    Added by D-0506: the operator's objective is the rare, massive
+    ///    winner, and those moves exist in single stocks and are averaged
+    ///    away in an index.
+    ///
+    /// # The five F&O underlyings that are indices
+    ///
+    /// `crate::universe::FNO_INDEX_UNDERLYINGS` -- BANKNIFTY, FINNIFTY,
+    /// MIDCPNIFTY, NIFTY and NIFTYNXT50 -- are F&O underlyings and have no
+    /// cash equity, so a `(NSE, Cash, Equity)` key named after one describes
+    /// no instrument. Until D-0682 this arm accepted them, so a made-up
+    /// `NSE-FINNIFTY` stock passed as sweepable. It refuses all five now.
+    /// NIFTY and BANKNIFTY are unaffected, because they reach the
+    /// surface through shape 1 as the indices they are; FINNIFTY, MIDCPNIFTY
+    /// and NIFTYNXT50 are in neither shape.
     ///
     /// # What is deliberately NOT sweepable
     ///
@@ -317,8 +332,11 @@ impl InstrumentKey {
     /// The index arm is two comparisons. The equity arm is one probe into
     /// `FNO_INDEX`, an open-addressed table built at compile time with a
     /// test-pinned worst case of six probes on a hit and eleven on a miss --
-    /// the only true worst-case O(1) membership structure in the workspace.
-    /// No list is copied and no list is scanned.
+    /// the only true worst-case O(1) membership structure in the workspace --
+    /// and, on a hit, at most five string comparisons against
+    /// `FNO_INDEX_UNDERLYINGS`, a fixed five-name array walked the way the
+    /// index arm walks `SWEPT`'s two. No list is copied, and the 213-name
+    /// list is not walked.
     #[must_use]
     pub fn is_sweepable(&self) -> bool {
         match (self.segment, &self.kind) {
@@ -326,8 +344,15 @@ impl InstrumentKey {
                 .iter()
                 .any(|&(ex, sym)| ex == self.exchange && self.underlying.as_str() == sym),
             (Segment::Cash, Kind::Equity) => {
+                let symbol = self.underlying.as_str();
                 self.exchange == Exchange::Nse
-                    && crate::universe::FNO_INDEX.contains(self.underlying.as_str())
+                    && crate::universe::FNO_INDEX.contains(symbol)
+                    // None of the five index names. Spelled `all(!=)` because
+                    // clippy rewrites `any(==)` to the `.contains(&` gate 11
+                    // refuses; the two are the same predicate.
+                    && crate::universe::FNO_INDEX_UNDERLYINGS
+                        .iter()
+                        .all(|&index| index != symbol)
             }
             _ => false,
         }
@@ -1022,6 +1047,63 @@ mod tests {
                 .is_sweepable(),
             "India VIX is reference only and never enters the sweep"
         );
+    }
+
+    /// AF-02. AN F&O INDEX UNDERLYING IS NEVER A SWEEPABLE CASH EQUITY.
+    ///
+    /// The cash arm accepted every `FNO_INDEX` member, and five of those are
+    /// indices, so `InstrumentKey::cash(Nse, "FINNIFTY")` -- a stock that does
+    /// not exist -- was on the sweep surface. D-0682. Pinned from both sides:
+    /// the five are refused as cash, and EXACTLY the other 208 are accepted,
+    /// so the refusal cannot have been bought by shrinking the share side.
+    #[test]
+    fn an_fno_index_underlying_is_never_a_sweepable_cash_equity() {
+        use crate::universe::{FNO_INDEX, FNO_INDEX_UNDERLYINGS, FNO_UNDERLYINGS};
+
+        for name in FNO_INDEX_UNDERLYINGS {
+            assert!(
+                FNO_INDEX.contains(name),
+                "{name} must be an F&O member, or the refusal below proves nothing"
+            );
+            let cash = InstrumentKey::cash(Exchange::Nse, name).expect("valid");
+            assert!(!cash.is_sweepable(), "{name} is an index and has no stock");
+            assert_eq!(
+                cash.require_sweepable(),
+                Err(InstrumentError::NotSweepable),
+                "{name} as a cash equity is refused by name"
+            );
+        }
+
+        let swept_as_cash: Vec<&str> = FNO_UNDERLYINGS
+            .iter()
+            .copied()
+            .filter(|name| {
+                InstrumentKey::cash(Exchange::Nse, name)
+                    .expect("every F&O name is a valid symbol")
+                    .is_sweepable()
+            })
+            .collect();
+        let shares: Vec<&str> = FNO_UNDERLYINGS
+            .iter()
+            .copied()
+            .filter(|name| !FNO_INDEX_UNDERLYINGS.contains(name))
+            .collect();
+        assert_eq!(
+            swept_as_cash, shares,
+            "the cash arm is exactly the F&O list less its index names"
+        );
+        assert_eq!(swept_as_cash.len(), 208, "213 less 5");
+
+        // NIFTY AND BANKNIFTY STAY, THROUGH THE INDEX ARM; THE OTHER THREE ARE
+        // IN NEITHER SHAPE.
+        for name in FNO_INDEX_UNDERLYINGS {
+            let as_index = InstrumentKey::index(Exchange::Nse, name).expect("valid");
+            assert_eq!(
+                as_index.is_sweepable(),
+                matches!(name, "NIFTY" | "BANKNIFTY"),
+                "{name}: only the two SWEPT indices sweep as an index"
+            );
+        }
     }
 
     #[test]
