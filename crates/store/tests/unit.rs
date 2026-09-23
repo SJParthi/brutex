@@ -1829,8 +1829,17 @@ fn a_tail_checksum_the_proof_cannot_reach_is_still_refused() {
 /// * the extent one record past the block's NOMINAL end is refused although its
 ///   bytes were handed in, naming the committed extent's checksum;
 /// * for every admitted extent, one flipped committed bit is refused, naming
-///   the checksum of the damaged bytes. The bit moves with `n` and the extent,
-///   so every record of the committed range is damaged somewhere.
+///   the checksum of the damaged bytes. The damaged RECORD walks down from the
+///   last committed one as the extent grows, wrapping inside the commit, so
+///   the extent that seals exactly the commit damages record `n - 1` and every
+///   record of the block is damaged at some commit — which the test counts
+///   rather than states. The bit inside the record moves with `n` and the
+///   extent.
+///
+/// That last clause once said the bit covered every record while it was
+/// `(through × 131 + n × 7) mod (n × stride × 8)`, which never reaches past
+/// record 22 at the bar geometry: 50 of 73, 47 of 170 and 40 of 51 records
+/// were never damaged anywhere.
 ///
 /// Every stored number is `crc32c` over bytes this test lays out, never one the
 /// function under test produced.
@@ -1856,6 +1865,7 @@ fn the_proof_admits_every_extent_inside_the_block_at_every_geometry_and_nothing_
             .map(|records| crc32c(&file[..records * stride]))
             .collect();
         let mut admitted = 0usize;
+        let mut damaged_records = vec![false; rpb];
         for n in 1..=rpb {
             let header = sealed_at(u64::try_from(n).expect("small"));
             let committed = &file[..n * stride];
@@ -1869,7 +1879,9 @@ fn the_proof_admits_every_extent_inside_the_block_at_every_geometry_and_nothing_
                 );
                 admitted += 1;
 
-                let bit = (through * 131 + n * 7) % (committed.len() * 8);
+                let record = n - 1 - (through - n) % n;
+                let bit = record * stride * 8 + (through * 131 + n * 7) % (stride * 8);
+                damaged_records[bit / (stride * 8)] = true;
                 damaged[bit / 8] ^= 1 << (bit % 8);
                 assert_eq!(
                     block::verify_through(&header, layout, 0, &damaged, past, stored),
@@ -1895,6 +1907,16 @@ fn the_proof_admits_every_extent_inside_the_block_at_every_geometry_and_nothing_
         assert_eq!(
             admitted, admissions,
             "stride {stride}: every extent inside the block"
+        );
+        let undamaged: Vec<usize> = damaged_records
+            .iter()
+            .enumerate()
+            .filter_map(|(record, &hit)| (!hit).then_some(record))
+            .collect();
+        assert_eq!(
+            undamaged,
+            Vec::<usize>::new(),
+            "stride {stride}: every record of the block is damaged at some commit"
         );
     }
 }

@@ -8885,7 +8885,10 @@ measurement, not a new one.
   is unchanged.
 - **The directory `fsync` after creating a `.crc` is not observable by any
   test.** It runs on each writer open of a month with no committed records, so
-  a month reopened while still empty pays one directory flush each time.
+  a month reopened while still empty pays one directory flush each time. What
+  a test does observe is that the flush is issued with its refusal returned
+  (AF-41) and that it follows the sidecar's create (AF-45); that it reached
+  stable storage is the part no test here sees.
 - **Bit rot in the newest header slot cannot be told from a torn slot write,
   and is read as the previous commit.** Both fail that slot's own checksum.
   Before D-0688 the previous commit's tail block, sealed over the newer
