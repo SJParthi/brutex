@@ -2179,6 +2179,17 @@ file it. If that build is gone, for example because an OS update replaced it,
 that recovery is not available. Once a later window is appended, the refused
 days are a gap the append-only file cannot fill.
 
+**A resume that does not overlap is not checked at all.** Nothing records or
+compares the libm build: the provenance word has no field for it, and
+`Header::advance` accepts a batch whose first timestamp follows the last one
+committed without comparing a field of any row. A plain forward append under
+another libm, or after an OS update, is accepted without comment, and the file
+then holds rows from two libm builds with nothing saying which rows came from
+which. Re-offering a window written before the switch is then refused under the
+new build whenever its bits differ. D-0692 keys a `.grk` resume to the libm
+build that began the series as an operating rule, not an enforced one, and the
+second hardening it records is what would enforce it.
+
 **"Within one target" above means within one libm build, and the target triple
 does not fix that.** Measured on this machine (macOS 26.6.2, aarch64), from
 the source at `b1d9ac70`: the release `api` executable, which writes `.grk`,

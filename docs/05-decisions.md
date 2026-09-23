@@ -38747,7 +38747,7 @@ the one the operating system supplies when the process loads. An OS update can
 replace it on the same machine under the same target triple, and a resume
 after one is the same hazard as a resume on another machine. Whether any macOS
 update has in fact changed an `exp` or `ln` result is not measured, and nothing
-here was measured on x86_64 glibc, the CI target (D-0046).
+here was measured on x86_64 glibc, the CI target (`docs/06-limits.md` §29).
 
 **Within one libm build the reproduction is argued, not measured for `.grk`.**
 G-10, `greeks::solver::the_solver_is_idempotent_to_the_bit`, proves that the
@@ -38773,6 +38773,18 @@ If that build is gone, for example because an OS update replaced it, that
 recovery is not available. Once a later window is appended, the refused days
 are a gap the append-only file cannot fill, the same shape as the gap D-0218
 records for a rate supplied late.
+
+**That rule is operational, and nothing enforces it.** No code records or
+checks the libm build. The provenance word has no field for it, and
+`Header::advance` accepts any batch whose first timestamp follows the last one
+committed without comparing a field of any row. So a resume that does not
+overlap, a plain forward append under another libm or after an OS update, is
+accepted without comment, and the file then holds rows from two libm builds
+with nothing recording which rows came from which. From then on no one libm
+build is expected to re-file every held window: re-offering a window written
+before the switch is refused under the new build whenever its bits differ, and
+the build that wrote it may be gone. Hardening 2 below is what would close
+this.
 
 **Rejected.** (1) Rounding the greeks to a coarser grid before storing them.
 §7 forbids it, and it would not remove the hazard: a value near a rounding
