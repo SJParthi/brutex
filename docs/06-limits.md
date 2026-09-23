@@ -4853,6 +4853,17 @@ the source arrays with the crate's own hash:
   Total Market names is 7.6 steps, and 8.4 over 5,000 non-members — nothing is
   measurably slow, the constant is real, the number is wrong.
 
+*Added 2026-09-23, AF-54.* The ledger holds one more copy of this kind. D-0506
+quotes six probes on a hit and eleven on a miss for `FNO_INDEX`. Those are
+`NTM_INDEX`'s figures over 750 members. `FNO_INDEX` measures 7 on a hit and 10
+on a miss over its 213, so the hit figure D-0506 gives is one step short.
+Neither pair exceeds the bounds the probe tests pin, 8 on a hit and 12 on a
+miss. The ledger is append-only, so D-0506 keeps its sentence and this is the
+correction. `InstrumentKey::is_sweepable` quoted the same pair until AF-51
+corrected it, and
+`core::universe::the_worst_probes_quoted_in_prose_are_the_measured_ones` pins
+all four measured figures.
+
 ### Floor-relative budgets: thirteen of thirteen crates — CLOSED
 
 `vocab`, `indicators` and `engine` carried one; `core` joined them (C-09b,

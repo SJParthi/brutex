@@ -1247,6 +1247,39 @@ mod tests {
         }
     }
 
+    /// Every `(exchange, segment, kind)` shape over one underlying: 2
+    /// exchanges x 3 segments x 4 kinds, 24 keys, exchange-major.
+    ///
+    /// The near-miss walk and the F&O walk below both ask this product, so
+    /// neither can cover fewer shapes than the other.
+    fn every_shape_of(underlying: Symbol) -> Vec<InstrumentKey> {
+        let expiry = Expiry::new(2026, 9, 29).expect("valid");
+        let kinds = [
+            Kind::Index,
+            Kind::Equity,
+            Kind::Future { expiry },
+            Kind::Option {
+                expiry,
+                strike: Paisa::from_raw(2_280_000),
+                side: OptionSide::Call,
+            },
+        ];
+        let mut keys = Vec::with_capacity(2 * 3 * kinds.len());
+        for exchange in [Exchange::Nse, Exchange::Bse] {
+            for segment in [Segment::Index, Segment::Cash, Segment::Fno] {
+                for kind in kinds {
+                    keys.push(InstrumentKey {
+                        exchange,
+                        segment,
+                        underlying,
+                        kind,
+                    });
+                }
+            }
+        }
+        keys
+    }
+
     /// AF-50. SWEEPABILITY IS JUDGED ON THE CASE-FOLDED SYMBOL, BOTH WAYS.
     ///
     /// `Symbol::new` upper-cases its input, so `finnifty` and `FINNIFTY` are
@@ -1338,6 +1371,13 @@ mod tests {
     /// premise is checked against `FNO_INDEX` first, and the exact names they
     /// surround are asserted to sweep, so the refusal is not a table that
     /// refuses everything.
+    ///
+    /// AF-52. "In any shape" is the whole product, 23 names x 2 exchanges x
+    /// 3 segments x 4 kinds, 552 keys. This test first built only the cash
+    /// and index keys, 2 of the 12 `(segment, kind)` shapes, so a third arm
+    /// that swept `NIFTY50` as a future passed it, and the F&O walk below
+    /// never asks a near miss. The two constructor keys are asserted to be
+    /// among the 24 each name is asked in.
     #[test]
     fn a_near_miss_of_a_surface_name_is_never_sweepable_in_any_shape() {
         use crate::universe::FNO_INDEX;
@@ -1367,25 +1407,35 @@ mod tests {
             "BAJAJAUTO",
             "BAJAJ_AUTO",
         ];
+        let mut asked = 0_usize;
         for name in near {
             assert!(
                 !FNO_INDEX.contains(name),
                 "{name} must be OUTSIDE the F&O list, or this proves nothing"
             );
+            let shapes = every_shape_of(Symbol::new(name).expect("valid shape"));
             for exchange in [Exchange::Nse, Exchange::Bse] {
-                for key in [
+                for built in [
                     InstrumentKey::cash(exchange, name).expect("valid shape"),
                     InstrumentKey::index(exchange, name).expect("valid shape"),
                 ] {
-                    assert!(!key.is_sweepable(), "{key} is a near miss");
-                    assert_eq!(
-                        key.require_sweepable(),
-                        Err(InstrumentError::NotSweepable),
-                        "{key} is refused as storable but not sweepable"
+                    assert!(
+                        shapes.contains(&built),
+                        "{built} is one of the shapes asked below"
                     );
                 }
             }
+            for key in shapes {
+                assert!(!key.is_sweepable(), "{key:?} is a near miss");
+                assert_eq!(
+                    key.require_sweepable(),
+                    Err(InstrumentError::NotSweepable),
+                    "{key:?} is refused as storable but not sweepable"
+                );
+                asked += 1;
+            }
         }
+        assert_eq!(asked, 23 * 2 * 3 * 4, "every shape of every near miss");
 
         // THE NAMES THEY SURROUND DO SWEEP, each in its own shape only.
         for (name, as_cash, as_index) in [
@@ -1418,40 +1468,18 @@ mod tests {
     fn every_shape_over_every_fno_name_sweeps_only_the_two_surface_shapes() {
         use crate::universe::{FNO_INDEX_UNDERLYINGS, FNO_UNDERLYINGS};
 
-        let expiry = Expiry::new(2026, 9, 29).expect("valid");
-        let kinds = [
-            Kind::Index,
-            Kind::Equity,
-            Kind::Future { expiry },
-            Kind::Option {
-                expiry,
-                strike: Paisa::from_raw(2_280_000),
-                side: OptionSide::Call,
-            },
-        ];
-
         let mut swept = Vec::new();
         let mut asked = 0_usize;
         for name in FNO_UNDERLYINGS {
             let underlying = Symbol::new(name).expect("every F&O name is a symbol");
-            for exchange in [Exchange::Nse, Exchange::Bse] {
-                for segment in [Segment::Index, Segment::Cash, Segment::Fno] {
-                    for kind in kinds {
-                        let key = InstrumentKey {
-                            exchange,
-                            segment,
-                            underlying,
-                            kind,
-                        };
-                        let first = key.is_sweepable();
-                        assert_eq!(key.is_sweepable(), first, "{key} asked twice");
-                        assert_eq!(key.require_sweepable(), owed(first), "{key}");
-                        assert_eq!(key.is_sweepable(), first, "{key} asked again");
-                        asked += 1;
-                        if first {
-                            swept.push((exchange, segment, kind, name));
-                        }
-                    }
+            for key in every_shape_of(underlying) {
+                let first = key.is_sweepable();
+                assert_eq!(key.is_sweepable(), first, "{key} asked twice");
+                assert_eq!(key.require_sweepable(), owed(first), "{key}");
+                assert_eq!(key.is_sweepable(), first, "{key} asked again");
+                asked += 1;
+                if first {
+                    swept.push((key.exchange, key.segment, key.kind, name));
                 }
             }
         }

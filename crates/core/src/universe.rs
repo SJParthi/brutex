@@ -4835,6 +4835,46 @@ mod tests {
         worst
     }
 
+    /// The header's cost table as this build measures it, in the header's row
+    /// order: the table's name, its members counted from the array, its slots
+    /// read from the index type, then the worst hit and the worst miss.
+    fn measured_cost_table() -> [(&'static str, usize, usize, usize, usize); 6] {
+        fn row<const N: usize>(
+            table: &'static str,
+            idx: &MemberIndex<N>,
+            members: &[&str],
+        ) -> (&'static str, usize, usize, usize, usize) {
+            (
+                table,
+                members.len(),
+                N,
+                worst_probe(idx, members),
+                worst_miss_probe(idx),
+            )
+        }
+        [
+            row("NTM_INDEX", &NTM_INDEX, &NIFTY_TOTAL_MARKET),
+            row("FNO_INDEX", &FNO_INDEX, &FNO_UNDERLYINGS),
+            row("NIFTY_500_INDEX", &NIFTY_500_INDEX, &NIFTY_500),
+            row("NIFTY_200_INDEX", &NIFTY_200_INDEX, &NIFTY_200),
+            row("NIFTY_100_INDEX", &NIFTY_100_INDEX, &NIFTY_100),
+            row("NIFTY_50_INDEX", &NIFTY_50_INDEX, &NIFTY_50),
+        ]
+    }
+
+    /// A probe count spelled the way prose spells it. Anything above twelve
+    /// has already failed the miss bound.
+    fn in_words(n: usize) -> &'static str {
+        const WORDS: [&str; 13] = [
+            "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+            "eleven", "twelve",
+        ];
+        WORDS
+            .get(n)
+            .copied()
+            .expect("a worst case above twelve breaks the bound")
+    }
+
     #[test]
     fn the_probe_length_is_bounded_which_is_what_makes_it_o1() {
         // THE CLAIM UNDER TEST, AND ONLY HALF OF IT. `binary_search` cost ~10
@@ -4980,27 +5020,25 @@ mod tests {
     /// figures; `FNO_INDEX` measures seven and ten, so its stated hit worst
     /// case was one step short, and both bound tests stayed green.
     ///
-    /// The measurements are exact here. Every sentence that quotes one is
-    /// looked for with the number formatted in, so the sentence this test
-    /// searches for never appears in this file as a literal. A table edit
-    /// that moves a worst case fails here, and the message names the prose to
-    /// correct in the same change.
+    /// The measurements are exact here. Every doc comment outside this test
+    /// module that quotes one is looked for: every row of this file's header
+    /// table and the sums drawn from it, `MemberIndex`,
+    /// `MemberIndex::position`, `nse_isin` and `InstrumentKey::is_sweepable`.
+    /// Each is searched with the number formatted in, so the sentence this
+    /// test searches for never appears in this file as a literal. A table
+    /// edit that moves a worst case fails here, and the message names the
+    /// prose to correct in the same change.
+    ///
+    /// AF-53. This paragraph used to say "every sentence" while the list
+    /// below held only the four named sites. The header, whose cost table
+    /// quotes both figures for all six tables, was not in it, so giving the
+    /// `FNO_INDEX` row `NTM_INDEX`'s 6 and 11 left this test green. Each row
+    /// is now formatted from the table it names: members from the array,
+    /// slots from the index type, both figures from the measurement.
     #[test]
     fn the_worst_probes_quoted_in_prose_are_the_measured_ones() {
-        const WORDS: [&str; 13] = [
-            "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
-            "eleven", "twelve",
-        ];
-        let word = |n: usize| {
-            *WORDS
-                .get(n)
-                .expect("a worst case above twelve breaks the bound")
-        };
-
-        let ntm_hit = worst_probe(&NTM_INDEX, &NIFTY_TOTAL_MARKET);
-        let ntm_miss = worst_miss_probe(&NTM_INDEX);
-        let fno_hit = worst_probe(&FNO_INDEX, &FNO_UNDERLYINGS);
-        let fno_miss = worst_miss_probe(&FNO_INDEX);
+        let rows = measured_cost_table();
+        let [(.., ntm_hit, ntm_miss), (.., fno_hit, fno_miss), ..] = rows;
         assert_eq!(
             (ntm_hit, ntm_miss, fno_hit, fno_miss),
             (6, 11, 7, 10),
@@ -5040,8 +5078,8 @@ mod tests {
                 instrument,
                 format!(
                     "{} probes on a hit and {} on a miss",
-                    word(fno_hit),
-                    word(fno_miss)
+                    in_words(fno_hit),
+                    in_words(fno_miss)
                 ),
             ),
         ] {
@@ -5051,18 +5089,130 @@ mod tests {
             );
         }
 
+        // THE HEADER'S COST TABLE, EVERY ROW. Members and slots are read from
+        // the arrays and the index types, and both figures are measured, so
+        // no column of a row is taken from the row itself.
+        for (table, members, slots, hit, miss) in rows {
+            let row = format!("//! | `{table}` | {members} | {slots} | {hit} | {miss} |");
+            assert!(
+                universe.contains(&row),
+                "universe.rs's header must carry the measured row: {row:?}"
+            );
+        }
+
+        // AND THE SUMS THE HEADER TAKES FROM THAT TABLE. `of_equity` probes
+        // all six tables, so a name outside every tier costs the miss column's
+        // sum, and the hit column's is the figure it once quoted. The two-table
+        // pair is the same sum over `NTM_INDEX` and `FNO_INDEX` alone.
+        let hit_sum: usize = rows.iter().map(|&(.., hit, _)| hit).sum();
+        let miss_sum: usize = rows.iter().map(|&(.., miss)| miss).sum();
+        for sentence in [
+            format!("Six misses is at most **{miss_sum}** steps measured"),
+            format!("not the {hit_sum} the hit column sums to"),
+            format!("— {miss_sum} is just the honest constant"),
+            format!("//! and {hit_sum} was the flattering one."),
+            format!(
+                "//! it was {} rather than the {} this paragraph used to quote.",
+                ntm_miss + fno_miss,
+                ntm_hit + fno_hit
+            ),
+        ] {
+            assert!(
+                universe.contains(&sentence),
+                "universe.rs's header must quote the measured sum: {sentence:?}"
+            );
+        }
+
         // `is_sweepable` probes `FNO_INDEX` and no other table, so the
         // Total Market figures in its sentence are the defect this test
         // exists for.
         let foreign = format!(
             "{} probes on a hit and {} on a miss",
-            word(ntm_hit),
-            word(ntm_miss)
+            in_words(ntm_hit),
+            in_words(ntm_miss)
         );
         assert!(
             !instrument.contains(&foreign),
             "instrument.rs quotes NTM_INDEX's figures for FNO_INDEX: {foreign:?}"
         );
+    }
+
+    /// AF-54. D-0506 QUOTES `NTM_INDEX`'S PROBE FIGURES FOR `FNO_INDEX`, AND
+    /// THE LIMITS CORRECT IT BY NAME.
+    ///
+    /// D-0506 widened the surface to the F&O cash equities and gave
+    /// `FNO_INDEX` a worst case of six probes on a hit and eleven on a miss.
+    /// That is the sentence AF-51 corrected on `is_sweepable`, and those are
+    /// the Total Market figures. The ledger is append-only, so the entry keeps
+    /// its words, and nothing pointed a reader of it at the measured ones.
+    ///
+    /// `docs/06-limits.md` carries the correction, and both halves are held
+    /// here with every figure formatted from the measurement. D-0506's own
+    /// section still quotes the Total Market figures for `FNO_INDEX`, so the
+    /// correction is about something. Exactly one paragraph of the limits
+    /// quotes those words back, names them as `NTM_INDEX`'s, and gives
+    /// `FNO_INDEX`'s measured pair. Each paragraph is searched with its line
+    /// breaks folded to spaces, so rewrapping either file does not break the
+    /// search.
+    #[test]
+    fn d0506s_fno_probe_figures_are_ntm_indexs_and_the_limits_correct_them() {
+        let [
+            (.., ntm_members, _, ntm_hit, ntm_miss),
+            (.., fno_members, _, fno_hit, fno_miss),
+            ..,
+        ] = measured_cost_table();
+        assert_ne!(
+            (ntm_hit, ntm_miss),
+            (fno_hit, fno_miss),
+            "the two tables measure alike, so D-0506's figures would be right"
+        );
+        let fold = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let stale = format!(
+            "{} probes on a hit and {} on a miss",
+            in_words(ntm_hit),
+            in_words(ntm_miss)
+        );
+
+        // THE PREMISE: D-0506's section, from its heading to the next one.
+        let decisions = include_str!("../../../docs/05-decisions.md");
+        let (_, from) = decisions
+            .split_once("\n## D-0506\n")
+            .expect("D-0506 heads a section of the ledger");
+        let section = fold(
+            from.split_once("\n## ")
+                .map_or(from, |(section, _)| section),
+        );
+        let premise =
+            format!("index over `FNO_UNDERLYINGS`, with a test-pinned worst case of {stale}");
+        assert!(
+            section.contains(&premise),
+            "D-0506 no longer quotes {stale:?} for FNO_INDEX, so the correction is about nothing"
+        );
+
+        // THE CORRECTION, in one paragraph of the limits.
+        let limits = include_str!("../../../docs/06-limits.md");
+        let quoted = format!("D-0506 quotes {stale} for `FNO_INDEX`.");
+        let correcting: Vec<String> = limits
+            .split("\n\n")
+            .map(fold)
+            .filter(|paragraph| paragraph.contains(&quoted))
+            .collect();
+        assert_eq!(
+            correcting.len(),
+            1,
+            "exactly one paragraph of docs/06-limits.md must quote {quoted:?}"
+        );
+        for owed in [
+            format!("Those are `NTM_INDEX`'s figures over {ntm_members} members."),
+            format!(
+                "`FNO_INDEX` measures {fno_hit} on a hit and {fno_miss} on a miss over its {fno_members}"
+            ),
+        ] {
+            assert!(
+                correcting[0].contains(&owed),
+                "the paragraph correcting D-0506 must say {owed:?}"
+            );
+        }
     }
 
     #[test]
