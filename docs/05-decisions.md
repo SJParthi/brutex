@@ -38681,7 +38681,7 @@ same hunks: 9 mutants, 7 caught, 0 missed, 2 unviable, 0 timeouts. The two
 unviable ones construct `Entry::default()`, which does not exist. That is a
 type error, not a lint.
 
-### D-0692 — Keep the `.grk` sidecar's target-dependent bits unrounded, and withdraw D-0046's "no consumer" premise — 2026-09-23
+### D-0692 — Keep the `.grk` sidecar's libm-dependent bits unrounded, and withdraw D-0046's "no consumer" premise — 2026-09-23
 
 **The premise, quoted.** D-0046's section "Reproducible within one target, and
 not across two" set the rule that a greek or an implied volatility "must never
@@ -38694,7 +38694,9 @@ when D-0217 gave `greeks` its caller in `pull::pricing`, the commits after it
 gave the computed greeks the `.grk` sidecar, and D-0218 made both feeds file
 there. The ledger is append-only, so D-0046 is not edited. This entry
 supersedes that sentence, and `docs/06-limits.md` §29, which repeated it, is
-corrected.
+corrected. The same premise carried half of D-0046's reason for keeping the
+platform's `exp` and `ln`, and that half is withdrawn too; see "Deferred, not
+rejected" below.
 
 **What the store does with the bits, read from the code at `b1d9ac70`.**
 `api`'s `greek_records` turns each priced row into a `store::format::Greek`,
@@ -38712,8 +38714,9 @@ range fails `Header::advance` with `TimestampsOutOfOrder`, and `append` asks
 are already on disk. Both compare with `!=`. `Greek`'s `PartialEq` is derived,
 so each `f64` field is compared by IEEE-754 equality, and because
 `Greek::is_sane` admits finite values only, that is bit equality apart from
-`0.0 == -0.0`. On the target that wrote the file, a re-run recomputes the same
-bits and is `AlreadyPresent`, which is `CLAUDE.md` §3 rule 5 working. Under a
+`0.0 == -0.0`. Under the libm build that wrote the file, a re-run is expected
+to recompute the same bits and be `AlreadyPresent`, which is `CLAUDE.md` §3
+rule 5 working; how far that expectation is proved is set out below. Under a
 libm that rounds one `exp` or `ln` differently, one differing field in one
 overlapping row sends the batch to the third case in `append`, which its
 comment calls "a genuine conflict. The vendor restated history, or bars
@@ -38730,16 +38733,46 @@ pure-Rust `libm` crate, 63 of 1,344 grid prices and 140 of 1,344 solved
 volatilities differed. They show that the bits move. They do not say how many
 `.grk` rows would.
 
+**The identity that decides the bits is the libm build, not the target.**
+D-0046 wrote "within one target", but the target triple does not fix the
+libm. Measured on this machine (macOS 26.6.2, aarch64), from the source at
+`b1d9ac70`: the release `api` executable, which is what writes `.grk`
+(`cargo build -p api --release --locked --bin api`), and the release `greeks`
+unit-test executable (`cargo test -p greeks --release --locked --lib
+--no-run`) each carry `_exp` and `_log` as undefined symbols that `nm -m`
+reports as bound from libSystem, and `otool -L` lists
+`/usr/lib/libSystem.B.dylib` as a dynamic library of each. Neither function is
+compiled into the binary. The libm that computes a stored greek is therefore
+the one the operating system supplies when the process loads. An OS update can
+replace it on the same machine under the same target triple, and a resume
+after one is the same hazard as a resume on another machine. Whether any macOS
+update has in fact changed an `exp` or `ln` result is not measured, and nothing
+here was measured on x86_64 glibc, the CI target (D-0046).
+
+**Within one libm build the reproduction is argued, not measured for `.grk`.**
+G-10, `greeks::solver::the_solver_is_idempotent_to_the_bit`, proves that the
+same inputs give the same solved volatility bit for bit within one process and
+one target, and `docs/04-invariants.md` narrows it to exactly that. A resume in
+a new process is outside what it proves. There the claim rests on D-0046's
+reading of the crate — "no clock, no randomness, no hash iteration and no
+threading anywhere in its non-test code" — and on one libm build returning the
+same result for the same argument. No `.grk` window was written by one process
+and re-offered by another to check it. Whether one libm build gives the same
+bits on two different CPUs is not measured either.
+
 **Decision: persist the bits as computed, unrounded.** `CLAUDE.md` §7 says
 statistical values "keep full precision and are never rounded for storage",
 and `store::format::Greek`'s own doc cites that sentence. The consequence is
-accepted and stated: a `.grk` series resumes on the target that began it.
-Resumed under a different libm, an overlapping batch whose recomputed bits
-differ is refused as above. Re-running the refused window on the original
-target, before anything later is appended, files it, because within one target
-the bits reproduce. Once a later window is appended, the refused days are a
-gap the append-only file cannot fill, the same shape as the gap D-0218 records
-for a rate supplied late.
+accepted and stated: a `.grk` series resumes under the libm build that began
+it. A resume under any other libm, on another machine or on the same machine
+after an OS update has replaced it, is not a supported workflow, and an
+overlapping batch whose recomputed bits differ is refused as above. Re-running
+the refused window under the original libm build, before anything later is
+appended, is expected to file it, on the argument in the previous paragraph.
+If that build is gone, for example because an OS update replaced it, that
+recovery is not available. Once a later window is appended, the refused days
+are a gap the append-only file cannot fill, the same shape as the gap D-0218
+records for a rate supplied late.
 
 **Rejected.** (1) Rounding the greeks to a coarser grid before storing them.
 §7 forbids it, and it would not remove the hazard: a value near a rounding
@@ -38748,8 +38781,28 @@ would become rarer, not impossible, and every stored greek would lose
 precision to pay for that. (2) Comparing only the timestamps of greek rows in
 the overlap check. That would accept a genuinely different row, such as one
 priced under another rate, as already present, which is the silent fallback
-`CLAUDE.md` §4 bans. (3) A target-independent `exp` and `ln`. D-0046 rejected
-it for reasons this entry does not change.
+`CLAUDE.md` §4 bans.
+
+**Deferred, not rejected: a target-independent `exp` and `ln`.** D-0046 did
+not take it because it "would replace a measured 4.2e-14 disagreement with
+several hundred lines of transcendental code carrying its own errors, for a
+property nothing currently needs." The cost half of that reason still holds: it
+would be several hundred lines of transcendental code carrying its own errors.
+The other half no longer does, and this entry is what withdraws it: an
+overlapping `.grk` resume under a libm other than the one that began the
+series needs exactly that property. Of the options this entry considers, it is
+the only one that removes the refusal without accepting a genuinely different
+row. The two hardenings below only name the refusal better. It is still not
+taken now, for three reasons. The cost D-0046 weighed is unchanged. The
+dependency fails closed: an overlapping batch whose bits differ is refused
+loudly, under a misleading name but refused, and nothing is written, so it is
+never filed as a duplicate and never silently replaces a held row. And how
+often the refusal happens is not measured, so the case for several hundred
+lines of transcendental code has not been made. Adopting it would also move
+the bits once more, from the platform's libm to the vendored one, so the first
+overlapping resume of every `.grk` series written before the switch would be
+refused in the same way. The entry that takes it has to say what happens to
+those series, and should bring a measurement.
 
 **Not done. Each would need its own entry.**
 
@@ -38759,13 +38812,15 @@ it for reasons this entry does not change.
    is what a different libm produces, instead of reporting a timestamp fault.
    That needs a new error variant and a comparison specific to greeks, which
    is a code change.
-2. **Stamp the target or libm into the `.grk` provenance.** Recording which
-   target wrote a file would let a resume on another one refuse up front, by
-   name, before anything is recomputed. The provenance word has bits 17 to 31
-   unused, but giving them a meaning changes what a version-8 record says, and
-   `CLAUDE.md` §3 rule 8 forbids mutating a format version in place. So this
-   is a new `.grk` version, by §4's "a new field is a new file version at its
-   own stride".
+2. **Stamp the libm build into the `.grk` provenance.** Recording which libm
+   wrote a file would let a resume under another one refuse up front, by name,
+   before anything is recomputed. A target triple alone would not do it: the
+   libm is loaded from the operating system and changes under the same triple,
+   so what can name a libm build is part of that entry's question. The
+   provenance word has bits 17 to 31 unused, but giving them a meaning changes
+   what a version-8 record says, and `CLAUDE.md` §3 rule 8 forbids mutating a
+   format version in place. So this is a new `.grk` version, by §4's "a new
+   field is a new file version at its own stride".
 
 **The thresholds, recorded because they are the rest of the finding.** Outside
 `crates/greeks`, a grep of non-test source at this commit finds `ln` or `exp`

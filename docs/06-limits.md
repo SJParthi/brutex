@@ -2140,13 +2140,14 @@ rows.
 `CLAUDE.md` §3 rule 3 and must never be compared byte-for-byte across machines;
 a consumer that branches on `GreeksError` variant or records `method` must
 treat that as a property of the machine it ran on. No run identity takes one.
-**One path does compare them across machines: the store's overlap check, when
-a `.grk` file is resumed on a target other than the one that began it.**
-Invariant G-10 is narrowed to what its test proves.
+**One path does compare them across machines, and across libm builds on one
+machine: the store's overlap check, when a `.grk` file is resumed under a libm
+other than the one that began it.** Invariant G-10 is narrowed to what its test
+proves.
 
 **Until D-0692 this rule ended "Nothing in this repository does any of it
 today", and that had been false since D-0217 and D-0218.** The `.grk` sidecar
-persists target-dependent bits. `api`'s `greek_records` builds one
+persists libm-dependent bits. `api`'s `greek_records` builds one
 `store::format::Greek` per priced row, and `pull::ingest::write_greeks` appends
 the batch through `BarFile::append`. The record holds the volatility, the five
 greeks and the rate as `f64`, and `Greek::image` writes each with
@@ -2161,9 +2162,10 @@ follow the committed range fails `Header::advance` with
 `suffix_that_follows`, whether the overlap is already on disk. Both compare
 records with `!=`, and `Greek`'s `PartialEq` is derived: IEEE-754 equality per
 `f64` field, which on the finite values `Greek::is_sane` admits is bit equality
-except that `0.0 == -0.0`. On the target that wrote the file, a re-run
-recomputes the same bits and answers `AlreadyPresent`. Under a libm that rounds
-one `exp` or `ln` differently, one field of one overlapping row fails the
+except that `0.0 == -0.0`. Under the libm build that wrote the file, a re-run
+is expected to recompute the same bits and answer `AlreadyPresent`; the
+paragraphs below say how far that is proved. Under a libm that rounds one `exp`
+or `ln` differently, one field of one overlapping row fails the
 comparison, and the whole batch is refused through the door `append`'s comment
 reserves for "a genuine conflict. The vendor restated history, or bars arrived
 out of order". The operator reads `<path>: timestamp <first offered> does not
@@ -2171,15 +2173,40 @@ follow <last held>`: a timestamp fault, for timestamps the file already holds,
 when the difference is in an `f64`'s last bits. The new days in that batch are
 refused with the overlap. The Groww chain path counts the rows as refused ("the
 greeks were computed and could not be filed"); the Dhan rolling path records a
-failure for that contract-month. Re-running the refused window on the original
-target, before anything later is appended, files it, because within one target
-the bits reproduce. Once a later window is appended, the refused days are a gap
-the append-only file cannot fill.
+failure for that contract-month. Re-running the refused window under the libm
+build that wrote the file, before anything later is appended, is expected to
+file it. If that build is gone, for example because an OS update replaced it,
+that recovery is not available. Once a later window is appended, the refused
+days are a gap the append-only file cannot fill.
+
+**"Within one target" above means within one libm build, and the target triple
+does not fix that.** Measured on this machine (macOS 26.6.2, aarch64), from
+the source at `b1d9ac70`: the release `api` executable, which writes `.grk`,
+and the release `greeks` unit-test executable each carry `_exp` and `_log` as
+undefined symbols that `nm -m` reports as bound from libSystem, and `otool -L`
+lists `/usr/lib/libSystem.B.dylib` as a dynamic library of each (D-0692 gives
+the build commands). The libm that computes a stored greek is the one the
+operating system supplies when the process loads, so an OS update can change it
+on the same machine under the same target triple, and a resume after one is the
+same hazard as a resume on another machine. Whether any macOS update has in
+fact changed an `exp` or `ln` result is not measured.
+
+**Within one libm build, reproduction across processes is argued, not
+measured.** G-10's test, `greeks::solver::the_solver_is_idempotent_to_the_bit`,
+covers the solved volatility within one process and one target. A resume in a
+new process rests on D-0046's reading of the crate (no clock, no randomness, no
+hash iteration and no threading in its non-test code) and on one libm build
+returning the same result for the same argument. No `.grk` window was written
+by one process and re-offered by another to check it, and whether one libm
+build gives the same bits on two different CPUs is not measured either.
 
 Not measured: no cross-libm `.grk` resume was run, so how often a real batch
 trips is unknown. D-0692 records the choice to keep the bits unrounded and two
 hardenings that were not made: naming the likely cause in the refusal, and
-stamping the target or libm into the `.grk` provenance.
+stamping the libm build into the `.grk` provenance. It also records why a
+target-independent `exp` and `ln`, the one option considered that would remove
+the refusal without accepting a genuinely different row, is deferred rather
+than rejected.
 
 **Outside this crate `ln` and `exp` only set thresholds, and a libm moves a
 decision there only at an exact knife-edge.** Non-test source outside
@@ -2368,6 +2395,11 @@ Publishing the spot would not fix it: a 1% error in `S` moves `r` by only about
   and no claim is made about it.
 - **How often a `.grk` resume under a different libm is refused.** The
   mechanism is read from the code above; no such resume was run. D-0692.
+- **Whether a `.grk` resume under the same libm build, in a new process, is
+  always `AlreadyPresent`.** Argued from D-0046 and G-10, whose test covers one
+  process; not run for `.grk`. Nor whether any macOS update has changed an
+  `exp` or `ln` result, which would make a resume on the same machine the
+  cross-libm case. D-0692.
 
 ### Mutation testing: 320 killed, 2 alive, and both are named
 
