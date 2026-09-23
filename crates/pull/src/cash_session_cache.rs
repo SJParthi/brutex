@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use flate2::bufread::GzDecoder;
 use sha2::{Digest, Sha256};
+use store::flock::Flock;
 
 use crate::calendar::{self, DayKind, Session};
 use crate::cash_auction::{DailyEligibility, LifecycleAssessment, LifecycleEvidence};
@@ -117,7 +118,7 @@ pub fn read_local_lifecycle(
             path.display()
         )
     })?;
-    lock.try_lock_shared().map_err(|why| {
+    let lock = Flock::try_lock_shared(lock, path.clone()).map_err(|why| {
         format!(
             "UNVERIFIED local lifecycle lock {} unavailable: {why}",
             path.display()
@@ -129,6 +130,7 @@ pub fn read_local_lifecycle(
         )
     })?;
     let daily = decode(&bytes)?;
+    lock.release().map_err(|u| format!("UNVERIFIED {u}"))?;
     Ok(VerifiedLifecycleMaster {
         provenance: LifecycleProvenance {
             master_day,
@@ -265,13 +267,14 @@ where
         .map_err(|why| why.to_string())?;
     let mut missing = Vec::new();
     for day in days {
-        let _lock = lock_day(root, day)?;
+        let lock = lock_day(root, day)?;
         match read_entry(root, day)? {
             Some(bytes) => {
                 result.insert(day.days_from_epoch(), decode(&bytes)?);
             }
             None => missing.push(day),
         }
+        lock.release().map_err(|u| u.to_string())?;
     }
     for day in missing {
         let url = source_url(day);
@@ -308,7 +311,7 @@ where
         .map_err(|why| why.to_string())?;
     let mut missing = Vec::new();
     for day in days {
-        let _lock = lock_day(root, day)?;
+        let lock = lock_day(root, day)?;
         match read_entry(root, day)? {
             Some(bytes) => {
                 pending.insert(day.days_from_epoch(), decode(&bytes)?);
@@ -321,6 +324,7 @@ where
             }
             None => missing.push(day),
         }
+        lock.release().map_err(|u| u.to_string())?;
     }
     for day in missing {
         let url = source_url(day);
@@ -365,11 +369,13 @@ fn receipt(day: Day, bytes: &[u8]) -> String {
 
 // Persistent advisory locks serialize cooperating readers and installers.
 // A busy entry refuses promptly; no async task waits on a filesystem lock.
+// Each is released by an explicit unlock, never by closing the descriptor, so
+// a duplicate left in a child another thread spawned cannot hold it (D-0693).
 fn lock_path(root: &Path, day: Day) -> PathBuf {
     root.join(format!(".{}.lock", filename(day)))
 }
 
-fn lock_day(root: &Path, day: Day) -> Result<File, String> {
+fn lock_day(root: &Path, day: Day) -> Result<Flock<File>, String> {
     fs::create_dir_all(root)
         .map_err(|why| format!("cannot create cash-session cache {}: {why}", root.display()))?;
     let path = lock_path(root, day);
@@ -381,13 +387,12 @@ fn lock_day(root: &Path, day: Day) -> Result<File, String> {
         .truncate(false)
         .open(&path)
         .map_err(|why| format!("cannot open cache lock {}: {why}", path.display()))?;
-    file.try_lock().map_err(|why| {
+    Flock::try_lock(file, path.clone()).map_err(|why| {
         format!(
             "cash-session cache lock {} unavailable: {why}",
             path.display()
         )
-    })?;
-    Ok(file)
+    })
 }
 
 fn regular_file(path: &Path) -> Result<bool, String> {
@@ -483,13 +488,14 @@ fn install_and_read(root: &Path, day: Day, bytes: &[u8]) -> Result<DailyEligibil
     }
     // Validation precedes even creating the cache directory.
     let eligibility = decode(bytes)?;
-    let _lock = lock_day(root, day)?;
+    let lock = lock_day(root, day)?;
     if let Some(existing) = read_entry(root, day)? {
         if existing != bytes {
             return Err(format!(
                 "conflicting NSE cash master for {day}; existing cache retained"
             ));
         }
+        lock.release().map_err(|u| u.to_string())?;
         return Ok(eligibility);
     }
     let (payload, metadata) = paths(root, day);
@@ -499,6 +505,7 @@ fn install_and_read(root: &Path, day: Day, bytes: &[u8]) -> Result<DailyEligibil
     write_new(&metadata, receipt(day, bytes).as_bytes())?;
     File::open(root).and_then(|directory| directory.sync_all())
         .map_err(|why| format!("cache for {day} is visible but directory sync failed: {why}; crash durability UNVERIFIED"))?;
+    lock.release().map_err(|u| u.to_string())?;
     Ok(eligibility)
 }
 

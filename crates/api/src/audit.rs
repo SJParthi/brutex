@@ -110,6 +110,7 @@ use std::time::SystemTime;
 use pull::ingest::Ingested;
 use pull::session::{DropCensus, DropReason, Window};
 use store::crc::crc32c;
+use store::flock::Flock;
 
 /// One record, in bytes. Every record is exactly this long, always.
 pub const RECORD_LEN: usize = 256;
@@ -1149,13 +1150,20 @@ impl Journal {
             std::fs::create_dir_all(dir)
                 .map_err(|e| named("cannot create the audit directory", &e))?;
         }
-        let mut file = std::fs::OpenOptions::new()
-            .read(true)
-            .append(true)
-            .create(true)
-            .open(&self.path)
-            .map_err(|e| named("cannot open the journal", &e))?;
-        file.try_lock().map_err(|e| {
+        // Every refusal below releases the append lock through the guard's
+        // explicit unlock, and the success path releases it by name: closing
+        // the descriptor would leave the lock alive on any duplicate a child
+        // spawned by another thread still holds (D-0693).
+        let mut file = Flock::try_lock(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .append(true)
+                .create(true)
+                .open(&self.path)
+                .map_err(|e| named("cannot open the journal", &e))?,
+            self.path.as_path(),
+        )
+        .map_err(|e| {
             format!(
                 "{}: cannot take the journal append lock; another writer may be appending, so this record was refused rather than interleaved — {e}",
                 self.path.display()
@@ -1176,7 +1184,8 @@ impl Journal {
         file.write_all(&record.image())
             .map_err(|e| named("cannot append the record", &e))?;
         file.sync_all()
-            .map_err(|e| named("the record was written and not synced", &e))
+            .map_err(|e| named("the record was written and not synced", &e))?;
+        file.release().map_err(|u| u.to_string())
     }
 
     /// One page of records, newest first.
@@ -2265,12 +2274,18 @@ mod tests {
             ))
             .expect("the first record");
 
-        let squatter = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&journal.path)
-            .expect("the journal handle");
-        squatter.try_lock().expect("nothing else holds it");
+        // A guard, so the `drop` below unlocks explicitly: this test binary
+        // spawns children, and a close-only release can survive in one of
+        // them and refuse the append that must succeed (D-0693).
+        let squatter = store::flock::Flock::try_lock(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&journal.path)
+                .expect("the journal handle"),
+            journal.path.clone(),
+        )
+        .expect("nothing else holds it");
 
         let why = journal
             .append(&Record::refused(

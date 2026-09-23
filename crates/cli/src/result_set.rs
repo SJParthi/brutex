@@ -28,6 +28,7 @@ use std::os::unix::fs::MetadataExt as _;
 use std::os::windows::fs::MetadataExt as _;
 
 use crate::results::Refusal;
+use store::flock::Flock;
 
 /// `BRUTEXRC`: the result-detail receipt, distinct from every detail file.
 const MAGIC: [u8; 8] = *b"BRUTEXRC";
@@ -236,6 +237,31 @@ pub struct Receipts {
     max_bytes: Option<u64>,
 }
 
+/// The open-time validation lock over `file`, exclusive for the writer's door
+/// and shared for the readers'.
+///
+/// Taken on a duplicate of the descriptor, so `file` stays free to be written
+/// and moved into the `Receipts` while the lock is held. The lock belongs to
+/// the open file description, so the duplicate's guard takes and releases the
+/// very lock `file` sees. It is released by an explicit unlock, never by
+/// closing a descriptor: a duplicate left in a child another thread spawned
+/// would otherwise keep it (D-0693).
+fn validation_lock(file: &File, path: &Path, exclusive: bool) -> Result<Flock<File>, Refusal> {
+    let refused = |why: std::io::Error| {
+        format!(
+            "{} could not be locked for validation: {why}",
+            path.display()
+        )
+    };
+    let duplicate = file.try_clone().map_err(refused)?;
+    if exclusive {
+        Flock::lock(duplicate, path.to_path_buf())
+    } else {
+        Flock::lock_shared(duplicate, path.to_path_buf())
+    }
+    .map_err(refused)
+}
+
 impl Receipts {
     /// The receipt path beside the ledger and both detail files.
     #[must_use]
@@ -253,13 +279,8 @@ impl Receipts {
         let path = Self::path(root);
         let file = File::open(&path)
             .map_err(|why| format!("{} could not be opened: {why}", path.display()))?;
-        file.lock_shared().map_err(|why| {
-            format!(
-                "{} could not be locked for validation: {why}",
-                path.display()
-            )
-        })?;
-        Self::from_file(file, path, None)
+        let lock = validation_lock(&file, &path, false)?;
+        Self::from_file(file, lock, path, None)
     }
 
     /// Opens for reading only when the receipt manifest fits `max_bytes`.
@@ -276,13 +297,8 @@ impl Receipts {
         let path = Self::path(root);
         let file = File::open(&path)
             .map_err(|why| format!("{} could not be opened: {why}", path.display()))?;
-        file.lock_shared().map_err(|why| {
-            format!(
-                "{} could not be locked for validation: {why}",
-                path.display()
-            )
-        })?;
-        Self::from_file(file, path, Some(max_bytes))
+        let lock = validation_lock(&file, &path, false)?;
+        Self::from_file(file, lock, path, Some(max_bytes))
     }
 
     /// Opens for append, creating a fresh header when the file does not exist.
@@ -303,12 +319,7 @@ impl Receipts {
             .truncate(false)
             .open(&path)
             .map_err(|why| format!("{} could not be opened: {why}", path.display()))?;
-        file.lock().map_err(|why| {
-            format!(
-                "{} could not be locked for validation: {why}",
-                path.display()
-            )
-        })?;
+        let lock = validation_lock(&file, &path, true)?;
         if file
             .metadata()
             .map_err(|why| format!("{} could not be measured: {why}", path.display()))?
@@ -317,10 +328,18 @@ impl Receipts {
         {
             write_header(&mut file, &path)?;
         }
-        Self::from_file(file, path, None)
+        Self::from_file(file, lock, path, None)
     }
 
-    fn from_file(mut file: File, path: PathBuf, max_bytes: Option<u64>) -> Result<Self, Refusal> {
+    /// Validates the whole file under `lock`, a guard over a duplicate of
+    /// `file`'s own descriptor, and releases it by name on success. Every
+    /// refusal releases it through the guard's explicit unlock.
+    fn from_file(
+        mut file: File,
+        lock: Flock<File>,
+        path: PathBuf,
+        max_bytes: Option<u64>,
+    ) -> Result<Self, Refusal> {
         let len = file
             .metadata()
             .map_err(|why| format!("{} could not be measured: {why}", path.display()))?
@@ -357,10 +376,11 @@ impl Receipts {
                 generation.len
             ));
         }
-        file.unlock().map_err(|why| {
+        lock.release().map_err(|u| {
             format!(
-                "{} could not release its validation lock: {why}",
-                path.display()
+                "{} could not release its validation lock: {}",
+                path.display(),
+                u.why
             )
         })?;
         Ok(Self {

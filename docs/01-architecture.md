@@ -34,7 +34,7 @@ core costs engine indicators pull runner store telemetry vocab <-- cli
 | `costs` | Indian F&O transaction costs: dated statutory regimes, option arithmetic, the round-trip charge stack | `core` | ✓ |
 | `indicators` | candles in, condition bits out | **`vocab`** | ✓ |
 | `engine` | the Apriori ladder: generation, subset-prune, support, extinction | **`vocab`** | ✓ |
-| `store` | the fixed-stride bar file: open, read, append, verify | `core`, `telemetry` | ✓ |
+| `store` | the fixed-stride bar file: open, read, append, verify; `flock`, the advisory-lock guard every lock with an early return or an owner goes through (D-0693) | `core`, `telemetry` | ✓ |
 | `lake` | the parquet-shaped reader for vendor archives | `core`, `telemetry` | ✓ |
 | `pull` | vendor ingest, rate governor, credential read, option pricing | `core`, `store`, `telemetry`, `costs`, `greeks` | ✓ |
 | `api` | the HTTP surface | `core`, `pull`, `store`, `telemetry`, **`cli`**, **`vocab`** | ✓ |

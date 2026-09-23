@@ -12,6 +12,7 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use crate::file::{BarFile, StoreError, survey};
+use crate::flock::Flock;
 use crate::format::Bar;
 use crate::header::Header;
 use crate::path::{FileKind, StorePath};
@@ -168,7 +169,9 @@ impl RevisionReader {
         let source = Header::decode(source_bytes)
             .map_err(|_| RepairError::InvalidReceipt(receipt_path.clone()))?;
         // Unlike the legacy opener, revisions must never admit a missing lock.
-        let _lock = shared_lock(path.with_file(FileKind::Lock).to_path_buf(&revision_root))?;
+        // Every refusal below releases it through the guard's explicit unlock.
+        let lock_path = path.with_file(FileKind::Lock).to_path_buf(&revision_root);
+        let lock = shared_lock(lock_path.clone())?;
         let bars = BarFile::open_existing(&revision_root, path, symbol_id)?;
         check_header(bars.header())?;
         if source.symbol_id != symbol_id
@@ -178,6 +181,12 @@ impl RevisionReader {
             return Err(RepairError::InvalidReceipt(receipt_path));
         }
         check_header(source)?;
+        io_at(
+            lock.release().map_err(io::Error::from),
+            &lock_path,
+            "release shared lock",
+            false,
+        )?;
         Ok(Self { bars, source })
     }
 
@@ -261,14 +270,26 @@ pub fn publish(
         return Ok(Published::Reused);
     }
 
-    let _source_lock = shared_lock(path.with_file(FileKind::Lock).to_path_buf(root))?;
+    let lock_path = path.with_file(FileKind::Lock).to_path_buf(root);
+    let source_lock = shared_lock(lock_path.clone())?;
     let source = BarFile::open_existing(root, path, symbol_id)?;
     check_header(source.header())?;
     if source.header() != expected_source {
         return Err(RepairError::StaleSource);
     }
     retain_timestamps(&source, merged)?;
-    write_revision(root, path, symbol_id, revision, expected_source, merged)
+    let published = write_revision(root, path, symbol_id, revision, expected_source, merged)?;
+    // Released explicitly, never by close: a descriptor duplicated into a child
+    // another thread spawned would otherwise keep the source locked. D-0693.
+    // A refusal here comes after a written revision, so it says the
+    // publication may be visible, because it is.
+    io_at(
+        source_lock.release().map_err(io::Error::from),
+        &lock_path,
+        "release shared lock",
+        true,
+    )?;
+    Ok(published)
 }
 
 fn retain_timestamps(source: &BarFile, merged: &[Bar]) -> Result<(), RepairError> {
@@ -418,14 +439,13 @@ fn read_receipt(path: &Path) -> Result<[u8; RECEIPT_LEN], RepairError> {
     Ok(bytes)
 }
 
-fn shared_lock(path: PathBuf) -> Result<File, RepairError> {
+fn shared_lock(path: PathBuf) -> Result<Flock<File>, RepairError> {
     let file = io_at(File::open(&path), &path, "open required lock", false)?;
-    match file.try_lock_shared() {
-        Ok(()) => (),
-        Err(TryLockError::WouldBlock) => return Err(StoreError::Locked { path }.into()),
-        Err(TryLockError::Error(error)) => return io_at(Err(error), &path, "lock shared", false),
+    match Flock::try_lock_shared(file, path.clone()) {
+        Ok(held) => Ok(held),
+        Err(TryLockError::WouldBlock) => Err(StoreError::Locked { path }.into()),
+        Err(TryLockError::Error(error)) => io_at(Err(error), &path, "lock shared", false),
     }
-    Ok(file)
 }
 
 fn exists(path: &Path) -> Result<bool, RepairError> {

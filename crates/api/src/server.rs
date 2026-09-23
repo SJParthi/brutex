@@ -15490,23 +15490,33 @@ fn announce_universe(read: &Read) -> bool {
 ///
 /// # Held by the OS, released by the OS
 ///
-/// `File::try_lock` is an advisory lock on the open file description. It is
-/// released when the handle closes, which includes a process that was killed —
-/// so an abandoned lock file never wedges the next start, the way a PID file
-/// written by hand does. The handle is kept alive for the whole session by this
-/// value; nothing reads it again.
+/// `File::try_lock` is an advisory lock on the open file description. The
+/// kernel releases it when the last descriptor referring to that description
+/// closes, which includes a process that was killed — so an abandoned lock
+/// file never wedges the next start, the way a PID file written by hand does.
+/// The handle is kept alive for the whole session by this value.
+///
+/// A live process releases it by an explicit unlock, never by closing its
+/// handle: a descriptor duplicated into a child another thread spawned would
+/// otherwise keep the lock alive after this value is gone, and the next serve
+/// over the same store would be refused by an instance that no longer exists
+/// (D-0693).
 #[derive(Debug)]
 struct ServeLock {
     /// The locked handle. `None` when this process already holds the lock — see
     /// [`take_serve_lock`].
-    _held: Option<std::fs::File>,
+    held: Option<store::flock::Flock<std::fs::File>>,
     /// The store this lock is over, canonical, so [`Drop`] releases the same
     /// key that was taken.
     root: PathBuf,
 }
 
 impl Drop for ServeLock {
+    /// Unlocks the file BEFORE freeing the in-process key. The other order
+    /// leaves a window in which a second serve in this process takes the key,
+    /// finds the file still locked, and refuses itself.
     fn drop(&mut self) {
+        drop(self.held.take());
         if let Ok(mut held) = serving_roots().lock() {
             held.remove(&self.root);
         }
@@ -15583,7 +15593,7 @@ fn take_serve_lock(store_root: &Path, addr: std::net::SocketAddr) -> Result<Serv
         Err(poisoned) => {
             if !poisoned.into_inner().insert(key.clone()) {
                 return Ok(ServeLock {
-                    _held: None,
+                    held: None,
                     root: key,
                 });
             }
@@ -15591,7 +15601,7 @@ fn take_serve_lock(store_root: &Path, addr: std::net::SocketAddr) -> Result<Serv
         Ok(mut held) => {
             if !held.insert(key.clone()) {
                 return Ok(ServeLock {
-                    _held: None,
+                    held: None,
                     root: key,
                 });
             }
@@ -15613,35 +15623,38 @@ fn take_serve_lock(store_root: &Path, addr: std::net::SocketAddr) -> Result<Serv
             ));
         }
     };
-    if let Err(refusal) = file.try_lock() {
-        // WHO HOLDS IT, NOT MERELY THAT SOMEBODY DOES. The holder wrote its
-        // address and pid into this file after taking the lock, and reading a
-        // locked file is not itself a locked operation.
-        let held_by = std::fs::read_to_string(&path).unwrap_or_default();
-        let held_by = held_by.trim();
-        release_root(&key);
-        return Err(format!(
-            "REFUSED: another brutex api is already serving this store.\n  \
-             store: {}\n  lock:  {} ({refusal})\n  held by: {}\n\
-             Two servers over one store run two autopilots against one \
-             append-only tree and spend one shared vendor token's quota twice. \
-             A different port is not a second store. Stop the other instance, \
-             or point this one at another BRUTEX_STORE.",
-            store_root.display(),
-            path.display(),
-            if held_by.is_empty() {
-                "an instance that had not yet stamped the file"
-            } else {
-                held_by
-            }
-        ));
-    }
+    let file = match store::flock::Flock::try_lock(file, path.clone()) {
+        Ok(held) => held,
+        Err(refusal) => {
+            // WHO HOLDS IT, NOT MERELY THAT SOMEBODY DOES. The holder wrote its
+            // address and pid into this file after taking the lock, and reading a
+            // locked file is not itself a locked operation.
+            let held_by = std::fs::read_to_string(&path).unwrap_or_default();
+            let held_by = held_by.trim();
+            release_root(&key);
+            return Err(format!(
+                "REFUSED: another brutex api is already serving this store.\n  \
+                 store: {}\n  lock:  {} ({refusal})\n  held by: {}\n\
+                 Two servers over one store run two autopilots against one \
+                 append-only tree and spend one shared vendor token's quota twice. \
+                 A different port is not a second store. Stop the other instance, \
+                 or point this one at another BRUTEX_STORE.",
+                store_root.display(),
+                path.display(),
+                if held_by.is_empty() {
+                    "an instance that had not yet stamped the file"
+                } else {
+                    held_by
+                }
+            ));
+        }
+    };
     // STAMPED AFTER THE LOCK IS HELD, so the value a refused instance reads was
     // written by the instance that actually holds it.
     let stamp = format!("addr={addr} pid={}\n", std::process::id());
-    let _ignored_stamp = std::io::Write::write_all(&mut (&file), stamp.as_bytes());
+    let _ignored_stamp = std::io::Write::write_all(&mut &*file, stamp.as_bytes());
     Ok(ServeLock {
-        _held: Some(file),
+        held: Some(file),
         root: key,
     })
 }
@@ -18419,15 +18432,21 @@ mod tests {
 
         // THE OTHER INSTANCE. It writes its own stamp first, so the refusal can
         // quote it the way a real holder's would be quoted.
-        let squatter = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(root.join(SERVE_LOCK))
-            .expect("the lock file");
-        squatter.try_lock().expect("nothing else holds it");
-        std::io::Write::write_all(&mut (&squatter), b"addr=127.0.0.1:8080 pid=4242\n")
+        // A guard, so the `drop` below unlocks explicitly: this test binary
+        // spawns children, and a lock released only by close can survive in
+        // one of them and refuse the take that must succeed (D-0693).
+        let squatter = store::flock::Flock::try_lock(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(root.join(SERVE_LOCK))
+                .expect("the lock file"),
+            root.join(SERVE_LOCK),
+        )
+        .expect("nothing else holds it");
+        std::io::Write::write_all(&mut &*squatter, b"addr=127.0.0.1:8080 pid=4242\n")
             .expect("stamp");
 
         let refused = take_serve_lock(&root, "127.0.0.1:9999".parse().expect("an address"))
@@ -18468,6 +18487,41 @@ mod tests {
         let taken = take_serve_lock(&root, "127.0.0.1:9999".parse().expect("an address"))
             .expect("the store is free once the other instance is gone");
         drop(taken);
+    }
+
+    /// **A dropped serve lock is released while a duplicate of its descriptor
+    /// is still open.** D-0693.
+    ///
+    /// The duplicate is the model of the reference a child spawned by another
+    /// thread holds until its exec. While closing the handle was the release,
+    /// that reference kept `serve.lock` held after the `ServeLock` was gone,
+    /// and the next serve over the same store was refused as "already serving
+    /// this store" by an instance that no longer existed.
+    #[test]
+    fn a_dropped_serve_lock_is_released_despite_a_duplicated_descriptor() {
+        let root = crate::scratch::path("serve-lock-dup");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let addr: std::net::SocketAddr = "127.0.0.1:9999".parse().expect("an address");
+
+        let first = take_serve_lock(&root, addr).expect("a free store");
+        let child = first
+            .held
+            .as_deref()
+            .expect("the first serve in this process holds the file lock")
+            .try_clone()
+            .expect("the duplicate a spawned child would hold");
+        drop(first);
+
+        let second = take_serve_lock(&root, addr)
+            .expect("the dropped serve lock was released despite the duplicate");
+        assert!(
+            second.held.is_some(),
+            "and this serve holds the file lock itself, not an in-process pass"
+        );
+        drop(second);
+        drop(child);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A configured store is an existing capability, never a directory the
@@ -22083,11 +22137,14 @@ mod tests {
             );
             return;
         };
+        // A probe that ACQUIRES the real lock releases it through the guard's
+        // explicit unlock before `run` takes it, never by close (D-0693).
+        let lock_path = root.join("serve.lock");
         let busy = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .open(root.join("serve.lock"))
-            .is_ok_and(|file| file.try_lock().is_err());
+            .open(&lock_path)
+            .is_ok_and(|file| store::flock::Flock::try_lock(file, lock_path.clone()).is_err());
         if busy {
             // A HELD STORE IS A REFUSAL AND IT NAMES THE HOLDER. This is the
             // same path `run_refuses_a_store_another_server_holds` pins; what is

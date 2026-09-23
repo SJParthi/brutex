@@ -1,6 +1,26 @@
 #![cfg(test)]
 use super::*;
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Something to run while `publish_inner` holds the payload lock.
+type PayloadHook = Box<dyn FnOnce(&File)>;
+
+thread_local! {
+    /// Armed by a test on its own thread, taken by the next publication on
+    /// that thread and by nothing else.
+    static PAYLOAD_LOCKED: RefCell<Option<PayloadHook>> = const { RefCell::new(None) };
+}
+
+/// Called by `publish_inner` right after it takes the payload lock: runs the
+/// hook a test armed, once. The regression below uses it to take the
+/// duplicate descriptor a child spawned at that moment would hold.
+pub(super) fn payload_locked(file: &File) {
+    if let Some(hook) = PAYLOAD_LOCKED.with(|slot| slot.borrow_mut().take()) {
+        hook(file);
+    }
+}
 
 pub(crate) struct Scratch(pub PathBuf);
 impl Scratch {
@@ -147,5 +167,71 @@ fn dangling_owner_symlink_refuses_without_creating_a_foreign_file() -> Result<()
         !foreign.exists(),
         "refusing a symlink must not create its target"
     );
+    Ok(())
+}
+
+/// THE CI FAILURE, DETERMINISTICALLY: a published checkpoint is readable while
+/// a duplicate of its payload descriptor is still open. D-0693.
+///
+/// The duplicate is taken while the payload lock is held, which is exactly
+/// what a child spawned by another thread at that moment inherits until its
+/// exec. While closing the descriptor was the release, that reference kept the
+/// exclusive lock alive and `latest` refused with "checkpoint payload is busy
+/// or cannot be read: ... would block".
+#[test]
+fn a_published_checkpoint_is_released_despite_a_duplicated_descriptor() -> Result<(), String> {
+    let scratch = Scratch::new().map_err(error)?;
+    let mut journal = Journal::open(&scratch.0, "and-checkpoint-v1", [9; 32])?;
+    let captured: Rc<RefCell<Option<File>>> = Rc::default();
+    let into = Rc::clone(&captured);
+    PAYLOAD_LOCKED.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move |file: &File| {
+            *into.borrow_mut() = file.try_clone().ok();
+        }));
+    });
+    let (sequence, seal) = journal.publish(b"survives a child", 1024)?;
+    let child = captured
+        .borrow_mut()
+        .take()
+        .ok_or("the hook ran under the payload lock and duplicated it")?;
+
+    let saved = journal
+        .latest(1024)?
+        .ok_or("the acknowledged checkpoint is the latest")?;
+    assert_eq!(saved.payload, b"survives a child");
+    assert_eq!((saved.sequence, saved.seal), (sequence, seal));
+    let snapshot =
+        Snapshot::open(&scratch.0, "and-checkpoint-v1", [9; 32])?.ok_or("the namespace exists")?;
+    assert_eq!(
+        snapshot.read(sequence, 1024)?.payload,
+        b"survives a child",
+        "a read-only observer reads it too"
+    );
+    drop(child);
+    Ok(())
+}
+
+/// A dropped journal releases its namespace while a duplicate of the owner
+/// descriptor is still open. D-0693.
+#[test]
+fn a_dropped_search_journal_is_released_despite_a_duplicated_descriptor() -> Result<(), String> {
+    let scratch = Scratch::new().map_err(error)?;
+    let journal = Journal::open(&scratch.0, "and-checkpoint-v1", [10; 32])?;
+    let child = journal.owner.try_clone().map_err(error)?;
+    assert!(
+        Journal::open(&scratch.0, "and-checkpoint-v1", [10; 32]).is_err(),
+        "the premise: a live owner refuses a second one"
+    );
+    drop(journal);
+
+    let reopened = Journal::open(&scratch.0, "and-checkpoint-v1", [10; 32])?;
+    drop(reopened);
+    let snapshot =
+        Snapshot::open(&scratch.0, "and-checkpoint-v1", [10; 32])?.ok_or("the namespace exists")?;
+    assert!(
+        !snapshot.writer_observed,
+        "no writer is observed once every owner has dropped"
+    );
+    drop(child);
     Ok(())
 }

@@ -13,6 +13,8 @@ use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use store::flock::Flock;
+
 use costs::fill::Direction;
 use indicators::column::Column;
 use runner::grid;
@@ -913,9 +915,12 @@ impl TradeReader {
     fn open_candidate(dir: &Path, candidate: &Candidate, max_bytes: u64) -> Result<Self, String> {
         let path = trade_path(dir, candidate.key);
         let mut file = crate::readonly_file::open(&path).map_err(io_error)?;
-        lock_for_read(&file)?;
-        let generation = crate::result_set::file_generation(&file, &path)?;
-        let len = file.metadata().map_err(io_error)?.len();
+        // Every refusal below releases the shared lock through the guard's
+        // explicit unlock, never by close: the reader keeps this descriptor,
+        // and a child another thread spawned may hold a duplicate (D-0693).
+        let mut held = Flock::try_lock_shared(&mut file, path.as_path()).map_err(busy)?;
+        let generation = crate::result_set::file_generation(&held, &path)?;
+        let len = held.metadata().map_err(io_error)?.len();
         let count = candidate.cell.map_or(0, |cell| cell.trades);
         let expected = count
             .checked_mul(TRADE_BYTES as u64)
@@ -927,26 +932,26 @@ impl TradeReader {
             );
         }
         let mut header = [0; HEADER];
-        file.read_exact(&mut header).map_err(io_error)?;
+        held.read_exact(&mut header).map_err(io_error)?;
         verify_header(&header, TRADES)?;
         let mut digest = brutex_core::blake3::Hasher::new();
         digest.update(&header);
         let mut financial = Financial::default();
         for seq in 0..count {
             let mut raw = [0; TRADE_BYTES];
-            file.read_exact(&mut raw).map_err(io_error)?;
+            held.read_exact(&mut raw).map_err(io_error)?;
             digest.update(&raw);
             financial.add(checked_trade(&raw, candidate, seq)?);
         }
         let mut seal = [0; SEAL];
-        file.read_exact(&mut seal).map_err(io_error)?;
+        held.read_exact(&mut seal).map_err(io_error)?;
         if digest.finalize() != seal || seal != candidate.trades_digest {
             return Err("candidate trade content digest differs from its manifest".to_owned());
         }
         financial.matches(candidate.cell.as_ref())?;
-        let observed = crate::result_set::file_generation(&file, &path)?;
+        let observed = crate::result_set::file_generation(&held, &path)?;
         crate::result_set::require_generation_unchanged(generation, observed, &path)?;
-        file.unlock().map_err(io_error)?;
+        held.release().map_err(|u| io_error(u.why))?;
         Ok(Self {
             file,
             path,
@@ -965,7 +970,7 @@ impl TradeReader {
     /// Refuses invalid pages, changed files and row corruption.
     pub fn page(&mut self, start: u64, limit: usize) -> Result<Vec<crate::trades::Row>, String> {
         page_limit(limit)?;
-        lock_for_read(&self.file)?;
+        self.file.try_lock_shared().map_err(busy)?;
         let result = self.page_locked(start, limit);
         self.file.unlock().map_err(io_error)?;
         result
@@ -1183,14 +1188,16 @@ fn write_exact(path: &Path, magic: [u8; 8], payload: &[u8]) -> Result<[u8; 32], 
         .create_new(true)
         .open(path)
     {
-        Ok(mut file) => {
-            file.lock().map_err(io_error)?;
+        Ok(file) => {
+            // A write or sync failure releases the lock through the guard's
+            // explicit unlock, never by close (D-0693).
+            let mut file = Flock::lock(file, path).map_err(io_error)?;
             file.write_all(&header)
                 .and_then(|()| file.write_all(payload))
                 .and_then(|()| file.write_all(&digest))
                 .and_then(|()| file.sync_all())
                 .map_err(io_error)?;
-            file.unlock().map_err(io_error)?;
+            file.release().map_err(|u| io_error(u.why))?;
         }
         Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(why) => return Err(io_error(why)),
@@ -1208,8 +1215,11 @@ fn write_exact(path: &Path, magic: [u8; 8], payload: &[u8]) -> Result<[u8; 32], 
     Ok(digest)
 }
 fn read_sealed(path: &Path, magic: [u8; 8], max_bytes: u64) -> Result<(Vec<u8>, [u8; 32]), String> {
-    let mut file = crate::readonly_file::open(path).map_err(io_error)?;
-    lock_for_read(&file)?;
+    // Released by name below and by the guard's explicit unlock on every
+    // refusal, never by close (D-0693).
+    let mut file =
+        Flock::try_lock_shared(crate::readonly_file::open(path).map_err(io_error)?, path)
+            .map_err(busy)?;
     let generation = crate::result_set::file_generation(&file, path)?;
     let metadata = file.metadata().map_err(io_error)?;
     let len = metadata.len();
@@ -1236,16 +1246,17 @@ fn read_sealed(path: &Path, magic: [u8; 8], max_bytes: u64) -> Result<(Vec<u8>, 
     }
     let observed = crate::result_set::file_generation(&file, path)?;
     crate::result_set::require_generation_unchanged(generation, observed, path)?;
+    file.release().map_err(|u| io_error(u.why))?;
     Ok((payload, seal))
 }
 
-fn lock_for_read(file: &File) -> Result<(), String> {
-    file.try_lock_shared().map_err(|why| match why {
+fn busy(why: std::fs::TryLockError) -> String {
+    match why {
         std::fs::TryLockError::WouldBlock => {
             "candidate detail is busy; retry this exact saved page".to_owned()
         }
         std::fs::TryLockError::Error(why) => io_error(why),
-    })
+    }
 }
 
 #[cfg(test)]

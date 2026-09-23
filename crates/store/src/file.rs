@@ -174,6 +174,7 @@ const MAX_ROW_LEN: usize = {
 
 /// The three widths, pinned so a format change is seen here.
 const _: () = assert!(MAX_ROW_LEN == 80);
+use crate::flock::Flock;
 use crate::header::Header;
 use crate::layout::Layout;
 use crate::path::{FileKind, StorePath};
@@ -787,7 +788,10 @@ pub enum Appended {
 ///
 /// Holds the month's advisory lock for as long as it lives. Dropping it closes
 /// the records and then releases the lock, in that order — the fields are
-/// declared in that order and Rust drops them in declaration order.
+/// declared in that order and Rust drops them in declaration order. The lock is
+/// released by an explicit unlock, not by closing its descriptor, so a
+/// duplicate of that descriptor left in a spawned child cannot keep the month
+/// locked after its owner is gone (D-0693).
 #[derive(Debug)]
 pub struct BarFile {
     /// The records.
@@ -877,11 +881,16 @@ pub struct BarFile {
     verified: AtomicU64,
     /// The advisory lock, held for its **drop** and never read again.
     ///
-    /// Underscored because that is what it is: closing this descriptor is what
+    /// Underscored because that is what it is: dropping this guard is what
     /// releases the month, so the field is live for its whole life and is
     /// touched exactly once, by the compiler-generated drop. Declared last so
     /// the records are closed before the lock is released.
-    _lock: Option<File>,
+    ///
+    /// A [`Flock`] and not a bare `File`, because closing the descriptor was
+    /// the release and a `flock` lock survives its close while any duplicate
+    /// of the descriptor is open — one inherited by a child another thread
+    /// spawned is enough. The guard unlocks explicitly. D-0693.
+    _lock: Option<Flock<File>>,
 }
 
 /// The only geometry a `.ovl` file may have.
@@ -985,11 +994,13 @@ impl BarFile {
         fault(fs::create_dir_all(&dir), &dir, Action::CreateDir)?;
 
         // The lock is taken before the bar file is opened, let alone measured.
-        // Everything below this line assumes exactly one writer.
-        let lock = fault(open_rw(&lock_path), &lock_path, Action::Open)?;
-        if let Err(refusal) = lock.try_lock() {
-            return Err(lock_fault(&lock_path, refusal));
-        }
+        // Everything below this line assumes exactly one writer. Every `?`
+        // below it releases the month through the guard's explicit unlock.
+        let lock = Flock::try_lock(
+            fault(open_rw(&lock_path), &lock_path, Action::Open)?,
+            lock_path.clone(),
+        )
+        .map_err(|refusal| lock_fault(&lock_path, refusal))?;
 
         let bars = fault(open_rw(&bars_path), &bars_path, Action::Open)?;
         let mut len = fault(bars.metadata(), &bars_path, Action::Measure)?.len();
@@ -1131,12 +1142,10 @@ impl BarFile {
         // file to hold a lock on would be the very write this function exists
         // to avoid.
         let lock = match File::open(&lock_path) {
-            Ok(handle) => {
-                if let Err(refusal) = handle.try_lock_shared() {
-                    return Err(lock_fault(&lock_path, refusal));
-                }
-                Some(handle)
-            }
+            Ok(handle) => Some(
+                Flock::try_lock_shared(handle, lock_path.clone())
+                    .map_err(|refusal| lock_fault(&lock_path, refusal))?,
+            ),
             Err(why) if why.kind() == io::ErrorKind::NotFound => None,
             Err(why) => return Err(classify(&lock_path, Action::Open, &why)),
         };
@@ -1174,9 +1183,11 @@ impl BarFile {
         }
         let bars_path = path.to_path_buf(root);
         let lock_path = path.with_file(FileKind::Lock).to_path_buf(root);
-        let lock =
-            crate::checksum_audit::open_regular(&lock_path).map_err(|why| why.to_string())?;
-        lock.try_lock_shared().map_err(|why| why.to_string())?;
+        let lock = Flock::try_lock_shared(
+            crate::checksum_audit::open_regular(&lock_path).map_err(|why| why.to_string())?,
+            lock_path.clone(),
+        )
+        .map_err(|why| why.to_string())?;
         let bars =
             crate::checksum_audit::open_regular(&bars_path).map_err(|why| why.to_string())?;
         let len = bars.metadata().map_err(|why| why.to_string())?.len();
@@ -1238,7 +1249,7 @@ impl BarFile {
         // drifts. `None` at the doors that have no `StorePath` to ask -- only
         // the test harness.
         crc_path: Option<PathBuf>,
-        lock: Option<File>,
+        lock: Option<Flock<File>>,
         len: u64,
         symbol_id: u32,
         timeframe_secs: u32,
@@ -1656,7 +1667,7 @@ impl BarFile {
                 .ok_or("strict checksum audit refuses a file born without checksums")?,
             lock: self
                 ._lock
-                .as_ref()
+                .as_deref()
                 .ok_or("strict checksum audit requires an existing held month lock")?,
             lock_path: self
                 .bars_path
@@ -4025,6 +4036,61 @@ mod tests {
         );
         drop(reader);
         scrub_month(&path);
+    }
+
+    /// A DROPPED MONTH IS RELEASED WHILE A DUPLICATE OF ITS LOCK DESCRIPTOR IS
+    /// STILL OPEN. D-0693.
+    ///
+    /// The duplicate is the model of the reference a child spawned by another
+    /// thread holds until its exec. While closing the descriptor was the
+    /// release, that reference kept the month's lock alive and the reopen below
+    /// was `StoreError::Locked`.
+    #[test]
+    #[expect(
+        clippy::used_underscore_binding,
+        reason = "the duplicate is taken of the month lock itself, which is the \
+                  field whose drop this test is about"
+    )]
+    fn a_dropped_month_is_released_despite_a_duplicated_descriptor() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+        let root =
+            std::env::temp_dir().join(format!("brutex-store-file-flockdup-{}", std::process::id()));
+        let _ignored = std::fs::remove_dir_all(&root);
+        let month = crate::path::StorePath::new(crate::path::PathParts {
+            vendor: brutex_core::vendor::Vendor::Groww,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: crate::path::Timeframe::MINUTE_1,
+            month: crate::path::YearMonth::new(2024, 6).expect("2024-06"),
+            file: crate::path::FileKind::Bars,
+        })
+        .expect("a legal path");
+
+        let writer = BarFile::open_or_create(&root, month, SYMBOL).expect("a fresh month opens");
+        let child = writer
+            ._lock
+            .as_deref()
+            .expect("the writer holds the month lock")
+            .try_clone()
+            .expect("the duplicate a spawned child would hold");
+        assert_eq!(
+            BarFile::open_or_create(&root, month, SYMBOL).map(|_| ()),
+            Err(StoreError::Locked {
+                path: month
+                    .with_file(crate::path::FileKind::Lock)
+                    .to_path_buf(&root),
+            }),
+            "the premise: a live writer refuses a second one"
+        );
+        drop(writer);
+
+        let again = BarFile::open_or_create(&root, month, SYMBOL)
+            .expect("the dropped writer unlocked the month despite the duplicate");
+        drop(again);
+        drop(child);
+        let _ignored = std::fs::remove_dir_all(&root);
     }
 }
 

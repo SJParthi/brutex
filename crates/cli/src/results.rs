@@ -51,6 +51,8 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 
+use store::flock::Flock;
+
 /// Why a result could not be written or read, in the operator's words.
 pub type Refusal = String;
 
@@ -693,7 +695,16 @@ fn write_fresh_header(file: &mut File, path: &Path) -> Result<(), Refusal> {
     Ok(())
 }
 
-fn open_result_file(path: &Path, writable: bool) -> Result<(File, bool), Refusal> {
+/// Opens the ledger and, when it is a regular file, takes the initial
+/// validation lock on a duplicate of its descriptor.
+///
+/// The lock belongs to the open file description, so the duplicate's guard
+/// takes and releases the very lock the returned `File` sees, and the `File`
+/// stays free to be written, read and moved while it is held. Every refusal
+/// between here and the end of `Results::open_with` releases it through the
+/// guard's explicit unlock, never by closing a descriptor: a duplicate left in
+/// a child another thread spawned would otherwise keep it (D-0693).
+fn open_result_file(path: &Path, writable: bool) -> Result<(File, Option<Flock<File>>), Refusal> {
     let file = OpenOptions::new()
         .read(true)
         .write(writable)
@@ -718,23 +729,29 @@ fn open_result_file(path: &Path, writable: bool) -> Result<(File, bool), Refusal
         .metadata()
         .map_err(|why| format!("{} could not be classified: {why}", path.display()))?
         .is_file();
-    if regular {
-        let locked = if writable {
-            file.lock()
-        } else {
-            file.lock_shared()
-        };
-        locked.map_err(|why| {
+    let lock = if regular {
+        let refused = |why: std::io::Error| {
             format!(
                 "{} could not be locked while opening: {why}",
                 path.display()
             )
-        })?;
-    }
+        };
+        let duplicate = file.try_clone().map_err(refused)?;
+        Some(
+            if writable {
+                Flock::lock(duplicate, path.to_path_buf())
+            } else {
+                Flock::lock_shared(duplicate, path.to_path_buf())
+            }
+            .map_err(refused)?,
+        )
+    } else {
+        None
+    };
     // A device such as /dev/null still reaches write_fresh_header's specific
     // non-retained-bytes refusal. Its unsupported advisory lock is not evidence
     // that a header was stored, and must not hide that existing diagnosis.
-    Ok((file, regular))
+    Ok((file, lock))
 }
 
 fn enforce_read_limit(path: &Path, len: u64, max_bytes: Option<u64>) -> Result<(), Refusal> {
@@ -745,18 +762,6 @@ fn enforce_read_limit(path: &Path, len: u64, max_bytes: Option<u64>) -> Result<(
             "{} is {len} bytes; this bounded results reader accepts at most {max_bytes}. No header or record was read and no partial identity index was built",
             path.display()
         ));
-    }
-    Ok(())
-}
-
-fn release_initial_lock(file: &File, path: &Path, locked: bool) -> Result<(), Refusal> {
-    if locked {
-        file.unlock().map_err(|why| {
-            format!(
-                "{} could not release its initial validation lock: {why}",
-                path.display()
-            )
-        })?;
     }
     Ok(())
 }
@@ -841,6 +846,12 @@ impl Results {
     /// three places the two genuinely differ: whether the directory is made,
     /// whether the file may be created, and whether an empty file is given a
     /// fresh header or reported as the absence it is.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the open-time validation lock is released inline at the end \
+                  (D-0693), and splitting the scan from its lock would put the \
+                  refusal paths in one function and the release in another"
+    )]
     fn open_with(root: &Path, writable: bool, max_bytes: Option<u64>) -> Result<Self, Refusal> {
         let dir = root.join("results");
         if writable {
@@ -848,7 +859,7 @@ impl Results {
                 .map_err(|why| format!("the results directory could not be made: {why}"))?;
         }
         let path = Self::path(root);
-        let (mut file, locked) = open_result_file(&path, writable)?;
+        let (mut file, lock) = open_result_file(&path, writable)?;
 
         let len = file
             .metadata()
@@ -996,7 +1007,18 @@ impl Results {
                 "the results ledger changed length while its index was being built".to_owned(),
             );
         }
-        release_initial_lock(&file, &path, locked)?;
+        // Released here rather than through a helper: a helper's only body
+        // would be this release, and replacing it with `Ok(())` would still
+        // unlock through the guard's `Drop` — a mutant no test can tell apart.
+        if let Some(lock) = lock {
+            lock.release().map_err(|u| {
+                format!(
+                    "{} could not release its initial validation lock: {}",
+                    path.display(),
+                    u.why
+                )
+            })?;
+        }
         Ok(Self {
             file,
             path,

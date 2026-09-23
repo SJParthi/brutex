@@ -41,6 +41,7 @@ use brutex_core::blake3::Hasher;
 use indicators::{Candle, column::Column};
 use pull::calendar::{DayKind, kind_of};
 use runner::grid::{Cell, TradeRow};
+use store::flock::Flock;
 
 use crate::candidate_universe::CandidateUniverseReceiptV1;
 use crate::population::InstrumentFamilyV1;
@@ -2097,7 +2098,10 @@ pub struct ObservationAuthorityLedgerV1 {
     lock_path: PathBuf,
     file_path: PathBuf,
     file: File,
-    lock_file: File,
+    /// Held for the ledger's whole life and released by an explicit unlock
+    /// when it drops, never by closing the descriptor: a duplicate left in a
+    /// child another thread spawned would otherwise keep it (D-0693).
+    lock_file: Flock<File>,
     bounds: ObservationAuthorityBoundsV1,
     audits: std::collections::HashMap<[u8; 32], ObservationAuthorityAuditV1>,
     data_by_id: std::collections::HashMap<[u8; 32], ObservationAuthorityDataV1>,
@@ -2145,21 +2149,21 @@ impl ObservationAuthorityLedgerV1 {
                     lock_path.display()
                 )
             })?;
-        if writable {
-            lock.lock().map_err(|why| {
+        let lock = if writable {
+            Flock::lock(lock, lock_path.clone()).map_err(|why| {
                 format!(
                     "cannot lock observation authority writer {}: {why}",
                     lock_path.display()
                 )
-            })?;
+            })?
         } else {
-            lock.lock_shared().map_err(|why| {
+            Flock::lock_shared(lock, lock_path.clone()).map_err(|why| {
                 format!(
                     "cannot take shared observation authority lock {}: {why}",
                     lock_path.display()
                 )
-            })?;
-        }
+            })?
+        };
         let mut file = OpenOptions::new()
             .read(true)
             .write(writable)
@@ -3284,7 +3288,10 @@ pub struct ObservationAuthorityLedgerV2 {
     lock_path: PathBuf,
     file_path: PathBuf,
     file: File,
-    lock_file: File,
+    /// Held for the ledger's whole life and released by an explicit unlock
+    /// when it drops, never by closing the descriptor: a duplicate left in a
+    /// child another thread spawned would otherwise keep it (D-0693).
+    lock_file: Flock<File>,
     bounds: ObservationAuthorityBoundsV2,
     audits: HashMap<[u8; 32], ObservationAuthorityAuditV2>,
     data_by_id: HashMap<[u8; 32], ObservationAuthorityDataV2>,
@@ -3329,15 +3336,13 @@ impl ObservationAuthorityLedgerV2 {
             .truncate(false)
             .open(&lock_path)
             .map_err(|why| format!("cannot open Observation V2 lock: {why}"))?;
-        if writable {
-            lock_file
-                .lock()
-                .map_err(|why| format!("cannot lock Observation V2 writer: {why}"))?;
+        let lock_file = if writable {
+            Flock::lock(lock_file, lock_path.clone())
+                .map_err(|why| format!("cannot lock Observation V2 writer: {why}"))?
         } else {
-            lock_file
-                .lock_shared()
-                .map_err(|why| format!("cannot take shared Observation V2 lock: {why}"))?;
-        }
+            Flock::lock_shared(lock_file, lock_path.clone())
+                .map_err(|why| format!("cannot take shared Observation V2 lock: {why}"))?
+        };
         let mut file = OpenOptions::new()
             .read(true)
             .write(writable)

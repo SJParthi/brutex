@@ -18984,7 +18984,17 @@ struct Recorded<'a> {
 
 /// Cross-process serialization for the four-file result commit. The file has
 /// no payload and is never deleted; it coordinates writers, not history.
-struct ResultSetLock(std::fs::File);
+///
+/// Released by name at the end of `record_all_attempt` and by the guard's
+/// explicit unlock on every other path — an unwind included — never by closing
+/// the descriptor: a duplicate left in a child another thread spawned would
+/// otherwise hold the next commit off (D-0693).
+///
+/// There is no `release` wrapper on this type. Its only body would be the
+/// guard's own release, and replacing that body with `Ok(())` would still
+/// unlock through the guard's `Drop` — a mutant no test could tell apart. The
+/// caller releases the guard directly instead.
+struct ResultSetLock(store::flock::Flock<std::fs::File>);
 
 impl ResultSetLock {
     fn acquire(root: &std::path::Path) -> Result<Self, String> {
@@ -18999,15 +19009,9 @@ impl ResultSetLock {
             .truncate(false)
             .open(&path)
             .map_err(|why| format!("{} could not be opened: {why}", path.display()))?;
-        file.lock()
+        let held = store::flock::Flock::lock(file, path.clone())
             .map_err(|why| format!("{} could not be locked: {why}", path.display()))?;
-        Ok(Self(file))
-    }
-
-    fn release(self) -> Result<(), String> {
-        self.0
-            .unlock()
-            .map_err(|why| format!("the result-set writer lock could not be released: {why}"))
+        Ok(Self(held))
     }
 }
 
@@ -19229,7 +19233,8 @@ fn record_all_attempt(
         Ok((report, committed, frontier_rows, trade_rows))
     })();
     let mut attempted = attempted;
-    if let Err(why) = cross_process.release() {
+    if let Err(store::flock::Unreleased { why: cause, .. }) = cross_process.0.release() {
+        let why = format!("the result-set writer lock could not be released: {cause}");
         append_result_set_release_warning(&mut attempted, &why);
     }
     attempted
@@ -23471,7 +23476,7 @@ mod tests {
             started_tx.send(()).expect("announces its attempt");
             let second = super::ResultSetLock::acquire(&other_root).expect("second writer locks");
             acquired_tx.send(()).expect("announces acquisition");
-            second.release().expect("second writer unlocks");
+            second.0.release().expect("second writer unlocks");
         });
         started_rx.recv().expect("the other writer started");
         assert!(
@@ -23480,7 +23485,7 @@ mod tests {
                 .is_err(),
             "the second writer acquired while the first still held the result set"
         );
-        first.release().expect("first writer unlocks");
+        first.0.release().expect("first writer unlocks");
         acquired_rx
             .recv_timeout(std::time::Duration::from_secs(1))
             .expect("the second writer proceeds after release");

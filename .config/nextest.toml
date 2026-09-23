@@ -22,3 +22,10 @@ priority = 100
 [[profile.default.overrides]]
 filter = 'test(all_eight_stored_rungs_publish_exact_selection_chains_and_reuse_every_byte)'
 priority = -100
+
+# D-0693. Each advisory-lock regression fails in milliseconds when a lock is
+# released only by close, so a mutant that stops an unlock is caught before the
+# long suites start. This changes order only: every test still runs.
+[[profile.default.overrides]]
+filter = 'test(released_despite_a_duplicated_descriptor) | test(dropping_receipt_releases_lock_even_when_a_duplicate_descriptor_survives) | test(a_refused_release_is_returned_naming_the_file) | test(a_contended_lock_is_refused_and_takes_nothing)'
+priority = 100

@@ -36,6 +36,7 @@ use std::os::unix::fs::OpenOptionsExt as _;
 
 use brutex_core::blake3::Hasher;
 use runner::admission::{AdmissionExactProbabilityV2, AdmissionStatisticsDraftV3};
+use store::flock::Flock;
 
 use crate::candidate_universe::CANDIDATE_SIGNAL_RUNGS_SECONDS_V1;
 use crate::population::{InstrumentFamilyV1, RequestedSpanIdentityV1};
@@ -2142,19 +2143,21 @@ impl PopulationStatisticsV3Ledger {
         let lock_path = root.join(LOCK_FILE);
         let data_path = root.join(DATA_FILE);
         let lock_file = open_file(&lock_path, writable, writable)?;
-        if writable {
-            lock_file
-                .lock()
-                .map_err(|why| format!("cannot lock {}: {why}", lock_path.display()))?;
+        // The open lock is released by name on success and by the guard's
+        // explicit unlock on every refusal, never by closing a descriptor: the
+        // ledger keeps a duplicate of this one, and a child another thread
+        // spawned may hold a third (D-0693).
+        let held = if writable {
+            Flock::lock(&lock_file, lock_path.as_path())
+                .map_err(|why| format!("cannot lock {}: {why}", lock_path.display()))?
         } else {
-            lock_file
-                .lock_shared()
-                .map_err(|why| format!("cannot share-lock {}: {why}", lock_path.display()))?;
-        }
+            Flock::lock_shared(&lock_file, lock_path.as_path())
+                .map_err(|why| format!("cannot share-lock {}: {why}", lock_path.display()))?
+        };
         let held_lock = lock_file
             .try_clone()
             .map_err(|why| format!("cannot clone {}: {why}", lock_path.display()))?;
-        let opened = (|| {
+        let opened: Result<Self, PopulationStatisticsV3Refusal> = (|| {
             let mut data_file = open_file(&data_path, writable, writable)?;
             if writable {
                 ensure_header(&mut data_file, &data_path)?;
@@ -2179,13 +2182,10 @@ impl PopulationStatisticsV3Ledger {
             ledger.scan()?;
             Ok(ledger)
         })();
-        let unlocked = lock_file
-            .unlock()
-            .map_err(|why| format!("cannot unlock {}: {why}", lock_path.display()));
-        match (opened, unlocked) {
-            (Ok(value), Ok(())) => Ok(value),
-            (Err(why), _) | (Ok(_), Err(why)) => Err(why),
-        }
+        let ledger = opened?;
+        held.release()
+            .map_err(|u| format!("cannot unlock {}: {}", lock_path.display(), u.why))?;
+        Ok(ledger)
     }
 
     fn scan(&mut self) -> Result<(), PopulationStatisticsV3Refusal> {

@@ -38844,3 +38844,184 @@ records the same.
 
 Only `docs/06-limits.md` and this ledger changed. No source changed, so there
 is no test to add and no mutant to run.
+
+### D-0693 — Release every advisory file lock by `File::unlock`, through one guard in `store` — 2026-09-23
+
+**The defect, proven before the fix.** `File::lock`, `lock_shared`, `try_lock`
+and `try_lock_shared` are `flock(2)` locks, and a `flock` lock belongs to the
+open file description, not to the descriptor that took it. On Linux,
+`std::process::Command` duplicates the whole descriptor table into the child.
+A `CLOEXEC` descriptor closes only when the child execs. So when any thread
+spawns a child while another holds a file lock, the child holds a second
+reference to that description until its exec. A holder that releases only by
+dropping its `File` then leaves the lock alive on the child's reference, and
+the next `try_lock` or `try_lock_shared` refuses with `WouldBlock`, in this
+process or any other. An explicit `File::unlock` releases the lock on the
+description however many descriptors still refer to it.
+
+CI hit it. The `cli` test
+`boolean_grammar_campaign::tests::checkpoint_counter_reseeding_and_changed_batch_boundaries_refuse`
+failed with "checkpoint payload is busy or cannot be read: lock acquisition
+failed because the operation would block". `search_checkpoint`'s
+`publish_inner` took `lock()` on the payload and released it only by drop,
+and `latest` then took `try_lock_shared` on a fresh open. macOS applies
+`CLOEXEC` inside `posix_spawn` atomically, so a real spawn never reproduces it
+there. `File::try_clone` makes the same second reference deterministically, and
+every regression below uses it. Proven on this Mac with `try_clone` as the
+duplicate: close-only leaves the lock held, and unlock-then-close releases it.
+
+**Decision.** One guard, `store::flock::Flock<F: Borrow<File>, P: AsRef<Path> =
+PathBuf>`, is used at every production site that released a lock by close on
+any non-panic path. Its constructors are the four `File` lock calls and return
+std's own `io::Error` or `TryLockError`, so every site keeps its refusal text
+unchanged. `release(self) -> Result<(), Unreleased>` unlocks by name on the
+success path. It clears `held` first, so a refusal is reported once, there, and
+never again by `Drop`. `Drop` unlocks every other path: an early `?`, a refusal,
+an owner that drops. A refused unlock in `Drop` is logged as `store.flock`,
+"advisory lock not released before close", at `Warn`. `Unreleased` names the
+path and keeps the host's `io::Error` as its source. `From<Unreleased> for
+io::Error` keeps the kind. The guard implements `Deref`/`DerefMut` to `File` and
+no `io::Read` or `io::Write`. `File::flush` is a no-op, so a delegating `flush`
+would be a mutant no test can kill. A site that must also move or wrap the
+`File` while it is locked locks a duplicate instead:
+`Flock::lock(file.try_clone()?, path)`. The duplicate names the same open file
+description, so its guard takes and releases the very lock the original sees.
+
+**Why `store`.** Every crate that takes a production file lock already depends
+on it: `store`, `pull`, `api` and `cli`. No other crate calls `File::lock`,
+`lock_shared`, `try_lock`, `try_lock_shared` or `unlock` outside test code. So
+the guard adds no arrow, and `CLAUDE.md` §5, gates 9, 9b and 22 and
+`core/tests/graph.rs` are untouched. `core` holds no I/O and cannot name
+`telemetry`, which the drop note needs. A lock guard is not an event, so it
+does not belong in `telemetry`. Four per-crate copies of one rule would be four
+authorities. `store` already owns the busiest lock, `BarFile`'s month lock,
+and already emits through `telemetry`. Gate 17 is unaffected: `vocab`,
+`engine`, `indicators` and `runner` depend on no `store` and take no file lock.
+
+**Sites converted.** `store`: `BarFile`'s month lock at all three doors, and
+`repair`'s shared source lock in `RevisionReader::open` and `publish`. `pull`:
+`masters::lock_source`, the cash-session cache's reader and day locks, and
+`ingest`'s `CensusLock`. `api`: the audit journal's append lock, the recovery
+journal's lifetime lock and its snapshot, and `ServeLock`, which now unlocks
+the file before it frees the in-process key. `cli`: the checkpoint journal's
+owner lock, its payload lock (the CI failure) and its reader; the invocation
+audit's index at `begin` and `read`; result-set receipts' open-time lock; the
+results ledger's open-time lock; the sweep-evidence page read; both observation
+ledgers' lifetime locks; the open-time locks of the candidate universe,
+Finalization V2, Statistics V2 and V3 and both pre-admission ledgers; the
+campaign receipt check; Boolean `Pending`, `read_held` and `Observation`, whose
+body and receipt stay shared-locked for its life; the observation read lease;
+candidate trades' reader, writer and sealed read; the checksum `Receipt`, whose
+manual `Drop` discarded the unlock result with `let _ =`; the execution lease
+and its probe, which released by close; expression evidence's writer and
+reader; the search signal reader; and `ResultSetLock`. Test-only locks were
+converted only where a test depends on them: the audit-journal, serve-lock
+and Boolean-owner squatters, the `serve.lock` probe and the grammar campaign's
+source lock. Each of those test binaries spawns children.
+
+**Sites deliberately unchanged.** About 150 bracket sites lock, run one call
+or closure, unlock, and only then combine the results. They already unlock by
+name on every path a release binary can take, because the release profile sets
+`panic = "abort"`. The sites are: `admission_join` 146/231; `admission_store`
+601/644/748/770/820/885; `anchored_search_lineage_v2` 608/612/758/779, v3
+663/667/813/845, v4 711/716/848/880; `execution_capability`
+1379/1456/1590/1656/1785; `execution_disposition_v2` 2006/2080/2355/2504;
+`execution_v3` 1967/1971/2203/2522/2579/2620; `execution_v4`
+2455/2459/2691/3010/3067/3108; `frontier` 1029/1243/1283/1460; `global_replay`
+2612/2677/2785; `global_replay_v2` 2020/2095/2187; `global_replay_v3` 2576;
+`global_replay_v4_store` 28/111; `institutional_statistics` 918/970/1124;
+`population` 2623/2701/3019/3057/3097/3874/3976; `population_admission_v2`
+1948/1952/2124/2163, v3 3571/3575/3745/3789/3843/3961, v4 2540/2544/2656/2793;
+`population_base_evidence_ledger_v2` 900/904/1116/1145;
+`population_finalization_v2` 1446/1473/1541, v3 1946/1950/2116/2160/2206/2289,
+v4 2145/2149/2267/2406; `population_statistics_v2` 2633/4663, v3 2331/2356;
+`population_v5` 2012/2016/2179/2395/2419/2473; `population_v6`
+1912/1916/2049/2163; `pre_admission_data` 1197/1235/1290/2486/2509;
+`result_set` 389/416; `results` 1200/1225/1421/1459; `selection`
+1816/1820/1921/2129/2133/2228; `selection_v3` 1162/1166/1260; `selection_v4`
+1737/1741/1836; `selection_v4_authority` 92/179; `selection_v5`
+1971/1976/2080/2256/2273; `selection_v6` 305/376; `stored_data_completeness`
+749/752/805/848; `sweep_evidence` 615/848/1282/1367/1420/1458; `trades`
+595/691; `candidate_universe` 3412/3445/3521/3636; `candidate_trades` 968;
+`checksum_receipts` 315; `operation_audit` 327; and `search_checkpoint` 100.
+Line numbers are as of b1d9ac70. Converting them is a follow-up. It would put
+about 150 more functions into gate 18's in-diff mutation run.
+
+**Deviations from the design this entry was written to, each forced by the
+code.**
+
+- *Where a site combined a result with the unlock's result*, the combination is
+  now `let value = result?; guard.release()...?; Ok(value)`, not
+  `let released = guard.release(); match (result, released)`. When both failed,
+  the old match dropped the unlock's error. With `release` consuming the guard,
+  nothing would log it either. Returning the operation's error first lets the
+  guard's `Drop` unlock and log a refusal. This applies to `sweep_evidence`'s
+  page read, the candidate universe, Finalization V2, Statistics V2 and V3,
+  both pre-admission ledgers, `repair::publish` and the api audit journal. Each
+  site's refusal sentences are unchanged.
+- *`repair::publish` reports a refused source release with
+  `publication_may_be_visible: true`*, not `false`. The revision is already
+  written by then, and that field's own contract says `true` means callers must
+  not report that publication did not happen.
+- *No wrapper whose only body is a guard's `release` survives.*
+  `ResultSetLock::release`, the results ledger's `release_initial_lock` and
+  `ReadLease::release` would each have been a function that `cargo mutants`
+  replaces with `Ok(())`. That mutant still unlocks, through the guard's
+  `Drop`, so no test can tell it apart. The caller releases the guard directly:
+  `record_all_attempt` calls `cross_process.0.release()`, `Results::open_with`
+  releases inline (with `#[expect(clippy::too_many_lines)]` and a reason), and
+  `with_current` and `with_current_many` release `lease.lease`.
+- *`result_set` locks through one helper, `validation_lock`*, not three inline
+  copies. Its refusal sentence is the sites' sentence, byte for byte.
+- *The recovery journal's field is `_lock`, not `lock`*, the name this crate
+  gives a field held only for its drop. Without the underscore it is a
+  `dead_code` warning.
+- *The `Pending` regression lives in `boolean_observation_file_tests.rs`*, not
+  `boolean_candidate_tests.rs`. `Pending`'s owner is private to the persistence
+  module, and that file is inside it.
+
+**Proof.** Store: `an_owned_lock_is_released_despite_a_duplicated_descriptor`
+and `a_borrowed_lock_is_released_despite_a_duplicated_descriptor` cover all four
+constructors, both `release` and drop, and `F` = `File`, `&File` and
+`&mut File`. The borrowed case also writes and reads through `DerefMut`.
+`a_refused_release_is_returned_naming_the_file` covers the path, the sentence,
+the source, `From<Unreleased>`, and that `Drop` does not ask again.
+`a_contended_lock_is_refused_and_takes_nothing` covers contention. `emits.rs`
+gains the ninth row, `store.flock` at `Warn`, driven by a refused unlock in the
+production `Drop`. One per-site regression each: the month lock, the census
+lock, the recovery journal, the serve lock, the published checkpoint, the
+checkpoint journal, the execution lease, the finished expression writer and
+Boolean `Pending`. The existing checksum-receipt duplicate test now proves
+`Receipt` through the guard. AF-15.
+
+**Red before green, as measured.** With `store::flock::unlock` made close-only,
+every site regression failed and the two `flock` duplicate tests failed.
+`a_contended_lock_is_refused_and_takes_nothing`,
+`a_refused_release_is_returned_naming_the_file` and the emits table do not
+depend on the unlock and stayed green. The failures named the cause. The
+checkpoint regression refused with "checkpoint payload is busy or cannot be
+read: lock acquisition failed because the operation would block", the CI
+failure verbatim. The month failed `Locked`, the serve lock "already serving
+this store", the recovery journal "already exclusively locked", the census
+"another ingest holds the census lock", the lease `Busy`, the expression
+evidence "busy", `Pending` "already owned", and the checksum receipt
+`WouldBlock`. Against b1d9ac70's own sources, the tests that compile against
+them failed the same way: both checkpoint regressions (with only the one-line
+test hook added to `publish_inner`), the execution lease and `Pending`. The
+other site tests name fields that did not exist at b1d9ac70, so for those the
+close-only guard is the model of the old code.
+
+**Mutation evidence.** `cargo mutants -p store --file
+crates/store/src/flock.rs`: 16 mutants, 6 caught, 0 missed, 10 unviable, 0
+timeouts. The unviable ones construct a `Default` that `Flock`, `File` and
+`io::Error` do not have, or write `||` into a `let` chain. In-diff over this
+change's `store` hunks: 26 mutants, 6 caught, 20 unviable, 0 missed. Over its
+`pull` hunks: 15 mutants, 2 caught, 13 unviable, 0 missed. Over its `api` hunks:
+5 mutants, 3 caught, 2 unviable, 0 missed. Over its `cli` hunks: 83 mutants, 55
+unviable by a build-only pass, and the 28 that build all caught, 0 missed and 0
+timeouts. That `cli` run gave nextest a filter of the test modules that own the
+touched code (`candidate_trades`, `execution_lease`, `expression`,
+`operation_audit`, `search_checkpoint`, `sweep_evidence`, `boolean_campaign` and
+`boolean_candidate_v1`), not the whole `cli` suite. A filtered run can only miss
+a kill the full suite would make, never invent one. Before the three release
+wrappers above were removed, their `Ok(())` mutants would have been equivalent.

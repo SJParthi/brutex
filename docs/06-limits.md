@@ -8920,3 +8920,44 @@ further indicators run, at 51, verified them.
 - **The fixtures are synthetic.** C-R-05's volume is 1,000 to 1,010 on every
   bar. A real equity month with zero-volume bars or wider prices is not
   timed.
+
+## Advisory file locks are released by unlock, not by close — D-0693, 23 September 2026
+
+`store::flock::Flock` releases every lock that has an early return or an owner
+by `File::unlock`. What that does not cover, stated rather than implied away:
+
+- **About 150 bracket sites still call `File::lock` and `File::unlock`
+  directly.** Each takes a lock, runs a closure or one call, unlocks, and only
+  then combines the two results, so it unlocks by name on every path a
+  release binary can take. The release profile sets `panic = "abort"`. A test
+  build unwinds, so a panic between the lock and the unlock at one of those
+  sites releases by close, and a duplicate descriptor in a child can then
+  hold the lock. D-0693 lists the sites. Converting them is a follow-up.
+- **The race was never reproduced here with a real spawn.** macOS applies
+  `CLOEXEC` inside `posix_spawn` atomically, so no child ever holds a
+  duplicate there. Every regression uses `File::try_clone` as the duplicate.
+  It is the same second reference to the same open file description, made
+  deterministically. The Linux fork-to-exec window that CI hit has not been
+  run on this machine.
+- **A refused unlock is logged, not returned, when it happens in `Drop`.** The
+  lock then lasts until every descriptor that refers to it has closed. The
+  `store.flock` warning names the file. It reaches a log only in a process
+  that installed a telemetry sink, and the default floor, `Info`, keeps a
+  `Warn`. In a process with no sink the note goes nowhere.
+- **A success-path release that is refused turns the success into a
+  failure.** That is deliberate: the caller hears of it in its own error
+  type. For `store::repair::publish` the revision is already written when the
+  source lock's release is refused, so that error says
+  `publication_may_be_visible: true`. `pull::masters::land_validated` returns
+  `Landed`, which cannot carry an unlock failure after a committed replace,
+  so its lock is released by `Drop` and a refusal is only logged.
+- **Cost.** A release is one `flock(LOCK_UN)` syscall that closing alone did
+  not make. The duplicate-descriptor idiom adds one `dup` at open for the
+  recovery journal, the result-set receipts, the results ledger, the
+  expression evidence writer and the Boolean observation owner. An owned
+  guard holds one `PathBuf` for the path its refusal would name. A borrowed
+  guard allocates nothing. None of this is on a per-bar or per-candidate path,
+  and none of it is measured.
+- **Only the test locks that a test's success depends on were converted.**
+  Probes that expect `WouldBlock`, and fixtures that unlock by name, still use
+  `File` directly.
