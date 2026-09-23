@@ -1813,6 +1813,92 @@ fn a_tail_checksum_the_proof_cannot_reach_is_still_refused() {
     );
 }
 
+/// The proof at every geometry this build seals, for every commit inside one
+/// block and every extent that commit could have been sealed through. D-0688.
+///
+/// The two tests above use the bar geometry only. The overlay (24-byte records,
+/// 170 to a block) and the computed greeks (80-byte records, 51 to a block)
+/// seal through the same `block::seal`, so an interrupted append of either
+/// reaches the same proof with a different stride and a different room.
+///
+/// For every commit `n` in `1..=rpb`, handed every byte of the block and one
+/// record more past the commit:
+///
+/// * every extent `n..=rpb` is admitted, naming its own count — 2,701, 14,535
+///   and 1,326 admissions;
+/// * the extent one record past the block's NOMINAL end is refused although its
+///   bytes were handed in, naming the committed extent's checksum;
+/// * for every admitted extent, one flipped committed bit is refused, naming
+///   the checksum of the damaged bytes. The bit moves with `n` and the extent,
+///   so every record of the committed range is damaged somewhere.
+///
+/// Every stored number is `crc32c` over bytes this test lays out, never one the
+/// function under test produced.
+#[test]
+fn the_proof_admits_every_extent_inside_the_block_at_every_geometry_and_nothing_else() {
+    for (layout, stride, rpb, admissions) in [
+        (Layout::V2, 56usize, 73usize, 2_701usize),
+        (Layout::OVERLAY, 24, 170, 14_535),
+        (Layout::GREEKS, 80, 51, 1_326),
+    ] {
+        assert_eq!(
+            (layout.record_stride(), layout.records_per_block()),
+            (
+                u64::try_from(stride).expect("small"),
+                u64::try_from(rpb).expect("small")
+            ),
+            "the premise: the geometry this row names"
+        );
+        // One block and one record more, and the checksum of each whole-record
+        // prefix of it.
+        let file = ramp((rpb + 1) * stride);
+        let prefix: Vec<u32> = (0..=rpb + 1)
+            .map(|records| crc32c(&file[..records * stride]))
+            .collect();
+        let mut admitted = 0usize;
+        for n in 1..=rpb {
+            let header = sealed_at(u64::try_from(n).expect("small"));
+            let committed = &file[..n * stride];
+            let past = &file[n * stride..];
+            let mut damaged = committed.to_vec();
+            for (through, &stored) in prefix.iter().enumerate().take(rpb + 1).skip(n) {
+                assert_eq!(
+                    block::verify_through(&header, layout, 0, committed, past, stored),
+                    Ok(u64::try_from(through).expect("small")),
+                    "stride {stride}: {n} committed, sealed through {through}"
+                );
+                admitted += 1;
+
+                let bit = (through * 131 + n * 7) % (committed.len() * 8);
+                damaged[bit / 8] ^= 1 << (bit % 8);
+                assert_eq!(
+                    block::verify_through(&header, layout, 0, &damaged, past, stored),
+                    Err(FormatError::BlockChecksum {
+                        block: 0,
+                        stored,
+                        computed: crc32c(&damaged),
+                    }),
+                    "stride {stride}: {n} committed, sealed through {through}, bit {bit} flipped"
+                );
+                damaged[bit / 8] ^= 1 << (bit % 8);
+            }
+            assert_eq!(
+                block::verify_through(&header, layout, 0, committed, past, prefix[rpb + 1]),
+                Err(FormatError::BlockChecksum {
+                    block: 0,
+                    stored: prefix[rpb + 1],
+                    computed: prefix[n],
+                }),
+                "stride {stride}: {n} committed, an extent past the block's nominal end"
+            );
+        }
+        assert_eq!(
+            admitted, admissions,
+            "stride {stride}: every extent inside the block"
+        );
+    }
+}
+
 // ===========================================================================
 // Paths
 // ===========================================================================
