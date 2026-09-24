@@ -125,10 +125,21 @@ fn respond(asked: crate::detail::Selector) -> (axum::http::StatusCode, JsonHeade
         return unavailable(axum::http::StatusCode::SERVICE_UNAVAILABLE, &why);
     }
 
-    let receipt = match crate::detail::committed_receipt(&root, &identity) {
-        Ok(receipt) => receipt,
+    let committed = match crate::detail::committed_receipt(&root, &identity) {
+        Ok(committed) => committed,
         Err(why) => return refuse(json, &why),
     };
+    // THESE ARE A RUN'S RANKED COMBINATIONS, AND A STOCK'S SAY WHAT THEY ARE
+    // MADE OF. The ledger parent the receipt read confirms names the
+    // instrument, so a RELIANCE run's frontier carries the gross label and the
+    // corporate-action sentence `cli top` prints over the same rows. Decided
+    // from this one snapshot; an index run's payload gains no key. AF-19.
+    let note = crate::detail::equity_note_member(
+        committed
+            .as_ref()
+            .map(|committed| committed.underlying.as_str()),
+    );
+    let receipt = committed.map(|committed| committed.receipt);
     if let Some(committed) = receipt
         && committed.frontier_rows > crate::detail::MAX_RESULT_ROWS
     {
@@ -160,7 +171,9 @@ fn respond(asked: crate::detail::Selector) -> (axum::http::StatusCode, JsonHeade
     ) {
         Ok(Ok(pair)) => pair,
         Ok(Err(why)) => return refuse(json, &why),
-        Err(why) => return missing_file_response(&root, &identity, receipt, page, json, &why),
+        Err(why) => {
+            return missing_file_response(&root, &identity, receipt, &note, page, json, &why);
+        }
     };
     if receipt.is_none() {
         return absent_response(
@@ -220,7 +233,7 @@ fn respond(asked: crate::detail::Selector) -> (axum::http::StatusCode, JsonHeade
     let _ = std::fmt::Write::write_fmt(
         &mut out,
         format_args!(
-            r#"{{"identity":"{}","rows":["#,
+            r#"{{"identity":"{}"{note},"rows":["#,
             crate::server::hex32(identity)
         ),
     );
@@ -269,10 +282,15 @@ fn respond(asked: crate::detail::Selector) -> (axum::http::StatusCode, JsonHeade
     (status, json, out)
 }
 
+/// Distinguishes an unswept store from a committed child deleted afterwards.
+///
+/// `note` is the committed run's [`crate::detail::equity_note_member`]: a
+/// stock's committed empty frontier still says what its run is made of.
 fn missing_file_response(
     root: &std::path::Path,
     identity: &[u8; 32],
     receipt: Option<cli::result_set::Receipt>,
+    note: &str,
     page: crate::detail::Page,
     json: JsonHeaders,
     why: &str,
@@ -308,7 +326,7 @@ fn missing_file_response(
                 axum::http::StatusCode::OK,
                 json,
                 format!(
-                    r#"{{"identity":"{}","rows":[],"count":0,"total_count":0,"admitted":0,"total_admitted":0,"rules":null,"page":{},"limit":{},"page_complete":true,"complete":true,"next_page":null,"refusal":null}}"#,
+                    r#"{{"identity":"{}"{note},"rows":[],"count":0,"total_count":0,"admitted":0,"total_admitted":0,"rules":null,"page":{},"limit":{},"page_complete":true,"complete":true,"next_page":null,"refusal":null}}"#,
                     crate::server::hex32(*identity),
                     page.number,
                     page.limit
@@ -685,6 +703,16 @@ mod tests {
     }
 
     fn commit_frontier_fixture(dir: &std::path::Path, identity: [u8; 32], frontier_rows: u64) {
+        commit_frontier_fixture_for(dir, identity, frontier_rows, "NIFTY");
+    }
+
+    /// [`commit_frontier_fixture`], with the ledger parent naming `underlying`.
+    fn commit_frontier_fixture_for(
+        dir: &std::path::Path,
+        identity: [u8; 32],
+        frontier_rows: u64,
+        underlying: &str,
+    ) {
         cli::result_set::Receipts::open(dir)
             .expect("a fresh detail-receipt store opens")
             .append_exact(cli::result_set::Receipt {
@@ -701,7 +729,7 @@ mod tests {
                 identity,
                 finished_micros: 1,
                 feed: cli::results::field("zerodha"),
-                underlying: cli::results::field("NIFTY"),
+                underlying: cli::results::field(underlying),
                 timeframe: cli::results::field("15min"),
                 from_year: 2026,
                 from_month: 1,
@@ -832,6 +860,82 @@ mod tests {
         assert!(
             body.contains(r#""mask_words":["3","0""#),
             "mask words are decimal strings: {body}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A stock run's ranked combinations say what their figures are made
+    /// of; an index run's are the bytes they were.** AF-19.
+    ///
+    /// This route serves one run's RANKED combinations, the rows `cli top`
+    /// prints under a stock's gross label and corporate-action sentence, and a
+    /// RELIANCE run's were served with neither. The ledger parent the receipt
+    /// read already confirms names the instrument, so a stock's payload now
+    /// carries `equity_note` beside its identity, a committed empty frontier
+    /// included, and an index run's gains no key.
+    #[test]
+    fn a_stock_runs_frontier_carries_the_equity_note_and_an_index_runs_is_unchanged() {
+        let dir = std::env::temp_dir().join(format!(
+            "brutex-api-frontier-equity-note-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (index, stock) = ([0x96_u8; 32], [0x97_u8; 32]);
+        let mut frontier = cli::frontier::Frontier::open(&dir).expect("a fresh frontier opens");
+        frontier
+            .append_all(&[verdict_row(index, 1)])
+            .expect("the index run's row");
+        commit_frontier_fixture(&dir, index, 1);
+        frontier
+            .append_all(&[verdict_row(stock, 1)])
+            .expect("the stock run's row");
+        commit_frontier_fixture_for(&dir, stock, 1, "RELIANCE");
+        drop(frontier);
+
+        let member = crate::detail::equity_note_member(Some("RELIANCE"));
+        for part in ["GROSS OF EVERY CHARGE", "CORPORATE ACTIONS ARE UNCHECKED"] {
+            assert!(member.contains(part), "premise, {part}: {member}");
+        }
+        let (status, _, index_body) =
+            respond(Ok(dir.clone()), &format!("identity={}", "96".repeat(32)));
+        assert_eq!(status, axum::http::StatusCode::OK, "{index_body}");
+        assert!(!index_body.contains("equity_note"), "{index_body}");
+        let (status, _, stock_body) =
+            respond(Ok(dir.clone()), &format!("identity={}", "97".repeat(32)));
+        assert_eq!(status, axum::http::StatusCode::OK, "{stock_body}");
+        assert_body_identity(&stock_body, &"97".repeat(32));
+        let _: serde_json::Value = serde_json::from_str(&stock_body).expect("valid JSON");
+        assert!(
+            stock_body.starts_with(&format!(
+                r#"{{"identity":"{}"{member},"rows":[{{"rank":1,"#,
+                "97".repeat(32)
+            )),
+            "beside the identity, before the ranked rows: {stock_body}"
+        );
+        assert_eq!(
+            stock_body
+                .replacen(&member, "", 1)
+                .replace(&"97".repeat(32), &"96".repeat(32)),
+            index_body,
+            "the note is the only thing a stock's frontier adds"
+        );
+
+        // A stock's committed EMPTY frontier is still a statement about its run.
+        let empty_dir = dir.join("empty");
+        let empty = [0x98_u8; 32];
+        cli::frontier::Frontier::open(&empty_dir).expect("empty frontier header");
+        commit_frontier_fixture_for(&empty_dir, empty, 0, "RELIANCE");
+        std::fs::remove_file(cli::frontier::Frontier::path(&empty_dir))
+            .expect("delete empty child");
+        let (status, _, body) = respond(Ok(empty_dir), &format!("identity={}", "98".repeat(32)));
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert!(
+            body.starts_with(&format!(
+                r#"{{"identity":"{}"{member},"rows":[],"#,
+                "98".repeat(32)
+            )),
+            "{body}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

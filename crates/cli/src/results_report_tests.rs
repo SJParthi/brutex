@@ -195,9 +195,9 @@ fn list_filters_and_omitted_rows_do_not_change_the_selected_totals()
 /// what it risked, so it ranks. With a RELIANCE row as that winner it printed
 /// neither the gross label nor the corporate-action sentence, while `cli top`
 /// on the same row printed both. The statement is decided on the rows the
-/// page prints a figure for, the table's and the winner's: a stock that is
-/// the winner but beyond the table still puts it there, and a stock that is
-/// neither adds nothing.
+/// page prints a figure for, the table's and the winner's: a stock in the
+/// table under an index winner puts it there, a stock that is the winner but
+/// beyond the table puts it there, and a stock that is neither adds nothing.
 #[test]
 fn a_listing_that_prints_a_stock_states_gross_and_corporate_actions_and_an_index_listing_does_not()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -245,6 +245,30 @@ fn a_listing_that_prints_a_stock_states_gross_and_corporate_actions_and_an_index
     );
     mixed.unchanged(&before)?;
     drop(mixed);
+
+    // A stock in the table with an index as the winner puts it on the page
+    // too: the row's worst and best are the stock's figures. Deciding on the
+    // winner alone would print this page bare.
+    let shown = Fixture::new(&[row(149, 10_000, 3), stock(150, -10_000)])?;
+    let listing = crate::results_at(&shown.0, None, None);
+    assert!(
+        listing.contains("BEST COMPLETE RUN: zerodha NIFTY"),
+        "premise: the index wins:\n{listing}"
+    );
+    assert!(
+        listing.contains(&format!(
+            "  matching                                2\n\n{note}  feed"
+        )),
+        "straight after the counts, before the table:\n{listing}"
+    );
+    assert_eq!(
+        listing
+            .matches(runner::audit::CORPORATE_ACTIONS_UNCHECKED)
+            .count(),
+        1,
+        "{listing}"
+    );
+    drop(shown);
 
     // A stock beyond the table that is still the winner puts it on the page.
     let mut records = vec![stock(67, 10_000)];

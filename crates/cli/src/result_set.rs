@@ -790,24 +790,45 @@ impl CommittedParents {
         Ok(())
     }
 
-    /// Return owned receipt evidence from the last successful parent refresh.
+    /// Return owned receipt evidence from the last successful parent refresh,
+    /// with the instrument the ledger parent names.
+    ///
+    /// The parent row is read to confirm the commit in any case. Its
+    /// underlying was dropped there, so `/frontier.json` and `/trades.json`
+    /// served a stock's ranked and chosen figures with no way to say what
+    /// they are made of. It now travels with the receipt from the same
+    /// snapshot, and the caller decides the statement from it. D-0694, AF-19.
     ///
     /// # Errors
     /// Refuses a corrupt parent or committed row lacking a sealed receipt.
-    pub fn receipt(&mut self, identity: &[u8; 32]) -> Result<Option<Receipt>, Refusal> {
+    pub fn committed(&mut self, identity: &[u8; 32]) -> Result<Option<Committed>, Refusal> {
         if !self.valid {
             return Err("parent evidence has not passed its latest refresh; cached receipts are unavailable".to_owned());
         }
         let Some(ledger) = &mut self.ledger else {
             return Ok(None);
         };
-        if ledger.of_identity(identity)?.is_none() {
+        let Some(parent) = ledger.of_identity(identity)? else {
             return Ok(None);
-        }
-        self.receipts.as_ref().and_then(|receipts| receipts.of_identity(identity)).map(Some).ok_or_else(|| format!(
+        };
+        let receipt = self.receipts.as_ref().and_then(|receipts| receipts.of_identity(identity)).ok_or_else(|| format!(
             "run {} has a results-ledger parent but no validated detail receipt; its children are not exposed", identity_hex(identity)
-        ))
+        ))?;
+        Ok(Some(Committed {
+            receipt,
+            underlying: crate::results::read_field(&parent.underlying),
+        }))
     }
+}
+
+/// One committed run as a detail reader sees it: the sealed receipt, and the
+/// instrument its ledger parent names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Committed {
+    /// The exact child counts and trade policy the run committed.
+    pub receipt: Receipt,
+    /// The ledger parent's instrument, padding removed, exactly as recorded.
+    pub underlying: String,
 }
 
 /// The committed-receipt read gate with a hard ceiling on each parent file.

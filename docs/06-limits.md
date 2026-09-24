@@ -2968,8 +2968,9 @@ ranks. See the D-0694 section at the end of this file.
 *Corrected 2026-09-24, AF-19.* "Every report that ranks or audits a cash
 equity now states" was more than held. The D-0694 section at the end of this
 file listed surfaces without the statement, and one of them, `cli results`,
-ranks. `cli results` and `/backtest.json` carry it now, and that section says
-which surfaces still do not.
+ranks. `cli results`, `/backtest.json`, `/frontier.json`, `/trades.json` and
+`/sweep-evidence.json` carry it now, and that section says which surfaces
+still do not.
 
 ### 41.4 Even with a threshold, this field flags a month and cannot name a day
 
@@ -9092,12 +9093,17 @@ by `File::unlock`. What that does not cover, stated rather than implied away:
   changed, and they are corrected here rather than edited:
   - *Where the sentence is not.* `cli results` ranks: it names a BEST COMPLETE
     RUN on the worst-case total. It now states the note before its table
-    whenever a run it prints a figure for is a stock. `/backtest.json` gives a
-    stock's run an `equity_note`. Still without it are `/frontier.json` and
-    `/trades.json` (keyed by identity, and they name no instrument),
-    `/live.json` (its file records no instrument), `/candidate-trades.json`
-    and `/expression-search.json` (keyed by identity), and the Boolean views.
-    No page under `web/` renders `equity_note`.
+    whenever a run it prints a figure for is a stock. `/backtest.json`,
+    `/frontier.json`, `/trades.json` and `/sweep-evidence.json` give a stock's
+    run an `equity_note`, and an index run's payload gains no key. The last
+    three name no instrument, so the run's ledger row does. Still without it
+    are `/sweep-evidence.json` for an attempt no ledger row names (running,
+    refused or killed before its commit, or an operation that records no
+    row), `/live.json` (its file records no instrument),
+    `/candidate-trades.json` and `/expression-search.json` (keyed by
+    identity), and the Boolean views. That list comes from reading the route
+    table, and nothing checks it against every payload. No page under `web/`
+    renders `equity_note`.
   - *The FINDINGS copy.* `pool` pass 1 lifts no section. It keeps only each
     rung's outcome, and its opening carries the sentence. `range-all` and
     `range-rung` are what print a lifted FINDINGS block.
@@ -9106,9 +9112,15 @@ by `File::unlock`. What that does not cover, stated rather than implied away:
     `screen`, and `GapExclusion::one_series` counts them.
   - *The withheld line* prints only when a signal bar was withheld, as on
     `screen`, and not whenever a holed minute day was measured.
+- **`/sweep-evidence.json` reads the ledger now.** It looks up the identity's
+  ledger row on every saved page, through a cached, byte-bounded ledger
+  handle: O(history) cold, O(new rows) warm. A damaged or over-limit ledger
+  refuses the page, where before the ledger was not read at all. No bench
+  times this. AF-19.
 - **A recorded row's note is decided when it is rendered.** `top`,
-  `/engine/top.json`, `cli results` and `/backtest.json` resolve a row's
-  underlying against the compiled F&O list. A ledger record carries no
+  `/engine/top.json`, `cli results`, `/backtest.json`, `/frontier.json`,
+  `/trades.json` and `/sweep-evidence.json` resolve a row's underlying
+  against the compiled F&O list. A ledger record carries no
   instrument kind, so a share later removed from that list would lose the
   statement on its old rows. Recording the kind is a new ledger version, and
   it is not done.

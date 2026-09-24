@@ -644,12 +644,10 @@ impl Run {
         // a RELIANCE run here is a ranked cash equity, and it was served with
         // neither the gross-of-every-charge label nor the corporate-action
         // sentence every `cli` report over it prints. The text is `cli`'s one
-        // wording, beside the instrument it qualifies. An index run gains no
-        // key, so its object is the bytes it was. D-0694, AF-19.
-        let note = cli::equity_note_for(&self.underlying);
-        if !note.is_empty() {
-            let _ = write!(out, r#","equity_note":{}"#, render::json_string(&note));
-        }
+        // wording, beside the instrument it qualifies, and the member is the
+        // one every detail payload over a recorded run carries. An index run
+        // gains no key, so its object is the bytes it was. D-0694, AF-19.
+        out.push_str(&crate::detail::equity_note_member(Some(&self.underlying)));
         let _ = write!(
             out,
             r#","timeframe":{}"#,

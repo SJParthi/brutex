@@ -108,10 +108,21 @@ fn respond(asked: crate::detail::Selector) -> (axum::http::StatusCode, JsonHeade
     // after `open_read` would let metadata from one instant label a block index
     // built at another; a commit that races this request is either wholly in
     // this snapshot or wholly left for the next request.
-    let receipt = match crate::detail::committed_receipt(&root, &identity) {
-        Ok(receipt) => receipt,
+    let committed = match crate::detail::committed_receipt(&root, &identity) {
+        Ok(committed) => committed,
         Err(why) => return refuse(json, &why),
     };
+    // A STOCK'S ROUND TRIPS SAY WHAT THEY ARE MADE OF. They are the chosen
+    // combination's trades, priced gross, and the ledger parent the receipt
+    // read confirms names the instrument, so a RELIANCE run carries the gross
+    // label and the corporate-action sentence beside them. Decided from this
+    // one snapshot; an index run's payload gains no key. AF-19.
+    let note = crate::detail::equity_note_member(
+        committed
+            .as_ref()
+            .map(|committed| committed.underlying.as_str()),
+    );
+    let receipt = committed.map(|committed| committed.receipt);
     if let Some(committed) = receipt
         && committed.trade_rows > crate::detail::MAX_RESULT_ROWS
     {
@@ -146,7 +157,9 @@ fn respond(asked: crate::detail::Selector) -> (axum::http::StatusCode, JsonHeade
     ) {
         Ok(Ok(rows)) => rows,
         Ok(Err(why)) => return refuse(json, &why),
-        Err(why) => return missing_file_response(&root, &identity, receipt, page, json, &why),
+        Err(why) => {
+            return missing_file_response(&root, &identity, receipt, &note, page, json, &why);
+        }
     };
     let Some(receipt) = receipt else {
         return absent_response(
@@ -175,7 +188,7 @@ fn respond(asked: crate::detail::Selector) -> (axum::http::StatusCode, JsonHeade
     let _ = std::fmt::Write::write_fmt(
         &mut out,
         format_args!(
-            r#"{{"identity":"{}","policy":"{}","direction":"{}","trades":["#,
+            r#"{{"identity":"{}"{note},"policy":"{}","direction":"{}","trades":["#,
             crate::server::hex32(identity),
             receipt.trade_policy.as_str(),
             receipt.direction
@@ -310,10 +323,14 @@ fn append_periods(out: &mut String, rows: &[cli::trades::Row]) {
 /// A missing path is a complete empty answer only when the sealed manifest says
 /// this run committed zero trade rows. A positive committed count is corruption
 /// and therefore receives the same null-list refusal as a damaged row.
+///
+/// `note` is the committed run's [`crate::detail::equity_note_member`]: a
+/// stock's committed empty trade list still says what its run is made of.
 fn missing_file_response(
     root: &std::path::Path,
     identity: &[u8; 32],
     receipt: Option<cli::result_set::Receipt>,
+    note: &str,
     page: crate::detail::Page,
     json: JsonHeaders,
     why: &str,
@@ -346,7 +363,7 @@ fn missing_file_response(
                 return range_refusal(json, identity, 0, &range);
             }
             let mut out = format!(
-                r#"{{"identity":"{}","policy":"{}","direction":"{}","trades":[],"periods":"#,
+                r#"{{"identity":"{}"{note},"policy":"{}","direction":"{}","trades":[],"periods":"#,
                 crate::server::hex32(*identity),
                 receipt.trade_policy.as_str(),
                 receipt.direction
@@ -569,6 +586,16 @@ mod tests {
     }
 
     fn commit_trade_fixture(dir: &std::path::Path, identity: [u8; 32], trade_rows: u64) {
+        commit_trade_fixture_for(dir, identity, trade_rows, "NIFTY");
+    }
+
+    /// [`commit_trade_fixture`], with the ledger parent naming `underlying`.
+    fn commit_trade_fixture_for(
+        dir: &std::path::Path,
+        identity: [u8; 32],
+        trade_rows: u64,
+        underlying: &str,
+    ) {
         cli::result_set::Receipts::open(dir)
             .expect("receipt store")
             .append_exact(cli::result_set::Receipt {
@@ -585,7 +612,7 @@ mod tests {
                 identity,
                 finished_micros: 1,
                 feed: cli::results::field("zerodha"),
-                underlying: cli::results::field("NIFTY"),
+                underlying: cli::results::field(underlying),
                 timeframe: cli::results::field("15min"),
                 from_year: 2026,
                 from_month: 1,
@@ -782,6 +809,81 @@ mod tests {
         ] {
             assert!(body.contains(fact), "missing {fact}: {body}");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A stock run's round trips say what their figures are made of; an
+    /// index run's are the bytes they were.** AF-19.
+    ///
+    /// These are the chosen combination's trades, priced gross, with every
+    /// period's wins and losses, and a RELIANCE run's were served with neither
+    /// the gross label nor the corporate-action sentence. The ledger parent
+    /// the receipt read already confirms names the instrument, so a stock's
+    /// payload now carries `equity_note` beside its identity, a committed empty
+    /// trade list included, and an index run's gains no key.
+    #[test]
+    fn a_stock_runs_trades_carry_the_equity_note_and_an_index_runs_are_unchanged() {
+        let dir = std::env::temp_dir().join(format!(
+            "brutex-api-trades-equity-note-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (index, stock) = ([0x86_u8; 32], [0x87_u8; 32]);
+        let mut trades = cli::trades::Trades::open(&dir).expect("chosen trade store");
+        trades
+            .append_all(&[trade_row(index, 0)])
+            .expect("the index run's trade");
+        commit_trade_fixture(&dir, index, 1);
+        trades
+            .append_all(&[trade_row(stock, 0)])
+            .expect("the stock run's trade");
+        commit_trade_fixture_for(&dir, stock, 1, "RELIANCE");
+        drop(trades);
+
+        let member = crate::detail::equity_note_member(Some("RELIANCE"));
+        for part in ["GROSS OF EVERY CHARGE", "CORPORATE ACTIONS ARE UNCHECKED"] {
+            assert!(member.contains(part), "premise, {part}: {member}");
+        }
+        let (status, _, index_body) =
+            respond(Ok(dir.clone()), &format!("identity={}", "86".repeat(32)));
+        assert_eq!(status, axum::http::StatusCode::OK, "{index_body}");
+        assert!(!index_body.contains("equity_note"), "{index_body}");
+        let (status, _, stock_body) =
+            respond(Ok(dir.clone()), &format!("identity={}", "87".repeat(32)));
+        assert_eq!(status, axum::http::StatusCode::OK, "{stock_body}");
+        assert_body_identity(&stock_body, &"87".repeat(32));
+        let _: serde_json::Value = serde_json::from_str(&stock_body).expect("valid JSON");
+        assert!(
+            stock_body.starts_with(&format!(
+                r#"{{"identity":"{}"{member},"policy":"chosen-grid-v1","#,
+                "87".repeat(32)
+            )),
+            "beside the identity, before the trades: {stock_body}"
+        );
+        assert_eq!(
+            stock_body
+                .replacen(&member, "", 1)
+                .replace(&"87".repeat(32), &"86".repeat(32)),
+            index_body,
+            "the note is the only thing a stock's trades add"
+        );
+
+        // A stock's committed EMPTY trade list is still a statement about its run.
+        let empty_dir = dir.join("empty");
+        let empty = [0x88_u8; 32];
+        cli::trades::Trades::open(&empty_dir).expect("empty trade header");
+        commit_trade_fixture_for(&empty_dir, empty, 0, "RELIANCE");
+        std::fs::remove_file(cli::trades::Trades::path(&empty_dir)).expect("delete empty child");
+        let (status, _, body) = respond(Ok(empty_dir), &format!("identity={}", "88".repeat(32)));
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert!(
+            body.starts_with(&format!(
+                r#"{{"identity":"{}"{member},"policy":"chosen-grid-v1","direction":"short","trades":[],"#,
+                "88".repeat(32)
+            )),
+            "{body}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -39375,21 +39375,45 @@ edited.
    counts and its table. That is the same note `sweep-all` prints for a walk
    over several instruments. A stock that is neither shown nor the winner
    adds nothing, and a listing of index runs is unchanged byte for byte.
-2. **`/backtest.json` now carries it on a stock's run.** That payload ranks
-   too (`best_complete`). Each run object whose underlying resolves to a
-   swept cash equity gains `"equity_note"`, holding the stored banner's own
-   text through the new `cli::equity_note_for`. An index run's object gains
-   no key. The other JSON projections still carry neither statement, and
-   "What is still not done" named only some of them. The complete list, with
-   the reason for each:
-   - `/frontier.json` and `/trades.json` are keyed by run identity, and
-     neither payload names an instrument. Their shared reader,
-     `cli::result_set::CommittedParents::receipt`, does look up the run's
-     ledger row, but only to confirm that it exists, and it returns the
-     receipt alone. Carrying the row's instrument into both payloads needs a
-     new reader there and a field on both handlers. This repair kept to the
-     two ranking surfaces. A page learns a run's identity from its
-     `/backtest.json` row, which now carries the note.
+2. **The JSON payloads over one recorded run now carry it on a stock's
+   run.** Each gains `"equity_note"`, holding the stored banner's own text
+   through the new `cli::equity_note_for`, and an index run's payload gains
+   no key. Every one of them takes the member from
+   `api::detail::equity_note_member`, so no two can word it differently.
+   - `/backtest.json` ranks (`best_complete`). Each run object whose
+     underlying resolves to a swept cash equity carries the member after
+     its `underlying`.
+   - `/frontier.json` ranks too. It serves one run's ranked combinations,
+     the rows `cli top` prints under a stock's statement. `/trades.json`
+     serves that run's chosen round trips with their period wins and
+     losses. Neither payload names an instrument, and neither needed a new
+     file version to learn it. Their shared reader, `CommittedParents`,
+     already read the run's ledger row to confirm the commit, then dropped
+     it. `CommittedParents::receipt` is now `committed`, which returns the
+     row's instrument with the receipt from the same snapshot. Both
+     payloads put the member beside the identity, a committed empty set
+     included.
+   - `/sweep-evidence.json` serves a saved attempt's depth levels and, with
+     `kind=ranked`, its retained ranked combinations with their hits, means,
+     wins and losses. The review's probe found a RELIANCE sweep's saved
+     attempt holding 25 ranked rows, and the page had no statement field on
+     any path. The attempt file records no instrument and has no receipt,
+     so `api::detail::recorded_underlying` reads the ledger alone for the
+     identity's row. Every saved page whose identity a ledger row names as
+     a stock carries the member beside the identity.
+     The page now reads the ledger, so a damaged ledger refuses it, where
+     before the ledger was not read at all.
+
+   "What is still not done" named only some of the projections, and missed
+   `/sweep-evidence.json`. These still carry neither statement, with the
+   reason for each. The list comes from reading the route table in
+   `crates/api/src/server.rs`. Nothing checks it against every payload.
+   - `/sweep-evidence.json` for an attempt no ledger row names: one still
+     running, one refused or killed before its commit, and every operation
+     that records no ledger row. The page cannot call such an attempt a
+     stock, so it gains no key, as an index attempt does not. Recording the
+     instrument in the attempt is a new evidence format version (`CLAUDE.md`
+     §3 rule 8).
    - `/live.json` serves `results/live/<hex>.bin`, and that format records
      no instrument. It cannot tell a stock from an index without a new file
      version (`CLAUDE.md` §3 rule 8).
@@ -39398,8 +39422,9 @@ edited.
    - The Boolean views (`/boolean*.json`) carry `"cash": true` for a stock
      family, and no statement.
 
-   No page under `web/` renders `equity_note`. This repair was backend only
-   and did not touch `web/`.
+   `/engine/top.json` and `/backtest/run.json` serve report text that `cli`
+   rendered, stored banner included. No page under `web/` renders
+   `equity_note`. This repair was backend only and did not touch `web/`.
 3. **Where the FINDINGS copy travels.** Item 5 of "What changed: the
    statement" said `range-all` and `pool` pass 1 lift the FINDINGS block
    through `section_note`. That is wrong about `pool`. Its pass 1 keeps only
@@ -39413,11 +39438,17 @@ edited.
    byte for byte what it was" is false for `sweep-stored` over an index. Its
    identity binds `MINUTE_GAP_POLICY` (AF-17), and a holed month gains the
    withheld line and loses that day's bars. AF-19 states what does hold: the
-   statement adds no byte to an index report, and a stock's banner past its
-   note is the index banner past its provenance. The review also compared
-   NIFTY's month audit, extinct audit, checksum-audited sweep, range audit,
-   screen and `top` reports on a generated store with the tree before this
-   entry, at `1min` and `5min`, and found them byte-identical. That
+   statement adds no byte to an index report, and a stock's banner is the
+   index banner with the note put in after the provenance and the symbol
+   swapped. Only the note's closing blank line is decided per page. On `top`
+   and the elite descent it takes the place of the blank line the index page
+   sets its heading off with. On `range-all`, `descend`, `audit-stored` and
+   the span banner, the index page runs straight from its provenance into
+   its feed line, so that blank line is one the index page does not have.
+   The review also compared NIFTY's month audit, extinct audit,
+   checksum-audited sweep, range audit, screen and `top` reports on a
+   generated store with the tree before this entry, at `1min` and `5min`,
+   and found them byte-identical. That
    comparison is the review's, and this repair did not repeat it.
 5. **Two identity terms were unpinned.** Nothing pinned `MINUTE_GAP_POLICY`'s
    value: the review set it to 2 and reports 136 targeted tests passing.
@@ -39447,6 +39478,12 @@ edited.
    The note ends on a blank line, and both pages then added one of their
    own. The `top` page printed three blank lines before `TOP COMBINATIONS`
    where an index page printed two. This was cosmetic, and it is fixed.
+   Only those two pages set their heading off with a blank line of their
+   own. On `range-all`, `descend`, `audit-stored` and the span banner the
+   index page runs from its provenance straight into its feed line. There a
+   stock's page has one blank line the index page does not: the note's own,
+   which separates the note from the report. That is not this defect, and
+   it was left as it is.
 9. **AF-17's "byte-identical ... reference contexts"** was checked on three
    fields only. `DailyContext` and `ExactMinuteContext` now derive
    `PartialEq`, and the gap-free test compares both whole.
@@ -39456,7 +39493,7 @@ edited.
     from `sweep_stored_inner` to `sweep_stored_kernel` to follow the
     refactor, and gave both existing `batch::tests` calls of `render` the new
     `""` note argument. Neither change weakened its test. This repair changed
-    three more:
+    four more:
     - The holed-session test's `minute_bars() == 0` is now checked per rung
       (item 6).
     - The gap-free test's field comparisons now compare whole contexts
@@ -39469,18 +39506,22 @@ edited.
       follows that label in FINDINGS. It now removes
       `equity_ranking_statement()`, as the halted exit's test does, and
       asserts that the sentence closes the block.
+    - `equity_statement_tests::banners`, shared by the banner test and
+      `every_one_instrument_banner_states_corporate_actions_for_a_stock_and_never_for_an_index`,
+      now drives the span banner as well. Both tests cover six surfaces
+      instead of five.
 
     So since this entry, AF-31's and AF-33's "the label is the only byte
     that differs" means the whole FINDINGS statement: the label and the
     sentence. AF-18's "every one indented two spaces" is what AF-60 words
     correctly, "blank or indented two spaces". Its test allows blank lines.
-11. **Not changed, and why.** `top` and `/engine/top.json` decide a recorded
-    row's note from the compile-time F&O list at render time, not from
-    anything stored with the row, because a ledger record carries no
-    instrument kind. So an old row of a share later removed from
-    `FNO_UNDERLYINGS` would render with no statement. Recording the kind is
-    a new ledger version (`CLAUDE.md` §3 rule 8), and it is not done here.
-    `CLAUDE.md` §1 is still unamended, for the reason given above.
+11. **Not changed, and why.** `top`, `cli results` and every JSON payload
+    in item 2 decide a recorded row's note from the compile-time F&O list at
+    render time, not from anything stored with the row, because a ledger
+    record carries no instrument kind. So an old row of a share later
+    removed from `FNO_UNDERLYINGS` would render with no statement. Recording
+    the kind is a new ledger version (`CLAUDE.md` §3 rule 8), and it is not
+    done here. `CLAUDE.md` §1 is still unamended, for the reason given above.
 
 **What each repair was proven against.** Each regression below was applied
 to the repaired tree, and the named test was run and seen to fail. The repair
@@ -39514,6 +39555,53 @@ different test. Batch two was a second build.
   to keep `results_at` inside clippy's line budget. The listing break was
   applied again to the helper: the listing test failed with "the note is on
   the page", and the other 8 `results_report_tests` passed.
+
+**A second review of this repair** upheld three findings, and each is
+answered above. The JSON projections were only partly labelled (item 2).
+Nothing tested a stock shown in the listing's table under an index winner:
+under the review's break B1, which decides the listing on the winner alone,
+all 192 tests the review ran passed. The listing test now has that case
+(item 1). AF-19 (b) claimed one banner shape on every surface, but it holds
+on two of them. The test passed both shapes through
+`strip_prefix('\n').unwrap_or(..)`, and it now asserts which shape each
+surface has (items 4 and 8). Four builds proved those answers. Each applied
+its breaks together, each break reaching a different test, then ran the new
+tests with the banner, listing and `/backtest.json` tests beside them, then
+restored the tree and checked it byte for byte:
+
+- *Batch A.* `/frontier.json`'s ranked page without the member; the
+  committed empty `/trades.json` answer without it; `/sweep-evidence.json`
+  never looking the instrument up; the review's B1 (`.take(LIST_ROWS)` made
+  `.take(0)`); and `range-all`'s index page given a blank line after its
+  provenance. The frontier test failed at "beside the identity, before the
+  ranked rows". The trades test failed on the committed empty list. The
+  evidence test failed at "depth: the note beside the identity is the only
+  thing a stock's page adds". The listing test failed at "straight after the
+  counts, before the table". The banner test failed at "range-all: whether
+  NIFTY's page puts a blank line after its provenance". A verbatim copy of
+  the banner test as it stood before this round PASSED under the same break.
+  Eight tests ran: those five failed, and the old copy,
+  `every_one_instrument_banner_...` and the `/backtest.json` test passed.
+- *Batch B.* The committed empty `/frontier.json` answer without the member;
+  `/trades.json`'s trade page without it; `recorded_underlying` never
+  finding a row; and the elite descent's own blank line removed. The
+  frontier test failed on the committed empty frontier. The trades test
+  failed at "beside the identity, before the trades". The evidence test
+  failed at its depth comparison. The banner test failed at "elite descent",
+  and the verbatim old copy PASSED again. Eight ran, and four failed.
+- *Batch C.* `CommittedParents::committed` returning an empty instrument:
+  the frontier and trades tests failed, and the other five run passed.
+- *Batch D.* `Run::to_json` no longer writing the shared member, re-proving
+  the `/backtest.json` test after it moved onto `equity_note_member`; and
+  `recorded_underlying` opening an absent ledger instead of answering
+  `None`. The backtest test failed ("left: 0, right: 1"). The evidence test
+  and `durable_depths_are_paged_with_exact_attempt_and_validation_state`
+  both failed on a 503 refusal ("runs.bin does not exist yet"). Nine ran,
+  and the other six passed.
+
+The frontier and trades test modules gained `commit_*_fixture_for`, which
+names the ledger parent's instrument. The existing fixture calls it with
+`NIFTY`, so every earlier test commits the same bytes it did.
 
 Invariant AF-19.
 

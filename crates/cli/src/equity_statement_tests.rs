@@ -9,7 +9,7 @@
 
 use super::{
     AuditOptions, Cadence, Rules, STORED_PROVENANCE, audit_bars, descend_banner, descent_banner,
-    month_banner, range_opening, render_top_record,
+    month_banner, range_opening, render_top_record, span_banner,
 };
 use runner::audit::{CORPORATE_ACTIONS_UNCHECKED, CostScope};
 
@@ -22,9 +22,37 @@ fn record(underlying: &str) -> crate::results::Record {
     record
 }
 
+/// Six months over `underlying` holding no bars, for the banner a span opens
+/// with.
+fn span(underlying: &str) -> crate::stored::Span {
+    crate::stored::Span {
+        bars: Vec::new(),
+        vendor: brutex_core::vendor::Vendor::Zerodha,
+        key: crate::stored::swept_index(underlying).expect("a swept instrument"),
+        timeframe: "5min",
+        asked: 6,
+        found: 6,
+        missing: Vec::new(),
+        excluded: crate::stored::CalendarExclusion::none(),
+    }
+}
+
 /// Every one-instrument banner a stored report opens with, for `underlying`.
-fn banners(underlying: &str) -> [(&'static str, String); 5] {
+///
+/// `audit-range` stands for the span banner, which `screen` and the strict
+/// audited range open with too.
+fn banners(underlying: &str) -> [(&'static str, String); 6] {
     [
+        (
+            "audit-range",
+            span_banner(
+                &span(underlying),
+                underlying,
+                (2025, 1),
+                (2025, 6),
+                "abc123",
+            ),
+        ),
         (
             "range-all",
             range_opening(
@@ -114,21 +142,40 @@ fn every_one_instrument_banner_states_corporate_actions_for_a_stock_and_never_fo
     }
 }
 
+/// The pages whose index banner sets their first heading off from the
+/// provenance with a blank line of its own. Every other one-instrument page
+/// runs from its provenance straight into its feed line.
+const SET_OFF: [&str; 2] = ["elite descent", "top"];
+
 /// **A stock's banner is its index banner with the note put in after the
-/// provenance, and nothing else changes, not even a blank line.** AF-19.
+/// provenance, and the note's closing blank line is the only line that is
+/// decided per page.** AF-19.
 ///
-/// The note closes on a blank line. `top` and the elite descent each set
-/// their heading off from the banner with a blank line of their own, so a
-/// stock's page carried one more blank line there than its index page did:
-/// three before `TOP COMBINATIONS` where an index had two. So the blank line
-/// the index page puts after its provenance is the note's own on a stock's
-/// page, and not a second one. Past it, the two banners are the same bytes
-/// with the symbol swapped. The claim is about the banner: the index side is
-/// what the index banner was before D-0694 only because the note is empty
-/// there, which `every_one_instrument_banner_...` pins.
+/// The note closes on a blank line, and what that line is depends on the
+/// page. `top` and the elite descent set their heading off from the banner
+/// with a blank line of their own, and a stock's page carried one more blank
+/// line there than its index page did: three before `TOP COMBINATIONS` where
+/// an index had two. On those two the note's closing blank line takes the
+/// place of the index page's, and is not a second one. `range-all`,
+/// `descend`, `audit-stored` and the span banner run from the provenance
+/// straight into their feed line, so there the note's closing blank line is
+/// one the stock's page has and the index page does not. It sets the note
+/// off from the report, and the index page has no note to set off.
+///
+/// Past that line the two banners are the same bytes with the symbol
+/// swapped. Which shape each surface has is asserted, not tolerated: an
+/// index page that gained or lost its blank line fails here. The claim is
+/// about the banner: the index side is what the index banner was before
+/// D-0694 only because the note is empty there, which
+/// `every_one_instrument_banner_...` pins.
 #[test]
 fn a_stock_banner_is_its_index_banner_with_the_note_put_in_and_nothing_else() {
-    let stock_head = format!("{STORED_PROVENANCE}{}", CostScope::CashEquity.report_note());
+    let note = CostScope::CashEquity.report_note();
+    assert!(
+        note.ends_with("\n\n") && !note.ends_with("\n\n\n"),
+        "premise: the note closes on one blank line:\n{note}"
+    );
+    let stock_head = format!("{STORED_PROVENANCE}{note}");
     for (stock, index) in [("RELIANCE", "NIFTY"), ("TCS", "BANKNIFTY")] {
         for ((surface, stock_text), (_, index_text)) in
             banners(stock).into_iter().zip(banners(index))
@@ -139,7 +186,19 @@ fn a_stock_banner_is_its_index_banner_with_the_note_put_in_and_nothing_else() {
             let index_rest = index_text
                 .strip_prefix(STORED_PROVENANCE)
                 .expect("an index's banner leads with the provenance");
-            let index_body = index_rest.strip_prefix('\n').unwrap_or(index_rest);
+            let sets_off = SET_OFF.contains(&surface);
+            assert_eq!(
+                index_rest.starts_with('\n'),
+                sets_off,
+                "{surface}: whether {index}'s page puts a blank line after its provenance:\n{index_text}"
+            );
+            let index_body = if sets_off {
+                index_rest
+                    .strip_prefix('\n')
+                    .expect("the blank line asserted just above")
+            } else {
+                index_rest
+            };
             assert_eq!(
                 stock_rest.replace(stock, index),
                 index_body,

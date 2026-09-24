@@ -120,6 +120,17 @@ fn render(root: &Path, asked: &Asked) -> Result<String, String> {
     {
         return Err("the saved attempt changed between pages; restart at page zero".to_owned());
     }
+    // A STOCK'S SAVED ATTEMPT SAYS WHAT ITS FIGURES ARE MADE OF. A ranked
+    // page is a sweep's retained combinations with their hits, means, wins and
+    // losses, and a RELIANCE run's was served with neither the gross label
+    // nor the corporate-action sentence. The attempt file records no
+    // instrument, so the ledger row for this identity names it. An attempt
+    // with no ledger row, still running or never committed, is not one this
+    // page can call a stock, and it gains no key, as an index's does not.
+    // AF-19.
+    let note = crate::detail::equity_note_member(
+        crate::detail::recorded_underlying(root, &asked.identity)?.as_deref(),
+    );
     let total = if asked.ranked {
         evidence.ranked_rows
     } else {
@@ -173,7 +184,7 @@ fn render(root: &Path, asked: &Asked) -> Result<String, String> {
         .next_page
         .map_or_else(|| "null".to_owned(), |next| next.to_string());
     Ok(format!(
-        r#"{{"schema_version":1,"identity":"{identity}","status":"saved","evidence":{},"kind":"{kind}","page":{},"limit":{},"total_count":"{total}","next_page":{next},"page_complete":true,"rows":[{rows}],"refusal":null}}"#,
+        r#"{{"schema_version":1,"identity":"{identity}"{note},"status":"saved","evidence":{},"kind":"{kind}","page":{},"limit":{},"total_count":"{total}","next_page":{next},"page_complete":true,"rows":[{rows}],"refusal":null}}"#,
         metadata(evidence),
         asked.page.number,
         asked.page.limit
@@ -339,6 +350,105 @@ mod tests {
         assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
         assert!(refused.contains("attempt changed"));
         drop(newer);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A committed ledger row for `identity`, naming `underlying`.
+    fn ledger_row(dir: &std::path::Path, identity: [u8; 32], underlying: &str) {
+        let mut row = cli::results::Record::from_bytes(&[0; cli::results::STRIDE_BYTES]);
+        row.identity = identity;
+        row.feed = cli::results::field("zerodha");
+        row.underlying = cli::results::field(underlying);
+        row.timeframe = cli::results::field("5min");
+        row.exit_rungs = [-1; 5];
+        cli::results::Results::open(dir)
+            .expect("ledger")
+            .append(&row)
+            .expect("the parent row");
+    }
+
+    /// **A stock's saved attempt says what its figures are made of; an
+    /// index's, or one no ledger row names, is the bytes it was.** AF-19.
+    ///
+    /// A ranked page is a sweep's retained combinations with their hits,
+    /// means, wins and losses, and a RELIANCE run's was served with neither
+    /// the gross label nor the corporate-action sentence. The attempt file
+    /// records no instrument, so the ledger row for the identity names it.
+    /// Each attempt is read before its ledger row exists and again after, so
+    /// the comparison is byte for byte over the same attempt: the index page
+    /// does not move, and the stock page gains `equity_note` beside its
+    /// identity and nothing else, on the depth and the ranked page alike.
+    #[test]
+    fn a_stock_attempt_carries_the_equity_note_and_an_index_or_unrecorded_attempt_does_not() {
+        let dir = crate::scratch::path("sweep-evidence-http-equity-note");
+        let _ = std::fs::remove_dir_all(&dir);
+        let (index, stock) = ([0xc1_u8; 32], [0xc2_u8; 32]);
+        for id in [index, stock] {
+            let attempt =
+                sweep_evidence::begin(&dir, id, sweep_evidence::Operation::Sweep).expect("start");
+            attempt.level(level(1)).expect("one depth row");
+            attempt
+                .ranked(&[sweep_evidence::RankedRow {
+                    rank: 1,
+                    mask_words: [3, 0, 0, 0, 0, 0],
+                    hits: 72,
+                    observations: 72,
+                    mean_bits: 1.5_f64.to_bits(),
+                    t_bits: 2.0_f64.to_bits(),
+                    refused: 0,
+                    mismatched: 0,
+                    wins: 40,
+                    losses: 32,
+                    win_sum_bits: 90.0_f64.to_bits(),
+                    loss_sum_bits: (-30.0_f64).to_bits(),
+                    adverse_sum_bits: 0,
+                    favourable_sum_bits: 0,
+                }])
+                .expect("one ranked row");
+            attempt
+                .finish(sweep_evidence::Completion::Completed)
+                .expect("durable finish");
+        }
+        let member = crate::detail::equity_note_member(Some("RELIANCE"));
+        for part in ["GROSS OF EVERY CHARGE", "CORPORATE ACTIONS ARE UNCHECKED"] {
+            assert!(member.contains(part), "premise, {part}: {member}");
+        }
+        let page = |id: [u8; 32], kind: &str| {
+            let query = format!("identity={}&kind={kind}", crate::server::hex32(id));
+            let (status, _, body) =
+                respond(Ok(dir.clone()), &Asked::parse(&query).expect("page zero"));
+            assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+            let _: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+            body
+        };
+        let kinds = ["depth", "ranked"];
+        let unrecorded = kinds.map(|kind| (page(index, kind), page(stock, kind)));
+        for (index_body, stock_body) in &unrecorded {
+            assert!(!index_body.contains("equity_note"), "{index_body}");
+            assert!(
+                !stock_body.contains("equity_note"),
+                "no ledger row names this attempt's instrument yet: {stock_body}"
+            );
+        }
+        ledger_row(&dir, index, "NIFTY");
+        ledger_row(&dir, stock, "RELIANCE");
+        for (kind, (index_before, stock_before)) in kinds.into_iter().zip(unrecorded) {
+            assert_eq!(
+                page(index, kind),
+                index_before,
+                "{kind}: an index run's page"
+            );
+            let hex = crate::server::hex32(stock);
+            assert_eq!(
+                page(stock, kind),
+                stock_before.replacen(
+                    &format!(r#""identity":"{hex}","#),
+                    &format!(r#""identity":"{hex}"{member},"#),
+                    1
+                ),
+                "{kind}: the note beside the identity is the only thing a stock's page adds"
+            );
+        }
         let _ = std::fs::remove_dir_all(dir);
     }
 

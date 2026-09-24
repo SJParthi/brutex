@@ -453,9 +453,10 @@ pub static FRONTIER: Cached<cli::frontier::Frontier> = Cached::new();
 
 static PARENTS: Cached<cli::result_set::CommittedParents> = Cached::new();
 
-/// Refreshes both parent indexes once and returns one owned receipt before
-/// the caller refreshes any child. Cold open is O(history); warm refresh is
-/// O(new parent rows), with each file still subject to the HTTP byte ceiling.
+/// Refreshes both parent indexes once and returns one owned receipt, with
+/// the instrument its ledger parent names, before the caller refreshes any
+/// child. Cold open is O(history); warm refresh is O(new parent rows), with
+/// each file still subject to the HTTP byte ceiling.
 ///
 /// # Errors
 /// Returns parent generation/integrity/size failures and missing committed
@@ -463,13 +464,60 @@ static PARENTS: Cached<cli::result_set::CommittedParents> = Cached::new();
 pub fn committed_receipt(
     root: &Path,
     identity: &[u8; 32],
-) -> Result<Option<cli::result_set::Receipt>, String> {
+) -> Result<Option<cli::result_set::Committed>, String> {
     PARENTS.with_verified(
         root,
         || cli::result_set::CommittedParents::open_read_bounded(root, MAX_SCAN_BYTES),
         cli::result_set::CommittedParents::refresh,
-        |parents| parents.receipt(identity),
+        |parents| parents.committed(identity),
     )?
+}
+
+static LEDGER: Cached<cli::results::Results> = Cached::new();
+
+/// The instrument the results ledger records for `identity`, or `None` when
+/// no ledger row names it, a store with no ledger included.
+///
+/// For a reader whose own file is keyed by identity and is not a receipted
+/// child: `/sweep-evidence.json`. It reads the ledger alone, so a damaged
+/// receipt sidecar cannot refuse a saved attempt that never had a receipt.
+/// Cold open is O(history); warm refresh is O(new rows), under the same byte
+/// ceiling. Nothing is created: an absent ledger is answered before any open.
+///
+/// # Errors
+/// Returns a damaged, changed or over-limit ledger, never a guessed `None`.
+pub fn recorded_underlying(root: &Path, identity: &[u8; 32]) -> Result<Option<String>, String> {
+    if !cli::results::Results::path(root)
+        .try_exists()
+        .map_err(|why| format!("ledger path cannot be inspected: {why}"))?
+    {
+        return Ok(None);
+    }
+    let parent = LEDGER.with_verified(
+        root,
+        || cli::results::Results::open_read_bounded(root, MAX_SCAN_BYTES),
+        cli::results::Results::refresh,
+        |ledger| ledger.of_identity(identity),
+    )??;
+    Ok(parent.map(|row| cli::results::read_field(&row.underlying)))
+}
+
+/// The `"equity_note"` member, leading comma included, that a payload over
+/// one recorded run carries when that run's instrument is a swept stock, and
+/// nothing for any other run.
+///
+/// The text is `cli::equity_note_for`, the stored banner's own: gross of
+/// every charge, then corporate actions unchecked. `/backtest.json`,
+/// `/frontier.json`, `/trades.json` and `/sweep-evidence.json` all take it
+/// from here, so one instrument cannot be described two ways, and an index
+/// run's payload gains no key and is the bytes it was. D-0694, AF-19.
+#[must_use]
+pub fn equity_note_member(underlying: Option<&str>) -> String {
+    let note = underlying.map_or_else(String::new, cli::equity_note_for);
+    if note.is_empty() {
+        return note;
+    }
+    format!(r#","equity_note":{}"#, crate::render::json_string(&note))
 }
 
 #[cfg(test)]
