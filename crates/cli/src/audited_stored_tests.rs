@@ -1485,6 +1485,19 @@ fn a_stored_sweep_of_a_share_says_its_ranking_is_gross_of_every_charge() {
             underlying == "RELIANCE",
             "{underlying}:\n{page}"
         );
+        // FINDINGS is where the ranking is labelled, and not the page's only
+        // charge statement: since D-0694 a share's page opens with the banner
+        // note too. D-0696 said "FINDINGS only".
+        let banner = format!(
+            "{}{}",
+            crate::STORED_PROVENANCE,
+            runner::audit::CostScope::CashEquity.report_note()
+        );
+        assert_eq!(
+            page.starts_with(&banner),
+            underlying == "RELIANCE",
+            "{underlying}: the banner note heads a share's page and no index's:\n{page}"
+        );
         assert!(!crate::carries_refusal(&page), "{page}");
     }
 }

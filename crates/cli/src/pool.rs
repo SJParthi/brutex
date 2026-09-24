@@ -232,20 +232,8 @@ fn run(
     let vendor = crate::parse_vendor(vendor_word)?;
     crate::swept_rung(rung)?;
     let root = crate::store_root()?;
-    let Surface {
-        symbols: surface,
-        elsewhere,
-    } = surface_under(&root, vendor, rung)?;
-    let mut out = opening(vendor_word, rung, from, to, support_ppm, &surface);
-    not_on_the_surface(&mut out, &elsewhere);
+    let (mut out, surface) = head_under(&root, vendor_word, rung, from, to, support_ppm)?;
     if surface.is_empty() {
-        let _ = writeln!(
-            out,
-            "  0 instruments on the surface for {vendor_word} at {rung}. The store holds \
-             no month of any swept index or F&O cash equity at the path its own load \
-             reads on this feed and rung, so there is nothing to screen and nothing to \
-             pool. Nothing was read."
-        );
         return Ok(out);
     }
     crate::note(
@@ -322,6 +310,45 @@ fn run(
     );
     render_pooled(&mut out, &union, &surface, &priced, &pooled, rules);
     Ok(out)
+}
+
+/// Everything the page says before a bar is read, and the surface pass 1
+/// screens, with the store root supplied rather than read from the
+/// environment. D-0696.
+///
+/// The opening, the directories [`not_on_the_surface`] names, and the
+/// empty-surface line. They were written in [`run`], which checks the commit
+/// stamp first and so no test reaches, and the tests drove
+/// [`surface_under`] and [`not_on_the_surface`] one at a time: deleting the
+/// one line that put NOT ON THE SURFACE on the page left every test green,
+/// and the page dropped a misfiled holding with no word. Split out for the
+/// reason `batch::sweep_under` is, so a test drives the page's own head on a
+/// scratch store.
+fn head_under(
+    root: &std::path::Path,
+    vendor_word: &str,
+    rung: &str,
+    from: (u16, u8),
+    to: (u16, u8),
+    support_ppm: Option<u64>,
+) -> Result<(String, Vec<String>), String> {
+    let vendor = crate::parse_vendor(vendor_word)?;
+    let Surface {
+        symbols: surface,
+        elsewhere,
+    } = surface_under(root, vendor, rung)?;
+    let mut out = opening(vendor_word, rung, from, to, support_ppm, &surface);
+    not_on_the_surface(&mut out, &elsewhere);
+    if surface.is_empty() {
+        let _ = writeln!(
+            out,
+            "  0 instruments on the surface for {vendor_word} at {rung}. The store holds \
+             no month of any swept index or F&O cash equity at the path its own load \
+             reads on this feed and rung, so there is nothing to screen and nothing to \
+             pool. Nothing was read."
+        );
+    }
+    Ok((out, surface))
 }
 
 /// `usize` as the `u64` a telemetry field takes, saturating rather than
@@ -1328,6 +1355,67 @@ mod tests {
             !crate::carries_refusal(&page),
             "naming a directory is not a refusal of the pool:\n{page}"
         );
+    }
+
+    /// **The pool page itself names each directory it did not read, under its
+    /// opening.** D-0696.
+    ///
+    /// The test above renders the block alone, and the surface tests list it
+    /// alone. The line that put the block on the page sat in `run`, which no
+    /// test reaches without a verified commit stamp, so deleting it left every
+    /// test green while the page dropped a misfiled holding with no word. This
+    /// drives `head_under`, the page's head as `run` prints it.
+    #[test]
+    fn the_pool_page_names_each_directory_it_did_not_read() {
+        let head = |tag: &str, dirs: &[&str]| {
+            let root = store_holding(tag, dirs);
+            let head = super::head_under(&root, "zerodha", "60min", (2026, 7), (2026, 7), None)
+                .expect("the head renders");
+            let _ = std::fs::remove_dir_all(&root);
+            head
+        };
+        let opening = |surface: &[&str]| {
+            let owned: Vec<String> = surface.iter().map(|s| (*s).to_owned()).collect();
+            super::opening("zerodha", "60min", (2026, 7), (2026, 7), None, &owned)
+        };
+        let block = |dir: &str, key: &str| {
+            format!(
+                "\n  NOT ON THE SURFACE: 1 held director(ies) name a swept instrument at a path \
+                 its load does not read.\n  Nothing under them was screened or pooled:\n    {}\n\n",
+                named(dir, key)
+            )
+        };
+        let empty = "  0 instruments on the surface for zerodha at 60min.";
+
+        // Beside the instrument it names: the pool still runs over RELIANCE.
+        let (page, surface) = head("page-beside", &["NSE/CASH/RELIANCE", "BSE/CASH/RELIANCE"]);
+        assert_eq!(surface, vec!["RELIANCE".to_owned()]);
+        assert_eq!(
+            page,
+            format!(
+                "{}{}",
+                opening(&["RELIANCE"]),
+                block("BSE/CASH/RELIANCE", "RELIANCE")
+            ),
+            "the opening, then the directory it did not read, and nothing else"
+        );
+        assert!(!crate::carries_refusal(&page), "{page}");
+
+        // Alone: named, and then the empty-surface line.
+        let (page, surface) = head("page-alone", &["NSE/INDEX/RELIANCE"]);
+        assert!(surface.is_empty(), "{surface:?}");
+        assert!(
+            page.starts_with(&format!(
+                "{}{}{empty}",
+                opening(&[]),
+                block("NSE/INDEX/RELIANCE", "RELIANCE")
+            )),
+            "{page}"
+        );
+
+        // Every holding at its own path: the opening alone, as before D-0696.
+        let (page, _) = head("page-clean", &["NSE/CASH/RELIANCE", "NSE/INDEX/NIFTY"]);
+        assert_eq!(page, opening(&["NIFTY", "RELIANCE"]));
     }
 
     /// **The pool quotes no charge rate.** `CLAUDE.md` §3 rule 1: every claim

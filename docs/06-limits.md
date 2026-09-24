@@ -9760,3 +9760,14 @@ The text above is kept as it was written.
   doc to its body, read off the source, and
   `what_a_changed_rows_line_costs_is_named_in_part_and_read_off_the_source`
   finds each part named here and in that doc in the source that pays it.
+- **Four copies are bound, and one of them is `runner`'s (correction,
+  24 September 2026).** The second bullet above named three.
+  `runner::audit::CASH_EQUITY_GROSS` (D-0694), which `CostScope::report_note`
+  prints at the head of every stored share page, of `sweep-all` over a stock
+  and of the Boolean research heading over a cash family, was a fourth that no
+  test bound, and it lacked the header's Selection V6 clause. It now carries
+  the header's sentence, and the same test reads it. A share's page still
+  states the charge fact more than once, in lead-in words that differ: the
+  banner's "EVERY TOTAL BELOW", the FINDINGS label's "EVERY FIGURE IN THIS
+  RANKING", `top`'s "per ONE share", and an audit header's own paragraphs.
+  Only the charge list and the cost-excluded sentence are held identical.

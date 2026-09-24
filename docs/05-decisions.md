@@ -42177,3 +42177,117 @@ does not inject a failed write into a running telemetry sink. No production
 source changed. AF-28l records that boundary. The full API suite and package
 clippy were still pending at this checkpoint; these focused results do not
 replace them or the historical mutation evidence above.
+
+**Correction, 2026-09-24: four claims above, and one line of `pool`, on the
+integrated tree.** This entry was written on a branch that did not yet hold
+D-0694, and was cherry-picked beside it unchanged. A review of the integrated
+tree upheld what follows against it. Each item is corrected here, not in the
+text above.
+
+1. *Item 1, the halted and the kept-rows-none-closed exits: "The label is the
+   only byte that differs from the same index page" and "The label is again
+   the only byte that differs".* Superseded. Since D-0694 the FINDINGS block
+   of a ranked stock ends with `equity_ranking_statement()`: the label, then
+   `runner::audit::CORPORATE_ACTIONS_UNCHECKED`. On both exits the equity page
+   differs from the same index page by that whole statement and by nothing
+   else. The halted test has removed the whole statement since D-0694. The
+   untraded test removed the label alone, so on the integrated tree it failed
+   at its equality, the corporate-actions paragraph being the first byte that
+   differed (measured by the review). Commit `29025433` made it remove the
+   whole statement. A statement that had lost the sentence would still pass
+   that equality, so the test now also requires its FINDINGS block to end with
+   the sentence.
+2. *Item 1's `sweep-stored` bullet: "FINDINGS only."* Superseded. FINDINGS
+   is where its ranking is labelled, but since D-0694 a share's
+   `sweep-stored` page, like every stored share page, also opens with the
+   stored banner and `CostScope::report_note`, which states the charge fact
+   again.
+   `a_stored_sweep_of_a_share_says_its_ranking_is_gross_of_every_charge` now
+   asserts that opening for RELIANCE and its absence for NIFTY.
+3. *Item 3: "One wording, bound to the audit header".* False on the
+   integrated tree. D-0694 added `runner::audit::CASH_EQUITY_GROSS`, the gross
+   paragraph of `report_note`, which heads every stored share page, `sweep-all`
+   over a stock and the Boolean research heading over a cash family. It was a
+   fourth copy of the charge statement, the test item 3 names did not read it,
+   and its sentence was not the header's: "This is cost-excluded research, not
+   a net result (D-0509, D-0525, D-0681)", with no Selection V6 clause. It now
+   ends with the header's own sentence, "COST-EXCLUDED RESEARCH, NOT A NET
+   RESULT (D-0509, D-0525, D-0681). No equity result carries Selection V6 or
+   execution authority until a charter-sourced equity charge stack exists.",
+   and that test checks it with the other three.
+   - *What a reader sees change:* that sentence, in place of the old one, in
+     the banner of every stored share page, of `sweep-all` over a stock and of
+     the Boolean research heading over a cash family. Its first line is
+     unchanged. No index page, run identity, store format or exit status
+     changed.
+   - *Two `runner` tests follow the text.* The note's fact list names
+     "COST-EXCLUDED RESEARCH" and "Selection V6" in place of the lower-case
+     phrase. The property test D-0694 wrote for the sentence, the gross
+     paragraph and the note now admits `V6` in the gross paragraph and the
+     note, where it is part of the name Selection V6, as
+     `the_equity_charge_statement_names_no_rate` admits it in the header
+     (AF-61). It still admits no digit outside a `D-dddd` reference in the
+     corporate-actions sentence. So AF-18's "none carrying a rate or any digit
+     outside a `D-dddd` reference" no longer holds for the gross paragraph or
+     the note, and AF-38 supersedes it for those two.
+   - *Rejected: one `runner` constant composed into all four texts, with the
+     three `cli` literals deleted.* Only the charge list and the sentence are
+     common to the four. Each copy opens with words that belong where it
+     stands: "EVERY FIGURE IN THIS RANKING" and "the ranking above" after a
+     table, "per ONE share" inside the sentence of `top`'s legend, "Correct on
+     an index by charter; NOT correct on a cash equity" in a pool that can
+     hold both, and "EVERY TOTAL BELOW" in a banner. Composing the common part
+     at run time means re-wrapping each page's lines, which item 3 already
+     rejected. The test holds the common part word for word in all four, and
+     a rate in none.
+   - *Why a `cli` repair edits `runner`.* Item 3 rejected a `runner` constant
+     because it "would change `runner`'s public surface in a repair of `cli`'s
+     piece". By integration D-0694 had already made `CASH_EQUITY_GROSS` a
+     public `runner` constant, so that reason no longer held. This change edits
+     the constant's text and two `runner` tests, and not its name or type.
+4. *Item 5, `pool`: the block was on the page, and no test read the page.*
+   The one line that put NOT ON THE SURFACE on the page sat in `pool::run`,
+   which checks the commit stamp first and which no test reaches. The tests
+   rendered the block alone and listed the surface alone, so deleting that
+   line left every test green (measured by the review), and the page then
+   dropped a misfiled holding without a word: the silent drop item 5 says this
+   entry removed. Everything the page says before a bar is read (the opening,
+   the block and the empty-surface line) now comes from `pool::head_under`.
+   `run` calls it, it is split out the way `batch::sweep_under` is, and
+   `the_pool_page_names_each_directory_it_did_not_read` drives it on a
+   scratch store. The page's bytes did not change.
+
+**Tests, and what each is proven against (this correction).** Each regression
+below was applied to this tree, one per build, and the named test was run and
+seen to fail. The fix was then restored and each file compared byte for byte
+with its copy.
+
+- *`head_under` without its `not_on_the_surface` call:*
+  `the_pool_page_names_each_directory_it_did_not_read` fails ("the opening,
+  then the directory it did not read, and nothing else"). The other 17 `pool`
+  tests, the block test among them, pass under it.
+- *`head_under` without the empty-surface line:* the same test fails, on the
+  store holding only `NSE/INDEX/RELIANCE`. The other 17 pass.
+- *`equity_ranking_statement` returning the label alone:*
+  `an_untraded_equity_ranking_is_labelled_gross_before_it_refuses` fails at
+  its new assertion. The halted test passes under it, because its equality
+  strips the same function's output. On the halted page the sentence is read
+  by AF-18's `a_stock_ranking_states_corporate_actions_inside_its_findings_block`
+  (read from the source; not run under this break).
+- *`CASH_EQUITY_GROSS` back at its D-0694 text:*
+  `every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate`
+  fails ("the stored banner's gross paragraph (`report_note`) must carry the
+  header's sentence"), and so does
+  `a_report_note_is_gross_then_corporate_actions_for_a_stock_and_empty_for_an_index`
+  (`missing "COST-EXCLUDED RESEARCH"`). The property test passes under it.
+- *`stored_provenance_of` without the note:*
+  `a_stored_sweep_of_a_share_says_its_ranking_is_gross_of_every_charge` fails
+  at its new banner assertion, for RELIANCE.
+- *"Selection V6" written into `CORPORATE_ACTIONS_UNCHECKED`:* the property
+  test fails (`the sentence: "V6" is a number that is neither a decision
+  reference nor the Selection V6 name`).
+
+Invariants AF-38 and AF-39. AF-38 supersedes AF-33's two clauses quoted in 1
+and 2, and AF-34's "Every equity charge statement `cli` prints", which read
+three copies of four. AF-39 asserts on the page what AF-35 asserted only of the
+block.

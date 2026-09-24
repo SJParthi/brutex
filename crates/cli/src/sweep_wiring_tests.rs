@@ -571,6 +571,12 @@ fn an_untraded_equity_ranking_is_labelled_gross_before_it_refuses() {
         findings.contains(super::EQUITY_RANKING_GROSS.trim_end()),
         "the untraded ranking must say it is gross:\n{findings}"
     );
+    // The equality below strips whatever `equity_ranking_statement` returns,
+    // so a statement that lost the sentence would pass it. D-0694.
+    assert!(
+        findings.ends_with(runner::audit::CORPORATE_ACTIONS_UNCHECKED),
+        "the untraded ranking must say corporate actions are unchecked, after its label:\n{findings}"
+    );
     let label = equity.find("GROSS OF EVERY CHARGE").expect("labelled");
     assert!(
         label < equity.find(refused).expect("refused"),
@@ -645,6 +651,15 @@ fn names_a_rate(text: &str) -> bool {
 /// `CLAUDE.md` §3 rule 1: no copy may quote a rate, because
 /// `docs/00-charter.md` sources none. Asserted on the copies themselves, so a
 /// rate added to one of them fails whether or not a page test reads it.
+///
+/// **There were four copies, not three.** D-0694 gave `runner::audit`
+/// `CASH_EQUITY_GROSS`, which `CostScope::report_note` prints at the head of
+/// every stored share page (`top` and `sweep-stored` among them), of
+/// `sweep-all` and of the Boolean research heading. It said "This is
+/// cost-excluded research, not a net result" with no Selection V6 clause, so
+/// those pages stated the charge fact in two wordings and this test read one.
+/// It now carries the header's sentence and is checked with the other three
+/// (D-0696).
 #[test]
 fn every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate() {
     use runner::audit::CostScope;
@@ -688,7 +703,10 @@ fn every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate() {
         ("the FINDINGS label", super::EQUITY_RANKING_GROSS),
         ("`cli top`'s share legend", super::SHARE_MEAN_LEGEND),
         ("`pool`'s opening", super::pool::EQUITY_TOTALS_GROSS),
-        ("the stored banner's note", runner::audit::CASH_EQUITY_GROSS),
+        (
+            "the stored banner's gross paragraph (`report_note`)",
+            runner::audit::CASH_EQUITY_GROSS,
+        ),
     ] {
         let said = words(text);
         assert!(

@@ -2166,11 +2166,18 @@ mod tests {
                 .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
                 .filter(|token| token.bytes().any(|b| b.is_ascii_digit()))
             {
+                // `V6` is the Selection V6 the gross paragraph withholds, the one
+                // name the header test allows too (D-0696). The sentence names no
+                // policy, so it may carry none.
                 assert!(
                     token
                         .strip_prefix("D-")
-                        .is_some_and(|n| n.len() == 4 && n.bytes().all(|b| b.is_ascii_digit())),
-                    "{what}: {token:?} is a number that is not a decision reference:\n{text}"
+                        .is_some_and(|n| n.len() == 4 && n.bytes().all(|b| b.is_ascii_digit()))
+                        || (what != "the sentence"
+                            && token == "V6"
+                            && text.contains("Selection V6")),
+                    "{what}: {token:?} is a number that is neither a decision reference nor \
+                     the Selection V6 name:\n{text}"
                 );
             }
         }
