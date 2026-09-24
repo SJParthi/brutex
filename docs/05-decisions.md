@@ -40332,3 +40332,137 @@ Each repair above was proven by breaking it and running the named test. The
 breaks were built into one test binary, each selected by an environment
 variable, and removed afterwards. Every break failed its test for the reason
 stated above, and the unbroken build passed all 64 tests the filter selected.
+
+**Repaired again, on a second review — 24 September 2026.** Two should-fix
+issues were upheld against `9e08e3b6`, the commit that carried the repair above
+and this entry. Both are answered here. The text above is kept as it was
+written; where it is now wrong, this says so.
+
+- *The scoping half of the new `/bars` refusal was untested.* `locate_series`
+  refuses on an unreadable census only when it is the asked feed's own:
+  `Some(vendor_census.vendor) == asked_vendor`. "Recorded, not done" above says
+  that an unreadable census of any other feed is still stepped over. Nothing
+  drove that. `bars_refuses_when_the_asked_feeds_own_census_is_unreadable`
+  meets a damaged census only through the asked feed. Its control, Groww's own
+  request, returns at Groww's census before the walk reaches Dhan's damaged
+  one. The review switched the condition to refuse on every unreadable census
+  the walk meets and measured the whole api lib still green: 1,181 passed, 0
+  failed.
+  Under that break, with Groww's manifest damaged, `/bars?symbol=X&vendor=dhan`
+  would refuse with "the asked feed's own census could not be read: groww …"
+  even when a third feed held X. That sentence is false.
+  `bars_steps_over_another_feeds_unreadable_census_to_a_third_feeds_identity`
+  now drives the case. Groww's manifest is damaged, and Groww is walked first
+  among the other feeds, being first in `Vendor::ALL`. Dhan's census is read
+  and does not hold `ADANIENT`, and Zerodha's holds it as CASH. Dhan's request,
+  with `?vendor=dhan`, with no vendor and with `?segment=CASH`, must answer 200
+  from Dhan's file at `NSE/CASH/ADANIENT` and must not mention Groww's
+  manifest. With the refusal applied to every unreadable census, the full api
+  lib had 1,183 passed and 1 failed, the new test, which got 400. No behaviour
+  changed.
+- *A permission repair on a manifest FILE left a stale 503.* "The key still
+  served 'absent' over two faults", above, fixed this case for a manifest
+  DIRECTORY and left it for a manifest FILE. A manifest that exists was keyed on
+  its modified time alone (`ManifestStamp::At(mtime)`). `chmod` and `chown`
+  move the status-change time, not the modified time. So a manifest this
+  process could not read when the cache was cold was cached "unreadable" under a
+  time the repair did not move. One way that happens is a manifest written by a
+  pull run as another user. After the permission was fixed, `/calendar.json`
+  kept answering 503 "Permission denied" and `/bars` kept refusing on the asked
+  feed's census, over a store that could be read. It lasted until the next pull
+  moved the modified time or the server restarted. The review drove it with
+  `chmod 000` and then `0644` on Dhan's manifest: a fresh read said "held" and
+  the cache still served "unreadable". "Recorded, not done" above and
+  `docs/06-limits.md` named only the other direction, "held" served after the
+  file stops being readable. That one answers from the census last read, and
+  the routes then read bar files, not the manifest.
+- **Decided: the key carries the manifest's status-change time.**
+  `ManifestStamp::At` is now `{ modified, changed }`, where `changed` is
+  `st_ctime` and `st_ctime_nsec` read through `std::os::unix::fs::MetadataExt`
+  from the same `stat` as the modified time. No syscall is added. D-0686
+  rejected adding the manifest's length to this key because that change "needs
+  its own decision": other routes and the pull run's progress count rely on the
+  key. This is that decision for the status-change time, and it covers them too.
+  A key that moves more often can cause more re-reads, and never a staler
+  answer. Every write, `chmod` and `chown` moves it, and a read does not, so the
+  only new re-reads follow a permission or ownership change, which is the
+  point. Outside Unix, `std` exposes no status-change time and the key stays
+  the modified time alone. This workspace is built and tested on macOS and
+  Linux. `a_permission_change_on_a_manifest_file_is_seen_on_the_next_request`
+  drives both directions. Warm on "held", the file is made unreadable and then
+  repaired. Cold on the unreadable file, `/calendar.json` must answer 503 and
+  `/bars` must refuse. After the repair, `/calendar.json` must answer 200 with
+  its one session, and `/bars` must answer 200. With the status-change time held
+  constant in the key, the test fails at "warm: the fault is seen". With the
+  warm half skipped as well, it fails at "the cached refusal does not outlive
+  the repair", which is the reviewed case.
+- *D-0686's same-modified-time gap narrows with it.* Every write moves the
+  status-change time, so a rewrite that keeps the cached modified time is now
+  read on the next request. `a_rewrite_that_keeps_only_the_modified_time_is_read_again`
+  pins it and fails with the status-change time held constant. What is left is
+  two changes inside one tick of the filesystem's clock. That tick was not
+  measured, on the operator's volume or on CI's.
+- *AF-23's pinned-limit test had to change how it makes its rewrite.*
+  `a_rewrite_that_keeps_the_stamp_is_served_stale_until_the_stamp_moves` wrote
+  a new image at the same modified time and required the stale answer. Under
+  the new key that rewrite is seen, and the old body fails at "stale: the stamp
+  did not move". A status-change time cannot be set. So the test still rewrites
+  at the same modified time, and then plants the state that a rewrite inside
+  one tick leaves: the census read before the rewrite, under the stamp taken
+  after it. What it pins has not changed. While the key stays put, the older
+  census is served and nothing is read. The first request after the key moves
+  reads once.
+- A test that needs the status-change time to move waits for it through
+  `past_a_ctime_tick`. That re-applies an idempotent change every millisecond,
+  at most a thousand times, rather than assuming the tick's size. It is the
+  same reason the fixture sets modified times rather than waiting for them.
+
+**Rejected.** *Adding the length and the inode as well.* A manifest is
+installed as a whole new file renamed onto the live path, as
+`Manifest::image`'s doc requires, and writing that file moves both times. So
+the length and the inode would separate only two installs inside one tick. The
+status-change time is enough to fix the reviewed defect, and D-0686's
+rejection of the length stands.
+
+**Still not done, and corrected.**
+
+- "*A permission change on a manifest FILE* keeps its modified time, so it is
+  served stale like any same-stamp rewrite", above, is no longer true, except
+  for a change inside one tick.
+- "*An unreadable census of a feed other than the asked one* is still stepped
+  over" is still true, and it is now pinned.
+- `calendar_of::cached` is still keyed on the manifest's modified time alone. It
+  caches calendars derived from bar files, not the census, so a permission
+  change on the manifest does not change what it would derive. A
+  same-modified-time rewrite is still missed there until the stamp moves, as
+  D-0686 recorded. It is not changed here.
+- The browser follow-up above is still open. `/gaps` does not render
+  `calendar.unreadable`, and `/ingest` drops the 503's refusal. This repair is
+  backend only.
+- Gates 11 and 23, which `950ead28` left red, were closed by the repair above:
+  the `server.rs` 8 line with its reason, and the three declared `println!`.
+  This repair adds no search and no print.
+
+AF-28b and AF-29b record the two invariants. Each is a new row, lettered after
+the row it completes, because every number reserved for this piece (AF-27 to
+AF-29) is taken and a row is never edited in place. Gates 10b and 27 accept the
+letter, as `S-06b` and `C-E-02b` already use it.
+
+**Verified (second repair)**, on this tree (arm64 laptop, `CARGO_BUILD_JOBS=2`,
+`--locked --offline`). `cargo fmt --all --check` is clean, and so is
+`cargo clippy --workspace --all-targets --locked --offline -- -D warnings`.
+The `api` suite ran outside the command sandbox, which refuses the loopback
+binds some of its tests make. Its lib has 1,184 passed, 0 failed and 2
+ignored; `src/main.rs` 2 passed, `tests/binary.rs` 3 and the doctest 1. The 21
+census request tests passed in 30 runs out of 30. `core`'s whole suite, which
+reads these documents, passes. Every shell gate of CI's Gate 1+2 job except 1e
+passes, Gates 10, 10b, 11, 23 and 27 among them.
+
+Each proof above was taken the same way as the first repair's. The breaks were
+built into one test binary, each selected by an environment variable, and
+removed afterwards: refusing on every unreadable census, where the full lib had
+1,183 passed and 1 failed; holding the status-change time constant in the key,
+where it had 1,182 passed and 2 failed, the two tests named above; the same
+with the permission test's warm half skipped; and AF-23's test without its
+planted stamp. Each failed for the reason stated above, and the unbroken build
+passed all 21 census request tests.

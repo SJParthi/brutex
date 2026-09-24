@@ -9284,3 +9284,33 @@ by `File::unlock`. What that does not cover, stated rather than implied away:
 - **Not measured.** No latency was taken for any route. The census key's cost
   is counted from the code (five `stat` calls, and a sixth when no manifest
   answered with a time), not timed.
+
+**Corrected 24 September 2026, on a second review (D-0695).** Two bullets
+above, one in this file's D-0686 correction and one in the D-0686 section
+itself are stale or incomplete. The text above is kept as it was written.
+
+* *"One census fault is still served stale."* That bullet named only the
+  harmless direction. The other one was a defect. A manifest file this process
+  could not read when the cache was cold stayed "unreadable" after its
+  permission was repaired. So `/calendar.json` answered 503 and `/bars`
+  refused, over a store that could be read, until the next pull or a restart.
+  Both directions are now closed. Each existing manifest is also keyed on its
+  status-change time, which `chmod` and `chown` move. That time comes from the
+  same `stat`, so a request against an unchanged store still costs five `stat`
+  calls, or six when no manifest answered with a time.
+* The D-0686 correction's *"One same-stamp case remains: a permission change
+  on an existing manifest FILE …"* is closed the same way.
+* D-0686's *"The key is the modified time and nothing else."* The key is now
+  the modified time and the status-change time. Every write moves the
+  status-change time, so a rewrite that keeps the modified time is seen on the
+  next request. The only case still missed is two changes inside one tick of
+  the filesystem's clock, until a later change moves either time. That tick is
+  **UNMEASURED** on the operator's volume and on CI's. `calendar_of::cached`
+  is still keyed on the modified time alone, as that section says. Outside
+  Unix, `std` exposes no status-change time, and the key is the modified time
+  alone, as it was.
+* *"`/bars` still steps over an unreadable census of a feed other than the
+  asked one."* Still true, and still not changed. It is now pinned by
+  `bars_steps_over_another_feeds_unreadable_census_to_a_third_feeds_identity`.
+  Before that test, a `/bars` that refused on every unreadable census it walked
+  passed every test.

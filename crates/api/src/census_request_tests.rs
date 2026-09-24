@@ -23,6 +23,10 @@
 //! resolution is not this test's to assume, and two writes inside one tick
 //! would otherwise share a stamp and make the test's answer depend on the
 //! clock rather than on the code.
+//!
+//! Since D-0695 the key also carries each manifest's status-change time, which
+//! cannot be set. The tests that need it to move wait for its tick through
+//! `past_a_ctime_tick`; every other test reads the same with or without it.
 #![expect(
     clippy::expect_used,
     reason = "finite owned fixtures and exact response assertions"
@@ -466,11 +470,25 @@ async fn a_stamp_moved_backwards_or_a_deleted_manifest_is_read_again() {
 /// first request after the stamp moves reads once and answers from the new
 /// image. A change that closes the gap fails the first half and must update
 /// that section.
+///
+/// # How the rewrite keeps the stamp, since D-0695
+///
+/// The stamp now carries the manifest's status-change time too. Every write
+/// moves it, and no call can set it, so a rewrite that keeps the WHOLE stamp
+/// means two writes inside one tick of the filesystem's clock. A test cannot
+/// make that on demand on a filesystem that keeps nanoseconds. So this rewrite
+/// keeps the modified time, and the cache is then given the state such a
+/// rewrite leaves: the census read before the rewrite, under the stamp taken
+/// after it. What is pinned has not changed. While the key stays put, the older
+/// census is served and nothing is read; the first request after it moves reads
+/// once. `a_rewrite_that_keeps_only_the_modified_time_is_read_again` pins that a
+/// rewrite keeping only the modified time IS seen now.
 #[tokio::test]
 async fn a_rewrite_that_keeps_the_stamp_is_served_stale_until_the_stamp_moves() {
     let fixture = Fixture::new("census-request-same-stamp");
     fixture.publish(&[(Segment::Cash, "ADANIENT")], 0);
     assert_eq!(fixture.locate("RELIANCE"), None);
+    let (older_censuses, older_entries) = census_now(&fixture.site);
     let base = fixture.reads();
 
     fixture.publish(
@@ -481,6 +499,17 @@ async fn a_rewrite_that_keeps_the_stamp_is_served_stale_until_the_stamp_moves() 
         ],
         0,
     );
+    // THE STATE A REWRITE INSIDE ONE TICK LEAVES: the older census, keyed on the
+    // stamp the newer image answers with.
+    *fixture
+        .site
+        .census
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((
+        manifest_stamps(&fixture.site.store_root),
+        older_censuses,
+        older_entries,
+    ));
     assert_eq!(
         fixture.locate("RELIANCE"),
         None,
@@ -996,6 +1025,39 @@ impl Drop for Unsearchable<'_> {
     }
 }
 
+/// Run `change`, again and again, until `path`'s status-change time has moved.
+///
+/// A mode change, a `set_modified` and a rename into place each move
+/// `st_ctime`, but only to the tick of the clock the filesystem stamps with,
+/// whose size is not this test's to assume. Two changes inside one tick share
+/// a stamp, which the cache is right not to tell apart. The fixture SETS
+/// modified times so that no answer here depends on the clock. A status-change
+/// time cannot be set, so this waits the tick out instead, re-running
+/// `change`, which must therefore be idempotent.
+#[cfg(unix)]
+fn past_a_ctime_tick(path: &Path, change: impl Fn()) {
+    use std::os::unix::fs::MetadataExt as _;
+    let changed = || {
+        let meta = fs::metadata(path).expect("a manifest to stat");
+        (meta.ctime(), meta.ctime_nsec())
+    };
+    let before = changed();
+    change();
+    for _ in 0..1_000 {
+        if changed() != before {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+        change();
+    }
+    assert_ne!(
+        changed(),
+        before,
+        "{} kept its status-change time through a thousand changes",
+        path.display()
+    );
+}
+
 /// A MANIFEST DIRECTORY THIS PROCESS MAY NOT SEARCH IS REFUSED, NOT MISSING,
 /// warm or cold, and its repair is seen on the next request. D-0695.
 ///
@@ -1129,4 +1191,181 @@ async fn bars_refuses_when_the_asked_feeds_own_census_is_unreadable() {
     let (_, page) =
         fixture.bars("symbol=ADANIENT&vendor=dhan&month=2025-05&exchange=NSE&segment=CASH");
     assert!(page.contains("NSE/CASH/ADANIENT"), "{page}");
+}
+
+/// ANOTHER FEED'S UNREADABLE CENSUS IS STEPPED OVER; ONLY THE ASKED FEED'S IS
+/// REFUSED ON. D-0695.
+///
+/// `locate_series` refuses on an unreadable census only when it is the asked
+/// feed's own, and D-0695 states the other half: an unreadable census of any
+/// other feed is stepped over, and when a third feed places the name, that
+/// identity is used and the note is not shown. Nothing drove that half.
+/// `bars_refuses_when_the_asked_feeds_own_census_is_unreadable` checks it only
+/// through Groww's own request, and Groww's census holds the name, so the walk
+/// returns before it meets Dhan's damaged one. A `locate_series` that refused
+/// on EVERY unreadable census it walked passed the whole api lib, and would
+/// answer a Dhan request with "the asked feed's own census could not be read:
+/// groww ...", which is false.
+///
+/// Here Groww's manifest is damaged, and Groww is walked before Zerodha
+/// because it is first in `Vendor::ALL`. Dhan's census is read and does not
+/// hold `ADANIENT`; Zerodha's holds it as CASH. Dhan's request, with
+/// `?vendor=dhan`, with no vendor (Dhan by default) and with `?segment=CASH`,
+/// opens Dhan's file at `NSE/CASH/ADANIENT` and says nothing of Groww's
+/// census. The one bar is written straight into Dhan's file at that path,
+/// and the census is left as published, so a 200 page showing Dhan's one CASH
+/// bar proves the file was opened at that identity: the page names the feed
+/// and segment, not the exchange.
+#[tokio::test]
+async fn bars_steps_over_another_feeds_unreadable_census_to_a_third_feeds_identity() {
+    let fixture = Fixture::new("census-request-other-unreadable");
+    fixture.publish_bytes(Vendor::Groww, &[0xFF; 16], 0);
+    fixture.publish_for(Vendor::Dhan, &[(Segment::Index, "NIFTY")], 0);
+    fixture.publish_for(Vendor::Zerodha, &[(Segment::Cash, "ADANIENT")], 0);
+    fixture.bar(Vendor::Dhan, Segment::Cash, "ADANIENT", 2);
+    assert_eq!(
+        fixture.states(),
+        ["unreadable", "held", "absent", "absent", "held"],
+        "Groww damaged, Dhan read, Zerodha holding"
+    );
+    for query in [
+        "symbol=ADANIENT&vendor=dhan&month=2025-05&timeframe=1day",
+        "symbol=ADANIENT&month=2025-05&timeframe=1day",
+        "symbol=ADANIENT&vendor=dhan&month=2025-05&timeframe=1day&segment=CASH",
+    ] {
+        let (status, page) = fixture.bars(query);
+        assert_eq!(status, axum::http::StatusCode::OK, "{query}: {page}");
+        assert!(
+            page.contains("DHAN · CASH · 2025-05") && page.contains("<b>1</b> bar(s)"),
+            "{query}: {page}"
+        );
+        assert!(
+            !page.contains("own census could not be read"),
+            "only the asked feed's census is refused on: {query}: {page}"
+        );
+        assert!(
+            !page.contains("groww.man"),
+            "and another feed's note is not shown: {query}: {page}"
+        );
+    }
+}
+
+/// A PERMISSION CHANGE ON A MANIFEST FILE IS SEEN ON THE NEXT REQUEST, warm or
+/// cold, and so is its repair. D-0695.
+///
+/// A manifest that exists was keyed on its modified time alone, and `chmod`
+/// moves no modified time. Cold on a file this process could not read -- one a
+/// pull run wrote as another user -- "unreadable" was cached under a time the
+/// repair left where it was, so `/calendar.json` answered 503 and `/bars`
+/// refused over a readable store until the next pull or a restart. Warm on
+/// "held", a file that stopped being readable was served held. The key now
+/// carries the status-change time as well, which `chmod` moves. Both
+/// directions are driven, and the cold one through both routes. Like the
+/// directory tests, this needs a process the permission binds, which a root
+/// process is not.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_permission_change_on_a_manifest_file_is_seen_on_the_next_request() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let fixture = Fixture::new("census-request-manifest-file-mode");
+    fixture.publish(&[(Segment::Index, "NIFTY")], 0);
+    fixture.bar(Vendor::Dhan, Segment::Index, "NIFTY", 2);
+    let manifest = fixture.manifest();
+    let set_mode = |bits: u32| {
+        past_a_ctime_tick(&manifest, || {
+            fs::set_permissions(&manifest, fs::Permissions::from_mode(bits))
+                .expect("a manifest whose mode this process may set");
+        });
+    };
+    let bars = "symbol=NIFTY&vendor=dhan&month=2025-05&timeframe=1day";
+    let unreadable = ["absent", "unreadable", "absent", "absent", "absent"];
+    let held = ["absent", "held", "absent", "absent", "absent"];
+
+    // WARM ON "HELD", then the file stops being readable.
+    assert_eq!(fixture.states(), held, "warm on a readable manifest");
+    set_mode(0o000);
+    assert_eq!(
+        fixture.fresh_states(),
+        unreadable,
+        "the permission binds this process"
+    );
+    assert_eq!(fixture.states(), unreadable, "warm: the fault is seen");
+    let (status, body) = fixture.calendar_answer("feed=dhan").await;
+    assert_eq!(
+        status,
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "{body}"
+    );
+    set_mode(0o644);
+    assert_eq!(fixture.states(), held, "and so is the repair");
+
+    // COLD ON THE FAULT, then repaired: the case that answered 503 for good.
+    set_mode(0o000);
+    *fixture
+        .site
+        .census
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    assert_eq!(fixture.states(), unreadable, "cold: the fault is seen");
+    let (status, body) = fixture.calendar_answer("feed=dhan").await;
+    assert_eq!(
+        status,
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "{body}"
+    );
+    let (status, page) = fixture.bars(bars);
+    assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{page}");
+    assert!(page.contains("own census could not be read"), "{page}");
+
+    set_mode(0o644);
+    assert_eq!(fixture.fresh_states(), held);
+    assert_eq!(
+        fixture.states(),
+        held,
+        "the cached refusal does not outlive the repair"
+    );
+    let (status, body) = fixture.calendar_answer("feed=dhan").await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    assert!(body.contains(r#""sessions":1"#), "{body}");
+    let (status, page) = fixture.bars(bars);
+    assert_eq!(status, axum::http::StatusCode::OK, "{page}");
+}
+
+/// A REWRITE THAT KEEPS ONLY THE MODIFIED TIME IS READ AGAIN. D-0695.
+///
+/// D-0686's gap was any rewrite that kept the cached modified time. Every
+/// write also moves the status-change time, which the key now carries, so such
+/// a rewrite is seen on the next request, read once. The gap left is a rewrite
+/// that keeps both times, which `a_rewrite_that_keeps_the_stamp_is_served_stale_until_the_stamp_moves`
+/// pins.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_rewrite_that_keeps_only_the_modified_time_is_read_again() {
+    let fixture = Fixture::new("census-request-same-modified-time");
+    fixture.publish(&[(Segment::Cash, "ADANIENT")], 0);
+    assert_eq!(fixture.locate("RELIANCE"), None);
+    let base = fixture.reads();
+
+    let newer = Fixture::image(
+        Vendor::Dhan,
+        &[
+            (Segment::Cash, "ADANIENT"),
+            (Segment::Index, "ADANIENT"),
+            (Segment::Cash, "RELIANCE"),
+        ],
+    );
+    past_a_ctime_tick(&fixture.manifest(), || {
+        fixture.publish_bytes(Vendor::Dhan, &newer, 0);
+    });
+    assert_eq!(
+        fixture.locate("RELIANCE"),
+        Some(("NSE".to_owned(), "CASH".to_owned())),
+        "seen, though its modified time is the one cached"
+    );
+    assert_eq!(
+        fixture.calendar("feed=dhan&symbol=ADANIENT").await,
+        axum::http::StatusCode::CONFLICT,
+        "the second identity is seen too"
+    );
+    assert_eq!(fixture.reads(), base + 1, "read once");
 }

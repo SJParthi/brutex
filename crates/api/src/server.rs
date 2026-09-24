@@ -3355,6 +3355,9 @@ fn census_now_reading(
     // manifest is the only thing that can change what a census says, so the
     // modified-time of each vendor's manifest is exactly the key. A pull
     // rewrites them and the next request rebuilds; nothing else can go stale.
+    // A permission change could, because it moves no modified time and does
+    // decide whether a manifest reads, so since D-0695 the key also carries the
+    // status-change time from the same `stat`; see `manifest_stamps`.
     //
     // The lock is released BEFORE `read_all`, so a rebuild never serialises the
     // other requests -- the mistake that would turn a cache into a global
@@ -3455,15 +3458,32 @@ fn census_now_reading(
 /// three lines `read_vendor` draws. The root is still asked only when no
 /// manifest answered with a time, exactly the condition it was asked on
 /// before, so this costs no syscall. D-0695.
+///
+/// # And when the manifest FILE's own status changed, because a mode is not a write
+///
+/// A manifest that exists was keyed on its modified time alone, and `chmod` and
+/// `chown` do not move that time. A manifest file this process could not read
+/// when the cache was cold -- written by a pull run as another user -- was
+/// cached "unreadable" under a time the permission repair left where it was, so
+/// `/calendar.json` kept answering 503 and `/bars` kept refusing over a store
+/// that could be read again, until the next pull or a restart. The other
+/// direction served "held" over a file that had stopped being readable. The
+/// same `stat` also carries the status-change time, which both calls move, so
+/// it is now part of the key: no syscall is added. It narrows D-0686's
+/// same-modified-time gap as well, because every write moves it too; what is
+/// left is two changes inside one tick of the filesystem's clock. D-0695.
 fn manifest_stamps(store_root: &std::path::Path) -> CensusStamps {
     let dir = store_root.join("manifest");
     let manifests: Vec<ManifestStamp> = brutex_core::vendor::Vendor::ALL
         .iter()
         .map(|vendor| {
-            match std::fs::metadata(dir.join(format!("{}.man", vendor.as_str())))
-                .and_then(|meta| meta.modified())
-            {
-                Ok(at) => ManifestStamp::At(at),
+            match std::fs::metadata(dir.join(format!("{}.man", vendor.as_str()))).and_then(|meta| {
+                Ok(ManifestStamp::At {
+                    modified: meta.modified()?,
+                    changed: status_changed(&meta),
+                })
+            }) {
+                Ok(stamp) => stamp,
                 Err(why) if why.kind() == std::io::ErrorKind::NotFound => ManifestStamp::Missing,
                 Err(why) => ManifestStamp::Faulted(why.kind()),
             }
@@ -3471,7 +3491,7 @@ fn manifest_stamps(store_root: &std::path::Path) -> CensusStamps {
         .collect();
     let root_is_dir = manifests
         .iter()
-        .any(|stamp| matches!(stamp, ManifestStamp::At(_)))
+        .any(|stamp| matches!(stamp, ManifestStamp::At { .. }))
         || std::fs::metadata(store_root).is_ok_and(|meta| meta.is_dir());
     CensusStamps {
         manifests,
@@ -3501,14 +3521,40 @@ pub struct CensusStamps {
 /// census states the cache cannot tell apart. D-0695.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ManifestStamp {
-    /// It exists, last modified then.
-    At(std::time::SystemTime),
+    /// It exists: last modified then, and its status last changed then.
+    At {
+        /// The modified time, which a write moves.
+        modified: std::time::SystemTime,
+        /// The status-change time, which a write, a `chmod` and a `chown` all
+        /// move. See [`manifest_stamps`].
+        changed: StatusChanged,
+    },
     /// `NotFound`: no manifest, or no directory or root on the way to one.
     Missing,
     /// Any other error, by kind: `NotADirectory` where a directory on the way
     /// is a file, `PermissionDenied` where one may not be searched.
     Faulted(std::io::ErrorKind),
 }
+
+/// A manifest's status-change time, `st_ctime` in seconds and nanoseconds.
+#[cfg(unix)]
+type StatusChanged = (i64, i64);
+
+/// No status-change time: outside Unix, `std` exposes none, and the key is the
+/// modified time alone, as it was before D-0695.
+#[cfg(not(unix))]
+type StatusChanged = ();
+
+/// What `meta`'s one `stat` said about when its status last changed.
+#[cfg(unix)]
+fn status_changed(meta: &std::fs::Metadata) -> StatusChanged {
+    use std::os::unix::fs::MetadataExt as _;
+    (meta.ctime(), meta.ctime_nsec())
+}
+
+/// Nothing: see [`StatusChanged`].
+#[cfg(not(unix))]
+fn status_changed(_meta: &std::fs::Metadata) -> StatusChanged {}
 
 /// Why one percentage is not a number.
 ///
