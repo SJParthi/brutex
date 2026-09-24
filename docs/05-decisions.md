@@ -38918,15 +38918,26 @@ section" and began the next with "18", and the sixth test of `libm_key.rs`
 stayed green because it matched raw text, and matched a stale pointer only when
 spelt "§18". It now reads each file with comment markers and string
 continuations removed and line breaks collapsed, and counts "section 18" as
-stale beside "§18". The G-10 row of
+stale beside "§18". That reading still found a citation only in four
+spellings, each naming `06-limits.md`, and `crates/api` also cites the register
+as "limits §98" and "limits §125". A review wrote "limits §29" into the module
+doc of `crates/core` and "limits §18" into a comment of `crates/greeks`, which
+made the first correction's sentence about §29 false, and the sixth test
+stayed green. The sixth test now names no document: it takes every "§29",
+"§ 29", "section 29" or "sections 29" under `crates/`, in any case and
+whatever document it names, as a possible citation of §29, and every such
+mention of 18 in `crates/greeks` as stale. That reads more than the register's
+citations, so a file that comes to mention another document's §29 fails it
+too, and is listed once read. A number apart from its "§" or "section", as the
+29 in "sections 18 and 29", is not read. The G-10 row of
 `docs/04-invariants.md` and a paragraph of `docs/00-charter.md` still cite §18
 for the same material; both are on `main` and are not edited here. The seventh
 test of `libm_key.rs` checks that the sixth test's walk reads only `.rs`,
 `.toml` and `.md` files and follows no link. The eighth checks that this entry
 and §29 quote their sources verbatim, the ninth that they cite `96194c11`
 and keep none of the wordings corrected here, and the tenth that the sixth
-test's reading finds a citation wrapped across two lines, in each spelling
-`crates/` uses for one.
+test's reading finds a citation wrapped across two lines, and a section number
+however the document before it is named.
 
 ### D-0693 — Release every advisory file lock by `File::unlock`, through one guard in `store` — 2026-09-23
 
