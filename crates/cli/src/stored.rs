@@ -1804,11 +1804,29 @@ pub(crate) fn rung(name: &str) -> Result<Timeframe, Refusal> {
 /// **UNVERIFIED as a measured bound.** No bench in this workspace
 /// times this, so the shape above is read from the source rather
 /// than measured. `CLAUDE.md` §3 rule 6.
+///
+/// # And escaped, because a quoted word is not a line
+///
+/// What is kept is printed through `escape_debug`, so a control character in
+/// the word is quoted as its escape and the refusal stays on one line. The
+/// word is not always typed: `sweep-all` loads every held month by its symbol
+/// DIRECTORY's name, and a directory can be called anything a filesystem
+/// admits. One named `X\nrefused: forged` put `refused: forged` at column zero
+/// of a completed run, and [`crate::carries_refusal`] then read the whole run
+/// as refused (measured by the review, D-0696). A word of printable
+/// characters with no quote and no backslash is quoted exactly as before.
+///
+/// Clipped FIRST and escaped after, so the escape walks at most the 64
+/// characters kept and the cost above is unchanged. What comes back is at
+/// most 643 bytes -- 64 characters, each printed as itself or as an escape of
+/// at most ten bytes (`\u{10ffff}`), and the three-byte mark -- read from the
+/// source, not measured.
 fn clipped(word: &str) -> String {
     /// Characters of the offending word a refusal keeps.
     const KEEP: usize = 64;
 
-    let mut out: String = word.chars().take(KEEP).collect();
+    let kept: String = word.chars().take(KEEP).collect();
+    let mut out = kept.escape_debug().to_string();
     if word.chars().nth(KEEP).is_some() {
         out.push('…');
     }
@@ -1853,8 +1871,11 @@ fn clipped(word: &str) -> String {
 /// will print, which is why they share one value rather than each calling the
 /// cut.
 ///
-/// That value is built EAGERLY, on the success path too. It is at most 67 bytes
-/// and this function runs once per instrument-month load, never per bar and
+/// That value is built EAGERLY, on the success path too. It is at most the 643
+/// bytes [`clipped`] can return, and on the success path -- a word
+/// `Symbol::new` admitted, at most 24 ASCII letters, digits, `-`, `_` and `&`,
+/// none of which is escaped -- at most 24; this function runs once per
+/// instrument-month load, never per bar and
 /// never per candidate, so it is not one of the five operations `CLAUDE.md` §3
 /// rule 4 bounds. Buying that with a predictable shape — one clip, one
 /// sentence, no way for them to drift — is the better trade.
@@ -1927,10 +1948,14 @@ pub(crate) fn swept_index(underlying: &str) -> Result<InstrumentKey, Refusal> {
 /// line at column zero in the middle of the `pool` page and of a `sweep-all`
 /// REFUSED row, and a line reading `refused: ...` made a completed pool read
 /// as a refusal to every scanner that asks [`crate::carries_refusal`]. Each
-/// name is therefore clipped and then rendered through `escape_debug`, so a
-/// control character is printed as its escape and the sentence stays on one
-/// line. A name of printable characters without a quote or backslash prints
-/// exactly as it did.
+/// name is therefore named through [`clipped`], which clips it and then
+/// renders it through `escape_debug`, so a control character is printed as its
+/// escape and the sentence stays on one line. A name of printable characters
+/// without a quote or backslash prints exactly as it did. The escape was first
+/// written here alone, and the symbol directory -- which reaches
+/// [`swept_index`]'s refusal and `sweep-all`'s row label as a word -- still
+/// forged a refusal of the run; it now lives in [`clipped`], for every word a
+/// refusal quotes (D-0696).
 ///
 /// UNVERIFIED performance: no bench times this. Read from the source, it is
 /// three comparisons of strings no longer than a path segment, once per
@@ -1954,9 +1979,9 @@ pub(crate) fn misfiled(
         "`{}/{}/{}` is not where `{key}` is stored: a load of `{key}` reads `{}/{}/{}`, \
          spelt exactly as the writer writes it. Nothing under this directory was read \
          (D-0696)",
-        clipped(exchange).escape_debug(),
-        clipped(segment).escape_debug(),
-        clipped(symbol).escape_debug(),
+        clipped(exchange),
+        clipped(segment),
+        clipped(symbol),
         own.0,
         own.1,
         own.2
@@ -3749,9 +3774,10 @@ mod tests {
             let refused = scope(word).expect_err("not on the engine surface");
             assert!(
                 refused.starts_with(&format!(
-                    "`{word}` is not an instrument this engine sweeps: "
+                    "`{}` is not an instrument this engine sweeps: ",
+                    word.escape_debug()
                 )),
-                "the refusal quotes the raw word first: {refused}"
+                "the refusal quotes the word first, a control character escaped (D-0696): {refused}"
             );
             assert!(
                 refused.contains(why),
@@ -5593,6 +5619,66 @@ mod tests {
                 !crate::carries_refusal(&format!("    {why}\n")),
                 "{shown}: the named directory reads as a refusal: {why:?}"
             );
+        }
+    }
+
+    /// **A word that names no instrument or rung is quoted escaped, on one
+    /// line.** D-0696.
+    ///
+    /// `misfiled` escaped the three directory names it prints, and
+    /// `swept_index` and `rung` quoted theirs raw through [`clipped`]. A symbol
+    /// directory reaches `swept_index` as a word -- `sweep-all` loads every
+    /// held month by its symbol directory's name -- so a directory named
+    /// `X\nrefused: forged` put `refused: forged` at column zero of a completed
+    /// run (measured by the review). [`clipped`] now escapes what it keeps, so
+    /// every refusal that quotes a caller's word or a directory's name is one
+    /// line, and a word of printable characters with no quote or backslash is
+    /// quoted exactly as before.
+    #[test]
+    fn a_refused_word_is_quoted_escaped_on_one_line() {
+        for (word, shown) in [
+            ("X\nrefused: forged", "`X\\nrefused: forged`"),
+            ("NIFTY\n", "`NIFTY\\n`"),
+            ("\tRELIANCE\r", "`\\tRELIANCE\\r`"),
+            ("RE\u{7}L", "`RE\\u{7}L`"),
+        ] {
+            let why = swept_index(word).expect_err("no instrument");
+            assert!(
+                why.starts_with(&format!(
+                    "{shown} is not an instrument this engine sweeps: "
+                )),
+                "{shown}: {why:?}"
+            );
+            assert!(
+                !why.contains(|c: char| c.is_control()),
+                "{shown}: a control character reached the refusal: {why:?}"
+            );
+            assert!(
+                !crate::carries_refusal(&format!("    {why}\n")),
+                "{shown}: the quoted word reads as a refusal: {why:?}"
+            );
+            let rung_why = rung(word).expect_err("no rung");
+            assert!(
+                rung_why.starts_with(&format!("{shown} is not a rung this store carries.")),
+                "{shown}: {rung_why:?}"
+            );
+            assert!(
+                !rung_why.contains(|c: char| c.is_control()),
+                "{shown}: {rung_why:?}"
+            );
+        }
+        // Clipped first and escaped after: the escape is of what is kept, and
+        // the mark still says that something was cut.
+        let long = format!("{}\n", "N".repeat(64));
+        let why = swept_index(&long).expect_err("no instrument");
+        assert!(
+            why.starts_with(&format!("`{}…` is not", "N".repeat(64))),
+            "{why:?}"
+        );
+        // Printable words are quoted as they were typed.
+        for word in ["NIFTYX", "1hour", "RELIANCE-EQ", "niftyé"] {
+            let why = swept_index(word).expect_err("no instrument");
+            assert!(why.starts_with(&format!("`{word}` is not")), "{why:?}");
         }
     }
 }

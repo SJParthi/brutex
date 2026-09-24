@@ -242,9 +242,13 @@ fn run(
 /// hands everything else here. The head [`head_under`] renders is the page's
 /// first bytes, and `out` is bound from it once and only appended to after:
 /// `the_pool_page_is_its_head_and_then_only_appends` drives this on a scratch
-/// store and reads that shape from the source. [`run`] itself stays out of
+/// store and reads that shape from the source: every mention of `out` after
+/// the head is `writeln!(out, ..)`, `&mut out` handed to a renderer, or
+/// `Ok(out)`, and every return is `out` itself. [`run`] itself stays out of
 /// reach of a test for the reason it always was -- the stamp check comes
-/// first -- and holds no line of the page.
+/// first -- so `the_pool_verb_hands_on_run_unders_page_untouched` reads its
+/// body: it ends by returning this function's result as it is, and builds no
+/// page of its own by any phrasing that test lists.
 ///
 /// **The root is supplied for the head, the union and pass 2, not pass 1.**
 /// Pass 1 screens each instrument through `crate::one_rung`, exactly as
@@ -1463,6 +1467,19 @@ mod tests {
             "{page}"
         );
         assert!(!crate::carries_refusal(&page), "{page}");
+
+        // A SYMBOL directory carrying a newline names no instrument --
+        // `Symbol::new` admits no control character -- so the surface skips
+        // it without a word, as it skips every word that resolves to nothing,
+        // and the page is the opening over the instrument beside it and
+        // nothing else.
+        let (page, surface) = head(
+            "page-forged-symbol",
+            &["NSE/CASH/RELIANCE", "NSE/CASH/X\nrefused: forged"],
+        );
+        assert_eq!(surface, vec!["RELIANCE".to_owned()]);
+        assert_eq!(page, opening(&["RELIANCE"]));
+        assert!(!crate::carries_refusal(&page), "{page}");
     }
 
     /// **The page `pool` prints IS its head, and every later line is
@@ -1478,8 +1495,20 @@ mod tests {
     /// A surface with an instrument on it is screened through `one_rung`,
     /// which reads the root from the environment, so that path is held here by
     /// the shape of the source instead: `out` is bound from `head_under` once,
-    /// is never assigned again, and the page writes neither the opening nor
-    /// the block itself.
+    /// the page writes neither the opening nor the block itself, every `Ok(`
+    /// and every `return` after the head returns `out`, and the body's last
+    /// value is `Ok(out)`.
+    ///
+    /// **Every mention of `out` after the head is an append or the return.**
+    /// A list of refused rewrites missed one it did not name --
+    /// `std::mem::replace(&mut out, String::new())` stayed green (measured by
+    /// the review, D-0696) -- so each mention of the name is checked against
+    /// three shapes instead: `writeln!(out, ..)`, `&mut out` handed to
+    /// `render_per_symbol` or `render_pooled`, and `Ok(out)`. A rewrite, an
+    /// alias or a closure over the page has to name it, and any other shape
+    /// fails. What the two renderers do with the page is held by
+    /// `the_renderers_only_append_to_the_page_they_are_handed`, on one input
+    /// each.
     #[test]
     fn the_pool_page_is_its_head_and_then_only_appends() {
         let root = store_holding("run-under", &["NSE/INDEX/RELIANCE", "BSE/CASH/RELIANCE"]);
@@ -1550,6 +1579,162 @@ mod tests {
                 .is_some_and(|(before, _)| !before.contains("out")),
             "nothing is written before the head is bound"
         );
+        // EVERY RETURN IS THE PAGE. The list above refuses rewriting `out`;
+        // it did not refuse returning something else. The review returned a
+        // fresh "nothing to pool" string from the empty-union branch, and the
+        // 69 tests in its set passed.
+        assert!(
+            after.matches("Ok(").count() >= 2,
+            "premise: both of `run_under`'s later returns were read:\n{after}"
+        );
+        assert_eq!(
+            after.matches("Ok(").count(),
+            after.matches("Ok(out)").count(),
+            "every `Ok(` after the head returns `out` itself"
+        );
+        assert_eq!(
+            after.matches("return").count(),
+            after.matches("return Ok(out);").count(),
+            "every early return after the head returns `out` itself"
+        );
+        assert!(
+            after.trim_end().ends_with("\n    Ok(out)"),
+            "the page is the body's last value"
+        );
+        // EVERY MENTION OF THE PAGE IS AN APPEND OR THE RETURN. The list above
+        // names rewrites, and `std::mem::replace(&mut out, String::new())` was
+        // not among them.
+        let (writes, renders, returns) = mentions_of_the_page(after);
+        assert!(
+            writes > 0 && renders == 2 && returns >= 2,
+            "premise: the scan read the page's appends and returns \
+             ({writes} writes, {renders} renders, {returns} returns)"
+        );
+    }
+
+    /// How often `after` -- `run_under`'s body past the head -- names the
+    /// page `out` to append to it, to hand it to a renderer, and to return
+    /// it. Any other mention of the name fails. A mention inside a longer
+    /// word -- `outcome` -- is not the name.
+    fn mentions_of_the_page(after: &str) -> (usize, usize, usize) {
+        let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+        let (mut writes, mut renders, mut returns) = (0_usize, 0_usize, 0_usize);
+        for (at, _) in after.match_indices("out") {
+            let lead = after.get(..at).unwrap_or_default();
+            let tail = after.get(at + "out".len()..).unwrap_or_default();
+            if lead.ends_with(ident) || tail.starts_with(ident) {
+                continue;
+            }
+            let lead = lead.trim_end();
+            let write = lead.ends_with("writeln!(") && tail.starts_with(',');
+            let render = (lead.ends_with("render_per_symbol(&mut")
+                || lead.ends_with("render_pooled(&mut"))
+                && tail.starts_with(',');
+            let returned = lead.ends_with("Ok(") && tail.starts_with(')');
+            assert!(
+                write || render || returned,
+                "`{} out` after the head neither appends to the page nor returns it",
+                lead.rsplit('\n').next().unwrap_or_default().trim_start()
+            );
+            writes += usize::from(write);
+            renders += usize::from(render);
+            returns += usize::from(returned);
+        }
+        (writes, renders, returns)
+    }
+
+    /// **Each renderer `run_under` hands the page to only appends to it.**
+    /// D-0696.
+    ///
+    /// `the_pool_page_is_its_head_and_then_only_appends` admits `&mut out`
+    /// passed to [`super::render_per_symbol`] and [`super::render_pooled`], so
+    /// what those two do with a page that already holds its head is part of
+    /// the claim. Each is handed a page and must leave it as the prefix of
+    /// what it returns. One input each, a refused row and a priced one: the
+    /// renderers are driven here, not read from their source.
+    #[test]
+    fn the_renderers_only_append_to_the_page_they_are_handed() {
+        let head = "HEAD, AS `head_under` WROTE IT\n";
+
+        let mut out = head.to_owned();
+        super::render_per_symbol(
+            &mut out,
+            &[super::Screened {
+                symbol: "AAA".to_owned(),
+                outcome: Err("refused for this test".to_owned()),
+            }],
+        );
+        assert!(
+            out.starts_with(head) && out.contains("refused for this test"),
+            "pass 1 keeps the head and appends its rows:\n{out}"
+        );
+
+        let union = candidates(1);
+        let surface = vec!["AAA".to_owned(), "BBB".to_owned()];
+        let priced = vec![
+            Ok(vec![Some(cell(3, 1, 900, -100, 1_000, 150))]),
+            Err("not priced for this test".to_owned()),
+        ];
+        let rules = rules_at(300);
+        let pooled = fold(&union, &surface, &priced, rules);
+        let mut out = head.to_owned();
+        super::render_pooled(&mut out, &union, &surface, &priced, &pooled, rules);
+        assert!(
+            out.starts_with(head)
+                && out.contains("PASS 2 -- POOLED")
+                && out.contains("not priced for this test"),
+            "pass 2 keeps the head and appends its table:\n{out}"
+        );
+    }
+
+    /// **`run` hands on `run_under`'s page untouched.** D-0696.
+    ///
+    /// `run` checks the commit stamp before anything else, so no test build
+    /// reaches it. The review made it return the bare opening in place of
+    /// `run_under`'s page, and every test passed. Its body is read instead:
+    /// the checks, and then `run_under`'s result as its tail and its only
+    /// page. The tail is pinned exactly and `run_under` is called once; that
+    /// nothing else in the body builds or returns a page is a list of refused
+    /// phrasings, among them `Ok(` and `return`.
+    #[test]
+    fn the_pool_verb_hands_on_run_unders_page_untouched() {
+        let source = include_str!("pool.rs");
+        let from = source.find("\nfn run(").expect("run");
+        let run = source
+            .get(from..)
+            .and_then(|rest| rest.find("\n}\n").and_then(|to| rest.get(..to + 2)))
+            .expect("its body");
+        assert!(
+            run.contains("crate::commit_stamp()") && run.contains("crate::store_root()?"),
+            "premise: the body read is `run`'s:\n{run}"
+        );
+        assert!(
+            run.ends_with(
+                "\n    run_under(&root, vendor, vendor_word, rung, from, to, support_ppm)\n}"
+            ),
+            "`run` ends by returning `run_under`'s page as it is:\n{run}"
+        );
+        assert_eq!(
+            run.matches("run_under(").count(),
+            1,
+            "`run` calls `run_under` once"
+        );
+        for other in [
+            "Ok(",
+            "return",
+            "opening(",
+            "head_under(",
+            "not_on_the_surface(",
+            "format!(",
+            "String::",
+            "writeln!(",
+            "push_str(",
+        ] {
+            assert!(
+                !run.contains(other),
+                "`{other}` in `run`: its page is `run_under`'s alone"
+            );
+        }
     }
 
     /// **The pool quotes no charge rate.** `CLAUDE.md` §3 rule 1: every claim

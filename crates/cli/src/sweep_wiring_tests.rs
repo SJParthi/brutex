@@ -633,14 +633,18 @@ fn a_nested_none_closed_guard_restores_the_outer_one_when_it_drops() {
     );
 }
 
-/// **Two doc comments this piece corrected say no more than holds.** D-0696.
+/// **Three doc comments this piece corrected say no more than holds.** D-0696.
 ///
 /// `Rules::elite` said every admitted row's figures are "per ONE unit of the
 /// index, gross of the statutory charge stack" after D-0506 let a row be a
 /// share, which `cli top` tells is per ONE share and GROSS OF EVERY CHARGE.
 /// The stored-sweep share test said "An index's sweep is unchanged" and
-/// compared no index page with a baseline. Read from the source, because a
-/// doc comment reaches no other test.
+/// compared no index page with a baseline. `EQUITY_RANKING_GROSS` called itself
+/// one of three copies in this crate beside the header, after
+/// `runner::audit::CASH_EQUITY_GROSS` became the fourth copy the binding test
+/// reads, and named neither that copy nor the "none is subtracted" check
+/// (measured by the review). Read from the source, because a doc comment
+/// reaches no other test.
 #[test]
 fn the_corrected_doc_comments_say_no_more_than_holds() {
     let doc_before = |source: &'static str, item: &str| -> String {
@@ -671,6 +675,17 @@ fn the_corrected_doc_comments_say_no_more_than_holds() {
     assert!(
         sweep.contains("It is not compared byte for byte"),
         "the doc says what is and is not asserted of an index: {sweep}"
+    );
+    let label = doc_before(include_str!("lib.rs"), "\nconst EQUITY_RANKING_GROSS: &str");
+    assert!(
+        !label.contains("one of three copies"),
+        "the label's doc counts three copies of four: {label}"
+    );
+    assert!(
+        label.contains("one of four copies")
+            && label.contains("`runner::audit::CASH_EQUITY_GROSS`")
+            && label.contains("does not say \"none is subtracted\""),
+        "the label's doc names the fourth copy and the check on the fact: {label}"
     );
 }
 
@@ -774,8 +789,9 @@ fn the_headers_charge_fact() -> (String, String, String) {
     (header, charges, excluded)
 }
 
-/// **The subtraction check refuses every way of contradicting the header
-/// that keeps its words.** D-0696.
+/// **The subtraction check refuses each listed way of contradicting the
+/// header that keeps its words, and each of its four clauses is the one that
+/// refuses at least one of them.** D-0696.
 ///
 /// The review's label kept the charge list, the sentence and "GROSS OF EVERY
 /// CHARGE" and said the engine subtracts every charge. Each contradiction
@@ -783,6 +799,16 @@ fn the_headers_charge_fact() -> (String, String, String) {
 /// and must be refused by [`denies_subtraction`], so the check in
 /// `every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate`
 /// is not vacuous.
+///
+/// **A list, not every way.** These are five rewrites, and a contradiction
+/// in words the check does not look for would pass it. What the list does
+/// establish is that no clause is idle: each case is refused by the reason
+/// named beside it, and the first clause -- "none is subtracted" must be said
+/// -- is the only one that refuses the last case, which has one "subtract",
+/// no "net" and no "deduct". Before that case was listed, deleting the first
+/// clause left every test green, and the label "this engine subtracts all of
+/// them, so the ranking above is on GROSS returns" then passed the binding
+/// test (measured by the review).
 #[test]
 fn the_subtraction_check_refuses_each_contradiction_of_the_header() {
     let (_, charges, excluded) = the_headers_charge_fact();
@@ -792,26 +818,37 @@ fn the_subtraction_check_refuses_each_contradiction_of_the_header() {
         Ok(()),
         "premise: the label itself states the fact: {label}"
     );
-    for (contradiction, from, to) in [
+    let unsaid = "does not say that none is subtracted";
+    for (contradiction, from, to, refused) in [
         (
             "the review's label",
             "and none is subtracted, so the ranking above is on GROSS returns",
             "and this engine subtracts all of them, so the ranking above is on NET returns",
+            unsaid,
         ),
         (
             "a second claim beside the fact",
             "and none is subtracted,",
             "and none is subtracted, but brokerage is subtracted,",
+            "speaks of subtraction beyond `none is subtracted`",
         ),
         (
             "a net figure beside the fact",
             "is on GROSS returns",
             "is on net returns",
+            "calls a figure net outside `NOT A NET RESULT`",
         ),
         (
             "a deduction beside the fact",
             "and none is subtracted,",
             "and none is subtracted, though every charge is deducted,",
+            "speaks of a deduction",
+        ),
+        (
+            "a contradiction with no net figure",
+            "and none is subtracted,",
+            "and this engine subtracts all of them,",
+            unsaid,
         ),
     ] {
         assert!(label.contains(from), "premise: {contradiction}: {label}");
@@ -820,9 +857,10 @@ fn the_subtraction_check_refuses_each_contradiction_of_the_header() {
             broken.contains(&charges) && broken.contains(&excluded),
             "premise: {contradiction} keeps the list and the sentence"
         );
-        assert!(
-            denies_subtraction(&broken, &excluded).is_err(),
-            "{contradiction} must be refused: {broken}"
+        assert_eq!(
+            denies_subtraction(&broken, &excluded),
+            Err(refused),
+            "{contradiction} must be refused, and for its own reason: {broken}"
         );
     }
 }
@@ -865,6 +903,15 @@ fn the_subtraction_check_refuses_each_contradiction_of_the_header() {
 /// passed every equity test (measured by the review). The header says NONE of
 /// those charges is subtracted, and [`denies_subtraction`] now holds every
 /// copy to saying so in one wording and to contradicting it nowhere.
+///
+/// **And every other word of each copy.** [`denies_subtraction`] refuses the
+/// phrasings it lists, and a clause in other words -- "Every charge is taken
+/// off each trade before it is ranked." appended to the label -- passed it and
+/// every other assertion here (measured by the review, D-0696). So each copy,
+/// with the header's list and sentence replaced by `<charges>` and
+/// `<sentence>`, must equal the words written beside it below. The list and
+/// the sentence still follow the header; everything around them is pinned per
+/// copy, and a clause added to a copy fails until this test is edited with it.
 #[test]
 fn every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate() {
     let (header, charges, excluded) = the_headers_charge_fact();
@@ -873,13 +920,32 @@ fn every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate() {
         "premise: the header itself quotes no rate: {header}"
     );
 
-    for (copy, text) in [
-        ("the FINDINGS label", super::EQUITY_RANKING_GROSS),
-        ("`cli top`'s share legend", super::SHARE_MEAN_LEGEND),
-        ("`pool`'s opening", super::pool::EQUITY_TOTALS_GROSS),
+    for (copy, text, around) in [
+        (
+            "the FINDINGS label",
+            super::EQUITY_RANKING_GROSS,
+            "CASH EQUITY: EVERY FIGURE IN THIS RANKING IS GROSS OF EVERY CHARGE. A share \
+             trade pays <charges>, and none is subtracted, so the ranking above is on GROSS \
+             returns. <sentence>",
+        ),
+        (
+            "`cli top`'s share legend",
+            super::SHARE_MEAN_LEGEND,
+            "ONE share, GROSS OF EVERY CHARGE: <charges> all apply to a share trade and \
+             none is subtracted. <sentence>",
+        ),
+        (
+            "`pool`'s opening",
+            super::pool::EQUITY_TOTALS_GROSS,
+            "NO COST OF ANY KIND IS CHARGED. Correct on an index by charter; NOT correct \
+             on a cash equity, where <charges> all apply and none is subtracted: every \
+             equity total is GROSS OF EVERY CHARGE. <sentence>",
+        ),
         (
             "the stored banner's gross paragraph (`report_note`)",
             runner::audit::CASH_EQUITY_GROSS,
+            "CASH EQUITY. EVERY TOTAL BELOW IS GROSS OF EVERY CHARGE: <charges> apply to \
+             a share trade and none is subtracted. <sentence>",
         ),
     ] {
         let said = words(text);
@@ -900,6 +966,13 @@ fn every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate() {
         assert!(
             verdict.is_ok(),
             "{copy} {verdict:?}, against the header's fact: {said}"
+        );
+        assert_eq!(
+            said.replace(&charges, "<charges>")
+                .replace(&excluded, "<sentence>"),
+            around,
+            "{copy}: every word around the header's list and sentence is pinned, so a \
+             clause added beside them fails here"
         );
     }
 

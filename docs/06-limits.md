@@ -9210,8 +9210,9 @@ by `File::unlock`. What that does not cover, stated rather than implied away:
   it.** `EQUITY_RANKING_GROSS`, `SHARE_MEAN_LEGEND` and
   `pool::EQUITY_TOTALS_GROSS` are literals. One test reads the charge list and
   the cost-excluded sentence out of `runner::audit::render` and fails when a
-  copy lacks either or quotes a rate. A copy can still differ from the header
-  in any other word and pass.
+  copy lacks either or quotes a rate. Each copy's other words differ from the
+  header's. Since the third correction the same test pins them per copy, so a
+  change to them fails until the test is edited with it.
 - **One exit is reached only through a test seam.** A completed audit whose
   ranker kept rows of which none is closed prints the label and then the AUDIT
   refusal. No generated store reaches it: a retained non-closed row always has
@@ -9240,7 +9241,11 @@ by `File::unlock`. What that does not cover, stated rather than implied away:
   prints one line for each such directory on every `pool` page.
 - **Cost, unmeasured.** `stored::misfiled` is three string comparisons per
   holding the catalog lists, paid once per `pool` or `sweep-all` run and never
-  per bar or per candidate. No bench times it.
+  per bar or per candidate. A holding it names as misfiled also has each of
+  its three names clipped to at most 64 characters and escaped, through
+  `stored::clipped`, which every refusal that quotes a word or a directory
+  name now uses. `sweep-all` also escapes each held month's symbol directory
+  once for its row label. No bench times any of it.
 
 ## Screen-budget refusals and census faults on the api routes — D-0695, 24 September 2026
 
@@ -9770,4 +9775,15 @@ The text above is kept as it was written.
   states the charge fact more than once, in lead-in words that differ: the
   banner's "EVERY TOTAL BELOW", the FINDINGS label's "EVERY FIGURE IN THIS
   RANKING", `top`'s "per ONE share", and an audit header's own paragraphs.
-  Only the charge list and the cost-excluded sentence are held identical.
+  The charge list and the cost-excluded sentence are held identical to the
+  header's, and each copy states the header's fact in the same words, "none
+  is subtracted". The lead-in words around them are pinned per copy by the
+  same test. That test holds today's words; it does not read what a new
+  clause means.
+- **The `pool` page past its head is read from the source, not driven.** No
+  test build passes `pool::run`'s commit-stamp check, and a surface with an
+  instrument on it is screened through `one_rung`, which reads the store root
+  from the environment. So the tests read `run`'s body and `run_under`'s: every
+  mention of the page after its head is an append or its return, and `run`
+  returns `run_under`'s page as its tail. The two renderers that append to it
+  are driven on one input each.

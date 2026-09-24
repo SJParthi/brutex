@@ -18094,15 +18094,20 @@ fn opening(banner: &str, refused: Option<&str>) -> String {
 ///
 /// # The audit header's own words, and a test that says so
 ///
-/// This is one of three copies of the charge statement in this crate -- with
-/// [`SHARE_MEAN_LEGEND`] and `pool`'s opening -- and `runner::audit`'s equity
-/// header is the fourth. The first version of all three named their own
-/// decisions, and two dropped the header's Selection V6 clause (D-0696).
+/// This is one of four copies of the charge statement a share's page prints
+/// -- with [`SHARE_MEAN_LEGEND`], `pool`'s opening and
+/// `runner::audit::CASH_EQUITY_GROSS`, which every stored share banner carries
+/// -- and all four are held to what `runner::audit`'s equity header says. The
+/// first version of the three in this crate named their own decisions, and
+/// two dropped the header's Selection V6 clause (D-0696).
 /// `sweep_wiring_tests::every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate`
-/// now reads the charge list and the cost-excluded sentence out of the header
-/// `runner::audit::render` prints and fails if any copy here lacks either, or
-/// carries a digit or `%` outside its decision numbers and the name
-/// `Selection V6`.
+/// reads the charge list and the cost-excluded sentence out of the header
+/// `runner::audit::render` prints, and fails if any copy lacks either; carries
+/// a digit or `%` outside its decision numbers and the name `Selection V6`;
+/// does not say "none is subtracted", which is the header's fact, or
+/// contradicts it by a phrasing `denies_subtraction` lists; or has any word
+/// around the list and the sentence other than the words that test pins for
+/// it.
 const EQUITY_RANKING_GROSS: &str = "  CASH EQUITY: EVERY FIGURE IN THIS RANKING IS GROSS OF EVERY CHARGE.\n  \
      A share trade pays brokerage, STT, stamp duty, exchange charges, the SEBI\n  \
      fee and GST, and none is subtracted, so the ranking above is on GROSS\n  \

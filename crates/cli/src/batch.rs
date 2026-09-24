@@ -382,10 +382,17 @@ fn sweep_under(
     reason = "one stored batch row keeps its signal, daily, exact-minute, identity, and refusal receipts together"
 )]
 fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row {
+    // THE SYMBOL IS A DIRECTORY'S NAME, ESCAPED. The feed, rung and month are
+    // parsed before a holding exists; the symbol directory is not, and it can
+    // be called anything a filesystem admits. Printed raw, one named
+    // `X\nrefused: forged` put `refused: forged` at column zero of a completed
+    // run (measured by the review, D-0696). A symbol `Symbol::new` admits --
+    // ASCII letters, digits, `-`, `_` and `&` -- escapes to itself, so every
+    // month that can be swept is labelled exactly as before.
     let label = format!(
         "{} {} {} {}",
         held.vendor.as_str(),
-        held.symbol,
+        held.symbol.escape_debug(),
         held.timeframe.as_str(),
         held.month
     );
@@ -993,6 +1000,55 @@ mod tests {
             "no line of a completed run opens as a refusal:\n{text}"
         );
         assert!(!crate::carries_refusal(&text), "{text}");
+    }
+
+    /// **Nor can the SYMBOL directory's name forge one.** D-0696.
+    ///
+    /// The test above names the exchange directory. The symbol directory is
+    /// printed twice on a REFUSED row -- in the row's label, and in
+    /// `stored::swept_index`'s refusal when the name resolves to nothing -- and
+    /// both printed it raw, so a symbol directory named `X\nrefused: forged`
+    /// put two lines at column zero and the completed run read as a refusal
+    /// (measured by the review). Each is printed escaped, so the row is one
+    /// line, and a directory that is a real instrument beside it is labelled
+    /// exactly as before.
+    #[test]
+    fn a_symbol_directory_name_cannot_forge_a_refusal_of_the_run() {
+        let root = scratch("forged-symbol");
+        for rel in [
+            "groww/NSE/CASH/RELIANCE/1min/2026-08.bin",
+            "groww/NSE/CASH/X\nrefused: forged/1min/2026-08.bin",
+            "groww/NSE/CASH/T\tAB\r\u{7}/1min/2026-08.bin",
+        ] {
+            let full = root.join("bars").join(rel);
+            std::fs::create_dir_all(full.parent().expect("has a parent")).expect("creatable");
+            std::fs::write(&full, b"not a bar file").expect("writable");
+        }
+        let text = sweep_under(&root, "groww", "1min", 100, "deadbeef").expect("the run completes");
+        let _ = std::fs::remove_dir_all(&root);
+        for shown in ["X\\nrefused: forged", "T\\tAB\\r\\u{7}"] {
+            assert!(
+                text.contains(&format!(
+                    "\n  REFUSED  groww {shown} 1min 2026-08  — `{shown}` is not an instrument \
+                     this engine sweeps: "
+                )),
+                "the unresolved symbol directory is one escaped row:\n{text}"
+            );
+        }
+        assert!(
+            text.contains("\n  REFUSED  groww RELIANCE 1min 2026-08  — "),
+            "the real instrument beside them keeps its own label:\n{text}"
+        );
+        assert!(
+            !text.lines().any(|line| line.starts_with("refused")),
+            "no line of a completed run opens as a refusal:\n{text}"
+        );
+        assert!(
+            !text.contains(|c: char| c.is_control() && c != '\n'),
+            "no control character but the line break reaches the page:\n{text}"
+        );
+        assert!(!crate::carries_refusal(&text), "{text}");
+        assert!(text.contains("0 swept · 3 refused"), "{text}");
     }
 
     /// The feed and rung filter, so a run sweeps what was asked for and no more.

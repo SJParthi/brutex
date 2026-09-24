@@ -42395,3 +42395,172 @@ restored from copies, and `cmp` found them identical.
 
 Invariants AF-38 and AF-39 are corrected in place. They are new in this
 change and are not on `main`.
+
+**Third correction, 2026-09-24: what a third review upheld.** Corrected here,
+not in the text above.
+
+1. *The second correction's item 3: `run`, and what `run_under` returns.*
+   The source check read `run_under` for a list of rewrites of `out`. It did
+   not check what `run_under` returned, and it did not read `run` at all.
+   Each of three regressions left every test in the reviews' sets green
+   (measured by the reviews): `run` returning the bare opening in place of
+   `run_under`'s page, `run_under`'s empty-union branch returning a fresh
+   "nothing to pool" string, and `std::mem::replace(&mut out, String::new())`
+   after the empty-surface return, a rewrite the list did not name.
+   - *`run_under`: every mention of the page, not a list of rewrites.*
+     `the_pool_page_is_its_head_and_then_only_appends` now checks each
+     mention of the name `out` after the head against three shapes:
+     `writeln!(out, ..)`, `&mut out` handed to `render_per_symbol` or
+     `render_pooled`, and `Ok(out)`. Any other shape fails it. It also
+     requires every `Ok(` to be `Ok(out)`, every `return` to be
+     `return Ok(out);`, and the body's last value to be `Ok(out)`. A rewrite,
+     an alias or a closure over the page has to name it.
+   - *The two renderers.* What they do with the page they are handed is now
+     part of that claim. `the_renderers_only_append_to_the_page_they_are_handed`
+     hands each a page that already holds a head, and requires the head as
+     the prefix of what it returns. That is one input each, driven, and not
+     read from their source.
+   - *`run`.* The new `the_pool_verb_hands_on_run_unders_page_untouched`
+     reads `run`'s body. The body must end with
+     `run_under(&root, vendor, vendor_word, rung, from, to, support_ppm)`,
+     call it once, and hold no `Ok(`, `return`, `opening(`, `head_under(`,
+     `not_on_the_surface(`, `format!(`, `String::`, `writeln!(` or
+     `push_str(`. The tail is exact. The rest is a list of refused phrasings.
+   - *Still not driven.* No test build passes `run`'s stamp check, and a
+     non-empty surface is still screened through `one_rung`, which reads the
+     root from the environment. Giving `one_rung` the root was the review's
+     alternative. It was not taken: `descend` and the all-rungs range sweep
+     call `one_rung` too, and this correction does not change their path for
+     a test. AF-39 is corrected in place to state what is read and what is
+     driven.
+2. *The second correction's item 2: the symbol directory.* The escape was
+   added only in `stored::misfiled`, which names the exchange and segment
+   directories. `sweep-all` loads each held month by its symbol directory's
+   name, and printed that name raw twice: in `batch::one`'s row label, and in
+   `stored::swept_index`'s refusal of a word that resolves to nothing. With a
+   symbol directory named `X\nrefused: forged`, the review measured
+   `carries_refusal` true on the page of a completed run. `sweep_all_arm`
+   returns MISUSED whenever it is true (read from the source). The same
+   defect is on `main`. AF-39 said the forge was closed for every held
+   directory; that was new in this change, and false.
+   - *The fix is in the one place a refusal quotes a word.* `stored::clipped`
+     now passes what it keeps through `escape_debug`, after the cut. So
+     `swept_index`, `rung` and `misfiled` all quote escaped, and `misfiled`
+     no longer escapes a second time. `batch::one` escapes the symbol in its
+     label. A word `Symbol::new` admits -- at most 24 ASCII letters, digits,
+     `-`, `_` and `&` -- escapes to itself, so no month that can be swept is
+     labelled differently.
+   - *What a reader sees change:* a refused instrument or rung word that
+     carries a control character, a quote or a backslash is now quoted with
+     those characters escaped. `NIFTY` followed by a newline was quoted with
+     the newline itself; it is now quoted as `NIFTY\n`.
+     `every_spelling_of_an_instrument_word_lands_on_one_scope_or_the_surface_sentence`
+     pinned the raw echo for two such words, and now expects the escaped
+     word. No accepted word, run identity or store format changed.
+   - *`swept_index`'s doc said the eager value "is at most 67 bytes".* That
+     held only for ASCII, even before the escape. It now says at most the 643
+     bytes `clipped` can return: 64 characters, each at most a ten-byte
+     escape, and the three-byte mark. On the success path it says at most 24.
+     Both figures are read from the source, not measured.
+   - *The pool page.* It names no symbol directory that does not resolve, and
+     one carrying a control character never resolves. A case asserting that
+     was added to `the_pool_page_names_each_directory_it_did_not_read`. It
+     pins behaviour that already held, and no reverted fix makes it fail.
+3. *The second correction's item 1: the check's first clause.*
+   `the_subtraction_check_refuses_each_contradiction_of_the_header` listed
+   four rewrites, and each was refused by one of the other three clauses. So
+   deleting the requirement that a copy says "none is subtracted" left every
+   test green, and the label "this engine subtracts all of them, so the
+   ranking above is on GROSS returns" then passed the binding test (measured
+   by the review). A fifth case is that rewrite. It has one "subtract", no
+   "net" and no "deduct", so only the first clause refuses it. Each case must
+   now be refused with the reason of the clause it was written for. The
+   test's headline said it refuses "every way" of contradicting the header;
+   it now says "each listed way".
+4. *The check is a list, and a copy is now pinned beside it.* The review
+   appended "Every charge is taken off each trade before it is ranked." to
+   the FINDINGS label, keeping the list, the sentence, "GROSS OF EVERY
+   CHARGE" and "none is subtracted", and every test passed. The second
+   correction had stated that gap and kept it. It is closed here without the
+   composed source that correction rejected:
+   `every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate`
+   replaces the header's list and sentence in each copy with `<charges>` and
+   `<sentence>`, and requires what is left to equal words it writes for that
+   copy. The list and the sentence still follow the header. Every other word
+   of each copy is pinned, so a clause added to a copy fails until the test
+   is edited with it. It pins words; it does not read what a new clause
+   means.
+5. *Three texts new in this change were stale.* `EQUITY_RANKING_GROSS`'s doc
+   called it one of three copies in `cli` beside the header, and named
+   neither `runner::audit::CASH_EQUITY_GROSS` nor the "none is subtracted"
+   check. It now counts four copies and names both.
+   `the_corrected_doc_comments_say_no_more_than_holds` reads it.
+   `docs/06-limits.md` said "Only the charge list and the cost-excluded
+   sentence are held identical", and gave `stored::misfiled`'s cost as three
+   string comparisons, omitting the clip and escape of each name it prints.
+   Both bullets are corrected in place. One bullet is added: the `pool` page
+   past its head is read from the source, not driven.
+
+**Tests, and what each is proven against (third correction).** Four builds
+were used. Before them the five edited sources were copied aside. Each build
+applied its regressions to this tree and ran the 77 tests the filter
+`misfiled pool:: nested equity gross charge corrected_doc subtraction
+operator_boundary symbol_directory refused_word every_spelling enormous
+renderers` selects. After each build the five files were restored from the
+copies, and `cmp` found them identical. Each build's failures are exactly
+those listed below, and only in build 2 do two regressions meet in one test;
+that entry says so. With no regression, all 77 pass. Builds 1 and 2 ran
+before the scan of `out` moved into a helper, `mentions_of_the_page`, which
+clippy's line limit asked for. Builds 3 and 4 exercise that scan, and were
+run again after the move, with the same failures.
+
+- *Build 1:*
+  - `clipped` without the escape, and `misfiled` escaping again: this is
+    `stored.rs` as it was before this correction.
+    `a_refused_word_is_quoted_escaped_on_one_line`,
+    `a_symbol_directory_name_cannot_forge_a_refusal_of_the_run` and
+    `every_spelling_of_an_instrument_word_lands_on_one_scope_or_the_surface_sentence`
+    fail. Both `misfiled` tests pass.
+  - `run` returning the bare opening:
+    `the_pool_verb_hands_on_run_unders_page_untouched` fails ("`run` ends
+    by returning `run_under`'s page as it is").
+  - The first clause of `denies_subtraction` deleted:
+    `the_subtraction_check_refuses_each_contradiction_of_the_header` fails.
+    The review's label came back refused for calling a figure net, not with
+    the first clause's reason.
+  - `EQUITY_RANKING_GROSS`'s earlier doc restored:
+    `the_corrected_doc_comments_say_no_more_than_holds` fails.
+- *Build 2:*
+  - `batch::one`'s label unescaped:
+    `a_symbol_directory_name_cannot_forge_a_refusal_of_the_run` fails.
+  - `run_under`'s empty-union branch returning a fresh string:
+    `the_pool_page_is_its_head_and_then_only_appends` fails ("every `Ok(`
+    after the head returns `out` itself").
+  - The second clause deleted: the subtraction test fails on "a second claim
+    beside the fact". The sentence appended below is in the label this test
+    rewrites too. It has no "subtract", "deduct" or "net", and the premise
+    that the label itself passes the check held.
+  - The review's sentence appended to the FINDINGS label:
+    `every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate`
+    fails at the new pin. Every assertion before it passes.
+- *Build 3:*
+  - `std::mem::replace(&mut out, String::new())` after the empty-surface
+    return: `the_pool_page_is_its_head_and_then_only_appends` fails on that
+    mention of `out`.
+  - `render_per_symbol` clearing the page first:
+    `the_renderers_only_append_to_the_page_they_are_handed` fails ("pass 1
+    keeps the head").
+  - The third clause deleted: the subtraction test fails on "a deduction
+    beside the fact".
+- *Build 4:*
+  - `let _ = out.split_off(0);` after the empty-surface return:
+    `the_pool_page_is_its_head_and_then_only_appends` fails on that mention
+    of `out`.
+  - `render_pooled` clearing the page first: the renderers test fails
+    ("pass 2 keeps the head").
+  - The fourth clause deleted: the subtraction test fails on "a net figure
+    beside the fact".
+  - `run` ending with `run_under(..).map(|_| String::new())`: the `run`
+    test fails ("`run` ends by returning `run_under`'s page as it is").
+
+Invariants AF-38 and AF-39 are corrected in place again.
