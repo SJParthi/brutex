@@ -1194,9 +1194,12 @@ fn d_0692_and_limits_29_cite_main_and_keep_none_of_the_corrected_wordings() {
 /// "limits §18" into `crates/greeks`, and the sixth test stayed green. All
 /// four are written into a scratch tree here and read through the same walk,
 /// beside a citation that names its document after the section, and each
-/// shape `crates/` wraps a citation in is read as prose. D-0692, §29 and this
-/// file's module doc say what the sixth test reads, and D-0692 that two of its
-/// readings missed a citation.
+/// shape `crates/` wraps a citation in is read as prose. Each of those shapes
+/// wraps between the `§` or `section` and the number: they once wrapped before
+/// it, where the mention is whole on one line, and stayed green with the
+/// continuation join, the `//!` and `///` stripping or the `#` stripping
+/// removed from [`prose`]. D-0692, §29 and this file's module doc say what the
+/// sixth test reads, and D-0692 that two of its readings missed a citation.
 #[test]
 fn the_citation_check_reads_a_wrapped_citation_however_its_document_is_named() {
     let scratch = Scratch::new("wrapped");
@@ -1255,30 +1258,40 @@ fn the_citation_check_reads_a_wrapped_citation_however_its_document_is_named() {
          the register named another way, is not seen"
     );
 
+    // Each wrap falls between the `§` or `section` and its number. A wrap
+    // before the sign or the word leaves the mention whole on one line, so it
+    // is found even when `prose` removes no marker and joins no continuation,
+    // and the case holds none of them.
     for (source, number, mentions) in [
-        // An item doc, indented, wrapped between the file and its section.
+        // An item doc, indented.
         (
-            "    /// good to this many digits*. `docs/06-limits.md`\n    /// §29 carries",
+            "    /// good to this many digits*. `docs/06-limits.md` section\n    /// 29 carries",
+            "29",
+            true,
+        ),
+        // A module doc.
+        (
+            "//! The libm hazard is in `docs/06-limits.md` §\n//! 29.",
             "29",
             true,
         ),
         // A string continued with a backslash.
         (
-            "\"cite docs/06-limits.md \\\n         §29 for it\"",
+            "\"cite docs/06-limits.md section \\\n         29 for it\"",
             "29",
             true,
         ),
         // A TOML comment, and a Markdown line.
         (
-            "# registered in docs/06-limits.md\n# section 29",
+            "# registered in docs/06-limits.md section\n# 29",
             "29",
             true,
         ),
-        ("see `docs/06-limits.md`\n§29 for it", "29", true),
+        ("see `docs/06-limits.md` section\n29 for it", "29", true),
         // The register named as `crates/api` names it, wrapped and not.
-        ("//! D-0435 and limits\n//! §29.", "29", true),
+        ("//! D-0435 and limits section\n//! 29.", "29", true),
         ("//! D-0404 and limits §29 name the cold bound", "29", true),
-        ("# limits\n# section 29", "29", true),
+        ("# limits §\n# 29", "29", true),
         // Any case, a space after the sign, and the plural.
         ("`docs/06-limits.md` Section 29", "29", true),
         ("Limits § 29", "29", true),
