@@ -1,7 +1,7 @@
 //! The D-0688 tail proof runs again on every touch of the tail that follows a
 //! touch of another block, counted off the log:
 //! `store::tail_proof::every_touch_of_the_tail_after_another_block_runs_its_proof_again`.
-//! The second test here reads the two invariant rows that describe it.
+//! The other two tests here read the invariant rows that describe it.
 //!
 //! # What the answers could not show
 //!
@@ -31,8 +31,8 @@
 //! `store::emits::every_emit_in_this_crate_reaches_the_log_through_its_production_call`,
 //! whose exact count would also swallow these lines. Cargo builds every file
 //! under `tests/` into its own process, so the install below is a different
-//! `OnceLock`, and nothing else in this binary emits: the second test only
-//! reads a document.
+//! `OnceLock`, and nothing else in this binary emits: the other two tests
+//! only read a document.
 //!
 //! # What it does not prove
 //!
@@ -47,6 +47,15 @@
 //! this file landed, because the count here fails under that memory too.
 //! The second test checks that AF-47 scopes the measurement to its commit
 //! and names the count, and that AF-48 says AF-47 was corrected.
+//!
+//! # The rows that named too little
+//!
+//! AF-43 and AF-47 each say the tail is proved again on every touch, and
+//! each named only the test in `crate::file` beside it. Measured at
+//! da28ae95, a memory keyed on the entry and the bar file's modification
+//! time passes that test, and the count here is the one store test it fails.
+//! The third test checks that every row making the claim names the count in
+//! its test column.
 
 #![allow(
     clippy::expect_used,
@@ -220,7 +229,7 @@ fn every_touch_of_the_tail_after_another_block_runs_its_proof_again() {
 }
 
 // ===========================================================================
-// The rows: what AF-47 and AF-48 say the test above fails under
+// The rows: what AF-43, AF-47 and AF-48 say the test above fails under
 // ===========================================================================
 
 /// The invariants register. Read at compile time so a rename fails the build
@@ -244,6 +253,28 @@ fn says(text: &str, id: &str, claim: &str) {
     assert!(text.contains(claim), "{id} does not say `{claim}`");
 }
 
+/// The test column of the row whose id is `id`: the cell before the status.
+fn tests_of(id: &str) -> &'static str {
+    let body = row(id)
+        .strip_suffix(" |")
+        .unwrap_or_else(|| panic!("{id} does not close its row with ` |`"));
+    let (rest, _status) = body
+        .rsplit_once(" | ")
+        .unwrap_or_else(|| panic!("{id} has no status cell"));
+    let (_text, tests) = rest
+        .rsplit_once(" | ")
+        .unwrap_or_else(|| panic!("{id} has no test column"));
+    tests
+}
+
+/// The count above, as a test column names it.
+const COUNT: &str =
+    "`store::tail_proof::every_touch_of_the_tail_after_another_block_runs_its_proof_again`";
+
+/// The test in `crate::file` that checks the answers and the damaged inputs.
+const FILE_TEST: &str =
+    "`store::file::reads_of_a_month_an_interrupted_append_left_are_idempotent_and_write_nothing`";
+
 /// **AF-47 DOES NOT CALL ITS TEST THE ONLY ONE ITS SECOND CACHE FAILS.**
 ///
 /// AF-47 measured two caches at 224b6760, and under the second, a memory that
@@ -253,12 +284,15 @@ fn says(text: &str, id: &str, claim: &str) {
 /// sentence was false from then on, while AF-48 said "both fail" of the same
 /// memory. Neither row is on main, so AF-47 is corrected in place: it scopes
 /// the measurement to the commit that took it and names the test above, and
-/// AF-48 no longer says AF-47 is unedited. This holds the two rows to each
-/// other and to the test above.
+/// AF-48 no longer says AF-47 is unedited. AF-48 scopes its own count the same
+/// way: a memory keyed on the entry's value passed every store test at
+/// 224b6760, 224 of them, and fails two since the test above landed. This
+/// holds the two rows to each other and to the test above.
 #[test]
 fn af_47_and_af_48_agree_on_which_tests_a_memory_of_the_tail_block_fails() {
     let (af_47, af_48) = (row("AF-47"), row("AF-48"));
     says(af_48, "AF-48", "Keyed on the tail block alone: both fail.");
+    says(af_48, "AF-48", "at 224b6760, every store test passed (224)");
     says(
         af_47,
         "AF-47",
@@ -280,5 +314,41 @@ fn af_47_and_af_48_agree_on_which_tests_a_memory_of_the_tail_block_fails() {
     assert!(
         !af_48.contains("AF-47 is not edited"),
         "AF-48 says AF-47 is not edited, and AF-47 was corrected in place"
+    );
+}
+
+/// **EVERY ROW THAT SAYS THE TAIL IS PROVED AGAIN NAMES THE COUNT BESIDE IT.**
+///
+/// AF-43, AF-47 and AF-48 each say that reads alternating between a full
+/// block and the tail run the proof again on every touch of the tail. The
+/// test in `crate::file` checks the answers and refuses damaged inputs, and a
+/// memory keyed on the tail's entry and the bar file's modification time
+/// passes it: measured at da28ae95, the count above was then the one store
+/// test that failed. A row whose test column named only the test in
+/// `crate::file` claimed more than its tests check. So each of the three
+/// names the count beside it, and AF-47, which is the row that corrects
+/// AF-43, says why and no longer says AF-43 is unedited.
+#[test]
+fn every_row_that_says_the_tail_is_proved_again_names_the_count_in_its_test_column() {
+    for id in ["AF-43", "AF-47", "AF-48"] {
+        let tests = tests_of(id);
+        assert!(
+            tests.contains(COUNT),
+            "{id}'s test column does not name the count: {tests}"
+        );
+        assert!(
+            tests.contains(FILE_TEST),
+            "{id}'s test column no longer names the test in `crate::file`: {tests}"
+        );
+    }
+    let af_47 = row("AF-47");
+    says(
+        af_47,
+        "AF-47",
+        "a memory keyed on the entry and the bar file's modification time passes it",
+    );
+    assert!(
+        !af_47.contains("AF-43 is not edited."),
+        "AF-47 says AF-43 is not edited, and AF-43's test column names the count"
     );
 }
