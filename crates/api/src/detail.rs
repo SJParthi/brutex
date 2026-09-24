@@ -476,22 +476,30 @@ pub fn committed_receipt(
 static LEDGER: Cached<cli::results::Results> = Cached::new();
 
 /// The instrument the results ledger records for `identity`, or `None` when
-/// no ledger row names it, a store with no ledger included.
+/// no ledger row names it, a store with no ledger or an empty one included.
 ///
 /// For a reader whose own file is keyed by identity and is not a receipted
-/// child: `/sweep-evidence.json`. It reads the ledger alone, so a damaged
-/// receipt sidecar cannot refuse a saved attempt that never had a receipt.
-/// Cold open is O(history); warm refresh is O(new rows), under the same byte
-/// ceiling. Nothing is created: an absent ledger is answered before any open.
+/// child: `/sweep-evidence.json` and the AND-mask `/candidate-trades.json`.
+/// It reads the ledger alone, so a damaged receipt sidecar cannot refuse a
+/// saved attempt that never had a receipt. Cold open is O(history); warm
+/// refresh is O(new rows), under the same byte ceiling. Nothing is created:
+/// an absent or empty ledger is answered before any open.
+///
+/// AN EMPTY LEDGER IS AN ABSENCE, as `cli::results::Results::open_read` says
+/// on its own read path: no run has been recorded, which is not an error. A
+/// zero-byte `runs.bin` is what `Results::open` leaves when it stops between
+/// creating the file and writing its header, and the next writer gives it
+/// its header. The length is measured from the path's metadata, one call,
+/// rather than by matching the words of the read path's refusal.
 ///
 /// # Errors
 /// Returns a damaged, changed or over-limit ledger, never a guessed `None`.
 pub fn recorded_underlying(root: &Path, identity: &[u8; 32]) -> Result<Option<String>, String> {
-    if !cli::results::Results::path(root)
-        .try_exists()
-        .map_err(|why| format!("ledger path cannot be inspected: {why}"))?
-    {
-        return Ok(None);
+    match std::fs::metadata(cli::results::Results::path(root)) {
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(why) => return Err(format!("ledger path cannot be inspected: {why}")),
+        Ok(ledger) if ledger.len() == 0 => return Ok(None),
+        Ok(_) => {}
     }
     let parent = LEDGER.with_verified(
         root,
@@ -518,6 +526,26 @@ pub fn equity_note_member(underlying: Option<&str>) -> String {
         return note;
     }
     format!(r#","equity_note":{}"#, crate::render::json_string(&note))
+}
+
+/// [`equity_note_member`] for a payload built as a `serde_json::Value`: puts
+/// `note` in as the `"equity_note"` member when it says anything, and adds
+/// no key when it is empty, so an index payload is the value it was.
+///
+/// `note` is always one of `cli`'s own wordings, `cli::equity_note_for` for a
+/// recorded run or `cli::research_equity_note` for Boolean research families,
+/// and both are `runner::audit::CostScope::report_note`. D-0694, AF-19.
+///
+/// # Errors
+/// Refuses a payload that is not a JSON object rather than dropping the note.
+pub fn put_equity_note(body: &mut serde_json::Value, note: String) -> Result<(), String> {
+    if note.is_empty() {
+        return Ok(());
+    }
+    body.as_object_mut()
+        .ok_or("a payload that is not a JSON object cannot carry its equity note")?
+        .insert("equity_note".to_owned(), serde_json::Value::String(note));
+    Ok(())
 }
 
 #[cfg(test)]

@@ -637,6 +637,11 @@ fn names_a_rate(text: &str) -> bool {
 /// word for word. A change to the header's charges -- the day a
 /// charter-sourced stack lands -- fails here until every copy follows it.
 ///
+/// The stored banner's note, `runner::audit::CASH_EQUITY_GROSS`, is a fourth
+/// copy: every stored report over a stock opens with it, and every JSON
+/// payload's `equity_note` carries it. It was written after this test
+/// (D-0694) without the Selection V6 clause, and nothing here read it. AF-19.
+///
 /// `CLAUDE.md` §3 rule 1: no copy may quote a rate, because
 /// `docs/00-charter.md` sources none. Asserted on the copies themselves, so a
 /// rate added to one of them fails whether or not a page test reads it.
@@ -683,6 +688,7 @@ fn every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate() {
         ("the FINDINGS label", super::EQUITY_RANKING_GROSS),
         ("`cli top`'s share legend", super::SHARE_MEAN_LEGEND),
         ("`pool`'s opening", super::pool::EQUITY_TOTALS_GROSS),
+        ("the stored banner's note", runner::audit::CASH_EQUITY_GROSS),
     ] {
         let said = words(text);
         assert!(

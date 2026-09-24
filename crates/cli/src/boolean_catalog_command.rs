@@ -455,6 +455,43 @@ mod tests {
         }
     }
 
+    /// **The note a Boolean payload carries is the research heading's own.**
+    /// D-0694, AF-19.
+    ///
+    /// `api` serves the same research as JSON and has no arrow to `runner`,
+    /// so it takes the note from `research_equity_note`. The heading decides
+    /// its note there too, so the text page and the JSON cannot disagree on
+    /// which scope is a stock's or on what it says.
+    #[test]
+    fn the_public_research_note_is_the_research_headings_own() {
+        const BEFORE: &str = "\nEXPLICIT BOOLEAN CATALOG RESEARCH. This is the complete supplied catalog, not exhaustive Boolean grammar search or Selection V6. Intraday only;15:10IST deadline.\n";
+        for (symbols, cash) in [
+            ("NIFTY,RELIANCE", true),
+            ("RELIANCE", true),
+            ("BANKNIFTY,TCS", true),
+            ("NIFTY,BANKNIFTY", false),
+            ("NIFTY", false),
+        ] {
+            let scope = scope(symbols).unwrap();
+            let note = crate::research_equity_note(scope.families().iter().copied());
+            assert_eq!(
+                note,
+                if cash {
+                    runner::audit::CostScope::CashEquity.report_note()
+                } else {
+                    String::new()
+                },
+                "{symbols}"
+            );
+            assert_eq!(
+                prepared::research_heading(&scope),
+                format!("{}{note}{BEFORE}", crate::STORED_PROVENANCE),
+                "{symbols}"
+            );
+        }
+        assert_eq!(crate::research_equity_note([]), "", "no family, no note");
+    }
+
     #[test]
     fn scope_is_canonical_and_never_widens_into_references_or_derivatives() {
         let first = scope("RELIANCE,NIFTY,BANKNIFTY").unwrap();

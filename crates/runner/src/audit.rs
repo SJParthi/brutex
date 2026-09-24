@@ -140,12 +140,17 @@ impl CostScope {
 ///
 /// The one-paragraph form of what [`equity_header`] says at length: every
 /// total is gross of every charge a share trade pays, and the result is
-/// cost-excluded research. It names no rate, for the reason the audit header
-/// names none: `docs/00-charter.md` records no source for one.
+/// cost-excluded research with no Selection V6 or execution authority. Its
+/// cost-excluded sentence is the header's own, word for word, as D-0696 asks
+/// of every copy; the first version of this paragraph left out the Selection
+/// V6 clause (AF-19). It names no rate, for the reason the audit header names
+/// none: `docs/00-charter.md` records no source for one.
 pub const CASH_EQUITY_GROSS: &str = "  CASH EQUITY. EVERY TOTAL BELOW IS GROSS OF EVERY CHARGE: brokerage,\n  \
      STT, stamp duty, exchange charges, the SEBI fee and GST apply to a\n  \
-     share trade and none is subtracted. This is cost-excluded research,\n  \
-     not a net result (D-0509, D-0525, D-0681).";
+     share trade and none is subtracted. COST-EXCLUDED RESEARCH, NOT A NET\n  \
+     RESULT (D-0509, D-0525, D-0681). No equity result carries Selection V6\n  \
+     or execution authority until a charter-sourced equity charge stack\n  \
+     exists.";
 
 /// What every report that ranks or audits a cash equity states about
 /// corporate actions. D-0694.
@@ -2042,11 +2047,15 @@ mod tests {
             "exchange charges",
             "SEBI fee",
             "GST",
-            "cost-excluded research",
+            "COST-EXCLUDED RESEARCH, NOT A NET RESULT",
+            "No equity result carries Selection V6",
             "D-0681",
             "CORPORATE ACTIONS ARE UNCHECKED (D-0018, D-0694)",
         ] {
-            assert!(note.contains(fact), "missing {fact:?}:\n{note}");
+            // Read as words: a phrase wrapped across two indented lines is
+            // still the phrase.
+            let flat = note.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(flat.contains(fact), "missing {fact:?}:\n{note}");
         }
         assert!(
             note.find("GROSS OF EVERY CHARGE") < note.find("CORPORATE ACTIONS"),
@@ -2065,9 +2074,11 @@ mod tests {
     /// checked on their own, for the same three properties: every line
     /// indented, so a lifted block keeps it whole; no line opening like a
     /// refusal, so no completed stock run exits as a failure; and no rate --
-    /// its only digits are the decision references D-0018 and D-0694, because
+    /// its only digits are decision references, D-0018 and D-0694 in the
+    /// sentence, and the name Selection V6 in the gross paragraph, because
     /// `docs/00-charter.md` sources no split threshold (`docs/06-limits.md`
-    /// §41.3) and no charge rate.
+    /// §41.3) and no charge rate. The name is the one D-0696's rate check in
+    /// `cli` also allows; the gross paragraph carries it since AF-19.
     #[test]
     fn the_corporate_action_sentence_keeps_the_charge_statement_properties_wherever_it_travels() {
         let note = CostScope::CashEquity.report_note();
@@ -2104,6 +2115,7 @@ mod tests {
                 assert!(!lower.contains(rate), "{what} carries {rate:?}:\n{text}");
             }
             for token in text
+                .replace("Selection V6", "Selection")
                 .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
                 .filter(|token| token.bytes().any(|b| b.is_ascii_digit()))
             {

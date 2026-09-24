@@ -42,12 +42,14 @@ pub(crate) struct Prepared {
 /// A scope holding a cash stock also states, before any figure, that its
 /// totals are gross of every charge and that corporate actions are
 /// unchecked -- the statement every report that ranks a stock carries. A
-/// scope of the two indices opens exactly as it did before D-0694.
+/// scope of the two indices opens exactly as it did before D-0694. The note
+/// is [`crate::research_equity_note`], which `api` serves beside the same
+/// research as JSON (AF-19).
 pub(crate) fn research_heading(scope: &ResearchScopeV1) -> String {
     let mut out = String::from(crate::STORED_PROVENANCE);
-    if scope.families().iter().any(|family| family.is_cash()) {
-        out.push_str(&runner::audit::CostScope::CashEquity.report_note());
-    }
+    out.push_str(&crate::research_equity_note(
+        scope.families().iter().copied(),
+    ));
     out.push_str("\nEXPLICIT BOOLEAN CATALOG RESEARCH. This is the complete supplied catalog, not exhaustive Boolean grammar search or Selection V6. Intraday only;15:10IST deadline.\n");
     out
 }

@@ -299,6 +299,12 @@ fn detail(
             "replay_nodes_charged".into(),
             json!(replay_nodes.to_string()),
         );
+    // A STOCK FAMILY'S RUNG SAYS WHAT ITS FIGURES ARE MADE OF, with the note its
+    // qualification's own page carries over the same sources. D-0694, AF-19.
+    crate::detail::put_equity_note(
+        &mut body,
+        crate::booleanevidencejson::sources_note(source.original().statistics().sources()),
+    )?;
     source.require_current()?;
     selected.require_current()?;
     Ok(body)

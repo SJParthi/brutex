@@ -206,12 +206,14 @@ counted as losses.
 
 ## Read contracts and visible limits
 
-`CommittedParents::open_read_bounded`, `refresh` and `receipt` provide a cached
-validated parent snapshot. Refresh reads the legacy ledger before receipts;
-the API copies that receipt before refreshing and serving a child. Missing
-parents stay absent; the reader creates no files. Shrink, replacement,
-same-length mutation, corruption or a size limit is a refusal. There is no
-implicit reopening into a different history.
+`CommittedParents::open_read_bounded`, `refresh` and `committed` provide a
+cached validated parent snapshot. Refresh reads the legacy ledger before
+receipts. `committed` returns the receipt together with the instrument its
+ledger parent names, both from that one snapshot (D-0694, AF-19); the API
+copies them before refreshing and serving a child. Missing parents stay
+absent; the reader creates no files. Shrink, replacement, same-length
+mutation, corruption or a size limit is a refusal. There is no implicit
+reopening into a different history.
 
 `Results::with_shared_writer` is crate-private and holds one validated writer
 for one root. It refreshes newly appended history before publication and verifies

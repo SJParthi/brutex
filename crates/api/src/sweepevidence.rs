@@ -275,7 +275,7 @@ fn refusal(status: axum::http::StatusCode, why: &str) -> Response {
     clippy::unwrap_used,
     reason = "tests fail through assertions"
 )]
-mod tests {
+pub(crate) mod tests {
     use super::{Asked, depth_json, ranked_json, respond};
     use cli::sweep_evidence;
 
@@ -354,7 +354,7 @@ mod tests {
     }
 
     /// A committed ledger row for `identity`, naming `underlying`.
-    fn ledger_row(dir: &std::path::Path, identity: [u8; 32], underlying: &str) {
+    pub(crate) fn ledger_row(dir: &std::path::Path, identity: [u8; 32], underlying: &str) {
         let mut row = cli::results::Record::from_bytes(&[0; cli::results::STRIDE_BYTES]);
         row.identity = identity;
         row.feed = cli::results::field("zerodha");
@@ -429,6 +429,19 @@ mod tests {
                 !stock_body.contains("equity_note"),
                 "no ledger row names this attempt's instrument yet: {stock_body}"
             );
+        }
+        // AN EMPTY LEDGER IS NO LEDGER. A zero-byte `runs.bin` is what
+        // `Results::open` leaves if it dies between creating the file and
+        // writing its header, and the read path calls it "not an error". The
+        // page reads the ledger only to name an instrument, so it must answer
+        // exactly as it does with no ledger, not refuse every saved attempt.
+        let ledger = cli::results::Results::path(&dir);
+        std::fs::create_dir_all(ledger.parent().expect("the results directory"))
+            .expect("results directory");
+        std::fs::write(&ledger, []).expect("an empty ledger");
+        for (kind, (index_body, stock_body)) in kinds.into_iter().zip(&unrecorded) {
+            assert_eq!(&page(index, kind), index_body, "{kind}: an empty ledger");
+            assert_eq!(&page(stock, kind), stock_body, "{kind}: an empty ledger");
         }
         ledger_row(&dir, index, "NIFTY");
         ledger_row(&dir, stock, "RELIANCE");

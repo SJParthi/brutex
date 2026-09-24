@@ -39374,12 +39374,14 @@ edited.
    is a stock, the page now states `CostScope::report_note` between its
    counts and its table. That is the same note `sweep-all` prints for a walk
    over several instruments. A stock that is neither shown nor the winner
-   adds nothing, and a listing of index runs is unchanged byte for byte.
+   adds nothing, and a listing of index runs gains nothing between its
+   counts and its table.
 2. **The JSON payloads over one recorded run now carry it on a stock's
    run.** Each gains `"equity_note"`, holding the stored banner's own text
    through the new `cli::equity_note_for`, and an index run's payload gains
-   no key. Every one of them takes the member from
-   `api::detail::equity_note_member`, so no two can word it differently.
+   no key. Each takes the member from `api::detail::equity_note_member`, or
+   from `api::detail::put_equity_note` when the payload is built as a JSON
+   value, and the text is always `cli`'s, so no two can word it differently.
    - `/backtest.json` ranks (`best_complete`). Each run object whose
      underlying resolves to a swept cash equity carries the member after
      its `underlying`.
@@ -39402,25 +39404,52 @@ edited.
      identity's row. Every saved page whose identity a ledger row names as
      a stock carries the member beside the identity.
      The page now reads the ledger, so a damaged ledger refuses it, where
-     before the ledger was not read at all.
+     before the ledger was not read at all. An absent or zero-byte
+     `runs.bin` is no row, as `Results::open_read` calls an empty ledger on
+     its own read path, so either serves the page served before.
+   - `/candidate-trades.json` with `model=and-mask` serves a stock audit's
+     priced candidates and their per-trade best, worst, adverse and
+     favourable figures. An AND-mask capture is keyed by the audit's own run
+     identity, the one the ledger records, so `recorded_underlying` names
+     its instrument exactly as for `/sweep-evidence.json`. The candidate
+     page, the trade page and the empty catalog all carry the member.
+   - The Boolean research payloads carry `cli::research_equity_note`, the
+     note the Boolean research heading states, whenever a family they
+     serve is cash. The heading now decides its note there as well.
+     `/boolean-candidates.json` and `/boolean-oos.json` decide it over
+     their one family. `/boolean-statistics.json`, `/boolean-admission.json`
+     and `/boolean-qualification.json` decide it over their statistics'
+     linked sources, every page kind included. The
+     `/boolean-qualified-search.json` rung detail decides it over its
+     qualification's sources, and `/boolean-campaign.json` over every family
+     a rung expects. A family records its own kind, and decoding a cash
+     family whose membership snapshot is no longer current refuses, so
+     these payloads cannot show a stock without the note the way an old
+     recorded run can (item 11).
 
    "What is still not done" named only some of the projections, and missed
    `/sweep-evidence.json`. These still carry neither statement, with the
    reason for each. The list comes from reading the route table in
    `crates/api/src/server.rs`. Nothing checks it against every payload.
-   - `/sweep-evidence.json` for an attempt no ledger row names: one still
-     running, one refused or killed before its commit, and every operation
-     that records no ledger row. The page cannot call such an attempt a
-     stock, so it gains no key, as an index attempt does not. Recording the
-     instrument in the attempt is a new evidence format version (`CLAUDE.md`
-     §3 rule 8).
+   - `/sweep-evidence.json` and the AND-mask `/candidate-trades.json` for an
+     attempt no ledger row names: one still running, one refused or killed
+     before its commit, and every operation that records no ledger row. The
+     page cannot call such an attempt a stock, so it gains no key, as an
+     index attempt does not. Recording the instrument in the attempt is a
+     new evidence format version (`CLAUDE.md` §3 rule 8).
    - `/live.json` serves `results/live/<hex>.bin`, and that format records
      no instrument. It cannot tell a stock from an index without a new file
      version (`CLAUDE.md` §3 rule 8).
-   - `/candidate-trades.json` and `/expression-search.json` serve saved
-     captures keyed by identity, and name no instrument either.
-   - The Boolean views (`/boolean*.json`) carry `"cash": true` for a stock
-     family, and no statement.
+   - `/expression-search.json`, and `/candidate-trades.json` with
+     `model=expression`, serve the expression search. The search is keyed
+     by `runner::expression::search_identity` and each candidate's attempt
+     and capture by `candidate_identity`. No ledger row carries either, and
+     the search's progress file records no instrument, so there is no row
+     to name one.
+   - `/boolean-qualified-campaign.json` and the
+     `/boolean-qualified-search.json` overview serve states, links and
+     verdict counts, and no family's figure. Neither names a family to
+     decide from.
 
    `/engine/top.json` and `/backtest/run.json` serve report text that `cli`
    rendered, stored banner included. No page under `web/` renders
@@ -39434,7 +39463,7 @@ edited.
    `validation_note`, and the FINDINGS placement is needed for those. The
    doc comment on `equity_ranking_statement` made the same claim and is
    corrected.
-4. **AF-16's last clause claimed more than holds.** "Every index report is
+4. **AF-16's last clause claimed more than holds.** "every index report is
    byte for byte what it was" is false for `sweep-stored` over an index. Its
    identity binds `MINUTE_GAP_POLICY` (AF-17), and a holed month gains the
    withheld line and loses that day's bars. AF-19 states what does hold: the
@@ -39466,7 +39495,7 @@ edited.
    report prints that count, so no output changed. `docs/06-limits.md` said
    "Only the signal bars lose a holed day", and it is corrected there.
 7. **The withheld line now prints only when a signal bar was withheld.**
-   "The way `screen` does" was the claim, but `screen` gates its line on
+   "the way `screen` does" was the claim, but `screen` gates its line on
    `withheld > 0`, and this door printed whenever the day list was not
    empty. So a holed minute day that the coarse rung held no bar of printed
    "0 signal bar(s)". The door is still not reported the way `auto-stored`,
@@ -39516,7 +39545,8 @@ edited.
     sentence. AF-18's "every one indented two spaces" is what AF-60 words
     correctly, "blank or indented two spaces". Its test allows blank lines.
 11. **Not changed, and why.** `top`, `cli results` and every JSON payload
-    in item 2 decide a recorded row's note from the compile-time F&O list at
+    in item 2 over a recorded run (every one but the Boolean research
+    payloads) decide a recorded row's note from the compile-time F&O list at
     render time, not from anything stored with the row, because a ledger
     record carries no instrument kind. So an old row of a share later
     removed from `FNO_UNDERLYINGS` would render with no statement. Recording
@@ -39602,6 +39632,84 @@ restored the tree and checked it byte for byte:
 The frontier and trades test modules gained `commit_*_fixture_for`, which
 names the ledger parent's instrument. The existing fixture calls it with
 `NIFTY`, so every earlier test commits the same bytes it did.
+
+**A third review of this repair** upheld one blocking finding and three
+should-fix findings, and each is answered above or here.
+
+- *Blocking.* `docs/16-sweep-evidence.md` still said, in the present tense,
+  that `CommittedParents::receipt` provides the parent snapshot, after the
+  second round renamed it `committed`. The document is not a ledger and is
+  corrected in place. `the_sweep_evidence_read_contract_names_only_methods_committed_parents_has`
+  now reads that sentence and requires every method it names to be a
+  `pub fn` of `impl CommittedParents`, `committed` among them.
+- *An empty ledger refused every saved attempt.* `recorded_underlying`
+  checked only that `runs.bin` existed, then opened it, and the read path
+  refuses a zero-byte ledger with "this is not an error". The review's probe
+  saw a saved attempt's page go from 200 to 503 once an empty `runs.bin`
+  existed, and every saved attempt, an index's included, reads that ledger.
+  `recorded_underlying` now measures the path's length and answers an empty
+  ledger as no row, as it answers an absent one (item 2). The sweep-evidence
+  test gained the case, and each page must be byte-identical to the page
+  with no ledger.
+- *`/candidate-trades.json` had the same lookup available.* The reason given
+  for leaving it unlabelled, "keyed by identity", is also true of
+  `/sweep-evidence.json`, which this repair labelled. An AND-mask capture's
+  identity is the audit's run identity, the one the ledger records, so the
+  page now carries the note (item 2). The expression model keeps no note,
+  now for its real reason: no ledger row carries `candidate_identity`.
+- *The Boolean payloads had `"cash"` and no statement.* Each already
+  computed `family.is_cash()`, the flag the text research heading decides
+  its note on. `cli::research_equity_note` now holds that decision for both
+  the heading and the JSON (item 2).
+
+Nits answered: item 1's "unchanged byte for byte" was stronger than its test
+and now says what the test asserts; items 4 and 7 quote their sources' case;
+item 11 is scoped to the recorded-run payloads; AF-19 gains clauses (i) to
+(k). The review also found that `runner::audit::CASH_EQUITY_GROSS`, which
+this entry added and every `equity_note` carries, left out the Selection V6
+clause D-0696 requires of every copy of the charge statement. It now carries
+the audit header's sentence "COST-EXCLUDED RESEARCH, NOT A NET RESULT
+(D-0509, D-0525, D-0681). No equity result carries Selection V6 or execution
+authority until a charter-sourced equity charge stack exists." word for word,
+and D-0696's charge test reads it as a fourth copy. So every stock banner and
+every `equity_note` gained that clause. `the_corporate_action_sentence_keeps_the_charge_statement_properties_wherever_it_travels`
+allows the name Selection V6 among the digits it refuses, as D-0696's rate
+check does, and `a_report_note_is_gross_then_corporate_actions_for_a_stock_and_empty_for_an_index`
+reads its facts as words, because the sentence now wraps. Two nits were not
+acted on. A saved attempt no ledger row names still looks like an index's:
+marking it would add a key to every unrecorded index attempt too, and the
+honest fix is the instrument in the attempt file, a new format version. And
+`/backtest.json` still repeats the note on every stock run object
+(`docs/06-limits.md` records the cost).
+
+Two builds proved the answers. Each applied its breaks together, each break
+reaching a different test, ran the targeted `api`, `cli` and `runner` tests,
+then restored the tree and checked `git diff` byte for byte.
+
+- *Batch A*, nine breaks: `docs/16` naming `receipt` again; the empty-ledger
+  arm removed from `recorded_underlying`; the note removed from the saved
+  candidate page, the catalog page, the later page, the campaign snapshot,
+  the evidence pages and the search detail; and `CASH_EQUITY_GROSS` given
+  back its first text. Ten `api` tests ran and seven failed, one per `api`
+  break, while the `/backtest.json`, frontier and trades tests passed. In
+  `cli` the contract test and D-0696's charge test failed and the research
+  note test passed. In `runner` the report-note test failed and the
+  sentence-properties test passed.
+- *Batch B*, two breaks: the note removed from the empty candidate catalog,
+  and `cli::research_equity_note` made to say nothing. The candidate test
+  failed at "RELIANCE, rows=false". The four Boolean tests that were run
+  failed, and so did both `cli` heading tests, the new one and the existing
+  `a_stock_research_scope_states_corporate_actions_are_unchecked_and_an_index_scope_does_not`,
+  which shows the heading now takes its note from the same function.
+- *After a refactor.* The candidate test was then split into helpers to fit
+  clippy's line budget. Its two breaks were applied again, one build each,
+  and it failed at "RELIANCE, rows=true" and at "RELIANCE, rows=false".
+
+Three of the new `api` tests hold `render` to the note by its source, not by
+a rendered page: the campaign, evidence and search-detail tests. `api` has no
+fixture for a saved campaign, statistics, admission, qualification or search,
+so those payloads were not rendered with a stock family. The helper each one
+calls was tested on cash and index families.
 
 Invariant AF-19.
 
@@ -39699,6 +39807,12 @@ any copy lacks either, or carries a digit or `%` outside a decision number
 `D-dddd` and the name `Selection V6`. AF-31 claimed the label "names no rate",
 and until that test nothing asserted it: the review reports a rate written
 into the constant passing all ten tests the row cited.
+
+*Corrected 2026-09-24, AF-19.* There was a fourth copy. D-0694's
+`runner::audit::CASH_EQUITY_GROSS` opens every stock banner and every JSON
+`equity_note`, and it left out the Selection V6 clause while this test read
+only the three above. It now carries the header's sentence word for word, and
+the test reads it as a fourth copy.
 
 *Rejected:* one `pub` constant in `runner::audit` that all four texts compose
 from. It would change `runner`'s public surface in a repair of `cli`'s piece,

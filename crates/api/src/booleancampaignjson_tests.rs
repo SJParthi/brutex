@@ -235,3 +235,64 @@ fn qualified_overview_authenticates_all_eight_initial_units_and_refuses_replacem
     );
     fs::remove_dir_all(root).unwrap();
 }
+
+/// **A campaign that expects a stock family states the equity note; a
+/// campaign of indices does not.** D-0694, AF-19.
+///
+/// A campaign snapshot names each rung's expected catalogs and their family,
+/// and each catalog's figures are a stock's when its family is cash. The
+/// snapshot carries `cli::research_equity_note` over every expected family,
+/// the Boolean research heading's own decision, so one cash family anywhere
+/// is enough and a campaign of indices gains no key. The snapshot is built
+/// from a saved reader this crate has no fixture for, so `render` is held to
+/// putting that note in by its source.
+#[test]
+fn a_campaign_expecting_a_stock_family_states_the_equity_note_and_an_index_campaign_does_not() {
+    let family = |key: Result<brutex_core::instrument::InstrumentKey, _>| {
+        cli::boolean_observation::ResearchFamilyV1::new(key.unwrap()).unwrap()
+    };
+    let nse = brutex_core::instrument::Exchange::Nse;
+    let nifty = family(brutex_core::instrument::InstrumentKey::index(nse, "NIFTY"));
+    let reliance = family(brutex_core::instrument::InstrumentKey::cash(
+        nse, "RELIANCE",
+    ));
+    let rung = |families: &[cli::boolean_observation::ResearchFamilyV1]| Rung {
+        rung: "5min",
+        status: Status::Waiting,
+        reason: String::new(),
+        catalogs: families
+            .iter()
+            .map(|family| Catalog {
+                family: *family,
+                expected: [3; 32],
+                completion: None,
+            })
+            .collect(),
+        statistics: None,
+        admission: None,
+    };
+    let note = cli::research_equity_note([reliance]);
+    assert!(
+        note.contains("CORPORATE ACTIONS ARE UNCHECKED"),
+        "premise: {note}"
+    );
+    assert_eq!(equity_note(&[rung(&[nifty]), rung(&[nifty])]), "");
+    assert_eq!(equity_note(&[]), "");
+    assert_eq!(equity_note(&[rung(&[nifty, reliance])]), note);
+    assert_eq!(
+        equity_note(&[rung(&[nifty]), rung(&[reliance])]),
+        note,
+        "a stock family on any rung"
+    );
+
+    let source = include_str!("booleancampaignjson.rs");
+    let render = source
+        .split_once("\nfn render(root: &Path, asked: &Asked)")
+        .and_then(|(_, tail)| tail.split_once("\n}\n"))
+        .map(|(body, _)| body)
+        .unwrap();
+    assert!(
+        render.contains("crate::detail::put_equity_note(&mut value, equity_note(reader.rows()))?;"),
+        "the snapshot carries the note over the rows it serves"
+    );
+}

@@ -124,9 +124,22 @@ fn render(root: &Path, asked: &Asked) -> Result<Value, String> {
     require_pin(asked.pin, reader.pin())?;
     let (from_year, from_month) = reader.from();
     let (to_year, to_month) = reader.to();
-    let value = json!({"schema_version":1,"status":"saved","authority":"acknowledged-campaign-snapshot","identity":crate::server::hex32(reader.identity()),"pin":crate::server::hex32(reader.pin()),"sequence":reader.sequence().to_string(),"state":reader.status().as_str(),"owner_active":reader.owner_active(),"from":format!("{from_year:04}-{from_month:02}"),"to":format!("{to_year:04}-{to_month:02}"),"horizon_bars":reader.horizon().to_string(),"program_count":reader.program_count().to_string(),"program_digest":crate::server::hex32(reader.program_digest()),"descriptor_digest":crate::server::hex32(reader.descriptor_digest()),"child_completion_receipts_checked":true,"child_bodies_checked":false,"rows":rows(reader.rows()),"refusal":null,"scope":"Acknowledged finite-catalog campaign snapshot and fixed child completion receipts only. Child bodies authenticate on their detail routes. No current raw-market re-attestation, exhaustive Boolean grammar, Selection V6, later-period acceptance or profitability approval."});
+    let mut value = json!({"schema_version":1,"status":"saved","authority":"acknowledged-campaign-snapshot","identity":crate::server::hex32(reader.identity()),"pin":crate::server::hex32(reader.pin()),"sequence":reader.sequence().to_string(),"state":reader.status().as_str(),"owner_active":reader.owner_active(),"from":format!("{from_year:04}-{from_month:02}"),"to":format!("{to_year:04}-{to_month:02}"),"horizon_bars":reader.horizon().to_string(),"program_count":reader.program_count().to_string(),"program_digest":crate::server::hex32(reader.program_digest()),"descriptor_digest":crate::server::hex32(reader.descriptor_digest()),"child_completion_receipts_checked":true,"child_bodies_checked":false,"rows":rows(reader.rows()),"refusal":null,"scope":"Acknowledged finite-catalog campaign snapshot and fixed child completion receipts only. Child bodies authenticate on their detail routes. No current raw-market re-attestation, exhaustive Boolean grammar, Selection V6, later-period acceptance or profitability approval."});
+    crate::detail::put_equity_note(&mut value, equity_note(reader.rows()))?;
     reader.require_current()?;
     Ok(value)
+}
+/// What a campaign snapshot states before its rows: `cli::research_equity_note`
+/// over every family any rung expects. D-0694, AF-19.
+///
+/// Each expected catalog's figures are its family's, so one cash family on any
+/// rung makes the campaign a stock's research too, exactly as one makes the
+/// text research heading carry the note. A campaign of indices gains no key.
+fn equity_note(rows: &[Rung]) -> String {
+    cli::research_equity_note(
+        rows.iter()
+            .flat_map(|row| row.catalogs.iter().map(|catalog| catalog.family)),
+    )
 }
 fn require_pin(expected: Option<[u8; 32]>, actual: [u8; 32]) -> Result<(), String> {
     if expected.is_some_and(|pin| pin != actual) {

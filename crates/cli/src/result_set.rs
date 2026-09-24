@@ -1390,4 +1390,48 @@ mod tests {
         assert!(!why.contains("not a 16-byte header"), "{why}");
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// **`docs/16-sweep-evidence.md` names only methods `CommittedParents`
+    /// has.** AF-19.
+    ///
+    /// Its read contract says which methods give the cached parent snapshot.
+    /// D-0694's repair renamed `receipt` to `committed`, which returns the
+    /// receipt with the ledger parent's instrument, and the document went on
+    /// naming `receipt` in the present tense. Nothing read it against the
+    /// code. Each name in that sentence must be a `pub fn` inside
+    /// `impl CommittedParents`, and the method the API calls must be one of
+    /// them.
+    #[test]
+    fn the_sweep_evidence_read_contract_names_only_methods_committed_parents_has() {
+        let doc = include_str!("../../../docs/16-sweep-evidence.md");
+        let source = include_str!("result_set.rs");
+        let from = doc
+            .find("`CommittedParents::")
+            .expect("the read contract names CommittedParents");
+        let sentence = doc
+            .get(from..)
+            .and_then(|tail| tail.split_once(" provide").map(|(named, _)| named))
+            .expect("the sentence says what the methods provide");
+        let named: Vec<&str> = sentence
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .map(|name| name.trim_start_matches("CommittedParents::"))
+            .collect();
+        assert!(
+            named.len() >= 3 && named.contains(&"committed"),
+            "the contract names the snapshot's methods, `committed` among them: {named:?}"
+        );
+        let body = source
+            .split_once("\nimpl CommittedParents {\n")
+            .and_then(|(_, tail)| tail.split_once("\n}\n"))
+            .map(|(body, _)| body)
+            .expect("the impl block");
+        for name in named {
+            assert!(
+                body.contains(&format!("    pub fn {name}(")),
+                "docs/16 names `CommittedParents::{name}`, which is not a method of it"
+            );
+        }
+    }
 }

@@ -2667,6 +2667,29 @@ pub fn equity_note_for(underlying: &str) -> String {
     stored::equity_note_for(underlying)
 }
 
+/// What Boolean research over `families` states before any figure, for a
+/// reader outside this crate. D-0694, AF-19.
+///
+/// When any family is a cash stock, the scope's figures include a stock's,
+/// so it gets [`runner::audit::CostScope::report_note`] for a cash equity:
+/// gross of every charge, then corporate actions unchecked. A scope of
+/// indices gets nothing. The Boolean research heading decides its own note
+/// here, so the text report and `api`'s JSON over the same research say the
+/// same thing about the same scope. `api` has no arrow to `runner`.
+#[must_use]
+pub fn research_equity_note(
+    families: impl IntoIterator<Item = runner::research_family::ResearchFamilyV1>,
+) -> String {
+    if families
+        .into_iter()
+        .any(runner::research_family::ResearchFamilyV1::is_cash)
+    {
+        runner::audit::CostScope::CashEquity.report_note()
+    } else {
+        String::new()
+    }
+}
+
 /// End a stored banner with one blank line, and never two.
 ///
 /// A page that sets its first heading off from the banner by a blank line

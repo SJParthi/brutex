@@ -217,7 +217,7 @@ fn project(reader: &Reader, asked: &Asked) -> Result<Value, String> {
     let (total, selected, rows) = page(reader, asked, completion)?;
     let next = next_offset(total, asked.offset, asked.limit, rows.len())?;
     let family = reader.family();
-    let body = json!({
+    let mut body = json!({
         "schema_version":1,"status":"saved","authority":"authenticated-catalog-observation",
         "identity":crate::server::hex32(reader.identity()),"completion":crate::server::hex32(completion),
         "cohort":crate::server::hex32(reader.cohort_digest()),
@@ -229,6 +229,10 @@ fn project(reader: &Reader, asked: &Asked) -> Result<Value, String> {
         "grids":reader.grids().iter().map(grid_summary).collect::<Vec<_>>(),"selected":selected,"rows":rows,"refusal":null,
         "scope":"Complete supplied program catalog only. Saved training observations do not grant statistical admission, Selection V6, OOS performance or live trading approval."
     });
+    // A STOCK FAMILY'S PAGE SAYS WHAT ITS FIGURES ARE MADE OF: the Boolean
+    // research heading's own note, where the JSON said only `"cash":true`.
+    // An index family's page gains no key. D-0694, AF-19.
+    crate::detail::put_equity_note(&mut body, cli::research_equity_note([family]))?;
     reader.require_current()?;
     Ok(body)
 }

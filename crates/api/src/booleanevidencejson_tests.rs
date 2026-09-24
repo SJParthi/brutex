@@ -199,3 +199,66 @@ fn daily_and_weekly_pages_require_exact_setting_parent_pin_and_bounded_period_se
     assert!(Asked::parse(&format!("identity={ID}&setting=0"), Model::Qualification).is_err());
     assert!(Asked::parse(&format!("identity={ID}&period=full"), Model::Qualification).is_err());
 }
+
+/// **A statistics, admission or qualification page over a stock family
+/// states the equity note; a page over indices does not.** D-0694, AF-19.
+///
+/// Each of the three pages serves a candidate's trades, wins and returns
+/// from saved statistics whose linked sources name their families. The page
+/// carries `cli::research_equity_note` over those sources, the Boolean
+/// research heading's own decision, so one cash source is enough and a page
+/// of index sources gains no key. The three readers are saved evidence this
+/// crate has no fixture for, so `render_with_budget` is held to putting the
+/// note in, over each reader's own sources, by its source.
+#[test]
+fn a_page_over_a_stock_source_states_the_equity_note_and_an_index_page_does_not() {
+    let family = |key: Result<brutex_core::instrument::InstrumentKey, _>| {
+        cli::boolean_observation::ResearchFamilyV1::new(key.unwrap()).unwrap()
+    };
+    let nse = brutex_core::instrument::Exchange::Nse;
+    let source = |family| StatisticsSource {
+        family,
+        identity: [1; 32],
+        completion: [2; 32],
+        coordinates: 2,
+    };
+    let nifty = source(family(brutex_core::instrument::InstrumentKey::index(
+        nse, "NIFTY",
+    )));
+    let bank = source(family(brutex_core::instrument::InstrumentKey::index(
+        nse,
+        "BANKNIFTY",
+    )));
+    let reliance = source(family(brutex_core::instrument::InstrumentKey::cash(
+        nse, "RELIANCE",
+    )));
+    let note = cli::research_equity_note([reliance.family]);
+    assert!(
+        note.contains("CORPORATE ACTIONS ARE UNCHECKED"),
+        "premise: {note}"
+    );
+    assert_eq!(sources_note(&[nifty, bank]), "");
+    assert_eq!(sources_note(&[]), "");
+    assert_eq!(sources_note(&[nifty, reliance]), note);
+
+    let text = include_str!("booleanevidencejson.rs");
+    let body = |name: &str| {
+        text.split_once(&format!("\nfn {name}("))
+            .and_then(|(_, tail)| tail.split_once("\n}\n"))
+            .map(|(body, _)| body)
+            .unwrap()
+    };
+    assert!(
+        body("render_with_budget")
+            .contains("crate::detail::put_equity_note(&mut body, equity_note(reader))?;"),
+        "every page of the three models carries the note"
+    );
+    let note_of = body("equity_note");
+    for arm in [
+        "Reader::Statistics(reader) => reader.sources(),",
+        "Reader::Admission(reader) => reader.statistics().sources(),",
+        "Reader::Qualification(reader) => reader.original().statistics().sources(),",
+    ] {
+        assert!(note_of.contains(arm), "{arm}: each model's own sources");
+    }
+}
