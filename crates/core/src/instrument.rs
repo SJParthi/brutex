@@ -327,6 +327,12 @@ impl InstrumentKey {
     /// stock's own price, the same thing NIFTY's spot level is for the index,
     /// and it does not expire.
     ///
+    /// Every contract, not one of each shape.
+    /// `core::instrument::no_contract_is_sweepable_whatever_its_side_expiry_or_strike`
+    /// asks both sides, every expiry [`Expiry::new`] admits and both ends of
+    /// the strike. The shape walks before it built one call at one expiry, so
+    /// an arm that swept every put passed them (AF-56).
+    ///
     /// # Cost
     ///
     /// The index arm is two comparisons. The equity arm is one probe into
@@ -1497,5 +1503,223 @@ mod tests {
         }
         assert_eq!(swept.len(), 210, "208 shares and 2 indices");
         assert_eq!(swept, expected, "exactly the two surface shapes sweep");
+    }
+
+    /// Every date `Expiry::new` admits, 1990-01-01 through 2100-12-31, in
+    /// chronological order.
+    fn every_expiry() -> Vec<Expiry> {
+        let mut all = Vec::with_capacity(111 * 366);
+        for year in 1990..=2100 {
+            for month in 1..=12 {
+                for day in 1..=31 {
+                    if let Ok(expiry) = Expiry::new(year, month, day) {
+                        all.push(expiry);
+                    }
+                }
+            }
+        }
+        all
+    }
+
+    /// The contract kinds the grid walk below asks, 4 + 4 x 6 x 2 = 52: a
+    /// future at each of four expiries, and an option at each of those
+    /// expiries, at each of six strikes, on both sides.
+    ///
+    /// The expiries are the two ends of what `Expiry::new` admits, a leap day,
+    /// and `every_shape_of`'s own. The strikes are both ends of `i64`, zero and
+    /// the values either side of it, and `every_shape_of`'s 22800.00. A key is
+    /// judged without being rendered, so a strike too wide for a contract
+    /// segment is still a key `is_sweepable` must answer.
+    fn every_contract_kind() -> Vec<Kind> {
+        let expiries = [
+            Expiry::new(1990, 1, 1).expect("the first expiry admitted"),
+            Expiry::new(2024, 2, 29).expect("a leap day"),
+            Expiry::new(2026, 9, 29).expect("every_shape_of's expiry"),
+            Expiry::new(2100, 12, 31).expect("the last expiry admitted"),
+        ];
+        let strikes = [i64::MIN, -1, 0, 1, 2_280_000, i64::MAX];
+        let mut kinds = Vec::with_capacity(expiries.len() * (1 + strikes.len() * 2));
+        for expiry in expiries {
+            kinds.push(Kind::Future { expiry });
+            for strike in strikes {
+                for side in [OptionSide::Call, OptionSide::Put] {
+                    kinds.push(Kind::Option {
+                        expiry,
+                        strike: Paisa::from_raw(strike),
+                        side,
+                    });
+                }
+            }
+        }
+        // Its 52 kinds are distinct, and half its options are puts.
+        let mut distinct = kinds.clone();
+        distinct.sort();
+        distinct.dedup();
+        assert_eq!(distinct.len(), 52, "4 futures and 48 options, none twice");
+        let puts = kinds
+            .iter()
+            .filter(|kind| {
+                matches!(
+                    kind,
+                    Kind::Option {
+                        side: OptionSide::Put,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(puts, 24, "every option is asked on both sides");
+        kinds
+    }
+
+    /// `kind` on `underlying` in each of the six (exchange, segment) pairs,
+    /// exchange-major as `every_shape_of` orders them, whether or not the
+    /// pair is one a contract is filed under.
+    fn filed_everywhere(underlying: Symbol, kind: Kind) -> [InstrumentKey; 6] {
+        [
+            (Exchange::Nse, Segment::Index),
+            (Exchange::Nse, Segment::Cash),
+            (Exchange::Nse, Segment::Fno),
+            (Exchange::Bse, Segment::Index),
+            (Exchange::Bse, Segment::Cash),
+            (Exchange::Bse, Segment::Fno),
+        ]
+        .map(|(exchange, segment)| InstrumentKey {
+            exchange,
+            segment,
+            underlying,
+            kind,
+        })
+    }
+
+    /// Both answers a contract is owed: it is not sweepable, and
+    /// `require_sweepable` refuses it as storable but not sweepable. A failure
+    /// is reported at the caller's line, so it names the walk that found it.
+    #[track_caller]
+    fn assert_refused(key: InstrumentKey) {
+        assert!(!key.is_sweepable(), "{key:?} is a contract");
+        assert_eq!(
+            key.require_sweepable(),
+            Err(InstrumentError::NotSweepable),
+            "{key:?} is refused as storable but not sweepable"
+        );
+    }
+
+    /// AF-56. NO CONTRACT IS SWEEPABLE, WHATEVER ITS SIDE, EXPIRY OR STRIKE.
+    ///
+    /// `every_shape_of` builds one future and one option: expiry 2026-09-29,
+    /// strike 22800.00, a call. AF-50 and AF-52 walk that product, so each
+    /// contract shape was pinned by one value, and no test in this crate
+    /// asked whether a put is sweepable. An arm that swept every F&O put, on
+    /// either exchange and any underlying, passed the whole core suite.
+    /// `CLAUDE.md` section 1 refuses every contract, not one of each shape.
+    ///
+    /// Three walks, each over keys whose answer is stated here and not read
+    /// off `is_sweepable`. First, a put on NIFTY, BANKNIFTY and RELIANCE on
+    /// NSE's F&O segment, beside the index and cash keys that do sweep, so
+    /// the refusal is not a table that refuses everything. Second, the 52
+    /// kinds of `every_contract_kind` in every (exchange, segment) of the 213
+    /// F&O names and five outsiders, 68,016 keys. Third, every expiry
+    /// `Expiry::new` admits, as a future and as an option on each side, in
+    /// every (exchange, segment) of NIFTY, BANKNIFTY and RELIANCE, the names
+    /// that reach the surface in each of its two shapes.
+    ///
+    /// Not walked: the strike beyond its six values. It is an `i64`.
+    #[test]
+    fn no_contract_is_sweepable_whatever_its_side_expiry_or_strike() {
+        use crate::universe::{FNO_INDEX, FNO_UNDERLYINGS};
+
+        // THE PUT, NAMED. The rendering proves each key is the put it claims.
+        let expiry = Expiry::new(2026, 9, 29).expect("valid");
+        let strike = Paisa::from_raw(2_280_000);
+        for (name, surface, rendered) in [
+            (
+                "NIFTY",
+                InstrumentKey::index(Exchange::Nse, "NIFTY").expect("valid"),
+                "NSE-NIFTY-2026-09-29-2280000-PE",
+            ),
+            (
+                "BANKNIFTY",
+                InstrumentKey::index(Exchange::Nse, "BANKNIFTY").expect("valid"),
+                "NSE-BANKNIFTY-2026-09-29-2280000-PE",
+            ),
+            (
+                "RELIANCE",
+                InstrumentKey::cash(Exchange::Nse, "RELIANCE").expect("valid"),
+                "NSE-RELIANCE-2026-09-29-2280000-PE",
+            ),
+        ] {
+            assert!(surface.is_sweepable(), "{surface} is on the surface");
+            let put = InstrumentKey {
+                exchange: Exchange::Nse,
+                segment: Segment::Fno,
+                underlying: Symbol::new(name).expect("valid"),
+                kind: Kind::Option {
+                    expiry,
+                    strike,
+                    side: OptionSide::Put,
+                },
+            };
+            assert_eq!(put.to_string(), rendered);
+            assert_refused(put);
+        }
+
+        // THE GRID, over every F&O name and five outsiders.
+        let kinds = every_contract_kind();
+        let outsiders = ["INDIAVIX", "SENSEX", "BANKEX", "NIFTY50", "ZZQXNOTFNO"];
+        for name in outsiders {
+            assert!(!FNO_INDEX.contains(name), "{name} is outside the F&O list");
+        }
+        let mut asked = 0_usize;
+        for name in FNO_UNDERLYINGS.iter().chain(outsiders.iter()) {
+            let underlying = Symbol::new(name).expect("valid");
+            for &kind in &kinds {
+                for key in filed_everywhere(underlying, kind) {
+                    assert_refused(key);
+                    asked += 1;
+                }
+            }
+        }
+        assert_eq!(asked, (213 + 5) * 2 * 3 * 52, "the whole grid was asked");
+
+        // EVERY EXPIRY THE TYPE ADMITS. Its ends are the domain's ends, and it
+        // holds 365 days a year for 111 years plus the 27 leap days, 2000 among
+        // them and 2100 not.
+        let expiries = every_expiry();
+        assert_eq!(expiries.len(), 111 * 365 + 27, "every admitted date");
+        assert_eq!(
+            expiries.first().map(ToString::to_string).as_deref(),
+            Some("1990-01-01")
+        );
+        assert_eq!(
+            expiries.last().map(ToString::to_string).as_deref(),
+            Some("2100-12-31")
+        );
+        assert!(Expiry::new(1989, 12, 31).is_err() && Expiry::new(2101, 1, 1).is_err());
+        let mut asked = 0_usize;
+        for name in ["NIFTY", "BANKNIFTY", "RELIANCE"] {
+            let underlying = Symbol::new(name).expect("valid");
+            for &expiry in &expiries {
+                for kind in [
+                    Kind::Future { expiry },
+                    Kind::Option {
+                        expiry,
+                        strike,
+                        side: OptionSide::Call,
+                    },
+                    Kind::Option {
+                        expiry,
+                        strike,
+                        side: OptionSide::Put,
+                    },
+                ] {
+                    for key in filed_everywhere(underlying, kind) {
+                        assert_refused(key);
+                        asked += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(asked, 3 * expiries.len() * 3 * 2 * 3, "every expiry");
     }
 }
