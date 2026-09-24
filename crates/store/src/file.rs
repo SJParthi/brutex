@@ -4092,6 +4092,7 @@ mod tests {
         drop(child);
         let _ignored = std::fs::remove_dir_all(&root);
     }
+
     // =======================================================================
     // The interrupted append at its edges — D-0688
     //
@@ -4431,6 +4432,15 @@ mod tests {
     /// of the tail. Each of those six touches must be refused, which a proof
     /// that did not run again cannot do. The same record must then read again
     /// once the entry is put back.
+    ///
+    /// That leg changes the entry before every touch it checks, so a proof
+    /// remembered against the entry's value misses each time and passes it
+    /// (AF-48). The last leg leaves the entry alone and damages a record
+    /// instead: a committed one of block 1 the touch does not read, then one
+    /// the dead append left past the commit. Each of those twelve touches must
+    /// be refused too. That every touch of the tail runs the proof, the
+    /// undamaged ones included, is counted off the log by
+    /// `store::tail_proof::every_touch_of_the_tail_after_another_block_runs_its_proof_again`.
     #[test]
     fn reads_of_a_month_an_interrupted_append_left_are_idempotent_and_write_nothing() {
         let _sink_is_mine = crate::emits::hold_the_sink();
@@ -4526,6 +4536,13 @@ mod tests {
                 );
             }
         }
+        assert_eq!(std::fs::read(&path).expect("the month reads"), bin);
+        assert_eq!(
+            std::fs::read(sidecar_of(&path)).expect("the sidecar reads"),
+            crc
+        );
+
+        the_tail_refuses_a_damaged_record_on_each_alternating_touch(&reader, &path);
         drop(reader);
         assert_eq!(std::fs::read(&path).expect("the month reads"), bin);
         assert_eq!(
@@ -4533,6 +4550,56 @@ mod tests {
             crc
         );
         scrub_month(&path);
+    }
+
+    /// The last leg of
+    /// `reads_of_a_month_an_interrupted_append_left_are_idempotent_and_write_nothing`,
+    /// on the handle it opened over eighty committed records and three lost.
+    ///
+    /// THE PROOF READ THE RECORDS AGAIN, NOT ONLY THE ENTRY. Every checked
+    /// touch of the leg before this one changed the entry, so a proof
+    /// remembered against the entry's value missed on each of them and passed
+    /// that leg (AF-48). Here the entry is left alone and the RECORDS are
+    /// damaged under the open handle, after a touch of block 0 and before each
+    /// touch of the tail: first a committed record of block 1 that the touch
+    /// does not read, then a record the dead append left past the commit,
+    /// inside the extent the entry was sealed over. Either is refused only by
+    /// a proof that read the block's bytes again. The refusal names the entry
+    /// the dead append sealed and the committed extent's checksum as it now
+    /// is, and the same record reads again once the bit is flipped back.
+    fn the_tail_refuses_a_damaged_record_on_each_alternating_touch(reader: &BarFile, path: &Path) {
+        let sealed = sealed_sum(path, 1);
+        for round in 0..3i64 {
+            for (full, tail) in [(round, 73 + round), (72 - round, 79 - round)] {
+                let at = u64::try_from(tail).expect("small");
+                for damaged in [152 - tail, 80 + round] {
+                    let hit = u64::try_from(damaged).expect("small");
+                    assert_eq!(
+                        reader.read_record(u64::try_from(full).expect("small")),
+                        Ok(bar(full)),
+                        "round {round}, record {full}"
+                    );
+                    flip_record(path, hit);
+                    assert_eq!(
+                        reader.read_record(at),
+                        Err(StoreError::BlockChecksum {
+                            path: path.to_path_buf(),
+                            block: 1,
+                            stored: sealed,
+                            computed: live_sum(path, 1, 80),
+                        }),
+                        "round {round}, record {tail}, record {damaged} damaged: \
+                         the tail's proof read the block again"
+                    );
+                    flip_record(path, hit);
+                    assert_eq!(
+                        reader.read_record(at),
+                        Ok(bar(tail)),
+                        "round {round}, record {tail}: and again with record {damaged} back"
+                    );
+                }
+            }
+        }
     }
 
     /// The read the proof pays for is at most the tail block's room, however
