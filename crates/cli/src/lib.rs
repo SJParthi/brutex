@@ -2631,8 +2631,10 @@ column they came from. A figure here describes that instrument and that month.
 /// Every stored report that ranks or audits ONE instrument opens with this.
 /// For a cash equity it adds [`stored::equity_note`]: gross of every charge
 /// (`CLAUDE.md` §1, D-0681) and corporate actions unchecked (D-0018, D-0694),
-/// before any figure. For an index it adds nothing, so an index report is
-/// byte for byte what it was.
+/// before any figure. For an index it adds nothing: an index banner is
+/// [`STORED_PROVENANCE`] byte for byte. That is a claim about the banner and
+/// not about the whole report -- `sweep-stored`'s index report moved its
+/// identity and names withheld sessions since D-0694 (AF-17, AF-19).
 ///
 /// An audit's own charge header says both again, at length, when it renders.
 /// The banner carries them as well because an audit that trades nothing
@@ -2650,6 +2652,33 @@ pub(crate) fn stored_provenance(underlying: &str) -> String {
     let mut out = String::from(STORED_PROVENANCE);
     out.push_str(&stored::equity_note_for(underlying));
     out
+}
+
+/// What a report over `underlying` states before any figure, for a reader
+/// outside this crate. D-0694, AF-19.
+///
+/// A swept cash equity gets [`runner::audit::CostScope::report_note`] --
+/// gross of every charge, then corporate actions unchecked -- and anything
+/// else gets nothing, decided exactly as the stored banner decides it. `api`
+/// serves recorded runs as JSON and has no arrow to `runner`, so it takes the
+/// one wording from here rather than restating it.
+#[must_use]
+pub fn equity_note_for(underlying: &str) -> String {
+    stored::equity_note_for(underlying)
+}
+
+/// End a stored banner with one blank line, and never two.
+///
+/// A page that sets its first heading off from the banner by a blank line
+/// asks for it here. An index banner ends on its last provenance line, so it
+/// gets the blank line exactly as it always did. A stock banner already ends
+/// with the one [`stored::equity_note`] closes on, so adding another would
+/// give a stock's page one blank line more there than its index page. The
+/// `top` and elite-descent pages did exactly that until AF-19.
+fn blank_line_after_banner(banner: &mut String) {
+    if !banner.ends_with("\n\n") {
+        banner.push('\n');
+    }
 }
 
 /// The commit this binary was BUILT from, if the build proved and stamped it.
@@ -3126,9 +3155,13 @@ fn sweep_stored_kernel(request: StoredSweepRequest<'_>) -> Result<String, stored
 /// [`crate::minute_gaps::days_with_interior_gaps`] and never written down;
 /// [`crate::minute_gaps::withhold`] removes those days from the signal bars;
 /// and the daily and exact-minute contexts are derived afterwards, from the
-/// bars that remain, so all three agree. The execution series is left whole,
-/// as the other doors leave it: with no signal bar on a withheld day, none of
-/// its minutes is looked up. A month with no hole is copied unchanged.
+/// bars that remain, so all three agree. On a coarse rung the separately
+/// loaded execution series is left whole, as the other doors leave it: with no
+/// signal bar on a withheld day, none of its minutes is looked up. On `1min`
+/// there is no separate series -- the signal bars ARE the execution bars, as
+/// on `screen` -- so the day leaves both, and the exclusion counts its bars as
+/// minute bars too ([`crate::minute_gaps::GapExclusion::one_series`]). A
+/// month with no hole is copied unchanged.
 ///
 /// The withheld sessions are carried to the report and named there, and
 /// [`crate::minute_gaps::MINUTE_GAP_POLICY`] enters the identity (see
@@ -3192,14 +3225,20 @@ fn stored_sweep_inputs(request: &StoredSweepRequest<'_>) -> Result<StoredMonthIn
         ((year, month), (year, month)),
         &loaded.bars,
     )?;
+    // WHAT LEFT WHICH SERIES. On `1min` the withheld bars were the execution
+    // minutes as well, and the exclusion must not say "no minute bar was
+    // removed" of a series that lost a day.
+    let minute_gaps = if execution_bars.is_none() {
+        crate::minute_gaps::GapExclusion::one_series(holed_days, withheld)
+    } else {
+        crate::minute_gaps::GapExclusion::signal_only(holed_days, withheld)
+    };
     Ok(StoredMonthInputs {
         loaded,
         execution_bars,
         daily,
         exact_minute,
-        minute_gaps: Some(crate::minute_gaps::GapExclusion::signal_only(
-            holed_days, withheld,
-        )),
+        minute_gaps: Some(minute_gaps),
     })
 }
 
@@ -3210,9 +3249,11 @@ fn stored_sweep_inputs(request: &StoredSweepRequest<'_>) -> Result<StoredMonthIn
 ///
 /// `Some` is the ordinary door, which withholds holed sessions since D-0694.
 /// Its masks changed, so its identity must: the ladder is folded with
-/// [`crate::minute_gaps::MINUTE_GAP_POLICY`] through the same
-/// `Params::with_policy` every other door uses for a choice outside the
-/// ladder. The VERSION is bound and not only its consequence, the rule
+/// [`crate::minute_gaps::MINUTE_GAP_POLICY`] through `Params::with_policy`,
+/// the mechanism `auto-stored` binds its AUTO-V1 tag with and `screen` and
+/// `audit-range` bind `policy_of` with. Not every door uses it:
+/// `sweep-audited-stored` and `sweep-all` bind the ladder alone. The
+/// VERSION is bound and not only its consequence, the rule
 /// `runner::identity::DailyReferenceBinding::swept_series_calendar_policy`
 /// states: a month with no hole computes the same bars under both rules, and
 /// two runs that agree by luck are still two different computations. Rows
@@ -3368,7 +3409,12 @@ fn stored_month_kernel(
     // WITHHELD SESSIONS ARE NAMED, the way `screen` names them: a sweep over
     // fewer sessions than the month holds must say which, or its bar count
     // describes a month the column never saw. D-0694.
-    if let Some(gaps) = minute_gaps.as_ref().filter(|gaps| !gaps.is_empty()) {
+    //
+    // And only when a signal bar was withheld, as `screen` gates its line on
+    // `withheld > 0`. A holed minute day the signal rung holds no bar of
+    // removes nothing, and "0 signal bar(s)" would name a withholding that
+    // did not happen.
+    if let Some(gaps) = minute_gaps.as_ref().filter(|gaps| gaps.signal_bars() > 0) {
         let _ = writeln!(
             out,
             "MINUTE-GAP SESSIONS WITHHELD: {} signal bar(s); IST dates: {}. The sweep uses the remaining {} signal bars.",
@@ -7678,7 +7724,7 @@ pub fn render_top_record(
     unreadable: &str,
 ) -> String {
     let mut out = stored_provenance(&crate::results::read_field(&rows.underlying));
-    out.push('\n');
+    blank_line_after_banner(&mut out);
     let _ = writeln!(
         out,
         "\nTOP COMBINATIONS\n  feed {} · {} · {} · {}-{:02}..{}-{:02}\n  run {}",
@@ -7812,6 +7858,15 @@ fn newest_complete(
 /// ordered by the best case would quietly propose a different winner from the
 /// one every other surface names.
 ///
+/// # A stock among the printed runs puts its statement above the table
+///
+/// Because the page ranks, it is a report that ranks a cash equity whenever a
+/// run it prints a figure for is a stock. Then, before the table, it states
+/// [`runner::audit::CostScope::report_note`]: gross of every charge
+/// (`CLAUDE.md` §1, D-0681) and corporate actions unchecked (D-0694), exactly
+/// as `sweep-all` does for a walk over several instruments. A listing of index
+/// runs gains nothing.
+///
 /// # Cost
 ///
 /// `O(rows)` — the size of the answer, and every individual read is `O(1)` at
@@ -7893,6 +7948,11 @@ fn results_at(root: &std::path::Path, feed: Option<&str>, underlying: Option<&st
     );
     let _ = writeln!(out);
 
+    // THE BEST ROW, BY THE FIGURE SELECTION USES. Chosen before the table,
+    // because what it is decides what the page states above the table.
+    let best = best_complete_newest_first(&rows);
+    out.push_str(&listing_equity_note(&rows, best));
+
     let _ = writeln!(
         out,
         "  {:<9}{:<8}{:>16}{:>16}{:>7}{:>6}{:>6}{:>17}{:>17}{:>9}",
@@ -7940,9 +8000,8 @@ fn results_at(root: &std::path::Path, feed: Option<&str>, underlying: Option<&st
         );
     }
 
-    // THE BEST ROW, BY THE FIGURE SELECTION USES.
+    // THE BEST ROW, chosen above the table.
     let _ = writeln!(out);
-    let best = best_complete_newest_first(&rows);
     out.push_str(&best_complete_line(best));
     // AND WHAT IT RISKED, for the row just named. A total answers "how much did
     // it make" and nothing else; these answer "what did it risk to make it",
@@ -7951,6 +8010,35 @@ fn results_at(root: &std::path::Path, feed: Option<&str>, underlying: Option<&st
         out.push_str(&quality_block(best));
     }
     out
+}
+
+/// What [`results_at`] states above its table: a stock's figures say what they
+/// are made of before any of them -- gross of every charge, and corporate
+/// actions unchecked. D-0694, AF-19.
+///
+/// The listing RANKS -- it names a BEST COMPLETE RUN on the worst-case total
+/// and prices what that run risked -- so it is a report that ranks a cash
+/// equity whenever one of the runs it prints is a stock. It was left bare on
+/// the reasoning that it only lists the ledger, while `cli top` on the same
+/// row carried both statements. Decided on the rows whose figures the page
+/// prints, the table's first [`LIST_ROWS`] and the winner, by the same kind
+/// check the stored banner uses, so a listing of index runs is byte for byte
+/// what it was.
+fn listing_equity_note(
+    rows: &[crate::results::Record],
+    best: Option<&crate::results::Record>,
+) -> String {
+    let shown: Vec<String> = rows
+        .iter()
+        .take(LIST_ROWS)
+        .chain(best)
+        .map(|record| crate::results::read_field(&record.underlying))
+        .collect();
+    if stored::any_cash_equity(shown.iter().map(String::as_str)) {
+        audit::CostScope::CashEquity.report_note()
+    } else {
+        String::new()
+    }
 }
 
 /// One rung's `min_hits`, derived from that rung's own bar count.
@@ -10669,10 +10757,11 @@ fn descent_banner(
 ) -> String {
     let ((fy, fm), (ty, tm)) = span;
     let mut out = stored_provenance(underlying);
+    blank_line_after_banner(&mut out);
     let trades = floor.saturating_mul(bars) / 1_000_000;
     let _ = writeln!(
         out,
-        "\nELITE, SELF-TUNING\n  feed {vendor_word} · {underlying} · {rung} · \
+        "ELITE, SELF-TUNING\n  feed {vendor_word} · {underlying} · {rung} · \
          {fy}-{fm:02}..{ty}-{tm:02}\n  {bars} bars · floor {floor} ppm is about \
          {trades} round trip(s) — the fewest at which these rules can be \
          satisfied\n  by anything, so below it no combination passes however \
@@ -17998,11 +18087,17 @@ const SHARE_MEAN_LEGEND: &str = "ONE share, GROSS OF EVERY CHARGE: brokerage, ST
 ///
 /// # Beside the label, because the lift keeps only the block
 ///
-/// `range-all` and `pool` pass 1 discard the report and keep sections lifted
-/// out of it through [`section_note`]. A stock's banner says corporate actions
-/// are unchecked, but a lifted FINDINGS block does not carry the banner with
-/// it. So the statement sits inside the block, after the gross label it
-/// stands beside, in the same indentation, and a lifted ranking keeps both.
+/// `range-all` and `range-rung` discard each rung's report and print the
+/// sections [`one_rung`] lifts out of it through [`validation_note`], FINDINGS
+/// among them. A stock's banner says corporate actions are unchecked, but a
+/// lifted FINDINGS block does not carry the banner with it. So the statement
+/// sits inside the block, after the gross label it stands beside, in the same
+/// indentation, and a lifted ranking keeps both.
+///
+/// `pool` pass 1 is NOT such a lift, whatever this comment said until D-0694's
+/// review: it keeps only each rung's `outcome` and prints no lifted section, so
+/// no FINDINGS block reaches a pool page. The pool's own opening carries the
+/// sentence when a stock is on its surface.
 ///
 /// The wording is `runner::audit`'s constant and nothing else: the audit
 /// header, every stored banner and this block say the same sentence, so a

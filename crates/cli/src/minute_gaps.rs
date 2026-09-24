@@ -110,19 +110,38 @@ impl GapExclusion {
         }
     }
 
-    /// What a door that withholds from its SIGNAL bars alone removed. D-0694.
+    /// What a door that withholds from its SIGNAL bars alone removed, on a
+    /// coarse rung. D-0694.
     ///
     /// `sweep-stored`, like `auto-stored`, `audit-range`, `screen` and `pool`,
-    /// removes the holed `days` from the signal series with [`withhold`] and
-    /// leaves its separately loaded execution minutes whole: with no signal
-    /// bar on a withheld day, none of that day's minutes is ever looked up. So
-    /// no minute bar was removed, and this says so rather than counting one.
+    /// removes the holed `days` from the signal series with [`withhold`]. On a
+    /// coarse rung it leaves its separately loaded execution minutes whole:
+    /// with no signal bar on a withheld day, none of that day's minutes is
+    /// ever looked up. So no minute bar was removed, and this says so rather
+    /// than counting one. On `1min` there is no separate series, and
+    /// [`Self::one_series`] is the answer.
     #[must_use]
     pub const fn signal_only(days: Vec<i64>, signal_bars: u64) -> Self {
         Self {
             days,
             signal_bars,
             minute_bars: 0,
+        }
+    }
+
+    /// What a door removed from a series that is both its signal and its
+    /// execution: the `1min` rung. D-0694.
+    ///
+    /// There the signal bars ARE the one-minute execution bars, so every bar
+    /// [`withhold`] removed is a minute bar too, and the day leaves the
+    /// execution as well. [`Self::signal_only`] recorded zero minute bars
+    /// here, which said the execution minutes stayed whole when they did not.
+    #[must_use]
+    pub const fn one_series(days: Vec<i64>, bars: u64) -> Self {
+        Self {
+            days,
+            signal_bars: bars,
+            minute_bars: bars,
         }
     }
 

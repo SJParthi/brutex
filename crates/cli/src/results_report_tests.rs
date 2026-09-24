@@ -188,6 +188,88 @@ fn list_filters_and_omitted_rows_do_not_change_the_selected_totals()
     fixture.unchanged(&before)
 }
 
+/// **A listing that prints a stock's figures says what they are made of,
+/// before the table; a listing of index runs is what it was.** AF-19.
+///
+/// `cli results` names a BEST COMPLETE RUN on the worst-case total and prices
+/// what it risked, so it ranks. With a RELIANCE row as that winner it printed
+/// neither the gross label nor the corporate-action sentence, while `cli top`
+/// on the same row printed both. The statement is decided on the rows the
+/// page prints a figure for, the table's and the winner's: a stock that is
+/// the winner but beyond the table still puts it there, and a stock that is
+/// neither adds nothing.
+#[test]
+fn a_listing_that_prints_a_stock_states_gross_and_corporate_actions_and_an_index_listing_does_not()
+-> Result<(), Box<dyn std::error::Error>> {
+    let note = runner::audit::CostScope::CashEquity.report_note();
+    let stock = |id: u8, profit: i64| Record {
+        underlying: field("RELIANCE"),
+        ..row(id, profit, 3)
+    };
+    // Nothing inserted between the counts and the table on an index listing.
+    let bare = |listing: &str, matching: usize| {
+        listing.contains(&format!(
+            "  matching                                {matching}\n\n  feed     rung"
+        ))
+    };
+
+    let index = Fixture::new(&[row(62, 500, 2), row(63, 700, 3)])?;
+    let listing = crate::results_at(&index.0, None, None);
+    assert!(bare(&listing, 2), "{listing}");
+    for equity_only in ["GROSS OF EVERY CHARGE", "CORPORATE ACTIONS"] {
+        assert!(!listing.contains(equity_only), "{listing}");
+    }
+
+    let mixed = Fixture::new(&[row(64, 500, 2), stock(65, 900), row(66, 700, 3)])?;
+    let before = mixed.bytes()?;
+    let listing = crate::results_at(&mixed.0, None, None);
+    assert!(
+        listing.contains("BEST COMPLETE RUN: zerodha RELIANCE"),
+        "premise: the stock wins:\n{listing}"
+    );
+    let at = listing.find(&note).ok_or("the note is on the page")?;
+    let table = listing.find("\n  feed     rung").ok_or("the table")?;
+    assert!(at < table, "before the table:\n{listing}");
+    assert!(
+        listing.contains(&format!(
+            "  matching                                3\n\n{note}  feed"
+        )),
+        "straight after the counts:\n{listing}"
+    );
+    assert_eq!(
+        listing
+            .matches(runner::audit::CORPORATE_ACTIONS_UNCHECKED)
+            .count(),
+        1,
+        "{listing}"
+    );
+    mixed.unchanged(&before)?;
+    drop(mixed);
+
+    // A stock beyond the table that is still the winner puts it on the page.
+    let mut records = vec![stock(67, 10_000)];
+    records.extend((68..=107).map(|id| row(id, 500, 1)));
+    let winner = Fixture::new(&records)?;
+    let listing = crate::results_at(&winner.0, None, None);
+    assert!(listing.contains("further row(s) NOT SHOWN"), "{listing}");
+    assert!(
+        listing.contains("BEST COMPLETE RUN: zerodha RELIANCE"),
+        "{listing}"
+    );
+    assert!(listing.contains(&note), "{listing}");
+    drop(winner);
+
+    // A stock that is neither in the table nor the winner adds nothing.
+    let mut records = vec![stock(108, -10_000)];
+    records.extend((109..=148).map(|id| row(id, 500, 1)));
+    let hidden = Fixture::new(&records)?;
+    let listing = crate::results_at(&hidden.0, None, None);
+    assert!(listing.contains("further row(s) NOT SHOWN"), "{listing}");
+    assert!(bare(&listing, 41), "{listing}");
+    assert!(!listing.contains("CORPORATE ACTIONS"), "{listing}");
+    Ok(())
+}
+
 #[test]
 fn absent_empty_and_corrupt_ledgers_are_read_without_creating_or_repairing_files()
 -> Result<(), Box<dyn std::error::Error>> {

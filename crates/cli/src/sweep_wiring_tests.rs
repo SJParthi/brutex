@@ -580,6 +580,14 @@ fn an_untraded_equity_ranking_is_labelled_gross_before_it_refuses() {
         !equity.contains("CASH EQUITY run."),
         "premise: this exit renders no AUDIT header:\n{equity}"
     );
+    // THE WHOLE FINDINGS STATEMENT, the label and D-0694's corporate-action
+    // sentence after it, as the halted exit's test strips it. Stripping the
+    // label alone left the sentence behind, so this failed on the tree that
+    // carries both. AF-19.
+    assert!(
+        findings.ends_with(runner::audit::CORPORATE_ACTIONS_UNCHECKED),
+        "the sentence closes the untraded ranking's FINDINGS:\n{findings}"
+    );
     assert_eq!(
         equity.replacen(&super::equity_ranking_statement(), "", 1),
         index,

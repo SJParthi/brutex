@@ -39360,6 +39360,163 @@ All new `cli` tests run under the D-0694 priority-100 override in
 `.config/nextest.toml`, which names each of them. That changes their order
 only: nothing is filtered, skipped, retried or ignored.
 
+**Correction, 2026-09-24 (AF-19).** A review of this entry upheld findings
+against it. The repair that answers them changed code, tests and this record.
+Each item below corrects a statement above by adding text; nothing above is
+edited.
+
+1. **`cli results` ranks, and now says so.** "It lists the ledger rather
+   than ranking or auditing, and it was left as it was" was false. The page
+   names a BEST COMPLETE RUN, "Ranked on the WORST-case total", and prints a
+   TRADE QUALITY block for it. The review ran it on a one-row RELIANCE ledger
+   and found neither statement, while `cli top` on the same row printed
+   both. When a run the page prints a figure for (a table row or the winner)
+   is a stock, the page now states `CostScope::report_note` between its
+   counts and its table. That is the same note `sweep-all` prints for a walk
+   over several instruments. A stock that is neither shown nor the winner
+   adds nothing, and a listing of index runs is unchanged byte for byte.
+2. **`/backtest.json` now carries it on a stock's run.** That payload ranks
+   too (`best_complete`). Each run object whose underlying resolves to a
+   swept cash equity gains `"equity_note"`, holding the stored banner's own
+   text through the new `cli::equity_note_for`. An index run's object gains
+   no key. The other JSON projections still carry neither statement, and
+   "What is still not done" named only some of them. The complete list, with
+   the reason for each:
+   - `/frontier.json` and `/trades.json` are keyed by run identity, and
+     neither payload names an instrument. Their shared reader,
+     `cli::result_set::CommittedParents::receipt`, does look up the run's
+     ledger row, but only to confirm that it exists, and it returns the
+     receipt alone. Carrying the row's instrument into both payloads needs a
+     new reader there and a field on both handlers. This repair kept to the
+     two ranking surfaces. A page learns a run's identity from its
+     `/backtest.json` row, which now carries the note.
+   - `/live.json` serves `results/live/<hex>.bin`, and that format records
+     no instrument. It cannot tell a stock from an index without a new file
+     version (`CLAUDE.md` §3 rule 8).
+   - `/candidate-trades.json` and `/expression-search.json` serve saved
+     captures keyed by identity, and name no instrument either.
+   - The Boolean views (`/boolean*.json`) carry `"cash": true` for a stock
+     family, and no statement.
+
+   No page under `web/` renders `equity_note`. This repair was backend only
+   and did not touch `web/`.
+3. **Where the FINDINGS copy travels.** Item 5 of "What changed: the
+   statement" said `range-all` and `pool` pass 1 lift the FINDINGS block
+   through `section_note`. That is wrong about `pool`. Its pass 1 keeps only
+   each rung's `outcome` and lifts no section, so no FINDINGS block reaches
+   a pool page. The pool's opening carries the sentence instead (item 4).
+   `range-all` and `range-rung` print what `one_rung` lifts through
+   `validation_note`, and the FINDINGS placement is needed for those. The
+   doc comment on `equity_ranking_statement` made the same claim and is
+   corrected.
+4. **AF-16's last clause claimed more than holds.** "Every index report is
+   byte for byte what it was" is false for `sweep-stored` over an index. Its
+   identity binds `MINUTE_GAP_POLICY` (AF-17), and a holed month gains the
+   withheld line and loses that day's bars. AF-19 states what does hold: the
+   statement adds no byte to an index report, and a stock's banner past its
+   note is the index banner past its provenance. The review also compared
+   NIFTY's month audit, extinct audit, checksum-audited sweep, range audit,
+   screen and `top` reports on a generated store with the tree before this
+   entry, at `1min` and `5min`, and found them byte-identical. That
+   comparison is the review's, and this repair did not repeat it.
+5. **Two identity terms were unpinned.** Nothing pinned `MINUTE_GAP_POLICY`'s
+   value: the review set it to 2 and reports 136 targeted tests passing.
+   Nothing checked the checksum-audited door's `Params::of(ladder)` on the
+   row that door records either: a call site binding the rule for both
+   doors passed the 247 tests the review ran. Both are now checked on the
+   recorded rows. The value is a literal, and the audited row is rebuilt
+   from outside the kernel.
+6. **"The execution series stays whole" holds on a coarse rung only.** On
+   `1min` there is no separate execution series. The signal bars are the
+   execution bars, so a withheld day leaves both, exactly as on `screen`.
+   `GapExclusion::signal_only` counted zero minute bars there, and the
+   holed-session test asserted that zero with the message "the execution
+   minutes stay whole". `GapExclusion::one_series` now counts them. No
+   report prints that count, so no output changed. `docs/06-limits.md` said
+   "Only the signal bars lose a holed day", and it is corrected there.
+7. **The withheld line now prints only when a signal bar was withheld.**
+   "The way `screen` does" was the claim, but `screen` gates its line on
+   `withheld > 0`, and this door printed whenever the day list was not
+   empty. So a holed minute day that the coarse rung held no bar of printed
+   "0 signal bar(s)". The door is still not reported the way `auto-stored`,
+   `audit-range` and `pool` report. Those three withhold and name nothing.
+   The doc of `stored_month_params` said every other door uses
+   `Params::with_policy`. `sweep-audited-stored` and `sweep-all` bind the
+   ladder alone, and the doc now says so.
+8. **A stock's `top` and elite-descent pages had one blank line too many.**
+   The note ends on a blank line, and both pages then added one of their
+   own. The `top` page printed three blank lines before `TOP COMBINATIONS`
+   where an index page printed two. This was cosmetic, and it is fixed.
+9. **AF-17's "byte-identical ... reference contexts"** was checked on three
+   fields only. `DailyContext` and `ExactMinuteContext` now derive
+   `PartialEq`, and the gap-free test compares both whole.
+10. **Tests changed, including ones this entry did not name.** Beside the
+    two named above, this entry retargeted
+    `derived_floor_tests::every_stored_three_series_operator_path_binds_all_inputs_into_identity`
+    from `sweep_stored_inner` to `sweep_stored_kernel` to follow the
+    refactor, and gave both existing `batch::tests` calls of `render` the new
+    `""` note argument. Neither change weakened its test. This repair changed
+    three more:
+    - The holed-session test's `minute_bars() == 0` is now checked per rung
+      (item 6).
+    - The gap-free test's field comparisons now compare whole contexts
+      (item 9).
+    - `sweep_wiring_tests::an_untraded_equity_ranking_is_labelled_gross_before_it_refuses`
+      (D-0696) failed on the integrated tree. Run on eecca4da with nothing
+      changed, it failed at "the scope may change the charge statement and
+      nothing else". It removed only the gross label from the equity page
+      and compared the rest with the index page, and this entry's sentence
+      follows that label in FINDINGS. It now removes
+      `equity_ranking_statement()`, as the halted exit's test does, and
+      asserts that the sentence closes the block.
+
+    So since this entry, AF-31's and AF-33's "the label is the only byte
+    that differs" means the whole FINDINGS statement: the label and the
+    sentence. AF-18's "every one indented two spaces" is what AF-60 words
+    correctly, "blank or indented two spaces". Its test allows blank lines.
+11. **Not changed, and why.** `top` and `/engine/top.json` decide a recorded
+    row's note from the compile-time F&O list at render time, not from
+    anything stored with the row, because a ledger record carries no
+    instrument kind. So an old row of a share later removed from
+    `FNO_UNDERLYINGS` would render with no statement. Recording the kind is
+    a new ledger version (`CLAUDE.md` §3 rule 8), and it is not done here.
+    `CLAUDE.md` §1 is still unamended, for the reason given above.
+
+**What each repair was proven against.** Each regression below was applied
+to the repaired tree, and the named test was run and seen to fail. The repair
+was then restored. Batch one was one build with six breaks, each reaching a
+different test. Batch two was a second build.
+
+- *Batch one.* Breaks: the note dropped from `cli results`; `blank_line_after_banner`
+  always adding its line; `MINUTE_GAP_POLICY` set to 2; the minute rung
+  given `signal_only`; the withheld line gated on a non-empty day list; and
+  `cli::equity_note_for` returning nothing. Six tests failed, one per break:
+  the listing test ("the note is on the page"), the banner test (at the
+  elite descent), the pin test ("left: 2, right: 1"), the holed-session test
+  ("1min: the withheld bars were the execution minutes", 0 against 374), the
+  no-signal-bar test (the page printed "0 signal bar(s)"), and the public
+  note test. The other 16 tests of the 22 run passed.
+- *Batch two.* Breaks:
+  - the review's own break B2 at the kernel call site, which binds the rule
+    for both doors;
+  - `daily.asked` raised by one inside `stored_sweep_inputs`;
+  - the `top` page alone given back its extra blank line.
+
+  The pin test failed on the audited door's identity. The gap-free test
+  failed at "the same daily context". The banner test failed at `top`. A
+  temporary copy of the gap-free test with its old three-field assertions
+  PASSED under the same `daily.asked` break, which shows the gap the review
+  named. The copy was then deleted.
+- *`api`.* The `equity_note` write removed from `Run::to_json`:
+  `a_stock_run_carries_the_equity_note_and_an_index_run_is_unchanged`
+  failed, and the other 55 `backtest::tests` passed.
+- *After a refactor.* The listing's note moved into `listing_equity_note`
+  to keep `results_at` inside clippy's line budget. The listing break was
+  applied again to the helper: the listing test failed with "the note is on
+  the page", and the other 8 `results_report_tests` passed.
+
+Invariant AF-19.
+
 ### D-0696 — Label every equity ranking gross in the audit header's own words, and read a stored instrument only at its own path — 2026-09-23
 
 **Why this entry exists.** Commit c8c5383c ("Test the cli audit follow-ups

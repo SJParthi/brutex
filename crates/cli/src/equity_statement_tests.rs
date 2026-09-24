@@ -114,6 +114,67 @@ fn every_one_instrument_banner_states_corporate_actions_for_a_stock_and_never_fo
     }
 }
 
+/// **A stock's banner is its index banner with the note put in after the
+/// provenance, and nothing else changes, not even a blank line.** AF-19.
+///
+/// The note closes on a blank line. `top` and the elite descent each set
+/// their heading off from the banner with a blank line of their own, so a
+/// stock's page carried one more blank line there than its index page did:
+/// three before `TOP COMBINATIONS` where an index had two. So the blank line
+/// the index page puts after its provenance is the note's own on a stock's
+/// page, and not a second one. Past it, the two banners are the same bytes
+/// with the symbol swapped. The claim is about the banner: the index side is
+/// what the index banner was before D-0694 only because the note is empty
+/// there, which `every_one_instrument_banner_...` pins.
+#[test]
+fn a_stock_banner_is_its_index_banner_with_the_note_put_in_and_nothing_else() {
+    let stock_head = format!("{STORED_PROVENANCE}{}", CostScope::CashEquity.report_note());
+    for (stock, index) in [("RELIANCE", "NIFTY"), ("TCS", "BANKNIFTY")] {
+        for ((surface, stock_text), (_, index_text)) in
+            banners(stock).into_iter().zip(banners(index))
+        {
+            let stock_rest = stock_text
+                .strip_prefix(&stock_head)
+                .expect("a stock's banner leads with the provenance and the note");
+            let index_rest = index_text
+                .strip_prefix(STORED_PROVENANCE)
+                .expect("an index's banner leads with the provenance");
+            let index_body = index_rest.strip_prefix('\n').unwrap_or(index_rest);
+            assert_eq!(
+                stock_rest.replace(stock, index),
+                index_body,
+                "{surface}: {stock}'s banner past its note against {index}'s past its provenance"
+            );
+        }
+    }
+}
+
+/// **The note `api` serves beside a recorded run is the stored banner's own.**
+/// AF-19.
+///
+/// `/backtest.json` takes the statement from `cli::equity_note_for`, so the
+/// two cannot say different things about one instrument: a stock gets the
+/// gross label and the corporate-action sentence, and an index, a symbol no
+/// sweep resolves, and an empty word get nothing.
+#[test]
+fn the_public_equity_note_is_the_stored_banners_own() {
+    for stock in ["RELIANCE", "TCS", "reliance"] {
+        assert_eq!(
+            super::equity_note_for(stock),
+            CostScope::CashEquity.report_note(),
+            "{stock}"
+        );
+        assert_eq!(
+            super::stored_provenance(stock),
+            format!("{STORED_PROVENANCE}{}", super::equity_note_for(stock)),
+            "{stock}"
+        );
+    }
+    for other in ["NIFTY", "BANKNIFTY", "FINNIFTY", "ZZQXNOTFNO", ""] {
+        assert_eq!(super::equity_note_for(other), "", "{other:?}");
+    }
+}
+
 /// **A stock audit's charge header says corporate actions are unchecked,
 /// through the whole audit, and an index audit's never does.** D-0694.
 ///

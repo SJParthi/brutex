@@ -40,9 +40,10 @@ filter = 'test(cash_inventory_never_relabels_an_index_as_a_stock) | test(an_fno_
 priority = 100
 
 # D-0694: the stock statement on every stored report and the ordinary stored
-# sweep's minute-gap withholding. Pure renders and small generated stores, run
-# early so a cli mutant that breaks either fails before the long suites. This
-# changes order only: nothing is filtered, skipped, retried or ignored.
+# sweep's minute-gap withholding, with the AF-19 repairs of both. Pure renders
+# and small generated stores, run early so a cli mutant that breaks either
+# fails before the long suites. This changes order only: nothing is filtered,
+# skipped, retried or ignored.
 [[profile.default.overrides]]
-filter = 'test(equity_statement_tests::) | test(the_ordinary_stored_sweep_) | test(a_gap_free_month_keeps_its_bars_and_masks_and_moves_its_identity) | test(every_stored_report_over_a_stock_states_corporate_actions_are_unchecked) | test(a_pool_with_a_stock_states_corporate_actions_are_unchecked) | test(the_stock_inventory_states_corporate_actions_are_unchecked) | test(the_equity_note_is_decided_by_the_kind) | test(a_walk_offering_a_stock_states_corporate_actions_are_unchecked) | test(a_stock_search_states_corporate_actions_are_unchecked) | test(a_stock_research_scope_states_corporate_actions_are_unchecked) | test(states_corporate_actions_inside_its_findings)'
+filter = 'test(equity_statement_tests::) | test(the_ordinary_stored_sweep_) | test(a_gap_free_month_keeps_its_bars_and_masks_and_moves_its_identity) | test(every_stored_report_over_a_stock_states_corporate_actions_are_unchecked) | test(a_pool_with_a_stock_states_corporate_actions_are_unchecked) | test(the_stock_inventory_states_corporate_actions_are_unchecked) | test(the_equity_note_is_decided_by_the_kind) | test(a_walk_offering_a_stock_states_corporate_actions_are_unchecked) | test(a_stock_search_states_corporate_actions_are_unchecked) | test(a_stock_research_scope_states_corporate_actions_are_unchecked) | test(states_corporate_actions_inside_its_findings) | test(the_minute_gap_rule_is_bound_by_value_and_the_audited_door_records_the_ladder_alone) | test(a_holed_day_the_signal_rung_does_not_hold_withholds_nothing_and_is_not_named) | test(a_listing_that_prints_a_stock_states_gross_and_corporate_actions)'
 priority = 100

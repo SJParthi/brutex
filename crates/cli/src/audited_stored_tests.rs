@@ -1696,7 +1696,29 @@ fn the_ordinary_stored_sweep_withholds_and_names_a_holed_session() {
             .expect("this door applies the minute-gap rule");
         assert_eq!(gaps.day_numbers(), &[holed]);
         assert_eq!(gaps.signal_bars(), withheld);
-        assert_eq!(gaps.minute_bars(), 0, "the execution minutes stay whole");
+        // WHICH SERIES LOST THE DAY. This asserted zero minute bars on both
+        // rungs, "the execution minutes stay whole", and on `1min` they do not:
+        // there the signal bars ARE the execution bars. AF-19.
+        match inputs.execution_bars.as_ref() {
+            None => {
+                assert_eq!(rung, "1min", "only the minute rung has no separate series");
+                assert_eq!(
+                    gaps.minute_bars(),
+                    withheld,
+                    "{rung}: the withheld bars were the execution minutes"
+                );
+            }
+            Some(execution) => {
+                assert_eq!(gaps.minute_bars(), 0, "{rung}: no minute bar was removed");
+                assert!(
+                    execution
+                        .bars
+                        .iter()
+                        .any(|bar| indicators::ist_day(bar.ts_micros) == holed),
+                    "{rung}: the separately loaded execution minutes keep the day"
+                );
+            }
+        }
 
         let report = fixture.sweep(rung).expect("the holed month sweeps");
         assert!(
@@ -1781,9 +1803,15 @@ fn a_gap_free_month_keeps_its_bars_and_masks_and_moves_its_identity() {
             "{rung}: a gap-free month withholds nothing"
         );
         assert_eq!(inputs.loaded.bars, loaded.bars, "{rung}: the same bars");
-        assert_eq!(inputs.daily.bars, daily.bars, "{rung}");
-        assert_eq!(inputs.daily.eligibility, daily.eligibility, "{rung}");
-        assert_eq!(inputs.exact_minute.bars, exact.bars, "{rung}");
+        // WHOLE CONTEXTS, EVERY FIELD. This compared the daily bars and
+        // eligibility and the exact-minute bars, and left the references,
+        // the month counts, the prior session and the calendar exclusion to
+        // the data digest. AF-19.
+        assert_eq!(inputs.daily, daily, "{rung}: the same daily context");
+        assert_eq!(
+            inputs.exact_minute, exact,
+            "{rung}: the same exact-minute context"
+        );
         let signal = stored::rung_length_micros(rung).expect("a swept rung");
         let availability = stored::vwap_availability(&loaded.key);
         let before =
@@ -1846,6 +1874,159 @@ fn a_gap_free_month_keeps_its_bars_and_masks_and_moves_its_identity() {
             "{rung}: the identity this month had before D-0694 must not be reused"
         );
     }
+    crate::knobs::clear_all();
+}
+
+/// The identity a stored month kernel recorded for `inputs` under `params`,
+/// rebuilt term by term from outside the kernel.
+fn month_identity(
+    inputs: &crate::StoredMonthInputs,
+    data_digest: [u8; 32],
+    params: runner::identity::Params,
+) -> [u8; 32] {
+    runner::identity::identity(&runner::identity::Run {
+        mask: vocab::ConditionMask::default(),
+        direction: runner::identity::Direction::Undirected,
+        instrument: &inputs.loaded.key,
+        timeframe: inputs.loaded.timeframe,
+        params,
+        data_digest,
+        commit: "generated-stored-sweep-fixture",
+        feed: "zerodha",
+    })
+    .bytes()
+}
+
+/// The data term a stored month kernel digests `inputs` into.
+fn month_digest(inputs: &crate::StoredMonthInputs) -> [u8; 32] {
+    let execution = inputs
+        .execution_bars
+        .as_ref()
+        .map_or(inputs.loaded.bars.as_slice(), |minute| {
+            minute.bars.as_slice()
+        });
+    crate::stored_executed_digest(
+        &inputs.loaded.bars,
+        &inputs.exact_minute,
+        &inputs.daily,
+        execution,
+    )
+    .expect("the data term")
+}
+
+/// **The ordinary door binds the minute-gap rule by its VALUE, and the
+/// checksum-audited door records the ladder alone, on the row it
+/// records.** AF-19.
+///
+/// Two holes the D-0694 tests left. The gap-free test builds its expected
+/// identity from `MINUTE_GAP_POLICY` itself, so renumbering the constant
+/// re-keyed every ordinary stored sweep recorded since D-0694 and failed
+/// nothing (`CLAUDE.md` §3 rule 8). And the audited door's
+/// `Params::of(ladder)` was checked on `stored_month_params`, never on the
+/// identity the door writes, so a kernel call site binding the rule for both
+/// doors passed. Here the value is a literal, and both doors run over one
+/// gap-free month and each recorded row is rebuilt from outside the kernel.
+#[test]
+fn the_minute_gap_rule_is_bound_by_value_and_the_audited_door_records_the_ladder_alone() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    crate::knobs::set("BRUTEX_CEILING", "256");
+    assert_eq!(
+        crate::minute_gaps::MINUTE_GAP_POLICY,
+        1,
+        "renumbering the rule re-keys every ordinary stored sweep recorded since D-0694"
+    );
+    for rung in ["1min", "5min"] {
+        let fixture = Fixture::warmed();
+        let ladder = crate::ladder_for(u64::MAX).expect("ladder");
+        let legacy = runner::identity::Params::of(ladder);
+
+        let ordinary = crate::stored_sweep_inputs(&fixture.month_request(rung)).expect("inputs");
+        let first = fixture.sweep(rung).expect("the ordinary door sweeps");
+        assert!(first.contains("RESULT RECORDED"), "{rung}:\n{first}");
+        let audited = Inputs::load(fixture.request(rung)).expect("audited generated inputs");
+        let second =
+            crate::stored_month_kernel(fixture.month_request(rung), audited.data(), Some(&audited))
+                .expect("the audited door sweeps");
+        assert!(second.contains("RESULT RECORDED"), "{rung}:\n{second}");
+
+        let mut ledger = crate::results::Results::open_read(&fixture.root).expect("ledger");
+        assert_eq!(ledger.len().expect("count"), 2, "{rung}: one row per door");
+        let (ordinary_row, audited_row) = (
+            ledger.read(0).expect("the ordinary row"),
+            ledger.read(1).expect("the audited row"),
+        );
+        drop(ledger);
+        assert_eq!(
+            ordinary_row.identity,
+            month_identity(&ordinary, month_digest(&ordinary), legacy.with_policy(&[1])),
+            "{rung}: the ordinary door binds minute-gap rule 1"
+        );
+        let bound = audited.bind_digest(month_digest(audited.data()));
+        assert_eq!(
+            audited_row.identity,
+            month_identity(audited.data(), bound, legacy),
+            "{rung}: the checksum-audited door records the ladder alone"
+        );
+        assert_ne!(
+            audited_row.identity,
+            month_identity(audited.data(), bound, legacy.with_policy(&[1])),
+            "{rung}: the rule did not reach the audited door"
+        );
+    }
+    crate::knobs::clear_all();
+}
+
+/// **A holed minute day the signal rung holds no bar of withholds nothing,
+/// and the report does not name it.** AF-19.
+///
+/// The ordinary door printed its MINUTE-GAP line whenever the measured day
+/// list was not empty, where `screen` prints only when a signal bar was
+/// withheld. Here 2025-05-05 loses one minute and the `5min` file holds no
+/// bar of that day, so nothing leaves the signal series: the line would have
+/// read "0 signal bar(s)". The rule is still applied and still bound.
+#[test]
+fn a_holed_day_the_signal_rung_does_not_hold_withholds_nothing_and_is_not_named() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    crate::knobs::set("BRUTEX_CEILING", "256");
+    let holed = i64::from(
+        pull::session::Day::new(2025, 5, 5)
+            .expect("date")
+            .days_from_epoch(),
+    );
+    let fixture = Fixture::warmed();
+    fixture.omit_owned_minutes(&[5]);
+    let coarse = fixture.path(5, Timeframe::MINUTE_5);
+    fs::remove_file(&coarse).expect("replace owned generated coarse file");
+    fs::remove_file(coarse.with_extension("crc")).expect("replace its owned proof");
+    for day in [2, 6, 7, 8, 9, 12, 13] {
+        let rows = generated_session(5, day);
+        fixture.write(
+            5,
+            Timeframe::MINUTE_5,
+            &rows.iter().step_by(5).copied().collect::<Vec<_>>(),
+        );
+    }
+
+    let inputs = crate::stored_sweep_inputs(&fixture.month_request("5min")).expect("inputs");
+    let gaps = inputs
+        .minute_gaps
+        .as_ref()
+        .expect("this door applies the minute-gap rule");
+    assert_eq!(
+        gaps.day_numbers(),
+        &[holed],
+        "premise: the hole is measured"
+    );
+    assert_eq!(
+        gaps.signal_bars(),
+        0,
+        "premise: no signal bar of it is held"
+    );
+    let report = fixture.sweep("5min").expect("the month sweeps");
+    assert!(report.contains("RESULT RECORDED"), "{report}");
+    assert!(!report.contains("MINUTE-GAP SESSIONS WITHHELD"), "{report}");
     crate::knobs::clear_all();
 }
 

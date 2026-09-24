@@ -639,6 +639,17 @@ impl Run {
             r#","underlying":{}"#,
             render::json_string(&self.underlying)
         );
+        // A STOCK'S RUN SAYS WHAT ITS FIGURES ARE MADE OF. This ledger ranks
+        // -- `best_complete` is the highest worst-case total across runs -- so
+        // a RELIANCE run here is a ranked cash equity, and it was served with
+        // neither the gross-of-every-charge label nor the corporate-action
+        // sentence every `cli` report over it prints. The text is `cli`'s one
+        // wording, beside the instrument it qualifies. An index run gains no
+        // key, so its object is the bytes it was. D-0694, AF-19.
+        let note = cli::equity_note_for(&self.underlying);
+        if !note.is_empty() {
+            let _ = write!(out, r#","equity_note":{}"#, render::json_string(&note));
+        }
         let _ = write!(
             out,
             r#","timeframe":{}"#,
@@ -1973,6 +1984,43 @@ mod tests {
         ] {
             assert!(json.contains(fragment), "missing {fragment} in {json}");
         }
+    }
+
+    /// **A stock's run carries what its figures are made of; an index's run
+    /// is the bytes it was.** AF-19.
+    ///
+    /// This ledger ranks -- `best_complete` is the highest worst-case total --
+    /// and a RELIANCE run was served with neither the gross label nor the
+    /// corporate-action sentence. The statement is `cli`'s one wording, keyed
+    /// `equity_note` on the run it qualifies, and an index run gains no key.
+    #[test]
+    fn a_stock_run_carries_the_equity_note_and_an_index_run_is_unchanged() {
+        let ledger = over(file(VERSION, &[record(7, false, 34_302)]), 10);
+        let index = ledger.runs.first().expect("one run").clone();
+        let stock = super::Run {
+            underlying: "RELIANCE".to_owned(),
+            ..index.clone()
+        };
+        let note = cli::equity_note_for("RELIANCE");
+        for part in ["GROSS OF EVERY CHARGE", "CORPORATE ACTIONS ARE UNCHECKED"] {
+            assert!(note.contains(part), "premise, {part}: {note}");
+        }
+        let field = format!(r#","equity_note":{}"#, crate::render::json_string(&note));
+        let index_json = index.to_json();
+        assert!(!index_json.contains("equity_note"), "{index_json}");
+        let stock_json = stock.to_json();
+        assert_eq!(stock_json.matches(&field).count(), 1, "{stock_json}");
+        assert_eq!(
+            stock_json.replacen(&field, "", 1).replacen(
+                r#""underlying":"RELIANCE""#,
+                r#""underlying":"NIFTY""#,
+                1
+            ),
+            index_json,
+            "the note is the only thing a stock's run adds"
+        );
+        let whole = over(file(VERSION, &[record(7, false, 34_302)]), 10).to_json();
+        assert!(!whole.contains("equity_note"), "{whole}");
     }
 
     #[test]

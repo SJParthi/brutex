@@ -1670,7 +1670,10 @@ pub const DAILY_INTEGRITY_NOTE: &str = "UNVERIFIED -- committed store records we
 pub const EXACT_MINUTE_INTEGRITY_NOTE: &str = "UNVERIFIED -- exact stored 1min records were read, but no independent checksum-scrub receipt was supplied";
 
 /// Stored one-day evidence ready for the causal anchored evaluator.
-#[derive(Clone, Debug)]
+///
+/// `PartialEq` so a test can say two loads are the same context in every
+/// field, and not only in the fields it thought to name (AF-19).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DailyContext {
     /// Every one-day OHLCV record that can influence the requested signal span.
     pub bars: Vec<Candle>,
@@ -1685,7 +1688,9 @@ pub struct DailyContext {
 }
 
 /// Same-feed, same-instrument stored one-minute evidence for `GapFib`.
-#[derive(Clone, Debug)]
+///
+/// `PartialEq` for the reason [`DailyContext`] gives.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExactMinuteContext {
     /// Complete one-minute context, including the preceding warm-up month.
     pub bars: Vec<Candle>,
