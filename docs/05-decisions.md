@@ -42564,3 +42564,159 @@ run again after the move, with the same failures.
     test fails ("`run` ends by returning `run_under`'s page as it is").
 
 Invariants AF-38 and AF-39 are corrected in place again.
+
+**Fourth correction, 2026-09-24: what a fourth review upheld.** Corrected
+here, not in the text above.
+
+1. *The stamp never kept `run` from a test.* The first correction's item 4
+   said `pool::run` "checks the commit stamp first and which no test
+   reaches". The second correction's item 3 said no test reached `run`
+   "because it checks the commit stamp first". The third correction's item 1
+   said "No test build passes `run`'s stamp check", and its item 5 added a
+   `docs/06-limits.md` bullet on that premise. The premise was false. The
+   build script stamps a tree whose index and working tree equal HEAD, and a
+   clean checkout, CI's among them, is one; only a tree that differs from
+   HEAD builds unstamped. The reviews found the commit in a clean build's
+   test binary and drove `pool` on a generated store to a whole page
+   (measured by the reviews). What keeps an in-process test off a surface
+   with an instrument on it is the store root, which `run` and pass 1's
+   `one_rung` read from the environment, and the crate already drives public
+   commands past that by running the test binary again as a child with
+   `BRUTEX_STORE` set. With `pool::pool` dropping `run`'s page, the whole
+   `cli` library suite stayed green (measured by the reviews). AF-39, the
+   `docs/06-limits.md` bullet, the docs of `run_under` and `head_under`, and
+   the docs of three `pool` tests repeated the claim, and each is corrected
+   in place.
+   - *Driven.* `the_pool_verb_prints_its_whole_page_on_a_generated_store`
+     runs itself again as a child. The child's environment names a generated
+     store and carries no other `BRUTEX_` variable. It dispatches `pool`
+     twice through `crate::dispatch`, which goes through `pool_arm`,
+     `pool::pool`, `run` and `run_under`:
+     - At `5min` and 200000 ppm over the generated NIFTY month, the page
+       starts with `head_under`'s head. Then comes pass 1's table, with
+       NIFTY's 600 bars, no refused row and no unread frontier, then pass 2's
+       table over one instrument with none unpriced, and the page ends with
+       the in-sample warning.
+     - At `60min`, over an unreadable `NSE/CASH/RELIANCE` month beside
+       `BSE/CASH/RELIANCE`, the page is exactly three things: the head
+       naming the BSE directory, pass 1's table refusing RELIANCE for its
+       unreadable month, and the nothing-to-pool line.
+
+     Both pages exit OK and neither is a refusal. In an unstamped build the
+     child requires the stamp refusal, MISUSED and no ledger. The priced page
+     names its support rather than `auto`, whose probe has a ceiling that
+     scales with the machine's core count (read from the source), so that
+     page's support does not depend on the machine it runs on.
+   - *Still read from the source.* A mutation run builds a tree that is not
+     HEAD, so it is unstamped, and there the driven test takes its
+     stamp-refusal branch. The third correction's source reads stay, and one
+     is added (item 2).
+   - *The third correction's alternative stays rejected.* Giving `one_rung`
+     the root is still not taken. Its reason now is that no test needs it:
+     the verb is reached from a child process with `one_rung` unchanged.
+2. *The last two links: `pool::pool` and `pool_arm`.* The third correction
+   pinned `run` and stopped there. Two links come after it:
+   - `pool::pool` turns `run`'s result into text.
+   - `lib.rs`'s `pool_arm` appends that text to what the binary prints.
+
+   `the_pool_verb_and_its_arm_print_runs_page_as_it_is` reads both bodies,
+   so a mutation run is held too:
+   - `pool::pool`'s whole text is pinned.
+   - `pool_arm`'s arm that runs the verb is pinned line for line.
+   - Every other mention of `out` in `pool_arm` must be its parameter or a
+     `refuse(out, ..)`.
+
+   AF-39's heading describes the page `cli pool` prints, and a test now
+   reaches that page.
+3. *`clipped`'s order was not under test.* The third correction's item 2
+   said `stored::clipped` escapes what it keeps "after the cut", and
+   `clipped`'s doc rests its cost on that order: the escape walks at most
+   the 64 characters kept. The test's one long input, 64 `N`s and a
+   newline, reads the same in either order, and escaping the whole word
+   before the cut passed every test (measured by the reviews).
+   `a_refused_word_is_quoted_escaped_on_one_line` now also quotes 63 `N`s
+   and a newline, and 63 `N`s, a newline and an `N`, through both
+   `swept_index` and `rung`. Kept and then escaped, each quotes the newline
+   whole as `\n`; escaped and then kept, the cut leaves a lone backslash.
+   `clipped` itself did not change.
+4. *Four sentences said more than holds about the escape.* The third
+   correction's item 2 said "The fix is in the one place a refusal quotes a
+   word". `docs/06-limits.md` said `stored::clipped` is used by "every
+   refusal that quotes a word or a directory name", `misfiled`'s doc said
+   "for every word a refusal quotes", and the doc of
+   `a_refused_word_is_quoted_escaped_on_one_line` said "every refusal that
+   quotes a caller's word or a directory's name is one line". `parse_vendor`,
+   `swept_rung` and `pool_arm`'s rung refusal quote the word they are handed
+   raw (read from the source). A feed word carrying a newline, typed to
+   `pool` or `sweep-all`, was refused as the whole command, across two lines
+   (measured by the review). Such a refusal is the command's own, and
+   forges no completed run. `misfiled`'s doc, the test's doc and the
+   `docs/06-limits.md` sentence are narrowed in place to what quotes through
+   `clipped`: `misfiled`'s three names and the word `swept_index` and `rung`
+   refuse. `batch::one`'s row label escapes the symbol itself. The third
+   correction's sentence is superseded here. A new `docs/06-limits.md`
+   bullet names the three raw refusals, and says that whether any of their
+   callers hands them a word that was not typed was not examined.
+   - *What a reader sees change, restated.* The third correction's item 2
+     named a control character, a quote and a backslash. `escape_debug`
+     escapes more than those: a format character such as U+200B, a
+     separator such as U+00A0 or U+2028, and a combining mark that opens the
+     word. A combining mark inside a word prints as itself. The test now
+     quotes each of those four characters, and a word with a combining
+     mark inside it. These cases pin behaviour that already held, and no
+     reverted fix makes them fail.
+
+**Tests, and what each is proven against (fourth correction).** The set is
+the 32 tests the filter `pool:: refused_word misfiled symbol_directory
+every_spelling enormous` selects, except the unstamped `pool_arm` run, which
+ran the 23 `pool::` tests. Unstamped runs used this tree with the change
+uncommitted: the first printed the persistence-disabled warning, and in the
+second the child failed on its stamp-refusal branch. Stamped runs used a
+throwaway worktree: the change was committed there on a detached HEAD,
+and each regression was committed on top of it, one per build, so every
+build was of a tree equal to its HEAD. No stamped build printed that
+warning, and the first one's test binary held its commit. After each
+unstamped run the edited files were restored from copies.
+
+- *No regression, stamped:* all 32 pass. The driven test, run alone three
+  times, took 0.88 s, 0.94 s and 0.91 s of wall time. Its support is
+  200000 ppm: in a stamped probe build that was never committed on this
+  branch, the same page took 7.9 s at 50000 ppm and 0.69 s at 200000 ppm,
+  measured once each.
+- *`pool::pool`'s `Ok(text) => text` returning `String::new()`:*
+  - Stamped: `the_pool_verb_and_its_arm_print_runs_page_as_it_is` fails at
+    its pin of `pool`, and
+    `the_pool_verb_prints_its_whole_page_on_a_generated_store` fails ("the
+    page opens with `head_under`'s head").
+  - Unstamped: the pin fails and the driven test passes, on its
+    stamp-refusal branch. That gap is why the pin exists.
+- *`pool_arm` without `out.push_str(&text);`:* both tests fail, stamped and
+  unstamped. Unstamped, the child finds an empty page where the stamp
+  refusal should be. A first stamped attempt at this regression matched the
+  same line in `elite_arm`, which comes first in `lib.rs`, and left all 32
+  green; it was rerun on `pool_arm`'s line.
+- *`run` ending with `.map(|_| opening(vendor_word, rung, from, to,
+  support_ppm, &[]))`, the bare opening in place of `run_under`'s page:*
+  stamped, `the_pool_verb_hands_on_run_unders_page_untouched` fails ("`run`
+  ends by returning `run_under`'s page as it is"), and so does the driven
+  test ("the page opens with `head_under`'s head").
+- *`run_under`'s empty-union branch returning a fresh "nothing to pool"
+  string:* stamped, `the_pool_page_is_its_head_and_then_only_appends` fails
+  ("every `Ok(` after the head returns `out` itself"), and so does the
+  driven test ("pass 1 refuses RELIANCE").
+- *`clipped` escaping before it cuts
+  (`word.escape_debug().take(KEEP)`):* unstamped,
+  `a_refused_word_is_quoted_escaped_on_one_line` fails on 63 `N`s and a
+  newline, which came back quoted with a lone backslash. This ran in the
+  same build as the unstamped `pool::pool` regression; the two touch
+  different tests, and those two tests were the build's only failures.
+
+The whole `cli` suite then ran stamped in the throwaway on the change with
+no regression: the library's 1469 tests passed with 1 ignored, and the
+three integration files' 38 tests and the one doc test passed. After it,
+the driven test's child was split into two helpers, one per page, for
+clippy's line limit; no assertion changed. On the split, stamped, the 32
+pass, the driven test alone took 0.74 s, 0.75 s and 0.77 s, and the
+`pool::pool` regression fails the same two tests with the same message.
+
+Invariant AF-39 is corrected in place again.

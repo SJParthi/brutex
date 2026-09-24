@@ -244,18 +244,24 @@ fn run(
 /// `the_pool_page_is_its_head_and_then_only_appends` drives this on a scratch
 /// store and reads that shape from the source: every mention of `out` after
 /// the head is `writeln!(out, ..)`, `&mut out` handed to a renderer, or
-/// `Ok(out)`, and every return is `out` itself. [`run`] itself stays out of
-/// reach of a test for the reason it always was -- the stamp check comes
-/// first -- so `the_pool_verb_hands_on_run_unders_page_untouched` reads its
-/// body: it ends by returning this function's result as it is, and builds no
-/// page of its own by any phrasing that test lists.
+/// `Ok(out)`, and every return is `out` itself.
+/// `the_pool_verb_hands_on_run_unders_page_untouched` reads [`run`]'s body:
+/// it ends by returning this function's result as it is, and builds no page
+/// of its own by any phrasing that test lists.
 ///
 /// **The root is supplied for the head, the union and pass 2, not pass 1.**
 /// Pass 1 screens each instrument through `crate::one_rung`, exactly as
-/// `range-rung` does, and that reads the store root from the environment. A
-/// test therefore drives this function on a surface that is empty, where it
-/// returns after the head; a surface with an instrument on it is reached from
-/// here by no test.
+/// `range-rung` does, and that reads the store root from the environment. An
+/// in-process test therefore drives this function only on a surface that is
+/// empty, where it returns after the head. A surface with an instrument on it
+/// is driven through the verb itself, by
+/// `the_pool_verb_prints_its_whole_page_on_a_generated_store`, from a child
+/// process whose environment names a generated store. That reaches this
+/// function only in a stamped build -- one of a tree equal to HEAD, as a
+/// clean checkout is -- because [`run`] checks the stamp first and an
+/// unstamped build refuses there. The stamp never kept a clean build's test
+/// out of [`run`]; the store root read from the environment is what keeps an
+/// in-process test off a non-empty surface (D-0696).
 fn run_under(
     root: &std::path::Path,
     vendor: brutex_core::vendor::Vendor,
@@ -350,13 +356,12 @@ fn run_under(
 /// environment. D-0696.
 ///
 /// The opening, the directories [`not_on_the_surface`] names, and the
-/// empty-surface line. They were written in [`run`], which checks the commit
-/// stamp first and so no test reaches, and the tests drove
-/// [`surface_under`] and [`not_on_the_surface`] one at a time: deleting the
-/// one line that put NOT ON THE SURFACE on the page left every test green,
-/// and the page dropped a misfiled holding with no word. Split out for the
-/// reason `batch::sweep_under` is, so a test drives the page's own head on a
-/// scratch store.
+/// empty-surface line. They were written in [`run`], which no test then
+/// drove, and the tests drove [`surface_under`] and [`not_on_the_surface`]
+/// one at a time: deleting the one line that put NOT ON THE SURFACE on the
+/// page left every test green, and the page dropped a misfiled holding with
+/// no word. Split out for the reason `batch::sweep_under` is, so a test
+/// drives the page's own head on a scratch store.
 fn head_under(
     root: &std::path::Path,
     vendor_word: &str,
@@ -1395,9 +1400,9 @@ mod tests {
     ///
     /// The test above renders the block alone, and the surface tests list it
     /// alone. The line that put the block on the page sat in `run`, which no
-    /// test reaches without a verified commit stamp, so deleting it left every
-    /// test green while the page dropped a misfiled holding with no word. This
-    /// drives `head_under`, the page's head as `run` prints it.
+    /// test then drove, so deleting it left every test green while the page
+    /// dropped a misfiled holding with no word. This drives `head_under`, the
+    /// page's head as `run` prints it.
     #[test]
     fn the_pool_page_names_each_directory_it_did_not_read() {
         let head = |tag: &str, dirs: &[&str]| {
@@ -1485,19 +1490,21 @@ mod tests {
     /// **The page `pool` prints IS its head, and every later line is
     /// appended.** D-0696.
     ///
-    /// The test above drives `head_under`, and `run` -- which no test reaches,
-    /// because it checks the commit stamp first -- was what put that head on
-    /// the page. The review replaced `run`'s `out` with the bare opening after
-    /// `head_under` returned, dropping the NOT ON THE SURFACE block from the
-    /// real page, and every test stayed green. Everything after the stamp,
-    /// feed, rung and root checks is now `run_under`, which this drives on a
-    /// scratch store whose surface is empty, where it returns after the head.
-    /// A surface with an instrument on it is screened through `one_rung`,
-    /// which reads the root from the environment, so that path is held here by
-    /// the shape of the source instead: `out` is bound from `head_under` once,
-    /// the page writes neither the opening nor the block itself, every `Ok(`
-    /// and every `return` after the head returns `out`, and the body's last
-    /// value is `Ok(out)`.
+    /// The test above drives `head_under`, and `run` -- which no test then
+    /// drove -- was what put that head on the page. The review replaced
+    /// `run`'s `out` with the bare opening after `head_under` returned,
+    /// dropping the NOT ON THE SURFACE block from the real page, and every
+    /// test stayed green. Everything after the stamp, feed, rung and root
+    /// checks is now `run_under`, which this drives on a scratch store whose
+    /// surface is empty, where it returns after the head. A surface with an
+    /// instrument on it is screened through `one_rung`, which reads the root
+    /// from the environment, so no in-process test drives that path.
+    /// `the_pool_verb_prints_its_whole_page_on_a_generated_store` drives it
+    /// from a child process, in a stamped build only, and here it is held by
+    /// the shape of the source in every build: `out` is bound from
+    /// `head_under` once, the page writes neither the opening nor the block
+    /// itself, every `Ok(` and every `return` after the head returns `out`,
+    /// and the body's last value is `Ok(out)`.
     ///
     /// **Every mention of `out` after the head is an append or the return.**
     /// A list of refused rewrites missed one it did not name --
@@ -1689,9 +1696,12 @@ mod tests {
 
     /// **`run` hands on `run_under`'s page untouched.** D-0696.
     ///
-    /// `run` checks the commit stamp before anything else, so no test build
-    /// reaches it. The review made it return the bare opening in place of
-    /// `run_under`'s page, and every test passed. Its body is read instead:
+    /// No test drove `run` when the review made it return the bare opening in
+    /// place of `run_under`'s page, and every test passed.
+    /// `the_pool_verb_prints_its_whole_page_on_a_generated_store` now drives
+    /// it, but only in a stamped build: `run` checks the commit stamp before
+    /// anything else, and a build of a tree that is not HEAD -- a mutation run
+    /// among them -- refuses there. So its body is read here, in every build:
     /// the checks, and then `run_under`'s result as its tail and its only
     /// page. The tail is pinned exactly and `run_under` is called once; that
     /// nothing else in the body builds or returns a page is a list of refused
@@ -1735,6 +1745,291 @@ mod tests {
                 "`{other}` in `run`: its page is `run_under`'s alone"
             );
         }
+    }
+
+    /// **`pool` and its dispatch arm print `run`'s page as it is.** D-0696.
+    ///
+    /// The test above stops at `run`. Two links sit between it and what the
+    /// binary prints: `pool` turns `run`'s result into text, and `lib.rs`'s
+    /// `pool_arm` appends that text to the output. With `pool`'s
+    /// `Ok(text) => text` returning an empty string, the whole `cli` library
+    /// suite stayed green (measured by the review).
+    /// `the_pool_verb_prints_its_whole_page_on_a_generated_store` catches that
+    /// in a stamped build. A build of a tree that is not HEAD, which is what a
+    /// mutation run builds, takes that test's stamp-refusal branch, and there
+    /// `pool`'s `Ok` arm is never reached. So both bodies are read here as
+    /// well, in every build: `pool` is pinned whole, `pool_arm`'s arm that runs
+    /// the verb is pinned line for line, and every other mention of `out` in
+    /// `pool_arm` is its parameter or a refusal.
+    #[test]
+    fn the_pool_verb_and_its_arm_print_runs_page_as_it_is() {
+        let body_of = |source: &'static str, head: &str| {
+            let from = source.find(head).expect("the function");
+            source
+                .get(from..)
+                .and_then(|rest| rest.find("\n}\n").and_then(|to| rest.get(..to + 2)))
+                .expect("its body")
+        };
+        let pool = body_of(include_str!("pool.rs"), "\npub fn pool(");
+        assert_eq!(
+            pool,
+            concat!(
+                "\npub fn pool(\n",
+                "    vendor_word: &str,\n",
+                "    rung: &'static str,\n",
+                "    from: (u16, u8),\n",
+                "    to: (u16, u8),\n",
+                "    support_ppm: Option<u64>,\n",
+                ") -> String {\n",
+                "    match run(vendor_word, rung, from, to, support_ppm) {\n",
+                "        Ok(text) => text,\n",
+                "        Err(why) => format!(\"refused: {why}\\n\"),\n",
+                "    }\n",
+                "}",
+            ),
+            "`pool` prints `run`'s page, or `run`'s refusal, and nothing else"
+        );
+
+        let arm = body_of(include_str!("lib.rs"), "\nfn pool_arm(");
+        assert!(
+            arm.contains(concat!(
+                "        (Ok(fy), Ok(fm), Ok(ty), Ok(tm), Ok(h)) => {\n",
+                "            let text = pool::pool(vendor, known, (fy, fm), (ty, tm), h);\n",
+                "            let refused = carries_refusal(&text);\n",
+                "            out.push_str(&text);\n",
+                "            if refused { MISUSED } else { OK }\n",
+                "        }\n",
+            )),
+            "`pool_arm` appends `pool`'s page whole, and exits on what it says:\n{arm}"
+        );
+        assert_eq!(arm.matches("pool::pool(").count(), 1, "{arm}");
+        // EVERY OTHER MENTION OF THE OUTPUT IS A REFUSAL. The arm above could
+        // append the page and a later line clear it, so each mention of the
+        // name is the parameter, the one append, or `refuse(out, ..)`.
+        let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+        let (mut appends, mut refusals) = (0_usize, 0_usize);
+        for (at, _) in arm.match_indices("out") {
+            let lead = arm.get(..at).unwrap_or_default();
+            let tail = arm.get(at + "out".len()..).unwrap_or_default();
+            if lead.ends_with(ident) || tail.starts_with(ident) {
+                continue;
+            }
+            let parameter = tail.starts_with(": &mut String,");
+            let append = tail.starts_with(".push_str(&text);");
+            let refusal = lead.trim_end().ends_with("refuse(") && tail.starts_with(',');
+            assert!(
+                parameter || append || refusal,
+                "`{}out{}` in `pool_arm` neither appends the page nor refuses",
+                lead.rsplit('\n').next().unwrap_or_default().trim_start(),
+                tail.split('\n').next().unwrap_or_default()
+            );
+            appends += usize::from(append);
+            refusals += usize::from(refusal);
+        }
+        assert_eq!(appends, 1, "the page is appended once:\n{arm}");
+        assert!(refusals >= 3, "premise: the refusals were read:\n{arm}");
+    }
+
+    /// **The `pool` verb prints its whole page, driven end to end on a
+    /// generated store.** D-0696.
+    ///
+    /// Every test above drives one piece of the page (the head, `run_under`
+    /// on an empty surface, each renderer) or reads the source. The reason
+    /// given for driving no more, that no test build passes `run`'s
+    /// commit-stamp check, was false: the build script stamps a tree equal to
+    /// HEAD, and a clean checkout, CI's among them, is one. What keeps an
+    /// in-process test off a surface with an instrument on it is the store
+    /// root, which `run` and pass 1's `one_rung` read from the environment.
+    /// So this test runs itself again as a child whose environment names a
+    /// generated store and carries no other `BRUTEX_` variable, as
+    /// `public_generated_probe_and_screen_agree_with_durable_results` runs
+    /// itself. The child dispatches `pool` through `crate::dispatch`, the path
+    /// the binary takes through `pool_arm`, `pool`, `run` and `run_under`,
+    /// twice:
+    ///
+    /// * at `5min` over the generated NIFTY month, at a fixed support, where
+    ///   pass 1 screens NIFTY and pass 2 prices the union on it: the page is
+    ///   `head_under`'s head, then pass 1's table with NIFTY's 600 bars, then
+    ///   pass 2's table over that one instrument, ending with the in-sample
+    ///   warning;
+    /// * at `60min` over an unreadable `NSE/CASH/RELIANCE` month beside
+    ///   `BSE/CASH/RELIANCE`: the page is exactly the head, which names the
+    ///   BSE directory, then pass 1's table refusing RELIANCE, then the
+    ///   nothing-to-pool line.
+    ///
+    /// Both exit OK, and neither is a refusal. An unstamped build refuses both
+    /// before a bar is read, and there the child requires the stamp refusal
+    /// and that nothing was recorded.
+    #[test]
+    fn the_pool_verb_prints_its_whole_page_on_a_generated_store()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const CHILD: &str = "BRUTEX_TEST_POOL_VERB_PAGE";
+        if std::env::var_os(CHILD).is_some() {
+            return pool_pages_on(&crate::store_root()?);
+        }
+        crate::audited_stored::with_warmed_store(|root| {
+            // RELIANCE's 60min month at its own path, unreadable, and the same
+            // symbol under BSE, which the page names and does not read.
+            for dir in ["NSE/CASH/RELIANCE", "BSE/CASH/RELIANCE"] {
+                let at = root.join(format!("bars/zerodha/{dir}/60min"));
+                std::fs::create_dir_all(&at)?;
+                std::fs::write(at.join("2026-07.bin"), b"")?;
+            }
+            let mut child = std::process::Command::new(std::env::current_exe()?);
+            child.args([
+                "--exact",
+                "pool::tests::the_pool_verb_prints_its_whole_page_on_a_generated_store",
+                "--nocapture",
+                "--test-threads=1",
+            ]);
+            // NO KNOB FROM THE SHELL THAT RAN THE SUITE: the child's pages
+            // depend on the generated store alone.
+            for (name, _) in std::env::vars_os() {
+                if name.to_string_lossy().starts_with("BRUTEX_") {
+                    child.env_remove(name);
+                }
+            }
+            let child = child
+                .env(CHILD, "generated")
+                .env("BRUTEX_STORE", root)
+                .env("BRUTEX_LOG_DIR", root.join("logs"))
+                .output()?;
+            assert!(
+                child.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&child.stdout),
+                String::from_utf8_lossy(&child.stderr)
+            );
+            assert!(String::from_utf8_lossy(&child.stdout).contains("1 passed"));
+            Ok(())
+        })
+    }
+
+    /// The child of `the_pool_verb_prints_its_whole_page_on_a_generated_store`,
+    /// on the generated store its environment names.
+    fn pool_pages_on(root: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+        // THE HEADS, BEFORE EITHER RUN: the head is what the page says before
+        // a bar is read.
+        let priced_head =
+            super::head_under(root, "zerodha", "5min", (2025, 5), (2025, 5), Some(200_000))?;
+        let empty_head = super::head_under(root, "zerodha", "60min", (2026, 7), (2026, 7), None)?;
+        let dispatch = |words: &[&str]| {
+            let args: Vec<String> = words.iter().map(ToString::to_string).collect();
+            let mut page = String::new();
+            let status = crate::dispatch(&args, &mut page);
+            (status, page)
+        };
+        let priced = dispatch(&[
+            "pool", "zerodha", "5min", "2025", "5", "2025", "5", "200000",
+        ]);
+        let emptied = dispatch(&["pool", "zerodha", "60min", "2026", "7", "2026", "7", "auto"]);
+        if crate::commit_stamp().is_none() {
+            for (status, page) in [&priced, &emptied] {
+                assert_eq!(*status, crate::MISUSED, "{page}");
+                assert!(
+                    page.starts_with("refused: this build carries no verified commit stamp"),
+                    "{page}"
+                );
+                assert!(!page.contains(crate::STORED_PROVENANCE), "{page}");
+            }
+            assert!(
+                !crate::results::Results::path(root).exists(),
+                "an unstamped pool records nothing"
+            );
+            return Ok(());
+        }
+        both_passes_over_nifty(&priced_head, priced.0, &priced.1)?;
+        the_empty_union_beside_bse(&empty_head, emptied.0, &emptied.1)
+    }
+
+    /// BOTH PASSES, over the generated NIFTY month: the head, pass 1's table
+    /// with NIFTY on its 600 bars, and pass 2's table over that instrument.
+    fn both_passes_over_nifty(
+        (head, surface): &(String, Vec<String>),
+        status: u8,
+        page: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(surface, &vec!["NIFTY".to_owned()], "premise: {head}");
+        assert!(
+            page.starts_with(head.as_str()),
+            "the page opens with `head_under`'s head:\n{page}"
+        );
+        let rest = page.get(head.len()..).unwrap_or_default();
+        let (pass_1, pass_2) = rest
+            .split_once("\n  PASS 2 -- POOLED across 1 instrument(s), ")
+            .ok_or_else(|| format!("pass 2 pools the one instrument pass 1 screened:\n{rest}"))?;
+        assert!(
+            pass_1.starts_with("\n  PASS 1 -- PER SYMBOL, each on its own bars\n"),
+            "pass 1 follows the head:\n{rest}"
+        );
+        assert!(
+            pass_1
+                .lines()
+                .any(|line| line.starts_with(&format!("  {:<14}{:>9}", "NIFTY", 600))),
+            "pass 1 screened NIFTY's 600 generated five-minute bars:\n{pass_1}"
+        );
+        assert!(
+            !pass_1.contains("REFUSED") && !pass_1.contains("NOT READ"),
+            "pass 1 refused nothing and its frontier was read:\n{pass_1}"
+        );
+        assert!(
+            !pass_2.contains("NOT PRICED"),
+            "pass 2 priced NIFTY:\n{pass_2}"
+        );
+        assert!(
+            pass_2.ends_with(crate::IN_SAMPLE_WARNING),
+            "the page ends with pass 2's table and its warning:\n{rest}"
+        );
+        assert!(!crate::carries_refusal(page), "{page}");
+        assert_eq!(status, crate::OK, "{page}");
+        Ok(())
+    }
+
+    /// THE EMPTY UNION, over one unreadable month beside a BSE directory: the
+    /// head naming that directory, pass 1's table refusing RELIANCE, and the
+    /// nothing-to-pool line, and nothing else.
+    fn the_empty_union_beside_bse(
+        (head, surface): &(String, Vec<String>),
+        status: u8,
+        page: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(surface, &vec!["RELIANCE".to_owned()], "premise: {head}");
+        assert!(
+            head.contains(&named("BSE/CASH/RELIANCE", "RELIANCE")),
+            "premise: the head names the BSE directory:\n{head}"
+        );
+        let row = format!("  {:<14}REFUSED: ", "RELIANCE");
+        let why = page
+            .lines()
+            .find_map(|line| line.strip_prefix(row.as_str()))
+            .ok_or_else(|| format!("pass 1 refuses RELIANCE:\n{page}"))?;
+        assert!(
+            why.contains("no header slot survived"),
+            "premise: pass 1 read the unreadable month and refused it for that: {why}"
+        );
+        let mut expected = head.clone();
+        super::render_per_symbol(
+            &mut expected,
+            &[super::Screened {
+                symbol: "RELIANCE".to_owned(),
+                outcome: Err(why.to_owned()),
+            }],
+        );
+        expected.push_str(
+            "\n  POOLED: nothing to pool. No screened instrument left a frontier row, so the \
+             union of top combinations is empty.\n",
+        );
+        assert_eq!(
+            page, expected,
+            "the head, pass 1's refused row and the empty union, and nothing else"
+        );
+        assert!(!crate::carries_refusal(page), "{page}");
+        assert_eq!(
+            status,
+            crate::OK,
+            "an instrument refused in pass 1 is a row, not a refusal of the pool"
+        );
+        Ok(())
     }
 
     /// **The pool quotes no charge rate.** `CLAUDE.md` §3 rule 1: every claim

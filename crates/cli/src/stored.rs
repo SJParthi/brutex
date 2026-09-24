@@ -1954,8 +1954,9 @@ pub(crate) fn swept_index(underlying: &str) -> Result<InstrumentKey, Refusal> {
 /// without a quote or backslash prints exactly as it did. The escape was first
 /// written here alone, and the symbol directory -- which reaches
 /// [`swept_index`]'s refusal and `sweep-all`'s row label as a word -- still
-/// forged a refusal of the run; it now lives in [`clipped`], for every word a
-/// refusal quotes (D-0696).
+/// forged a refusal of the run; it now lives in [`clipped`], for every word
+/// quoted through it: this function's three names, and the word
+/// [`swept_index`] and [`rung`] refuse (D-0696).
 ///
 /// UNVERIFIED performance: no bench times this. Read from the source, it is
 /// three comparisons of strings no longer than a path segment, once per
@@ -5631,9 +5632,12 @@ mod tests {
     /// held month by its symbol directory's name -- so a directory named
     /// `X\nrefused: forged` put `refused: forged` at column zero of a completed
     /// run (measured by the review). [`clipped`] now escapes what it keeps, so
-    /// every refusal that quotes a caller's word or a directory's name is one
-    /// line, and a word of printable characters with no quote or backslash is
-    /// quoted exactly as before.
+    /// the refusals that quote through it -- `swept_index`'s, `rung`'s and
+    /// `misfiled`'s -- are one line, and a word of printable characters with no
+    /// quote or backslash is quoted exactly as before. Not every refusal in
+    /// the crate quotes through it: `parse_vendor`, `swept_rung` and
+    /// `pool_arm`'s rung refusal still quote the word they are handed raw, and
+    /// `docs/06-limits.md` says what that reaches (D-0696).
     #[test]
     fn a_refused_word_is_quoted_escaped_on_one_line() {
         for (word, shown) in [
@@ -5667,16 +5671,54 @@ mod tests {
                 "{shown}: {rung_why:?}"
             );
         }
-        // Clipped first and escaped after: the escape is of what is kept, and
-        // the mark still says that something was cut.
+        // The mark still says that something was cut: a newline past the
+        // sixty-fourth character is cut, not quoted.
         let long = format!("{}\n", "N".repeat(64));
         let why = swept_index(&long).expect_err("no instrument");
         assert!(
             why.starts_with(&format!("`{}…` is not", "N".repeat(64))),
             "{why:?}"
         );
-        // Printable words are quoted as they were typed.
-        for word in ["NIFTYX", "1hour", "RELIANCE-EQ", "niftyé"] {
+        // CLIPPED FIRST AND ESCAPED AFTER. The case above reads the same in
+        // either order, so it did not hold the order `clipped`'s cost rests on:
+        // escaping the whole word and then clipping walks all of it, and
+        // passed every test (measured by the review, D-0696). A newline AT the
+        // sixty-fourth character tells the two apart. Kept and then escaped,
+        // it is quoted whole as `\n`; escaped and then clipped, the cut lands
+        // inside its escape and leaves a lone backslash.
+        for (word, shown) in [
+            (
+                format!("{}\n", "N".repeat(63)),
+                format!("`{}\\n` is not", "N".repeat(63)),
+            ),
+            (
+                format!("{}\nN", "N".repeat(63)),
+                format!("`{}\\n…` is not", "N".repeat(63)),
+            ),
+        ] {
+            let why = swept_index(&word).expect_err("no instrument");
+            assert!(why.starts_with(&shown), "{shown}: {why:?}");
+            let rung_why = rung(&word).expect_err("no rung");
+            assert!(rung_why.starts_with(&shown), "{shown}: {rung_why:?}");
+        }
+        // Not only control characters: `escape_debug` also escapes a format or
+        // separator character, and a combining mark that opens the word, so
+        // none of them is quoted as itself.
+        for (word, shown) in [
+            ("NIFTY\u{200b}", "`NIFTY\\u{200b}`"),
+            ("NIFTY\u{a0}X", "`NIFTY\\u{a0}X`"),
+            ("NIFTY\u{2028}refused", "`NIFTY\\u{2028}refused`"),
+            ("\u{301}NIFTY", "`\\u{301}NIFTY`"),
+        ] {
+            let why = swept_index(word).expect_err("no instrument");
+            assert!(
+                why.starts_with(&format!("{shown} is not")),
+                "{shown}: {why:?}"
+            );
+        }
+        // Printable words are quoted as they were typed, a combining mark
+        // inside one among them.
+        for word in ["NIFTYX", "1hour", "RELIANCE-EQ", "niftyé", "N\u{301}IFTY"] {
             let why = swept_index(word).expect_err("no instrument");
             assert!(why.starts_with(&format!("`{word}` is not")), "{why:?}");
         }

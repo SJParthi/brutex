@@ -9243,9 +9243,17 @@ by `File::unlock`. What that does not cover, stated rather than implied away:
   holding the catalog lists, paid once per `pool` or `sweep-all` run and never
   per bar or per candidate. A holding it names as misfiled also has each of
   its three names clipped to at most 64 characters and escaped, through
-  `stored::clipped`, which every refusal that quotes a word or a directory
-  name now uses. `sweep-all` also escapes each held month's symbol directory
-  once for its row label. No bench times any of it.
+  `stored::clipped`, which `stored::swept_index`'s and `stored::rung`'s
+  refusals quote through as well. `sweep-all` also escapes each held month's
+  symbol directory once for its row label. No bench times any of it.
+- **Not every refusal quotes through `stored::clipped`.** `parse_vendor`,
+  `swept_rung` and `pool_arm`'s rung refusal still quote the word they are
+  handed raw, read from the source. A feed word carrying a newline, typed to
+  `pool` or to `sweep-all`, was refused as the whole command, and the refusal
+  was printed across two lines (measured by the review). That refusal is the
+  command's own and forges no completed run. Whether any of their callers
+  hands them a word that was not typed, such as a directory's name, was not
+  examined.
 
 ## Screen-budget refusals and census faults on the api routes — D-0695, 24 September 2026
 
@@ -9780,10 +9788,23 @@ The text above is kept as it was written.
   is subtracted". The lead-in words around them are pinned per copy by the
   same test. That test holds today's words; it does not read what a new
   clause means.
-- **The `pool` page past its head is read from the source, not driven.** No
-  test build passes `pool::run`'s commit-stamp check, and a surface with an
+- **The `pool` page past its head is driven only in a stamped build
+  (correction, 24 September 2026).** This bullet said no test build passes
+  `pool::run`'s commit-stamp check. That was false: the build script stamps a
+  tree equal to HEAD, and a clean checkout is one. A surface with an
   instrument on it is screened through `one_rung`, which reads the store root
-  from the environment. So the tests read `run`'s body and `run_under`'s: every
-  mention of the page after its head is an append or its return, and `run`
-  returns `run_under`'s page as its tail. The two renderers that append to it
-  are driven on one input each.
+  from the environment, so the verb is driven from a child process whose
+  environment names a generated store: `pool` dispatched through
+  `crate::dispatch`, the command table `cli::run_durable` reaches from the
+  binary, once over the generated NIFTY month through both passes, and once
+  over an unreadable share month beside a BSE directory. The lease and audit
+  `run_durable` wraps around that table are not on this path. A build of any
+  other tree -- an uncommitted edit, or a mutation run -- is unstamped and
+  refuses both before a bar is read. There the page past its head is held only
+  by reading the source: `pool_arm`'s arm and `pool::pool` are pinned, `run`
+  returns `run_under`'s page as its tail, and every mention of the page in
+  `run_under` after its head is an append or its return. The two renderers
+  that append to it are driven on one input each. No test pools two
+  instruments, or a cash equity, end to end: the driven pages are one index
+  and one refused share, and `fold` over two instruments is driven only
+  directly.
