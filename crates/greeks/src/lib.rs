@@ -66,7 +66,7 @@
 //! function every evaluation passes through, by
 //! `greeks::solver::the_iteration_count_never_exceeds_the_arithmetic_bound` and
 //! `greeks::solver::the_reported_cost_is_every_model_evaluation`. See
-//! [`solver`] and `docs/06-limits.md` §18.
+//! [`solver`] and `docs/06-limits.md` §29.
 //!
 //! Named as tests rather than as an invariant row **because of a collision that
 //! has since been fixed, and the reasoning is kept because it is what made the
@@ -97,7 +97,7 @@
 //! `libm` crate that `wasm32` links: 140 of 1,344 solved volatilities differ,
 //! worst `4.22e-14` relative. **A greek or an implied volatility from this
 //! crate must therefore never enter a content hash or be compared byte for
-//! byte across machines.** `docs/06-limits.md` §18 carries the measurement.
+//! byte across machines.** `docs/06-limits.md` §29 carries the measurement.
 //!
 //! ```
 //! use greeks::{Contract, OptionKind};

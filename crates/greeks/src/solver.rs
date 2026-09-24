@@ -109,7 +109,7 @@
 //! estimate and it cannot see that the computed price is not strictly
 //! monotone in volatility. Passing this check does not prove the answer is
 //! good to `MAX_RELATIVE_UNCERTAINTY`. Failing it proves the answer is
-//! worthless. See `docs/06-limits.md` §18.
+//! worthless. See `docs/06-limits.md` §29.
 
 // Every expression below is a float expression. An implied volatility is a
 // solved statistical parameter, not money; `CLAUDE.md` §7 keeps such values
@@ -203,7 +203,7 @@ pub struct ImpliedVolatility {
     /// estimate — the price's granularity divided by vega — and it cannot see
     /// that the computed price is not strictly monotone in volatility. Read it
     /// as *the answer is not obviously worthless*, never as *the answer is
-    /// good to this many digits*. `docs/06-limits.md` §18 carries the measured
+    /// good to this many digits*. `docs/06-limits.md` §29 carries the measured
     /// gap between the two readings.
     pub uncertainty: f64,
 }

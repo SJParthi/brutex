@@ -9,28 +9,33 @@
 //! the key in the present tense, as if something checked it. Nothing does:
 //! neither the header nor the provenance word has a field for a libm build,
 //! and `Header::advance` accepts a batch that follows the committed range
-//! without comparing a field of any row. The first two tests drive the store
-//! through exactly that, and the third checks that D-0692 and
-//! `docs/06-limits.md` §29 say so.
+//! without reading any stored row or comparing any field but the timestamps.
+//! The first two tests drive the store through exactly that, and the third
+//! checks that D-0692 and `docs/06-limits.md` §29 say so.
 //!
 //! **None of them can see the key enforced.** The first fails if the store
-//! comes to refuse a forward append because a computed field moved by one ulp,
-//! or if a byte of the `.grk` outside the moved fields comes to depend on them.
-//! It cannot fail because the store records or checks a libm build: both
-//! builds here are one real libm in one process, so a stamp the store writes,
-//! into the header or into a file beside the `.grk`, comes out the same in both
-//! files and a check against it passes, and a stamp a caller packs into the
-//! provenance word never reaches these tests, which build the provenance
-//! themselves. No other file under `crates/` names D-0692 or §29 either, so
+//! comes to refuse that forward append, or if a byte of the `.grk` outside the
+//! moved fields comes to depend on them. It cannot fail because the store
+//! records or checks a libm build: both builds here are one real libm in one
+//! process, so a stamp the store writes, into the header or into a file beside
+//! the `.grk`, comes out the same in both files and a check against it passes,
+//! and a stamp a caller packs into the provenance word never reaches these
+//! tests, which build the provenance themselves. No other file under `crates/`
+//! names D-0692, and the only others that cite §29 are four files of
+//! `crates/greeks`, which cite it for its measurement and read no document, so
 //! the entry that enforces the key has to correct D-0692's caveat and §29
-//! itself. The fifth test checks that this doc, §29 and D-0692 all say so, and
-//! the sixth that no other file under `crates/` names D-0692 or §29.
+//! itself. The fifth test checks that this doc, §29 and D-0692 all say so, the
+//! sixth which files under `crates/` name D-0692 or cite §29, and the seventh
+//! that the sixth's walk reads only source files and follows no link.
 //!
 //! **A fact is cited to the source that states it.** The entry cited D-0046
 //! for "`x86_64` glibc, the CI target", and D-0046 never mentions glibc,
 //! `x86_64` or the CI runner. The fourth test checks that the citation names
 //! `docs/06-limits.md` §29, that §29 states the fact, that D-0046 still does
-//! not, and that the CI workflow runs where §29 says it does.
+//! not, and that the CI workflow runs where §29 says it does. The eighth checks
+//! that D-0692 and §29 quote their sources verbatim, and the ninth that they
+//! cite `main`'s `96194c11` for the code they read and the linkage they
+//! measured, and keep none of the wordings a review corrected.
 //!
 //! A second libm is modelled here as a one-ulp move in a computed `f64`, the
 //! size of the first `exp` disagreement D-0046 reports between two real
@@ -233,9 +238,8 @@ fn a_forward_append_under_another_libm_is_committed_and_names_no_build() {
             }),
             "the second window, under {second:?}, was not committed. D-0692 and \
              docs/06-limits.md §29 say a resume that does not overlap is \
-             accepted without comment. Both builds here are one real libm, so \
-             no check of the build refused it: the store now refuses a \
-             forward append for what its rows hold"
+             accepted without comment, and the store now refuses this forward \
+             append"
         );
     }
 
@@ -246,9 +250,9 @@ fn a_forward_append_under_another_libm_is_committed_and_names_no_build() {
     assert_eq!(
         mixed[..header],
         single[..header],
-        "the two headers differ, and the two files were given the same rows \
-         but for window two's `delta`: the header has come to depend on a \
-         computed field"
+        "the two headers differ, though the two files were given the same \
+         rows but for window two's `delta`: the header now depends on that \
+         `delta`, or on something that is not a row"
     );
 
     // Every differing byte is a byte of window two's `delta`, and window two's
@@ -270,8 +274,9 @@ fn a_forward_append_under_another_libm_is_committed_and_names_no_build() {
     for at in differing {
         assert!(
             deltas.iter().any(|delta| delta.contains(&at)),
-            "byte {at} differs and is not a delta of window two: a byte of the \
-             `.grk` has come to depend on a computed field"
+            "byte {at} differs and is not a delta of window two, though the two \
+             files were given the same rows but for those: that byte now \
+             depends on a computed field, or on something that is not a row"
         );
     }
 }
@@ -504,26 +509,49 @@ fn module_doc() -> String {
         .join(" ")
 }
 
+/// The source of the test named `test` in this file, from its `fn` line to the
+/// next `#[test]`, with string continuations joined and whitespace collapsed,
+/// so an assertion message can be looked up whole.
+fn source_of(test: &str) -> String {
+    let start = format!("fn {test}()");
+    let from = HERE
+        .find(&start)
+        .unwrap_or_else(|| panic!("this file has no test `{test}`"));
+    let rest = &HERE[from..];
+    let to = rest.find("\n#[test]").unwrap_or(rest.len());
+    rest[..to]
+        .replace("\\\n", " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// **NO TEST HERE CAN SEE THE LIBM KEY ENFORCED, AND ALL THREE TEXTS SAY SO.**
 ///
 /// Both modelled builds are one real libm in one process, so a stamp of the
 /// build comes out the same in both files and a check against it passes. §29
 /// and this file's module doc once said the first test fails the day the store
 /// refuses a forward append under another libm, or writes a byte that tells
-/// the builds apart; it cannot fail for either. D-0692's correction, §29 and
-/// the module doc now say why, and that the entry which enforces the key has
-/// to correct the caveat itself, because no test here will fail to make it.
+/// the builds apart. Both were read as promising that the test would catch the
+/// store recording or checking a libm build, and it cannot fail for that,
+/// though it does fail for either as the model has them. D-0692's correction,
+/// §29 and the module doc now say which, and that the entry which enforces the
+/// key has to correct the caveat itself, because no test here will fail to
+/// make it. The first test's own messages name no cause it cannot see.
 #[test]
 fn nothing_here_sees_the_libm_key_enforced_and_the_three_texts_say_so() {
     let entry = d_0692();
     for claim in [
         "**Correction, 2026-09-24: what `libm_key.rs` can see.**",
-        "It cannot fail for either reason.",
+        "As the model has the two builds, it does fail for either",
+        "It cannot fail because the store records or checks a libm build, \
+         which is what both were read as promising.",
         "Both modelled builds are one real libm in one process",
         "comes out the same in both files and a check against it passes",
         "which build the provenance themselves",
         "every test in the `store` suite passed, these four included",
-        "No file under `crates/` but `libm_key.rs` names this entry or §29",
+        "No file under `crates/` but `libm_key.rs` names this entry, and the \
+         only others that cite §29 are four files of `crates/greeks`",
         "has to supersede the paragraph that begins \"That rule is \
          operational, and nothing enforces it\" and correct §29 itself",
     ] {
@@ -536,13 +564,13 @@ fn nothing_here_sees_the_libm_key_enforced_and_the_three_texts_say_so() {
         (
             &doc,
             "libm_key.rs's module doc",
-            "No other file under `crates/` names D-0692 or §29 either",
+            "No other file under `crates/` names D-0692",
             "has to correct D-0692's caveat and §29 itself",
         ),
         (
             &limits,
             "docs/06-limits.md §29",
-            "No file under `crates/` but `libm_key.rs` names §29 or D-0692",
+            "No file under `crates/` but `libm_key.rs` names D-0692",
             "has to correct this paragraph and D-0692's caveat itself",
         ),
     ] {
@@ -551,6 +579,7 @@ fn nothing_here_sees_the_libm_key_enforced_and_the_three_texts_say_so() {
             "one real libm in one process",
             "comes out the same in both files and a check against it passes",
             "which build the provenance themselves",
+            "the only others that cite §29 are four files of `crates/greeks`",
             alone,
             owed,
         ] {
@@ -559,7 +588,8 @@ fn nothing_here_sees_the_libm_key_enforced_and_the_three_texts_say_so() {
         assert!(
             !text.contains("tells the two builds apart"),
             "{name} again says the first test would see a byte that tells the \
-             two builds apart, and under one real libm there is no such byte"
+             two builds apart, which reads as a record of the libm build, and \
+             a record of one real libm is the same in both files"
         );
     }
     offset(
@@ -567,49 +597,422 @@ fn nothing_here_sees_the_libm_key_enforced_and_the_three_texts_say_so() {
         "docs/06-limits.md §29",
         "every test in the `store` suite passed",
     );
+    for (text, name) in [
+        (&entry, "D-0692"),
+        (&limits, "docs/06-limits.md §29"),
+        (&doc, "libm_key.rs's module doc"),
+    ] {
+        assert!(
+            !text.contains("cannot fail for either"),
+            "{name} again says the first test cannot fail for either reason, \
+             and it fails for both as the model has them; what it cannot \
+             see is the store recording or checking a libm build"
+        );
+    }
+
+    // The first test's messages give no cause it cannot see: a refusal made by
+    // position alone fails it with the same message as one made by content.
+    let first = source_of("a_forward_append_under_another_libm_is_committed_and_names_no_build");
+    offset(
+        &first,
+        "the first test",
+        "and the store now refuses this forward append",
+    );
+    for cause in [
+        "for what its rows hold",
+        "has come to depend on a computed field",
+    ] {
+        assert!(
+            !first.contains(cause),
+            "a message of the first test again gives a cause it cannot see: \
+             `{cause}`"
+        );
+    }
 }
 
-/// Every file under `dir`, at any depth, in no particular order.
-fn files_under(dir: &Path, into: &mut Vec<PathBuf>) {
+/// `crates/`, the directory this crate sits in.
+fn crates_dir() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates/store sits under crates/")
+}
+
+/// Every `.rs`, `.toml` and `.md` file under `dir`, at any depth, in no
+/// particular order.
+///
+/// Nothing else is read, because nothing else is source: an editor's backup,
+/// a merge's `.orig` or a swap file of a source file holds its text without
+/// being it. A link is not followed, to a file or to a directory, because a
+/// linked directory can loop and a linked file is read where it lives.
+fn sources_under(dir: &Path, into: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(dir).unwrap_or_else(|error| panic!("{}: {error}", dir.display())) {
-        let path = entry.expect("a directory entry").path();
-        if path.is_dir() {
-            files_under(&path, into);
-        } else {
+        let entry = entry.expect("a directory entry");
+        // `DirEntry::file_type` does not follow a link, so a link is neither.
+        let kind = entry.file_type().expect("a file type");
+        let path = entry.path();
+        if kind.is_dir() {
+            sources_under(&path, into);
+        } else if kind.is_file()
+            && path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| matches!(extension, "rs" | "toml" | "md"))
+        {
             into.push(path);
         }
     }
 }
 
-/// **NO FILE UNDER `crates/` BUT THIS ONE NAMES D-0692 OR §29.**
+/// Each source file under `crates/` whose text satisfies `names`, as a path
+/// relative to `crates/` with `/` between its parts, sorted.
+fn sources_that(names: impl Fn(&str) -> bool) -> Vec<String> {
+    let crates = crates_dir();
+    let mut files = Vec::new();
+    sources_under(crates, &mut files);
+    let mut hits: Vec<String> = files
+        .iter()
+        .filter(|path| names(&fs::read_to_string(path).expect("source is UTF-8")))
+        .map(|path| {
+            path.strip_prefix(crates)
+                .expect("under crates/")
+                .components()
+                .map(|part| part.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/")
+        })
+        .collect();
+    hits.sort();
+    hits
+}
+
+/// Whether `text` cites `docs/06-limits.md` §29, in any of the spellings
+/// `crates/` uses for a limits section. Another document's section 29 is not
+/// a citation of it, and neither is §290.
+fn cites_limits_29(text: &str) -> bool {
+    [
+        "06-limits.md` §29",
+        "06-limits.md §29",
+        "06-limits.md` section 29",
+        "06-limits.md section 29",
+    ]
+    .iter()
+    .any(|spelling| {
+        text.match_indices(spelling).any(|(at, _)| {
+            !text[at + spelling.len()..]
+                .chars()
+                .next()
+                .is_some_and(|next| next.is_ascii_digit())
+        })
+    })
+}
+
+/// **ONLY THIS FILE NAMES D-0692, AND ONLY `crates/greeks` ALSO CITES §29.**
 ///
 /// D-0692's correction and §29 say the key can be enforced without failing a
 /// test that would send its author back to either text, because this file is
-/// the only one that names them. A file that comes to name one fails here, so
-/// that sentence is re-read the day it could stop being true.
+/// the only one that names D-0692, and the only others that cite §29 are four
+/// files of `crates/greeks` that cite it for its measurement and read no
+/// document. A file that comes to name either, or a greeks file that comes to
+/// read a document, fails here, so that sentence is re-read the day it could
+/// stop being true. The greeks files are listed rather than exempted: they
+/// cited §18, the number §29 had before it was renumbered on merge, until the
+/// review that corrected them, and a list is what caught that.
 #[test]
-fn no_file_under_crates_but_this_one_names_d_0692_or_limits_29() {
-    let crates = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crates/store sits under crates/");
-    let mut files = Vec::new();
-    files_under(crates, &mut files);
-    let this = Path::new("store").join("tests").join("libm_key.rs");
-    let others: Vec<&PathBuf> = files.iter().filter(|path| !path.ends_with(&this)).collect();
-    assert!(
-        others.len() + 1 == files.len(),
-        "this file was not found under {}",
-        crates.display()
+fn only_this_file_names_d_0692_and_only_greeks_also_cites_limits_29() {
+    assert_eq!(
+        sources_that(|text| text.contains("D-0692")),
+        ["store/tests/libm_key.rs"],
+        "the files under crates/ that name D-0692 changed. D-0692's correction \
+         and docs/06-limits.md §29 say only libm_key.rs does; re-read both"
     );
-    for path in others {
-        let text = String::from_utf8_lossy(&fs::read(path).expect("a readable file")).into_owned();
-        for name in ["D-0692", "§29"] {
+
+    let greeks = [
+        "greeks/src/bsm.rs",
+        "greeks/src/lib.rs",
+        "greeks/src/solver.rs",
+        "greeks/tests/vendor_anchor.rs",
+    ];
+    let mut expected = greeks.to_vec();
+    expected.push("store/tests/libm_key.rs");
+    assert_eq!(
+        sources_that(cites_limits_29),
+        expected,
+        "the files under crates/ that cite docs/06-limits.md §29 changed. \
+         D-0692's correction and §29 name libm_key.rs and four greeks files; \
+         re-read both"
+    );
+
+    for file in greeks {
+        let text = fs::read_to_string(crates_dir().join(file)).expect("a greeks source");
+        assert!(
+            !text.contains(".md\")"),
+            "{file} now reads a document. D-0692's correction and \
+             docs/06-limits.md §29 say it cites §29 and reads none; re-read both"
+        );
+    }
+    let stale: Vec<String> = sources_that(|text| text.contains("06-limits.md` §18"))
+        .into_iter()
+        .filter(|file| file.starts_with("greeks/"))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "{stale:?} cite docs/06-limits.md §18 for this crate's measurement, \
+         and §18 is \"What CI cannot prove about a credential path\": the \
+         measurement is §29"
+    );
+}
+
+/// **THE WALK ABOVE READS SOURCE, AND FOLLOWS NO LINK.**
+///
+/// A copy of this file left beside it by an editor or a merge names D-0692
+/// without being source, and failed the test above when the walk read every
+/// file. A linked directory that points back up the tree would recurse until
+/// the operating system refused the path.
+#[test]
+fn the_crates_walk_reads_only_source_files_and_follows_no_link() {
+    let scratch = Scratch::new("walk");
+    let root = scratch.root();
+    let tree = root.join("tree");
+    fs::create_dir_all(tree.join("nested")).expect("the scratch tree");
+    for (name, text) in [
+        ("keep.rs", "D-0692"),
+        ("Cargo.toml", "D-0692"),
+        ("nested/notes.md", "D-0692"),
+        ("keep.rs.orig", "D-0692"),
+        (".keep.rs.swp", "D-0692"),
+        ("keep.rs~", "D-0692"),
+        ("nested/image.bin", "D-0692"),
+    ] {
+        fs::write(tree.join(name), text).expect("a scratch file");
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&tree, tree.join("nested").join("loop"))
+            .expect("a directory link");
+        std::os::unix::fs::symlink(tree.join("keep.rs"), tree.join("linked.rs"))
+            .expect("a file link");
+    }
+
+    let mut found = Vec::new();
+    sources_under(&tree, &mut found);
+    let mut found: Vec<String> = found
+        .iter()
+        .map(|path| {
+            path.strip_prefix(&tree)
+                .expect("under the scratch tree")
+                .components()
+                .map(|part| part.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/")
+        })
+        .collect();
+    found.sort();
+    assert_eq!(found, ["Cargo.toml", "keep.rs", "nested/notes.md"]);
+}
+
+/// Every run of whitespace in `text` collapsed to one space.
+fn collapse(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The text of `source`'s `//` comments, markers removed, whitespace collapsed.
+fn comments(source: &str) -> String {
+    collapse(
+        &source
+            .lines()
+            .filter_map(|line| line.trim_start().strip_prefix("//"))
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+/// `CLAUDE.md`, for the sentences D-0692 quotes from it.
+const CLAUDE_MD: &str = include_str!("../../../CLAUDE.md");
+/// `store::file`, for the comment D-0692 and §29 quote from `append`.
+const FILE_RS: &str = include_str!("../src/file.rs");
+/// `api`'s server, for the message §29 quotes from the Groww chain path.
+const SERVER_RS: &str = include_str!("../../api/src/server.rs");
+
+/// **D-0692 AND §29 QUOTE THEIR SOURCES VERBATIM.**
+///
+/// Each quotation is looked up, opening quote mark included, in the text that
+/// quotes it and, whitespace collapsed, in the source it names. D-0692 once
+/// quoted `CLAUDE.md` §4 with a lowercase first letter.
+#[test]
+fn d_0692_and_limits_29_quote_their_sources_verbatim() {
+    let entry = d_0692();
+    let limits = limits_29();
+    let (claude, d_0046, append, server) = (
+        collapse(CLAUDE_MD),
+        d_0046(),
+        comments(FILE_RS),
+        collapse(SERVER_RS),
+    );
+
+    for (text, name, quote, source, source_name) in [
+        (
+            &entry,
+            "D-0692",
+            "must never enter the blake3 run identity of `CLAUDE.md` §3 rule 3, \
+             and must never be compared byte-for-byte across machines",
+            &d_0046,
+            "D-0046",
+        ),
+        (
+            &entry,
+            "D-0692",
+            "Nothing in this repository does either today — `greeks` is a leaf \
+             with no consumer here — and this paragraph is what a future \
+             consumer has to read first.",
+            &d_0046,
+            "D-0046",
+        ),
+        (&entry, "D-0692", "within one target", &d_0046, "D-0046"),
+        (
+            &entry,
+            "D-0692",
+            "would replace a measured 4.2e-14 disagreement with several \
+             hundred lines of transcendental code carrying its own errors, for \
+             a property nothing currently needs.",
+            &d_0046,
+            "D-0046",
+        ),
+        (
+            &entry,
+            "D-0692",
+            "no clock, no randomness, no hash iteration and no threading \
+             anywhere in its non-test code",
+            &d_0046,
+            "D-0046",
+        ),
+        (
+            &entry,
+            "D-0692",
+            "keep full precision and are never rounded for storage",
+            &claude,
+            "CLAUDE.md",
+        ),
+        (
+            &entry,
+            "D-0692",
+            "A new field is a new file version at its own stride.",
+            &claude,
+            "CLAUDE.md",
+        ),
+        (
+            &entry,
+            "D-0692",
+            "a genuine conflict. The vendor restated history, or bars arrived \
+             out of order",
+            &append,
+            "crates/store/src/file.rs",
+        ),
+        (
+            &limits,
+            "docs/06-limits.md §29",
+            "a genuine conflict. The vendor restated history, or bars arrived \
+             out of order",
+            &append,
+            "crates/store/src/file.rs",
+        ),
+        (
+            &limits,
+            "docs/06-limits.md §29",
+            "the greeks were computed and could not be filed",
+            &server,
+            "crates/api/src/server.rs",
+        ),
+    ] {
+        offset(text, name, &format!("\"{quote}"));
+        assert!(
+            source.contains(quote),
+            "{name} quotes {source_name} as saying `{quote}`, and it does not"
+        );
+    }
+}
+
+/// **D-0692 AND §29 CITE WHAT `main` HOLDS, AND KEEP NONE OF THE WORDINGS A
+/// REVIEW CORRECTED.**
+///
+/// The code reading and the linkage measurement cite `96194c11`, on `main`,
+/// where they were re-taken: the commit first cited is in neither `main`'s
+/// history nor this branch's. And each wording a review found wrong stays
+/// gone: that `Header::advance` compares no field of any row, when it compares
+/// the timestamps; that the two hardenings only name the refusal better, when
+/// the second also refuses a forward append; that G-10's test proves, when it
+/// checks the inputs it runs; and that a resume under one build is always
+/// `AlreadyPresent`, when a window whose inputs changed is refused under any.
+#[test]
+fn d_0692_and_limits_29_cite_main_and_keep_none_of_the_corrected_wordings() {
+    let entry = d_0692();
+    let limits = limits_29();
+    let doc = module_doc();
+
+    for (text, name) in [(&entry, "D-0692"), (&limits, "docs/06-limits.md §29")] {
+        offset(text, name, "from the source at `96194c11`");
+        for gone in [
+            "from the source at `b1d9ac70`",
+            "from the code at `b1d9ac70`",
+        ] {
             assert!(
-                !text.contains(name),
-                "{} names {name}. D-0692's correction and docs/06-limits.md §29 \
-                 say no file under crates/ but libm_key.rs does; re-read both",
-                path.display()
+                !text.contains(gone),
+                "{name} again cites `{gone}`, a commit in neither main's \
+                 history nor this branch's"
             );
         }
     }
+    offset(&entry, "D-0692", "read from the code at `96194c11`.");
+
+    for (text, name) in [
+        (&entry, "D-0692"),
+        (&limits, "docs/06-limits.md §29"),
+        (&doc, "libm_key.rs's module doc"),
+    ] {
+        offset(
+            text,
+            name,
+            "without reading any stored row or comparing any field but the \
+             timestamps",
+        );
+        assert!(
+            !text.contains("without comparing a field of any row"),
+            "{name} again says Header::advance compares no field of any row, \
+             and it compares the batch's timestamps"
+        );
+    }
+
+    offset(
+        &entry,
+        "D-0692",
+        "Neither hardening below removes the refusal: the first names it \
+         better, and the second would refuse a resume under another libm up \
+         front, by name, whether or not it overlaps.",
+    );
+    assert!(
+        !entry.contains("only name the refusal better"),
+        "D-0692 again says both hardenings only name the refusal better, and \
+         the second would also refuse a forward append"
+    );
+
+    offset(
+        &entry,
+        "D-0692",
+        "checks that the same inputs give the same solved volatility",
+    );
+    assert!(
+        !entry.contains("proves that the same inputs"),
+        "D-0692 again says G-10's test proves what it checks on its inputs"
+    );
+
+    offset(
+        &limits,
+        "docs/06-limits.md §29",
+        "recomputes the same bits and so is `AlreadyPresent`",
+    );
+    assert!(
+        !limits.contains("always `AlreadyPresent`"),
+        "docs/06-limits.md §29 again asks whether a same-build resume is \
+         always AlreadyPresent, and a window whose inputs changed is refused \
+         under any build"
+    );
 }

@@ -38698,7 +38698,7 @@ corrected. The same premise carried half of D-0046's reason for keeping the
 platform's `exp` and `ln`, and that half is withdrawn too; see "Deferred, not
 rejected" below.
 
-**What the store does with the bits, read from the code at `b1d9ac70`.**
+**What the store does with the bits, read from the code at `96194c11`.**
 `api`'s `greek_records` turns each priced row into a `store::format::Greek`,
 and `pull::ingest::write_greeks` appends the batch through `BarFile::append`.
 `Greek` holds the volatility, delta, gamma, vega, theta, rho and rate as `f64`,
@@ -38736,7 +38736,7 @@ volatilities differed. They show that the bits move. They do not say how many
 **The identity that decides the bits is the libm build, not the target.**
 D-0046 wrote "within one target", but the target triple does not fix the
 libm. Measured on this machine (macOS 26.6.2, aarch64), from the source at
-`b1d9ac70`: the release `api` executable, which is what writes `.grk`
+`96194c11`: the release `api` executable, which is what writes `.grk`
 (`cargo build -p api --release --locked --bin api`), and the release `greeks`
 unit-test executable (`cargo test -p greeks --release --locked --lib
 --no-run`) each carry `_exp` and `_log` as undefined symbols that `nm -m`
@@ -38750,10 +38750,10 @@ update has in fact changed an `exp` or `ln` result is not measured, and nothing
 here was measured on x86_64 glibc, the CI target (`docs/06-limits.md` §29).
 
 **Within one libm build the reproduction is argued, not measured for `.grk`.**
-G-10, `greeks::solver::the_solver_is_idempotent_to_the_bit`, proves that the
+G-10, `greeks::solver::the_solver_is_idempotent_to_the_bit`, checks that the
 same inputs give the same solved volatility bit for bit within one process and
 one target, and `docs/04-invariants.md` narrows it to exactly that. A resume in
-a new process is outside what it proves. There the claim rests on D-0046's
+a new process is outside what it checks. There the claim rests on D-0046's
 reading of the crate — "no clock, no randomness, no hash iteration and no
 threading anywhere in its non-test code" — and on one libm build returning the
 same result for the same argument. No `.grk` window was written by one process
@@ -38777,11 +38777,11 @@ records for a rate supplied late.
 **That rule is operational, and nothing enforces it.** No code records or
 checks the libm build. Neither the header nor the provenance word has a field
 for it, and `Header::advance` accepts any batch whose first timestamp follows
-the last one committed without comparing a field of any row. So a resume that
-does not overlap, a plain forward append under another libm or after an OS
-update, is accepted without comment, and the file then holds rows from two libm
-builds with nothing recording which rows came from which. From then on no one
-libm build is expected to re-file every held window: re-offering a window
+the last one committed, without reading any stored row or comparing any field
+but the timestamps. So a resume that does not overlap, a plain forward append
+under another libm or after an OS update, is accepted without comment, and the
+file then holds rows from two libm builds with nothing recording which rows
+came from which. From then on no one libm build is expected to re-file every held window: re-offering a window
 written before the switch is refused under the new build whenever its bits
 differ, a window written after it is refused under the old build the same way,
 and the build that wrote the earlier windows may be gone. Hardening 2 below is
@@ -38805,8 +38805,10 @@ The other half no longer does, and this entry is what withdraws it: an
 overlapping `.grk` resume under a libm other than the one that began the
 series needs exactly that property. Of the options this entry considers, it is
 the only one that removes the refusal without accepting a genuinely different
-row. The two hardenings below only name the refusal better. It is still not
-taken now, for three reasons. The cost D-0046 weighed is unchanged. The
+row. Neither hardening below removes the refusal: the first names it better,
+and the second would refuse a resume under another libm up front, by name,
+whether or not it overlaps. It is still not taken now, for three reasons. The
+cost D-0046 weighed is unchanged. The
 dependency fails closed: an overlapping batch whose bits differ is refused
 loudly, under a misleading name but refused, and nothing is written, so it is
 never filed as a duplicate and never silently replaces a held row. And how
@@ -38832,8 +38834,8 @@ those series, and should bring a measurement.
    so what can name a libm build is part of that entry's question. The
    provenance word has bits 17 to 31 unused, but giving them a meaning changes
    what a version-8 record says, and `CLAUDE.md` §3 rule 8 forbids mutating a
-   format version in place. So this is a new `.grk` version, by §4's "a new
-   field is a new file version at its own stride".
+   format version in place. So this is a new `.grk` version, by §4's "A new
+   field is a new file version at its own stride."
 
 **The thresholds, recorded because they are the rest of the finding.** Outside
 `crates/greeks`, a grep of non-test source at this commit finds `ln` or `exp`
@@ -38870,21 +38872,51 @@ does not. No second libm is linked or run by those tests.
 says that file checks this entry against the store it describes, and
 `docs/06-limits.md` §29 said its first test fails the day the store refuses a
 forward append under another libm, or writes a byte that tells the two builds
-apart. It cannot fail for either reason. Both modelled builds are one real libm
-in one process, so a stamp the store writes, into the `.grk` header or into a
-file beside it, comes out the same in both files and a check against it
-passes, and a stamp a caller packs into the provenance word never reaches the
-tests, which build the provenance themselves. Tried at `eecca4da`: a stamp the
-store wrote into the `.grk` header region on the first append, refusing an
-append whenever the held stamp differed from its own, refused a forward append
-once the held stamp was altered, and every test in the `store` suite passed,
-these four included. No file under `crates/` but `libm_key.rs` names this
-entry or §29, so the key can be enforced without failing any test that would
-send its author back to either, and the entry that enforces it has to
-supersede the paragraph that begins "That rule is operational, and nothing
-enforces it" and correct §29 itself. §29 and the file's module doc now say so.
-Two tests were added to the file: the fifth checks that all three texts say
-it, and the sixth that no other file under `crates/` names this entry or §29.
+apart. As the model has the two builds, it does fail for either: a refused
+forward append, or a byte of the `.grk` outside the moved `delta` fields that
+comes to depend on them. It cannot fail because the store records or checks a
+libm build, which is what both were read as promising. Both modelled builds are
+one real libm in one process, so a stamp the store writes, into the `.grk`
+header or into a file beside it, comes out the same in both files and a check
+against it passes, and a stamp a caller packs into the provenance word never
+reaches the tests, which build the provenance themselves. Tried at `eecca4da`,
+a commit of the branch this entry was written on: a stamp the store wrote into
+the `.grk` header region on the first append, refusing an append whenever the
+held stamp differed from its own, refused a forward append once the held stamp
+was altered, and every test in the `store` suite passed, these four included.
+No file under `crates/` but `libm_key.rs` names this entry, and the only others
+that cite §29 are four files of `crates/greeks`, which cite it for the
+measurement it carries and read no document. So the key can be enforced
+without failing any test that would send its author back to either, and the
+entry that enforces it has to supersede the paragraph that begins "That rule is
+operational, and nothing enforces it" and correct §29 itself. §29 and the
+file's module doc now say so. The file's fifth test checks that all three texts
+say it, and its sixth which files under `crates/` name this entry or cite §29.
+
+**Correction, 2026-09-24: five sentences above, and the stale §18 citations.**
+Five things above were corrected in place before the entry reached `main`. It
+cited `b1d9ac70` for its reading of the store and for the linkage measurement,
+and that commit is in neither `main`'s history nor this entry's branch, so both
+were re-taken at
+`96194c11`, on `main`: every function the reading names is there,
+`crates/store/src/header.rs` and `crates/store/src/format.rs` are
+byte-identical to this entry's branch, `crates/greeks` differs from it only in
+the comments corrected below, and `nm -m` and `otool -L` report the same
+`_exp`, `_log` and libSystem for both release executables. It said
+`Header::advance` compares no field of any row, and it compares the batch's
+timestamps. It said the hardenings do no more than name the refusal better, and
+the second would also refuse a forward append. It said G-10's test proves the
+solver's bits reproduce, where a test checks that on the inputs it runs. And it
+quoted §4 with a lowercase first letter. Separately, four files of
+`crates/greeks` cited `docs/06-limits.md` §18 for this crate's measurement, the
+number §29 had before it was renumbered on merge, and they now cite §29. That is
+a comment change only, so there is still no mutant to run. The G-10 row of
+`docs/04-invariants.md` and a paragraph of `docs/00-charter.md` still cite §18
+for the same material; both are on `main` and are not edited here. The seventh
+test of `libm_key.rs` checks that the sixth test's walk reads only `.rs`,
+`.toml` and `.md` files and follows no link. The eighth checks that this entry
+and §29 quote their sources verbatim, and the ninth that they cite `96194c11`
+and keep none of the wordings corrected here.
 
 ### D-0693 — Release every advisory file lock by `File::unlock`, through one guard in `store` — 2026-09-23
 

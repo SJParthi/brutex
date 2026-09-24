@@ -31,7 +31,7 @@
 //! behind it is UNVERIFIED. Getting the divisor wrong by the trading-day
 //! factor costs `365/252 = 1.448`, so a theta of `−15.15` a day becomes
 //! `−10.46`: a 44.8% error on a single strike, invisible unless it is tested.
-//! See `docs/05-decisions.md` D-0046 and `docs/06-limits.md` §18.
+//! See `docs/05-decisions.md` D-0046 and `docs/06-limits.md` §29.
 //!
 //! # What is exact here and what is not
 //!
