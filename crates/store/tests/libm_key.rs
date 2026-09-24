@@ -26,7 +26,10 @@
 //! the entry that enforces the key has to correct D-0692's caveat and §29
 //! itself. The fifth test checks that this doc, §29 and D-0692 all say so, the
 //! sixth which files under `crates/` name D-0692 or cite §29, and the seventh
-//! that the sixth's walk reads only source files and follows no link.
+//! that the sixth's walk reads only source files and follows no link. The
+//! tenth checks that the sixth reads a citation wrapped across two lines as
+//! one phrase, in each spelling `crates/` uses for one: it once matched raw
+//! text, and missed a greeks pointer still citing §18 across a line break.
 //!
 //! **A fact is cited to the source that states it.** The entry cited D-0046
 //! for "`x86_64` glibc, the CI target", and D-0046 never mentions glibc,
@@ -663,18 +666,19 @@ fn sources_under(dir: &Path, into: &mut Vec<PathBuf>) {
     }
 }
 
-/// Each source file under `crates/` whose text satisfies `names`, as a path
-/// relative to `crates/` with `/` between its parts, sorted.
-fn sources_that(names: impl Fn(&str) -> bool) -> Vec<String> {
-    let crates = crates_dir();
+/// Each source file under `root` whose prose satisfies `names`, as a path
+/// relative to `root` with `/` between its parts, sorted. Each file is read
+/// through [`prose`], so a phrase wrapped across two comment lines, or across
+/// a continued string, is looked up whole.
+fn sources_in_that(root: &Path, names: impl Fn(&str) -> bool) -> Vec<String> {
     let mut files = Vec::new();
-    sources_under(crates, &mut files);
+    sources_under(root, &mut files);
     let mut hits: Vec<String> = files
         .iter()
-        .filter(|path| names(&fs::read_to_string(path).expect("source is UTF-8")))
+        .filter(|path| names(&prose(&fs::read_to_string(path).expect("source is UTF-8"))))
         .map(|path| {
-            path.strip_prefix(crates)
-                .expect("under crates/")
+            path.strip_prefix(root)
+                .expect("under the root walked")
                 .components()
                 .map(|part| part.as_os_str().to_string_lossy().into_owned())
                 .collect::<Vec<_>>()
@@ -685,19 +689,57 @@ fn sources_that(names: impl Fn(&str) -> bool) -> Vec<String> {
     hits
 }
 
-/// Whether `text` cites `docs/06-limits.md` §29, in any of the spellings
-/// `crates/` uses for a limits section. Another document's section 29 is not
-/// a citation of it, and neither is §290.
-fn cites_limits_29(text: &str) -> bool {
+/// Each source file under `crates/` whose prose satisfies `names`, as
+/// [`sources_in_that`] gives it.
+fn sources_that(names: impl Fn(&str) -> bool) -> Vec<String> {
+    sources_in_that(crates_dir(), names)
+}
+
+/// `source` read as prose: each line's leading comment marker (`//!`, `///`,
+/// `//` or `#`) removed, a string's `\` line continuation joined, and every
+/// run of whitespace collapsed to one space.
+///
+/// A citation wraps where its comment or its string wraps, so
+/// `docs/06-limits.md` can end one line and its section begin the next. Read
+/// raw, that citation is two fragments and matches no spelling of it; read as
+/// prose, it is the phrase a reader sees.
+fn prose(source: &str) -> String {
+    collapse(
+        &source
+            .replace("\\\n", "\n")
+            .lines()
+            .map(|line| {
+                let line = line.trim_start();
+                ["//!", "///", "//", "#"]
+                    .iter()
+                    .find_map(|marker| line.strip_prefix(marker))
+                    .unwrap_or(line)
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+/// Whether `text` cites section `number` of `docs/06-limits.md`, in any of
+/// the four spellings `crates/` used for a limits citation when this was
+/// written: `` 06-limits.md` §29 ``, `06-limits.md §29`,
+/// `` 06-limits.md` section 29 `` and `06-limits.md section 29`. Another
+/// document's section is not a citation of it, and neither is a longer number
+/// that begins with this one, as §290 begins with 29.
+///
+/// Give it text read through [`prose`]: raw, a citation wrapped across two
+/// lines is split, and none of the four spellings matches it.
+fn cites_limits(text: &str, number: &str) -> bool {
     [
-        "06-limits.md` §29",
-        "06-limits.md §29",
-        "06-limits.md` section 29",
-        "06-limits.md section 29",
+        "06-limits.md` §",
+        "06-limits.md §",
+        "06-limits.md` section ",
+        "06-limits.md section ",
     ]
     .iter()
+    .map(|lead| format!("{lead}{number}"))
     .any(|spelling| {
-        text.match_indices(spelling).any(|(at, _)| {
+        text.match_indices(&spelling).any(|(at, _)| {
             !text[at + spelling.len()..]
                 .chars()
                 .next()
@@ -717,6 +759,13 @@ fn cites_limits_29(text: &str) -> bool {
 /// stop being true. The greeks files are listed rather than exempted: they
 /// cited §18, the number §29 had before it was renumbered on merge, until the
 /// review that corrected them, and a list is what caught that.
+///
+/// Every file is read as [`prose`], and "section 18" is as stale as "§18".
+/// This test once matched the raw text, and stayed green while
+/// `crates/greeks/src/solver.rs` still cited "`docs/06-limits.md` section" on
+/// one comment line and "18" on the next. A file reads a document through a
+/// string that names it, so any string ending in `.md` counts as a read,
+/// wherever the call around it closes.
 #[test]
 fn only_this_file_names_d_0692_and_only_greeks_also_cites_limits_29() {
     assert_eq!(
@@ -735,7 +784,7 @@ fn only_this_file_names_d_0692_and_only_greeks_also_cites_limits_29() {
     let mut expected = greeks.to_vec();
     expected.push("store/tests/libm_key.rs");
     assert_eq!(
-        sources_that(cites_limits_29),
+        sources_that(|text| cites_limits(text, "29")),
         expected,
         "the files under crates/ that cite docs/06-limits.md §29 changed. \
          D-0692's correction and §29 name libm_key.rs and four greeks files; \
@@ -745,20 +794,21 @@ fn only_this_file_names_d_0692_and_only_greeks_also_cites_limits_29() {
     for file in greeks {
         let text = fs::read_to_string(crates_dir().join(file)).expect("a greeks source");
         assert!(
-            !text.contains(".md\")"),
-            "{file} now reads a document. D-0692's correction and \
-             docs/06-limits.md §29 say it cites §29 and reads none; re-read both"
+            !text.contains(".md\""),
+            "{file} now names a document in a string, which is how a file reads \
+             one. D-0692's correction and docs/06-limits.md §29 say it cites \
+             §29 and reads none; re-read both"
         );
     }
-    let stale: Vec<String> = sources_that(|text| text.contains("06-limits.md` §18"))
+    let stale: Vec<String> = sources_that(|text| cites_limits(text, "18"))
         .into_iter()
         .filter(|file| file.starts_with("greeks/"))
         .collect();
     assert!(
         stale.is_empty(),
-        "{stale:?} cite docs/06-limits.md §18 for this crate's measurement, \
-         and §18 is \"What CI cannot prove about a credential path\": the \
-         measurement is §29"
+        "{stale:?} cite docs/06-limits.md §18, in some spelling and perhaps \
+         across a line break, and §18 is \"What CI cannot prove about a \
+         credential path\": this crate's measurement is §29"
     );
 }
 
@@ -1014,5 +1064,111 @@ fn d_0692_and_limits_29_cite_main_and_keep_none_of_the_corrected_wordings() {
         "docs/06-limits.md §29 again asks whether a same-build resume is \
          always AlreadyPresent, and a window whose inputs changed is refused \
          under any build"
+    );
+}
+
+/// **THE SIXTH TEST READS A CITATION WHERE IT WRAPS, IN EACH SPELLING.**
+///
+/// The sixth test once matched raw text for four unwrapped spellings of §29
+/// and one of §18. `crates/greeks/src/solver.rs` cited
+/// "`docs/06-limits.md` section" on one comment line and "18" on the next,
+/// and the repair that corrected six other greeks pointers left it, because
+/// that test stayed green. A module doc citing §29 across a line break in a
+/// crate outside `crates/greeks` would have left it green too. Both are
+/// written into a scratch tree here and read through the same walk, and each
+/// shape `crates/` wraps a citation in is read as prose. D-0692, §29 and this
+/// file's module doc say what the sixth test reads, and D-0692 that its first
+/// correction of the greeks pointers missed one.
+#[test]
+fn the_citation_check_reads_a_wrapped_citation_in_each_spelling() {
+    let scratch = Scratch::new("wrapped");
+    let tree = scratch.root().join("tree");
+    fs::create_dir_all(tree.join("core/src")).expect("the scratch tree");
+    fs::create_dir_all(tree.join("greeks/src")).expect("the scratch tree");
+    fs::write(
+        tree.join("core/src/lib.rs"),
+        "//! The libm hazard is in `docs/06-limits.md`\n//! §29.\n",
+    )
+    .expect("a scratch file");
+    fs::write(
+        tree.join("greeks/src/normal.rs"),
+        "fn f() {\n    // Invariant G-10 is narrowed to match and `docs/06-limits.md` \
+         section\n    // 18 carries the measurement. D-0046.\n}\n",
+    )
+    .expect("a scratch file");
+    assert_eq!(
+        sources_in_that(&tree, |text| cites_limits(text, "29")),
+        ["core/src/lib.rs"],
+        "a module doc citing docs/06-limits.md §29 across a line break is \
+         not seen"
+    );
+    assert_eq!(
+        sources_in_that(&tree, |text| cites_limits(text, "18")),
+        ["greeks/src/normal.rs"],
+        "a comment citing docs/06-limits.md section 18 across a line break is \
+         not seen"
+    );
+
+    for (source, number, cites) in [
+        // An item doc, indented, wrapped between the file and its section.
+        (
+            "    /// good to this many digits*. `docs/06-limits.md`\n    /// §29 carries",
+            "29",
+            true,
+        ),
+        // A string continued with a backslash.
+        (
+            "\"cite docs/06-limits.md \\\n         §29 for it\"",
+            "29",
+            true,
+        ),
+        // A TOML comment, and a Markdown line.
+        (
+            "# registered in docs/06-limits.md\n# section 29",
+            "29",
+            true,
+        ),
+        ("see `docs/06-limits.md`\n§29 for it", "29", true),
+        // Not a citation of that section of the limits register.
+        ("`docs/06-limits.md` §290", "29", false),
+        ("`docs/05-decisions.md` §29", "29", false),
+        ("`docs/06-limits.md` §18", "29", false),
+        ("`docs/06-limits.md` section 29", "18", false),
+    ] {
+        assert_eq!(
+            cites_limits(&prose(source), number),
+            cites,
+            "`{source}`, read as prose, {} a citation of docs/06-limits.md §{number}",
+            if cites { "is not" } else { "is" }
+        );
+    }
+
+    let entry = d_0692();
+    for claim in [
+        "at seven places, the number §29 had before it was renumbered on \
+         merge, and all seven now cite §29.",
+        "The first pass of this correction changed six and said all four files \
+         were done.",
+        "counts \"section 18\" as stale beside \"§18\"",
+        "the tenth that the sixth test's reading finds a citation wrapped \
+         across two lines",
+    ] {
+        offset(&entry, "D-0692", claim);
+    }
+    assert!(
+        !entry.contains("renumbered on merge, and they now cite §29"),
+        "D-0692 again says the greeks files now cite §29 without saying its \
+         first pass missed the pointer wrapped across a line in solver.rs"
+    );
+    offset(
+        &limits_29(),
+        "docs/06-limits.md §29",
+        "reads a citation that wraps across two lines as one phrase",
+    );
+    offset(
+        &module_doc(),
+        "libm_key.rs's module doc",
+        "The tenth checks that the sixth reads a citation wrapped across two \
+         lines as one phrase",
     );
 }

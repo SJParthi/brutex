@@ -38908,15 +38908,25 @@ timestamps. It said the hardenings do no more than name the refusal better, and
 the second would also refuse a forward append. It said G-10's test proves the
 solver's bits reproduce, where a test checks that on the inputs it runs. And it
 quoted §4 with a lowercase first letter. Separately, four files of
-`crates/greeks` cited `docs/06-limits.md` §18 for this crate's measurement, the
-number §29 had before it was renumbered on merge, and they now cite §29. That is
-a comment change only, so there is still no mutant to run. The G-10 row of
+`crates/greeks` cited `docs/06-limits.md` §18 for this crate's measurement, at
+seven places, the number §29 had before it was renumbered on merge, and all
+seven now cite §29. That is a comment change only, so there is still no mutant
+to run. The first pass of this correction changed six and said all four files
+were done. It missed the seventh, a comment in a test of
+`crates/greeks/src/solver.rs` that ended one line with "`docs/06-limits.md`
+section" and began the next with "18", and the sixth test of `libm_key.rs`
+stayed green because it matched raw text, and matched a stale pointer only when
+spelt "§18". It now reads each file with comment markers and string
+continuations removed and line breaks collapsed, and counts "section 18" as
+stale beside "§18". The G-10 row of
 `docs/04-invariants.md` and a paragraph of `docs/00-charter.md` still cite §18
 for the same material; both are on `main` and are not edited here. The seventh
 test of `libm_key.rs` checks that the sixth test's walk reads only `.rs`,
 `.toml` and `.md` files and follows no link. The eighth checks that this entry
-and §29 quote their sources verbatim, and the ninth that they cite `96194c11`
-and keep none of the wordings corrected here.
+and §29 quote their sources verbatim, the ninth that they cite `96194c11`
+and keep none of the wordings corrected here, and the tenth that the sixth
+test's reading finds a citation wrapped across two lines, in each spelling
+`crates/` uses for one.
 
 ### D-0693 — Release every advisory file lock by `File::unlock`, through one guard in `store` — 2026-09-23
 

@@ -746,8 +746,8 @@ mod tests {
         // runs on", and the second is false: `exp` and `ln` come from the
         // platform's libm, and against the pure-Rust libm that wasm32 links,
         // 140 of 1,344 solved volatilities differ by up to 4.22e-14 relative.
-        // Invariant G-10 is narrowed to match and `docs/06-limits.md` section
-        // 18 carries the measurement. D-0046.
+        // Invariant G-10 is narrowed to match and `docs/06-limits.md` §29
+        // carries the measurement. D-0046.
         let contract = at_the_money();
         let quoted = contract.price(0.23, OptionKind::Call).expect("priced");
         let first = contract
