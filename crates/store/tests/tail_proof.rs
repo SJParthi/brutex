@@ -1,5 +1,7 @@
 //! The D-0688 tail proof runs again on every touch of the tail that follows a
-//! touch of another block, counted off the log: `store::tail_proof::*`.
+//! touch of another block, counted off the log:
+//! `store::tail_proof::every_touch_of_the_tail_after_another_block_runs_its_proof_again`.
+//! The second test here reads the two invariant rows that describe it.
 //!
 //! # What the answers could not show
 //!
@@ -22,19 +24,29 @@
 //! second touch of the tail in a row, which the one-block memory still serves
 //! for the price of a load.
 //!
-//! # Why this is its own test binary, and holds one test
+//! # Why this is its own test binary, and holds one test that emits
 //!
 //! `telemetry::install` writes a per-process `OnceLock` and refuses a second
 //! call. `store`'s unit-test binary spends its install on
 //! `store::emits::every_emit_in_this_crate_reaches_the_log_through_its_production_call`,
 //! whose exact count would also swallow these lines. Cargo builds every file
 //! under `tests/` into its own process, so the install below is a different
-//! `OnceLock`, and nothing else in this binary emits.
+//! `OnceLock`, and nothing else in this binary emits: the second test only
+//! reads a document.
 //!
 //! # What it does not prove
 //!
 //! That the proof's answer is right: `crate::file` and `crate::unit` hold
 //! that. This proves only that it ran, once per touch that needed it.
+//!
+//! # The row it made false
+//!
+//! AF-47 measured a memory that keeps the tail block keyed on the block
+//! alone, and said in the present tense that its own test was then the only
+//! store test that failed. That held at 224b6760 and stopped holding when
+//! this file landed, because the count here fails under that memory too.
+//! The second test checks that AF-47 scopes the measurement to its commit
+//! and names the count, and that AF-48 says AF-47 was corrected.
 
 #![allow(
     clippy::expect_used,
@@ -205,4 +217,68 @@ fn every_touch_of_the_tail_after_another_block_runs_its_proof_again() {
     drop(reader);
     let _ignored = fs::remove_dir_all(&dir);
     let _ignored = fs::remove_dir_all(&root);
+}
+
+// ===========================================================================
+// The rows: what AF-47 and AF-48 say the test above fails under
+// ===========================================================================
+
+/// The invariants register. Read at compile time so a rename fails the build
+/// rather than skipping the check.
+const INVARIANTS: &str = include_str!("../../../docs/04-invariants.md");
+
+/// The row of the register whose id is `id`, one line of the table.
+fn row(id: &str) -> &'static str {
+    let lead = format!("\n| {id} | ");
+    let from = INVARIANTS
+        .find(&lead)
+        .unwrap_or_else(|| panic!("docs/04-invariants.md has no row {id}"))
+        + 1;
+    let rest = &INVARIANTS[from..];
+    rest.find('\n').map_or(rest, |to| &rest[..to])
+}
+
+/// A failure naming the row and the claim, unless the row makes it.
+#[track_caller]
+fn says(text: &str, id: &str, claim: &str) {
+    assert!(text.contains(claim), "{id} does not say `{claim}`");
+}
+
+/// **AF-47 DOES NOT CALL ITS TEST THE ONLY ONE ITS SECOND CACHE FAILS.**
+///
+/// AF-47 measured two caches at 224b6760, and under the second, a memory that
+/// keeps the tail block keyed on the block alone, its own test was then the
+/// only store test that failed. The row said so in the present tense. The
+/// test above landed one commit later and fails under that memory too, so the
+/// sentence was false from then on, while AF-48 said "both fail" of the same
+/// memory. Neither row is on main, so AF-47 is corrected in place: it scopes
+/// the measurement to the commit that took it and names the test above, and
+/// AF-48 no longer says AF-47 is unedited. This holds the two rows to each
+/// other and to the test above.
+#[test]
+fn af_47_and_af_48_agree_on_which_tests_a_memory_of_the_tail_block_fails() {
+    let (af_47, af_48) = (row("AF-47"), row("AF-48"));
+    says(af_48, "AF-48", "Keyed on the tail block alone: both fail.");
+    says(
+        af_47,
+        "AF-47",
+        "At 224b6760, which added this leg, it was the only store test the \
+         second cache failed.",
+    );
+    says(
+        af_47,
+        "AF-47",
+        "`store::tail_proof::every_touch_of_the_tail_after_another_block_runs_its_proof_again` \
+         (AF-48) fails under both caches",
+    );
+    assert!(
+        !af_47.contains("it is the only store test that fails"),
+        "AF-47 again calls its test the only store test the second cache \
+         fails, and the test above fails under it too"
+    );
+    says(af_48, "AF-48", "AF-47 is corrected in place");
+    assert!(
+        !af_48.contains("AF-47 is not edited"),
+        "AF-48 says AF-47 is not edited, and AF-47 was corrected in place"
+    );
 }
