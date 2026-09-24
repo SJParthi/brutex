@@ -2208,11 +2208,11 @@ wrote into the `.grk` header region on the first append, refusing an append
 whenever the held stamp differed from its own, refused a forward append once
 the held stamp was altered, and every test in the `store` suite passed. No
 file under `crates/` but `libm_key.rs` names D-0692, and the only others that
-cite §29 are four files of `crates/greeks`, which cite it for the measurement
-above and read no document; the sixth test of `libm_key.rs` checks both. It
-reads a citation that wraps across two lines as one phrase, and takes every
-"§29" or "section 29" under `crates/` for a citation, whatever document it
-names, so a citation is seen however the register is named. So the key can be
+cite §29 are four files of `crates/greeks`, which cite it for what it records
+about that crate and read no document; the sixth test of `libm_key.rs` checks
+both. It reads a citation that wraps across two lines as one phrase, and takes
+every "§29" or "section 29" under `crates/` for a citation, whatever document
+it names, so a citation is seen however the register is named. So the key can be
 enforced without failing any test that would send its author back to either
 text, and the entry that enforces it has to correct this paragraph and D-0692's
 caveat itself.

@@ -38885,8 +38885,8 @@ the `.grk` header region on the first append, refusing an append whenever the
 held stamp differed from its own, refused a forward append once the held stamp
 was altered, and every test in the `store` suite passed, these four included.
 No file under `crates/` but `libm_key.rs` names this entry, and the only others
-that cite §29 are four files of `crates/greeks`, which cite it for the
-measurement it carries and read no document. So the key can be enforced
+that cite §29 are four files of `crates/greeks`, which cite it for what it
+records about that crate and read no document. So the key can be enforced
 without failing any test that would send its author back to either, and the
 entry that enforces it has to supersede the paragraph that begins "That rule is
 operational, and nothing enforces it" and correct §29 itself. §29 and the
@@ -38933,11 +38933,18 @@ too, and is listed once read. A number apart from its "§" or "section", as the
 `docs/04-invariants.md` and a paragraph of `docs/00-charter.md` still cite §18
 for the same material; both are on `main` and are not edited here. The seventh
 test of `libm_key.rs` checks that the sixth test's walk reads only `.rs`,
-`.toml` and `.md` files and follows no link. The eighth checks that this entry
-and §29 quote their sources verbatim, the ninth that they cite `96194c11`
-and keep none of the wordings corrected here, and the tenth that the sixth
-test's reading finds a citation wrapped across two lines, and a section number
-however the document before it is named.
+`.toml` and `.md` files and follows no link. The eighth checks against its
+source, verbatim, each quotation this entry takes from D-0046, `CLAUDE.md` and
+`store::file`, and the two §29 takes from `store::file` and `api`'s server,
+the ninth that they cite `96194c11` and keep none of the wordings corrected
+here, each refused as it was written, and the tenth that the sixth test's
+reading finds a citation wrapped across two lines, and a section number
+however the document before it is named. The eighth was once said to check
+every quotation in both texts, and left out the two this entry opens with, the
+premise its title names and D-0046's section title; both are in its list now.
+The ninth refused the first of the two sentences that said G-10's test proves
+and not the second, and did not refuse the lowercase §4 quote; it now refuses
+both.
 
 ### D-0693 — Release every advisory file lock by `File::unlock`, through one guard in `store` — 2026-09-23
 

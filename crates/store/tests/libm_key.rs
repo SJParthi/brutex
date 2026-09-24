@@ -22,26 +22,28 @@
 //! and a stamp a caller packs into the provenance word never reaches these
 //! tests, which build the provenance themselves. No other file under `crates/`
 //! names D-0692, and the only others that cite §29 are four files of
-//! `crates/greeks`, which cite it for its measurement and read no document, so
-//! the entry that enforces the key has to correct D-0692's caveat and §29
-//! itself. The fifth test checks that this doc, §29 and D-0692 all say so, the
-//! sixth which files under `crates/` name D-0692 or cite §29, and the seventh
-//! that the sixth's walk reads only source files and follows no link. The
-//! tenth checks that the sixth reads a citation wrapped across two lines as
-//! one phrase, and a section number however the document before it is named:
-//! it once matched raw text, and missed a greeks pointer still citing §18
-//! across a line break, and it then matched four spellings that name
-//! `06-limits.md`, and missed "limits §29", which is how `crates/api` names
-//! the register.
+//! `crates/greeks`, which cite it for what it records about that crate and
+//! read no document, so the entry that enforces the key has to correct
+//! D-0692's caveat and §29 itself. The fifth test checks that this doc, §29
+//! and D-0692 all say so, the sixth which files under `crates/` name D-0692 or
+//! cite §29, and the seventh that the sixth's walk reads only source files and
+//! follows no link. The tenth checks that the sixth reads a citation wrapped
+//! across two lines as one phrase, and a section number however the document
+//! before it is named: it once matched raw text, and missed a greeks pointer
+//! still citing §18 across a line break, and it then matched four spellings
+//! that name `06-limits.md`, and missed "limits §29", which is how
+//! `crates/api` names the register.
 //!
 //! **A fact is cited to the source that states it.** The entry cited D-0046
 //! for "`x86_64` glibc, the CI target", and D-0046 never mentions glibc,
 //! `x86_64` or the CI runner. The fourth test checks that the citation names
 //! `docs/06-limits.md` §29, that §29 states the fact, that D-0046 still does
 //! not, and that the CI workflow runs where §29 says it does. The eighth checks
-//! that D-0692 and §29 quote their sources verbatim, and the ninth that they
-//! cite `main`'s `96194c11` for the code they read and the linkage they
-//! measured, and keep none of the wordings a review corrected.
+//! against its source, verbatim, each quotation D-0692 takes from D-0046,
+//! `CLAUDE.md` and `store::file`, and the two §29 takes from `store::file` and
+//! `api`'s server, and the ninth that they cite `main`'s `96194c11` for the
+//! code they read and the linkage they measured, and keep none of the wordings
+//! D-0692's second correction lists.
 //!
 //! A second libm is modelled here as a one-ulp move in a computed `f64`, the
 //! size of the first `exp` disagreement D-0046 reports between two real
@@ -543,7 +545,11 @@ fn source_of(test: &str) -> String {
 /// though it does fail for either as the model has them. D-0692's correction,
 /// §29 and the module doc now say which, and that the entry which enforces the
 /// key has to correct the caveat itself, because no test here will fail to
-/// make it. The first test's own messages name no cause it cannot see.
+/// make it. The first test's own messages name no cause it cannot see. All
+/// three say the four greeks files cite §29 for what it records about that
+/// crate, not for its measurement: `lib.rs` cites it for the solver's bound on
+/// model evaluations, and `tests/vendor_anchor.rs` for vendor parameters §29
+/// leaves UNVERIFIED.
 #[test]
 fn nothing_here_sees_the_libm_key_enforced_and_the_three_texts_say_so() {
     let entry = d_0692();
@@ -614,6 +620,20 @@ fn nothing_here_sees_the_libm_key_enforced_and_the_three_texts_say_so() {
              and it fails for both as the model has them; what it cannot \
              see is the store recording or checking a libm build"
         );
+        offset(
+            text,
+            name,
+            "which cite it for what it records about that crate and read no \
+             document",
+        );
+        for gone in ["cite it for the measurement", "cite it for its measurement"] {
+            assert!(
+                !text.contains(gone),
+                "{name} again says the greeks files {gone}, and two of them \
+                 cite §29 for the solver's evaluation bound and for vendor \
+                 parameters it leaves UNVERIFIED"
+            );
+        }
     }
 
     // The first test's messages give no cause it cannot see: a refusal made by
@@ -761,12 +781,13 @@ fn mentions_section(text: &str, number: &str) -> bool {
 /// D-0692's correction and §29 say the key can be enforced without failing a
 /// test that would send its author back to either text, because this file is
 /// the only one that names D-0692, and the only others that cite §29 are four
-/// files of `crates/greeks` that cite it for its measurement and read no
-/// document. A file that comes to name either, or a greeks file that comes to
-/// read a document, fails here, so that sentence is re-read the day it could
-/// stop being true. The greeks files are listed rather than exempted: they
-/// cited §18, the number §29 had before it was renumbered on merge, until the
-/// review that corrected them, and a list is what caught that.
+/// files of `crates/greeks` that cite it for what it records about that crate
+/// and read no document. A file that comes to name either, or a greeks file
+/// that comes to read a document, fails here, so that sentence is re-read the
+/// day it could stop being true. The greeks files are listed rather than
+/// exempted: they cited §18, the number §29 had before it was renumbered on
+/// merge, until the review that corrected them, and a list is what caught
+/// that.
 ///
 /// Every file is read as [`prose`], every mention of a section 29 is taken
 /// for a citation of §29 whatever document it names, and "section 18" is as
@@ -902,8 +923,12 @@ const SERVER_RS: &str = include_str!("../../api/src/server.rs");
 /// **D-0692 AND §29 QUOTE THEIR SOURCES VERBATIM.**
 ///
 /// Each quotation is looked up, opening quote mark included, in the text that
-/// quotes it and, whitespace collapsed, in the source it names. D-0692 once
-/// quoted `CLAUDE.md` §4 with a lowercase first letter.
+/// quotes it and, whitespace collapsed, in the source it names. The list is
+/// every quotation D-0692 takes from D-0046, `CLAUDE.md` and `store::file`,
+/// and the two §29 takes from `store::file` and `api`'s server. D-0692 once
+/// quoted `CLAUDE.md` §4 with a lowercase first letter, and this list once
+/// left out the two quotations D-0692 opens with, D-0046's section title and
+/// its "no consumer".
 #[test]
 fn d_0692_and_limits_29_quote_their_sources_verbatim() {
     let entry = d_0692();
@@ -916,6 +941,14 @@ fn d_0692_and_limits_29_quote_their_sources_verbatim() {
     );
 
     for (text, name, quote, source, source_name) in [
+        (&entry, "D-0692", "no consumer", &d_0046, "D-0046"),
+        (
+            &entry,
+            "D-0692",
+            "Reproducible within one target, and not across two",
+            &d_0046,
+            "D-0046",
+        ),
         (
             &entry,
             "D-0692",
@@ -995,19 +1028,50 @@ fn d_0692_and_limits_29_quote_their_sources_verbatim() {
             "{name} quotes {source_name} as saying `{quote}`, and it does not"
         );
     }
+
+    the_texts_say_which_quotations_the_eighth_test_checks(&entry);
 }
 
-/// **D-0692 AND §29 CITE WHAT `main` HOLDS, AND KEEP NONE OF THE WORDINGS A
-/// REVIEW CORRECTED.**
+/// D-0692 and this file's module doc say which quotations the eighth test
+/// checks, and neither says it checks every quotation in both texts, which it
+/// once said while leaving out the two D-0692 opens with.
+fn the_texts_say_which_quotations_the_eighth_test_checks(entry: &str) {
+    let doc = module_doc();
+    for (text, name, who) in [
+        (entry, "D-0692", "this entry"),
+        (doc.as_str(), "libm_key.rs's module doc", "D-0692"),
+    ] {
+        offset(
+            text,
+            name,
+            &format!(
+                "The eighth checks against its source, verbatim, each quotation \
+                 {who} takes from D-0046, `CLAUDE.md` and `store::file`, and the \
+                 two §29 takes from `store::file` and `api`'s server"
+            ),
+        );
+        assert!(
+            !text.contains("quote their sources verbatim"),
+            "{name} again says the eighth test checks every quotation in D-0692 \
+             and §29, and it checks the ones it lists"
+        );
+    }
+}
+
+/// **D-0692 AND §29 CITE WHAT `main` HOLDS, AND KEEP NONE OF THE WORDINGS
+/// D-0692'S SECOND CORRECTION LISTS.**
 ///
 /// The code reading and the linkage measurement cite `96194c11`, on `main`,
 /// where they were re-taken: the commit first cited is in neither `main`'s
-/// history nor this branch's. And each wording a review found wrong stays
+/// history nor this branch's. And each wording that correction lists stays
 /// gone: that `Header::advance` compares no field of any row, when it compares
 /// the timestamps; that the two hardenings only name the refusal better, when
 /// the second also refuses a forward append; that G-10's test proves, when it
-/// checks the inputs it runs; and that a resume under one build is always
+/// checks the inputs it runs, in either of the two sentences that said so; and
+/// that the §4 sentence it quotes begins with a lowercase letter. So does
+/// §29's question whether a resume under one build is always
 /// `AlreadyPresent`, when a window whose inputs changed is refused under any.
+/// Each is refused as it was written.
 #[test]
 fn d_0692_and_limits_29_cite_main_and_keep_none_of_the_corrected_wordings() {
     let entry = d_0692();
@@ -1069,6 +1133,20 @@ fn d_0692_and_limits_29_cite_main_and_keep_none_of_the_corrected_wordings() {
         !entry.contains("proves that the same inputs"),
         "D-0692 again says G-10's test proves what it checks on its inputs"
     );
+    offset(
+        &entry,
+        "D-0692",
+        "A resume in a new process is outside what it checks.",
+    );
+    assert!(
+        !entry.contains("outside what it proves"),
+        "D-0692 again says what G-10's test proves, where it checks inputs"
+    );
+
+    assert!(
+        !entry.contains("\"a new field is a new file version"),
+        "D-0692 again quotes CLAUDE.md §4 with a lowercase first letter"
+    );
 
     offset(
         &limits,
@@ -1080,6 +1158,24 @@ fn d_0692_and_limits_29_cite_main_and_keep_none_of_the_corrected_wordings() {
         "docs/06-limits.md §29 again asks whether a same-build resume is \
          always AlreadyPresent, and a window whose inputs changed is refused \
          under any build"
+    );
+
+    offset(
+        &entry,
+        "D-0692",
+        "the ninth that they cite `96194c11` and keep none of the wordings \
+         corrected here, each refused as it was written",
+    );
+    offset(
+        &doc,
+        "libm_key.rs's module doc",
+        "keep none of the wordings D-0692's second correction lists",
+    );
+    assert!(
+        !doc.contains("keep none of the wordings a review corrected"),
+        "libm_key.rs's module doc again says the ninth test refuses every \
+         wording a review corrected, and it refuses those D-0692's second \
+         correction lists"
     );
 }
 
