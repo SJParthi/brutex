@@ -9222,7 +9222,8 @@ impl Rules {
     /// # This is a FILTER, not a promise
     ///
     /// Every row it admits still carries the whole-workspace caveats: figures
-    /// are per ONE unit of the index, gross of the statutory charge stack, and
+    /// are per ONE unit of the instrument -- one unit of an index, or one
+    /// share, GROSS OF EVERY CHARGE a share trade pays (D-0506, D-0696) -- and
     /// selected out of a search whose multiplicity the screen does not correct
     /// for. A row passing `elite` is a candidate to investigate, not a result.
     #[must_use]
@@ -18104,10 +18105,10 @@ fn opening(banner: &str, refused: Option<&str>) -> String {
 /// `Selection V6`.
 const EQUITY_RANKING_GROSS: &str = "  CASH EQUITY: EVERY FIGURE IN THIS RANKING IS GROSS OF EVERY CHARGE.\n  \
      A share trade pays brokerage, STT, stamp duty, exchange charges, the SEBI\n  \
-     fee and GST, and this engine subtracts none of them, so the ranking above\n  \
-     is on GROSS returns. COST-EXCLUDED RESEARCH, NOT A NET RESULT (D-0509,\n  \
-     D-0525, D-0681). No equity result carries Selection V6 or execution\n  \
-     authority until a charter-sourced equity charge stack exists.\n\n";
+     fee and GST, and none is subtracted, so the ranking above is on GROSS\n  \
+     returns. COST-EXCLUDED RESEARCH, NOT A NET RESULT (D-0509, D-0525,\n  \
+     D-0681). No equity result carries Selection V6 or execution authority\n  \
+     until a charter-sourced equity charge stack exists.\n\n";
 
 /// What `cli top` says a share's `mean` is per. D-0696.
 ///
@@ -18261,21 +18262,33 @@ std::thread_local! {
 /// page that exit prints ranks shares, and a test that never reached it let
 /// its charge statement be stripped with every other test green. The guard
 /// drives the real exit in `audit_bars_work` on a real generated audit.
+///
+/// # Nested, it restores what it replaced
+///
+/// As `stored::CostScopeFault` does: the guard keeps the flag it displaced
+/// and puts it back when it drops, so an inner guard dropping cannot switch
+/// off an outer one still in scope. The field is private, so no guard exists
+/// that did not come from [`NoneClosedFault::install`], and none can be
+/// dropped without having set the flag first.
 #[cfg(test)]
-pub(crate) struct NoneClosedFault;
+pub(crate) struct NoneClosedFault {
+    /// What the flag was before this guard was installed.
+    displaced: bool,
+}
 
 #[cfg(test)]
 impl NoneClosedFault {
     pub(crate) fn install() -> Self {
-        NONE_CLOSED.with(|held| held.set(true));
-        Self
+        let displaced = NONE_CLOSED.with(|held| held.replace(true));
+        Self { displaced }
     }
 }
 
 #[cfg(test)]
 impl Drop for NoneClosedFault {
     fn drop(&mut self) {
-        NONE_CLOSED.with(|held| held.set(false));
+        let displaced = self.displaced;
+        NONE_CLOSED.with(|held| held.set(displaced));
     }
 }
 

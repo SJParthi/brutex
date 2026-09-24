@@ -232,7 +232,36 @@ fn run(
     let vendor = crate::parse_vendor(vendor_word)?;
     crate::swept_rung(rung)?;
     let root = crate::store_root()?;
-    let (mut out, surface) = head_under(&root, vendor_word, rung, from, to, support_ppm)?;
+    run_under(&root, vendor, vendor_word, rung, from, to, support_ppm)
+}
+
+/// The page, from its head to its last pooled row, with the store root
+/// supplied rather than read from the environment. D-0696.
+///
+/// [`run`] checks the commit stamp, the feed, the rung and the root, and then
+/// hands everything else here. The head [`head_under`] renders is the page's
+/// first bytes, and `out` is bound from it once and only appended to after:
+/// `the_pool_page_is_its_head_and_then_only_appends` drives this on a scratch
+/// store and reads that shape from the source. [`run`] itself stays out of
+/// reach of a test for the reason it always was -- the stamp check comes
+/// first -- and holds no line of the page.
+///
+/// **The root is supplied for the head, the union and pass 2, not pass 1.**
+/// Pass 1 screens each instrument through `crate::one_rung`, exactly as
+/// `range-rung` does, and that reads the store root from the environment. A
+/// test therefore drives this function on a surface that is empty, where it
+/// returns after the head; a surface with an instrument on it is reached from
+/// here by no test.
+fn run_under(
+    root: &std::path::Path,
+    vendor: brutex_core::vendor::Vendor,
+    vendor_word: &str,
+    rung: &'static str,
+    from: (u16, u8),
+    to: (u16, u8),
+    support_ppm: Option<u64>,
+) -> Result<String, String> {
+    let (mut out, surface) = head_under(root, vendor_word, rung, from, to, support_ppm)?;
     if surface.is_empty() {
         return Ok(out);
     }
@@ -264,7 +293,7 @@ fn run(
     render_per_symbol(&mut out, &screened);
 
     // ── PASS 2: the union of every top combination, on every instrument ──
-    let (union, unread) = union_of(&root, &screened);
+    let (union, unread) = union_of(root, &screened);
     if !unread.is_empty() {
         let _ = writeln!(
             out,
@@ -291,7 +320,7 @@ fn run(
     );
     let priced: Vec<Result<Vec<Priced>, String>> = surface
         .par_iter()
-        .map(|symbol| price_all(&root, vendor, symbol, rung, from, to, &union))
+        .map(|symbol| price_all(root, vendor, symbol, rung, from, to, &union))
         .collect();
     let rules = crate::Rules::operator();
     let pooled = fold(&union, &surface, &priced, rules);
@@ -1416,6 +1445,111 @@ mod tests {
         // Every holding at its own path: the opening alone, as before D-0696.
         let (page, _) = head("page-clean", &["NSE/CASH/RELIANCE", "NSE/INDEX/NIFTY"]);
         assert_eq!(page, opening(&["NIFTY", "RELIANCE"]));
+
+        // A directory name carrying a newline is named on one line, and the
+        // page it heads is not a refusal (D-0696). Raw, the name put
+        // `refused: forged/...` at column zero, as the review measured.
+        let (page, surface) = head(
+            "page-forged",
+            &["NSE/CASH/RELIANCE", "X\nrefused: forged/CASH/RELIANCE"],
+        );
+        assert_eq!(surface, vec!["RELIANCE".to_owned()]);
+        assert!(
+            page.contains("\n    `X\\nrefused: forged/CASH/RELIANCE` is not where"),
+            "{page}"
+        );
+        assert!(
+            !page.lines().any(|line| line.starts_with("refused")),
+            "{page}"
+        );
+        assert!(!crate::carries_refusal(&page), "{page}");
+    }
+
+    /// **The page `pool` prints IS its head, and every later line is
+    /// appended.** D-0696.
+    ///
+    /// The test above drives `head_under`, and `run` -- which no test reaches,
+    /// because it checks the commit stamp first -- was what put that head on
+    /// the page. The review replaced `run`'s `out` with the bare opening after
+    /// `head_under` returned, dropping the NOT ON THE SURFACE block from the
+    /// real page, and every test stayed green. Everything after the stamp,
+    /// feed, rung and root checks is now `run_under`, which this drives on a
+    /// scratch store whose surface is empty, where it returns after the head.
+    /// A surface with an instrument on it is screened through `one_rung`,
+    /// which reads the root from the environment, so that path is held here by
+    /// the shape of the source instead: `out` is bound from `head_under` once,
+    /// is never assigned again, and the page writes neither the opening nor
+    /// the block itself.
+    #[test]
+    fn the_pool_page_is_its_head_and_then_only_appends() {
+        let root = store_holding("run-under", &["NSE/INDEX/RELIANCE", "BSE/CASH/RELIANCE"]);
+        let page = super::run_under(
+            &root,
+            brutex_core::vendor::Vendor::Zerodha,
+            "zerodha",
+            "60min",
+            (2026, 7),
+            (2026, 7),
+            None,
+        )
+        .expect("the page renders");
+        let (head, surface) =
+            super::head_under(&root, "zerodha", "60min", (2026, 7), (2026, 7), None)
+                .expect("the head renders");
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            surface.is_empty(),
+            "premise: nothing to screen: {surface:?}"
+        );
+        assert!(
+            head.contains("NOT ON THE SURFACE: 2 held director(ies)"),
+            "premise: the head names both directories:\n{head}"
+        );
+        assert_eq!(page, head, "the page of an empty surface is its head");
+
+        let source = include_str!("pool.rs");
+        let from = source.find("\nfn run_under(").expect("run_under");
+        let body = source
+            .get(from..)
+            .and_then(|rest| rest.find("\n}\n").and_then(|to| rest.get(..to)))
+            .expect("its body");
+        assert!(
+            body.len() > 2_000,
+            "the body found is {} bytes, so the anchors moved and this reads nothing",
+            body.len()
+        );
+        let bound =
+            "let (mut out, surface) = head_under(root, vendor_word, rung, from, to, support_ppm)?;";
+        assert_eq!(
+            body.matches(bound).count(),
+            1,
+            "out comes from the head once"
+        );
+        let after = body
+            .split_once(bound)
+            .map(|(_, rest)| rest)
+            .unwrap_or_default();
+        for rewrite in [
+            "out =",
+            "out.clear()",
+            "out.truncate(",
+            "out.replace_range(",
+            "out.drain(",
+            "mem::take(&mut out)",
+            "opening(",
+            "not_on_the_surface(",
+            "head_under(",
+        ] {
+            assert!(
+                !after.contains(rewrite),
+                "`{rewrite}` after the head: the page must be its head and then appends"
+            );
+        }
+        assert!(
+            body.split_once(bound)
+                .is_some_and(|(before, _)| !before.contains("out")),
+            "nothing is written before the head is bound"
+        );
     }
 
     /// **The pool quotes no charge rate.** `CLAUDE.md` §3 rule 1: every claim

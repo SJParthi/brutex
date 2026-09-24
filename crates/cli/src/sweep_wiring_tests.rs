@@ -606,6 +606,74 @@ fn an_untraded_equity_ranking_is_labelled_gross_before_it_refuses() {
     );
 }
 
+/// **A nested untraded guard puts back what it displaced.** D-0696.
+///
+/// The guard cleared the flag when it dropped, so an inner guard dropping
+/// switched off an outer one still in scope, and the outer's test then drove
+/// the ordinary exit without knowing it.
+#[test]
+fn a_nested_none_closed_guard_restores_the_outer_one_when_it_drops() {
+    let held = || super::NONE_CLOSED.with(std::cell::Cell::get);
+    assert!(!held(), "premise: no guard on this thread");
+    {
+        let _outer = super::NoneClosedFault::install();
+        assert!(held(), "the outer guard sets the flag");
+        {
+            let _inner = super::NoneClosedFault::install();
+            assert!(held(), "the inner guard sets it too");
+        }
+        assert!(
+            held(),
+            "the inner guard dropping must leave the outer one in force"
+        );
+    }
+    assert!(
+        !held(),
+        "the outer guard dropping leaves the flag as it found it"
+    );
+}
+
+/// **Two doc comments this piece corrected say no more than holds.** D-0696.
+///
+/// `Rules::elite` said every admitted row's figures are "per ONE unit of the
+/// index, gross of the statutory charge stack" after D-0506 let a row be a
+/// share, which `cli top` tells is per ONE share and GROSS OF EVERY CHARGE.
+/// The stored-sweep share test said "An index's sweep is unchanged" and
+/// compared no index page with a baseline. Read from the source, because a
+/// doc comment reaches no other test.
+#[test]
+fn the_corrected_doc_comments_say_no_more_than_holds() {
+    let doc_before = |source: &'static str, item: &str| -> String {
+        let at = source.find(item).expect("the item is still there");
+        let head = source.get(..at).expect("a prefix");
+        let from = head.rfind("\n\n").map_or(0, |gap| gap + 2);
+        let doc = head.get(from..).expect("its doc");
+        assert!(doc.len() > 200, "the doc of {item} is {} bytes", doc.len());
+        words(&doc.replace("///", " "))
+    };
+    let elite = doc_before(include_str!("lib.rs"), "    pub const fn elite(");
+    assert!(
+        !elite.contains("per ONE unit of the index, gross of the statutory charge stack"),
+        "{elite}"
+    );
+    assert!(
+        elite.contains("one unit of an index, or one share, GROSS OF EVERY CHARGE"),
+        "the filter's caveat names a share's unit and charges: {elite}"
+    );
+    let sweep = doc_before(
+        include_str!("audited_stored_tests.rs"),
+        "fn a_stored_sweep_of_a_share_says_its_ranking_is_gross_of_every_charge(",
+    );
+    assert!(
+        !sweep.contains("An index's sweep is unchanged."),
+        "the doc claims a byte comparison the test does not make: {sweep}"
+    );
+    assert!(
+        sweep.contains("It is not compared byte for byte"),
+        "the doc says what is and is not asserted of an index: {sweep}"
+    );
+}
+
 /// `text` with every run of whitespace folded to one space, so two copies of a
 /// sentence wrapped or indented differently compare by their words.
 fn words(text: &str) -> String {
@@ -631,37 +699,41 @@ fn names_a_rate(text: &str) -> bool {
         .any(|piece| piece.contains(|c: char| c.is_ascii_digit() || c == '%'))
 }
 
-/// **Every equity charge statement `cli` prints is the audit header's own,
-/// and none names a rate.** D-0696.
+/// Why `said` -- one copy of the charge statement, whitespace folded -- does
+/// not state the audit header's fact that none of the charges is subtracted,
+/// or `Ok` when it does. `excluded` is the header's cost-excluded sentence,
+/// whose "NOT A NET RESULT" is the one place a copy may use the word.
 ///
-/// The FINDINGS label, `cli top`'s share legend and `pool`'s opening are three
-/// copies of what `runner::audit`'s equity header says, and the first version
-/// of each pinned only its own literal. They had already drifted: three sets
-/// of decision citations, and two copies without the header's Selection V6
-/// clause. So the charge list and the cost-excluded sentence are read out of
-/// the header `runner::audit::render` prints, and every copy must carry both
-/// word for word. A change to the header's charges -- the day a
-/// charter-sourced stack lands -- fails here until every copy follows it.
-///
-/// The stored banner's note, `runner::audit::CASH_EQUITY_GROSS`, is a fourth
-/// copy: every stored report over a stock opens with it, and every JSON
-/// payload's `equity_note` carries it. It was written after this test
-/// (D-0694) without the Selection V6 clause, and nothing here read it. AF-19.
-///
-/// `CLAUDE.md` §3 rule 1: no copy may quote a rate, because
-/// `docs/00-charter.md` sources none. Asserted on the copies themselves, so a
-/// rate added to one of them fails whether or not a page test reads it.
-///
-/// **There were four copies, not three.** D-0694 gave `runner::audit`
-/// `CASH_EQUITY_GROSS`, which `CostScope::report_note` prints at the head of
-/// every stored share page (`top` and `sweep-stored` among them), of
-/// `sweep-all` and of the Boolean research heading. It said "This is
-/// cost-excluded research, not a net result" with no Selection V6 clause, so
-/// those pages stated the charge fact in two wordings and this test read one.
-/// It now carries the header's sentence and is checked with the other three
-/// (D-0696).
-#[test]
-fn every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate() {
+/// Every copy states the fact in the same four words, "none is subtracted",
+/// and speaks of subtraction nowhere else. So a copy that ALSO says something
+/// is subtracted, calls a figure net, or speaks of a deduction contradicts
+/// the header while still carrying its charge list and sentence -- which is
+/// exactly what passed every test before this check (D-0696).
+fn denies_subtraction(said: &str, excluded: &str) -> Result<(), &'static str> {
+    if !said.contains("none is subtracted") {
+        return Err("does not say that none is subtracted");
+    }
+    let rest = said.replace(excluded, " ").to_lowercase();
+    if rest.matches("subtract").count() != 1 {
+        return Err("speaks of subtraction beyond `none is subtracted`");
+    }
+    if rest.contains("deduct") {
+        return Err("speaks of a deduction");
+    }
+    if rest
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|word| word == "net")
+    {
+        return Err("calls a figure net outside `NOT A NET RESULT`");
+    }
+    Ok(())
+}
+
+/// The audit header's equity text with whitespace folded, its charge list,
+/// and its cost-excluded sentence with the Selection V6 clause -- each read
+/// out of what `runner::audit::render` prints, and the header's own fact that
+/// none of the charges is subtracted checked as a premise.
+fn the_headers_charge_fact() -> (String, String, String) {
     use runner::audit::CostScope;
     let header = words(&runner::audit::render(
         CostScope::CashEquity,
@@ -695,6 +767,108 @@ fn every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate() {
         "premise: {excluded:?}"
     );
     assert!(
+        header.contains("so NONE of those charges is subtracted anywhere in this run"),
+        "premise: the header states the fact every copy must: {header}"
+    );
+    let (charges, excluded) = (charges.to_owned(), excluded.to_owned());
+    (header, charges, excluded)
+}
+
+/// **The subtraction check refuses every way of contradicting the header
+/// that keeps its words.** D-0696.
+///
+/// The review's label kept the charge list, the sentence and "GROSS OF EVERY
+/// CHARGE" and said the engine subtracts every charge. Each contradiction
+/// below is written into the FINDINGS label, keeps the list and the sentence,
+/// and must be refused by [`denies_subtraction`], so the check in
+/// `every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate`
+/// is not vacuous.
+#[test]
+fn the_subtraction_check_refuses_each_contradiction_of_the_header() {
+    let (_, charges, excluded) = the_headers_charge_fact();
+    let label = words(super::EQUITY_RANKING_GROSS);
+    assert_eq!(
+        denies_subtraction(&label, &excluded),
+        Ok(()),
+        "premise: the label itself states the fact: {label}"
+    );
+    for (contradiction, from, to) in [
+        (
+            "the review's label",
+            "and none is subtracted, so the ranking above is on GROSS returns",
+            "and this engine subtracts all of them, so the ranking above is on NET returns",
+        ),
+        (
+            "a second claim beside the fact",
+            "and none is subtracted,",
+            "and none is subtracted, but brokerage is subtracted,",
+        ),
+        (
+            "a net figure beside the fact",
+            "is on GROSS returns",
+            "is on net returns",
+        ),
+        (
+            "a deduction beside the fact",
+            "and none is subtracted,",
+            "and none is subtracted, though every charge is deducted,",
+        ),
+    ] {
+        assert!(label.contains(from), "premise: {contradiction}: {label}");
+        let broken = label.replace(from, to);
+        assert!(
+            broken.contains(&charges) && broken.contains(&excluded),
+            "premise: {contradiction} keeps the list and the sentence"
+        );
+        assert!(
+            denies_subtraction(&broken, &excluded).is_err(),
+            "{contradiction} must be refused: {broken}"
+        );
+    }
+}
+
+/// **Every equity charge statement `cli` prints is the audit header's own,
+/// and none names a rate.** D-0696.
+///
+/// The FINDINGS label, `cli top`'s share legend and `pool`'s opening are three
+/// copies of what `runner::audit`'s equity header says, and the first version
+/// of each pinned only its own literal. They had already drifted: three sets
+/// of decision citations, and two copies without the header's Selection V6
+/// clause. So the charge list and the cost-excluded sentence are read out of
+/// the header `runner::audit::render` prints, and every copy must carry both
+/// word for word. A change to the header's charges -- the day a
+/// charter-sourced stack lands -- fails here until every copy follows it.
+///
+/// `CLAUDE.md` §3 rule 1: no copy may quote a rate, because
+/// `docs/00-charter.md` sources none. Asserted on the copies themselves, so a
+/// rate added to one of them fails whether or not a page test reads it.
+///
+/// **There were four copies, not three.** D-0694 gave `runner::audit`
+/// `CASH_EQUITY_GROSS`, which `CostScope::report_note` prints at the head of
+/// every stored share page (`top` and `sweep-stored` among them), of
+/// `sweep-all` and of the Boolean research heading. It said "This is
+/// cost-excluded research, not a net result" with no Selection V6 clause, so
+/// those pages stated the charge fact in two wordings and this test read one.
+/// It now carries the header's sentence and is checked with the other three
+/// (D-0696).
+///
+/// **The four constants, not every sentence `cli` prints.** "Every equity
+/// charge statement" in the name means these four texts. Other pages over a
+/// share carry wordings of their own that this test does not read -- a priced
+/// expression search's "Cost-excluded, unvalidated research" note and the
+/// research page's "Discovery policy requested: no charges" line among them.
+///
+/// **And the fact itself, not only its words.** Each copy was held to the
+/// header's charge list and sentence and to "GROSS OF EVERY CHARGE", and to
+/// nothing about subtraction: a label rewritten to say "this engine subtracts
+/// all of them, so the ranking above is on NET returns" kept all three and
+/// passed every equity test (measured by the review). The header says NONE of
+/// those charges is subtracted, and [`denies_subtraction`] now holds every
+/// copy to saying so in one wording and to contradicting it nowhere.
+#[test]
+fn every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate() {
+    let (header, charges, excluded) = the_headers_charge_fact();
+    assert!(
         !names_a_rate(&header),
         "premise: the header itself quotes no rate: {header}"
     );
@@ -710,11 +884,11 @@ fn every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate() {
     ] {
         let said = words(text);
         assert!(
-            said.contains(charges),
+            said.contains(&charges),
             "{copy} must name the header's charges {charges:?}: {said}"
         );
         assert!(
-            said.contains(excluded),
+            said.contains(&excluded),
             "{copy} must carry the header's sentence {excluded:?}: {said}"
         );
         assert!(
@@ -722,6 +896,11 @@ fn every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate() {
             "{copy} must say it is gross: {said}"
         );
         assert!(!names_a_rate(text), "{copy} quotes a rate: {text}");
+        let verdict = denies_subtraction(&said, &excluded);
+        assert!(
+            verdict.is_ok(),
+            "{copy} {verdict:?}, against the header's fact: {said}"
+        );
     }
 
     // The checker is not vacuous: a quoted rate trips it, a decision number

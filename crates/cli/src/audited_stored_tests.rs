@@ -1463,8 +1463,13 @@ fn top_names_a_recorded_share_as_a_share_and_an_index_as_before() {
 ///
 /// The verb renders FINDINGS and stops -- it has no AUDIT block, so D-0681's
 /// header never reached it, and a ranked share table (for example `mean 45
-/// paisa, t 103.04, clears`) carried no charge statement at all. An index's
-/// sweep is unchanged.
+/// paisa, t 103.04, clears`) carried no charge statement at all.
+///
+/// An index's sweep carries none of the equity text: not the label, not the
+/// banner's gross paragraph, not the corporate-actions sentence, anywhere on
+/// its page. That is what is asserted of NIFTY. It is not compared byte for
+/// byte with an index page from before D-0694, and this doc said "An index's
+/// sweep is unchanged" when it asserted less than that (D-0696).
 #[test]
 fn a_stored_sweep_of_a_share_says_its_ranking_is_gross_of_every_charge() {
     let _knobs = crate::knobs::serially();
@@ -1498,6 +1503,18 @@ fn a_stored_sweep_of_a_share_says_its_ranking_is_gross_of_every_charge() {
             underlying == "RELIANCE",
             "{underlying}: the banner note heads a share's page and no index's:\n{page}"
         );
+        for equity_text in [
+            crate::EQUITY_RANKING_GROSS.trim_end(),
+            runner::audit::CASH_EQUITY_GROSS,
+            runner::audit::CORPORATE_ACTIONS_UNCHECKED,
+        ] {
+            assert_eq!(
+                page.contains(equity_text),
+                underlying == "RELIANCE",
+                "{underlying}: a share's page carries {equity_text:?} and an index's \
+                 carries it nowhere:\n{page}"
+            );
+        }
         assert!(!crate::carries_refusal(&page), "{page}");
     }
 }

@@ -1919,9 +1919,23 @@ pub(crate) fn swept_index(underlying: &str) -> Result<InstrumentKey, Refusal> {
 /// `research::render` already counts only the exact `NSE/CASH/<symbol>`
 /// spelling, for the same reason.
 ///
+/// # Named escaped, because a directory name is not a line
+///
+/// The three directories are the operator's own names, and only the symbol
+/// has to resolve: an exchange or segment directory can be called anything a
+/// filesystem admits, a newline included. Interpolated raw, such a name put a
+/// line at column zero in the middle of the `pool` page and of a `sweep-all`
+/// REFUSED row, and a line reading `refused: ...` made a completed pool read
+/// as a refusal to every scanner that asks [`crate::carries_refusal`]. Each
+/// name is therefore clipped and then rendered through `escape_debug`, so a
+/// control character is printed as its escape and the sentence stays on one
+/// line. A name of printable characters without a quote or backslash prints
+/// exactly as it did.
+///
 /// UNVERIFIED performance: no bench times this. Read from the source, it is
 /// three comparisons of strings no longer than a path segment, once per
-/// holding the caller lists and never per bar.
+/// holding the caller lists and never per bar; the escape walks at most the
+/// 64 characters [`clipped`] keeps of each name.
 pub(crate) fn misfiled(
     key: &InstrumentKey,
     exchange: &str,
@@ -1940,9 +1954,9 @@ pub(crate) fn misfiled(
         "`{}/{}/{}` is not where `{key}` is stored: a load of `{key}` reads `{}/{}/{}`, \
          spelt exactly as the writer writes it. Nothing under this directory was read \
          (D-0696)",
-        clipped(exchange),
-        clipped(segment),
-        clipped(symbol),
+        clipped(exchange).escape_debug(),
+        clipped(segment).escape_debug(),
+        clipped(symbol).escape_debug(),
         own.0,
         own.1,
         own.2
@@ -2032,21 +2046,33 @@ std::thread_local! {
 /// in a test, and a kernel that swallowed it -- or that asked before a durable
 /// write it should not make -- would pass every fixture. The guard lets a test
 /// drive the refusal through each real call site on a real generated store.
+///
+/// # Nested, it restores what it replaced
+///
+/// It keeps the key it displaced and puts that back when it drops, rather than
+/// clearing the seam. Cleared, an inner guard dropping switched an outer one
+/// off while the outer was still in scope, and a test holding the outer then
+/// asserted against the real key without knowing it. The field is private, so
+/// no guard exists that did not come from [`CostScopeFault::install`].
 #[cfg(test)]
-pub(crate) struct CostScopeFault;
+pub(crate) struct CostScopeFault {
+    /// What the seam held before this guard was installed.
+    displaced: Option<InstrumentKey>,
+}
 
 #[cfg(test)]
 impl CostScopeFault {
     pub(crate) fn install(key: InstrumentKey) -> Self {
-        COST_SCOPE_KEY.with(|held| held.set(Some(key)));
-        Self
+        let displaced = COST_SCOPE_KEY.with(|held| held.replace(Some(key)));
+        Self { displaced }
     }
 }
 
 #[cfg(test)]
 impl Drop for CostScopeFault {
     fn drop(&mut self) {
-        COST_SCOPE_KEY.with(|held| held.set(None));
+        let displaced = self.displaced;
+        COST_SCOPE_KEY.with(|held| held.set(displaced));
     }
 }
 
@@ -5491,5 +5517,82 @@ mod tests {
              B x M / 2 bytes moved instead of B, and it makes this function's \
              own stated O(M + B) cost false"
         );
+    }
+
+    /// **A nested scope guard puts back what it displaced.** D-0696.
+    ///
+    /// The guard cleared the seam when it dropped, so an inner guard dropping
+    /// switched off an outer one still in scope: the outer's test then judged
+    /// the real key without knowing it.
+    #[test]
+    fn a_nested_cost_scope_guard_restores_the_outer_one_when_it_drops() {
+        use brutex_core::instrument::{Expiry, Segment};
+        let index = swept_index("NIFTY").expect("an index");
+        let contract = InstrumentKey {
+            exchange: Exchange::Nse,
+            segment: Segment::Fno,
+            underlying: brutex_core::symbol::Symbol::new("NIFTY").expect("valid"),
+            kind: Kind::Future {
+                expiry: Expiry::new(2025, 5, 29).expect("a real expiry"),
+            },
+        };
+        assert!(audit_cost_scope(&index).is_ok(), "premise: no guard held");
+        {
+            let _outer = CostScopeFault::install(contract);
+            assert!(audit_cost_scope(&index).is_err(), "the outer key is judged");
+            {
+                let _inner = CostScopeFault::install(index);
+                assert!(audit_cost_scope(&index).is_ok(), "the inner key is judged");
+            }
+            assert!(
+                audit_cost_scope(&index).is_err(),
+                "the inner guard dropping must leave the outer one in force"
+            );
+        }
+        assert!(
+            audit_cost_scope(&index).is_ok(),
+            "the outer guard dropping leaves the seam as it found it"
+        );
+    }
+
+    /// **A directory name cannot put a line on the page.** D-0696.
+    ///
+    /// Only the symbol directory has to resolve, so an exchange or segment
+    /// directory can carry a newline, and `misfiled` interpolated it raw: a
+    /// store holding `NSE/CASH/RELIANCE` beside an exchange directory named
+    /// `X\nrefused: forged` made the pool page print a column-zero line
+    /// `refused: forged/...`, and the completed pool read as a refusal
+    /// (measured by the review). Each name is now escaped, so the sentence is
+    /// one line, and a printable name prints as it always did.
+    #[test]
+    fn a_misfiled_directory_name_is_escaped_onto_one_line() {
+        let key = swept_index("RELIANCE").expect("a share");
+        for (exchange, segment, symbol, shown) in [
+            (
+                "X\nrefused: forged",
+                "CASH",
+                "RELIANCE",
+                "`X\\nrefused: forged/CASH/RELIANCE`",
+            ),
+            ("NSE", "CA\rSH\t", "RELIANCE", "`NSE/CA\\rSH\\t/RELIANCE`"),
+            (
+                "NSE",
+                "IN\u{7}DEX",
+                "RELIANCE",
+                "`NSE/IN\\u{7}DEX/RELIANCE`",
+            ),
+            ("BSE", "CASH", "RELIANCE", "`BSE/CASH/RELIANCE`"),
+        ] {
+            let why = misfiled(&key, exchange, segment, symbol).expect("misfiled");
+            assert!(why.starts_with(shown), "{shown}: {why:?}");
+            assert!(
+                !why.contains(|c: char| c.is_control()),
+                "{shown}: a control character reached the sentence: {why:?}"
+            );
+            assert!(
+                !crate::carries_refusal(&format!("    {why}\n")),
+                "{shown}: the named directory reads as a refusal: {why:?}"
+            );
+        }
     }
 }

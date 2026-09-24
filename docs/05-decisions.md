@@ -42291,3 +42291,107 @@ Invariants AF-38 and AF-39. AF-38 supersedes AF-33's two clauses quoted in 1
 and 2, and AF-34's "Every equity charge statement `cli` prints", which read
 three copies of four. AF-39 asserts on the page what AF-35 asserted only of the
 block.
+
+**Second correction, 2026-09-24: what a second review of the integrated tree
+upheld.** Corrected here, not in the text above.
+
+1. *Item 3 and the first correction's item 3: one wording.* The four copies
+   carried the header's charge list and sentence, and nothing held them to the
+   header's fact that none of the charges is subtracted. The review rewrote
+   the FINDINGS label to say "this engine subtracts all of them, so the
+   ranking above is on NET returns", keeping the list and the sentence, and 69
+   equity tests passed (measured by the review). The four copies now state
+   the fact in one wording, "none is subtracted", and
+   `every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate`
+   requires it of each, after checking that the header says "NONE of those
+   charges is subtracted". It also refuses a copy that speaks of subtraction
+   anywhere else, speaks of a deduction, or calls a figure net outside "NOT A
+   NET RESULT". `the_subtraction_check_refuses_each_contradiction_of_the_header`
+   shows each such rewrite of the label is refused.
+   - *What a reader sees change:* the FINDINGS label on every ranked equity
+     page. It said "and this engine subtracts none of them, so the ranking
+     above is on GROSS returns" (the text item 1 quotes). It now says "and
+     none is subtracted, so the ranking above is on GROSS returns", and the
+     next three lines are re-wrapped. No index page, run identity, store
+     format or exit status changed.
+   - *Still rejected: one `runner` constant composed into all four texts.*
+     The review withdrew the public-surface reason, which the first
+     correction had already withdrawn, and called re-wrapping a layout
+     preference. The reason that stands is the one the first correction gave:
+     each copy's words around the common part belong to the page it is on. The
+     check is now on the fact as well as on the words, and it is a list of
+     refused phrasings. A contradiction in words it does not list would pass
+     it, and a single composed source would not have that gap.
+   - *AF-38 claimed "every equity charge statement `cli` prints".* It is
+     narrowed in place to the four constants. A priced expression search's
+     "Cost-excluded, unvalidated research" note and the research page's
+     "Discovery policy requested: no charges" line are wordings no test binds.
+2. *Item 5: a directory name is printed raw.* Only the symbol directory has
+   to resolve. `stored::misfiled` interpolated the other two directory names
+   raw. An exchange directory named `X\nrefused: forged` then put a line
+   reading `refused: forged/...` at column zero on the `pool` page and in a
+   `sweep-all` REFUSED row. `refusal_reason` reads such a line as a refusal,
+   so a completed run exited MISUSED (measured by the review). Each name is
+   now clipped and then rendered through `escape_debug`, so the sentence stays
+   on one line. A name of printable characters, with no quote and no
+   backslash, prints as it did.
+3. *The first correction's item 4: "the page's own head".* `head_under` was
+   under test. `run` still bound the page from it, and no test reached `run`,
+   because it checks the commit stamp first. The review replaced `out` with
+   the bare opening after `head_under` returned, and all 56 tests in its set
+   passed. Everything after the stamp, feed, rung and root checks is now
+   `pool::run_under`. `the_pool_page_is_its_head_and_then_only_appends`
+   drives it on a store whose surface is empty and requires the page to equal
+   the head. A non-empty surface is screened through `one_rung`, which reads
+   the root from the environment, so no test drives that path. The same test
+   reads `run_under`'s source instead, and requires three things: `out` is
+   bound from `head_under` once, it is never assigned, cleared or rewritten
+   after that, and the function calls neither `opening` nor
+   `not_on_the_surface` itself.
+4. *Item 6: "Each guard ... resets when it drops".* It cleared the seam. So
+   when an inner guard dropped, it switched off an outer guard that was still
+   in scope. Each guard now keeps the value it displaced and restores it on
+   drop, and its field is private.
+5. *Two doc comments.* `Rules::elite` said every admitted row is "per ONE
+   unit of the index, gross of the statutory charge stack". It now names the
+   unit of the instrument, and a share's GROSS OF EVERY CHARGE. The doc of
+   `a_stored_sweep_of_a_share_says_its_ranking_is_gross_of_every_charge` said
+   "An index's sweep is unchanged". The test now asserts that the NIFTY page
+   carries neither the label, `CASH_EQUITY_GROSS`, nor
+   `CORPORATE_ACTIONS_UNCHECKED`, and the doc says that it makes no
+   byte-for-byte comparison with an earlier index page.
+   `the_corrected_doc_comments_say_no_more_than_holds` reads both comments
+   from the source.
+
+**Tests, and what each is proven against (second correction).** Each
+regression below was applied to this tree, and the named tests were run and
+seen to fail. Three builds were used, and each build's regressions touch code
+no other named test reads. After each build the six edited files were
+restored from copies, and `cmp` found them identical.
+
+- *`misfiled` without `escape_debug`:*
+  `a_misfiled_directory_name_is_escaped_onto_one_line`,
+  `a_misfiled_directory_name_cannot_forge_a_refusal_of_the_run` ("the
+  misfiled month is one escaped row") and
+  `the_pool_page_names_each_directory_it_did_not_read` fail.
+- *`CostScopeFault` clearing the seam on drop:*
+  `a_nested_cost_scope_guard_restores_the_outer_one_when_it_drops` fails
+  ("the inner guard dropping must leave the outer one in force").
+  *`NoneClosedFault` clearing its flag:*
+  `a_nested_none_closed_guard_restores_the_outer_one_when_it_drops` fails
+  with the same message.
+- *The review's contradictory label:*
+  `every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate`
+  fails (`the FINDINGS label Err("does not say that none is subtracted")`).
+  *The label's earlier wording, "this engine subtracts none of them":* the
+  same test fails with the same message.
+- *`run_under` replacing `out` with the bare opening right after the head:*
+  `the_pool_page_is_its_head_and_then_only_appends` fails ("the page of an
+  empty surface is its head"). *The same line placed after the empty-surface
+  return:* the same test fails at its source check ("`out =` after the
+  head").
+- *Either doc comment restored:*
+  `the_corrected_doc_comments_say_no_more_than_holds` fails.
+
+Invariants AF-38 and AF-39 are corrected in place. They are new in this
+change and are not on `main`.

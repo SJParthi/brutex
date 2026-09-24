@@ -962,6 +962,39 @@ mod tests {
         assert!(!text.contains("DOES NOT RECONCILE"), "{text}");
     }
 
+    /// **A directory name cannot forge a refusal of the run.** D-0696.
+    ///
+    /// Only the symbol directory has to resolve, and the REFUSED row named the
+    /// other two raw: an exchange directory named `X\nrefused: forged` split
+    /// the row, put `refused: forged/...` at column zero, and the completed run
+    /// read as a refusal (measured by the review). The row is one line, and
+    /// the name is printed escaped.
+    #[test]
+    fn a_misfiled_directory_name_cannot_forge_a_refusal_of_the_run() {
+        let root = scratch("forged");
+        for rel in [
+            "groww/NSE/CASH/RELIANCE/1min/2026-08.bin",
+            "groww/X\nrefused: forged/CASH/RELIANCE/1min/2026-08.bin",
+        ] {
+            let full = root.join("bars").join(rel);
+            std::fs::create_dir_all(full.parent().expect("has a parent")).expect("creatable");
+            std::fs::write(&full, b"not a bar file").expect("writable");
+        }
+        let text = sweep_under(&root, "groww", "1min", 100, "deadbeef").expect("the run completes");
+        assert!(
+            text.contains(
+                "  REFUSED  groww RELIANCE 1min 2026-08  — `X\\nrefused: forged/CASH/RELIANCE` \
+                 is not where `NSE-RELIANCE` is stored"
+            ),
+            "the misfiled month is one escaped row:\n{text}"
+        );
+        assert!(
+            !text.lines().any(|line| line.starts_with("refused")),
+            "no line of a completed run opens as a refusal:\n{text}"
+        );
+        assert!(!crate::carries_refusal(&text), "{text}");
+    }
+
     /// The feed and rung filter, so a run sweeps what was asked for and no more.
     #[test]
     fn only_the_named_feed_and_rung_are_swept() {
