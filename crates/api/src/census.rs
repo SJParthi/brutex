@@ -107,6 +107,8 @@ pub enum Census {
     Unreadable {
         /// What refused it, in the refusal's own words.
         reason: String,
+        /// Where the refusal came from. See [`Fault`].
+        fault: Fault,
     },
     /// A census that loaded.
     Held {
@@ -115,7 +117,46 @@ pub enum Census {
     },
 }
 
+/// Where an unreadable census's refusal came from.
+///
+/// The words are for the operator. This is for `server::census_now`, whose
+/// cache is keyed on what each manifest's `stat` said and must not keep a
+/// census that key cannot vouch for: a store root that was gone for one read,
+/// or an I/O error that moved no time. Folding these into one string left the
+/// cache nothing to tell them by. D-0695.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fault {
+    /// The configured store root was not a directory, or could not be asked:
+    /// [`read_all`]'s admission, one refusal for every vendor.
+    Root,
+    /// The file system refused this manifest -- its `stat` or its read -- with
+    /// this kind. `NotFound` is not one: that is [`Census::Absent`].
+    Io(std::io::ErrorKind),
+    /// This reader refused a file it could measure: past the size bound, or
+    /// bytes that do not decode as a manifest.
+    Refused,
+}
+
 impl Census {
+    /// What a manifest the file system refused is: absent on `NotFound`, the
+    /// ordinary state before a first pull, and unreadable on any other error,
+    /// with the error's own words and its kind.
+    ///
+    /// The one mapping [`read_vendor`] draws from an I/O error, named so a test
+    /// can give the census cache an error no test can make a real disk return
+    /// on demand (`EIO`, `EMFILE`) and still get exactly what a read would.
+    #[must_use]
+    pub fn of_io_error(error: &std::io::Error) -> Self {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            Self::Absent
+        } else {
+            Self::Unreadable {
+                reason: error.to_string(),
+                fault: Fault::Io(error.kind()),
+            }
+        }
+    }
+
     /// Which of the three states this is, as one stable word.
     ///
     /// A total match rather than a `matches!` at each call site: three states
@@ -201,7 +242,7 @@ impl VendorCensus {
                 self.vendor.as_str(),
                 self.path.display()
             ),
-            Census::Unreadable { ref reason } => format!(
+            Census::Unreadable { ref reason, .. } => format!(
                 "{} UNREADABLE · {} — at {}",
                 self.vendor.as_str(),
                 reason,
@@ -251,11 +292,11 @@ impl VendorCensus {
 pub fn read_vendor(root: &Path, vendor: Vendor) -> VendorCensus {
     let path = manifest_path(root, vendor);
     let state = match sized(&path) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Census::Absent,
-        Err(e) => Census::Unreadable {
-            reason: e.to_string(),
+        Err(e) => Census::of_io_error(&e),
+        Ok(Err(reason)) => Census::Unreadable {
+            reason,
+            fault: Fault::Refused,
         },
-        Ok(Err(reason)) => Census::Unreadable { reason },
         Ok(Ok(bytes)) => {
             // A file shorter than the header region is not sliced past its end;
             // it is handed over as it is, and the manifest decoder refuses it
@@ -271,6 +312,7 @@ pub fn read_vendor(root: &Path, vendor: Vendor) -> VendorCensus {
                 },
                 Err(why) => Census::Unreadable {
                     reason: why.to_string(),
+                    fault: Fault::Refused,
                 },
             }
         }
@@ -304,7 +346,12 @@ pub fn read_vendor(root: &Path, vendor: Vendor) -> VendorCensus {
     // census on **every request**". Two sites, one path, one answer.
     //
     // The fault arm stays loud. An unreadable manifest is per-vendor and does
-    // not recur per request once it is fixed.
+    // not recur per request once it is fixed. While it is NOT fixed it recurs
+    // per request in one case, by design: a fault its manifest's stamp cannot
+    // see -- an I/O error that moved no time -- is not kept by
+    // `server::census_now`'s cache (D-0695), so every request reads it again
+    // and warns again until it ends. That is a fault still happening, said
+    // once per request that met it, not a healthy read repeated.
     let (level, said) = match state {
         Census::Held { .. } => (telemetry::Level::Debug, "held"),
         Census::Absent => (telemetry::Level::Debug, "absent"),
@@ -411,6 +458,7 @@ fn unreadable_root(root: &Path, reason: &str) -> Vec<VendorCensus> {
             path: manifest_path(root, vendor),
             state: Census::Unreadable {
                 reason: reason.to_owned(),
+                fault: Fault::Root,
             },
         })
         .collect()

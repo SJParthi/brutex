@@ -413,19 +413,31 @@ fn stamp_refusal(stamp: Option<&str>) -> Option<Refusal> {
 /// names the journal row that is written. D-0695.
 fn environment_budget_refusal() -> Option<Refusal> {
     cli::recorded_budget_refusal().is_err().then(|| {
-        Refusal::Environment(
-            "BRUTEX_SCREEN_BUDGET_MS is set in this server's environment, and every run \
-             this route starts is recorded: a screen budget derives how many candidates \
-             are priced from a wall-clock calibration the run identity cannot name, so \
-             the engine refuses it on every run that records (D-0685). Refused before \
-             the run slot, the execution lease and the run's invocation record were \
-             taken, so no run started; this server's HTTP request journal still records \
-             the request itself (D-0568). Unset it and restart the server, and bound the \
-             screen with BRUTEX_SCREEN_CAP, a stated count."
-                .to_owned(),
-        )
+        Refusal::Environment(format!(
+            "BRUTEX_SCREEN_BUDGET_MS is set in this server's environment, and is refused: \
+             {BUDGET_NOT_RECORDABLE}. The engine refuses it on every run that records \
+             (D-0685). Refused before the run slot, the execution lease and the run's \
+             invocation record were taken, so no run started; this server's HTTP request \
+             journal still records the request itself (D-0568). Unset it and restart the \
+             server, and bound the screen with BRUTEX_SCREEN_CAP, a stated count."
+        ))
     })
 }
+
+/// Why a recorded run takes no screen budget, in this file's one wording.
+///
+/// Both budget refusals here state it -- [`refuse_screen_budget`] for a body
+/// that names the field, [`environment_budget_refusal`] for this server's own
+/// environment -- and each adds its own subject and its own remedy. It was
+/// written out once in each, as two different sentences for one reason, which
+/// a review of D-0695 upheld as two sources of wording for one fact.
+/// `cli`'s private `SCREEN_BUDGET_NOT_RECORDABLE` gives the engine's own
+/// refusal in `cli`'s words; it names no route, so it is not this sentence.
+/// D-0695.
+const BUDGET_NOT_RECORDABLE: &str = "every run this route starts is recorded, and a screen \
+     budget derives how many candidates are priced from a \
+     wall-clock calibration the run identity cannot name, so one identity could \
+     record different answers";
 
 /// What one `POST /backtest/run` body asked for.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -676,14 +688,10 @@ impl WireBody {
 /// cannot be set at all -- naming it is the error.
 fn refuse_screen_budget(body: &WireBody) -> Result<(), Refusal> {
     if body.screen_budget_ms.as_ref().is_some() {
-        return Err(Refusal::Malformed(
-            "`screen_budget_ms` is refused: every run this route starts is recorded, \
-             and a screen budget derives how many candidates are priced from a \
-             wall-clock calibration the run identity cannot name, so one identity \
-             could record different answers. Omit it and bound the screen with \
-             `screen_cap`, a stated count. No setting was ignored."
-                .to_owned(),
-        ));
+        return Err(Refusal::Malformed(format!(
+            "`screen_budget_ms` is refused: {BUDGET_NOT_RECORDABLE}. Omit it and bound \
+             the screen with `screen_cap`, a stated count. No setting was ignored."
+        )));
     }
     Ok(())
 }
@@ -3746,6 +3754,35 @@ mod tests {
             "{context}: {}",
             why.why()
         );
+        assert!(
+            why.why().contains(super::BUDGET_NOT_RECORDABLE),
+            "{context}: the reason is the file's one wording: {}",
+            why.why()
+        );
+    }
+
+    /// THE BUDGET'S REASON IS WORDED ONCE in this file's production code, and
+    /// both of its refusals state it. D-0695.
+    ///
+    /// The body refusal and the environment refusal each wrote the reason out,
+    /// as two different sentences for one fact. `BUDGET_NOT_RECORDABLE` now
+    /// holds it. `assert_budget_named` checks that the body refusal states it,
+    /// and `server_budget_through_the_journal` that the environment refusal
+    /// does. This counts the reason's own words in the production source, so a
+    /// refusal that spells it out again, in either wording, fails here.
+    #[test]
+    fn the_budget_reason_is_worded_once() {
+        let production = include_str!("sweeprun.rs")
+            .split_once("\n#[cfg(test)]")
+            .expect("this module has one test boundary")
+            .0;
+        assert_eq!(
+            production
+                .matches("wall-clock calibration the run identity cannot name")
+                .count(),
+            1,
+            "the budget's reason is spelt out more than once"
+        );
     }
 
     /// Every ordinary `POST /engine/command` word, as a good body names it.
@@ -4219,6 +4256,10 @@ mod tests {
         assert!(
             body.contains("BRUTEX_SCREEN_BUDGET_MS is set in this server's environment"),
             "{body}"
+        );
+        assert!(
+            body.contains(super::BUDGET_NOT_RECORDABLE),
+            "the reason is the file's one wording, as the body refusal's is: {body}"
         );
         assert!(
             body.contains("HTTP request journal still records the request itself"),

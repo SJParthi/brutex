@@ -2614,7 +2614,7 @@ fn survey(
                     .iter()
                     .find(|c| c.vendor == state.vendor)
                     .and_then(|c| match c.state {
-                        Census::Unreadable { ref reason } => Some(reason.clone()),
+                        Census::Unreadable { ref reason, .. } => Some(reason.clone()),
                         Census::Absent | Census::Held { .. } => None,
                     });
             if let Some(reason) = unreadable {
@@ -4408,6 +4408,7 @@ mod tests {
                     f.vendor,
                     Census::Unreadable {
                         reason: String::from("entry 41 fails its own checksum"),
+                        fault: crate::census::Fault::Refused,
                     },
                 )
             })
@@ -5937,6 +5938,7 @@ mod tests {
                     f.vendor,
                     Census::Unreadable {
                         reason: String::from("entry 41 fails its own checksum"),
+                        fault: crate::census::Fault::Refused,
                     },
                 )
             })

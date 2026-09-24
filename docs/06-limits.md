@@ -9314,3 +9314,64 @@ itself are stale or incomplete. The text above is kept as it was written.
   `bars_steps_over_another_feeds_unreadable_census_to_a_third_feeds_identity`.
   Before that test, a `/bars` that refused on every unreadable census it walked
   passed every test.
+
+**Corrected 24 September 2026, on a third review (D-0695).** The correction
+above says "*Both directions are now closed*" and "*The only case still missed
+is two changes inside one tick of the filesystem's clock*". Neither was true of
+one case. One bullet of the section itself is also wrong, about `/logs`, and
+one limit the second correction left out is added, about `calendar_of::cached`.
+The text above is kept as it was written.
+
+* *A census that contradicts its own key was cached, and served until a
+  manifest was next written.* The stamps are taken before the read. A store
+  root that was gone for one read, a manifest stamped present that reads
+  `NotFound`, or a manifest read that fails with an error moving neither time
+  (`EIO`, `EMFILE`) leaves every stamp where it was. Its census was cached
+  anyway. All five feeds could be "unreadable", so `/calendar.json` answered
+  503 and `/bars` refused over a store that reads. Or all five could be
+  "absent", so `/calendar.json` answered 200 with no sessions and `/bars` said
+  no feed holds the name. Since D-0695's third repair, a read is cached only
+  when every row is what its own stamp says the disk would give. Anything else
+  is served to the request that read it and not kept. D-0695 lists the rule
+  line by line.
+* **What is still true.** The request that meets such a fault answers what it
+  read. That includes the race inside `census::read_all` between its root
+  check and its manifest reads, which predates every cache. The next request
+  reads again.
+* **A new cost, while a fault persists.** An I/O error its manifest's stamp
+  cannot see is read again on every `census_now` request until it ends. That is
+  any kind other than `PermissionDenied` or `IsADirectory`, from a manifest
+  whose `stat` succeeds. Each such request reads every vendor's manifest, as
+  every request did before D-0686, and `read_vendor` warns once per request.
+  Unchanged stores, and faults the stamp records, still cost five `stat`
+  calls, or six when no manifest answered with a time. The rule adds no
+  syscall. No such fault was produced on a real disk. The tests give the read
+  the census the error maps to. **UNMEASURED**: how often, if ever, the
+  operator's volume returns one.
+* **A `PermissionDenied` read is kept on the word of the file's own status.**
+  A `chmod` or `chown` of the manifest moves its status-change time, so that
+  fault's end is seen. The same error can come from elsewhere: a directory on
+  the way made unsearchable after the stamp and searchable again before the
+  next request, or a control that is not recorded on the file. Either leaves
+  the stamp where it was, and the refusal is served until the manifest next
+  changes. Read from the code, not produced. Whether the operator's system has
+  such a control was not checked.
+* Of the ways a manifest can change and keep its stamp, the key still misses
+  only two changes inside one tick. That is now pinned by a check that no term
+  of the key other than the status-change time moves on a rewrite at the same
+  modified time. A wider key fails
+  `a_rewrite_that_keeps_the_stamp_is_served_stale_until_the_stamp_moves` and
+  must update this section.
+* *"The environment-budget refusal writes no telemetry event … `/logs` does
+  not show it."* The first half is still true. The second is not. On the
+  production router, `logs::note_request` records every 5xx as an
+  `api.request` `served` event at Error level, with its method, path and
+  status. So `/logs` shows the 503, and not why. D-0695 corrects the reason it
+  gave for leaving the event out.
+* `calendar_of::cached` is keyed on the manifest's modified time and the
+  series, and not on the months the census hands it. Since the second
+  correction the census is read again after a rewrite that keeps the modified
+  time, and that cache is not. So `/calendar.json` can pair a fresher census
+  with a calendar derived from the months held before, until the modified time
+  moves. This is the same-modified-time gap D-0686 recorded for that cache, now
+  beside a census that no longer shares it. Not changed, and no test drives it.

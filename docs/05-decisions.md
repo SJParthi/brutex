@@ -40466,3 +40466,246 @@ where it had 1,182 passed and 2 failed, the two tests named above; the same
 with the permission test's warm half skipped; and AF-23's test without its
 planted stamp. Each failed for the reason stated above, and the unbroken build
 passed all 21 census request tests.
+
+**Repaired a third time, on a third review — 24 September 2026.** Two
+should-fix issues were upheld against `5a10ce7b`, the commit that carried the
+second repair. Both are answered here. Of the five nits the same reviews
+raised, one is fixed in code, three are corrected in the text, and one is left
+as it was recorded, with the reason. The text above is kept as it was written;
+where it is now wrong, this says so.
+
+- *AF-23's pinned-limit test no longer pinned what the key contains.* The
+  second repair made it plant its stale state under
+  `manifest_stamps(&store_root)`, which is the production key function. So
+  whatever that function returns, the planted key equals the current one, and
+  the stale answer is served. The test then checked only that an entry keyed on
+  the current stamps is served without a read, which
+  `census_backed_get_routes_read_an_unchanged_manifest_once_and_a_rewrite_again`
+  already checks. The review added a field to `ManifestStamp::At` in a
+  throwaway tree and measured the reworked test passing with the manifest's
+  length in the key, with its inode, and with the length in place of the
+  status-change time. The body before the second repair failed under each of
+  those. Two sentences became false. One is the test's own doc, "A change that
+  closes the gap fails the first half". The other is the second repair's
+  "What it pins has not changed", above. Nothing then forced
+  `docs/06-limits.md`'s "two changes inside one tick" to be updated when the
+  key changed again.
+- **Decided: the test checks the key before it plants anything.** It takes
+  `manifest_stamps` before and after its rewrite at the same modified time,
+  clears each `ManifestStamp::At`'s `changed`, and requires the two to be equal.
+  So the status-change time is the only term of the key that a rewrite moves.
+  The clearing assigns through the variant's one named field rather than
+  rebuilding the variant, so a field added to `At` later is kept and compared.
+  In a throwaway tree, with a switched `extra` field added to `At` and set to
+  the manifest's length, the test fails at that assertion. It also fails with
+  the field set to the inode, and with the length in place of the
+  status-change time. With the assertion switched off as well, the length and
+  the inode each pass all 26 census request tests, which is the review's
+  measurement. With the key narrowed to the modified time alone, the test
+  passes, and `a_rewrite_that_keeps_only_the_modified_time_is_read_again` and
+  `a_permission_change_on_a_manifest_file_is_seen_on_the_next_request` fail.
+  Between them, the tests pin what the key contains as far as a rewrite can see
+  it. The test's doc now says this. AF-28d records it.
+- *The census cache kept a census that contradicts its own key.*
+  `census_now_reading` takes the stamps before the read, which is right for
+  installs. It then cached whatever the read returned under those stamps. A
+  fault that undoes itself before the next request moves no stamp, so the
+  census it produced was served until a manifest was next written or the server
+  restarted. The review drove two cases through `census_now_reading`, the seam
+  the first repair added for such interleavings. In the first, the store root
+  was gone when `read_all` checked it, and all five feeds were cached
+  "unreadable" under stamps that say Dhan's manifest exists. `/calendar.json`
+  then answered 503 and `/bars` refused over a store that reads. This is the
+  stale-503 shape the second repair called a defect for `chmod`. In the second,
+  the root was gone just after that check. Each `read_vendor` met `NotFound`,
+  which it rightly calls absent, so an all-"absent" census was cached.
+  `/calendar.json` answered `200 {"sessions":0}` and `/bars` said no feed holds
+  the name. That is the silent fallback `CLAUDE.md` §4 bans. A manifest read
+  that fails with an error that moves neither time (`EIO`, `EMFILE`) while its
+  `stat` succeeds has the same effect. The mechanism predates this entry
+  (D-0686). But `950ead28` made a cached unreadable census visible as a 503 and
+  a `/bars` refusal. The second repair then said "Both directions are now
+  closed" and "The only case still missed is two changes inside one tick", and
+  neither statement is true of this case.
+- **Decided: only a census its own stamps could have read is cached.**
+  `census::Census::Unreadable` gains `fault: census::Fault`, which says where
+  the refusal came from. `Root` is `read_all`'s admission. `Io(kind)` is the
+  file system refusing the manifest's `stat` or read, with the error's kind.
+  `Refused` is this reader refusing a file it could measure: past the size
+  bound, or bytes that do not decode. `Census::of_io_error` is the one mapping
+  from an I/O error that `read_vendor` uses. After the read,
+  `census_now_reading` asks `read_as_stamped`, and keeps the read only when
+  every row is what its own stamp says the disk would give:
+  - `read_all`'s root refusal, only under a root the stamps did not see as a
+    directory. Any other census, only under one they did.
+  - Absent, only where the stamp found no manifest.
+  - Held, or refused by this reader, only where the stamp found one.
+  - An I/O refusal of a manifest the stamp found, only of the two kinds its own
+    status decides. `PermissionDenied` ends with a `chmod` or `chown`, which
+    moves the status-change time. `IsADirectory` ends only with a replacement.
+  - An I/O refusal where the stamp itself failed, only of the same kind. The
+    stamp then records the fault, and its end moves the stamp.
+  - One row per vendor, in `Vendor::ALL` order.
+
+  Anything else is served to the request that read it and is not cached, so the
+  next request reads again. The rule costs no syscall. It compares what was
+  already read with what was already stamped: at most `FEED_COUNT` rows, zipped
+  in order, with no search.
+  `a_store_root_that_vanishes_during_the_read_is_not_cached` and
+  `a_store_root_that_vanishes_after_its_check_is_not_cached_as_absent` are the
+  review's two probes as tests. Each moves the root aside inside the read and
+  back before the next request. Each then requires that request to serve
+  "held", `/calendar.json` to answer 200 with its one session, and `/bars` to
+  answer 200. `an_io_error_its_stamp_cannot_see_is_not_cached` gives the read
+  Dhan's census as `Census::of_io_error` makes it from `EIO` and from `EMFILE`
+  (errno 5 and 24 on Linux and macOS). It requires the next request to read
+  once and to keep what it read. `a_fault_its_stamp_can_see_is_cached` makes
+  Groww's manifest bytes that do not decode, then a file this process may not
+  read, then a directory, and requires each to be cached: a warm request reads
+  no bytes of Dhan's manifest beside it. That keeps the rule from declining
+  more than it must. `a_census_is_kept_only_under_a_stamp_that_could_have_read_it`
+  holds every arm of `stamp_could_read`, each from both sides, and the order
+  and count checks of `read_as_stamped`. AF-28c records them.
+
+  Each was proven the way the earlier repairs were, with switched breaks in a
+  throwaway tree. With the check removed from `census_now_reading`, the three
+  route tests fail and the other 23 census request tests pass. With
+  `PermissionDenied`, `IsADirectory` or this reader's own refusal dropped from
+  what is kept, `a_fault_its_stamp_can_see_is_cached` and the table test fail.
+  With an absent census kept under any stamp, the table test and the
+  after-its-check test fail. With the root refusal kept under any root, the
+  table test and the during-the-read test fail. With an I/O refusal kept under
+  any found manifest, the table test and the I/O test fail. With an I/O
+  refusal kept under a failed stamp of any kind, the table test fails.
+
+- *The screen budget's reason was written out twice in `sweeprun.rs`.* A nit,
+  raised by the second review and not answered by the second repair.
+  `refuse_screen_budget` (400) and `environment_budget_refusal` (503) each
+  stated why a recorded run takes no budget, in two different sentences for one
+  fact.
+- **Decided: the reason is worded once.** `BUDGET_NOT_RECORDABLE` holds it, and
+  each refusal adds its own subject and its own remedy. The body refusal's text
+  is unchanged, byte for byte. The environment refusal now begins
+  "BRUTEX_SCREEN_BUDGET_MS is set in this server's environment, and is refused:"
+  followed by that reason and "The engine refuses it on every run that records
+  (D-0685)."; the rest of it, quoted above, is unchanged.
+  `the_budget_reason_is_worded_once` counts the reason's own words in the
+  production source and requires one. `assert_budget_named` and the
+  server-budget child each require the reason in their refusal. In a throwaway
+  tree with the environment refusal's older sentence restored beside the
+  constant, the count test failed, and under the switch that serves that
+  sentence the server-budget child failed at the new assertion. `cli`'s own
+  `SCREEN_BUDGET_NOT_RECORDABLE` is a third wording of the reason, for the
+  engine's own refusal. It names no route, so it is not this sentence, and it
+  is left as it is. AF-27b records it.
+
+**Rejected.**
+
+- *Declining every census with an I/O refusal.* That is simpler, but a manifest
+  this process may not read would then make every request read every other
+  vendor's whole manifest, up to `census::MAX_MANIFEST_BYTES` each, for as long
+  as the mode stood. The status-change time already sees that fault's end.
+- *Reading again at once, in the same request, when a read contradicts its
+  stamps.* A retry that repeats until the two agree has no bound against a
+  fault that persists. A retry that runs once only moves the race. The request
+  that met the fault answers what it read, and the next request reads again.
+- *A cache per vendor, so that only the contradicting feed is read again.* That
+  is a different cache with its own invalidation. The contradicting case is
+  rare, and a whole-census read on the next request is what any manifest change
+  already costs.
+
+**Still not done, and corrected.**
+
+- The second repair's "*Both directions are now closed*" and "*The only case
+  still missed is two changes inside one tick of the filesystem's clock*"
+  missed this case. With this change, the only way a manifest can change and
+  keep its stamp is still two changes inside one tick. The bullets below say
+  what the rule itself leaves.
+- *The request that meets the fault answers what it read.* In the second probe
+  that is five "absent" feeds for one request: the race inside `read_all`
+  itself, between its root check and its manifest reads. It predates every
+  cache. It is no longer kept past that request.
+- *A fault its stamp cannot see, and that persists, is read on every request.*
+  Such a fault is an I/O error of any kind other than the two above, from a
+  manifest whose `stat` succeeds. While it lasts, every `census_now` request
+  reads every vendor's manifest again, and `read_vendor` emits its
+  `api.census` warning again. That is the pre-D-0686 cost, and it holds only
+  while that fault holds. No such fault was produced on a real disk here. The
+  tests give the read the census `of_io_error` makes from the error.
+- *A `PermissionDenied` read of a manifest the stamp found is kept, because a
+  `chmod` or `chown` of that file moves its status-change time.* It can also
+  come from something that is not the file's own status. A directory on the
+  way can be made unsearchable after the stamp is taken and searchable again
+  before the next request, or a control that is not recorded on the file can
+  refuse the read. Either leaves the stamp where it was, so the refusal is
+  served until the manifest next changes. A directory that stays unsearchable
+  is seen on the next request, because the manifest's own `stat` then fails.
+  Neither case was produced here. This is read from the code, and whether the
+  operator's system has such a control was not checked.
+- *Which I/O kinds a stamp decides is a list of two.* `PermissionDenied` and
+  `IsADirectory` were chosen from what a manifest path can hold. A kind that is
+  not on the list and persists falls under "A fault its stamp cannot see",
+  above. It costs reads but gives no wrong answer.
+- *The second repair's reason for leaving `calendar_of::cached` as it is was
+  wrong.* It said that cache "caches
+  calendars derived from bar files, not the census, so a permission change on
+  the manifest does not change what it would derive". But which months
+  `derive` probes comes from the census: `/calendar.json` hands it the months
+  `census::held_entries` returned. The cache is keyed on
+  `(vendor, exchange, segment, symbol)` and the manifest's modified time, not
+  on those months. Since the second repair, the census is read again after a
+  rewrite that keeps the modified time, so `/calendar.json` can pair that
+  fresher census with a calendar derived from the months held before, until
+  the modified time moves. The limit the second repair recorded stands as it
+  was written: a rewrite that keeps the modified time is missed there. It is
+  still not changed. Keying it as the census is keyed is its own change, with
+  its own re-derivation cost, and no test here drives that lag.
+- *"Recorded, not done" gives a false reason for the environment-budget
+  refusal's missing telemetry event.* It says a row in `crate::emitted`'s table
+  "runs in the parent test binary, whose environment cannot carry the budget".
+  That binary can carry it: `cli::recorded_budget_refusal` reads
+  `cli::knobs::var`, which looks in the knob store before the environment, and
+  `the_budget_rule_is_clis` drives the rule that way. What such a row would
+  have to answer is that the knob store is process-wide, so a budget set there
+  is read by any test in that binary that reaches
+  `cli::recorded_budget_refusal` while the row runs. That was not worked
+  through here, and the event is still not emitted. `docs/06-limits.md` said
+  "`/logs` does not show it", which is also wrong. On the production router,
+  `logs::note_request` records every 5xx as an `api.request` `served` event at
+  Error level, with its method, path and status. So `/logs` shows the 503, and
+  not why.
+- *AF-28 described the key as it was before the second repair.* It said each
+  manifest is keyed on "a modified time", and that `docs/06-limits.md` leaves
+  a permission change on a manifest FILE uncovered. The second repair answered
+  that with a new row, AF-28b, because "a row is never edited in place". That
+  was a choice, not this piece's rule: a row already on `main` is never edited,
+  and AF-15 to AF-29 are all new in this piece. AF-28's two sentences are now
+  corrected in place. AF-28b, and the lettered rows below it, stay as they are.
+- *Symbol case is still folded on two routes of five.* Item 7 and
+  `docs/06-limits.md` record it, and a review asked for it again. Folding it on
+  `/bars.json`, `/bars/window.json` and `/gaps.json` would change what those
+  routes answer for a lowercase name, and no test here drives them with one. It
+  is left as recorded.
+- The browser follow-up above is still open. This repair is backend only.
+
+**Verified (third repair)** on this tree (arm64 laptop, `CARGO_BUILD_JOBS=2`,
+`--locked --offline`). `cargo fmt --all --check` is clean, and so is
+`cargo clippy --workspace --all-targets --locked --offline -- -D warnings`.
+The `api` suite ran outside the command sandbox, which refuses the loopback
+binds some of its tests make. Its lib has 1,190 passed, 0 failed and 2
+ignored: the 1,184 of the second repair and the six tests this adds.
+`src/main.rs` has 2 passed, `tests/binary.rs` 3 and the doctest 1. All 26
+census request tests pass, and so do the 28 tests the `budget` filter selects.
+`core`'s whole suite, which reads these documents, passes, and so does
+`store`'s `libm_key`.
+Every shell gate of CI's Gate 1+2 job except 1e passes, Gates 10, 10b, 11, 23,
+27 and 27b among them. Gate 11 passes with every allowance as it was: the new
+rule zips two rows in order and declares no search.
+
+Each proof above was taken in a throwaway worktree at `5a10ce7b` with this
+change applied and the breaks added there, each selected by an environment
+variable, and the worktree was removed afterwards. With no break selected, the
+census build passed all 26 census request tests. The budget break put the
+older sentence into the source whatever the switch said, so the count test
+failed there on every run and the server-budget child failed only under the
+switch. This tree, with no break in it, passes all 28 budget tests.

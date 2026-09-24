@@ -3393,6 +3393,15 @@ fn census_now_reading(
     // `census_now_reading`'s doc.
     let censuses = std::sync::Arc::new(read(&site.store_root));
     let entries = std::sync::Arc::new(census::held_entries(&censuses));
+    // AND ONLY A CENSUS THE STAMPS COULD HAVE READ IS KEPT UNDER THEM. A read
+    // that contradicts its own key -- a root gone for this one read, a manifest
+    // stamped present and read absent, an I/O error that moved no time -- is
+    // this request's answer and nobody else's. Kept, it outlived the fault for
+    // as long as the stamps stood still, because the fault had not moved them:
+    // a 503, or an empty store, over a store that reads. See `read_as_stamped`.
+    if !read_as_stamped(&stamps, &censuses) {
+        return (censuses, entries);
+    }
     {
         let mut held = site
             .census
@@ -3497,6 +3506,99 @@ fn manifest_stamps(store_root: &std::path::Path) -> CensusStamps {
         manifests,
         root_is_dir,
     }
+}
+
+/// Whether every census in `censuses` is one `stamps` could have read, with
+/// nothing changed between the two.
+///
+/// # Why the cache asks, since D-0695
+///
+/// The stamps are taken BEFORE the read, and must be (see
+/// [`census_now_reading`]). A change between the two is therefore met by the
+/// next request, whose stamps differ -- unless the change undid itself first. A
+/// store root gone when `read_all` asked for it and back before the next
+/// request, a root gone just after `read_all`'s own check (every manifest then
+/// reads `NotFound`, which is "absent"), or a manifest read that failed with an
+/// error no time records (`EIO`, `EMFILE`) all leave every stamp where it was.
+/// Cached, that census was served as the store's for as long as the manifests
+/// stood still: all five feeds "unreadable", so `/calendar.json` answered 503
+/// and `/bars` refused, or all five "absent", so `/calendar.json` answered 200
+/// with no sessions and `/bars` said no feed holds the name. A review drove
+/// both through [`census_now_reading`] with the root moved aside inside the
+/// read.
+///
+/// So a read is kept only when each census is what its own stamp says the disk
+/// would give:
+///
+/// * `read_all`'s root refusal, only under a root the stamps did not see as a
+///   directory, and any other census only under one they did;
+/// * absent, only where the stamp found no manifest;
+/// * held, or refused by this reader (past the size bound, or bytes that do not
+///   decode), only where the stamp found one -- its bytes are what the
+///   modified and status-change times vouch for;
+/// * an I/O refusal where the stamp found a manifest, only for the kinds its
+///   own status decides: `PermissionDenied`, which a `chmod` or `chown` ends
+///   by moving the status-change time, and `IsADirectory`, which only a
+///   replacement ends. Any other kind moved no time, so no stamp can say when
+///   it ends;
+/// * an I/O refusal where the stamp itself failed, only of the same kind: the
+///   stamp then records the fault, and its end moves the stamp.
+///
+/// Anything else is served to the request that read it and not kept, so the
+/// next request reads again. A fault that persists is then read, and its
+/// `api.census` warning emitted, on every request until it ends -- the cost
+/// `docs/06-limits.md`'s D-0695 section states. A census row out of
+/// `Vendor::ALL` order, or a count other than one per vendor, is never kept
+/// either: `census::read_all` yields neither.
+///
+/// `PermissionDenied` is kept on the word of the file's own status. The same
+/// error from a directory on the way, made unsearchable after the stamp and
+/// searchable again before the next request, moves no stamp, and is served
+/// until the manifest next changes. `docs/06-limits.md` states that too.
+fn read_as_stamped(stamps: &CensusStamps, censuses: &[census::VendorCensus]) -> bool {
+    censuses.len() == stamps.manifests.len()
+        && censuses
+            .iter()
+            .zip(&stamps.manifests)
+            .zip(brutex_core::vendor::Vendor::ALL)
+            .all(|((read, stamp), vendor)| {
+                read.vendor == vendor && stamp_could_read(*stamp, stamps.root_is_dir, &read.state)
+            })
+}
+
+/// Whether one vendor's `stamp`, under a root the stamps saw as a directory or
+/// not, could have read `state`. See [`read_as_stamped`] for each line.
+fn stamp_could_read(stamp: ManifestStamp, root_is_dir: bool, state: &census::Census) -> bool {
+    use census::{Census, Fault};
+    use std::io::ErrorKind;
+    if let Census::Unreadable {
+        fault: Fault::Root, ..
+    } = *state
+    {
+        return !root_is_dir;
+    }
+    root_is_dir
+        && match (state, stamp) {
+            (Census::Absent, ManifestStamp::Missing)
+            | (
+                Census::Held { .. }
+                | Census::Unreadable {
+                    fault:
+                        Fault::Refused
+                        | Fault::Io(ErrorKind::PermissionDenied | ErrorKind::IsADirectory),
+                    ..
+                },
+                ManifestStamp::At { .. },
+            ) => true,
+            (
+                Census::Unreadable {
+                    fault: Fault::Io(read),
+                    ..
+                },
+                ManifestStamp::Faulted(stamped),
+            ) => *read == stamped,
+            _ => false,
+        }
 }
 
 /// What [`census_now`]'s cache is keyed on: what each vendor manifest's `stat`
@@ -6516,7 +6618,7 @@ fn ladder_refusal(
         .map(|c| &c.state);
 
     let gate = match state {
-        Some(census::Census::Unreadable { reason }) => {
+        Some(census::Census::Unreadable { reason, .. }) => {
             return Some(format!(
                 "the pull order cannot be checked, so nothing was asked for. \
                  {}'s census exists and would not load — {reason}. Until it \
@@ -16956,6 +17058,7 @@ mod tests {
             path: PathBuf::from("/nonexistent/ladder-gate/broken.man"),
             state: census::Census::Unreadable {
                 reason: "entry 4 fails its own checksum".to_owned(),
+                fault: census::Fault::Refused,
             },
         }];
         let why = ladder_refusal(

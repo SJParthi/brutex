@@ -27,6 +27,11 @@
 //! Since D-0695 the key also carries each manifest's status-change time, which
 //! cannot be set. The tests that need it to move wait for its tick through
 //! `past_a_ctime_tick`; every other test reads the same with or without it.
+//! And only a read those stamps could have made is kept under them. The tests
+//! from `a_store_root_that_vanishes_during_the_read_is_not_cached` on pin which
+//! reads are kept: a read faulted through `census_now_reading` in a way no
+//! stamp records is read again on the next request, and a fault the stamps do
+//! record is still kept.
 #![expect(
     clippy::expect_used,
     reason = "finite owned fixtures and exact response assertions"
@@ -461,28 +466,56 @@ async fn a_stamp_moved_backwards_or_a_deleted_manifest_is_read_again() {
     assert!(body.contains(r#""sessions":0"#), "{body}");
 }
 
+/// `stamps` with every existing manifest's status-change time cleared, and
+/// every other term left as it was.
+///
+/// Written as an assignment through the variant's one named field, not as a
+/// rebuilt `At`, so a term added to `ManifestStamp::At` later is KEPT here and
+/// compared: the AF-23 tripwire exists to see exactly such a term.
+fn without_status_change(mut stamps: CensusStamps) -> CensusStamps {
+    for stamp in &mut stamps.manifests {
+        if let ManifestStamp::At { changed, .. } = stamp {
+            *changed = StatusChanged::default();
+        }
+    }
+    stamps
+}
+
 /// THE DOCUMENTED LIMIT, PINNED: a rewrite that keeps the cached stamp is not
 /// seen until the stamp moves.
 ///
-/// `docs/06-limits.md`'s D-0686 section states it and D-0686 rejected widening
-/// the key to close it. This proves both halves of that sentence: the stale
-/// answer is served with no manifest read while the stamp is unchanged, and the
-/// first request after the stamp moves reads once and answers from the new
-/// image. A change that closes the gap fails the first half and must update
-/// that section.
+/// `docs/06-limits.md`'s D-0686 section states it, D-0686 rejected widening
+/// the key to close it, and D-0695 narrowed it to two changes inside one tick
+/// of the filesystem's clock. This proves the three parts of that sentence, in
+/// order:
 ///
-/// # How the rewrite keeps the stamp, since D-0695
+/// 1. **The tripwire.** The key is taken before and after a rewrite at the
+///    same modified time, and the two must be equal once each manifest's
+///    status-change time is cleared. So the status-change time is the only
+///    term of the key a rewrite moves, and a rewrite inside one tick of it
+///    moves nothing. Widen the key with the length, the inode or any other term
+///    a rewrite moves, and this fails, because that change closes the gap the
+///    limits section states and must update it. Narrowing the key back to the
+///    modified time alone passes here and fails
+///    `a_rewrite_that_keeps_only_the_modified_time_is_read_again`, so between
+///    them the two tests pin what the key contains, as far as a rewrite can
+///    see it.
+/// 2. **The stale answer.** While the key stays put, the older census is served
+///    and nothing is read.
+/// 3. **The recovery.** The first request after the key moves reads once and
+///    answers from the new image.
 ///
-/// The stamp now carries the manifest's status-change time too. Every write
-/// moves it, and no call can set it, so a rewrite that keeps the WHOLE stamp
-/// means two writes inside one tick of the filesystem's clock. A test cannot
-/// make that on demand on a filesystem that keeps nanoseconds. So this rewrite
-/// keeps the modified time, and the cache is then given the state such a
-/// rewrite leaves: the census read before the rewrite, under the stamp taken
-/// after it. What is pinned has not changed. While the key stays put, the older
-/// census is served and nothing is read; the first request after it moves reads
-/// once. `a_rewrite_that_keeps_only_the_modified_time_is_read_again` pins that a
-/// rewrite keeping only the modified time IS seen now.
+/// # Why the stale state is planted, and why part 1 must come first
+///
+/// Every write moves the status-change time, and no call can set it, so a
+/// rewrite that keeps the WHOLE stamp means two writes inside one tick. A test
+/// cannot make that on demand on a filesystem that keeps nanoseconds. So this
+/// rewrite keeps the modified time, and the cache is then given the state such
+/// a rewrite leaves: the census read before the rewrite, under the stamp taken
+/// after it. That planted key is what the production `manifest_stamps`
+/// computes, so parts 2 and 3 alone hold under ANY key: a review measured this
+/// test passing with the length, and with the inode, added to the key. Part 1
+/// is what they lacked, and it is checked before anything is planted.
 #[tokio::test]
 async fn a_rewrite_that_keeps_the_stamp_is_served_stale_until_the_stamp_moves() {
     let fixture = Fixture::new("census-request-same-stamp");
@@ -490,6 +523,7 @@ async fn a_rewrite_that_keeps_the_stamp_is_served_stale_until_the_stamp_moves() 
     assert_eq!(fixture.locate("RELIANCE"), None);
     let (older_censuses, older_entries) = census_now(&fixture.site);
     let base = fixture.reads();
+    let older_stamps = manifest_stamps(&fixture.site.store_root);
 
     fixture.publish(
         &[
@@ -499,17 +533,29 @@ async fn a_rewrite_that_keeps_the_stamp_is_served_stale_until_the_stamp_moves() 
         ],
         0,
     );
+    // THE TRIPWIRE: the status-change time is the ONLY term of the key this
+    // rewrite moved. A key that also carries the length, the inode or anything
+    // else a rewrite moves separates this rewrite from the older image by a
+    // term that no tick can share, closes the gap this test pins, and fails
+    // here, before the planted state could hide it.
+    let newer_stamps = manifest_stamps(&fixture.site.store_root);
+    assert_eq!(
+        without_status_change(newer_stamps.clone()),
+        without_status_change(older_stamps),
+        "a rewrite at the same modified time moved a term of the census key \
+         other than the status-change time; the gap docs/06-limits.md states \
+         (\"two changes inside one tick\") is no longer the one the key has, \
+         so that section and this test must be updated with the key"
+    );
     // THE STATE A REWRITE INSIDE ONE TICK LEAVES: the older census, keyed on the
-    // stamp the newer image answers with.
+    // stamp the newer image answers with, which the assertion above has just
+    // shown differs from the older one by the status-change time alone.
     *fixture
         .site
         .census
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((
-        manifest_stamps(&fixture.site.store_root),
-        older_censuses,
-        older_entries,
-    ));
+        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+        Some((newer_stamps, older_censuses, older_entries));
     assert_eq!(
         fixture.locate("RELIANCE"),
         None,
@@ -1368,4 +1414,316 @@ async fn a_rewrite_that_keeps_only_the_modified_time_is_read_again() {
         "the second identity is seen too"
     );
     assert_eq!(fixture.reads(), base + 1, "read once");
+}
+
+/// Empty the census cache, as a server that has not yet answered a request.
+fn cold(fixture: &Fixture) {
+    *fixture
+        .site
+        .census
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+}
+
+/// Each census's state, in the order given.
+fn named(censuses: &[census::VendorCensus]) -> Vec<&'static str> {
+    censuses.iter().map(|census| census.state.name()).collect()
+}
+
+/// A store root moved aside for one read, and put back afterwards even when an
+/// assertion inside that read fails, so the fixture's own `Drop` still finds it.
+struct Aside<'a> {
+    root: &'a Path,
+    aside: PathBuf,
+}
+
+impl<'a> Aside<'a> {
+    fn new(root: &'a Path) -> Self {
+        let aside = root.with_extension("aside");
+        fs::rename(root, &aside).expect("move the store root aside");
+        Self { root, aside }
+    }
+}
+
+impl Drop for Aside<'_> {
+    fn drop(&mut self) {
+        let _restored = fs::rename(&self.aside, self.root);
+    }
+}
+
+/// A healthy store the next three tests fault for one read: Dhan's manifest
+/// holds NIFTY as INDEX and its one daily bar is on disk.
+fn nifty_store(name: &str) -> Fixture {
+    let fixture = Fixture::new(name);
+    fixture.publish(&[(Segment::Index, "NIFTY")], 0);
+    fixture.bar(Vendor::Dhan, Segment::Index, "NIFTY", 2);
+    cold(&fixture);
+    fixture
+}
+
+/// What `nifty_store` answers once nothing is faulted: held, one session on
+/// `/calendar.json`, and a 200 page on `/bars`.
+async fn serves_the_healthy_store(fixture: &Fixture, why: &str) {
+    let held = ["absent", "held", "absent", "absent", "absent"];
+    assert_eq!(fixture.fresh_states(), held, "{why}: the disk reads held");
+    assert_eq!(
+        fixture.states(),
+        held,
+        "{why}: the next request reads again"
+    );
+    let (status, body) = fixture.calendar_answer("feed=dhan").await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{why}: {body}");
+    assert!(body.contains(r#""sessions":1"#), "{why}: {body}");
+    let (status, page) = fixture.bars("symbol=NIFTY&vendor=dhan&month=2025-05&timeframe=1day");
+    assert_eq!(status, axum::http::StatusCode::OK, "{why}: {page}");
+    assert!(
+        !page.contains("no feed in this store holds"),
+        "{why}: {page}"
+    );
+}
+
+/// A CENSUS THAT CONTRADICTS ITS OWN KEY IS SERVED TO THE REQUEST THAT READ IT
+/// AND NOT CACHED: a store root gone when `read_all` asks for it, and back
+/// before the next request. D-0695.
+///
+/// The stamps are taken before the read, which is right for installs. But the
+/// read was then cached under them whatever it said. The root's absence moves
+/// no manifest's stamp, so all five feeds were cached "unreadable" under stamps
+/// that say Dhan's manifest exists: `/calendar.json` answered 503 and `/bars`
+/// refused over a store that reads, until a manifest was next written or the
+/// server restarted -- the stale 503 D-0695 removed for a permission change.
+/// The read moves the root aside, reads, and puts it back.
+#[tokio::test]
+async fn a_store_root_that_vanishes_during_the_read_is_not_cached() {
+    let fixture = nifty_store("census-request-root-vanishes");
+    let (served, _) = census_now_reading(&fixture.site, |root| {
+        let _aside = Aside::new(root);
+        census::read_all(root)
+    });
+    assert_eq!(
+        named(&served),
+        vec!["unreadable"; 5],
+        "the request that met the outage names it"
+    );
+    serves_the_healthy_store(&fixture, "after the outage").await;
+}
+
+/// A CENSUS THAT CONTRADICTS ITS OWN KEY IS NOT CACHED: a store root that
+/// passes `read_all`'s own check and is gone for the manifest reads. D-0695.
+///
+/// Each `read_vendor` then meets `NotFound`, which it rightly calls absent, so
+/// an all-"absent" census was cached under stamps that say Dhan's manifest
+/// exists. `/calendar.json` then answered `200 {"sessions":0}` and `/bars` said
+/// no feed holds the name: a claim about the store made from a read that did
+/// not reach it, the silent fallback `CLAUDE.md` §4 bans, served until a
+/// manifest was next written. The read here is `read_all`'s own two steps with
+/// the root moved aside between them.
+#[tokio::test]
+async fn a_store_root_that_vanishes_after_its_check_is_not_cached_as_absent() {
+    let fixture = nifty_store("census-request-root-after-check");
+    let (served, _) = census_now_reading(&fixture.site, |root| {
+        assert!(
+            fs::metadata(root).is_ok_and(|meta| meta.is_dir()),
+            "read_all's own check passes"
+        );
+        let _aside = Aside::new(root);
+        Vendor::ALL
+            .into_iter()
+            .map(|vendor| census::read_vendor(root, vendor))
+            .collect()
+    });
+    assert_eq!(
+        named(&served),
+        vec!["absent"; 5],
+        "the request that raced the root answers what it read"
+    );
+    serves_the_healthy_store(&fixture, "after the race").await;
+}
+
+/// AN I/O ERROR NO TIME RECORDS IS NOT CACHED. D-0695.
+///
+/// A manifest whose `stat` answers and whose read then fails with `EIO` or
+/// `EMFILE` has moved neither of its times, so its stamp is the one a clean
+/// read has. Cached, "unreadable" outlived the fault: `/calendar.json` answered
+/// 503 and `/bars` refused until the manifest was next written. No test can
+/// make a disk return either on demand, so the read here is `read_all` with
+/// Dhan's census replaced by what `read_vendor` makes of that error, through
+/// the one mapping it uses, `Census::of_io_error`. The next request reads
+/// again, once, and keeps what it read.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_io_error_its_stamp_cannot_see_is_not_cached() {
+    let held = ["absent", "held", "absent", "absent", "absent"];
+    // `EIO` and `EMFILE`: 5 and 24 on Linux and on macOS alike.
+    for errno in [5, 24] {
+        let fixture = nifty_store(&format!("census-request-io-{errno}"));
+        let (served, _) = census_now_reading(&fixture.site, |root| {
+            let mut read = census::read_all(root);
+            for census in &mut read {
+                if census.vendor == Vendor::Dhan {
+                    census.state =
+                        census::Census::of_io_error(&std::io::Error::from_raw_os_error(errno));
+                }
+            }
+            read
+        });
+        assert_eq!(
+            named(&served),
+            ["absent", "unreadable", "absent", "absent", "absent"],
+            "errno {errno}: the request that met it names it"
+        );
+        let base = fixture.reads();
+        assert_eq!(fixture.states(), held, "errno {errno}: read again");
+        assert_eq!(fixture.reads(), base + 1, "errno {errno}: once");
+        assert_eq!(fixture.states(), held, "errno {errno}: warm");
+        assert_eq!(
+            fixture.reads(),
+            base + 1,
+            "errno {errno}: and what it read is kept"
+        );
+        let (status, body) = fixture.calendar_answer("feed=dhan").await;
+        assert_eq!(status, axum::http::StatusCode::OK, "errno {errno}: {body}");
+        assert!(body.contains(r#""sessions":1"#), "errno {errno}: {body}");
+        let (status, page) = fixture.bars("symbol=NIFTY&vendor=dhan&month=2025-05&timeframe=1day");
+        assert_eq!(status, axum::http::StatusCode::OK, "errno {errno}: {page}");
+    }
+}
+
+/// A FAULT ITS STAMP CAN SEE IS STILL CACHED. D-0695.
+///
+/// A census the cache declines to keep is read again on every request, so the
+/// rule must decline no more than it has to. Groww's manifest is, in turn,
+/// bytes that do not decode, a file this process may not read, and a
+/// directory. Each is unreadable, each is decided by what its stamp records --
+/// the bytes by the modified and status-change times, the mode by the
+/// status-change time a `chmod` moves, the directory by a replacement -- and
+/// each must be kept: the warm request reads no manifest bytes, counted on
+/// Dhan's healthy manifest beside it. Like the other permission tests, this
+/// needs a process the permission binds, which a root process is not.
+#[cfg(unix)]
+#[test]
+fn a_fault_its_stamp_can_see_is_cached() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let fixture = Fixture::new("census-request-kept-faults");
+    fixture.publish(&[(Segment::Index, "NIFTY")], 0);
+    let groww = manifest_path(&fixture.root, Vendor::Groww);
+    let undecodable = || fixture.publish_bytes(Vendor::Groww, &[0xFF; 16], 0);
+    let unpermitted = || {
+        fixture.publish_for(Vendor::Groww, &[(Segment::Cash, "ITC")], 0);
+        fs::set_permissions(&groww, fs::Permissions::from_mode(0o000))
+            .expect("a manifest whose mode this process may set");
+    };
+    let directory = || {
+        fs::remove_file(&groww).expect("take the file away");
+        fs::create_dir(&groww).expect("a directory where Groww's manifest goes");
+    };
+    let faults: [(&str, &dyn Fn()); 3] = [
+        ("bytes that do not decode", &undecodable),
+        ("a file this process may not read", &unpermitted),
+        ("a directory", &directory),
+    ];
+    let unreadable = ["unreadable", "held", "absent", "absent", "absent"];
+    for (what, fault) in faults {
+        fault();
+        cold(&fixture);
+        assert_eq!(
+            fixture.fresh_states(),
+            unreadable,
+            "{what}: the fault binds this process"
+        );
+        let base = fixture.reads();
+        assert_eq!(fixture.states(), unreadable, "{what}: cold");
+        assert_eq!(fixture.reads(), base + 1, "{what}: read once");
+        assert_eq!(fixture.states(), unreadable, "{what}: warm");
+        assert_eq!(fixture.reads(), base + 1, "{what}: and kept");
+    }
+}
+
+/// EVERY LINE OF THE RULE, ONE ROW EACH: which census each stamp keeps.
+/// D-0695.
+///
+/// `stamp_could_read` decides what the census cache keeps. The route tests
+/// above reach its lines through real faults; this reaches every arm, each
+/// from both sides, so a line dropped from it or widened fails here by name.
+#[test]
+fn a_census_is_kept_only_under_a_stamp_that_could_have_read_it() {
+    use census::{Census, Fault};
+    use std::io::ErrorKind;
+    let exists = ManifestStamp::At {
+        modified: at(0),
+        changed: StatusChanged::default(),
+    };
+    let missing = ManifestStamp::Missing;
+    let refused = ManifestStamp::Faulted(ErrorKind::PermissionDenied);
+    let unreadable = |fault| Census::Unreadable {
+        reason: String::from("fixture"),
+        fault,
+    };
+    let held = || Census::Held {
+        manifest: Box::new(Manifest::open(Vendor::Dhan, &[], &[]).expect("a genesis manifest")),
+    };
+    let io = |kind| unreadable(Fault::Io(kind));
+    let not_a_directory = ManifestStamp::Faulted(ErrorKind::NotADirectory);
+    // (the stamp, whether the root was a directory, what the read said, kept)
+    let rows: [(ManifestStamp, bool, Census, bool); 19] = [
+        // `read_all`'s root refusal: only under a root that was not a directory.
+        (missing, false, unreadable(Fault::Root), true),
+        (missing, true, unreadable(Fault::Root), false),
+        (exists, true, unreadable(Fault::Root), false),
+        // Any other census: only under a root that was.
+        (missing, false, Census::Absent, false),
+        (not_a_directory, false, io(ErrorKind::NotADirectory), false),
+        // Absent: only where no manifest was found.
+        (missing, true, Census::Absent, true),
+        (exists, true, Census::Absent, false),
+        (refused, true, Census::Absent, false),
+        // Held, or refused by this reader: only where one was.
+        (exists, true, held(), true),
+        (missing, true, held(), false),
+        (exists, true, unreadable(Fault::Refused), true),
+        (missing, true, unreadable(Fault::Refused), false),
+        // An I/O refusal of a stamped manifest: only the kinds its status decides.
+        (exists, true, io(ErrorKind::PermissionDenied), true),
+        (exists, true, io(ErrorKind::IsADirectory), true),
+        (exists, true, io(ErrorKind::Interrupted), false),
+        (exists, true, io(ErrorKind::Other), false),
+        // An I/O refusal where the stamp failed: only of the same kind.
+        (refused, true, io(ErrorKind::PermissionDenied), true),
+        (refused, true, io(ErrorKind::NotADirectory), false),
+        (missing, true, io(ErrorKind::PermissionDenied), false),
+    ];
+    for (stamp, root_is_dir, state, kept) in rows {
+        assert_eq!(
+            stamp_could_read(stamp, root_is_dir, &state),
+            kept,
+            "{stamp:?}, root a directory: {root_is_dir}, {state:?}"
+        );
+    }
+
+    // THE WHOLE READ: one row per vendor, in `Vendor::ALL` order, or nothing.
+    let stamps = CensusStamps {
+        manifests: vec![missing; Vendor::ALL.len()],
+        root_is_dir: true,
+    };
+    let absent: Vec<census::VendorCensus> = Vendor::ALL
+        .into_iter()
+        .map(|vendor| census::VendorCensus {
+            vendor,
+            path: PathBuf::from("fixture.man"),
+            state: Census::Absent,
+        })
+        .collect();
+    assert!(read_as_stamped(&stamps, &absent), "every row agrees");
+    let mut reversed = absent.clone();
+    reversed.reverse();
+    assert!(!read_as_stamped(&stamps, &reversed), "out of order");
+    assert!(
+        !read_as_stamped(&stamps, absent.get(1..).expect("five rows")),
+        "one row short"
+    );
+    let mut one_off = absent;
+    if let Some(dhan) = one_off.get_mut(1) {
+        dhan.state = held();
+    }
+    assert!(!read_as_stamped(&stamps, &one_off), "one row disagrees");
 }
