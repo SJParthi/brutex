@@ -2189,14 +2189,28 @@ from which. Re-offering a window written before the switch is then refused
 under the new build whenever its bits differ, and one written after it is
 refused under the old build the same way. D-0692 keys a `.grk` resume to the
 libm build that began the series as an operating rule, not an enforced one, and
-the second hardening it records is what would enforce it. Pinned by
+the second hardening it records is what would enforce it. Driven by
 `crates/store/tests/libm_key.rs`, with a second libm modelled as a one-ulp move
 in `delta`: `a_forward_append_under_another_libm_is_committed_and_names_no_build`
-fails the day the store refuses that append, or writes a byte outside the moved
-`delta` fields that tells the two builds apart, and
+shows the forward append committed and the file differing from a single-build
+file only in the moved `delta` fields, and
 `after_a_mixed_resume_neither_libm_build_re_files_the_whole_month` drives the
-two refusals. A stamp a caller packs into the provenance word would not be seen
-by either, because the tests build the provenance themselves.
+two refusals. **Neither can see the key enforced, so neither pins this
+paragraph.** The first fails if the store comes to refuse a forward append
+because a computed field moved, or if a byte of the `.grk` outside the moved
+fields comes to depend on them. It cannot fail because the store records or
+checks a libm build: both modelled builds are one real libm in one process, so
+a stamp the store writes, into the `.grk` header or into a file beside it,
+comes out the same in both files and a check against it passes, and a stamp a
+caller packs into the provenance word never reaches the tests, which build the
+provenance themselves. Tried at `eecca4da`: a stamp the store wrote into the
+`.grk` header region on the first append, refusing an append whenever the held
+stamp differed from its own, refused a forward append once the held stamp was
+altered, and every test in the `store` suite passed. No file under `crates/`
+but `libm_key.rs` names §29 or D-0692, which its sixth test checks, so the key
+can be enforced without failing any test that would send its author back to
+either, and the entry that enforces it has to correct this paragraph and
+D-0692's caveat itself.
 
 **"Within one target" above means within one libm build, and the target triple
 does not fix that.** Measured on this machine (macOS 26.6.2, aarch64), from

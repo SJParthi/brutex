@@ -11,12 +11,20 @@
 //! and `Header::advance` accepts a batch that follows the committed range
 //! without comparing a field of any row. The first two tests drive the store
 //! through exactly that, and the third checks that D-0692 and
-//! `docs/06-limits.md` §29 say so. If the store comes to refuse that forward
-//! append, or to write a byte that tells the two builds apart outside the bits
-//! they computed, the first test fails, and the entry that makes the change
-//! has to say what changed. A stamp a caller packs into the provenance word
-//! would not be seen here, because these tests build the provenance
-//! themselves.
+//! `docs/06-limits.md` §29 say so.
+//!
+//! **None of them can see the key enforced.** The first fails if the store
+//! comes to refuse a forward append because a computed field moved by one ulp,
+//! or if a byte of the `.grk` outside the moved fields comes to depend on them.
+//! It cannot fail because the store records or checks a libm build: both
+//! builds here are one real libm in one process, so a stamp the store writes,
+//! into the header or into a file beside the `.grk`, comes out the same in both
+//! files and a check against it passes, and a stamp a caller packs into the
+//! provenance word never reaches these tests, which build the provenance
+//! themselves. No other file under `crates/` names D-0692 or §29 either, so
+//! the entry that enforces the key has to correct D-0692's caveat and §29
+//! itself. The fifth test checks that this doc, §29 and D-0692 all say so, and
+//! the sixth that no other file under `crates/` names D-0692 or §29.
 //!
 //! **A fact is cited to the source that states it.** The entry cited D-0046
 //! for "`x86_64` glibc, the CI target", and D-0046 never mentions glibc,
@@ -200,7 +208,9 @@ fn refused_as_a_timestamp_fault(appended: &Result<Appended, StoreError>) -> bool
 /// under a replaced libm. Both appends commit, and the only bytes that differ
 /// between the files are the `delta` fields of that window: the header, the
 /// stamps, the spots and the provenance words are identical. So nothing but the
-/// computed bits themselves says two builds wrote the file.
+/// computed bits themselves says two builds wrote the file. Both builds are one
+/// real libm, though, so a record of that libm would be the same in both files
+/// and pass here unseen; the module doc says what that leaves unpinned.
 #[test]
 fn a_forward_append_under_another_libm_is_committed_and_names_no_build() {
     let mixed = Scratch::new("mixed");
@@ -223,8 +233,9 @@ fn a_forward_append_under_another_libm_is_committed_and_names_no_build() {
             }),
             "the second window, under {second:?}, was not committed. D-0692 and \
              docs/06-limits.md §29 say a resume that does not overlap is \
-             accepted without comment; if a libm check now refuses it, the \
-             entry that added the check must say so"
+             accepted without comment. Both builds here are one real libm, so \
+             no check of the build refused it: the store now refuses a \
+             forward append for what its rows hold"
         );
     }
 
@@ -235,8 +246,9 @@ fn a_forward_append_under_another_libm_is_committed_and_names_no_build() {
     assert_eq!(
         mixed[..header],
         single[..header],
-        "the header now differs by the libm that wrote a window, which D-0692 \
-         and docs/06-limits.md §29 say nothing records"
+        "the two headers differ, and the two files were given the same rows \
+         but for window two's `delta`: the header has come to depend on a \
+         computed field"
     );
 
     // Every differing byte is a byte of window two's `delta`, and window two's
@@ -258,8 +270,8 @@ fn a_forward_append_under_another_libm_is_committed_and_names_no_build() {
     for at in differing {
         assert!(
             deltas.iter().any(|delta| delta.contains(&at)),
-            "byte {at} differs and is not a delta of window two: something in \
-             the file now records the build"
+            "byte {at} differs and is not a delta of window two: a byte of the \
+             `.grk` has come to depend on a computed field"
         );
     }
 }
@@ -476,4 +488,128 @@ fn d_0692_cites_the_glibc_ci_target_to_a_source_that_states_it() {
         runners.iter().all(|runner| *runner == "ubuntu-24.04"),
         "CI no longer runs only where docs/06-limits.md §29 says: {runners:?}"
     );
+}
+
+/// This file, for its own module doc.
+const HERE: &str = include_str!("libm_key.rs");
+
+/// This file's module doc: its `//!` lines, whitespace collapsed as
+/// [`section`] collapses it. Only the `//!` lines are read, so a phrase the
+/// tests below look for, or keep out, is never found in the test itself.
+fn module_doc() -> String {
+    HERE.lines()
+        .filter_map(|line| line.strip_prefix("//!"))
+        .flat_map(str::split_whitespace)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// **NO TEST HERE CAN SEE THE LIBM KEY ENFORCED, AND ALL THREE TEXTS SAY SO.**
+///
+/// Both modelled builds are one real libm in one process, so a stamp of the
+/// build comes out the same in both files and a check against it passes. §29
+/// and this file's module doc once said the first test fails the day the store
+/// refuses a forward append under another libm, or writes a byte that tells
+/// the builds apart; it cannot fail for either. D-0692's correction, §29 and
+/// the module doc now say why, and that the entry which enforces the key has
+/// to correct the caveat itself, because no test here will fail to make it.
+#[test]
+fn nothing_here_sees_the_libm_key_enforced_and_the_three_texts_say_so() {
+    let entry = d_0692();
+    for claim in [
+        "**Correction, 2026-09-24: what `libm_key.rs` can see.**",
+        "It cannot fail for either reason.",
+        "Both modelled builds are one real libm in one process",
+        "comes out the same in both files and a check against it passes",
+        "which build the provenance themselves",
+        "every test in the `store` suite passed, these four included",
+        "No file under `crates/` but `libm_key.rs` names this entry or §29",
+        "has to supersede the paragraph that begins \"That rule is \
+         operational, and nothing enforces it\" and correct §29 itself",
+    ] {
+        offset(&entry, "D-0692", claim);
+    }
+
+    let doc = module_doc();
+    let limits = limits_29();
+    for (text, name, alone, owed) in [
+        (
+            &doc,
+            "libm_key.rs's module doc",
+            "No other file under `crates/` names D-0692 or §29 either",
+            "has to correct D-0692's caveat and §29 itself",
+        ),
+        (
+            &limits,
+            "docs/06-limits.md §29",
+            "No file under `crates/` but `libm_key.rs` names §29 or D-0692",
+            "has to correct this paragraph and D-0692's caveat itself",
+        ),
+    ] {
+        for claim in [
+            "It cannot fail because the store records or checks a libm build",
+            "one real libm in one process",
+            "comes out the same in both files and a check against it passes",
+            "which build the provenance themselves",
+            alone,
+            owed,
+        ] {
+            offset(text, name, claim);
+        }
+        assert!(
+            !text.contains("tells the two builds apart"),
+            "{name} again says the first test would see a byte that tells the \
+             two builds apart, and under one real libm there is no such byte"
+        );
+    }
+    offset(
+        &limits,
+        "docs/06-limits.md §29",
+        "every test in the `store` suite passed",
+    );
+}
+
+/// Every file under `dir`, at any depth, in no particular order.
+fn files_under(dir: &Path, into: &mut Vec<PathBuf>) {
+    for entry in fs::read_dir(dir).unwrap_or_else(|error| panic!("{}: {error}", dir.display())) {
+        let path = entry.expect("a directory entry").path();
+        if path.is_dir() {
+            files_under(&path, into);
+        } else {
+            into.push(path);
+        }
+    }
+}
+
+/// **NO FILE UNDER `crates/` BUT THIS ONE NAMES D-0692 OR §29.**
+///
+/// D-0692's correction and §29 say the key can be enforced without failing a
+/// test that would send its author back to either text, because this file is
+/// the only one that names them. A file that comes to name one fails here, so
+/// that sentence is re-read the day it could stop being true.
+#[test]
+fn no_file_under_crates_but_this_one_names_d_0692_or_limits_29() {
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates/store sits under crates/");
+    let mut files = Vec::new();
+    files_under(crates, &mut files);
+    let this = Path::new("store").join("tests").join("libm_key.rs");
+    let others: Vec<&PathBuf> = files.iter().filter(|path| !path.ends_with(&this)).collect();
+    assert!(
+        others.len() + 1 == files.len(),
+        "this file was not found under {}",
+        crates.display()
+    );
+    for path in others {
+        let text = String::from_utf8_lossy(&fs::read(path).expect("a readable file")).into_owned();
+        for name in ["D-0692", "§29"] {
+            assert!(
+                !text.contains(name),
+                "{} names {name}. D-0692's correction and docs/06-limits.md §29 \
+                 say no file under crates/ but libm_key.rs does; re-read both",
+                path.display()
+            );
+        }
+    }
 }

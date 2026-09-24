@@ -38866,6 +38866,26 @@ saying nothing enforces the key follows the rule it qualifies, and that the
 glibc CI target is cited to §29, which states it, rather than to D-0046, which
 does not. No second libm is linked or run by those tests.
 
+**Correction, 2026-09-24: what `libm_key.rs` can see.** The paragraph above
+says that file checks this entry against the store it describes, and
+`docs/06-limits.md` §29 said its first test fails the day the store refuses a
+forward append under another libm, or writes a byte that tells the two builds
+apart. It cannot fail for either reason. Both modelled builds are one real libm
+in one process, so a stamp the store writes, into the `.grk` header or into a
+file beside it, comes out the same in both files and a check against it
+passes, and a stamp a caller packs into the provenance word never reaches the
+tests, which build the provenance themselves. Tried at `eecca4da`: a stamp the
+store wrote into the `.grk` header region on the first append, refusing an
+append whenever the held stamp differed from its own, refused a forward append
+once the held stamp was altered, and every test in the `store` suite passed,
+these four included. No file under `crates/` but `libm_key.rs` names this
+entry or §29, so the key can be enforced without failing any test that would
+send its author back to either, and the entry that enforces it has to
+supersede the paragraph that begins "That rule is operational, and nothing
+enforces it" and correct §29 itself. §29 and the file's module doc now say so.
+Two tests were added to the file: the fifth checks that all three texts say
+it, and the sixth that no other file under `crates/` names this entry or §29.
+
 ### D-0693 — Release every advisory file lock by `File::unlock`, through one guard in `store` — 2026-09-23
 
 **The defect, proven before the fix.** `File::lock`, `lock_shared`, `try_lock`
