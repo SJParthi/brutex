@@ -40709,3 +40709,166 @@ census build passed all 26 census request tests. The budget break put the
 older sentence into the source whatever the switch said, so the count test
 failed there on every run and the server-budget child failed only under the
 switch. This tree, with no break in it, passes all 28 budget tests.
+
+**Repaired a fourth time, on a fourth review — 24 September 2026.** Two
+should-fix issues were upheld against `310f09e1`, the commit that carried the
+third repair. One says a pin the third repair claimed did not bite. The other
+says the rule the third repair gave the census cache was not given to the
+calendar cache behind it. The text above is kept as it was written; where it
+is now wrong, this says so.
+
+- *The count check of `read_as_stamped` was pinned by no test.* The table
+  test's short read was `absent.get(1..)`, which drops the first row. Every
+  row after it then sits one vendor off, so the order check refuses that read
+  on its own. The review deleted the count check, and every census request
+  test and the rest of the `api` lib it ran still passed. Without it, a read
+  missing its last row would be kept, because the zip stops early. So the
+  third repair's "the order and count checks of `read_as_stamped`" and
+  AF-28c's "short of one row per vendor" held for the order and not for the
+  count. `census::read_all` never returns a short read, so no wrong answer was
+  served.
+- **Decided: the table test drops each end, and adds a row over.** A read
+  missing its first row, one missing its last row, and one with a sixth row
+  past the last vendor are each refused. Only the count check refuses the
+  second and the third: their rows line up with `Vendor::ALL`, and the zip
+  never reaches a sixth. AF-28c is corrected in place, because it is new in
+  this piece.
+- *`calendar_of::cached` kept a calendar whatever `derive` said about it.* It
+  discarded `derive`'s `Report` and cached the calendar under the manifest's
+  modified time. A bar directory moved aside for one request, a store root
+  gone after the census was read, or an I/O error opening a bar file moves no
+  manifest. The review moved `bars/dhan` aside for one `/calendar.json`
+  request over a store whose census holds NIFTY's one daily month, then put it
+  back. That request answered `200 {"sessions":0}`, the next one answered the
+  same, and `/bars` served the month. It is the defect the third repair
+  removed from the census cache, one cache further in, and `Report::unreadable`
+  says of it: "Named, never silent." The code predates D-0695. The third
+  repair recorded a smaller limit of this cache (the months it lags) and not
+  this one.
+- **Decided: a derivation is kept only when every file it could not open is
+  one the census does not hold.** `derive` now records every daily or minute
+  file it could not open in `Report::unopened`, with its rung, its month and
+  the refusal. The minute month is opened once, for the counter and the walk,
+  where it was opened twice, and a minute file that does not open is recorded
+  rather than folded into "no minute file" by `.ok()`. `cached` takes the
+  caller's census as `holds`: for a rung and a month, whether that census
+  holds that file of the series, one hash probe (`VendorCensus::rows_for`) per
+  file that did not open, and none when every file opened. A file the census
+  holds and the derivation could not open is a read that did not reach the
+  store. That derivation is not kept, and `Derived::unopened` names it to the
+  caller. A file the census does not hold is not a fault: a month held at the
+  minute rung and not the daily one is still kept, and so is a minute file the
+  store never held. A held file that opened and whose records fail their
+  checks is kept, as the census cache keeps a manifest whose bytes do not
+  decode. Every caller answers such a derivation as what it is.
+  `/calendar.json` refuses it with 503 on both branches, with
+  `"bars":"unopened"`, the count, and the first refusal in its own words
+  (`unopened_calendar`). On
+  the exchange branch, one series with such a file refuses the whole
+  agreement: left out, it would vote for nothing, and the union would read no
+  session wherever it was the one witness. `/gaps.json`'s peer vote names the
+  peer as `feed:symbol` under `calendar.unreadable` and counts no vote from it.
+  The ingest path's calendar observation is `None` for that call, so its plan
+  takes the static authority rather than a short observation. The census
+  search `calendar_json` needs for `holds` is the one `unreadable_calendar`
+  made: it is now made once in `calendar_json` and handed to both, so Gate 11
+  rule 6 still counts 8 in `server.rs`. The Gate's comment is corrected in
+  place, because it is new in this piece. The "*eighth is
+  `unreadable_calendar`'s search*" above is now `calendar_json`'s.
+- **Tests.**
+  `a_derivation_is_kept_only_when_every_file_it_could_not_open_is_unheld`
+  drives `cached` directly over January's daily file on disk and February's
+  absent, with three answers from `holds`: January at the daily rung only
+  (kept, and the second call is the same `Arc`), both months at the daily rung
+  (February named, January's session still derived, not kept, derived again),
+  and January at the minute rung too (its absent minute file named, not kept).
+  `a_calendar_derived_while_the_bars_were_away_is_refused_and_not_kept` is the
+  review's probe on both branches of `/calendar.json`: 503 naming NIFTY's
+  2025-05 file while `bars/dhan` is aside, and 200 with the one session on the
+  next request. `a_peer_derived_while_its_bars_were_away_is_named_and_not_kept`
+  and `an_observation_derived_while_the_bars_were_away_is_withheld_and_not_kept`
+  do the same for the peer vote and the ingest observation. AF-28e records
+  them. Two older census tests published a census naming ADANIENT's month with
+  no bar file under it, which since this change is a store its census does
+  not describe, so `/calendar.json` refused it. What they count is the census
+  read, not that. Each now writes the bar its census names, as a pull does;
+  `census_backed_get_routes_read_an_unchanged_manifest_once_and_a_rewrite_again`
+  then counts Dhan's ADANIENT as one voting peer where it counted none, and
+  its manifest-read counts are unchanged.
+- *Also answered here, though this round's review did not raise it: nothing
+  checked that `read_vendor` labels an I/O error through
+  `Census::of_io_error`.* `an_io_error_its_stamp_cannot_see_is_not_cached`
+  builds Dhan's census by calling `of_io_error` itself. A `read_vendor` that
+  called every I/O error `Fault::Refused` would have had any such refusal kept
+  under a stamp that found the manifest. The third repair also said no such
+  fault was produced on a real disk; a Unix socket at a manifest path is one.
+  `a_manifest_that_stats_but_will_not_open_is_not_cached` binds one at Groww's
+  manifest path, requires its stamp to be `At` and `read_vendor` to call it
+  `Fault::Io` of a kind that is neither `PermissionDenied` nor `IsADirectory`,
+  then requires three requests to read again with nothing cached, and the read
+  after the socket is removed to be kept. Its scratch name is short, `cr-sock`,
+  because a socket's path must fit a socket address. On this laptop the
+  refusal read "Operation not supported on socket (os error 102)", and a
+  throwaway probe outside the tree measured its kind as `Unsupported`.
+  `a_fault_its_stamp_can_see_is_cached` now also requires `read_vendor` to
+  call its three faults `Fault::Refused`, `Fault::Io(PermissionDenied)` and
+  `Fault::Io(IsADirectory)`. AF-28c names both.
+
+**Rejected.**
+
+- *Declining every derivation whose `Report::unreadable` is not empty.* That
+  list names a month whose daily file is absent whatever the census says, so a
+  store holding a month at the minute rung only would be derived again on
+  every request, at the 0.28 s per instrument `cached`'s doc records. A switch
+  that treated every file that did not open as held failed 16 tests of the
+  `api` lib, among them the `cached` test's first case and
+  `production_ingestion_attests_only_the_bounded_calendar_extension`.
+- *Asking the disk, after a refusal, whether the series directory exists.* A
+  directory back between the refusal and the question keeps a calendar the
+  derivation did not read. The census is read before the derivation and says
+  which files exist, so the comparison has no such window.
+- *Answering the exchange calendar without the series that did not open.* See
+  above: the union cannot tell a missing witness from a closed day.
+
+**Still not done.**
+
+- A held file that opened and whose records fail to read is kept, including a
+  read that fails for a reason that does not persist. A held file that
+  persistently fails to open refuses `/calendar.json` on every request, and is
+  derived again each time; on the exchange branch, it refuses the whole feed.
+  `docs/06-limits.md`'s D-0695 section states both, and that the cost of such
+  a derivation is unmeasured.
+- The browser follow-up above is still open. `/ingest` shows
+  "/calendar.json answered 503" and not the refusal.
+
+Each proof was taken on this tree with breaks added and each selected by an
+environment variable, and the tree restored afterwards. With no break, the
+`api` lib had 1,195 passed, 0 failed and 2 ignored. With the count check
+removed, 1 failed: the table test, at "the last row short"; with that
+assertion also skipped, the table test failed at "one row over". With every
+derivation kept whatever it met, 4 failed: the `cached` test at "both months
+at the daily rung: not kept", the route test at "the next request derives
+again", the peer test at "the next vote counts it", and the observation test,
+whose day read `Unmeasured`. With the callers ignoring `Derived::unopened`, 3
+failed: the route test (200 with `"sessions":0` where 503 was due), the peer
+test at "the peer is named", and the observation test (`Some(0)`). With
+`holds` answering false for every file, which is the rule before this change,
+the same four tests failed, each at its first assertion on the fault: the
+`cached` test named nothing for February, the route test answered 200, the
+peer test named no peer, and the observation test observed `Some(0)`. With a
+missing minute file not recorded, 1 failed: the `cached` test's minute case.
+With `read_vendor` calling every I/O error `Fault::Refused`, 2 failed,
+`a_fault_its_stamp_can_see_is_cached` at the file this process may not read
+and the socket test at its label; with that label assertion skipped, the
+socket test failed at "request 2: read again, not kept".
+
+**Verified (fourth repair)** on this tree (arm64 laptop, `CARGO_BUILD_JOBS=2`,
+`--locked --offline`). `cargo fmt --all --check` is clean, and so is
+`cargo clippy --workspace --all-targets --locked --offline -- -D warnings`.
+The `api` suite ran outside the command sandbox, which refuses the loopback
+binds some of its tests make and the socket the new census test binds. Its
+lib has 1,195 passed, 0 failed and 2 ignored: the 1,190 of the third repair
+and the five tests this adds. `src/main.rs` has 2 passed, `tests/binary.rs` 3
+and the doctest 1. `core`'s whole suite, which reads these documents, passes.
+Every shell gate of CI's Gate 1+2 job except 1e passes, Gates 10, 10b, 11,
+23, 27 and 27b among them; Gate 11 counts `server.rs` at 8 of 8 under rule 6.

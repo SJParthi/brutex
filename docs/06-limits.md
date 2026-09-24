@@ -9375,3 +9375,51 @@ The text above is kept as it was written.
   with a calendar derived from the months held before, until the modified time
   moves. This is the same-modified-time gap D-0686 recorded for that cache, now
   beside a census that no longer shares it. Not changed, and no test drives it.
+
+**Corrected 24 September 2026, on a fourth review (D-0695).** One limit the
+third correction left out is added, about the calendar cache, and one of its
+bullets is wrong. The text above is kept as it was written.
+
+* *A calendar derived without a bar file its census holds was served as the
+  store's, and kept.* `calendar_of::cached` threw away `derive`'s report and
+  cached its calendar under the manifest's modified time, whatever the report
+  said. A bar directory moved aside for one request, a store root gone after
+  the census was read, or an I/O error opening a held file moves no manifest.
+  So `/calendar.json` answered `200 {"sessions":0}` for that request, and went
+  on answering it after the fault ended, until the next pull wrote the
+  manifest. The review measured both halves with `bars/dhan` moved aside for
+  one request. `/gaps.json`'s peer vote and the ingest path's calendar
+  observation read through the same cache. Since D-0695's fourth repair,
+  `derive` records every daily or minute file it could not open, and a
+  derivation is kept only when the caller's census holds none of them. One
+  that is not kept answers its own request: `/calendar.json` refuses it with
+  503 and names the first file and the count, `/gaps.json` names the peer as
+  `feed:symbol` under `calendar.unreadable` and counts no vote from it, and the
+  ingest path takes no observation for that call. The next request derives
+  again.
+* **What is still kept.** A held file that opened and whose records fail their
+  checks is kept, as a manifest whose bytes do not decode is kept by the
+  census cache. That includes a record read that fails for a reason that does
+  not persist, such as an I/O error inside a file that opened. Read from the
+  code, not produced. A file the census does not hold is not a fault, so a
+  month held at one rung and not the other is still kept.
+* **A new cost and a new refusal, while a held file will not open.** Until it
+  opens, that series is derived again on every request that reaches it, and
+  `/calendar.json` answers 503 on every request. On the exchange branch, one
+  such series refuses the feed's whole exchange calendar. `derive` is
+  documented at 0.28 s for one instrument across 81 months; what a derivation
+  that fails to open files costs is **UNMEASURED**. A store whose census holds
+  bar files that are not on disk, such as a partial copy, answered a calendar
+  without those months and now answers 503. `/ingest` shows "/calendar.json
+  answered 503" and not the refusal, as for an unreadable census: it reads no
+  body from a status that is not a success (read from
+  `web/src/routes/ingest/+page.svelte`). The browser follow-up above is where
+  either would be rendered.
+* *"No such fault was produced on a real disk"*, in the third correction's
+  bullet on a new cost, is wrong. A Unix socket at a manifest path answers
+  `stat` and fails every open. On the macOS laptop this repair ran on, the
+  refusal read "Operation not supported on socket (os error 102)".
+  `a_manifest_that_stats_but_will_not_open_is_not_cached` reads it through
+  `read_vendor` on every request while it stays, and keeps the read once it is
+  gone. `EIO` and `EMFILE` were still not produced; for those the tests give
+  the read what `Census::of_io_error` makes of each.

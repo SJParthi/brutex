@@ -31,7 +31,10 @@
 //! from `a_store_root_that_vanishes_during_the_read_is_not_cached` on pin which
 //! reads are kept: a read faulted through `census_now_reading` in a way no
 //! stamp records is read again on the next request, and a fault the stamps do
-//! record is still kept.
+//! record is still kept. The last two move a bar directory aside instead, and
+//! pin the same rule for the calendar cache behind the census: a calendar
+//! derived without a bar file its census holds is refused to the request that
+//! derived it, and derived again on the next.
 #![expect(
     clippy::expect_used,
     reason = "finite owned fixtures and exact response assertions"
@@ -280,6 +283,11 @@ impl Drop for Fixture {
 async fn census_backed_get_routes_read_an_unchanged_manifest_once_and_a_rewrite_again() {
     let fixture = Fixture::new("census-request-reads");
     fixture.publish(&[(Segment::Cash, "ADANIENT")], 0);
+    // THE BAR THE CENSUS NAMES IS ON DISK. Since D-0695 a calendar derived
+    // without a file its census holds is refused, and what this test counts is
+    // the census read each route takes, not that refusal. So Dhan's ADANIENT
+    // also has a daily bar, and it votes on `/gaps.json`.
+    fixture.bar(Vendor::Dhan, Segment::Cash, "ADANIENT", 2);
     let base = fixture.reads();
 
     // THE FIRST REQUEST READS ONCE -- the cache was never filled, and the
@@ -325,7 +333,11 @@ async fn census_backed_get_routes_read_an_unchanged_manifest_once_and_a_rewrite_
         base + 1,
         "/calendar.json (symbol) re-read an unchanged manifest"
     );
-    assert_eq!(fixture.peers(), 0, "no bars, so no peer can vote");
+    assert_eq!(
+        fixture.peers(),
+        1,
+        "Dhan's ADANIENT, whose bar is on disk, votes"
+    );
     assert_eq!(
         fixture.reads(),
         base + 1,
@@ -404,13 +416,13 @@ async fn census_backed_get_routes_read_an_unchanged_manifest_once_and_a_rewrite_
 
     // REWRITE, AND /gaps.json's PEER VOTE MEETS IT FIRST.
     fixture.publish(&[(Segment::Cash, "ADANIENT")], 4);
-    assert_eq!(fixture.peers(), 0, "still no bars, so still no vote");
+    assert_eq!(fixture.peers(), 1, "still Dhan's ADANIENT alone");
     assert_eq!(
         fixture.reads(),
         base + 5,
         "/gaps.json's peer vote re-reads a rewritten manifest once"
     );
-    assert_eq!(fixture.peers(), 0);
+    assert_eq!(fixture.peers(), 1);
     assert_eq!(
         fixture.reads(),
         base + 5,
@@ -520,6 +532,9 @@ fn without_status_change(mut stamps: CensusStamps) -> CensusStamps {
 async fn a_rewrite_that_keeps_the_stamp_is_served_stale_until_the_stamp_moves() {
     let fixture = Fixture::new("census-request-same-stamp");
     fixture.publish(&[(Segment::Cash, "ADANIENT")], 0);
+    // The bar the census names, so the stale answer below is a calendar and
+    // not D-0695's refusal of one derived without a held file.
+    fixture.bar(Vendor::Dhan, Segment::Cash, "ADANIENT", 2);
     assert_eq!(fixture.locate("RELIANCE"), None);
     let (older_censuses, older_entries) = census_now(&fixture.site);
     let base = fixture.reads();
@@ -1430,8 +1445,9 @@ fn named(censuses: &[census::VendorCensus]) -> Vec<&'static str> {
     censuses.iter().map(|census| census.state.name()).collect()
 }
 
-/// A store root moved aside for one read, and put back afterwards even when an
-/// assertion inside that read fails, so the fixture's own `Drop` still finds it.
+/// A store root, or a directory in it, moved aside for one read, and put back
+/// afterwards even when an assertion inside that read fails, so the fixture's
+/// own `Drop` still finds it.
 struct Aside<'a> {
     root: &'a Path,
     aside: PathBuf,
@@ -1440,7 +1456,7 @@ struct Aside<'a> {
 impl<'a> Aside<'a> {
     fn new(root: &'a Path) -> Self {
         let aside = root.with_extension("aside");
-        fs::rename(root, &aside).expect("move the store root aside");
+        fs::rename(root, &aside).expect("move it aside");
         Self { root, aside }
     }
 }
@@ -1451,7 +1467,7 @@ impl Drop for Aside<'_> {
     }
 }
 
-/// A healthy store the next three tests fault for one read: Dhan's manifest
+/// A healthy store the tests below fault for one read: Dhan's manifest
 /// holds NIFTY as INDEX and its one daily bar is on disk.
 fn nifty_store(name: &str) -> Fixture {
     let fixture = Fixture::new(name);
@@ -1550,6 +1566,13 @@ async fn a_store_root_that_vanishes_after_its_check_is_not_cached_as_absent() {
 /// Dhan's census replaced by what `read_vendor` makes of that error, through
 /// the one mapping it uses, `Census::of_io_error`. The next request reads
 /// again, once, and keeps what it read.
+///
+/// That mapping holds this test only while `read_vendor` goes through it, and
+/// nothing here reads a disk that fails. So two tests read real faults through
+/// `read_vendor` itself: `a_manifest_that_stats_but_will_not_open_is_not_cached`
+/// an error of a kind no stamp decides, and `a_fault_its_stamp_can_see_is_cached`
+/// the two kinds a stamp does. A `read_vendor` that labelled every I/O error
+/// `Fault::Refused` passed this test and every other one before them.
 #[cfg(unix)]
 #[tokio::test]
 async fn an_io_error_its_stamp_cannot_see_is_not_cached() {
@@ -1589,6 +1612,83 @@ async fn an_io_error_its_stamp_cannot_see_is_not_cached() {
     }
 }
 
+/// A MANIFEST THAT `stat` ANSWERS AND NO READ OPENS IS NOT CACHED, on a real
+/// disk and through `read_vendor` itself. D-0695.
+///
+/// `an_io_error_its_stamp_cannot_see_is_not_cached` hands the cache the census
+/// `Census::of_io_error` makes, so it cannot see whether `read_vendor` makes
+/// the same one. This reads a real fault instead: a Unix socket bound at
+/// Groww's manifest path. Its `stat` answers with both times, so its stamp is
+/// the one a file's is, and opening it fails with a kind that is neither of the
+/// two a stamp decides (`EOPNOTSUPP` on this macOS host, which `std` calls
+/// `Unsupported`; the kind is not assumed here, only required to be neither).
+/// `read_vendor` must label it `Fault::Io` of that kind, and the cache must
+/// decline it: every request while the socket stays reads again, counted on
+/// Dhan's healthy manifest beside it, and nothing is cached. Once the socket
+/// is gone the next read is kept. A `read_vendor` that labelled every I/O
+/// error `Fault::Refused` had this socket kept, under a stamp that cannot say
+/// when the fault ends.
+///
+/// The socket's path must fit a socket address, so the scratch name is short.
+#[cfg(unix)]
+#[test]
+fn a_manifest_that_stats_but_will_not_open_is_not_cached() {
+    use std::io::ErrorKind;
+    let fixture = Fixture::new("cr-sock");
+    fixture.publish(&[(Segment::Index, "NIFTY")], 0);
+    let groww = manifest_path(&fixture.root, Vendor::Groww);
+    let socket = std::os::unix::net::UnixListener::bind(&groww)
+        .expect("a socket at Groww's manifest path, whose path fits a socket address");
+    let stamp = Vendor::ALL
+        .into_iter()
+        .zip(manifest_stamps(&fixture.root).manifests)
+        .find_map(|(vendor, stamp)| (vendor == Vendor::Groww).then_some(stamp));
+    assert!(
+        matches!(stamp, Some(ManifestStamp::At { .. })),
+        "the socket's `stat` answers with its times: {stamp:?}"
+    );
+    let state = census::read_vendor(&fixture.root, Vendor::Groww).state;
+    assert!(
+        matches!(
+            state,
+            census::Census::Unreadable {
+                fault: census::Fault::Io(kind),
+                ..
+            } if !matches!(kind, ErrorKind::PermissionDenied | ErrorKind::IsADirectory)
+        ),
+        "`read_vendor` names an I/O fault of a kind no stamp decides: {state:?}"
+    );
+
+    let faulted = ["unreadable", "held", "absent", "absent", "absent"];
+    cold(&fixture);
+    let base = fixture.reads();
+    for request in 1..=3 {
+        assert_eq!(fixture.states(), faulted, "request {request}: served");
+        assert_eq!(
+            fixture.reads(),
+            base + request,
+            "request {request}: read again, not kept"
+        );
+    }
+    assert!(
+        fixture
+            .site
+            .census
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none(),
+        "nothing is cached while the socket stays"
+    );
+
+    drop(socket);
+    fs::remove_file(&groww).expect("take the socket away");
+    let repaired = ["absent", "held", "absent", "absent", "absent"];
+    assert_eq!(fixture.states(), repaired, "its end is read");
+    let after = fixture.reads();
+    assert_eq!(fixture.states(), repaired, "warm");
+    assert_eq!(fixture.reads(), after, "and what it read is kept");
+}
+
 /// A FAULT ITS STAMP CAN SEE IS STILL CACHED. D-0695.
 ///
 /// A census the cache declines to keep is read again on every request, so the
@@ -1600,9 +1700,18 @@ async fn an_io_error_its_stamp_cannot_see_is_not_cached() {
 /// each must be kept: the warm request reads no manifest bytes, counted on
 /// Dhan's healthy manifest beside it. Like the other permission tests, this
 /// needs a process the permission binds, which a root process is not.
+///
+/// And `read_vendor` must say where each refusal came from: `Fault::Refused`
+/// for the bytes, `Fault::Io` of `PermissionDenied` for the mode and of
+/// `IsADirectory` for the directory. Those two kinds are what the cache keeps
+/// under a stamp that found the manifest, so this pins which kinds reach that
+/// list from a real disk, not only what the list says. A `read_vendor` that
+/// labelled every I/O error `Refused` still had all three kept, and so passed
+/// the counts below without them.
 #[cfg(unix)]
 #[test]
 fn a_fault_its_stamp_can_see_is_cached() {
+    use std::io::ErrorKind;
     use std::os::unix::fs::PermissionsExt as _;
     let fixture = Fixture::new("census-request-kept-faults");
     fixture.publish(&[(Segment::Index, "NIFTY")], 0);
@@ -1617,19 +1726,36 @@ fn a_fault_its_stamp_can_see_is_cached() {
         fs::remove_file(&groww).expect("take the file away");
         fs::create_dir(&groww).expect("a directory where Groww's manifest goes");
     };
-    let faults: [(&str, &dyn Fn()); 3] = [
-        ("bytes that do not decode", &undecodable),
-        ("a file this process may not read", &unpermitted),
-        ("a directory", &directory),
+    let faults: [(&str, &dyn Fn(), census::Fault); 3] = [
+        (
+            "bytes that do not decode",
+            &undecodable,
+            census::Fault::Refused,
+        ),
+        (
+            "a file this process may not read",
+            &unpermitted,
+            census::Fault::Io(ErrorKind::PermissionDenied),
+        ),
+        (
+            "a directory",
+            &directory,
+            census::Fault::Io(ErrorKind::IsADirectory),
+        ),
     ];
     let unreadable = ["unreadable", "held", "absent", "absent", "absent"];
-    for (what, fault) in faults {
+    for (what, fault, from) in faults {
         fault();
         cold(&fixture);
         assert_eq!(
             fixture.fresh_states(),
             unreadable,
             "{what}: the fault binds this process"
+        );
+        let state = census::read_vendor(&fixture.root, Vendor::Groww).state;
+        assert!(
+            matches!(state, census::Census::Unreadable { fault, .. } if fault == from),
+            "{what}: `read_vendor` names where it came from, {from:?}: {state:?}"
         );
         let base = fixture.reads();
         assert_eq!(fixture.states(), unreadable, "{what}: cold");
@@ -1645,6 +1771,11 @@ fn a_fault_its_stamp_can_see_is_cached() {
 /// `stamp_could_read` decides what the census cache keeps. The route tests
 /// above reach its lines through real faults; this reaches every arm, each
 /// from both sides, so a line dropped from it or widened fails here by name.
+///
+/// Then `read_as_stamped`'s two checks on the whole read, order and count,
+/// each with a read that only it refuses. The short read here used to drop the
+/// first row, which the order check refuses on its own, so deleting the count
+/// check passed every test.
 #[test]
 fn a_census_is_kept_only_under_a_stamp_that_could_have_read_it() {
     use census::{Census, Fault};
@@ -1717,13 +1848,97 @@ fn a_census_is_kept_only_under_a_stamp_that_could_have_read_it() {
     let mut reversed = absent.clone();
     reversed.reverse();
     assert!(!read_as_stamped(&stamps, &reversed), "out of order");
-    assert!(
-        !read_as_stamped(&stamps, absent.get(1..).expect("five rows")),
-        "one row short"
-    );
+    // SHORT AT EITHER END, AND ONE OVER. A read missing its FIRST row puts
+    // every row after it one vendor off, so the order check refuses it with or
+    // without the count. Only the count refuses a read missing its LAST row,
+    // whose rows still line up with `Vendor::ALL`, or one with a row past the
+    // last vendor, which the zip never reaches.
+    let (_, but_first) = absent.split_first().expect("five rows");
+    let (_, but_last) = absent.split_last().expect("five rows");
+    assert!(!read_as_stamped(&stamps, but_first), "the first row short");
+    assert!(!read_as_stamped(&stamps, but_last), "the last row short");
+    let mut one_over = absent.clone();
+    one_over.push(absent.first().cloned().expect("five rows"));
+    assert!(!read_as_stamped(&stamps, &one_over), "one row over");
     let mut one_off = absent;
     if let Some(dhan) = one_off.get_mut(1) {
         dhan.state = held();
     }
     assert!(!read_as_stamped(&stamps, &one_off), "one row disagrees");
+}
+
+/// A CALENDAR DERIVED WHILE A HELD BAR FILE WOULD NOT OPEN IS REFUSED TO ITS
+/// REQUEST AND NOT KEPT, on both branches of `/calendar.json`. D-0695.
+///
+/// The census cache keeps only a read its stamps could have made. The calendar
+/// cache behind it kept whatever `calendar_of::derive` returned. With
+/// `bars/dhan` moved aside for one request, NIFTY's one held daily month did
+/// not open, and `/calendar.json` answered `200 {"sessions":0}`. That calendar
+/// was cached under the manifest's modified time, which the fault had not
+/// moved, so it was still served after the directory came back, while `/bars`
+/// served the month. A review measured both halves. Now the request that meets
+/// the fault is refused with 503, naming the file it could not open, and the
+/// next request derives again and answers the one session.
+///
+/// Each branch gets its own store, because each must meet the fault with the
+/// calendar cache cold: a kept calendar is a hit, and a hit opens nothing.
+#[tokio::test]
+async fn a_calendar_derived_while_the_bars_were_away_is_refused_and_not_kept() {
+    for (branch, query) in [
+        ("symbol", "feed=dhan&symbol=NIFTY"),
+        ("exchange", "feed=dhan"),
+    ] {
+        let fixture = nifty_store(&format!("census-request-bars-away-{branch}"));
+        let bars = fixture.root.join("bars").join("dhan");
+        let (status, body) = {
+            let _aside = Aside::new(&bars);
+            fixture.calendar_answer(query).await
+        };
+        assert_eq!(
+            status,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "{branch}: the request that met the fault refuses: {body}"
+        );
+        assert!(body.contains(r#""bars":"unopened""#), "{branch}: {body}");
+        assert!(body.contains(r#""unopened":1"#), "{branch}: {body}");
+        assert!(
+            body.contains("NIFTY") && body.contains("2025-05"),
+            "{branch}: it names the file it could not open: {body}"
+        );
+        let (status, body) = fixture.calendar_answer(query).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{branch}: {body}");
+        assert!(
+            body.contains(r#""sessions":1"#),
+            "{branch}: the next request derives again, and nothing was kept: {body}"
+        );
+    }
+}
+
+/// A PEER DERIVED WHILE ITS BARS WERE AWAY IS NAMED, NOT COUNTED, AND NOT
+/// KEPT. D-0695.
+///
+/// `/gaps.json`'s peer vote reads through the same calendar cache. Asked for
+/// BANKNIFTY on Zerodha, Dhan's NIFTY is the one peer. With `bars/dhan` moved
+/// aside, its derivation opens nothing its census holds: it votes for nothing,
+/// and is named under `unreadable` as `dhan:NIFTY` beside the unreadable
+/// censuses, where it was silently no vote at all. Once the directory is back,
+/// the next vote derives again and counts it.
+#[test]
+fn a_peer_derived_while_its_bars_were_away_is_named_and_not_kept() {
+    let fixture = nifty_store("census-request-peer-away");
+    let asked = Addressed::parse(
+        "feed=zerodha&exchange=NSE&segment=INDEX&symbol=BANKNIFTY&timeframe=1min&month=2025-05",
+    )
+    .expect("a well-formed address");
+    let bars = fixture.root.join("bars").join("dhan");
+    let away = {
+        let _aside = Aside::new(&bars);
+        peer_calendar(&fixture.site, &asked)
+    };
+    assert!(away.from.is_empty(), "no vote: {:?}", away.from);
+    assert!(away.calendar.is_none(), "and so no agreed calendar");
+    assert_eq!(away.unreadable, ["dhan:NIFTY"], "the peer is named");
+    let back = peer_calendar(&fixture.site, &asked);
+    assert_eq!(back.from, ["dhan:NIFTY"], "the next vote counts it");
+    assert!(back.unreadable.is_empty(), "{:?}", back.unreadable);
 }

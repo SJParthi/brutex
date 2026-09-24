@@ -6043,13 +6043,16 @@ jobs:
           #     FEED_COUNT (5 today, capped at 8 by `VendorSet(u8)`). One is
           #     `self.unread`, the same per-vendor list.
           #     server.rs 7 -> 8 (D-0695), and the census searches 9 -> 10: the
-          #     tenth is `unreadable_calendar`'s, which finds the asked feed's
-          #     census when it is `Unreadable`. Its `censuses` is `census_now`'s,
-          #     and `census::read_all` and `unreadable_root` yield exactly one
-          #     row per `Vendor::ALL` entry, so it sees at most FEED_COUNT rows,
-          #     once per `/calendar.json` request -- never per entry, per bar or
-          #     per series. `.filter().next()` would hide it from this rule at
-          #     the same cost, which is why it is declared rather than respelt.
+          #     tenth is `calendar_json`'s, which finds the asked feed's census
+          #     once per request (it was `unreadable_calendar`'s until D-0695's
+          #     fourth repair, which also asks that row whether a bar file is
+          #     held, and moved the one search up rather than adding a second).
+          #     Its rows are `census_now`'s, and `census::read_all` and
+          #     `unreadable_root` yield exactly one row per `Vendor::ALL` entry,
+          #     so it sees at most FEED_COUNT rows, once per `/calendar.json`
+          #     request -- never per entry, per bar or per series.
+          #     `.filter().next()` would hide it from this rule at the same cost,
+          #     which is why it is declared rather than respelt.
           #   pull/vendor.rs -- `rung_routes`, `layouts` and the granularity rows
           #     are the descriptor's own `&'static` arrays, units long.
           #   pull/fno.rs -- `MONTHS`, twelve.

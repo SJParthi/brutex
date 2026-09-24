@@ -2654,6 +2654,11 @@ struct PeerCalendar {
     /// counter fell back to the table with `voted_by: []` -- the same answer
     /// as a store with no peers at all, which is the failure `CLAUDE.md` §4
     /// bans. A peer that might have voted and could not be read is named.
+    ///
+    /// Then, as `feed:symbol` in the order they were walked, every peer series
+    /// with a bar file its census holds and its derivation could not open. Its
+    /// calendar lacks what that file would have proved, so it does not vote,
+    /// and `calendar_of::cached` does not keep it. D-0695.
     unreadable: Vec<String>,
 }
 
@@ -2668,7 +2673,7 @@ fn peer_calendar(site: &Loaded, asked: &Addressed) -> PeerCalendar {
     // steady-state audit reads no manifest bytes. D-0686.
     let (fresh, _) = census_now(site);
     let mut readings: Vec<(String, pull::calendar::Calendar)> = Vec::new();
-    let unreadable: Vec<String> = fresh
+    let mut unreadable: Vec<String> = fresh
         .iter()
         .filter(|census| matches!(census.state, census::Census::Unreadable { .. }))
         .map(|census| census.vendor.as_str().to_owned())
@@ -2694,7 +2699,7 @@ fn peer_calendar(site: &Loaded, asked: &Addressed) -> PeerCalendar {
             }
             let months: Vec<store::path::YearMonth> =
                 by_series.get(&key).cloned().unwrap_or_default();
-            let calendar = crate::calendar_of::cached(
+            let derived = crate::calendar_of::cached(
                 &site.calendars,
                 &site.store_root,
                 vendor_census.vendor,
@@ -2702,7 +2707,19 @@ fn peer_calendar(site: &Loaded, asked: &Addressed) -> PeerCalendar {
                 segment.as_str(),
                 symbol.as_str(),
                 &months,
+                census_holds(Some((vendor_census, key))),
             );
+            // A PEER WHOSE HELD FILE DID NOT OPEN IS NAMED, NOT COUNTED AS A
+            // PEER THAT TRADED NOTHING THERE. See `PeerCalendar::unreadable`.
+            if !derived.unopened.is_empty() {
+                unreadable.push(format!(
+                    "{}:{}",
+                    vendor_census.vendor.as_str(),
+                    symbol.as_str()
+                ));
+                continue;
+            }
+            let calendar = derived.calendar;
             // A SERIES THIS FEED HOLDS NOTHING FOR IS NOT A VOTE FOR ANYTHING —
             // counting an empty calendar as agreement would let an absence
             // close the exchange.
@@ -5801,6 +5818,8 @@ fn land_one_scheduled(
 /// Read existing index observations for diagnostics, never schedule authority.
 /// The cached calendar is keyed by feed and full identity and invalidated by
 /// manifest changes. No vendor fetch or calendar construction from this response.
+/// A derivation that could not open a bar file the census holds is `None`, as
+/// no observation, and is not cached (D-0695).
 fn ingestion_observations(
     landed: &BrokerWindow,
     site: &Site,
@@ -5822,22 +5841,26 @@ fn ingestion_observations(
         .iter()
         .find(|census| census.vendor == landed.store_vendor)?;
     let held = census::held_entries(std::slice::from_ref(vendor));
+    // The series' own identity, typed, for `census_holds`: set exactly when a
+    // month is found, so it is also the emptiness check below.
+    let mut identity = None;
     let mut months: Vec<_> = held
         .iter()
         .filter_map(|(series, month)| {
-            (series.exchange.as_str() == "NSE"
+            let spot = series.exchange.as_str() == "NSE"
                 && series.segment.as_str() == "INDEX"
                 && series.symbol.as_str() == symbol
-                && series.contract.is_none())
-            .then_some(*month)
+                && series.contract.is_none();
+            if spot {
+                identity = Some((series.exchange, series.segment, series.symbol));
+            }
+            spot.then_some(*month)
         })
         .collect();
     months.sort_unstable();
     months.dedup();
-    if months.is_empty() {
-        return None;
-    }
-    Some(crate::calendar_of::cached(
+    let identity = identity?;
+    let derived = crate::calendar_of::cached(
         &site.calendars,
         &site.store_root,
         landed.store_vendor,
@@ -5845,7 +5868,12 @@ fn ingestion_observations(
         "INDEX",
         symbol,
         &months,
-    ))
+        census_holds(Some((vendor, identity))),
+    );
+    // A DERIVATION THAT DID NOT OPEN A HELD FILE OBSERVED LESS THAN THE STORE
+    // HOLDS, and its days would attest nothing it did not read: no observation
+    // rather than a short one. `cached` does not keep it. D-0695.
+    derived.unopened.is_empty().then_some(derived.calendar)
 }
 
 fn land_bodies_scheduled(
@@ -18067,6 +18095,77 @@ mod tests {
                 }
             );
         }
+    }
+
+    /// AN OBSERVATION DERIVED WHILE A HELD BAR FILE WOULD NOT OPEN IS WITHHELD,
+    /// AND NOT KEPT. D-0695.
+    ///
+    /// Zerodha's daily NIFTY bar is landed, so its census holds that month at
+    /// the daily rung. With `bars/zerodha` moved aside for one call, the
+    /// derivation behind the observation opens nothing the census holds. That
+    /// call used to answer an empty calendar and keep it under the manifest's
+    /// modified time, which the fault does not move, so the next call observed
+    /// nothing either, with the bars back. Now the call that meets it answers no
+    /// observation, and the next derives again and sees the day the bar proves:
+    /// open, with no minute file to size it.
+    #[test]
+    fn an_observation_derived_while_the_bars_were_away_is_withheld_and_not_kept() {
+        use pull::fetch::{RawRow, RawWindow};
+        use pull::session::{IST_OFFSET_SECS, Window};
+        use pull::vendor::{Feed, Granularity, Listing, Transport};
+        let (site, _) = readiness_fixture("observations-away", "INE002A01018");
+        let date = day(2026, 9, 4);
+        let midnight = i64::from(date.days_from_epoch()) * 86_400 - IST_OFFSET_SECS;
+        let Transport::Http(spec) = Feed::Zerodha.descriptor().transport else {
+            panic!("HTTP descriptor");
+        };
+        let window = Window::new(date, date).unwrap();
+        let mut landed = BrokerWindow {
+            listing: Listing::Index,
+            contract: None,
+            unfetched: None,
+            instrument: "NIFTY".to_owned(),
+            origin: "test only".to_owned(),
+            spec,
+            exchange: "NSE",
+            segment: "INDEX",
+            store_vendor: Vendor::Zerodha,
+            window,
+            granularity: Granularity::Day1,
+            bodies: vec![(
+                window,
+                RawWindow {
+                    rows: vec![RawRow {
+                        timestamp: midnight,
+                        open: 100,
+                        high: 100,
+                        low: 100,
+                        close: 100,
+                        volume: 0,
+                        open_interest: None,
+                    }],
+                },
+            )],
+        };
+        let daily = super::land_one(&landed, &site);
+        assert_eq!(daily.bars_committed, 1, "{:?}", daily.failures);
+        landed.granularity = Granularity::Minute1;
+        let bars = site.store_root.join("bars").join("zerodha");
+        let aside = bars.with_extension("aside");
+        std::fs::rename(&bars, &aside).unwrap();
+        let away = super::ingestion_observations(&landed, &site);
+        std::fs::rename(&aside, &bars).unwrap();
+        assert!(
+            away.is_none(),
+            "a derivation that opened no held file observes nothing: {:?}",
+            away.map(|calendar| calendar.sessions())
+        );
+        let back = super::ingestion_observations(&landed, &site)
+            .expect("the next call derives again, with the bars back");
+        assert_eq!(
+            back.kind_of(i64::from(date.days_from_epoch())),
+            pull::calendar::DayKind::OpenLengthUnmeasured
+        );
     }
 
     async fn cash_month_replay_fixture(
@@ -30626,10 +30725,11 @@ type CalendarAnswer = (
 /// §4 bans, and the one D-0124 already refused on `/store.json`. So the answer
 /// is 503, the state is named, and the census's own note says which file and
 /// why. An ABSENT census is still the ordinary state and still answers 200.
-fn unreadable_calendar(censuses: &[census::VendorCensus], feed: Vendor) -> Option<CalendarAnswer> {
-    let damaged = censuses.iter().find(|census| {
-        census.vendor == feed && matches!(census.state, census::Census::Unreadable { .. })
-    })?;
+///
+/// `own` is the asked feed's census, found once by `calendar_json` for this
+/// and for `census_holds`, so the route searches the census rows once.
+fn unreadable_calendar(own: Option<&census::VendorCensus>, feed: Vendor) -> Option<CalendarAnswer> {
+    let damaged = own.filter(|census| matches!(census.state, census::Census::Unreadable { .. }))?;
     Some((
         axum::http::StatusCode::SERVICE_UNAVAILABLE,
         [(
@@ -30649,6 +30749,76 @@ fn unreadable_calendar(censuses: &[census::VendorCensus], feed: Vendor) -> Optio
         })
         .to_string(),
     ))
+}
+
+/// Whether a census holds one spot series' file at a rung and a month: what
+/// `calendar_of::cached` asks of each file a derivation could not open.
+///
+/// One hash probe into the manifest `census_now` already read, per file that
+/// did not open. `None` -- no census for the feed, or no series the census
+/// names -- holds nothing, so an unopened file of a series the census does not
+/// hold keeps its calendar, as a month held at one rung and not the other does.
+fn census_holds(
+    held: Option<(&census::VendorCensus, SpotIdentity)>,
+) -> impl Fn(store::path::Timeframe, store::path::YearMonth) -> bool + '_ {
+    move |rung, month| {
+        held.is_some_and(|(census, (exchange, segment, symbol))| {
+            census
+                .rows_for(
+                    &census::Series {
+                        contract: None,
+                        exchange,
+                        segment,
+                        symbol,
+                        timeframe: rung,
+                    }
+                    .at(month),
+                )
+                .is_some()
+        })
+    }
+}
+
+/// The answer `/calendar.json` gives when a bar file this feed's census holds
+/// could not be opened for the derivation.
+///
+/// # Why a refusal, and why it is not kept
+///
+/// `calendar_of::derive` names a month it could not open and derives the
+/// calendar without it, and `cached` used to throw that report away. So a bar
+/// directory gone for one request answered `200 {"sessions":0}` -- the empty
+/// calendar `unreadable_calendar` refuses for an unreadable census -- and the
+/// days a month that did not open would have proved were closed days in any
+/// calendar that spanned it. The census says the file is there, so the store
+/// disagrees with its own counter for this read. The answer is 503, the first
+/// refusal is quoted, and the count says how many there were: a store root gone
+/// for the request refuses every held month, and naming each would grow the
+/// body with the store. `cached` keeps no such derivation, so the next request
+/// derives again. D-0695.
+fn unopened_calendar(feed: Vendor, symbol: &str, unopened: &[String]) -> CalendarAnswer {
+    (
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/json; charset=utf-8",
+        )],
+        serde_json::json!({
+            "status": "refused",
+            "feed": feed.as_str(),
+            "symbol": symbol,
+            "bars": "unopened",
+            "unopened": unopened.len(),
+            "refusal": format!(
+                "{} bar file(s) this feed's census holds for {symbol} could not be \
+                 opened, the first: {}. The days they would prove are unknown, so no \
+                 calendar is answered; one derived without them would put a holiday \
+                 in the calendar that never happened.",
+                unopened.len(),
+                unopened.first().map_or("", String::as_str),
+            ),
+        })
+        .to_string(),
+    )
 }
 
 fn calendar_conflict_json(
@@ -30696,7 +30866,12 @@ async fn calendar_json(
     // ONE STAMPED CENSUS FOR EITHER BRANCH, and a feed whose census cannot be
     // read is refused before either derives anything. See `unreadable_calendar`.
     let (fresh, _) = census_now(&site);
-    if let Some(refused) = unreadable_calendar(&fresh, feed) {
+    // THE ASKED FEED'S OWN ROW, FOUND ONCE: the refusal just below reads its
+    // state, and each branch asks it through `census_holds` whether a bar file
+    // a derivation could not open is one it holds. `census_now` yields one row
+    // per `Vendor::ALL` entry, so this sees at most `FEED_COUNT` rows.
+    let own = fresh.iter().find(|census| census.vendor == feed);
+    if let Some(refused) = unreadable_calendar(own, feed) {
         return refused;
     }
     // NO SYMBOL MEANS THE EXCHANGE'S OWN CALENDAR, AGREED RATHER THAN BORROWED.
@@ -30818,7 +30993,7 @@ async fn calendar_json(
             let (exchange, segment, symbol) = key;
             let months: Vec<store::path::YearMonth> =
                 by_series.get(&key).cloned().unwrap_or_default();
-            let calendar = crate::calendar_of::cached(
+            let derived = crate::calendar_of::cached(
                 &site.calendars,
                 &site.store_root,
                 feed,
@@ -30826,7 +31001,16 @@ async fn calendar_json(
                 segment.as_str(),
                 symbol.as_str(),
                 &months,
+                census_holds(own.map(|census| (census, key))),
             );
+            // ONE INSTRUMENT'S HELD FILE THAT DID NOT OPEN REFUSES THE AGREEMENT.
+            // Left out, it votes for nothing, which the union reads as no
+            // session wherever it was the one witness, and that agreement would
+            // be answered as the exchange's. See `unopened_calendar`.
+            if !derived.unopened.is_empty() {
+                return unopened_calendar(feed, symbol.as_str(), &derived.unopened);
+            }
+            let calendar = derived.calendar;
             // A SYMBOL THIS FEED HOLDS NOTHING FOR IS NOT A VOTE FOR ANYTHING.
             // `entries` spans every vendor, so asking Zerodha's store for an
             // instrument only Dhan carries reads no files and returns an empty
@@ -30866,6 +31050,8 @@ async fn calendar_json(
         brutex_core::instrument::Exchange,
         brutex_core::instrument::Segment,
     )> = None;
+    // The stored name that goes with `held`, kept for `census_holds`.
+    let mut named: Option<brutex_core::symbol::Symbol> = None;
     let mut months: Vec<store::path::YearMonth> = Vec::new();
     // THIS FEED'S CENSUS ONLY — the same filter the exchange branch takes, and
     // for the same measured reason: `Series` carries no vendor, so without it
@@ -30891,6 +31077,7 @@ async fn calendar_json(
         match held {
             None => {
                 held = Some(identity);
+                named = Some(series.symbol);
                 months.push(month);
             }
             Some(seen) if seen == identity => months.push(month),
@@ -30920,7 +31107,10 @@ async fn calendar_json(
         brutex_core::instrument::Segment::Index,
     ));
 
-    let calendar = crate::calendar_of::cached(
+    let series = held
+        .zip(named)
+        .map(|((exchange, segment), symbol)| (exchange, segment, symbol));
+    let derived = crate::calendar_of::cached(
         &site.calendars,
         &site.store_root,
         feed,
@@ -30928,7 +31118,14 @@ async fn calendar_json(
         segment.as_str(),
         &symbol,
         &months,
+        census_holds(own.zip(series)),
     );
+    // A HELD MONTH THAT DID NOT OPEN IS NOT A MONTH WITHOUT SESSIONS. See
+    // `unopened_calendar`.
+    if !derived.unopened.is_empty() {
+        return unopened_calendar(feed, &symbol, &derived.unopened);
+    }
+    let calendar = derived.calendar;
     (
         axum::http::StatusCode::OK,
         [(axum::http::header::CONTENT_TYPE, json)],
