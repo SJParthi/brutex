@@ -9423,3 +9423,40 @@ bullets is wrong. The text above is kept as it was written.
   `read_vendor` on every request while it stays, and keeps the read once it is
   gone. `EIO` and `EMFILE` were still not produced; for those the tests give
   the read what `Census::of_io_error` makes of each.
+
+**Corrected 24 September 2026, on a fifth review (D-0695).** One bullet of the
+third correction is incomplete, and one sentence of the fourth was pinned for
+less than it says. The text above is kept as it was written.
+
+* The third correction's last bullet says `calendar_of::cached` can pair a
+  fresher census with a calendar derived from the months held before, "until
+  the modified time moves", and names only a rewrite that keeps the modified
+  time. There was a second way, and it needed no such rewrite. `cached` took
+  its key with its own `stat` of the manifest, after its caller's census had
+  been read. A pull that installed a manifest between the two had the calendar
+  of the older census's months kept under the NEWER modified time. Every later
+  request read the newer census and was served that calendar until the
+  manifest was written again, which can be the next day's pull. The exchange
+  branch of `/calendar.json` took that `stat` once per series, and `/ingest`
+  polls the route while a pull runs, so the window was an ordinary one. Since
+  D-0695's fifth repair, every caller hands `cached` the modified time from the
+  stamps its census was read under, which are taken before the read. A
+  calendar is never kept under a time newer than its months, and an install
+  moves the next request's key, which misses and derives again. The request
+  that met the install answers what its own census held.
+* **What is still true.** The same-modified-time lag the third correction
+  names stands: this cache is keyed on the modified time alone, not also on the
+  status-change time the census cache carries. And a request holding an older
+  census can replace a calendar a newer request kept, under its own older key;
+  the next request misses and derives again. That costs a derivation and
+  serves nothing stale. Read from the code, not produced.
+* The fourth correction says `/gaps.json` "counts no vote from" a peer named
+  under `calendar.unreadable`. That is what the code does. But the only test of
+  it moved every bar file of the peer aside, so the peer had no session to vote
+  and was dropped by another check, and a review removed the skip with every
+  test still passing. A test now moves one held month of two aside, so the
+  peer still has a session, and requires that it is named and does not vote.
+* **No syscall is added.** The key comes from the `stat` calls the census
+  already takes, and the `stat` `cached` took per series is gone. A census
+  that is kept now copies its five stamps once, because the request that read
+  it keeps them too. Not timed.

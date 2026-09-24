@@ -657,7 +657,10 @@ mod tests {
     ///
     /// `cached` is keyed on the manifest's modified time, and a bar file that
     /// does not open moves no manifest, so a calendar derived through one was
-    /// served until the next pull. January's daily file is on disk and
+    /// served until the next pull. The key is the one the caller hands it,
+    /// from the stamps its census was read under, and the first case also
+    /// checks that a call under another stamp, or none, derives again rather
+    /// than meeting the kept calendar. January's daily file is on disk and
     /// February's is not; neither month has a minute file. Whether each absence
     /// is a fault is the census's to say, so `holds` says it three ways, each
     /// over a cold cache:
@@ -686,10 +689,9 @@ mod tests {
         let february = YearMonth::new(2026, 2).expect("a real month");
         let monday = epoch_day(2026, 1, 5);
         write_bars(&root, Timeframe::DAY_1, january, &[stamp(monday, OPEN)]);
-        // THE STAMP `cached` KEYS ON: any file at Zerodha's manifest path.
-        std::fs::create_dir_all(root.join("manifest")).expect("a manifest directory");
-        std::fs::write(root.join("manifest").join("zerodha.man"), b"stamp")
-            .expect("a manifest to stamp");
+        // THE STAMP `cached` KEYS ON is the caller's, handed in: no manifest is
+        // on disk for it to find, and it must not look for one.
+        let stamped = Some(std::time::SystemTime::UNIX_EPOCH);
         let months = [january, february];
         let call = |cache: &Cache, holds: Holds<'_>| {
             cached(
@@ -699,6 +701,7 @@ mod tests {
                 "NSE",
                 "INDEX",
                 "NIFTY",
+                stamped,
                 &months,
                 holds,
             )
@@ -716,6 +719,33 @@ mod tests {
             "the second call is the kept calendar"
         );
         assert!(again.unopened.is_empty(), "a hit names nothing");
+        // KEPT UNDER THE STAMP IT WAS HANDED, AND ONLY THAT ONE: a caller whose
+        // census was read under another stamp derives again, and so does every
+        // caller with no stamp, whose derivation is not kept.
+        let under = |other| {
+            cached(
+                &cache,
+                &root,
+                Vendor::Zerodha,
+                "NSE",
+                "INDEX",
+                "NIFTY",
+                other,
+                &months,
+                january_daily,
+            )
+            .calendar
+        };
+        let later = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
+        assert!(
+            !Arc::ptr_eq(&first.calendar, &under(Some(later))),
+            "another stamp derives again"
+        );
+        let unstamped = under(None);
+        assert!(
+            !Arc::ptr_eq(&unstamped, &under(None)),
+            "no stamp derives again every call"
+        );
 
         let cases: [(&str, Holds<'_>, &str); 2] = [
             (
@@ -959,22 +989,6 @@ mod against_the_real_store {
     }
 }
 
-/// The manifest file whose modification time keys the cache.
-///
-/// One file per vendor, rewritten on every pull that stores anything, so its
-/// mtime is the cheapest honest "has the store changed" signal available — one
-/// `stat`, no directory walk, no counter to maintain.
-fn manifest_stamp(store_root: &Path, vendor: Vendor) -> Option<std::time::SystemTime> {
-    std::fs::metadata(
-        store_root
-            .join("manifest")
-            .join(format!("{}.man", vendor.as_str())),
-    )
-    .ok()?
-    .modified()
-    .ok()
-}
-
 /// A calendar [`cached`] answered, and every file the caller's census holds that
 /// the derivation behind it could not open.
 #[derive(Debug, Clone)]
@@ -998,13 +1012,36 @@ pub struct Derived {
 /// `derive` measured **0.28 s** for one instrument across 81 months — fine once
 /// after a pull, and not fine on a page that polls every two seconds. This
 /// returns the cached answer when the vendor's manifest has not been rewritten
-/// since it was built, which is one `stat` and one map probe.
+/// since it was built, which is one map probe.
+///
+/// # The key is the caller's, taken before its census was read
+///
+/// `stamp` is the modified time of the vendor's manifest from the stamps the
+/// caller's census was read under: `server::census_now_stamped`, whose stamps
+/// are taken BEFORE its read on a miss. `months` and `holds` come from that
+/// census, so the three share one moment, and a calendar is never kept under a
+/// time newer than the months it was derived from.
+///
+/// This function took the key itself, one `stat` of the manifest after the
+/// census had been read. A pull that installed a manifest between the two had
+/// the calendar derived from the OLDER census's months kept under the NEWER
+/// modified time, and every later request, reading the newer census, hit it
+/// until the manifest was next written. A review measured it: a June bar and a
+/// manifest naming May and June installed between the census and this call,
+/// then three `/calendar.json` requests that each answered one session where a
+/// cold derivation answered two. Taken before the census, the key is older
+/// than what it keys: the next request's stamp differs, misses, and derives
+/// again, which costs one derivation and serves nothing stale. It is the order
+/// D-0695 gave the census cache for the same reason. The `stat` this took per
+/// call is gone too, and on the exchange branch of `/calendar.json` that was
+/// one per series. D-0695.
 ///
 /// **A store that has never been written has no manifest and therefore no
-/// stamp.** That case re-derives every call, which is correct rather than
-/// unfortunate: an empty store derives an empty calendar in microseconds, and
-/// caching "I found nothing" against a key that cannot change would answer
-/// `Unmeasured` for ever once the first pull landed.
+/// stamp**, and neither does one whose `stat` failed: `stamp` is `None`. That
+/// case re-derives every call, which is correct rather than unfortunate: an
+/// empty store derives an empty calendar in microseconds, and caching "I found
+/// nothing" against a key that cannot change would answer `Unmeasured` for
+/// ever once the first pull landed.
 ///
 /// # Only a derivation that opened every file the census holds is kept
 ///
@@ -1036,9 +1073,9 @@ pub struct Derived {
     clippy::too_many_arguments,
     reason = "the cache, the root and the four terms of the series' address that \
               `bars::open` also takes one by one (it declares its own count, for \
-              the reason it gives), the months, and the census's answer about \
-              which of those files exist; a struct for any of them would be a \
-              second spelling of one address in the crate"
+              the reason it gives), then what one census says: the stamp it was \
+              read under, the months, and which of those files exist; a struct for \
+              any of them would be a second spelling of one address in the crate"
 )]
 pub fn cached(
     site_calendars: &Cache,
@@ -1047,10 +1084,10 @@ pub fn cached(
     exchange: &str,
     segment: &str,
     symbol: &str,
+    stamp: Option<std::time::SystemTime>,
     months: &[YearMonth],
     holds: impl Fn(Timeframe, YearMonth) -> bool,
 ) -> Derived {
-    let stamp = manifest_stamp(store_root, vendor);
     // THE KEY IS THE WHOLE PATH THIS DERIVATION READS, NOT JUST THE NAME.
     //
     // It was `(vendor, symbol)`, which was safe only for as long as every

@@ -31,10 +31,12 @@
 //! from `a_store_root_that_vanishes_during_the_read_is_not_cached` on pin which
 //! reads are kept: a read faulted through `census_now_reading` in a way no
 //! stamp records is read again on the next request, and a fault the stamps do
-//! record is still kept. The last two move a bar directory aside instead, and
-//! pin the same rule for the calendar cache behind the census: a calendar
-//! derived without a bar file its census holds is refused to the request that
-//! derived it, and derived again on the next.
+//! record is still kept. The next three move a bar directory or file aside
+//! instead, and pin the same rule for the calendar cache behind the census: a
+//! calendar derived without a bar file its census holds is refused to the
+//! request that derived it, and derived again on the next. The last lands a
+//! month between a census and the calendar derived from it, and pins that the
+//! calendar is kept under the census's stamp, not a newer one.
 #![expect(
     clippy::expect_used,
     reason = "finite owned fixtures and exact response assertions"
@@ -52,6 +54,23 @@ use store::path::{Timeframe, YearMonth};
 /// for.
 fn at(minute: u64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000) + Duration::from_mins(minute)
+}
+
+/// 2025-05, the month every fixture census holds.
+fn may() -> YearMonth {
+    YearMonth::new(2025, 5).expect("fixture month")
+}
+
+/// 2025-06, the month a fixture adds when a test needs a second one.
+fn june() -> YearMonth {
+    YearMonth::new(2025, 6).expect("fixture month")
+}
+
+/// The micros stamp of 11:30 IST on `month`'s 2nd: where a fixture's daily bar
+/// and its manifest entry sit.
+fn on_the_2nd(month: YearMonth) -> i64 {
+    let day = Day::new(month.year(), month.month(), 2).expect("fixture date");
+    i64::from(day.days_from_epoch()) * 86_400_000_000 + 21_600_000_000
 }
 
 /// One store root, one site over it, and Dhan's manifest as the only one.
@@ -91,28 +110,39 @@ impl Fixture {
     }
 
     /// A manifest image for `vendor` holding exactly `held`, one daily month
-    /// each.
+    /// each: 2025-05.
     fn image(vendor: Vendor, held: &[(Segment, &str)]) -> Vec<u8> {
-        let month = YearMonth::new(2025, 5).expect("fixture month");
-        let day = Day::new(2025, 5, 2).expect("fixture date");
-        let ts = i64::from(day.days_from_epoch()) * 86_400_000_000 + 21_600_000_000;
+        let may = [may()];
+        let held: Vec<(Segment, &str, &[YearMonth])> = held
+            .iter()
+            .map(|(segment, symbol)| (*segment, *symbol, may.as_slice()))
+            .collect();
+        Self::image_of(vendor, &held)
+    }
+
+    /// A manifest image for `vendor` holding exactly `held`: each series at
+    /// the daily rung, for each month given, one bar on the 2nd.
+    fn image_of(vendor: Vendor, held: &[(Segment, &str, &[YearMonth])]) -> Vec<u8> {
         let mut manifest = Manifest::open(vendor, &[], &[]).expect("a genesis manifest");
-        for (segment, symbol) in held {
-            manifest
-                .record(Entry {
-                    key: EntryKey {
-                        contract: None,
-                        exchange: Exchange::Nse,
-                        segment: *segment,
-                        symbol: Symbol::new(symbol).expect("fixture symbol"),
-                        timeframe: Timeframe::DAY_1,
-                        month,
-                    },
-                    rows: 1,
-                    first_ts_micros: ts,
-                    last_ts_micros: ts,
-                })
-                .expect("one held month");
+        for (segment, symbol, months) in held {
+            for month in *months {
+                let ts = on_the_2nd(*month);
+                manifest
+                    .record(Entry {
+                        key: EntryKey {
+                            contract: None,
+                            exchange: Exchange::Nse,
+                            segment: *segment,
+                            symbol: Symbol::new(symbol).expect("fixture symbol"),
+                            timeframe: Timeframe::DAY_1,
+                            month: *month,
+                        },
+                        rows: 1,
+                        first_ts_micros: ts,
+                        last_ts_micros: ts,
+                    })
+                    .expect("one held month");
+            }
         }
         manifest.image()
     }
@@ -120,6 +150,13 @@ impl Fixture {
     /// [`Self::publish`] for any vendor's manifest.
     fn publish_for(&self, vendor: Vendor, held: &[(Segment, &str)], minute: u64) {
         self.publish_bytes(vendor, &Self::image(vendor, held), minute);
+    }
+
+    /// Publish Dhan's manifest holding NIFTY as INDEX for each of `months`,
+    /// stamped `minute`: what a pull that lands a further month installs.
+    fn publish_nifty(&self, months: &[YearMonth], minute: u64) {
+        let image = Self::image_of(Vendor::Dhan, &[(Segment::Index, "NIFTY", months)]);
+        self.publish_bytes(Vendor::Dhan, &image, minute);
     }
 
     /// Install `bytes` as `vendor`'s manifest, stamped `minute`, the way a
@@ -151,8 +188,20 @@ impl Fixture {
     /// One real daily bar on 2025-05-`date`, so a calendar has a session and
     /// `/bars` has a file. The census is not touched.
     fn bar(&self, vendor: Vendor, segment: Segment, symbol: &str, date: u8) {
-        let month = YearMonth::new(2025, 5).expect("fixture month");
-        let day = Day::new(2025, 5, date).expect("fixture date");
+        self.bar_in(vendor, segment, symbol, may(), date);
+    }
+
+    /// [`Self::bar`] in any month: one real daily bar on `month`'s `date`,
+    /// and the path of the file it is in. The census is not touched.
+    fn bar_in(
+        &self,
+        vendor: Vendor,
+        segment: Segment,
+        symbol: &str,
+        month: YearMonth,
+        date: u8,
+    ) -> PathBuf {
+        let day = Day::new(month.year(), month.month(), date).expect("fixture date");
         let ts = i64::from(day.days_from_epoch()) * 86_400_000_000 + 21_600_000_000;
         let path = store::path::StorePath::new(store::path::PathParts {
             vendor,
@@ -165,6 +214,7 @@ impl Fixture {
             file: store::path::FileKind::Bars,
         })
         .expect("fixture path");
+        let file_path = path.to_path_buf(&self.root);
         let hash = brutex_core::universe::fnv1a(symbol).to_le_bytes();
         let low = hash
             .first_chunk::<4>()
@@ -183,6 +233,7 @@ impl Fixture {
             open_interest: i64::MIN,
         }])
         .expect("one daily bar");
+        file_path
     }
 
     /// `/calendar.json` with `query`: status and body.
@@ -1010,7 +1061,7 @@ async fn query_edges_on_bars_and_calendar_are_pinned() {
 fn a_manifest_installed_after_the_read_is_seen_on_the_next_request() {
     let fixture = Fixture::new("census-request-stamp-before-read");
     fixture.publish(&[(Segment::Cash, "RELIANCE")], 0);
-    let (_, entries) = census_now_reading(&fixture.site, |root| {
+    let (_, (_, entries)) = census_now_reading(&fixture.site, |root| {
         let read = census::read_all(root);
         fixture.publish(&[(Segment::Cash, "ITC")], 1);
         read
@@ -1445,9 +1496,9 @@ fn named(censuses: &[census::VendorCensus]) -> Vec<&'static str> {
     censuses.iter().map(|census| census.state.name()).collect()
 }
 
-/// A store root, or a directory in it, moved aside for one read, and put back
-/// afterwards even when an assertion inside that read fails, so the fixture's
-/// own `Drop` still finds it.
+/// A store root, or a directory or file in it, moved aside for one read, and
+/// put back afterwards even when an assertion inside that read fails, so the
+/// fixture's own `Drop` still finds it.
 struct Aside<'a> {
     root: &'a Path,
     aside: PathBuf,
@@ -1512,7 +1563,7 @@ async fn serves_the_healthy_store(fixture: &Fixture, why: &str) {
 #[tokio::test]
 async fn a_store_root_that_vanishes_during_the_read_is_not_cached() {
     let fixture = nifty_store("census-request-root-vanishes");
-    let (served, _) = census_now_reading(&fixture.site, |root| {
+    let (_, (served, _)) = census_now_reading(&fixture.site, |root| {
         let _aside = Aside::new(root);
         census::read_all(root)
     });
@@ -1537,7 +1588,7 @@ async fn a_store_root_that_vanishes_during_the_read_is_not_cached() {
 #[tokio::test]
 async fn a_store_root_that_vanishes_after_its_check_is_not_cached_as_absent() {
     let fixture = nifty_store("census-request-root-after-check");
-    let (served, _) = census_now_reading(&fixture.site, |root| {
+    let (_, (served, _)) = census_now_reading(&fixture.site, |root| {
         assert!(
             fs::metadata(root).is_ok_and(|meta| meta.is_dir()),
             "read_all's own check passes"
@@ -1580,7 +1631,7 @@ async fn an_io_error_its_stamp_cannot_see_is_not_cached() {
     // `EIO` and `EMFILE`: 5 and 24 on Linux and on macOS alike.
     for errno in [5, 24] {
         let fixture = nifty_store(&format!("census-request-io-{errno}"));
-        let (served, _) = census_now_reading(&fixture.site, |root| {
+        let (_, (served, _)) = census_now_reading(&fixture.site, |root| {
             let mut read = census::read_all(root);
             for census in &mut read {
                 if census.vendor == Vendor::Dhan {
@@ -1941,4 +1992,170 @@ fn a_peer_derived_while_its_bars_were_away_is_named_and_not_kept() {
     let back = peer_calendar(&fixture.site, &asked);
     assert_eq!(back.from, ["dhan:NIFTY"], "the next vote counts it");
     assert!(back.unreadable.is_empty(), "{:?}", back.unreadable);
+}
+
+/// A PEER THAT OPENED SOME OF ITS HELD FILES AND NOT ANOTHER IS NAMED, AND
+/// COUNTS NO VOTE. D-0695.
+///
+/// `a_peer_derived_while_its_bars_were_away_is_named_and_not_kept` moves all
+/// of `bars/dhan` aside, so the peer's derivation holds no session, and the
+/// `sessions() > 0` filter drops its calendar whether or not a named peer is
+/// skipped. A review deleted that skip and every test still passed. Here Dhan
+/// holds NIFTY for May and June at the daily rung, both bars on disk, and only
+/// June's file is moved aside. The derivation still carries May's session, so
+/// only the skip keeps a peer named under `unreadable` from voting a calendar
+/// short of June. It is the one witness here, and `agree` would take its
+/// calendar as the agreed one. With June's file back, the next vote counts
+/// both sessions.
+#[test]
+fn a_peer_that_opened_only_some_of_its_held_files_is_named_and_does_not_vote() {
+    let fixture = nifty_store("census-request-peer-partial");
+    let june_bar = fixture.bar_in(Vendor::Dhan, Segment::Index, "NIFTY", june(), 2);
+    fixture.publish_nifty(&[may(), june()], 1);
+    let asked = Addressed::parse(
+        "feed=zerodha&exchange=NSE&segment=INDEX&symbol=BANKNIFTY&timeframe=1min&month=2025-05",
+    )
+    .expect("a well-formed address");
+    let partial = {
+        let _aside = Aside::new(&june_bar);
+        peer_calendar(&fixture.site, &asked)
+    };
+    assert_eq!(partial.unreadable, ["dhan:NIFTY"], "the peer is named");
+    assert!(
+        partial.from.is_empty(),
+        "a named peer counts no vote: {:?}",
+        partial.from
+    );
+    assert!(
+        partial.calendar.is_none(),
+        "and its calendar, short of June, is not agreed: {:?}",
+        partial.calendar.map(|calendar| calendar.sessions())
+    );
+    let back = peer_calendar(&fixture.site, &asked);
+    assert_eq!(back.from, ["dhan:NIFTY"], "the next vote counts it");
+    assert!(back.unreadable.is_empty(), "{:?}", back.unreadable);
+    assert_eq!(
+        back.calendar.map(|calendar| calendar.sessions()),
+        Some(2),
+        "with both months"
+    );
+}
+
+/// A census read the production way, and then June landed as a pull lands it:
+/// its daily bar, and a manifest naming May and June at a new modified time.
+///
+/// What a caller that takes its census through this hook derives from is the
+/// census as it was before June arrived, while the disk it derives from and
+/// every manifest `stat` taken afterwards already show June.
+fn landing_june(fixture: &Fixture) -> impl FnOnce(&Site) -> (CensusStamps, CensusNow) + '_ {
+    move |site| {
+        let read = census_now_stamped(site);
+        fixture.bar_in(Vendor::Dhan, Segment::Index, "NIFTY", june(), 2);
+        fixture.publish_nifty(&[may(), june()], 7);
+        read
+    }
+}
+
+/// What the ingest path would land for Dhan's NIFTY at one minute: the
+/// window `ingestion_observations` derives an observation for.
+fn landed_nifty() -> BrokerWindow {
+    let spec = match pull::vendor::Feed::Dhan.descriptor().transport {
+        pull::vendor::Transport::Http(spec) => Some(spec),
+        pull::vendor::Transport::LocalArchive(_) => None,
+    }
+    .expect("Dhan is an HTTP feed");
+    let day = Day::new(2025, 5, 2).expect("fixture date");
+    let window = pull::session::Window::new(day, day).expect("a one-day window");
+    BrokerWindow {
+        listing: pull::vendor::Listing::Index,
+        contract: None,
+        unfetched: None,
+        instrument: "NIFTY".to_owned(),
+        origin: "test only".to_owned(),
+        spec,
+        exchange: "NSE",
+        segment: "INDEX",
+        store_vendor: Vendor::Dhan,
+        window,
+        granularity: pull::vendor::Granularity::Minute1,
+        bodies: Vec::new(),
+    }
+}
+
+/// A CALENDAR DERIVED FROM A CENSUS IS KEPT UNDER THAT CENSUS'S STAMP, NOT A
+/// NEWER ONE, on every route that derives one. D-0695.
+///
+/// `calendar_of::cached` took its key itself: one `stat` of the manifest, after
+/// the caller's census had supplied the months. A pull that installed a
+/// manifest between the two had the calendar derived from the OLDER census's
+/// months kept under the NEWER modified time. Every later request read the
+/// newer census, hit that calendar, and answered it until the manifest was next
+/// written, which can be the next day's pull. A review measured it on
+/// `/calendar.json`: three requests after the install each answered one
+/// session, where a cold derivation over both months answered two. Nothing
+/// failed to open, so the rule that keeps only a derivation that opened every
+/// held file keeps this one.
+///
+/// Each caller that derives from a census meets that interleaving here, over a
+/// store holding NIFTY's May on Dhan with its calendar cache cold: both
+/// branches of `/calendar.json`, `/gaps.json`'s peer vote, and the ingest
+/// path's observation. Each takes its census through `landing_june`. The call
+/// that met the install answers what its own census holds, one session. Every
+/// later call reads the census naming June and must answer two.
+#[tokio::test]
+async fn a_calendar_is_kept_under_the_stamp_of_the_census_it_was_derived_from() {
+    let asked = Addressed::parse(
+        "feed=zerodha&exchange=NSE&segment=INDEX&symbol=BANKNIFTY&timeframe=1min&month=2025-05",
+    )
+    .expect("a well-formed address");
+    for (branch, query) in [
+        ("symbol", "feed=dhan&symbol=NIFTY"),
+        ("exchange", "feed=dhan"),
+    ] {
+        let fixture = nifty_store(&format!("census-request-june-{branch}"));
+        let uri = format!("/calendar.json?{query}").parse().expect("uri");
+        let (status, _, body) = calendar_json_reading(&fixture.site, &uri, landing_june(&fixture));
+        assert_eq!(status, axum::http::StatusCode::OK, "{branch}: {body}");
+        assert!(
+            body.contains(r#""sessions":1"#),
+            "{branch}: the request that met the install answers its own census: {body}"
+        );
+        for request in 1..=3 {
+            let (status, body) = fixture.calendar_answer(query).await;
+            assert_eq!(status, axum::http::StatusCode::OK, "{branch}: {body}");
+            assert!(
+                body.contains(r#""sessions":2"#),
+                "{branch}, request {request}: May and June, not the calendar kept \
+                 before June: {body}"
+            );
+        }
+    }
+
+    let sessions = |vote: PeerCalendar| vote.calendar.map(|calendar| calendar.sessions());
+    let fixture = nifty_store("census-request-june-peer");
+    let met = peer_calendar_reading(&fixture.site, &asked, landing_june(&fixture));
+    assert_eq!(sessions(met), Some(1), "peer: its own census");
+    for request in 1..=3 {
+        assert_eq!(
+            sessions(peer_calendar(&fixture.site, &asked)),
+            Some(2),
+            "peer, request {request}: May and June"
+        );
+    }
+
+    let landed = landed_nifty();
+    let fixture = nifty_store("census-request-june-observed");
+    let met = ingestion_observations_reading(&landed, &fixture.site, landing_june(&fixture));
+    assert_eq!(
+        met.map(|calendar| calendar.sessions()),
+        Some(1),
+        "observation: its own census"
+    );
+    for request in 1..=3 {
+        assert_eq!(
+            ingestion_observations(&landed, &fixture.site).map(|calendar| calendar.sessions()),
+            Some(2),
+            "observation, request {request}: May and June"
+        );
+    }
 }

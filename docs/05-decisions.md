@@ -40872,3 +40872,140 @@ and the five tests this adds. `src/main.rs` has 2 passed, `tests/binary.rs` 3
 and the doctest 1. `core`'s whole suite, which reads these documents, passes.
 Every shell gate of CI's Gate 1+2 job except 1e passes, Gates 10, 10b, 11,
 23, 27 and 27b among them; Gate 11 counts `server.rs` at 8 of 8 under rule 6.
+
+**Repaired a fifth time, on a fifth review — 24 September 2026.** Three
+should-fix issues were upheld against `4a91b24a`, the commit that carried the
+fourth repair. Two of them are one finding: a pin the fourth repair claimed
+did not bite. The third says the calendar cache took its key after the census
+that supplied its months, which the accounts of that cache above leave out.
+The text above is kept as it was written; where it is now wrong, this says so.
+Both findings the fourth repair answered were checked again here, each against
+a break of its own (see the proofs below).
+
+- *"Counts no vote from it" was pinned by no test.* `peer_calendar` names a
+  peer that has a held file its derivation could not open, and then skips its
+  vote with `continue`. The only test,
+  `a_peer_derived_while_its_bars_were_away_is_named_and_not_kept`, moved all
+  of `bars/dhan` aside. The peer's derivation then held no session, and the
+  `calendar.sessions() > 0` filter that already existed dropped it with or
+  without the skip. Both reviewers removed only the `continue`, and the `api`
+  lib still passed 1,195 of 1,195. The skip decides the case of a partial
+  derivation, where some held files opened and one did not. Without it, such a
+  peer is named under `unreadable` and also votes a calendar short of the
+  missing month, and `agree` takes that calendar as the agreed one when it is
+  the one witness. A review's throwaway probe measured it: `from` was
+  `["dhan:NIFTY"]` beside `unreadable` `["dhan:NIFTY"]`. So the fourth
+  repair's "counts no vote from it", and AF-28e's, were true of the code and
+  pinned only for a peer with nothing to vote.
+- **Decided: the partial case is tested.**
+  `a_peer_that_opened_only_some_of_its_held_files_is_named_and_does_not_vote`
+  holds NIFTY on Dhan for May and June at the daily rung, both bars on disk,
+  and moves only June's file aside. The peer is named `dhan:NIFTY`, `from` is
+  empty and no calendar is agreed. With the file back, the next vote counts it,
+  with both sessions. AF-28e is corrected in place, because it is new in this
+  piece.
+- *`calendar_of::cached` took its key after the census that supplied its
+  months.* It stat'ed the vendor's manifest itself, and every caller had read
+  its census first. A pull that installed a manifest between the two had the
+  calendar of the OLDER census's months kept under the NEWER modified time,
+  and every later request read the newer census and hit it until the manifest
+  was next written, which can be the next day's pull. The review measured it
+  with a throwaway probe. Dhan held NIFTY's May with its bar; after the census
+  was read, a June bar and a manifest naming May and June were installed at a
+  new modified time; `cached` was then called over May, as `/calendar.json`
+  calls it. Three later `/calendar.json` requests each read a census naming
+  both months and answered `"sessions":1`, and a cold derivation over both
+  answered 2. The fourth repair's keep rule did not catch it, because every
+  file in the older month list opened. It is the order D-0695 refused for the
+  census cache, one cache further in. The exchange branch stat'ed the manifest
+  once per series, and `/ingest` polls the route during a pull, so the window
+  is an ordinary one. The code predates D-0695. The second repair's "Still not
+  done", the third repair's bullet on this cache, and the third correction in
+  `docs/06-limits.md` describe its lag only as a rewrite that keeps the
+  modified time, lasting until that time moves. Here the time had already
+  moved, and the lag lasted until the next manifest write.
+- **Decided: a calendar is kept under the stamp its census was read under.**
+  `census_now_stamped` hands back the census and its stamps: taken before the
+  read on a miss, and on a hit the stamps just taken, which equal the key the
+  census was kept under. `census_now` is that function without the stamps.
+  `CensusStamps::modified` reads one feed's modified time out of them by index
+  (`vendor as usize`, the order `manifest_stamps` builds them in, which
+  `merge::Entry::ids` also indexes by), and `cached` takes it as its key and
+  takes no `stat` of its own. All three callers pass it: both branches of
+  `/calendar.json`, `/gaps.json`'s peer vote and the ingest path's
+  observation. The months, `holds` and the key are then one census's, and the
+  key is never newer than the months. A manifest installed after the stamps
+  moves the next request's key, which misses and derives again: one
+  derivation, and nothing stale. A missing manifest, or one whose `stat`
+  failed, has no time and keeps nothing, as before. Each caller takes its
+  census through a parameter that production fills with `census_now_stamped`
+  and nothing else (`calendar_json_reading`, `peer_calendar_reading`,
+  `ingestion_observations_reading`), as `census_now_reading` does for the
+  census, so a test installs a manifest inside that window on every run. Gate
+  11 rule 6 is unchanged at 8 in `server.rs`: the index is not a search, and
+  no search was added.
+- **Tests.**
+  `a_calendar_is_kept_under_the_stamp_of_the_census_it_was_derived_from` is
+  the review's probe, driven through each caller over its own store, holding
+  NIFTY's May on Dhan with the calendar cache cold. The census is read the
+  production way, then June's bar and a manifest naming May and June at a new
+  modified time are landed, before the caller derives. The call that met the
+  install answers its own census, one session, and each of three later calls
+  answers two. `a_derivation_is_kept_only_when_every_file_it_could_not_open_is_unheld`
+  now hands `cached` its stamp with no manifest on disk, and checks that a
+  call under another stamp, or none, derives again. AF-28f records both.
+
+**Rejected.**
+
+- *Keeping the month list with the cached calendar and treating another list
+  as a miss.* It catches a month added, but a hit then compares the whole
+  list, which is O(months) per series on every request where the key is one
+  comparison. It would also still pair the keep rule's `holds`, taken from the
+  older census, with a stamp newer than it. Keyed on the census's own stamp,
+  the months, `holds` and the key come from one census.
+- *Keying this cache on the status-change time too, as the census cache is.*
+  It would close the same-modified-time lag the second repair recorded here.
+  The review did not raise it, and no test here drives it. It stays under
+  "Still not done".
+
+**Still not done.**
+
+- `calendar_of::cached` is keyed on the modified time alone, so a rewrite that
+  keeps the modified time is still missed there until that time moves, as the
+  second repair recorded.
+- A request holding an older census can replace a calendar that a newer
+  request kept, under its own older key. The next request misses and derives
+  again. That costs a derivation and serves nothing stale. Read from the code,
+  not produced.
+- The browser follow-up above is still open.
+
+Each proof was taken on this tree with breaks added, each selected by an
+environment variable, and the tree restored afterwards. With no break, the
+`api` lib had 1,197 passed, 0 failed and 2 ignored. With the peer vote's skip
+removed and the naming kept, 1 failed: the new partial-peer test, at "a named
+peer counts no vote", its vote `["dhan:NIFTY"]`; the move-aside peer test
+passed, as the review said it would. With `cached` ignoring the stamp it is
+handed and taking its own `stat` after the census, which is the rule before
+this change, 2 failed: the new route test at "symbol, request 1", which
+answered `"sessions":1`, and the `cached` test at "kept", because no manifest
+is on disk for a `stat` to find. With one caller at a time handing `cached` a
+stamp taken after its census, each failed the route test at its own case and
+nowhere else: "symbol, request 1" and "exchange, request 1", each answering
+`"sessions":1`; "peer, request 1", `Some(1)` against `Some(2)`; and
+"observation, request 1", the same. The two findings the fourth repair
+answered still bite. With `read_as_stamped`'s count check removed, 1 failed:
+the table test, at "the last row short". With `read_vendor` calling every I/O
+error other than `NotFound` `Fault::Refused`, 2 failed:
+`a_fault_its_stamp_can_see_is_cached` at the file this process may not read,
+and the socket test at its label.
+
+**Verified (fifth repair)** on this tree (arm64 laptop, `CARGO_BUILD_JOBS=2`,
+`--locked --offline`). `cargo fmt --all --check` is clean, and so is
+`cargo clippy --workspace --all-targets --locked --offline -- -D warnings`.
+The `api` suite ran outside the command sandbox, for the loopback binds and
+the socket. Its lib has 1,197 passed, 0 failed and 2 ignored: the 1,195 of the
+fourth repair and the two tests this adds. `src/main.rs` has 2 passed,
+`tests/binary.rs` 3 and the doctest 1. `core`'s whole suite, which reads these
+documents, passes. Every shell gate of CI's Gate 1+2 job except 1e passes,
+Gates 10, 10b, 11, 23, 27 and 27b among them; Gate 11 counts `server.rs` at 8
+of 8 under rule 6.
