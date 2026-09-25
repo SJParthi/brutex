@@ -39795,9 +39795,10 @@ Invariant AF-19.
 
 ### D-0696 — Label every equity ranking gross in the audit header's own words, and read a stored instrument only at its own path — 2026-09-23
 
-**Why this entry exists.** Commit c8c5383c ("Test the cli audit follow-ups
-on a share, and label every equity ranking gross") changed what an operator
-reads on four surfaces and changed which stored months `pool` reads. It
+**Why this entry exists.** Commit 12916123, cherry-picked from c8c5383c
+("Test the cli audit follow-ups on a share, and label every equity ranking
+gross"), changed what an operator reads on four surfaces and changed which
+stored months `pool` reads. It
 recorded none of it: its own message, AF-31 and AF-32 each say "no decision
 entry yet". A review of that commit then upheld ten issues against it. This
 entry records every behaviour change the commit made, as corrected by the
@@ -39850,7 +39851,7 @@ score under every lens, and larger mask words, which every ordering uses as
 its last tie-break. So that superset ranks above it, and so does the closed row
 its chain of such supersets ends in. A non-empty ranking of a complete run
 therefore holds a closed row. The exit still exists and still prints a ranked
-table of shares. c8c5383c said it was fixed "confirmed by failing tests
+table of shares. 12916123 said it was fixed "confirmed by failing tests
 first", yet no test reached it: the review reports stripping the label on that
 exit alone with all 23 of the commit's new tests still green. A test-only guard
 now drives it (item 6).
@@ -39871,7 +39872,7 @@ Every other row keeps the index legend byte for byte. `api`'s
 `/engine/top.json` renders through `cli::render_top_record`
 (`crates/api/src/topjson.rs`), so its text for a share changes the same way.
 
-**3. One wording, bound to the audit header.** c8c5383c wrote three copies of
+**3. One wording, bound to the audit header.** 12916123 wrote three copies of
 the equity charge statement in `cli`: the FINDINGS label, the `top` legend and
 the `pool` opening. They cited three different sets of decisions — (D-0509,
 D-0525, D-0681), (D-0681) and (D-0506, D-0681) — and two of them left out the
@@ -39931,10 +39932,10 @@ different question. `BSE/CASH/RELIANCE`, `NSE/INDEX/RELIANCE` and
 `NSE/CASH/reliance` all resolve to `NSE-RELIANCE`, and a load of that key opens
 `NSE/CASH/RELIANCE`.
 
-- *Before c8c5383c,* `pool` listed each such holding under its directory's own
+- *Before 12916123,* `pool` listed each such holding under its directory's own
   spelling. One share could be pooled twice (`fold` summed its trades, wins and
   net twice), and BSE holdings were counted on the surface.
-- *c8c5383c* compared the exchange and segment exactly, folded the symbol's
+- *12916123* compared the exchange and segment exactly, folded the symbol's
   case, and listed the canonical symbol. Its comment and message said the
   surface was "only where that key's own path is -- the file a load of that key
   opens". That was false in both directions. `NSE/CASH/Reliance` was listed as
@@ -39966,7 +39967,7 @@ What each verb does with a holding under that rule:
   holding is at its own path prints no block. A word that resolves to no swept
   key (an off-list equity, a reference index, an F&O index, a contract) is
   skipped without a word, as it always was.
-- **`sweep-all`** had the same defect and it predates c8c5383c. It offered
+- **`sweep-all`** had the same defect and it predates 12916123. It offered
   every held month for the feed and rung, loaded each by `held.symbol`, and
   labelled the row without the exchange. So a `BSE/CASH/RELIANCE` or
   `NSE/INDEX/RELIANCE` month swept the `NSE/CASH/RELIANCE` file under the same
@@ -39982,7 +39983,7 @@ What did not change:
 - *The ledger:* pass 1 of `pool` records the symbol it was handed. Every
   listed holding's directory is now spelt canonically, so the recorded
   underlying is the directory's own spelling and the canonical one at once. A
-  non-canonical directory is no longer screened at all, where before c8c5383c
+  non-canonical directory is no longer screened at all, where before 12916123
   it was screened and recorded under its own spelling. Rows already written are
   not rewritten.
 - *Run identity:* it hashes the resolved key, not the word, so no identity
@@ -39990,7 +39991,7 @@ What did not change:
 
 *Rejected:* folding case on all three directories. The surface would again
 depend on the filesystem, and on Linux a non-canonical directory would be
-listed and then refused as absent. *Rejected:* keeping c8c5383c's filter and
+listed and then refused as absent. *Rejected:* keeping 12916123's filter and
 restating it. That leaves the silent drop on one filesystem and the list-then-
 refuse on the other. *Rejected:* probing the filesystem for the canonical
 path of each holding. The answer would depend on the mount. *Rejected:*
@@ -40002,7 +40003,7 @@ spells it is now named and not read, although the canonical load would open
 it. That is deliberate, and it is stated in `docs/06-limits.md`.
 
 **6. Two test seams sit inside production function bodies.**
-`stored::CostScopeFault` (c8c5383c) and `NoneClosedFault` (this repair) are
+`stored::CostScopeFault` (12916123) and `NoneClosedFault` (this repair) are
 `#[cfg(test)]` thread-locals, read at the top of `stored::audit_cost_scope` and
 `retained_to_trade` respectively. They are compiled out of every non-test
 build. Each guard acts only on the thread that installed it and resets when it
@@ -40047,7 +40048,7 @@ fail. The fix was then restored.
 - *Segment check skipped for equities.* This fails
   `a_share_held_only_under_the_index_segment_is_not_on_the_surface` and two
   other surface tests.
-- *c8c5383c's folded-symbol filter.* This fails
+- *12916123's folded-symbol filter.* This fails
   `a_case_variant_directory_of_a_swept_instrument_is_named_and_not_read` and
   `one_instrument_is_one_surface_entry_at_the_path_its_key_reads`.
 - *The label stripped on the untraded exit only.* This fails
@@ -40056,10 +40057,10 @@ fail. The fix was then restored.
   range refusal test with "wrote more than loading its span writes".
 - *`sweep-all` without the path check.* This fails
   `a_misfiled_month_is_refused_by_name_and_not_swept_as_its_nse_namesake`.
-- *The FINDINGS label at c8c5383c's wording.* This fails
+- *The FINDINGS label at 12916123's wording.* This fails
   `every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate`.
-  So does the `top` legend at c8c5383c's wording, and so does the pool's
-  sentence at c8c5383c's citations (which also fails
+  So does the `top` legend at 12916123's wording, and so does the pool's
+  sentence at 12916123's citations (which also fails
   `the_pool_report_names_the_equity_charges_and_quotes_no_rate`).
 - *"(STT alone is 0.025% of every sell)" written into the label, with the
   charge list left intact.* This fails the same test with "quotes a rate". The
@@ -43067,3 +43068,15 @@ changes what an operator reads, or the exit status a script sees, says so.
    reason it exists (found by a review). Both rows are new in this change and
    now name D-0696. `no_invariant_row_says_its_change_has_no_decision_entry`
    refuses the phrase anywhere in `docs/04-invariants.md`.
+7. *The commit this entry records.* This entry named it thirteen times by a
+   hash that is in neither this history nor `main`'s. This history carries it
+   as 12916123, cherry-picked from c8c5383c: the two have the same subject,
+   the same author date and the same `git patch-id --stable` (found by two
+   reviews; this correction measured the ancestry with
+   `git merge-base --is-ancestor` and both patch ids). Every citation now
+   names 12916123.
+   `d_0696_cites_the_commit_it_records_by_its_hash_in_this_history` refuses
+   the other hash anywhere in this entry but where it says what 12916123 was
+   cherry-picked from. It runs no `git`, so it does not check a hash cited
+   later. D-0693's citations belong to another piece of this change and are
+   not edited here.

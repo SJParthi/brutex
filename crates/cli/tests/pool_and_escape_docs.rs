@@ -783,3 +783,36 @@ fn no_invariant_row_says_its_change_has_no_decision_entry() {
         assert!(text.contains(change), "{row} names its entry: {text}");
     }
 }
+
+/// **D-0696 cites the commit it records by its hash in this history.**
+/// D-0696.
+///
+/// It named c8c5383c thirteen times. That commit is on no branch this one
+/// merges into: this history carries its cherry-pick, 12916123, whose
+/// `git patch-id --stable` is the same (found by two reviews; the ancestry
+/// and the patch ids were measured with `git` when this was written, and
+/// this test runs no `git`). So the entry names 12916123, and c8c5383c
+/// appears only where it says what 12916123 was cherry-picked from.
+#[test]
+fn d_0696_cites_the_commit_it_records_by_its_hash_in_this_history() {
+    let entry = DECISIONS
+        .split("\n### D-0696 ")
+        .nth(1)
+        .expect("D-0696")
+        .split("\n### D-")
+        .next()
+        .expect("its text");
+    assert_eq!(
+        entry.matches("c8c5383c").count(),
+        entry.matches("cherry-picked from c8c5383c").count(),
+        "D-0696 cites c8c5383c other than as what 12916123 was cherry-picked from"
+    );
+    assert!(
+        entry.contains("Commit 12916123, cherry-picked from c8c5383c"),
+        "D-0696 opens by naming the commit in this history"
+    );
+    assert!(
+        entry.matches("12916123").count() >= 13,
+        "every citation names 12916123"
+    );
+}
