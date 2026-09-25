@@ -9243,17 +9243,35 @@ by `File::unlock`. What that does not cover, stated rather than implied away:
   holding the catalog lists, paid once per `pool` or `sweep-all` run and never
   per bar or per candidate. A holding it names as misfiled also has each of
   its three names clipped to at most 64 characters and escaped, through
-  `stored::clipped`, which `stored::swept_index`'s and `stored::rung`'s
-  refusals quote through as well. `sweep-all` also escapes each held month's
-  symbol directory once for its row label. No bench times any of it.
-- **Not every refusal quotes through `stored::clipped`.** `parse_vendor`,
-  `swept_rung` and `pool_arm`'s rung refusal still quote the word they are
-  handed raw, read from the source. A feed word carrying a newline, typed to
-  `pool` or to `sweep-all`, was refused as the whole command, and the refusal
-  was printed across two lines (measured by the review). That refusal is the
-  command's own and forges no completed run. Whether any of their callers
-  hands them a word that was not typed, such as a directory's name, was not
-  examined.
+  `stored::clipped`, which `stored::swept_index`'s, `stored::rung`'s and
+  `parse_vendor`'s refusals quote through as well. `sweep-all` also escapes
+  each held month's symbol directory once for its row label. No bench times
+  any of it.
+- **Not every refusal quotes through `stored::clipped` (corrected 25 September
+  2026).** `parse_vendor` does, since D-0696's fifth correction, because not
+  every word it refuses is typed. Two of its callers hand it a feed word
+  decoded from stored bytes: the feed of a saved single-stop search
+  declaration (`index_stop_search_reader.rs`) and the feed of a saved
+  original source snapshot (`index_stop_source_context_codec.rs`). Read from
+  the source, the first decoder is reached only through the `api` route
+  `/index-stop-ranking.json` and the second only through
+  `/index-stop-candles.json`. Either refusal refuses that whole response:
+  status `refused`, no rows, and the sentence inside a JSON string. No `cli`
+  command reaches either decoder. A test hands each decoder the feed
+  `X\nrefused: forged` and finds it quoted escaped, on one line. Quoted
+  through `clipped`, the word is also cut to 64 characters, so the refusal no
+  longer grows with it. `swept_rung` and `pool_arm`'s rung refusal still
+  quote the word they are handed raw. Before this correction, a feed word
+  carrying a newline, typed to `pool` or to `sweep-all`, was refused as the
+  whole command, and the refusal was printed across two lines; so was such a
+  rung word typed to `pool` (each measured by a review). The feed word is now
+  quoted on one line, and the rung word typed to `pool` still is not. Each
+  such refusal is the command's own and forges no completed run. `pool_arm`'s
+  one caller is `dispatch`'s `pool` arm, a typed argument. `cli::swept_rung`'s
+  eight call sites each take the rung as a parameter, and the chains above
+  them were not all followed to their end. `batch.rs` has a `swept_rung` of
+  its own that quotes raw too, but only a word `stored::rung` has already
+  accepted as a stored rung reaches that quote.
 
 ## Screen-budget refusals and census faults on the api routes — D-0695, 24 September 2026
 

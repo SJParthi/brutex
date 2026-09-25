@@ -2980,6 +2980,15 @@ fn note_attempt(attempt: Option<u64>, event: &telemetry::Event<'_>) {
 ///
 /// Walks [`Vendor::ALL`], which is five entries and a compile-time constant, so
 /// no word can be accepted here that the store cannot then address.
+///
+/// The refused word is quoted through [`stored::clipped`], cut to 64
+/// characters and escaped, because it is not always typed: a saved single-stop
+/// search declaration and a saved original source snapshot each hand this
+/// function a feed word decoded from stored bytes. Quoted raw, a newline in
+/// such a word would print as a line of its own. An accepted feed never
+/// reaches the quote, and a refused word is quoted as before unless it is
+/// longer than 64 characters or holds a character `escape_debug` does not
+/// print as itself (D-0696).
 fn parse_vendor(word: &str) -> Result<Vendor, stored::Refusal> {
     Vendor::ALL
         .into_iter()
@@ -2987,7 +2996,8 @@ fn parse_vendor(word: &str) -> Result<Vendor, stored::Refusal> {
         .ok_or_else(|| {
             let known: Vec<&str> = Vendor::ALL.iter().map(|v| v.as_str()).collect();
             format!(
-                "`{word}` is not a feed this build knows: {}",
+                "`{}` is not a feed this build knows: {}",
+                stored::clipped(word),
                 known.join(", ")
             )
         })
@@ -20760,6 +20770,42 @@ mod tests {
                 why.contains(v.as_str()),
                 "and lists {} as an alternative: {why}",
                 v.as_str()
+            );
+        }
+    }
+
+    /// **A refused feed word is quoted through `stored::clipped`, on one
+    /// line.** D-0696.
+    ///
+    /// Two callers hand `parse_vendor` a feed word decoded from stored bytes,
+    /// a saved single-stop search declaration and a saved original source
+    /// snapshot, so the word it refuses is not always typed. It was quoted
+    /// raw: a newline in it printed as a line of its own, and one reading
+    /// `refused: ...` sat at column zero (measured by a review with a typed
+    /// word). Quoted through `clipped`, it is cut to 64 characters and escaped.
+    #[test]
+    fn a_refused_feed_word_is_quoted_escaped_on_one_line() {
+        let long = "z".repeat(65);
+        for (word, shown) in [
+            ("X\nrefused: forged", "`X\\nrefused: forged`".to_owned()),
+            ("zerodha\r", "`zerodha\\r`".to_owned()),
+            ("\u{301}zerodha", "`\\u{301}zerodha`".to_owned()),
+            (long.as_str(), format!("`{}…`", "z".repeat(64))),
+            ("bogus", "`bogus`".to_owned()),
+            ("z\u{301}erodha", "`z\u{301}erodha`".to_owned()),
+        ] {
+            let why = parse_vendor(word).expect_err("not a feed");
+            assert!(
+                why.starts_with(&format!("{shown} is not a feed this build knows: ")),
+                "{shown}: {why:?}"
+            );
+            assert!(
+                !why.contains(|c: char| c.is_control()),
+                "{shown}: a control character reached the refusal: {why:?}"
+            );
+            assert!(
+                !crate::carries_refusal(&format!("    {why}\n")),
+                "{shown}: the quoted word reads as a refusal: {why:?}"
             );
         }
     }

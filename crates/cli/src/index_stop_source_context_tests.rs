@@ -732,6 +732,46 @@ fn original_context_codec_rejects_tails_lengths_versions_and_foreign_loader_befo
     Ok(())
 }
 
+/// **A saved snapshot's feed word is refused on one line.** D-0696.
+///
+/// The feed is decoded from the saved bytes and handed to `parse_vendor`,
+/// so it is not a typed word. A newline in it is quoted escaped, and the
+/// refusal carries no control character.
+#[test]
+fn a_saved_snapshots_feed_word_is_refused_on_one_line() -> Result<(), String> {
+    let fixture = Fixture::new()?;
+    let loaded = source(&fixture, "NSE-NIFTY", 5, 5)?;
+    let context = loaded.prepare(limits())?;
+    let body = codec::encode(&loaded, &context, bounds().bytes)?;
+    // The feed is the snapshot's first text: its 8-byte length at 164, then
+    // its bytes.
+    let feed = "zerodha";
+    assert_eq!(
+        body.get(164..172),
+        Some(&(feed.len() as u64).to_le_bytes()[..]),
+        "premise: the feed's length"
+    );
+    assert_eq!(
+        body.get(172..179),
+        Some(feed.as_bytes()),
+        "premise: the feed"
+    );
+    let forged = "X\nrefused: forged";
+    let mut raw = body.get(..164).ok_or("generated head")?.to_vec();
+    raw.extend_from_slice(&(forged.len() as u64).to_le_bytes());
+    raw.extend_from_slice(forged.as_bytes());
+    raw.extend_from_slice(body.get(179..).ok_or("generated tail")?);
+    let Err(why) = codec::decode(&raw, bounds()) else {
+        return Err("a snapshot naming no feed was admitted".into());
+    };
+    assert!(
+        why.starts_with("`X\\nrefused: forged` is not a feed this build knows: "),
+        "{why:?}"
+    );
+    assert!(!why.contains(|c: char| c.is_control()), "{why:?}");
+    Ok(())
+}
+
 fn write_generated_five_minute_source(fixture: &Fixture, minute: &Loaded) -> Result<(), String> {
     let mut coarse = Vec::new();
     for group in minute.data.signal.bars.chunks(5) {

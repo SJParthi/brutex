@@ -42333,8 +42333,10 @@ upheld.** Corrected here, not in the text above.
    `sweep-all` REFUSED row. `refusal_reason` reads such a line as a refusal,
    so a completed run exited MISUSED (measured by the review). Each name is
    now clipped and then rendered through `escape_debug`, so the sentence stays
-   on one line. A name of printable characters, with no quote and no
-   backslash, prints as it did.
+   on one line. A name prints as it did only when `escape_debug` prints each
+   of its characters as itself; a combining mark that opens a name is
+   escaped, though the same mark inside one is not (corrected in place by
+   the fifth correction).
 3. *The first correction's item 4: "the page's own head".* `head_under` was
    under test. `run` still bound the page from it, and no test reached `run`,
    because it checks the commit stamp first. The review replaced `out` with
@@ -42588,10 +42590,12 @@ here, not in the text above.
    the docs of three `pool` tests repeated the claim, and each is corrected
    in place.
    - *Driven.* `the_pool_verb_prints_its_whole_page_on_a_generated_store`
-     runs itself again as a child. The child's environment names a generated
-     store and carries no other `BRUTEX_` variable. It dispatches `pool`
-     twice through `crate::dispatch`, which goes through `pool_arm`,
-     `pool::pool`, `run` and `run_under`:
+     runs itself again as a child. The child inherits no `BRUTEX_` variable
+     from the shell that ran the suite, and is given three: `BRUTEX_STORE`,
+     naming a generated store, `BRUTEX_LOG_DIR`, inside it, and
+     `BRUTEX_TEST_POOL_VERB_PAGE`, its own marker (corrected in place by the
+     fifth correction). It dispatches `pool` twice through `crate::dispatch`,
+     which goes through `pool_arm`, `pool::pool`, `run` and `run_under`:
      - At `5min` and 200000 ppm over the generated NIFTY month, the page
        starts with `head_under`'s head. Then comes pass 1's table, with
        NIFTY's 600 bars, no refused row and no unread frontier, then pass 2's
@@ -42718,5 +42722,123 @@ the driven test's child was split into two helpers, one per page, for
 clippy's line limit; no assertion changed. On the split, stamped, the 32
 pass, the driven test alone took 0.74 s, 0.75 s and 0.77 s, and the
 `pool::pool` regression fails the same two tests with the same message.
+
+Invariant AF-39 is corrected in place again.
+
+**Fifth correction, 2026-09-25: what a fifth review found.** Three sentences
+new in this change were false when they were written. Unlike the corrections
+above, each is corrected where it stands, and listed here. One limit is
+answered, and one refusal's quote changes.
+
+1. *The driven test's child.* The doc of
+   `the_pool_verb_prints_its_whole_page_on_a_generated_store`, AF-39 and the
+   fourth correction's item 1 said the child's environment names a generated
+   store and holds no `BRUTEX_` variable besides. The test removes every
+   `BRUTEX_` variable the child would inherit, and then gives it three:
+   `BRUTEX_STORE`, `BRUTEX_LOG_DIR` and its own marker,
+   `BRUTEX_TEST_POOL_VERB_PAGE` (read from the source by the review). Neither
+   extra variable changes the page. The three texts now name all three, and
+   say the child inherits no `BRUTEX_` variable from the shell that ran the
+   suite. `each_variable_the_driven_pool_test_gives_its_child_is_named`, in
+   the new `crates/cli/tests/pool_and_escape_docs.rs`, reads the names from
+   the test's own `.env(` calls and its removal loop, and requires each of
+   the three texts to name every one.
+2. *"Printable" words.* `clipped`'s doc, `misfiled`'s doc, the docs of
+   `a_misfiled_directory_name_is_escaped_onto_one_line` and
+   `a_refused_word_is_quoted_escaped_on_one_line`, and the second
+   correction's item 2 each said that a word or name of printable
+   characters, with no quote and no backslash, is quoted as it was.
+   `escape_debug` escapes a combining mark that opens a string and prints the
+   same mark as itself inside one. So U+0301 followed by `NIFTY` is quoted as
+   the text `\u{301}NIFTY`, and `N` then U+0301 then `IFTY` is quoted as
+   typed. The refused-word test already asserted both, and the review and
+   this correction each measured both with `rustc` outside the repository.
+   Each text now says a word is quoted as it was only when `escape_debug`
+   prints each of its characters as itself, and names the combining mark.
+   `misfiled` escapes its three names one at a time, so a combining mark that
+   opens the segment is escaped as well. The misfiled test gains that case,
+   and one with the mark inside the segment. Those two cases pin behaviour
+   that already held, and no reverted fix makes them fail.
+   `no_text_says_a_printable_word_is_quoted_as_typed` reads the five texts.
+3. *`parse_vendor`'s callers that are not typed.* The fourth correction's
+   item 4 added a `docs/06-limits.md` bullet which ended by saying it was not
+   examined whether any caller of the three raw refusals hands them a word
+   that was not typed. One search answers it for `parse_vendor` (found by the
+   review). Two of its callers hand it a feed word decoded from stored bytes:
+   `index_stop_search_reader.rs`, for a saved single-stop search declaration,
+   and `index_stop_source_context_codec.rs`, for a saved original source
+   snapshot. Read from the source, each decoder is reached from one `api`
+   route only, `/index-stop-ranking.json` and `/index-stop-candles.json`
+   respectively. Its refusal refuses that whole response, with the sentence
+   inside a JSON string, so neither could forge a completed page. No `cli`
+   command reaches either decoder.
+   - *The quote changes anyway.* `parse_vendor` now quotes the refused word
+     through `stored::clipped`, which is made `pub(crate)` for it. A word
+     from stored bytes is then quoted escaped wherever the refusal is
+     printed, and a caller added later inherits that.
+     `a_refused_feed_word_is_quoted_escaped_on_one_line` drives
+     `parse_vendor`, and
+     `a_saved_declarations_feed_word_is_refused_on_one_line` and
+     `a_saved_snapshots_feed_word_is_refused_on_one_line` drive each decoder
+     with the feed `X\nrefused: forged` spliced into bytes it otherwise
+     accepts. AF-39 names all three.
+   - *What a reader sees change:* a refused feed word longer than 64
+     characters, or holding a character `escape_debug` does not print as
+     itself, is now quoted cut and escaped. `bogus` is quoted as before. No
+     accepted feed word, run identity, store format or exit status changed.
+     The quote no longer grows with the word: `clipped` reads at most 65 of
+     its characters. That is read from the source, not measured.
+   - *The bullet is rewritten in place.* It names both callers and both
+     routes. `swept_rung` and `pool_arm`'s rung refusal still quote raw.
+     `pool_arm`'s one caller is `dispatch`'s `pool` arm, whose rung is typed.
+     `cli::swept_rung` has eight call sites, and the chains above them were
+     not all followed to their end; the bullet says so. `batch.rs` has a
+     `swept_rung` of its own, whose raw quote only a word `stored::rung` has
+     already accepted can reach.
+   - *Two texts listed `clipped`'s users.* `misfiled`'s doc named the words
+     quoted through `clipped`. The refused-word test's doc named
+     `parse_vendor` among the raw refusals. Both now name `parse_vendor`
+     among `clipped`'s users, and so does the `docs/06-limits.md` bullet on
+     `misfiled`'s cost. The fourth correction's item 4 is superseded here
+     where it says the bullet leaves the question unexamined.
+   - `the_raw_quote_limit_names_parse_vendors_stored_callers` reads the two
+     decoder calls, `parse_vendor`'s quote and the bullet together.
+
+The three tests in `crates/cli/tests/pool_and_escape_docs.rs` read the
+documents at compile time. They are a separate test crate so that the
+library's own tests are not rebuilt whenever the ledger changes.
+
+**Tests, and what each is proven against (fifth correction).** Each
+regression below was applied alone to this tree, with the change
+uncommitted, and the named tests were run and seen to fail. The edited file
+was then restored from a copy. After the last regression, `shasum` found all
+six edited files as they had been before the first. Each regression ran
+`crates/cli/tests/pool_and_escape_docs.rs`; the `parse_vendor` one also ran
+the library tests the filter `feed_word` selects.
+
+- *The driven test's doc, AF-39's sentence, or the fourth correction's item
+  1, each restored alone:*
+  `each_variable_the_driven_pool_test_gives_its_child_is_named` fails where
+  it refuses the old sentence. The file's other two tests pass.
+- *`clipped`'s doc, `misfiled`'s doc, the misfiled test's doc, the
+  refused-word test's doc, or the second correction's item 2, each restored
+  alone:* `no_text_says_a_printable_word_is_quoted_as_typed` fails where it
+  refuses "printable". The file's other two tests pass.
+- *The `docs/06-limits.md` bullet restored:*
+  `the_raw_quote_limit_names_parse_vendors_stored_callers` fails at "was not
+  examined".
+- *`parse_vendor` quoting `{word}` raw again:*
+  `a_refused_feed_word_is_quoted_escaped_on_one_line`,
+  `a_saved_declarations_feed_word_is_refused_on_one_line` and
+  `a_saved_snapshots_feed_word_is_refused_on_one_line` each fail at the
+  check of how the word is quoted, and
+  `the_raw_quote_limit_names_parse_vendors_stored_callers` fails at its read
+  of `parse_vendor`'s quote.
+
+With no regression, the file's three tests pass, and so do the 34 library
+tests the filter `feed_word refused_word misfiled symbol_directory
+every_spelling every_feed pool::` selects. After the regressions, `cargo fmt`
+re-wrapped three of the new tests and one doc sentence was reworded; no
+assertion changed.
 
 Invariant AF-39 is corrected in place again.

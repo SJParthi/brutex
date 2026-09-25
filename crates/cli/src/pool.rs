@@ -1840,10 +1840,13 @@ mod tests {
     /// HEAD, and a clean checkout, CI's among them, is one. What keeps an
     /// in-process test off a surface with an instrument on it is the store
     /// root, which `run` and pass 1's `one_rung` read from the environment.
-    /// So this test runs itself again as a child whose environment names a
-    /// generated store and carries no other `BRUTEX_` variable, as
+    /// So this test runs itself again as a child, as
     /// `public_generated_probe_and_screen_agree_with_durable_results` runs
-    /// itself. The child dispatches `pool` through `crate::dispatch`, the path
+    /// itself. The child inherits no `BRUTEX_` variable from the shell that
+    /// ran the suite, and is given three: `BRUTEX_STORE`, naming a generated
+    /// store, `BRUTEX_LOG_DIR`, inside that store, and
+    /// `BRUTEX_TEST_POOL_VERB_PAGE`, the marker that makes it the child. The
+    /// child dispatches `pool` through `crate::dispatch`, the path
     /// the binary takes through `pool_arm`, `pool`, `run` and `run_under`,
     /// twice:
     ///

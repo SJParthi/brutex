@@ -1813,15 +1813,23 @@ pub(crate) fn rung(name: &str) -> Result<Timeframe, Refusal> {
 /// DIRECTORY's name, and a directory can be called anything a filesystem
 /// admits. One named `X\nrefused: forged` put `refused: forged` at column zero
 /// of a completed run, and [`crate::carries_refusal`] then read the whole run
-/// as refused (measured by the review, D-0696). A word of printable
-/// characters with no quote and no backslash is quoted exactly as before.
+/// as refused (measured by the review, D-0696). A feed word can come from
+/// stored bytes as well, which is why `parse_vendor` quotes through this too.
+///
+/// A word is quoted exactly as before only when `escape_debug` prints every
+/// character of it as itself. Among those it escapes are a quote, a
+/// backslash, a control character, a format or separator character such as
+/// U+200B or U+00A0, and a combining mark that opens the word: U+0301
+/// followed by `NIFTY` is quoted as the text `\u{301}NIFTY`, while the same
+/// mark after the `N` prints as itself. So a word of characters that each
+/// print as themselves inside a word is not always quoted as typed (D-0696).
 ///
 /// Clipped FIRST and escaped after, so the escape walks at most the 64
 /// characters kept and the cost above is unchanged. What comes back is at
 /// most 643 bytes -- 64 characters, each printed as itself or as an escape of
 /// at most ten bytes (`\u{10ffff}`), and the three-byte mark -- read from the
 /// source, not measured.
-fn clipped(word: &str) -> String {
+pub(crate) fn clipped(word: &str) -> String {
     /// Characters of the offending word a refusal keeps.
     const KEEP: usize = 64;
 
@@ -1950,13 +1958,16 @@ pub(crate) fn swept_index(underlying: &str) -> Result<InstrumentKey, Refusal> {
 /// as a refusal to every scanner that asks [`crate::carries_refusal`]. Each
 /// name is therefore named through [`clipped`], which clips it and then
 /// renders it through `escape_debug`, so a control character is printed as its
-/// escape and the sentence stays on one line. A name of printable characters
-/// without a quote or backslash prints exactly as it did. The escape was first
-/// written here alone, and the symbol directory -- which reaches
-/// [`swept_index`]'s refusal and `sweep-all`'s row label as a word -- still
-/// forged a refusal of the run; it now lives in [`clipped`], for every word
-/// quoted through it: this function's three names, and the word
-/// [`swept_index`] and [`rung`] refuse (D-0696).
+/// escape and the sentence stays on one line. A name prints exactly as it did
+/// only when `escape_debug` prints each of its characters as itself, which
+/// [`clipped`]'s doc spells out: each of the three names is escaped on its
+/// own, so a combining mark that opens any one of them is escaped too. The
+/// escape was first written here alone, and the symbol directory -- which
+/// reaches [`swept_index`]'s refusal and `sweep-all`'s row label as a word --
+/// still forged a refusal of the run; it now lives in [`clipped`], for every
+/// word quoted through it: this function's three names, the word
+/// [`swept_index`] and [`rung`] refuse, and the feed word `parse_vendor`
+/// refuses (D-0696).
 ///
 /// UNVERIFIED performance: no bench times this. Read from the source, it is
 /// three comparisons of strings no longer than a path segment, once per
@@ -5589,8 +5600,10 @@ mod tests {
     /// store holding `NSE/CASH/RELIANCE` beside an exchange directory named
     /// `X\nrefused: forged` made the pool page print a column-zero line
     /// `refused: forged/...`, and the completed pool read as a refusal
-    /// (measured by the review). Each name is now escaped, so the sentence is
-    /// one line, and a printable name prints as it always did.
+    /// (measured by the review). Each name is now escaped on its own, so the
+    /// sentence is one line. A name prints as it always did only when
+    /// `escape_debug` prints each of its characters as itself: a combining
+    /// mark that opens a name is escaped, and one inside it is not.
     #[test]
     fn a_misfiled_directory_name_is_escaped_onto_one_line() {
         let key = swept_index("RELIANCE").expect("a share");
@@ -5609,6 +5622,20 @@ mod tests {
                 "`NSE/IN\\u{7}DEX/RELIANCE`",
             ),
             ("BSE", "CASH", "RELIANCE", "`BSE/CASH/RELIANCE`"),
+            // Each name is escaped on its own, so a combining mark that opens
+            // the segment is escaped, and one inside it prints as itself.
+            (
+                "NSE",
+                "\u{301}CASH",
+                "RELIANCE",
+                "`NSE/\\u{301}CASH/RELIANCE`",
+            ),
+            (
+                "NSE",
+                "CA\u{301}SH",
+                "RELIANCE",
+                "`NSE/CA\u{301}SH/RELIANCE`",
+            ),
         ] {
             let why = misfiled(&key, exchange, segment, symbol).expect("misfiled");
             assert!(why.starts_with(shown), "{shown}: {why:?}");
@@ -5632,12 +5659,14 @@ mod tests {
     /// held month by its symbol directory's name -- so a directory named
     /// `X\nrefused: forged` put `refused: forged` at column zero of a completed
     /// run (measured by the review). [`clipped`] now escapes what it keeps, so
-    /// the refusals that quote through it -- `swept_index`'s, `rung`'s and
-    /// `misfiled`'s -- are one line, and a word of printable characters with no
-    /// quote or backslash is quoted exactly as before. Not every refusal in
-    /// the crate quotes through it: `parse_vendor`, `swept_rung` and
-    /// `pool_arm`'s rung refusal still quote the word they are handed raw, and
-    /// `docs/06-limits.md` says what that reaches (D-0696).
+    /// the refusals that quote through it -- `swept_index`'s, `rung`'s,
+    /// `misfiled`'s and `parse_vendor`'s -- are one line. A word is quoted
+    /// exactly as before only when `escape_debug` prints each of its
+    /// characters as itself, and a combining mark that opens the word is not
+    /// printed as itself, though the same mark inside a word is. Not every
+    /// refusal in the crate quotes through it: `swept_rung` and `pool_arm`'s
+    /// rung refusal still quote the word they are handed raw, and
+    /// `docs/06-limits.md` names them and what reaches them (D-0696).
     #[test]
     fn a_refused_word_is_quoted_escaped_on_one_line() {
         for (word, shown) in [
@@ -5716,8 +5745,8 @@ mod tests {
                 "{shown}: {why:?}"
             );
         }
-        // Printable words are quoted as they were typed, a combining mark
-        // inside one among them.
+        // These words are quoted as they were typed, a combining mark inside
+        // one among them.
         for word in ["NIFTYX", "1hour", "RELIANCE-EQ", "niftyé", "N\u{301}IFTY"] {
             let why = swept_index(word).expect_err("no instrument");
             assert!(why.starts_with(&format!("`{word}` is not")), "{why:?}");
