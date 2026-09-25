@@ -9269,10 +9269,20 @@ by `File::unlock`. What that does not cover, stated rather than implied away:
   were measured on `pool` only, with a stamped build of D-0696's fifth
   correction. Each such refusal is the command's own and forges no completed
   run. `pool_arm`'s one caller is `dispatch`'s `pool` arm, a typed argument.
-  `cli::swept_rung`'s eight call sites each take the rung as a parameter, and
-  the chains above them were not all followed to their end. `batch.rs` has a
-  `swept_rung` of its own that quotes raw too, but only a word `stored::rung`
-  has already accepted as a stored rung reaches that quote.
+  `cli::swept_rung` has eleven call sites (this said eight until D-0696's
+  sixth correction). One is in `pool.rs`, in `pool::run`. The `pool` verb
+  reaches it only through `pool_arm`, which hands `pool::pool` a rung only
+  after finding it among `EVERY_RUNG`'s entries, and `swept_rung` accepts
+  every one of those, so the verb never reaches that refusal. The other ten
+  are `sweep_audited_stored`, `sweep_stored_inner`, `auto_stored_inner`,
+  `audit_stored_inner`, `audit_range_inner` and `screen_range_inner` in
+  `lib.rs`, and one each in `audited_stored.rs`, `audited_range.rs`,
+  `expression.rs` and `expression_search.rs`. Each of those takes the rung it
+  checks as a parameter or a field of one, except `sweep_audited_stored`,
+  which takes it from the `sweep-audited-stored` command's own argument
+  list; the chains above them were not all followed to their end. `batch.rs`
+  has a `swept_rung` of its own that quotes raw too, but only a word
+  `stored::rung` has already accepted as a stored rung reaches that quote.
 
 ## Screen-budget refusals and census faults on the api routes — D-0695, 24 September 2026
 

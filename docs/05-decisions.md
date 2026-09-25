@@ -42333,10 +42333,12 @@ upheld.** Corrected here, not in the text above.
    `sweep-all` REFUSED row. `refusal_reason` reads such a line as a refusal,
    so a completed run exited MISUSED (measured by the review). Each name is
    now clipped and then rendered through `escape_debug`, so the sentence stays
-   on one line. A name prints as it did only when `escape_debug` prints each
-   of its characters as itself; a combining mark that opens a name is
-   escaped, though the same mark inside one is not (corrected in place by
-   the fifth correction).
+   on one line. A name prints as it did when, and only when, `escape_debug`
+   prints each of the characters `clipped` keeps of it -- its first 64 -- as
+   itself, so a newline past the cut leaves it as it was; a combining mark
+   that opens a name and has Unicode's `Grapheme_Extend` property, such as
+   U+0301, is escaped, though the same mark inside one is not (corrected in
+   place by the fifth and sixth corrections).
 3. *The first correction's item 4: "the page's own head".* `head_under` was
    under test. `run` still bound the page from it, and no test reached `run`,
    because it checks the commit stamp first. The review replaced `out` with
@@ -42664,8 +42666,10 @@ here, not in the text above.
    - *What a reader sees change, restated.* The third correction's item 2
      named a control character, a quote and a backslash. `escape_debug`
      escapes more than those: a format character such as U+200B, a
-     separator such as U+00A0 or U+2028, and a combining mark that opens the
-     word. A combining mark inside a word prints as itself. The test now
+     separator other than the space, such as U+00A0 or U+2028, and a
+     combining mark that opens the word and has Unicode's `Grapheme_Extend`
+     property, such as U+0301 (narrowed in place by the sixth correction). A
+     combining mark inside a word prints as itself. The test now
      quotes each of those four characters, and a word with a combining
      mark inside it. These cases pin behaviour that already held, and no
      reverted fix makes them fail.
@@ -42748,13 +42752,17 @@ answered, and one refusal's quote changes.
    `a_refused_word_is_quoted_escaped_on_one_line`, and the second
    correction's item 2 each said that a word or name of printable
    characters, with no quote and no backslash, is quoted as it was.
-   `escape_debug` escapes a combining mark that opens a string and prints the
-   same mark as itself inside one. So U+0301 followed by `NIFTY` is quoted as
+   `escape_debug` escapes a combining mark that opens a string and has
+   Unicode's `Grapheme_Extend` property, as U+0301 does, and prints the same
+   mark as itself inside one. So U+0301 followed by `NIFTY` is quoted as
    the text `\u{301}NIFTY`, and `N` then U+0301 then `IFTY` is quoted as
-   typed. The refused-word test already asserted both, and the review and
-   this correction each measured both with `rustc` outside the repository.
-   Each text now says a word is quoted as it was only when `escape_debug`
-   prints each of its characters as itself, and names the combining mark.
+   typed. The refused-word test already asserted both, and the review
+   measured both with `rustc` outside the repository; this correction
+   recorded no measurement of its own. Each text then said a word is quoted
+   as it was only when `escape_debug` prints each of its characters as
+   itself, and named the combining mark. That rule was false as well, and
+   so was this item's claim of a second measurement: the sixth correction
+   names both and corrects this item in place.
    `misfiled` escapes its three names one at a time, so a combining mark that
    opens the segment is escaped as well. The misfiled test gains that case,
    and one with the mark inside the segment. Those two cases pin behaviour
@@ -42791,8 +42799,9 @@ answered, and one refusal's quote changes.
    - *The bullet is rewritten in place.* It names both callers and both
      routes. `swept_rung` and `pool_arm`'s rung refusal still quote raw.
      `pool_arm`'s one caller is `dispatch`'s `pool` arm, whose rung is typed.
-     `cli::swept_rung` has eight call sites, and the chains above them were
-     not all followed to their end; the bullet says so. `batch.rs` has a
+     `cli::swept_rung` has eleven call sites (this said eight until the sixth
+     correction), and the chains above them were not all followed to their
+     end; the bullet says so. `batch.rs` has a
      `swept_rung` of its own, whose raw quote only a word `stored::rung` has
      already accepted can reach.
    - *Two texts listed `clipped`'s users.* `misfiled`'s doc named the words
@@ -42850,3 +42859,120 @@ rung word `60min`, a newline and `refused: Y`, it printed the rung refusal
 across two lines, as before, and exited 2.
 
 Invariant AF-39 is corrected in place again.
+
+**Sixth correction, 2026-09-25: what a sixth review found.** Every text
+below is new in this change, and each is corrected where it stands and listed
+here. No behaviour changed: no refusal, page, run identity, store format or
+exit status.
+
+1. *The rule that replaced "printable".* The fifth correction made five texts
+   say a word is quoted as before only when `escape_debug` prints each of its
+   characters as itself. `clipped` cuts to 64 characters before it escapes,
+   so a character after the sixty-fourth is dropped, not escaped: 64 `N`s and
+   then a newline are quoted as they were before the escape, though a newline
+   is not printed as itself. The refused-word test's own body asserted that
+   case beneath the doc that denied it (found by a review, which measured it
+   with `rustc` outside the repository). The five texts -- `clipped`'s doc,
+   `misfiled`'s doc, the docs of
+   `a_misfiled_directory_name_is_escaped_onto_one_line` and
+   `a_refused_word_is_quoted_escaped_on_one_line`, and the second
+   correction's item 2 -- now say a word is quoted as before when, and only
+   when, `escape_debug` prints each of the characters `clipped` keeps, the
+   first 64, as itself, and say what becomes of a character past the cut.
+   The fifth correction's item 2 keeps its record of what it wrote, and says
+   the rule was false. `no_text_says_a_printable_word_is_quoted_as_typed` now
+   requires the new wording and refuses the fifth correction's.
+   - *Pinned as behaviour.* The refused-word test also quotes 64 `N`s, a
+     newline and `refused: forged` through `swept_index`: the quote is the 64
+     `N`s and the mark, on one line, and does not read as a refusal. A new
+     test, `a_word_is_quoted_as_before_exactly_when_what_clipped_keeps_prints_as_itself`,
+     finds `clipped` returning what the cut before the escape returned for
+     the words whose kept characters each print as themselves, and something
+     else for the words holding a kept character that does not. The misfiled
+     test gains a segment of 64 `C`s, a newline and `refused: forged`, named
+     as its first 64 characters and the mark. These cases pin behaviour that
+     already held, and no reverted fix makes them fail. AF-39 now names the
+     new test.
+2. *The opening combining mark, and the separators.* `clipped`'s doc, the
+   second correction's item 2, the fourth correction's item 4, the fifth
+   correction's item 2, AF-39 and a comment in the refused-word test said
+   `escape_debug` escapes a combining mark that opens the word, and some of
+   them named a format or separator character among what it escapes. The
+   `core` source of the pinned toolchain, 1.97.1 in `rust-toolchain.toml`,
+   read from the `rust-src` installed beside it, says which characters it
+   escapes.
+   `str::escape_debug` escapes its first character with
+   `EscapeDebugExtArgs::ESCAPE_ALL` and each later one with
+   `escape_grapheme_extended: false` (`library/core/src/str/mod.rs`).
+   `char::escape_debug_ext` escapes a character when
+   `args.escape_grapheme_extended && self.is_grapheme_extended()`, and
+   otherwise when it is not printable (`library/core/src/char/methods.rs`).
+   `library/core/src/unicode/printable.py`, which generates the table
+   `is_printable` reads, yields as escaped every character whose category
+   is one of `Cc Cf Cs Co Cn Zl Zp Zs`, the space excepted. So
+   a combining mark is escaped at the start of a word only when it has
+   Unicode's `Grapheme_Extend` property, and a separator other than the space
+   is escaped anywhere in one. U+0903 and U+093F, spacing marks without the
+   property, print as themselves opening a word; U+09BE, a spacing mark with
+   it, is escaped there and prints as itself inside a word (found by a
+   review, which measured U+0903, U+093F, U+09BE and the space with `rustc`
+   1.93.1 outside the repository). Each text now names the property beside
+   the opening mark, and each separator it names is one other than the space.
+   - *Pinned as behaviour.* The refused-word test now quotes U+20DD and
+     U+09BE opening a word, each escaped, and U+0903 and U+093F opening a
+     word, U+09BE inside one and a space inside one, each as typed. The new
+     test above puts each character `char::is_control` or
+     `char::is_whitespace` accepts, the space excepted, inside a word, and
+     finds `clipped` escaping it, so no such word is quoted as before. The
+     misfiled test gains a segment that opens with U+0903, named as it is.
+     These pin behaviour that already held, and the suite measures each
+     under the pinned toolchain whenever it runs.
+   - `each_text_names_only_the_characters_escape_debug_escapes` reads the
+     five texts above, AF-39, the fourth correction's item 4, the fifth
+     correction's item 2 and the refused-word test's comments. It requires
+     each to name the property beside the opening mark, refuses the words
+     "format or separator", and requires every "a separator" to be one other
+     than the space. It also requires the two tests to still quote the cases
+     named here.
+3. *The fifth correction's measurement.* Its item 2 said the review and that
+   correction each measured U+0301 with `rustc` outside the repository. No
+   record of that correction's own measurement was found (found by a review).
+   The sentence now says the review measured it and the correction recorded
+   none, and `each_text_names_only_the_characters_escape_debug_escapes`
+   refuses the old sentence. This correction rests on no probe of its own
+   either: it rests on the toolchain source quoted in item 2 and on the tests
+   named there.
+4. *`cli::swept_rung`'s call sites.* The `docs/06-limits.md` bullet said its
+   "eight call sites each take the rung as a parameter", and the fifth
+   correction's item 3 said it "has eight call sites". It had eleven (found
+   by two reviews, each counting with `grep`), and `sweep_audited_stored`
+   takes its rung from the `sweep-audited-stored` command's own argument
+   list, not as a parameter (found by one of them). Both texts now say
+   eleven. The bullet names each site and where its rung comes from, and
+   says why the `pool` verb never reaches the refusal in `pool::run`:
+   `pool_arm` hands `pool::pool` only a rung it found among `EVERY_RUNG`'s
+   entries, and `swept_rung` accepts each of them.
+   `the_raw_quote_limit_counts_and_names_every_call_of_swept_rung` finds
+   every call of `cli::swept_rung` in the `.rs` files under `crates/cli/src`
+   when it runs. It requires both texts to give that count in words and the
+   bullet to name each file, and each `lib.rs` function, that calls it, and
+   it reads where each call's rung comes from.
+   `the_pool_verb_reaches_swept_rung_only_with_a_rung_it_accepts` reads each
+   link from `dispatch`'s `pool` arm through `pool_arm` and `pool::pool` to
+   `swept_rung`'s acceptance of every `EVERY_RUNG` entry.
+5. *Two docs of `crates/cli/tests/pool_and_escape_docs.rs`.* Its module doc
+   said no other test reads a doc comment, an invariant row, a decision or a
+   limit. `cli`'s `the_corrected_doc_comments_say_no_more_than_holds` reads
+   doc comments of `lib.rs`, tests in `core/src/universe.rs` and
+   `store/tests/libm_key.rs` read this file and `docs/06-limits.md` (found by
+   a review), and `core/tests/cost_invariants.rs` reads
+   `docs/04-invariants.md` (found by this correction with `grep`). The claim
+   is dropped, and so is the module doc's claim that each text the file reads
+   described code in this crate, which item 3's does not. The doc of
+   `each_variable_the_driven_pool_test_gives_its_child_is_named` said a
+   variable added to the child fails that test until the three texts name
+   it; it fails until that test's own list names it too (found by a review),
+   and the doc now says so. `this_crates_own_docs_say_no_more_than_holds`
+   reads both. The file gains that test, the two of item 4 and
+   `each_text_names_only_the_characters_escape_debug_escapes`; the fifth
+   correction's note on the file's three tests speaks of those three.

@@ -1,11 +1,13 @@
-//! Sentences D-0696's fifth correction found false, read where they stand.
+//! Sentences D-0696's fifth and sixth corrections found false, read where
+//! they stand.
 //!
-//! Each described code in this crate and said more than the code does, and no
-//! other test reads a doc comment, an invariant row, a decision or a limit. So
-//! each is read here beside the code it describes, at compile time: a rename
-//! fails the build rather than skipping the check. A separate test crate,
-//! because a document read into the library's own tests would rebuild them
-//! whenever any line of the ledger changed.
+//! Each said more than holds, so each is read here. Every document and source
+//! file a constant below names is read at compile time: a rename fails the
+//! build rather than skipping the check. The `.rs` files under `src` are also
+//! read when the test runs, so that a call of `cli::swept_rung` added in a new
+//! file is counted too. A separate test crate, because a document read into
+//! the library's own tests would rebuild them whenever any line of the ledger
+//! changed.
 
 #![allow(
     clippy::expect_used,
@@ -23,6 +25,32 @@ const SNAPSHOT_CODEC: &str = include_str!("../src/index_stop_source_context_code
 const INVARIANTS: &str = include_str!("../../../docs/04-invariants.md");
 const DECISIONS: &str = include_str!("../../../docs/05-decisions.md");
 const LIMITS: &str = include_str!("../../../docs/06-limits.md");
+const THIS: &str = include_str!("pool_and_escape_docs.rs");
+
+/// Counts this crate spells out, from zero.
+const NUMBERS: [&str; 21] = [
+    "zero",
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "ten",
+    "eleven",
+    "twelve",
+    "thirteen",
+    "fourteen",
+    "fifteen",
+    "sixteen",
+    "seventeen",
+    "eighteen",
+    "nineteen",
+    "twenty",
+];
 
 /// `text` with every `///` dropped and every run of whitespace folded to one
 /// space, so a sentence compares by its words wherever it is wrapped.
@@ -76,6 +104,97 @@ fn body<'a>(source: &'a str, head: &str, indent: &str) -> &'a str {
         .expect("its body")
 }
 
+/// Every `.rs` file under this crate's `src`, as its path below `src` and
+/// its text, read when the test runs, in path order.
+fn sources() -> Vec<(String, String)> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut pending = vec![root.clone()];
+    let mut found = Vec::new();
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).expect("a source directory") {
+            let path = entry.expect("a directory entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                let name = path
+                    .strip_prefix(&root)
+                    .expect("under src")
+                    .to_string_lossy()
+                    .into_owned();
+                let text = std::fs::read_to_string(&path).expect("a source file");
+                found.push((name, text));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// One call of `cli::swept_rung` in this crate's source.
+struct Call {
+    /// The file it is in, as its path below `src`.
+    file: String,
+    /// The name of the function it is in.
+    function: String,
+    /// What it hands `swept_rung`.
+    argument: String,
+    /// That function's text, from its name up to the call.
+    lead: String,
+}
+
+/// The function whose head is the last to come before the end of `before`,
+/// as its name and its text from that name on.
+fn enclosing_fn(before: &str) -> (String, &str) {
+    let head = [
+        "\nfn ",
+        "\npub fn ",
+        "\npub(crate) fn ",
+        "\n    fn ",
+        "\n    pub fn ",
+        "\n    pub(crate) fn ",
+    ]
+    .iter()
+    .filter_map(|head| before.rfind(head).map(|at| at + head.len()))
+    .max()
+    .expect("a function around the call");
+    let lead = before.get(head..).expect("its text");
+    let name = lead.split(['(', '<']).next().expect("its name");
+    (name.to_owned(), lead)
+}
+
+/// Each call of `cli::swept_rung` in this crate's source, in path order.
+///
+/// `batch.rs` has a `swept_rung` of its own, so there only a call through
+/// `crate::` is one of these.
+fn swept_rung_calls() -> Vec<Call> {
+    let mut calls = Vec::new();
+    for (file, text) in sources() {
+        let needle = if file.starts_with("batch") {
+            "crate::swept_rung("
+        } else {
+            "swept_rung("
+        };
+        for (at, _) in text.match_indices(needle) {
+            let before = text.get(..at).expect("a prefix");
+            if before.ends_with("fn ") {
+                continue;
+            }
+            let argument = text
+                .get(at + needle.len()..)
+                .and_then(|after| after.split(')').next())
+                .expect("an argument");
+            let (function, lead) = enclosing_fn(before);
+            calls.push(Call {
+                file: file.clone(),
+                function,
+                argument: argument.to_owned(),
+                lead: lead.to_owned(),
+            });
+        }
+    }
+    calls
+}
+
 /// **Every `BRUTEX_` variable the driven `pool` test gives its child is named
 /// wherever the child is described.** D-0696.
 ///
@@ -84,7 +203,7 @@ fn body<'a>(source: &'a str, head: &str, indent: &str) -> &'a str {
 /// generated store and carries no other `BRUTEX_` variable. The test gives it
 /// `BRUTEX_LOG_DIR` and its own marker as well (found by a review). The names
 /// are read from the test's own `.env(` calls, so a variable added there
-/// fails here until each of the three texts names it.
+/// fails here until the list below and each of the three texts name it.
 #[test]
 fn each_variable_the_driven_pool_test_gives_its_child_is_named() {
     let head = "    #[test]\n    fn the_pool_verb_prints_its_whole_page_on_a_generated_store()";
@@ -152,18 +271,10 @@ fn each_variable_the_driven_pool_test_gives_its_child_is_named() {
     }
 }
 
-/// **A word is said to be quoted as typed only when `escape_debug` prints each
-/// of its characters as itself.** D-0696.
-///
-/// Five texts said a word or name "of printable characters", with no quote
-/// and no backslash, is quoted as before. A combining mark prints as itself
-/// inside a word and is escaped when it opens one: U+0301 followed by `NIFTY`
-/// is quoted escaped, as `a_refused_word_is_quoted_escaped_on_one_line`
-/// asserts (found by a review). Each text now names that rule and the
-/// combining mark.
-#[test]
-fn no_text_says_a_printable_word_is_quoted_as_typed() {
-    let texts = [
+/// The five texts that say when a word is quoted as it was before `clipped`
+/// escaped what it keeps, each folded.
+fn quoted_as_before_texts() -> [(&'static str, String); 5] {
+    [
         (
             "`clipped`'s doc",
             doc_above(STORED, "\npub(crate) fn clipped("),
@@ -194,22 +305,176 @@ fn no_text_says_a_printable_word_is_quoted_as_typed() {
                 "\n3. *The first correction's item 4",
             ),
         ),
-    ];
-    for (place, text) in &texts {
+    ]
+}
+
+/// **A word is said to be quoted as before only when `escape_debug` prints
+/// each of the characters `clipped` keeps of it as itself.** D-0696.
+///
+/// Five texts said a word or name "of printable characters", with no quote
+/// and no backslash, is quoted as before. A combining mark prints as itself
+/// inside a word and is escaped when it opens one: U+0301 followed by `NIFTY`
+/// is quoted escaped, as `a_refused_word_is_quoted_escaped_on_one_line`
+/// asserts (found by a review). The fifth correction then said a word is
+/// quoted as before only when `escape_debug` prints each of its characters
+/// as itself, and that was false as well: `clipped` cuts before it escapes,
+/// so 64 `N`s and then a newline are quoted as they always were, and the
+/// refused-word test asserts exactly that (found by a later review). Each
+/// text now names the characters `clipped` keeps, says what becomes of one
+/// past the cut, and names the combining mark.
+#[test]
+fn no_text_says_a_printable_word_is_quoted_as_typed() {
+    for (place, text) in &quoted_as_before_texts() {
         assert!(
             !text.contains("printable"),
             "{place} still speaks of printable characters: {text}"
         );
         assert!(
-            text.contains("`escape_debug` prints each of its characters as itself")
-                || text.contains("`escape_debug` prints every character of it as itself"),
-            "{place} states when a word is quoted as typed: {text}"
+            !text.contains("prints each of its characters as itself")
+                && !text.contains("prints every character of it as itself"),
+            "{place} says a word is quoted as before only when every character of \
+             it prints as itself: {text}"
+        );
+        assert!(
+            text.contains("`escape_debug` prints each of the characters `clipped` keeps"),
+            "{place} states when a word is quoted as before: {text}"
+        );
+        assert!(
+            text.contains("past the cut"),
+            "{place} says what becomes of a character past the cut: {text}"
         );
         assert!(
             text.contains("combining mark that opens"),
             "{place} names the combining mark that opens a word: {text}"
         );
     }
+}
+
+/// **Each text that names what `escape_debug` escapes names only what it
+/// escapes.** D-0696.
+///
+/// The texts said it escapes a combining mark that opens a word, and some a
+/// format or separator character. At the start of a word it escapes a mark
+/// only when the mark has Unicode's `Grapheme_Extend` property: U+0903, a
+/// spacing mark without it, prints as itself there. And the space is a
+/// separator and prints as itself (found by a review, which measured both
+/// with `rustc` outside the repository). The fifth correction also said that
+/// it had measured the combining mark with `rustc`, and no record of that
+/// measurement was found (found by the same review). So each text that names
+/// the opening mark names the property, each separator it names is one other
+/// than the space, and the fifth correction no longer claims the measurement.
+/// `a_refused_word_is_quoted_escaped_on_one_line` and
+/// `a_word_is_quoted_as_before_exactly_when_what_clipped_keeps_prints_as_itself`
+/// must still quote the cases D-0696's sixth correction names.
+#[test]
+fn each_text_names_only_the_characters_escape_debug_escapes() {
+    let fifth = section(
+        DECISIONS,
+        "2. *\"Printable\" words.*",
+        "\n3. *`parse_vendor`'s callers that are not typed.*",
+    );
+    assert!(
+        !fifth.contains("and this correction each measured"),
+        "D-0696's fifth correction, item 2 claims a measurement it did not record: {fifth}"
+    );
+    let refused = body(
+        STORED,
+        "    fn a_refused_word_is_quoted_escaped_on_one_line(",
+        "    ",
+    );
+    let as_before = body(
+        STORED,
+        "    fn a_word_is_quoted_as_before_exactly_when_what_clipped_keeps_prints_as_itself(",
+        "    ",
+    );
+    for (test, case) in [
+        (refused, "\"\\u{903}NIFTY\""),
+        (refused, "\"\\u{93f}NIFTY\""),
+        (refused, "\"NIFTY X\""),
+        (refused, "\"\\u{20dd}NIFTY\""),
+        (refused, "\"\\u{9be}NIFTY\""),
+        (refused, "\"N\\u{9be}IFTY\""),
+        (as_before, "\"\\u{903}NIFTY\""),
+        (as_before, "for c in '\\0'..=char::MAX {"),
+        (as_before, "'\\u{3000}'"),
+        (as_before, "'\\u{2029}'"),
+    ] {
+        assert!(test.contains(case), "the test quotes {case}:\n{test}");
+    }
+    let mut texts = Vec::from(quoted_as_before_texts());
+    texts.extend([
+        ("AF-39", section(INVARIANTS, "| AF-39 |", "\n")),
+        (
+            "D-0696's fourth correction, item 4",
+            section(
+                DECISIONS,
+                "   - *What a reader sees change, restated.*",
+                "\n\n**Tests, and what each is proven against (fourth correction).**",
+            ),
+        ),
+        ("D-0696's fifth correction, item 2", fifth),
+        (
+            "the refused-word test's comments",
+            words(&refused.replace("//", " ")),
+        ),
+    ]);
+    for (place, text) in &texts {
+        assert!(
+            text.contains("combining mark that opens"),
+            "premise: {place} names the combining mark that opens a word: {text}"
+        );
+        assert!(
+            text.contains("`Grapheme_Extend`"),
+            "{place} names the opening combining mark without the property that \
+             decides whether it is escaped: {text}"
+        );
+        assert!(
+            !text.contains("format or separator"),
+            "{place} says every separator is escaped: {text}"
+        );
+        assert_eq!(
+            text.matches("a separator").count(),
+            text.matches("a separator other than the space").count(),
+            "{place} names a separator without excepting the space: {text}"
+        );
+    }
+}
+
+/// **This crate's own docs say no more than holds.** D-0696.
+///
+/// Its module doc said that no other test reads a doc comment, an invariant
+/// row, a decision or a limit, and other tests in this workspace read each
+/// of those (found by a review). The doc of
+/// `each_variable_the_driven_pool_test_gives_its_child_is_named` said a
+/// variable given to the child fails that test until the three texts name
+/// it; it fails until the list in that test names it too (found by the same
+/// review).
+#[test]
+fn this_crates_own_docs_say_no_more_than_holds() {
+    let module = words(
+        &THIS
+            .lines()
+            .take_while(|line| line.starts_with("//!"))
+            .map(|line| line.trim_start_matches("//!"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    assert!(
+        module.contains("Sentences D-0696's"),
+        "premise: the module doc was read: {module}"
+    );
+    assert!(
+        !module.contains("no other test reads"),
+        "the module doc says no other test reads a document: {module}"
+    );
+    let named = doc_above(
+        THIS,
+        "#[test]\nfn each_variable_the_driven_pool_test_gives_its_child_is_named(",
+    );
+    assert!(
+        named.contains("fails here until the list below and each of the three texts name it"),
+        "the doc says what a variable added to the child fails until: {named}"
+    );
 }
 
 /// **The limit on raw quotes names `parse_vendor`'s two callers that hand it
@@ -236,11 +501,7 @@ fn the_raw_quote_limit_names_parse_vendors_stored_callers() {
         parse_vendor.contains("stored::clipped(word),") && !parse_vendor.contains("`{word}`"),
         "`parse_vendor` quotes the word through `clipped` alone:\n{parse_vendor}"
     );
-    let bullet = section(
-        LIMITS,
-        "- **Not every refusal quotes through `stored::clipped`",
-        "\n- **",
-    );
+    let bullet = raw_quote_bullet();
     assert!(!bullet.contains("was not examined"), "{bullet}");
     for named in [
         "`index_stop_search_reader.rs`",
@@ -252,4 +513,165 @@ fn the_raw_quote_limit_names_parse_vendors_stored_callers() {
     ] {
         assert!(bullet.contains(named), "the bullet names {named}: {bullet}");
     }
+}
+
+/// The `docs/06-limits.md` bullet on the refusals that do not quote through
+/// `stored::clipped`, folded.
+fn raw_quote_bullet() -> String {
+    section(
+        LIMITS,
+        "- **Not every refusal quotes through `stored::clipped`",
+        "\n- **",
+    )
+}
+
+/// **The limit on raw quotes counts and names every call of
+/// `cli::swept_rung`, and says where each call's rung comes from.** D-0696.
+///
+/// The bullet and D-0696's fifth correction said `cli::swept_rung` has eight
+/// call sites, and the bullet that each takes the rung as a parameter. It had
+/// eleven (found by two reviews), and `sweep_audited_stored` takes its rung
+/// from the command's own argument list (found by one of them). The calls are
+/// now found in the `.rs` files under `src` when this runs. Both texts must
+/// give their count in words, the bullet must name each file, and each
+/// `lib.rs` function, that calls it, and each call's rung must come from where
+/// the bullet says.
+#[test]
+fn the_raw_quote_limit_counts_and_names_every_call_of_swept_rung() {
+    let bullet = raw_quote_bullet();
+    let calls = swept_rung_calls();
+    let sites: Vec<String> = calls
+        .iter()
+        .map(|call| format!("{} in {}", call.function, call.file))
+        .collect();
+    let count = *NUMBERS
+        .get(calls.len())
+        .expect("a count this test can spell");
+    let item_3 = section(
+        DECISIONS,
+        "3. *`parse_vendor`'s callers that are not typed.*",
+        "\n\nThe three tests in",
+    );
+    for (place, text) in [
+        ("the bullet", &bullet),
+        ("D-0696's fifth correction, item 3", &item_3),
+    ] {
+        let said: Vec<&str> = NUMBERS
+            .iter()
+            .copied()
+            .filter(|number| text.contains(&format!(" {number} call sites")))
+            .collect();
+        assert_eq!(
+            said,
+            [count],
+            "{place} counts `cli::swept_rung`'s call sites, and {count} were \
+             found: {sites:?}\n{text}"
+        );
+    }
+    assert!(
+        !bullet.contains("the rung as a parameter"),
+        "the bullet says every caller takes the rung as a parameter: {bullet}"
+    );
+    for call in &calls {
+        let named = if call.file == "lib.rs" {
+            format!("`{}`", call.function)
+        } else {
+            assert_eq!(
+                calls.iter().filter(|other| other.file == call.file).count(),
+                1,
+                "the bullet says one call each outside `lib.rs`: {sites:?}"
+            );
+            format!("`{}`", call.file)
+        };
+        assert!(
+            bullet.contains(&named),
+            "the bullet does not name {named}, which calls `cli::swept_rung`: {bullet}"
+        );
+        // Where the rung it hands on comes from: a parameter, a field of one,
+        // or -- in `sweep_audited_stored` alone -- the command's arguments.
+        let signature = call.lead.split(" {\n").next().expect("its signature");
+        let from = match call.argument.as_str() {
+            "rung" if call.function == "sweep_audited_stored" => {
+                call.lead.contains("        rung,\n") && call.lead.contains("] = arguments\n")
+            }
+            "rung" => signature.contains("rung: &"),
+            "request.rung" => signature.contains("(request: "),
+            "args.rung" => signature.contains("(args: &"),
+            _ => false,
+        };
+        assert!(
+            from,
+            "`{}` in {} hands `swept_rung` `{}`; the bullet does not say where \
+             that comes from:\n{signature}",
+            call.function, call.file, call.argument
+        );
+    }
+    let others = *NUMBERS
+        .get(calls.len().saturating_sub(1))
+        .expect("a count this test can spell");
+    assert!(
+        bullet.contains(&format!("The other {others} are")),
+        "the bullet counts the calls besides `pool::run`'s: {bullet}"
+    );
+    assert!(
+        LIB.contains(
+            "\n        [\"sweep-audited-stored\", arguments @ ..] if arguments.len() == 9 => {\n            \
+             command_report(out, sweep_audited_stored(arguments), \"AUDITED SWEEP\")\n"
+        ),
+        "`sweep_audited_stored` is handed the command's own argument list"
+    );
+}
+
+/// **The `pool` verb reaches `pool::run`'s call of `cli::swept_rung` only
+/// with a rung that call accepts, and the limit on raw quotes says so.**
+/// D-0696.
+///
+/// `pool::run`'s call is one of those the test above counts. Each link by
+/// which the verb
+/// reaches it -- `dispatch`'s one `pool` arm, `pool_arm`'s search of
+/// `EVERY_RUNG`, `pool::pool` handing `run` its rung as it is, and
+/// `swept_rung`'s acceptance of every `EVERY_RUNG` entry -- is read from the
+/// source.
+#[test]
+fn the_pool_verb_reaches_swept_rung_only_with_a_rung_it_accepts() {
+    let bullet = raw_quote_bullet();
+    let calls = swept_rung_calls();
+    let sites: Vec<String> = calls
+        .iter()
+        .map(|call| format!("{} in {}", call.function, call.file))
+        .collect();
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.file == "pool.rs" && call.function == "run"),
+        "premise: `pool::run` calls `cli::swept_rung`: {sites:?}"
+    );
+    assert_eq!(LIB.matches("[\"pool\", ").count(), 1, "one `pool` arm");
+    assert!(
+        LIB.contains(
+            "\n        [\"pool\", v, r, fy, fm, ty, tm, mh] => pool_arm(out, v, r, (fy, fm), (ty, tm), mh),\n"
+        ) && LIB.matches("pool_arm(").count() == 2,
+        "`dispatch`'s `pool` arm is `pool_arm`'s one caller"
+    );
+    let arm = body(LIB, "\nfn pool_arm(", "");
+    assert!(
+        arm.contains("let Some(known) = EVERY_RUNG.iter().find(|r| **r == rung) else {")
+            && arm.matches("pool::pool(").count() == 1
+            && arm.contains("pool::pool(vendor, known, "),
+        "`pool_arm` hands `pool::pool` a rung it found in `EVERY_RUNG`:\n{arm}"
+    );
+    let verb = body(POOL, "\npub fn pool(", "");
+    assert!(
+        verb.contains("    match run(vendor_word, rung, from, to, support_ppm) {"),
+        "`pool::pool` hands `run` its rung as it is:\n{verb}"
+    );
+    let guard = body(LIB, "\nfn swept_rung(", "");
+    assert!(
+        guard.contains("    if EVERY_RUNG.contains(&rung) {\n        return Ok(());\n    }"),
+        "`swept_rung` accepts every `EVERY_RUNG` entry:\n{guard}"
+    );
+    assert!(
+        bullet.contains("`EVERY_RUNG`") && bullet.contains("never reaches that refusal"),
+        "the bullet says where `pool::run`'s rung comes from: {bullet}"
+    );
 }

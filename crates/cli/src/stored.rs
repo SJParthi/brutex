@@ -1816,13 +1816,17 @@ pub(crate) fn rung(name: &str) -> Result<Timeframe, Refusal> {
 /// as refused (measured by the review, D-0696). A feed word can come from
 /// stored bytes as well, which is why `parse_vendor` quotes through this too.
 ///
-/// A word is quoted exactly as before only when `escape_debug` prints every
-/// character of it as itself. Among those it escapes are a quote, a
-/// backslash, a control character, a format or separator character such as
-/// U+200B or U+00A0, and a combining mark that opens the word: U+0301
-/// followed by `NIFTY` is quoted as the text `\u{301}NIFTY`, while the same
-/// mark after the `N` prints as itself. So a word of characters that each
-/// print as themselves inside a word is not always quoted as typed (D-0696).
+/// A word is quoted exactly as before when, and only when, `escape_debug`
+/// prints each of the characters `clipped` keeps -- the first 64 -- as
+/// itself. A character past the cut is dropped, not escaped, so 64 `N`s and
+/// then a newline are quoted as they always were. Among the characters it
+/// escapes are a quote, a backslash, a control character, a format character
+/// such as U+200B, a separator other than the space, such as U+00A0 or
+/// U+2028, and a combining mark that opens the word and has Unicode's
+/// `Grapheme_Extend` property: U+0301 followed by `NIFTY` is quoted as the text
+/// `\u{301}NIFTY`, while the same mark after the `N` prints as itself. A
+/// spacing mark without that property, such as U+0903, prints as itself even
+/// when it opens the word (D-0696).
 ///
 /// Clipped FIRST and escaped after, so the escape walks at most the 64
 /// characters kept and the cost above is unchanged. What comes back is at
@@ -1959,15 +1963,17 @@ pub(crate) fn swept_index(underlying: &str) -> Result<InstrumentKey, Refusal> {
 /// name is therefore named through [`clipped`], which clips it and then
 /// renders it through `escape_debug`, so a control character is printed as its
 /// escape and the sentence stays on one line. A name prints exactly as it did
-/// only when `escape_debug` prints each of its characters as itself, which
-/// [`clipped`]'s doc spells out: each of the three names is escaped on its
-/// own, so a combining mark that opens any one of them is escaped too. The
-/// escape was first written here alone, and the symbol directory -- which
-/// reaches [`swept_index`]'s refusal and `sweep-all`'s row label as a word --
-/// still forged a refusal of the run; it now lives in [`clipped`], for every
-/// word quoted through it: this function's three names, the word
-/// [`swept_index`] and [`rung`] refuse, and the feed word `parse_vendor`
-/// refuses (D-0696).
+/// when, and only when, `escape_debug` prints each of the characters
+/// `clipped` keeps of it -- its first 64 -- as itself, which [`clipped`]'s doc
+/// spells out: a character past the cut is dropped, not escaped. Each of the
+/// three names is escaped on its own, so a combining mark that opens any one
+/// of them is escaped too when it has Unicode's `Grapheme_Extend` property, as
+/// U+0301 does. The escape was first written here alone, and the symbol
+/// directory -- which reaches [`swept_index`]'s refusal and `sweep-all`'s row
+/// label as a word -- still forged a refusal of the run; it now lives in
+/// [`clipped`], for every word quoted through it: this function's three
+/// names, the word [`swept_index`] and [`rung`] refuse, and the feed word
+/// `parse_vendor` refuses (D-0696).
 ///
 /// UNVERIFIED performance: no bench times this. Read from the source, it is
 /// three comparisons of strings no longer than a path segment, once per
@@ -5601,12 +5607,21 @@ mod tests {
     /// `X\nrefused: forged` made the pool page print a column-zero line
     /// `refused: forged/...`, and the completed pool read as a refusal
     /// (measured by the review). Each name is now escaped on its own, so the
-    /// sentence is one line. A name prints as it always did only when
-    /// `escape_debug` prints each of its characters as itself: a combining
-    /// mark that opens a name is escaped, and one inside it is not.
+    /// sentence is one line. A name prints as it always did when, and only
+    /// when, `escape_debug` prints each of the characters `clipped` keeps of
+    /// it -- its first 64 -- as itself, so a newline past the cut leaves it as
+    /// it was. A combining mark that opens a name and has Unicode's
+    /// `Grapheme_Extend` property, such as U+0301, is escaped; one inside a
+    /// name is not, and neither is U+0903, a spacing mark without that
+    /// property, even when it opens one.
     #[test]
     fn a_misfiled_directory_name_is_escaped_onto_one_line() {
         let key = swept_index("RELIANCE").expect("a share");
+        // A newline past the sixty-fourth character is cut, not escaped, so a
+        // longer name is named as it was before the escape: its first 64
+        // characters and the mark.
+        let long = format!("{}\nrefused: forged", "C".repeat(64));
+        let long_shown = format!("`NSE/{}…/RELIANCE`", "C".repeat(64));
         for (exchange, segment, symbol, shown) in [
             (
                 "X\nrefused: forged",
@@ -5622,8 +5637,9 @@ mod tests {
                 "`NSE/IN\\u{7}DEX/RELIANCE`",
             ),
             ("BSE", "CASH", "RELIANCE", "`BSE/CASH/RELIANCE`"),
-            // Each name is escaped on its own, so a combining mark that opens
-            // the segment is escaped, and one inside it prints as itself.
+            // Each name is escaped on its own, so U+0301, a combining mark
+            // with the `Grapheme_Extend` property, is escaped when it opens
+            // the segment, and prints as itself inside it.
             (
                 "NSE",
                 "\u{301}CASH",
@@ -5636,6 +5652,15 @@ mod tests {
                 "RELIANCE",
                 "`NSE/CA\u{301}SH/RELIANCE`",
             ),
+            // A spacing mark without the `Grapheme_Extend` property prints as
+            // itself even when it opens the segment.
+            (
+                "NSE",
+                "\u{903}CASH",
+                "RELIANCE",
+                "`NSE/\u{903}CASH/RELIANCE`",
+            ),
+            ("NSE", long.as_str(), "RELIANCE", long_shown.as_str()),
         ] {
             let why = misfiled(&key, exchange, segment, symbol).expect("misfiled");
             assert!(why.starts_with(shown), "{shown}: {why:?}");
@@ -5661,9 +5686,13 @@ mod tests {
     /// run (measured by the review). [`clipped`] now escapes what it keeps, so
     /// the refusals that quote through it -- `swept_index`'s, `rung`'s,
     /// `misfiled`'s and `parse_vendor`'s -- are one line. A word is quoted
-    /// exactly as before only when `escape_debug` prints each of its
-    /// characters as itself, and a combining mark that opens the word is not
-    /// printed as itself, though the same mark inside a word is. Not every
+    /// exactly as before when, and only when, `escape_debug` prints each of
+    /// the characters `clipped` keeps -- the first 64 -- as itself: a newline
+    /// past the cut is dropped, not escaped, and leaves the quote as it was. A
+    /// combining mark that opens the word and has Unicode's `Grapheme_Extend`
+    /// property, such as U+0301, is not printed as itself, though the same
+    /// mark inside a word is, and U+0903, a spacing mark without that
+    /// property, prints as itself even when it opens the word. Not every
     /// refusal in the crate quotes through it: `swept_rung` and `pool_arm`'s
     /// rung refusal still quote the word they are handed raw, and
     /// `docs/06-limits.md` names them and what reaches them (D-0696).
@@ -5701,13 +5730,20 @@ mod tests {
             );
         }
         // The mark still says that something was cut: a newline past the
-        // sixty-fourth character is cut, not quoted.
+        // sixty-fourth character is cut, not quoted, so the word is quoted as
+        // it was before the escape, and a line after the cut never reaches
+        // the refusal.
         let long = format!("{}\n", "N".repeat(64));
-        let why = swept_index(&long).expect_err("no instrument");
-        assert!(
-            why.starts_with(&format!("`{}…` is not", "N".repeat(64))),
-            "{why:?}"
-        );
+        let forged = format!("{}\nrefused: forged", "N".repeat(64));
+        for word in [&long, &forged] {
+            let why = swept_index(word).expect_err("no instrument");
+            assert!(
+                why.starts_with(&format!("`{}…` is not", "N".repeat(64))),
+                "{why:?}"
+            );
+            assert!(!why.contains(|c: char| c.is_control()), "{why:?}");
+            assert!(!crate::carries_refusal(&format!("    {why}\n")), "{why:?}");
+        }
         // CLIPPED FIRST AND ESCAPED AFTER. The case above reads the same in
         // either order, so it did not hold the order `clipped`'s cost rests on:
         // escaping the whole word and then clipping walks all of it, and
@@ -5730,14 +5766,17 @@ mod tests {
             let rung_why = rung(&word).expect_err("no rung");
             assert!(rung_why.starts_with(&shown), "{shown}: {rung_why:?}");
         }
-        // Not only control characters: `escape_debug` also escapes a format or
-        // separator character, and a combining mark that opens the word, so
-        // none of them is quoted as itself.
+        // Not only control characters: `escape_debug` also escapes a format
+        // character, a separator other than the space, and a combining mark
+        // that opens the word and has Unicode's `Grapheme_Extend` property, as
+        // U+0301, U+20DD and U+09BE do, so none of them is quoted as itself.
         for (word, shown) in [
             ("NIFTY\u{200b}", "`NIFTY\\u{200b}`"),
             ("NIFTY\u{a0}X", "`NIFTY\\u{a0}X`"),
             ("NIFTY\u{2028}refused", "`NIFTY\\u{2028}refused`"),
             ("\u{301}NIFTY", "`\\u{301}NIFTY`"),
+            ("\u{20dd}NIFTY", "`\\u{20dd}NIFTY`"),
+            ("\u{9be}NIFTY", "`\\u{9be}NIFTY`"),
         ] {
             let why = swept_index(word).expect_err("no instrument");
             assert!(
@@ -5745,11 +5784,81 @@ mod tests {
                 "{shown}: {why:?}"
             );
         }
-        // These words are quoted as they were typed, a combining mark inside
-        // one among them.
-        for word in ["NIFTYX", "1hour", "RELIANCE-EQ", "niftyé", "N\u{301}IFTY"] {
+        // These words are quoted as they were typed: a combining mark inside
+        // one, U+09BE among them, so it is escaped above only because it
+        // opens the word; U+0903 and U+093F, spacing marks without the
+        // `Grapheme_Extend` property, opening one; and the space.
+        for word in [
+            "NIFTYX",
+            "1hour",
+            "RELIANCE-EQ",
+            "niftyé",
+            "N\u{301}IFTY",
+            "N\u{9be}IFTY",
+            "\u{903}NIFTY",
+            "\u{93f}NIFTY",
+            "NIFTY X",
+        ] {
             let why = swept_index(word).expect_err("no instrument");
             assert!(why.starts_with(&format!("`{word}` is not")), "{why:?}");
         }
+    }
+
+    /// **A word is quoted as it was before the escape when, and only when,
+    /// `escape_debug` prints each of the characters `clipped` keeps as
+    /// itself.** D-0696.
+    ///
+    /// `clipped` cuts to 64 characters and escapes what it kept, so whether a
+    /// quote changed is decided by the kept characters alone: a newline past
+    /// the cut is dropped and changes nothing, and one that is the
+    /// sixty-fourth character is escaped. The docs stated the rule over the
+    /// whole word, which the first case refutes (found by a review). Every
+    /// control character, and every character `char::is_whitespace` accepts
+    /// other than the space, is escaped inside a word, so a word holding one
+    /// is not quoted as before; the space is.
+    #[test]
+    fn a_word_is_quoted_as_before_exactly_when_what_clipped_keeps_prints_as_itself() {
+        // `before` is the cut `clipped` made before it escaped anything.
+        let before = |word: &str| {
+            let mut out: String = word.chars().take(64).collect();
+            if word.chars().nth(64).is_some() {
+                out.push('…');
+            }
+            out
+        };
+        let long = format!("{}\n", "N".repeat(64));
+        let forged = format!("{}\nrefused: forged", "N".repeat(64));
+        let at_the_cut = format!("{}\n", "N".repeat(63));
+        for (word, as_before) in [
+            (long.as_str(), true),
+            (forged.as_str(), true),
+            ("N\u{301}IFTY", true),
+            ("\u{903}NIFTY", true),
+            ("NIFTY X", true),
+            (at_the_cut.as_str(), false),
+            ("\u{301}NIFTY", false),
+            ("NIFTY\u{a0}X", false),
+            ("X\nrefused: forged", false),
+        ] {
+            assert_eq!(clipped(word) == before(word), as_before, "{word:?}");
+        }
+        // Every control character, and every character `char::is_whitespace`
+        // accepts other than the space, is escaped inside a word.
+        let mut escaped = Vec::new();
+        for c in '\0'..=char::MAX {
+            if c == ' ' || !(c.is_control() || c.is_whitespace()) {
+                continue;
+            }
+            let word = format!("NIFTY{c}X");
+            assert_ne!(clipped(&word), before(&word), "{word:?}");
+            escaped.push(c);
+        }
+        for c in [
+            '\0', '\n', '\u{7f}', '\u{a0}', '\u{2028}', '\u{2029}', '\u{3000}',
+        ] {
+            assert!(escaped.contains(&c), "premise: {c:?} was checked");
+        }
+        let why = swept_index("NIFTY\u{3000}X").expect_err("no instrument");
+        assert!(why.starts_with("`NIFTY\\u{3000}X` is not"), "{why:?}");
     }
 }
