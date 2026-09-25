@@ -1095,6 +1095,14 @@ fn budgeted_audit_transaction_refuses_only_a_recording(
 ///
 /// The budget is stated in a CHILD process's environment, not in the process
 /// knob store, so no concurrently running recorded test can observe it.
+///
+/// BEFORE IT READS, NOT ONLY BEFORE IT WRITES. The child's store was whole, so
+/// a kernel that read its months and only then refused the budget answered
+/// with the same sentence and wrote nothing, and passed (found by a review,
+/// D-0696). Every month file of the child's store is now bytes no reader
+/// accepts, so a kernel that reads before it refuses answers with the store's
+/// refusal instead, and the child's exact comparison with the budget's
+/// sentence fails.
 #[test]
 fn recorded_runs_refuse_a_screen_budget_before_reading_or_writing()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -1103,7 +1111,20 @@ fn recorded_runs_refuse_a_screen_budget_before_reading_or_writing()
         return Ok(budgeted_recorded_runs_refuse(&crate::store_root()?)?);
     }
     let fixture = Fixture::warmed();
-    let before = tree(&fixture.root);
+    let unreadable = Fixture::warmed();
+    let mut damaged = 0_usize;
+    for (path, bytes) in tree(&unreadable.root) {
+        if bytes.is_some() && path.extension().is_some_and(|ext| ext == "bin") {
+            fs::write(&path, b"NOT A BAR FILE: any reader refuses these bytes")?;
+            damaged += 1;
+        }
+    }
+    assert!(damaged >= 5, "premise: every month file was damaged");
+    assert!(
+        stored::load(&unreadable.root, Vendor::Zerodha, "NIFTY", "5min", 2025, 5).is_err(),
+        "premise: a read of the child's store is refused"
+    );
+    let before = tree(&unreadable.root);
     let child = std::process::Command::new(std::env::current_exe()?)
         .args([
             "--exact",
@@ -1112,7 +1133,7 @@ fn recorded_runs_refuse_a_screen_budget_before_reading_or_writing()
             "--test-threads=1",
         ])
         .env(CHILD, "budgeted")
-        .env("BRUTEX_STORE", &fixture.root)
+        .env("BRUTEX_STORE", &unreadable.root)
         .env("BRUTEX_SCREEN_BUDGET_MS", "5000")
         .output()?;
     assert!(
@@ -1123,7 +1144,7 @@ fn recorded_runs_refuse_a_screen_budget_before_reading_or_writing()
     );
     assert!(String::from_utf8_lossy(&child.stdout).contains("1 passed"));
     assert_eq!(
-        tree(&fixture.root),
+        tree(&unreadable.root),
         before,
         "a refused budget wrote under the store"
     );

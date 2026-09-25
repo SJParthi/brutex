@@ -43080,3 +43080,15 @@ changes what an operator reads, or the exit status a script sees, says so.
    cherry-picked from. It runs no `git`, so it does not check a hash cited
    later. D-0693's citations belong to another piece of this change and are
    not edited here.
+8. *The budget refusal comes before a read.* AF-05 and the D-0685 limit say
+   a run that records refuses a usable `BRUTEX_SCREEN_BUDGET_MS` before it
+   reads its source or writes anything.
+   `recorded_runs_refuse_a_screen_budget_before_reading_or_writing` gave its
+   child a whole store, so a kernel that read its months and only then
+   refused the budget answered with the same sentence, wrote nothing, and
+   passed (found by a review). The child's store is now a second generated
+   store whose every month file holds bytes no reader accepts, so a kernel
+   that reads first answers with the store's refusal and fails the child's
+   exact comparison; the run with a stated cap that follows keeps the whole
+   store. No behaviour changed, and neither AF-05 nor the limit is edited:
+   the test now proves what they say.
