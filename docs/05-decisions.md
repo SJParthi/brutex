@@ -41291,14 +41291,15 @@ was written; where it is now wrong, this says so.
 - **What that does to the sixth repair's refusal.** Read from the code: the
   only derivation the sixth repair's per-row refusal in `modified` could
   refuse was the symbol branch's. `/calendar.json` refuses an unreadable row
-  before either branch derives, and the peer vote and the observation derive
-  only for held rows. A held row under a stamp that found a time always
-  passes, so what was left is a row read absent under a stamp that found its
-  manifest, as the store-root race reads, and on that row every name is
-  unheld. The unheld-name skip now declines that derivation first. So the
-  refusal decides no calendar any caller keeps today. It
-  stays at the one function every key comes from, so a caller added later
-  that derives from a row its stamp contradicts is covered, and
+  before either branch derives, and the exchange branch, the peer vote and
+  the observation derive only for a row's held series. A held row under a
+  stamp that found a time always passes, so what was left is a row read
+  absent under a stamp that found its manifest, as the store-root race
+  reads, and on that row every name is unheld. The unheld-name skip now
+  declines that derivation first. So the refusal decides no calendar any
+  caller keeps today. It stays at the one function every key comes from, so
+  a caller added later that derives from a row its stamp contradicts is
+  covered, and
   `each_feed_is_handed_its_own_modified_time_only_for_a_row_its_stamp_could_read`
   pins it alone. The two root-race tests now fail only with both rules
   removed. The sixth repair's proof that removing the refusal failed "both
@@ -41396,3 +41397,31 @@ passed, 0 failed and 2 ignored.
   unheld-name break together, 4 failed: both root-race tests, each at
   "Symbol, request 1", `Some(0)` against `Some(1)`, the unit test and the
   unheld-name test.
+
+cargo-mutants 26.2.0 ran over the whole piece's source diff, `eecca4da` to
+`ee4711ac`, the run the seventh review asked for, with `--cap-lints true` as
+Gate 18 passes it, two jobs, and the `api` lib as the test set, run by
+`cargo test` rather than Gate 18's nextest. No source line changed after
+`ee4711ac`. Its unmutated baseline passed. Of 79 mutants, 54 were caught, 25
+were unviable, and none was missed or timed out. Caught among them: both
+`&&` -> `||` mutants the review reported MISSED, at the symbol and
+no-contract tests of the observation's conjunction, and its two `==` ->
+`!=`; `CensusStamps::modified` replaced with `None`; and its match guard
+replaced with `true` and with `false`. The 25 unviable ones failed to
+compile: 22 put `Default::default()` where a type has no `Default`
+(`CensusStamps`, `PeerCalendar`, `SystemTime`, `Calendar`, `HeaderName` in
+`CalendarAnswer`, and others), 2 name `Arc`, which is not in scope where they
+land, and 1 turns the `&&` of `cached`'s `if let` chain into an `||`.
+
+**Verified (seventh repair)** on this tree (arm64 laptop,
+`CARGO_BUILD_JOBS=3`, `--locked --offline`, the machine's load average
+between 45 and 107 from other work). `cargo fmt --all --check` is clean, and
+so is
+`cargo clippy --workspace --all-targets --locked --offline -- -D warnings`.
+`Cargo.lock` is byte-identical to `main`'s. The `api` suite ran outside the
+command sandbox, for the loopback binds and the socket. Its lib has 1,205
+passed, 0 failed and 2 ignored: the sixth repair's 1,202 and the three
+tests `ee4711ac` added. `src/main.rs` has 2 passed, `tests/binary.rs` 3 and
+the doctest 1. `core`'s whole suite, which reads these documents,
+passes. Every shell gate of CI's Gate 1+2 job except 1e passes, Gates 10,
+10b, 11, 23, 27 and 27b among them.
