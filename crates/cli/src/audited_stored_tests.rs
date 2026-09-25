@@ -1273,6 +1273,25 @@ impl Traded {
         })
     }
 
+    /// The `sweep-stored` verb's own door over May 2025: `sweep_stored_kernel`,
+    /// which withholds holed sessions and hands `stored_month_kernel` no
+    /// checksum guard.
+    fn sweep_stored(&self, rung: &str, min_hits: u64) -> Result<String, String> {
+        crate::sweep_stored_kernel(crate::StoredSweepRequest {
+            root: self.root.clone(),
+            vendor: Vendor::Zerodha,
+            underlying: self.underlying,
+            rung,
+            year: 2025,
+            month: 5,
+            min_hits,
+            commit: "generated-traded-sweep-fixture",
+        })
+    }
+
+    /// The `sweep-audited-stored` verb's door over May 2025: the two calls
+    /// `sweep_audited_stored` makes, `Inputs::load` and then
+    /// `stored_month_kernel` with that checksum guard.
     fn sweep(&self, rung: &str, min_hits: u64) -> Result<String, String> {
         let input = Inputs::load(Request {
             store_root: &self.root,
@@ -1496,16 +1515,35 @@ fn top_names_a_recorded_share_as_a_share_and_an_index_as_before() {
 /// its page. That is what is asserted of NIFTY. It is not compared byte for
 /// byte with an index page from before D-0694, and this doc said "An index's
 /// sweep is unchanged" when it asserted less than that (D-0696).
+///
+/// BOTH DOORS. This drove only `sweep-audited-stored`'s, through
+/// `Traded::sweep`, while this doc and AF-31, AF-33 and AF-38 named
+/// `sweep-stored`, whose door no test ranked on (found by a review, D-0696).
+/// Each page is now asserted from `sweep-stored`'s door, `Traded::sweep_stored`,
+/// and from the audited one.
 #[test]
 fn a_stored_sweep_of_a_share_says_its_ranking_is_gross_of_every_charge() {
     let _knobs = crate::knobs::serially();
     crate::knobs::clear_all();
-    for underlying in ["RELIANCE", "NIFTY"] {
+    for (underlying, door) in [
+        ("RELIANCE", "sweep-stored"),
+        ("NIFTY", "sweep-stored"),
+        ("RELIANCE", "sweep-audited-stored"),
+        ("NIFTY", "sweep-audited-stored"),
+    ] {
         let fixture = Traded::new(underlying);
-        let page = fixture
-            .sweep("1min", 700)
-            .map_err(|why| format!("{underlying}: {why}"))
-            .expect("a generated traded sweep completes");
+        let page = if door == "sweep-stored" {
+            fixture.sweep_stored("1min", 700)
+        } else {
+            fixture.sweep("1min", 700)
+        }
+        .map_err(|why| format!("{underlying} through {door}: {why}"))
+        .expect("a generated traded sweep completes");
+        assert_eq!(
+            page.contains("STRICT HISTORICAL INPUT CHECKSUMS V1"),
+            door == "sweep-audited-stored",
+            "premise: the page is {door}'s:\n{page}"
+        );
         let findings = crate::section_note(&page, "FINDINGS").expect("the ranking");
         assert!(
             findings.contains("  rank "),
@@ -1514,7 +1552,7 @@ fn a_stored_sweep_of_a_share_says_its_ranking_is_gross_of_every_charge() {
         assert_eq!(
             findings.contains(crate::EQUITY_RANKING_GROSS.trim_end()),
             underlying == "RELIANCE",
-            "{underlying}:\n{page}"
+            "{underlying} through {door}:\n{page}"
         );
         // FINDINGS is where the ranking is labelled, and not the page's only
         // charge statement: since D-0694 a share's page opens with the banner
@@ -1527,7 +1565,7 @@ fn a_stored_sweep_of_a_share_says_its_ranking_is_gross_of_every_charge() {
         assert_eq!(
             page.starts_with(&banner),
             underlying == "RELIANCE",
-            "{underlying}: the banner note heads a share's page and no index's:\n{page}"
+            "{underlying} through {door}: the banner note heads a share's page and no index's:\n{page}"
         );
         for equity_text in [
             crate::EQUITY_RANKING_GROSS.trim_end(),
@@ -1537,8 +1575,8 @@ fn a_stored_sweep_of_a_share_says_its_ranking_is_gross_of_every_charge() {
             assert_eq!(
                 page.contains(equity_text),
                 underlying == "RELIANCE",
-                "{underlying}: a share's page carries {equity_text:?} and an index's \
-                 carries it nowhere:\n{page}"
+                "{underlying} through {door}: a share's page carries {equity_text:?} and an \
+                 index's carries it nowhere:\n{page}"
             );
         }
         assert!(!crate::carries_refusal(&page), "{page}");
@@ -1553,17 +1591,29 @@ fn a_stored_sweep_of_a_share_says_its_ranking_is_gross_of_every_charge() {
 /// `ranked_opening`, so the audit-page proof in `equity_statement_tests` does
 /// not reach this call site. A lifted FINDINGS block carries no banner, so the
 /// sentence must be inside the block to travel with the ranking.
+///
+/// Asserted from both doors that reach `stored_month_kernel`: `sweep-stored`'s
+/// and `sweep-audited-stored`'s. Only the second was driven until a review
+/// found it (D-0696).
 #[test]
 fn a_ranked_stored_sweep_of_a_share_states_corporate_actions_inside_its_findings() {
     let _knobs = crate::knobs::serially();
     crate::knobs::clear_all();
-    for underlying in ["RELIANCE", "NIFTY"] {
+    for (underlying, door) in [
+        ("RELIANCE", "sweep-stored"),
+        ("NIFTY", "sweep-stored"),
+        ("RELIANCE", "sweep-audited-stored"),
+        ("NIFTY", "sweep-audited-stored"),
+    ] {
         let fixture = Traded::new(underlying);
         let equity = underlying == "RELIANCE";
-        let page = fixture
-            .sweep("1min", 700)
-            .map_err(|why| format!("{underlying}: {why}"))
-            .expect("a generated traded sweep completes");
+        let page = if door == "sweep-stored" {
+            fixture.sweep_stored("1min", 700)
+        } else {
+            fixture.sweep("1min", 700)
+        }
+        .map_err(|why| format!("{underlying} through {door}: {why}"))
+        .expect("a generated traded sweep completes");
         let findings = crate::section_note(&page, "FINDINGS").expect("the ranking");
         assert!(
             findings.contains("  rank "),
@@ -1572,12 +1622,12 @@ fn a_ranked_stored_sweep_of_a_share_states_corporate_actions_inside_its_findings
         assert_eq!(
             findings.contains(crate::equity_ranking_statement().trim_end()),
             equity,
-            "{underlying}: the gross label and the sentence, together:\n{page}"
+            "{underlying} through {door}: the gross label and the sentence, together:\n{page}"
         );
         assert_eq!(
             findings.contains(runner::audit::CORPORATE_ACTIONS_UNCHECKED),
             equity,
-            "{underlying}:\n{page}"
+            "{underlying} through {door}:\n{page}"
         );
         assert!(!crate::carries_refusal(&page), "{page}");
     }

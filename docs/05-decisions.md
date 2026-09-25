@@ -43102,3 +43102,13 @@ changes what an operator reads, or the exit status a script sees, says so.
    `Prepared::new` from a child over `RELIANCE`, `NIFTY,RELIANCE` and
    `NIFTY`, and AF-73 states what it asserts. AF-16 belongs to D-0694 and is
    not edited here. No behaviour changed.
+10. *`sweep-stored`'s own door.* AF-31, AF-33 and AF-38, and the doc of
+    `a_stored_sweep_of_a_share_says_its_ranking_is_gross_of_every_charge`,
+    speak of `sweep-stored`, and that test and
+    `a_ranked_stored_sweep_of_a_share_states_corporate_actions_inside_its_findings`
+    drove `sweep-audited-stored`'s door: `Traded::sweep` makes the two calls
+    `sweep_audited_stored` makes. The one test that reached
+    `sweep_stored_kernel` over a share ran extinct and ranked nothing (found
+    by a review). Both tests now assert each page from `Traded::sweep_stored`,
+    which calls `sweep_stored_kernel`, and from `Traded::sweep`. AF-38 says
+    so. No behaviour changed.
