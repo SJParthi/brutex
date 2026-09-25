@@ -8,8 +8,9 @@
 //! than the source does:
 //!
 //! - AF-16 said every stored report over one stock opens with the banner and
-//!   the note. The explicit expression report, `expression-stored`, loads a
-//!   stock's month and opens with the bare banner.
+//!   the note, and D-0694's item 3 opens by saying so of every stored report
+//!   over one instrument. The explicit expression report, `expression-stored`,
+//!   loads a stock's month and opens with the bare banner.
 //! - The list of stored doors that still keep holed sessions, in D-0694 and in
 //!   `docs/06-limits.md`, left out the strict audited range,
 //!   `audit-audited-range`, which never calls `crate::minute_gaps`.
@@ -86,9 +87,12 @@ fn limits_d_0694() -> String {
 /// `STORED_PROVENANCE` alone. It ranks nothing, which is the operator's scope
 /// for the note ("every report that ranks or audits a cash equity"), and
 /// D-0694 lists Expression V1 as unchanged. AF-16 said every stored report
-/// over one stock carries the note. This checks the row's scope, and that the
-/// report it names as the exception still opens bare, so the row fails here
-/// if that report gains the note or the row loses its exception.
+/// over one stock carries the note, and D-0694's item 3 still opens by saying
+/// it of every stored report over one instrument. This checks the row's
+/// scope, that D-0694's correction scopes item 3's opening sentence to the
+/// reports its list names, and that the report AF-16 names as the exception
+/// still opens bare, so the row fails here if that report gains the note or
+/// the row loses its exception.
 #[test]
 fn af_16_names_the_explicit_expression_report_as_one_that_opens_with_the_bare_banner() {
     let af_16 = collapse(&row("AF-16"));
@@ -110,6 +114,23 @@ fn af_16_names_the_explicit_expression_report_as_one_that_opens_with_the_bare_ba
              over an index."
         ),
         "AF-16 must name the explicit expression report as the exception: {af_16}"
+    );
+    let decision = d_0694();
+    assert!(
+        decision.contains(
+            "3. Every stored report over one instrument now opens with `STORED_PROVENANCE` \
+             and then, for a stock only, the note."
+        ),
+        "the premise: item 3 opens with the universal sentence its correction scopes"
+    );
+    assert!(
+        decision.contains(
+            "Item 3's opening sentence says the same of every stored report over one \
+             instrument, and it covers the reports its list names, which Expression V1 \
+             is not among."
+        ),
+        "D-0694's correction must scope item 3's opening sentence, which says every \
+         stored report over one instrument opens with the note"
     );
 
     let source = read("crates/cli/src/expression.rs");

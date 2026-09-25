@@ -39939,20 +39939,22 @@ edited.
    name `minute_gaps::` outside their tests to be `lib.rs` and `pool.rs`, as
    this entry says, requires the strict audited range's two sources not to
    name it, and requires both lists to name the door.
-2. *AF-16 said more than item 3 did.* Item 3 lists the stored reports that
+2. *AF-16 said more than item 3's list.* Item 3 lists the stored reports that
    open with the note, and "What is still not done" leaves Expression V1 out
-   of them. AF-16 said every stored report over one stock opens with it. The
-   explicit expression report, `expression-stored`, loads a stock's month
-   through `stored::load` and opens with the bare `STORED_PROVENANCE`: it
-   evaluates one named expression and ranks nothing, which is outside the
-   operator's scope for the note, every report that ranks or audits a cash
-   equity. AF-16 now says every stored report that ranks or audits one stock
-   opens with it, and names the explicit expression report as the one that
-   opens bare.
+   of them. AF-16 said every stored report over one stock opens with it.
+   Item 3's opening sentence says the same of every stored report over one
+   instrument, and it covers the reports its list names, which Expression V1
+   is not among. The explicit expression report, `expression-stored`, loads a
+   stock's month through `stored::load` and opens with the bare
+   `STORED_PROVENANCE`: it evaluates one named expression and ranks nothing,
+   which is outside the operator's scope for the note, every report that
+   ranks or audits a cash equity. AF-16 now says every stored report that
+   ranks or audits one stock opens with it, and names the explicit expression
+   report as the one that opens bare.
    `af_16_names_the_explicit_expression_report_as_one_that_opens_with_the_bare_banner`
-   checks the row, and checks against `crates/cli/src/expression.rs` that the
-   report still loads through `stored::load` and still opens with the bare
-   banner.
+   checks the row and this scoping of item 3, and checks against
+   `crates/cli/src/expression.rs` that the report still loads through
+   `stored::load` and still opens with the bare banner.
 
 Both tests failed on this record before these corrections, and pass after.
 

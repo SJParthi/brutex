@@ -307,7 +307,9 @@ fn af_47_and_af_48_agree_on_which_tests_a_memory_of_the_tail_block_fails() {
     says(
         af_48,
         "AF-48",
-        "which carries them as 7f617f01, 9fc9233b and f6716814: the same patches",
+        "were taken at 224b6760, 28c362c1 and da28ae95, and each \
+         is in neither `main`'s history nor this row's branch, \
+         which carries them as 7f617f01, 9fc9233b and f6716814: the same patches",
     );
     says(
         af_47,
