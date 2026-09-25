@@ -1,5 +1,5 @@
-//! Sentences D-0696's fifth and sixth corrections found false, read where
-//! they stand.
+//! Sentences D-0696's fifth, sixth and seventh corrections found false, read
+//! where they stand.
 //!
 //! Each said more than holds, so each is read here. Every document and source
 //! file a constant below names is read at compile time: a rename fails the
@@ -26,6 +26,8 @@ const INVARIANTS: &str = include_str!("../../../docs/04-invariants.md");
 const DECISIONS: &str = include_str!("../../../docs/05-decisions.md");
 const LIMITS: &str = include_str!("../../../docs/06-limits.md");
 const THIS: &str = include_str!("pool_and_escape_docs.rs");
+const AUDIT: &str = include_str!("../../runner/src/audit.rs");
+const EQUITY_TESTS: &str = include_str!("../src/equity_statement_tests.rs");
 
 /// Counts this crate spells out, from zero.
 const NUMBERS: [&str; 21] = [
@@ -673,5 +675,88 @@ fn the_pool_verb_reaches_swept_rung_only_with_a_rung_it_accepts() {
     assert!(
         bullet.contains("`EVERY_RUNG`") && bullet.contains("never reaches that refusal"),
         "the bullet says where `pool::run`'s rung comes from: {bullet}"
+    );
+}
+
+/// **No text says `pool` pass 1 lifts a section out of a report.** D-0696.
+///
+/// Pass 1 keeps each instrument's `one_rung(..).outcome`, a ledger record,
+/// and prints a table of its fields; no FINDINGS block reaches a pool page.
+/// `range-all` and `range-rung` are what print sections lifted through
+/// `validation_note`. Five texts said `range-all` and `pool` pass 1 keep
+/// lifted sections (found by a review): a reader who believed them could
+/// drop the pool opening's own statement.
+#[test]
+fn no_text_says_pool_pass_1_lifts_a_section() {
+    let run_under = body(POOL, "\nfn run_under(", "");
+    assert!(
+        run_under.contains(
+            "outcome: crate::one_rung(vendor_word, symbol, rung, from, to, support_ppm, None)\n                .outcome,"
+        ),
+        "premise: pass 1 keeps each rung's outcome alone:\n{run_under}"
+    );
+    let production = POOL.split("\n#[cfg(test)]").next().expect("the module");
+    for lift in [
+        "section_note(",
+        "validation_note(",
+        ".validation",
+        ".retention",
+    ] {
+        assert!(
+            !production.contains(lift),
+            "premise: `pool` lifts no section, and `{lift}` is in it"
+        );
+    }
+    let texts = [
+        (
+            "`equity_ranking_statement`'s doc",
+            doc_above(LIB, "\nfn equity_ranking_statement("),
+        ),
+        (
+            "the lifted-AUDIT test's doc in `runner::audit`",
+            doc_above(
+                AUDIT,
+                "\n    #[test]\n    fn every_charge_statement_line_is_indented_so_a_lifted_audit_block_keeps_it_whole(",
+            ),
+        ),
+        (
+            "the FINDINGS test's doc",
+            doc_above(
+                EQUITY_TESTS,
+                "\n#[test]\nfn a_stock_ranking_states_corporate_actions_inside_its_findings_block(",
+            ),
+        ),
+        (
+            "the limits bullet on three copies",
+            section(
+                LIMITS,
+                "- **A stock report can say it up to three times.**",
+                "\n- **",
+            ),
+        ),
+        (
+            "D-0696's first item",
+            section(
+                DECISIONS,
+                "`validation_note` lifts FINDINGS whole, so the rung notes",
+                "exit status changes.",
+            ),
+        ),
+    ];
+    for (place, text) in &texts {
+        assert!(
+            text.contains("`range-all`"),
+            "premise: {place} was read: {text}"
+        );
+        assert!(
+            !text.contains("and `pool` pass 1 keep")
+                && !text.contains("and `pool` pass 1 discard")
+                && !text.contains("and `pool` keep"),
+            "{place} says `pool` pass 1 lifts a section: {text}"
+        );
+    }
+    assert!(
+        texts[0].1.contains("`pool` pass 1 is NOT such a lift"),
+        "`equity_ranking_statement`'s doc says pass 1 is no lift"
     );
 }

@@ -298,7 +298,7 @@ fn generated_audit(cost: CostScope, ceiling: usize, min_hits: u64) -> String {
 /// right after its gross label, and the rung note keeps both; an index's
 /// ranking and an extinct one never say it.** D-0694.
 ///
-/// `range-all` and `pool` pass 1 keep only sections lifted out of a report,
+/// `range-all` and `range-rung` keep only sections lifted out of a report,
 /// so a stock's banner does not travel with its ranking. The FINDINGS label
 /// D-0681's follow-up added is what does, and the sentence has to sit inside
 /// that block to survive the lift. Checked on a ladder that halts at ceiling

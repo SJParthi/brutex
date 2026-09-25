@@ -9110,7 +9110,7 @@ by `File::unlock`. What that does not cover, stated rather than implied away:
   block, and again at the end of its AUDIT header. A ranked `sweep-stored` over
   a stock says it in the banner and in FINDINGS. Each copy serves a reader who
   sees only that part: the banner covers the whole page, extinct or not; the
-  FINDINGS copy is what `range-all` and `pool` pass 1 keep when they lift a
+  FINDINGS copy is what `range-all` and `range-rung` keep when they lift a
   ranking out of a report; and the header copy travels with a lifted AUDIT
   block. That is repetition, not contradiction, and all three are the one
   constant `runner::audit::CORPORATE_ACTIONS_UNCHECKED`.

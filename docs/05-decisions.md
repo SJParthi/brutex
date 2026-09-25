@@ -39837,7 +39837,9 @@ Where it lands, exit by exit:
   ranking, so no label.
 
 `validation_note` lifts FINDINGS whole, so the rung notes that `range-all` and
-`pool` keep when they discard a report carry the label too. Every label line
+`range-rung` print when they discard a report carry the label too (this said
+`pool`, whose pass 1 lifts no section, until the seventh correction). Every
+label line
 is indented two spaces, so no refusal scanner reads one as a refusal and no
 exit status changes.
 
@@ -43037,3 +43039,19 @@ changes what an operator reads, or the exit status a script sees, says so.
    unchanged, and it keeps no name of what it could not file, so both
    reports give counts and not names. *Behaviour change:* those lines. AF-72
    states them.
+4. *Where a lifted FINDINGS block travels.* Five texts new in this change
+   said `range-all` and `pool` pass 1 keep sections lifted out of a report:
+   `equity_ranking_statement`'s doc, the doc of `runner::audit`'s
+   `every_charge_statement_line_is_indented_so_a_lifted_audit_block_keeps_it_whole`,
+   the doc of `a_stock_ranking_states_corporate_actions_inside_its_findings_block`,
+   the `docs/06-limits.md` bullet on a stock report saying it up to three
+   times, and item 1 of this entry. Pass 1 keeps each instrument's
+   `one_rung(..).outcome` alone and prints a table of that record's fields,
+   so no FINDINGS block reaches a pool page (found by a review). `range-all`
+   and `range-rung` are what print the sections `one_rung` lifts through
+   `validation_note`. Each text now names those two, and
+   `equity_ranking_statement`'s doc says pass 1 is not such a lift. D-0694's
+   item 5 says the same of `pool`; that entry belongs to another piece of
+   this change and is not edited here. `no_text_says_pool_pass_1_lifts_a_section`
+   reads the five texts, and reads from `pool.rs` that pass 1 keeps only
+   the outcome.

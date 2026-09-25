@@ -1866,8 +1866,8 @@ mod tests {
     /// THE CHARGE STATEMENT IS ONE INDENTED BLOCK, SO A LIFTED `AUDIT`
     /// SECTION KEEPS ALL OF IT.
     ///
-    /// `range-all` and `pool` pass 1 discard the audit report and keep only
-    /// sections lifted out of it (`cli`'s `validation_note`, through
+    /// `range-all` and `range-rung` discard each rung's audit report and keep
+    /// only sections lifted out of it (`cli`'s `validation_note`, through
     /// `section_note`), and that lift ends a section at its first unindented,
     /// non-blank line. The equity statement is four paragraphs split by blank
     /// lines. One line of it written at column zero would end the lift there,
