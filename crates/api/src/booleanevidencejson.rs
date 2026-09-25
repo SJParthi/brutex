@@ -16,7 +16,7 @@ mod qualification_projection;
 pub(crate) use index_consistency_projection::policy as index_consistency_policy;
 #[cfg(test)]
 #[path = "booleanevidencejson_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 type Response = (
     StatusCode,
     [(axum::http::HeaderName, &'static str); 1],

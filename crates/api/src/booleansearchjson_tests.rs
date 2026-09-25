@@ -125,9 +125,13 @@ async fn invalid_public_search_queries_refuse_before_reading_config_or_sources()
 /// over the same qualification's statistics sources, through
 /// `booleanevidencejson::sources_note` (whose cash and index cases are
 /// tested there), so the two views of one qualification cannot disagree. The
-/// search is saved evidence this crate has no fixture for, so `detail` is
-/// held to it by its source. The overview names counts and links and no
-/// family's figure, and carries no note.
+/// search is saved evidence this crate has no fixture for, so no detail is
+/// rendered here with a stock family: `detail` is held to it by its source.
+/// The call must be a statement at the top level of `detail` with no
+/// `return Ok` before it, the rule `booleanevidencejson`'s test applies, so
+/// a detail returned before the call, or a call made on some reads only,
+/// fails here. The overview names counts and links and no family's figure,
+/// and carries no note.
 #[test]
 fn a_search_detail_states_its_qualifications_equity_note() {
     let text = include_str!("booleansearchjson.rs");
@@ -137,9 +141,10 @@ fn a_search_detail_states_its_qualifications_equity_note() {
         .map(|(body, _)| body)
         .unwrap();
     assert!(
-        detail.contains(
+        crate::booleanevidencejson::tests::on_every_page(
+            detail,
             "crate::detail::put_equity_note(\n        &mut body,\n        crate::booleanevidencejson::sources_note(source.original().statistics().sources()),\n    )?;"
         ),
-        "the rung detail carries its qualification's note"
+        "every rung detail carries its qualification's note"
     );
 }

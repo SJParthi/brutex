@@ -200,6 +200,15 @@ fn daily_and_weekly_pages_require_exact_setting_parent_pin_and_bounded_period_se
     assert!(Asked::parse(&format!("identity={ID}&period=full"), Model::Qualification).is_err());
 }
 
+/// Whether `call` is a statement at the top level of the function `body`, as
+/// rustfmt indents one, with no `return Ok` before it: then every value the
+/// function returns has passed through the call. A call under a condition,
+/// a loop or a closure is indented deeper and is not found.
+pub(crate) fn on_every_page(body: &str, call: &str) -> bool {
+    body.split_once(&format!("\n    {call}"))
+        .is_some_and(|(before, _)| !before.contains("return Ok"))
+}
+
 /// **A statistics, admission or qualification page over a stock family
 /// states the equity note; a page over indices does not.** D-0694, AF-19.
 ///
@@ -208,8 +217,13 @@ fn daily_and_weekly_pages_require_exact_setting_parent_pin_and_bounded_period_se
 /// carries `cli::research_equity_note` over those sources, the Boolean
 /// research heading's own decision, so one cash source is enough and a page
 /// of index sources gains no key. The three readers are saved evidence this
-/// crate has no fixture for, so `render_with_budget` is held to putting the
-/// note in, over each reader's own sources, by its source.
+/// crate has no fixture for, so no page of theirs is rendered here with a
+/// stock family: `render_with_budget` is held to putting the note in, over
+/// each reader's own sources, by its source. The call must be a statement at
+/// the top level of its body with no `return Ok` before it, so that every
+/// page the function returns has passed through it. A call made only when a
+/// completion was asked for is indented under its condition and fails here;
+/// the same call passed when this checked only that the line was present.
 #[test]
 fn a_page_over_a_stock_source_states_the_equity_note_and_an_index_page_does_not() {
     let family = |key: Result<brutex_core::instrument::InstrumentKey, _>| {
@@ -249,8 +263,10 @@ fn a_page_over_a_stock_source_states_the_equity_note_and_an_index_page_does_not(
             .unwrap()
     };
     assert!(
-        body("render_with_budget")
-            .contains("crate::detail::put_equity_note(&mut body, equity_note(reader))?;"),
+        on_every_page(
+            body("render_with_budget"),
+            "crate::detail::put_equity_note(&mut body, equity_note(reader))?;"
+        ),
         "every page of the three models carries the note"
     );
     let note_of = body("equity_note");

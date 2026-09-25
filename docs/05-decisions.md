@@ -39958,6 +39958,37 @@ edited.
 
 Both tests failed on this record before these corrections, and pass after.
 
+**Correction, 2026-09-26: AF-19's Boolean payloads.** A review found that
+AF-19 said five Boolean payloads carry the note while the three tests it
+named for them rendered none of them. Each test checked its helper on
+hand-built values and then only that the source of `render`,
+`render_with_budget` or the search `detail` held the call that puts the note
+in. The third review's paragraph above says so of the tests; the row did not.
+Each item corrects a statement above by adding text; nothing above is edited.
+
+1. *`/boolean-campaign.json` is rendered now.*
+   `a_campaign_expecting_a_stock_family_states_the_equity_note_and_an_index_campaign_does_not`
+   saves a waiting campaign over RELIANCE and one over NIFTY, in the bytes
+   `cli`'s campaign reader admits, and reads each with no pin and with its
+   own. The stock's page carries the note on both reads, and the index's has
+   no key. So "`api` has no fixture for a saved campaign" above no longer
+   holds of the campaign.
+2. *The other four are still held by their source.* `/boolean-statistics.json`,
+   `/boolean-admission.json`, `/boolean-qualification.json` and the
+   `/boolean-qualified-search.json` rung detail are not rendered with a stock
+   family, for the reason given above. Their two tests now also require the
+   call to be a statement at the top level of `render_with_budget` and of
+   `detail`, with no `return Ok` before it.
+3. *AF-19* says which payloads are rendered and which are held by their
+   source.
+
+One build applied three breaks together: the campaign's call made only on a
+pinned read, the evidence call made only when a completion was asked for,
+and the search detail returning before its call when the page offset is not
+zero. The campaign, evidence and search-detail tests all failed. A second
+build applied the same three breaks under those three tests as they stood
+before this correction, and all 33 tests of the three modules passed.
+
 ### D-0696 — Label every equity ranking gross in the audit header's own words, and read a stored instrument only at its own path — 2026-09-23
 
 **Why this entry exists.** Commit 12916123, cherry-picked from c8c5383c
