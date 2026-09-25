@@ -762,6 +762,20 @@ fn render(
         "store holds {} spot instrument-month(s); {} match this feed and rung",
         walk.spot, tally.offered
     );
+    // THE MONTHS THE CATALOG COULD NOT FILE, counted rather than dropped. It
+    // compares the feed and rung directories exactly, and on a
+    // case-insensitive volume a load opens a directory spelt in another case
+    // (found by a review, D-0696).
+    if walk.unknown_vendor > 0 || walk.unknown_rung > 0 {
+        let _ = writeln!(
+            out,
+            "{} month file(s) under a feed directory and {} under a rung directory are \
+             spelt as no feed or rung this engine knows, and were not offered. On a \
+             case-insensitive volume a load opens such a directory when it differs from \
+             the feed or rung only in case.",
+            walk.unknown_vendor, walk.unknown_rung
+        );
+    }
     out.push('\n');
 
     for row in rows {
@@ -1279,6 +1293,55 @@ mod tests {
             text.contains("DOES NOT RECONCILE"),
             "the shortfall is announced, not swallowed: {text}"
         );
+    }
+
+    /// **The report counts the month files the catalog could not file under a
+    /// feed or a rung.** D-0696.
+    ///
+    /// `store::catalog` compares both directories exactly, so a month under
+    /// `bars/Zerodha/...` or a `60MIN` directory was offered to no sweep and
+    /// named nowhere, while on a case-insensitive volume a load of `zerodha`
+    /// opens `Zerodha` (found by a review). A walk that filed every month
+    /// prints no such line.
+    #[test]
+    fn the_report_counts_the_months_the_catalog_could_not_file() {
+        let tally = Tally::default();
+        let census = store::catalog::Census {
+            unknown_vendor: 2,
+            unknown_rung: 3,
+            ..store::catalog::Census::default()
+        };
+        let text = render("groww", "1min", 100, "deadbeef", "", &census, &tally, &[]);
+        assert!(
+            text.contains(
+                "\n2 month file(s) under a feed directory and 3 under a rung directory are \
+                 spelt as no feed or rung this engine knows, and were not offered. On a \
+                 case-insensitive volume a load opens such a directory when it differs from \
+                 the feed or rung only in case.\n"
+            ),
+            "{text}"
+        );
+        assert!(!crate::carries_refusal(&text), "{text}");
+        for (unknown_vendor, unknown_rung) in [(1, 0), (0, 1)] {
+            let census = store::catalog::Census {
+                unknown_vendor,
+                unknown_rung,
+                ..store::catalog::Census::default()
+            };
+            let text = render("groww", "1min", 100, "deadbeef", "", &census, &tally, &[]);
+            assert!(text.contains(" were not offered."), "{text}");
+        }
+        let quiet = render(
+            "groww",
+            "1min",
+            100,
+            "deadbeef",
+            "",
+            &store::catalog::Census::default(),
+            &tally,
+            &[],
+        );
+        assert!(!quiet.contains("were not offered"), "{quiet}");
     }
 
     /// A ceiling breach is reported as a floor on depth, not as an answer.

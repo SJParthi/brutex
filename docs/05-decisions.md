@@ -43020,3 +43020,20 @@ changes what an operator reads, or the exit status a script sees, says so.
    before it loads the execution minutes, and the minute-gap sentence is left
    to a month whose every session was withheld. *Behaviour change:* that
    refusal's words. AF-71 states it.
+3. *Months the catalog cannot file.* `store::catalog` files a month only
+   under a feed and a rung directory spelt exactly as this engine spells
+   them, and counts every other month file store-wide, in `unknown_vendor`
+   and `unknown_rung`, without its name. `pool` and `sweep-all` read neither
+   count, so a month under `bars/Zerodha/...` or a `60MIN` directory was
+   dropped from both reports with no word, and the pool's empty-surface line
+   said the store held no month at the path a load reads, although on a
+   case-insensitive volume a load of `zerodha` opens `Zerodha` (found by a
+   review, which measured the operator's store volume as case-insensitive).
+   The pool's head now gives both counts in a NOT CATALOGUED block and says
+   what a case-insensitive volume does with such a directory, its
+   empty-surface line says what the catalog found "spelt exactly", and
+   `sweep-all` prints the two counts under its census line. A store whose
+   every month was filed prints neither. The catalog is `store`'s and is
+   unchanged, and it keeps no name of what it could not file, so both
+   reports give counts and not names. *Behaviour change:* those lines. AF-72
+   states them.

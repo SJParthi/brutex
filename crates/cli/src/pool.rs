@@ -366,6 +366,11 @@ fn run_under(
 /// page left every test green, and the page dropped a misfiled holding with
 /// no word. Split out for the reason `batch::sweep_under` is, so a test
 /// drives the page's own head on a scratch store.
+///
+/// The catalog files a month only under a feed and a rung directory spelt
+/// exactly as this engine spells them, so the empty-surface line says what
+/// it found at that spelling, and [`not_catalogued`] counts the month files
+/// under any other (D-0696).
 fn head_under(
     root: &std::path::Path,
     vendor_word: &str,
@@ -378,19 +383,48 @@ fn head_under(
     let Surface {
         symbols: surface,
         elsewhere,
+        unrecognised,
     } = surface_under(root, vendor, rung)?;
     let mut out = opening(vendor_word, rung, from, to, support_ppm, &surface);
     not_on_the_surface(&mut out, &elsewhere);
+    not_catalogued(&mut out, unrecognised);
     if surface.is_empty() {
         let _ = writeln!(
             out,
-            "  0 instruments on the surface for {vendor_word} at {rung}. The store holds \
+            "  0 instruments on the surface for {vendor_word} at {rung}. The catalog finds \
              no month of any swept index or F&O cash equity at the path its own load \
-             reads on this feed and rung, so there is nothing to screen and nothing to \
-             pool. Nothing was read."
+             reads on this feed and rung, spelt exactly, so there is nothing to screen \
+             and nothing to pool. Nothing was read."
         );
     }
     Ok((out, surface))
+}
+
+/// The month files the catalog could not file because their feed or rung
+/// directory is spelt as no feed or rung this engine knows, under the
+/// opening. Nothing when there are none. D-0696.
+///
+/// `store::catalog` compares both directories exactly and only counts a
+/// file it cannot place, so `bars/Zerodha/...` and a `60MIN` rung directory
+/// were dropped from the page with no word. On a case-insensitive volume a
+/// load of `zerodha` opens `Zerodha`, so the page said the store held no
+/// month the load reads while that load read one (found by a review, which
+/// measured the operator's store volume as case-insensitive). The census
+/// counts such files store-wide and does not keep their names, so the block
+/// gives the two counts, and says what a case-insensitive volume does with
+/// them.
+fn not_catalogued(out: &mut String, (feeds, rungs): (u64, u64)) {
+    if feeds == 0 && rungs == 0 {
+        return;
+    }
+    let _ = writeln!(
+        out,
+        "\n  NOT CATALOGUED: the store holds {feeds} month file(s) under a feed directory \
+         and {rungs} under a rung directory\n  whose name is no feed or rung this engine \
+         knows, spelt exactly. None was screened or pooled.\n  On a case-insensitive \
+         volume a directory spelt as a feed or rung in another case is the one a load\n  \
+         opens, so a month counted here can be one this page reads or says is not held.\n"
+    );
 }
 
 /// `usize` as the `u64` a telemetry field takes, saturating rather than
@@ -502,6 +536,7 @@ fn surface_under(
     Ok(Surface {
         symbols: symbols.into_iter().collect(),
         elsewhere: elsewhere.into_values().collect(),
+        unrecognised: (holdings.census.unknown_vendor, holdings.census.unknown_rung),
     })
 }
 
@@ -515,6 +550,10 @@ struct Surface {
     /// a swept instrument at a path that instrument's load does not read,
     /// sorted by directory.
     elsewhere: Vec<String>,
+    /// The store's month files under a feed directory, and under a rung
+    /// directory, that is spelt as no feed or rung this engine knows: the
+    /// catalog census's `unknown_vendor` and `unknown_rung`, store-wide.
+    unrecognised: (u64, u64),
 }
 
 /// The holdings the surface names and does not read, under the opening they
@@ -1522,6 +1561,72 @@ mod tests {
         assert_eq!(surface, vec!["RELIANCE".to_owned()]);
         assert_eq!(page, opening(&["RELIANCE"]));
         assert!(!crate::carries_refusal(&page), "{page}");
+    }
+
+    /// **The pool page counts the month files its catalog cannot file under a
+    /// feed or a rung, and its empty-surface line says what it found at the
+    /// exact spelling.** D-0696.
+    ///
+    /// `store::catalog` compares the feed and rung directories exactly, so a
+    /// month under `bars/Zerodha/...` or a `60MIN` directory was neither on the
+    /// surface nor named, and the page said the store held no month at the
+    /// path a load reads, although on a case-insensitive volume a load of
+    /// `zerodha` opens `Zerodha` (found by a review). Here one month sits
+    /// under `Zerodha` and one under another feed's `60MIN`. No two names
+    /// differ only in case under one parent, so the page is the same on
+    /// either kind of filesystem.
+    #[test]
+    fn the_pool_page_counts_the_months_its_catalog_cannot_file() {
+        let root =
+            std::env::temp_dir().join(format!("brutex-pool-uncatalogued-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for rel in [
+            "Zerodha/NSE/CASH/RELIANCE/60min/2026-07.bin",
+            "dhan/NSE/INDEX/NIFTY/60MIN/2026-07.bin",
+        ] {
+            let at = root.join("bars").join(rel);
+            std::fs::create_dir_all(at.parent().expect("a parent")).expect("dirs");
+            std::fs::write(&at, b"").expect("a file the catalog counts");
+        }
+        let census = store::catalog::walk(&root).expect("walked").census;
+        let head = super::head_under(&root, "zerodha", "60min", (2026, 7), (2026, 7), None);
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(
+            (census.unknown_vendor, census.unknown_rung, census.spot),
+            (1, 1, 0),
+            "premise: the catalog filed neither month"
+        );
+        let (page, surface) = head.expect("the head renders");
+        assert!(surface.is_empty(), "{surface:?}");
+        let mut block = String::new();
+        super::not_catalogued(&mut block, (1, 1));
+        assert!(
+            block.starts_with(
+                "\n  NOT CATALOGUED: the store holds 1 month file(s) under a feed directory \
+                 and 1 under a rung directory\n"
+            ) && block.contains("On a case-insensitive volume"),
+            "{block}"
+        );
+        assert_eq!(
+            page,
+            format!(
+                "{}{block}  0 instruments on the surface for zerodha at 60min. The catalog \
+                 finds no month of any swept index or F&O cash equity at the path its own \
+                 load reads on this feed and rung, spelt exactly, so there is nothing to \
+                 screen and nothing to pool. Nothing was read.\n",
+                super::opening("zerodha", "60min", (2026, 7), (2026, 7), None, &[])
+            ),
+            "the opening, the count, then the empty-surface line"
+        );
+        assert!(!crate::carries_refusal(&page), "{page}");
+        let mut quiet = String::new();
+        super::not_catalogued(&mut quiet, (0, 0));
+        assert!(quiet.is_empty(), "no block when every month was filed");
+        for counts in [(1, 0), (0, 1)] {
+            let mut one = String::new();
+            super::not_catalogued(&mut one, counts);
+            assert!(one.contains("NOT CATALOGUED"), "{counts:?}: {one}");
+        }
     }
 
     /// **The page `pool` prints IS its head, and every later line is
