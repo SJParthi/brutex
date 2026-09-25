@@ -3399,6 +3399,22 @@ fn census_now_reading(
     site: &Site,
     read: impl FnOnce(&std::path::Path) -> Vec<census::VendorCensus>,
 ) -> (CensusStamps, CensusNow) {
+    census_now_stamping(site, manifest_stamps, read)
+}
+
+/// [`census_now_reading`], with the stamping passed in as well.
+///
+/// Production passes [`manifest_stamps`] and nothing else. The parameter is
+/// here so a test can hand the request stamps a store root that changes while
+/// they are taken makes: five manifests stamped missing while the root was
+/// away, under a root seen as a directory because it was back for its own
+/// check. No test can make a real root do that on demand; a review met it by
+/// renaming a root aside and back in a tight loop. D-0695.
+fn census_now_stamping(
+    site: &Site,
+    mut stamp: impl FnMut(&std::path::Path) -> CensusStamps,
+    read: impl FnOnce(&std::path::Path) -> Vec<census::VendorCensus>,
+) -> (CensusStamps, CensusNow) {
     // CACHED ON THE MANIFESTS' OWN STAMPS, because this is FIVE per-request
     // paths and it reads the whole store on every one of them.
     //
@@ -3430,7 +3446,7 @@ fn census_now_reading(
     // The lock is released BEFORE `read_all`, so a rebuild never serialises the
     // other requests -- the mistake that would turn a cache into a global
     // bottleneck, and the reason `calendar_of` scopes its guard the same way.
-    let stamps = manifest_stamps(&site.store_root);
+    let stamps = stamp(&site.store_root);
     {
         // READ THROUGH A POISONED LOCK rather than around it: a panic while
         // holding it means another request died, the map is still readable, and
@@ -3467,6 +3483,18 @@ fn census_now_reading(
     // EMPTY FEED, to this request either. It is served unreadable, naming why.
     // See `refuse_contradicted_absences`. D-0695.
     refuse_contradicted_absences(&stamps, &mut censuses);
+    // AND AN ABSENCE STILL STANDING IS STAMPED AGAIN, AFTER THE READ, because
+    // the stamps before it can tear: a root away for the five manifest `stat`
+    // calls and back for its own check is an empty store's key. An absence
+    // those stamps vouch for is served only if these could have read it too.
+    // Five or six more `stat` calls, and only on a miss that read an absence.
+    // See `refuse_contradicted_absences`. D-0695.
+    if censuses
+        .iter()
+        .any(|row| matches!(row.state, census::Census::Absent))
+    {
+        refuse_contradicted_absences(&stamp(&site.store_root), &mut censuses);
+    }
     let censuses = std::sync::Arc::new(censuses);
     let entries = std::sync::Arc::new(census::held_entries(&censuses));
     // AND ONLY A CENSUS THE STAMPS COULD HAVE READ IS KEPT UNDER THEM. A read
@@ -3687,9 +3715,9 @@ fn stamp_could_read(stamp: ManifestStamp, root_is_dir: bool, state: &census::Cen
 /// Why a row [`refuse_contradicted_absences`] changed is unreadable, in the
 /// words its note and every refusal that quotes the note carry.
 const CONTRADICTED_ABSENCE: &str = "this read found no manifest here, and the stamps \
-     taken of the store just before it contradict that, so it cannot say what this \
-     feed holds and is not answered as a feed that holds nothing. The next request \
-     reads again";
+     taken of the store just before or just after it contradict that, so it cannot \
+     say what this feed holds and is not answered as a feed that holds nothing. The \
+     next request reads again";
 
 /// Each row of `censuses` read absent that its own stamp could not have read,
 /// served unreadable instead, as [`CONTRADICTED_ABSENCE`] says.
@@ -3718,6 +3746,35 @@ const CONTRADICTED_ABSENCE: &str = "this read found no manifest here, and the st
 /// syscall. A read no stamp contradicts is unchanged, so [`read_as_stamped`]
 /// keeps what it kept before, and a changed row is never kept, because
 /// [`stamp_could_read`] vouches for no [`census::Fault::Contradicted`].
+///
+/// # And again with stamps taken after the read, since D-0695's ninth repair
+///
+/// The stamps taken before the read can tear. [`manifest_stamps`] asks the
+/// root only when no manifest answered with a time, so a root away for the
+/// five manifest `stat` calls and back for its own check stamps five missing
+/// manifests under a root that is a directory: an empty store's key, over a
+/// store that holds a manifest. Away again once `read_all`'s own check has
+/// passed, every row reads absent, and those stamps could have read each one,
+/// so this changed nothing: the request was answered an empty store, and the
+/// read was kept under the torn key. A review met it with a root renamed aside
+/// and back in a tight loop.
+///
+/// So [`census_now_stamping`] stamps again after the read when any row still
+/// reads absent, and hands those stamps here too. An absence is served only
+/// where both stampings found no manifest, below a root both saw as a
+/// directory. With the root back, the stamps taken again find the manifest
+/// the read missed, and with it away they see no directory, so the row is
+/// served unreadable and nothing is kept. It asks each row its own stamp, so a manifest rewritten
+/// for another feed in between changes no absence, while a first manifest
+/// installed for this feed in between is served unreadable to that request,
+/// which cannot tell it from a root that came back.
+///
+/// What is left: stamps taken again that tear the same way vouch for the
+/// absence too. A root that is away for both stampings' manifest `stat` calls
+/// and for the read, and back for both root checks and for `read_all`'s own,
+/// is still answered an empty store, and that read is kept under the torn key
+/// and served, without reading, to a later request whose stamps tear the same
+/// way, until a request whose stamps do not. `docs/06-limits.md` states it.
 fn refuse_contradicted_absences(stamps: &CensusStamps, censuses: &mut [census::VendorCensus]) {
     for row in censuses {
         let vouched = stamps

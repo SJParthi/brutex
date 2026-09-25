@@ -38,7 +38,10 @@
 //! the rule's own table pin what the request that made such a read is served:
 //! a row read absent that its stamp contradicts is served unreadable, and no
 //! other row is changed, a first manifest installed inside the read among
-//! them. The next three move a bar
+//! them. The three after those pin the stamps taken again after a read with an
+//! absence: stamps a changing root tore before the read are met by them, a
+//! miss pays for them only when a row reads absent, and each row is decided by
+//! its own stamp. The next three move a bar
 //! directory or file aside instead, and pin the same rule for the calendar
 //! cache behind the census: a calendar derived without a bar file its census
 //! holds is refused to the request that derived it, and derived again on the
@@ -2331,6 +2334,275 @@ fn a_first_manifest_installed_inside_the_read_is_served_held_and_read_again() {
     assert_eq!(fixture.reads(), base + 1, "and kept");
 }
 
+/// The stamps a store root that changes while they are taken makes:
+/// `manifest_stamps`' five manifest `stat` calls with the root moved aside,
+/// and its root check with the root back.
+fn torn(root: &Path) -> CensusStamps {
+    let manifests = {
+        let _aside = Aside::new(root);
+        manifest_stamps(root).manifests
+    };
+    CensusStamps {
+        manifests,
+        root_is_dir: fs::metadata(root).is_ok_and(|meta| meta.is_dir()),
+    }
+}
+
+/// What `read_all` reads when the root passes its own check and is gone for
+/// the manifest reads: its two steps, with the root moved aside between them.
+fn read_past_the_check(root: &Path) -> Vec<census::VendorCensus> {
+    assert!(
+        fs::metadata(root).is_ok_and(|meta| meta.is_dir()),
+        "read_all's own check passes"
+    );
+    let _aside = Aside::new(root);
+    Vendor::ALL
+        .into_iter()
+        .map(|vendor| census::read_vendor(root, vendor))
+        .collect()
+}
+
+/// Whether the census cache holds anything.
+fn kept_census(fixture: &Fixture) -> Option<CensusStamps> {
+    fixture
+        .site
+        .census
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .map(|(at, _, _)| at.clone())
+}
+
+/// Where the store root is when a miss that read an absence stamps again.
+#[derive(Clone, Copy, Debug)]
+enum StampedAgain {
+    /// Back, whole.
+    Back,
+    /// Moved aside again.
+    Away,
+    /// Torn the same way as the stamps before the read.
+    TornAgain,
+}
+
+/// AN ABSENCE UNDER STAMPS A CHANGING ROOT TORE IS STAMPED AGAIN AFTER THE
+/// READ, AND SERVED ABSENT ONLY WHEN THOSE STAMPS COULD HAVE READ IT TOO.
+/// D-0695.
+///
+/// `manifest_stamps` asks the root only when no manifest answered with a
+/// time. A root away for the five manifest `stat` calls and back for its own
+/// check gives five missing manifests under a root that is a directory: the
+/// key of an empty store, over a store that holds NIFTY on Dhan. Away again
+/// once `read_all`'s own check has passed, every row reads absent, and those
+/// stamps could have read every one of them, so the eighth repair's rule
+/// changed nothing: the request was answered an empty store, and the read was
+/// kept under the torn key. A review met it with a root renamed aside and back
+/// in a tight loop.
+///
+/// Each row read absent is now stamped again after the read. With the root
+/// back, Dhan's stamp finds its manifest, and Dhan's row is served unreadable
+/// as `CONTRADICTED_ABSENCE` says. With the root away again, no stamp sees a
+/// directory, and every row is. Either way nothing is kept, and the next
+/// request serves the healthy store.
+///
+/// # What is left, pinned
+///
+/// Stamps taken again that tear the same way vouch for every absence too. So
+/// that request is still answered an empty store, and its read is kept under
+/// the torn key, and a later request whose stamps tear the same way is served
+/// it without reading. A request whose stamps do not tear reads again.
+/// `docs/06-limits.md` states it.
+#[tokio::test]
+async fn an_absence_under_stamps_a_changing_root_tore_is_stamped_again_after_the_read() {
+    use census::{Census, Fault};
+    let empty_store = CensusStamps {
+        manifests: vec![ManifestStamp::Missing; Vendor::ALL.len()],
+        root_is_dir: true,
+    };
+    for again in [
+        StampedAgain::Back,
+        StampedAgain::Away,
+        StampedAgain::TornAgain,
+    ] {
+        let fixture = nifty_store(&format!("census-request-torn-{again:?}"));
+        let mut stampings = 0;
+        let (stamps, (served, _)) = census_now_stamping(
+            &fixture.site,
+            |root| {
+                stampings += 1;
+                match (stampings, again) {
+                    (1, _) | (_, StampedAgain::TornAgain) => torn(root),
+                    (_, StampedAgain::Back) => manifest_stamps(root),
+                    (_, StampedAgain::Away) => {
+                        let _aside = Aside::new(root);
+                        manifest_stamps(root)
+                    }
+                }
+            },
+            read_past_the_check,
+        );
+        assert_eq!(
+            stamps, empty_store,
+            "{again:?}: the premise, torn stamps that are an empty store's key"
+        );
+        let contradicted = |row: &census::VendorCensus| {
+            matches!(
+                row.state,
+                Census::Unreadable {
+                    ref reason,
+                    fault: Fault::Contradicted,
+                } if reason == CONTRADICTED_ABSENCE
+            )
+        };
+        match again {
+            StampedAgain::Back => {
+                assert_eq!(
+                    named(&served),
+                    ["absent", "unreadable", "absent", "absent", "absent"],
+                    "{again:?}: Dhan's manifest is found again"
+                );
+                assert!(
+                    served
+                        .iter()
+                        .all(|row| contradicted(row) == (row.vendor == Vendor::Dhan)),
+                    "{again:?}: Dhan's row, and only Dhan's, is contradicted"
+                );
+            }
+            StampedAgain::Away => assert!(
+                served.iter().all(contradicted),
+                "{again:?}: no stamp sees a directory, so no absence stands: {:?}",
+                named(&served)
+            ),
+            StampedAgain::TornAgain => {
+                assert_eq!(
+                    named(&served),
+                    vec!["absent"; 5],
+                    "{again:?}: what is left, an empty store served"
+                );
+                assert_eq!(
+                    kept_census(&fixture),
+                    Some(empty_store.clone()),
+                    "{again:?}: and kept under the torn key"
+                );
+                assert_eq!(stampings, 2, "{again:?}: stamped again after the read");
+                let mut read = false;
+                let (_, (hit, _)) = census_now_stamping(&fixture.site, torn, |root| {
+                    read = true;
+                    census::read_all(root)
+                });
+                assert!(!read, "{again:?}: stamps that tear the same way hit it");
+                assert_eq!(named(&hit), vec!["absent"; 5], "{again:?}: served");
+                serves_the_healthy_store(&fixture, "untorn stamps").await;
+                continue;
+            }
+        }
+        assert_eq!(kept_census(&fixture), None, "{again:?}: nothing is kept");
+        assert_eq!(stampings, 2, "{again:?}: stamped again after the read");
+        serves_the_healthy_store(&fixture, &format!("{again:?}: after the flap")).await;
+    }
+}
+
+/// A MISS IS STAMPED AGAIN ONLY WHEN A ROW READ ABSENT, AND A HIT NEVER.
+/// D-0695.
+///
+/// The second stamping is `manifest_stamps` again: five `stat` calls, and a
+/// sixth when none of them found a manifest with a time. Only a row read
+/// absent is served on its word, so a read with none pays nothing more. Here
+/// a store with every feed's manifest is stamped once on its miss, and a
+/// store with four feeds absent twice. Each hit after is stamped once.
+#[test]
+fn a_miss_is_stamped_again_only_when_a_row_reads_absent() {
+    let every = Fixture::new("census-request-stamped-once");
+    for (minute, vendor) in (1..).zip(Vendor::ALL) {
+        every.publish_for(vendor, &[], minute);
+    }
+    let nifty = nifty_store("census-request-stamped-twice");
+    for (fixture, miss) in [(&every, 1), (&nifty, 2)] {
+        cold(fixture);
+        for (request, want) in [("miss", miss), ("hit", 1)] {
+            let mut stampings = 0;
+            let _served = census_now_stamping(
+                &fixture.site,
+                |root| {
+                    stampings += 1;
+                    manifest_stamps(root)
+                },
+                census::read_all,
+            );
+            assert_eq!(
+                stampings,
+                want,
+                "{request} over {:?}",
+                fixture.fresh_states()
+            );
+        }
+    }
+}
+
+/// WHAT CHANGES BETWEEN THE READ AND ITS SECOND STAMPING DECIDES ONLY ITS OWN
+/// ROW. D-0695.
+///
+/// A row read absent is served absent only when its manifest is missing in
+/// the stamps taken again too. Groww's first manifest installed after the
+/// read and before those stamps is therefore served unreadable to that one
+/// request, which cannot tell it from a root that came back, and read on the
+/// next. Dhan's manifest rewritten in the same place changes no absent row's
+/// stamp: every feed keeps what it read, and the read is kept under the
+/// stamps taken before it, which the next request's stamps no longer match,
+/// so it reads again.
+#[test]
+fn what_changes_between_the_read_and_its_second_stamping_decides_only_its_own_row() {
+    // Groww's first manifest.
+    let fixture = nifty_store("census-request-installed-after-the-read");
+    let mut stampings = 0;
+    let (_, (served, _)) = census_now_stamping(
+        &fixture.site,
+        |root| {
+            stampings += 1;
+            if stampings == 2 {
+                fixture.publish_for(Vendor::Groww, &[(Segment::Cash, "ITC")], 0);
+            }
+            manifest_stamps(root)
+        },
+        census::read_all,
+    );
+    assert_eq!(
+        named(&served),
+        ["unreadable", "held", "absent", "absent", "absent"],
+        "Groww's absence is refused for this request"
+    );
+    assert_eq!(kept_census(&fixture), None, "and not kept");
+    assert_eq!(
+        fixture.states(),
+        ["held", "held", "absent", "absent", "absent"],
+        "the next request reads Groww's manifest"
+    );
+
+    // Dhan's manifest rewritten.
+    let fixture = nifty_store("census-request-rewritten-after-the-read");
+    let mut stampings = 0;
+    let (before, (served, _)) = census_now_stamping(
+        &fixture.site,
+        |root| {
+            stampings += 1;
+            if stampings == 2 {
+                fixture.publish(&[(Segment::Index, "NIFTY")], 1);
+            }
+            manifest_stamps(root)
+        },
+        census::read_all,
+    );
+    let held = ["absent", "held", "absent", "absent", "absent"];
+    assert_eq!(named(&served), held, "every row as read");
+    assert_eq!(
+        kept_census(&fixture),
+        Some(before),
+        "kept under the stamps taken before the read"
+    );
+    let base = fixture.reads();
+    assert_eq!(fixture.states(), held, "the next request");
+    assert_eq!(fixture.reads(), base + 1, "reads the rewrite");
+}
+
 /// A CALENDAR DERIVED WHILE A HELD BAR FILE WOULD NOT OPEN IS REFUSED TO ITS
 /// REQUEST AND NOT KEPT, on both branches of `/calendar.json`. D-0695.
 ///
@@ -2798,6 +3070,14 @@ fn every_caller_keeps_its_calendar_under_the_asked_feeds_own_modified_time() {
 /// the first by
 /// `each_feed_is_handed_its_own_modified_time_only_for_a_row_its_stamp_could_read`,
 /// the second by `a_name_the_census_does_not_hold_keeps_no_calendar`.
+///
+/// # With the root still away when the absences are stamped again
+///
+/// Since D-0695's ninth repair a read with a row absent is stamped again
+/// after it. With `until_the_route_returns` the root is still away then, so
+/// those stamps see no directory and no absence stands: the peer vote names
+/// every feed unreadable, Zerodha's own among them. With the root back as the
+/// read ends, only Dhan's stamp contradicts its row, as before.
 fn race_the_root(name: &str, until_the_route_returns: bool) {
     for caller in Caller::ALL {
         let fixture = nifty_store(&format!("{name}-{caller:?}"));
@@ -2828,8 +3108,14 @@ fn race_the_root(name: &str, until_the_route_returns: bool) {
                 "{caller:?}: the call that raced the root refuses on Dhan's census: {raced}"
             ),
             Caller::Peer => assert_eq!(
-                raced, r#"calendar None, from [], unreadable ["dhan"]"#,
-                "{caller:?}: the vote that raced the root names Dhan"
+                raced,
+                if until_the_route_returns {
+                    r#"calendar None, from [], unreadable ["groww", "dhan", "truedata", "gdfl", "zerodha"]"#
+                } else {
+                    r#"calendar None, from [], unreadable ["dhan"]"#
+                },
+                "{caller:?}: the vote that raced the root names Dhan, and every feed \
+                 while the root is still away"
             ),
             Caller::Observation => assert_eq!(raced, "observed None", "{caller:?}"),
         }

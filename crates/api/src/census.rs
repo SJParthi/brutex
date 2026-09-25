@@ -107,7 +107,8 @@ pub enum Census {
     ///
     /// Also the configured store root, refused for every vendor
     /// ([`Fault::Root`]), and, since D-0695, a row read absent that the stamps
-    /// taken just before the read contradict ([`Fault::Contradicted`]).
+    /// taken just before or just after the read contradict
+    /// ([`Fault::Contradicted`]).
     Unreadable {
         /// What refused it, in the refusal's own words.
         reason: String,
@@ -140,9 +141,10 @@ pub enum Fault {
     /// bytes that do not decode as a manifest.
     Refused,
     /// This request's read found no manifest, and the stamps
-    /// `server::census_now_reading` took of the store just before it could not
-    /// have read that. Put there by `server::census_now_reading` in place of
-    /// [`Census::Absent`], never by this module. D-0695.
+    /// `server::census_now_reading` took of the store just before it, or again
+    /// just after it, could not have read that. Put there by
+    /// `server::census_now_reading` in place of [`Census::Absent`], never by
+    /// this module. D-0695.
     Contradicted,
 }
 
