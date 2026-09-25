@@ -249,6 +249,9 @@ fn run(
 /// it ends by returning this function's result as it is, and builds no page
 /// of its own by any phrasing that test lists.
 ///
+/// When every instrument on the surface refuses in pass 1, the page is not
+/// returned: [`at_least_one_screened`] refuses the verb instead (D-0696).
+///
 /// **The root is supplied for the head, the union and pass 2, not pass 1.**
 /// Pass 1 screens each instrument through `crate::one_rung`, exactly as
 /// `range-rung` does, and that reads the store root from the environment. An
@@ -300,6 +303,7 @@ fn run_under(
             .with("screened", count(screened_ok))
             .with("refused", count(screened.len().saturating_sub(screened_ok))),
     );
+    at_least_one_screened(&screened)?;
     render_per_symbol(&mut out, &screened);
 
     // ── PASS 2: the union of every top combination, on every instrument ──
@@ -393,6 +397,39 @@ fn head_under(
 /// wrapping on a platform where that could differ.
 fn count(n: usize) -> u64 {
     u64::try_from(n).unwrap_or(u64::MAX)
+}
+
+/// Nothing, when pass 1 screened at least one instrument or had none to
+/// screen; the pool's refusal when every instrument on the surface refused.
+/// D-0696.
+///
+/// `range_over` refuses when every rung refuses, for the reason its comment
+/// gives: the stored banner says real bars were read, and printed over
+/// nothing with a zero exit it is the failure wearing a success's clothes
+/// `CLAUDE.md` §4 bans. The pool printed that banner, a `REFUSED` row for each
+/// instrument and "nothing to pool", and exited OK, because an indented
+/// `REFUSED` row is not a refusal to `carries_refusal` (found by a review).
+/// So when every instrument refused, the verb refuses, with the count and the
+/// first instrument's reason, and prints no page.
+fn at_least_one_screened(screened: &[Screened]) -> Result<(), String> {
+    let refused: Option<Vec<(&str, &str)>> = screened
+        .iter()
+        .map(|s| {
+            s.outcome
+                .as_ref()
+                .err()
+                .map(|why| (s.symbol.as_str(), why.as_str()))
+        })
+        .collect();
+    match refused.as_deref() {
+        Some([(symbol, why), ..]) => Err(format!(
+            "every one of the {} instrument(s) on the surface refused in pass 1, so \
+             nothing was screened and nothing can be pooled. No completed result could \
+             be confirmed.\n  first refusal: {symbol}: {why}",
+            screened.len()
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// Every symbol the store holds on this feed and rung that is on the engine
@@ -1617,6 +1654,96 @@ mod tests {
             "premise: the scan read the page's appends and returns \
              ({writes} writes, {renders} renders, {returns} returns)"
         );
+        // A POOL WHOSE EVERY INSTRUMENT REFUSED IS REFUSED, before pass 1's
+        // table is rendered (D-0696). The driven test sees it only in a
+        // stamped build, so its place is read here in every build.
+        assert_eq!(
+            after
+                .matches(
+                    "\n    at_least_one_screened(&screened)?;\n    \
+                     render_per_symbol(&mut out, &screened);\n"
+                )
+                .count(),
+            1,
+            "pass 1's refusals are checked once, right before its table"
+        );
+    }
+
+    /// **A pool whose every instrument refused in pass 1 is refused.** D-0696.
+    ///
+    /// `range_over` refuses when every rung refuses. The pool printed its
+    /// banner, a `REFUSED` row per instrument and "nothing to pool", and exited
+    /// OK (found by a review). One instrument screened is enough for a page,
+    /// and an empty surface is the head's own case, not this refusal.
+    #[test]
+    fn a_pool_whose_every_instrument_refused_is_refused() {
+        let refused = |symbol: &str, why: &str| super::Screened {
+            symbol: symbol.to_owned(),
+            outcome: Err(why.to_owned()),
+        };
+        let screened = |symbol: &str| super::Screened {
+            symbol: symbol.to_owned(),
+            outcome: Ok(crate::results::Record::from_bytes(
+                &[0; crate::results::STRIDE_BYTES],
+            )),
+        };
+        let why = super::at_least_one_screened(&[
+            refused("NIFTY", "its month could not be read"),
+            refused("RELIANCE", "no bar"),
+        ])
+        .expect_err("every instrument refused");
+        assert_eq!(
+            why,
+            "every one of the 2 instrument(s) on the surface refused in pass 1, so nothing \
+             was screened and nothing can be pooled. No completed result could be \
+             confirmed.\n  first refusal: NIFTY: its month could not be read"
+        );
+        assert!(crate::carries_refusal(&format!("refused: {why}\n")));
+        for one_screened in [
+            vec![refused("NIFTY", "no bar"), screened("RELIANCE")],
+            vec![screened("NIFTY"), refused("RELIANCE", "no bar")],
+            vec![screened("NIFTY")],
+            Vec::new(),
+        ] {
+            assert_eq!(super::at_least_one_screened(&one_screened), Ok(()));
+        }
+    }
+
+    /// **`pool` refuses a month off the calendar and a span that runs
+    /// backwards, before it reads the store.** D-0696.
+    ///
+    /// Month 13 parsed as a `u8` and nothing checked the span, so each
+    /// instrument refused them on its own, and a store with no instrument on
+    /// the surface printed its page over them and exited OK (found by a
+    /// review). The arm refuses both before `pool::pool` runs.
+    #[test]
+    fn the_pool_arm_refuses_a_month_off_the_calendar_and_a_backwards_span() {
+        for (from, to, why) in [
+            (("2026", "13"), ("2026", "13"), "MONTH must be 1..=12"),
+            (("2026", "0"), ("2026", "7"), "MONTH must be 1..=12"),
+            (("2026", "7"), ("2027", "13"), "MONTH must be 1..=12"),
+            (
+                ("2026", "7"),
+                ("2026", "6"),
+                "the range runs backwards: 2026-07 is after 2026-06. Give FROM first and \
+                 TO second. Nothing was read.",
+            ),
+            (
+                ("2027", "1"),
+                ("2026", "12"),
+                "the range runs backwards: 2027-01 is after 2026-12. Give FROM first and \
+                 TO second. Nothing was read.",
+            ),
+        ] {
+            let mut page = String::new();
+            let status = crate::pool_arm(&mut page, "zerodha", "60min", from, to, "auto");
+            assert_eq!(status, crate::MISUSED, "{page}");
+            assert!(
+                page.starts_with(&format!("refused: {why}\n")),
+                "{from:?}..{to:?}: {page}"
+            );
+            assert!(!page.contains(crate::STORED_PROVENANCE), "{page}");
+        }
     }
 
     /// How often `after` -- `run_under`'s body past the head -- names the
@@ -1793,7 +1920,7 @@ mod tests {
         let arm = body_of(include_str!("lib.rs"), "\nfn pool_arm(");
         assert!(
             arm.contains(concat!(
-                "        (Ok(fy), Ok(fm), Ok(ty), Ok(tm), Ok(h)) => {\n",
+                "        (Ok(fy), Ok(fm), Ok(ty), Ok(tm), Ok(h)) if (fy, fm) <= (ty, tm) => {\n",
                 "            let text = pool::pool(vendor, known, (fy, fm), (ty, tm), h);\n",
                 "            let refused = carries_refusal(&text);\n",
                 "            out.push_str(&text);\n",
@@ -1856,13 +1983,14 @@ mod tests {
     ///   pass 2's table over that one instrument, ending with the in-sample
     ///   warning;
     /// * at `60min` over an unreadable `NSE/CASH/RELIANCE` month beside
-    ///   `BSE/CASH/RELIANCE`: the page is exactly the head, which names the
-    ///   BSE directory, then pass 1's table refusing RELIANCE, then the
-    ///   nothing-to-pool line.
+    ///   `BSE/CASH/RELIANCE`, where the one instrument on the surface refuses
+    ///   in pass 1: the verb refuses, naming RELIANCE and the month it could
+    ///   not read, and prints none of the page. It printed the head, pass 1's
+    ///   refused row and the nothing-to-pool line, and exited OK (D-0696).
     ///
-    /// Both exit OK, and neither is a refusal. An unstamped build refuses both
-    /// before a bar is read, and there the child requires the stamp refusal
-    /// and that nothing was recorded.
+    /// The first exits OK and is not a refusal; the second exits MISUSED. An
+    /// unstamped build refuses both before a bar is read, and there the child
+    /// requires the stamp refusal and that nothing was recorded.
     #[test]
     fn the_pool_verb_prints_its_whole_page_on_a_generated_store()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1942,7 +2070,7 @@ mod tests {
             return Ok(());
         }
         both_passes_over_nifty(&priced_head, priced.0, &priced.1)?;
-        the_empty_union_beside_bse(&empty_head, emptied.0, &emptied.1)
+        every_instrument_refused_beside_bse(&empty_head, emptied.0, &emptied.1)
     }
 
     /// BOTH PASSES, over the generated NIFTY month: the head, pass 1's table
@@ -1988,10 +2116,10 @@ mod tests {
         Ok(())
     }
 
-    /// THE EMPTY UNION, over one unreadable month beside a BSE directory: the
-    /// head naming that directory, pass 1's table refusing RELIANCE, and the
-    /// nothing-to-pool line, and nothing else.
-    fn the_empty_union_beside_bse(
+    /// EVERY INSTRUMENT REFUSED, over one unreadable month beside a BSE
+    /// directory: the verb refuses, naming RELIANCE and the month it could
+    /// not read, and prints nothing of the page that head would have opened.
+    fn every_instrument_refused_beside_bse(
         (head, surface): &(String, Vec<String>),
         status: u8,
         page: &str,
@@ -2001,36 +2129,31 @@ mod tests {
             head.contains(&named("BSE/CASH/RELIANCE", "RELIANCE")),
             "premise: the head names the BSE directory:\n{head}"
         );
-        let row = format!("  {:<14}REFUSED: ", "RELIANCE");
         let why = page
-            .lines()
-            .find_map(|line| line.strip_prefix(row.as_str()))
-            .ok_or_else(|| format!("pass 1 refuses RELIANCE:\n{page}"))?;
+            .strip_prefix(
+                "refused: every one of the 1 instrument(s) on the surface refused in pass 1, \
+                 so nothing was screened and nothing can be pooled. No completed result \
+                 could be confirmed.\n  first refusal: RELIANCE: ",
+            )
+            .ok_or_else(|| format!("the verb refuses, naming RELIANCE:\n{page}"))?;
         assert!(
             why.contains("no header slot survived"),
             "premise: pass 1 read the unreadable month and refused it for that: {why}"
         );
-        let mut expected = head.clone();
-        super::render_per_symbol(
-            &mut expected,
-            &[super::Screened {
-                symbol: "RELIANCE".to_owned(),
-                outcome: Err(why.to_owned()),
-            }],
+        assert!(
+            why.strip_suffix('\n')
+                .is_some_and(|reason| !reason.contains('\n')),
+            "the refusal is its two lines and nothing else:\n{page}"
         );
-        expected.push_str(
-            "\n  POOLED: nothing to pool. No screened instrument left a frontier row, so the \
-             union of top combinations is empty.\n",
+        assert!(
+            !page.contains(crate::STORED_PROVENANCE),
+            "no banner over nothing:\n{page}"
         );
-        assert_eq!(
-            page, expected,
-            "the head, pass 1's refused row and the empty union, and nothing else"
-        );
-        assert!(!crate::carries_refusal(page), "{page}");
+        assert!(crate::carries_refusal(page), "{page}");
         assert_eq!(
             status,
-            crate::OK,
-            "an instrument refused in pass 1 is a row, not a refusal of the pool"
+            crate::MISUSED,
+            "a pool whose every instrument refused is a refusal of the pool"
         );
         Ok(())
     }

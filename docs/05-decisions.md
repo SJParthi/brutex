@@ -42976,3 +42976,38 @@ exit status.
    reads both. The file gains that test, the two of item 4 and
    `each_text_names_only_the_characters_escape_debug_escapes`; the fifth
    correction's note on the file's three tests speaks of those three.
+
+**Seventh correction, 2026-09-26: what the attack rounds found.** Two rounds
+of attacks on this change, and the votes that upheld their findings, found the
+defects below. Each text new in this change is corrected where it stands and
+listed here; an entry or row that is on `main` is not edited. An item that
+changes what an operator reads, or the exit status a script sees, says so.
+
+1. *A run whose every instrument or month refuses.* When every instrument on
+   its surface refused in pass 1, `pool` printed the stored banner, a
+   `REFUSED` row for each and "nothing to pool", and exited OK. `sweep-all`
+   did the same over its months, with `0 swept · N refused`. An indented
+   `REFUSED` row is not a refusal to `carries_refusal`, so a script that ran
+   either and then its next step went on after a run that computed nothing.
+   `range_over` refuses in that case, for the reason its comment gives, and
+   this entry's own pool test and the two `sweep-all` tests of a forged
+   directory asserted the OK exit (found by a review, which reached it
+   with month 13, a backwards span and an unreadable month).
+   `pool::at_least_one_screened` and `batch::at_least_one_swept` now refuse
+   such a run with the count and the first instrument's or month's reason,
+   printed as `refused: ` at column zero with no banner, so the verb exits
+   MISUSED. `pool_arm` also refuses a month outside 1..=12 and a FROM after
+   TO before it reads the store: it checked neither, so a store with no
+   instrument on the surface printed its page over month 13 and exited OK. A
+   pool that screened one instrument, a walk that swept one month, and a
+   store holding no month of the feed and rung print what they printed.
+   *Behaviour change:* the page and exit status of those runs.
+   - The driven pool test's `60min` case, one unreadable RELIANCE month
+     beside a BSE directory, now requires the refusal and MISUSED.
+     `the_pool_page_is_its_head_and_then_only_appends` reads the new call's
+     place in `run_under`, because the driven test reaches it only in a
+     stamped build. The `sweep-all` tests that read rows of a completed run
+     (the two forging tests, the misfiled test, the continued walk and the
+     stock note) now run beside a generated month that sweeps, and the
+     filter test reads its count from the refusal. AF-39's sentence about the
+     `60min` page is corrected in place, and AF-70 states the rule.

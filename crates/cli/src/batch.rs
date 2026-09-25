@@ -353,6 +353,7 @@ fn sweep_under(
     for row in &rows {
         tally.fold(row);
     }
+    at_least_one_swept(&rows)?;
 
     // A STOCK AMONG THE MONTHS OFFERED PUTS ITS STATEMENT ON THE REPORT: gross
     // of every charge, corporate actions unchecked. D-0694.
@@ -371,6 +372,32 @@ fn sweep_under(
         &tally,
         &rows,
     ))
+}
+
+/// Nothing, when a month was swept or none was offered; the run's refusal
+/// when every month offered refused. D-0696.
+///
+/// `range_over` refuses when every rung refuses, and the pool when every
+/// instrument does, because the stored banner printed over nothing with a
+/// zero exit is the failure wearing a success's clothes `CLAUDE.md` §4 bans.
+/// This printed that banner, a `REFUSED` row per month and
+/// `0 swept · N refused`, and exited OK, because an indented `REFUSED` row is
+/// not a refusal to `carries_refusal` (found by a review). A store holding no
+/// month of the feed and rung is still a report, as it always was: a fresh
+/// clone has pulled nothing, and that is not a fault.
+fn at_least_one_swept(rows: &[Row]) -> Result<(), String> {
+    let refused: Option<Vec<(&str, &str)>> = rows
+        .iter()
+        .map(|row| row.refused.as_deref().map(|why| (row.label.as_str(), why)))
+        .collect();
+    match refused.as_deref() {
+        Some([(label, why), ..]) => Err(format!(
+            "every one of the {} month(s) offered refused, so nothing was swept. No \
+             completed result could be confirmed.\n  first refusal: {label}  — {why}",
+            rows.len()
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// Sweeps one instrument-month. Pure: it reads the store and returns a row.
@@ -818,6 +845,32 @@ mod tests {
         root
     }
 
+    /// `sweep_under` at `zerodha` and `1min`, at `u64::MAX`, over a generated
+    /// store in which NIFTY's May 2025 sweeps, beside a file of bytes no
+    /// reader accepts at each path in `rels`, below `bars/`.
+    ///
+    /// A GENERATED MONTH THAT SWEEPS, because a walk whose every month refuses
+    /// is refused as a whole since D-0696, and these tests read the rows of a
+    /// run that completed.
+    fn beside_a_swept_month(rels: &[&str]) -> String {
+        let _knobs = crate::knobs::serially();
+        crate::knobs::clear_all();
+        let text = crate::audited_stored::with_warmed_store(|root| {
+            for rel in rels {
+                let full = root.join("bars").join(rel);
+                std::fs::create_dir_all(full.parent().expect("has a parent")).expect("creatable");
+                std::fs::write(&full, b"not a bar file").expect("writable");
+            }
+            sweep_under(root, "zerodha", "1min", u64::MAX, "deadbeef").expect("the run completes")
+        });
+        crate::knobs::clear_all();
+        assert!(
+            text.contains("\n  zerodha NIFTY 1min 2025-05  "),
+            "premise: the generated month swept:\n{text}"
+        );
+        text
+    }
+
     /// **Every offered month is swept or refused, and nothing else.**
     ///
     /// The arithmetic that stops a short report hiding a long tail. A run
@@ -860,25 +913,64 @@ mod tests {
     /// The property that matters at 54,000 months: one unreadable file must not
     /// abandon the other 53,999. Written as a bar path the catalog will offer
     /// and the loader will then reject, because that is the real failure —
-    /// a path that looks right and holds nothing.
+    /// a path that looks right and holds nothing. Beside it a generated month
+    /// sweeps, so the walk is seen to continue past the refusal.
     #[test]
     fn a_month_that_cannot_be_loaded_is_named_and_the_run_continues() {
-        let root = scratch("refused");
-        let dir = root.join("bars/groww/NSE/INDEX/NIFTY/1min");
-        std::fs::create_dir_all(&dir).expect("dirs are creatable");
-        std::fs::write(dir.join("2026-08.bin"), b"not a bar file").expect("writable");
-
-        let text = sweep_under(&root, "groww", "1min", 100, "deadbeef").expect("the run completes");
+        let text = beside_a_swept_month(&["zerodha/NSE/INDEX/BANKNIFTY/1min/2025-05.bin"]);
         assert!(
-            text.contains("REFUSED"),
-            "the month is named as refused: {text}"
+            text.contains("\n  REFUSED  zerodha BANKNIFTY 1min 2025-05  — "),
+            "the month is named as refused, by instrument: {text}"
         );
-        assert!(text.contains("NIFTY"), "and named by instrument: {text}");
-        assert!(text.contains("1 refused"), "and counted: {text}");
+        assert!(
+            text.contains("\n1 swept · "),
+            "and the walk swept on: {text}"
+        );
         assert!(
             !text.contains("DOES NOT RECONCILE"),
             "one refusal still reconciles: {text}"
         );
+        assert!(!crate::carries_refusal(&text), "{text}");
+    }
+
+    /// **A walk whose every month refuses is refused, and names the first
+    /// month and its reason.** D-0696.
+    ///
+    /// It printed the stored banner, a `REFUSED` row per month and
+    /// `0 swept · 2 refused`, and exited OK, because an indented `REFUSED`
+    /// row is not a refusal to `carries_refusal` (found by a review). A walk
+    /// that swept a month, and a store holding no month of the feed and rung,
+    /// are each still a report.
+    #[test]
+    fn a_walk_whose_every_month_refused_is_refused() {
+        let root = scratch("all-refused");
+        for rel in [
+            "groww/NSE/INDEX/NIFTY/1min/2026-08.bin",
+            "groww/NSE/CASH/RELIANCE/1min/2026-08.bin",
+        ] {
+            let full = root.join("bars").join(rel);
+            std::fs::create_dir_all(full.parent().expect("has a parent")).expect("creatable");
+            std::fs::write(&full, b"not a bar file").expect("writable");
+        }
+        let why =
+            sweep_under(&root, "groww", "1min", 100, "deadbeef").expect_err("every month refused");
+        let _ = std::fs::remove_dir_all(&root);
+        let first = why
+            .strip_prefix(
+                "every one of the 2 month(s) offered refused, so nothing was swept. No \
+                 completed result could be confirmed.\n  first refusal: groww RELIANCE \
+                 1min 2026-08  — ",
+            )
+            .expect("the refusal counts the months and names the first");
+        assert!(
+            first.contains("could not be read from the store") && !first.contains('\n'),
+            "the first month's own reason, on one line: {why}"
+        );
+        assert!(
+            crate::carries_refusal(&format!("refused: {why}\n")),
+            "the verb prints it as a refusal"
+        );
+        assert!(!why.contains(crate::STORED_PROVENANCE), "{why}");
     }
 
     /// **A walk that offers a stock states corporate actions are unchecked;
@@ -889,24 +981,17 @@ mod tests {
     /// reader must know what a stock's figures are made of before reading one.
     #[test]
     fn a_walk_offering_a_stock_states_corporate_actions_are_unchecked_and_an_index_walk_does_not() {
-        let root = scratch("equity-note");
-        let index = root.join("bars/groww/NSE/INDEX/NIFTY/1min");
-        std::fs::create_dir_all(&index).expect("dirs are creatable");
-        std::fs::write(index.join("2026-08.bin"), b"not a bar file").expect("writable");
-        let indices = sweep_under(&root, "groww", "1min", 100, "deadbeef").expect("runs");
+        let indices = beside_a_swept_month(&[]);
         assert!(
-            indices.starts_with(&format!("{}feed groww", crate::STORED_PROVENANCE)),
+            indices.starts_with(&format!("{}feed zerodha", crate::STORED_PROVENANCE)),
             "an index walk is unchanged: {indices}"
         );
         assert!(!indices.contains("CORPORATE ACTIONS"), "{indices}");
 
-        let stock = root.join("bars/groww/NSE/CASH/RELIANCE/1min");
-        std::fs::create_dir_all(&stock).expect("dirs are creatable");
-        std::fs::write(stock.join("2026-08.bin"), b"not a bar file").expect("writable");
-        let mixed = sweep_under(&root, "groww", "1min", 100, "deadbeef").expect("runs");
+        let mixed = beside_a_swept_month(&["zerodha/NSE/CASH/RELIANCE/1min/2025-05.bin"]);
         assert!(
             mixed.starts_with(&format!(
-                "{}{}feed groww",
+                "{}{}feed zerodha",
                 crate::STORED_PROVENANCE,
                 runner::audit::CostScope::CashEquity.report_note()
             )),
@@ -929,19 +1014,13 @@ mod tests {
     /// answer is the same on a case-insensitive filesystem.
     #[test]
     fn a_misfiled_month_is_refused_by_name_and_not_swept_as_its_nse_namesake() {
-        let root = scratch("misfiled");
-        for rel in [
-            "groww/NSE/CASH/RELIANCE/1min/2026-08.bin",
-            "groww/NSE/INDEX/RELIANCE/1min/2026-08.bin",
-            "groww/BSE/CASH/RELIANCE/1min/2026-08.bin",
-            "groww/NSE/CASH/NIFTY/1min/2026-08.bin",
-            "groww/NSE/INDEX/NIFTY/1min/2026-08.bin",
-        ] {
-            let full = root.join("bars").join(rel);
-            std::fs::create_dir_all(full.parent().expect("has a parent")).expect("creatable");
-            std::fs::write(&full, b"not a bar file").expect("writable");
-        }
-        let text = sweep_under(&root, "groww", "1min", 100, "deadbeef").expect("the run completes");
+        let text = beside_a_swept_month(&[
+            "zerodha/NSE/CASH/RELIANCE/1min/2026-08.bin",
+            "zerodha/NSE/INDEX/RELIANCE/1min/2026-08.bin",
+            "zerodha/BSE/CASH/RELIANCE/1min/2026-08.bin",
+            "zerodha/NSE/CASH/NIFTY/1min/2026-08.bin",
+            "zerodha/NSE/INDEX/NIFTY/1min/2026-08.bin",
+        ]);
         for (dir, word) in [
             ("NSE/INDEX/RELIANCE", "RELIANCE"),
             ("BSE/CASH/RELIANCE", "RELIANCE"),
@@ -953,7 +1032,7 @@ mod tests {
             let why = crate::stored::misfiled(&key, exchange, segment, symbol).expect("misfiled");
             assert!(
                 text.contains(&format!(
-                    "  REFUSED  groww {symbol} 1min 2026-08  — {why}\n"
+                    "  REFUSED  zerodha {symbol} 1min 2026-08  — {why}\n"
                 )),
                 "{dir} must be refused by its own directory, before any load:\n{text}"
             );
@@ -965,7 +1044,7 @@ mod tests {
             2,
             "{text}"
         );
-        assert!(text.contains("0 swept · 5 refused"), "{text}");
+        assert!(text.contains("\n1 swept · "), "{text}");
         assert!(!text.contains("DOES NOT RECONCILE"), "{text}");
     }
 
@@ -978,19 +1057,13 @@ mod tests {
     /// the name is printed escaped.
     #[test]
     fn a_misfiled_directory_name_cannot_forge_a_refusal_of_the_run() {
-        let root = scratch("forged");
-        for rel in [
-            "groww/NSE/CASH/RELIANCE/1min/2026-08.bin",
-            "groww/X\nrefused: forged/CASH/RELIANCE/1min/2026-08.bin",
-        ] {
-            let full = root.join("bars").join(rel);
-            std::fs::create_dir_all(full.parent().expect("has a parent")).expect("creatable");
-            std::fs::write(&full, b"not a bar file").expect("writable");
-        }
-        let text = sweep_under(&root, "groww", "1min", 100, "deadbeef").expect("the run completes");
+        let text = beside_a_swept_month(&[
+            "zerodha/NSE/CASH/RELIANCE/1min/2026-08.bin",
+            "zerodha/X\nrefused: forged/CASH/RELIANCE/1min/2026-08.bin",
+        ]);
         assert!(
             text.contains(
-                "  REFUSED  groww RELIANCE 1min 2026-08  — `X\\nrefused: forged/CASH/RELIANCE` \
+                "  REFUSED  zerodha RELIANCE 1min 2026-08  — `X\\nrefused: forged/CASH/RELIANCE` \
                  is not where `NSE-RELIANCE` is stored"
             ),
             "the misfiled month is one escaped row:\n{text}"
@@ -1014,29 +1087,22 @@ mod tests {
     /// exactly as before.
     #[test]
     fn a_symbol_directory_name_cannot_forge_a_refusal_of_the_run() {
-        let root = scratch("forged-symbol");
-        for rel in [
-            "groww/NSE/CASH/RELIANCE/1min/2026-08.bin",
-            "groww/NSE/CASH/X\nrefused: forged/1min/2026-08.bin",
-            "groww/NSE/CASH/T\tAB\r\u{7}/1min/2026-08.bin",
-        ] {
-            let full = root.join("bars").join(rel);
-            std::fs::create_dir_all(full.parent().expect("has a parent")).expect("creatable");
-            std::fs::write(&full, b"not a bar file").expect("writable");
-        }
-        let text = sweep_under(&root, "groww", "1min", 100, "deadbeef").expect("the run completes");
-        let _ = std::fs::remove_dir_all(&root);
+        let text = beside_a_swept_month(&[
+            "zerodha/NSE/CASH/RELIANCE/1min/2026-08.bin",
+            "zerodha/NSE/CASH/X\nrefused: forged/1min/2026-08.bin",
+            "zerodha/NSE/CASH/T\tAB\r\u{7}/1min/2026-08.bin",
+        ]);
         for shown in ["X\\nrefused: forged", "T\\tAB\\r\\u{7}"] {
             assert!(
                 text.contains(&format!(
-                    "\n  REFUSED  groww {shown} 1min 2026-08  — `{shown}` is not an instrument \
-                     this engine sweeps: "
+                    "\n  REFUSED  zerodha {shown} 1min 2026-08  — `{shown}` is not an \
+                     instrument this engine sweeps: "
                 )),
                 "the unresolved symbol directory is one escaped row:\n{text}"
             );
         }
         assert!(
-            text.contains("\n  REFUSED  groww RELIANCE 1min 2026-08  — "),
+            text.contains("\n  REFUSED  zerodha RELIANCE 1min 2026-08  — "),
             "the real instrument beside them keeps its own label:\n{text}"
         );
         assert!(
@@ -1048,7 +1114,7 @@ mod tests {
             "no control character but the line break reaches the page:\n{text}"
         );
         assert!(!crate::carries_refusal(&text), "{text}");
-        assert!(text.contains("0 swept · 3 refused"), "{text}");
+        assert!(text.contains("\n1 swept · "), "{text}");
     }
 
     /// The feed and rung filter, so a run sweeps what was asked for and no more.
@@ -1064,10 +1130,17 @@ mod tests {
             std::fs::create_dir_all(full.parent().expect("has a parent")).expect("creatable");
             std::fs::write(&full, b"x").expect("writable");
         }
-        let text = sweep_under(&root, "groww", "1min", 100, "deadbeef").expect("runs");
+        // Every month offered refuses, so the run is refused, and the
+        // refusal counts what the filter offered (D-0696).
+        let why = sweep_under(&root, "groww", "1min", 100, "deadbeef")
+            .expect_err("the one month offered refused");
+        let _ = std::fs::remove_dir_all(&root);
         assert!(
-            text.contains("3 spot instrument-month(s); 1 match"),
-            "three held, one matched: {text}"
+            why.starts_with(
+                "every one of the 1 month(s) offered refused, so nothing was swept. No \
+                 completed result could be confirmed.\n  first refusal: groww NIFTY 1min 2026-08  — "
+            ),
+            "three held, one matched: {why}"
         );
     }
 

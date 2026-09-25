@@ -1513,6 +1513,12 @@ const fn ppm_to_points_at(ppm: i64, reference: i64) -> i64 {
 /// arm makes the list harder to read as one.
 /// The `pool` arm: the same argument discipline as `range-rung`, minus the
 /// underlying — the store decides which instruments are on the surface.
+///
+/// A month outside 1..=12 and a span that runs backwards are refused here,
+/// before the store is read. Month 13 parsed as a `u8`, the pool never checked
+/// the span, and each instrument refused it on its own, so a store with no
+/// instrument on the surface printed its page and exited OK (found by a
+/// review, D-0696).
 fn pool_arm(
     out: &mut String,
     vendor: &str,
@@ -1530,23 +1536,36 @@ fn pool_arm(
             ),
         );
     };
+    let month = |word: &str| {
+        word.parse::<u8>()
+            .ok()
+            .filter(|m| (1..=12).contains(m))
+            .ok_or(())
+    };
     match (
         from.0.parse::<u16>(),
-        from.1.parse::<u8>(),
+        month(from.1),
         to.0.parse::<u16>(),
-        to.1.parse::<u8>(),
+        month(to.1),
         parse_support_choice(support_ppm),
     ) {
-        (Ok(fy), Ok(fm), Ok(ty), Ok(tm), Ok(h)) => {
+        (Ok(fy), Ok(fm), Ok(ty), Ok(tm), Ok(h)) if (fy, fm) <= (ty, tm) => {
             let text = pool::pool(vendor, known, (fy, fm), (ty, tm), h);
             let refused = carries_refusal(&text);
             out.push_str(&text);
             if refused { MISUSED } else { OK }
         }
+        (Ok(fy), Ok(fm), Ok(ty), Ok(tm), Ok(_)) => refuse(
+            out,
+            &format!(
+                "the range runs backwards: {fy}-{fm:02} is after {ty}-{tm:02}. Give FROM \
+                 first and TO second. Nothing was read."
+            ),
+        ),
         (Err(_), _, _, _, _) | (_, _, Err(_), _, _) => {
             refuse(out, "YEAR must be a number like 2026")
         }
-        (_, Err(_), _, _, _) | (_, _, _, Err(_), _) => refuse(out, "MONTH must be 1..=12"),
+        (_, Err(()), _, _, _) | (_, _, _, Err(()), _) => refuse(out, "MONTH must be 1..=12"),
         (_, _, _, _, Err(why)) => refuse(out, why),
     }
 }
