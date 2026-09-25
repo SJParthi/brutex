@@ -43062,3 +43062,8 @@ changes what an operator reads, or the exit status a script sees, says so.
    per month passed every pool test (found by a review). The tests'
    `store_holding` now writes two months into every directory it makes, and
    checks that the catalog lists both. AF-35 says so. No behaviour changed.
+6. *AF-31 and AF-32.* Each ended by saying its change had "no decision entry
+   yet", while this entry records both changes and quotes those words as the
+   reason it exists (found by a review). Both rows are new in this change and
+   now name D-0696. `no_invariant_row_says_its_change_has_no_decision_entry`
+   refuses the phrase anywhere in `docs/04-invariants.md`.

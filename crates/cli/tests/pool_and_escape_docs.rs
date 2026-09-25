@@ -760,3 +760,26 @@ fn no_text_says_pool_pass_1_lifts_a_section() {
         "`equity_ranking_statement`'s doc says pass 1 is no lift"
     );
 }
+
+/// **No invariant row says its change has no decision entry.** D-0696.
+///
+/// AF-31 and AF-32 ended "the extension to these pages has no decision entry
+/// yet" and "the surface change has no decision entry yet", while D-0696 in
+/// the same tree records both changes and quotes those words as the reason
+/// it exists (found by a review). `CLAUDE.md` §9 asks for an entry for every
+/// locked choice, so a row may not say one is missing.
+#[test]
+fn no_invariant_row_says_its_change_has_no_decision_entry() {
+    assert_eq!(
+        INVARIANTS.matches("no decision entry yet").count(),
+        0,
+        "an invariant row says its change has no decision entry"
+    );
+    for (row, change) in [
+        ("| AF-31 |", "D-0696 records the extension to these pages"),
+        ("| AF-32 |", "D-0696 records the surface change"),
+    ] {
+        let text = section(INVARIANTS, row, "\n");
+        assert!(text.contains(change), "{row} names its entry: {text}");
+    }
+}
