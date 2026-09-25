@@ -33,10 +33,12 @@
 //! stamp records is read again on the next request, and a fault the stamps do
 //! record is still kept. One among them pins what reading again costs
 //! `/store.json`: its body is encoded again on every such request, which
-//! `docs/06-limits.md` states. The two after the rule's own table pin what the
-//! request that made such a read is served: a row read absent that its stamp
-//! contradicts is served unreadable, and no other row is changed, a first
-//! manifest installed inside the read among them. The next three move a bar
+//! `docs/06-limits.md` states. Another pins `SocketAt`, which binds a Unix
+//! socket at a manifest path whatever the length of `TMPDIR`. The two after
+//! the rule's own table pin what the request that made such a read is served:
+//! a row read absent that its stamp contradicts is served unreadable, and no
+//! other row is changed, a first manifest installed inside the read among
+//! them. The next three move a bar
 //! directory or file aside instead, and pin the same rule for the calendar
 //! cache behind the census: a calendar derived without a bar file its census
 //! holds is refused to the request that derived it, and derived again on the
@@ -1790,6 +1792,100 @@ async fn an_io_error_its_stamp_cannot_see_is_not_cached() {
     }
 }
 
+/// A Unix socket bound at `path`, and the short link it was bound through,
+/// removed when this drops. The socket file itself stays at `path`.
+///
+/// # Why through a link
+///
+/// A socket address holds only a short path, and `std` refuses a longer one
+/// with `InvalidInput` ("path must be shorter than SUN_LEN"). The tests that
+/// put a socket at a manifest path bound it there directly, under
+/// `crate::scratch::path`, which is under `TMPDIR`. A review ran them under
+/// the long `TMPDIR` its mutation runs are given, and every one panicked
+/// there, so cargo-mutants refused to test anything ("cargo test failed in an
+/// unmutated tree").
+///
+/// So the socket is bound through a link named under `/tmp` to the directory
+/// that holds `path`. The address is the link's short spelling, and the
+/// socket is made at `path` itself, a socket file in that directory as before:
+/// its `stat` answers with its times and no read opens it.
+/// `a_socket_is_bound_at_a_path_too_long_for_a_socket_address` pins that.
+#[cfg(unix)]
+struct SocketAt {
+    /// The bound socket, closed when the guard drops.
+    _listener: std::os::unix::net::UnixListener,
+    /// The link under `/tmp` the socket was bound through.
+    link: PathBuf,
+}
+
+#[cfg(unix)]
+impl SocketAt {
+    /// Bind a socket at `path` through a link under `/tmp` named for this
+    /// process and `name`.
+    fn new(path: &Path, name: &str) -> Self {
+        let dir = path.parent().expect("a socket path inside a directory");
+        let file = path.file_name().expect("a socket path that names a file");
+        let link = Path::new("/tmp").join(format!("brutex-{}-{name}", std::process::id()));
+        let _stale = fs::remove_file(&link);
+        std::os::unix::fs::symlink(dir, &link)
+            .expect("a link under /tmp to the socket's directory");
+        let listener = std::os::unix::net::UnixListener::bind(link.join(file))
+            .expect("a socket bound through the short link");
+        Self {
+            _listener: listener,
+            link,
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for SocketAt {
+    fn drop(&mut self) {
+        let _removed = fs::remove_file(&self.link);
+    }
+}
+
+/// A SOCKET IS BOUND AT A MANIFEST PATH TOO LONG FOR A SOCKET ADDRESS. D-0695.
+///
+/// The path here is longer than a socket address holds, whatever `TMPDIR` is:
+/// bound directly, `std` refuses it with `InvalidInput`. `SocketAt` binds it
+/// all the same, and what is at the path is the socket itself, not a link to
+/// one, so `stat` and a read meet it exactly as they meet a socket bound there
+/// directly. Once the guard drops, its link is gone and the socket file is
+/// still at the path.
+#[cfg(unix)]
+#[test]
+fn a_socket_is_bound_at_a_path_too_long_for_a_socket_address() {
+    use std::os::unix::fs::FileTypeExt as _;
+    let fixture = Fixture::new("census-request-long-socket");
+    let dir = fixture.root.join("d".repeat(200)).join("manifest");
+    fs::create_dir_all(&dir).expect("a deep manifest directory");
+    let path = dir.join("groww.man");
+    let direct = std::os::unix::net::UnixListener::bind(&path);
+    assert!(
+        matches!(direct, Err(ref why) if why.kind() == std::io::ErrorKind::InvalidInput),
+        "the premise: this path does not fit a socket address: {direct:?}"
+    );
+    let socket = SocketAt::new(&path, "cr-long");
+    let link = socket.link.clone();
+    let at_path = fs::symlink_metadata(&path).expect("something at the path itself");
+    assert!(
+        at_path.file_type().is_socket(),
+        "the path holds the socket itself, not a link: {:?}",
+        at_path.file_type()
+    );
+    assert!(
+        fs::symlink_metadata(&link).is_ok_and(|meta| meta.file_type().is_symlink()),
+        "bound through the link"
+    );
+    drop(socket);
+    assert!(fs::symlink_metadata(&link).is_err(), "the link is removed");
+    assert!(
+        fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_socket()),
+        "and the socket file stays at the path"
+    );
+}
+
 /// A MANIFEST THAT `stat` ANSWERS AND NO READ OPENS IS NOT CACHED, on a real
 /// disk and through `read_vendor` itself. D-0695.
 ///
@@ -1807,7 +1903,7 @@ async fn an_io_error_its_stamp_cannot_see_is_not_cached() {
 /// error `Fault::Refused` had this socket kept, under a stamp that cannot say
 /// when the fault ends.
 ///
-/// The socket's path must fit a socket address, so the scratch name is short.
+/// The socket is bound through `SocketAt`, so a long `TMPDIR` still fits.
 #[cfg(unix)]
 #[test]
 fn a_manifest_that_stats_but_will_not_open_is_not_cached() {
@@ -1815,8 +1911,7 @@ fn a_manifest_that_stats_but_will_not_open_is_not_cached() {
     let fixture = Fixture::new("cr-sock");
     fixture.publish(&[(Segment::Index, "NIFTY")], 0);
     let groww = manifest_path(&fixture.root, Vendor::Groww);
-    let socket = std::os::unix::net::UnixListener::bind(&groww)
-        .expect("a socket at Groww's manifest path, whose path fits a socket address");
+    let socket = SocketAt::new(&groww, "cr-sock");
     let stamp = Vendor::ALL
         .into_iter()
         .zip(manifest_stamps(&fixture.root).manifests)
@@ -1886,8 +1981,7 @@ fn a_fault_the_census_cache_declines_rebuilds_the_store_body_on_every_request() 
     let fixture = Fixture::new("cr-wire");
     fixture.publish(&[(Segment::Index, "NIFTY")], 0);
     let groww = manifest_path(&fixture.root, Vendor::Groww);
-    let socket = std::os::unix::net::UnixListener::bind(&groww)
-        .expect("a socket at Groww's manifest path, whose path fits a socket address");
+    let socket = SocketAt::new(&groww, "cr-wire");
     let uri: Uri = "/store.json?feed=dhan".parse().expect("uri");
     let body = || {
         let (status, _, body) =
@@ -2947,14 +3041,13 @@ fn an_observation_derives_over_its_own_series_months_and_no_other_series() {
 /// calendar under Dhan's own modified time, and its second call must meet that
 /// `Arc`.
 ///
-/// The socket's path must fit a socket address, so the scratch name is short.
+/// The socket is bound through `SocketAt`, so a long `TMPDIR` still fits.
 #[cfg(unix)]
 #[test]
 fn a_fault_on_another_feeds_manifest_leaves_this_feeds_calendar_kept() {
     let fixture = nifty_store("cr-row");
     let groww = manifest_path(&fixture.root, Vendor::Groww);
-    let _socket = std::os::unix::net::UnixListener::bind(&groww)
-        .expect("a socket at Groww's manifest path, whose path fits a socket address");
+    let _socket = SocketAt::new(&groww, "cr-row");
     assert_eq!(
         fixture.fresh_states(),
         ["unreadable", "held", "absent", "absent", "absent"],
