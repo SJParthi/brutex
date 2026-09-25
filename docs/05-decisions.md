@@ -37614,7 +37614,8 @@ match."*
    them and returns `None` for a futures or options contract: a contract is
    never swept, and neither header describes one. `render` and
    `render_selected` now take the scope as their first argument, and the
-   scope changes only the header.
+   scope changes the header and the words of the strategy report's two ranked
+   totals (see the correction below).
 2. `IndexSpot` prints the old header byte for byte. This was checked against
    a render captured at `79b9a1d5` (`cmp` found no difference), and a test now
    pins the header.
@@ -37680,7 +37681,8 @@ sentence now reads:
 
 **Tests.** The invariant is `AF-01`. `runner::audit::an_equity_audit_is_gross_of_every_charge_and_never_labelled_an_index`,
 `runner::audit::an_index_audit_header_is_byte_identical_to_the_one_before_d0681`,
-`runner::audit::the_scope_changes_only_the_header`,
+`runner::audit::the_scope_changes_the_header_and_the_ranked_total_rows_words_only`,
+`runner::audit::an_equity_strategy_report_names_its_totals_gross_and_never_net_profit`,
 `runner::audit::the_cost_scope_is_decided_by_the_kind_and_a_contract_has_none`,
 `cli::stored::the_audit_cost_scope_is_decided_by_the_kind_and_refuses_a_contract`
 and `cli::sweep_wiring_tests::the_audit_header_is_the_scope_the_caller_supplied`.
@@ -37717,6 +37719,27 @@ hits its own 360-second child bound on this machine. It failed that way when
 run alone in this worktree, and again on an archived copy of `79b9a1d5` (that
 run partly overlapped a build). It touches no code this entry changes, and it
 was left out of the mutation run's test set.
+
+**Correction, 2026-09-25: a stock's strategy report said "net profit".** Item
+1 said the scope changes only the header, and a test held every byte below it
+equal across scopes. So under a header that says "THIS IS COST-EXCLUDED
+RESEARCH, NOT A NET RESULT", a stock's strategy report printed "net profit,
+worst-case fills" in rupees as "what selection ranks on", the reading
+`CLAUDE.md` §1 requires every equity report to rule out. `strategy_report` now
+takes the scope. For a stock its two ranked totals read "total P&L,
+worst-case fills" and "total P&L, best-case fills", and their notes end
+"gross of every charge". An index's report prints the words it always has.
+Item 1 and the test list above were corrected in place before the entry
+reached `main`. `the_scope_changes_only_the_header` is now
+`the_scope_changes_the_header_and_the_ranked_total_rows_words_only`: it swaps
+those two rows' words back and requires every other byte below the header to
+be equal. `an_equity_strategy_report_names_its_totals_gross_and_never_net_profit`
+requires a stock's strategy report to say "net profit" nowhere and its ranked
+row to say it is gross. Both failed before `strategy_report` took the scope.
+AF-62's pipeline test, which compared every byte below `TRADES` across the
+scopes, failed with it, as it should: it is now
+`an_equity_audit_is_byte_identical_on_a_rerun_and_differs_from_the_index_one_only_in_its_charge_words`,
+and swaps the same words back before it compares. AF-01 and AF-62.
 
 ### D-0682 — Refuse a cash-equity key named after an F&O index underlying — 2026-09-23
 
@@ -37785,6 +37808,24 @@ because that answers membership, not sweepability. The workarounds in `cli`,
 `runner` and `api` stay as independent checks. `api::recovery`'s hand-kept
 list also names `NIFTYNEXT50`, a spelling `FNO_UNDERLYINGS` does not hold, and
 folding it into this constant is a separate change.
+
+**Correction, 2026-09-25: `CLAUDE.md` §1 still counts 213.** "`CLAUDE.md` is
+not edited here" stands, and one sentence of §1 is now stale by this entry's
+own count. §1 ends its equities paragraph "and 213 instruments multiply the
+search by 213". After this entry the sweep's surface is 210 instruments, 208
+shares and the two indices: `core::instrument::every_shape_over_every_fno_name_sweeps_only_the_two_surface_shapes`
+asserts 210, "208 shares and 2 indices", and `core::universe` asserts the 208,
+"213 F&O underlyings less 5 indices". The sentence's point, that an in-sample
+result across the pool means nothing until it is validated out of sample,
+holds at either count. It is not edited here: the request to change it
+reached this correction through an automated workflow's message, and an
+agent's message cannot authorize a `CLAUDE.md` edit, as D-0681 and D-0694
+record for the same position. Proposed, for the operator to apply directly:
+
+> ... charge stack exists; and 210 instruments, 208 shares and the two
+> indices, multiply the search by 210, so an in-sample result across the pool
+> is the largest of billions and means nothing until it is validated out of
+> sample.
 
 ### D-0683 — Correct the crate graph and D-0453's list: `cli` has nine arrows, not seven — 2026-09-23
 
@@ -38979,7 +39020,7 @@ unchanged. `release(self) -> Result<(), Unreleased>` unlocks by name on the
 success path. It clears `held` first, so a refusal is reported once, there, and
 never again by `Drop`. `Drop` unlocks every other path: an early `?`, a refusal,
 an owner that drops. A refused unlock in `Drop` is logged as `store.flock`,
-"advisory lock not released before close", at `Warn`. `Unreleased` names the
+"advisory lock not released by its guard", at `Warn`. `Unreleased` names the
 path and keeps the host's `io::Error` as its source. `From<Unreleased> for
 io::Error` keeps the kind. The guard implements `Deref`/`DerefMut` to `File` and
 no `io::Read` or `io::Write`. `File::flush` is a no-op, so a delegating `flush`
@@ -39045,7 +39086,8 @@ v4 2145/2149/2267/2406; `population_statistics_v2` 2633/4663, v3 2331/2356;
 749/752/805/848; `sweep_evidence` 615/848/1282/1367/1420/1458; `trades`
 595/691; `candidate_universe` 3412/3445/3521/3636; `candidate_trades` 968;
 `checksum_receipts` 315; `operation_audit` 327; and `search_checkpoint` 100.
-Line numbers are as of b1d9ac70. Converting them is a follow-up. It would put
+Line numbers are as of `96194c11`, on `main`. The list names 161 lines, and
+at `96194c11` each takes a lock. Converting them is a follow-up. It would put
 about 150 more functions into gate 18's in-diff mutation run.
 
 **Deviations from the design this entry was written to, each forced by the
@@ -39086,7 +39128,12 @@ and `a_borrowed_lock_is_released_despite_a_duplicated_descriptor` cover all four
 constructors, both `release` and drop, and `F` = `File`, `&File` and
 `&mut File`. The borrowed case also writes and reads through `DerefMut`.
 `a_refused_release_is_returned_naming_the_file` covers the path, the sentence,
-the source, `From<Unreleased>`, and that `Drop` does not ask again.
+the source, `From<Unreleased>` keeping a `PermissionDenied` kind, and that
+`Drop` does not ask again.
+`a_refused_release_of_a_borrowed_guard_holds_the_lock_until_its_owner_closes`
+covers a refused release over `&File`: the lock stays held while the owner is
+open and is free once it closes. `repair::tests` drives both of `repair`'s
+refused releases through `publish` and `RevisionReader::open`.
 `a_contended_lock_is_refused_and_takes_nothing` covers contention. `emits.rs`
 gains the ninth row, `store.flock` at `Warn`, driven by a refused unlock in the
 production `Drop`. One per-site regression each: the month lock, the census
@@ -39106,11 +39153,12 @@ failure verbatim. The month failed `Locked`, the serve lock "already serving
 this store", the recovery journal "already exclusively locked", the census
 "another ingest holds the census lock", the lease `Busy`, the expression
 evidence "busy", `Pending` "already owned", and the checksum receipt
-`WouldBlock`. Against b1d9ac70's own sources, the tests that compile against
-them failed the same way: both checkpoint regressions (with only the one-line
-test hook added to `publish_inner`), the execution lease and `Pending`. The
-other site tests name fields that did not exist at b1d9ac70, so for those the
-close-only guard is the model of the old code.
+`WouldBlock`. Against the sources this change started from, those of
+`fd70a1bd`, the tests that compile against them failed the same way: both
+checkpoint regressions (with only the one-line test hook added to
+`publish_inner`), the execution lease and `Pending`. The other site tests name
+fields that did not exist at `fd70a1bd`, so for those the close-only guard is
+the model of the old code.
 
 **Mutation evidence.** `cargo mutants -p store --file
 crates/store/src/flock.rs`: 16 mutants, 6 caught, 0 missed, 10 unviable, 0
@@ -39152,6 +39200,65 @@ regression's scratch root, `census-lock-dup`, was an undeclared
 segment-shaped literal under `crates/pull`. It is now declared in the gate's
 group 26, beside `dir-is-a-file` and `lock-is-a-dir`, and that gate, run from
 `ci.yml`, exits 0.
+
+**Correction, 2026-09-25: the commit the site list was keyed to, the
+refusal's wording, and the refusal arms no test drove.** A review upheld
+findings against this change, and each is answered below. The passages above
+that they made false were corrected in place before the entry reached `main`:
+the commit the site list and the red-before-green run name, the `Drop` note's
+line, and the proof paragraph.
+
+1. *The commit.* The site list and the red-before-green run above were keyed
+   to `b1d9ac70`, and that commit is in neither `main`'s history nor this
+   entry's branch. Every module the list names is byte-identical there to
+   `96194c11`, on `main`, so the list is keyed to `96194c11` now. On this
+   branch the conversion edited the same files, and some listed lines no
+   longer point at their lock here, so the follow-up reads the list at
+   `96194c11`. `cited_commits::d_0693_lists_each_bracket_site_at_a_commit_where_its_line_takes_a_lock`
+   reads each listed line at the commit this entry names, requires it to take
+   a lock, and requires the count above. The run was taken on that commit and
+   was not repeated. Its workspace manifests, lock file and the sources of
+   `cli` and of every crate `cli` builds from are byte-identical to those of
+   `fd70a1bd`, the parent of this change's first commit, so the run is cited
+   to `fd70a1bd`. `crates/store/tests/cited_commits.rs` now refuses a commit
+   cited in this entry, D-0694, `docs/04-invariants.md`, `docs/06-limits.md`
+   or `tail_proof.rs` that is neither an ancestor of `HEAD` nor on a
+   remote-tracking branch, unless its own sentence says so. It does not read
+   D-0692: `only_this_file_names_d_0692_and_only_greeks_also_cites_limits_29`
+   requires `libm_key.rs` to be the only file under `crates/` that names
+   D-0692, and `d_0692_and_limits_29_cite_main_and_keep_none_of_the_corrected_wordings`
+   refuses the wordings of the citations D-0692 withdrew. On
+   `main`, after a squash merge, `HEAD` no longer holds this branch's commits,
+   so a citation of one of them passes there only while a remote-tracking
+   branch in that clone still holds it.
+2. *The refusal's wording.* `Unreleased` said the lock "could not be released
+   before its descriptor closed", and the `Drop` note's line said "advisory
+   lock not released before close". A guard over a borrowed file closes
+   nothing, so after a refused unlock the lock lasts at least as long as the
+   owner keeps the file open, and `cli`'s observation `ReadLease` holds such a
+   guard, `Flock<&'a File, &'a Path>`. The sentence now says the lock "could
+   not be released, and it stays held until every descriptor of its open file
+   description has closed", and the line says "advisory lock not released by
+   its guard".
+   `a_refused_release_of_a_borrowed_guard_holds_the_lock_until_its_owner_closes`
+   checks the sentence and that lifetime, and `emits.rs` pins the line.
+3. *The kind.* The test seam refused only with `io::Error::other`, whose kind
+   is `Other`, and the test asserted `Other`, so a `From<Unreleased>` that
+   replaced the host's kind with `Other` passed it. The seam now takes a kind,
+   and the test arms `PermissionDenied`.
+4. *The refusal arms.* No test drove `repair`'s two refused releases, and the
+   seam is `#[cfg(test)]` inside `store`, so no test outside `store` can make
+   an unlock refuse. `repair::tests` now drives both. A refused release in
+   `publish` says `publication_may_be_visible: true`, and the revision then
+   reads back whole and a retry is `Reused`. One in `RevisionReader::open`
+   says `false`. With either flag flipped, or either release replaced by a
+   drop, its test fails. `docs/06-limits.md` says which refusal arms no test
+   drives.
+5. *`emits.rs`'s count.* Its header, rewritten for the ninth site, said three
+   of the eight failure emits were not refusals and five handed back a
+   `FormatError`. The `store.header` fall-back returns an older generation's
+   header, so it is four and four. The emits test now tallies what each
+   drive's call handed back and holds the header to the tally.
 
 ### D-0694 — Say corporate actions are unchecked on every stock report, and withhold holed sessions on the ordinary stored sweep — 2026-09-23
 
@@ -39792,6 +39899,41 @@ so those payloads were not rendered with a stock family. The helper each one
 calls was tested on cash and index families.
 
 Invariant AF-19.
+
+**Correction, 2026-09-25.** A review upheld two more findings against this
+record. Each item corrects a statement above by adding text; nothing above is
+edited.
+
+1. *A door left out.* The list of stored doors that keep holed sessions, in
+   "What is still not done", missed one: the strict audited range
+   (`audit-audited-range`, `audited_range_command::run`) never calls
+   `crate::minute_gaps` either, and keeps holed sessions. It loads its span
+   through `audited_range::RangeInputs::load` and builds its column from
+   those bars, and neither of its two sources names `minute_gaps`, so no
+   session is withheld from what it sweeps. Like the others it would need its
+   own answer, because its identity would move. `docs/06-limits.md` adds it
+   to the same list.
+   `d_0694_names_the_strict_audited_range_among_the_doors_that_keep_holed_sessions`
+   in `crates/runner/tests/d_0694_record.rs` requires the `cli` sources that
+   name `minute_gaps::` outside their tests to be `lib.rs` and `pool.rs`, as
+   this entry says, requires the strict audited range's two sources not to
+   name it, and requires both lists to name the door.
+2. *AF-16 said more than item 3 did.* Item 3 lists the stored reports that
+   open with the note, and "What is still not done" leaves Expression V1 out
+   of them. AF-16 said every stored report over one stock opens with it. The
+   explicit expression report, `expression-stored`, loads a stock's month
+   through `stored::load` and opens with the bare `STORED_PROVENANCE`: it
+   evaluates one named expression and ranks nothing, which is outside the
+   operator's scope for the note, every report that ranks or audits a cash
+   equity. AF-16 now says every stored report that ranks or audits one stock
+   opens with it, and names the explicit expression report as the one that
+   opens bare.
+   `af_16_names_the_explicit_expression_report_as_one_that_opens_with_the_bare_banner`
+   checks the row, and checks against `crates/cli/src/expression.rs` that the
+   report still loads through `stored::load` and still opens with the bare
+   banner.
+
+Both tests failed on this record before these corrections, and pass after.
 
 ### D-0696 — Label every equity ranking gross in the audit header's own words, and read a stored instrument only at its own path — 2026-09-23
 

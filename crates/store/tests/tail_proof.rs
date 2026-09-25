@@ -43,7 +43,7 @@
 //!
 //! AF-47 measured a memory that keeps the tail block keyed on the block
 //! alone, and said in the present tense that its own test was then the only
-//! store test that failed. That held at 224b6760 and stopped holding when
+//! store test that failed. That held at 7f617f01 and stopped holding when
 //! this file landed, because the count here fails under that memory too.
 //! The second test checks that AF-47 scopes the measurement to its commit
 //! and names the count, and that AF-48 says AF-47 was corrected.
@@ -52,10 +52,19 @@
 //!
 //! AF-43 and AF-47 each say the tail is proved again on every touch, and
 //! each named only the test in `crate::file` beside it. Measured at
-//! da28ae95, a memory keyed on the entry and the bar file's modification
+//! f6716814, a memory keyed on the entry and the bar file's modification
 //! time passes that test, and the count here is the one store test it fails.
 //! The third test checks that every row making the claim names the count in
 //! its test column.
+//!
+//! # The commits it cites
+//!
+//! Each commit named above is this branch's copy of the one the measurement
+//! was taken on: the same patch, with a byte-identical `crates/store`, and a
+//! `crates/core` that differs only by one doc comment and core's own tests.
+//! The originals are on no branch a reader can fetch. AF-48 names them, the
+//! second test checks that it does, and `cited_commits.rs` refuses a citation
+//! of a commit no reader can fetch.
 
 #![allow(
     clippy::expect_used,
@@ -277,26 +286,33 @@ const FILE_TEST: &str =
 
 /// **AF-47 DOES NOT CALL ITS TEST THE ONLY ONE ITS SECOND CACHE FAILS.**
 ///
-/// AF-47 measured two caches at 224b6760, and under the second, a memory that
-/// keeps the tail block keyed on the block alone, its own test was then the
-/// only store test that failed. The row said so in the present tense. The
-/// test above landed one commit later and fails under that memory too, so the
-/// sentence was false from then on, while AF-48 said "both fail" of the same
-/// memory. Neither row is on main, so AF-47 is corrected in place: it scopes
-/// the measurement to the commit that took it and names the test above, and
-/// AF-48 no longer says AF-47 is unedited. AF-48 scopes its own count the same
-/// way: a memory keyed on the entry's value passed every store test at
-/// 224b6760, 224 of them, and fails two since the test above landed. This
+/// AF-47 measured two caches at the commit that added its leg, 7f617f01 on
+/// this branch, and under the second, a memory that keeps the tail block
+/// keyed on the block alone, its own test was then the only store test that
+/// failed. The row said so in the present tense. The test above landed one
+/// commit later and fails under that memory too, so the sentence was false
+/// from then on, while AF-48 said "both fail" of the same memory. Neither row
+/// is on main, so AF-47 is corrected in place: it scopes the measurement to
+/// that commit and names the test above, and AF-48 no longer says AF-47 is
+/// unedited. AF-48 scopes its own count the same way: a memory keyed on the
+/// entry's value passed every store test at 7f617f01, 224 of them, and fails
+/// two since the test above landed. AF-48 also says the measurements were
+/// taken on the commits this branch carries as copies, and names both. This
 /// holds the two rows to each other and to the test above.
 #[test]
 fn af_47_and_af_48_agree_on_which_tests_a_memory_of_the_tail_block_fails() {
     let (af_47, af_48) = (row("AF-47"), row("AF-48"));
     says(af_48, "AF-48", "Keyed on the tail block alone: both fail.");
-    says(af_48, "AF-48", "at 224b6760, every store test passed (224)");
+    says(af_48, "AF-48", "at 7f617f01, every store test passed (224)");
+    says(
+        af_48,
+        "AF-48",
+        "which carries them as 7f617f01, 9fc9233b and f6716814: the same patches",
+    );
     says(
         af_47,
         "AF-47",
-        "At 224b6760, which added this leg, it was the only store test the \
+        "At 7f617f01, which added this leg, it was the only store test the \
          second cache failed.",
     );
     says(
@@ -323,7 +339,7 @@ fn af_47_and_af_48_agree_on_which_tests_a_memory_of_the_tail_block_fails() {
 /// block and the tail run the proof again on every touch of the tail. The
 /// test in `crate::file` checks the answers and refuses damaged inputs, and a
 /// memory keyed on the tail's entry and the bar file's modification time
-/// passes it: measured at da28ae95, the count above was then the one store
+/// passes it: measured at f6716814, the count above was then the one store
 /// test that failed. A row whose test column named only the test in
 /// `crate::file` claimed more than its tests check. So each of the three
 /// names the count beside it, and AF-47, which is the row that corrects

@@ -9083,6 +9083,18 @@ by `File::unlock`. What that does not cover, stated rather than implied away:
 - **Only the test locks that a test's success depends on were converted.**
   Probes that expect `WouldBlock`, and fixtures that unlock by name, still use
   `File` directly.
+- **Corrected 2026-09-25.** Two statements above were incomplete, and they
+  are completed here rather than edited:
+  - *A refused unlock in `Drop`.* For a guard over a borrowed file the drop
+    closes nothing, and the owner's descriptor is one of those that must
+    close, so the lock lasts at least as long as the owner keeps the file
+    open. `cli`'s observation `ReadLease` holds such a guard.
+  - *A refused success-path release.* Only `store` can make an unlock refuse
+    under test: the refusal is injected through a seam in `store::flock`'s
+    `#[cfg(test)]` test module, and every other crate builds `store` without
+    `cfg(test)`. So the branches that turn a refused `release()` into an
+    error in `pull`'s cash-session cache, in `api` and in `cli` run under no
+    test. In `store`, `repair::tests` drives both of `repair`'s. D-0693.
 
 ## Corporate actions are stated, not detected, and one more stored door withholds holed sessions — D-0694, 23 September 2026
 
@@ -9197,6 +9209,13 @@ by `File::unlock`. What that does not cover, stated rather than implied away:
   is a new ledger version, and it is not done. The Boolean payloads do not
   depend on the list at render time: a family records its kind, and a cash
   family no longer in the membership snapshot is refused when decoded.
+- **Corrected 2026-09-25.** *Doors that still keep holed sessions* missed
+  one, and it is added here rather than edited in: the strict audited range
+  (`audit-audited-range`, `audited_range_command::run`) keeps holed sessions
+  too: it never calls `crate::minute_gaps`. It builds its column from the
+  span `audited_range::RangeInputs::load` returns, with no session withheld.
+  Its identity would move with an answer, as each of the others' would.
+  D-0694.
 
 ## Every equity ranking is labelled gross, and a stored instrument is read only at its own path — D-0696, 23 September 2026
 
