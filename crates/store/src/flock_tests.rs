@@ -1,10 +1,12 @@
 #![cfg(test)]
 #![allow(clippy::expect_used, clippy::panic)]
-//! [`Flock`] releases by `File::unlock`, never by close. Every proof below
-//! keeps a duplicate descriptor open — `File::try_clone`, the deterministic
-//! model of the reference a spawned child holds until its exec — because a
-//! guard that released only by close passes every one of these checks the
-//! moment the duplicate is closed first. D-0693.
+//! [`Flock`] releases by `File::unlock`, never by close. The two proofs below
+//! that a guard releases its lock, owned and borrowed, keep a duplicate
+//! descriptor open — `File::try_clone`, the deterministic model of the
+//! reference a spawned child holds until its exec — because a guard that
+//! released only by close passes their checks the moment the duplicate is
+//! closed first. The others prove the mode each constructor takes, what a
+//! refused release reports and leaves held, and contention. D-0693.
 
 use super::{Flock, Unreleased};
 use std::cell::Cell;
@@ -108,6 +110,14 @@ impl Scratch {
     /// exclusive lock without waiting.
     fn probe(&self) -> Result<(), TryLockError> {
         let held = Flock::try_lock(self.open(), self.lock.as_path())?;
+        held.release().expect("the probe releases what it took");
+        Ok(())
+    }
+
+    /// What another reader sees: a fresh description asking for a shared
+    /// lock without waiting.
+    fn shared_probe(&self) -> Result<(), TryLockError> {
+        let held = Flock::try_lock_shared(self.open(), self.lock.as_path())?;
         held.release().expect("the probe releases what it took");
         Ok(())
     }
@@ -229,6 +239,79 @@ fn a_borrowed_lock_is_released_despite_a_duplicated_descriptor() {
     }
     drop(child);
     drop(owner);
+}
+
+/// While a guard taken by `take` over `over` is held: an exclusive probe is
+/// refused, and a shared probe is granted exactly when `take` is shared.
+fn holds_the_mode_it_names(scratch: &Scratch, take: Take, over: &str) {
+    assert!(
+        would_block(&scratch.probe()),
+        "{take:?} over {over}: a second description's exclusive lock is refused \
+         beside any guard"
+    );
+    let reader = scratch.shared_probe();
+    if matches!(take, Take::LockShared | Take::TryLockShared) {
+        reader.unwrap_or_else(|why| {
+            panic!(
+                "{take:?} over {over} took the exclusive lock: a second description's \
+                 shared lock was refused — {why}"
+            )
+        });
+    } else {
+        assert!(
+            would_block(&reader),
+            "{take:?} over {over} took a shared lock: a second description's shared \
+             lock was granted"
+        );
+    }
+}
+
+/// EACH CONSTRUCTOR TAKES THE MODE IT NAMES, OVER AN OWNED FILE AND A
+/// BORROWED ONE.
+///
+/// The two duplicate tests above probe only with an exclusive `try_lock`,
+/// which a shared holder refuses exactly as an exclusive one does, so they
+/// cannot tell the two modes apart: `lock_shared` taking the exclusive lock
+/// passed them and every other store test. Here, while each guard is held, a
+/// second description asks for a shared lock without waiting. It is granted
+/// beside `lock_shared` and `try_lock_shared` and refused beside `lock` and
+/// `try_lock`, and an exclusive `try_lock` is refused beside all four, for
+/// `F` = `File`, `&File` and `&mut File`.
+///
+/// Every probe is a `try_` call, and the lock is proved free before each
+/// guard is taken, so neither a constructor that took the wrong mode nor a
+/// release that left the lock held can leave `lock` or `lock_shared` waiting:
+/// either fails the test rather than hanging it.
+#[test]
+fn each_constructor_takes_the_mode_it_names_owned_or_borrowed() {
+    let scratch = Scratch::new("mode");
+    let mut owner = scratch.open();
+    for take in TAKES {
+        let free = |over: &str| {
+            scratch.probe().unwrap_or_else(|why| {
+                panic!("{take:?} over {over}: the last guard's release left the lock held — {why}")
+            });
+        };
+
+        free("File");
+        let guard = take.on(scratch.open(), scratch.lock.clone());
+        holds_the_mode_it_names(&scratch, take, "File");
+        guard.release().expect("an ordinary unlock succeeds");
+
+        free("&File");
+        let guard = take.on(&owner, scratch.lock.as_path());
+        holds_the_mode_it_names(&scratch, take, "&File");
+        guard.release().expect("an ordinary unlock succeeds");
+
+        free("&mut File");
+        let guard = take.on(&mut owner, scratch.lock.as_path());
+        holds_the_mode_it_names(&scratch, take, "&mut File");
+        guard.release().expect("an ordinary unlock succeeds");
+    }
+    drop(owner);
+    scratch
+        .probe()
+        .expect("every guard above was released, and no probe kept what it took");
 }
 
 /// A REFUSED RELEASE IS RETURNED, NAMING THE FILE, AND IS NOT REPEATED.

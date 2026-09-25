@@ -39124,9 +39124,16 @@ code.**
   module, and that file is inside it.
 
 **Proof.** Store: `an_owned_lock_is_released_despite_a_duplicated_descriptor`
-and `a_borrowed_lock_is_released_despite_a_duplicated_descriptor` cover all four
-constructors, both `release` and drop, and `F` = `File`, `&File` and
-`&mut File`. The borrowed case also writes and reads through `DerefMut`.
+and `a_borrowed_lock_is_released_despite_a_duplicated_descriptor` prove that a
+lock taken by each of the four constructors is released while a duplicate
+descriptor is open, by `release` and by drop, with `F` = `File`, `&File` and
+`&mut File`. The borrowed case also writes and reads through `DerefMut`. Their
+only probe is an exclusive `try_lock`, which a shared holder refuses as an
+exclusive one does, so they do not show which mode a constructor took.
+`each_constructor_takes_the_mode_it_names_owned_or_borrowed` does: while each
+guard is held, a second description's `try_lock_shared` is granted beside
+`lock_shared` and `try_lock_shared` and refused beside `lock` and `try_lock`,
+for the same three `F`.
 `a_refused_release_is_returned_naming_the_file` covers the path, the sentence,
 the source, `From<Unreleased>` keeping a `PermissionDenied` kind, and that
 `Drop` does not ask again.
@@ -39202,7 +39209,8 @@ group 26, beside `dir-is-a-file` and `lock-is-a-dir`, and that gate, run from
 `ci.yml`, exits 0.
 
 **Correction, 2026-09-25: the commit the site list was keyed to, the
-refusal's wording, and the refusal arms no test drove.** A review upheld
+refusal's wording, the refusal arms no test drove, and the lock mode no test
+checked.** A review upheld
 findings against this change, and each is answered below. The passages above
 that they made false were corrected in place before the entry reached `main`:
 the commit the site list and the red-before-green run name, the `Drop` note's
@@ -39259,6 +39267,19 @@ line, and the proof paragraph.
    `FormatError`. The `store.header` fall-back returns an older generation's
    header, so it is four and four. The emits test now tallies what each
    drive's call handed back and holds the header to the tally.
+6. *The mode.* The proof paragraph said the two duplicate tests cover all
+   four constructors. They cover each constructor's release, and their only
+   probe, an exclusive `try_lock`, is refused by a shared holder as by an
+   exclusive one. So `lock_shared` taking the exclusive lock
+   (`file.borrow().lock()?`) passed them and every other `store` test, and no
+   `store` code outside `flock`'s own tests calls `Flock::lock_shared`.
+   `each_constructor_takes_the_mode_it_names_owned_or_borrowed` asks a second
+   description for a shared lock while each guard is held, over `File`,
+   `&File` and `&mut File`. It fails under that substitution, and under each
+   other constructor's swap of exclusive and shared. It proves the lock free
+   before each guard is taken, so a release that leaves the lock held fails
+   it rather than leaving `lock` or `lock_shared` waiting. The proof paragraph
+   is narrowed to what the two tests show.
 
 ### D-0694 — Say corporate actions are unchecked on every stock report, and withhold holed sessions on the ordinary stored sweep — 2026-09-23
 
