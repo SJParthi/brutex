@@ -9661,3 +9661,66 @@ is paid. The text above is kept as it was written.
   removed. The per-request cost is therefore linear in the store for as long
   as such a fault lasts. **UNMEASURED**: how often, if ever, the operator's
   volume returns one.
+
+**Corrected 26 September 2026, on a ninth review (D-0695).** The eighth
+correction's second bullet says a row read absent under a stamp that found no
+manifest, below a root the stamps saw as a directory, is served absent. That
+holds only while the stamps are taken of one state of the store. The text
+above is kept as it was written.
+
+* **Stamps a changing root tore vouched for an empty store.**
+  `manifest_stamps` stats the five manifests and asks the root only when none
+  of them answered with a time (`std::fs::metadata(store_root).is_ok_and(|meta|
+  meta.is_dir())`). A root away for those five `stat` calls and back for its
+  own check stamps five missing manifests under a root that is a directory:
+  the key of an empty store, over a store that holds Dhan's manifest. Away
+  again once `read_all`'s own check has passed, every row reads absent, those
+  stamps could have read each one, and the request was answered an empty
+  store: a review renamed a store root aside and back in a tight loop and saw
+  `/calendar.json?feed=dhan&symbol=NIFTY` answer `200` with no session, and a
+  peer vote with no calendar, no voter and no feed named unreadable. The read
+  was also kept under the torn key.
+* **Since this correction such an absence is stamped again after the read.**
+  A miss whose read still has a row absent takes `manifest_stamps` again, and
+  an absence is served only where both stampings found no manifest, below a
+  root both saw as a directory. With the root back by then, the manifest the
+  read missed is found; with it away, no directory is seen. Either way the row
+  is served unreadable, as `CONTRADICTED_ABSENCE` says, and nothing is kept.
+  `an_absence_under_stamps_a_changing_root_tore_is_stamped_again_after_the_read`
+  drives both through torn stamps handed to `census_now_stamping`.
+* **Its cost.** One more `manifest_stamps`: five `stat` calls, and a sixth
+  when none of them found a manifest with a time. It is paid only on a miss
+  whose read has a row absent; a read with none, and every hit, pays nothing
+  more. `a_miss_is_stamped_again_only_when_a_row_reads_absent` counts the
+  stampings: one on a miss over a store with every feed's manifest, two on a
+  miss over a store with four feeds absent, one on each hit. Counted, not
+  timed.
+* **What is still answered an empty store.** Stamps taken again that tear the
+  same way vouch for the absence too. A root that is away for both stampings'
+  manifest `stat` calls and for the manifest reads, and back for both root
+  checks and for `read_all`'s own, is still answered an empty store, and that
+  read is kept under the torn key: a later request whose stamps tear the same
+  way is served it without reading, until a request whose stamps do not tear,
+  which reads again. Every check here is a `stat` by path, each seeing the root
+  as it is at that instant, so the race is narrowed, not closed. The same test
+  pins this residual as it stands. **UNMEASURED**: how often, if ever, a real
+  volume changes that way; the review's loop renamed the root as fast as it
+  could.
+* **A newer manifest is refused for one request, as a newer absence is.** The
+  eighth correction's "An absence that is real and newer than its stamp is
+  refused too, for one request" gains a case: a feed's first manifest
+  installed after the read and before the stamps taken again. That row read
+  absent, and those stamps found its manifest, so it is served unreadable to
+  that request and read on the next. Each row is asked its own stamp, so a
+  manifest rewritten for another feed in that window changes no absence, and
+  the read is kept under the stamps taken before it, which the next request's
+  no longer match.
+  `what_changes_between_the_read_and_its_second_stamping_decides_only_its_own_row`
+  pins both.
+* **Such a row is now logged.** `read_vendor`'s own line for it says "absent",
+  at `Debug`, which the default floor does not write. Each row
+  `refuse_contradicted_absences` changes now writes one `api.census` line at
+  `Warn`, "absence contradicted by its stamp", naming the feed, the manifest's
+  path and `CONTRADICTED_ABSENCE`, one line for each row it changes and none
+  for any other. `an_absence_its_stamps_contradict_is_logged_at_warn` reads
+  them back from the installed sink.

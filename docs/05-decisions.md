@@ -41652,3 +41652,190 @@ passed, 2 failed and 2 ignored. The 2 were
 `nothing_after_the_sync_can_refuse_an_append`, at the release line after the
 sync, and `the_budget_reason_is_worded_once`, at 3 against 1. The old count
 passed over the same source.
+
+**Repaired a ninth time, on a ninth review — 26 September 2026.** Two
+should-fix and one nit were upheld against `647767f9`, the commit that
+carried the eighth repair's record. The text above is kept as it was written,
+except AF-28i and AF-28j, rows new in this piece, which are corrected in
+place; where the rest is now wrong, this says so. The four findings the
+eighth repair took from the adversarial passes were reported resolved by the
+same review.
+
+- *Stamps a changing store root tore still answered an empty store.*
+  `manifest_stamps` stats the five manifests and asks the root only when none
+  of them answered with a time. A root away for those five `stat` calls and
+  back for its own check stamps `CensusStamps { manifests: [Missing; 5],
+  root_is_dir: true }`, the key of an empty store, over a store that holds
+  Dhan's manifest. Away again once `read_all`'s own check had passed, every
+  row read absent, `stamp_could_read(Missing, true, Absent)` accepted each,
+  and `refuse_contradicted_absences` changed nothing. A review renamed the
+  root of `nifty_store` aside and back in a tight loop while three threads
+  called the symbol branch of `/calendar.json`, its exchange branch and the
+  peer vote: the symbol branch answered `200` with no session, and the peer
+  vote had no calendar, no voter and no feed named unreadable. A second
+  probe found such a read kept under the torn key, where a later request
+  whose stamps tear the same way is answered from the cache without reading,
+  as the test below requires of the case still left. The eighth repair
+  decided "the request that raced a store root" closed, and neither it nor
+  `docs/06-limits.md` stated this.
+- **Decided: an absence is stamped again after the read.**
+  `census_now_reading` now calls `census_now_stamping` with
+  `manifest_stamps`, and a miss whose read still has a row absent takes the
+  stamps again after the read and hands them to
+  `refuse_contradicted_absences` too. An absence is served only where both
+  stampings found no manifest, below a root both saw as a directory; any
+  other becomes `Fault::Contradicted`, and the read is not kept. The cost is
+  one more `manifest_stamps`, five `stat` calls and a sixth when none of them
+  found a manifest with a time, on a miss whose read has a row absent, and
+  nothing on any other miss or on a hit. `CONTRADICTED_ABSENCE` now names the
+  stamps "taken of the store just before or just after" the read. The
+  stamping is a parameter so a test can hand the request torn stamps;
+  production passes `manifest_stamps` and nothing else.
+  `an_absence_under_stamps_a_changing_root_tore_is_stamped_again_after_the_read`
+  makes the torn stamps as the review's root did, the five manifests stamped
+  with the root moved aside and the root checked with it back, requires them
+  equal to an empty store's key, and reads past `read_all`'s check with the
+  root aside. Stamped again with the root back, Dhan's row is served
+  unreadable and the others absent; with the root away, every row is; neither
+  read is kept, and the next request serves the healthy store.
+  `a_miss_is_stamped_again_only_when_a_row_reads_absent` counts the
+  stampings. `what_changes_between_the_read_and_its_second_stamping_decides_only_its_own_row`
+  installs Groww's first manifest between the read and the second stamping,
+  and, over a second store, rewrites Dhan's there. AF-28k records them.
+- **What is left, stated and pinned.** Stamps taken again that tear the same
+  way vouch for the absence too. A root away for both stampings' manifest
+  `stat` calls and for the manifest reads, and back for both root checks and
+  for `read_all`'s own, is still answered an empty store, and that read is
+  kept under the torn key and served, without reading, to a later request
+  whose stamps tear the same way, until a request whose stamps do not. The
+  same test drives that case and requires exactly this, so a change that
+  closes it must say so. `docs/06-limits.md`'s ninth correction states it.
+- **Why each row is asked its own stamps, not the whole stamps compared.**
+  The review suggested serving an absence, and keeping the read, only when
+  the stamps before and after the read are equal. Then any manifest written
+  between the read and the second stamping makes them unequal, and every
+  feed read absent is refused for that request although no stamp of its own
+  moved. Asked per row, Groww's first manifest installed there refuses only
+  Groww's row, and Dhan's manifest rewritten there refuses none, while the
+  read is kept under the stamps taken before it, which the next request no
+  longer matches, as any read a rewrite raced was. The proof below runs the
+  review's rule.
+- *Three tests bound a Unix socket at a manifest path too long for a socket
+  address.* `a_manifest_that_stats_but_will_not_open_is_not_cached`,
+  `a_fault_on_another_feeds_manifest_leaves_this_feeds_calendar_kept` and
+  `a_fault_the_census_cache_declines_rebuilds_the_store_body_on_every_request`
+  bound it at `scratch::path(name)/manifest/groww.man`, under `TMPDIR`.
+  Under the long `TMPDIR` this workflow gives cargo-mutants, each panicked
+  with "path must be shorter than SUN_LEN", and cargo-mutants refused to test
+  anything: "cargo test failed in an unmutated tree". So no mutation run over
+  this piece could be taken under that constraint without skipping them.
+  **Decided:** the tests bind through `SocketAt`, which makes a link named
+  under `/tmp` for this process to the manifest directory and binds through
+  it, so the address is short and the socket is the file at the manifest
+  path, as before; the guard removes the link when it drops.
+  `a_socket_is_bound_at_a_path_too_long_for_a_socket_address` requires a
+  path longer than a socket address holds to be refused when bound directly,
+  and bound through `SocketAt` to hold the socket itself, not a link, and
+  the link to be gone and the socket file left after the drop. AF-28j names
+  it.
+- *A contradicted row left no trace in the log.* A nit, and true:
+  `read_vendor` logged the row "absent" at `Debug`, below the default floor
+  and under the state the request was then not served, and
+  `refuse_contradicted_absences` changed the row and emitted nothing, so a
+  reader of `/logs` after the 503 found nothing, while every other unreadable
+  row is written there at `Warn`. **Decided:** each row it changes writes one
+  `api.census` line at `Warn`, "absence contradicted by its stamp", naming
+  the feed, the manifest's path and `CONTRADICTED_ABSENCE`.
+  `an_absence_its_stamps_contradict_is_logged_at_warn` reads them back from
+  the installed sink: Dhan's line alone when the absences are stamped again
+  with the root back, and one line for each of the five feeds when they are
+  stamped again with it away. The emit-site accounting in `emitted.rs` counts
+  58 sites, up from 57, and 19 driven from `server`'s tests, up from 18.
+  AF-28l records it.
+
+**What that makes wrong above.**
+
+- The eighth repair's "neither is an absence its stamp could have read" and
+  its "the four feeds whose stamps found no manifest served absent" hold only
+  where the stamps taken again after the read find no manifest either, below
+  a root that is a directory. With the root still away when they are taken,
+  as in `race_the_root`'s second case, every feed read absent is served
+  unreadable, and the racing peer vote names all five feeds, not `dhan`
+  alone. AF-28i's peer-vote clause is corrected in place to say so.
+- The eighth repair's "The cost is one index and one `stamp_could_read` per
+  row, and no syscall" is the cost of `refuse_contradicted_absences` alone.
+  A miss whose read has a row absent now also pays the second stamping.
+- The eighth repair's gloss of `CONTRADICTED_ABSENCE`, "the stamps taken
+  just before the read contradict it". It now names the stamps taken just
+  before or just after.
+- The first item of the eighth repair's "Still not done", "An absence that is
+  real and newer than its stamp is refused too, for one request", now has a
+  further case: a feed's first manifest installed between the read and the
+  second stamping is refused for that one request, and read on the next.
+
+**Rejected.**
+
+- *Requiring the whole stamps before and after the read to be equal.* See
+  "Why each row is asked its own stamps" above.
+- *Saying in `refuse_contradicted_absences`'s doc that the contradiction is
+  logged nowhere*, the review's alternative for the nit. The 503's reason
+  would still never reach `/logs`, which is the gap the nit names.
+
+**Still not done.** The items of the fifth, sixth, seventh and eighth
+repairs' lists stand as written. One more, which this repair adds:
+
+- *A root that tears both stampings the same way, around a read it tears
+  too, is still answered an empty store, and kept.* Every stamp and read here
+  goes through the root's path, each meeting the root as it is at that
+  instant, so this repair narrows the race and does not close it. Stated in
+  `docs/06-limits.md` and pinned as it stands. How often, if ever, a real
+  volume does this is not measured.
+
+Each proof was taken on this tree with breaks added in one build, each
+selected by an environment variable, and the tree restored afterwards from
+copies taken before the breaks, compared byte for byte, and equal to
+`0d1289b1` under `crates/`. The whole `api` lib ran under each break; with
+none set it had 1,216 passed, 0 failed and 2 ignored.
+
+- With `SocketAt` binding directly at the path, 1 failed:
+  `a_socket_is_bound_at_a_path_too_long_for_a_socket_address`, at "path must
+  be shorter than SUN_LEN". Run over the census request tests with `TMPDIR`
+  set to this workflow's cargo-mutants directory, 4 failed there, the helper's
+  test and the three socket tests, each at the same words; unbroken, all 47
+  passed under that `TMPDIR`.
+- With no second stamping, 5 failed: the torn-stamps test, at "Back: Dhan's
+  manifest is found again", five "absent" against Dhan unreadable; the count
+  test, 1 stamping against 2 over the store with four feeds absent; the
+  per-row test, at "Groww's absence is refused for this request"; the
+  logging test, at the stamped-away case, `dhan` alone against all five; and
+  `a_calendar_derived_while_the_root_stays_away_is_not_kept`, whose peer vote
+  named `dhan` alone.
+- With a second stamping on every miss, 1 failed: the count test, 2
+  stampings against 1 over the store with every feed's manifest.
+- With the review's rule, every absence refused when the whole stamps taken
+  again differ, 4 of the census request tests failed: the torn-stamps test,
+  all five unreadable against Dhan alone with the root back; the per-row
+  test, TrueData, GDFL and Zerodha refused beside Groww; the logging test,
+  whose stamped-away case logged Dhan alone, because that break refuses the
+  other rows without the log line; and
+  `a_first_manifest_installed_inside_the_read_is_served_held_and_read_again`,
+  the four absent feeds refused beside the install. A fifth failure in that
+  run, `coverage::tests::the_lookup_does_not_grow_with_the_universe`, is a
+  timing test ("1 ns against 6 ns"); run alone under the same break it passed
+  3 times of 3.
+- With the log line removed, 1 failed: the logging test, at the root-back
+  case, no line against Dhan's.
+
+**Verified (ninth repair)** on this tree (arm64 laptop,
+`CARGO_BUILD_JOBS=3`, `--locked --offline`, the machine's load average
+between 20 and 90 from other work). `cargo fmt --all --check` is clean.
+`cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
+refused `a7ae38d1`'s doc comment for a bare `SUN_LEN`
+(`clippy::doc_markdown`); `04f09aef` puts the quoted refusal in backticks,
+and clippy is then clean. `Cargo.lock` is byte-identical to `main`'s, and
+`web/` is untouched. The `api` suite ran outside the command sandbox, for the
+loopback binds and the sockets. Its lib has 1,216 passed, 0 failed and 2
+ignored: the eighth repair's 1,211 and the five tests this repair adds.
+`src/main.rs` has 2 passed, `tests/binary.rs` 3 and the doctest 1. `core`'s
+whole suite, which reads these documents, passes. Every shell gate of CI's
+Gate 1+2 job except 1e passes, Gates 10, 11, 12, 14 and 23 among them.
