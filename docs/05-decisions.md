@@ -41220,3 +41220,179 @@ passed, `tests/binary.rs` 3 and the doctest 1. `core`'s whole suite, which
 reads these documents, passes. Every shell gate of CI's Gate 1+2 job except
 1e passes, Gates 10, 10b, 11, 23, 27 and 27b among them.
 
+
+**Repaired a seventh time, on a seventh review — 25 September 2026.** One
+blocking issue and one should-fix were upheld against `88fbf5c6`, the commit
+that carried the sixth repair, with four nits. The text above is kept as it
+was written; where it is now wrong, this says so.
+
+- *Two mutants of the fourth repair's own code survived.* This one blocked.
+  `ingestion_observations_reading` takes the observed series' months out of
+  every entry the landed feed's census holds, by four tests joined with `&&`:
+  NSE, INDEX, the symbol, and no contract. `4a91b24a` rewrote that
+  conjunction so it also sets the identity `census_holds` asks with. A review
+  ran cargo-mutants 26.2.0 over the whole piece's source diff,
+  `eecca4da..HEAD`, 79 mutants over the `api` lib, and 2 were MISSED, both in
+  that conjunction. With its last `&&` turned into `||`, every series without
+  a contract counts as NIFTY; with the one before it, every NSE INDEX series
+  does. Every fixture held NIFTY alone, so both passed every `api` target:
+  the lib, `src/main.rs`, `tests/binary.rs` and the doctest. The sixth
+  repair's recorded run did not reach them. It covered the diff since
+  `4a91b24a`, which leaves out `4a91b24a`'s own change, and no earlier repair
+  recorded a run that included it.
+- **Decided: the observation is tested beside other series.**
+  `an_observation_derives_over_its_own_series_months_and_no_other_series`
+  holds NIFTY's May on Dhan and, for June, one other series without a
+  contract, with NIFTY's June daily bar on disk though no census names it:
+  BANKNIFTY as INDEX, ITC as CASH and NIFTY as CASH, each in turn. The
+  observation must answer May's one session, keep that calendar under Dhan's
+  own modified time, and meet it on its second call. A conjunction that
+  counts the other series' June derives NIFTY over June as well and answers
+  two. The code was right and is unchanged.
+- *No test pinned that `CensusStamps::modified` is asked per row.* The sixth
+  repair chose the per-row rule "so a persistent fault on another feed's
+  manifest does not turn this feed's calendar cache off, as a whole-read rule
+  would", and `modified`'s doc and the sixth correction in
+  `docs/06-limits.md` say the same. A review switched in the whole-read rule,
+  every caller handing `cached` no time while `read_as_stamped` refuses the
+  read, and the whole `api` lib passed. Under it, while another feed's
+  manifest holds a fault the census cache declines to keep (a socket at the
+  path, `EIO`, `EMFILE`), every request derives this feed's calendars again:
+  0.28 s per instrument by `cached`'s record, and every instrument on the
+  exchange branch. A second review raised the same finding as a nit.
+- **Decided: the per-row rule is tested through every caller.**
+  `a_fault_on_another_feeds_manifest_leaves_this_feeds_calendar_kept` binds a
+  Unix socket at Groww's manifest path over `nifty_store`, as
+  `a_manifest_that_stats_but_will_not_open_is_not_cached` does, so no whole
+  read is kept. Each of the four callers must still keep Dhan's NIFTY
+  calendar under Dhan's own modified time and meet that same `Arc` on its
+  second call. AF-28h records it.
+- *The symbol branch kept a calendar for every name its census does not
+  hold.* Raised as a nit; the code predates D-0695. For such a name
+  `/calendar.json?feed=…&symbol=…` derives over no months and answers 200
+  with no session, and `cached` kept that empty calendar under a key built
+  from the request's own text. Nothing evicts from `site.calendars`, so each
+  distinct name was one more entry for the life of the process. A review
+  sent 2,000 such names and the map went from 9 entries to 2,009. Spellings
+  of a held name that `Symbol::new` refuses, and so does not fold to the
+  stored case, are such names: a leading or trailing space, a NUL, a
+  zero-width space, full-width letters. Lower and mixed case fold, and answer
+  the held name's sessions.
+- **Decided: a name the census does not hold keeps nothing.** The symbol
+  branch hands `cached` the feed's time only when its census holds the name
+  (`held.and(stamp)`). An unheld name is derived for its own request, which
+  opens no file, and is neither looked up nor kept. The map is then bounded
+  by the identities the feeds' censuses have held. What the request answers
+  is unchanged: 200 with no session.
+  `a_name_the_census_does_not_hold_keeps_no_calendar` sends six such
+  spellings of NIFTY and 64 junk names. Each answers 200 with no session and
+  keeps nothing, and NIFTY's own calendar stays kept and is met on its next
+  call. AF-28h records it.
+- **What that does to the sixth repair's refusal.** Read from the code: the
+  only derivation the sixth repair's per-row refusal in `modified` could
+  refuse was the symbol branch's. `/calendar.json` refuses an unreadable row
+  before either branch derives, and the peer vote and the observation derive
+  only for held rows. A held row under a stamp that found a time always
+  passes, so what was left is a row read absent under a stamp that found its
+  manifest, as the store-root race reads, and on that row every name is
+  unheld. The unheld-name skip now declines that derivation first. So the
+  refusal decides no calendar any caller keeps today. It
+  stays at the one function every key comes from, so a caller added later
+  that derives from a row its stamp contradicts is covered, and
+  `each_feed_is_handed_its_own_modified_time_only_for_a_row_its_stamp_could_read`
+  pins it alone. The two root-race tests now fail only with both rules
+  removed. The sixth repair's proof that removing the refusal failed "both
+  root-race tests ... and the unit test" held on its tree; on this one only
+  the unit test fails. `modified`'s doc and `race_the_root`'s say so.
+- *The production-router audit test was not kept apart from the tests that
+  hold every detail slot.* Raised as a nit; it predates the piece.
+  `production_router_wires_durable_request_audit_and_its_read_only_reader`
+  journals its request through `request_audited`, whose journal start takes
+  one of the four shared detail slots, and it did not take
+  `detail::apart_from_slot_owners`, which its sibling has taken since
+  `950ead28` for the same 429. A review saw it answer 429 "bounded request
+  audit capacity is full" in 2 of 19 full `api` lib runs, and pass alone
+  three times.
+- **Decided: every test that journals through `request_audited` is kept
+  apart.** The router test and the four other tests in
+  `operation_audit_tests.rs` that call it without the guard now take it.
+  `apart_from_slot_owners` and `hold_every_slot` lock one mutex, so none of
+  them runs while a test holds every slot. A throwaway probe, since removed,
+  held every slot and sent the router test's own request: on each of five
+  runs the server answered `HTTP/1.1 429 Too Many Requests` with that
+  refusal, and `400 Bad Request`, the answer the test expects, once the slots
+  were released. A race cannot be made to fail on demand, so no test fails
+  with the guard removed; the probe is the evidence that the guard names the
+  cause.
+- *That commit's message said more than it did.* `ee4711ac`, which carried
+  the decision above, says "Every test that journals through
+  `request_audited` takes `apart_from_slot_owners`". It guarded the five in
+  `operation_audit_tests.rs` and no other.
+  `booleanlaunch_tests::production_metadata_route_audits_only_its_http_outcome_without_launching_work`
+  sends `GET /engine/boolean-launch.json` through the audited router, which
+  journals it the same way, and did not take the guard. A throwaway probe
+  held every slot and sent that request: on each of three runs it answered
+  429, and 200 once the slots were released. It takes the guard since the
+  commit that carries this paragraph, so the message is now true of every
+  test in the `api` lib's own process.
+  `sweeprun::tests::a_usable_server_budget_is_refused_before_the_slot_and_writes_nothing`
+  journals through `request_audited` too, in a child process that
+  `isolated::rerun` starts for that one test, where no test holds a slot.
+
+**Rejected.**
+
+- *Refusing a name the census does not hold, with 404 or 400.* It would
+  change what `/calendar.json` answers on a route `/ingest` reads, and the
+  nit asked only that nothing be kept. The answer is recorded under "Still
+  not done".
+- *Bounding `site.calendars` with an eviction rule.* Once only held
+  identities are kept, the map is as large as what the store has held, and
+  a rule for choosing what to evict would be a second question to answer.
+- *Filtering the exchange branch to NSE here.* See "Still not done".
+
+**Still not done.** The items of the fifth and sixth repairs' lists stand as
+written. Two more, raised as nits by the seventh review:
+
+- *The exchange branch of `/calendar.json` agrees BSE series into the feed's
+  calendar.* It derives every spot identity the feed's census holds, and
+  D-0660's venue filter reached only `/gaps.json`'s peer vote. A review's
+  throwaway probe had Dhan's census hold NIFTY as NSE INDEX, its bar on
+  2025-05-02, and SENSEX as BSE INDEX, its bar on Saturday 2025-05-03:
+  `/calendar.json?feed=dhan` answered 200 with 2 sessions and `derivedFrom`
+  `["NIFTY","SENSEX"]`, while `feed=dhan&symbol=NIFTY` answered 1. A day only
+  stored BSE data traded, which `CLAUDE.md` §1 keeps on disk, is then
+  answered to `/ingest` as a session of the exchange it computes NSE months
+  against. Since the fourth repair, a held BSE file that does not open also
+  refuses the whole answer with 503; that is read from the code, not
+  produced. The code predates D-0695. Filtering the branch to NSE changes
+  what it answers for a feed that holds only BSE series, and is left to a
+  decision of its own. `docs/06-limits.md` states it.
+- *A name the census does not hold answers 200 with no session, not a
+  refusal.* That includes the spellings of a held name `Symbol::new`
+  refuses. It is answered, not kept, since this repair.
+
+Each proof was taken on this tree with breaks added, each selected by an
+environment variable and compiled once, and the tree restored afterwards with
+`git checkout` of the files the breaks touched. The whole `api` lib ran under
+each break, with the throwaway probes skipped. With no break it had 1,205
+passed, 0 failed and 2 ignored.
+
+- With the conjunction's first `&&` an `||` (NSE or INDEX), 1 failed: the
+  observation test, at "beside NIFTY as CASH", `Some(2)` against `Some(1)`.
+  Its second `&&` an `||`, and its third, each failed that test alone, at
+  "beside BANKNIFTY as INDEX", `Some(2)` against `Some(1)`. The second and
+  third are the two cargo-mutants reported MISSED.
+- With `census_now_reading` handing every caller stamps that found no
+  manifest whenever `read_as_stamped` refuses the read, the whole-read rule,
+  1 failed: the per-row test, at "Symbol: kept under Dhan's own modified
+  time, with Groww's manifest faulted", `None` against Dhan's time.
+- With the symbol branch handing `cached` the feed's time for an unheld name
+  as well, as it did before this repair, 1 failed: the unheld-name test,
+  at "%20NIFTY: kept nothing", 2 entries against 1.
+- With `modified` handing a row's stamp time without asking
+  `stamp_could_read`, 1 failed: the unit test, at "absent under a manifest
+  stamped present". Both root-race tests passed, because the unheld-name
+  skip declines the race's derivation first. With that break and the
+  unheld-name break together, 4 failed: both root-race tests, each at
+  "Symbol, request 1", `Some(0)` against `Some(1)`, the unit test and the
+  unheld-name test.

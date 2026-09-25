@@ -627,6 +627,11 @@ async fn accepted_child(root: &Path) {
 #[tokio::test]
 async fn production_metadata_route_audits_only_its_http_outcome_without_launching_work() {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    // THE AUDITED ROUTER JOURNALS THIS REQUEST THROUGH A DETAIL SLOT, so it is
+    // kept apart from the tests that hold every slot. A probe that held every
+    // slot got 429 from this same request on each of three runs, and 200 once
+    // the slots were released. D-0695.
+    let _apart = crate::detail::apart_from_slot_owners().await;
     let root = Scratch::new();
     let site = root.site();
     let sentinel = root.0.join("retained-source.bin");

@@ -306,8 +306,8 @@ async fn production_router_wires_durable_request_audit_and_its_read_only_reader(
     // this test was not kept apart from the tests that hold every slot. Under a
     // full `api` lib run a review saw it answered 429, "bounded request audit
     // capacity is full", in 2 of 19 runs, and it passed alone. A probe that
-    // held every slot got that 429 from this same request on every run, and
-    // 400 once the slots were released. D-0695.
+    // held every slot got that 429 from this same request on each of five
+    // runs, and 400 once the slots were released. D-0695.
     let _apart = crate::detail::apart_from_slot_owners().await;
     let root = Scratch::new();
     let site = Arc::new(crate::server::Site::load(&root.0.join("masters"), &root.0));

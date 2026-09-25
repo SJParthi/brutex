@@ -9531,3 +9531,52 @@ text above is kept as it was written.
   moved aside, had `/gaps.json` answer 200 with a one-session calendar voted by
   `groww:NIFTY` and `dhan:NIFTY` unreadable, while `/calendar.json?feed=dhan`
   answered 503. Not changed; D-0695 records it under "Still not done".
+
+**Corrected 25 September 2026, on a seventh review (D-0695).** The sixth
+correction's per-feed sentence was pinned by no test, one cost of the
+calendar cache was unbounded and stated nowhere, and one answer of the
+exchange branch was stated nowhere. The text above is kept as it was written.
+
+* The sixth correction's first bullet ends "This is asked per feed, so a
+  fault on another feed's manifest does not turn this feed's calendar cache
+  off." That is what the code does, and no test showed it: a review switched
+  in a rule on the whole read, no time for any row while the census cache
+  declines the read, and the whole `api` lib passed. Under that rule a fault
+  on one feed's manifest that the census cache does not keep (a socket at the
+  path, `EIO`, `EMFILE`) would have every request derive every other feed's
+  calendars again, 0.28 s per instrument, for as long as the fault lasts. A
+  test now binds a socket at Groww's manifest path and requires each of the
+  four callers to keep Dhan's calendar under Dhan's own modified time and meet
+  it on its next call.
+* **The calendar cache grew by one entry per distinct name no census holds.**
+  The symbol branch of `/calendar.json` kept the empty calendar it derives for
+  such a name, under a key built from the request's own text, and nothing
+  evicts from that map. A review sent 2,000 such names and the map went from 9
+  entries to 2,009, for the life of the process. Since this correction an
+  unheld name is derived for its own request and not kept. The map then holds
+  at most one entry per identity (feed, exchange, segment, symbol) that a
+  census has held since the process started; an identity no census holds any
+  longer stays until a restart, because nothing evicts. What an unheld name
+  costs per request is one derivation over no months, which opens no file.
+  Read from the code, not timed.
+* **A name no census holds is still answered 200 with no session.** That
+  includes a held name spelled with a leading or trailing space, a NUL, a
+  zero-width space or full-width letters, which `Symbol::new` refuses and so
+  does not fold to the stored case; lower and mixed case fold and answer the
+  held name's sessions. Not changed; D-0695 records it under "Still not done".
+* **The exchange branch of `/calendar.json` agrees BSE series into the feed's
+  calendar.** It derives every spot identity the feed's census holds, BSE
+  among them, and agrees them into one calendar. D-0660's venue filter
+  reached only `/gaps.json`'s peer vote. A review's throwaway probe had Dhan
+  hold NIFTY as NSE INDEX, its bar on 2025-05-02, and SENSEX as BSE INDEX, its
+  bar on Saturday 2025-05-03: `/calendar.json?feed=dhan` answered two
+  sessions, derived from NIFTY and SENSEX, and `symbol=NIFTY` one. So a day
+  only stored BSE data traded, which `CLAUDE.md` §1 keeps on disk, is answered
+  to `/ingest` as a session. A held BSE file that does not open also refuses
+  the whole answer with 503; read from the code, not produced. Not changed;
+  D-0695 records it under "Still not done".
+* **The sixth correction's per-row refusal now decides no kept calendar.**
+  The only derivation it could refuse was the symbol branch's over a census
+  row read absent under a stamp that found its manifest, where every name is
+  unheld, and the unheld-name skip declines that first. It is kept for a
+  caller added later, and a unit test pins it alone.
