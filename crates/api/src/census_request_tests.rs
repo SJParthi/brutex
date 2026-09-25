@@ -41,7 +41,8 @@
 //! them. The three after those pin the stamps taken again after a read with an
 //! absence: stamps a changing root tore before the read are met by them, a
 //! miss pays for them only when a row reads absent, and each row is decided by
-//! its own stamp. The next three move a bar
+//! its own stamp. One more pins that each row changed that way is logged at
+//! `Warn`. The next three move a bar
 //! directory or file aside instead, and pin the same rule for the calendar
 //! cache behind the census: a calendar derived without a bar file its census
 //! holds is refused to the request that derived it, and derived again on the
@@ -2601,6 +2602,92 @@ fn what_changes_between_the_read_and_its_second_stamping_decides_only_its_own_ro
     let base = fixture.reads();
     assert_eq!(fixture.states(), held, "the next request");
     assert_eq!(fixture.reads(), base + 1, "reads the rewrite");
+}
+
+/// A ROW SERVED UNREADABLE BECAUSE ITS STAMPS CONTRADICT ITS ABSENCE IS
+/// LOGGED AT `Warn`, ONE LINE PER ROW CHANGED. D-0695.
+///
+/// `read_vendor` logs a row it reads absent at `Debug`, under the state the
+/// request is then not served, and `refuse_contradicted_absences` changed the
+/// row and logged nothing: a reader of `/logs` after the 503 found no trace
+/// of why. With the store root moved aside just after `read_all`'s own check
+/// and back as the read ends, Dhan's row alone is changed, and one
+/// `api.census` line at `Warn` names Dhan, its manifest and
+/// `CONTRADICTED_ABSENCE`. With the root still away when the absences are
+/// stamped again, every feed's row is changed, and each is named once.
+#[test]
+fn an_absence_its_stamps_contradict_is_logged_at_warn() {
+    let _shared = crate::emitted::sink();
+    for (name, away_when_stamped_again, logged) in [
+        ("census-request-logged-back", false, vec!["dhan"]),
+        (
+            "census-request-logged-away",
+            true,
+            Vendor::ALL.into_iter().map(Vendor::as_str).collect(),
+        ),
+    ] {
+        let fixture = nifty_store(name);
+        let from = crate::emitted::mark();
+        let mut stampings = 0;
+        let (_, (served, _)) = census_now_stamping(
+            &fixture.site,
+            |root| {
+                stampings += 1;
+                let _aside = (stampings == 2 && away_when_stamped_again).then(|| Aside::new(root));
+                manifest_stamps(root)
+            },
+            read_past_the_check,
+        );
+        let lines: Vec<telemetry::Record> =
+            crate::emitted::landed(from, "api.census", "absence contradicted by its stamp")
+                .into_iter()
+                .filter(|record| crate::emitted::says(record, "path", name))
+                .collect();
+        assert!(
+            lines
+                .iter()
+                .all(|record| record.level == telemetry::Level::Warn
+                    && crate::emitted::says(record, "why", CONTRADICTED_ABSENCE)),
+            "{name}: at Warn, with the reason: {lines:?}"
+        );
+        // Sorted, because the log is read back newest first.
+        let mut vendors: Vec<&str> = lines
+            .iter()
+            .filter_map(|record| {
+                record
+                    .field("vendor")
+                    .and_then(telemetry::OwnedValue::as_str)
+            })
+            .collect();
+        vendors.sort_unstable();
+        let mut want = logged.clone();
+        want.sort_unstable();
+        assert_eq!(vendors, want, "{name}: one line per row changed");
+        let changed: Vec<&str> = served
+            .iter()
+            .filter(|row| {
+                matches!(
+                    row.state,
+                    census::Census::Unreadable {
+                        fault: census::Fault::Contradicted,
+                        ..
+                    }
+                )
+            })
+            .map(|row| row.vendor.as_str())
+            .collect();
+        assert_eq!(changed, logged, "{name}: the rows changed");
+        for vendor in &logged {
+            assert!(
+                lines.iter().any(|record| crate::emitted::says(
+                    record,
+                    "path",
+                    &format!("manifest/{vendor}.man")
+                )),
+                "{name}: {vendor}'s manifest named: {lines:?}"
+            );
+        }
+    }
 }
 
 /// A CALENDAR DERIVED WHILE A HELD BAR FILE WOULD NOT OPEN IS REFUSED TO ITS

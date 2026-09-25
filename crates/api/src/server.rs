@@ -3747,6 +3747,17 @@ const CONTRADICTED_ABSENCE: &str = "this read found no manifest here, and the st
 /// keeps what it kept before, and a changed row is never kept, because
 /// [`stamp_could_read`] vouches for no [`census::Fault::Contradicted`].
 ///
+/// # Each row it changes is logged, since D-0695's ninth repair
+///
+/// `census::read_vendor` logs every row it reads, a row read absent at
+/// `Debug`, which the default floor does not write, and under the state this
+/// request is then not served. This changed the row and logged nothing, so a
+/// reader of `/logs` after the refusal found no trace of it. Each row changed
+/// here writes one `api.census` line at `Warn`, "absence contradicted by its
+/// stamp", naming the feed, the manifest's path and [`CONTRADICTED_ABSENCE`],
+/// as an unreadable row `read_vendor` reads is written at `Warn`. That is at
+/// most one line per feed per call, and only for a row this changes.
+///
 /// # And again with stamps taken after the read, since D-0695's ninth repair
 ///
 /// The stamps taken before the read can tear. [`manifest_stamps`] asks the
@@ -3782,6 +3793,17 @@ fn refuse_contradicted_absences(stamps: &CensusStamps, censuses: &mut [census::V
             .get(row.vendor as usize)
             .is_some_and(|stamp| stamp_could_read(*stamp, stamps.root_is_dir, &row.state));
         if matches!(row.state, census::Census::Absent) && !vouched {
+            // LOGGED HERE, because the read's own line for this row said
+            // "absent", at `Debug`: below the default floor, and not the state
+            // this request is served. See this function's doc. D-0695.
+            let _dropped_when_filtered = telemetry::emit_if!(
+                telemetry::Level::Warn,
+                "api.census",
+                "absence contradicted by its stamp",
+                "vendor" => telemetry::Value::Str(row.vendor.as_str()),
+                "path" => telemetry::Value::Str(&row.path.display().to_string()),
+                "why" => telemetry::Value::Str(CONTRADICTED_ABSENCE),
+            );
             row.state = census::Census::Unreadable {
                 reason: CONTRADICTED_ABSENCE.to_owned(),
                 fault: census::Fault::Contradicted,
