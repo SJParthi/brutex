@@ -307,8 +307,10 @@ pub fn render(
 /// a different strategy report below the same audit. `None` preserves the
 /// unconstrained historical rendering for callers that apply no policy.
 ///
-/// `scope` chooses the charge statement that leads the report, and nothing
-/// else: every section below the header is the same for either scope.
+/// `scope` chooses the charge statement that leads the report and the words
+/// of the strategy report's two ranked totals, which [`strategy_report`]
+/// calls net profit for an index and a gross total for a stock. Every other
+/// byte below the header is the same for either scope.
 #[must_use]
 #[expect(
     clippy::too_many_arguments,
@@ -355,7 +357,7 @@ pub fn render_selected(
                         "the final admitted screen row; it may differ from the grid's unconstrained BEST",
                     );
                 }
-                strategy_report(&mut out, chosen, &exit_name(chosen));
+                strategy_report(&mut out, chosen, &exit_name(chosen), scope);
             }
         }
         None => absent(&mut out, "EXIT GRID"),
@@ -786,22 +788,38 @@ fn excursion_block(out: &mut String, cell: &Cell) {
 /// mean of 30 ppm across ten thousand trades is entirely consistent with one
 /// trade that went 4,000 ppm against, and that one trade is the one that takes
 /// the account out. Every other figure here is a summary; that one is a bound.
-pub fn strategy_report(out: &mut String, cell: &Cell, name: &str) {
+///
+/// # The two ranked totals are named by the scope
+///
+/// An index's two totals are "net profit": net of the losing trades, and no
+/// charge exists for them to be gross of. A stock's are not net of anything
+/// its trades pay, and the header above them says "NOT A NET RESULT", so for
+/// [`CostScope::CashEquity`] they are "total P&L" and each says it is gross of
+/// every charge. Every other row is the same for either scope. D-0681.
+pub fn strategy_report(out: &mut String, cell: &Cell, name: &str, scope: CostScope) {
     let _ = writeln!(out, "STRATEGY REPORT — exit variant {name}");
     let losers = cell.trades.saturating_sub(cell.wins);
     let pf = cell.profit_factor_bp();
+    let [(worst, worst_note), (best, best_note)] = match scope {
+        CostScope::IndexSpot => [
+            ("net profit, worst-case fills", "what selection ranks on"),
+            ("net profit, best-case fills", "both fills at the open"),
+        ],
+        CostScope::CashEquity => [
+            (
+                "total P&L, worst-case fills",
+                "what selection ranks on, gross of every charge",
+            ),
+            (
+                "total P&L, best-case fills",
+                "both fills at the open, gross of every charge",
+            ),
+        ],
+    };
 
     for (label, value, note) in [
-        (
-            "net profit, worst-case fills",
-            money(cell.pessimistic),
-            "what selection ranks on",
-        ),
-        (
-            "net profit, best-case fills",
-            money(cell.optimistic),
-            "both fills at the open",
-        ),
+        (worst, money(cell.pessimistic), worst_note),
+        (best, money(cell.optimistic), best_note),
         (
             "gross profit",
             money(cell.gross_win),
@@ -1752,11 +1770,38 @@ mod tests {
         }
     }
 
-    /// THE SCOPE CHANGES THE HEADER AND NOTHING ELSE. Every section below it
-    /// is the same bytes for either scope, so no figure can differ between an
-    /// index report and an equity report except by the bars that produced it.
+    /// The strategy report's two ranked-total rows, label and note, as an
+    /// index prints them and as a stock prints them. A label is matched with
+    /// the padding the report gives it, so a swap cannot leave a column
+    /// misaligned by the difference in length.
+    const INDEX_TOTALS: [(&str, &str); 2] = [
+        ("net profit, worst-case fills", "what selection ranks on"),
+        ("net profit, best-case fills", "both fills at the open"),
+    ];
+    const EQUITY_TOTALS: [(&str, &str); 2] = [
+        (
+            "total P&L, worst-case fills",
+            "what selection ranks on, gross of every charge",
+        ),
+        (
+            "total P&L, best-case fills",
+            "both fills at the open, gross of every charge",
+        ),
+    ];
+
+    /// One ranked-total row's label, as the report pads it.
+    fn padded(label: &str) -> String {
+        format!("  {label:<32}")
+    }
+
+    /// THE SCOPE CHANGES THE HEADER AND THE TWO RANKED-TOTAL ROWS' WORDS, AND
+    /// NOTHING ELSE. Every other byte below the header is the same for either
+    /// scope, so no figure can differ between an index report and an equity
+    /// report except by the bars that produced it. The two rows are the ones
+    /// an index calls "net profit": a stock's totals are gross of every
+    /// charge, so there they are named as totals and say so.
     #[test]
-    fn the_scope_changes_only_the_header() {
+    fn the_scope_changes_the_header_and_the_ranked_total_rows_words_only() {
         let index = populated_render(CostScope::IndexSpot);
         let equity = populated_render(CostScope::CashEquity);
         let body = |out: &str| {
@@ -1764,11 +1809,62 @@ mod tests {
                 .map(|(_, rest)| rest.to_owned())
         };
         assert_ne!(index, equity, "the two scopes must print different headers");
-        assert!(body(&index).is_some(), "the index render must carry TRADES");
+        let index_body = body(&index).expect("the index render carries TRADES");
+        let mut equity_body = body(&equity).expect("the equity render carries TRADES");
+        for ((equity_label, equity_note), (index_label, index_note)) in
+            EQUITY_TOTALS.into_iter().zip(INDEX_TOTALS)
+        {
+            for (equity_words, index_words) in [
+                (padded(equity_label), padded(index_label)),
+                (format!("  {equity_note}\n"), format!("  {index_note}\n")),
+            ] {
+                assert_eq!(
+                    equity_body.matches(&equity_words).count(),
+                    1,
+                    "the equity report says {equity_words:?} once:\n{equity_body}"
+                );
+                equity_body = equity_body.replacen(&equity_words, &index_words, 1);
+            }
+        }
         assert_eq!(
-            body(&index),
-            body(&equity),
-            "every section below the header must be identical across scopes"
+            index_body, equity_body,
+            "every other byte below the header must be identical across scopes"
+        );
+    }
+
+    /// A STOCK'S STRATEGY REPORT NEVER CALLS A TOTAL NET PROFIT, AND SAYS THE
+    /// ONE SELECTION RANKS ON IS GROSS OF EVERY CHARGE.
+    ///
+    /// The equity header says "THIS IS COST-EXCLUDED RESEARCH, NOT A NET
+    /// RESULT", and the report under it printed a rupee "net profit" as the
+    /// figure selection ranks on. That is the reading `CLAUDE.md` §1 requires
+    /// every equity report to rule out. D-0681.
+    #[test]
+    fn an_equity_strategy_report_names_its_totals_gross_and_never_net_profit() {
+        let equity = populated_render(CostScope::CashEquity);
+        let report = equity
+            .split_once("STRATEGY REPORT")
+            .map(|(_, rest)| rest)
+            .expect("the populated render carries a strategy report");
+        assert!(
+            !report.to_lowercase().contains("net profit"),
+            "a stock's totals are gross of every charge, not net:\n{report}"
+        );
+        let ranked = report
+            .lines()
+            .find(|line| line.contains("worst-case fills"))
+            .expect("the row selection ranks on");
+        assert!(
+            ranked
+                .trim_start()
+                .starts_with("total P&L, worst-case fills")
+                && ranked.ends_with("what selection ranks on, gross of every charge"),
+            "the ranked row says it is a gross total: {ranked}"
+        );
+        let index = populated_render(CostScope::IndexSpot);
+        assert!(
+            index.contains("  net profit, worst-case fills"),
+            "an index report keeps the words it has always printed:\n{index}"
         );
     }
 

@@ -335,14 +335,22 @@ fn audited_from_nothing(scope: audit::CostScope) -> String {
 
 /// A CASH-EQUITY AUDIT OF THE SAME BARS IS THE SAME BYTES ON A RERUN
 /// (`CLAUDE.md` §3 rule 5), AND IT DIFFERS FROM THE INDEX AUDIT OF THOSE BARS
-/// ONLY IN ITS CHARGE STATEMENT.
+/// ONLY IN WHAT IT SAYS OF CHARGES: ITS HEADER, AND THE WORDS OF THE STRATEGY
+/// REPORT'S TWO RANKED TOTALS.
 ///
 /// The unit tests render hand-built sections. This drives the real sequence --
 /// sweep, closure, trade walk, exit grid -- so a figure that came out of the
 /// sweep differently on a second run, or a figure the scope reached below the
 /// header, fails here even though every hand-built render agrees with itself.
+/// An index calls those two totals "net profit"; a stock's are gross of every
+/// charge and say so (D-0681). Their words are swapped back before the
+/// comparison, and every other byte below `TRADES` must match.
 #[test]
-fn an_equity_audit_is_byte_identical_on_a_rerun_and_differs_from_the_index_one_only_in_its_statement()
+#[expect(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes."
+)]
+fn an_equity_audit_is_byte_identical_on_a_rerun_and_differs_from_the_index_one_only_in_its_charge_words()
  {
     let equity = audited_from_nothing(audit::CostScope::CashEquity);
     assert_eq!(
@@ -372,8 +380,34 @@ fn an_equity_audit_is_byte_identical_on_a_rerun_and_differs_from_the_index_one_o
         }),
         "the equity audit must carry the swept trades and a populated exit grid:\n{equity}"
     );
+    let mut swapped = below(&equity).expect("the equity audit carries TRADES");
+    for (stock, index_words) in [
+        (
+            "total P&L, worst-case fills     ",
+            "net profit, worst-case fills    ",
+        ),
+        (
+            "total P&L, best-case fills      ",
+            "net profit, best-case fills     ",
+        ),
+        (
+            "  what selection ranks on, gross of every charge\n",
+            "  what selection ranks on\n",
+        ),
+        (
+            "  both fills at the open, gross of every charge\n",
+            "  both fills at the open\n",
+        ),
+    ] {
+        assert_eq!(
+            swapped.matches(stock).count(),
+            1,
+            "the stock's strategy report says {stock:?} once:\n{equity}"
+        );
+        swapped = swapped.replacen(stock, index_words, 1);
+    }
     assert_eq!(
-        below(&equity),
+        Some(swapped),
         below(&index),
         "no figure may differ between the scopes except by the bars"
     );
