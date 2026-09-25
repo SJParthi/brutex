@@ -3373,11 +3373,13 @@ pub(crate) fn census_now(site: &Site) -> CensusNow {
 /// A read [`read_as_stamped`] refuses to keep is still this request's answer,
 /// and these are still the stamps taken before it, which that read
 /// contradicts: a store root gone after `read_all`'s own check reads every
-/// feed "absent" under a stamp of a manifest that exists. A key taken from
-/// them for such a row kept the calendar derived from it under a time the
-/// fault had not moved, and served it after the fault had ended, until the
-/// manifest was next written. So [`CensusStamps::modified`] takes the row as
-/// well, and hands a time only for one its stamp could have read. D-0695.
+/// feed "absent" under a stamp of a manifest that exists. (Since D-0695's
+/// eighth repair that row is handed to the request unreadable, not absent:
+/// see [`refuse_contradicted_absences`].) A key taken from them for such a
+/// row kept the calendar derived from it under a time the fault had not
+/// moved, and served it after the fault had ended, until the manifest was
+/// next written. So [`CensusStamps::modified`] takes the row as well, and
+/// hands a time only for one its stamp could have read. D-0695.
 pub(crate) fn census_now_stamped(site: &Site) -> (CensusStamps, CensusNow) {
     census_now_reading(site, census::read_all)
 }
@@ -3460,7 +3462,12 @@ fn census_now_reading(
     // at most that one request. The other order keys an older census under a
     // newer stamp, which is stale until the manifest next changes. See
     // `census_now_reading`'s doc.
-    let censuses = std::sync::Arc::new(read(&site.store_root));
+    let mut censuses = read(&site.store_root);
+    // AND A ROW READ ABSENT THAT ITS STAMP CONTRADICTS IS NOT ANSWERED AS AN
+    // EMPTY FEED, to this request either. It is served unreadable, naming why.
+    // See `refuse_contradicted_absences`. D-0695.
+    refuse_contradicted_absences(&stamps, &mut censuses);
+    let censuses = std::sync::Arc::new(censuses);
     let entries = std::sync::Arc::new(census::held_entries(&censuses));
     // AND ONLY A CENSUS THE STAMPS COULD HAVE READ IS KEPT UNDER THEM. A read
     // that contradicts its own key -- a root gone for this one read, a manifest
@@ -3619,8 +3626,10 @@ fn manifest_stamps(store_root: &std::path::Path) -> CensusStamps {
 ///   stamp then records the fault, and its end moves the stamp.
 ///
 /// Anything else is served to the request that read it and not kept, so the
-/// next request reads again. A fault that persists is then read, and its
-/// `api.census` warning emitted, on every request until it ends -- the cost
+/// next request reads again. A row of it read absent that its own stamp could
+/// not have read is served unreadable, not absent: see
+/// [`refuse_contradicted_absences`]. A fault that persists is then read, and
+/// its `api.census` warning emitted, on every request until it ends -- the cost
 /// `docs/06-limits.md`'s D-0695 section states. A census row out of
 /// `Vendor::ALL` order, or a count other than one per vendor, is never kept
 /// either: `census::read_all` yields neither.
@@ -3675,6 +3684,55 @@ fn stamp_could_read(stamp: ManifestStamp, root_is_dir: bool, state: &census::Cen
         }
 }
 
+/// Why a row [`refuse_contradicted_absences`] changed is unreadable, in the
+/// words its note and every refusal that quotes the note carry.
+const CONTRADICTED_ABSENCE: &str = "this read found no manifest here, and the stamps \
+     taken of the store just before it contradict that, so it cannot say what this \
+     feed holds and is not answered as a feed that holds nothing. The next request \
+     reads again";
+
+/// Each row of `censuses` read absent that its own stamp could not have read,
+/// served unreadable instead, as [`CONTRADICTED_ABSENCE`] says.
+///
+/// # Why, since D-0695's eighth repair
+///
+/// [`read_as_stamped`] keeps such a read out of the cache, and the request that
+/// made it was still handed it as read. A store root gone just after
+/// `read_all`'s own check reads every feed `NotFound`, which is absent, while
+/// Dhan's stamp still names its manifest. So that request's `/calendar.json`
+/// answered `200` with no session on both branches, and its `/gaps.json` peer
+/// vote agreed nothing and named no feed unreadable: an empty store, over a
+/// store that holds NIFTY, the fallback `CLAUDE.md` §4 bans. The next request,
+/// over the same missing root, answered 503. A review measured both.
+///
+/// Absent is the one state that says a feed holds nothing, so it is the one a
+/// contradicted row may not say. Served unreadable, the row is refused where
+/// every unreadable census is: `/calendar.json` answers 503 on both branches,
+/// the peer vote names the feed, and `/bars` refuses it when it is the asked
+/// feed's. A contradicted row read held, as a first manifest installed inside
+/// the read is under a stamp that found none, keeps the bytes it read, and a
+/// contradicted row read unreadable keeps its own words. Neither is changed,
+/// and neither is kept: the cache keeps no read with a contradicted row.
+///
+/// One index into the stamps and one [`stamp_could_read`] per row, and no
+/// syscall. A read no stamp contradicts is unchanged, so [`read_as_stamped`]
+/// keeps what it kept before, and a changed row is never kept, because
+/// [`stamp_could_read`] vouches for no [`census::Fault::Contradicted`].
+fn refuse_contradicted_absences(stamps: &CensusStamps, censuses: &mut [census::VendorCensus]) {
+    for row in censuses {
+        let vouched = stamps
+            .manifests
+            .get(row.vendor as usize)
+            .is_some_and(|stamp| stamp_could_read(*stamp, stamps.root_is_dir, &row.state));
+        if matches!(row.state, census::Census::Absent) && !vouched {
+            row.state = census::Census::Unreadable {
+                reason: CONTRADICTED_ABSENCE.to_owned(),
+                fault: census::Fault::Contradicted,
+            };
+        }
+    }
+}
+
 /// What [`census_now`]'s cache is keyed on: what each vendor manifest's `stat`
 /// said, and whether the store root was a directory. See [`manifest_stamps`].
 ///
@@ -3722,9 +3780,11 @@ impl CensusStamps {
     /// # No caller today reaches the refusal
     ///
     /// Since D-0695's seventh repair the symbol branch keeps nothing for a name
-    /// its census does not hold, which covers the case above as well. The other
-    /// callers derive only for a row's held series, and a held row under a
-    /// stamp that found a time always passes. So no calendar any caller keeps
+    /// its census does not hold, which covers the case above as well. Since the
+    /// eighth, that case's row is served unreadable, and `/calendar.json`
+    /// refuses it before either branch derives. The other callers derive only
+    /// for a row's held series, and a held row under a stamp that found a time
+    /// always passes. So no calendar any caller keeps
     /// today is decided by this refusal. It stays at the one function every key
     /// comes from, so a caller added later that derives from a row its stamp
     /// contradicts is covered, and its unit test pins it.

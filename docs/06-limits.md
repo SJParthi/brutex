@@ -9580,3 +9580,84 @@ exchange branch was stated nowhere. The text above is kept as it was written.
   row read absent under a stamp that found its manifest, where every name is
   unheld, and the unheld-name skip declines that first. It is kept for a
   caller added later, and a unit test pins it alone.
+
+**Corrected 25 September 2026, on an eighth review (D-0695).** Two bullets
+above say the request that meets a read its stamps contradict answers what it
+read, and the seventh correction's last bullet says what declines the one
+derivation the sixth correction's refusal could refuse. None of the three
+holds for a row read absent that its stamp could not have read. The third
+correction's cost bullet also leaves out two costs and compares them with the
+wrong baseline, and D-0686's correction in §40.5 is not true while that cost
+is paid. The text above is kept as it was written.
+
+* The third correction's "*What is still true.* The request that meets such a
+  fault answers what it read" and the sixth correction's "*What the request
+  that met the fault answers is unchanged.*" held for every row. A row read
+  absent then said its feed holds nothing where the stamp taken just before
+  the read had found the manifest, and the third correction had called that
+  answer, cached, the fallback `CLAUDE.md` §4 bans. A review moved the store
+  root aside just after `read_all`'s own check, over a store holding NIFTY on
+  Dhan: the racing request's `/calendar.json` answered 200 with no session on
+  both branches and its peer vote named no feed unreadable, while the next
+  request answered 503. Since this correction such a row is served
+  unreadable, naming the contradiction, to the request that read it: both
+  branches of `/calendar.json` answer 503 and the peer vote names `dhan`
+  unreadable. The read is not kept, so the next request reads again. The cost
+  is one index and one `stamp_could_read` per row, and no syscall. Not timed.
+* **What the request still answers as read.** A row read held keeps its bytes
+  even under a stamp that found no manifest, as a first manifest installed
+  inside the read is. A row read unreadable keeps its own words. A row read
+  absent under a stamp that found no manifest, below a root the stamps saw as
+  a directory, is served absent. None of these is changed.
+* **An absence that is real and newer than its stamp is refused too, for one
+  request.** The rule cannot tell why the disk answered differently from the
+  stamps: a root gone after its check, a manifest removed, a stamp's fault
+  that ended with no manifest behind it, or a root that was not a directory
+  when stamped and is one, without a manifest, when read. Each of those rows
+  reads absent under a stamp that could not have read that, and is served
+  unreadable to that request and not kept, so the next request reads again.
+* The seventh correction's last bullet ends "the unheld-name skip declines
+  that first". The row it names is now served unreadable, and
+  `/calendar.json` refuses it before either branch derives. The two root-race
+  tests now pass with both the sixth correction's refusal and the unheld-name
+  skip removed; each of those is pinned alone by a test of its own.
+* **What a fault the census cache declines costs per request, completed.**
+  The third correction's "*A new cost, while a fault persists*" names a read
+  of every vendor's manifest and one `read_vendor` warning per request. Two
+  more costs are paid on each such request. Every `census_now` caller is
+  handed a census `census::held_entries` built from that read, which collects
+  every held entry of every feed and sorts them
+  (`out.sort_unstable_by(...)`). And `/store.json` encodes its body again and
+  hashes it for its ETag (`census_etag`, a blake3 of the body), because
+  `store_wire::Cache` reuses a body only for the census `Arc` it was built
+  from (`current.source.ptr_eq(&Arc::downgrade(source))`), and a read the
+  cache declines is a new `Arc` on every request. With a Unix socket at
+  Groww's manifest path, each of three `/store.json?feed=dhan` requests
+  reads Dhan's manifest again and answers equal bytes from a new allocation;
+  once the socket is gone, one request reads, and the next reads nothing and
+  answers the same allocation. `a_fault_the_census_cache_declines_rebuilds_the_store_body_on_every_request`
+  pins both halves. Counted by that test, not timed.
+* **"As every request did before D-0686" is true of three routes, not of
+  every caller.** It holds for the routes D-0686 moved onto the census cache,
+  which `census_now_reading`'s own comment names: both branches of
+  `/calendar.json`, `/gaps.json` through `peer_calendar`, and `/bars` through
+  `locate_series` whenever `?exchange=` or `?segment=` is omitted. Each called
+  `read_all` directly before D-0686. Every other `census_now` caller,
+  `/store.json` among them, was served from the census cache before D-0695's
+  third repair whatever its read had met, because that cache kept every read:
+  so none of them paid this per request before it.
+* **D-0686's correction in §40.5 is not true while such a fault lasts.** It
+  says "a request against an unchanged store reads no manifest and walks no
+  entry. Both are paid once per manifest change". A fault the census cache
+  declines moves no stamp, so while it lasts each request reads every
+  manifest, walks and sorts every held entry and, on `/store.json`, encodes
+  and hashes its body. Once the fault ends, the next request pays them once
+  and the rest are served from both caches, as the test above pins.
+* **Why this is not made constant per request.** A read the stamps cannot
+  vouch for is read again because no key records when its fault ends. Keeping
+  the body across such reads would still leave the read and the sort, each
+  linear in the store, on every request; skipping those as well means serving
+  a census the key cannot vouch for, which is what the third correction
+  removed. The per-request cost is therefore linear in the store for as long
+  as such a fault lasts. **UNMEASURED**: how often, if ever, the operator's
+  volume returns one.

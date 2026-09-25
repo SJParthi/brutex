@@ -31,18 +31,23 @@
 //! from `a_store_root_that_vanishes_during_the_read_is_not_cached` on pin which
 //! reads are kept: a read faulted through `census_now_reading` in a way no
 //! stamp records is read again on the next request, and a fault the stamps do
-//! record is still kept. The next three move a bar directory or file aside
-//! instead, and pin the same rule for the calendar cache behind the census: a
-//! calendar derived without a bar file its census holds is refused to the
-//! request that derived it, and derived again on the next. The rest pin the
-//! calendar cache's key, through every caller that derives one: a month landed
-//! after a census's stamps, whether after or inside its read, is not keyed
-//! under them; a calendar is kept at all, under the asked feed's own modified
-//! time and no other feed's; and a census row its stamp could not have read
-//! keys nothing. The last three pin that the ingest path's observation derives
-//! over its own series' months alone, that a fault on another feed's manifest
-//! leaves this feed's calendar kept, and that a name the census does not hold
-//! keeps no calendar.
+//! record is still kept. One among them pins what reading again costs
+//! `/store.json`: its body is encoded again on every such request, which
+//! `docs/06-limits.md` states. The two after the rule's own table pin what the
+//! request that made such a read is served: a row read absent that its stamp
+//! contradicts is served unreadable, and no other row is changed, a first
+//! manifest installed inside the read among them. The next three move a bar
+//! directory or file aside instead, and pin the same rule for the calendar
+//! cache behind the census: a calendar derived without a bar file its census
+//! holds is refused to the request that derived it, and derived again on the
+//! next. The rest pin the calendar cache's key, through every caller that
+//! derives one: a month landed after a census's stamps, whether after or
+//! inside its read, is not keyed under them; a calendar is kept at all, under
+//! the asked feed's own modified time and no other feed's; and a census row
+//! its stamp could not have read keys nothing. The last three pin that the
+//! ingest path's observation derives over its own series' months alone, that
+//! a fault on another feed's manifest leaves this feed's calendar kept, and
+//! that a name the census does not hold keeps no calendar.
 #![expect(
     clippy::expect_used,
     reason = "finite owned fixtures and exact response assertions"
@@ -1369,6 +1374,93 @@ async fn bars_steps_over_another_feeds_unreadable_census_to_a_third_feeds_identi
     }
 }
 
+/// A NAME NO READABLE CENSUS HOLDS IS REFUSED BY NAMING EVERY OTHER FEED'S
+/// UNREADABLE CENSUS, never as "no feed holds". D-0695.
+///
+/// AF-24's `/bars` clause is `locate_series` carrying each unreadable census
+/// it steps over into `Unlocated::NotHeld`, and `unlocatable` choosing the
+/// sentence that names them when that list is not empty. Its test,
+/// `an_unreadable_census_is_named_by_calendar_and_bars`, damages the ASKED
+/// feed's census, which since D-0695 is refused as `AskedUnreadable` before
+/// the walk reaches that list, so no test drove the named arm or the push that
+/// fills it. Dropping the push, or letting the empty-list arm match every
+/// list, answered "no feed in this store holds" over a census nobody could
+/// read, and no test failed.
+///
+/// Here Groww's manifest is damaged, Dhan's census is read and holds only
+/// NIFTY, and no feed holds RELIANCE. Dhan's request, with `?vendor=dhan`,
+/// with no vendor (Dhan by default) and with a vendor this build has no feed
+/// for, which `locate_series` walks as no asked feed, is refused 400 naming
+/// Groww's manifest and a count of one. With Zerodha's manifest damaged too,
+/// the count is two and both notes are joined in `Vendor::ALL` order.
+#[tokio::test]
+async fn bars_names_every_unreadable_census_when_no_readable_census_holds_the_name() {
+    let fixture = Fixture::new("census-request-unheld-unreadable");
+    fixture.publish_bytes(Vendor::Groww, &[0xFF; 16], 0);
+    fixture.publish_for(Vendor::Dhan, &[(Segment::Index, "NIFTY")], 0);
+    assert_eq!(
+        fixture.states(),
+        ["unreadable", "held", "absent", "absent", "absent"],
+        "Groww damaged, Dhan read and not holding RELIANCE"
+    );
+    let note = |vendor: Vendor| {
+        census_now(&fixture.site)
+            .0
+            .iter()
+            .find(|census| census.vendor == vendor)
+            .map(census::VendorCensus::note)
+            .expect("one row per vendor")
+    };
+    let queries = [
+        "symbol=RELIANCE&vendor=dhan&month=2025-05&timeframe=1day",
+        "symbol=RELIANCE&month=2025-05&timeframe=1day",
+        "symbol=RELIANCE&vendor=nosuchfeed&month=2025-05&timeframe=1day",
+    ];
+    for (damaged, count) in [
+        (vec![Vendor::Groww], 1),
+        (vec![Vendor::Groww, Vendor::Zerodha], 2),
+    ] {
+        if count == 2 {
+            fixture.publish_bytes(Vendor::Zerodha, &[0xFF; 16], 0);
+        }
+        let notes: Vec<String> = damaged.iter().map(|vendor| note(*vendor)).collect();
+        for query in queries {
+            assert_eq!(
+                locate_series(&fixture.site, query, "RELIANCE"),
+                Err(Unlocated::NotHeld(notes.clone())),
+                "{query}: every unreadable census walked is carried, in order"
+            );
+            let (status, page) = fixture.bars(query);
+            assert_eq!(
+                status,
+                axum::http::StatusCode::BAD_REQUEST,
+                "{query}: {page}"
+            );
+            assert!(
+                page.contains(&format!(
+                    "no census that could be read holds a spot series under that name, and \
+                     {count} could not be read:"
+                )),
+                "{query}: {page}"
+            );
+            for vendor in &damaged {
+                assert!(
+                    page.contains(&format!("{}.man", vendor.as_str())),
+                    "{query}: names {vendor:?}'s manifest: {page}"
+                );
+            }
+            assert!(
+                !page.contains("no feed in this store holds"),
+                "{query}: the stated reason must be the true one: {page}"
+            );
+            assert!(
+                !page.contains("own census could not be read"),
+                "{query}: the asked feed's census was read: {page}"
+            );
+        }
+    }
+}
+
 /// A PERMISSION CHANGE ON A MANIFEST FILE IS SEEN ON THE NEXT REQUEST, warm or
 /// cold, and so is its repair. D-0695.
 ///
@@ -1592,6 +1684,14 @@ async fn a_store_root_that_vanishes_during_the_read_is_not_cached() {
 /// not reach it, the silent fallback `CLAUDE.md` §4 bans, served until a
 /// manifest was next written. The read here is `read_all`'s own two steps with
 /// the root moved aside between them.
+///
+/// # And the request that raced the root does not answer an empty store
+///
+/// Not cached, that read was still this request's answer until D-0695's eighth
+/// repair: the same empty store, for one request. Dhan's row, read absent
+/// under a stamp that found its manifest, is now served unreadable, as
+/// `CONTRADICTED_ABSENCE` says. The four feeds whose stamps found no manifest
+/// are served absent, which is what those stamps say too.
 #[tokio::test]
 async fn a_store_root_that_vanishes_after_its_check_is_not_cached_as_absent() {
     let fixture = nifty_store("census-request-root-after-check");
@@ -1608,8 +1708,28 @@ async fn a_store_root_that_vanishes_after_its_check_is_not_cached_as_absent() {
     });
     assert_eq!(
         named(&served),
-        vec!["absent"; 5],
-        "the request that raced the root answers what it read"
+        ["absent", "unreadable", "absent", "absent", "absent"],
+        "the request that raced the root does not answer Dhan's feed as empty"
+    );
+    let dhan = served
+        .iter()
+        .find(|census| census.vendor == Vendor::Dhan)
+        .expect("Dhan's row");
+    assert!(
+        matches!(
+            dhan.state,
+            census::Census::Unreadable {
+                fault: census::Fault::Contradicted,
+                ..
+            }
+        ),
+        "{:?}",
+        dhan.state
+    );
+    assert!(
+        dhan.note().contains(CONTRADICTED_ABSENCE),
+        "{}",
+        dhan.note()
     );
     serves_the_healthy_store(&fixture, "after the race").await;
 }
@@ -1745,6 +1865,67 @@ fn a_manifest_that_stats_but_will_not_open_is_not_cached() {
     let after = fixture.reads();
     assert_eq!(fixture.states(), repaired, "warm");
     assert_eq!(fixture.reads(), after, "and what it read is kept");
+}
+
+/// WHILE A FAULT THE CENSUS CACHE DECLINES LASTS, `/store.json` READS THE
+/// MANIFESTS AND ENCODES ITS BODY AGAIN ON EVERY REQUEST. D-0695.
+///
+/// This pins a cost `docs/06-limits.md` states, not a behaviour anybody
+/// wants. `/store.json` keeps its encoded body in `store_wire::Cache`, keyed on
+/// the census it was built from. A read the census cache declines is a new
+/// census on every request, so that cache misses too. With a socket at
+/// Groww's manifest path, each of three `feed=dhan` requests reads Dhan's
+/// healthy manifest again and answers the same bytes from a new allocation.
+/// Once the socket is gone, the next request reads once, and the one after
+/// reads nothing and answers the same allocation. A cache that survived the
+/// declined read fails the first half, and must correct that section.
+#[cfg(unix)]
+#[test]
+fn a_fault_the_census_cache_declines_rebuilds_the_store_body_on_every_request() {
+    use axum::http::{HeaderMap, Method, StatusCode, Uri};
+    let fixture = Fixture::new("cr-wire");
+    fixture.publish(&[(Segment::Index, "NIFTY")], 0);
+    let groww = manifest_path(&fixture.root, Vendor::Groww);
+    let socket = std::os::unix::net::UnixListener::bind(&groww)
+        .expect("a socket at Groww's manifest path, whose path fits a socket address");
+    let uri: Uri = "/store.json?feed=dhan".parse().expect("uri");
+    let body = || {
+        let (status, _, body) =
+            store_response(&fixture.site, &HeaderMap::new(), &uri, &Method::GET);
+        assert_eq!(status, StatusCode::OK, "Dhan's census reads");
+        body
+    };
+    cold(&fixture);
+    let base = fixture.reads();
+    let first = body();
+    assert_eq!(fixture.reads(), base + 1, "the first request reads");
+    for request in 2..=3 {
+        let again = body();
+        assert_eq!(
+            fixture.reads(),
+            base + request,
+            "request {request}: read again"
+        );
+        assert_eq!(again, first, "request {request}: the same answer");
+        assert_ne!(
+            again.as_ptr(),
+            first.as_ptr(),
+            "request {request}: encoded again"
+        );
+    }
+
+    drop(socket);
+    fs::remove_file(&groww).expect("take the socket away");
+    let kept = body();
+    let after = fixture.reads();
+    assert_eq!(after, base + 4, "its end is read");
+    let warm = body();
+    assert_eq!(fixture.reads(), after, "and kept");
+    assert_eq!(
+        warm.as_ptr(),
+        kept.as_ptr(),
+        "and its body is not encoded again"
+    );
 }
 
 /// A FAULT ITS STAMP CAN SEE IS STILL CACHED. D-0695.
@@ -1923,6 +2104,137 @@ fn a_census_is_kept_only_under_a_stamp_that_could_have_read_it() {
         dhan.state = held();
     }
     assert!(!read_as_stamped(&stamps, &one_off), "one row disagrees");
+}
+
+/// A ROW READ ABSENT THAT ITS OWN STAMP COULD NOT HAVE READ IS SERVED
+/// UNREADABLE, AND NO OTHER ROW IS CHANGED. D-0695.
+///
+/// `refuse_contradicted_absences` is what the request that made a read the
+/// cache declines is handed. Absent is the one state that says a feed holds
+/// nothing, so it is the one such a row may not say: under a stamp that found
+/// the manifest, under a stamp whose `stat` failed, and under stamps that did
+/// not see the root as a directory, it becomes unreadable, naming
+/// `CONTRADICTED_ABSENCE`. An absence its stamp could have read is unchanged,
+/// and so is every row read held or unreadable, whatever its stamp: held under
+/// a stamp that found no manifest keeps the bytes it read, and a root or I/O
+/// refusal keeps its own words.
+///
+/// Each read is five rows, one per vendor, all under one stamp. A changed read
+/// is never kept, and an unchanged one is kept exactly when it was before.
+#[test]
+fn only_an_absence_its_stamp_contradicts_is_served_unreadable() {
+    use census::{Census, Fault};
+    use std::io::ErrorKind;
+    let exists = ManifestStamp::At {
+        modified: at(0),
+        changed: StatusChanged::default(),
+    };
+    let missing = ManifestStamp::Missing;
+    let refused = ManifestStamp::Faulted(ErrorKind::PermissionDenied);
+    let unreadable = |fault| Census::Unreadable {
+        reason: String::from("fixture"),
+        fault,
+    };
+    let held = || Census::Held {
+        manifest: Box::new(Manifest::open(Vendor::Dhan, &[], &[]).expect("a genesis manifest")),
+    };
+    // (the stamp, whether the root was a directory, what the read said,
+    // served unreadable in its place)
+    let rows: [(ManifestStamp, bool, Census, bool); 11] = [
+        (exists, true, Census::Absent, true),
+        (refused, true, Census::Absent, true),
+        (missing, false, Census::Absent, true),
+        (missing, true, Census::Absent, false),
+        (missing, true, held(), false),
+        (refused, true, held(), false),
+        (exists, true, held(), false),
+        (exists, true, unreadable(Fault::Root), false),
+        (missing, false, unreadable(Fault::Root), false),
+        (
+            exists,
+            true,
+            unreadable(Fault::Io(ErrorKind::Interrupted)),
+            false,
+        ),
+        (missing, true, unreadable(Fault::Refused), false),
+    ];
+    for (stamp, root_is_dir, state, replaced) in rows {
+        let why = format!("{stamp:?}, root a directory: {root_is_dir}, {state:?}");
+        let stamps = CensusStamps {
+            manifests: vec![stamp; Vendor::ALL.len()],
+            root_is_dir,
+        };
+        let read: Vec<census::VendorCensus> = Vendor::ALL
+            .into_iter()
+            .map(|vendor| census::VendorCensus {
+                vendor,
+                path: PathBuf::from("fixture.man"),
+                state: state.clone(),
+            })
+            .collect();
+        let mut served = read.clone();
+        refuse_contradicted_absences(&stamps, &mut served);
+        for (before, after) in read.iter().zip(&served) {
+            if replaced {
+                assert!(
+                    matches!(
+                        after.state,
+                        Census::Unreadable {
+                            ref reason,
+                            fault: Fault::Contradicted,
+                        } if reason == CONTRADICTED_ABSENCE
+                    ),
+                    "{why}: served unreadable, as {:?}",
+                    after.state
+                );
+            } else {
+                assert_eq!(
+                    format!("{:?}", after.state),
+                    format!("{:?}", before.state),
+                    "{why}: unchanged"
+                );
+            }
+        }
+        assert_eq!(served.len(), read.len(), "{why}: one row per vendor");
+        assert_eq!(
+            read_as_stamped(&stamps, &served),
+            !replaced && read_as_stamped(&stamps, &read),
+            "{why}: kept only when nothing was changed and it was kept before"
+        );
+    }
+    // `census.rs` names the fault only in its docs: no read there makes one.
+    let census_source = include_str!("census.rs");
+    assert_eq!(
+        census_source.matches("Fault::Contradicted").count(),
+        census_source.matches("[`Fault::Contradicted`]").count(),
+        "census.rs makes no contradicted row"
+    );
+}
+
+/// A MANIFEST INSTALLED INSIDE THE READ, OVER A FEED THE STAMPS FOUND NONE
+/// FOR, IS SERVED HELD AND READ AGAIN. D-0695.
+///
+/// Dhan's first manifest lands after the stamps are taken and before its
+/// read, as a first pull's install can. The row reads held under a stamp that
+/// found no manifest, which the cache declines. It is served held all the
+/// same: `refuse_contradicted_absences` changes only a row read absent. The
+/// next request stamps the manifest, reads it once, and keeps it.
+#[test]
+fn a_first_manifest_installed_inside_the_read_is_served_held_and_read_again() {
+    let fixture = Fixture::new("census-request-first-inside-the-read");
+    fixture.bar(Vendor::Dhan, Segment::Index, "NIFTY", 2);
+    cold(&fixture);
+    let (_, (served, _)) = census_now_reading(&fixture.site, |root| {
+        fixture.publish(&[(Segment::Index, "NIFTY")], 0);
+        census::read_all(root)
+    });
+    let held = ["absent", "held", "absent", "absent", "absent"];
+    assert_eq!(named(&served), held, "the install is served as read");
+    let base = fixture.reads();
+    assert_eq!(fixture.states(), held, "read again");
+    assert_eq!(fixture.reads(), base + 1, "once");
+    assert_eq!(fixture.states(), held, "warm");
+    assert_eq!(fixture.reads(), base + 1, "and kept");
 }
 
 /// A CALENDAR DERIVED WHILE A HELD BAR FILE WOULD NOT OPEN IS REFUSED TO ITS
@@ -2153,13 +2465,7 @@ impl Caller {
     ) -> Option<u32> {
         match self {
             Self::Symbol | Self::Exchange => {
-                let query = if matches!(self, Self::Symbol) {
-                    "feed=dhan&symbol=NIFTY"
-                } else {
-                    "feed=dhan"
-                };
-                let uri = format!("/calendar.json?{query}").parse().expect("uri");
-                let (status, _, body) = calendar_json_reading(site, &uri, census);
+                let (status, _, body) = calendar_json_reading(site, &self.calendar_uri(), census);
                 assert_eq!(status, axum::http::StatusCode::OK, "{self:?}: {body}");
                 let answer: serde_json::Value =
                     serde_json::from_str(&body).expect("a calendar as JSON");
@@ -2181,6 +2487,43 @@ impl Caller {
     /// passes, `census_now_stamped`.
     fn sessions(self, site: &Site) -> Option<u32> {
         self.reading(site, census_now_stamped)
+    }
+
+    /// The `/calendar.json` request the two calendar callers send.
+    fn calendar_uri(self) -> axum::http::Uri {
+        let query = if matches!(self, Self::Symbol) {
+            "feed=dhan&symbol=NIFTY"
+        } else {
+            "feed=dhan"
+        };
+        format!("/calendar.json?{query}").parse().expect("uri")
+    }
+
+    /// One call over the census `census` hands it, and what it answered, as
+    /// text: `/calendar.json`'s status and body, the peer vote's calendar and
+    /// the two lists it names, or the sessions observed. Unlike
+    /// [`Self::reading`], it requires no status.
+    fn raced(self, site: &Site, census: impl FnOnce(&Site) -> (CensusStamps, CensusNow)) -> String {
+        match self {
+            Self::Symbol | Self::Exchange => {
+                let (status, _, body) = calendar_json_reading(site, &self.calendar_uri(), census);
+                format!("{} {body}", status.as_u16())
+            }
+            Self::Peer => {
+                let vote = peer_calendar_reading(site, &zerodha_banknifty(), census);
+                format!(
+                    "calendar {:?}, from {:?}, unreadable {:?}",
+                    vote.calendar.map(|calendar| calendar.sessions()),
+                    vote.from,
+                    vote.unreadable
+                )
+            }
+            Self::Observation => format!(
+                "observed {:?}",
+                ingestion_observations_reading(&landed_nifty(), site, census)
+                    .map(|calendar| calendar.sessions())
+            ),
+        }
     }
 }
 
@@ -2326,11 +2669,11 @@ fn every_caller_keeps_its_calendar_under_the_asked_feeds_own_modified_time() {
     }
 }
 
-/// Race one `/calendar.json?feed=dhan&symbol=NIFTY` request against its store
-/// root, gone after `read_all`'s own check, and back as the read ends or, with
-/// `until_the_route_returns`, once the route has answered. Then require that
-/// the request that raced it answered what its census read, and that every
-/// caller after it answers NIFTY's one session.
+/// Race each caller against its store root, gone after `read_all`'s own
+/// check, and back as the read ends or, with `until_the_route_returns`, once
+/// the caller has answered. Then require that the call that raced it did not
+/// answer Dhan's feed as empty, and that every caller after it answers NIFTY's
+/// one session.
 ///
 /// Every feed then reads `NotFound`, which is "absent", while Dhan's stamp is
 /// still the modified time of a manifest that holds NIFTY. The census cache
@@ -2343,54 +2686,75 @@ fn every_caller_keeps_its_calendar_under_the_asked_feeds_own_modified_time() {
 /// both branches answered no session, the peer vote silently lost Dhan, and
 /// the ingest path observed nothing. A review measured all four.
 ///
-/// Two rules now keep that calendar, each on its own. `CensusStamps::modified`
-/// hands no time for a row its stamp could not have read, and since D-0695's
-/// seventh repair the symbol branch keeps nothing for a name its census does
-/// not hold. So these tests fail only with both removed. The first rule is
-/// pinned alone by
+/// # The call that raced the root, since D-0695's eighth repair
+///
+/// That call answered what its census read: `200` with no session on both
+/// branches of `/calendar.json`, and a peer vote that agreed nothing and named
+/// no feed unreadable, over a store that holds NIFTY. A review measured it.
+/// Dhan's row is now served unreadable, as `CONTRADICTED_ABSENCE` says, so
+/// both branches answer 503 quoting it and the peer vote names `dhan`
+/// unreadable. The observation answers none, as it did.
+///
+/// The raced call's assertion fails with `refuse_contradicted_absences` not
+/// called. The later calls were kept by two older rules, each on its own:
+/// `CensusStamps::modified` hands no time for a row its stamp could not have
+/// read, and since D-0695's seventh repair the symbol branch keeps nothing for
+/// a name its census does not hold. Now that the raced call refuses, these
+/// tests pass with both of those removed, so each is pinned alone elsewhere:
+/// the first by
 /// `each_feed_is_handed_its_own_modified_time_only_for_a_row_its_stamp_could_read`,
 /// the second by `a_name_the_census_does_not_hold_keeps_no_calendar`.
 fn race_the_root(name: &str, until_the_route_returns: bool) {
-    let fixture = nifty_store(name);
-    let mut away = None;
-    let raced = Caller::Symbol.reading(&fixture.site, |site| {
-        census_now_reading(site, |root| {
-            assert!(
-                fs::metadata(root).is_ok_and(|meta| meta.is_dir()),
-                "read_all's own check passes"
-            );
-            let aside = Aside::new(&fixture.root);
-            let read = Vendor::ALL
-                .into_iter()
-                .map(|vendor| census::read_vendor(root, vendor))
-                .collect();
-            if until_the_route_returns {
-                away = Some(aside);
-            }
-            read
-        })
-    });
-    drop(away);
-    assert_eq!(
-        raced,
-        Some(0),
-        "the request that raced the root answers what it read"
-    );
     for caller in Caller::ALL {
-        for request in 1..=3 {
-            assert_eq!(
-                caller.sessions(&fixture.site),
-                Some(1),
-                "{caller:?}, request {request}: NIFTY's May, not the empty calendar the \
-                 race derived"
-            );
+        let fixture = nifty_store(&format!("{name}-{caller:?}"));
+        let mut away = None;
+        let raced = caller.raced(&fixture.site, |site| {
+            census_now_reading(site, |root| {
+                assert!(
+                    fs::metadata(root).is_ok_and(|meta| meta.is_dir()),
+                    "read_all's own check passes"
+                );
+                let aside = Aside::new(&fixture.root);
+                let read = Vendor::ALL
+                    .into_iter()
+                    .map(|vendor| census::read_vendor(root, vendor))
+                    .collect();
+                if until_the_route_returns {
+                    away = Some(aside);
+                }
+                read
+            })
+        });
+        drop(away);
+        match caller {
+            Caller::Symbol | Caller::Exchange => assert!(
+                raced.starts_with("503 ")
+                    && raced.contains(r#""census":"unreadable""#)
+                    && raced.contains(CONTRADICTED_ABSENCE),
+                "{caller:?}: the call that raced the root refuses on Dhan's census: {raced}"
+            ),
+            Caller::Peer => assert_eq!(
+                raced, r#"calendar None, from [], unreadable ["dhan"]"#,
+                "{caller:?}: the vote that raced the root names Dhan"
+            ),
+            Caller::Observation => assert_eq!(raced, "observed None", "{caller:?}"),
+        }
+        for later in Caller::ALL {
+            for request in 1..=3 {
+                assert_eq!(
+                    later.sessions(&fixture.site),
+                    Some(1),
+                    "raced by {caller:?}, then {later:?}, request {request}: NIFTY's May, \
+                     and nothing kept from the race"
+                );
+            }
         }
     }
 }
 
-/// A CALENDAR DERIVED FROM A CENSUS ROW ITS STAMP COULD NOT HAVE READ IS
-/// ANSWERED TO ITS REQUEST AND NOT KEPT: a store root gone after `read_all`'s
-/// own check and back before the route derives. D-0695.
+/// NOTHING DERIVED FROM A CENSUS ROW ITS STAMP COULD NOT HAVE READ IS KEPT,
+/// AND THE CALL THAT READ IT DOES NOT ANSWER DHAN'S FEED AS EMPTY: a store
+/// root gone after `read_all`'s own check and back as the read ends. D-0695.
 ///
 /// This case predates D-0695's fifth repair: `cached` then took its own `stat`
 /// after the census, and the root was back to answer it. See `race_the_root`.
@@ -2399,8 +2763,8 @@ fn a_calendar_derived_from_a_row_its_stamp_could_not_have_read_is_not_kept() {
     race_the_root("census-request-root-back-after-the-read", false);
 }
 
-/// The same, with the root still gone while the route derives and back once
-/// it has answered. D-0695.
+/// The same, with the root still gone while the call answers and back once it
+/// has. D-0695.
 ///
 /// This case the fifth repair opened. Before it, `cached`'s own `stat` of a
 /// manifest under a root that was gone found no time, and nothing was kept.

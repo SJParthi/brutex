@@ -104,6 +104,10 @@ pub enum Census {
     /// An I/O failure, or a manifest this build refuses — a header that does
     /// not decode, a counter the entry region cannot support, an entry that
     /// fails its own checksum.
+    ///
+    /// Also the configured store root, refused for every vendor
+    /// ([`Fault::Root`]), and, since D-0695, a row read absent that the stamps
+    /// taken just before the read contradict ([`Fault::Contradicted`]).
     Unreadable {
         /// What refused it, in the refusal's own words.
         reason: String,
@@ -135,6 +139,11 @@ pub enum Fault {
     /// This reader refused a file it could measure: past the size bound, or
     /// bytes that do not decode as a manifest.
     Refused,
+    /// This request's read found no manifest, and the stamps
+    /// `server::census_now_reading` took of the store just before it could not
+    /// have read that. Put there by `server::census_now_reading` in place of
+    /// [`Census::Absent`], never by this module. D-0695.
+    Contradicted,
 }
 
 impl Census {

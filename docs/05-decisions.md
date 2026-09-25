@@ -41401,9 +41401,13 @@ passed, 0 failed and 2 ignored.
 cargo-mutants 26.2.0 ran over the whole piece's source diff, `eecca4da` to
 `ee4711ac`, the run the seventh review asked for, with `--cap-lints true` as
 Gate 18 passes it, two jobs, and the `api` lib as the test set, run by
-`cargo test` rather than Gate 18's nextest. No source line changed after
-`ee4711ac`. Its unmutated baseline passed. Of 79 mutants, 54 were caught, 25
-were unviable, and none was missed or timed out. Caught among them: both
+`cargo test` rather than Gate 18's nextest. No production source line
+changed from `ee4711ac` to `16736f23`, the commit that carried this record:
+`49280fe9` changed two files under `crates/api/src`,
+`booleanlaunch_tests.rs` and `operation_audit_tests.rs`, each a test module
+declared under `#[cfg(test)]`, and cargo-mutants lists no mutant in that
+diff. Its unmutated baseline passed. Of 79 mutants, 54 were caught, 25 were
+unviable, and none was missed or timed out. Caught among them: both
 `&&` -> `||` mutants the review reported MISSED, at the symbol and
 no-contract tests of the observation's conjunction, and its two `==` ->
 `!=`; `CensusStamps::modified` replaced with `None`; and its match guard
@@ -41425,3 +41429,226 @@ tests `ee4711ac` added. `src/main.rs` has 2 passed, `tests/binary.rs` 3 and
 the doctest 1. `core`'s whole suite, which reads these documents,
 passes. Every shell gate of CI's Gate 1+2 job except 1e passes, Gates 10,
 10b, 11, 23, 27 and 27b among them.
+
+**Repaired an eighth time, on an eighth review — 25 September 2026.** One
+should-fix and one nit were upheld against `16736f23`, the commit that
+carried the seventh repair's record. Four findings of separate adversarial
+passes over the piece, each upheld by two further reviewers, are repaired
+with them. The text above is kept as it was written, except the nit's sentence,
+which is corrected in place, and AF-24, AF-27b, AF-28c and AF-28g, rows new
+in this piece, which are corrected in place; where the rest is now wrong,
+this says so.
+
+- *The request that raced a store root was still answered an empty store.*
+  The third repair stopped keeping a read its stamps contradict, and called
+  what such a read answered, once cached, "the silent fallback `CLAUDE.md` §4
+  bans". The request that made the read was still handed it. A review moved
+  the root aside just after `read_all`'s own check, over `nifty_store`, and
+  kept it away until the route had answered. The racing
+  `/calendar.json?feed=dhan&symbol=NIFTY` answered `200` with no session, and
+  so did `feed=dhan`. The racing peer vote had no calendar, no voter and no
+  feed named unreadable. The next request, over the same missing root,
+  answered 503 with a refusal whose own words are "an empty one would claim
+  the store holds no bars". `race_the_root` asserted the racing answer as
+  correct, `docs/06-limits.md` recorded it, and the sixth repair rejected
+  refusing it because "This was not raised".
+- **Decided: a row read absent that its stamp could not have read is served
+  unreadable.** `refuse_contradicted_absences` runs on every read
+  `census_now_reading` makes on a miss, before the read is shared or kept. A
+  row read absent that its own stamp could not have read, by
+  `stamp_could_read`, becomes `Census::Unreadable` with the new
+  `Fault::Contradicted` and the reason `CONTRADICTED_ABSENCE`, which says the
+  stamps taken just before the read contradict it and the next request reads
+  again. Over the race, both branches of `/calendar.json` answer 503 quoting
+  that reason, and the peer vote has no calendar, no voter and `dhan` named
+  unreadable. `/bars` refuses any unreadable census of the asked feed
+  (`Unlocated::AskedUnreadable`), which AF-29's test pins for a damaged
+  manifest. The observation answers none, as it did. A row read held or
+  unreadable is not changed, whatever its stamp, and neither is an absence
+  its stamp could have read. A changed read is never kept, because
+  `stamp_could_read` vouches for no `Fault::Contradicted`. The cost is one
+  index and one `stamp_could_read` per row, and no syscall. `race_the_root`
+  now races each of the four callers in turn and requires those answers.
+  `a_store_root_that_vanishes_after_its_check_is_not_cached_as_absent`
+  requires Dhan's row served as `Fault::Contradicted` with the reason in its
+  note, and the four feeds whose stamps found no manifest served absent.
+  `only_an_absence_its_stamp_contradicts_is_served_unreadable` walks eleven
+  rows of stamp, root and state, and
+  `a_first_manifest_installed_inside_the_read_is_served_held_and_read_again`
+  installs Dhan's first manifest inside the read. AF-28i records the five
+  tests.
+- **Why only an absence.** The review proposed replacing every row that
+  fails `stamp_could_read`. Absent is the one state that says a feed holds
+  nothing. A row read unreadable already refuses, in its own words. A row
+  read held under a stamp that found no manifest, as a first manifest
+  installed inside the read is, holds bytes that decoded; replaced by an
+  unreadable census, it would make `/calendar.json` answer 503 for that
+  request over a manifest it read, because `unreadable_calendar` refuses any
+  unreadable row of the asked feed. Neither is kept, so the next request
+  reads again either way. The proof below runs the review's rule and names
+  the two tests it fails.
+- *The seventh repair's mutation paragraph said "No source line changed after
+  `ee4711ac`".* A nit. `49280fe9` changed two files under `crates/api/src`,
+  both test modules. The sentence now says no production source line changed
+  from `ee4711ac` to `16736f23`, names the two files, and says cargo-mutants
+  lists no mutant in that diff: `cargo mutants --list --in-diff` over
+  `git diff ee4711ac 49280fe9 -- crates` printed "No mutants to filter". The
+  run's result is unaffected.
+- *A journal record that was written and synced was reported not appended
+  when only the unlock after it was refused.* `c355840f` ended
+  `Journal::appended` with `file.release().map_err(|u| u.to_string())`, after
+  `write_all` and `sync_all` had made the record durable. So a refused unlock
+  came back as the append's error: `append` logs it as "record not
+  appended", `recorded_fact` renders "NO — this run is NOT in the journal",
+  and the spot path's `journal.append(&record)?;` returns before the loop
+  that appends the run's member-failure records. **Decided:** after the
+  `sync_all` statement, `appended` drops the guard and returns `Ok(())`. The
+  guard's `Drop` unlocks, and a refused unlock is logged by `store.flock` at
+  Warn ("advisory lock not released before close"), as it is for every guard
+  dropped without a release. The seam that refuses an unlock on request is
+  `#[cfg(test)]` inside `store`, so no `api` test can drive it.
+  `nothing_after_the_sync_can_refuse_an_append` reads `appended`'s own source
+  instead, and requires its only code after the `sync_all` statement to be
+  `drop(file);` and `Ok(())`. `append`'s doc says so. AF-29c records it.
+- *A fault the census cache declines costs more per request than the third
+  correction in `docs/06-limits.md` says.* That bullet names a read of every
+  vendor's manifest and one warning per request, "as every request did before
+  D-0686". Each such request also builds `census::held_entries` from the new
+  read, a sort of every held entry of every feed, and `/store.json` encodes
+  its body again and hashes it for its ETag, because `store_wire::Cache`
+  reuses a body only for the census `Arc` it was built from and a declined
+  read is a new `Arc` on every request. The comparison holds only for the
+  three routes D-0686 moved onto the census cache; every other `census_now`
+  caller, `/store.json` among them, was served from that cache before the
+  third repair, which kept every read. **Decided:** stated, not changed. A
+  body kept across such reads would still leave the read and the sort on
+  every request, and skipping those means serving a census the stamps cannot
+  vouch for, which the third repair removed. `docs/06-limits.md`'s eighth
+  correction states the whole cost, why it is linear while the fault lasts,
+  and that D-0686's correction in §40.5 is not true meanwhile.
+  `a_fault_the_census_cache_declines_rebuilds_the_store_body_on_every_request`
+  pins it: with a socket at Groww's manifest path, each of three
+  `/store.json?feed=dhan` requests reads Dhan's manifest again and answers
+  equal bytes from a new allocation, and with the socket gone one request
+  reads and the next reads nothing and answers the same allocation. AF-28j
+  records it.
+- *AF-24's `/bars` clause had lost its only driving test.* Since `9e08e3b6`,
+  an unreadable census of the asked feed is refused as
+  `Unlocated::AskedUnreadable` before the walk reaches the list of notes, so
+  `an_unreadable_census_is_named_by_calendar_and_bars`, which damages the
+  asked feed's manifest, no longer reached `Unlocated::NotHeld` with a note
+  in it, and nothing else did: the census tests' `locate` helper fails its
+  test on such a list. Dropping the push that fills the list, or letting
+  `unlocatable`'s empty-list arm match every list, answered "no feed in this
+  store holds" over a census nobody could read. **Decided:**
+  `bars_names_every_unreadable_census_when_no_readable_census_holds_the_name`
+  damages Groww's manifest, keeps Dhan's read without `RELIANCE`, and
+  requests `/bars` for `RELIANCE` with `?vendor=dhan`, with no vendor and
+  with a vendor this build has no feed for. Each answers 400 saying 1 could
+  not be read and naming `groww.man`; with Zerodha's manifest damaged too, 2
+  and both files, and `locate_series` returns the notes in `Vendor::ALL`
+  order. AF-24 now names the test for each arm.
+- *AF-27b claimed more than its test counted.* The test cut `sweeprun.rs` at
+  its first `\n#[cfg(test)]`, and production `top_json` sits below that line,
+  before `mod tests`. It counted the phrase on one source line, so a copy
+  wrapped with a `\` continuation, as `BUDGET_NOT_RECORDABLE` itself is, was
+  not counted. **Decided:** the test now cuts at `\nmod tests {`, requires
+  the part before it to contain `pub async fn top_json(`, and counts over the
+  source with each `\`-ended line joined to the next and every other run of
+  whitespace made one space. `a_wrapped_copy_reads_as_one_line` pins that
+  joining. AF-27b now says what is counted, and that a paraphrase or a copy
+  assembled from pieces is not.
+
+**What that makes wrong above.**
+
+- The third repair's "*The request that meets the fault answers what it
+  read.* In the second probe that is five "absent" feeds for one request",
+  and its rejection's "The request that met the fault answers what it read".
+  In that probe Dhan's row is now served unreadable, and the four feeds whose
+  stamps found no manifest absent.
+- The third repair's "That is the pre-D-0686 cost". It is for the three
+  routes D-0686 moved onto the census cache, and not for the other callers,
+  as the fourth finding above says.
+- The sixth repair's "The request that met the race still answers what its
+  own census read. For the symbol branch that is `200` with no session, for
+  that one request". It now answers 503.
+- The sixth repair's rejection of "*Refusing the racing request's answer as
+  well.*" It was raised by this review, and is decided above for a row read
+  absent.
+- The seventh repair's "The unheld-name skip now declines that derivation
+  first" and "The two root-race tests now fail only with both rules removed".
+  The row that derivation would read is now served unreadable, and
+  `/calendar.json` refuses it before either branch derives. With both rules
+  removed, the two root-race tests pass. Their raced call fails with
+  `refuse_contradicted_absences` not called, and each rule is pinned alone by
+  its own test: `modified`'s refusal by
+  `each_feed_is_handed_its_own_modified_time_only_for_a_row_its_stamp_could_read`,
+  the unheld-name skip by `a_name_the_census_does_not_hold_keeps_no_calendar`.
+- D-0693's "*Where a site combined a result with the unlock's result*" names
+  the api audit journal among the sites that now release by name. The
+  journal no longer calls `release`, as the journal finding above says.
+
+**Rejected.**
+
+- *Replacing every row that fails `stamp_could_read`.* See "Why only an
+  absence" above.
+- *Keying `store_wire::Cache` on something that outlives a declined read.*
+  See the cost finding above: the read and the sort stay linear per request
+  whatever the body cache keys on.
+
+**Still not done.** The items of the fifth, sixth and seventh repairs' lists
+stand as written. Three more, which this repair adds:
+
+- *An absence that is real and newer than its stamp is refused too, for one
+  request.* The rule cannot tell why the disk answered differently from the
+  stamps: a root gone after its check, a manifest removed, a stamp's fault
+  that ended with no manifest behind it, or a root that was not a directory
+  when stamped and is one, without a manifest, when read. Each such row is
+  served unreadable to the request that read it and not kept.
+  `docs/06-limits.md` states it.
+- *A fault the census cache declines costs a read, a sort and, on
+  `/store.json`, an encode and a hash per request while it lasts.* Stated in
+  `docs/06-limits.md`, not changed, and not timed.
+- *No `api` test drives a refused unlock of the journal.* The source test
+  above holds the shape; a seam `api` can reach would be a `store` change.
+
+Each proof was taken on this tree with breaks added in two builds, and the
+tree restored afterwards from copies taken before the breaks, compared byte
+for byte. The whole `api` lib ran under each break. The first build selected
+each break of `server.rs` by an environment variable; with none set it had
+1,211 passed, 0 failed and 2 ignored.
+
+- With `refuse_contradicted_absences` not called, 3 failed: both root-race
+  tests, each at "Symbol: the call that raced the root refuses on Dhan's
+  census" with `200` and no session, and the after-check test, five "absent"
+  against Dhan unreadable.
+- With every row its stamp could not have read replaced, the review's rule, 2
+  failed: the first-manifest test, Dhan unreadable against held, and the
+  table test, at held under a stamp that found no manifest.
+- With its `&&` an `||`, 39 failed, 27 of them census request tests; among
+  them the table test, at an absence its stamp could have read, and the
+  first-manifest test, with all five feeds unreadable.
+- With `modified`'s refusal removed, 1 failed: the unit test, at "absent
+  under a manifest stamped present". With the unheld-name skip removed, 1
+  failed: the unheld-name test, at "%20NIFTY: kept nothing". With both
+  removed, those 2 failed and both root-race tests passed. With
+  `refuse_contradicted_absences` also not called, 5 failed: those two, both
+  root-race tests at the raced Symbol call, and the after-check test.
+- With `locate_series` pushing no note for another feed's unreadable census,
+  1 failed: the new `/bars` test, at `?vendor=dhan`, `NotHeld([])` against
+  Groww's note. With `unlocatable`'s empty-list arm matching every list, 1
+  failed: the same test, at the page for `?vendor=dhan`, which no longer
+  says a census could not be read.
+- With `read_as_stamped` keeping every read, as the census cache did before
+  the third repair, 10 failed, the `/store.json` test among them at "request
+  2: read again", 1 read against 2.
+
+The second build restored `appended`'s last line to
+`file.release().map_err(|u| u.to_string())`, added the reason's words to the
+production source twice, once wrapped with a `\` beside
+`BUDGET_NOT_RECORDABLE` and once on one line below `top_json`, and kept
+`16736f23`'s count beside the new one as a test of its own. It had 1,210
+passed, 2 failed and 2 ignored. The 2 were
+`nothing_after_the_sync_can_refuse_an_append`, at the release line after the
+sync, and `the_budget_reason_is_worded_once`, at 3 against 1. The old count
+passed over the same source.

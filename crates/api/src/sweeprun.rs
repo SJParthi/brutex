@@ -3768,21 +3768,53 @@ mod tests {
     /// as two different sentences for one fact. `BUDGET_NOT_RECORDABLE` now
     /// holds it. `assert_budget_named` checks that the body refusal states it,
     /// and `server_budget_through_the_journal` that the environment refusal
-    /// does. This counts the reason's own words in the production source, so a
-    /// refusal that spells it out again, in either wording, fails here.
+    /// does. This counts the reason's own words in this file's production
+    /// source, everything before `mod tests`, which includes `top_json` below
+    /// the first `#[cfg(test)]`. Before counting, a `\` that ends a line is
+    /// dropped with the newline and the next line's leading whitespace, as the
+    /// compiler drops them inside a string literal, and every other run of
+    /// whitespace is made one space. So a second copy of those words fails here
+    /// however its lines are wrapped, with a `\` or without one. A paraphrase,
+    /// or a copy assembled from pieces, is not counted.
     #[test]
     fn the_budget_reason_is_worded_once() {
         let production = include_str!("sweeprun.rs")
-            .split_once("\n#[cfg(test)]")
-            .expect("this module has one test boundary")
+            .split_once("\nmod tests {")
+            .expect("this file declares its tests module")
             .0;
+        assert!(
+            production.contains("pub async fn top_json("),
+            "the production source reaches past the first `#[cfg(test)]`"
+        );
         assert_eq!(
-            production
+            as_read(production)
                 .matches("wall-clock calibration the run identity cannot name")
                 .count(),
             1,
             "the budget's reason is spelt out more than once"
         );
+    }
+
+    /// `source` with each `\`-newline continuation and the whitespace after
+    /// it removed, and every other run of whitespace made one space.
+    fn as_read(source: &str) -> String {
+        let mut pieces = source.split("\\\n");
+        let mut joined = pieces.next().unwrap_or_default().to_owned();
+        for piece in pieces {
+            joined.push_str(piece.trim_start());
+        }
+        joined.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// `as_read` joins what the compiler joins, and nothing else.
+    #[test]
+    fn a_wrapped_copy_reads_as_one_line() {
+        assert_eq!(
+            as_read("\"wall-clock \\\n        calibration the\n    run  identity\""),
+            "\"wall-clock calibration the run identity\""
+        );
+        assert_eq!(as_read("first\\\n  second\\\nthird"), "firstsecondthird");
+        assert_eq!(as_read("no continuation"), "no continuation");
     }
 
     /// Every ordinary `POST /engine/command` word, as a good body names it.

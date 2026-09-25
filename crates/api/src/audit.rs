@@ -1124,6 +1124,22 @@ impl Journal {
     /// `crates/store/src/file.rs` solved exactly this shape with a trait so
     /// the arms can be injected. That is the available fix and it is not built
     /// here. `CLAUDE.md` §3 rule 6: said, rather than left to be found.
+    ///
+    /// # A refused unlock after the sync is not a failed append
+    ///
+    /// Once `sync_all` has returned, the record is on disk, and an error from
+    /// here says it is not: `recorded_fact` renders "NO — this run is NOT in
+    /// the journal", and the spot path returns before it appends the run's
+    /// member-failure records. So the lock is not released by
+    /// `Flock::release`, whose refusal would be returned, but by the guard's
+    /// `Drop`, whose refusal `store.flock` logs as a Warn and does not return,
+    /// as `pull::masters::land_validated`'s `_lock` guard is released after
+    /// its file is written (D-0693). A lock still held refuses the next append
+    /// by name, as `a_held_journal_lock_refuses_a_second_writer_without_appending`
+    /// pins for a lock another handle holds. No test here can refuse an unlock:
+    /// the seam that does is `#[cfg(test)]` inside `store`. So
+    /// `nothing_after_the_sync_can_refuse_an_append` pins the source instead.
+    /// D-0695.
     pub fn append(&self, record: &Record) -> Result<(), String> {
         // ONE LINE WHEN THE RUN DOES NOT MAKE IT ONTO THE RECORD, and none when
         // it does. The refusal below is already returned to the caller and
@@ -1150,10 +1166,11 @@ impl Journal {
             std::fs::create_dir_all(dir)
                 .map_err(|e| named("cannot create the audit directory", &e))?;
         }
-        // Every refusal below releases the append lock through the guard's
-        // explicit unlock, and the success path releases it by name: closing
-        // the descriptor would leave the lock alive on any duplicate a child
-        // spawned by another thread still holds (D-0693).
+        // Every path below releases the append lock through the guard's
+        // explicit unlock in its `Drop`, a refusal by returning and the
+        // success path once the record is synced: closing the descriptor would
+        // leave the lock alive on any duplicate a child spawned by another
+        // thread still holds (D-0693).
         let mut file = Flock::try_lock(
             std::fs::OpenOptions::new()
                 .read(true)
@@ -1185,7 +1202,13 @@ impl Journal {
             .map_err(|e| named("cannot append the record", &e))?;
         file.sync_all()
             .map_err(|e| named("the record was written and not synced", &e))?;
-        file.release().map_err(|u| u.to_string())
+        // THE RECORD IS DURABLE FROM HERE, SO NOTHING BELOW MAY REFUSE THE
+        // APPEND. The lock is released by the guard's `Drop`, whose refused
+        // unlock `store.flock` logs as a Warn naming the journal. Returned as
+        // this append's error, it said a synced record was not in the journal.
+        // See `append`'s doc. D-0695.
+        drop(file);
+        Ok(())
     }
 
     /// One page of records, newest first.
@@ -2321,6 +2344,42 @@ mod tests {
                 bytes: 2 * RECORD_LEN_U64,
                 torn: None,
             }
+        );
+    }
+
+    /// ONCE THE RECORD IS SYNCED, NOTHING MAY REFUSE THE APPEND. D-0695.
+    ///
+    /// `appended` ended with `file.release().map_err(|u| u.to_string())`, after
+    /// `write_all` and `sync_all` had made the record durable, so a refused
+    /// unlock was returned as a record "NOT in the journal". No test in this
+    /// crate can make an unlock refuse, so this reads `appended`'s own source:
+    /// after the `sync_all` statement, its only code is the guard's drop and
+    /// `Ok(())`. A `?`, an `Err` or a `release` there fails this.
+    #[test]
+    fn nothing_after_the_sync_can_refuse_an_append() {
+        let body = include_str!("audit.rs")
+            .split_once("    fn appended(&self, record: &Record) -> Result<(), String> {\n")
+            .expect("`appended` is in this file")
+            .1
+            .split_once("\n    }\n")
+            .expect("`appended` ends")
+            .0;
+        let after_sync = body
+            .split_once("file.sync_all()")
+            .expect("`appended` syncs the record")
+            .1
+            .split_once(";\n")
+            .expect("the sync statement ends")
+            .1;
+        let code: Vec<&str> = after_sync
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with("//"))
+            .collect();
+        assert_eq!(
+            code,
+            ["drop(file);", "Ok(())"],
+            "after the sync: {after_sync}"
         );
     }
 
