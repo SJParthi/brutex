@@ -1802,7 +1802,7 @@ async fn an_io_error_its_stamp_cannot_see_is_not_cached() {
 /// # Why through a link
 ///
 /// A socket address holds only a short path, and `std` refuses a longer one
-/// with `InvalidInput` ("path must be shorter than SUN_LEN"). The tests that
+/// with `InvalidInput` (`path must be shorter than SUN_LEN`). The tests that
 /// put a socket at a manifest path bound it there directly, under
 /// `crate::scratch::path`, which is under `TMPDIR`. A review ran them under
 /// the long `TMPDIR` its mutation runs are given, and every one panicked
