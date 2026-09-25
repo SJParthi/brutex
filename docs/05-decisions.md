@@ -43011,3 +43011,12 @@ changes what an operator reads, or the exit status a script sees, says so.
      stock note) now run beside a generated month that sweeps, and the
      filter test reads its count from the refusal. AF-39's sentence about the
      `60min` page is corrected in place, and AF-70 states the rule.
+2. *An empty month on `sweep-stored`.* `stored_sweep_inputs` refused a month
+   whose file exists and holds no record, the file a writer's open leaves
+   before its first append, with "every signal session has a minute gap; no
+   sweepable bars remain". No gap had been measured and nothing had been
+   withheld (found by a review). It now refuses with words of its own, such
+   as "the 5min month 2025-04 is stored and holds no bar. Nothing was swept",
+   before it loads the execution minutes, and the minute-gap sentence is left
+   to a month whose every session was withheld. *Behaviour change:* that
+   refusal's words. AF-71 states it.

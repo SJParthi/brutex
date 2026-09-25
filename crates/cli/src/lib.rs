@@ -3230,6 +3230,15 @@ fn stored_sweep_inputs(request: &StoredSweepRequest<'_>) -> Result<StoredMonthIn
         ..
     } = *request;
     let mut loaded = stored::load(root, vendor, underlying, rung, year, month)?;
+    // AN EMPTY MONTH IS REFUSED AS EMPTY. `stored::load` returns a file that
+    // exists and holds no record as a month with no bars, and the check below
+    // then blamed minute gaps no one had measured, with nothing withheld
+    // (found by a review, D-0696).
+    if loaded.bars.is_empty() {
+        return Err(format!(
+            "the {rung} month {year}-{month:02} is stored and holds no bar. Nothing was swept"
+        ));
+    }
     let execution_bars = if rung == EXECUTION_RUNG {
         None
     } else {

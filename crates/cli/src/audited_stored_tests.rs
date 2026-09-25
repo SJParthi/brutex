@@ -81,6 +81,12 @@ impl Fixture {
         .to_path_buf(&self.root)
     }
     fn write(&self, month: u8, timeframe: Timeframe, rows: &[Bar]) {
+        let mut file = self.open(month, timeframe);
+        file.append(rows).expect("generated fixture rows");
+    }
+    /// The writer of `month` at `timeframe`, which creates the file when it
+    /// is absent. Dropped unwritten, it leaves a month that holds no bar.
+    fn open(&self, month: u8, timeframe: Timeframe) -> BarFile {
         let key = stored::swept_index(self.symbol).expect("key");
         let path = StorePath::for_key(
             Vendor::Zerodha,
@@ -92,8 +98,7 @@ impl Fixture {
         .expect("path");
         let hash = brutex_core::universe::fnv1a(self.symbol).to_le_bytes();
         let symbol = u32::from_le_bytes(hash[..4].try_into().expect("low32"));
-        let mut file = BarFile::open_or_create(&self.root, path, symbol).expect("writer");
-        file.append(rows).expect("generated fixture rows");
+        BarFile::open_or_create(&self.root, path, symbol).expect("writer")
     }
     fn request<'a>(&'a self, rung: &'a str) -> Request<'a> {
         Request {
@@ -1612,6 +1617,53 @@ fn an_extinct_share_audit_prints_no_ranking_and_no_charge_statement() {
             );
         }
     }
+}
+
+/// **The ordinary stored sweep refuses an empty month as empty, and never
+/// blames minute gaps it did not measure.** D-0696.
+///
+/// `stored::load` returns a month whose file exists and holds no record as a
+/// month with no bars. The door then refused it with "every signal session
+/// has a minute gap; no sweepable bars remain", though no gap was measured and
+/// nothing was withheld (found by a review). An interrupted ingest leaves
+/// exactly that file. Here a `5min` April left empty beside April's whole
+/// minutes, and a `1min` June left empty, are each refused by the reason that
+/// holds, before an attempt is opened.
+#[test]
+fn the_ordinary_stored_sweep_refuses_an_empty_month_as_empty() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    let fixture = Fixture::new();
+    drop(fixture.open(4, Timeframe::MINUTE_5));
+    drop(fixture.open(6, Timeframe::MINUTE_1));
+    for (rung, month) in [("5min", 4), ("1min", 6)] {
+        let loaded = stored::load(&fixture.root, Vendor::Zerodha, "NIFTY", rung, 2025, month)
+            .expect("premise: the month's file exists");
+        assert!(loaded.bars.is_empty(), "premise: it holds no bar");
+        let mut request = fixture.month_request(rung);
+        request.month = month;
+        let refusal = crate::sweep_stored_kernel(request).expect_err("an empty month");
+        assert_eq!(
+            refusal,
+            format!(
+                "the {rung} month 2025-{month:02} is stored and holds no bar. Nothing was swept"
+            )
+        );
+        assert!(!crate::results::Results::path(&fixture.root).exists());
+        assert_eq!(
+            crate::sweep_evidence::latest(&fixture.root, 1_048_576).expect("no empty attempt"),
+            None
+        );
+    }
+    // April's minutes are whole, so the coarse month's refusal is not theirs.
+    let minutes = stored::load(&fixture.root, Vendor::Zerodha, "NIFTY", "1min", 2025, 4)
+        .expect("April's minutes");
+    assert!(!minutes.bars.is_empty(), "premise: April holds minutes");
+    assert!(
+        crate::minute_gaps::days_with_interior_gaps(&minutes.bars).is_empty(),
+        "premise: no April session has a minute gap"
+    );
+    crate::knobs::clear_all();
 }
 
 /// A NIFTY future: a key `swept_index` can never hand a kernel.
