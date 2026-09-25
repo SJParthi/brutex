@@ -1271,16 +1271,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A scratch store holding one empty `2026-07` file under each
-    /// `bars/zerodha/<dir>/60min` directory named, for `surface_under` to list.
+    /// A scratch store holding two empty months, `2026-06` and `2026-07`,
+    /// under each `bars/zerodha/<dir>/60min` directory named, for
+    /// `surface_under` to list.
+    ///
+    /// TWO MONTHS, because `store::catalog::walk` lists one holding per month
+    /// and a directory is named once however many months it holds. With one
+    /// month in each directory, a surface that named a directory once per
+    /// month passed every test here (found by a review, D-0696).
     fn store_holding(tag: &str, dirs: &[&str]) -> std::path::PathBuf {
         let root = std::env::temp_dir().join(format!("brutex-pool-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         for dir in dirs {
             let at = root.join(format!("bars/zerodha/{dir}/60min"));
             std::fs::create_dir_all(&at).expect("dirs");
-            std::fs::write(at.join("2026-07.bin"), b"").expect("a file the catalog lists");
+            for month in ["2026-06.bin", "2026-07.bin"] {
+                std::fs::write(at.join(month), b"").expect("a file the catalog lists");
+            }
         }
+        let held = store::catalog::walk(&root)
+            .expect("the scratch store is walked")
+            .held;
+        assert_eq!(
+            held.len(),
+            2 * dirs.len(),
+            "premise: the catalog lists each directory's two months"
+        );
         root
     }
 

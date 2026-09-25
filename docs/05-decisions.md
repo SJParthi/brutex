@@ -43055,3 +43055,10 @@ changes what an operator reads, or the exit status a script sees, says so.
    this change and is not edited here. `no_text_says_pool_pass_1_lifts_a_section`
    reads the five texts, and reads from `pool.rs` that pass 1 keeps only
    the outcome.
+5. *A misfiled directory holding two months.* `store::catalog::walk` lists
+   one holding per month, and `surface_under` names a misfiled directory once
+   because its map is keyed by the three directory names. Every pool fixture
+   held one month in each directory, so a surface that named a directory once
+   per month passed every pool test (found by a review). The tests'
+   `store_holding` now writes two months into every directory it makes, and
+   checks that the catalog lists both. AF-35 says so. No behaviour changed.
