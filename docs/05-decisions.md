@@ -42841,4 +42841,12 @@ every_spelling every_feed pool::` selects. After the regressions, `cargo fmt`
 re-wrapped three of the new tests and one doc sentence was reworded; no
 assertion changed.
 
+The change was then committed, and the `cli` binary built from that clean
+commit carried it as its stamp. Run with an empty store, `cli pool` given
+the feed word `zerodha`, a newline and `refused: X`, at `60min` from 2026-07
+to 2026-07 with `auto`, printed `refused: ` and the word with its newline
+quoted as its escape, on one line, and exited 2. Given `zerodha` and the
+rung word `60min`, a newline and `refused: Y`, it printed the rung refusal
+across two lines, as before, and exited 2.
+
 Invariant AF-39 is corrected in place again.

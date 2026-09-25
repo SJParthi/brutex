@@ -9265,13 +9265,14 @@ by `File::unlock`. What that does not cover, stated rather than implied away:
   carrying a newline, typed to `pool` or to `sweep-all`, was refused as the
   whole command, and the refusal was printed across two lines; so was such a
   rung word typed to `pool` (each measured by a review). The feed word is now
-  quoted on one line, and the rung word typed to `pool` still is not. Each
-  such refusal is the command's own and forges no completed run. `pool_arm`'s
-  one caller is `dispatch`'s `pool` arm, a typed argument. `cli::swept_rung`'s
-  eight call sites each take the rung as a parameter, and the chains above
-  them were not all followed to their end. `batch.rs` has a `swept_rung` of
-  its own that quotes raw too, but only a word `stored::rung` has already
-  accepted as a stored rung reaches that quote.
+  quoted on one line, and the rung word typed to `pool` still is not; both
+  were measured on `pool` only, with a stamped build of D-0696's fifth
+  correction. Each such refusal is the command's own and forges no completed
+  run. `pool_arm`'s one caller is `dispatch`'s `pool` arm, a typed argument.
+  `cli::swept_rung`'s eight call sites each take the rung as a parameter, and
+  the chains above them were not all followed to their end. `batch.rs` has a
+  `swept_rung` of its own that quotes raw too, but only a word `stored::rung`
+  has already accepted as a stored rung reaches that quote.
 
 ## Screen-budget refusals and census faults on the api routes — D-0695, 24 September 2026
 
