@@ -19,15 +19,19 @@
 //! can repeat afterwards. A line that was never proved to be written is not
 //! evidence.
 //!
-//! Three of those eight are not refusals. `store.open` **accepts** the month and
-//! names the damage, and since D-0688 the `store.block` interrupted-append line
+//! Four of those eight are not refusals. `store.open` **accepts** the month and
+//! names the damage. Since D-0688 the `store.block` interrupted-append line
 //! accepts a tail block whose entry was sealed past the commit and names the
-//! append that died. The other five hand the caller a `FormatError` as well as
-//! writing a line, so a lost emit still leaves a trace somewhere. Those two hand
-//! back working data, so the line is the only trace there is. The third is
+//! append that died. The `store.header` fall-back returns an older committed
+//! generation's header and names the newer one it rejected. Those three hand
+//! back working data, so the line is the only trace there is. The fourth is
 //! `store.flock` (D-0693): it fires from a `Drop`, which cannot hand anybody
-//! anything. Those are the three sites in this crate whose deletion is
-//! invisible from outside the log.
+//! anything. Those are the four sites in this crate whose deletion is
+//! invisible from outside the log. The other four hand the caller a
+//! `FormatError` as well as writing a line, so a lost emit still leaves a
+//! trace somewhere: the unreadable header, the refused commit, the block with
+//! no checksums to verify against and the checksum mismatch. The test counts
+//! what each drive's call handed back and holds this paragraph to the counts.
 //!
 //! # Why the emits are driven and never built
 //!
@@ -186,8 +190,57 @@ struct Site {
     message: &'static str,
     /// How loud it must be.
     level: telemetry::Level,
-    /// The production call that reaches it, given a scratch store root.
-    drive: fn(&Path),
+    /// The production call that reaches it, given a scratch store root, and
+    /// what that call handed back to its caller.
+    drive: fn(&Path) -> Handed,
+}
+
+/// What the production call a drive makes handed back to its caller.
+///
+/// Each drive returns this only after its own `expect` or `expect_err` has
+/// checked the call's result, so the tally the test takes of it is what the
+/// calls did, not what a row declares. The module header counts these, and
+/// the test holds the header to the tally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Handed {
+    /// A `FormatError`: the caller hears of the damage whether or not the
+    /// line reaches a log.
+    Refusal,
+    /// Working data despite the damage the line names: the line is the only
+    /// trace of it.
+    Data,
+    /// Nothing at all: the emit fires from a `Drop`.
+    Nothing,
+    /// Nothing went wrong: the line records a success.
+    Success,
+}
+
+/// `n` as the header spells it, for the nine sites and the tallies of them.
+fn spelt(n: usize) -> &'static str {
+    [
+        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+    ]
+    .get(n)
+    .copied()
+    .unwrap_or_else(|| panic!("the header spells no count above nine, got {n}"))
+}
+
+/// [`spelt`] opening a sentence.
+fn spelt_first(n: usize) -> String {
+    let word = spelt(n);
+    word.get(..1).map_or_else(String::new, str::to_uppercase) + word.get(1..).unwrap_or("")
+}
+
+/// This module's `//!` header as one line of prose: markers removed, lines
+/// joined with a space, so a sentence wrapped across lines reads whole.
+fn module_header() -> String {
+    include_str!("emits.rs")
+        .lines()
+        .map_while(|line| line.strip_prefix("//!"))
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// A header region whose every slot is zeros: `note_header_unreadable`.
@@ -196,11 +249,12 @@ struct Site {
 /// no slot offers a reason and the search ends on `NoValidHeader` — the
 /// "every copy of the header is damaged" answer an operator cannot otherwise
 /// tell apart from a month that was never pulled.
-fn drive_header_unreadable(_root: &Path) {
+fn drive_header_unreadable(_root: &Path) -> Handed {
     let region = vec![0u8; HEADER_BYTES];
     let refused = Header::read_region(&region, HEADER_LEN)
         .expect_err("a region of zeros holds no committed header");
     assert_eq!(refused, FormatError::NoValidHeader);
+    Handed::Refusal
 }
 
 /// A newest slot the file's length cannot support: `note_header_fell_back`.
@@ -211,7 +265,7 @@ fn drive_header_unreadable(_root: &Path) {
 /// alone — 32768 bytes, capacity zero. Generation 1 is whole and unsupported,
 /// so `read_region` walks back to generation 0 instead of condemning the file,
 /// which is exactly the recovery that used to happen in silence.
-fn drive_header_fell_back(_root: &Path) {
+fn drive_header_fell_back(_root: &Path) -> Handed {
     let genesis = Header::genesis(SYMBOL, 60, 0);
     let unsupported = genesis
         .advance(1_000, T0, T0 + MINUTE)
@@ -228,6 +282,7 @@ fn drive_header_fell_back(_root: &Path) {
         .expect("the previous generation is intact and is returned");
     assert_eq!(read.generation, 0, "the newest commit is not the one used");
     assert_eq!(read.n_valid, 0, "and its counter is the one that came back");
+    Handed::Data
 }
 
 /// A counter whose data end is past `u64`: `note_commit_refused`.
@@ -236,7 +291,7 @@ fn drive_header_fell_back(_root: &Path) {
 /// version does not define, and this one — and all three reach the single emit
 /// site through `commit_image`. The offset is the arm reachable without
 /// hand-building a header state no constructor produces.
-fn drive_commit_refused(_root: &Path) {
+fn drive_commit_refused(_root: &Path) -> Handed {
     let past_the_end = Header::genesis(SYMBOL, 60, 0)
         .advance(u64::MAX, T0, T0)
         .expect("a counter of u64::MAX is arithmetically fine; its offset is not");
@@ -244,6 +299,7 @@ fn drive_commit_refused(_root: &Path) {
         .commit()
         .expect_err("the end of the data is past u64");
     assert_eq!(refused, FormatError::OffsetOverflow);
+    Handed::Refusal
 }
 
 /// A verification asked of a file carrying no checksums: `note_unverifiable`.
@@ -253,7 +309,7 @@ fn drive_commit_refused(_root: &Path) {
 /// first build that turns checksums on, against files every build before it
 /// wrote. Their file is not corrupt; it predates the flag, and the line is the
 /// only place that distinction survives.
-fn drive_block_unverifiable(_root: &Path) {
+fn drive_block_unverifiable(_root: &Path) -> Handed {
     let plain = Header::genesis(SYMBOL, 60, 0)
         .advance(1, T0, T0)
         .expect("one record commits");
@@ -261,6 +317,7 @@ fn drive_block_unverifiable(_root: &Path) {
     let refused = block::verify(&plain, Layout::CURRENT, 0, &[7u8; RECORD_LEN], 0)
         .expect_err("there is nothing to verify against");
     assert_eq!(refused, FormatError::ChecksumsAbsent);
+    Handed::Refusal
 }
 
 /// A block whose committed bytes are not the bytes sealed: `note_block_mismatch`.
@@ -269,7 +326,7 @@ fn drive_block_unverifiable(_root: &Path) {
 /// allocated extent reads back as, and an all-zero [`Bar`] satisfies
 /// `ohlc_is_sane` with a *real* zero open interest rather than [`OI_NULL`], so
 /// nothing downstream can tell that extent from data. Only the checksum can.
-fn drive_block_mismatch(_root: &Path) {
+fn drive_block_mismatch(_root: &Path) -> Handed {
     let sealed_header = Header::genesis(SYMBOL, 60, FLAG_CHECKSUMS)
         .advance(1, T0, T0)
         .expect("one record commits");
@@ -284,19 +341,20 @@ fn drive_block_mismatch(_root: &Path) {
         matches!(refused, FormatError::BlockChecksum { block: 0, .. }),
         "the refusal names the block, got {refused:?}"
     );
+    Handed::Refusal
 }
 
 /// A tail block whose entry an interrupted append sealed past the commit:
 /// `note_interrupted_append`. D-0688.
 ///
-/// The second site in this crate that **accepts** rather than refuses, and so
-/// the second whose deletion is invisible outside the log: the block is
+/// One of the three sites in this crate that **accept** rather than refuse,
+/// and so one whose deletion is invisible outside the log: the block is
 /// served, and this line is the only trace of the append that died between
 /// sealing the sidecar and writing its header slot. Driven through the public
 /// [`block::verify_through`] with bytes laid out here, so it reaches this site
 /// and no neighbour — a real file would also fire `store.append` and
 /// `store.open`, which this table already drives once each.
-fn drive_block_sealed_past_the_commit(_root: &Path) {
+fn drive_block_sealed_past_the_commit(_root: &Path) -> Handed {
     let header = Header::genesis(SYMBOL, 60, FLAG_CHECKSUMS)
         .advance(1, T0, T0)
         .expect("one record commits");
@@ -314,16 +372,18 @@ fn drive_block_sealed_past_the_commit(_root: &Path) {
     )
     .expect("the entry is proved to cover the committed record and one more");
     assert_eq!(through, 2, "the proof names the extent it matched");
+    Handed::Data
 }
 
 /// A batch that reached stable storage: the `store.append` emit in
 /// `crate::file`.
 ///
 /// The only one of the nine that fires where nothing whatever went wrong, and
-/// one of the three that need a real filesystem — [`drive_open_ragged_tail`] is
-/// the other. It fires after the second `sync_all`, so the line cannot claim a
-/// durability the file does not have. Two bars, one commit, one event.
-fn drive_append_committed(root: &Path) {
+/// one of the three that need a real filesystem — [`drive_open_ragged_tail`] and
+/// [`drive_flock_unlock_refused`] are the others. It fires after the second
+/// `sync_all`, so the line cannot claim a durability the file does not have.
+/// Two bars, one commit, one event.
+fn drive_append_committed(root: &Path) -> Handed {
     let mut file = BarFile::open_or_create(root, bars_path(), SYMBOL).expect("a fresh month opens");
     let landed = file
         .append(&[bar(0), bar(1)])
@@ -336,6 +396,7 @@ fn drive_append_committed(root: &Path) {
         },
         "the premise: the bars were written, not recognised as already present"
     );
+    Handed::Success
 }
 
 /// A month whose last bytes no commit claims: the `store.open` emit in
@@ -373,7 +434,7 @@ fn drive_append_committed(root: &Path) {
 /// The exclusive advisory lock lives in the [`BarFile`], not in the scope, so
 /// reopening with the first handle alive would be `StoreError::Locked` and
 /// never reach the open this drive exists to reach.
-fn drive_open_ragged_tail(root: &Path) {
+fn drive_open_ragged_tail(root: &Path) -> Handed {
     let fresh = BarFile::open_or_create(root, bars_path(), SYMBOL).expect("a fresh month opens");
     assert_eq!(fresh.records(), 0, "the premise: nothing is committed yet");
     let bars = fresh.path().to_path_buf();
@@ -395,6 +456,7 @@ fn drive_open_ragged_tail(root: &Path) {
         HEADER_LEN + 17,
         "the premise: seventeen bytes sit past the committed extent"
     );
+    Handed::Data
 }
 
 /// A guard dropped without a release, whose unlock the host refused:
@@ -406,13 +468,14 @@ fn drive_open_ragged_tail(root: &Path) {
 /// everything after the injection is the production `Drop`. The descriptor
 /// then closes, and with no duplicate of it open the kernel frees the lock, so
 /// the drive leaves nothing held behind it.
-fn drive_flock_unlock_refused(root: &Path) {
+fn drive_flock_unlock_refused(root: &Path) -> Handed {
     std::fs::create_dir_all(root).expect("a scratch store root");
     let path = root.join("flock.lock");
     let file = std::fs::File::create(&path).expect("the lock file");
     let held = Flock::lock(file, path).expect("an uncontended lock is taken");
     crate::flock::tests::refuse_next_unlock();
     drop(held);
+    Handed::Nothing
 }
 
 /// Copies one commit's 64 bytes into the region at the offset it names.
@@ -520,7 +583,7 @@ const SITES: [Site; 9] = [
     },
     Site {
         target: "store.flock",
-        message: "advisory lock not released before close",
+        message: "advisory lock not released by its guard",
         level: telemetry::Level::Warn,
         drive: drive_flock_unlock_refused,
     },
@@ -599,9 +662,11 @@ fn every_emit_in_this_crate_reaches_the_log_through_its_production_call() {
     // same rendered `StorePath`, so a shared root would hand the second one the
     // first one's file — and a torn tail found by the drive that only meant to
     // commit is a line this table cannot tell from a crate defect.
-    for (ordinal, site) in SITES.iter().enumerate() {
-        (site.drive)(&root.join(format!("site-{ordinal}")));
-    }
+    let handed: Vec<Handed> = SITES
+        .iter()
+        .enumerate()
+        .map(|(ordinal, site)| (site.drive)(&root.join(format!("site-{ordinal}"))))
+        .collect();
 
     let found = telemetry::tail(&dir, sink.keep_files(), &telemetry::Query::last(64));
     assert_eq!(
@@ -639,4 +704,44 @@ fn every_emit_in_this_crate_reaches_the_log_through_its_production_call() {
 
     let _ignored = std::fs::remove_dir_all(&dir);
     let _ignored = std::fs::remove_dir_all(&root);
+
+    // THE HEADER COUNTS WHAT THE CALLS HANDED BACK. It said three of the
+    // eight failure sites were not refusals and five handed back a
+    // `FormatError`, and the header fall-back returns `Ok` with an older
+    // generation: four and four. Each count is taken from the drives above.
+    let tally = |which: Handed| handed.iter().filter(|&&each| each == which).count();
+    let failures = SITES.len() - tally(Handed::Success);
+    let silent = tally(Handed::Data) + tally(Handed::Nothing);
+    let header = module_header();
+    for claim in [
+        format!(
+            "{} of these {} fire only once something has already gone wrong",
+            spelt_first(failures),
+            spelt(SITES.len())
+        ),
+        format!(
+            "{} of those {} are not refusals",
+            spelt_first(silent),
+            spelt(failures)
+        ),
+        format!(
+            "Those {} hand back working data, so the line is the only trace there is",
+            spelt(tally(Handed::Data))
+        ),
+        format!(
+            "Those are the {} sites in this crate whose deletion is invisible from \
+             outside the log",
+            spelt(silent)
+        ),
+        format!(
+            "The other {} hand the caller a `FormatError`",
+            spelt(tally(Handed::Refusal))
+        ),
+    ] {
+        assert!(
+            header.contains(&claim),
+            "the module header must say {claim:?}, which is what the drives handed \
+             back: {handed:?}"
+        );
+    }
 }

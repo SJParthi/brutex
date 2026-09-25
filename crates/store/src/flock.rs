@@ -180,11 +180,15 @@ impl<F: Borrow<File>, P: AsRef<Path>> Drop for Flock<F, P> {
     }
 }
 
-/// A lock that could not be released before its descriptor closed.
+/// A lock whose unlock the host refused.
 ///
 /// Returned by [`Flock::release`]. The lock may still be held by the open file
 /// description, so a later attempt to take it can refuse until every descriptor
-/// referring to that description has closed.
+/// referring to that description has closed. For a guard that owned its
+/// `File`, that is the guard's own descriptor, which closes as the guard is
+/// consumed, and any duplicate of it. For a guard over a borrowed file, the
+/// guard closes nothing: the owner's descriptor is one of those, and the lock
+/// lasts at least as long as the owner keeps it open.
 #[derive(Debug)]
 pub struct Unreleased {
     /// The file the lock was taken on.
@@ -197,7 +201,8 @@ impl fmt::Display for Unreleased {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "the advisory lock on {} could not be released before its descriptor closed: {}",
+            "the advisory lock on {} could not be released, and it stays held until every \
+             descriptor of its open file description has closed: {}",
             self.path.display(),
             self.why
         )
@@ -220,28 +225,36 @@ impl From<Unreleased> for io::Error {
 
 /// The one `File::unlock` this crate makes on a guard's behalf.
 ///
-/// Under `cfg(test)` a one-shot, per-thread refusal can be armed first, because
-/// no real file refuses an unlock on request and the refusal arms of
-/// [`Flock::release`] and `Drop` must still be driven.
+/// Under `cfg(test)` a one-shot, per-thread refusal of a chosen kind can be
+/// armed first, because no real file refuses an unlock on request and the
+/// refusal arms of [`Flock::release`] and `Drop`, and of the callers in this
+/// crate that turn a refused release into their own error, must still be
+/// driven.
 fn unlock(file: &File) -> io::Result<()> {
     #[cfg(test)]
-    if tests::take_unlock_refusal() {
-        return Err(io::Error::other("unlock refused by the flock test seam"));
+    if let Some(kind) = tests::take_unlock_refusal() {
+        return Err(io::Error::new(
+            kind,
+            "unlock refused by the flock test seam",
+        ));
     }
     file.unlock()
 }
 
 /// A guard dropped without a release, whose unlock the host refused.
 ///
-/// `Warn`, not `Error`: the descriptor still closes, and once every duplicate
-/// of it has closed too the kernel frees the lock. What the line records is
-/// the window in which it has not, which is the window that turns a later
-/// acquisition into a `WouldBlock` nobody can otherwise explain. One event per
-/// refused unlock, never per acquisition, so the normal path costs nothing
-/// beyond the `flock` call itself.
+/// `Warn`, not `Error`: the kernel still frees the lock once every descriptor
+/// of its open file description has closed. For a guard that owned its `File`
+/// that is its own descriptor, which closes as the guard drops, and any
+/// duplicate of it. For a guard over a borrowed file the drop closes nothing,
+/// and the owner's descriptor holds the lock for as long as the owner keeps
+/// it open. What the line records is that the lock outlived its guard, which
+/// is what turns a later acquisition into a `WouldBlock` nobody can otherwise
+/// explain. One event per refused unlock, never per acquisition, so the normal
+/// path costs nothing beyond the `flock` call itself.
 fn note_unreleased(path: &Path, why: &io::Error) {
     let _dropped_when_filtered = telemetry::emit(
-        &telemetry::Event::warn("store.flock", "advisory lock not released before close")
+        &telemetry::Event::warn("store.flock", "advisory lock not released by its guard")
             .with("file", telemetry::Value::Str(&path.display().to_string()))
             .with("why", telemetry::Value::Str(&why.to_string())),
     );

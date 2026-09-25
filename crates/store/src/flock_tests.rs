@@ -15,27 +15,58 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 thread_local! {
-    /// Armed by [`refuse_next_unlock`], consumed by the next unlock on this
-    /// thread and by nothing else.
-    static REFUSE_NEXT_UNLOCK: Cell<bool> = const { Cell::new(false) };
+    /// Armed by [`refuse_unlock`]: how many unlocks on this thread to let
+    /// through first, and the kind the refusal then carries. Consumed by
+    /// that one unlock and by nothing else.
+    static REFUSE_UNLOCK: Cell<Option<(u64, io::ErrorKind)>> = const { Cell::new(None) };
     /// Every unlock this thread has asked the seam about, refused or not.
     static UNLOCKS: Cell<u64> = const { Cell::new(0) };
 }
 
-/// Makes the next `Flock` unlock on this thread fail, once.
+/// Makes the next `Flock` unlock on this thread fail, once, with kind
+/// `Other`.
 ///
 /// Per-thread, so a refusal armed by one test can never land in a guard
 /// another test is dropping on a neighbouring thread.
 pub(crate) fn refuse_next_unlock() {
-    REFUSE_NEXT_UNLOCK.with(|armed| armed.set(true));
+    refuse_unlock(0, io::ErrorKind::Other);
+}
+
+/// Lets `after` unlocks on this thread through, then makes the next one fail,
+/// once, with an `io::Error` of `kind`.
+///
+/// The kind is the caller's so a test can tell a kept kind from a hardcoded
+/// `Other`, and `after` is there because a production call such as
+/// `repair::publish` unlocks other guards before the release under test.
+pub(crate) fn refuse_unlock(after: u64, kind: io::ErrorKind) {
+    REFUSE_UNLOCK.with(|armed| armed.set(Some((after, kind))));
 }
 
 /// The seam `super::unlock` asks before it unlocks: counts the call, and
-/// disarms and reports a refusal armed by [`refuse_next_unlock`].
-pub(super) fn take_unlock_refusal() -> bool {
+/// disarms and reports the kind of a refusal armed by [`refuse_unlock`] once
+/// the unlocks it lets through have passed.
+pub(super) fn take_unlock_refusal() -> Option<io::ErrorKind> {
     UNLOCKS.with(|count| count.set(count.get() + 1));
-    REFUSE_NEXT_UNLOCK.with(|armed| armed.replace(false))
+    REFUSE_UNLOCK.with(|armed| match armed.get() {
+        Some((0, kind)) => {
+            armed.set(None);
+            Some(kind)
+        }
+        Some((after, kind)) => {
+            armed.set(Some((after - 1, kind)));
+            None
+        }
+        None => None,
+    })
 }
+
+/// The part of [`Unreleased`]'s sentence that says how long the lock lasts.
+///
+/// True of an owned guard and of a borrowed one: the open file description
+/// keeps the lock until the last descriptor referring to it closes, and for a
+/// borrowed guard that includes the owner's, which the guard never closes.
+const UNRELEASED_SAYS: &str = "could not be released, and it stays held until every \
+                               descriptor of its open file description has closed";
 
 /// How many unlocks this thread has made through the seam.
 fn unlocks() -> u64 {
@@ -205,12 +236,16 @@ fn a_borrowed_lock_is_released_despite_a_duplicated_descriptor() {
 /// The refusal is injected, because no real file refuses an unlock on request.
 /// It never drops a held guard under an injected fault, so it writes nothing
 /// to the process-wide sink `crate::emits` counts.
+///
+/// The injected kind is `PermissionDenied`, not the `Other` an
+/// `io::Error::other` carries, so a `From<Unreleased>` that replaced the
+/// host's kind with `Other` fails here rather than passing by coincidence.
 #[test]
 fn a_refused_release_is_returned_naming_the_file() {
     let scratch = Scratch::new("refused");
     let guard = Flock::lock(scratch.open(), scratch.lock.clone()).expect("lock");
     let before = unlocks();
-    refuse_next_unlock();
+    refuse_unlock(0, io::ErrorKind::PermissionDenied);
     let refused: Unreleased = guard
         .release()
         .expect_err("the seam refused the unlock and release must say so");
@@ -231,8 +266,8 @@ fn a_refused_release_is_returned_naming_the_file() {
         "the sentence names the file: {sentence}"
     );
     assert!(
-        sentence.contains("could not be released before its descriptor closed"),
-        "the sentence says what failed: {sentence}"
+        sentence.contains(UNRELEASED_SAYS),
+        "the sentence says what failed and how long the lock lasts: {sentence}"
     );
     assert!(
         sentence.contains("unlock refused by the flock test seam"),
@@ -243,11 +278,16 @@ fn a_refused_release_is_returned_naming_the_file() {
         Some("unlock refused by the flock test seam"),
         "the host's refusal is the source"
     );
+    assert_eq!(
+        refused.why.kind(),
+        io::ErrorKind::PermissionDenied,
+        "the premise: the seam refused with the kind it was armed with"
+    );
 
     let lifted = io::Error::from(refused);
     assert_eq!(
         lifted.kind(),
-        io::ErrorKind::Other,
+        io::ErrorKind::PermissionDenied,
         "the host's kind survives"
     );
     assert!(
@@ -260,6 +300,48 @@ fn a_refused_release_is_returned_naming_the_file() {
     scratch
         .probe()
         .expect("with no duplicate, closing the only descriptor freed the lock");
+}
+
+/// A BORROWED GUARD WHOSE RELEASE IS REFUSED LEAVES THE LOCK HELD UNTIL ITS
+/// OWNER CLOSES THE FILE, AND ITS REFUSAL SAYS NOTHING CLOSED.
+///
+/// Dropping or consuming a guard over `&File` closes nothing: the owner keeps
+/// the descriptor open, and the lock stays on its open file description for
+/// as long as the owner lives. A refusal that said the lock "could not be
+/// released before its descriptor closed" told the reader of a close that
+/// never happened, and so the wrong lifetime. The sentence is checked on this
+/// guard, where only the owner's close frees the lock.
+///
+/// Released rather than dropped, so it writes nothing to the process-wide sink
+/// `crate::emits` counts.
+#[test]
+fn a_refused_release_of_a_borrowed_guard_holds_the_lock_until_its_owner_closes() {
+    let scratch = Scratch::new("refused-borrowed");
+    let owner = scratch.open();
+    let guard = Flock::lock(&owner, scratch.lock.as_path()).expect("lock");
+    refuse_unlock(0, io::ErrorKind::PermissionDenied);
+    let refused = guard
+        .release()
+        .expect_err("the seam refused the unlock and release must say so");
+
+    let sentence = refused.to_string();
+    assert!(
+        sentence.contains(UNRELEASED_SAYS),
+        "the sentence says how long the lock lasts: {sentence}"
+    );
+    assert!(
+        !sentence.contains("descriptor closed:"),
+        "the sentence claims a close that never happened for a borrowed \
+         guard: {sentence}"
+    );
+    assert!(
+        would_block(&scratch.probe()),
+        "the guard is gone and the owner is open, so the lock is still held"
+    );
+    drop(owner);
+    scratch
+        .probe()
+        .expect("the owner's close was the last descriptor, and it freed the lock");
 }
 
 /// A CONTENDED LOCK IS REFUSED WITHOUT WAITING, AND A REFUSAL HOLDS NOTHING.

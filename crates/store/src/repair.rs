@@ -509,3 +509,7 @@ fn io_at<T>(
         publication_may_be_visible: visible,
     })
 }
+
+#[cfg(test)]
+#[path = "repair_tests.rs"]
+mod tests;
