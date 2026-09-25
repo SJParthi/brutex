@@ -3715,7 +3715,19 @@ impl CensusStamps {
     /// is handed only where [`stamp_could_read`] says this row is one the stamp
     /// could have read, the rule the census cache keeps a whole read by. It is
     /// asked per row, so a fault on another feed's manifest does not turn this
-    /// feed's calendar cache off. D-0695.
+    /// feed's calendar cache off, which
+    /// `a_fault_on_another_feeds_manifest_leaves_this_feeds_calendar_kept`
+    /// pins for every caller. D-0695.
+    ///
+    /// # No caller today reaches the refusal
+    ///
+    /// Since D-0695's seventh repair the symbol branch keeps nothing for a name
+    /// its census does not hold, which covers the case above as well. The other
+    /// callers derive only for a row's held series, and a held row under a
+    /// stamp that found a time always passes. So no calendar any caller keeps
+    /// today is decided by this refusal. It stays at the one function every key
+    /// comes from, so a caller added later that derives from a row its stamp
+    /// contradicts is covered, and its unit test pins it.
     pub(crate) fn modified(&self, row: &census::VendorCensus) -> Option<std::time::SystemTime> {
         match self.manifests.get(row.vendor as usize).copied() {
             Some(stamp @ ManifestStamp::At { modified, .. })
@@ -31246,6 +31258,14 @@ fn calendar_json_reading(
     let series = held
         .zip(named)
         .map(|((exchange, segment), symbol)| (exchange, segment, symbol));
+    // A NAME THIS FEED'S CENSUS DOES NOT HOLD IS DERIVED FOR ITS OWN REQUEST
+    // AND NOT KEPT. Its key is built from the request's own text, and nothing
+    // evicts from `site.calendars`, so keeping it let every distinct unheld
+    // name grow the map for the life of the process: a review sent 2,000 and
+    // the map went from 9 entries to 2,009. With no stamp, `cached` neither
+    // looks it up nor keeps it, and a derivation over no months opens no file.
+    // The map is then bounded by the identities the feeds' censuses have held.
+    // D-0695.
     let derived = crate::calendar_of::cached(
         &site.calendars,
         &site.store_root,
@@ -31253,7 +31273,7 @@ fn calendar_json_reading(
         exchange.as_str(),
         segment.as_str(),
         &symbol,
-        stamp,
+        held.and(stamp),
         &months,
         census_holds(own.zip(series)),
     );

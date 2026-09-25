@@ -176,6 +176,10 @@ async fn successful_and_refused_handlers_leave_durable_separate_request_records(
 
 #[tokio::test]
 async fn failed_audit_start_never_polls_the_handler() {
+    // `request_audited` journals through a detail slot, so this is kept apart
+    // from the tests that hold every slot, as the first test that calls it is.
+    // D-0695.
+    let _apart = crate::detail::apart_from_slot_owners().await;
     let root = Scratch::new();
     let called = AtomicUsize::new(0);
     let response = request_audited(
@@ -198,6 +202,10 @@ async fn failed_audit_start_never_polls_the_handler() {
 
 #[tokio::test]
 async fn cancelled_request_records_cancellation_and_never_completed() {
+    // `request_audited` journals through a detail slot, so this is kept apart
+    // from the tests that hold every slot, as the first test that calls it is.
+    // D-0695.
+    let _apart = crate::detail::apart_from_slot_owners().await;
     let root = Scratch::new();
     let entered = Arc::new(tokio::sync::Notify::new());
     let notify = Arc::clone(&entered);
@@ -222,6 +230,10 @@ async fn cancelled_request_records_cancellation_and_never_completed() {
 
 #[tokio::test]
 async fn a_busy_journal_start_is_retryable_without_dispatching_the_handler() {
+    // `request_audited` journals through a detail slot, so this is kept apart
+    // from the tests that hold every slot, as the first test that calls it is.
+    // D-0695.
+    let _apart = crate::detail::apart_from_slot_owners().await;
     let root = Scratch::new();
     drop(journal::begin(&root.0, Origin::Http, "GET /backtest.json").unwrap());
     let index = std::fs::File::open(root.0.join("audit/invocations-v1/index.bin")).unwrap();
@@ -253,6 +265,10 @@ async fn a_busy_journal_start_is_retryable_without_dispatching_the_handler() {
 #[tokio::test]
 async fn failed_terminal_says_that_the_handler_already_ran() {
     use std::io::Write as _;
+    // `request_audited` journals through a detail slot, so this is kept apart
+    // from the tests that hold every slot, as the first test that calls it is.
+    // D-0695.
+    let _apart = crate::detail::apart_from_slot_owners().await;
     let root = Scratch::new();
     let path = root
         .0
@@ -286,6 +302,13 @@ async fn failed_terminal_says_that_the_handler_already_ran() {
 #[tokio::test]
 async fn production_router_wires_durable_request_audit_and_its_read_only_reader() {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    // THE ROUTER JOURNALS EACH AUDITED REQUEST THROUGH A DETAIL SLOT TOO, and
+    // this test was not kept apart from the tests that hold every slot. Under a
+    // full `api` lib run a review saw it answered 429, "bounded request audit
+    // capacity is full", in 2 of 19 runs, and it passed alone. A probe that
+    // held every slot got that 429 from this same request on every run, and
+    // 400 once the slots were released. D-0695.
+    let _apart = crate::detail::apart_from_slot_owners().await;
     let root = Scratch::new();
     let site = Arc::new(crate::server::Site::load(&root.0.join("masters"), &root.0));
     let front = Arc::new(crate::assets::Assets::new(&root.0.join("web")));

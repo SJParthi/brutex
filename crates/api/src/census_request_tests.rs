@@ -39,7 +39,10 @@
 //! after a census's stamps, whether after or inside its read, is not keyed
 //! under them; a calendar is kept at all, under the asked feed's own modified
 //! time and no other feed's; and a census row its stamp could not have read
-//! keys nothing.
+//! keys nothing. The last three pin that the ingest path's observation derives
+//! over its own series' months alone, that a fault on another feed's manifest
+//! leaves this feed's calendar kept, and that a name the census does not hold
+//! keeps no calendar.
 #![expect(
     clippy::expect_used,
     reason = "finite owned fixtures and exact response assertions"
@@ -2339,6 +2342,14 @@ fn every_caller_keeps_its_calendar_under_the_asked_feeds_own_modified_time() {
 /// caller hit it until Dhan's manifest was next written: `/calendar.json` on
 /// both branches answered no session, the peer vote silently lost Dhan, and
 /// the ingest path observed nothing. A review measured all four.
+///
+/// Two rules now keep that calendar, each on its own. `CensusStamps::modified`
+/// hands no time for a row its stamp could not have read, and since D-0695's
+/// seventh repair the symbol branch keeps nothing for a name its census does
+/// not hold. So these tests fail only with both removed. The first rule is
+/// pinned alone by
+/// `each_feed_is_handed_its_own_modified_time_only_for_a_row_its_stamp_could_read`,
+/// the second by `a_name_the_census_does_not_hold_keeps_no_calendar`.
 fn race_the_root(name: &str, until_the_route_returns: bool) {
     let fixture = nifty_store(name);
     let mut away = None;
@@ -2480,5 +2491,193 @@ fn each_feed_is_handed_its_own_modified_time_only_for_a_row_its_stamp_could_read
         missing.modified(&absent),
         None,
         "a missing manifest has none"
+    );
+}
+
+/// AN OBSERVATION DERIVES OVER ITS OWN SERIES' MONTHS, AND NO OTHER SERIES'.
+/// D-0695.
+///
+/// `ingestion_observations_reading` takes the months of the one spot series it
+/// observes out of every entry the landed feed's census holds, by four tests
+/// joined with `&&`: NSE, INDEX, the symbol, and no contract. The fourth repair
+/// rewrote that conjunction so it also sets the series' identity for
+/// `census_holds`. Every fixture here held NIFTY alone, so a review turned the
+/// last `&&` or the one before it into `||` -- every series without a contract
+/// counted as NIFTY, or every NSE INDEX series did -- and cargo-mutants 26.2.0
+/// reported both MISSED, with every `api` test passing.
+///
+/// Here Dhan's census holds NIFTY's May and, for June, one other series without
+/// a contract, and NIFTY's June daily bar is on disk though no census names it.
+/// A conjunction that counts the other series' month derives NIFTY over June
+/// as well and observes two sessions. So the observation must answer May's
+/// one beside each other series in turn: BANKNIFTY as INDEX, which only the
+/// symbol test tells apart from NIFTY; ITC as CASH, which the segment and
+/// symbol tests both do; and NIFTY itself as CASH, which only the segment test
+/// does. Between them they catch any one of the three `&&` turned into `||`.
+/// The observation must also keep its calendar under Dhan's own modified time,
+/// and its second call must meet it.
+#[test]
+fn an_observation_derives_over_its_own_series_months_and_no_other_series() {
+    let (in_may, in_june) = ([may()], [june()]);
+    for (segment, symbol) in [
+        (Segment::Index, "BANKNIFTY"),
+        (Segment::Cash, "ITC"),
+        (Segment::Cash, "NIFTY"),
+    ] {
+        let beside = format!("{symbol} as {}", segment.as_str());
+        let fixture = nifty_store(&format!(
+            "census-request-observed-beside-{}-{symbol}",
+            segment.as_str()
+        ));
+        fixture.bar_in(Vendor::Dhan, Segment::Index, "NIFTY", june(), 2);
+        let image = Fixture::image_of(
+            Vendor::Dhan,
+            &[
+                (Segment::Index, "NIFTY", in_may.as_slice()),
+                (segment, symbol, in_june.as_slice()),
+            ],
+        );
+        fixture.publish_bytes(Vendor::Dhan, &image, 1);
+        assert_eq!(
+            Caller::Observation.sessions(&fixture.site),
+            Some(1),
+            "beside {beside}: NIFTY's May alone, not the other series' June"
+        );
+        let first = kept_nifty(&fixture);
+        assert_eq!(
+            first.as_ref().map(|(at, _)| *at),
+            Some(at(1)),
+            "beside {beside}: kept under Dhan's own modified time"
+        );
+        assert_eq!(
+            Caller::Observation.sessions(&fixture.site),
+            Some(1),
+            "beside {beside}: again"
+        );
+        assert!(
+            first
+                .zip(kept_nifty(&fixture))
+                .is_some_and(|((_, first), (_, second))| Arc::ptr_eq(&first, &second)),
+            "beside {beside}: the second call met the kept calendar"
+        );
+    }
+}
+
+/// A FAULT ON ANOTHER FEED'S MANIFEST LEAVES THIS FEED'S CALENDAR CACHE ON, for
+/// every caller. D-0695.
+///
+/// `CensusStamps::modified` asks `stamp_could_read` of the one row it is
+/// handed. D-0695's sixth repair chose that over a rule on the whole read, so
+/// that a persistent fault on one feed's manifest would not turn every other
+/// feed's calendar cache off, and no test pinned the choice. A review switched
+/// in the whole-read rule, no time for any row while `read_as_stamped` refuses
+/// the read, and the whole `api` lib passed. Under it, for as long as Groww's
+/// manifest stays faulted, every request derives Dhan's calendars again: 0.28 s
+/// per instrument by `calendar_of::cached`'s record, and every instrument on
+/// the exchange branch.
+///
+/// Here a Unix socket is bound at Groww's manifest path. Its `stat` answers
+/// with its times and no read opens it, a fault the census cache declines to
+/// keep (see `a_manifest_that_stats_but_will_not_open_is_not_cached`), so no
+/// whole read is kept while it stays. Each caller must still keep Dhan's NIFTY
+/// calendar under Dhan's own modified time, and its second call must meet that
+/// `Arc`.
+///
+/// The socket's path must fit a socket address, so the scratch name is short.
+#[cfg(unix)]
+#[test]
+fn a_fault_on_another_feeds_manifest_leaves_this_feeds_calendar_kept() {
+    let fixture = nifty_store("cr-row");
+    let groww = manifest_path(&fixture.root, Vendor::Groww);
+    let _socket = std::os::unix::net::UnixListener::bind(&groww)
+        .expect("a socket at Groww's manifest path, whose path fits a socket address");
+    assert_eq!(
+        fixture.fresh_states(),
+        ["unreadable", "held", "absent", "absent", "absent"],
+        "Groww's manifest will not read, and Dhan's does"
+    );
+    let dhan = fs::metadata(fixture.manifest())
+        .and_then(|meta| meta.modified())
+        .expect("Dhan's manifest stamp");
+    for caller in Caller::ALL {
+        forget_calendars(&fixture);
+        assert_eq!(caller.sessions(&fixture.site), Some(1), "{caller:?}: May");
+        let first = kept_nifty(&fixture);
+        assert_eq!(
+            first.as_ref().map(|(at, _)| *at),
+            Some(dhan),
+            "{caller:?}: kept under Dhan's own modified time, with Groww's manifest faulted"
+        );
+        assert_eq!(caller.sessions(&fixture.site), Some(1), "{caller:?}: again");
+        assert!(
+            first
+                .zip(kept_nifty(&fixture))
+                .is_some_and(|((_, first), (_, second))| Arc::ptr_eq(&first, &second)),
+            "{caller:?}: the second call met the kept calendar and kept no other"
+        );
+    }
+    assert!(
+        fixture
+            .site
+            .census
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none(),
+        "no whole read was kept, so only the per-row rule kept each calendar"
+    );
+}
+
+/// A NAME THE ASKED FEED'S CENSUS DOES NOT HOLD KEEPS NO CALENDAR. D-0695.
+///
+/// The symbol branch of `/calendar.json` derives even for a name its census
+/// does not hold: over no months, which opens no file, and answers 200 with no
+/// session. It also kept that empty calendar, under a key built from the
+/// request's own text, in a map nothing evicts. A review sent 2,000 distinct
+/// unheld names and the map grew from 9 entries to 2,009, one per name, for
+/// the life of the process. Spellings of a held name that `Symbol::new`
+/// refuses, and so does not fold, are unheld names too: with a space, a NUL, a
+/// zero-width space, or in full-width letters.
+///
+/// Here each such name answers what it answered, 200 with no session, and
+/// keeps nothing. The held name beside them is still kept, and its next call
+/// meets that calendar.
+#[tokio::test]
+async fn a_name_the_census_does_not_hold_keeps_no_calendar() {
+    let fixture = nifty_store("census-request-unheld-names");
+    let held = |fixture: &Fixture| {
+        fixture
+            .site
+            .calendars
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    };
+    let (status, body) = fixture.calendar_answer("feed=dhan&symbol=NIFTY").await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    assert!(body.contains(r#""sessions":1"#), "{body}");
+    let kept = kept_nifty(&fixture).expect("the held name's calendar is kept");
+    assert_eq!(held(&fixture), 1, "one held name, one calendar");
+    let spellings = [
+        "%20NIFTY",
+        "NIFTY%20",
+        "NIFTY%00",
+        "NIFTY+",
+        "%E2%80%8BNIFTY",
+        "%EF%BC%AE%EF%BC%A9%EF%BC%A6%EF%BC%B4%EF%BC%B9",
+    ];
+    let junk = (0..64).map(|n| format!("JUNK{n}"));
+    for name in spellings.into_iter().map(str::to_owned).chain(junk) {
+        let (status, body) = fixture
+            .calendar_answer(&format!("feed=dhan&symbol={name}"))
+            .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{name}: {body}");
+        assert!(body.contains(r#""sessions":0"#), "{name}: {body}");
+        assert_eq!(held(&fixture), 1, "{name}: kept nothing");
+    }
+    let (status, body) = fixture.calendar_answer("feed=dhan&symbol=NIFTY").await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    assert!(
+        kept_nifty(&fixture).is_some_and(|(_, again)| Arc::ptr_eq(&kept.1, &again)),
+        "the held name's next call met its calendar"
     );
 }
