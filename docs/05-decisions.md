@@ -41009,3 +41009,214 @@ fourth repair and the two tests this adds. `src/main.rs` has 2 passed,
 documents, passes. Every shell gate of CI's Gate 1+2 job except 1e passes,
 Gates 10, 10b, 11, 23, 27 and 27b among them; Gate 11 counts `server.rs` at 8
 of 8 under rule 6.
+
+**Repaired a sixth time, on a sixth review — 25 September 2026.** Four issues
+were upheld against `f08722b2`, the commit that carried the fifth repair, with
+two nits. One issue was blocking. The text above is kept as it was written;
+where it is now wrong, this says so.
+
+- *A mutant of the fifth repair's own code survived.* This one blocked. The
+  mutant was `replace CensusStamps::modified -> Option<SystemTime> with None`:
+  cargo-mutants 26.2.0, the version CI pins, reported it MISSED, and its test
+  log showed every `api` lib test passing. `CLAUDE.md` §4 says a surviving
+  mutant blocks the build. The fifth repair had moved the calendar cache's key
+  out of `cached`, where its unit test pinned the one key source there was,
+  and into `modified` and its three callers. No test showed that any caller
+  kept a calendar at all. The route test it added required only that nothing
+  was kept under a NEWER stamp, and a cache that keeps nothing passes that.
+  The review switched in more breaks and each passed the whole lib: `modified`
+  answering the first time of any feed, `modified` reading the next feed's
+  stamp, and each caller in turn handing `cached` `None`. The first two key
+  Dhan's calendar on another feed's manifest, which a pull of Dhan does not
+  move, so they are the stale calendar the fifth repair set out to remove. The
+  others turn the cache off for that caller, and every request then derives,
+  0.28 s per instrument by `cached`'s own record. So the fifth repair's "reads
+  one feed's modified time", and AF-28f's headline, were true of the code and
+  asserted by no test.
+- **Decided: the key and the hit are tested, per caller and per feed.**
+  `every_caller_keeps_its_calendar_under_the_asked_feeds_own_modified_time`
+  puts every feed's manifest on disk at a modified time of its own, with
+  Dhan's holding NIFTY's May. Over a cold calendar cache, each of the four
+  callers must keep NIFTY's calendar under Dhan's modified time as its `stat`
+  reads it, and its second call must meet that same `Arc`, not derive and keep
+  another. Then June lands on Dhan alone, every other manifest where it was,
+  and each caller must answer both months.
+  `each_feed_is_handed_its_own_modified_time_only_for_a_row_its_stamp_could_read`
+  reads every feed's row over a store where each feed's manifest has its own
+  modified time, and requires each row to be handed its own feed's time.
+- *No test pinned that the stamps handed to callers were taken before the
+  read.* The fifth repair's test landed June only after `census_now_stamped`
+  had returned. It therefore passed when `census_now_reading` returned stamps
+  from a fresh `stat` taken after its read on the miss paths, while the census
+  cache itself stayed keyed on the stamps before it. The review switched in
+  that break and the whole lib passed. Its throwaway probe then landed June
+  inside the read, and under the break the next request answered one session
+  where the clean build answered two.
+- **Decided: June lands inside the read as well.**
+  `a_calendar_is_kept_under_the_stamp_of_the_census_it_was_derived_from` now
+  runs every caller twice. June lands once after the census, as before, and
+  once inside `census_now_reading`'s own read, after the manifests are read.
+  Only stamps taken before that read predate the second landing. AF-28f is
+  corrected in place, because it is new in this piece.
+- *A calendar derived from a census its stamps contradict was kept under
+  them.* `census_now_stamped` hands its stamps to every request, including one
+  whose census `read_as_stamped` refused to keep. The review's case was a
+  store root gone after `read_all`'s own check. Every feed reads "absent",
+  while Dhan's stamp still names its manifest. The symbol branch of
+  `/calendar.json` derives even for a name its census does not hold: over no
+  months, under the default NSE/INDEX identity, which for NIFTY is the real
+  series' key. `cached` kept that empty calendar under Dhan's unmoved modified
+  time. Once the root was back, both branches of `/calendar.json` answered no
+  session, the peer vote dropped Dhan without naming it, and the ingest path
+  observed nothing, until Dhan's manifest was next written. The review
+  measured all four. The race predates the fifth repair when the root comes
+  back before the route derives. It is new with that repair when the root
+  stays away until the route has answered, because `cached`'s own `stat` found
+  no time then. So the fifth repair's "the months, `holds` and the key are
+  then one census's ... one derivation, and nothing stale" did not hold for a
+  read that contradicts its key. Nor did the matching sentence in
+  `calendar_of::cached`'s doc, nor the first bullet of the fifth correction in
+  `docs/06-limits.md`.
+- **Decided: a time is handed only for a row its stamp could have read.**
+  `CensusStamps::modified` takes the census row itself, not a vendor. It
+  indexes that row's own stamp by `row.vendor as usize`, as before, and hands
+  its modified time only where `stamp_could_read` says the stamp could have
+  read the row. That is the rule `read_as_stamped` keeps a whole read by,
+  asked here for one feed. So a persistent fault on another feed's manifest
+  does not turn this feed's calendar cache off, as a whole-read rule would.
+  The exchange branch, the peer vote and the observation derive only for held
+  rows, and a held row under a stamp that found a time always passes, so the
+  rule changes what is kept only where a row contradicts its stamp. The
+  request that met the race still answers what its own census read. For the
+  symbol branch that is `200` with no session, for that one request, the trade
+  the census cache makes for its own racing read.
+  `a_calendar_derived_from_a_row_its_stamp_could_not_have_read_is_not_kept`
+  and `a_calendar_derived_while_the_root_stays_away_is_not_kept` are the
+  review's two probes, one per point where the root comes back. After the
+  race, each requires every caller to answer NIFTY's one session on each of
+  three calls. The unit test also requires no time for an absent row, a root
+  refusal, or an `Interrupted` I/O refusal under Dhan's stamped manifest, and
+  none from a stamp without a time. AF-28g records the four tests. The docs of
+  `cached`, `census_now_stamped` and `modified` say what was wrong.
+- *AF-28e states a cost no test counts.* It said `cached` asks the caller's
+  census "one hash probe per such file". None of the five tests it names
+  counts a probe.
+- **Decided: the questions are counted, and the probe's cost is stated where
+  limits are.** `holds_is_asked_once_per_file_that_did_not_open_and_never_on_a_hit`
+  counts every question `cached` asks `holds`. Over January's daily file alone,
+  across January and February, it must ask about exactly the three files that
+  did not open, once each and in `derive`'s order. A hit must ask nothing, and
+  so must a cold derivation that opened every file. What one question costs in
+  production, one `Manifest::entry` hash probe through `census_holds`, is read
+  from the source, not timed, and stated in `docs/06-limits.md`. AF-28e is
+  corrected in place.
+
+**Rejected.**
+
+- *Blanking the stamps inside `census_now_stamped` for the rows that fail
+  them.* The stamps are the census cache's key, compared whole. A second,
+  blanked copy of them would be a second value to keep in step with the first.
+  Asking per row, at the one function every caller already takes its key
+  from, needs no copy.
+- *Refusing the racing request's answer as well.* This was not raised. It
+  would widen what a racing census read may answer, and the census cache
+  settled that trade for itself earlier in this entry.
+
+**Still not done.** The three items of the fifth repair's list stand as
+written: the same-modified-time lag of this cache, the older census that can
+replace a newer request's calendar, and the browser follow-up. Two more,
+raised as nits by the fifth review and recorded by neither repair until now:
+
+- *A month a writer holds answers 503 on `/calendar.json`.* `calendar_of::derive`
+  opens each held month through `BarFile::open_existing`, whose shared lock a
+  writer's exclusive lock refuses with `StoreError::Locked`, and `pull`'s
+  ingest appends through `BarFile::open_or_create`, which takes that exclusive
+  lock. A month refused that way is a held file that did not open, so both
+  branches answer 503 `"bars":"unopened"` for as long as the writer holds it,
+  and nothing is kept. A throwaway probe held a writer on Dhan's NIFTY
+  2025-05 daily file: `feed=dhan` and `feed=dhan&symbol=NIFTY` each answered
+  503, quoting "another writer holds ...2025-05.lock", and each answered 200
+  with its one session once the writer was dropped. The `/ingest` page reads
+  `/calendar.json?feed=…` and, on a status that is not a success, shows
+  "/calendar.json answered 503" and no calendar
+  (`web/src/routes/ingest/+page.svelte`), so a pull that is writing a month
+  this census already holds can leave that page without its calendar until it
+  next loads one. Telling "being written" apart from "gone" is a change to
+  what a refusal is and to what may be kept, and is not made here.
+- *`/gaps.json` answers the other peers' agreement where `/calendar.json`
+  refuses.* A peer with a held file its derivation could not open is named
+  under `calendar.unreadable` and does not vote, and the remaining peers are
+  still agreed and answered `200`. The exchange branch of `/calendar.json`
+  refuses the same state with 503, because a union cannot tell a missing
+  witness from a closed day. The `/gaps.json` answer names the peer, so it is
+  not silent, but it is the partial union this entry declines on
+  `/calendar.json`. A throwaway probe had Dhan hold NIFTY for May and June and
+  Groww hold it for May, with Dhan's June daily file moved aside: the vote had
+  `from` `["groww:NIFTY"]`, `unreadable` `["dhan:NIFTY"]` and one session;
+  `/gaps.json` for Zerodha's BANKNIFTY at 2025-06 answered 200 with that
+  one-session calendar, `"voted_by":["groww:NIFTY"],"unreadable":["dhan:NIFTY"]`;
+  `/calendar.json?feed=dhan` answered 503 over the same store; and with the
+  file back the vote had both peers and two sessions. Not changed here.
+
+Each proof was taken on this tree with breaks added, each selected by an
+environment variable and compiled once, and the tree restored afterwards,
+byte for byte against a copy. The whole `api` lib ran under each break. With
+no break it had 1,202 passed, 0 failed and 2 ignored.
+
+- With `modified` handing a row's stamp time without asking
+  `stamp_could_read`, which is `f08722b2`'s rule, 3 failed: both root-race
+  tests, at "Symbol, request 1", `Some(0)` against `Some(1)`, and the unit
+  test, at "absent under a manifest stamped present".
+- With `modified` answering `None`, 2 failed: the keep test, at "Symbol: kept,
+  and under Dhan's own modified time", and the unit test, at Groww's own time,
+  the first feed it asks.
+- With `modified` answering the first time any feed's stamp found, 4 failed:
+  the keep test, the unit test at Dhan's own time, and both race tests.
+- With `modified` reading the next feed's stamp, 2 failed: the keep test and
+  the unit test.
+- With one caller at a time handing `cached` `None`, the keep test failed at
+  that caller's own case and nowhere else: "Symbol", "Exchange", "Peer" and
+  "Observation", each at "kept, and under Dhan's own modified time", 1 failure
+  per run.
+- With `census_now_reading` returning stamps from a `stat` taken after its
+  read, on each of its three miss-path returns, with the census cache still
+  keyed on the stamps before it, 1 failed: the stamp test, at "InsideTheRead,
+  Symbol, request 1", `Some(1)` against `Some(2)`.
+- With `cached` never looking its key up, so that every call derives and keeps
+  a new calendar, 3 failed: `cached`'s unit test and the count test, each at
+  "the second call is the kept calendar", and the keep test, at "Symbol: the
+  second call met the kept calendar and kept no other".
+- With `cached` asking `holds` twice per file that did not open, 1 failed: the
+  count test, at "once per file that did not open". With `cached` asking
+  `holds` about every month on a hit, 1 failed: the count test, at "a hit asks
+  nothing". With `cached` asking `holds` about every month when every file
+  opened, run over `calendar_of`'s tests alone, 1 failed of 5: the count test,
+  at "a derivation that opened every file asks nothing".
+
+cargo-mutants 26.2.0 ran over this piece's source diff since `4a91b24a`,
+which is the fifth repair and this one, with `--cap-lints true` as Gate 18
+passes it, one job, and the `api` lib as the test set, run by `cargo test`
+rather than Gate 18's nextest. Its unmutated baseline passed. Of 15 mutants,
+7 were caught, 8 were unviable, and none was missed or timed out. Caught:
+`CensusStamps::modified` replaced with `None`, by the keep test and the unit
+test; its match guard replaced with `true`, by both root-race tests and the
+unit test, and with `false`, by the keep test and the unit test; `delete !`
+in `census_now_reading`; `census_now` replaced with a default; and both
+observation functions replaced with `None`. The 8 unviable ones replace a
+function with `Default::default()` of a type that has no `Default`
+(`PeerCalendar`, `CensusStamps`, `SystemTime`, `Calendar`, `CalendarAnswer`),
+and failed to compile. No line of `calendar_of.rs` this diff touches outside
+its tests generates a mutant.
+
+**Verified (sixth repair)** on this tree (arm64 laptop, `CARGO_BUILD_JOBS=3`,
+`--locked --offline`, the machine's load average between 40 and 85 from
+other work). `cargo fmt --all --check` is clean, and so is
+`cargo clippy --workspace --all-targets --locked --offline -- -D warnings`.
+`Cargo.lock` is byte-identical to `main`'s. The `api` suite ran outside the
+command sandbox, for the loopback binds and the socket. Its lib has 1,202
+passed, 0 failed and 2 ignored: the 1,197 of the fifth repair and the five
+tests this adds, the stamp test reworked in place. `src/main.rs` has 2
+passed, `tests/binary.rs` 3 and the doctest 1. `core`'s whole suite, which
+reads these documents, passes. Every shell gate of CI's Gate 1+2 job except
+1e passes, Gates 10, 10b, 11, 23, 27 and 27b among them.
+

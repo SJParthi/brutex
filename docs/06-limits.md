@@ -9460,3 +9460,74 @@ less than it says. The text above is kept as it was written.
   already takes, and the `stat` `cached` took per series is gone. A census
   that is kept now copies its five stamps once, because the request that read
   it keeps them too. Not timed.
+
+**Corrected 25 September 2026, on a sixth review (D-0695).** The fifth
+correction's first bullet is incomplete, its "Not timed" cost rested on a key
+no test checked, and two behaviours raised earlier were stated nowhere. The
+text above is kept as it was written.
+
+* The first bullet says a calendar is never kept under a time newer than its
+  months, and that an install moves the next request's key, which then
+  misses. Both are true, and they do not make every kept calendar current.
+  `census_now_stamped` hands its stamps to every request, including one whose
+  census `read_as_stamped` refused to keep because the read contradicts them.
+  The case a review produced is a store root gone after `read_all`'s own
+  check. Every feed then reads "absent", while Dhan's stamp still names its
+  manifest. The symbol branch of `/calendar.json` derived NIFTY over no
+  months, and that empty calendar was kept under Dhan's unmoved modified time.
+  After the root came back, both branches answered no session, the peer vote
+  dropped Dhan without naming it, and the ingest path observed nothing, until
+  Dhan's manifest was next written. That held whether the root came back
+  before the route derived or after it answered. The second case was new with
+  the fifth repair: before it, `cached`'s own `stat` under a missing root found
+  no time. Since this correction, `CensusStamps::modified` takes the row and
+  hands a time only where `stamp_could_read` says the stamp could have read it.
+  So such a calendar is answered to its request and not kept. This is asked
+  per feed, so a fault on another feed's manifest does not turn this feed's
+  calendar cache off.
+* **What the request that met the fault answers is unchanged.** It answers
+  what its census read. For the symbol branch that is `200` with no session,
+  over a store that holds NIFTY, for that one request. The census cache makes
+  the same trade for its own racing read.
+* **The cache's key and its hit are now tested; the hit's cost is still not
+  timed.** The fifth correction says "no syscall is added" and states a hit's
+  cost as one map probe. No test showed that any caller kept a calendar at
+  all: `CensusStamps::modified` answering `None` turned the cache off, the
+  cost went back to a derivation per request (0.28 s per instrument over 81
+  months, as `calendar_of::cached` records), and every test still passed. A
+  test now requires each of the four callers to keep NIFTY's calendar under
+  Dhan's own modified time, and its second call to meet the same calendar.
+  `modified` now asks `stamp_could_read` once per call, one `match` over the
+  row's state and its one stamp: no syscall, no walk, and not timed.
+* **What `cached` asks the census, counted; what each question costs, read.**
+  AF-28e said `cached` asks the caller's census "one hash probe per such file".
+  A test now counts the questions: once per file the derivation could not
+  open, none for a file that opened, none on a hit. What one question costs in
+  production is read from the source: `census_holds` calls
+  `VendorCensus::rows_for` once, which is one `Manifest::entry`, one
+  `HashMap::get` on the manifest's index. That is expected O(1) per question, as
+  any hash probe is, and O(files that did not open) per derivation. Not timed.
+* **A month a writer holds answers 503 on `/calendar.json`.** A derivation
+  opens each held month through `BarFile::open_existing`, whose shared lock a
+  writer's exclusive lock refuses with `StoreError::Locked`, and a pull's
+  ingest appends through `BarFile::open_or_create`, which holds that exclusive
+  lock. The refused month is a held file that did not open, so both branches
+  answer 503 `"bars":"unopened"` while the writer holds it, and keep nothing.
+  A throwaway probe held a writer on Dhan's NIFTY 2025-05 daily file: both
+  branches answered 503, quoting "another writer holds ...2025-05.lock", and
+  200 with the one session once the writer was dropped. The `/ingest` page
+  reads `/calendar.json?feed=…` and shows "/calendar.json answered 503" and no
+  calendar on a status that is not a success. So a pull writing a month the
+  census already holds can leave that page without its calendar until it next
+  loads one. Not changed; D-0695 records it under "Still not done".
+* **`/gaps.json` answers a partial agreement that `/calendar.json` refuses.** A
+  peer with a held file that did not open is named under
+  `calendar.unreadable` and does not vote, and the remaining peers' agreement
+  is answered `200`. `/calendar.json`'s exchange branch answers 503 for the
+  same state, because a union cannot tell a missing witness from a closed day.
+  The `/gaps.json` answer is named, not silent, but a day only the unopened
+  peer proved reads there as no session. A throwaway probe, with Dhan holding
+  NIFTY for May and June, Groww holding it for May, and Dhan's June daily file
+  moved aside, had `/gaps.json` answer 200 with a one-session calendar voted by
+  `groww:NIFTY` and `dhan:NIFTY` unreadable, while `/calendar.json?feed=dhan`
+  answered 503. Not changed; D-0695 records it under "Still not done".

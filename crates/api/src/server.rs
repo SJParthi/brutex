@@ -2720,7 +2720,7 @@ fn peer_calendar_reading(
                 exchange.as_str(),
                 segment.as_str(),
                 symbol.as_str(),
-                stamps.modified(vendor_census.vendor),
+                stamps.modified(vendor_census),
                 &months,
                 census_holds(Some((vendor_census, key))),
             );
@@ -3367,6 +3367,17 @@ pub(crate) fn census_now(site: &Site) -> CensusNow {
 /// feed's modified time from these stamps ([`CensusStamps::modified`]). A
 /// manifest installed after them moves the next request's stamp, which then
 /// misses. D-0695.
+///
+/// # They come with a census the cache refused, too
+///
+/// A read [`read_as_stamped`] refuses to keep is still this request's answer,
+/// and these are still the stamps taken before it, which that read
+/// contradicts: a store root gone after `read_all`'s own check reads every
+/// feed "absent" under a stamp of a manifest that exists. A key taken from
+/// them for such a row kept the calendar derived from it under a time the
+/// fault had not moved, and served it after the fault had ended, until the
+/// manifest was next written. So [`CensusStamps::modified`] takes the row as
+/// well, and hands a time only for one its stamp could have read. D-0695.
 pub(crate) fn census_now_stamped(site: &Site) -> (CensusStamps, CensusNow) {
     census_now_reading(site, census::read_all)
 }
@@ -3679,9 +3690,9 @@ pub struct CensusStamps {
 }
 
 impl CensusStamps {
-    /// The modified time `vendor`'s manifest `stat` found, if it found one:
-    /// what `calendar_of::cached` keeps a calendar derived from this census
-    /// under. See [`census_now_stamped`].
+    /// The modified time the `stat` of `row`'s own manifest found, when it
+    /// found one and could have read `row`: what `calendar_of::cached` keeps a
+    /// calendar derived from `row` under. See [`census_now_stamped`].
     ///
     /// One index, not a search: [`manifest_stamps`] builds one stamp per
     /// `Vendor::ALL` entry in that order, and `Vendor::ALL` is in declaration
@@ -3689,11 +3700,30 @@ impl CensusStamps {
     /// the same `vendor as usize`. A missing manifest or one whose `stat` failed
     /// has no time, and a calendar derived under it is not kept, as it was not
     /// when `cached` asked the manifest itself.
-    pub(crate) fn modified(&self, vendor: Vendor) -> Option<std::time::SystemTime> {
-        if let Some(ManifestStamp::At { modified, .. }) = self.manifests.get(vendor as usize) {
-            Some(*modified)
-        } else {
-            None
+    ///
+    /// # Only for a row the stamp could have read
+    ///
+    /// [`census_now_stamped`] hands its stamps to every request, including one
+    /// whose census [`read_as_stamped`] refused to keep. A calendar derived
+    /// from such a read was kept under a time the fault had not moved and
+    /// served to every request after it. A review measured it with a store root
+    /// gone after `read_all`'s own check: Dhan read "absent" under a stamp of
+    /// its manifest, the symbol branch of `/calendar.json` derived NIFTY over no
+    /// months and kept that empty calendar, and once the root was back both
+    /// branches answered no session, the peer vote lost Dhan and the ingest
+    /// path observed nothing, until Dhan's manifest was next written. So a time
+    /// is handed only where [`stamp_could_read`] says this row is one the stamp
+    /// could have read, the rule the census cache keeps a whole read by. It is
+    /// asked per row, so a fault on another feed's manifest does not turn this
+    /// feed's calendar cache off. D-0695.
+    pub(crate) fn modified(&self, row: &census::VendorCensus) -> Option<std::time::SystemTime> {
+        match self.manifests.get(row.vendor as usize).copied() {
+            Some(stamp @ ManifestStamp::At { modified, .. })
+                if stamp_could_read(stamp, self.root_is_dir, &row.state) =>
+            {
+                Some(modified)
+            }
+            _ => None,
         }
     }
 }
@@ -5948,7 +5978,7 @@ fn ingestion_observations_reading(
         "NSE",
         "INDEX",
         symbol,
-        stamps.modified(landed.store_vendor),
+        stamps.modified(vendor),
         &months,
         census_holds(Some((vendor, identity))),
     );
@@ -30975,9 +31005,10 @@ fn calendar_json_reading(
         return refused;
     }
     // THE KEY EVERY CALENDAR BELOW IS KEPT UNDER: this feed's manifest as it
-    // was stamped before `fresh` was read, never a `stat` taken after it. See
-    // `census_now_stamped`.
-    let stamp = stamps.modified(feed);
+    // was stamped before `fresh` was read, never a `stat` taken after it, and
+    // only when that stamp could have read this feed's row. See
+    // `census_now_stamped` and `CensusStamps::modified`.
+    let stamp = own.and_then(|row| stamps.modified(row));
     // NO SYMBOL MEANS THE EXCHANGE'S OWN CALENDAR, AGREED RATHER THAN BORROWED.
     //
     // This used to answer 400, on the reasoning that a derived calendar is one

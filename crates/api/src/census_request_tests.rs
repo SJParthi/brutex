@@ -34,9 +34,12 @@
 //! record is still kept. The next three move a bar directory or file aside
 //! instead, and pin the same rule for the calendar cache behind the census: a
 //! calendar derived without a bar file its census holds is refused to the
-//! request that derived it, and derived again on the next. The last lands a
-//! month between a census and the calendar derived from it, and pins that the
-//! calendar is kept under the census's stamp, not a newer one.
+//! request that derived it, and derived again on the next. The rest pin the
+//! calendar cache's key, through every caller that derives one: a month landed
+//! after a census's stamps, whether after or inside its read, is not keyed
+//! under them; a calendar is kept at all, under the asked feed's own modified
+//! time and no other feed's; and a census row its stamp could not have read
+//! keys nothing.
 #![expect(
     clippy::expect_used,
     reason = "finite owned fixtures and exact response assertions"
@@ -47,6 +50,7 @@ use brutex_core::instrument::{Exchange, Segment};
 use brutex_core::symbol::Symbol;
 use pull::manifest::{Entry, EntryKey, Manifest, manifest_path};
 use std::fs;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use store::path::{Timeframe, YearMonth};
 
@@ -2041,18 +2045,44 @@ fn a_peer_that_opened_only_some_of_its_held_files_is_named_and_does_not_vote() {
     );
 }
 
-/// A census read the production way, and then June landed as a pull lands it:
-/// its daily bar, and a manifest naming May and June at a new modified time.
+/// Where June lands, relative to the census a caller derives from.
+#[derive(Clone, Copy, Debug)]
+enum Landing {
+    /// After `census_now_stamped` has returned and before the caller derives:
+    /// the stamps and the census both predate June.
+    AfterTheCensus,
+    /// Inside the census's own read, once the manifests are read: the census
+    /// predates June, and so do the stamps only if they were taken BEFORE that
+    /// read.
+    InsideTheRead,
+}
+
+/// A census read the production way, with June landed as a pull lands it --
+/// its daily bar, and a manifest naming May and June at a new modified time
+/// -- where `landing` says.
 ///
 /// What a caller that takes its census through this hook derives from is the
 /// census as it was before June arrived, while the disk it derives from and
-/// every manifest `stat` taken afterwards already show June.
-fn landing_june(fixture: &Fixture) -> impl FnOnce(&Site) -> (CensusStamps, CensusNow) + '_ {
-    move |site| {
-        let read = census_now_stamped(site);
+/// every manifest `stat` taken after the landing already show June.
+fn landing_june(
+    fixture: &Fixture,
+    landing: Landing,
+) -> impl FnOnce(&Site) -> (CensusStamps, CensusNow) + '_ {
+    let land = move || {
         fixture.bar_in(Vendor::Dhan, Segment::Index, "NIFTY", june(), 2);
         fixture.publish_nifty(&[may(), june()], 7);
-        read
+    };
+    move |site| match landing {
+        Landing::AfterTheCensus => {
+            let read = census_now_stamped(site);
+            land();
+            read
+        }
+        Landing::InsideTheRead => census_now_reading(site, |root| {
+            let read = census::read_all(root);
+            land();
+            read
+        }),
     }
 }
 
@@ -2082,6 +2112,103 @@ fn landed_nifty() -> BrokerWindow {
     }
 }
 
+/// The series `/gaps.json` audits in these tests: Zerodha's BANKNIFTY, whose
+/// one peer in `nifty_store` is Dhan's NIFTY.
+fn zerodha_banknifty() -> Addressed {
+    Addressed::parse(
+        "feed=zerodha&exchange=NSE&segment=INDEX&symbol=BANKNIFTY&timeframe=1min&month=2025-05",
+    )
+    .expect("a well-formed address")
+}
+
+/// Each caller that derives a calendar from a census, and so keeps one under
+/// `calendar_of::cached`'s key for Dhan's NIFTY as INDEX.
+#[derive(Clone, Copy, Debug)]
+enum Caller {
+    /// `/calendar.json?feed=dhan&symbol=NIFTY`.
+    Symbol,
+    /// `/calendar.json?feed=dhan`: the exchange's calendar, agreed over every
+    /// series Dhan holds.
+    Exchange,
+    /// `/gaps.json`'s peer vote for Zerodha's BANKNIFTY.
+    Peer,
+    /// The ingest path's observation for Dhan's NIFTY at one minute.
+    Observation,
+}
+
+impl Caller {
+    /// Every caller, in the order the tests below walk them.
+    const ALL: [Self; 4] = [Self::Symbol, Self::Exchange, Self::Peer, Self::Observation];
+
+    /// One call, over the census `census` hands it, and the sessions of the
+    /// calendar it answered: `None` where it answered no calendar at all -- a
+    /// peer vote nobody cast, or no observation.
+    fn reading(
+        self,
+        site: &Site,
+        census: impl FnOnce(&Site) -> (CensusStamps, CensusNow),
+    ) -> Option<u32> {
+        match self {
+            Self::Symbol | Self::Exchange => {
+                let query = if matches!(self, Self::Symbol) {
+                    "feed=dhan&symbol=NIFTY"
+                } else {
+                    "feed=dhan"
+                };
+                let uri = format!("/calendar.json?{query}").parse().expect("uri");
+                let (status, _, body) = calendar_json_reading(site, &uri, census);
+                assert_eq!(status, axum::http::StatusCode::OK, "{self:?}: {body}");
+                let answer: serde_json::Value =
+                    serde_json::from_str(&body).expect("a calendar as JSON");
+                let sessions = answer
+                    .get("sessions")
+                    .and_then(serde_json::Value::as_u64)
+                    .expect("a session count");
+                Some(u32::try_from(sessions).expect("a session count that fits"))
+            }
+            Self::Peer => peer_calendar_reading(site, &zerodha_banknifty(), census)
+                .calendar
+                .map(|calendar| calendar.sessions()),
+            Self::Observation => ingestion_observations_reading(&landed_nifty(), site, census)
+                .map(|calendar| calendar.sessions()),
+        }
+    }
+
+    /// [`Self::reading`] over the census production takes: what each wrapper
+    /// passes, `census_now_stamped`.
+    fn sessions(self, site: &Site) -> Option<u32> {
+        self.reading(site, census_now_stamped)
+    }
+}
+
+/// What the calendar cache keeps for Dhan's NIFTY as INDEX: the modified time
+/// it was kept under, and the calendar.
+fn kept_nifty(fixture: &Fixture) -> Option<(SystemTime, Arc<pull::calendar::Calendar>)> {
+    let key = (
+        Vendor::Dhan,
+        "NSE".to_owned(),
+        "INDEX".to_owned(),
+        "NIFTY".to_owned(),
+    );
+    fixture
+        .site
+        .calendars
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&key)
+        .map(|(at, calendar)| (*at, Arc::clone(calendar)))
+}
+
+/// Empty the calendar cache, as a server that has not yet derived one.
+fn forget_calendars(fixture: &Fixture) {
+    fixture
+        .site
+        .calendars
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+}
+
 /// A CALENDAR DERIVED FROM A CENSUS IS KEPT UNDER THAT CENSUS'S STAMP, NOT A
 /// NEWER ONE, on every route that derives one. D-0695.
 ///
@@ -2102,60 +2229,256 @@ fn landed_nifty() -> BrokerWindow {
 /// path's observation. Each takes its census through `landing_june`. The call
 /// that met the install answers what its own census holds, one session. Every
 /// later call reads the census naming June and must answer two.
-#[tokio::test]
-async fn a_calendar_is_kept_under_the_stamp_of_the_census_it_was_derived_from() {
-    let asked = Addressed::parse(
-        "feed=zerodha&exchange=NSE&segment=INDEX&symbol=BANKNIFTY&timeframe=1min&month=2025-05",
-    )
-    .expect("a well-formed address");
-    for (branch, query) in [
-        ("symbol", "feed=dhan&symbol=NIFTY"),
-        ("exchange", "feed=dhan"),
-    ] {
-        let fixture = nifty_store(&format!("census-request-june-{branch}"));
-        let uri = format!("/calendar.json?{query}").parse().expect("uri");
-        let (status, _, body) = calendar_json_reading(&fixture.site, &uri, landing_june(&fixture));
-        assert_eq!(status, axum::http::StatusCode::OK, "{branch}: {body}");
-        assert!(
-            body.contains(r#""sessions":1"#),
-            "{branch}: the request that met the install answers its own census: {body}"
+///
+/// # And June lands twice, because "before the census" has two halves
+///
+/// Landed after `census_now_stamped` returns, June is newer than the stamps
+/// and the census alike, so a key taken after `census_now_stamped` has
+/// returned is caught, and a key taken after the read but before it returns
+/// is not. A review returned the
+/// stamps from a `stat` taken AFTER the read, with the census cache itself
+/// still keyed on the stamps before it, and every test passed: the case that
+/// fails it is an install inside the read, which such stamps already show and
+/// the census does not. So each caller also meets June landed inside
+/// `census_now_reading`'s read.
+#[test]
+fn a_calendar_is_kept_under_the_stamp_of_the_census_it_was_derived_from() {
+    for landing in [Landing::AfterTheCensus, Landing::InsideTheRead] {
+        for caller in Caller::ALL {
+            let fixture = nifty_store(&format!("census-request-june-{landing:?}-{caller:?}"));
+            assert_eq!(
+                caller.reading(&fixture.site, landing_june(&fixture, landing)),
+                Some(1),
+                "{landing:?}, {caller:?}: the call that met the install answers its own census"
+            );
+            for request in 1..=3 {
+                assert_eq!(
+                    caller.sessions(&fixture.site),
+                    Some(2),
+                    "{landing:?}, {caller:?}, request {request}: May and June, not the \
+                     calendar kept before June"
+                );
+            }
+        }
+    }
+}
+
+/// EVERY CALLER KEEPS ITS CALENDAR, UNDER THE ASKED FEED'S OWN MODIFIED TIME,
+/// AND ITS NEXT CALL MEETS IT. D-0695.
+///
+/// `a_calendar_is_kept_under_the_stamp_of_the_census_it_was_derived_from` pins
+/// that nothing is kept under a NEWER stamp, and passes whether a calendar is
+/// kept at all: a caller that hands `cached` no stamp derives on every call
+/// and answers the same. A review made `CensusStamps::modified` answer `None`,
+/// then answer another feed's time, and then had each caller in turn hand
+/// `cached` `None`, and the `api` lib passed every time. The first turns the
+/// calendar cache off -- 0.28 s per instrument on every request, and every
+/// instrument on the exchange branch -- and the second keys Dhan's calendar on
+/// another feed's manifest, which a pull of Dhan does not move: the stale
+/// calendar the key exists to prevent.
+///
+/// Here every feed has a manifest, each at a modified time of its own, and
+/// Dhan's holds NIFTY's May. Over a cold calendar cache, each caller must keep
+/// NIFTY's calendar under Dhan's modified time as its `stat` reads it, and its
+/// second call must meet that calendar rather than derive and keep another.
+/// Then June lands on Dhan alone, every other manifest where it was, and each
+/// caller must answer both months: a calendar kept under a feed that did not
+/// move would still answer one.
+#[test]
+fn every_caller_keeps_its_calendar_under_the_asked_feeds_own_modified_time() {
+    let fixture = nifty_store("census-request-kept-own-time");
+    for (minute, vendor) in (1..).zip(Vendor::ALL) {
+        if vendor != Vendor::Dhan {
+            fixture.publish_for(vendor, &[], minute);
+        }
+    }
+    let dhan = fs::metadata(fixture.manifest())
+        .and_then(|meta| meta.modified())
+        .expect("Dhan's manifest stamp");
+    for caller in Caller::ALL {
+        forget_calendars(&fixture);
+        assert_eq!(caller.sessions(&fixture.site), Some(1), "{caller:?}: May");
+        let first = kept_nifty(&fixture);
+        assert_eq!(
+            first.as_ref().map(|(at, _)| *at),
+            Some(dhan),
+            "{caller:?}: kept, and under Dhan's own modified time"
         );
-        for request in 1..=3 {
-            let (status, body) = fixture.calendar_answer(query).await;
-            assert_eq!(status, axum::http::StatusCode::OK, "{branch}: {body}");
+        assert_eq!(caller.sessions(&fixture.site), Some(1), "{caller:?}: again");
+        assert!(
+            first
+                .zip(kept_nifty(&fixture))
+                .is_some_and(|((_, first), (_, second))| Arc::ptr_eq(&first, &second)),
+            "{caller:?}: the second call met the kept calendar and kept no other"
+        );
+    }
+    fixture.bar_in(Vendor::Dhan, Segment::Index, "NIFTY", june(), 2);
+    fixture.publish_nifty(&[may(), june()], 7);
+    for caller in Caller::ALL {
+        assert_eq!(
+            caller.sessions(&fixture.site),
+            Some(2),
+            "{caller:?}: May and June, not a calendar kept under a feed that did not move"
+        );
+    }
+}
+
+/// Race one `/calendar.json?feed=dhan&symbol=NIFTY` request against its store
+/// root, gone after `read_all`'s own check, and back as the read ends or, with
+/// `until_the_route_returns`, once the route has answered. Then require that
+/// the request that raced it answered what its census read, and that every
+/// caller after it answers NIFTY's one session.
+///
+/// Every feed then reads `NotFound`, which is "absent", while Dhan's stamp is
+/// still the modified time of a manifest that holds NIFTY. The census cache
+/// refuses to keep that read. But `census_now_stamped` still hands its stamps
+/// to the request, and the symbol branch of `/calendar.json` derives even for a
+/// name its census does not hold: over no months, under the default NSE/INDEX
+/// identity, which for NIFTY is the real series' key. That empty calendar was
+/// kept under Dhan's unmoved modified time, and once the root was back every
+/// caller hit it until Dhan's manifest was next written: `/calendar.json` on
+/// both branches answered no session, the peer vote silently lost Dhan, and
+/// the ingest path observed nothing. A review measured all four.
+fn race_the_root(name: &str, until_the_route_returns: bool) {
+    let fixture = nifty_store(name);
+    let mut away = None;
+    let raced = Caller::Symbol.reading(&fixture.site, |site| {
+        census_now_reading(site, |root| {
             assert!(
-                body.contains(r#""sessions":2"#),
-                "{branch}, request {request}: May and June, not the calendar kept \
-                 before June: {body}"
+                fs::metadata(root).is_ok_and(|meta| meta.is_dir()),
+                "read_all's own check passes"
+            );
+            let aside = Aside::new(&fixture.root);
+            let read = Vendor::ALL
+                .into_iter()
+                .map(|vendor| census::read_vendor(root, vendor))
+                .collect();
+            if until_the_route_returns {
+                away = Some(aside);
+            }
+            read
+        })
+    });
+    drop(away);
+    assert_eq!(
+        raced,
+        Some(0),
+        "the request that raced the root answers what it read"
+    );
+    for caller in Caller::ALL {
+        for request in 1..=3 {
+            assert_eq!(
+                caller.sessions(&fixture.site),
+                Some(1),
+                "{caller:?}, request {request}: NIFTY's May, not the empty calendar the \
+                 race derived"
             );
         }
     }
+}
 
-    let sessions = |vote: PeerCalendar| vote.calendar.map(|calendar| calendar.sessions());
-    let fixture = nifty_store("census-request-june-peer");
-    let met = peer_calendar_reading(&fixture.site, &asked, landing_june(&fixture));
-    assert_eq!(sessions(met), Some(1), "peer: its own census");
-    for request in 1..=3 {
+/// A CALENDAR DERIVED FROM A CENSUS ROW ITS STAMP COULD NOT HAVE READ IS
+/// ANSWERED TO ITS REQUEST AND NOT KEPT: a store root gone after `read_all`'s
+/// own check and back before the route derives. D-0695.
+///
+/// This case predates D-0695's fifth repair: `cached` then took its own `stat`
+/// after the census, and the root was back to answer it. See `race_the_root`.
+#[test]
+fn a_calendar_derived_from_a_row_its_stamp_could_not_have_read_is_not_kept() {
+    race_the_root("census-request-root-back-after-the-read", false);
+}
+
+/// The same, with the root still gone while the route derives and back once
+/// it has answered. D-0695.
+///
+/// This case the fifth repair opened. Before it, `cached`'s own `stat` of a
+/// manifest under a root that was gone found no time, and nothing was kept.
+/// Its key is now the stamp taken before the read, which the root's absence
+/// does not reach. See `race_the_root`.
+#[test]
+fn a_calendar_derived_while_the_root_stays_away_is_not_kept() {
+    race_the_root("census-request-root-back-after-the-route", true);
+}
+
+/// `CensusStamps::modified` HANDS EACH FEED'S ROW ITS OWN MANIFEST'S MODIFIED
+/// TIME, AND ONLY WHEN THAT STAMP COULD HAVE READ THE ROW. D-0695.
+///
+/// It is the key every kept calendar is kept under, and nothing else asks it.
+/// A review made it answer `None`, and then answer a neighbouring feed's time,
+/// and the `api` lib passed both. Here every feed's manifest is on disk at a
+/// modified time of its own, so a time taken from any other feed's stamp is a
+/// different time. Then a row its stamp could not have read -- the rows
+/// `stamp_could_read` refuses, a store root gone after its check among them --
+/// is handed no time although its stamp has one, and a stamp with no time
+/// hands none to a row it could have read.
+#[test]
+fn each_feed_is_handed_its_own_modified_time_only_for_a_row_its_stamp_could_read() {
+    use census::{Census, Fault};
+    use std::io::ErrorKind;
+    let fixture = Fixture::new("census-request-modified-per-feed");
+    for (minute, vendor) in (1..).zip(Vendor::ALL) {
+        fixture.publish_for(vendor, &[], minute);
+    }
+    let stamps = manifest_stamps(&fixture.root);
+    let read = census::read_all(&fixture.root);
+    assert_eq!(named(&read), vec!["held"; 5], "every feed's manifest reads");
+    for ((minute, vendor), row) in (1..).zip(Vendor::ALL).zip(&read) {
+        assert_eq!(row.vendor, vendor, "one row per vendor, in order");
         assert_eq!(
-            sessions(peer_calendar(&fixture.site, &asked)),
-            Some(2),
-            "peer, request {request}: May and June"
+            stamps.modified(row),
+            Some(at(minute)),
+            "{vendor:?}: its own manifest's modified time"
         );
     }
 
-    let landed = landed_nifty();
-    let fixture = nifty_store("census-request-june-observed");
-    let met = ingestion_observations_reading(&landed, &fixture.site, landing_june(&fixture));
-    assert_eq!(
-        met.map(|calendar| calendar.sessions()),
-        Some(1),
-        "observation: its own census"
+    let dhan = read
+        .iter()
+        .find(|row| row.vendor == Vendor::Dhan)
+        .expect("Dhan's row");
+    let unreadable = |fault| Census::Unreadable {
+        reason: String::from("fixture"),
+        fault,
+    };
+    for (state, why) in [
+        (Census::Absent, "absent under a manifest stamped present"),
+        (
+            unreadable(Fault::Root),
+            "the root refused under one that answered",
+        ),
+        (
+            unreadable(Fault::Io(ErrorKind::Interrupted)),
+            "an I/O error no time records",
+        ),
+    ] {
+        let mut row = dhan.clone();
+        row.state = state;
+        assert_eq!(stamps.modified(&row), None, "{why}");
+    }
+
+    let untimed = CensusStamps {
+        manifests: vec![ManifestStamp::Faulted(ErrorKind::PermissionDenied); Vendor::ALL.len()],
+        root_is_dir: true,
+    };
+    let mut refused = dhan.clone();
+    refused.state = unreadable(Fault::Io(ErrorKind::PermissionDenied));
+    assert!(
+        stamp_could_read(
+            ManifestStamp::Faulted(ErrorKind::PermissionDenied),
+            true,
+            &refused.state
+        ),
+        "a row this stamp could have read"
     );
-    for request in 1..=3 {
-        assert_eq!(
-            ingestion_observations(&landed, &fixture.site).map(|calendar| calendar.sessions()),
-            Some(2),
-            "observation, request {request}: May and June"
-        );
-    }
+    assert_eq!(untimed.modified(&refused), None, "and no time to hand it");
+    let missing = CensusStamps {
+        manifests: vec![ManifestStamp::Missing; Vendor::ALL.len()],
+        root_is_dir: true,
+    };
+    let mut absent = dhan.clone();
+    absent.state = Census::Absent;
+    assert_eq!(
+        missing.modified(&absent),
+        None,
+        "a missing manifest has none"
+    );
 }

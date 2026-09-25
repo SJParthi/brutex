@@ -789,6 +789,80 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// **`holds` IS ASKED ONCE PER FILE THAT DID NOT OPEN, AND NOT AT ALL ON A
+    /// HIT OR FOR A DERIVATION THAT OPENED EVERY FILE.** D-0695.
+    ///
+    /// AF-28e states what `cached` costs its caller's census: one question per
+    /// file the derivation could not open. The test above counts nothing, so
+    /// asking for every file asked for, or twice for each, passed it. Here
+    /// January's daily file is the only one on disk, over January and February:
+    /// four files are asked for and three do not open, February's daily file
+    /// and both minute files. `holds` says none of them is held, so the
+    /// calendar is kept, and it must have been asked about exactly those three,
+    /// once each, in the order `derive` asked for them. The second call is a
+    /// hit and asks nothing. Then, with January's minute file written too, a
+    /// cold call over January alone opens every file it asks for, and asks
+    /// nothing either.
+    #[test]
+    fn holds_is_asked_once_per_file_that_did_not_open_and_never_on_a_hit() {
+        use std::sync::Arc;
+        let root = crate::scratch::path("calendar-of-holds-asked");
+        let _ = std::fs::remove_dir_all(&root);
+        let january = YearMonth::new(2026, 1).expect("a real month");
+        let february = YearMonth::new(2026, 2).expect("a real month");
+        let monday = epoch_day(2026, 1, 5);
+        write_bars(&root, Timeframe::DAY_1, january, &[stamp(monday, OPEN)]);
+        let asked = std::cell::RefCell::new(Vec::new());
+        let holds = |rung, month| {
+            asked.borrow_mut().push((rung, month));
+            false
+        };
+        let call = |cache: &Cache, months: &[YearMonth]| {
+            cached(
+                cache,
+                &root,
+                Vendor::Zerodha,
+                "NSE",
+                "INDEX",
+                "NIFTY",
+                Some(std::time::SystemTime::UNIX_EPOCH),
+                months,
+                holds,
+            )
+        };
+
+        let cache = Cache::default();
+        let first = call(&cache, &[january, february]);
+        assert!(first.unopened.is_empty(), "{:?}", first.unopened);
+        assert_eq!(
+            asked.take(),
+            vec![
+                (Timeframe::DAY_1, february),
+                (Timeframe::MINUTE_1, january),
+                (Timeframe::MINUTE_1, february),
+            ],
+            "once per file that did not open, and never for January's daily file"
+        );
+        let again = call(&cache, &[january, february]);
+        assert!(
+            Arc::ptr_eq(&first.calendar, &again.calendar),
+            "the second call is the kept calendar"
+        );
+        assert_eq!(asked.take(), Vec::new(), "a hit asks nothing");
+
+        write_bars(&root, Timeframe::MINUTE_1, january, &[stamp(monday, OPEN)]);
+        let opened = call(&Cache::default(), &[january]);
+        assert!(opened.unopened.is_empty(), "{:?}", opened.unopened);
+        assert_eq!(opened.calendar.sessions(), 1, "January's session");
+        assert_eq!(
+            asked.take(),
+            Vec::new(),
+            "a derivation that opened every file asks nothing"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// 09:15 IST, the first minute of a session.
     const OPEN: u16 = pull::calendar::OPEN_MINUTE;
     /// 15:29 IST, the last.
@@ -1031,10 +1105,20 @@ pub struct Derived {
 /// then three `/calendar.json` requests that each answered one session where a
 /// cold derivation answered two. Taken before the census, the key is older
 /// than what it keys: the next request's stamp differs, misses, and derives
-/// again, which costs one derivation and serves nothing stale. It is the order
-/// D-0695 gave the census cache for the same reason. The `stat` this took per
-/// call is gone too, and on the exchange branch of `/calendar.json` that was
-/// one per series. D-0695.
+/// again, which costs one derivation. It is the order D-0695 gave the census
+/// cache for the same reason. The `stat` this took per call is gone too, and
+/// on the exchange branch of `/calendar.json` that was one per series.
+///
+/// That alone did not make every kept calendar current. The stamps come with
+/// every census, including one whose read contradicts them, which the census
+/// cache refuses to keep: a store root gone after `read_all`'s own check reads
+/// the feed "absent" under a stamp of its manifest. The symbol branch of
+/// `/calendar.json` derived over no months from such a read and this kept the
+/// empty calendar under that unmoved time, so every caller was served it after
+/// the root came back, until the manifest was next written. The caller's
+/// stamp is therefore `None` for a census row the stamp could not have read
+/// (`server::CensusStamps::modified`), and a derivation from it is answered to
+/// its request and not kept. D-0695.
 ///
 /// **A store that has never been written has no manifest and therefore no
 /// stamp**, and neither does one whose `stat` failed: `stamp` is `None`. That
