@@ -43092,3 +43092,13 @@ changes what an operator reads, or the exit status a script sees, says so.
    exact comparison; the run with a stated cap that follows keeps the whole
    store. No behaviour changed, and neither AF-05 nor the limit is edited:
    the test now proves what they say.
+9. *The Boolean research heading on a stock's page.* AF-16 says the Boolean
+   research header of a scope holding a cash family states gross of every
+   charge and corporate actions unchecked, and its test reads
+   `research_heading` alone. Every test that drove `Prepared::new` did it
+   over NIFTY, so the line that puts the heading on the page could print the
+   index's heading over a stock with every test green (found by a review).
+   `the_prepared_page_over_a_stock_opens_with_its_gross_heading` drives
+   `Prepared::new` from a child over `RELIANCE`, `NIFTY,RELIANCE` and
+   `NIFTY`, and AF-73 states what it asserts. AF-16 belongs to D-0694 and is
+   not edited here. No behaviour changed.

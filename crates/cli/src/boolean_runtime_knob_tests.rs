@@ -215,3 +215,109 @@ fn boolean_request_preflight_checks_override_non_utf8_and_actual_prepared_bounda
     }
     Ok(())
 }
+
+/// **The page `Prepared::new` writes over a stock opens with the research
+/// heading that says it is gross of every charge and its corporate actions
+/// are unchecked.** D-0696, AF-16.
+///
+/// AF-16's Boolean clause was proven on `research_heading` alone, and every
+/// test that drove `Prepared::new` did it over NIFTY, so the one line that
+/// puts the heading on the catalog, qualified, later-period, campaign and
+/// search-launch pages could print the index's heading over a stock with
+/// every test green (found by a review). `Prepared::new` reads its receipt
+/// settings from the process environment, so it is driven here from a child
+/// whose environment is cleared and then given a generated receipt root, its
+/// two bounds, a generated store root and the admission policy file
+/// `config/intraday-research-v1.toml`.
+#[test]
+fn the_prepared_page_over_a_stock_opens_with_its_gross_heading() -> Result<(), String> {
+    const CHILD: &str = "BRUTEX_GENERATED_BOOLEAN_HEADING_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        return prepared_headings();
+    }
+    let root = std::env::temp_dir().join(format!("brutex-boolean-heading-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).map_err(|why| why.to_string())?;
+    let mut command = Command::new(std::env::current_exe().map_err(|why| why.to_string())?);
+    command
+        .env_clear()
+        .env(CHILD, "1")
+        .env("BRUTEX_STORE", &root)
+        .env("BRUTEX_CHECKSUM_RECEIPTS", &root)
+        .env("BRUTEX_CHECKSUM_MAX_BYTES", "67108864")
+        .env("BRUTEX_CHECKSUM_MAX_RECORDS", "3000000")
+        .env(
+            "BRUTEX_ADMISSION_POLICY_FILE",
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/intraday-research-v1.toml"),
+        )
+        .args([
+            "--exact",
+            "audited_range_command::settings::boolean_tests::the_prepared_page_over_a_stock_opens_with_its_gross_heading",
+            "--test-threads=1",
+            "--nocapture",
+        ]);
+    if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
+        command.env("LLVM_PROFILE_FILE", profile);
+    }
+    let result = command.output().map_err(|why| why.to_string());
+    let _ = std::fs::remove_dir_all(&root);
+    let result = result?;
+    assert!(
+        result.status.success(),
+        "generated heading child: {} {}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed; 0 failed"));
+    Ok(())
+}
+
+/// The child of `the_prepared_page_over_a_stock_opens_with_its_gross_heading`.
+fn prepared_headings() -> Result<(), String> {
+    let _serial = crate::knobs::serially();
+    let _clear = ClearKnobs;
+    crate::knobs::clear_all();
+    let root = crate::store_root()?;
+    let stock = format!(
+        "{}{}",
+        crate::STORED_PROVENANCE,
+        runner::audit::CostScope::CashEquity.report_note()
+    );
+    for (symbols, cash) in [
+        ("RELIANCE", true),
+        ("NIFTY,RELIANCE", true),
+        ("NIFTY", false),
+    ] {
+        let mut out = String::new();
+        let prepared = Prepared::new(
+            Input {
+                vendor: "zerodha",
+                symbols,
+                from: (2025, 4),
+                to: (2025, 5),
+                horizon: runner::outcome::Horizon::bars(5).ok_or("fixture horizon")?,
+                max_points: 50,
+                output: &root,
+            },
+            &mut out,
+        )
+        .map_err(|why| format!("{symbols}: {why}"))?;
+        let heading = crate::boolean_catalog_command::prepared::research_heading(&prepared.scope);
+        assert!(
+            out.starts_with(&heading),
+            "{symbols}: the page opens with the research heading:\n{out}"
+        );
+        assert_eq!(
+            out.starts_with(&stock),
+            cash,
+            "{symbols}: a stock's page opens with the gross and corporate-action note, \
+             and an index's does not:\n{out}"
+        );
+        assert_eq!(
+            out.contains(runner::audit::CORPORATE_ACTIONS_UNCHECKED),
+            cash,
+            "{symbols}:\n{out}"
+        );
+    }
+    Ok(())
+}
