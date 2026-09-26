@@ -29,9 +29,26 @@
 //! pretending otherwise would be the false-claim shape this repository keeps
 //! catching itself in.
 //!
-//! What is bounded: [`MAX_MEMBERS`] caps the walk, one file is open at a time,
-//! and each file's rows are decoded and handed on rather than accumulated
-//! across the whole directory. Peak memory is one file, not one archive.
+//! What is bounded: [`MAX_MEMBERS`] caps the walk, and one file is open at a
+//! time.
+//!
+//! **MEMORY IS NOT BOUNDED TO ONE FILE, AND THIS PARAGRAPH USED TO SAY IT
+//! WAS.** It said each file's rows were decoded and passed along, never
+//! gathered, and the walk has never done that. `descend` pushes every decoded
+//! [`Member`], rows and all, onto the one vector the whole walk shares, and
+//! [`read_dir`] returns that vector, so every decoded row of the folder is
+//! held at once when the walk returns. Held by
+//! `tests::every_decoded_member_is_held_until_the_walk_returns`.
+//!
+//! The ingest path depends on that. [`crate::ingest::from_dir`] calls
+//! [`read_dir`] and writes nothing until it returns, so a member that will not
+//! decode refuses the folder before any bar reaches the store, wherever the
+//! member sorts. Held by
+//! `pipeline::a_malformed_member_that_sorts_last_refuses_the_run_before_any_bar_is_written`.
+//! Handing members on one at a time would give that up or would need a second
+//! decoding pass, and neither is decided here. The only ceiling is a count:
+//! [`MAX_MEMBERS`] members, each refused by [`csv::decode`] past
+//! [`crate::fetch::MAX_ROWS`] rows. `docs/06-limits.md` records it, D-0720.
 //!
 //! Ordering the members is O(n log n) and **it happens once per walk**, at the
 //! foot of [`walk`] rather than at the foot of each directory. It used to sit
@@ -342,7 +359,9 @@ fn note_refused(dir: &Path, members: &[Member], why: &ArchiveError) {
 /// # Cost
 ///
 /// O(members) — a bulk import visits every file, and that is inherent. One file
-/// is open at a time and peak memory is one file's rows, not the directory's.
+/// is open at a time. Memory is every decoded row of the walk, not one file's:
+/// the returned vector holds them all, and the module doc says why the ingest
+/// path depends on that.
 pub fn read_dir(dir: &Path, columns: Columns) -> Result<Vec<Member>, ArchiveError> {
     let mut out = Vec::new();
     let mut passed = Passed {
@@ -425,6 +444,13 @@ enum Malformed {
 /// # Errors
 ///
 /// Every [`read_dir`] error except [`ArchiveError::MemberMalformed`].
+///
+/// # Cost
+///
+/// [`read_dir`]'s, memory included: the returned vector holds every decoded
+/// row of the walk. A census writes nothing, so unlike the ingest path it has
+/// no need to hold them all at once; it does because it shares this walk.
+/// `docs/06-limits.md` records that as well, D-0720.
 pub fn read_dir_reporting(
     dir: &Path,
     columns: Columns,
@@ -929,5 +955,73 @@ mod tests {
             matches!(why, ArchiveError::MemberMalformed { ref path, .. } if *path == odd),
             "the refusal must name the member a level down, not the folder: {why}"
         );
+    }
+
+    /// **THE WALK HOLDS EVERY MEMBER IT DECODED, ROWS AND ALL, UNTIL IT
+    /// RETURNS.** D-0720.
+    ///
+    /// The module doc said peak memory was one file, while the walk returned
+    /// one vector holding every member's rows. This pins what the walk does,
+    /// so the sentence that now describes it is checked against the code.
+    ///
+    /// A seventh member carries three rows, so the row total cannot pass by
+    /// coinciding with the member count.
+    #[test]
+    fn every_decoded_member_is_held_until_the_walk_returns() {
+        let scratch = Scratch::new();
+        let root = two_levels(&scratch);
+        fs::write(root.join("Options").join("THREE.csv"), ONE_ROW.repeat(3)).expect("three rows");
+
+        let members = read_dir(&root, Columns::TrueDataIndex).expect("the folder walks");
+
+        assert_eq!(
+            members.len(),
+            7,
+            "every member is in the one returned vector"
+        );
+        assert_eq!(
+            super::total_rows(&members),
+            9,
+            "and every row of every member is in it at the same time: six \
+             one-row members and one of three"
+        );
+        assert!(
+            members.iter().all(|member| !member.rows.is_empty()),
+            "no member was handed on and emptied before the walk returned"
+        );
+
+        // THE CENSUS WALK HOLDS THE SAME ROWS, though it writes nothing.
+        let (reported, rejected) =
+            super::read_dir_reporting(&root, Columns::TrueDataIndex).expect("the census walk");
+        assert!(rejected.is_empty(), "every member decodes");
+        assert_eq!(
+            super::total_rows(&reported),
+            9,
+            "the census walk returns every row too"
+        );
+    }
+
+    /// **THE MODULE NO LONGER CLAIMS ONE FILE OF PEAK MEMORY.** D-0720.
+    ///
+    /// Both sentences were false, and
+    /// `every_decoded_member_is_held_until_the_walk_returns` shows why. The
+    /// needles are assembled at run time, so this test's own source cannot
+    /// match them.
+    #[test]
+    fn the_walk_does_not_claim_one_file_of_peak_memory() {
+        let source = include_str!("archive.rs");
+        for needle in [
+            format!("{} {}", "Peak memory is one file,", "not one archive"),
+            format!(
+                "{} {}",
+                "peak memory is one file's rows,", "not the directory's"
+            ),
+        ] {
+            assert!(
+                !source.contains(&needle),
+                "archive.rs still claims {needle:?}, and the walk holds every \
+                 decoded member until it returns"
+            );
+        }
     }
 }

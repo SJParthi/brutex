@@ -1230,6 +1230,77 @@ fn a_member_that_cannot_be_stored_is_named_and_the_run_carries_on() {
     );
 }
 
+/// **A MEMBER THAT WILL NOT DECODE REFUSES THE FOLDER BEFORE ANY BAR IS
+/// WRITTEN, EVEN WHEN IT SORTS LAST.** D-0720.
+///
+/// `archive::read_dir` holds every decoded member until it returns, and
+/// `ingest::from_dir` writes nothing until then. That is why a folder walk's
+/// memory is every row of the folder rather than one file's, and this is the
+/// property the accumulation pays for: a complete member that sorts FIRST is
+/// not written ahead of a malformed one that sorts LAST.
+///
+/// The second run, over the same folder with the malformed member removed,
+/// is the control. It stores the complete member's 375 bars, so the empty
+/// store in the first run is the refusal's doing and not the fixture's.
+#[test]
+fn a_malformed_member_that_sorts_last_refuses_the_run_before_any_bar_is_written() {
+    use std::fmt::Write as _;
+
+    let scratch = Scratch::new("SORTSLAST");
+    let mut complete = String::new();
+    for minute in 555..930 {
+        writeln!(
+            complete,
+            "20221003,{:02}:{:02}:00,38445.65,0,0",
+            minute / 60,
+            minute % 60
+        )
+        .expect("fixture string");
+    }
+    let dir = folder_of(
+        &scratch,
+        &[
+            ("AAAA", &complete),
+            ("ZZZZ", "20221003,09:15:01,38445.65\n"),
+        ],
+    );
+    let store = store_of(&scratch);
+    let request = request();
+
+    let refused =
+        pull::ingest::from_dir(&dir, &store, plan_over(&request, "NSE", PriceScale::Paisa))
+            .expect_err("three fields is not five");
+    assert!(
+        matches!(refused, ArchiveError::MemberMalformed { ref path, .. }
+            if path.ends_with("ZZZZ.csv")),
+        "the refusal names the member that sorts last: {refused}"
+    );
+    let written: Vec<PathBuf> = fs::read_dir(&store)
+        .expect("the store root lists")
+        .map(|entry| entry.expect("an entry").path())
+        .collect();
+    assert!(
+        written.is_empty(),
+        "nothing reached the store, not even the member that sorts first: \
+         {written:?}"
+    );
+
+    fs::remove_file(dir.join("ZZZZ.csv")).expect("remove the malformed member");
+    let done = pull::ingest::from_dir(&dir, &store, plan_over(&request, "NSE", PriceScale::Paisa))
+        .expect("the complete member alone ingests");
+    assert_eq!(
+        done.bars_stored, 375,
+        "the control stores the complete member"
+    );
+    assert!(
+        fs::read_dir(&store)
+            .expect("the store root lists")
+            .next()
+            .is_some(),
+        "and the control writes into the store"
+    );
+}
+
 /// A member whose rows are all outside the window stores nothing and says so.
 #[test]
 fn a_member_whose_rows_all_fall_outside_the_window_stores_nothing() {

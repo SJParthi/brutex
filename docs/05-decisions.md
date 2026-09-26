@@ -38371,3 +38371,35 @@ here came from a scratch crate outside the repository, holding the verbatim
 same hunks: 9 mutants, 7 caught, 0 missed, 2 unviable, 0 timeouts. The two
 unviable ones construct `Entry::default()`, which does not exist. That is a
 type error, not a lint.
+
+### D-0720 — A folder walk holds every decoded row of the folder, and `archive.rs` now says so — 2026-09-26
+
+`crates/pull/src/archive.rs` said twice that a folder walk holds one file at a
+time. The module doc said "Peak memory is one file, not one archive", and
+`read_dir`'s `# Cost` said "peak memory is one file's rows, not the
+directory's". Both were false. `descend` runs
+`out.push(Member { path, instrument, rows, });` onto the one vector the whole
+walk shares, and `read_dir` returns that vector. `docs/12-ingest-audit.md` had
+already recorded the contradiction as open. Ledger row W1-pull1-1.
+
+**Decision: correct the claim and keep the accumulation.** The ingest path
+relies on it. `ingest::from_dir` is `let members = archive::read_dir(dir,
+columns)?;` followed by `from_members`, so a member that will not decode
+refuses the folder before anything is written, wherever the member sorts.
+Handing members on one at a time would write the members that sort ahead of a
+malformed one, or would need a second decoding pass over every file. Neither
+trade was asked for, so neither is made here. The census walk,
+`read_dir_reporting` behind `GET /folder.json`, writes nothing and holds the
+same rows only because it shares the walk. Its doc now says so.
+
+**Proof.** `every_decoded_member_is_held_until_the_walk_returns` walks seven
+members, six of one row and one of three, and finds all 9 rows in the vector
+`read_dir` returns and in the one `read_dir_reporting` returns.
+`a_malformed_member_that_sorts_last_refuses_the_run_before_any_bar_is_written`
+puts a complete 375-minute member first and a three-field member last.
+`from_dir` refuses, naming the last one, and the store root stays empty. With
+the malformed member removed, the same folder stores 375 bars.
+`the_walk_does_not_claim_one_file_of_peak_memory` fails while either false
+sentence is in `archive.rs`. It failed on origin/main, passes with the
+correction, and fails again with only the correction reverted. C4-PULL-01.
+`docs/06-limits.md` records the bound.

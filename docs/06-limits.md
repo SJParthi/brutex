@@ -8754,3 +8754,25 @@ further indicators run, at 51, verified them.
 - **The fixtures are synthetic.** C-R-05's volume is 1,000 to 1,010 on every
   bar. A real equity month with zero-volume bars or wider prices is not
   timed.
+
+## A folder walk holds every decoded row of the folder — D-0720, 26 September 2026
+
+`archive::read_dir` and `archive::read_dir_reporting` each return one
+`Vec<Member>` holding every member's rows (C4-PULL-01). A folder walk's peak
+memory therefore grows with every decoded row of the folder, not with one
+file, whether the walk is an ingest (`ingest::from_dir`) or a census
+(`folder::read_census` and `folder::read_reach`). Until D-0720 `archive.rs`
+claimed the opposite.
+
+- **The only ceilings are counts.** `MAX_MEMBERS` members
+  (`pub const MAX_MEMBERS: usize = 50_000;`), each refused by `csv::decode`
+  past `fetch::MAX_ROWS` rows. No byte figure for a real folder has been
+  measured.
+- **The ingest path needs the rows held.** It writes nothing until the walk
+  returns, which is what makes a malformed member refuse the folder before
+  any bar is written. Closing the limit there needs a decision between a
+  second decoding pass and giving that up.
+- **The census path does not need them.** It keeps only the reach, the
+  instrument names and the rejected members, and holds every row because it
+  shares the walk. Closing it there would be a walk that folds each member
+  into the census and drops its rows before decoding the next.
