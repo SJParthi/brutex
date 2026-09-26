@@ -42993,9 +42993,10 @@ changes what an operator reads, or the exit status a script sees, says so.
    `REFUSED` row is not a refusal to `carries_refusal`, so a script that ran
    either and then its next step went on after a run that computed nothing.
    `range_over` refuses in that case, for the reason its comment gives, and
-   this entry's own pool test and the two `sweep-all` tests of a forged
-   directory asserted the OK exit (found by a review, which reached it
-   with month 13, a backwards span and an unreadable month).
+   this entry's own pool test asserted the OK exit, and the two `sweep-all`
+   tests of a forged directory asserted that such a page is not a refusal
+   (found by a review, which reached it with month 13, a backwards span and
+   an unreadable month).
    `pool::at_least_one_screened` and `batch::at_least_one_swept` now refuse
    such a run with the count and the first instrument's or month's reason,
    printed as `refused: ` at column zero with no banner, so the verb exits
@@ -43003,7 +43004,8 @@ changes what an operator reads, or the exit status a script sees, says so.
    TO before it reads the store: it checked neither, so a store with no
    instrument on the surface printed its page over month 13 and exited OK. A
    pool that screened one instrument, a walk that swept one month, and a
-   store holding no month of the feed and rung print what they printed.
+   store holding no month of the feed and rung print what they printed
+   before this item.
    *Behaviour change:* the page and exit status of those runs.
    - The driven pool test's `60min` case, one unreadable RELIANCE month
      beside a BSE directory, now requires the refusal and MISUSED.
