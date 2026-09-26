@@ -8776,3 +8776,21 @@ claimed the opposite.
   instrument names and the rejected members, and holds every row because it
   shares the walk. Closing it there would be a walk that folds each member
   into the census and drops its rows before decoding the next.
+
+## A CSV row costs time linear in its line, and neither a line nor a member is capped — D-0721, 26 September 2026
+
+`csv::decode_rows` borrows a row's fields into a fixed ten-slot array
+(C4-PULL-02), so a row allocates nothing whatever its line holds. Until D-0721
+it collected them into a vector sized to the line's commas.
+
+- **A row's time is linear in its line's bytes.** `body.lines()` finds the
+  line's end and `fields_of` counts every comma, so both read the whole line.
+- **No line-length cap exists, and no member-size cap either.**
+  `archive::descend` reads a member with `fs::read(&path)` and decodes it
+  whole, so one line can be as long as its member and one member as large as
+  its file. No real line or member length has been measured here, so no cap
+  is set. Setting one needs the longest real row measured first.
+- **The row vector is not reserved.** `decode_rows` starts from
+  `let mut rows: Vec<RawRow> = Vec::new();` and `decode` takes no bound, so an
+  append is amortised O(1), not worst-case O(1). The module doc used to say
+  otherwise.

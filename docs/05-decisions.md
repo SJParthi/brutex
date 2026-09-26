@@ -38403,3 +38403,39 @@ the malformed member removed, the same folder stores 375 bars.
 sentence is in `archive.rs`. It failed on origin/main, passes with the
 correction, and fails again with only the correction reverted. C4-PULL-01.
 `docs/06-limits.md` records the bound.
+
+### D-0721 — Hold a CSV row's fields in a fixed array, and say what a row really costs — 2026-09-26
+
+`crates/pull/src/csv.rs` said, under `# Cost`, "No allocation per row" and that
+the row vector "is reserved from a caller-supplied bound". Neither was true.
+`decode_rows` ran `let fields: Vec<&str> = line.split(',').collect();` for every
+row, one heap allocation sized to every comma in the line, made before the
+field count was checked. It began from `let mut rows: Vec<RawRow> =
+Vec::new();`, and `pub fn decode(body: &str, columns: Columns)` takes no bound,
+so no caller supplies one. Ledger row W1-pull1-3.
+
+**Decision: make the per-row claim true, and correct the other two.**
+
+- A row's fields are borrowed into a `[&str; MAX_FIELDS]` array by `fields_of`.
+  `MAX_FIELDS` is 10, the widest layout's count, and
+  `every_layout_fits_the_fixed_field_array` pins every layout inside it.
+  Every field is still counted, so `CsvError::FieldCount` reports the line's
+  true width as before, but only the first ten are kept, and nothing is
+  allocated for the rest. A `want` wider than the array is refused rather
+  than read short.
+- The row vector is not reserved. The doc now says an append is amortised
+  O(1), not worst-case O(1). Reserving from the body's line count was not
+  chosen: blank and skipped lines would reserve rows that never arrive.
+- A row costs time linear in its line's bytes, and no line-length cap
+  exists. `archive` reads a member whole with `fs::read`, with no byte cap.
+  `docs/06-limits.md` records both. No real line or member length has been
+  measured here, so neither cap is set.
+
+**Proof.** `decode_rows_collects_nothing_per_row` reads `decode_rows`'s own
+text and fails if it collects. A counting allocator would be the direct test,
+and it needs `unsafe`, which every crate root forbids. It failed on origin/main,
+passes here, and fails again with only the fixed array reverted.
+`a_lines_fields_land_in_a_fixed_array_and_are_counted_whole` holds `fields_of`:
+exact counts accepted, short and long lines refused with their true count, a
+line of 1,000,000 commas counted as 1,000,001 fields, and a width past the
+array refused. The existing field-count tests still pass unchanged. C4-PULL-02.

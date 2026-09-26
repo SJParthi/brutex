@@ -38,9 +38,24 @@
 //!
 //! # Cost
 //!
-//! One pass per line, splitting on a byte. No allocation per row: fields are
-//! borrowed from the input and parsed into integers in place. The row vector is
-//! reserved from a caller-supplied bound — `docs/07-o1-architecture.md` law 2.
+//! One pass per line, splitting on a byte. **No allocation per row:** a row's
+//! fields are borrowed from the input into a fixed [`MAX_FIELDS`]-slot array by
+//! [`fields_of`], however many commas the line holds, and parsed into integers
+//! in place. Until D-0721 this paragraph said the same while every row collected
+//! its fields into a vector sized to its commas, before the field count was
+//! checked. Held by `tests::decode_rows_collects_nothing_per_row` and
+//! `tests::a_lines_fields_land_in_a_fixed_array_and_are_counted_whole`.
+//!
+//! **A row costs time linear in its line's bytes, and no line-length cap
+//! exists.** `body.lines()` finds the line's end and `line.split(',')` in
+//! [`fields_of`] counts every field, so each reads the whole line. A line may be
+//! as long as its member, and `crate::archive` reads a member whole, with
+//! `fs::read` and no byte cap. `docs/06-limits.md` records both.
+//!
+//! **The row vector is not reserved.** [`decode`] takes no bound and
+//! `decode_rows` starts from `Vec::new()`, so an append is amortised O(1), not
+//! worst-case O(1). This paragraph used to say the vector was reserved from a
+//! caller-supplied bound, and no caller supplies one.
 
 use crate::fetch::{FetchError, MAX_ROWS, RawRow};
 use crate::vendor::DateFormat;
@@ -551,6 +566,42 @@ pub fn decode(body: &str, columns: Columns) -> Result<Vec<RawRow>, CsvError> {
     }
 }
 
+/// The most fields any layout this decoder reads carries: [`Columns::Gdfl`]'s
+/// ten.
+///
+/// A row's fields are held in an array this wide rather than collected into a
+/// vector, so a row allocates nothing whatever its line holds. Every layout
+/// fits, held by `tests::every_layout_fits_the_fixed_field_array`. D-0721.
+const MAX_FIELDS: usize = 10;
+
+/// One line's fields, borrowed into a fixed array, when it has exactly `want`
+/// of them; otherwise how many it has.
+///
+/// Every field is counted, so a refusal reports the line's true width, the
+/// count [`CsvError::FieldCount`] has always carried. Only the first
+/// [`MAX_FIELDS`] are kept, and nothing is allocated for the rest. A `want`
+/// wider than the array is refused rather than read short, because the slots
+/// past the tenth would read as empty fields.
+///
+/// # Errors
+///
+/// The line's field count, when it is not `want` or `want` does not fit.
+fn fields_of(line: &str, want: usize) -> Result<[&str; MAX_FIELDS], usize> {
+    let mut fields = [""; MAX_FIELDS];
+    let mut got: usize = 0;
+    for field in line.split(',') {
+        if let Some(slot) = fields.get_mut(got) {
+            *slot = field;
+        }
+        got = got.saturating_add(1);
+    }
+    if got == want && want <= MAX_FIELDS {
+        Ok(fields)
+    } else {
+        Err(got)
+    }
+}
+
 /// [`decode`]'s pass over the body, split out for one reason: the two `note_*`
 /// helpers must report what it counted whether it finished or refused, and a
 /// `?` inside it cannot do that on the way past.
@@ -585,14 +636,14 @@ fn decode_rows(body: &str, columns: Columns, tally: &mut Tally) -> Result<Vec<Ra
             });
         }
 
-        let fields: Vec<&str> = line.split(',').collect();
-        if fields.len() != want {
-            return Err(CsvError::FieldCount {
-                line: line_no,
-                got: fields.len(),
-                want,
-            });
-        }
+        // A FIXED ARRAY, NOT A VECTOR PER ROW. D-0721: this collected every
+        // line into a `Vec<&str>` sized to its commas before the count was
+        // checked, one heap allocation per row as large as the line made it.
+        let fields = fields_of(line, want).map_err(|got| CsvError::FieldCount {
+            line: line_no,
+            got,
+            want,
+        })?;
 
         let date_text = fields.get(at.date).copied().unwrap_or_default();
         let day =
@@ -1382,5 +1433,95 @@ mod tests {
                  can be found again"
             );
         }
+    }
+
+    /// **A ROW'S FIELDS ARE NOT COLLECTED INTO A VECTOR PER ROW.** D-0721.
+    ///
+    /// The module doc said "No allocation per row" while `decode_rows`
+    /// collected every line into a `Vec<&str>` sized to its commas, before the
+    /// field count was checked: one heap allocation per row, as large as the
+    /// line made it. No allocator can be counted from a test here, because a
+    /// counting allocator needs `unsafe` and every crate root forbids it, so
+    /// the pass's own text is what is held: its body must not collect. The
+    /// needles are assembled at run time so this test's own source cannot match
+    /// them.
+    #[test]
+    fn decode_rows_collects_nothing_per_row() {
+        let source = include_str!("csv.rs");
+        let head = format!("{}{}", "fn decode_", "rows(");
+        let start = source.find(&head).expect("decode_rows is defined here");
+        let rest = source.get(start..).expect("from its head");
+        let end = rest.find("\n}\n").expect("and closed at column zero");
+        let body = rest.get(..end).expect("its body");
+        let collect = format!("{}{}", ".collect", "(");
+        assert!(
+            !body.contains(&collect),
+            "decode_rows collects into a vector, which is one heap allocation \
+             per row"
+        );
+    }
+
+    /// **A LINE'S FIELDS LAND IN A FIXED ARRAY, AND ARE COUNTED WHOLE.**
+    /// D-0721.
+    ///
+    /// The count is what `CsvError::FieldCount` reports, so it must still be
+    /// the line's true width however wide the line is. What is kept is the
+    /// first `MAX_FIELDS`, and a layout wider than that is refused rather than
+    /// read with empty fields past the tenth.
+    #[test]
+    fn a_lines_fields_land_in_a_fixed_array_and_are_counted_whole() {
+        let five = fields_of("a,b,c,d,e", 5).expect("five fields for five");
+        assert_eq!(five.len(), MAX_FIELDS, "the array is the fixed width");
+        assert_eq!(five.get(..5), Some(["a", "b", "c", "d", "e"].as_slice()));
+        assert!(
+            five.iter().skip(5).all(|field| field.is_empty()),
+            "the slots past the count stay empty"
+        );
+        assert_eq!(fields_of("a,b,c,d", 5), Err(4), "one short");
+        assert_eq!(fields_of("a,b,c,d,e,f", 5), Err(6), "one long");
+        assert_eq!(fields_of("", 1).map(|f| f.len()), Ok(MAX_FIELDS));
+        assert_eq!(
+            fields_of(&",".repeat(1_000_000), 5),
+            Err(1_000_001),
+            "a line of a million commas is counted whole"
+        );
+
+        // THE FULL WIDTH, and one past it.
+        let ten = "0,1,2,3,4,5,6,7,8,9";
+        let all = fields_of(ten, MAX_FIELDS).expect("ten fields fill the array");
+        assert_eq!(
+            all,
+            ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"],
+            "every slot holds its own field"
+        );
+        assert_eq!(
+            fields_of("0,1,2,3,4,5,6,7,8,9,10", MAX_FIELDS + 1),
+            Err(11),
+            "a layout wider than the array is refused, never read short"
+        );
+        assert_eq!(fields_of(ten, MAX_FIELDS + 1), Err(10));
+    }
+
+    /// Every layout this decoder reads fits the fixed field array, and the
+    /// widest fills it. D-0721.
+    #[test]
+    fn every_layout_fits_the_fixed_field_array() {
+        for columns in [
+            Columns::TrueDataIndex,
+            Columns::TrueDataFutures,
+            Columns::Gdfl,
+            Columns::TrueDataFno,
+        ] {
+            assert!(
+                columns.count() <= MAX_FIELDS,
+                "{columns:?} has {} fields and the array holds {MAX_FIELDS}",
+                columns.count()
+            );
+        }
+        assert_eq!(
+            Columns::Gdfl.count(),
+            MAX_FIELDS,
+            "the widest layout fills it"
+        );
     }
 }
