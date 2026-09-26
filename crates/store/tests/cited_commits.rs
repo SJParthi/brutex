@@ -286,14 +286,63 @@ fn bracket_sites(entry: &str) -> (String, Vec<(String, usize)>) {
     (commit, sites)
 }
 
+/// The calls that take an advisory file lock at D-0693's bracket sites: the
+/// four `File` lock calls, and `candidate_trades`'s own `lock_for_read`.
+const LOCK_CALLS: [&str; 5] = [
+    ".lock()",
+    ".lock_shared()",
+    ".try_lock()",
+    ".try_lock_shared()",
+    "lock_for_read(",
+];
+
+/// Whether the code of `line`, before any `//`, makes one of [`LOCK_CALLS`].
+///
+/// It reads the call's shape, not its receiver's type, so a `Mutex`'s
+/// `.lock()` would pass. What it refuses is a line that only mentions a lock:
+/// a comment, a word such as "clock" or "block", or `.unlock()`, none of
+/// which makes a call above.
+fn takes_a_lock(line: &str) -> bool {
+    let code = line.split_once("//").map_or(line, |(code, _)| code);
+    LOCK_CALLS.iter().any(|call| code.contains(call))
+}
+
+/// **A LINE THAT ONLY MENTIONS A LOCK IS NOT A LOCK SITE.**
+///
+/// The check below once accepted any line holding "lock" and not "unlock".
+/// Lines 13 and 192 of `result_set.rs` at `96194c11` are comments, holding
+/// "block" and "clock", and passed it as sites. So would the comment "Unlocked
+/// on both paths", whose capital escaped the "unlock" test.
+#[test]
+fn a_comment_or_a_word_holding_lock_is_not_a_lock_call() {
+    for mention in [
+        "//! parent, receipt, and the receipt's exact block count. An interrupted receipt",
+        "/// Unix and Windows expose a stable file identity plus a change clock. Other",
+        "        // Unlocked on both paths, including the refusals inside `append_locked`.",
+        "        file.unlock()?;",
+        "        let blocked = clock.tick(); // then .lock() the file",
+    ] {
+        assert!(!takes_a_lock(mention), "not a lock call: {mention}");
+    }
+    for call in [
+        "            .lock()",
+        "            .lock_shared()",
+        "        let writer_observed = match owner.try_lock_shared() {",
+        "        match file.try_lock() {",
+        "        lock_for_read(&self.file)?;",
+    ] {
+        assert!(takes_a_lock(call), "a lock call: {call}");
+    }
+}
+
 /// **D-0693 LISTS EACH BRACKET SITE AT A COMMIT WHERE ITS LINE TAKES A LOCK.**
 ///
-/// The list was keyed to a commit on no pushed branch, and 29 of its lines
-/// were no longer lock calls on this branch, where the conversion had moved
-/// them. It is keyed now to `main`'s `96194c11`, where every module it names
-/// is byte-identical to the commit the list was taken at. This reads each
-/// listed line at the commit the entry names, requires it to call a lock and
-/// not an unlock, and requires the entry to give the count it reads.
+/// The list was keyed to a commit on no pushed branch, and on this branch the
+/// conversion had moved some of its lines off their lock calls. It is keyed
+/// now to `main`'s `96194c11`, where every module it names is byte-identical
+/// to the commit the list was taken at. This reads each listed line at the
+/// commit the entry names, requires its code to make one of [`LOCK_CALLS`],
+/// and requires the entry to give the count it reads.
 #[test]
 fn d_0693_lists_each_bracket_site_at_a_commit_where_its_line_takes_a_lock() {
     let text = entry("D-0693");
@@ -321,7 +370,7 @@ fn d_0693_lists_each_bracket_site_at_a_commit_where_its_line_takes_a_lock() {
                 .collect()
         });
         let line = lines.get(number - 1).map_or("", String::as_str);
-        if !line.contains("lock") || line.contains("unlock") {
+        if !takes_a_lock(line) {
             wrong.push(format!("{module}.rs:{number}: {}", line.trim()));
         }
     }
