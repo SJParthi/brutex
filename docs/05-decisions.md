@@ -41839,3 +41839,21 @@ ignored: the eighth repair's 1,211 and the five tests this repair adds.
 `src/main.rs` has 2 passed, `tests/binary.rs` 3 and the doctest 1. `core`'s
 whole suite, which reads these documents, passes. Every shell gate of CI's
 Gate 1+2 job except 1e passes, Gates 10, 11, 12, 14 and 23 among them.
+
+cargo-mutants 26.2.0 ran over the whole piece's source diff, `eecca4da` to
+`0d1289b1`, with `--cap-lints true` as Gate 18 passes it, two jobs, the `api`
+lib as the test set, run by `cargo test` rather than Gate 18's nextest, and
+`TMPDIR` set to this workflow's cargo-mutants directory, under which the
+three socket tests could not bind before `a7ae38d1`. No production source
+line changed after `0d1289b1`: `04f09aef` changed a doc comment in
+`census_request_tests.rs`, and cargo-mutants lists no mutant in that diff
+("No mutants to filter"). Its unmutated baseline passed. Of 84 mutants, 58
+were caught, 26 were unviable, and none was missed or timed out. Caught
+among them: `refuse_contradicted_absences` replaced with `()`, its `&&` made
+`||`, and its `!` deleted; the `!` deleted in `census_now_stamping`; and
+every mutant of `stamp_could_read` and `read_as_stamped`. The 26 unviable
+ones failed to compile: 25 put `Default::default()` in a return value, among
+them `CensusStamps`, `PeerCalendar`, `CalendarAnswer` and `VendorCensus`, and
+one turns the `&&` of `cached`'s `if let` chain into an `||`. cargo-mutants
+generates no mutant for the condition that decides the second stamping; the
+count test and the breaks above pin it both ways.
