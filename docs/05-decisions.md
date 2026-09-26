@@ -42162,3 +42162,18 @@ wherever a letter or `_` does not come just before it
 `!`, which `Sink::report`'s `eprintln!(` still contains; Gate 23 then
 passes, and so does the test. It changes no production line, so no
 mutant above is affected.
+
+**Corrected 26 September 2026, after the stderr source-predicate review.**
+The name-only check described above also accepted a non-emitting
+`let _eprintln = format!(...)` in place of the notice. The repaired assertion
+uses `concat!("eprintln", "!")` to require the full macro token while keeping
+Gate 23's source scan unchanged. Its compare-exchange check remains in place.
+A temporary probe changed only the source text inspected by the test: the
+name-only predicate passed (one test, exit 0), the repaired predicate failed
+at "the notice goes to stderr, once per sink" (one failure, exit 101), and
+removing the probe restored a pass (one test, exit 0). Formatting and Gate 23
+also passed. This proves the source predicate rejects that replacement; it
+does not inject a failed write into a running telemetry sink. No production
+source changed. AF-28l records that boundary. The full API suite and package
+clippy were still pending at this checkpoint; these focused results do not
+replace them or the historical mutation evidence above.
