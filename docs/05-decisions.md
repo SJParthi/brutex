@@ -37842,7 +37842,7 @@ record for the same position. Proposed, for the operator to apply directly:
 operator's answer to the finding above, dated 2026-09-26 at 12:15 IST:
 *"just stick to stocks F&O alone and then from indices, as of now, I will pick
 one and only NIFTY and BANKNIFTY"*. That is the surface this entry's fix left:
-the cash equities of the F&O underlyings that are shares, and of the indices
+the cash equities of the F&O underlyings that are shares, and the spot indices
 `NSE-NIFTY` and `NSE-BANKNIFTY` alone. `core::universe::FNO_UNDERLYINGS` holds
 213 names, and 5 of them are the indices `FNO_INDEX_UNDERLYINGS` lists, which
 have no cash equity, so the shares are 208 and the surface is 210. The answer
@@ -37866,7 +37866,8 @@ directly, in place of §1's item 2 and beside the sentence proposed above:
 derives 208 as `FNO_UNDERLYINGS` less `FNO_INDEX_UNDERLYINGS`, each of those
 five an F&O underlying, and 210 as that and the two indices
 `InstrumentKey::SWEPT` names, `NIFTY` and `BANKNIFTY`. It requires
-`docs/00-charter.md` §1's row and both proposals here to state those counts,
+`docs/00-charter.md` §1's row, both proposals here and the applied `CLAUDE.md`
+§1 to state those counts,
 so none of them can drift from the lists.
 
 **Applied, 2026-09-26.** The operator gave the same answer to the
@@ -37875,7 +37876,11 @@ correction there. The coordinating session applied both proposals above to
 `CLAUDE.md` §1 verbatim: item 2 now counts the 208 F&O underlyings that are
 shares, and the equities paragraph ends "210 instruments, 208 shares and the
 two indices, multiply the search by 210". The proposals stay above as the
-record of what was applied.
+record of what was applied. The count test now reads that applied section
+as well as the proposals. It also requires the correction above to name
+cash equities and spot indices separately, rather than giving indices cash
+equities. Reverting either of the applied counts fails the test; restoring
+the correction's former "and of the indices" wording fails it too.
 
 ### D-0683 — Correct the crate graph and D-0453's list: `cli` has nine arrows, not seven — 2026-09-23
 

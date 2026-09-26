@@ -5233,3 +5233,10 @@ even when its branch commit no longer resolves. A new sentence citing an
 unrelated branch or a missing object is refused. Proven with an isolated Git
 history by
 `store::cited_commits::a_commit_listed_as_squashed_is_held_by_head_while_its_sentence_is_new`.
+
+**AF-02 follow-up (D-0682):**
+`core::universe::tests::the_surface_counts_the_records_give_are_the_two_lists_counts`
+reads the applied `CLAUDE.md` §1 as well as the charter row and D-0682's
+proposals. It derives the share and total counts from the membership lists and
+`InstrumentKey::SWEPT`, and requires D-0682's correction to name cash equities
+and spot indices separately.

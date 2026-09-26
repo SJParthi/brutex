@@ -6008,8 +6008,8 @@ mod tests {
     /// The shares are `FNO_UNDERLYINGS` less `FNO_INDEX_UNDERLYINGS`, each of
     /// those an F&O underlying, and the surface is the shares and the indices
     /// `InstrumentKey::SWEPT` names, `NIFTY` and `BANKNIFTY` and no other. The
-    /// charter's scope row and both of D-0682's proposals for `CLAUDE.md` §1
-    /// state those counts, so a change to either list fails here until every
+    /// charter's scope row, both of D-0682's proposals and the applied
+    /// `CLAUDE.md` §1 state those counts, so a change to either list fails here until every
     /// one of them is changed with it. Each text is read with its line breaks
     /// and a quotation's `>` markers folded away, so rewrapping does not break
     /// the search.
@@ -6047,6 +6047,12 @@ mod tests {
             .split_once("\n### D-0682 ")
             .expect("D-0682 heads an entry");
         let entry = fold(from.split_once("\n### ").map_or(from, |(entry, _)| entry));
+        let law = fold(
+            include_str!("../../../CLAUDE.md")
+                .split_once("\n## 2.")
+                .expect("CLAUDE.md has a second section")
+                .0,
+        );
         for proposed in [
             format!(
                 "and {surface} instruments, {shares} shares and the two indices, multiply the \
@@ -6057,11 +6063,12 @@ mod tests {
              `core::universe::FNO_INDEX_UNDERLYINGS` names"
                 .to_owned(),
         ] {
-            assert!(
-                entry.contains(&proposed),
-                "D-0682 must propose {proposed:?} for CLAUDE.md §1"
-            );
+            for (name, text) in [("D-0682", &entry), ("CLAUDE.md §1", &law)] {
+                assert!(text.contains(&proposed), "{name} must state {proposed:?}");
+            }
         }
+        assert!(entry.contains("the cash equities of the F&O underlyings that are shares, and the spot indices `NSE-NIFTY` and `NSE-BANKNIFTY` alone"),
+            "D-0682 must name spot indices separately from cash equities");
         assert_eq!(
             FNO_INDEX_UNDERLYINGS.len(),
             5,
