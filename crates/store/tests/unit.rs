@@ -362,6 +362,10 @@ fn negative_prices_are_not_sane_however_well_ordered() {
                 ..real
             },
         ),
+        // Isolate the final sign check too: the earlier negative low above
+        // short-circuits it. Ordering also rejects this case, so this is not
+        // evidence that the redundant close-sign clause has a unique mutant.
+        ("close alone", Bar { close: -1, ..real }),
     ] {
         assert!(!bar.ohlc_is_sane(), "{name} below zero must be refused");
     }
@@ -1476,6 +1480,34 @@ fn a_slot_naming_an_unknown_version_is_refused_by_number() {
 }
 
 #[test]
+fn a_file_identity_refusal_outranks_slot_damage_in_either_slot_order() {
+    let mut unknown = genesis_slot();
+    unknown[8..10].copy_from_slice(&7u16.to_le_bytes());
+    let mut damaged = genesis_slot();
+    damaged[24] ^= 1;
+    assert_eq!(
+        Header::decode(&unknown),
+        Err(FormatError::UnknownVersion(7))
+    );
+    assert!(matches!(
+        Header::decode(&damaged),
+        Err(FormatError::SlotChecksum { .. })
+    ));
+    for slots in [[unknown, damaged], [damaged, unknown]] {
+        let mut region = vec![0; usize::try_from(HEADER_LEN).expect("small header")];
+        for (index, slot) in slots.iter().enumerate() {
+            let start = index * usize::try_from(SLOT_STRIDE).expect("small slot stride");
+            region[start..start + SLOT_LEN].copy_from_slice(slot);
+        }
+        assert_eq!(
+            Header::read_region(&region, region.len() as u64),
+            Err(FormatError::UnknownVersion(7)),
+            "the later damaged slot must not replace a more informative file identity"
+        );
+    }
+}
+
+#[test]
 fn a_version_one_file_is_named_retired_rather_than_reported_as_destroyed() {
     // A file written to the geometry docs/02-store-format.md described before
     // this change: a 64-byte header, magic BRUTEXB1, version 1, stride 56,
@@ -2122,6 +2154,41 @@ fn a_case_variant_is_refused_not_a_second_prefix() {
         .to_string(),
         "bars/groww/NSE/INDEX/NIFTY/1min/2024-06.bin",
     );
+}
+
+#[test]
+fn a_store_path_propagates_a_refused_output_sink() {
+    struct BoundedOutput {
+        remaining: usize,
+        text: String,
+    }
+    impl std::fmt::Write for BoundedOutput {
+        fn write_str(&mut self, text: &str) -> std::fmt::Result {
+            if text.len() > self.remaining {
+                return Err(std::fmt::Error);
+            }
+            self.remaining -= text.len();
+            self.text.push_str(text);
+            Ok(())
+        }
+    }
+    let path = StorePath::new(parts(Vendor::Groww, "NIFTY")).expect("canonical path");
+    let complete = path.to_string();
+    for capacity in 0..=complete.len() {
+        let mut output = BoundedOutput {
+            remaining: capacity,
+            text: String::new(),
+        };
+        let result = std::fmt::write(&mut output, format_args!("{path}"));
+        if capacity == complete.len() {
+            assert_eq!(result, Ok(()));
+            assert_eq!(output.text, complete);
+        } else {
+            assert_eq!(result, Err(std::fmt::Error));
+            assert!(output.text.len() <= capacity);
+            assert!(complete.starts_with(&output.text));
+        }
+    }
 }
 
 #[test]

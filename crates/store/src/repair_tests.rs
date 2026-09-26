@@ -441,3 +441,42 @@ fn an_uninspectable_revision_path_is_a_named_nonpublication_refusal() {
         b"not a directory"
     );
 }
+
+#[test]
+fn an_unopenable_receipt_is_named_and_never_replaced_on_read_or_retry() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
+    let fixture = Fixture::new("receipt-open-error");
+    let rows = [bar(1)];
+    let expected = fixture.source(&rows);
+    assert_eq!(fixture.publish(expected, &rows), Ok(Published::Created));
+    let physical = path().to_path_buf(&revision().root(&fixture.root));
+    let receipt = physical.with_extension("repair-v1");
+    let saved = fixture.root.join("saved-receipt");
+    let receipt_bytes = fs::read(&receipt).expect("published receipt");
+    let data_bytes = fs::read(&physical).expect("published revision");
+    fs::rename(&receipt, &saved).expect("preserve the receipt");
+    std::os::unix::fs::symlink(&receipt, &receipt).expect("unopenable receipt loop");
+    let host = File::open(&receipt).expect_err("loop is an open error");
+    assert_ne!(host.kind(), io::ErrorKind::NotFound);
+    let refusal = RepairError::Io {
+        path: receipt.clone(),
+        operation: "open receipt",
+        kind: host.kind(),
+        publication_may_be_visible: false,
+    };
+    assert_eq!(fixture.read().expect_err("cannot read receipt"), refusal);
+    assert_eq!(fixture.publish(expected, &rows), Err(refusal));
+    assert_eq!(fs::read_link(&receipt).expect("loop preserved"), receipt);
+    assert_eq!(
+        fs::read(&saved).expect("original receipt preserved"),
+        receipt_bytes
+    );
+    assert_eq!(fs::read(&physical).expect("revision preserved"), data_bytes);
+    fs::remove_file(&receipt).expect("remove injected fault");
+    fs::rename(&saved, &receipt).expect("restore exact receipt");
+    assert_eq!(fixture.publish(expected, &rows), Ok(Published::Reused));
+    assert_eq!(
+        fixture.read().expect("restored reader").read_record(0),
+        Ok(rows[0])
+    );
+}

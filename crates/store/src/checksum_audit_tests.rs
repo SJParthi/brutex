@@ -333,6 +333,35 @@ fn warm_authority_refuses_mutation_replacement_and_deletion_of_every_held_file()
 }
 
 #[test]
+fn moving_each_held_file_aside_cannot_redirect_audited_authority_to_its_replacement() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
+    for kind in [FileKind::Bars, FileKind::Checksums, FileKind::Lock] {
+        let fixture = Fixture::new(1);
+        let audited = fixture.audited().expect("original authority");
+        let path = fixture.named(kind);
+        let saved = fixture.root.join("original-inode");
+        let bytes = fs::read(&path).expect("original bytes");
+        fs::rename(&path, &saved).expect("keep the original inode linked once");
+        fs::write(&path, &bytes).expect("byte-identical replacement at the original name");
+        let original = fs::metadata(&saved).expect("held inode still exists");
+        let replacement = fs::metadata(&path).expect("replacement exists");
+        assert_eq!(original.nlink(), 1);
+        assert_eq!(replacement.nlink(), 1);
+        assert_ne!(original.ino(), replacement.ino());
+        assert_eq!(
+            audited.require_current(),
+            Err(format!(
+                "checksum audit refuses an alias, non-regular file or replacement: {}",
+                path.display()
+            ))
+        );
+        assert!(audited.read_record(0).is_err());
+        assert_eq!(fs::read(&saved).expect("held bytes preserved"), bytes);
+        assert_eq!(fs::read(&path).expect("replacement untouched"), bytes);
+    }
+}
+
+#[test]
 fn aliases_and_unsealed_legacy_data_never_gain_a_strict_receipt() {
     let _sink_is_mine = crate::emits::hold_the_sink();
     for kind in [FileKind::Bars, FileKind::Checksums, FileKind::Lock] {
