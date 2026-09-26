@@ -14,9 +14,11 @@ ranks what survives.
 **Engine surface — two shapes, NSE only:**
 
 1. The two spot indices `NSE-NIFTY` and `NSE-BANKNIFTY`.
-2. The **cash equities of the 213 F&O underlyings** — the stock's own price
-   series, the same thing the spot level is for an index. Widened by D-0506.
-   The list is `core::universe::FNO_UNDERLYINGS` and nothing else names it.
+2. The **cash equities of the 208 F&O underlyings that are shares** — the
+   stock's own price series, the same thing the spot level is for an index.
+   Widened by D-0506, counted by D-0682. The list is
+   `core::universe::FNO_UNDERLYINGS` less the five indices
+   `core::universe::FNO_INDEX_UNDERLYINGS` names, which have no cash equity.
 
 BSE and MCX are not swept and not pulled. Narrowed from three
 instruments by D-0017. Existing BSE data already on disk is not deleted --
@@ -39,9 +41,9 @@ is optional: a stock CAN be bought, so its costs are real — equities may be
 ranked cost-excluded only as labelled research, every such report stating it
 is gross of every charge (D-0509, D-0525, D-0681), and no equity result may
 enter Selection V6 or execution authority until a charter-sourced equity
-charge stack exists; and 213 instruments multiply the search by 213, so an
-in-sample result across the pool is the largest of billions and means nothing
-until it is validated out of sample.
+charge stack exists; and 210 instruments, 208 shares and the two indices,
+multiply the search by 210, so an in-sample result across the pool is the
+largest of billions and means nothing until it is validated out of sample.
 
 ---
 

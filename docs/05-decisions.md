@@ -37859,6 +37859,14 @@ five an F&O underlying, and 210 as that and the two indices
 `docs/00-charter.md` §1's row and both proposals here to state those counts,
 so none of them can drift from the lists.
 
+**Applied, 2026-09-26.** The operator gave the same answer to the
+coordinating session directly, in their own words, and approved this
+correction there. The coordinating session applied both proposals above to
+`CLAUDE.md` §1 verbatim: item 2 now counts the 208 F&O underlyings that are
+shares, and the equities paragraph ends "210 instruments, 208 shares and the
+two indices, multiply the search by 210". The proposals stay above as the
+record of what was applied.
+
 ### D-0683 — Correct the crate graph and D-0453's list: `cli` has nine arrows, not seven — 2026-09-23
 
 `CLAUDE.md` §5 drew `cli` with seven arrows and said so in its prose. The
