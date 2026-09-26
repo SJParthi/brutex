@@ -1675,6 +1675,12 @@ mod tests {
     /// `the_renderers_only_append_to_the_page_they_are_handed`, on one input
     /// each.
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one reading of `run_under`'s body in order, from the head it binds to its \
+                  return, the refusal before pass 1's table among them; split, each half \
+                  would have to find the body again"
+    )]
     fn the_pool_page_is_its_head_and_then_only_appends() {
         let root = store_holding("run-under", &["NSE/INDEX/RELIANCE", "BSE/CASH/RELIANCE"]);
         let page = super::run_under(
