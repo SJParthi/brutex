@@ -43148,7 +43148,12 @@ text already on `main` at `96194c11` remains untouched.
    `sweep_all_keeps_the_column_zero_refusal_and_dispatch_status` pins the
    actual wrapper and arm in every build. The old test constructed its own
    `refused: ` prefix and could not catch a broken verb. AF-70 names both
-   checks.
+   checks. The file also carries `#![cfg(test)]` on its first line, as the
+   other out-of-line batch tests do. Gate 11 cannot follow the nested
+   path-qualified declaration, so it classified the assertions as shipping
+   code until this explicit marker was added; the compiler's existing outer
+   test guard already excluded them from non-test builds. No gate allowlist
+   is widened.
 3. The misfiled-month test again asserts the whole tally, `1 swept · 6
    refused`, plus ten stored months of which seven match. The seventh
    correction's restored-count list now includes it.

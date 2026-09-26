@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Dispatch and refusal spelling of the batch verb (D-0696).
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
