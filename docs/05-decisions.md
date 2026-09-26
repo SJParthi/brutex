@@ -42991,7 +42991,7 @@ changes what an operator reads, or the exit status a script sees, says so.
    `REFUSED` row for each and "nothing to pool", and exited OK. `sweep-all`
    did the same over its months, with `0 swept · N refused`. An indented
    `REFUSED` row is not a refusal to `carries_refusal`, so a script that ran
-   either and then its next step went on after a run that computed nothing.
+   either and then its next step went on without a confirmed result.
    `range_over` refuses in that case, for the reason its comment gives, and
    this entry's own pool test asserted the OK exit, and the two `sweep-all`
    tests of a forged directory asserted that such a page is not a refusal
@@ -43003,7 +43003,7 @@ changes what an operator reads, or the exit status a script sees, says so.
    MISUSED. `pool_arm` also refuses a month outside 1..=12 and a FROM after
    TO before it reads the store: it checked neither, so a store with no
    instrument on the surface printed its page over month 13 and exited OK. A
-   pool that screened one instrument, a walk that swept one month, and a
+   pool with one successful outcome, a walk with one swept and filed month, and a
    store holding no month of the feed and rung print what they printed
    before this item.
    *Behaviour change:* the page and exit status of those runs.
@@ -43166,6 +43166,13 @@ text already on `main` at `96194c11` remains untouched.
    the stamped dispatch child prove the refusal; the existing page-shape
    test now uses a fresh store. The former contrary assertion is superseded
    by these tests, not discarded without a replacement.
+7. The tests-bite journal also recorded a surviving documentation mutation:
+   `No other test reads` passed the guard that matched only lowercase text.
+   The module-doc check now folds ASCII case. Its regression checks lower,
+   sentence and upper case, plus a sentence without that claim, so reverting
+   only the case fold fails `the_module_doc_claim_guard_catches_each_ascii_case`.
+   The existing module-doc assertion uses that same predicate. AF-39 names
+   both checks. No operator behaviour changes for this test correction.
 
 These are reporting and test changes. No stored record format, condition bit,
 run identity term, lockfile, front-end file or market-data input is changed.

@@ -466,7 +466,7 @@ fn this_crates_own_docs_say_no_more_than_holds() {
         "premise: the module doc was read: {module}"
     );
     assert!(
-        !module.contains("no other test reads"),
+        !module_claims_exclusive_readership(&module),
         "the module doc says no other test reads a document: {module}"
     );
     let named = doc_above(
@@ -477,6 +477,25 @@ fn this_crates_own_docs_say_no_more_than_holds() {
         named.contains("fails here until the list below and each of the three texts name it"),
         "the doc says what a variable added to the child fails until: {named}"
     );
+}
+
+/// Whether the module text contains the disallowed readership claim.
+fn module_claims_exclusive_readership(module: &str) -> bool {
+    module.to_ascii_lowercase().contains("no other test reads")
+}
+
+#[test]
+fn the_module_doc_claim_guard_catches_each_ascii_case() {
+    for claim in [
+        "no other test reads a document",
+        "No other test reads a document",
+        "NO OTHER TEST READS a document",
+    ] {
+        assert!(module_claims_exclusive_readership(claim), "{claim}");
+    }
+    assert!(!module_claims_exclusive_readership(
+        "Each document named below is read here."
+    ));
 }
 
 /// **The limit on raw quotes names `parse_vendor`'s two callers that hand it
