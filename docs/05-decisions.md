@@ -41862,3 +41862,135 @@ them `CensusStamps`, `PeerCalendar`, `CalendarAnswer` and `VendorCensus`, and
 one turns the `&&` of `cached`'s `if let` chain into an `||`. cargo-mutants
 generates no mutant for the condition that decides the second stamping; the
 count test and the breaks above pin it both ways.
+
+**Repaired a tenth time, on a tenth review — 26 September 2026.** One
+should-fix and two nits were upheld against `8e5d3a89`, the commit that
+carried the ninth repair's record. The text above is kept as it was written,
+except the sentences of the ninth repair this names as corrected in place,
+new in this piece, and AF-28k and AF-28l, rows new in this piece, which are
+corrected in place too. The four findings the eighth repair took from the
+adversarial passes were reported resolved by the same review.
+
+- *A cost the ninth repair's log line made false was still stated, and
+  restated as true.* `refuse_contradicted_absences`'s doc said "One index
+  into the stamps and one [`stamp_could_read`] per row, and no syscall"
+  after `0d1289b1` put a `telemetry::emit_if!` at `Warn` inside its loop,
+  once per row it changes. Where a sink is installed whose floor admits the
+  line, `Sink::emit_for_run` takes the sink's lock
+  (`self.inner.lock()`) and appends the line
+  (`inner.target.append(&inner.buf)`), which for the `FileTarget` that
+  `Sink::open` gives every installed sink is `self.file.write_all(bytes)`.
+  The ninth repair's "What that makes wrong above" called the eighth
+  repair's "no syscall" "the cost of `refuse_contradicted_absences` alone",
+  and `docs/06-limits.md`'s ninth correction stated no cost for the line.
+- **Decided: the line stays, and its cost is stated.** The review offered
+  moving the log out of the loop instead. The line is what puts the reason
+  such a row is served unreadable into `/logs`, which was the ninth repair's
+  nit, and written by a caller it would be the same write on the same miss.
+  `refuse_contradicted_absences`'s doc has a "What it costs" section: a row
+  it leaves unchanged costs one index into the stamps and one
+  `stamp_could_read`, and no syscall; a row it changes also costs its line,
+  the level check alone when no sink is installed or the floor for
+  `api.census` is above `Warn`, and otherwise the sink's lock and a
+  `write_all` of the line to its log file, after a rotation when the line
+  would carry the current file past its bound; at most one line per feed per
+  call. Corrected in place: the ninth repair's bullet on the eighth
+  repair's cost, and, in `docs/06-limits.md`'s ninth correction, its opening,
+  with a new last bullet, "What that line costs".
+  `what_refusing_an_absence_costs_is_what_its_doc_says` reads the function
+  off `server.rs`: one `emit_if!`, inside the branch that changes a row; the
+  code before that branch calls only `get`, `is_some_and` and
+  `stamp_could_read`; `stamp_could_read` names no `fs::` call, no
+  `metadata` and no `emit`; every sentence of the doc that says "no
+  syscall" is about a row left unchanged; and the doc names the
+  `write_all`. `an_absence_its_stamps_contradict_is_logged_at_warn` gains a
+  case with the root in place throughout, in which no row is changed and no
+  line is written. AF-28l names both.
+- *AF-28k and the ninth repair said more than the code about when a miss is
+  stamped again.* A nit, and true. `census_now_stamping` stamps again only
+  when a row is still absent after `refuse_contradicted_absences` has been
+  asked with the stamps taken before the read. When those stamps contradict
+  every absence, each is served unreadable there and the miss is stamped
+  once. AF-28k said "A miss whose read has a row absent is now stamped again
+  after it" and "twice when one does", and the ninth repair's cost sentence
+  said "on a miss whose read has a row absent". The review stamped
+  `nifty_store` with its root moved aside and read it with the root back:
+  four rows read absent, all four were served unreadable, and it was stamped
+  once. **Decided:** those sentences say a read that still has a row absent
+  after the stamps taken before it, corrected in place, and
+  `a_miss_is_stamped_again_only_when_a_row_reads_absent` adds the review's
+  case: the store reads four rows absent, is served
+  `["unreadable", "held", "unreadable", "unreadable", "unreadable"]`, and is
+  stamped once. `docs/06-limits.md`'s ninth correction counts it in "Its
+  cost".
+
+**Still not done.** The items of the fifth to ninth repairs' lists stand as
+written. One more, which this repair does not fix:
+
+- *A FIFO at a manifest path holds the census read.* The review's third
+  item, a nit it reported for a follow-up and not as a regression of this
+  entry. `census::sized` stats the path and then calls `std::fs::read`, and
+  with a FIFO at Groww's manifest path the review's probe found
+  `census_now_stamped` still waiting after five seconds. `sized` is
+  byte-identical on `96194c11` and on this tree (`shasum` of its body gives
+  `150da636` on both), outside this piece's diff, and both adversarial votes
+  on the same finding placed it on `main`. Refusing a manifest path that is
+  not a regular file by name, as the review proposes, meets a socket there
+  too, which AF-28j's test uses as the fault the census cache declines, and
+  the review leaves open whether a socket should stay `Fault::Io`; so it is
+  left to a change of its own, as the review suggested.
+
+**Rejected.**
+
+- *Moving the log line out of `refuse_contradicted_absences`*, the review's
+  other option. See "Decided: the line stays" above.
+
+The cost test was first run with this repair's tests in place and
+`refuse_contradicted_absences`'s doc as `8e5d3a89` has it: it failed at "One
+index into the stamps and one [`stamp_could_read`] per row, and no syscall",
+and the two extended tests passed, the code they pin being already as they
+require. Then one build took two mutations made in `server.rs` together,
+the tree restored afterwards by `git checkout` and compared equal to
+`b8dc1c4f` (`git diff HEAD --quiet`): the second stamping decided by the
+read as it came back, before the first refusal, which is the rule the old
+sentences of AF-28k described; and the `emit_if!` moved out of the branch,
+so every row is logged. The whole `api` lib had 1,214 passed, 3 failed and
+2 ignored. The 3:
+
+- `a_miss_is_stamped_again_only_when_a_row_reads_absent`, at "and none left
+  standing to stamp again", 2 stampings against 1;
+- `an_absence_its_stamps_contradict_is_logged_at_warn`, at the root-in-place
+  case, ten lines, two for each feed, against none;
+- `what_refusing_an_absence_costs_is_what_its_doc_says`, at "the line is
+  written only for a row this changes".
+
+**Verified (tenth repair)** on this tree (arm64 laptop,
+`CARGO_BUILD_JOBS=3`, `--locked --offline`, the machine's load average read
+between 15 and 98 from other work). `cargo fmt --all --check` is clean.
+`cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
+is clean. `Cargo.lock` is byte-identical to `main`'s, and `web/` is
+untouched. The `api` suite ran outside the command sandbox. Its lib has
+1,217 passed, 0 failed and 2 ignored: the ninth repair's 1,216 and the one
+test this repair adds. `src/main.rs` has 2 passed, `tests/binary.rs` 3 and
+the doctest 1. `core`'s whole suite, which reads these documents, passes.
+Every shell gate of CI's Gate 1+2 job except 1e passes, Gates 10, 11, 12, 14
+and 23 among them.
+
+cargo-mutants 26.2.0 lists no mutant in this repair's source diff,
+`8e5d3a89` to `b8dc1c4f` ("No mutants to filter"): `server.rs` changed only
+in doc comments there, and the rest is `census_request_tests.rs`. Over the
+whole piece's source diff, `eecca4da` to `b8dc1c4f`, it lists 84 mutants,
+the same 84, compared by file, function and replacement with the line and
+column left out, as the ninth repair's run above, in which none was missed
+or timed out. That run was not repeated. A run on this tree, with
+`--cap-lints true`, two jobs, the `api` lib as the test set run by
+`cargo test`, and `TMPDIR` set to this workflow's cargo-mutants directory,
+took the five of those mutants in `refuse_contradicted_absences` and
+`census_now_stamping` (`-F 'refuse_contradicted_absences|census_now_stamping'`).
+Its unmutated
+baseline passed, 1,217 tests. Of the five, 4 were caught and 1 was
+unviable, and none was missed or timed out. Caught: the function replaced
+with `()`, its `&&` made `||` and its `!` deleted, and the `!` deleted in
+`census_now_stamping`; the first was caught by 10 tests, among them the
+three this repair changes. The unviable one puts `Default::default()` in
+`census_now_stamping`'s return value.
