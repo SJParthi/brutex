@@ -465,13 +465,7 @@ fn an_overlay_is_not_a_bar_file_and_no_reader_can_take_it_for_one() {
     assert_eq!(Layout::OVERLAY.record_stride(), OVERLAY_STRIDE);
 }
 
-/// **AN ABSENT VALUE AND A ZERO ARE DIFFERENT, AND STAY DIFFERENT.**
-///
-/// Both overlay fields carry real readings where zero is meaningful: a spot of
-/// zero is impossible, but an implied volatility genuinely can be, and a
-/// deep-out-of-the-money option late in its life is exactly where it happens.
-/// Reading "the vendor sent nothing" as "the vendor sent zero" would put a
-/// fabricated 0% volatility into a backtest and it would look like data.
+/// Every truncated overlay record refuses; a complete record retains its values.
 #[test]
 fn an_overlay_decoder_refuses_every_truncated_record_without_zero_filling() {
     use store::format::{FormatError, OI_NULL, Overlay};
@@ -495,6 +489,13 @@ fn an_overlay_decoder_refuses_every_truncated_record_without_zero_filling() {
     assert_eq!(Overlay::decode(&followed), Ok(overlay));
 }
 
+/// **AN ABSENT VALUE AND A ZERO ARE DIFFERENT, AND STAY DIFFERENT.**
+///
+/// Both overlay fields carry real readings where zero is meaningful: a spot of
+/// zero is impossible, but an implied volatility genuinely can be, and a
+/// deep-out-of-the-money option late in its life is exactly where it happens.
+/// Reading "the vendor sent nothing" as "the vendor sent zero" would put a
+/// fabricated 0% volatility into a backtest and it would look like data.
 #[test]
 fn an_overlay_tells_an_absent_reading_from_a_zero_one() {
     use store::format::{OI_NULL, Overlay};

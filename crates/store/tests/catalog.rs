@@ -102,11 +102,7 @@ fn one_spot_month_is_found_with_its_segments_intact() {
     assert!(out.census.reconciles());
 }
 
-/// **Every refusal is reachable, and the census adds up over all of them.**
-///
-/// The row `catalog`'s header points at. One store carrying every outcome at
-/// once, because a census that reconciles on a clean tree proves nothing about
-/// the arithmetic — the buckets have to be non-zero together.
+/// Malformed month spellings remain counted and preserved beside a valid month.
 #[test]
 fn malformed_month_names_cannot_masquerade_as_a_canonical_held_month() {
     let root = scratch("month-spelling");
@@ -137,6 +133,11 @@ fn malformed_month_names_cannot_masquerade_as_a_canonical_held_month() {
     assert_eq!(repeated.held, found.held);
 }
 
+/// **Every refusal is reachable, and the census adds up over all of them.**
+///
+/// The row `catalog`'s header points at. One store carrying every outcome at
+/// once, because a census that reconciles on a clean tree proves nothing about
+/// the arithmetic — the buckets have to be non-zero together.
 #[test]
 fn the_census_reconciles_over_a_store_holding_every_refusal() {
     let root = scratch("every");
