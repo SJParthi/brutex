@@ -39305,6 +39305,17 @@ line, and the proof paragraph.
    `a_comment_or_a_word_holding_lock_is_not_a_lock_call` holds it to such
    lines. The last step of item 4's open test was a re-read, which a leaked
    shared lock does not refuse; item 4 says what replaced it.
+8. *A skip taken on any refusal.* `cited_commits.rs` skipped its history
+   checks whenever `git rev-parse --git-dir` failed, and printed that the tree
+   was no git work tree. A review ran it in a work tree under a `GIT_DIR`
+   naming nothing: it printed that, and passed with every history check
+   skipped. It now skips only where `git` cannot be run and where the tree's
+   root holds no `.git`. Where the root holds one and that call fails, the
+   test fails with git's own words.
+   `cited_commits::only_a_tree_with_no_git_dir_skips_the_history` gives it a
+   tree with no `.git`, which it must skip, and a `.git` file naming a
+   directory that does not exist, which it must refuse. Under the old check
+   that test fails.
 
 ### D-0694 — Say corporate actions are unchecked on every stock report, and withhold holed sessions on the ordinary stored sweep — 2026-09-23
 
