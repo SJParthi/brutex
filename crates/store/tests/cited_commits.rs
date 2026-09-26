@@ -17,8 +17,9 @@
 //! this branch's own commits, which the texts then cited as its copies of
 //! those measurements. `main` takes squash merges (`auto-merge.yml` runs
 //! `gh pr merge` with `--squash`), so none of those commits ever becomes an
-//! ancestor of `main`. After the merge they passed only while this branch
-//! stayed on the remote, and in a clone without it `main`'s own suite failed.
+//! ancestor of `main`. After the merge they would pass only while this
+//! branch stayed on the remote: a review ran the first version on a squash of
+//! this branch onto `main`, and it refused five citations there.
 //!
 //! # What it reads
 //!
@@ -42,9 +43,11 @@
 //!
 //! # What passes
 //!
-//! A citation of an ancestor of `refs/remotes/origin/main`. That history is
-//! the one a squash merge keeps, so the answer is the same before this
-//! branch merges and after, and no other branch has to stay on the remote.
+//! A citation of an ancestor of `refs/remotes/origin/main`. A squash merge
+//! makes no commit of the merged branch an ancestor of it, so a citation of
+//! one passes here only as a listed commit, on the branch as it would on
+//! `main`, and no other branch has to stay on the remote for a citation to
+//! pass.
 //! `core/tests/findings.rs` holds its ledger's commits to the same ref for
 //! the same reason (D-0680).
 //!
