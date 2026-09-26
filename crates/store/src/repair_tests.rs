@@ -11,18 +11,24 @@
 //! replaced by a plain drop (whose `Drop` unlocks and only logs), left every
 //! store test green. These two drive each branch through the public call.
 //!
+//! Each then asks for the refused lock exclusively, on a fresh open file
+//! description. A re-read or a retry takes the lock shared, and a shared lock
+//! is granted beside one that a refused release left held on a leaked
+//! descriptor, so neither can show that the refusal took nothing with it.
+//!
 //! Each holds `crate::emits::hold_the_sink()`: `publish` appends, and an
 //! append emits `store.append` into whatever sink the binary installed.
 
-use std::fs;
+use std::fs::{self, File, TryLockError};
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use brutex_core::vendor::Vendor;
 
 use super::{Published, RepairError, Revision, RevisionReader, publish};
 use crate::file::BarFile;
+use crate::flock::Flock;
 use crate::flock::tests::refuse_unlock;
 use crate::format::{Bar, OI_NULL};
 use crate::header::Header;
@@ -91,6 +97,26 @@ fn revision() -> Revision {
     Revision::new(1).expect("ordinal 1")
 }
 
+/// Whether another holder could take `lock` exclusively now.
+///
+/// A fresh open file description asks for the exclusive lock without
+/// waiting, and releases what it took. A shared holder refuses an exclusive
+/// request as an exclusive holder does, so a refused release whose lock
+/// outlived the call, on a descriptor still open anywhere, makes this
+/// `false`. A shared request would be granted beside that shared lock, which
+/// is why a re-read cannot show it.
+fn free(lock: &Path) -> bool {
+    let file = File::open(lock).expect("the lock file opens");
+    match Flock::try_lock(file, lock) {
+        Ok(held) => {
+            held.release().expect("the probe releases what it took");
+            true
+        }
+        Err(TryLockError::WouldBlock) => false,
+        Err(TryLockError::Error(why)) => panic!("the probe could not ask: {why}"),
+    }
+}
+
 /// The `index`-th one-minute bar of 2024-06-03, in paisa.
 fn bar(index: i64) -> Bar {
     Bar {
@@ -128,15 +154,20 @@ fn a_refused_source_release_after_the_write_says_the_publication_may_be_visible(
     let refused = fixture
         .publish(expected, &merged)
         .expect_err("the source lock's release was refused and publish must say so");
+    let source_lock = path().with_file(FileKind::Lock).to_path_buf(&fixture.root);
     assert_eq!(
         refused,
         RepairError::Io {
-            path: path().with_file(FileKind::Lock).to_path_buf(&fixture.root),
+            path: source_lock.clone(),
             operation: "release shared lock",
             kind: io::ErrorKind::PermissionDenied,
             publication_may_be_visible: true,
         },
         "the source release's refusal, with the host's kind, after the revision was written"
+    );
+    assert!(
+        free(&source_lock),
+        "the refusal kept the source lock: its guard's own descriptor must close with it"
     );
 
     let revised = fixture
@@ -181,17 +212,22 @@ fn a_refused_release_when_a_revision_is_opened_says_nothing_was_published() {
         .read()
         .expect_err("the revision lock's release was refused and open must say so");
     let revision_root = fixture.root.join("bar-revisions-v1").join("1");
+    let revision_lock = path().with_file(FileKind::Lock).to_path_buf(&revision_root);
     assert_eq!(
         refused,
         RepairError::Io {
-            path: path().with_file(FileKind::Lock).to_path_buf(&revision_root),
+            path: revision_lock.clone(),
             operation: "release shared lock",
             kind: io::ErrorKind::PermissionDenied,
             publication_may_be_visible: false,
         },
         "the revision lock's refusal, with the host's kind, on a read"
     );
+    assert!(
+        free(&revision_lock),
+        "the refusal kept the revision lock: its guard's own descriptor must close with it"
+    );
     fixture
         .read()
-        .expect("the refusal took nothing: the guard's own descriptor closed with it");
+        .expect("the revision reads once the refused open has returned");
 }

@@ -39260,8 +39260,13 @@ line, and the proof paragraph.
    `publish` says `publication_may_be_visible: true`, and the revision then
    reads back whole and a retry is `Reused`. One in `RevisionReader::open`
    says `false`. With either flag flipped, or either release replaced by a
-   drop, its test fails. `docs/06-limits.md` says which refusal arms no test
-   drives.
+   drop, its test fails. Each test then asks a fresh open file description
+   for the refused lock exclusively and requires it granted. A re-read takes
+   the lock shared, which a shared lock left held beside it does not refuse,
+   so a release that kept a duplicate of the locked descriptor open when
+   refused passed every `store` test until the exclusive request was added,
+   and now fails the test of its branch. `docs/06-limits.md` says which
+   refusal arms no test drives.
 5. *`emits.rs`'s count.* Its header, rewritten for the ninth site, said three
    of the eight failure emits were not refusals and five handed back a
    `FormatError`. The `store.header` fall-back returns an older generation's
