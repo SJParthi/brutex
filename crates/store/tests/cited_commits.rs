@@ -203,17 +203,25 @@ fn history_is_here() -> bool {
 
 /// Whether history can be asked about in the tree whose root is `root`.
 ///
-/// It skips only where `git` cannot be run and where `root` holds no `.git`.
+/// It skips only where `git` cannot be run and where `root` holds no `.git`,
+/// which is where looking up `.git` itself, not what it names, finds nothing.
 /// Where `root` holds one and `git rev-parse --git-dir` fails there, as it
-/// does under a `GIT_DIR` naming nothing or with a `.git` pointing nowhere,
-/// it fails with git's own words: a skip there would pass every history
-/// check unread. It refuses a shallow clone and a clone without [`MAIN`].
+/// does under a `GIT_DIR` naming nothing or with a `.git` file or symlink
+/// pointing nowhere, it fails with git's own words: a skip there would pass
+/// every history check unread. That call is made with
+/// `GIT_CEILING_DIRECTORIES` set to `root`'s parent, so `git` does not walk
+/// up past a `.git` it cannot read to a repository enclosing `root`. It
+/// refuses a shallow clone and a clone without [`MAIN`].
 fn history_is_at(root: &Path) -> bool {
     if let Err(why) = Command::new("git").arg("--version").output() {
         println!("SKIPPING: `git` cannot be run here ({why}), so no commit can be resolved.");
         return false;
     }
-    if !root.join(".git").exists() {
+    let absent = matches!(
+        std::fs::symlink_metadata(root.join(".git")),
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound
+    );
+    if absent {
         println!(
             "SKIPPING: {} holds no `.git`, so no commit can be resolved. This is \
              what `cargo-mutants` looks like: it copies the tree without `.git`.",
@@ -221,12 +229,12 @@ fn history_is_at(root: &Path) -> bool {
         );
         return false;
     }
-    let asked = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["rev-parse", "--git-dir"])
-        .output()
-        .expect("`git` ran a moment ago");
+    let mut ask = Command::new("git");
+    ask.arg("-C").arg(root).args(["rev-parse", "--git-dir"]);
+    if let Some(above) = root.parent() {
+        ask.env("GIT_CEILING_DIRECTORIES", above);
+    }
+    let asked = ask.output().expect("`git` ran a moment ago");
     assert!(
         asked.status.success(),
         "{} holds a `.git`, and `git rev-parse --git-dir` failed there, so no commit \
@@ -265,6 +273,10 @@ fn scratch_root(tag: &str) -> PathBuf {
 /// nothing, printed that it was no git work tree and passed with every
 /// history check skipped. A `.git` file pointing at a directory that does not
 /// exist is the same refusal, made without touching the environment.
+///
+/// So is a `.git` symlink naming nothing. `Path::exists` follows a symlink,
+/// so the presence check once read that `.git` as absent, printed that the
+/// tree held none and passed with every history check skipped.
 #[test]
 fn only_a_tree_with_no_git_dir_skips_the_history() {
     let bare = scratch_root("bare");
@@ -289,6 +301,19 @@ fn only_a_tree_with_no_git_dir_skips_the_history() {
         "the failure names the tree's `.git` and carries git's words: {said}"
     );
     std::fs::remove_dir_all(&broken).expect("the scratch root is removed");
+
+    let dangling = scratch_root("dangling");
+    std::os::unix::fs::symlink(dangling.join("nowhere"), dangling.join(".git"))
+        .expect("a `.git` symlink naming nothing");
+    let refused = std::panic::catch_unwind(|| history_is_at(&dangling))
+        .expect_err("a `.git` symlink naming nothing must fail, not skip");
+    let said = refused.downcast_ref::<String>().map_or("", String::as_str);
+    assert!(
+        said.contains("holds a `.git`, and `git rev-parse --git-dir` failed there")
+            && said.contains("not a git repository"),
+        "the failure names the tree's `.git` and carries git's words: {said}"
+    );
+    std::fs::remove_dir_all(&dangling).expect("the scratch root is removed");
 }
 
 /// Whether `commit` names a commit in this clone.
