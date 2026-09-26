@@ -140,6 +140,25 @@ entering this API. No throughput or durability latency measurement is claimed.
 | Receipt/header damage and missing revised CRC cannot silently serve | `receipt_corruption_changed_headers_and_missing_crc_refuse` |
 | Competing publishers cannot mix a pair | `competing_publishers_cannot_mix_rows_or_checksums` |
 
+### Private directory-creation refusal — 27 September 2026 proof follow-up
+
+`repair::tests::a_post_preflight_directory_obstruction_refuses_without_publication`
+first performs the existing source/batch preflight with real shared source
+locks, then creates a regular-file obstruction in the revision directory tree.
+The unchanged private `write_revision` body returns `NotADirectory` naming
+`create revision directories`, the exact requested directory, and
+`publication_may_be_visible: false`. Source/CRC/lock and obstruction bytes
+remain unchanged; revision data, CRC, lock, reservation and receipt paths each
+return the expected obstruction error.
+
+The source remains locked until the test releases its explicit lock owner.
+Removing only the injected obstruction then permits public `publish` to return
+`Created`, and the reader returns all four merged rows exactly while preserving
+the original source bytes. This is a real filesystem failure at the private
+write boundary, followed by a public success control. It does not exercise
+public `publish`'s failure/release path, a scheduled race, a receipt/sync fault
+or power-loss durability. No production hook or publication policy changed.
+
 The main agent must allocate an append-only decision entry and invariant IDs
 in the shared documents; this work explicitly does not edit those files. The
 decision to record is: bounded explicit V1 revisions, unchanged bar V2 geometry,

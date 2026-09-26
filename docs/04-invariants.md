@@ -50,6 +50,25 @@ the crate where the gap matters, and `docs/06-limits.md` §18 records the rest.
 
 ---
 
+## Crate graph verification — parser proof follow-up, 27 September 2026
+
+`crates/core/tests/graph.rs` compares the documented graph with the manifests
+and checks its existing topology obligations. These additional fixtures test
+the scanners that supply that comparison; they do not change any crate arrow.
+
+| Existing scanner contract | Executable proof in `core::graph` |
+|---|---|
+| A following package or dependency header retains the preceding named dependency, including its package rename; the final entry also survives EOF | `named_dependencies_survive_following_package_and_dependency_headers` |
+| A line without `=` contributes no declaration and preserves valid neighbors | `a_dependency_line_without_equals_is_omitted` |
+| Empty dependency names do not become declarations, even through a package rename; both raw declarations and resolved sets are compared | `empty_dependency_names_are_omitted_before_package_resolution` |
+| Short rows naming a real member do not hide or invent graph rows | `short_document_rows_do_not_hide_or_invent_graph_members` |
+| A complete row naming an unknown member is omitted while both valid neighbors and their edge remain | `unknown_document_members_do_not_enter_the_graph` |
+
+The original document parser still receives `ARCHITECTURE`; supplied text is
+a seam inside this integration test. Malformed manifest snippets characterize
+the existing scanner's omissions, not Cargo acceptance of invalid TOML. These
+fixtures do not turn the scanners into complete TOML or Markdown parsers.
+
 ## Store
 
 | # | Must hold | Proven by | |
@@ -84,6 +103,28 @@ the crate where the gap matters, and `docs/06-limits.md` §18 records the rest.
 | S-28 | **A non-finite derivative never reaches the disk.** `Overlay::is_sane` answers `true` because a spot and a volatility constrain nothing about one another and an all-zero row is a legal reading. A greeks row is different: a `NaN` delta is not a reading at all, and it looks exactly like a real one until it is multiplied by something. Refused at the write boundary, across all seven float fields | `store::geometry::a_non_finite_derivative_is_refused_at_the_write_boundary` | ✓ |
 | S-29 | **Three geometries are told apart by magic, stride AND version, pairwise.** `.bin` is 56 bytes at version 2, `.ovl` is 24 at version 9, `.grk` is 80 at version 8. A shared version makes resolution pick whichever row is first; a shared stride makes two geometries indistinguishable to a reader that resolved correctly. Asserted as a property over the whole of `Layout::KNOWN` rather than as a pair, so a fourth row is checked against all three. **All three are IN `KNOWN`** — excluding a sidecar was tried and moves the problem: `Header::decode_parts` resolves a version while decoding, before any caller names a table, so a sidecar outside the list is `UnknownVersion` at its own first byte. What separates them is `file::table_of`, chosen by file kind | `store::unit::the_constants_are_the_current_versions_layout` · `store::geometry::three_geometries_are_told_apart_by_magic_stride_and_version` | ✓ |
 | S-26 | **A month the renderer writes always parses back.** `YearMonth`'s `Display` is `{:04}-{:02}` and `catalog::parse_month` is its inverse, checked over a decade — 120 months, both halves — so a change to either fails the build rather than leaving a store that cannot be listed. Width is checked before value: `2026-8` is refused, because accepting it would let a hand-made directory pass as one the writer produced | `store::catalog::every_month_the_renderer_writes_parses_back` | ✓ |
+
+### Store proof follow-up — 27 September 2026
+
+These fixtures strengthen the current replay, layout and catalog proofs. The
+historical store rows above retain their original descriptions; current
+record-family checksum isolation is also recorded by CIRO-64 below.
+
+| Existing contract exercised | Executable proof |
+|---|---|
+| Partial overlap appends only the suffix for bars, overlays and Greeks; excessive old overlap refuses and preserves committed bytes and rows | `store::file::sidecar_checksum_tests::partial_replays_append_only_the_suffix_for_every_record_family`; `store::file::sidecar_checksum_tests::a_replay_cannot_drop_more_old_rows_than_the_file_actually_holds` |
+| Wrong record width and exhausted generation refuse without changing committed data | `store::file::sidecar_checksum_tests::a_wrong_record_width_is_refused_before_any_committed_bytes_move`; `store::file::sidecar_checksum_tests::the_last_generation_refuses_a_following_append_without_recursing_or_writing` |
+| Ordinary reads name actual lock/checksum open failures, preserve source and affected siblings, and recover after restoration | `store::file::sidecar_checksum_tests::ordinary_read_refuses_unopenable_lock_and_checksum_siblings_without_writes` |
+| Integrity and batch diagnostics retain their specific evidence | `store::file::sidecar_checksum_tests::integrity_and_batch_errors_render_the_evidence_needed_to_diagnose_them` |
+| Every overlay record shorter than 24 bytes refuses with its exact length; a full record decodes without consuming trailing bytes | `store::geometry::an_overlay_decoder_refuses_every_truncated_record_without_zero_filling` |
+| Unknown file identity outranks slot damage in either tested slot order | `store::unit::a_file_identity_refusal_outranks_slot_damage_in_either_slot_order` |
+| Path formatting propagates an insufficient output sink and succeeds at exact capacity | `store::unit::a_store_path_propagates_a_refused_output_sink` |
+| Malformed month spellings remain malformed and preserved; only the canonical control is held, with repeatable census results | `store::catalog::malformed_month_names_cannot_masquerade_as_a_canonical_held_month` |
+| Negative high and close are supplied independently while other fields remain unchanged | Strengthened `store::unit::negative_prices_are_not_sane_however_well_ordered` |
+
+The negative-price comparisons overlap with ordering refusals; these fixtures
+do not establish a distinct non-equivalent killed mutant for each sign check.
+Branch execution is not a mutation result or a complete coverage measurement.
 
 ## The batch sweep — `cli sweep-all`, every stored month in one run
 
@@ -519,6 +560,14 @@ I-38 is taken, by the NSE series tables section near the end of this file.
 I-39 added by the gate 12 sweep: `crates/core/src/symbol.rs` and
 `crates/core/src/instrument.rs` had both rested an O(1) dedup claim on the field
 being fixed-width, and nothing measured it in either direction.
+
+The same I-39 test now reads the counting hasher through `Hasher::finish`,
+requires at least `SYMBOL_CAPACITY` bytes for a symbol, and requires a whole
+`InstrumentKey` to feed more bytes than that symbol. These necessary count
+conditions reject a vacuous zero counter and a constant finish result; they do
+not prove that every byte or every identity field participates. The original
+same-width assertions and separate identity tests remain. The fixed-width
+measurement does not measure the whole deduplication algorithm.
 
 ## The equity gate after D-0025, and the refusal after D-0026
 
@@ -4081,6 +4130,25 @@ and competing publishers. See `crates/store/REPAIR.md` for the exact test-to-rul
 table and remaining production-promotion and physical-fault limits. These tests
 do not establish power-loss guarantees, 100% coverage or a live-store migration.
 
+The additional `store::repair::tests` fixtures exercise the same revision
+contract through generated records and real filesystem refusals:
+
+| Existing contract exercised | Executable proof |
+|---|---|
+| Diagnostic text retains reason, path, operation and publication visibility | `repair_refusals_name_the_reason_path_and_publication_visibility` |
+| A receipt carrying a valid foreign source identity refuses without changing bytes | `a_receipt_for_another_source_symbol_or_timeframe_is_refused_without_writes` |
+| A valid CRC does not make duplicate or decreasing source timestamps ordered; refusal leaves no reservation | `a_checksum_valid_source_with_nonincreasing_timestamps_is_not_repaired` |
+| Unexplained revision siblings and receipts survive refusal | `every_unexplained_revision_sibling_and_receipt_is_preserved` |
+| An obstructed revision path returns its actual inspection failure before publication | `an_uninspectable_revision_path_is_a_named_nonpublication_refusal` |
+| An unopenable receipt refuses on read and retry; restoring it permits exact reuse | `an_unopenable_receipt_is_named_and_never_replaced_on_read_or_retry` |
+| A directory obstruction after preflight reaches the private write body's actual directory-creation refusal, with visibility false and unchanged source/obstruction bytes | `a_post_preflight_directory_obstruction_refuses_without_publication` |
+
+The last fixture checks exact missing-output errors through the obstruction
+and the caller-owned source lock's lifetime, then removes the obstruction and
+requires a successful public publication and exact four-row readback. It does
+not drive the failure through public `publish` or prove that caller's failure
+release path. The cooperating-writer and physical-durability limits remain.
+
 `calendar::runtime_tests::observations_preserve_every_static_answer_and_both_unknown_bounds`
 proves observed dates cannot override static schedules or turn unknown bounds
 into certified sessions, including extreme day values.
@@ -4285,6 +4353,10 @@ coverage or approved institutional configuration.
 | Invariant | Executable proof |
 |---|---|
 | Cold audit authenticates exact header, data and CRC sidecar, including partial format blocks and physical extent | `store::checksum_audit` tests: record/CRC byte faults, block boundaries, replacement and missing/extra/truncated input matrices |
+| Normally readable overlay/Greek files cannot gain bar audit authority through either strict door; their bytes remain unchanged | `store::checksum_audit::tests::strict_audit_refuses_derived_record_families_through_both_public_doors` |
+| Replacing a held data, checksum or lock path cannot renew the old authority, even with identical bytes and both old/new regular inodes retained | `store::checksum_audit::tests::moving_each_held_file_aside_cannot_redirect_audited_authority_to_its_replacement` |
+| The canonical path is retained alongside the exact cold-audit evidence | Strengthened `store::checksum_audit::tests::full_audit_matches_exact_file_images_at_all_partial_block_boundaries` |
+| CRC truncation after the held snapshot makes the private cold-audit body name the actual checksum read at offset four, return no evidence and preserve post-fault bytes; exact restoration recovers the original evidence and all 74 rows | `store::checksum_audit::tests::a_post_snapshot_crc_truncation_names_the_read_and_preserves_faulted_bytes` |
 | Receipts are append-only, source-bound and cannot grant rows after any required byte or path changes | `exact_receipts_reopen_with_same_identity_and_keep_every_real_row`, `every_torn_prefix_recovers_only_by_appending_the_exact_suffix`, `warm_receipt_checks_refuse_every_fault_and_never_release_a_row` |
 | Visible complete receipt bytes are not authority while the publisher owns the exclusive lock; typed readers retain shared ownership | `visible_complete_bytes_are_not_durable_authority_while_a_publisher_holds_the_lock` |
 | Missing receipts, prior context, physical resource ceilings and FIFO paths refuse without replacement data or waiting for a pipe peer | `strict_input_caps_and_missing_prior_context_refuse_without_fallback`, `receipt_fifo_cannot_block_either_read_or_publication`, store bounded subprocess path tests |
@@ -4298,6 +4370,11 @@ coverage or approved institutional configuration.
 | Checksum completion cannot masquerade as sweep or financial completion | `web/tests/sweep-evidence.test.js` checksum-audit comparison regression |
 | Missing institutional policy exposes all 37 required choices before loading market spans for sizing, for both final selection and later replay | `ledger_v6::tests::missing_policy_refuses_before_ledger_v6_market_sizing`, `missing_policy_refuses_before_ledger_v6_replay_market_sizing` |
 | Checksum test fixtures cannot contaminate the process-wide production telemetry census | All seven `store::checksum_audit::tests::full_audit_matches_exact_file_images_at_all_partial_block_boundaries` retain the existing `emits::hold_the_sink` guard; `emits::every_emit_in_this_crate_reaches_the_log_through_its_production_call` still requires exactly seven real production emit sites |
+
+The post-snapshot CRC fixture deliberately models a noncooperating truncation
+at an existing private boundary. It proves that cold audit body refusal, not a
+public-opener interleaving, a warm-read race or arbitrary hostile-writer safety.
+The telemetry sink guard remains held throughout its real audit calls.
 
 This list identifies executable tests, not an assertion that every verification
 gate or every possible source/OS failure has passed. The dated verification
