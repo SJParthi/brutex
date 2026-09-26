@@ -43014,8 +43014,14 @@ changes what an operator reads, or the exit status a script sees, says so.
      stamped build. The `sweep-all` tests that read rows of a completed run
      (the two forging tests, the misfiled test, the continued walk and the
      stock note) now run beside a generated month that sweeps, and the
-     filter test reads its count from the refusal. AF-39's sentence about the
-     `60min` page is corrected in place, and AF-70 states the rule.
+     filter test reads its count from the refusal. The filter test had
+     asserted the census line's `3 spot instrument-month(s); 1 match`, and the
+     continued walk `1 refused`, which a refused run no longer prints; the
+     continued walk now asserts its own census line,
+     `store holds 6 spot instrument-month(s); 3 match this feed and rung`, and
+     `1 swept · 2 refused`, and the filter test that its store holds three
+     months. AF-39's sentence about the `60min` page is corrected in place,
+     and AF-70 states the rule.
 2. *An empty month on `sweep-stored`.* `stored_sweep_inputs` refused a month
    whose file exists and holds no record, the file a writer's open leaves
    before its first append, with "every signal session has a minute gap; no

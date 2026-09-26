@@ -940,6 +940,17 @@ mod tests {
             text.contains("\n1 swept · "),
             "and the walk swept on: {text}"
         );
+        // The census line and the tally, counted: the store's five generated
+        // NIFTY months and the unreadable one are held, three of them at this
+        // feed and rung, and the unreadable month is among the refused.
+        assert!(
+            text.contains("store holds 6 spot instrument-month(s); 3 match this feed and rung\n"),
+            "six held, three matched: {text}"
+        );
+        assert!(
+            text.contains("\n1 swept · 2 refused"),
+            "and counted: {text}"
+        );
         assert!(
             !text.contains("DOES NOT RECONCILE"),
             "one refusal still reconciles: {text}"
@@ -1146,9 +1157,11 @@ mod tests {
         }
         // Every month offered refuses, so the run is refused, and the
         // refusal counts what the filter offered (D-0696).
+        let held = store::catalog::walk(&root).expect("walked").census.spot;
         let why = sweep_under(&root, "groww", "1min", 100, "deadbeef")
             .expect_err("the one month offered refused");
         let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(held, 3, "premise: three months are held");
         assert!(
             why.starts_with(
                 "every one of the 1 month(s) offered refused, so nothing was swept. No \
