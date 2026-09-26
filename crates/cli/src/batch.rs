@@ -1518,6 +1518,24 @@ mod tests {
             text.contains("floor"),
             "and calls the depth a floor: {text}"
         );
+        let complete = Tally {
+            incomplete: 0,
+            ..tally
+        };
+        let text = render(
+            "groww",
+            "1min",
+            100,
+            "deadbeef",
+            "",
+            &store::catalog::Census::default(),
+            &complete,
+            &[],
+        );
+        assert!(
+            !text.contains("month(s) stopped on the candidate ceiling"),
+            "no month stopped, so no ceiling warning belongs in the report: {text}"
+        );
     }
 
     /// The report leads with the REAL-bars banner, never the generated one.

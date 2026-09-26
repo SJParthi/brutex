@@ -5271,3 +5271,9 @@ descriptor; the owned file's last close frees it when neither remains.
 `store::flock::tests::a_refused_drop_unlock_may_outlive_the_guard_but_an_owned_last_close_frees_it`
 drives each case and requires the Drop note's doc to say the lock may outlive
 the guard. The existing emits test pins the warning's message and level.
+
+### Batch ceiling-warning boundary — BA-04 follow-up (D-0696)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |

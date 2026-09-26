@@ -41502,6 +41502,19 @@ run identity term, lockfile, front-end file or market-data input is changed.
 The remaining full-suite, mutation and coverage measurements are kept in the
 operator's CLI repair evidence; this paragraph makes no completion claim.
 
+The subsequent 54-case CLI campaign found one surviving renderer mutation:
+`tally.incomplete > 0` changed to `>= 0`. The existing ceiling test checked
+one incomplete month but did not reject a ceiling-warning paragraph when the
+count was zero. Its fixture now also renders the same one-swept-month tally
+with zero incomplete months and requires that paragraph to be absent. The
+new assertion fails on the exact surviving mutation and passes when only the
+production comparison is restored. BA-04's original row is preserved; its
+append-only follow-up records both boundary outcomes. This is a test-only
+repair to an already-correct production condition. The original campaign's
+49 caught, one missed and four unviable outcomes remain recorded unchanged;
+the targeted failing/passing evidence is separate, not a second full campaign
+or a claim of integrated-source, full-module or coverage closure.
+
 ### D-0695 — Refuse the screen budget on every body route and before the run slot, and name an unreadable census on every census-backed GET route — 2026-09-24
 
 **Why this entry exists.** Commit `950ead28` ("Test the api half of the audit
