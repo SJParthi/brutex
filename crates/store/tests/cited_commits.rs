@@ -23,7 +23,7 @@
 //!
 //! # What it reads
 //!
-//! The D-0693 and D-0694 entries of `docs/05-decisions.md`, the whole of
+//! The D-0681, D-0682, D-0693 and D-0694 entries of `docs/05-decisions.md`, the whole of
 //! `docs/04-invariants.md` and `docs/06-limits.md`, and the comment lines of
 //! `crates/store/tests/tail_proof.rs`. Each is read as sentences, split after
 //! a full stop that a space follows, with every run of whitespace made one
@@ -124,7 +124,8 @@ impl Off {
 }
 
 /// Every commit the texts cite that `main` does not hold, and why.
-const NOT_ON_MAIN: [(&str, Off); 24] = [
+const NOT_ON_MAIN: [(&str, Off); 25] = [
+    ("79b9a1d5", Off::Neither),
     ("224b6760", Off::Neither),
     ("28c362c1", Off::Neither),
     ("da28ae95", Off::Neither),
@@ -155,7 +156,7 @@ const NOT_ON_MAIN: [(&str, Off); 24] = [
 const MAIN: &str = "refs/remotes/origin/main";
 
 /// The decisions this file reads, each up to the next entry's heading.
-const ENTRIES: [&str; 2] = ["D-0693", "D-0694"];
+const ENTRIES: [&str; 4] = ["D-0681", "D-0682", "D-0693", "D-0694"];
 
 /// The documents this file reads whole, from the repository root.
 const WHOLE: [&str; 2] = ["docs/04-invariants.md", "docs/06-limits.md"];

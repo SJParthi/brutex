@@ -37617,8 +37617,8 @@ match."*
    scope changes the header and the words of the strategy report's two ranked
    totals (see the correction below).
 2. `IndexSpot` prints the old header byte for byte. This was checked against
-   a render captured at `79b9a1d5` (`cmp` found no difference), and a test now
-   pins the header.
+   a render captured at `79b9a1d5`, which is in neither `main`'s history nor this
+   entry's branch (`cmp` found no difference), and a test now pins the header.
 3. `CashEquity` prints a header that says every total is **GROSS OF EVERY
    CHARGE**. It says that brokerage, STT, stamp duty, exchange charges, the
    SEBI fee and GST apply to a share trade; that this engine has no equity
@@ -37716,9 +37716,19 @@ It ran with `--cap-lints true` under nextest, on the full `runner` suite plus
 One unrelated `cli` test,
 `boolean_search_command::integration_tests::generated_search_recovers_same_ordinal_and_refuses_missing_ancestry`,
 hits its own 360-second child bound on this machine. It failed that way when
-run alone in this worktree, and again on an archived copy of `79b9a1d5` (that
-run partly overlapped a build). It touches no code this entry changes, and it
+run alone in this worktree, and again on an archived copy of `79b9a1d5`, which
+is in neither `main`'s history nor this entry's branch (that run partly
+overlapped a build). It touches no code this entry changes, and it
 was left out of the mutation run's test set.
+
+**Correction, 2026-09-26: the measurement's commit is outside both histories.**
+The two measurement sentences above now state that limitation at the citation.
+The measurements were not rerun or reassigned to another commit. The runner
+and CLI sources at that original commit are byte-identical to those at
+`8435d26c`, which is on `main`; this identifies inspectable source, not a new
+measurement. `store::cited_commits` now reads this entry and D-0682 as well as
+D-0693 and D-0694. Its `every_commit_the_store_records_cite_is_on_main_or_says_why_not`
+test failed on both unqualified sentences before their corrections.
 
 **Correction, 2026-09-25: a stock's strategy report said "net profit".** Item
 1 said the scope changes only the header, and a test held every byte below it
@@ -39277,7 +39287,7 @@ line, and the proof paragraph.
    from, are byte-identical to those of `fd70a1bd`, the parent of this
    change's first commit, so the run is cited to `fd70a1bd`, which `main`'s
    squash merge does not keep either. `crates/store/tests/cited_commits.rs`
-   holds every citation it recognises in this entry, D-0694,
+   holds every citation it recognises in D-0681, D-0682, this entry, D-0694,
    `docs/04-invariants.md`, `docs/06-limits.md` and the comments of
    `tail_proof.rs` to the history of `refs/remotes/origin/main`, unless its
    `NOT_ON_MAIN` lists the commit with the reason `main` does not hold it and
