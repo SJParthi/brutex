@@ -3770,12 +3770,15 @@ mod tests {
     /// and `server_budget_through_the_journal` that the environment refusal
     /// does. This counts the reason's own words in this file's production
     /// source, everything before `mod tests`, which includes `top_json` below
-    /// the first `#[cfg(test)]`. Before counting, a `\` that ends a line is
-    /// dropped with the newline and the next line's leading whitespace, as the
-    /// compiler drops them inside a string literal, and every other run of
-    /// whitespace is made one space. So a second copy of those words fails here
-    /// however its lines are wrapped, with a `\` or without one. A paraphrase,
-    /// or a copy assembled from pieces, is not counted.
+    /// the first `#[cfg(test)]`. Before counting, the `//!`, `///` or `//`
+    /// that opens a line is dropped, a `\` that ends a line is dropped with
+    /// the newline and the next line's leading whitespace, as the compiler
+    /// drops them inside a string literal, and every other run of whitespace
+    /// is made one space. So a second copy of those words fails here wrapped
+    /// across lines with a `\`, without one, or across the lines of a `//!`,
+    /// `///` or `//` comment. A paraphrase, a copy assembled from pieces, or a
+    /// copy wrapped behind any other mark that opens a line, such as the `*`
+    /// of a block comment, is not counted.
     #[test]
     fn the_budget_reason_is_worded_once() {
         let production = include_str!("sweeprun.rs")
@@ -3795,10 +3798,22 @@ mod tests {
         );
     }
 
-    /// `source` with each `\`-newline continuation and the whitespace after
-    /// it removed, and every other run of whitespace made one space.
+    /// `source` with the `//!`, `///` or `//` that opens a line removed, each
+    /// `\`-newline continuation and the whitespace after it removed, and
+    /// every other run of whitespace made one space.
     fn as_read(source: &str) -> String {
-        let mut pieces = source.split("\\\n");
+        let uncommented = source
+            .lines()
+            .map(|line| {
+                let line = line.trim_start();
+                ["//!", "///", "//"]
+                    .into_iter()
+                    .find_map(|marker| line.strip_prefix(marker))
+                    .unwrap_or(line)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut pieces = uncommented.split("\\\n");
         let mut joined = pieces.next().unwrap_or_default().to_owned();
         for piece in pieces {
             joined.push_str(piece.trim_start());
@@ -3806,7 +3821,8 @@ mod tests {
         joined.split_whitespace().collect::<Vec<_>>().join(" ")
     }
 
-    /// `as_read` joins what the compiler joins, and nothing else.
+    /// `as_read` joins what the compiler joins inside a string literal, and
+    /// the lines of a line comment, and nothing else.
     #[test]
     fn a_wrapped_copy_reads_as_one_line() {
         assert_eq!(
@@ -3815,6 +3831,22 @@ mod tests {
         );
         assert_eq!(as_read("first\\\n  second\\\nthird"), "firstsecondthird");
         assert_eq!(as_read("no continuation"), "no continuation");
+        // A LINE COMMENT'S LINES READ AS ONE, the marker that opens each line
+        // dropped, so a copy in a comment wrapped across lines is counted as a
+        // copy on one line is. A marker inside a line is kept. D-0695.
+        assert_eq!(
+            as_read("    /// wall-clock calibration the\n    //! run identity\n// cannot name"),
+            "wall-clock calibration the run identity cannot name"
+        );
+        assert_eq!(
+            as_read("call(); // wall-clock\n    //    calibration"),
+            "call(); // wall-clock calibration"
+        );
+        // Any other mark that opens a line is kept, and parts the words.
+        assert_eq!(
+            as_read("/* wall-clock\n * calibration */"),
+            "/* wall-clock * calibration */"
+        );
     }
 
     /// Every ordinary `POST /engine/command` word, as a good body names it.
