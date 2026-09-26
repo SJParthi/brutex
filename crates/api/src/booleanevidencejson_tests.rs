@@ -210,21 +210,47 @@ fn daily_and_weekly_pages_require_exact_setting_parent_pin_and_bounded_period_se
 /// refused, however it is spelled. A call under a condition, a loop or a
 /// closure is indented deeper and is not found. A `return` inside a closure
 /// before the call is refused too, though it leaves only the closure. A word
-/// inside a `"` string or after `//` is not code and is not read. The text
-/// after the call is not read, so a page built after it is not held to the
-/// call.
+/// inside a string or a line or nested block comment is not code: these are
+/// removed before locating the call as well as before checking returns. The
+/// text after the call is not checked for returns, so a page built after it
+/// is not held to the call. This remains a rustfmt/source-shape check, not a
+/// control-flow proof or a rendered-response fixture.
 pub(crate) fn on_every_page(body: &str, call: &str) -> bool {
-    body.split_once(&format!("\n    {call}"))
-        .is_some_and(|(before, _)| only_errors_return(&code_only(before)))
+    code_only(body)
+        .split_once(&format!("\n    {call}"))
+        .is_some_and(|(before, _)| only_errors_return(before))
 }
 
-/// `code` with the contents of every `"` string and every `//` comment
-/// removed. A `'"'` character literal would be read as opening a string; the
-/// bodies this is applied to hold none.
+/// `code` with cooked/raw string contents removed and line/nested block
+/// comments blanked, preserving comment newlines and indentation. Byte and C
+/// string prefixes leave the same quote or raw-string opener. This is not a
+/// Rust parser: a `'"'` character literal would be read as opening a string;
+/// the bodies this is applied to hold none.
 fn code_only(code: &str) -> String {
     let mut out = String::with_capacity(code.len());
     let mut chars = code.chars().peekable();
     while let Some(c) = chars.next() {
+        if c == 'r' {
+            let mut after = chars.clone();
+            let mut hashes = 0;
+            while after.next_if_eq(&'#').is_some() {
+                hashes += 1;
+            }
+            if after.next() == Some('"') {
+                chars = after;
+                while let Some(inner) = chars.next() {
+                    if inner == '"' {
+                        let mut end = chars.clone();
+                        if (0..hashes).all(|_| end.next() == Some('#')) {
+                            chars = end;
+                            break;
+                        }
+                    }
+                }
+                out.push_str("r\"\"");
+                continue;
+            }
+        }
         if c == '"' {
             out.push('"');
             while let Some(inner) = chars.next() {
@@ -238,10 +264,31 @@ fn code_only(code: &str) -> String {
             }
             out.push('"');
         } else if c == '/' && chars.peek() == Some(&'/') {
+            chars.next();
+            out.push_str("  ");
             for rest in chars.by_ref() {
+                out.push(if rest == '\n' { '\n' } else { ' ' });
                 if rest == '\n' {
-                    out.push('\n');
                     break;
+                }
+            }
+        } else if c == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            out.push_str("  ");
+            let mut depth = 1;
+            while let Some(inner) = chars.next() {
+                out.push(if inner == '\n' { '\n' } else { ' ' });
+                if inner == '/' && chars.peek() == Some(&'*') {
+                    chars.next();
+                    out.push(' ');
+                    depth += 1;
+                } else if inner == '*' && chars.peek() == Some(&'/') {
+                    chars.next();
+                    out.push(' ');
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
                 }
             }
         } else {
@@ -335,6 +382,92 @@ fn the_source_rule_refuses_every_early_return_but_an_error() {
         !on_every_page(&format!("\n    if pinned {{\n        {CALL}\n    }}"), CALL),
         "a call under a condition is not a statement of the body"
     );
+}
+
+/// Replace the one real statement in a source body with non-code that still
+/// spells it. These are source-predicate controls, not rendered responses.
+fn rejects_a_note_call_that_is_only_text(source: &str, function: &str, call: &str) {
+    let body = source
+        .split_once(&format!("\nfn {function}("))
+        .and_then(|(_, tail)| tail.split_once("\n}\n"))
+        .map(|(body, _)| body)
+        .unwrap();
+    assert!(on_every_page(body, call), "the actual {function} statement");
+    assert_eq!(body.matches(call).count(), 1, "one replacement site");
+    let mut admitted = Vec::new();
+    for (kind, replacement) in [
+        ("block comment", format!("/*\n    {call}\n    */")),
+        (
+            "nested block comment",
+            format!("/* outer /* inner */\n    {call}\n    */"),
+        ),
+        (
+            "quoted string",
+            format!("let _ = \"an escaped \\\" quote\n    {call}\n    \";"),
+        ),
+        (
+            "raw string",
+            format!("let _ = r##\"an interior \" and \"#\n    {call}\n    \"##;"),
+        ),
+        (
+            "line comments",
+            call.lines()
+                .map(|line| format!("// {line}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+    ] {
+        if on_every_page(&body.replacen(call, &replacement, 1), call) {
+            admitted.push(kind);
+        }
+    }
+    assert!(
+        admitted.is_empty(),
+        "{function} accepted a note call only in: {admitted:?}"
+    );
+}
+
+#[test]
+fn the_source_rule_rejects_a_noncode_note_in_render_with_budget() {
+    rejects_a_note_call_that_is_only_text(
+        include_str!("booleanevidencejson.rs"),
+        "render_with_budget",
+        "crate::detail::put_equity_note(&mut body, equity_note(reader))?;",
+    );
+}
+
+#[test]
+fn the_source_rule_rejects_a_noncode_note_in_search_detail() {
+    rejects_a_note_call_that_is_only_text(
+        include_str!("booleansearchjson.rs"),
+        "detail",
+        "crate::detail::put_equity_note(\n        &mut body,\n        crate::booleanevidencejson::sources_note(source.original().statistics().sources()),\n    )?;",
+    );
+}
+
+#[test]
+fn the_source_rule_ignores_noncode_without_hiding_early_returns() {
+    const CALL: &str = "crate::detail::put_equity_note(&mut body, note)?;";
+    for hidden in [
+        "// return page; a quote \" and /* are comment text".to_owned(),
+        format!("/* a quote \" and // stay in this comment\n    {CALL}\n    return page; */"),
+        format!("/* outer /* inner */\n    {CALL}\n    return page; */"),
+        format!("let _ = \"an escaped \\\" quote /* and //\n    {CALL}\n    return page;\";"),
+        format!("let _ = r##\"a quote \" and \"#\n    {CALL}\n    return page;\"##;"),
+        format!("let _ = br#\"a quote \"\n    {CALL}\n    return page;\"#;"),
+        format!("let _ = cr\"\n    {CALL}\n    return page;\";"),
+    ] {
+        let body = |before: &str| format!("\n    {hidden}\n    {before}\n    {CALL}\n    Ok(body)");
+        assert!(on_every_page(&body(""), CALL), "non-code: {hidden}");
+        assert!(
+            on_every_page(&body("return Err(why);"), CALL),
+            "an early error remains allowed: {hidden}"
+        );
+        assert!(
+            !on_every_page(&body("return statistics(reader, asked);"), CALL),
+            "a non-code call must not hide a later page return: {hidden}"
+        );
+    }
 }
 
 /// **A statistics, admission or qualification page over a stock family
