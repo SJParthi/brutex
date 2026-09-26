@@ -28,7 +28,9 @@
 //! `crates/store/tests/tail_proof.rs`. Each is read as sentences, split after
 //! a full stop that a space follows, with every run of whitespace made one
 //! space and the comment markers `//!`, `///` and `//` dropped, so a phrase a
-//! comment wraps across lines reads whole.
+//! comment wraps across lines reads whole. Whole-sentence comparisons ignore
+//! one terminal full stop, including at end of file; they never accept a
+//! prefix, suffix or other substring as the existing sentence.
 //!
 //! A citation is a word of 7 to 12 hexadecimal characters, or of 40, holding
 //! at least one digit and one of `a` to `f`, with no letter, digit or
@@ -381,6 +383,12 @@ fn sentences(text: &str) -> Vec<String> {
     words(text).split(". ").map(str::to_owned).collect()
 }
 
+/// Splitting at `. ` removes the full stop except at end of file. Normalize
+/// that one remaining terminator before comparing complete sentences.
+fn sentence_body(sentence: &str) -> &str {
+    sentence.strip_suffix('.').unwrap_or(sentence)
+}
+
 /// The comment lines of a Rust source.
 fn comments(source: &str) -> String {
     source
@@ -520,7 +528,7 @@ fn history_faults_at(
     listing: &[(&str, Off)],
 ) -> Vec<String> {
     let mut faults = Vec::new();
-    let mut mains: BTreeMap<&str, String> = BTreeMap::new();
+    let mut mains: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
     for (commit, citing) in cited {
         let Some(off) = listed(listing, commit) else {
             if !is_ancestor_at(root, commit, main_ref) {
@@ -548,13 +556,16 @@ fn history_faults_at(
             let main = mains.entry(at.file).or_insert_with(|| {
                 let copy =
                     git_at(root, &["show", &format!("{main_ref}:{}", at.file)]).unwrap_or_default();
-                words(&if at.file == COMMENTED {
+                sentences(&if at.file == COMMENTED {
                     comments(&copy)
                 } else {
                     copy
                 })
+                .into_iter()
+                .map(|sentence| sentence_body(&sentence).to_owned())
+                .collect()
             });
-            if main.contains(&at.sentence) {
+            if main.contains(sentence_body(&at.sentence)) {
                 continue;
             }
             if off == Off::Squashed {
@@ -729,6 +740,68 @@ fn a_commit_listed_as_squashed_is_held_by_head_while_its_sentence_is_new() {
         &[(&head, Off::Squashed)],
     );
     assert!(!faults.is_empty(), "main does not exempt a new sentence");
+    std::fs::remove_dir_all(root).expect("fixture removed");
+}
+
+/// Main's exemption belongs to its whole sentence in the same file. A new
+/// prefix can remove a caveat, and a suffix can remove its subject; neither
+/// inherits that exemption. A final full stop and ordinary rewrapping do
+/// not change a sentence, including at the end of a file.
+#[test]
+fn main_text_exemptions_require_the_whole_sentence_in_the_same_file() {
+    if Command::new("git").arg("--version").output().is_err() {
+        println!("SKIPPING: git cannot run the synthetic history fixture");
+        return;
+    }
+    let root = scratch_root("whole-sentence");
+    fixture_git(&root, &["init", "--initial-branch=main"]);
+    std::fs::create_dir(root.join("docs")).expect("fixture docs");
+    let missing = "abcdef0123456789abcdef0123456789abcdef0123";
+    let prefix = format!(
+        "The audit at `{missing}` found no missed mutants; \
+         `main`'s squash merge does not keep this commit"
+    );
+    let whole = format!("{prefix}, but that measurement was withdrawn");
+    let elsewhere = format!("Only another file holds `{missing}`");
+    std::fs::write(
+        root.join("docs/06-limits.md"),
+        format!("Preamble. {}.\n", whole.replace("; ", ";\n")),
+    )
+    .expect("fixture limits");
+    std::fs::write(root.join("docs/04-invariants.md"), &elsewhere)
+        .expect("a different file's sentence");
+    fixture_git(&root, &["add", "."]);
+    fixture_git(&root, &["commit", "-m", "qualified measurement"]);
+    assert!(!resolves_at(&root, missing));
+    for reason in [Off::Squashed, Off::MainsOwnText] {
+        for original in [&whole, &format!("{whole}.")] {
+            let faults = history_faults_at(
+                &root,
+                "main",
+                &probe_citation(missing, original),
+                &[(missing, reason)],
+            );
+            assert!(faults.is_empty(), "same complete sentence: {faults:#?}");
+        }
+        for changed in [
+            prefix.clone(),
+            whole.trim_start_matches("The audit at ").to_owned(),
+            whole.replace("no missed mutants", "missed mutants"),
+            format!("{whole} with new words"),
+            elsewhere.clone(),
+        ] {
+            let faults = history_faults_at(
+                &root,
+                "main",
+                &probe_citation(missing, &changed),
+                &[(missing, reason)],
+            );
+            assert!(
+                !faults.is_empty(),
+                "{reason:?} must not exempt a changed sentence or another file: {changed}"
+            );
+        }
+    }
     std::fs::remove_dir_all(root).expect("fixture removed");
 }
 

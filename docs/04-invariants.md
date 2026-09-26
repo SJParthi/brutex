@@ -5234,6 +5234,16 @@ unrelated branch or a missing object is refused. Proven with an isolated Git
 history by
 `store::cited_commits::a_commit_listed_as_squashed_is_held_by_head_while_its_sentence_is_new`.
 
+The same-file exception compares complete normalized sentences, not substrings.
+Removing a trailing qualification, removing the subject, changing the claim,
+adding words, or copying another file's sentence gives no exemption under
+either `Squashed` or `MainsOwnText`. Whitespace rewrapping and one terminal full
+stop do not change the sentence, including at end of file. This retains the
+guard's stated full-stop-and-space sentence model; it is not a Markdown parser.
+Proved by
+`store::cited_commits::main_text_exemptions_require_the_whole_sentence_in_the_same_file`
+(D-0693).
+
 **AF-02 follow-up (D-0682):**
 `core::universe::tests::the_surface_counts_the_records_give_are_the_two_lists_counts`
 reads the applied `CLAUDE.md` §1 as well as the charter row and D-0682's

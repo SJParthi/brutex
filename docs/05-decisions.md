@@ -39415,6 +39415,21 @@ line, and the proof paragraph.
     fails. This fixture does not depend on the checkout's `HEAD` being off
     `main`, so the same check runs after this repair is squashed.
 
+    **Corrected 27 September 2026, on the independent tests-bite review.**
+    The initial exception used substring presence in main's file. A shortened
+    sentence could therefore discard a withdrawn-measurement caveat and still
+    inherit the exemption. The guard now compares complete normalized
+    sentences from that same file, ignoring one terminal full stop because
+    splitting at a full stop followed by a space already removes it elsewhere.
+    `main_text_exemptions_require_the_whole_sentence_in_the_same_file` checks
+    both `Squashed` and `MainsOwnText`: removing the caveat or subject, changing
+    the claim, extending it, and taking a sentence from another file all fail;
+    unchanged wording, rewrapping and an end-of-file full stop pass. The test
+    failed before the repair, all six citation tests passed after it, and a
+    separately compiled copy restoring substring acceptance failed the new
+    test again. The existing sentence/token recognition limits remain as
+    documented; this does not claim a complete Markdown or Git citation parser.
+
 ### D-0694 — Say corporate actions are unchecked on every stock report, and withhold holed sessions on the ordinary stored sweep — 2026-09-23
 
 **The gap (audit G16), in two halves.**
