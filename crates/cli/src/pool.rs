@@ -250,7 +250,8 @@ fn run(
 /// of its own by any phrasing that test lists.
 ///
 /// When every instrument on the surface refuses in pass 1, the page is not
-/// returned: [`at_least_one_screened`] refuses the verb instead (D-0696).
+/// returned: [`at_least_one_screened`] refuses the verb instead, with every
+/// instrument's reason and the head's `unread` blocks (D-0696).
 ///
 /// **The root is supplied for the head, the union and pass 2, not pass 1.**
 /// Pass 1 screens each instrument through `crate::one_rung`, exactly as
@@ -274,7 +275,7 @@ fn run_under(
     to: (u16, u8),
     support_ppm: Option<u64>,
 ) -> Result<String, String> {
-    let (mut out, surface) = head_under(root, vendor_word, rung, from, to, support_ppm)?;
+    let (mut out, surface, unread) = head_under(root, vendor_word, rung, from, to, support_ppm)?;
     if surface.is_empty() {
         return Ok(out);
     }
@@ -303,7 +304,7 @@ fn run_under(
             .with("screened", count(screened_ok))
             .with("refused", count(screened.len().saturating_sub(screened_ok))),
     );
-    at_least_one_screened(&screened)?;
+    at_least_one_screened(&screened, &unread)?;
     render_per_symbol(&mut out, &screened);
 
     // ── PASS 2: the union of every top combination, on every instrument ──
@@ -369,8 +370,15 @@ fn run_under(
 ///
 /// The catalog files a month only under a feed and a rung directory spelt
 /// exactly as this engine spells them, so the empty-surface line says what
-/// it found at that spelling, and [`not_catalogued`] counts the month files
+/// it found at that spelling, and [`not_catalogued`] counts the `.bin` files
 /// under any other (D-0696).
+///
+/// The third value is `unread`: the NOT ON THE SURFACE and NOT CATALOGUED
+/// blocks alone, exactly as the head carries them after the opening, so a
+/// pool that refuses in pass 1 still says what it did not read, without the
+/// banner (D-0696).
+/// A surface with only misfiled holdings refuses with these blocks before
+/// the opening is built. A store with no such holdings remains a page.
 fn head_under(
     root: &std::path::Path,
     vendor_word: &str,
@@ -378,16 +386,26 @@ fn head_under(
     from: (u16, u8),
     to: (u16, u8),
     support_ppm: Option<u64>,
-) -> Result<(String, Vec<String>), String> {
+) -> Result<(String, Vec<String>, String), String> {
     let vendor = crate::parse_vendor(vendor_word)?;
     let Surface {
         symbols: surface,
         elsewhere,
         unrecognised,
     } = surface_under(root, vendor, rung)?;
+    let mut unread = String::new();
+    not_on_the_surface(&mut unread, &elsewhere);
+    not_catalogued(&mut unread, unrecognised);
+    if surface.is_empty() && !elsewhere.is_empty() {
+        return Err(format!(
+            "no instrument is on the surface for {vendor_word} at {rung}; the catalog \
+             holds swept instruments only at paths their loads do not read. Nothing \
+             was screened or pooled.\n{}",
+            unread.trim_end()
+        ));
+    }
     let mut out = opening(vendor_word, rung, from, to, support_ppm, &surface);
-    not_on_the_surface(&mut out, &elsewhere);
-    not_catalogued(&mut out, unrecognised);
+    out.push_str(&unread);
     if surface.is_empty() {
         let _ = writeln!(
             out,
@@ -397,10 +415,10 @@ fn head_under(
              and nothing to pool. Nothing was read."
         );
     }
-    Ok((out, surface))
+    Ok((out, surface, unread))
 }
 
-/// The month files the catalog could not file because their feed or rung
+/// The `.bin` files at a month's depth the catalog could not file because their feed or rung
 /// directory is spelt as no feed or rung this engine knows, under the
 /// opening. Nothing when there are none. D-0696.
 ///
@@ -419,7 +437,7 @@ fn not_catalogued(out: &mut String, (feeds, rungs): (u64, u64)) {
     }
     let _ = writeln!(
         out,
-        "\n  NOT CATALOGUED: the store holds {feeds} month file(s) under a feed directory \
+        "\n  NOT CATALOGUED: the store holds {feeds} .bin file(s) at a month's depth under a feed directory \
          and {rungs} under a rung directory\n  whose name is no feed or rung this engine \
          knows, spelt exactly. None was screened or pooled.\n  On a case-insensitive \
          volume a directory spelt as a feed or rung in another case is the one a load\n  \
@@ -443,27 +461,36 @@ fn count(n: usize) -> u64 {
 /// `CLAUDE.md` §4 bans. The pool printed that banner, a `REFUSED` row for each
 /// instrument and "nothing to pool", and exited OK, because an indented
 /// `REFUSED` row is not a refusal to `carries_refusal` (found by a review).
-/// So when every instrument refused, the verb refuses, with the count and the
-/// first instrument's reason, and prints no page.
-fn at_least_one_screened(screened: &[Screened]) -> Result<(), String> {
-    let refused: Option<Vec<(&str, &str)>> = screened
-        .iter()
-        .map(|s| {
-            s.outcome
-                .as_ref()
-                .err()
-                .map(|why| (s.symbol.as_str(), why.as_str()))
-        })
-        .collect();
-    match refused.as_deref() {
-        Some([(symbol, why), ..]) => Err(format!(
-            "every one of the {} instrument(s) on the surface refused in pass 1, so \
-             nothing was screened and nothing can be pooled. No completed result could \
-             be confirmed.\n  first refusal: {symbol}: {why}",
-            screened.len()
-        )),
-        _ => Ok(()),
+/// So when every instrument refused, the verb refuses and prints no page.
+///
+/// **A refused instrument is not always one that was never screened.** Pass
+/// 1 keeps each instrument's `one_rung(..).outcome`, and an `Err` there can
+/// follow a sweep that halted, or one whose result was not recorded. The
+/// first version of this refusal said "nothing was screened" over those and
+/// kept the first instrument's reason alone, so a fault every instrument hit,
+/// such as a ledger no result could be filed into, reached the page as one
+/// line or not at all, and the NOT ON THE SURFACE and NOT CATALOGUED blocks
+/// were dropped (found by a review). The outcome is a sentence and carries no
+/// mark of how far the instrument ran, so this names every instrument with
+/// its own reason, claims nothing about what ran, and ends with `unread`,
+/// the head's two blocks.
+fn at_least_one_screened(screened: &[Screened], unread: &str) -> Result<(), String> {
+    if screened.is_empty() || screened.iter().any(|s| s.outcome.is_ok()) {
+        return Ok(());
     }
+    let mut why = format!(
+        "none of the {} instrument(s) on the surface came through pass 1 with a result, \
+         so nothing can be pooled. No completed result could be confirmed. Each \
+         instrument's own reason is below.\n",
+        screened.len()
+    );
+    for s in screened {
+        if let Err(reason) = &s.outcome {
+            let _ = writeln!(why, "  {}: {reason}", s.symbol);
+        }
+    }
+    why.push_str(unread);
+    Err(why.trim_end().to_owned())
 }
 
 /// Every symbol the store holds on this feed and rung that is on the engine
@@ -550,7 +577,7 @@ struct Surface {
     /// a swept instrument at a path that instrument's load does not read,
     /// sorted by directory.
     elsewhere: Vec<String>,
-    /// The store's month files under a feed directory, and under a rung
+    /// The store's `.bin` files at a month's depth under a feed directory, and under a rung
     /// directory, that is spelt as no feed or rung this engine knows: the
     /// catalog census's `unknown_vendor` and `unknown_rung`, store-wide.
     unrecognised: (u64, u64),
@@ -1515,10 +1542,11 @@ mod tests {
                 named(dir, key)
             )
         };
-        let empty = "  0 instruments on the surface for zerodha at 60min.";
 
         // Beside the instrument it names: the pool still runs over RELIANCE.
-        let (page, surface) = head("page-beside", &["NSE/CASH/RELIANCE", "BSE/CASH/RELIANCE"]);
+        // `unread` is the block alone, which a refusal in pass 1 carries.
+        let (page, surface, unread) =
+            head("page-beside", &["NSE/CASH/RELIANCE", "BSE/CASH/RELIANCE"]);
         assert_eq!(surface, vec!["RELIANCE".to_owned()]);
         assert_eq!(
             page,
@@ -1529,28 +1557,30 @@ mod tests {
             ),
             "the opening, then the directory it did not read, and nothing else"
         );
+        assert_eq!(unread, block("BSE/CASH/RELIANCE", "RELIANCE"));
         assert!(!crate::carries_refusal(&page), "{page}");
 
-        // Alone: named, and then the empty-surface line.
-        let (page, surface) = head("page-alone", &["NSE/INDEX/RELIANCE"]);
-        assert!(surface.is_empty(), "{surface:?}");
+        // Alone: refused, with the same directory reason and no stored banner.
+        let root = store_holding("page-alone", &["NSE/INDEX/RELIANCE"]);
+        let why = super::head_under(&root, "zerodha", "60min", (2026, 7), (2026, 7), None)
+            .expect_err("all holdings are misfiled");
+        std::fs::remove_dir_all(root).expect("scratch removed");
+        assert!(why.starts_with("no instrument is on the surface"), "{why}");
         assert!(
-            page.starts_with(&format!(
-                "{}{}{empty}",
-                opening(&[]),
-                block("NSE/INDEX/RELIANCE", "RELIANCE")
-            )),
-            "{page}"
+            why.ends_with(block("NSE/INDEX/RELIANCE", "RELIANCE").trim_end()),
+            "{why}"
         );
+        assert!(!why.contains(crate::STORED_PROVENANCE), "{why}");
 
         // Every holding at its own path: the opening alone, as before D-0696.
-        let (page, _) = head("page-clean", &["NSE/CASH/RELIANCE", "NSE/INDEX/NIFTY"]);
+        let (page, _, unread) = head("page-clean", &["NSE/CASH/RELIANCE", "NSE/INDEX/NIFTY"]);
         assert_eq!(page, opening(&["NIFTY", "RELIANCE"]));
+        assert_eq!(unread, "");
 
         // A directory name carrying a newline is named on one line, and the
         // page it heads is not a refusal (D-0696). Raw, the name put
         // `refused: forged/...` at column zero, as the review measured.
-        let (page, surface) = head(
+        let (page, surface, _) = head(
             "page-forged",
             &["NSE/CASH/RELIANCE", "X\nrefused: forged/CASH/RELIANCE"],
         );
@@ -1570,7 +1600,7 @@ mod tests {
         // it without a word, as it skips every word that resolves to nothing,
         // and the page is the opening over the instrument beside it and
         // nothing else.
-        let (page, surface) = head(
+        let (page, surface, _) = head(
             "page-forged-symbol",
             &["NSE/CASH/RELIANCE", "NSE/CASH/X\nrefused: forged"],
         );
@@ -1579,7 +1609,7 @@ mod tests {
         assert!(!crate::carries_refusal(&page), "{page}");
     }
 
-    /// **The pool page counts the month files its catalog cannot file under a
+    /// **The pool page counts the `.bin` files at a month's depth its catalog cannot file under a
     /// feed or a rung, and its empty-surface line says what it found at the
     /// exact spelling.** D-0696.
     ///
@@ -1588,7 +1618,8 @@ mod tests {
     /// surface nor named, and the page said the store held no month at the
     /// path a load reads, although on a case-insensitive volume a load of
     /// `zerodha` opens `Zerodha` (found by a review). Here one month sits
-    /// under `Zerodha` and one under another feed's `60MIN`. No two names
+    /// under `Zerodha` and one under another feed's `60MIN`, each beside
+    /// `notes.bin`, whose stem is counted before it is parsed. No two names
     /// differ only in case under one parent, so the page is the same on
     /// either kind of filesystem.
     #[test]
@@ -1599,6 +1630,8 @@ mod tests {
         for rel in [
             "Zerodha/NSE/CASH/RELIANCE/60min/2026-07.bin",
             "dhan/NSE/INDEX/NIFTY/60MIN/2026-07.bin",
+            "Zerodha/NSE/CASH/RELIANCE/60min/notes.bin",
+            "dhan/NSE/INDEX/NIFTY/60MIN/notes.bin",
         ] {
             let at = root.join("bars").join(rel);
             std::fs::create_dir_all(at.parent().expect("a parent")).expect("dirs");
@@ -1609,17 +1642,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         assert_eq!(
             (census.unknown_vendor, census.unknown_rung, census.spot),
-            (1, 1, 0),
-            "premise: the catalog filed neither month"
+            (2, 2, 0),
+            "premise: the catalog counts the unparsed stems too"
         );
-        let (page, surface) = head.expect("the head renders");
+        let (page, surface, unread) = head.expect("the head renders");
         assert!(surface.is_empty(), "{surface:?}");
         let mut block = String::new();
-        super::not_catalogued(&mut block, (1, 1));
+        super::not_catalogued(&mut block, (2, 2));
+        assert_eq!(unread, block, "`unread` is the block alone");
         assert!(
             block.starts_with(
-                "\n  NOT CATALOGUED: the store holds 1 month file(s) under a feed directory \
-                 and 1 under a rung directory\n"
+                "\n  NOT CATALOGUED: the store holds 2 .bin file(s) at a month's depth under a feed directory \
+                 and 2 under a rung directory\n"
             ) && block.contains("On a case-insensitive volume"),
             "{block}"
         );
@@ -1643,6 +1677,34 @@ mod tests {
             super::not_catalogued(&mut one, counts);
             assert!(one.contains("NOT CATALOGUED"), "{counts:?}: {one}");
         }
+    }
+
+    #[test]
+    fn a_pool_with_only_misfiled_holdings_refuses_and_keeps_their_reasons() {
+        let root = store_holding(
+            "all-misfiled-refusal",
+            &["NSE/INDEX/RELIANCE", "BSE/CASH/RELIANCE"],
+        );
+        let why = super::run_under(
+            &root,
+            brutex_core::vendor::Vendor::Zerodha,
+            "zerodha",
+            "60min",
+            (2026, 6),
+            (2026, 7),
+            None,
+        )
+        .expect_err("a store with only misfiled holdings is refused");
+        std::fs::remove_dir_all(root).expect("scratch removed");
+        assert!(why.starts_with("no instrument is on the surface"), "{why}");
+        assert!(
+            why.contains("NOT ON THE SURFACE: 2 held director(ies)"),
+            "{why}"
+        );
+        for dir in ["NSE/INDEX/RELIANCE", "BSE/CASH/RELIANCE"] {
+            assert!(why.contains(&named(dir, "RELIANCE")), "{why}");
+        }
+        assert!(!why.contains(crate::STORED_PROVENANCE), "{why}");
     }
 
     /// **The page `pool` prints IS its head, and every later line is
@@ -1682,7 +1744,7 @@ mod tests {
                   would have to find the body again"
     )]
     fn the_pool_page_is_its_head_and_then_only_appends() {
-        let root = store_holding("run-under", &["NSE/INDEX/RELIANCE", "BSE/CASH/RELIANCE"]);
+        let root = store_holding("run-under", &[]);
         let page = super::run_under(
             &root,
             brutex_core::vendor::Vendor::Zerodha,
@@ -1693,7 +1755,7 @@ mod tests {
             None,
         )
         .expect("the page renders");
-        let (head, surface) =
+        let (head, surface, _) =
             super::head_under(&root, "zerodha", "60min", (2026, 7), (2026, 7), None)
                 .expect("the head renders");
         let _ = std::fs::remove_dir_all(&root);
@@ -1702,10 +1764,12 @@ mod tests {
             "premise: nothing to screen: {surface:?}"
         );
         assert!(
-            head.contains("NOT ON THE SURFACE: 2 held director(ies)"),
-            "premise: the head names both directories:\n{head}"
+            !head.contains("NOT ON THE SURFACE"),
+            "a fresh store: {head}"
         );
         assert_eq!(page, head, "the page of an empty surface is its head");
+        // A fresh store remains a page; the all-misfiled store is tested separately.
+        assert!(!crate::carries_refusal(&page), "{page}");
 
         let source = include_str!("pool.rs");
         let from = source.find("\nfn run_under(").expect("run_under");
@@ -1718,8 +1782,7 @@ mod tests {
             "the body found is {} bytes, so the anchors moved and this reads nothing",
             body.len()
         );
-        let bound =
-            "let (mut out, surface) = head_under(root, vendor_word, rung, from, to, support_ppm)?;";
+        let bound = "let (mut out, surface, unread) = head_under(root, vendor_word, rung, from, to, support_ppm)?;";
         assert_eq!(
             body.matches(bound).count(),
             1,
@@ -1787,7 +1850,7 @@ mod tests {
         assert_eq!(
             after
                 .matches(
-                    "\n    at_least_one_screened(&screened)?;\n    \
+                    "\n    at_least_one_screened(&screened, &unread)?;\n    \
                      render_per_symbol(&mut out, &screened);\n"
                 )
                 .count(),
@@ -1796,12 +1859,17 @@ mod tests {
         );
     }
 
-    /// **A pool whose every instrument refused in pass 1 is refused.** D-0696.
+    /// **A pool whose every instrument refused in pass 1 is refused, naming
+    /// every instrument's reason and what the head did not read.** D-0696.
     ///
     /// `range_over` refuses when every rung refuses. The pool printed its
     /// banner, a `REFUSED` row per instrument and "nothing to pool", and exited
     /// OK (found by a review). One instrument screened is enough for a page,
-    /// and an empty surface is the head's own case, not this refusal.
+    /// and an empty surface is the head's own case, not this refusal. The
+    /// refusal said "nothing was screened" and kept the first instrument's
+    /// reason alone, so a second instrument's -- here a result that was not
+    /// recorded -- and the head's blocks were dropped (found by a later
+    /// review).
     #[test]
     fn a_pool_whose_every_instrument_refused_is_refused() {
         let refused = |symbol: &str, why: &str| super::Screened {
@@ -1814,17 +1882,25 @@ mod tests {
                 &[0; crate::results::STRIDE_BYTES],
             )),
         };
-        let why = super::at_least_one_screened(&[
-            refused("NIFTY", "its month could not be read"),
-            refused("RELIANCE", "no bar"),
-        ])
+        let unread = "\n  NOT ON THE SURFACE: 1 held director(ies) ...\n    `BSE/CASH/RELIANCE`\n\n  NOT CATALOGUED: 2 .bin files\n";
+        let why = super::at_least_one_screened(
+            &[
+                refused("NIFTY", "its month could not be read"),
+                refused("RELIANCE", "the result was not recorded: no ledger"),
+                refused("BANKNIFTY", "REFUSED -- the streamed ladder halted"),
+            ],
+            unread,
+        )
         .expect_err("every instrument refused");
         assert_eq!(
             why,
-            "every one of the 2 instrument(s) on the surface refused in pass 1, so nothing \
-             was screened and nothing can be pooled. No completed result could be \
-             confirmed.\n  first refusal: NIFTY: its month could not be read"
+            "none of the 3 instrument(s) on the surface came through pass 1 with a result, \
+             so nothing can be pooled. No completed result could be confirmed. Each \
+             instrument's own reason is below.\n  NIFTY: its month could not be read\n  \
+             RELIANCE: the result was not recorded: no ledger\n  BANKNIFTY: REFUSED -- the streamed ladder halted\n\n  NOT ON THE SURFACE: 1 \
+             held director(ies) ...\n    `BSE/CASH/RELIANCE`\n\n  NOT CATALOGUED: 2 .bin files"
         );
+        assert!(!why.contains("nothing was screened"), "{why}");
         assert!(crate::carries_refusal(&format!("refused: {why}\n")));
         for one_screened in [
             vec![refused("NIFTY", "no bar"), screened("RELIANCE")],
@@ -1832,7 +1908,7 @@ mod tests {
             vec![screened("NIFTY")],
             Vec::new(),
         ] {
-            assert_eq!(super::at_least_one_screened(&one_screened), Ok(()));
+            assert_eq!(super::at_least_one_screened(&one_screened, unread), Ok(()));
         }
     }
 
@@ -2112,8 +2188,10 @@ mod tests {
     /// * at `60min` over an unreadable `NSE/CASH/RELIANCE` month beside
     ///   `BSE/CASH/RELIANCE`, where the one instrument on the surface refuses
     ///   in pass 1: the verb refuses, naming RELIANCE and the month it could
-    ///   not read, and prints none of the page. It printed the head, pass 1's
-    ///   refused row and the nothing-to-pool line, and exited OK (D-0696).
+    ///   not read, then the head's NOT ON THE SURFACE block naming the BSE
+    ///   directory, and prints nothing else of the page. It printed the head,
+    ///   pass 1's refused row and the nothing-to-pool line, and exited OK
+    ///   (D-0696).
     ///
     /// The first exits OK and is not a refusal; the second exits MISUSED. An
     /// unstamped build refuses both before a bar is read, and there the child
@@ -2203,7 +2281,7 @@ mod tests {
     /// BOTH PASSES, over the generated NIFTY month: the head, pass 1's table
     /// with NIFTY on its 600 bars, and pass 2's table over that instrument.
     fn both_passes_over_nifty(
-        (head, surface): &(String, Vec<String>),
+        (head, surface, _): &(String, Vec<String>, String),
         status: u8,
         page: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -2245,9 +2323,10 @@ mod tests {
 
     /// EVERY INSTRUMENT REFUSED, over one unreadable month beside a BSE
     /// directory: the verb refuses, naming RELIANCE and the month it could
-    /// not read, and prints nothing of the page that head would have opened.
+    /// not read, then the head's block naming the BSE directory, and prints
+    /// nothing else of the page that head would have opened.
     fn every_instrument_refused_beside_bse(
-        (head, surface): &(String, Vec<String>),
+        (head, surface, unread): &(String, Vec<String>, String),
         status: u8,
         page: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -2258,19 +2337,26 @@ mod tests {
         );
         let why = page
             .strip_prefix(
-                "refused: every one of the 1 instrument(s) on the surface refused in pass 1, \
-                 so nothing was screened and nothing can be pooled. No completed result \
-                 could be confirmed.\n  first refusal: RELIANCE: ",
+                "refused: none of the 1 instrument(s) on the surface came through pass 1 \
+                 with a result, so nothing can be pooled. No completed result could be \
+                 confirmed. Each instrument's own reason is below.\n  RELIANCE: ",
             )
             .ok_or_else(|| format!("the verb refuses, naming RELIANCE:\n{page}"))?;
+        let (reason, rest) = why
+            .split_once('\n')
+            .ok_or_else(|| format!("RELIANCE's reason is one line:\n{page}"))?;
         assert!(
-            why.contains("no header slot survived"),
+            reason.contains("no header slot survived"),
             "premise: pass 1 read the unreadable month and refused it for that: {why}"
         );
+        assert_eq!(
+            rest,
+            format!("{}\n", unread.trim_end()),
+            "then the head's block naming the BSE directory, and nothing else:\n{page}"
+        );
         assert!(
-            why.strip_suffix('\n')
-                .is_some_and(|reason| !reason.contains('\n')),
-            "the refusal is its two lines and nothing else:\n{page}"
+            unread.contains(&named("BSE/CASH/RELIANCE", "RELIANCE")),
+            "premise: {unread}"
         );
         assert!(
             !page.contains(crate::STORED_PROVENANCE),

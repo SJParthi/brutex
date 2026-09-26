@@ -42997,8 +42997,8 @@ changes what an operator reads, or the exit status a script sees, says so.
    tests of a forged directory asserted that such a page is not a refusal
    (found by a review, which reached it with month 13, a backwards span and
    an unreadable month).
-   `pool::at_least_one_screened` and `batch::at_least_one_swept` now refuse
-   such a run with the count and the first instrument's or month's reason,
+   `pool::at_least_one_screened` and `batch::at_least_one_filed` now refuse
+   such a run with the count and every instrument's or month's reason,
    printed as `refused: ` at column zero with no banner, so the verb exits
    MISUSED. `pool_arm` also refuses a month outside 1..=12 and a FROM after
    TO before it reads the store: it checked neither, so a store with no
@@ -43020,7 +43020,8 @@ changes what an operator reads, or the exit status a script sees, says so.
      continued walk now asserts its own census line,
      `store holds 6 spot instrument-month(s); 3 match this feed and rung`, and
      `1 swept · 2 refused`, and the filter test that its store holds three
-     months. AF-39's sentence about the `60min` page is corrected in place,
+     months. The misfiled test also pins `1 swept · 6 refused` and its census
+     of ten stored months, seven matching the feed and rung. AF-39's sentence about the `60min` page is corrected in place,
      and AF-70 states the rule.
 2. *An empty month on `sweep-stored`.* `stored_sweep_inputs` refused a month
    whose file exists and holds no record, the file a writer's open leaves
@@ -43033,7 +43034,8 @@ changes what an operator reads, or the exit status a script sees, says so.
    refusal's words. AF-71 states it.
 3. *Months the catalog cannot file.* `store::catalog` files a month only
    under a feed and a rung directory spelt exactly as this engine spells
-   them, and counts every other month file store-wide, in `unknown_vendor`
+   them, and counts `.bin` files at a month's depth before parsing their
+   stems, store-wide, in `unknown_vendor`
    and `unknown_rung`, without its name. `pool` and `sweep-all` read neither
    count, so a month under `bars/Zerodha/...` or a `60MIN` directory was
    dropped from both reports with no word, and the pool's empty-surface line
@@ -43120,3 +43122,52 @@ changes what an operator reads, or the exit status a script sees, says so.
     by a review). Both tests now assert each page from `Traded::sweep_stored`,
     which calls `sweep_stored_kernel`, and from `Traded::sweep`. AF-38 says
     so. No behaviour changed.
+
+**Eighth correction, 2026-09-26: refusals retain the work that happened.**
+The two verification lenses found three should-fix items and three nits in
+the seventh correction. This correction changes only D-0696's CLI surface;
+text already on `main` at `96194c11` remains untouched.
+
+1. The whole-run refusal had equated an unrecorded result with a sweep that
+   never ran. `batch::Row::ran` now marks the completed call to the ladder,
+   independently of the later ledger/evidence result. The refusal counts
+   rows before and after that call separately, keeps the census and every
+   row's reason, and claims only that none was swept and filed without a
+   refusal. `a_walk_whose_swept_month_could_not_be_filed_says_it_swept`
+   makes the generated store's ledger path a directory: one month sweeps,
+   two refuse before sweeping, and the swept month's `not recorded` reason
+   names that path. Pool outcomes are strings without a stage field, so the
+   pool makes no count of instruments that ran. It retains each reason,
+   including halted and unrecorded outcomes, and the head's NOT ON THE
+   SURFACE and NOT CATALOGUED blocks. The all-refused pool test asserts all
+   of those strings. AF-39 and AF-70 describe the resulting output.
+2. A stamped child now calls `dispatch` for `sweep-all` and `pool` over the
+   same four generated misfiled months. It requires MISUSED, a column-zero
+   refusal, four batch refusal rows and both pool directory reasons. The
+   unstamped path checks the build-stamp refusal, while
+   `sweep_all_keeps_the_column_zero_refusal_and_dispatch_status` pins the
+   actual wrapper and arm in every build. The old test constructed its own
+   `refused: ` prefix and could not catch a broken verb. AF-70 names both
+   checks.
+3. The misfiled-month test again asserts the whole tally, `1 swept · 6
+   refused`, plus ten stored months of which seven match. The seventh
+   correction's restored-count list now includes it.
+4. The empty `5min` fixture now has damaged execution minutes beside it.
+   Loading those minutes first produces a different refusal. The test still
+   requires the empty-month sentence and no ledger or sweep evidence, so
+   AF-71's ordering claim is exercised rather than inferred.
+5. Both census outputs now say `.bin file(s) at a month's depth`. The pool
+   fixture includes `notes.bin` beside each month: the catalog counts those
+   files before parsing their stems. AF-72 describes the resulting two files
+   in each bucket. The catalog itself is unchanged.
+6. `pool::head_under` refuses an empty surface when its selected feed/rung
+   has misfiled swept holdings, retaining their reasons without the opening
+   banner. A fresh store remains a page. The direct misfiled-store test and
+   the stamped dispatch child prove the refusal; the existing page-shape
+   test now uses a fresh store. The former contrary assertion is superseded
+   by these tests, not discarded without a replacement.
+
+These are reporting and test changes. No stored record format, condition bit,
+run identity term, lockfile, front-end file or market-data input is changed.
+The remaining full-suite, mutation and coverage measurements are kept in the
+operator's CLI repair evidence; this paragraph makes no completion claim.
