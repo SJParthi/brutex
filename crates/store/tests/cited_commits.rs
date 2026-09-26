@@ -82,6 +82,8 @@
 //! copies, it prints which, and checks only what needs no history: the count
 //! of the citations and of D-0693's sites, that each listed commit is cited,
 //! and that each sentence citing a listed commit gives its reason's words.
+//! Where the tree holds a `.git` and `git rev-parse --git-dir` fails there, it
+//! fails with git's own words rather than skipping.
 //! It refuses a shallow clone, where no commit resolves and the checkout needs
 //! `fetch-depth: 0`, and a clone with no `refs/remotes/origin/main`, with the
 //! fetch that fixes it.
@@ -178,9 +180,14 @@ fn read(relative: &str) -> String {
 /// `None` both when `git` answers with a failure and when it cannot be run;
 /// [`history_is_here`] tells the two apart before any other call is made.
 fn git(args: &[&str]) -> Option<String> {
+    git_at(&repo(), args)
+}
+
+/// [`git`] in the tree whose root is `root`.
+fn git_at(root: &Path, args: &[&str]) -> Option<String> {
     Command::new("git")
         .arg("-C")
-        .arg(repo())
+        .arg(root)
         .args(args)
         .output()
         .ok()
@@ -191,40 +198,115 @@ fn git(args: &[&str]) -> Option<String> {
 /// Whether history can be asked about here, refusing a shallow clone and a
 /// clone without [`MAIN`].
 fn history_is_here() -> bool {
+    history_is_at(&repo())
+}
+
+/// Whether history can be asked about in the tree whose root is `root`.
+///
+/// It skips only where `git` cannot be run and where `root` holds no `.git`.
+/// Where `root` holds one and `git rev-parse --git-dir` fails there, as it
+/// does under a `GIT_DIR` naming nothing or with a `.git` pointing nowhere,
+/// it fails with git's own words: a skip there would pass every history
+/// check unread. It refuses a shallow clone and a clone without [`MAIN`].
+fn history_is_at(root: &Path) -> bool {
     if let Err(why) = Command::new("git").arg("--version").output() {
         println!("SKIPPING: `git` cannot be run here ({why}), so no commit can be resolved.");
         return false;
     }
-    if git(&["rev-parse", "--git-dir"]).is_none() {
+    if !root.join(".git").exists() {
         println!(
-            "SKIPPING: {} is not a git work tree, so no commit can be resolved. This \
-             is what `cargo-mutants` looks like: it copies the tree without `.git`.",
-            repo().display()
+            "SKIPPING: {} holds no `.git`, so no commit can be resolved. This is \
+             what `cargo-mutants` looks like: it copies the tree without `.git`.",
+            root.display()
         );
         return false;
     }
+    let asked = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--git-dir"])
+        .output()
+        .expect("`git` ran a moment ago");
+    assert!(
+        asked.status.success(),
+        "{} holds a `.git`, and `git rev-parse --git-dir` failed there, so no commit \
+         can be resolved and a skip would pass every history check unread: {}",
+        root.display(),
+        String::from_utf8_lossy(&asked.stderr).trim()
+    );
     assert_ne!(
-        git(&["rev-parse", "--is-shallow-repository"]).as_deref(),
+        git_at(root, &["rev-parse", "--is-shallow-repository"]).as_deref(),
         Some("true"),
         "this is a SHALLOW clone, so no cited commit resolves and this test would \
          refuse commits that exist. The checkout needs `fetch-depth: 0`."
     );
     assert!(
-        resolves(MAIN),
+        resolves_at(root, MAIN),
         "{MAIN} does not resolve, so no citation can be checked against the history a \
          squash merge keeps. Run `git fetch origin main`."
     );
     true
 }
 
+/// A scratch tree root under this test's own target directory, emptied.
+fn scratch_root(tag: &str) -> PathBuf {
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("cited-commits-{tag}-{}", std::process::id()));
+    let _stale = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("a scratch root");
+    root
+}
+
+/// **A TREE WITH NO `.git` SKIPS THE HISTORY, AND A `.git` GIT CANNOT READ
+/// FAILS.**
+///
+/// The skip was once taken whenever `git rev-parse --git-dir` failed, so a
+/// work tree whose `.git` git could not read, run under a `GIT_DIR` naming
+/// nothing, printed that it was no git work tree and passed with every
+/// history check skipped. A `.git` file pointing at a directory that does not
+/// exist is the same refusal, made without touching the environment.
+#[test]
+fn only_a_tree_with_no_git_dir_skips_the_history() {
+    let bare = scratch_root("bare");
+    assert!(
+        !history_is_at(&bare),
+        "a tree with no `.git` has no history to ask about"
+    );
+    std::fs::remove_dir_all(&bare).expect("the scratch root is removed");
+
+    let broken = scratch_root("broken");
+    std::fs::write(
+        broken.join(".git"),
+        format!("gitdir: {}\n", broken.join("nowhere").display()),
+    )
+    .expect("a `.git` file");
+    let refused = std::panic::catch_unwind(|| history_is_at(&broken))
+        .expect_err("a `.git` git cannot read must fail, not skip");
+    let said = refused.downcast_ref::<String>().map_or("", String::as_str);
+    assert!(
+        said.contains("holds a `.git`, and `git rev-parse --git-dir` failed there")
+            && said.contains("not a git repository"),
+        "the failure names the tree's `.git` and carries git's words: {said}"
+    );
+    std::fs::remove_dir_all(&broken).expect("the scratch root is removed");
+}
+
 /// Whether `commit` names a commit in this clone.
 fn resolves(commit: &str) -> bool {
-    git(&[
-        "rev-parse",
-        "--verify",
-        "--quiet",
-        &format!("{commit}^{{commit}}"),
-    ])
+    resolves_at(&repo(), commit)
+}
+
+/// Whether `commit` names a commit in the clone whose root is `root`.
+fn resolves_at(root: &Path, commit: &str) -> bool {
+    git_at(
+        root,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{commit}^{{commit}}"),
+        ],
+    )
     .is_some()
 }
 
