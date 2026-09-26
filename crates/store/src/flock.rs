@@ -251,9 +251,10 @@ fn unlock(file: &File) -> io::Result<()> {
 /// duplicate of it. For a guard over a borrowed file the drop closes nothing,
 /// and the owner's descriptor can hold the lock while the owner stays open,
 /// until a later guard over the same owner releases it or the owner closes.
-/// What the line records is that the lock outlived its guard, which
-/// is what turns a later acquisition into a `WouldBlock` nobody can otherwise
-/// explain. One event per refused unlock, never per acquisition, so the normal
+/// The line records a refused unlock; the lock may outlive the guard while a
+/// borrowed owner or a duplicate descriptor remains open. Without either,
+/// the owned file's last close frees the lock as the guard drops. One event
+/// per refused unlock, never per acquisition, so the normal
 /// path costs nothing beyond the `flock` call itself.
 fn note_unreleased(path: &Path, why: &io::Error) {
     let _dropped_when_filtered = telemetry::emit(

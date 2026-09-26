@@ -5240,3 +5240,10 @@ reads the applied `CLAUDE.md` §1 as well as the charter row and D-0682's
 proposals. It derives the share and total counts from the membership lists and
 `InstrumentKey::SWEPT`, and requires D-0682's correction to name cash equities
 and spot indices separately.
+
+**AF-15 follow-up (D-0693):** the Drop warning records a refused unlock. The
+lock can survive a borrowed guard or an owned guard with a duplicate file
+descriptor; the owned file's last close frees it when neither remains.
+`store::flock::tests::a_refused_drop_unlock_may_outlive_the_guard_but_an_owned_last_close_frees_it`
+drives each case and requires the Drop note's doc to say the lock may outlive
+the guard. The existing emits test pins the warning's message and level.

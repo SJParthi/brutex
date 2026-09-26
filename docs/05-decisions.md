@@ -39391,6 +39391,15 @@ line, and the proof paragraph.
    The sentence's test constant was changed first, and three `flock` tests
    failed on the old sentence before `Unreleased` was changed.
 
+   The `Drop` note's doc also said the lock "outlived its guard", although an
+   owned guard's last descriptor closes immediately after its refused unlock.
+   It now says the lock may outlive the guard, while a borrowed owner or a
+   duplicate descriptor remains open. The regression
+   `a_refused_drop_unlock_may_outlive_the_guard_but_an_owned_last_close_frees_it`
+   checks that qualification and drives all three cases: owned with no
+   duplicate, owned with a duplicate, and borrowed. Its doc check failed
+   before the wording changed. The log message remains "advisory lock not
+   released by its guard"; `emits.rs` checks its bytes and warning level.
 10. *A squash reason needs ancestry while its sentence is new.* The citation
     guard accepted another branch's commit as `Squashed` on the strength of
     the sentence's words alone. It now requires that commit to be an ancestor

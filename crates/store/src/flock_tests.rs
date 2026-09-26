@@ -470,6 +470,61 @@ fn a_lock_a_refused_release_left_is_freed_by_a_later_release_over_the_same_owner
     drop(owner);
 }
 
+/// The warning records a refused unlock, not a guaranteed surviving lock.
+/// Check the note's qualification against owned, duplicated and borrowed files.
+#[test]
+fn a_refused_drop_unlock_may_outlive_the_guard_but_an_owned_last_close_frees_it() {
+    let note = include_str!("flock.rs")
+        .split_once("/// A guard dropped without a release, whose unlock the host refused.")
+        .expect("the Drop note's doc")
+        .1
+        .split_once("fn note_unreleased(")
+        .expect("the Drop note's function")
+        .0
+        .split_whitespace()
+        .filter(|word| *word != "///")
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        note.contains("The line records a refused unlock; the lock may outlive the guard"),
+        "the warning cannot assert that every refused unlock leaves a lock held: {note}"
+    );
+    let _sink_is_mine = crate::emits::hold_the_sink();
+    let scratch = Scratch::new("refused-drop-lifetime");
+    for duplicated in [false, true] {
+        let guard = Flock::try_lock(scratch.open(), scratch.lock.clone()).expect("free lock");
+        let duplicate = duplicated.then(|| guard.try_clone().expect("duplicate"));
+        let before = unlocks();
+        refuse_next_unlock();
+        drop(guard);
+        assert_eq!(unlocks() - before, 1, "the Drop unlock is refused once");
+        if duplicated {
+            assert!(
+                would_block(&scratch.probe()),
+                "the duplicate keeps the lock held"
+            );
+        } else {
+            scratch
+                .probe()
+                .expect("the owned file's last close frees the lock");
+        }
+        drop(duplicate);
+        scratch.probe().expect("no duplicate remains");
+    }
+    let owner = scratch.open();
+    let guard = Flock::try_lock(&owner, scratch.lock.as_path()).expect("free borrowed lock");
+    refuse_next_unlock();
+    drop(guard);
+    assert!(
+        would_block(&scratch.probe()),
+        "the borrowed owner's file is still open"
+    );
+    drop(owner);
+    scratch
+        .probe()
+        .expect("the owner's last close frees the lock");
+}
+
 /// A CONTENDED LOCK IS REFUSED WITHOUT WAITING, AND A REFUSAL HOLDS NOTHING.
 #[test]
 fn a_contended_lock_is_refused_and_takes_nothing() {
