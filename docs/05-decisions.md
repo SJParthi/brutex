@@ -39978,8 +39978,7 @@ calls was tested on cash and index families.
 Invariant AF-19.
 
 **Correction, 2026-09-25.** A review upheld two more findings against this
-record. Each item corrects a statement above by adding text; nothing above is
-edited.
+record. Each item corrects a statement above by adding text.
 
 1. *A door left out.* The list of stored doors that keep holed sessions, in
    "What is still not done", missed one: the strict audited range
@@ -40020,7 +40019,7 @@ named for them rendered none of them. Each test checked its helper on
 hand-built values and then only that the source of `render`,
 `render_with_budget` or the search `detail` held the call that puts the note
 in. The third review's paragraph above says so of the tests; the row did not.
-Each item corrects a statement above by adding text; nothing above is edited.
+Each item corrects a statement above by adding text.
 
 1. *`/boolean-campaign.json` is rendered now.*
    `a_campaign_expecting_a_stock_family_states_the_equity_note_and_an_index_campaign_does_not`
@@ -40057,6 +40056,29 @@ break applied, the evidence test fails. A word inside a `"` string or after
 `//` is not read: the search `detail`'s scope string says "future-return",
 and a rule that read it refused `detail`. The rule reads nothing after the
 call, so the two tests do not hold a page built after it.
+
+**Correction, 2026-09-26, second: the rule's prefix, and what two
+corrections said of themselves.** A review upheld two more findings.
+
+1. *The rule read a prefix.* It admitted any `return` spelled `return Err(`,
+   so the review's `return Err(String::new()).or_else(|_| statistics(reader, asked));`
+   before the evidence call left a page without the note, and the evidence
+   test passed. The rule now also requires that `return`'s expression to end
+   where the parenthesis of `Err(` closes, at a `;`, a `,` or a `}`, so each
+   `return` it admits returns that `Err`, as item 2 above and AF-19 say.
+   `the_source_rule_refuses_every_early_return_but_an_error` refuses that
+   `return` on one line and wrapped onto the next, and admits an `Err` whose
+   argument holds parentheses of its own and one returned from a match arm,
+   with and without braces. Before the rule changed, it failed on the
+   one-line case. Parentheses are counted in the text the rule reads with
+   strings emptied, so one in a character literal would be counted; neither
+   body the rule is applied to holds one.
+2. *"Nothing above is edited".* The corrections of 2026-09-25 and of
+   2026-09-26 above each said so. After both were written, the sentence on
+   eecca4da in item 10 of the 2026-09-24 correction was edited in place to
+   add that `main`'s squash merge does not keep that commit, which this
+   entry allows, being new in this change. Both now say only that each item
+   corrects a statement above by adding text.
 
 ### D-0696 — Label every equity ranking gross in the audit header's own words, and read a stored instrument only at its own path — 2026-09-23
 

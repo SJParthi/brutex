@@ -201,8 +201,9 @@ fn daily_and_weekly_pages_require_exact_setting_parent_pin_and_bounded_period_se
 }
 
 /// Whether `call` is a statement at the top level of the function `body`, as
-/// rustfmt indents one, and every `return` written before it is a
-/// `return Err(`.
+/// rustfmt indents one, and every `return` written before it returns exactly
+/// an `Err`: a `return Err(` whose expression ends where that call's
+/// parenthesis closes.
 ///
 /// Before the call, a `?` can only return an error, so a page can leave the
 /// function before the call only by a `return`, and every such `return` is
@@ -250,8 +251,13 @@ fn code_only(code: &str) -> String {
     out
 }
 
-/// Whether every `return` keyword in `code` returns an `Err`, reading a word
-/// such as `returned` as no keyword.
+/// Whether every `return` keyword in `code` returns exactly an `Err`: it is
+/// written `return Err(`, and its expression ends where that call's
+/// parenthesis closes, at a `;`, a `,` or a `}` after any whitespace. So
+/// `return Err(why).or_else(|_| page)`, which returns the page, is refused. A
+/// word such as `returned` is no keyword. The parentheses are counted in the
+/// text [`code_only`] leaves, so one inside a string is not counted, and one
+/// in a character literal would be; the bodies this is applied to hold none.
 fn only_errors_return(code: &str) -> bool {
     let part_of_a_word =
         |byte: Option<&u8>| byte.is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_');
@@ -259,8 +265,28 @@ fn only_errors_return(code: &str) -> bool {
         let bytes = code.as_bytes();
         let keyword = !part_of_a_word(at.checked_sub(1).and_then(|before| bytes.get(before)))
             && !part_of_a_word(bytes.get(at + "return".len()));
-        !keyword || code[at..].starts_with("return Err(")
+        !keyword
+            || code[at..]
+                .strip_prefix("return Err(")
+                .is_some_and(ends_where_it_closes)
     })
+}
+
+/// Whether `rest`, the text after an opening `(`, closes that parenthesis and
+/// then, past any whitespace, ends the expression with a `;`, a `,` or a `}`.
+fn ends_where_it_closes(rest: &str) -> bool {
+    let mut open = 1_usize;
+    for (at, c) in rest.char_indices() {
+        match c {
+            '(' => open += 1,
+            ')' if open == 1 => {
+                return rest[at + 1..].trim_start().starts_with([';', ',', '}']);
+            }
+            ')' => open -= 1,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// **THE SOURCE RULE REFUSES A PAGE RETURNED BEFORE THE CALL, HOWEVER ITS
@@ -282,6 +308,8 @@ fn the_source_rule_refuses_every_early_return_but_an_error() {
         "\n    let body = match cached {\n        Some(page) => return page,\n        None => body,\n    };",
         "\n    let said = \"a \\\"quoted\\\" word\";\n    if pinned {\n        return page;\n    }",
         "\n    let link = \"http://host\";\n    if pinned {\n        return page;\n    }",
+        "\n    if pinned {\n        return Err(String::new()).or_else(|_| statistics(reader, asked));\n    }",
+        "\n    if pinned {\n        return Err(why)\n            .or_else(|_| statistics(reader, asked));\n    }",
     ] {
         assert!(
             !on_every_page(&body(early), CALL),
@@ -291,6 +319,9 @@ fn the_source_rule_refuses_every_early_return_but_an_error() {
     for admitted in [
         "",
         "\n    if stale {\n        return Err(\"changed\".into());\n    }",
+        "\n    if stale {\n        return Err(format!(\"changed ({})\", body.len()));\n    }",
+        "\n    let body = match cached {\n        Err(why) => return Err(why),\n        Ok(page) => page,\n    };",
+        "\n    let body = match cached {\n        Err(why) => { return Err(why) }\n        Ok(page) => page,\n    };",
         "\n    let returned = body.len();",
         "\n    let scope = \"no future-return guarantee\";",
         "\n    // return the page only once it carries the note",

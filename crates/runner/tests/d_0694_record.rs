@@ -15,8 +15,10 @@
 //!   `docs/06-limits.md`, left out the strict audited range,
 //!   `audit-audited-range`, which never calls `crate::minute_gaps`.
 //!
-//! Each test reads the record and the source together, so the record fails
-//! here when the source moves under it.
+//! Each of those two tests reads the record and the source together, so the
+//! record fails here when the source moves under it. A third reads the record
+//! alone: two of D-0694's corrections said nothing above them was edited,
+//! and a sentence above them was edited in place after they were written.
 
 #![allow(clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
 
@@ -229,5 +231,35 @@ fn d_0694_names_the_strict_audited_range_among_the_doors_that_keep_holed_session
             "{door} keeps holed sessions too: it never calls `crate::minute_gaps`"
         )),
         "the limits register must add the strict audited range to the same list"
+    );
+}
+
+/// **NO CORRECTION OF D-0694 WRITTEN SINCE 2026-09-25 SAYS NOTHING ABOVE IT IS
+/// EDITED.**
+///
+/// The corrections of 2026-09-25 and of 2026-09-26 each said that each item
+/// corrects a statement above by adding text and that nothing above is edited.
+/// After both were written, the sentence on `eecca4da` in item 10 of the
+/// 2026-09-24 correction was edited in place, which the entry allows, being
+/// new in its change, and which made both statements false. This requires
+/// neither correction, nor any later one, to say it, and the record to name
+/// the sentence that was edited.
+#[test]
+fn no_correction_of_d_0694_since_2026_09_25_says_nothing_above_it_is_edited() {
+    let decision = d_0694();
+    let (_, since) = decision
+        .split_once("**Correction, 2026-09-25.**")
+        .expect("D-0694 has its 2026-09-25 correction");
+    assert!(
+        !since.contains("nothing above is edited"),
+        "a correction since 2026-09-25 says nothing above it is edited, and a \
+         sentence above them was edited in place"
+    );
+    assert!(
+        since.contains(
+            "the sentence on eecca4da in item 10 of the 2026-09-24 correction was edited in \
+             place"
+        ),
+        "D-0694 must name the sentence edited in place above its later corrections"
     );
 }
