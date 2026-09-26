@@ -41504,8 +41504,10 @@ this says so.
   that appends the run's member-failure records. **Decided:** after the
   `sync_all` statement, `appended` drops the guard and returns `Ok(())`. The
   guard's `Drop` unlocks, and a refused unlock is logged by `store.flock` at
-  Warn ("advisory lock not released before close"), as it is for every guard
-  dropped without a release. The seam that refuses an unlock on request is
+  Warn ("advisory lock not released by its guard"), as it is for every guard
+  dropped without a release. This quoted warning is the D-0693 base repair's
+  message; this API piece still inherits the earlier `store` copy until the
+  pieces are integrated. The seam that refuses an unlock on request is
   `#[cfg(test)]` inside `store`, so no `api` test can drive it.
   `nothing_after_the_sync_can_refuse_an_append` reads `appended`'s own source
   instead, and requires its only code after the `sync_all` statement to be
@@ -41524,10 +41526,21 @@ this says so.
   body kept across such reads would still leave the read and the sort on
   every request, and skipping those means serving a census the stamps cannot
   vouch for, which the third repair removed. `docs/06-limits.md`'s eighth
-  correction states the whole cost, why it is linear while the fault lasts,
-  and that D-0686's correction in §40.5 is not true meanwhile.
+  correction separates manifest read/decode and index reconstruction/key
+  collection from the `O(H log H)` comparison sort of H held keys before
+  deduplication, the `O(H)` deduplication pass, and response encoding plus
+  hashing. Read/decode and collection depend on bytes, records and index
+  storage examined; hash-index operations retain their expected/amortised
+  qualification. Encoding depends on rows traversed and bytes produced, and
+  hashing is `O(B)` in B response bytes. This is structural accounting, not
+  measured latency or a linear bound on the complete request. These costs
+  repeat while `read_as_stamped` declines each census, even if its stamps do
+  not change, so D-0686's correction in §40.5 does not hold then. A matching
+  stamp fault and census I/O fault can be retained; a stamp failure alone
+  does not imply this repeated-work path.
   `a_fault_the_census_cache_declines_rebuilds_the_store_body_on_every_request`
-  pins it: with a socket at Groww's manifest path, each of three
+  pins repeated reads, body allocations and recovery, not the complexity
+  bound: with a socket at Groww's manifest path, each of three
   `/store.json?feed=dhan` requests reads Dhan's manifest again and answers
   equal bytes from a new allocation, and with the socket gone one request
   reads and the next reads nothing and answers the same allocation. AF-28j
@@ -41593,8 +41606,9 @@ this says so.
 - *Replacing every row that fails `stamp_could_read`.* See "Why only an
   absence" above.
 - *Keying `store_wire::Cache` on something that outlives a declined read.*
-  See the cost finding above: the read and the sort stay linear per request
-  whatever the body cache keys on.
+  See the cost finding above: manifest read/decode and index/key collection,
+  followed by the `O(H log H)` held-key sort and `O(H)` deduplication, still
+  recur on each declined census read whatever the body cache keys on.
 
 **Still not done.** The items of the fifth, sixth and seventh repairs' lists
 stand as written. Three more, which this repair adds:

@@ -9649,18 +9649,30 @@ is paid. The text above is kept as it was written.
 * **D-0686's correction in §40.5 is not true while such a fault lasts.** It
   says "a request against an unchanged store reads no manifest and walks no
   entry. Both are paid once per manifest change". A fault the census cache
-  declines moves no stamp, so while it lasts each request reads every
-  manifest, walks and sorts every held entry and, on `/store.json`, encodes
-  and hashes its body. Once the fault ends, the next request pays them once
-  and the rest are served from both caches, as the test above pins.
+  declines can leave the stamps unchanged. While each read remains
+  uncacheable, each request attempts every manifest, collects and sorts the
+  readable held keys and, on `/store.json`, encodes and hashes its body.
+  Once the socket fault in the test ends, the next request pays them once
+  and the rest are served from both caches, as that test pins. A stamp
+  failure does not by itself make a census uncacheable: `read_as_stamped`
+  can retain an I/O refusal matching that stamp's error kind. Repeated work
+  here means a read that fails cache admission, not every unreadable census.
 * **Why this is not made constant per request.** A read the stamps cannot
   vouch for is read again because no key records when its fault ends. Keeping
-  the body across such reads would still leave the read and the sort, each
-  linear in the store, on every request; skipping those as well means serving
-  a census the key cannot vouch for, which is what the third correction
-  removed. The per-request cost is therefore linear in the store for as long
-  as such a fault lasts. **UNMEASURED**: how often, if ever, the operator's
-  volume returns one.
+  the body across such reads would still leave manifest read/decode, index
+  reconstruction and held-key collection, then the sort, on every declined
+  read; skipping those as well means serving a census the key cannot vouch
+  for, which is what the third correction removed. Separate the costs:
+  read/decode and collection grow with the bytes, records and index storage
+  examined, with hash-index operations qualified as expected/amortised;
+  `held_entries` comparison-sorts H held keys across feeds before
+  deduplication in `O(H log H)`, then deduplicates in `O(H)`; `/store.json`
+  encodes the rows it traverses into B response bytes and hashes those bytes
+  for its ETag in `O(B)`. This gives no general linear or constant-time
+  bound for the complete repeated request. The read/allocation test does not count
+  sort comparisons or measure this complexity. **UNMEASURED**: latency,
+  sort scaling and how often, if ever, the operator's volume returns such
+  an uncacheable fault.
 
 **Corrected 26 September 2026, on a ninth review (D-0695).** The eighth
 correction's second bullet says a row read absent under a stamp that found no
