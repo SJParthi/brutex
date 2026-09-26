@@ -9732,11 +9732,19 @@ The text above is kept as it was written.
   unchanged costs one index and one `stamp_could_read`, and no syscall. A row
   it changes also costs its line, through `telemetry::emit_if!`: the level
   check alone when no sink is installed or the sink's floor for `api.census`
-  is above `Warn`, and otherwise what `Sink::emit` costs, the sink's lock
-  (`self.inner.lock()`) and a `write_all` of the line to its log file
-  (`inner.target.append(&inner.buf)`, which for the `FileTarget` every
-  installed sink opens is `self.file.write_all(bytes)`), after a rotation
-  when the line would carry the current file past its bound. At most one
-  line per feed per call. Not timed.
+  is above `Warn`. Otherwise it costs the event the macro builds, whose
+  `path` field formats the manifest's path into a new `String`
+  (`row.path.display().to_string()`), and what `Sink::emit` costs, including
+  the sink's lock (`self.inner.lock()`), a read of the clock inside it
+  (`inner.stamp(now_millis())`), the line formatted into the sink's buffer
+  (`line(&mut inner.buf, inner.seq, at, run, event)`), and a `write_all` of
+  the line to its log file (`inner.target.append(&inner.buf)`, which for the
+  `FileTarget` every installed sink opens is `self.file.write_all(bytes)`),
+  after a rotation when the line would carry the current file past its
+  bound. When that write fails, a second write ends the fragment
+  (`inner.target.append(b"\n")`), and a notice goes to stderr once per sink
+  (`self.report(&why)`). At most one line per feed per call. Not timed.
   `what_refusing_an_absence_costs_is_what_its_doc_says` holds the function's
-  doc to its body, read off the source.
+  doc to its body, read off the source, and
+  `what_a_changed_rows_line_costs_is_named_in_part_and_read_off_the_source`
+  finds each part named here and in that doc in the source that pays it.

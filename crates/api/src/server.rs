@@ -3752,10 +3752,14 @@ const CONTRADICTED_ABSENCE: &str = "this read found no manifest here, and the st
 /// [`stamp_could_read`], and no syscall. A row it changes also costs the line
 /// below, through `telemetry::emit_if!`: the level check alone when no sink
 /// is installed, or when the floor the sink applies to `api.census` is above
-/// `Warn`, and otherwise what `telemetry::Sink::emit` costs, which is the
-/// sink's lock and a `write_all` of the line to its log file, after a
-/// rotation of its files when the line would carry the current one past its
-/// bound. So a call writes at most one line per feed. Not timed.
+/// `Warn`. Otherwise it costs the event the macro builds, whose `path` field
+/// formats the manifest's path into a new `String`, and what
+/// `telemetry::Sink::emit` costs, including the sink's lock, a read of the
+/// clock inside it, the line formatted into the sink's buffer, and a
+/// `write_all` of the line to its log file, after a rotation of its files
+/// when the line would carry the current one past its bound. When that write
+/// fails, a second write ends the fragment, and a notice goes to stderr once
+/// per sink. So a call writes at most one line per feed. Not timed.
 ///
 /// # Each row it changes is logged, since D-0695's ninth repair
 ///

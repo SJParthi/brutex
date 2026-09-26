@@ -2846,6 +2846,166 @@ fn what_refusing_an_absence_costs_is_what_its_doc_says() {
     );
 }
 
+/// WHAT A CHANGED ROW'S LINE COSTS IS NAMED AS A LIST THAT SAYS IT IS NOT
+/// COMPLETE, AND EACH PART IT NAMES IS READ OFF THE SOURCE THAT PAYS IT. D-0695.
+///
+/// The tenth repair priced the line as what `telemetry::Sink::emit` costs,
+/// "which is the sink's lock and a `write_all` of the line", a list that
+/// reads as the whole cost. A review found more in the source: the macro
+/// builds the event, whose `path` field is a new `String`, and
+/// `Sink::emit_for_run` reads the clock inside the lock and formats the line
+/// into its buffer, and when the append fails it writes again to end the
+/// fragment and reports to stderr, once per sink.
+/// `refuse_contradicted_absences`'s doc and `docs/06-limits.md`'s "What that
+/// line costs" now each say "including" and name those parts. Here each part
+/// is also found in the source that pays it, so a part that stops being paid
+/// fails here too.
+#[test]
+fn what_a_changed_rows_line_costs_is_named_in_part_and_read_off_the_source() {
+    let (body, doc, bullet) = line_cost_texts();
+    let sink = include_str!("../../telemetry/src/sink.rs");
+    let emit = method(sink, "\n    pub fn emit_for_run(");
+    let report = method(sink, "\n    fn report(&self, why: &str) {");
+    let file_append = method(sink, "\nimpl Target for FileTarget {");
+
+    // Each part: where it is paid, what pays it there, and the words both
+    // texts name it with.
+    let parts: [(&str, &str, &str, &[&str]); 8] = [
+        (
+            "refuse_contradicted_absences",
+            body,
+            "\"path\" => telemetry::Value::Str(&row.path.display().to_string())",
+            &["`String`"],
+        ),
+        (
+            "Sink::emit_for_run",
+            emit,
+            "self.inner.lock()",
+            &["the sink's lock"],
+        ),
+        (
+            "Sink::emit_for_run",
+            emit,
+            "inner.stamp(now_millis())",
+            &["clock"],
+        ),
+        (
+            "Sink::emit_for_run",
+            emit,
+            "line(&mut inner.buf, inner.seq, at, run, event)",
+            &["formatted"],
+        ),
+        (
+            "Sink::emit_for_run",
+            emit,
+            "self.roll(inner)",
+            &["rotation"],
+        ),
+        (
+            "Sink::emit_for_run",
+            emit,
+            "let landed = inner.target.append(&inner.buf);",
+            &["`write_all`"],
+        ),
+        (
+            "Sink::emit_for_run",
+            emit,
+            "let _terminated = inner.target.append(b\"\\n\");",
+            &["ends the fragment"],
+        ),
+        (
+            "Sink::emit_for_run",
+            emit,
+            "self.report(&why);",
+            &["stderr", "once per sink"],
+        ),
+    ];
+    for (site, code, paid_by, words) in parts {
+        assert!(
+            code.contains(paid_by),
+            "{site} pays this part with `{paid_by}`: {code}"
+        );
+        for word in words {
+            for (text, said) in [
+                ("the doc", doc.as_str()),
+                ("docs/06-limits.md", bullet.as_str()),
+            ] {
+                assert!(
+                    said.contains(word),
+                    "{text} names the part `{paid_by}` pays ({word}): {said}"
+                );
+            }
+        }
+    }
+    assert!(
+        file_append.contains("self.file.write_all(bytes)"),
+        "the target every installed sink opens appends with `write_all`: {file_append}"
+    );
+    assert!(
+        report.contains("eprintln!") && report.contains(".compare_exchange(false, true,"),
+        "the notice goes to stderr, once per sink: {report}"
+    );
+    for (text, said) in [
+        ("the doc", doc.as_str()),
+        ("docs/06-limits.md", bullet.as_str()),
+    ] {
+        assert!(
+            said.contains("including"),
+            "{text} names the parts as a list that is not the whole cost: {said}"
+        );
+        assert!(
+            !said.contains("which is the sink's lock"),
+            "{text} does not call two parts the whole cost: {said}"
+        );
+    }
+}
+
+/// The body of the method that follows `head` in `source`, to its closing
+/// brace at one level of indentation.
+fn method<'a>(source: &'a str, head: &str) -> &'a str {
+    source
+        .split_once(head)
+        .expect("the method is in the source")
+        .1
+        .split_once("\n    }\n")
+        .expect("its body ends")
+        .0
+}
+
+/// What prices a changed row's line: `refuse_contradicted_absences`'s body,
+/// its doc as one line, and `docs/06-limits.md`'s "What that line costs"
+/// with every run of whitespace made one space.
+fn line_cost_texts() -> (&'static str, String, String) {
+    let server = include_str!("server.rs");
+    let (above, from) = server
+        .split_once("\nfn refuse_contradicted_absences(")
+        .expect("`refuse_contradicted_absences` is in server.rs");
+    let body = from.split_once("\n}\n").expect("its body ends").0;
+    let mut doc: Vec<&str> = above
+        .lines()
+        .rev()
+        .take_while(|line| line.starts_with("///"))
+        .map(|line| line.trim_start_matches("///").trim())
+        .collect();
+    doc.reverse();
+    let limits = include_str!("../../../docs/06-limits.md");
+    let bullet = limits
+        .split_once("* **What that line costs.**")
+        .expect("docs/06-limits.md prices the line")
+        .1;
+    let bullet = bullet
+        .split_once("\n\n")
+        .map_or(bullet, |(first, _)| first)
+        .split("\n* ")
+        .next()
+        .unwrap_or_default();
+    (
+        body,
+        doc.join(" "),
+        bullet.split_whitespace().collect::<Vec<_>>().join(" "),
+    )
+}
+
 /// A CALENDAR DERIVED WHILE A HELD BAR FILE WOULD NOT OPEN IS REFUSED TO ITS
 /// REQUEST AND NOT KEPT, on both branches of `/calendar.json`. D-0695.
 ///
