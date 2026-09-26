@@ -38921,7 +38921,8 @@ one real libm in one process, so a stamp the store writes, into the `.grk`
 header or into a file beside it, comes out the same in both files and a check
 against it passes, and a stamp a caller packs into the provenance word never
 reaches the tests, which build the provenance themselves. Tried at `eecca4da`,
-a commit of the branch this entry was written on: a stamp the store wrote into
+a commit of the branch this entry was written on, which `main`'s squash merge
+does not keep: a stamp the store wrote into
 the `.grk` header region on the first append, refusing an append whenever the
 held stamp differed from its own, refused a forward append once the held stamp
 was altered, and every test in the `store` suite passed, these four included.
@@ -39161,11 +39162,12 @@ this store", the recovery journal "already exclusively locked", the census
 "another ingest holds the census lock", the lease `Busy`, the expression
 evidence "busy", `Pending` "already owned", and the checksum receipt
 `WouldBlock`. Against the sources this change started from, those of
-`fd70a1bd`, the tests that compile against them failed the same way: both
+`fd70a1bd`, a commit of this entry's branch that `main`'s squash merge does
+not keep, the tests that compile against them failed the same way: both
 checkpoint regressions (with only the one-line test hook added to
 `publish_inner`), the execution lease and `Pending`. The other site tests name
-fields that did not exist at `fd70a1bd`, so for those the close-only guard is
-the model of the old code.
+fields that did not exist in those sources, so for those the close-only guard
+is the model of the old code.
 
 **Mutation evidence.** `cargo mutants -p store --file
 crates/store/src/flock.rs`: 16 mutants, 6 caught, 0 missed, 10 unviable, 0
@@ -39223,22 +39225,24 @@ line, and the proof paragraph.
    branch the conversion edited the same files, and some listed lines no
    longer point at their lock here, so the follow-up reads the list at
    `96194c11`. `cited_commits::d_0693_lists_each_bracket_site_at_a_commit_where_its_line_takes_a_lock`
-   reads each listed line at the commit this entry names, requires it to take
-   a lock, and requires the count above. The run was taken on that commit and
-   was not repeated. Its workspace manifests, lock file and the sources of
-   `cli` and of every crate `cli` builds from are byte-identical to those of
-   `fd70a1bd`, the parent of this change's first commit, so the run is cited
-   to `fd70a1bd`. `crates/store/tests/cited_commits.rs` now refuses a commit
-   cited in this entry, D-0694, `docs/04-invariants.md`, `docs/06-limits.md`
-   or `tail_proof.rs` that is neither an ancestor of `HEAD` nor on a
-   remote-tracking branch, unless its own sentence says so. It does not read
+   reads each listed line at the commit this entry names, requires its code
+   before any `//` to make one of the lock calls that file's `LOCK_CALLS`
+   names, and requires the count above. The red-before-green run was taken
+   on `b1d9ac70`, which is in neither `main`'s history nor this entry's
+   branch, and was not repeated. The workspace manifests and lock file of
+   that commit, and its sources of `cli` and of every crate `cli` builds
+   from, are byte-identical to those of `fd70a1bd`, the parent of this
+   change's first commit, so the run is cited to `fd70a1bd`, which `main`'s
+   squash merge does not keep either. `crates/store/tests/cited_commits.rs`
+   holds every citation it recognises in this entry, D-0694,
+   `docs/04-invariants.md`, `docs/06-limits.md` and the comments of
+   `tail_proof.rs` to the history of `refs/remotes/origin/main`, unless its
+   `NOT_ON_MAIN` lists the commit with the reason `main` does not hold it and
+   each sentence citing it gives that reason, as AF-48 says. It does not read
    D-0692: `only_this_file_names_d_0692_and_only_greeks_also_cites_limits_29`
    requires `libm_key.rs` to be the only file under `crates/` that names
    D-0692, and `d_0692_and_limits_29_cite_main_and_keep_none_of_the_corrected_wordings`
-   refuses the wordings of the citations D-0692 withdrew. On
-   `main`, after a squash merge, `HEAD` no longer holds this branch's commits,
-   so a citation of one of them passes there only while a remote-tracking
-   branch in that clone still holds it.
+   refuses the wordings of the citations D-0692 withdrew.
 2. *The refusal's wording.* `Unreleased` said the lock "could not be released
    before its descriptor closed", and the `Drop` note's line said "advisory
    lock not released before close". A guard over a borrowed file closes
@@ -39285,6 +39289,22 @@ line, and the proof paragraph.
    before each guard is taken, so a release that leaves the lock held fails
    it rather than leaving `lock` or `lock_shared` waiting. The proof paragraph
    is narrowed to what the two tests show.
+7. *What a second review found in the answers above.* The first version of
+   `cited_commits.rs` accepted a commit on any remote-tracking branch, and so
+   this branch's own commits, which items 1 and AF-48 cited. `main` takes
+   squash merges, so none of those commits ever joins `main`'s history. The
+   review built a squash of this branch onto `main` and ran that test there:
+   it refused five of them, since no remote-tracking branch held them. The
+   test now reads against `refs/remotes/origin/main`, as
+   `core/tests/findings.rs` reads its ledger's commits (D-0680), and lists
+   every commit it reads that `main` does not hold with the reason, which
+   every sentence citing it gives. Its site check accepted any line holding
+   "lock" and not "unlock", and the review moved `result_set`'s two sites in
+   the list above to two comments at `96194c11`, one holding "clock" and one
+   "block", and the check passed. It now requires a lock call, and
+   `a_comment_or_a_word_holding_lock_is_not_a_lock_call` holds it to such
+   lines. The last step of item 4's open test was a re-read, which a leaked
+   shared lock does not refuse; item 4 says what replaced it.
 
 ### D-0694 — Say corporate actions are unchecked on every stock report, and withhold holed sessions on the ordinary stored sweep — 2026-09-23
 
@@ -39741,8 +39761,9 @@ edited.
     - The gap-free test's field comparisons now compare whole contexts
       (item 9).
     - `sweep_wiring_tests::an_untraded_equity_ranking_is_labelled_gross_before_it_refuses`
-      (D-0696) failed on the integrated tree. Run on eecca4da with nothing
-      changed, it failed at "the scope may change the charge statement and
+      (D-0696) failed on the integrated tree. Run with nothing changed on
+      eecca4da, a commit of this entry's branch that `main`'s squash merge
+      does not keep, it failed at "the scope may change the charge statement and
       nothing else". It removed only the gross label from the equity page
       and compared the rest with the index page, and this entry's sentence
       follows that label in FINDINGS. It now removes

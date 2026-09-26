@@ -2203,7 +2203,8 @@ builds are one real libm in one process, so a stamp the store writes, into the
 `.grk` header or into a file beside it, comes out the same in both files and a
 check against it passes, and a stamp a caller packs into the provenance word
 never reaches the tests, which build the provenance themselves. Tried at
-`eecca4da`, a commit of the branch D-0692 was written on: a stamp the store
+`eecca4da`, a commit of the branch D-0692 was written on, which `main`'s
+squash merge does not keep: a stamp the store
 wrote into the `.grk` header region on the first append, refusing an append
 whenever the held stamp differed from its own, refused a forward append once
 the held stamp was altered, and every test in the `store` suite passed. No
