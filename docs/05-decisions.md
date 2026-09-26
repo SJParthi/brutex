@@ -38439,3 +38439,49 @@ passes here, and fails again with only the fixed array reverted.
 exact counts accepted, short and long lines refused with their true count, a
 line of 1,000,000 commas counted as 1,000,001 fields, and a width past the
 array refused. The existing field-count tests still pass unchanged. C4-PULL-02.
+
+### D-0722 — Read a contract's underlying from both ends, so `BAJAJ-AUTO` and `NAM-INDIA` are discoverable — 2026-09-26
+
+`fno::read_contract` split a discovered contract name on every `-` and took
+the second piece as the underlying: `let mut parts = name.split('-');` then
+`let underlying = parts.next()?;`. `core::universe::FNO_UNDERLYINGS` holds two
+underlyings with a hyphen, `BAJAJ-AUTO` and `NAM-INDIA`. A name such as
+`NSE-BAJAJ-AUTO-27Mar25-FUT` read as the underlying `BAJAJ` with `AUTO` where
+the expiry belongs, `expiry_token_agrees` refused `AUTO`, and the name went to
+`Chain::unreadable`. So no expired contract of either underlying could be
+discovered, and neither's month could report itself whole. Ledger row
+W1-pull1-5.
+
+**Decision: the grammar is fixed at both ends, so the underlying is what lies
+between.** The exchange is the first piece. A name ends `-FUT`, or a strike
+and a side. The expiry token is the piece before that tail. The underlying is
+everything between the exchange and the expiry token, hyphens included.
+Every name the reader's existing refusal test refuses is still refused, and
+the same malformed tails are refused for hyphenated names. One thing is
+looser, and the next paragraph names it.
+
+**What stands behind the looser middle.** A name with an extra piece in its
+middle, `NSE-BAJAJ-AUTO-X-25Jan24-FUT`, now reads as the underlying
+`BAJAJ-AUTO-X` rather than failing the expiry check. `chain::month` compares
+every read underlying with the ask and refuses a mismatch by name, so that name
+is still not filed.
+
+**UNVERIFIED.** No Groww contract name for either underlying has been
+observed. That the vendor writes `NSE-BAJAJ-AUTO-…` rather than dropping the
+hyphen is not established. This entry holds only that a name spelled with the
+hyphen reads as the underlying it names. A name spelled without it would read
+as `BAJAJAUTO` and be refused by the ask check, as before.
+
+**Proof.** `every_fno_underlying_reads_back_whole_hyphen_and_all` reads a
+weekly future, a monthly future and an option for every underlying in
+`FNO_UNDERLYINGS` and gets each underlying back whole. It also asserts that
+the hyphenated ones are exactly `BAJAJ-AUTO` and `NAM-INDIA`. It failed on
+origin/main at `NSE-BAJAJ-AUTO-27Mar25-FUT must read`, and fails again with
+only the reader reverted.
+`a_hyphenated_underlyings_contracts_are_filed_and_an_off_key_one_is_refused`
+drives `chain::month` for `BAJAJ-AUTO`: both of its contracts are filed, and
+`NSE-BAJAJ-AUTO-X-25Jan24-FUT` is refused naming `BAJAJ-AUTO-X`, as is
+`NSE-BAJAJAUTO-25Jan24-FUT` naming `BAJAJAUTO`. On origin/main it filed
+nothing, and it fails again with only the reader reverted.
+`a_hyphenated_name_with_a_malformed_tail_is_still_refused` holds malformed
+hyphenated names refused as their plain twins are. C4-PULL-03.

@@ -684,6 +684,63 @@ mod tests {
         );
     }
 
+    /// **A HYPHENATED UNDERLYING'S CONTRACTS ARE FILED, AND AN OFF-KEY NAME
+    /// BESIDE THEM IS STILL REFUSED.** D-0722.
+    ///
+    /// `BAJAJ-AUTO` is an F&O underlying, and every name answered for it was
+    /// unreadable to `fno::read_contract`, so none of its contracts was filed
+    /// and its month could never be whole. The third name reads now as the
+    /// underlying `BAJAJ-AUTO-X`, and the ask check refuses it by name. That
+    /// check is what stands between a name whose middle carries an extra piece
+    /// and a series nobody asked for.
+    ///
+    /// The fourth is the same series with the hyphen dropped. Which spelling
+    /// the vendor uses is UNVERIFIED, and a dropped hyphen reads as
+    /// `BAJAJAUTO`, which the ask check refuses rather than files.
+    #[tokio::test]
+    async fn a_hyphenated_underlyings_contracts_are_filed_and_an_off_key_one_is_refused() {
+        let canned = Canned {
+            answers: std::cell::RefCell::new(vec![
+                r#"{"expiries":["2024-01-25"]}"#.to_owned(),
+                r#"{"contracts":["NSE-BAJAJ-AUTO-25Jan24-7000-CE","NSE-BAJAJ-AUTO-25Jan24-FUT","NSE-BAJAJ-AUTO-X-25Jan24-FUT","NSE-BAJAJAUTO-25Jan24-FUT"]}"#
+                    .to_owned(),
+            ]),
+        };
+        let asked = Ask {
+            underlying: "BAJAJ-AUTO".to_owned(),
+            ..ask()
+        };
+        let chain = month(Feed::Groww, &asked, &canned)
+            .await
+            .expect("the call itself succeeded");
+
+        assert_eq!(
+            chain
+                .contracts
+                .iter()
+                .map(|found| (found.underlying.as_str(), found.contract.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("BAJAJ-AUTO", "2024-01-25-700000-CE"),
+                ("BAJAJ-AUTO", "2024-01-25-FUT"),
+            ],
+            "both contracts of the asked-for series are filed under it"
+        );
+        assert_eq!(chain.unreadable.len(), 2, "both off-key names are carried");
+        for named in ["names BAJAJ-AUTO-X", "names BAJAJAUTO"] {
+            assert!(
+                chain
+                    .unreadable
+                    .iter()
+                    .any(|why| why.contains(named) && why.contains("BAJAJ-AUTO was asked for")),
+                "refused by the ask check, which {named} and the asked-for series: \
+                 {:?}",
+                chain.unreadable
+            );
+        }
+        assert!(!chain.whole(), "a month that refused a name is not whole");
+    }
+
     /// A transport refusal stops the walk and carries the host's own words.
     #[tokio::test]
     async fn a_transport_refusal_names_the_url_and_the_reason() {
