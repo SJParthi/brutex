@@ -41686,9 +41686,10 @@ same review.
   stampings found no manifest, below a root both saw as a directory; any
   other becomes `Fault::Contradicted`, and the read is not kept. The cost is
   one more `manifest_stamps`, five `stat` calls and a sixth when none of them
-  found a manifest with a time, on a miss whose read has a row absent, and
-  nothing on any other miss or on a hit. `CONTRADICTED_ABSENCE` now names the
-  stamps "taken of the store just before or just after" the read. The
+  found a manifest with a time, on a miss whose read still has a row absent
+  after the stamps taken before it, and nothing on any other miss or on a
+  hit. `CONTRADICTED_ABSENCE` now names the stamps "taken of the store just
+  before or just after" the read. The
   stamping is a parameter so a test can hand the request torn stamps;
   production passes `manifest_stamps` and nothing else.
   `an_absence_under_stamps_a_changing_root_tore_is_stamped_again_after_the_read`
@@ -41763,8 +41764,12 @@ same review.
   unreadable, and the racing peer vote names all five feeds, not `dhan`
   alone. AF-28i's peer-vote clause is corrected in place to say so.
 - The eighth repair's "The cost is one index and one `stamp_could_read` per
-  row, and no syscall" is the cost of `refuse_contradicted_absences` alone.
-  A miss whose read has a row absent now also pays the second stamping.
+  row, and no syscall" is the cost of `refuse_contradicted_absences` for a
+  row it leaves unchanged. Each row it changes now also writes the `Warn`
+  line decided above: where a sink is installed whose floor admits it, the
+  sink's lock and a `write_all` of the line to its log file. A miss whose
+  read still has a row absent after the stamps taken before it also pays
+  the second stamping.
 - The eighth repair's gloss of `CONTRADICTED_ABSENCE`, "the stamps taken
   just before the read contradict it". It now names the stamps taken just
   before or just after.

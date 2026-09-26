@@ -9665,8 +9665,10 @@ is paid. The text above is kept as it was written.
 **Corrected 26 September 2026, on a ninth review (D-0695).** The eighth
 correction's second bullet says a row read absent under a stamp that found no
 manifest, below a root the stamps saw as a directory, is served absent. That
-holds only while the stamps are taken of one state of the store. The text
-above is kept as it was written.
+holds only while the stamps are taken of one state of the store. Its first
+bullet's cost, "one index and one `stamp_could_read` per row, and no
+syscall", holds only for a row left unchanged: see the last bullet below.
+The text above is kept as it was written.
 
 * **Stamps a changing root tore vouched for an empty store.**
   `manifest_stamps` stats the five manifests and asks the root only when none
@@ -9690,11 +9692,13 @@ above is kept as it was written.
   drives both through torn stamps handed to `census_now_stamping`.
 * **Its cost.** One more `manifest_stamps`: five `stat` calls, and a sixth
   when none of them found a manifest with a time. It is paid only on a miss
-  whose read has a row absent; a read with none, and every hit, pays nothing
-  more. `a_miss_is_stamped_again_only_when_a_row_reads_absent` counts the
-  stampings: one on a miss over a store with every feed's manifest, two on a
-  miss over a store with four feeds absent, one on each hit. Counted, not
-  timed.
+  whose read still has a row absent after the stamps taken before it; a read
+  with none, a read whose every absence those stamps already contradict, and
+  every hit, pay nothing more. `a_miss_is_stamped_again_only_when_a_row_reads_absent`
+  counts the stampings: one on a miss over a store with every feed's
+  manifest, two on a miss over a store with four feeds absent, one on a miss
+  over that store stamped with its root moved aside and read with it back,
+  and one on each hit. Counted, not timed.
 * **What is still answered an empty store.** Stamps taken again that tear the
   same way vouch for the absence too. A root that is away for both stampings'
   manifest `stat` calls and for the manifest reads, and back for both root
@@ -9724,3 +9728,15 @@ above is kept as it was written.
   path and `CONTRADICTED_ABSENCE`, one line for each row it changes and none
   for any other. `an_absence_its_stamps_contradict_is_logged_at_warn` reads
   them back from the installed sink.
+* **What that line costs.** A row `refuse_contradicted_absences` leaves
+  unchanged costs one index and one `stamp_could_read`, and no syscall. A row
+  it changes also costs its line, through `telemetry::emit_if!`: the level
+  check alone when no sink is installed or the sink's floor for `api.census`
+  is above `Warn`, and otherwise what `Sink::emit` costs, the sink's lock
+  (`self.inner.lock()`) and a `write_all` of the line to its log file
+  (`inner.target.append(&inner.buf)`, which for the `FileTarget` every
+  installed sink opens is `self.file.write_all(bytes)`), after a rotation
+  when the line would carry the current file past its bound. At most one
+  line per feed per call. Not timed.
+  `what_refusing_an_absence_costs_is_what_its_doc_says` holds the function's
+  doc to its body, read off the source.
