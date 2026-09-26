@@ -40174,6 +40174,29 @@ corrections said of themselves.** A review upheld two more findings.
    entry allows, being new in this change. Both now say only that each item
    corrects a statement above by adding text.
 
+**Correction, 2026-09-27: a source-only call must be code.** An independent
+tests-bite review wrapped the equity-note call in a block comment in each of
+the actual evidence and search-detail function bodies. The source predicate
+still passed: it located the call in raw text and filtered only the preceding
+text. The helper now filters the whole body before finding the statement,
+and its existing string/line-comment handling also excludes nested block
+comments and raw strings. It retains the early-return and top-level indentation
+checks. This changes the test helper, not the production response.
+
+`the_source_rule_rejects_a_noncode_note_in_render_with_budget` and
+`the_source_rule_rejects_a_noncode_note_in_search_detail` admit the real call
+and reject the comment/string replacements inside the actual source bodies.
+`the_source_rule_ignores_noncode_without_hiding_early_returns` checks that a
+decoy does not hide an early page return and that an early error remains
+admissible. On isolated copies of the exact helper/tests, all three new tests
+failed before repair while the existing helper regression passed; all four
+passed after repair. Restoring only the original helper made the three new
+tests fail again. The proof changes source strings in memory; it does not
+render those four stock routes. AF-19 retains that limit, the rustfmt indentation
+premise, and the exclusions for code after the call, macro/conditional
+compilation and character literals. Broader package and integration results
+are separate from these focused proofs.
+
 ### D-0696 — Label every equity ranking gross in the audit header's own words, and read a stored instrument only at its own path — 2026-09-23
 
 **Why this entry exists.** Commit 12916123, cherry-picked from c8c5383c

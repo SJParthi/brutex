@@ -5223,6 +5223,20 @@ zero test files and five production call sites.
 | AF-72 | **The `pool` page and the `sweep-all` report count the `.bin` files at a month's depth the catalog could not file under a feed or a rung.** `store::catalog` files a month only under a feed and a rung directory spelt exactly as this engine spells them, and counts unknown feed and rung directories before parsing the filename stem, store-wide without their names. Over a month and a `notes.bin` under `bars/Zerodha/...` and the same pair under another feed's `60MIN` directory, `pool`'s head is the opening, a NOT CATALOGUED block giving both counts as two and what a case-insensitive volume does with such a directory, and the empty-surface line, which says what the catalog found "spelt exactly". `sweep-all` prints one line with the two counts under its census line. Neither prints anything for a store whose every month was filed. Both dropped such months without a word, and the pool's empty-surface line said the store held no month at the path a load reads, which a case-insensitive volume contradicts (D-0696) | `cli::pool::tests::the_pool_page_counts_the_months_its_catalog_cannot_file`, `cli::pool::tests::the_pool_page_names_each_directory_it_did_not_read`, `cli::batch::tests::the_report_counts_the_months_the_catalog_could_not_file` | ✓ |
 | AF-73 | **The page `Prepared::new` writes opens with `research_heading`'s heading, so a Boolean research page over a stock opens with the gross and corporate-action note.** Driven from a child whose environment names generated receipt and store roots and the admission policy file `config/intraday-research-v1.toml`: over `RELIANCE` and over `NIFTY,RELIANCE` the page opens with `STORED_PROVENANCE` and `CostScope::CashEquity`'s note and carries `CORPORATE_ACTIONS_UNCHECKED`; over `NIFTY` it does neither, and each opens with that scope's `research_heading`. AF-16's Boolean clause was asserted of `research_heading` alone, and no test read a stock scope's page (D-0696) | `cli::audited_range_command::settings::boolean_tests::the_prepared_page_over_a_stock_opens_with_its_gross_heading` | ✓ |
 
+**AF-19 follow-up (D-0694):** the source-only proof filters the entire body
+before locating the note call. A call appearing only in a line comment,
+nested block comment, cooked string or raw string is refused. The tests
+`api::booleanevidencejson::tests::the_source_rule_rejects_a_noncode_note_in_render_with_budget`
+and
+`api::booleanevidencejson::tests::the_source_rule_rejects_a_noncode_note_in_search_detail`
+check those replacements in the actual production bodies. The test
+`api::booleanevidencejson::tests::the_source_rule_ignores_noncode_without_hiding_early_returns`
+also requires an early page return to remain visible after a non-code decoy,
+while admitting an early error. This is still an indentation/source-shape
+check: the four routes lack rendered stock fixtures, code after the call is
+not constrained, and macro, conditional-compilation and character-literal
+semantics are not proved by this helper.
+
 **AF-48 follow-up (D-0681, D-0693):** the citation guard also reads D-0681 and
 D-0682; `every_commit_the_store_records_cite_is_on_main_or_says_why_not`
 requires the original measurement citations in D-0681 to state their absence
