@@ -14856,15 +14856,19 @@ async fn bars_get(
 /// this build has no feed for — render the same shape, so they share it. A
 /// second copy is a second place for the two to drift into describing the
 /// store differently.
+///
+/// The status is the caller's: those two answer 400, and [`unlocatable`]
+/// answers 503 where a census could not be read. D-0695.
 fn bars_refusal(
     site: &Site,
+    status: axum::http::StatusCode,
     symbol: &str,
     segment: &str,
     vendor: &str,
     trouble: &str,
 ) -> (axum::http::StatusCode, String) {
     (
-        axum::http::StatusCode::BAD_REQUEST,
+        status,
         render::bars_page(&render::BarsView {
             symbol,
             segment,
@@ -15073,45 +15077,69 @@ fn stored_case(raw: String) -> String {
 /// because the sentence is the point: it names why the route could not LOOK,
 /// which is a different fact from a month being absent — and answering the
 /// second when the first is true is what the `"INDEX"` default did.
+///
+/// # 503 where a census could not be read, since D-0695's eleventh repair
+///
+/// Every arm answered 400. Two of them refuse because a census could not be
+/// read: the asked feed's own, or another feed's when no census that could be
+/// read holds the name. That is the store's fault, not the request's, and the
+/// same request is answered once the census reads again, as
+/// [`CONTRADICTED_ABSENCE`] tells the reader of one such census ("The next
+/// request reads again"). `/calendar.json` answers the same census state 503.
+/// So those two arms answer 503, and a name no census holds and a name one
+/// feed holds twice are still refused with 400.
 fn unlocatable(site: &Site, symbol: &str, why: &Unlocated) -> (axum::http::StatusCode, String) {
+    use axum::http::StatusCode;
     const EXPLICIT: &str = "Pass ?exchange= and ?segment= explicitly to address a series the \
                             census does not place.";
-    let sentence = match *why {
-        Unlocated::NotHeld(ref unreadable) if unreadable.is_empty() => format!(
-            "no feed in this store holds a spot series under that name, so there \
-             is no exchange or segment to read it from. Refused rather than \
-             guessed: a guessed path answers \"does not exist\" for a reason that \
-             is not the true one. {EXPLICIT}"
+    let (status, sentence) = match *why {
+        Unlocated::NotHeld(ref unreadable) if unreadable.is_empty() => (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "no feed in this store holds a spot series under that name, so there \
+                 is no exchange or segment to read it from. Refused rather than \
+                 guessed: a guessed path answers \"does not exist\" for a reason that \
+                 is not the true one. {EXPLICIT}"
+            ),
         ),
-        Unlocated::NotHeld(ref unreadable) => format!(
-            "no census that could be read holds a spot series under that name, and \
-             {} could not be read: {}. Whether one of them holds it is unknown, so \
-             no path was guessed. {EXPLICIT}",
-            unreadable.len(),
-            unreadable.join(" · ")
+        Unlocated::NotHeld(ref unreadable) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "no census that could be read holds a spot series under that name, and \
+                 {} could not be read: {}. Whether one of them holds it is unknown, so \
+                 no path was guessed. {EXPLICIT}",
+                unreadable.len(),
+                unreadable.join(" · ")
+            ),
         ),
-        Unlocated::AskedUnreadable(ref note) => format!(
-            "the asked feed's own census could not be read: {note}. This page opens \
-             that feed's file, and only its census says which exchange and segment \
-             it filed the name under; another feed's answer would be a guessed path, \
-             and a guessed path answers \"does not exist\" for a reason that is not \
-             the true one. No path was guessed. {EXPLICIT}"
+        Unlocated::AskedUnreadable(ref note) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "the asked feed's own census could not be read: {note}. This page opens \
+                 that feed's file, and only its census says which exchange and segment \
+                 it filed the name under; another feed's answer would be a guessed path, \
+                 and a guessed path answers \"does not exist\" for a reason that is not \
+                 the true one. No path was guessed. {EXPLICIT}"
+            ),
         ),
         Unlocated::Ambiguous {
             vendor,
             first,
             second,
-        } => format!(
-            "ambiguous stored symbol: {} holds {symbol} as {}/{} and as {}/{}, two \
-             different series. Refused rather than picking one. {EXPLICIT}",
-            vendor.as_str(),
-            first.0.as_str(),
-            first.1.as_str(),
-            second.0.as_str(),
-            second.1.as_str()
+        } => (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "ambiguous stored symbol: {} holds {symbol} as {}/{} and as {}/{}, two \
+                 different series. Refused rather than picking one. {EXPLICIT}",
+                vendor.as_str(),
+                first.0.as_str(),
+                first.1.as_str(),
+                second.0.as_str(),
+                second.1.as_str()
+            ),
         ),
     };
-    bars_refusal(site, symbol, "—", "—", &sentence)
+    bars_refusal(site, status, symbol, "—", "—", &sentence)
 }
 
 /// One month of bars, or a named refusal.
@@ -15153,6 +15181,7 @@ pub fn bars_html(site: &Site, query: &str) -> (axum::http::StatusCode, String) {
     let Some(vendor) = ingest::parse_vendor(&asked_vendor) else {
         return bars_refusal(
             site,
+            axum::http::StatusCode::BAD_REQUEST,
             &symbol,
             &segment,
             "—",
@@ -15172,6 +15201,7 @@ pub fn bars_html(site: &Site, query: &str) -> (axum::http::StatusCode, String) {
     let Some(month) = month else {
         return bars_refusal(
             site,
+            axum::http::StatusCode::BAD_REQUEST,
             &symbol,
             &segment,
             vendor.as_str(),
@@ -22542,9 +22572,9 @@ mod tests {
         assert_eq!(
             status,
             axum::http::StatusCode::BAD_REQUEST,
-            "a refusal is a 400 and a rendered page — the same status every \
-             other arm of this route answers with, never a 500 and never a 200 \
-             carrying an empty month"
+            "a name no census holds is refused with a 400 and a rendered page, \
+             never a 500 and never a 200 carrying an empty month; only a census \
+             that could not be read answers 503 (D-0695)"
         );
         assert!(
             body.contains("no feed in this store holds a spot series under that name"),

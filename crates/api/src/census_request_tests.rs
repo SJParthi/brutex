@@ -729,8 +729,14 @@ async fn an_unreadable_census_is_named_by_calendar_and_bars() {
         assert!(body.contains("dhan.man"), "names the file: {body}");
         assert!(!body.contains(r#""sessions""#), "no calendar: {body}");
     }
+    // 503, AS `/calendar.json` ANSWERS THE SAME CENSUS just above: the
+    // census is the store's fault, not the request's. D-0695.
     let (status, page) = fixture.bars("symbol=NIFTY&vendor=dhan&month=2025-05");
-    assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+    assert_eq!(
+        status,
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "{page}"
+    );
     assert!(page.contains("UNREADABLE"), "{page}");
     assert!(
         !page.contains("no feed in this store holds"),
@@ -1289,7 +1295,8 @@ fn a_root_and_a_manifest_directory_that_are_files_keep_their_own_notes() {
 /// guess `locate_series` exists to refuse -- and dropped the note, because
 /// notes surfaced only when nothing was found. The page said the month did not
 /// exist with no word that Dhan's counter could not be read. A half the caller
-/// gave still leaves the other half to that census, so it is refused too.
+/// gave still leaves the other half to that census, so it is refused too, with
+/// 503, as `/calendar.json` answers an unreadable census.
 #[tokio::test]
 async fn bars_refuses_when_the_asked_feeds_own_census_is_unreadable() {
     let fixture = Fixture::new("census-request-asked-unreadable");
@@ -1303,7 +1310,7 @@ async fn bars_refuses_when_the_asked_feeds_own_census_is_unreadable() {
         let (status, page) = fixture.bars(query);
         assert_eq!(
             status,
-            axum::http::StatusCode::BAD_REQUEST,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
             "{query}: {page}"
         );
         assert!(
@@ -1398,9 +1405,14 @@ async fn bars_steps_over_another_feeds_unreadable_census_to_a_third_feeds_identi
 /// Here Groww's manifest is damaged, Dhan's census is read and holds only
 /// NIFTY, and no feed holds RELIANCE. Dhan's request, with `?vendor=dhan`,
 /// with no vendor (Dhan by default) and with a vendor this build has no feed
-/// for, which `locate_series` walks as no asked feed, is refused 400 naming
+/// for, which `locate_series` walks as no asked feed, is refused 503 naming
 /// Groww's manifest and a count of one. With Zerodha's manifest damaged too,
 /// the count is two and both notes are joined in `Vendor::ALL` order.
+///
+/// 503, not 400, since D-0695's eleventh repair: a census that cannot be read
+/// is the store's fault, not the request's, and `/calendar.json` answers the
+/// same census 503. The unknown vendor is refused the same way, because
+/// `bars_html` asks `locate_series` before it parses the vendor.
 #[tokio::test]
 async fn bars_names_every_unreadable_census_when_no_readable_census_holds_the_name() {
     let fixture = Fixture::new("census-request-unheld-unreadable");
@@ -1441,7 +1453,7 @@ async fn bars_names_every_unreadable_census_when_no_readable_census_holds_the_na
             let (status, page) = fixture.bars(query);
             assert_eq!(
                 status,
-                axum::http::StatusCode::BAD_REQUEST,
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
                 "{query}: {page}"
             );
             assert!(
@@ -1533,7 +1545,11 @@ async fn a_permission_change_on_a_manifest_file_is_seen_on_the_next_request() {
         "{body}"
     );
     let (status, page) = fixture.bars(bars);
-    assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{page}");
+    assert_eq!(
+        status,
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "{page}"
+    );
     assert!(page.contains("own census could not be read"), "{page}");
 
     set_mode(0o644);
