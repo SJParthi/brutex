@@ -39444,6 +39444,12 @@ reviewed API text to D-0695, preserving the earlier decision order and all
 preceding foundation records. This is a section-boundary correction, not a
 new claim that the combined workspace has passed its required checks.
 
+The independent integration behaviour review found the analogous boundary
+error in `docs/06-limits.md`: its two CLI corrections followed the API
+section. Both complete paragraphs now precede that section, under D-0696,
+with their original wording and order retained. Their references to earlier
+bullets again name the CLI limits they correct.
+
 ### D-0694 — Say corporate actions are unchecked on every stock report, and withhold holed sessions on the ordinary stored sweep — 2026-09-23
 
 **The gap (audit G16), in two halves.**

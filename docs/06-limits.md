@@ -9309,6 +9309,42 @@ by `File::unlock`. What that does not cover, stated rather than implied away:
   has a `swept_rung` of its own that quotes raw too, but only a word
   `stored::rung` has already accepted as a stored rung reaches that quote.
 
+- **Four copies are bound, and one of them is `runner`'s (correction,
+  24 September 2026).** The second bullet above named three.
+  `runner::audit::CASH_EQUITY_GROSS` (D-0694), which `CostScope::report_note`
+  prints at the head of every stored share page, of `sweep-all` over a stock
+  and of the Boolean research heading over a cash family, was a fourth that no
+  test bound, and it lacked the header's Selection V6 clause. It now carries
+  the header's sentence, and the same test reads it. A share's page still
+  states the charge fact more than once, in lead-in words that differ: the
+  banner's "EVERY TOTAL BELOW", the FINDINGS label's "EVERY FIGURE IN THIS
+  RANKING", `top`'s "per ONE share", and an audit header's own paragraphs.
+  The charge list and the cost-excluded sentence are held identical to the
+  header's, and each copy states the header's fact in the same words, "none
+  is subtracted". The lead-in words around them are pinned per copy by the
+  same test. That test holds today's words; it does not read what a new
+  clause means.
+- **The `pool` page past its head is driven only in a stamped build
+  (correction, 24 September 2026).** This bullet said no test build passes
+  `pool::run`'s commit-stamp check. That was false: the build script stamps a
+  tree equal to HEAD, and a clean checkout is one. A surface with an
+  instrument on it is screened through `one_rung`, which reads the store root
+  from the environment, so the verb is driven from a child process whose
+  environment names a generated store: `pool` dispatched through
+  `crate::dispatch`, the command table `cli::run_durable` reaches from the
+  binary, once over the generated NIFTY month through both passes, and once
+  over an unreadable share month beside a BSE directory. The lease and audit
+  `run_durable` wraps around that table are not on this path. A build of any
+  other tree -- an uncommitted edit, or a mutation run -- is unstamped and
+  refuses both before a bar is read. There the page past its head is held only
+  by reading the source: `pool_arm`'s arm and `pool::pool` are pinned, `run`
+  returns `run_under`'s page as its tail, and every mention of the page in
+  `run_under` after its head is an append or its return. The two renderers
+  that append to it are driven on one input each. No test pools two
+  instruments, or a cash equity, end to end: the driven pages are one index
+  and one refused share, and `fold` over two instruments is driven only
+  directly.
+
 ## Screen-budget refusals and census faults on the api routes — D-0695, 24 September 2026
 
 - **The pages do not show the new census facts yet.** `/gaps.json` lists
@@ -9827,38 +9863,3 @@ The text above is kept as it was written.
   doc to its body, read off the source, and
   `what_a_changed_rows_line_costs_is_named_in_part_and_read_off_the_source`
   finds each part named here and in that doc in the source that pays it.
-- **Four copies are bound, and one of them is `runner`'s (correction,
-  24 September 2026).** The second bullet above named three.
-  `runner::audit::CASH_EQUITY_GROSS` (D-0694), which `CostScope::report_note`
-  prints at the head of every stored share page, of `sweep-all` over a stock
-  and of the Boolean research heading over a cash family, was a fourth that no
-  test bound, and it lacked the header's Selection V6 clause. It now carries
-  the header's sentence, and the same test reads it. A share's page still
-  states the charge fact more than once, in lead-in words that differ: the
-  banner's "EVERY TOTAL BELOW", the FINDINGS label's "EVERY FIGURE IN THIS
-  RANKING", `top`'s "per ONE share", and an audit header's own paragraphs.
-  The charge list and the cost-excluded sentence are held identical to the
-  header's, and each copy states the header's fact in the same words, "none
-  is subtracted". The lead-in words around them are pinned per copy by the
-  same test. That test holds today's words; it does not read what a new
-  clause means.
-- **The `pool` page past its head is driven only in a stamped build
-  (correction, 24 September 2026).** This bullet said no test build passes
-  `pool::run`'s commit-stamp check. That was false: the build script stamps a
-  tree equal to HEAD, and a clean checkout is one. A surface with an
-  instrument on it is screened through `one_rung`, which reads the store root
-  from the environment, so the verb is driven from a child process whose
-  environment names a generated store: `pool` dispatched through
-  `crate::dispatch`, the command table `cli::run_durable` reaches from the
-  binary, once over the generated NIFTY month through both passes, and once
-  over an unreadable share month beside a BSE directory. The lease and audit
-  `run_durable` wraps around that table are not on this path. A build of any
-  other tree -- an uncommitted edit, or a mutation run -- is unstamped and
-  refuses both before a bar is read. There the page past its head is held only
-  by reading the source: `pool_arm`'s arm and `pool::pool` are pinned, `run`
-  returns `run_under`'s page as its tail, and every mention of the page in
-  `run_under` after its head is an append or its return. The two renderers
-  that append to it are driven on one input each. No test pools two
-  instruments, or a cash equity, end to end: the driven pages are one index
-  and one refused share, and `fold` over two instruments is driven only
-  directly.
