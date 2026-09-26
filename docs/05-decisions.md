@@ -39983,7 +39983,7 @@ Each item corrects a statement above by adding text; nothing above is edited.
    `/boolean-qualified-search.json` rung detail are not rendered with a stock
    family, for the reason given above. Their two tests now also require the
    call to be a statement at the top level of `render_with_budget` and of
-   `detail`, with no `return Ok` before it.
+   `detail`, and every `return` written before it to return an `Err`.
 3. *AF-19* says which payloads are rendered and which are held by their
    source.
 
@@ -39993,6 +39993,19 @@ and the search detail returning before its call when the page offset is not
 zero. The campaign, evidence and search-detail tests all failed. A second
 build applied the same three breaks under those three tests as they stood
 before this correction, and all 33 tests of the three modules passed.
+
+As item 2's rule was first written it refused only the letters `return Ok`
+before the call. A review then put
+`if let (Reader::Statistics(reader), Some(_)) = (reader, asked.completion) { return statistics(reader, asked); }`
+before the evidence call, so that every statistics page read with a
+completion pin carried no note, and the evidence test passed. The rule now
+refuses every `return` before the call but `return Err(`, and
+`booleanevidencejson::tests::the_source_rule_refuses_every_early_return_but_an_error`
+holds it to that spelling and to the spelling `return Ok`. With the review's
+break applied, the evidence test fails. A word inside a `"` string or after
+`//` is not read: the search `detail`'s scope string says "future-return",
+and a rule that read it refused `detail`. The rule reads nothing after the
+call, so the two tests do not hold a page built after it.
 
 ### D-0696 — Label every equity ranking gross in the audit header's own words, and read a stored instrument only at its own path — 2026-09-23
 

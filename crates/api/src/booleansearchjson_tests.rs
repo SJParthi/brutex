@@ -127,11 +127,12 @@ async fn invalid_public_search_queries_refuse_before_reading_config_or_sources()
 /// tested there), so the two views of one qualification cannot disagree. The
 /// search is saved evidence this crate has no fixture for, so no detail is
 /// rendered here with a stock family: `detail` is held to it by its source.
-/// The call must be a statement at the top level of `detail` with no
-/// `return Ok` before it, the rule `booleanevidencejson`'s test applies, so
-/// a detail returned before the call, or a call made on some reads only,
-/// fails here. The overview names counts and links and no family's figure,
-/// and carries no note.
+/// The call must be a statement at the top level of `detail`, and every
+/// `return` before it must return an `Err`, the rule `booleanevidencejson`'s
+/// test applies. So a detail returned by a `return` before the call, however
+/// that `return` is spelled, or a call made on some reads only, fails here.
+/// The overview names counts and links and no family's figure, and carries
+/// no note.
 #[test]
 fn a_search_detail_states_its_qualifications_equity_note() {
     let text = include_str!("booleansearchjson.rs");

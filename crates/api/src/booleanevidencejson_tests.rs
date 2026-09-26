@@ -201,12 +201,109 @@ fn daily_and_weekly_pages_require_exact_setting_parent_pin_and_bounded_period_se
 }
 
 /// Whether `call` is a statement at the top level of the function `body`, as
-/// rustfmt indents one, with no `return Ok` before it: then every value the
-/// function returns has passed through the call. A call under a condition,
-/// a loop or a closure is indented deeper and is not found.
+/// rustfmt indents one, and every `return` written before it is a
+/// `return Err(`.
+///
+/// Before the call, a `?` can only return an error, so a page can leave the
+/// function before the call only by a `return`, and every such `return` is
+/// refused, however it is spelled. A call under a condition, a loop or a
+/// closure is indented deeper and is not found. A `return` inside a closure
+/// before the call is refused too, though it leaves only the closure. A word
+/// inside a `"` string or after `//` is not code and is not read. The text
+/// after the call is not read, so a page built after it is not held to the
+/// call.
 pub(crate) fn on_every_page(body: &str, call: &str) -> bool {
     body.split_once(&format!("\n    {call}"))
-        .is_some_and(|(before, _)| !before.contains("return Ok"))
+        .is_some_and(|(before, _)| only_errors_return(&code_only(before)))
+}
+
+/// `code` with the contents of every `"` string and every `//` comment
+/// removed. A `'"'` character literal would be read as opening a string; the
+/// bodies this is applied to hold none.
+fn code_only(code: &str) -> String {
+    let mut out = String::with_capacity(code.len());
+    let mut chars = code.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '"' {
+            out.push('"');
+            while let Some(inner) = chars.next() {
+                match inner {
+                    '\\' => {
+                        chars.next();
+                    }
+                    '"' => break,
+                    _ => {}
+                }
+            }
+            out.push('"');
+        } else if c == '/' && chars.peek() == Some(&'/') {
+            for rest in chars.by_ref() {
+                if rest == '\n' {
+                    out.push('\n');
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Whether every `return` keyword in `code` returns an `Err`, reading a word
+/// such as `returned` as no keyword.
+fn only_errors_return(code: &str) -> bool {
+    let part_of_a_word =
+        |byte: Option<&u8>| byte.is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_');
+    code.match_indices("return").all(|(at, _)| {
+        let bytes = code.as_bytes();
+        let keyword = !part_of_a_word(at.checked_sub(1).and_then(|before| bytes.get(before)))
+            && !part_of_a_word(bytes.get(at + "return".len()));
+        !keyword || code[at..].starts_with("return Err(")
+    })
+}
+
+/// **THE SOURCE RULE REFUSES A PAGE RETURNED BEFORE THE CALL, HOWEVER ITS
+/// `return` IS SPELLED, AND ADMITS AN EARLY ERROR.** D-0694, AF-19.
+///
+/// The rule once refused only the letters `return Ok`, and a
+/// `render_with_budget` that returned `statistics(reader, asked)` before its
+/// call on a read with a completion pin passed the test below, which applies
+/// the rule to that function, while every such page went out without the
+/// note.
+#[test]
+fn the_source_rule_refuses_every_early_return_but_an_error() {
+    const CALL: &str = "crate::detail::put_equity_note(&mut body, note)?;";
+    let body =
+        |before: &str| format!("\n    let mut body = page()?;{before}\n    {CALL}\n    Ok(body)");
+    for early in [
+        "\n    if pinned {\n        return statistics(reader, asked);\n    }",
+        "\n    if pinned {\n        return Ok(body);\n    }",
+        "\n    let body = match cached {\n        Some(page) => return page,\n        None => body,\n    };",
+        "\n    let said = \"a \\\"quoted\\\" word\";\n    if pinned {\n        return page;\n    }",
+        "\n    let link = \"http://host\";\n    if pinned {\n        return page;\n    }",
+    ] {
+        assert!(
+            !on_every_page(&body(early), CALL),
+            "a page returned before the call: {early}"
+        );
+    }
+    for admitted in [
+        "",
+        "\n    if stale {\n        return Err(\"changed\".into());\n    }",
+        "\n    let returned = body.len();",
+        "\n    let scope = \"no future-return guarantee\";",
+        "\n    // return the page only once it carries the note",
+    ] {
+        assert!(
+            on_every_page(&body(admitted), CALL),
+            "nothing returns a page before the call: {admitted}"
+        );
+    }
+    assert!(
+        !on_every_page(&format!("\n    if pinned {{\n        {CALL}\n    }}"), CALL),
+        "a call under a condition is not a statement of the body"
+    );
 }
 
 /// **A statistics, admission or qualification page over a stock family
@@ -220,10 +317,11 @@ pub(crate) fn on_every_page(body: &str, call: &str) -> bool {
 /// crate has no fixture for, so no page of theirs is rendered here with a
 /// stock family: `render_with_budget` is held to putting the note in, over
 /// each reader's own sources, by its source. The call must be a statement at
-/// the top level of its body with no `return Ok` before it, so that every
-/// page the function returns has passed through it. A call made only when a
-/// completion was asked for is indented under its condition and fails here;
-/// the same call passed when this checked only that the line was present.
+/// the top level of its body, and every `return` before it must return an
+/// `Err`, so no page can be returned before the call is made. A call made
+/// only when a completion was asked for is indented under its condition and
+/// fails here; the same call passed when this checked only that the line was
+/// present.
 #[test]
 fn a_page_over_a_stock_source_states_the_equity_note_and_an_index_page_does_not() {
     let family = |key: Result<brutex_core::instrument::InstrumentKey, _>| {
