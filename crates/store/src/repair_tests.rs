@@ -480,3 +480,95 @@ fn an_unopenable_receipt_is_named_and_never_replaced_on_read_or_retry() {
         Ok(rows[0])
     );
 }
+
+/// A real directory obstruction after preflight refuses before reservation.
+/// This is private write-body proof; the test owns the source-lock lifetime.
+#[test]
+fn a_post_preflight_directory_obstruction_refuses_without_publication() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
+    let fixture = Fixture::new("post-preflight-directory");
+    let expected = fixture.source(&[bar(1), bar(3)]);
+    let merged = [bar(0), bar(1), bar(2), bar(3)];
+    let original = [FileKind::Bars, FileKind::Checksums, FileKind::Lock].map(|kind| {
+        let path = path().with_file(kind).to_path_buf(&fixture.root);
+        let bytes = fs::read(&path).expect("original source image");
+        (path, bytes)
+    });
+    let revision_root = revision().root(&fixture.root);
+    let physical = path().to_path_buf(&revision_root);
+    let directory = physical.parent().expect("revision month directory");
+    let reservation = physical.with_extension("reserved-v1");
+    super::survey(&merged).expect("valid merged batch");
+    super::check_header(expected).expect("sealed bounded source");
+    assert!(!super::exists(&reservation).expect("preflight can inspect the absent reservation"));
+    let lock_path = path().with_file(FileKind::Lock).to_path_buf(&fixture.root);
+    let held = super::shared_lock(lock_path.clone()).expect("preflight shared lock");
+    let source = BarFile::open_existing(&fixture.root, path(), SYMBOL).expect("preflight source");
+    assert_eq!(source.header(), expected);
+    super::retain_timestamps(&source, &merged).expect("every source timestamp retained");
+    assert!(!free(&lock_path), "actual shared source locks are held");
+
+    fs::create_dir_all(revision_root.parent().expect("revision namespace"))
+        .expect("prepare the namespace after preflight");
+    fs::write(&revision_root, b"namespace obstruction").expect("file blocks a directory component");
+    assert_eq!(
+        super::write_revision(&fixture.root, path(), SYMBOL, revision(), expected, &merged),
+        Err(RepairError::Io {
+            path: directory.to_path_buf(),
+            operation: "create revision directories",
+            kind: io::ErrorKind::NotADirectory,
+            publication_may_be_visible: false,
+        })
+    );
+    assert_eq!(
+        fs::read(&revision_root).expect("obstruction preserved"),
+        b"namespace obstruction"
+    );
+    for output in [
+        physical.clone(),
+        path()
+            .with_file(FileKind::Checksums)
+            .to_path_buf(&revision_root),
+        path().with_file(FileKind::Lock).to_path_buf(&revision_root),
+        reservation,
+        physical.with_extension("repair-v1"),
+    ] {
+        assert_eq!(
+            fs::symlink_metadata(output)
+                .expect_err("no output exists through the obstruction")
+                .kind(),
+            io::ErrorKind::NotADirectory
+        );
+    }
+    for (path, bytes) in &original {
+        assert_eq!(fs::read(path).expect("source preserved on refusal"), *bytes);
+    }
+    assert!(
+        !free(&lock_path),
+        "the private body does not release its caller's lock"
+    );
+    drop(source);
+    assert!(
+        !free(&lock_path),
+        "the explicit preflight lock is still held"
+    );
+    held.release().expect("the test's lock owner releases");
+    assert!(free(&lock_path), "no lock survives its owner");
+
+    fs::remove_file(&revision_root).expect("remove only the injected obstruction");
+    assert_eq!(fixture.publish(expected, &merged), Ok(Published::Created));
+    let revised = fixture
+        .read()
+        .expect("ordinary public reader admits the revision");
+    assert_eq!(revised.source_header(), expected);
+    assert_eq!(revised.header().n_valid, 4);
+    for (index, row) in (0_u64..).zip(&merged) {
+        assert_eq!(
+            revised.read_record(index).expect("complete revised row"),
+            *row
+        );
+    }
+    for (path, bytes) in &original {
+        assert_eq!(fs::read(path).expect("source preserved on success"), *bytes);
+    }
+}

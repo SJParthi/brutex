@@ -432,3 +432,68 @@ fn source_changes_after_the_initial_snapshot_cannot_mint_cold_audit_authority() 
         );
     }
 }
+
+/// A CRC truncated after the cold snapshot refuses at the second block's read.
+/// This exercises the private audit body, not a public-open or warm-read race.
+#[test]
+fn a_post_snapshot_crc_truncation_names_the_read_and_preserves_faulted_bytes() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
+    let fixture = Fixture::new(74);
+    let original_evidence = fixture.audited().expect("healthy cold audit").evidence();
+    assert_eq!(original_evidence.blocks(), 2);
+    let unchanged = [FileKind::Bars, FileKind::Lock].map(|kind| {
+        let path = fixture.named(kind);
+        let bytes = fs::read(&path).expect("original source image");
+        (path, bytes)
+    });
+    let crc_path = fixture.named(FileKind::Checksums);
+    let original_crc = fs::read(&crc_path).expect("both original CRCs");
+    assert_eq!(original_crc.len(), 8);
+    let file = fixture.open().expect("original held files");
+    let input = file.checksum_inputs().expect("same exact handles");
+    let before = Generations::read(&input).expect("authenticated initial snapshot");
+
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&crc_path)
+        .expect("noncooperating fault writer")
+        .set_len(4)
+        .expect("truncate only the second CRC after snapshot");
+    let faulted_crc = fs::read(&crc_path).expect("post-fault CRC image");
+    assert_eq!(faulted_crc, original_crc[..4]);
+    let mut buffer = [0; BUFFER_BYTES];
+    verified_block(&input, file.header(), file.layout(), 0, &mut buffer)
+        .expect("the first block still verifies");
+    let host = File::open(&crc_path)
+        .expect("faulted CRC opens")
+        .read_exact_at(&mut [0; 4], 4)
+        .expect_err("the second CRC is genuinely absent");
+    assert_eq!(host.kind(), std::io::ErrorKind::UnexpectedEof);
+    let refusal = audit(&input, file.header(), file.layout(), before, 1_048_576)
+        .expect_err("an incomplete CRC read cannot mint evidence");
+    assert_eq!(
+        refusal,
+        format!("checksum audit read {} at 4: {host}", crc_path.display())
+    );
+    assert_eq!(
+        fs::read(&crc_path).expect("faulted CRC preserved"),
+        faulted_crc
+    );
+    for (path, bytes) in &unchanged {
+        assert_eq!(fs::read(path).expect("source preserved on refusal"), *bytes);
+    }
+
+    fs::write(&crc_path, &original_crc).expect("restore exact CRC bytes");
+    let restored = fixture.audited().expect("fresh audit after restoration");
+    assert_eq!(restored.evidence(), original_evidence);
+    for (index, row) in (0_u64..).zip((0..74).map(bar)) {
+        assert_eq!(restored.read_record(index).expect("restored row"), row);
+    }
+    assert_eq!(
+        fs::read(&crc_path).expect("restored CRC preserved"),
+        original_crc
+    );
+    for (path, bytes) in &unchanged {
+        assert_eq!(fs::read(path).expect("source preserved on success"), *bytes);
+    }
+}
