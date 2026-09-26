@@ -40,9 +40,11 @@
 //! other row is changed, a first manifest installed inside the read among
 //! them. The three after those pin the stamps taken again after a read with an
 //! absence: stamps a changing root tore before the read are met by them, a
-//! miss pays for them only when a row reads absent, and each row is decided by
-//! its own stamp. One more pins that each row changed that way is logged at
-//! `Warn`. The next three move a bar
+//! miss pays for them only when a row still reads absent after the stamps
+//! taken before it, and each row is decided by its own stamp. One more pins
+//! that each row changed that way is logged at `Warn`, and no other row, and
+//! the one after it that `refuse_contradicted_absences`'s doc prices that line
+//! as its body writes it. The next three move a bar
 //! directory or file aside instead, and pin the same rule for the calendar
 //! cache behind the census: a calendar derived without a bar file its census
 //! holds is refused to the request that derived it, and derived again on the
@@ -2510,6 +2512,13 @@ async fn an_absence_under_stamps_a_changing_root_tore_is_stamped_again_after_the
 /// absent is served on its word, so a read with none pays nothing more. Here
 /// a store with every feed's manifest is stamped once on its miss, and a
 /// store with four feeds absent twice. Each hit after is stamped once.
+///
+/// An absence is stamped again only while it still stands after the stamps
+/// taken before the read, so a read with rows absent can be stamped once
+/// too. Stamped with the root moved aside and read with it back, the same
+/// four-feed store's absences are each contradicted by the stamps before the
+/// read: every one is served unreadable by the first refusal, and the miss is
+/// stamped once.
 #[test]
 fn a_miss_is_stamped_again_only_when_a_row_reads_absent() {
     let every = Fixture::new("census-request-stamped-once");
@@ -2537,6 +2546,35 @@ fn a_miss_is_stamped_again_only_when_a_row_reads_absent() {
             );
         }
     }
+
+    let aside = nifty_store("census-request-stamped-once-aside");
+    let mut stampings = 0;
+    let (_, (served, _)) = census_now_stamping(
+        &aside.site,
+        |root| {
+            stampings += 1;
+            let _aside = Aside::new(root);
+            manifest_stamps(root)
+        },
+        census::read_all,
+    );
+    assert_eq!(
+        aside.fresh_states(),
+        ["absent", "held", "absent", "absent", "absent"],
+        "the premise: the read has four rows absent"
+    );
+    assert_eq!(
+        named(&served),
+        [
+            "unreadable",
+            "held",
+            "unreadable",
+            "unreadable",
+            "unreadable"
+        ],
+        "each absence refused on the stamps before the read"
+    );
+    assert_eq!(stampings, 1, "and none left standing to stamp again");
 }
 
 /// WHAT CHANGES BETWEEN THE READ AND ITS SECOND STAMPING DECIDES ONLY ITS OWN
@@ -2614,15 +2652,25 @@ fn what_changes_between_the_read_and_its_second_stamping_decides_only_its_own_ro
 /// and back as the read ends, Dhan's row alone is changed, and one
 /// `api.census` line at `Warn` names Dhan, its manifest and
 /// `CONTRADICTED_ABSENCE`. With the root still away when the absences are
-/// stamped again, every feed's row is changed, and each is named once.
+/// stamped again, every feed's row is changed, and each is named once. With
+/// the root in place throughout, no row is changed and no line is written.
 #[test]
 fn an_absence_its_stamps_contradict_is_logged_at_warn() {
     let _shared = crate::emitted::sink();
-    for (name, away_when_stamped_again, logged) in [
-        ("census-request-logged-back", false, vec!["dhan"]),
+    let as_it_is: fn(&Path) -> Vec<census::VendorCensus> = census::read_all;
+    let past_the_check: fn(&Path) -> Vec<census::VendorCensus> = read_past_the_check;
+    for (name, away_when_stamped_again, read, logged) in [
+        ("census-request-logged-none", false, as_it_is, vec![]),
+        (
+            "census-request-logged-back",
+            false,
+            past_the_check,
+            vec!["dhan"],
+        ),
         (
             "census-request-logged-away",
             true,
+            past_the_check,
             Vendor::ALL.into_iter().map(Vendor::as_str).collect(),
         ),
     ] {
@@ -2636,7 +2684,7 @@ fn an_absence_its_stamps_contradict_is_logged_at_warn() {
                 let _aside = (stampings == 2 && away_when_stamped_again).then(|| Aside::new(root));
                 manifest_stamps(root)
             },
-            read_past_the_check,
+            read,
         );
         let lines: Vec<telemetry::Record> =
             crate::emitted::landed(from, "api.census", "absence contradicted by its stamp")
@@ -2688,6 +2736,98 @@ fn an_absence_its_stamps_contradict_is_logged_at_warn() {
             );
         }
     }
+}
+
+/// WHAT `refuse_contradicted_absences` COSTS IS WHAT ITS DOC SAYS, READ OFF
+/// THE SOURCE. D-0695.
+///
+/// Its doc priced it at one index and one `stamp_could_read` per row, "and no
+/// syscall", after the ninth repair had put a `Warn` line in its loop. A line
+/// the installed sink admits is written to its log file with `write_all`,
+/// under the sink's lock, so a row changed costs a write and a row left
+/// unchanged does not. This holds the doc to the body: the one `emit_if!` is
+/// inside the branch that changes a row, the code before that branch calls
+/// only the index and `stamp_could_read`, `stamp_could_read` names no
+/// filesystem call and emits nothing, every sentence of the doc that says "no
+/// syscall" is about a row left unchanged, and the doc names the `write_all`
+/// a changed row's line costs.
+#[test]
+fn what_refusing_an_absence_costs_is_what_its_doc_says() {
+    /// Each name written just before a `(` in `code`: the calls, and the
+    /// tuple constructors, it makes.
+    fn called(code: &str) -> Vec<&str> {
+        code.match_indices('(')
+            .filter_map(|(at, _)| {
+                code.get(..at)?
+                    .rsplit(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .next()
+                    .filter(|name| !name.is_empty())
+            })
+            .collect()
+    }
+    let source = include_str!("server.rs");
+    let (above, from) = source
+        .split_once("\nfn refuse_contradicted_absences(")
+        .expect("`refuse_contradicted_absences` is in server.rs");
+    let body = from.split_once("\n}\n").expect("its body ends").0;
+    let mut doc: Vec<&str> = above
+        .lines()
+        .rev()
+        .take_while(|line| line.starts_with("///"))
+        .map(|line| line.trim_start_matches("///").trim())
+        .collect();
+    doc.reverse();
+    let doc = doc.join(" ");
+
+    let (before, inside) = body
+        .split_once("if matches!(row.state, census::Census::Absent) && !vouched {")
+        .expect("the branch that changes a row");
+    assert_eq!(
+        body.matches("emit_if!").count(),
+        1,
+        "one line, and one place that writes it: {body}"
+    );
+    assert!(
+        inside.contains("emit_if!"),
+        "the line is written only for a row this changes: {body}"
+    );
+    assert_eq!(
+        called(before),
+        ["get", "is_some_and", "stamp_could_read"],
+        "a row left unchanged costs the index and `stamp_could_read`: {before}"
+    );
+    let judge = source
+        .split_once("\nfn stamp_could_read(")
+        .expect("`stamp_could_read` is in server.rs")
+        .1
+        .split_once("\n}\n")
+        .expect("its body ends")
+        .0;
+    for needle in ["fs::", "metadata", "emit"] {
+        assert!(
+            !judge.contains(needle),
+            "`stamp_could_read` asks the disk or the log nothing ({needle}): {judge}"
+        );
+    }
+
+    let priced: Vec<&str> = doc
+        .split(". ")
+        .filter(|sentence| sentence.contains("no syscall"))
+        .collect();
+    assert!(
+        !priced.is_empty(),
+        "the doc prices a row left unchanged: {doc}"
+    );
+    for sentence in priced {
+        assert!(
+            sentence.contains("unchanged"),
+            "\"no syscall\" is said of a row left unchanged, and of no other: {sentence}"
+        );
+    }
+    assert!(
+        doc.contains("`write_all`"),
+        "the doc names the write a changed row's line costs: {doc}"
+    );
 }
 
 /// A CALENDAR DERIVED WHILE A HELD BAR FILE WOULD NOT OPEN IS REFUSED TO ITS

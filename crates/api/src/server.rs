@@ -3742,10 +3742,20 @@ const CONTRADICTED_ABSENCE: &str = "this read found no manifest here, and the st
 /// contradicted row read unreadable keeps its own words. Neither is changed,
 /// and neither is kept: the cache keeps no read with a contradicted row.
 ///
-/// One index into the stamps and one [`stamp_could_read`] per row, and no
-/// syscall. A read no stamp contradicts is unchanged, so [`read_as_stamped`]
-/// keeps what it kept before, and a changed row is never kept, because
+/// A read no stamp contradicts is unchanged, so [`read_as_stamped`] keeps
+/// what it kept before, and a changed row is never kept, because
 /// [`stamp_could_read`] vouches for no [`census::Fault::Contradicted`].
+///
+/// # What it costs, since D-0695's tenth repair
+///
+/// A row it leaves unchanged costs one index into the stamps and one
+/// [`stamp_could_read`], and no syscall. A row it changes also costs the line
+/// below, through `telemetry::emit_if!`: the level check alone when no sink
+/// is installed, or when the floor the sink applies to `api.census` is above
+/// `Warn`, and otherwise what `telemetry::Sink::emit` costs, which is the
+/// sink's lock and a `write_all` of the line to its log file, after a
+/// rotation of its files when the line would carry the current one past its
+/// bound. So a call writes at most one line per feed. Not timed.
 ///
 /// # Each row it changes is logged, since D-0695's ninth repair
 ///
