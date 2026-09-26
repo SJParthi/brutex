@@ -400,6 +400,12 @@ pub fn read_vendor(root: &Path, vendor: Vendor) -> VendorCensus {
 /// THE SIZE IS CHECKED BEFORE THE READ. `read` on a file this process cannot
 /// hold is not an error it can report — it is an allocator failure or an OOM
 /// kill, and neither reaches the operator as "that manifest is too big".
+///
+/// The size is the length `stat` gives, which for a character device is 0
+/// whatever a read of it returns, so such a path is read, not refused, and
+/// nothing here bounds that read. Pinned as it stands by
+/// `a_character_device_at_a_manifest_path_passes_the_size_bound_and_is_read`,
+/// and recorded as not done in D-0695, with the FIFO its tenth repair found.
 fn sized(path: &Path) -> std::io::Result<Result<Vec<u8>, String>> {
     let size = std::fs::metadata(path)?.len();
     if size > MAX_MANIFEST_BYTES {
@@ -1217,6 +1223,52 @@ mod tests {
             "the size arm fired at the bound itself: {at_bound}"
         );
         std::fs::remove_file(&p).expect("cleanup");
+    }
+
+    /// THE SIZE BOUND IS THE LENGTH `stat` GIVES, SO A CHARACTER DEVICE PASSES
+    /// IT AND IS READ, pinned as it stands. D-0695.
+    ///
+    /// `sized` takes the size from `std::fs::metadata(path)?.len()` and then
+    /// calls `std::fs::read`, which reads to the end. A character device's
+    /// length is 0 whatever a read of it returns, so a manifest path linked to
+    /// one passes the bound. `/dev/null` is what is read here, because its
+    /// read ends at once. `/dev/zero` has the same length of 0 and gives a
+    /// read a mebibyte of bytes here when asked for one, so nothing `sized`
+    /// checks bounds a read of it. D-0695's eleventh repair records this as
+    /// not done, beside the FIFO its tenth repair recorded: both are paths
+    /// that are not a regular file.
+    #[cfg(unix)]
+    #[test]
+    fn a_character_device_at_a_manifest_path_passes_the_size_bound_and_is_read() {
+        use std::io::Read as _;
+        use std::os::unix::fs::FileTypeExt as _;
+        for device in ["/dev/null", "/dev/zero"] {
+            let meta = std::fs::metadata(device).expect("the device");
+            assert!(
+                meta.file_type().is_char_device() && !meta.is_file(),
+                "{device} is a character device"
+            );
+            assert_eq!(meta.len(), 0, "{device}: the length `stat` gives");
+        }
+        let mut zeros = Vec::new();
+        std::fs::File::open("/dev/zero")
+            .expect("open /dev/zero")
+            .take(1 << 20)
+            .read_to_end(&mut zeros)
+            .expect("a bounded read of /dev/zero");
+        assert_eq!(zeros.len(), 1 << 20, "bytes past the length of 0");
+
+        let dir = root("character-device");
+        let path = manifest_path(&dir, Vendor::Dhan);
+        std::os::unix::fs::symlink("/dev/null", &path).expect("a link to a character device");
+        assert_eq!(
+            sized(&path)
+                .expect("the file system answers")
+                .expect("under the bound"),
+            Vec::<u8>::new(),
+            "passes the size bound and is read, not refused as no regular file"
+        );
+        std::fs::remove_file(&path).expect("cleanup");
     }
 
     #[test]
