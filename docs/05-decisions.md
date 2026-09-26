@@ -39376,6 +39376,21 @@ line, and the proof paragraph.
    The sentence's test constant was changed first, and three `flock` tests
    failed on the old sentence before `Unreleased` was changed.
 
+10. *A squash reason needs ancestry while its sentence is new.* The citation
+    guard accepted another branch's commit as `Squashed` on the strength of
+    the sentence's words alone. It now requires that commit to be an ancestor
+    of `HEAD`, unless the same sentence already exists in `main`'s copy of
+    the cited file. This exception keeps a squash merge's recorded sentences
+    valid after their branch commits cease to be ancestors or stop resolving;
+    it does not admit a new sentence citing a missing object.
+    `a_commit_listed_as_squashed_is_held_by_head_while_its_sentence_is_new`
+    builds an isolated Git history: it refuses an unrelated branch and a
+    missing object, admits this branch's ancestor, performs a squash, admits
+    the unchanged recorded sentences, and refuses a changed sentence. With
+    only the ancestry requirement reverted, its unrelated-branch assertion
+    fails. This fixture does not depend on the checkout's `HEAD` being off
+    `main`, so the same check runs after this repair is squashed.
+
 ### D-0694 — Say corporate actions are unchecked on every stock report, and withhold holed sessions on the ordinary stored sweep — 2026-09-23
 
 **The gap (audit G16), in two halves.**

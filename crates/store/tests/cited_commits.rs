@@ -59,7 +59,9 @@
 //!   history nor this" entry's, or row's, branch, in the words the libm-key
 //!   entry's correction uses. If it resolves, it is no ancestor of `HEAD`.
 //! - [`Off::Squashed`], a commit of this change's branch. Every sentence
-//!   citing it says that "`main`'s squash merge does not keep" it.
+//!   citing it says that "`main`'s squash merge does not keep" it. A new
+//!   sentence requires an ancestor of `HEAD`; one already in `main`'s copy
+//!   of that file still passes after the squash drops the branch's history.
 //! - [`Off::MainsOwnText`], cited by text `main` already held, which the
 //!   append-only rule never edits, so it cannot be made to say so. Every
 //!   sentence citing it is one `main`'s copy of the same file holds, word for
@@ -67,8 +69,8 @@
 //!
 //! A listed commit that resolves must not be an ancestor of `main`, and each
 //! listed commit must still be cited. A commit that does not resolve, as this
-//! branch's own commits need not in a clone of `main`, is checked by its
-//! sentences alone.
+//! branch's own commits need not in a clone of `main`, still needs that
+//! existing sentence on `main` when listed as squashed.
 //!
 //! `d_0693_lists_each_bracket_site_at_a_commit_where_its_line_takes_a_lock`
 //! reads D-0693's list of bracket sites at the commit the entry keys it to,
@@ -316,11 +318,6 @@ fn only_a_tree_with_no_git_dir_skips_the_history() {
     std::fs::remove_dir_all(&dangling).expect("the scratch root is removed");
 }
 
-/// Whether `commit` names a commit in this clone.
-fn resolves(commit: &str) -> bool {
-    resolves_at(&repo(), commit)
-}
-
 /// Whether `commit` names a commit in the clone whose root is `root`.
 fn resolves_at(root: &Path, commit: &str) -> bool {
     git_at(
@@ -337,7 +334,12 @@ fn resolves_at(root: &Path, commit: &str) -> bool {
 
 /// Whether `commit` resolves and is an ancestor of `of`.
 fn is_ancestor(commit: &str, of: &str) -> bool {
-    resolves(commit) && git(&["merge-base", "--is-ancestor", commit, of]).is_some()
+    is_ancestor_at(&repo(), commit, of)
+}
+
+fn is_ancestor_at(root: &Path, commit: &str, of: &str) -> bool {
+    resolves_at(root, commit)
+        && git_at(root, &["merge-base", "--is-ancestor", commit, of]).is_some()
 }
 
 /// One decision, from its heading up to the next entry's.
@@ -472,9 +474,9 @@ fn cited(texts: &[Text]) -> BTreeMap<String, Vec<Citing>> {
     cited
 }
 
-/// Why `commit` is not on `main`, if [`NOT_ON_MAIN`] lists it.
-fn listed(commit: &str) -> Option<Off> {
-    NOT_ON_MAIN
+/// Why `commit` is not on `main`, if `listing` lists it.
+fn listed(listing: &[(&str, Off)], commit: &str) -> Option<Off> {
+    listing
         .iter()
         .find(|(listed, _)| *listed == commit)
         .map(|(_, off)| *off)
@@ -503,43 +505,65 @@ fn listing_faults(cited: &BTreeMap<String, Vec<Citing>>) -> Vec<String> {
     faults
 }
 
-/// What needs history: each citation not listed is on `main`, and each listed
-/// one is as its reason says.
-fn history_faults(cited: &BTreeMap<String, Vec<Citing>>) -> Vec<String> {
+/// What needs history: each citation `listing` does not list is on `main`,
+/// and each listed one is as its reason says.
+fn history_faults(cited: &BTreeMap<String, Vec<Citing>>, listing: &[(&str, Off)]) -> Vec<String> {
+    history_faults_at(&repo(), MAIN, cited, listing)
+}
+
+/// The same check in an isolated fixture history, independent of this checkout.
+fn history_faults_at(
+    root: &Path,
+    main_ref: &str,
+    cited: &BTreeMap<String, Vec<Citing>>,
+    listing: &[(&str, Off)],
+) -> Vec<String> {
     let mut faults = Vec::new();
     let mut mains: BTreeMap<&str, String> = BTreeMap::new();
     for (commit, citing) in cited {
-        let Some(off) = listed(commit) else {
-            if !is_ancestor(commit, MAIN) {
+        let Some(off) = listed(listing, commit) else {
+            if !is_ancestor_at(root, commit, main_ref) {
                 let names: BTreeSet<&str> = citing.iter().map(|at| at.name.as_str()).collect();
                 faults.push(format!(
-                    "{commit}, cited in {names:?}, is not an ancestor of {MAIN} and \
+                    "{commit}, cited in {names:?}, is not an ancestor of {main_ref} and \
                      NOT_ON_MAIN does not list it"
                 ));
             }
             continue;
         };
-        if is_ancestor(commit, MAIN) {
+        if is_ancestor_at(root, commit, main_ref) {
             faults.push(format!("{commit} is listed as {off:?}, and it is on main"));
         }
-        if off == Off::Neither && is_ancestor(commit, "HEAD") {
+        if off == Off::Neither && is_ancestor_at(root, commit, "HEAD") {
             faults.push(format!(
                 "{commit} is listed as {off:?}, and it is an ancestor of HEAD"
             ));
         }
-        if off != Off::MainsOwnText {
+        let held_by_head = off == Off::Squashed && is_ancestor_at(root, commit, "HEAD");
+        if off == Off::Neither || held_by_head {
             continue;
         }
         for at in citing {
             let main = mains.entry(at.file).or_insert_with(|| {
-                let copy = git(&["show", &format!("{MAIN}:{}", at.file)]).unwrap_or_default();
+                let copy =
+                    git_at(root, &["show", &format!("{main_ref}:{}", at.file)]).unwrap_or_default();
                 words(&if at.file == COMMENTED {
                     comments(&copy)
                 } else {
                     copy
                 })
             });
-            if !main.contains(&at.sentence) {
+            if main.contains(&at.sentence) {
+                continue;
+            }
+            if off == Off::Squashed {
+                faults.push(format!(
+                    "{commit} is listed as {off:?}, and it is no ancestor of HEAD, yet {} \
+                     cites it in a sentence main's copy of {} does not hold, so this \
+                     change's own: {}",
+                    at.name, at.file, at.sentence
+                ));
+            } else {
                 faults.push(format!(
                     "{commit} is listed as {off:?}, and {} cites it in a sentence \
                      main's copy of {} does not hold: {}",
@@ -571,13 +595,140 @@ fn every_commit_the_store_records_cite_is_on_main_or_says_why_not() {
     );
     let mut faults = listing_faults(&cited);
     if history_is_here() {
-        faults.extend(history_faults(&cited));
+        faults.extend(history_faults(&cited, &NOT_ON_MAIN));
     }
     assert!(
         faults.is_empty(),
         "cite a commit on main, or list it in NOT_ON_MAIN and say why in every \
          sentence citing it: {faults:#?}"
     );
+}
+
+/// A fixture command: local identity, no hooks or signing, no external config.
+fn fixture_git(root: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args([
+            "-c",
+            "user.name=Citation test",
+            "-c",
+            "user.email=citation@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+        ])
+        .args(args)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .expect("fixture git runs");
+    assert!(
+        out.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+fn probe_citation(commit: &str, sentence: &str) -> BTreeMap<String, Vec<Citing>> {
+    BTreeMap::from([(
+        commit.to_owned(),
+        vec![Citing {
+            name: "a probe".to_owned(),
+            file: "docs/06-limits.md",
+            sentence: sentence.to_owned(),
+        }],
+    )])
+}
+
+/// New squashed citations require ancestry, even when the object is missing.
+/// Old sentences survive a squash with or without the branch object. The
+/// fixture builds both histories rather than assuming this checkout's HEAD
+/// is off main (which ceases to hold after this change is merged).
+#[test]
+fn a_commit_listed_as_squashed_is_held_by_head_while_its_sentence_is_new() {
+    if Command::new("git").arg("--version").output().is_err() {
+        println!("SKIPPING: git cannot run the synthetic history fixture");
+        return;
+    }
+    let root = scratch_root("squash");
+    fixture_git(&root, &["init", "--initial-branch=main"]);
+    std::fs::create_dir(root.join("docs")).expect("fixture docs");
+    std::fs::write(root.join("docs/06-limits.md"), "Original limits.\n").expect("fixture limits");
+    fixture_git(&root, &["add", "."]);
+    fixture_git(&root, &["commit", "-m", "original"]);
+    fixture_git(&root, &["checkout", "-b", "elsewhere"]);
+    fixture_git(&root, &["commit", "--allow-empty", "-m", "another branch"]);
+    let elsewhere = fixture_git(&root, &["rev-parse", "HEAD"]);
+    fixture_git(&root, &["checkout", "-b", "change", "main"]);
+    fixture_git(&root, &["commit", "--allow-empty", "-m", "this branch"]);
+    let head = fixture_git(&root, &["rev-parse", "HEAD"]);
+    let new = |commit: &str| {
+        format!("A probe sentence cites `{commit}`, which `main`'s squash merge does not keep")
+    };
+    let missing = "abcdef0123456789abcdef0123456789abcdef0123";
+    assert!(!resolves_at(&root, missing));
+    for commit in [&*elsewhere, missing] {
+        let faults = history_faults_at(
+            &root,
+            "main",
+            &probe_citation(commit, &new(commit)),
+            &[(commit, Off::Squashed)],
+        );
+        assert!(
+            faults
+                .iter()
+                .any(|fault| fault.contains("is no ancestor of HEAD")),
+            "a new sentence cannot cite another branch or a missing object as squashed: {faults:#?}"
+        );
+    }
+    let faults = history_faults_at(
+        &root,
+        "main",
+        &probe_citation(&head, &new(&head)),
+        &[(&head, Off::Squashed)],
+    );
+    assert!(
+        faults.is_empty(),
+        "an ancestor of HEAD is one of this change's commits: {faults:#?}"
+    );
+    std::fs::write(
+        root.join("docs/06-limits.md"),
+        format!("{}. {}.\n", new(&head), new(missing)),
+    )
+    .expect("the branch records its citations");
+    fixture_git(&root, &["commit", "-am", "citations"]);
+    fixture_git(&root, &["checkout", "main"]);
+    fixture_git(&root, &["merge", "--squash", "change"]);
+    fixture_git(&root, &["commit", "-m", "squash change"]);
+    assert!(!is_ancestor_at(&root, &head, "HEAD"));
+    assert!(
+        resolves_at(&root, &head),
+        "branch object still resolves after squash"
+    );
+    for commit in [&*head, missing] {
+        let faults = history_faults_at(
+            &root,
+            "main",
+            &probe_citation(commit, &new(commit)),
+            &[(commit, Off::Squashed)],
+        );
+        assert!(
+            faults.is_empty(),
+            "main's existing sentence survives the squash: {faults:#?}"
+        );
+    }
+    let changed = format!("{} with a new assertion", new(&head));
+    let faults = history_faults_at(
+        &root,
+        "main",
+        &probe_citation(&head, &changed),
+        &[(&head, Off::Squashed)],
+    );
+    assert!(!faults.is_empty(), "main does not exempt a new sentence");
+    std::fs::remove_dir_all(root).expect("fixture removed");
 }
 
 /// D-0693's bracket sites: each module and the lines listed for it.
