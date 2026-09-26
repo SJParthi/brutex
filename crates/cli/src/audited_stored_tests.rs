@@ -1697,9 +1697,9 @@ fn an_extinct_share_audit_prints_no_ranking_and_no_charge_statement() {
 /// month with no bars. The door then refused it with "every signal session
 /// has a minute gap; no sweepable bars remain", though no gap was measured and
 /// nothing was withheld (found by a review). An interrupted ingest leaves
-/// exactly that file. Here a `5min` April left empty beside April's whole
+/// exactly that file. Here a `5min` April left empty beside damaged execution
 /// minutes, and a `1min` June left empty, are each refused by the reason that
-/// holds, before an attempt is opened.
+/// holds, before execution minutes are loaded or an attempt is opened.
 #[test]
 fn the_ordinary_stored_sweep_refuses_an_empty_month_as_empty() {
     let _knobs = crate::knobs::serially();
@@ -1707,6 +1707,14 @@ fn the_ordinary_stored_sweep_refuses_an_empty_month_as_empty() {
     let fixture = Fixture::new();
     drop(fixture.open(4, Timeframe::MINUTE_5));
     drop(fixture.open(6, Timeframe::MINUTE_1));
+    let minutes = fixture
+        .root
+        .join("bars/zerodha/NSE/INDEX/NIFTY/1min/2025-04.bin");
+    std::fs::write(&minutes, b"unreadable execution minutes").expect("damage April's minutes");
+    assert!(
+        stored::load(&fixture.root, Vendor::Zerodha, "NIFTY", "1min", 2025, 4).is_err(),
+        "premise: loading execution minutes before the empty check would refuse differently"
+    );
     for (rung, month) in [("5min", 4), ("1min", 6)] {
         let loaded = stored::load(&fixture.root, Vendor::Zerodha, "NIFTY", rung, 2025, month)
             .expect("premise: the month's file exists");
@@ -1726,14 +1734,6 @@ fn the_ordinary_stored_sweep_refuses_an_empty_month_as_empty() {
             None
         );
     }
-    // April's minutes are whole, so the coarse month's refusal is not theirs.
-    let minutes = stored::load(&fixture.root, Vendor::Zerodha, "NIFTY", "1min", 2025, 4)
-        .expect("April's minutes");
-    assert!(!minutes.bars.is_empty(), "premise: April holds minutes");
-    assert!(
-        crate::minute_gaps::days_with_interior_gaps(&minutes.bars).is_empty(),
-        "premise: no April session has a minute gap"
-    );
     crate::knobs::clear_all();
 }
 
