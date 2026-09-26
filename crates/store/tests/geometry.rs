@@ -473,6 +473,29 @@ fn an_overlay_is_not_a_bar_file_and_no_reader_can_take_it_for_one() {
 /// Reading "the vendor sent nothing" as "the vendor sent zero" would put a
 /// fabricated 0% volatility into a backtest and it would look like data.
 #[test]
+fn an_overlay_decoder_refuses_every_truncated_record_without_zero_filling() {
+    use store::format::{FormatError, OI_NULL, Overlay};
+
+    let overlay = Overlay {
+        ts_micros: 12_345,
+        spot: 2_465_000,
+        iv_micros: OI_NULL,
+    };
+    let image = overlay.image();
+    for len in 0..image.len() {
+        assert_eq!(
+            Overlay::decode(&image[..len]),
+            Err(FormatError::RecordTooShort { len }),
+            "truncation at byte {len} must not fabricate the absent tail"
+        );
+    }
+    assert_eq!(Overlay::decode(&image), Ok(overlay));
+    let mut followed = image.to_vec();
+    followed.extend_from_slice(&[0xa5; 7]);
+    assert_eq!(Overlay::decode(&followed), Ok(overlay));
+}
+
+#[test]
 fn an_overlay_tells_an_absent_reading_from_a_zero_one() {
     use store::format::{OI_NULL, Overlay};
 

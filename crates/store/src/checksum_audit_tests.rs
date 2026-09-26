@@ -154,11 +154,46 @@ fn strict_source_fifo_probe_cannot_wait_for_a_writer() -> Result<(), Box<dyn std
 }
 
 #[test]
+fn strict_audit_refuses_derived_record_families_through_both_public_doors() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
+    for kind in [FileKind::Overlay, FileKind::Greeks] {
+        let fixture = Fixture::new(1);
+        let path = fixture.path().with_file(kind);
+        let file = BarFile::open_or_create(&fixture.root, path, 7).expect("derived writer");
+        drop(file);
+        let physical = path.to_path_buf(&fixture.root);
+        let before = fs::read(&physical).expect("derived header");
+        let refusal = BarFile::open_existing(&fixture.root, path, 7)
+            .expect("ordinary reader accepts this family")
+            .audit_checksums(1_048_576)
+            .err()
+            .expect("bar-only checksum authority refuses derived geometry");
+        assert_eq!(
+            refusal,
+            "strict checksum audit refuses unsealed, unsupported, non-exact or over-limit input extents"
+        );
+        let refusal = BarFile::open_existing_audited(&fixture.root, path, 7, 1_048_576)
+            .err()
+            .expect("strict path door refuses the derived kind");
+        assert_eq!(
+            refusal,
+            "strict historical checksum audit requires a bar path"
+        );
+        assert_eq!(
+            fs::read(&physical).expect("unchanged derived bytes"),
+            before
+        );
+        fixture.audited().expect("neighboring bars still audit");
+    }
+}
+
+#[test]
 fn full_audit_matches_exact_file_images_at_all_partial_block_boundaries() {
     let _sink_is_mine = crate::emits::hold_the_sink();
     for count in [0, 1, 72, 73, 74, 146, 147] {
         let fixture = Fixture::new(count);
         let audited = fixture.audited().expect("full bounded audit");
+        assert_eq!(audited.path(), fixture.named(FileKind::Bars));
         let evidence = audited.evidence();
         let data = fs::read(fixture.named(FileKind::Bars)).expect("raw data");
         let sidecar = fs::read(fixture.named(FileKind::Checksums)).expect("raw sidecar");
