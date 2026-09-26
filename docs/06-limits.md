@@ -9063,8 +9063,9 @@ by `File::unlock`. What that does not cover, stated rather than implied away:
   deterministically. The Linux fork-to-exec window that CI hit has not been
   run on this machine.
 - **A refused unlock is logged, not returned, when it happens in `Drop`.** The
-  lock then lasts until every descriptor that refers to it has closed. The
-  `store.flock` warning names the file. It reaches a log only in a process
+  lock may then last until its open file description is unlocked again or
+  every descriptor that refers to it has closed. The `store.flock` warning
+  names the file. It reaches a log only in a process
   that installed a telemetry sink, and the default floor, `Info`, keeps a
   `Warn`. In a process with no sink the note goes nowhere.
 - **A success-path release that is refused turns the success into a
@@ -9085,11 +9086,14 @@ by `File::unlock`. What that does not cover, stated rather than implied away:
   Probes that expect `WouldBlock`, and fixtures that unlock by name, still use
   `File` directly.
 - **Corrected 2026-09-25.** Two statements above were incomplete, and they
-  are completed here rather than edited:
+  were completed here then, not edited. On 2026-09-26 the first of them, and
+  its completion below, were narrowed in place: a later release over the same
+  owner frees the lock while the owner is still open (D-0693 item 9).
   - *A refused unlock in `Drop`.* For a guard over a borrowed file the drop
     closes nothing, and the owner's descriptor is one of those that must
-    close, so the lock lasts at least as long as the owner keeps the file
-    open. `cli`'s observation `ReadLease` holds such a guard.
+    close, so the lock can outlast the guard while the owner keeps the file
+    open, until a later guard over the same owner releases it or the owner
+    closes. `cli`'s observation `ReadLease` holds such a guard.
   - *A refused success-path release.* Only `store` can make an unlock refuse
     under test: the refusal is injected through a seam in `store::flock`'s
     `#[cfg(test)]` test module, and every other crate builds `store` without

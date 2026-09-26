@@ -183,12 +183,14 @@ impl<F: Borrow<File>, P: AsRef<Path>> Drop for Flock<F, P> {
 /// A lock whose unlock the host refused.
 ///
 /// Returned by [`Flock::release`]. The lock may still be held by the open file
-/// description, so a later attempt to take it can refuse until every descriptor
-/// referring to that description has closed. For a guard that owned its
-/// `File`, that is the guard's own descriptor, which closes as the guard is
-/// consumed, and any duplicate of it. For a guard over a borrowed file, the
-/// guard closes nothing: the owner's descriptor is one of those, and the lock
-/// lasts at least as long as the owner keeps it open.
+/// description, so a later attempt to take it can refuse until that
+/// description is unlocked again or every descriptor referring to it has
+/// closed. For a guard that owned its `File`, those descriptors are the
+/// guard's own, which closes as the guard is consumed, and any duplicate of
+/// it. For a guard over a borrowed file, the guard closes nothing: the owner's
+/// descriptor is one of them, so the lock can outlast the guard while the
+/// owner stays open, until a later guard over the same owner releases it or
+/// the owner closes.
 #[derive(Debug)]
 pub struct Unreleased {
     /// The file the lock was taken on.
@@ -201,8 +203,8 @@ impl fmt::Display for Unreleased {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "the advisory lock on {} could not be released, and it stays held until every \
-             descriptor of its open file description has closed: {}",
+            "the advisory lock on {} could not be released, and it may stay held until its \
+             open file description is unlocked again or every descriptor of it has closed: {}",
             self.path.display(),
             self.why
         )
@@ -247,8 +249,9 @@ fn unlock(file: &File) -> io::Result<()> {
 /// of its open file description has closed. For a guard that owned its `File`
 /// that is its own descriptor, which closes as the guard drops, and any
 /// duplicate of it. For a guard over a borrowed file the drop closes nothing,
-/// and the owner's descriptor holds the lock for as long as the owner keeps
-/// it open. What the line records is that the lock outlived its guard, which
+/// and the owner's descriptor can hold the lock while the owner stays open,
+/// until a later guard over the same owner releases it or the owner closes.
+/// What the line records is that the lock outlived its guard, which
 /// is what turns a later acquisition into a `WouldBlock` nobody can otherwise
 /// explain. One event per refused unlock, never per acquisition, so the normal
 /// path costs nothing beyond the `flock` call itself.

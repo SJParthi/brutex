@@ -62,13 +62,17 @@ pub(super) fn take_unlock_refusal() -> Option<io::ErrorKind> {
     })
 }
 
-/// The part of [`Unreleased`]'s sentence that says how long the lock lasts.
+/// The part of [`Unreleased`]'s sentence that says how long the lock may last.
 ///
-/// True of an owned guard and of a borrowed one: the open file description
-/// keeps the lock until the last descriptor referring to it closes, and for a
-/// borrowed guard that includes the owner's, which the guard never closes.
-const UNRELEASED_SAYS: &str = "could not be released, and it stays held until every \
-                               descriptor of its open file description has closed";
+/// True of an owned guard and of a borrowed one. The open file description
+/// keeps a lock nobody unlocked until the last descriptor referring to it
+/// closes, and for a borrowed guard that includes the owner's, which the guard
+/// never closes. A later unlock of the same description frees it sooner, as
+/// `a_lock_a_refused_release_left_is_freed_by_a_later_release_over_the_same_owner`
+/// shows, so the sentence says "may", not "stays".
+const UNRELEASED_SAYS: &str = "could not be released, and it may stay held until its open \
+                               file description is unlocked again or every descriptor of it \
+                               has closed";
 
 /// How many unlocks this thread has made through the seam.
 fn unlocks() -> u64 {
@@ -385,15 +389,17 @@ fn a_refused_release_is_returned_naming_the_file() {
         .expect("with no duplicate, closing the only descriptor freed the lock");
 }
 
-/// A BORROWED GUARD WHOSE RELEASE IS REFUSED LEAVES THE LOCK HELD UNTIL ITS
-/// OWNER CLOSES THE FILE, AND ITS REFUSAL SAYS NOTHING CLOSED.
+/// A BORROWED GUARD WHOSE RELEASE IS REFUSED LEAVES THE LOCK HELD WHILE ITS
+/// OWNER IS OPEN AND NOTHING UNLOCKS IT AGAIN, AND ITS REFUSAL SAYS NOTHING
+/// CLOSED.
 ///
 /// Dropping or consuming a guard over `&File` closes nothing: the owner keeps
-/// the descriptor open, and the lock stays on its open file description for
-/// as long as the owner lives. A refusal that said the lock "could not be
-/// released before its descriptor closed" told the reader of a close that
-/// never happened, and so the wrong lifetime. The sentence is checked on this
-/// guard, where only the owner's close frees the lock.
+/// the descriptor open, and the lock stays on its open file description until
+/// the owner closes it or that description is unlocked again. A refusal that
+/// said the lock "could not be released before its descriptor closed" told the
+/// reader of a close that never happened, and so the wrong lifetime. The
+/// sentence is checked on this guard, where nothing else unlocks the
+/// description and the owner's close frees the lock.
 ///
 /// Released rather than dropped, so it writes nothing to the process-wide sink
 /// `crate::emits` counts.
@@ -425,6 +431,43 @@ fn a_refused_release_of_a_borrowed_guard_holds_the_lock_until_its_owner_closes()
     scratch
         .probe()
         .expect("the owner's close was the last descriptor, and it freed the lock");
+}
+
+/// A LOCK A REFUSED RELEASE LEFT HELD IS FREED BY A LATER RELEASE OVER THE
+/// SAME OWNER, WHILE THE OWNER IS STILL OPEN.
+///
+/// So the refusal cannot say the lock stays held until the owner closes the
+/// file. `cli`'s observation `ReadLease` takes a guard over one cached owner
+/// for each projection, and the next projection's release unlocks the same
+/// description.
+///
+/// Released rather than dropped, so it writes nothing to the process-wide sink
+/// `crate::emits` counts.
+#[test]
+fn a_lock_a_refused_release_left_is_freed_by_a_later_release_over_the_same_owner() {
+    let scratch = Scratch::new("refused-relocked");
+    let owner = scratch.open();
+    let guard = Flock::lock(&owner, scratch.lock.as_path()).expect("lock");
+    refuse_unlock(0, io::ErrorKind::PermissionDenied);
+    let refused = guard
+        .release()
+        .expect_err("the seam refused the unlock and release must say so");
+    assert!(
+        refused.to_string().contains(UNRELEASED_SAYS),
+        "the sentence says the lock may stay held: {refused}"
+    );
+    assert!(
+        would_block(&scratch.probe()),
+        "the premise: the refused release left the lock held"
+    );
+    Flock::lock(&owner, scratch.lock.as_path())
+        .expect("the owner's own description takes its lock again")
+        .release()
+        .expect("and releases it");
+    scratch
+        .probe()
+        .expect("the owner is still open, and the later release freed the lock");
+    drop(owner);
 }
 
 /// A CONTENDED LOCK IS REFUSED WITHOUT WAITING, AND A REFUSAL HOLDS NOTHING.

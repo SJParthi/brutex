@@ -39140,7 +39140,10 @@ the source, `From<Unreleased>` keeping a `PermissionDenied` kind, and that
 `Drop` does not ask again.
 `a_refused_release_of_a_borrowed_guard_holds_the_lock_until_its_owner_closes`
 covers a refused release over `&File`: the lock stays held while the owner is
-open and is free once it closes. `repair::tests` drives both of `repair`'s
+open and nothing unlocks it again, and is free once the owner closes.
+`a_lock_a_refused_release_left_is_freed_by_a_later_release_over_the_same_owner`
+covers a later release over the same owner, which frees it while the owner
+is still open. `repair::tests` drives both of `repair`'s
 refused releases through `publish` and `RevisionReader::open`.
 `a_contended_lock_is_refused_and_takes_nothing` covers contention. `emits.rs`
 gains the ninth row, `store.flock` at `Warn`, driven by a refused unlock in the
@@ -39246,14 +39249,19 @@ line, and the proof paragraph.
 2. *The refusal's wording.* `Unreleased` said the lock "could not be released
    before its descriptor closed", and the `Drop` note's line said "advisory
    lock not released before close". A guard over a borrowed file closes
-   nothing, so after a refused unlock the lock lasts at least as long as the
-   owner keeps the file open, and `cli`'s observation `ReadLease` holds such a
+   nothing, so after a refused unlock the lock can outlast the guard while the
+   owner keeps the file open, until a later guard over the same owner releases
+   it or the owner closes, and `cli`'s observation `ReadLease` holds such a
    guard, `Flock<&'a File, &'a Path>`. The sentence now says the lock "could
-   not be released, and it stays held until every descriptor of its open file
-   description has closed", and the line says "advisory lock not released by
-   its guard".
+   not be released, and it may stay held until its open file description is
+   unlocked again or every descriptor of it has closed", and the line says
+   "advisory lock not released by its guard".
    `a_refused_release_of_a_borrowed_guard_holds_the_lock_until_its_owner_closes`
-   checks the sentence and that lifetime, and `emits.rs` pins the line.
+   checks the sentence, that the lock is held after the refused release while
+   the owner is open, and that it is free once the owner closes.
+   `a_lock_a_refused_release_left_is_freed_by_a_later_release_over_the_same_owner`
+   checks that a later guard's release over the still open owner frees it.
+   `emits.rs` pins the line.
 3. *The kind.* The test seam refused only with `io::Error::other`, whose kind
    is `Other`, and the test asserted `Other`, so a `From<Unreleased>` that
    replaced the host's kind with `Other` passed it. The seam now takes a kind,
@@ -39316,6 +39324,17 @@ line, and the proof paragraph.
    tree with no `.git`, which it must skip, and a `.git` file naming a
    directory that does not exist, which it must refuse. Under the old check
    that test fails.
+9. *A lifetime said too strongly.* Item 2, AF-15, `Unreleased`'s sentence and
+   the docs of `Unreleased` and of the `Drop` note said the lock stays held
+   until every descriptor of its open file description has closed, and for a
+   borrowed guard at least as long as the owner keeps the file open. A review
+   took a guard over an owner, had its release refused, then took and
+   released the lock again through the same owner, and with the owner still
+   open a probe was granted. Each now says the lock may stay held until the
+   description is unlocked again or every descriptor of it has closed. Item 2
+   and the proof paragraph above were corrected in place, and AF-15 was too.
+   The sentence's test constant was changed first, and three `flock` tests
+   failed on the old sentence before `Unreleased` was changed.
 
 ### D-0694 — Say corporate actions are unchecked on every stock report, and withhold holed sessions on the ordinary stored sweep — 2026-09-23
 
