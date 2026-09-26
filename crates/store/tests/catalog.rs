@@ -108,6 +108,36 @@ fn one_spot_month_is_found_with_its_segments_intact() {
 /// once, because a census that reconciles on a clean tree proves nothing about
 /// the arithmetic — the buckets have to be non-zero together.
 #[test]
+fn malformed_month_names_cannot_masquerade_as_a_canonical_held_month() {
+    let root = scratch("month-spelling");
+    let invalid = [
+        "026-08", "02026-08", "2026-8", "2026-008", "year-08", "2026-mm", "1969-08", "0000-08",
+        "2026-00", "2026-13", "202608",
+    ];
+    for stem in invalid {
+        put(&root, &format!("groww/NSE/INDEX/NIFTY/1min/{stem}.bin"));
+    }
+    put(&root, "groww/NSE/INDEX/NIFTY/1min/2026-08.bin");
+    let found = catalog::walk(&root).expect("malformed names do not stop the walk");
+    assert_eq!(found.census.seen, invalid.len() as u64 + 1);
+    assert_eq!(found.census.malformed_month, invalid.len() as u64);
+    assert_eq!(found.census.spot, 1);
+    assert!(found.census.reconciles());
+    assert_eq!(found.held.len(), 1);
+    assert_eq!(found.held[0].month.to_string(), "2026-08");
+    for stem in invalid {
+        assert_eq!(
+            std::fs::read(root.join(format!("bars/groww/NSE/INDEX/NIFTY/1min/{stem}.bin")))
+                .expect("malformed entry is preserved"),
+            b""
+        );
+    }
+    let repeated = catalog::walk(&root).expect("repeat walk");
+    assert_eq!(repeated.census, found.census);
+    assert_eq!(repeated.held, found.held);
+}
+
+#[test]
 fn the_census_reconciles_over_a_store_holding_every_refusal() {
     let root = scratch("every");
     // spot — the only kind that becomes a row
