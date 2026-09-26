@@ -42130,3 +42130,21 @@ unmutated baseline passed. All 13 were caught, and none was missed,
 unviable or timed out; among them each `unlocatable` match guard replaced
 with `true` and with `false`, and `bars_refusal` and `unlocatable` each
 replaced with a default status and an empty or `"xyzzy"` page.
+
+A second run, with the same settings, over the source as `3fb20672` has
+it, took the other 77 (`-E` with the same pattern). Its unmutated baseline
+passed. Of the 77, 51 were caught and 26 were unviable, and none was missed
+or timed out. So of the 90, 64 were caught, 26 unviable and none missed.
+The 26 unviable ones failed to compile: 25 put `Default::default()` in a
+return value, and one turns the `&&` of `cached`'s `if let` chain into an
+`||`, as in the ninth repair's run.
+
+Gate 23 then refused `ff0d82b6`, the commit that carried this record
+first: the cost test looked in `Sink::report` for the string `eprintln!`,
+and Gate 23 counts that token on any line not opened by `//` or `*`
+wherever a letter or `_` does not come just before it
+(`(^|[^A-Za-z_])${m}!`), so it measured an undeclared print in
+`census_request_tests.rs`. `cdbb3ff5` looks for `eprintln` without its
+`!`, which `Sink::report`'s `eprintln!(` still contains; Gate 23 then
+passes, and so does the test. It changes no production line, so no
+mutant above is affected.
