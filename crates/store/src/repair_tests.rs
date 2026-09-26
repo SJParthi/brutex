@@ -231,3 +231,213 @@ fn a_refused_release_when_a_revision_is_opened_says_nothing_was_published() {
         .read()
         .expect("the revision reads once the refused open has returned");
 }
+
+#[test]
+fn repair_refusals_name_the_reason_path_and_publication_visibility() {
+    let at = PathBuf::from("revision/2024-06.bin");
+    let cases = [
+        (
+            RepairError::RevisionLimit,
+            "repair revision ordinal outside 1..=1024",
+        ),
+        (
+            RepairError::RowLimit,
+            "repair exceeds the 100000-row ceiling",
+        ),
+        (
+            RepairError::StaleSource,
+            "repair source header changed; merge again",
+        ),
+        (
+            RepairError::MissingTimestamp(17),
+            "repair omits source timestamp 17",
+        ),
+        (
+            RepairError::UnsealedSource,
+            "repair requires checksum-protected source bars",
+        ),
+        (
+            RepairError::Conflict,
+            "repair revision already holds a different request",
+        ),
+        (
+            RepairError::Incomplete(at.clone()),
+            "incomplete repair at revision/2024-06.bin; preserved",
+        ),
+        (
+            RepairError::InvalidReceipt(at.clone()),
+            "invalid repair receipt at revision/2024-06.bin",
+        ),
+    ];
+    for (error, expected) in cases {
+        assert_eq!(error.to_string(), expected);
+    }
+    let store = crate::file::StoreError::NotCommitted {
+        index: 7,
+        n_valid: 3,
+    };
+    assert_eq!(
+        RepairError::from(store).to_string(),
+        "record 7 is past the 3 committed"
+    );
+    for visible in [false, true] {
+        let error = RepairError::Io {
+            path: at.clone(),
+            operation: "sync receipt",
+            kind: io::ErrorKind::PermissionDenied,
+            publication_may_be_visible: visible,
+        };
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "sync receipt revision/2024-06.bin: PermissionDenied; publication may be visible: {visible}"
+            )
+        );
+    }
+}
+
+#[test]
+fn a_receipt_for_another_source_symbol_or_timeframe_is_refused_without_writes() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
+    for foreign_symbol in [true, false] {
+        let fixture = Fixture::new("foreign-receipt");
+        let expected = fixture.source(&[bar(1)]);
+        assert_eq!(fixture.publish(expected, &[bar(1)]), Ok(Published::Created));
+        let receipt = path()
+            .to_path_buf(&revision().root(&fixture.root))
+            .with_extension("repair-v1");
+        let mut bytes = fs::read(&receipt).expect("published receipt");
+        let mut foreign = expected;
+        if foreign_symbol {
+            foreign.symbol_id = SYMBOL + 1;
+        } else {
+            foreign.timeframe_secs = 300;
+        }
+        bytes
+            .get_mut(16..80)
+            .expect("source header")
+            .copy_from_slice(&foreign.commit().expect("well-formed foreign header").bytes);
+        fs::write(&receipt, &bytes).expect("foreign source receipt");
+        assert_eq!(
+            fixture.read().expect_err("foreign source identity"),
+            RepairError::InvalidReceipt(receipt.clone())
+        );
+        assert_eq!(
+            fs::read(&receipt).expect("refusal preserves receipt"),
+            bytes
+        );
+    }
+}
+
+#[test]
+fn a_checksum_valid_source_with_nonincreasing_timestamps_is_not_repaired() {
+    use std::os::unix::fs::FileExt;
+
+    let _sink_is_mine = crate::emits::hold_the_sink();
+    for middle in [bar(0), bar(-1)] {
+        let fixture = Fixture::new("unordered-source");
+        let ordered = [bar(0), bar(2), bar(4)];
+        let expected = fixture.source(&ordered);
+        let physical = path().to_path_buf(&fixture.root);
+        let checksums = path()
+            .with_file(FileKind::Checksums)
+            .to_path_buf(&fixture.root);
+        // Model a checksum-valid historical producer that did not enforce
+        // today's batch ordering. Keep the header's first/last stamps valid.
+        let mut middle = middle;
+        middle.volume = 0;
+        let rows = [ordered[0], middle, ordered[2]];
+        let bytes: Vec<u8> = rows.iter().flat_map(Bar::image).collect();
+        let layout = crate::layout::Layout::V2;
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .open(&physical)
+            .expect("source to seed");
+        assert_eq!(
+            file.write_at(&bytes, layout.offset_of(0).expect("first record"))
+                .expect("seed records"),
+            bytes.len()
+        );
+        let checksum = crate::block::seal(layout, 3, 0, &bytes).expect("valid block geometry");
+        fs::write(&checksums, checksum.to_le_bytes()).expect("matching CRC");
+        let before = fs::read(&physical).expect("source bytes");
+        assert_eq!(
+            fixture.publish(expected, &ordered),
+            Err(RepairError::Store(
+                crate::file::StoreError::BatchNotOrdered {
+                    at: 1,
+                    previous: rows[0].ts_micros,
+                    next: middle.ts_micros,
+                }
+            ))
+        );
+        assert_eq!(fs::read(&physical).expect("unchanged source"), before);
+        assert_eq!(
+            fs::read(&checksums).expect("unchanged CRC"),
+            checksum.to_le_bytes()
+        );
+        assert!(
+            !revision().root(&fixture.root).exists(),
+            "refuse before reservation"
+        );
+    }
+}
+
+#[test]
+fn every_unexplained_revision_sibling_and_receipt_is_preserved() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
+    for kind in [
+        Some(FileKind::Bars),
+        Some(FileKind::Checksums),
+        Some(FileKind::Lock),
+        None,
+    ] {
+        let fixture = Fixture::new("unexplained-sibling");
+        let expected = fixture.source(&[bar(1)]);
+        let root = revision().root(&fixture.root);
+        let physical = path().to_path_buf(&root);
+        let orphan = kind.map_or_else(
+            || physical.with_extension("repair-v1"),
+            |kind| path().with_file(kind).to_path_buf(&root),
+        );
+        fs::create_dir_all(orphan.parent().expect("month directory")).expect("revision directory");
+        fs::write(&orphan, b"unexplained evidence").expect("orphan file");
+        assert_eq!(
+            fixture.publish(expected, &[bar(1)]),
+            Err(RepairError::Incomplete(orphan.clone()))
+        );
+        assert_eq!(
+            fs::read(&orphan).expect("orphan survives"),
+            b"unexplained evidence"
+        );
+        assert!(
+            physical.with_extension("reserved-v1").is_file(),
+            "failed reservation stays visible"
+        );
+    }
+}
+
+#[test]
+fn an_uninspectable_revision_path_is_a_named_nonpublication_refusal() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
+    let fixture = Fixture::new("inspect-error");
+    let expected = fixture.source(&[bar(1)]);
+    let obstacle = fixture.root.join("bar-revisions-v1");
+    fs::write(&obstacle, b"not a directory").expect("obstruct the revision path");
+    let reservation = path()
+        .to_path_buf(&revision().root(&fixture.root))
+        .with_extension("reserved-v1");
+    assert_eq!(
+        fixture.publish(expected, &[bar(1)]),
+        Err(RepairError::Io {
+            path: reservation,
+            operation: "inspect revision",
+            kind: io::ErrorKind::NotADirectory,
+            publication_may_be_visible: false,
+        })
+    );
+    assert_eq!(
+        fs::read(obstacle).expect("obstacle remains"),
+        b"not a directory"
+    );
+}
