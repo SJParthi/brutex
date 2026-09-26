@@ -37827,6 +37827,38 @@ record for the same position. Proposed, for the operator to apply directly:
 > is the largest of billions and means nothing until it is validated out of
 > sample.
 
+**Correction, 2026-09-26: the operator's answer, as relayed, and the rest of
+§1's stale count.** The workflow that assigned this repair relayed the
+operator's answer to the finding above, dated 2026-09-26 at 12:15 IST:
+*"just stick to stocks F&O alone and then from indices, as of now, I will pick
+one and only NIFTY and BANKNIFTY"*. That is the surface this entry's fix left:
+the cash equities of the F&O underlyings that are shares, and of the indices
+`NSE-NIFTY` and `NSE-BANKNIFTY` alone. `core::universe::FNO_UNDERLYINGS` holds
+213 names, and 5 of them are the indices `FNO_INDEX_UNDERLYINGS` lists, which
+have no cash equity, so the shares are 208 and the surface is 210. The answer
+changes no scope.
+
+The correction above named one sentence of §1 as stale. §1's item 2 is stale
+too: it says "The **cash equities of the 213 F&O underlyings**" and "The list
+is `core::universe::FNO_UNDERLYINGS` and nothing else names it", and since
+this entry `FNO_INDEX_UNDERLYINGS` names the five that have none. `CLAUDE.md`
+is still not edited by this repair, for the reason above: the answer reached
+it through the workflow's message. Proposed, for the operator to apply
+directly, in place of §1's item 2 and beside the sentence proposed above:
+
+> 2. The **cash equities of the 208 F&O underlyings that are shares** — the
+>    stock's own price series, the same thing the spot level is for an index.
+>    Widened by D-0506, counted by D-0682. The list is
+>    `core::universe::FNO_UNDERLYINGS` less the five indices
+>    `core::universe::FNO_INDEX_UNDERLYINGS` names, which have no cash equity.
+
+`core::universe::tests::the_surface_counts_the_records_give_are_the_two_lists_counts`
+derives 208 as `FNO_UNDERLYINGS` less `FNO_INDEX_UNDERLYINGS`, each of those
+five an F&O underlying, and 210 as that and the two indices
+`InstrumentKey::SWEPT` names, `NIFTY` and `BANKNIFTY`. It requires
+`docs/00-charter.md` §1's row and both proposals here to state those counts,
+so none of them can drift from the lists.
+
 ### D-0683 — Correct the crate graph and D-0453's list: `cli` has nine arrows, not seven — 2026-09-23
 
 `CLAUDE.md` §5 drew `cli` with seven arrows and said so in its prose. The

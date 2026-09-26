@@ -6002,6 +6002,73 @@ mod tests {
         }
     }
 
+    /// The counts the records give of the swept surface are the two lists'
+    /// counts. D-0682.
+    ///
+    /// The shares are `FNO_UNDERLYINGS` less `FNO_INDEX_UNDERLYINGS`, each of
+    /// those an F&O underlying, and the surface is the shares and the indices
+    /// `InstrumentKey::SWEPT` names, `NIFTY` and `BANKNIFTY` and no other. The
+    /// charter's scope row and both of D-0682's proposals for `CLAUDE.md` §1
+    /// state those counts, so a change to either list fails here until every
+    /// one of them is changed with it. Each text is read with its line breaks
+    /// and a quotation's `>` markers folded away, so rewrapping does not break
+    /// the search.
+    #[test]
+    fn the_surface_counts_the_records_give_are_the_two_lists_counts() {
+        for index in FNO_INDEX_UNDERLYINGS {
+            assert!(
+                FNO_UNDERLYINGS.contains(&index),
+                "{index} is an F&O underlying, so the difference counts the shares"
+            );
+        }
+        let shares = FNO_UNDERLYINGS.len() - FNO_INDEX_UNDERLYINGS.len();
+        let swept: Vec<&str> = InstrumentKey::SWEPT
+            .iter()
+            .map(|(_, symbol)| *symbol)
+            .collect();
+        assert_eq!(swept, ["NIFTY", "BANKNIFTY"], "the two swept indices");
+        let surface = shares + swept.len();
+
+        let fold = |text: &str| {
+            text.split_whitespace()
+                .filter(|word| *word != ">")
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let charter = fold(include_str!("../../../docs/00-charter.md"));
+        let row = format!("the {shares} F&O underlyings that are shares");
+        assert!(
+            charter.contains(&row),
+            "docs/00-charter.md's scope row must say {row:?}"
+        );
+
+        let decisions = include_str!("../../../docs/05-decisions.md");
+        let (_, from) = decisions
+            .split_once("\n### D-0682 ")
+            .expect("D-0682 heads an entry");
+        let entry = fold(from.split_once("\n### ").map_or(from, |(entry, _)| entry));
+        for proposed in [
+            format!(
+                "and {surface} instruments, {shares} shares and the two indices, multiply the \
+                 search by {surface}"
+            ),
+            format!("2. The **cash equities of the {shares} F&O underlyings that are shares**"),
+            "`core::universe::FNO_UNDERLYINGS` less the five indices \
+             `core::universe::FNO_INDEX_UNDERLYINGS` names"
+                .to_owned(),
+        ] {
+            assert!(
+                entry.contains(&proposed),
+                "D-0682 must propose {proposed:?} for CLAUDE.md §1"
+            );
+        }
+        assert_eq!(
+            FNO_INDEX_UNDERLYINGS.len(),
+            5,
+            "the five indices named above"
+        );
+    }
+
     #[test]
     fn the_placeholder_scrips_are_malformed_and_are_not_here() {
         // The published Total Market file has 752 rows; two are placeholders
