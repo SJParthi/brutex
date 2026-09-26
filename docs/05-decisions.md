@@ -41994,3 +41994,139 @@ with `()`, its `&&` made `||` and its `!` deleted, and the `!` deleted in
 `census_now_stamping`; the first was caught by 10 tests, among them the
 three this repair changes. The unviable one puts `Default::default()` in
 `census_now_stamping`'s return value.
+
+**Repaired an eleventh time, on an eleventh review — 26 September 2026.**
+The behaviour review of `837ef622`, the commit that carried the tenth
+repair's record, reported the four findings the eighth repair took from the
+adversarial passes resolved, and four nits, each a sentence that said more
+or less than the code. Each is upheld. The text above is kept as it was
+written, except rows new in this piece, AF-24, AF-27b, AF-28b, AF-28l, AF-29
+and AF-29b, and the "What that line costs" bullet of `docs/06-limits.md`'s
+ninth correction, new in this piece, which are corrected in place.
+
+- *The line's cost was a list that read as the whole of it.*
+  `refuse_contradicted_absences`'s doc and `docs/06-limits.md`'s "What that
+  line costs" priced a changed row's line as what `Sink::emit` costs, "which
+  is the sink's lock and a `write_all` of the line to its log file". The
+  source pays more. The macro builds the event, whose `path` field is
+  `row.path.display().to_string()`. `Sink::emit_for_run` reads the clock
+  inside the lock (`inner.stamp(now_millis())`) and formats the line into
+  its buffer (`line(&mut inner.buf, inner.seq, at, run, event)`). A failed
+  append writes again to end the fragment (`inner.target.append(b"\n")`)
+  and reports (`self.report(&why)`), whose `eprintln!` runs only for the
+  call whose `compare_exchange(false, true, ..)` succeeds, so once per sink.
+  **Decided:** both texts name those parts after "including".
+  `what_a_changed_rows_line_costs_is_named_in_part_and_read_off_the_source`
+  finds each part in `server.rs` or in `telemetry`'s `sink.rs`, and requires
+  both texts to name it and to say "including". Run against the tenth
+  repair's doc, it failed at the path's `String`. AF-28l names it. The ninth
+  repair's "What that makes wrong above" and the tenth repair's "Decided:
+  the line stays" give the lock and the `write_all` as the cost; they are
+  kept as written, as what was decided then.
+- *`/bars` answered 400 where a census could not be read.* `unlocatable`'s
+  `AskedUnreadable` arm, and its arm for a `NotHeld` that carries notes,
+  refused through `bars_refusal`, which answered 400 for every refusal.
+  `/calendar.json` answers the same census state 503, and so does
+  `/store.json`, whose comment gives the reason: "a monitor reads the status
+  code". A census that cannot be read is the store's fault, not the
+  request's, and the same request is answered once the census reads again:
+  `CONTRADICTED_ABSENCE`, the note of one such census, ends "The next
+  request reads again". **Decided:** those two arms answer 503, and a name
+  no census holds, every census read, and a name one feed holds twice still
+  answer 400. `bars_refusal` takes the status from its caller. The four
+  census request tests that drive those arms now require 503, and each
+  failed with 400 before the change:
+  `an_unreadable_census_is_named_by_calendar_and_bars`,
+  `bars_refuses_when_the_asked_feeds_own_census_is_unreadable`,
+  `bars_names_every_unreadable_census_when_no_readable_census_holds_the_name`
+  and `a_permission_change_on_a_manifest_file_is_seen_on_the_next_request`.
+  `the_bars_route_refuses_a_name_it_cannot_locate_rather_than_guessing_index`
+  still requires 400 for a name no census holds, and
+  `bars_takes_the_asked_feeds_identity_and_refuses_one_held_twice` 400 for
+  one held twice. A vendor this build has no feed for, asked with an
+  unreadable census, is answered 503 too, because `bars_html` asks
+  `locate_series` before it parses the vendor; the third of those four
+  tests drives it in its third query.
+
+  What that makes wrong above: item 6 of "The census (D-0686), as
+  `950ead28` left it", "Every `/bars` refusal goes through `bars_refusal`,
+  which answers 400, and that is left as it is"; "Repaired here, on the
+  census"'s "`Unlocated::AskedUnreadable` now refuses it with 400"; and the
+  eighth repair's "Each answers 400 saying 1 could not be read". Those arms
+  answer 503 now. P-66, a row on `main`, says "`400` is 'I could not work
+  out where to look'". That still holds for a name no census holds, which
+  its test drives, and not for a census that could not be read.
+- *AF-27b said a copy wrapped in a comment is counted, and it was not.* It
+  said a second copy of the budget's reason fails "however its source lines
+  are wrapped, with a `\` or without one". `as_read` joined `\`-newline
+  continuations and made each run of whitespace one space, and did nothing
+  more, so a copy in a `//` or `///` comment wrapped across lines kept a
+  marker between its words and was not counted. **Decided:** `as_read`
+  drops the `//!`, `///` or `//` that opens a line before it joins.
+  `a_wrapped_copy_reads_as_one_line` pins it: a copy across the lines of
+  `///`, `//!` and `//` comments reads as one line, which failed before as
+  "/// wall-clock calibration the //! run identity // cannot name"; a
+  marker inside a line is kept; and the `*` that opens a block comment's
+  line is kept. AF-27b and the test's doc now name the wraps that are
+  counted, and say a copy behind any other mark that opens a line is not.
+- *The tenth repair's FIFO item is wider than a FIFO.* A nit on `main`'s
+  code, not this piece's. `sized` bounds the read by
+  `std::fs::metadata(path)?.len()`, and a character device's length is 0
+  whatever a read of it returns. **Decided:** pinned as it stands, not
+  fixed.
+  `a_character_device_at_a_manifest_path_passes_the_size_bound_and_is_read`
+  finds `/dev/null` and `/dev/zero` character devices of length 0, takes a
+  mebibyte from `/dev/zero` with a bounded read, and has `sized` read a
+  manifest path linked to `/dev/null` as empty bytes, not refused as a path
+  that is not a regular file. `sized`'s doc says so. Its body is unchanged:
+  `shasum` of it gives `150da636` on `96194c11` and on this tree, as the
+  tenth repair found.
+
+**Still not done.** The items of the fifth to tenth repairs' lists stand as
+written, and the tenth repair's FIFO item is wider:
+
+- *A manifest path that is not a regular file is read by nothing `sized`
+  bounds.* A FIFO there holds the census read, as the tenth repair recorded.
+  A character device there passes the size bound, and one that does not
+  reach end of file, such as `/dev/zero`, would grow `std::fs::read`'s
+  buffer for as long as the read runs. That last is read off the code, and
+  was not run, by the review or here, because it would take the process's
+  memory. A check that the path is a regular file before the read would
+  refuse both, and a socket with them, which leaves the tenth repair's
+  question about the socket where it was, so it stays left to a change of
+  its own.
+
+Each new or changed test was first run with the repair's code and docs as
+`837ef622` has them, in one build: 6 failed and 2 passed. The four `/bars`
+tests failed with 400 against 503; the cost test failed at the path's
+`String`; `a_wrapped_copy_reads_as_one_line` failed as quoted above. The
+character device test passed, pinning the code as it is, and so did
+`the_budget_reason_is_worded_once`, unchanged. After the repair, one more
+build took a copy of the reason's words wrapped across two `///` lines in
+`BUDGET_NOT_RECORDABLE`'s doc: `the_budget_reason_is_worded_once` failed,
+2 against 1. With `as_read`'s comment step then removed as well, it passed,
+1, and `a_wrapped_copy_reads_as_one_line` failed. The tree was restored by
+`git checkout` and compared equal to `3fb20672` (`git diff --quiet HEAD`).
+
+**Verified (eleventh repair)** on this tree (arm64 laptop,
+`CARGO_BUILD_JOBS=3`, `--locked --offline`, the machine's one-minute load
+average read at 27 and at 23 from other work). `cargo fmt --all --check` is
+clean.
+`cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
+is clean. `Cargo.lock` is byte-identical to `main`'s, and `web/` is
+untouched. The `api` suite ran outside the command sandbox. Its lib has
+1,219 passed, 0 failed and 2 ignored: the tenth repair's 1,217 and the two
+tests this repair adds. `src/main.rs` has 2 passed, `tests/binary.rs` 3 and
+the doctest 1. `core`'s whole suite, which reads these documents, passes.
+
+cargo-mutants 26.2.0 lists 90 mutants in the `api` package over the whole
+piece's source diff, `eecca4da` to `3fb20672`. A run on this tree, with
+`--cap-lints true`, two jobs, the `api` lib as the test set run by
+`cargo test`, and `TMPDIR` set to this workflow's cargo-mutants directory,
+took the 13 of them in `unlocatable`, `bars_refusal` and `bars_html`,
+which this repair changes, and in `locate_series`, whose refusals
+`unlocatable` answers (`-F 'unlocatable|bars_refusal|bars_html|locate_series'`). Its
+unmutated baseline passed. All 13 were caught, and none was missed,
+unviable or timed out; among them each `unlocatable` match guard replaced
+with `true` and with `false`, and `bars_refusal` and `unlocatable` each
+replaced with a default status and an empty or `"xyzzy"` page.
