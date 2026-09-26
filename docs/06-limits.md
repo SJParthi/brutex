@@ -8904,8 +8904,9 @@ size seen on the operator's disk. The 5.56 MB §41.1 quotes is D-0067's
 measurement, not a new one.
 
 **Corrected 24 September 2026 (D-0695).** Four statements above are stale.
-Commit `950ead28` changed them, and the repair D-0695 records changed them
-again. The text above is kept as it was written.
+Commit `950ead28`, which `main`'s squash merge does not keep, changed them,
+and the repair D-0695 records changed them again. The text above is kept as
+it was written.
 
 * *"The census itself is five `stat` calls."* It is five, or six when no
   manifest answered with a modified time: the store root is then asked whether

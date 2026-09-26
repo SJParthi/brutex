@@ -39430,6 +39430,20 @@ line, and the proof paragraph.
     test again. The existing sentence/token recognition limits remain as
     documented; this does not claim a complete Markdown or Git citation parser.
 
+**Integration follow-up, 27 September 2026.** The combined API and store
+records cite commit `950ead28`, which `main`'s squash merge does not keep.
+It is an ancestor of the integration branch, so the guard records this one
+commit as `Squashed` and the limits sentence states that reason. The new
+sentence still needs the existing HEAD-ancestry check; neither the complete
+same-file sentence rule nor any other exemption is relaxed.
+
+The API and CLI repair histories both appended to the decision log. Keeping
+their text at the append conflict placed later CLI corrections under D-0695.
+Integration restores the complete reviewed CLI text to D-0696 and the complete
+reviewed API text to D-0695, preserving the earlier decision order and all
+preceding foundation records. This is a section-boundary correction, not a
+new claim that the combined workspace has passed its required checks.
+
 ### D-0694 — Say corporate actions are unchecked on every stock report, and withhold holed sessions on the ordinary stored sweep — 2026-09-23
 
 **The gap (audit G16), in two halves.**
@@ -40295,12 +40309,6 @@ any copy lacks either, or carries a digit or `%` outside a decision number
 and until that test nothing asserted it: the review reports a rate written
 into the constant passing all ten tests the row cited.
 
-*Corrected 2026-09-24, AF-19.* There was a fourth copy. D-0694's
-`runner::audit::CASH_EQUITY_GROSS` opens every stock banner and every JSON
-`equity_note`, and it left out the Selection V6 clause while this test read
-only the three above. It now carries the header's sentence word for word, and
-the test reads it as a fourth copy.
-
 *Rejected:* one `pub` constant in `runner::audit` that all four texts compose
 from. It would change `runner`'s public surface in a repair of `cli`'s piece,
 and the header's own shape and wording are pinned in `runner` by AF-60 to
@@ -40484,6 +40492,1009 @@ texts. The verbs that take an instrument word rather than a catalog holding
 (`sweep-stored`, the audit verbs, `range-rung`, `range-all`) are unaffected by
 item 5: they open the key's own path by construction. The `api` census routes
 that list stored symbols were not examined against item 5's rule.
+
+**Correction, 2026-09-24: four claims above, and one line of `pool`, on the
+integrated tree.** This entry was written on a branch that did not yet hold
+D-0694, and was cherry-picked beside it unchanged. A review of the integrated
+tree upheld what follows against it. Each item is corrected here, not in the
+text above.
+
+1. *Item 1, the halted and the kept-rows-none-closed exits: "The label is the
+   only byte that differs from the same index page" and "The label is again
+   the only byte that differs".* Superseded. Since D-0694 the FINDINGS block
+   of a ranked stock ends with `equity_ranking_statement()`: the label, then
+   `runner::audit::CORPORATE_ACTIONS_UNCHECKED`. On both exits the equity page
+   differs from the same index page by that whole statement and by nothing
+   else. The halted test has removed the whole statement since D-0694. The
+   untraded test removed the label alone, so on the integrated tree it failed
+   at its equality, the corporate-actions paragraph being the first byte that
+   differed (measured by the review). Commit `29025433` made it remove the
+   whole statement. A statement that had lost the sentence would still pass
+   that equality, so the test now also requires its FINDINGS block to end with
+   the sentence.
+2. *Item 1's `sweep-stored` bullet: "FINDINGS only."* Superseded. FINDINGS
+   is where its ranking is labelled, but since D-0694 a share's
+   `sweep-stored` page, like every stored share page, also opens with the
+   stored banner and `CostScope::report_note`, which states the charge fact
+   again.
+   `a_stored_sweep_of_a_share_says_its_ranking_is_gross_of_every_charge` now
+   asserts that opening for RELIANCE and its absence for NIFTY.
+3. *Item 3: "One wording, bound to the audit header".* False on the
+   integrated tree. D-0694 added `runner::audit::CASH_EQUITY_GROSS`, the gross
+   paragraph of `report_note`, which heads every stored share page, `sweep-all`
+   over a stock and the Boolean research heading over a cash family. It was a
+   fourth copy of the charge statement, the test item 3 names did not read it,
+   and its sentence was not the header's: "This is cost-excluded research, not
+   a net result (D-0509, D-0525, D-0681)", with no Selection V6 clause. It now
+   ends with the header's own sentence, "COST-EXCLUDED RESEARCH, NOT A NET
+   RESULT (D-0509, D-0525, D-0681). No equity result carries Selection V6 or
+   execution authority until a charter-sourced equity charge stack exists.",
+   and that test checks it with the other three.
+   - *What a reader sees change:* that sentence, in place of the old one, in
+     the banner of every stored share page, of `sweep-all` over a stock and of
+     the Boolean research heading over a cash family. Its first line is
+     unchanged. No index page, run identity, store format or exit status
+     changed.
+   - *Two `runner` tests follow the text.* The note's fact list names
+     "COST-EXCLUDED RESEARCH" and "Selection V6" in place of the lower-case
+     phrase. The property test D-0694 wrote for the sentence, the gross
+     paragraph and the note now admits `V6` in the gross paragraph and the
+     note, where it is part of the name Selection V6, as
+     `the_equity_charge_statement_names_no_rate` admits it in the header
+     (AF-61). It still admits no digit outside a `D-dddd` reference in the
+     corporate-actions sentence. So AF-18's "none carrying a rate or any digit
+     outside a `D-dddd` reference" no longer holds for the gross paragraph or
+     the note, and AF-38 supersedes it for those two.
+   - *Rejected: one `runner` constant composed into all four texts, with the
+     three `cli` literals deleted.* Only the charge list and the sentence are
+     common to the four. Each copy opens with words that belong where it
+     stands: "EVERY FIGURE IN THIS RANKING" and "the ranking above" after a
+     table, "per ONE share" inside the sentence of `top`'s legend, "Correct on
+     an index by charter; NOT correct on a cash equity" in a pool that can
+     hold both, and "EVERY TOTAL BELOW" in a banner. Composing the common part
+     at run time means re-wrapping each page's lines, which item 3 already
+     rejected. The test holds the common part word for word in all four, and
+     a rate in none.
+   - *Why a `cli` repair edits `runner`.* Item 3 rejected a `runner` constant
+     because it "would change `runner`'s public surface in a repair of `cli`'s
+     piece". By integration D-0694 had already made `CASH_EQUITY_GROSS` a
+     public `runner` constant, so that reason no longer held. This change edits
+     the constant's text and two `runner` tests, and not its name or type.
+4. *Item 5, `pool`: the block was on the page, and no test read the page.*
+   The one line that put NOT ON THE SURFACE on the page sat in `pool::run`,
+   which checks the commit stamp first and which no test reaches. The tests
+   rendered the block alone and listed the surface alone, so deleting that
+   line left every test green (measured by the review), and the page then
+   dropped a misfiled holding without a word: the silent drop item 5 says this
+   entry removed. Everything the page says before a bar is read (the opening,
+   the block and the empty-surface line) now comes from `pool::head_under`.
+   `run` calls it, it is split out the way `batch::sweep_under` is, and
+   `the_pool_page_names_each_directory_it_did_not_read` drives it on a
+   scratch store. The page's bytes did not change.
+
+**Tests, and what each is proven against (this correction).** Each regression
+below was applied to this tree, one per build, and the named test was run and
+seen to fail. The fix was then restored and each file compared byte for byte
+with its copy.
+
+- *`head_under` without its `not_on_the_surface` call:*
+  `the_pool_page_names_each_directory_it_did_not_read` fails ("the opening,
+  then the directory it did not read, and nothing else"). The other 17 `pool`
+  tests, the block test among them, pass under it.
+- *`head_under` without the empty-surface line:* the same test fails, on the
+  store holding only `NSE/INDEX/RELIANCE`. The other 17 pass.
+- *`equity_ranking_statement` returning the label alone:*
+  `an_untraded_equity_ranking_is_labelled_gross_before_it_refuses` fails at
+  its new assertion. The halted test passes under it, because its equality
+  strips the same function's output. On the halted page the sentence is read
+  by AF-18's `a_stock_ranking_states_corporate_actions_inside_its_findings_block`
+  (read from the source; not run under this break).
+- *`CASH_EQUITY_GROSS` back at its D-0694 text:*
+  `every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate`
+  fails ("the stored banner's gross paragraph (`report_note`) must carry the
+  header's sentence"), and so does
+  `a_report_note_is_gross_then_corporate_actions_for_a_stock_and_empty_for_an_index`
+  (`missing "COST-EXCLUDED RESEARCH"`). The property test passes under it.
+- *`stored_provenance_of` without the note:*
+  `a_stored_sweep_of_a_share_says_its_ranking_is_gross_of_every_charge` fails
+  at its new banner assertion, for RELIANCE.
+- *"Selection V6" written into `CORPORATE_ACTIONS_UNCHECKED`:* the property
+  test fails (`the sentence: "V6" is a number that is neither a decision
+  reference nor the Selection V6 name`).
+
+Invariants AF-38 and AF-39. AF-38 supersedes AF-33's two clauses quoted in 1
+and 2, and AF-34's "Every equity charge statement `cli` prints", which read
+three copies of four. AF-39 asserts on the page what AF-35 asserted only of the
+block.
+
+**Second correction, 2026-09-24: what a second review of the integrated tree
+upheld.** Corrected here, not in the text above.
+
+1. *Item 3 and the first correction's item 3: one wording.* The four copies
+   carried the header's charge list and sentence, and nothing held them to the
+   header's fact that none of the charges is subtracted. The review rewrote
+   the FINDINGS label to say "this engine subtracts all of them, so the
+   ranking above is on NET returns", keeping the list and the sentence, and 69
+   equity tests passed (measured by the review). The four copies now state
+   the fact in one wording, "none is subtracted", and
+   `every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate`
+   requires it of each, after checking that the header says "NONE of those
+   charges is subtracted". It also refuses a copy that speaks of subtraction
+   anywhere else, speaks of a deduction, or calls a figure net outside "NOT A
+   NET RESULT". `the_subtraction_check_refuses_each_contradiction_of_the_header`
+   shows each such rewrite of the label is refused.
+   - *What a reader sees change:* the FINDINGS label on every ranked equity
+     page. It said "and this engine subtracts none of them, so the ranking
+     above is on GROSS returns" (the text item 1 quotes). It now says "and
+     none is subtracted, so the ranking above is on GROSS returns", and the
+     next three lines are re-wrapped. No index page, run identity, store
+     format or exit status changed.
+   - *Still rejected: one `runner` constant composed into all four texts.*
+     The review withdrew the public-surface reason, which the first
+     correction had already withdrawn, and called re-wrapping a layout
+     preference. The reason that stands is the one the first correction gave:
+     each copy's words around the common part belong to the page it is on. The
+     check is now on the fact as well as on the words, and it is a list of
+     refused phrasings. A contradiction in words it does not list would pass
+     it, and a single composed source would not have that gap.
+   - *AF-38 claimed "every equity charge statement `cli` prints".* It is
+     narrowed in place to the four constants. A priced expression search's
+     "Cost-excluded, unvalidated research" note and the research page's
+     "Discovery policy requested: no charges" line are wordings no test binds.
+2. *Item 5: a directory name is printed raw.* Only the symbol directory has
+   to resolve. `stored::misfiled` interpolated the other two directory names
+   raw. An exchange directory named `X\nrefused: forged` then put a line
+   reading `refused: forged/...` at column zero on the `pool` page and in a
+   `sweep-all` REFUSED row. `refusal_reason` reads such a line as a refusal,
+   so a completed run exited MISUSED (measured by the review). Each name is
+   now clipped and then rendered through `escape_debug`, so the sentence stays
+   on one line. A name prints as it did when, and only when, `escape_debug`
+   prints each of the characters `clipped` keeps of it -- its first 64 -- as
+   itself, so a newline past the cut leaves it as it was; a combining mark
+   that opens a name and has Unicode's `Grapheme_Extend` property, such as
+   U+0301, is escaped, though the same mark inside one is not (corrected in
+   place by the fifth and sixth corrections).
+3. *The first correction's item 4: "the page's own head".* `head_under` was
+   under test. `run` still bound the page from it, and no test reached `run`,
+   because it checks the commit stamp first. The review replaced `out` with
+   the bare opening after `head_under` returned, and all 56 tests in its set
+   passed. Everything after the stamp, feed, rung and root checks is now
+   `pool::run_under`. `the_pool_page_is_its_head_and_then_only_appends`
+   drives it on a store whose surface is empty and requires the page to equal
+   the head. A non-empty surface is screened through `one_rung`, which reads
+   the root from the environment, so no test drives that path. The same test
+   reads `run_under`'s source instead, and requires three things: `out` is
+   bound from `head_under` once, it is never assigned, cleared or rewritten
+   after that, and the function calls neither `opening` nor
+   `not_on_the_surface` itself.
+4. *Item 6: "Each guard ... resets when it drops".* It cleared the seam. So
+   when an inner guard dropped, it switched off an outer guard that was still
+   in scope. Each guard now keeps the value it displaced and restores it on
+   drop, and its field is private.
+5. *Two doc comments.* `Rules::elite` said every admitted row is "per ONE
+   unit of the index, gross of the statutory charge stack". It now names the
+   unit of the instrument, and a share's GROSS OF EVERY CHARGE. The doc of
+   `a_stored_sweep_of_a_share_says_its_ranking_is_gross_of_every_charge` said
+   "An index's sweep is unchanged". The test now asserts that the NIFTY page
+   carries neither the label, `CASH_EQUITY_GROSS`, nor
+   `CORPORATE_ACTIONS_UNCHECKED`, and the doc says that it makes no
+   byte-for-byte comparison with an earlier index page.
+   `the_corrected_doc_comments_say_no_more_than_holds` reads both comments
+   from the source.
+
+**Tests, and what each is proven against (second correction).** Each
+regression below was applied to this tree, and the named tests were run and
+seen to fail. Three builds were used, and each build's regressions touch code
+no other named test reads. After each build the six edited files were
+restored from copies, and `cmp` found them identical.
+
+- *`misfiled` without `escape_debug`:*
+  `a_misfiled_directory_name_is_escaped_onto_one_line`,
+  `a_misfiled_directory_name_cannot_forge_a_refusal_of_the_run` ("the
+  misfiled month is one escaped row") and
+  `the_pool_page_names_each_directory_it_did_not_read` fail.
+- *`CostScopeFault` clearing the seam on drop:*
+  `a_nested_cost_scope_guard_restores_the_outer_one_when_it_drops` fails
+  ("the inner guard dropping must leave the outer one in force").
+  *`NoneClosedFault` clearing its flag:*
+  `a_nested_none_closed_guard_restores_the_outer_one_when_it_drops` fails
+  with the same message.
+- *The review's contradictory label:*
+  `every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate`
+  fails (`the FINDINGS label Err("does not say that none is subtracted")`).
+  *The label's earlier wording, "this engine subtracts none of them":* the
+  same test fails with the same message.
+- *`run_under` replacing `out` with the bare opening right after the head:*
+  `the_pool_page_is_its_head_and_then_only_appends` fails ("the page of an
+  empty surface is its head"). *The same line placed after the empty-surface
+  return:* the same test fails at its source check ("`out =` after the
+  head").
+- *Either doc comment restored:*
+  `the_corrected_doc_comments_say_no_more_than_holds` fails.
+
+Invariants AF-38 and AF-39 are corrected in place. They are new in this
+change and are not on `main`.
+
+**Third correction, 2026-09-24: what a third review upheld.** Corrected here,
+not in the text above.
+
+1. *The second correction's item 3: `run`, and what `run_under` returns.*
+   The source check read `run_under` for a list of rewrites of `out`. It did
+   not check what `run_under` returned, and it did not read `run` at all.
+   Each of three regressions left every test in the reviews' sets green
+   (measured by the reviews): `run` returning the bare opening in place of
+   `run_under`'s page, `run_under`'s empty-union branch returning a fresh
+   "nothing to pool" string, and `std::mem::replace(&mut out, String::new())`
+   after the empty-surface return, a rewrite the list did not name.
+   - *`run_under`: every mention of the page, not a list of rewrites.*
+     `the_pool_page_is_its_head_and_then_only_appends` now checks each
+     mention of the name `out` after the head against three shapes:
+     `writeln!(out, ..)`, `&mut out` handed to `render_per_symbol` or
+     `render_pooled`, and `Ok(out)`. Any other shape fails it. It also
+     requires every `Ok(` to be `Ok(out)`, every `return` to be
+     `return Ok(out);`, and the body's last value to be `Ok(out)`. A rewrite,
+     an alias or a closure over the page has to name it.
+   - *The two renderers.* What they do with the page they are handed is now
+     part of that claim. `the_renderers_only_append_to_the_page_they_are_handed`
+     hands each a page that already holds a head, and requires the head as
+     the prefix of what it returns. That is one input each, driven, and not
+     read from their source.
+   - *`run`.* The new `the_pool_verb_hands_on_run_unders_page_untouched`
+     reads `run`'s body. The body must end with
+     `run_under(&root, vendor, vendor_word, rung, from, to, support_ppm)`,
+     call it once, and hold no `Ok(`, `return`, `opening(`, `head_under(`,
+     `not_on_the_surface(`, `format!(`, `String::`, `writeln!(` or
+     `push_str(`. The tail is exact. The rest is a list of refused phrasings.
+   - *Still not driven.* No test build passes `run`'s stamp check, and a
+     non-empty surface is still screened through `one_rung`, which reads the
+     root from the environment. Giving `one_rung` the root was the review's
+     alternative. It was not taken: `descend` and the all-rungs range sweep
+     call `one_rung` too, and this correction does not change their path for
+     a test. AF-39 is corrected in place to state what is read and what is
+     driven.
+2. *The second correction's item 2: the symbol directory.* The escape was
+   added only in `stored::misfiled`, which names the exchange and segment
+   directories. `sweep-all` loads each held month by its symbol directory's
+   name, and printed that name raw twice: in `batch::one`'s row label, and in
+   `stored::swept_index`'s refusal of a word that resolves to nothing. With a
+   symbol directory named `X\nrefused: forged`, the review measured
+   `carries_refusal` true on the page of a completed run. `sweep_all_arm`
+   returns MISUSED whenever it is true (read from the source). The same
+   defect is on `main`. AF-39 said the forge was closed for every held
+   directory; that was new in this change, and false.
+   - *The fix is in the one place a refusal quotes a word.* `stored::clipped`
+     now passes what it keeps through `escape_debug`, after the cut. So
+     `swept_index`, `rung` and `misfiled` all quote escaped, and `misfiled`
+     no longer escapes a second time. `batch::one` escapes the symbol in its
+     label. A word `Symbol::new` admits -- at most 24 ASCII letters, digits,
+     `-`, `_` and `&` -- escapes to itself, so no month that can be swept is
+     labelled differently.
+   - *What a reader sees change:* a refused instrument or rung word that
+     carries a control character, a quote or a backslash is now quoted with
+     those characters escaped. `NIFTY` followed by a newline was quoted with
+     the newline itself; it is now quoted as `NIFTY\n`.
+     `every_spelling_of_an_instrument_word_lands_on_one_scope_or_the_surface_sentence`
+     pinned the raw echo for two such words, and now expects the escaped
+     word. No accepted word, run identity or store format changed.
+   - *`swept_index`'s doc said the eager value "is at most 67 bytes".* That
+     held only for ASCII, even before the escape. It now says at most the 643
+     bytes `clipped` can return: 64 characters, each at most a ten-byte
+     escape, and the three-byte mark. On the success path it says at most 24.
+     Both figures are read from the source, not measured.
+   - *The pool page.* It names no symbol directory that does not resolve, and
+     one carrying a control character never resolves. A case asserting that
+     was added to `the_pool_page_names_each_directory_it_did_not_read`. It
+     pins behaviour that already held, and no reverted fix makes it fail.
+3. *The second correction's item 1: the check's first clause.*
+   `the_subtraction_check_refuses_each_contradiction_of_the_header` listed
+   four rewrites, and each was refused by one of the other three clauses. So
+   deleting the requirement that a copy says "none is subtracted" left every
+   test green, and the label "this engine subtracts all of them, so the
+   ranking above is on GROSS returns" then passed the binding test (measured
+   by the review). A fifth case is that rewrite. It has one "subtract", no
+   "net" and no "deduct", so only the first clause refuses it. Each case must
+   now be refused with the reason of the clause it was written for. The
+   test's headline said it refuses "every way" of contradicting the header;
+   it now says "each listed way".
+4. *The check is a list, and a copy is now pinned beside it.* The review
+   appended "Every charge is taken off each trade before it is ranked." to
+   the FINDINGS label, keeping the list, the sentence, "GROSS OF EVERY
+   CHARGE" and "none is subtracted", and every test passed. The second
+   correction had stated that gap and kept it. It is closed here without the
+   composed source that correction rejected:
+   `every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate`
+   replaces the header's list and sentence in each copy with `<charges>` and
+   `<sentence>`, and requires what is left to equal words it writes for that
+   copy. The list and the sentence still follow the header. Every other word
+   of each copy is pinned, so a clause added to a copy fails until the test
+   is edited with it. It pins words; it does not read what a new clause
+   means.
+5. *Three texts new in this change were stale.* `EQUITY_RANKING_GROSS`'s doc
+   called it one of three copies in `cli` beside the header, and named
+   neither `runner::audit::CASH_EQUITY_GROSS` nor the "none is subtracted"
+   check. It now counts four copies and names both.
+   `the_corrected_doc_comments_say_no_more_than_holds` reads it.
+   `docs/06-limits.md` said "Only the charge list and the cost-excluded
+   sentence are held identical", and gave `stored::misfiled`'s cost as three
+   string comparisons, omitting the clip and escape of each name it prints.
+   Both bullets are corrected in place. One bullet is added: the `pool` page
+   past its head is read from the source, not driven.
+
+**Tests, and what each is proven against (third correction).** Four builds
+were used. Before them the five edited sources were copied aside. Each build
+applied its regressions to this tree and ran the 77 tests the filter
+`misfiled pool:: nested equity gross charge corrected_doc subtraction
+operator_boundary symbol_directory refused_word every_spelling enormous
+renderers` selects. After each build the five files were restored from the
+copies, and `cmp` found them identical. Each build's failures are exactly
+those listed below, and only in build 2 do two regressions meet in one test;
+that entry says so. With no regression, all 77 pass. Builds 1 and 2 ran
+before the scan of `out` moved into a helper, `mentions_of_the_page`, which
+clippy's line limit asked for. Builds 3 and 4 exercise that scan, and were
+run again after the move, with the same failures.
+
+- *Build 1:*
+  - `clipped` without the escape, and `misfiled` escaping again: this is
+    `stored.rs` as it was before this correction.
+    `a_refused_word_is_quoted_escaped_on_one_line`,
+    `a_symbol_directory_name_cannot_forge_a_refusal_of_the_run` and
+    `every_spelling_of_an_instrument_word_lands_on_one_scope_or_the_surface_sentence`
+    fail. Both `misfiled` tests pass.
+  - `run` returning the bare opening:
+    `the_pool_verb_hands_on_run_unders_page_untouched` fails ("`run` ends
+    by returning `run_under`'s page as it is").
+  - The first clause of `denies_subtraction` deleted:
+    `the_subtraction_check_refuses_each_contradiction_of_the_header` fails.
+    The review's label came back refused for calling a figure net, not with
+    the first clause's reason.
+  - `EQUITY_RANKING_GROSS`'s earlier doc restored:
+    `the_corrected_doc_comments_say_no_more_than_holds` fails.
+- *Build 2:*
+  - `batch::one`'s label unescaped:
+    `a_symbol_directory_name_cannot_forge_a_refusal_of_the_run` fails.
+  - `run_under`'s empty-union branch returning a fresh string:
+    `the_pool_page_is_its_head_and_then_only_appends` fails ("every `Ok(`
+    after the head returns `out` itself").
+  - The second clause deleted: the subtraction test fails on "a second claim
+    beside the fact". The sentence appended below is in the label this test
+    rewrites too. It has no "subtract", "deduct" or "net", and the premise
+    that the label itself passes the check held.
+  - The review's sentence appended to the FINDINGS label:
+    `every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate`
+    fails at the new pin. Every assertion before it passes.
+- *Build 3:*
+  - `std::mem::replace(&mut out, String::new())` after the empty-surface
+    return: `the_pool_page_is_its_head_and_then_only_appends` fails on that
+    mention of `out`.
+  - `render_per_symbol` clearing the page first:
+    `the_renderers_only_append_to_the_page_they_are_handed` fails ("pass 1
+    keeps the head").
+  - The third clause deleted: the subtraction test fails on "a deduction
+    beside the fact".
+- *Build 4:*
+  - `let _ = out.split_off(0);` after the empty-surface return:
+    `the_pool_page_is_its_head_and_then_only_appends` fails on that mention
+    of `out`.
+  - `render_pooled` clearing the page first: the renderers test fails
+    ("pass 2 keeps the head").
+  - The fourth clause deleted: the subtraction test fails on "a net figure
+    beside the fact".
+  - `run` ending with `run_under(..).map(|_| String::new())`: the `run`
+    test fails ("`run` ends by returning `run_under`'s page as it is").
+
+Invariants AF-38 and AF-39 are corrected in place again.
+
+**Fourth correction, 2026-09-24: what a fourth review upheld.** Corrected
+here, not in the text above.
+
+1. *The stamp never kept `run` from a test.* The first correction's item 4
+   said `pool::run` "checks the commit stamp first and which no test
+   reaches". The second correction's item 3 said no test reached `run`
+   "because it checks the commit stamp first". The third correction's item 1
+   said "No test build passes `run`'s stamp check", and its item 5 added a
+   `docs/06-limits.md` bullet on that premise. The premise was false. The
+   build script stamps a tree whose index and working tree equal HEAD, and a
+   clean checkout, CI's among them, is one; only a tree that differs from
+   HEAD builds unstamped. The reviews found the commit in a clean build's
+   test binary and drove `pool` on a generated store to a whole page
+   (measured by the reviews). What keeps an in-process test off a surface
+   with an instrument on it is the store root, which `run` and pass 1's
+   `one_rung` read from the environment, and the crate already drives public
+   commands past that by running the test binary again as a child with
+   `BRUTEX_STORE` set. With `pool::pool` dropping `run`'s page, the whole
+   `cli` library suite stayed green (measured by the reviews). AF-39, the
+   `docs/06-limits.md` bullet, the docs of `run_under` and `head_under`, and
+   the docs of three `pool` tests repeated the claim, and each is corrected
+   in place.
+   - *Driven.* `the_pool_verb_prints_its_whole_page_on_a_generated_store`
+     runs itself again as a child. The child inherits no `BRUTEX_` variable
+     from the shell that ran the suite, and is given three: `BRUTEX_STORE`,
+     naming a generated store, `BRUTEX_LOG_DIR`, inside it, and
+     `BRUTEX_TEST_POOL_VERB_PAGE`, its own marker (corrected in place by the
+     fifth correction). It dispatches `pool` twice through `crate::dispatch`,
+     which goes through `pool_arm`, `pool::pool`, `run` and `run_under`:
+     - At `5min` and 200000 ppm over the generated NIFTY month, the page
+       starts with `head_under`'s head. Then comes pass 1's table, with
+       NIFTY's 600 bars, no refused row and no unread frontier, then pass 2's
+       table over one instrument with none unpriced, and the page ends with
+       the in-sample warning.
+     - At `60min`, over an unreadable `NSE/CASH/RELIANCE` month beside
+       `BSE/CASH/RELIANCE`, the page is exactly three things: the head
+       naming the BSE directory, pass 1's table refusing RELIANCE for its
+       unreadable month, and the nothing-to-pool line.
+
+     Both pages exit OK and neither is a refusal. In an unstamped build the
+     child requires the stamp refusal, MISUSED and no ledger. The priced page
+     names its support rather than `auto`, whose probe has a ceiling that
+     scales with the machine's core count (read from the source), so that
+     page's support does not depend on the machine it runs on.
+   - *Still read from the source.* A mutation run builds a tree that is not
+     HEAD, so it is unstamped, and there the driven test takes its
+     stamp-refusal branch. The third correction's source reads stay, and one
+     is added (item 2).
+   - *The third correction's alternative stays rejected.* Giving `one_rung`
+     the root is still not taken. Its reason now is that no test needs it:
+     the verb is reached from a child process with `one_rung` unchanged.
+2. *The last two links: `pool::pool` and `pool_arm`.* The third correction
+   pinned `run` and stopped there. Two links come after it:
+   - `pool::pool` turns `run`'s result into text.
+   - `lib.rs`'s `pool_arm` appends that text to what the binary prints.
+
+   `the_pool_verb_and_its_arm_print_runs_page_as_it_is` reads both bodies,
+   so a mutation run is held too:
+   - `pool::pool`'s whole text is pinned.
+   - `pool_arm`'s arm that runs the verb is pinned line for line.
+   - Every other mention of `out` in `pool_arm` must be its parameter or a
+     `refuse(out, ..)`.
+
+   AF-39's heading describes the page `cli pool` prints, and a test now
+   reaches that page.
+3. *`clipped`'s order was not under test.* The third correction's item 2
+   said `stored::clipped` escapes what it keeps "after the cut", and
+   `clipped`'s doc rests its cost on that order: the escape walks at most
+   the 64 characters kept. The test's one long input, 64 `N`s and a
+   newline, reads the same in either order, and escaping the whole word
+   before the cut passed every test (measured by the reviews).
+   `a_refused_word_is_quoted_escaped_on_one_line` now also quotes 63 `N`s
+   and a newline, and 63 `N`s, a newline and an `N`, through both
+   `swept_index` and `rung`. Kept and then escaped, each quotes the newline
+   whole as `\n`; escaped and then kept, the cut leaves a lone backslash.
+   `clipped` itself did not change.
+4. *Four sentences said more than holds about the escape.* The third
+   correction's item 2 said "The fix is in the one place a refusal quotes a
+   word". `docs/06-limits.md` said `stored::clipped` is used by "every
+   refusal that quotes a word or a directory name", `misfiled`'s doc said
+   "for every word a refusal quotes", and the doc of
+   `a_refused_word_is_quoted_escaped_on_one_line` said "every refusal that
+   quotes a caller's word or a directory's name is one line". `parse_vendor`,
+   `swept_rung` and `pool_arm`'s rung refusal quote the word they are handed
+   raw (read from the source). A feed word carrying a newline, typed to
+   `pool` or `sweep-all`, was refused as the whole command, across two lines
+   (measured by the review). Such a refusal is the command's own, and
+   forges no completed run. `misfiled`'s doc, the test's doc and the
+   `docs/06-limits.md` sentence are narrowed in place to what quotes through
+   `clipped`: `misfiled`'s three names and the word `swept_index` and `rung`
+   refuse. `batch::one`'s row label escapes the symbol itself. The third
+   correction's sentence is superseded here. A new `docs/06-limits.md`
+   bullet names the three raw refusals, and says that whether any of their
+   callers hands them a word that was not typed was not examined.
+   - *What a reader sees change, restated.* The third correction's item 2
+     named a control character, a quote and a backslash. `escape_debug`
+     escapes more than those: a format character such as U+200B, a
+     separator other than the space, such as U+00A0 or U+2028, and a
+     combining mark that opens the word and has Unicode's `Grapheme_Extend`
+     property, such as U+0301 (narrowed in place by the sixth correction). A
+     combining mark inside a word prints as itself. The test now
+     quotes each of those four characters, and a word with a combining
+     mark inside it. These cases pin behaviour that already held, and no
+     reverted fix makes them fail.
+
+**Tests, and what each is proven against (fourth correction).** The set is
+the 32 tests the filter `pool:: refused_word misfiled symbol_directory
+every_spelling enormous` selects, except the unstamped `pool_arm` run, which
+ran the 23 `pool::` tests. Unstamped runs used this tree with the change
+uncommitted: the first printed the persistence-disabled warning, and in the
+second the child failed on its stamp-refusal branch. Stamped runs used a
+throwaway worktree: the change was committed there on a detached HEAD,
+and each regression was committed on top of it, one per build, so every
+build was of a tree equal to its HEAD. No stamped build printed that
+warning, and the first one's test binary held its commit. After each
+unstamped run the edited files were restored from copies.
+
+- *No regression, stamped:* all 32 pass. The driven test, run alone three
+  times, took 0.88 s, 0.94 s and 0.91 s of wall time. Its support is
+  200000 ppm: in a stamped probe build that was never committed on this
+  branch, the same page took 7.9 s at 50000 ppm and 0.69 s at 200000 ppm,
+  measured once each.
+- *`pool::pool`'s `Ok(text) => text` returning `String::new()`:*
+  - Stamped: `the_pool_verb_and_its_arm_print_runs_page_as_it_is` fails at
+    its pin of `pool`, and
+    `the_pool_verb_prints_its_whole_page_on_a_generated_store` fails ("the
+    page opens with `head_under`'s head").
+  - Unstamped: the pin fails and the driven test passes, on its
+    stamp-refusal branch. That gap is why the pin exists.
+- *`pool_arm` without `out.push_str(&text);`:* both tests fail, stamped and
+  unstamped. Unstamped, the child finds an empty page where the stamp
+  refusal should be. A first stamped attempt at this regression matched the
+  same line in `elite_arm`, which comes first in `lib.rs`, and left all 32
+  green; it was rerun on `pool_arm`'s line.
+- *`run` ending with `.map(|_| opening(vendor_word, rung, from, to,
+  support_ppm, &[]))`, the bare opening in place of `run_under`'s page:*
+  stamped, `the_pool_verb_hands_on_run_unders_page_untouched` fails ("`run`
+  ends by returning `run_under`'s page as it is"), and so does the driven
+  test ("the page opens with `head_under`'s head").
+- *`run_under`'s empty-union branch returning a fresh "nothing to pool"
+  string:* stamped, `the_pool_page_is_its_head_and_then_only_appends` fails
+  ("every `Ok(` after the head returns `out` itself"), and so does the
+  driven test ("pass 1 refuses RELIANCE").
+- *`clipped` escaping before it cuts
+  (`word.escape_debug().take(KEEP)`):* unstamped,
+  `a_refused_word_is_quoted_escaped_on_one_line` fails on 63 `N`s and a
+  newline, which came back quoted with a lone backslash. This ran in the
+  same build as the unstamped `pool::pool` regression; the two touch
+  different tests, and those two tests were the build's only failures.
+
+The whole `cli` suite then ran stamped in the throwaway on the change with
+no regression: the library's 1469 tests passed with 1 ignored, and the
+three integration files' 38 tests and the one doc test passed. After it,
+the driven test's child was split into two helpers, one per page, for
+clippy's line limit; no assertion changed. On the split, stamped, the 32
+pass, the driven test alone took 0.74 s, 0.75 s and 0.77 s, and the
+`pool::pool` regression fails the same two tests with the same message.
+
+Invariant AF-39 is corrected in place again.
+
+**Fifth correction, 2026-09-25: what a fifth review found.** Three sentences
+new in this change were false when they were written. Unlike the corrections
+above, each is corrected where it stands, and listed here. One limit is
+answered, and one refusal's quote changes.
+
+1. *The driven test's child.* The doc of
+   `the_pool_verb_prints_its_whole_page_on_a_generated_store`, AF-39 and the
+   fourth correction's item 1 said the child's environment names a generated
+   store and holds no `BRUTEX_` variable besides. The test removes every
+   `BRUTEX_` variable the child would inherit, and then gives it three:
+   `BRUTEX_STORE`, `BRUTEX_LOG_DIR` and its own marker,
+   `BRUTEX_TEST_POOL_VERB_PAGE` (read from the source by the review). Neither
+   extra variable changes the page. The three texts now name all three, and
+   say the child inherits no `BRUTEX_` variable from the shell that ran the
+   suite. `each_variable_the_driven_pool_test_gives_its_child_is_named`, in
+   the new `crates/cli/tests/pool_and_escape_docs.rs`, reads the names from
+   the test's own `.env(` calls and its removal loop, and requires each of
+   the three texts to name every one.
+2. *"Printable" words.* `clipped`'s doc, `misfiled`'s doc, the docs of
+   `a_misfiled_directory_name_is_escaped_onto_one_line` and
+   `a_refused_word_is_quoted_escaped_on_one_line`, and the second
+   correction's item 2 each said that a word or name of printable
+   characters, with no quote and no backslash, is quoted as it was.
+   `escape_debug` escapes a combining mark that opens a string and has
+   Unicode's `Grapheme_Extend` property, as U+0301 does, and prints the same
+   mark as itself inside one. So U+0301 followed by `NIFTY` is quoted as
+   the text `\u{301}NIFTY`, and `N` then U+0301 then `IFTY` is quoted as
+   typed. The refused-word test already asserted both, and the review
+   measured both with `rustc` outside the repository; this correction
+   recorded no measurement of its own. Each text then said a word is quoted
+   as it was only when `escape_debug` prints each of its characters as
+   itself, and named the combining mark. That rule was false as well, and
+   so was this item's claim of a second measurement: the sixth correction
+   names both and corrects this item in place.
+   `misfiled` escapes its three names one at a time, so a combining mark that
+   opens the segment is escaped as well. The misfiled test gains that case,
+   and one with the mark inside the segment. Those two cases pin behaviour
+   that already held, and no reverted fix makes them fail.
+   `no_text_says_a_printable_word_is_quoted_as_typed` reads the five texts.
+3. *`parse_vendor`'s callers that are not typed.* The fourth correction's
+   item 4 added a `docs/06-limits.md` bullet which ended by saying it was not
+   examined whether any caller of the three raw refusals hands them a word
+   that was not typed. One search answers it for `parse_vendor` (found by the
+   review). Two of its callers hand it a feed word decoded from stored bytes:
+   `index_stop_search_reader.rs`, for a saved single-stop search declaration,
+   and `index_stop_source_context_codec.rs`, for a saved original source
+   snapshot. Read from the source, each decoder is reached from one `api`
+   route only, `/index-stop-ranking.json` and `/index-stop-candles.json`
+   respectively. Its refusal refuses that whole response, with the sentence
+   inside a JSON string, so neither could forge a completed page. No `cli`
+   command reaches either decoder.
+   - *The quote changes anyway.* `parse_vendor` now quotes the refused word
+     through `stored::clipped`, which is made `pub(crate)` for it. A word
+     from stored bytes is then quoted escaped wherever the refusal is
+     printed, and a caller added later inherits that.
+     `a_refused_feed_word_is_quoted_escaped_on_one_line` drives
+     `parse_vendor`, and
+     `a_saved_declarations_feed_word_is_refused_on_one_line` and
+     `a_saved_snapshots_feed_word_is_refused_on_one_line` drive each decoder
+     with the feed `X\nrefused: forged` spliced into bytes it otherwise
+     accepts. AF-39 names all three.
+   - *What a reader sees change:* a refused feed word longer than 64
+     characters, or holding a character `escape_debug` does not print as
+     itself, is now quoted cut and escaped. `bogus` is quoted as before. No
+     accepted feed word, run identity, store format or exit status changed.
+     The quote no longer grows with the word: `clipped` reads at most 65 of
+     its characters. That is read from the source, not measured.
+   - *The bullet is rewritten in place.* It names both callers and both
+     routes. `swept_rung` and `pool_arm`'s rung refusal still quote raw.
+     `pool_arm`'s one caller is `dispatch`'s `pool` arm, whose rung is typed.
+     `cli::swept_rung` has eleven call sites (this said eight until the sixth
+     correction), and the chains above them were not all followed to their
+     end; the bullet says so. `batch.rs` has a
+     `swept_rung` of its own, whose raw quote only a word `stored::rung` has
+     already accepted can reach.
+   - *Two texts listed `clipped`'s users.* `misfiled`'s doc named the words
+     quoted through `clipped`. The refused-word test's doc named
+     `parse_vendor` among the raw refusals. Both now name `parse_vendor`
+     among `clipped`'s users, and so does the `docs/06-limits.md` bullet on
+     `misfiled`'s cost. The fourth correction's item 4 is superseded here
+     where it says the bullet leaves the question unexamined.
+   - `the_raw_quote_limit_names_parse_vendors_stored_callers` reads the two
+     decoder calls, `parse_vendor`'s quote and the bullet together.
+
+The three tests in `crates/cli/tests/pool_and_escape_docs.rs` read the
+documents at compile time. They are a separate test crate so that the
+library's own tests are not rebuilt whenever the ledger changes.
+
+**Tests, and what each is proven against (fifth correction).** Each
+regression below was applied alone to this tree, with the change
+uncommitted, and the named tests were run and seen to fail. The edited file
+was then restored from a copy. After the last regression, `shasum` found all
+six edited files as they had been before the first. Each regression ran
+`crates/cli/tests/pool_and_escape_docs.rs`; the `parse_vendor` one also ran
+the library tests the filter `feed_word` selects.
+
+- *The driven test's doc, AF-39's sentence, or the fourth correction's item
+  1, each restored alone:*
+  `each_variable_the_driven_pool_test_gives_its_child_is_named` fails where
+  it refuses the old sentence. The file's other two tests pass.
+- *`clipped`'s doc, `misfiled`'s doc, the misfiled test's doc, the
+  refused-word test's doc, or the second correction's item 2, each restored
+  alone:* `no_text_says_a_printable_word_is_quoted_as_typed` fails where it
+  refuses "printable". The file's other two tests pass.
+- *The `docs/06-limits.md` bullet restored:*
+  `the_raw_quote_limit_names_parse_vendors_stored_callers` fails at "was not
+  examined".
+- *`parse_vendor` quoting `{word}` raw again:*
+  `a_refused_feed_word_is_quoted_escaped_on_one_line`,
+  `a_saved_declarations_feed_word_is_refused_on_one_line` and
+  `a_saved_snapshots_feed_word_is_refused_on_one_line` each fail at the
+  check of how the word is quoted, and
+  `the_raw_quote_limit_names_parse_vendors_stored_callers` fails at its read
+  of `parse_vendor`'s quote.
+
+With no regression, the file's three tests pass, and so do the 34 library
+tests the filter `feed_word refused_word misfiled symbol_directory
+every_spelling every_feed pool::` selects. After the regressions, `cargo fmt`
+re-wrapped three of the new tests and one doc sentence was reworded; no
+assertion changed.
+
+The change was then committed, and the `cli` binary built from that clean
+commit carried it as its stamp. Run with an empty store, `cli pool` given
+the feed word `zerodha`, a newline and `refused: X`, at `60min` from 2026-07
+to 2026-07 with `auto`, printed `refused: ` and the word with its newline
+quoted as its escape, on one line, and exited 2. Given `zerodha` and the
+rung word `60min`, a newline and `refused: Y`, it printed the rung refusal
+across two lines, as before, and exited 2.
+
+Invariant AF-39 is corrected in place again.
+
+**Sixth correction, 2026-09-25: what a sixth review found.** Every text
+below is new in this change, and each is corrected where it stands and listed
+here. No behaviour changed: no refusal, page, run identity, store format or
+exit status.
+
+1. *The rule that replaced "printable".* The fifth correction made five texts
+   say a word is quoted as before only when `escape_debug` prints each of its
+   characters as itself. `clipped` cuts to 64 characters before it escapes,
+   so a character after the sixty-fourth is dropped, not escaped: 64 `N`s and
+   then a newline are quoted as they were before the escape, though a newline
+   is not printed as itself. The refused-word test's own body asserted that
+   case beneath the doc that denied it (found by a review, which measured it
+   with `rustc` outside the repository). The five texts -- `clipped`'s doc,
+   `misfiled`'s doc, the docs of
+   `a_misfiled_directory_name_is_escaped_onto_one_line` and
+   `a_refused_word_is_quoted_escaped_on_one_line`, and the second
+   correction's item 2 -- now say a word is quoted as before when, and only
+   when, `escape_debug` prints each of the characters `clipped` keeps, the
+   first 64, as itself, and say what becomes of a character past the cut.
+   The fifth correction's item 2 keeps its record of what it wrote, and says
+   the rule was false. `no_text_says_a_printable_word_is_quoted_as_typed` now
+   requires the new wording and refuses the fifth correction's.
+   - *Pinned as behaviour.* The refused-word test also quotes 64 `N`s, a
+     newline and `refused: forged` through `swept_index`: the quote is the 64
+     `N`s and the mark, on one line, and does not read as a refusal. A new
+     test, `a_word_is_quoted_as_before_exactly_when_what_clipped_keeps_prints_as_itself`,
+     finds `clipped` returning what the cut before the escape returned for
+     the words whose kept characters each print as themselves, and something
+     else for the words holding a kept character that does not. The misfiled
+     test gains a segment of 64 `C`s, a newline and `refused: forged`, named
+     as its first 64 characters and the mark. These cases pin behaviour that
+     already held, and no reverted fix makes them fail. AF-39 now names the
+     new test.
+2. *The opening combining mark, and the separators.* `clipped`'s doc, the
+   second correction's item 2, the fourth correction's item 4, the fifth
+   correction's item 2, AF-39 and a comment in the refused-word test said
+   `escape_debug` escapes a combining mark that opens the word, and some of
+   them named a format or separator character among what it escapes. The
+   `core` source of the pinned toolchain, 1.97.1 in `rust-toolchain.toml`,
+   read from the `rust-src` installed beside it, says which characters it
+   escapes.
+   `str::escape_debug` escapes its first character with
+   `EscapeDebugExtArgs::ESCAPE_ALL` and each later one with
+   `escape_grapheme_extended: false` (`library/core/src/str/mod.rs`).
+   `char::escape_debug_ext` escapes a character when
+   `args.escape_grapheme_extended && self.is_grapheme_extended()`, and
+   otherwise when it is not printable (`library/core/src/char/methods.rs`).
+   `library/core/src/unicode/printable.py`, which generates the table
+   `is_printable` reads, yields as escaped every character whose category
+   is one of `Cc Cf Cs Co Cn Zl Zp Zs`, the space excepted. So
+   a combining mark is escaped at the start of a word only when it has
+   Unicode's `Grapheme_Extend` property, and a separator other than the space
+   is escaped anywhere in one. U+0903 and U+093F, spacing marks without the
+   property, print as themselves opening a word; U+09BE, a spacing mark with
+   it, is escaped there and prints as itself inside a word (found by a
+   review, which measured U+0903, U+093F, U+09BE and the space with `rustc`
+   1.93.1 outside the repository). Each text now names the property beside
+   the opening mark, and each separator it names is one other than the space.
+   - *Pinned as behaviour.* The refused-word test now quotes U+20DD and
+     U+09BE opening a word, each escaped, and U+0903 and U+093F opening a
+     word, U+09BE inside one and a space inside one, each as typed. The new
+     test above puts each character `char::is_control` or
+     `char::is_whitespace` accepts, the space excepted, inside a word, and
+     finds `clipped` escaping it, so no such word is quoted as before. The
+     misfiled test gains a segment that opens with U+0903, named as it is.
+     These pin behaviour that already held, and the suite measures each
+     under the pinned toolchain whenever it runs.
+   - `each_text_names_only_the_characters_escape_debug_escapes` reads the
+     five texts above, AF-39, the fourth correction's item 4, the fifth
+     correction's item 2 and the refused-word test's comments. It requires
+     each to name the property beside the opening mark, refuses the words
+     "format or separator", and requires every "a separator" to be one other
+     than the space. It also requires the two tests to still quote the cases
+     named here.
+3. *The fifth correction's measurement.* Its item 2 said the review and that
+   correction each measured U+0301 with `rustc` outside the repository. No
+   record of that correction's own measurement was found (found by a review).
+   The sentence now says the review measured it and the correction recorded
+   none, and `each_text_names_only_the_characters_escape_debug_escapes`
+   refuses the old sentence. This correction rests on no probe of its own
+   either: it rests on the toolchain source quoted in item 2 and on the tests
+   named there.
+4. *`cli::swept_rung`'s call sites.* The `docs/06-limits.md` bullet said its
+   "eight call sites each take the rung as a parameter", and the fifth
+   correction's item 3 said it "has eight call sites". It had eleven (found
+   by two reviews, each counting with `grep`), and `sweep_audited_stored`
+   takes its rung from the `sweep-audited-stored` command's own argument
+   list, not as a parameter (found by one of them). Both texts now say
+   eleven. The bullet names each site and where its rung comes from, and
+   says why the `pool` verb never reaches the refusal in `pool::run`:
+   `pool_arm` hands `pool::pool` only a rung it found among `EVERY_RUNG`'s
+   entries, and `swept_rung` accepts each of them.
+   `the_raw_quote_limit_counts_and_names_every_call_of_swept_rung` finds
+   every call of `cli::swept_rung` in the `.rs` files under `crates/cli/src`
+   when it runs. It requires both texts to give that count in words and the
+   bullet to name each file, and each `lib.rs` function, that calls it, and
+   it reads where each call's rung comes from.
+   `the_pool_verb_reaches_swept_rung_only_with_a_rung_it_accepts` reads each
+   link from `dispatch`'s `pool` arm through `pool_arm` and `pool::pool` to
+   `swept_rung`'s acceptance of every `EVERY_RUNG` entry.
+5. *Two docs of `crates/cli/tests/pool_and_escape_docs.rs`.* Its module doc
+   said no other test reads a doc comment, an invariant row, a decision or a
+   limit. `cli`'s `the_corrected_doc_comments_say_no_more_than_holds` reads
+   doc comments of `lib.rs`, tests in `core/src/universe.rs` and
+   `store/tests/libm_key.rs` read this file and `docs/06-limits.md` (found by
+   a review), and `core/tests/cost_invariants.rs` reads
+   `docs/04-invariants.md` (found by this correction with `grep`). The claim
+   is dropped, and so is the module doc's claim that each text the file reads
+   described code in this crate, which item 3's does not. The doc of
+   `each_variable_the_driven_pool_test_gives_its_child_is_named` said a
+   variable added to the child fails that test until the three texts name
+   it; it fails until that test's own list names it too (found by a review),
+   and the doc now says so. `this_crates_own_docs_say_no_more_than_holds`
+   reads both. The file gains that test, the two of item 4 and
+   `each_text_names_only_the_characters_escape_debug_escapes`; the fifth
+   correction's note on the file's three tests speaks of those three.
+
+**Seventh correction, 2026-09-26: what the attack rounds found.** Two rounds
+of attacks on this change, and the votes that upheld their findings, found the
+defects below. Each text new in this change is corrected where it stands and
+listed here; an entry or row that is on `main` is not edited. An item that
+changes what an operator reads, or the exit status a script sees, says so.
+
+1. *A run whose every instrument or month refuses.* When every instrument on
+   its surface refused in pass 1, `pool` printed the stored banner, a
+   `REFUSED` row for each and "nothing to pool", and exited OK. `sweep-all`
+   did the same over its months, with `0 swept · N refused`. An indented
+   `REFUSED` row is not a refusal to `carries_refusal`, so a script that ran
+   either and then its next step went on without a confirmed result.
+   `range_over` refuses in that case, for the reason its comment gives, and
+   this entry's own pool test asserted the OK exit, and the two `sweep-all`
+   tests of a forged directory asserted that such a page is not a refusal
+   (found by a review, which reached it with month 13, a backwards span and
+   an unreadable month).
+   `pool::at_least_one_screened` and `batch::at_least_one_filed` now refuse
+   such a run with the count and every instrument's or month's reason,
+   printed as `refused: ` at column zero with no banner, so the verb exits
+   MISUSED. `pool_arm` also refuses a month outside 1..=12 and a FROM after
+   TO before it reads the store: it checked neither, so a store with no
+   instrument on the surface printed its page over month 13 and exited OK. A
+   pool with one successful outcome, a walk with one swept and filed month, and a
+   store holding no month of the feed and rung print what they printed
+   before this item.
+   *Behaviour change:* the page and exit status of those runs.
+   - The driven pool test's `60min` case, one unreadable RELIANCE month
+     beside a BSE directory, now requires the refusal and MISUSED.
+     `the_pool_page_is_its_head_and_then_only_appends` reads the new call's
+     place in `run_under`, because the driven test reaches it only in a
+     stamped build. The `sweep-all` tests that read rows of a completed run
+     (the two forging tests, the misfiled test, the continued walk and the
+     stock note) now run beside a generated month that sweeps, and the
+     filter test reads its count from the refusal. The filter test had
+     asserted the census line's `3 spot instrument-month(s); 1 match`, and the
+     continued walk `1 refused`, which a refused run no longer prints; the
+     continued walk now asserts its own census line,
+     `store holds 6 spot instrument-month(s); 3 match this feed and rung`, and
+     `1 swept · 2 refused`, and the filter test that its store holds three
+     months. The misfiled test also pins `1 swept · 6 refused` and its census
+     of ten stored months, seven matching the feed and rung. AF-39's sentence about the `60min` page is corrected in place,
+     and AF-70 states the rule.
+2. *An empty month on `sweep-stored`.* `stored_sweep_inputs` refused a month
+   whose file exists and holds no record, the file a writer's open leaves
+   before its first append, with "every signal session has a minute gap; no
+   sweepable bars remain". No gap had been measured and nothing had been
+   withheld (found by a review). It now refuses with words of its own, such
+   as "the 5min month 2025-04 is stored and holds no bar. Nothing was swept",
+   before it loads the execution minutes, and the minute-gap sentence is left
+   to a month whose every session was withheld. *Behaviour change:* that
+   refusal's words. AF-71 states it.
+3. *Months the catalog cannot file.* `store::catalog` files a month only
+   under a feed and a rung directory spelt exactly as this engine spells
+   them, and counts `.bin` files at a month's depth before parsing their
+   stems, store-wide, in `unknown_vendor`
+   and `unknown_rung`, without its name. `pool` and `sweep-all` read neither
+   count, so a month under `bars/Zerodha/...` or a `60MIN` directory was
+   dropped from both reports with no word, and the pool's empty-surface line
+   said the store held no month at the path a load reads, although on a
+   case-insensitive volume a load of `zerodha` opens `Zerodha` (found by a
+   review, which measured the operator's store volume as case-insensitive).
+   The pool's head now gives both counts in a NOT CATALOGUED block and says
+   what a case-insensitive volume does with such a directory, its
+   empty-surface line says what the catalog found "spelt exactly", and
+   `sweep-all` prints the two counts under its census line. A store whose
+   every month was filed prints neither. The catalog is `store`'s and is
+   unchanged, and it keeps no name of what it could not file, so both
+   reports give counts and not names. *Behaviour change:* those lines. AF-72
+   states them.
+4. *Where a lifted FINDINGS block travels.* Five texts new in this change
+   said `range-all` and `pool` pass 1 keep sections lifted out of a report:
+   `equity_ranking_statement`'s doc, the doc of `runner::audit`'s
+   `every_charge_statement_line_is_indented_so_a_lifted_audit_block_keeps_it_whole`,
+   the doc of `a_stock_ranking_states_corporate_actions_inside_its_findings_block`,
+   the `docs/06-limits.md` bullet on a stock report saying it up to three
+   times, and item 1 of this entry. Pass 1 keeps each instrument's
+   `one_rung(..).outcome` alone and prints a table of that record's fields,
+   so no FINDINGS block reaches a pool page (found by a review). `range-all`
+   and `range-rung` are what print the sections `one_rung` lifts through
+   `validation_note`. Each text now names those two, and
+   `equity_ranking_statement`'s doc says pass 1 is not such a lift. D-0694's
+   item 5 says the same of `pool`; that entry belongs to another piece of
+   this change and is not edited here. `no_text_says_pool_pass_1_lifts_a_section`
+   reads the five texts, and reads from `pool.rs` that pass 1 keeps only
+   the outcome.
+5. *A misfiled directory holding two months.* `store::catalog::walk` lists
+   one holding per month, and `surface_under` names a misfiled directory once
+   because its map is keyed by the three directory names. Every pool fixture
+   held one month in each directory, so a surface that named a directory once
+   per month passed every pool test (found by a review). The tests'
+   `store_holding` now writes two months into every directory it makes, and
+   checks that the catalog lists both. AF-35 says so. No behaviour changed.
+6. *AF-31 and AF-32.* Each ended by saying its change had "no decision entry
+   yet", while this entry records both changes and quotes those words as the
+   reason it exists (found by a review). Both rows are new in this change and
+   now name D-0696. `no_invariant_row_says_its_change_has_no_decision_entry`
+   refuses the phrase anywhere in `docs/04-invariants.md`.
+7. *The commit this entry records.* This entry named it thirteen times by a
+   hash that is in neither this history nor `main`'s. This history carries it
+   as 12916123, cherry-picked from c8c5383c: the two have the same subject,
+   the same author date and the same `git patch-id --stable` (found by two
+   reviews; this correction measured the ancestry with
+   `git merge-base --is-ancestor` and both patch ids). Every citation now
+   names 12916123.
+   `d_0696_cites_the_commit_it_records_by_its_hash_in_this_history` refuses
+   the other hash anywhere in this entry but where it says what 12916123 was
+   cherry-picked from. It runs no `git`, so it does not check a hash cited
+   later. D-0693's citations belong to another piece of this change and are
+   not edited here.
+8. *The budget refusal comes before a read.* AF-05 and the D-0685 limit say
+   a run that records refuses a usable `BRUTEX_SCREEN_BUDGET_MS` before it
+   reads its source or writes anything.
+   `recorded_runs_refuse_a_screen_budget_before_reading_or_writing` gave its
+   child a whole store, so a kernel that read its months and only then
+   refused the budget answered with the same sentence, wrote nothing, and
+   passed (found by a review). The child's store is now a second generated
+   store whose every month file holds bytes no reader accepts, so a kernel
+   that reads first answers with the store's refusal and fails the child's
+   exact comparison; the run with a stated cap that follows keeps the whole
+   store. No behaviour changed, and neither AF-05 nor the limit is edited:
+   the test now proves what they say.
+9. *The Boolean research heading on a stock's page.* AF-16 says the Boolean
+   research header of a scope holding a cash family states gross of every
+   charge and corporate actions unchecked, and its test reads
+   `research_heading` alone. Every test that drove `Prepared::new` did it
+   over NIFTY, so the line that puts the heading on the page could print the
+   index's heading over a stock with every test green (found by a review).
+   `the_prepared_page_over_a_stock_opens_with_its_gross_heading` drives
+   `Prepared::new` from a child over `RELIANCE`, `NIFTY,RELIANCE` and
+   `NIFTY`, and AF-73 states what it asserts. AF-16 belongs to D-0694 and is
+   not edited here. No behaviour changed.
+10. *`sweep-stored`'s own door.* AF-31, AF-33 and AF-38, and the doc of
+    `a_stored_sweep_of_a_share_says_its_ranking_is_gross_of_every_charge`,
+    speak of `sweep-stored`, and that test and
+    `a_ranked_stored_sweep_of_a_share_states_corporate_actions_inside_its_findings`
+    drove `sweep-audited-stored`'s door: `Traded::sweep` makes the two calls
+    `sweep_audited_stored` makes. The one test that reached
+    `sweep_stored_kernel` over a share ran extinct and ranked nothing (found
+    by a review). Both tests now assert each page from `Traded::sweep_stored`,
+    which calls `sweep_stored_kernel`, and from `Traded::sweep`. AF-38 says
+    so. No behaviour changed.
+
+**Eighth correction, 2026-09-26: refusals retain the work that happened.**
+The two verification lenses found three should-fix items and three nits in
+the seventh correction. This correction changes only D-0696's CLI surface;
+text already on `main` at `96194c11` remains untouched.
+
+1. The whole-run refusal had equated an unrecorded result with a sweep that
+   never ran. `batch::Row::ran` now marks the completed call to the ladder,
+   independently of the later ledger/evidence result. The refusal counts
+   rows before and after that call separately, keeps the census and every
+   row's reason, and claims only that none was swept and filed without a
+   refusal. `a_walk_whose_swept_month_could_not_be_filed_says_it_swept`
+   makes the generated store's ledger path a directory: one month sweeps,
+   two refuse before sweeping, and the swept month's `not recorded` reason
+   names that path. Pool outcomes are strings without a stage field, so the
+   pool makes no count of instruments that ran. It retains each reason,
+   including halted and unrecorded outcomes, and the head's NOT ON THE
+   SURFACE and NOT CATALOGUED blocks. The all-refused pool test asserts all
+   of those strings. AF-39 and AF-70 describe the resulting output.
+2. A stamped child now calls `dispatch` for `sweep-all` and `pool` over the
+   same four generated misfiled months. It requires MISUSED, a column-zero
+   refusal, four batch refusal rows and both pool directory reasons. The
+   unstamped path checks the build-stamp refusal, while
+   `sweep_all_keeps_the_column_zero_refusal_and_dispatch_status` pins the
+   actual wrapper and arm in every build. The old test constructed its own
+   `refused: ` prefix and could not catch a broken verb. AF-70 names both
+   checks. The file also carries `#![cfg(test)]` on its first line, as the
+   other out-of-line batch tests do. Gate 11 cannot follow the nested
+   path-qualified declaration, so it classified the assertions as shipping
+   code until this explicit marker was added; the compiler's existing outer
+   test guard already excluded them from non-test builds. No gate allowlist
+   is widened.
+3. The misfiled-month test again asserts the whole tally, `1 swept · 6
+   refused`, plus ten stored months of which seven match. The seventh
+   correction's restored-count list now includes it.
+4. The empty `5min` fixture now has damaged execution minutes beside it.
+   Loading those minutes first produces a different refusal. The test still
+   requires the empty-month sentence and no ledger or sweep evidence, so
+   AF-71's ordering claim is exercised rather than inferred.
+5. Both census outputs now say `.bin file(s) at a month's depth`. The pool
+   fixture includes `notes.bin` beside each month: the catalog counts those
+   files before parsing their stems. AF-72 describes the resulting two files
+   in each bucket. The catalog itself is unchanged.
+6. `pool::head_under` refuses an empty surface when its selected feed/rung
+   has misfiled swept holdings, retaining their reasons without the opening
+   banner. A fresh store remains a page. The direct misfiled-store test and
+   the stamped dispatch child prove the refusal; the existing page-shape
+   test now uses a fresh store. The former contrary assertion is superseded
+   by these tests, not discarded without a replacement.
+7. The tests-bite journal also recorded a surviving documentation mutation:
+   `No other test reads` passed the guard that matched only lowercase text.
+   The module-doc check now folds ASCII case. Its regression checks lower,
+   sentence and upper case, plus a sentence without that claim, so reverting
+   only the case fold fails `the_module_doc_claim_guard_catches_each_ascii_case`.
+   The existing module-doc assertion uses that same predicate. AF-39 names
+   both checks. No operator behaviour changes for this test correction.
+
+These are reporting and test changes. No stored record format, condition bit,
+run identity term, lockfile, front-end file or market-data input is changed.
+The remaining full-suite, mutation and coverage measurements are kept in the
+operator's CLI repair evidence; this paragraph makes no completion claim.
 
 ### D-0695 — Refuse the screen budget on every body route and before the run slot, and name an unreadable census on every census-backed GET route — 2026-09-24
 
@@ -42584,1006 +43595,3 @@ does not inject a failed write into a running telemetry sink. No production
 source changed. AF-28l records that boundary. The full API suite and package
 clippy were still pending at this checkpoint; these focused results do not
 replace them or the historical mutation evidence above.
-
-**Correction, 2026-09-24: four claims above, and one line of `pool`, on the
-integrated tree.** This entry was written on a branch that did not yet hold
-D-0694, and was cherry-picked beside it unchanged. A review of the integrated
-tree upheld what follows against it. Each item is corrected here, not in the
-text above.
-
-1. *Item 1, the halted and the kept-rows-none-closed exits: "The label is the
-   only byte that differs from the same index page" and "The label is again
-   the only byte that differs".* Superseded. Since D-0694 the FINDINGS block
-   of a ranked stock ends with `equity_ranking_statement()`: the label, then
-   `runner::audit::CORPORATE_ACTIONS_UNCHECKED`. On both exits the equity page
-   differs from the same index page by that whole statement and by nothing
-   else. The halted test has removed the whole statement since D-0694. The
-   untraded test removed the label alone, so on the integrated tree it failed
-   at its equality, the corporate-actions paragraph being the first byte that
-   differed (measured by the review). Commit `29025433` made it remove the
-   whole statement. A statement that had lost the sentence would still pass
-   that equality, so the test now also requires its FINDINGS block to end with
-   the sentence.
-2. *Item 1's `sweep-stored` bullet: "FINDINGS only."* Superseded. FINDINGS
-   is where its ranking is labelled, but since D-0694 a share's
-   `sweep-stored` page, like every stored share page, also opens with the
-   stored banner and `CostScope::report_note`, which states the charge fact
-   again.
-   `a_stored_sweep_of_a_share_says_its_ranking_is_gross_of_every_charge` now
-   asserts that opening for RELIANCE and its absence for NIFTY.
-3. *Item 3: "One wording, bound to the audit header".* False on the
-   integrated tree. D-0694 added `runner::audit::CASH_EQUITY_GROSS`, the gross
-   paragraph of `report_note`, which heads every stored share page, `sweep-all`
-   over a stock and the Boolean research heading over a cash family. It was a
-   fourth copy of the charge statement, the test item 3 names did not read it,
-   and its sentence was not the header's: "This is cost-excluded research, not
-   a net result (D-0509, D-0525, D-0681)", with no Selection V6 clause. It now
-   ends with the header's own sentence, "COST-EXCLUDED RESEARCH, NOT A NET
-   RESULT (D-0509, D-0525, D-0681). No equity result carries Selection V6 or
-   execution authority until a charter-sourced equity charge stack exists.",
-   and that test checks it with the other three.
-   - *What a reader sees change:* that sentence, in place of the old one, in
-     the banner of every stored share page, of `sweep-all` over a stock and of
-     the Boolean research heading over a cash family. Its first line is
-     unchanged. No index page, run identity, store format or exit status
-     changed.
-   - *Two `runner` tests follow the text.* The note's fact list names
-     "COST-EXCLUDED RESEARCH" and "Selection V6" in place of the lower-case
-     phrase. The property test D-0694 wrote for the sentence, the gross
-     paragraph and the note now admits `V6` in the gross paragraph and the
-     note, where it is part of the name Selection V6, as
-     `the_equity_charge_statement_names_no_rate` admits it in the header
-     (AF-61). It still admits no digit outside a `D-dddd` reference in the
-     corporate-actions sentence. So AF-18's "none carrying a rate or any digit
-     outside a `D-dddd` reference" no longer holds for the gross paragraph or
-     the note, and AF-38 supersedes it for those two.
-   - *Rejected: one `runner` constant composed into all four texts, with the
-     three `cli` literals deleted.* Only the charge list and the sentence are
-     common to the four. Each copy opens with words that belong where it
-     stands: "EVERY FIGURE IN THIS RANKING" and "the ranking above" after a
-     table, "per ONE share" inside the sentence of `top`'s legend, "Correct on
-     an index by charter; NOT correct on a cash equity" in a pool that can
-     hold both, and "EVERY TOTAL BELOW" in a banner. Composing the common part
-     at run time means re-wrapping each page's lines, which item 3 already
-     rejected. The test holds the common part word for word in all four, and
-     a rate in none.
-   - *Why a `cli` repair edits `runner`.* Item 3 rejected a `runner` constant
-     because it "would change `runner`'s public surface in a repair of `cli`'s
-     piece". By integration D-0694 had already made `CASH_EQUITY_GROSS` a
-     public `runner` constant, so that reason no longer held. This change edits
-     the constant's text and two `runner` tests, and not its name or type.
-4. *Item 5, `pool`: the block was on the page, and no test read the page.*
-   The one line that put NOT ON THE SURFACE on the page sat in `pool::run`,
-   which checks the commit stamp first and which no test reaches. The tests
-   rendered the block alone and listed the surface alone, so deleting that
-   line left every test green (measured by the review), and the page then
-   dropped a misfiled holding without a word: the silent drop item 5 says this
-   entry removed. Everything the page says before a bar is read (the opening,
-   the block and the empty-surface line) now comes from `pool::head_under`.
-   `run` calls it, it is split out the way `batch::sweep_under` is, and
-   `the_pool_page_names_each_directory_it_did_not_read` drives it on a
-   scratch store. The page's bytes did not change.
-
-**Tests, and what each is proven against (this correction).** Each regression
-below was applied to this tree, one per build, and the named test was run and
-seen to fail. The fix was then restored and each file compared byte for byte
-with its copy.
-
-- *`head_under` without its `not_on_the_surface` call:*
-  `the_pool_page_names_each_directory_it_did_not_read` fails ("the opening,
-  then the directory it did not read, and nothing else"). The other 17 `pool`
-  tests, the block test among them, pass under it.
-- *`head_under` without the empty-surface line:* the same test fails, on the
-  store holding only `NSE/INDEX/RELIANCE`. The other 17 pass.
-- *`equity_ranking_statement` returning the label alone:*
-  `an_untraded_equity_ranking_is_labelled_gross_before_it_refuses` fails at
-  its new assertion. The halted test passes under it, because its equality
-  strips the same function's output. On the halted page the sentence is read
-  by AF-18's `a_stock_ranking_states_corporate_actions_inside_its_findings_block`
-  (read from the source; not run under this break).
-- *`CASH_EQUITY_GROSS` back at its D-0694 text:*
-  `every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate`
-  fails ("the stored banner's gross paragraph (`report_note`) must carry the
-  header's sentence"), and so does
-  `a_report_note_is_gross_then_corporate_actions_for_a_stock_and_empty_for_an_index`
-  (`missing "COST-EXCLUDED RESEARCH"`). The property test passes under it.
-- *`stored_provenance_of` without the note:*
-  `a_stored_sweep_of_a_share_says_its_ranking_is_gross_of_every_charge` fails
-  at its new banner assertion, for RELIANCE.
-- *"Selection V6" written into `CORPORATE_ACTIONS_UNCHECKED`:* the property
-  test fails (`the sentence: "V6" is a number that is neither a decision
-  reference nor the Selection V6 name`).
-
-Invariants AF-38 and AF-39. AF-38 supersedes AF-33's two clauses quoted in 1
-and 2, and AF-34's "Every equity charge statement `cli` prints", which read
-three copies of four. AF-39 asserts on the page what AF-35 asserted only of the
-block.
-
-**Second correction, 2026-09-24: what a second review of the integrated tree
-upheld.** Corrected here, not in the text above.
-
-1. *Item 3 and the first correction's item 3: one wording.* The four copies
-   carried the header's charge list and sentence, and nothing held them to the
-   header's fact that none of the charges is subtracted. The review rewrote
-   the FINDINGS label to say "this engine subtracts all of them, so the
-   ranking above is on NET returns", keeping the list and the sentence, and 69
-   equity tests passed (measured by the review). The four copies now state
-   the fact in one wording, "none is subtracted", and
-   `every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate`
-   requires it of each, after checking that the header says "NONE of those
-   charges is subtracted". It also refuses a copy that speaks of subtraction
-   anywhere else, speaks of a deduction, or calls a figure net outside "NOT A
-   NET RESULT". `the_subtraction_check_refuses_each_contradiction_of_the_header`
-   shows each such rewrite of the label is refused.
-   - *What a reader sees change:* the FINDINGS label on every ranked equity
-     page. It said "and this engine subtracts none of them, so the ranking
-     above is on GROSS returns" (the text item 1 quotes). It now says "and
-     none is subtracted, so the ranking above is on GROSS returns", and the
-     next three lines are re-wrapped. No index page, run identity, store
-     format or exit status changed.
-   - *Still rejected: one `runner` constant composed into all four texts.*
-     The review withdrew the public-surface reason, which the first
-     correction had already withdrawn, and called re-wrapping a layout
-     preference. The reason that stands is the one the first correction gave:
-     each copy's words around the common part belong to the page it is on. The
-     check is now on the fact as well as on the words, and it is a list of
-     refused phrasings. A contradiction in words it does not list would pass
-     it, and a single composed source would not have that gap.
-   - *AF-38 claimed "every equity charge statement `cli` prints".* It is
-     narrowed in place to the four constants. A priced expression search's
-     "Cost-excluded, unvalidated research" note and the research page's
-     "Discovery policy requested: no charges" line are wordings no test binds.
-2. *Item 5: a directory name is printed raw.* Only the symbol directory has
-   to resolve. `stored::misfiled` interpolated the other two directory names
-   raw. An exchange directory named `X\nrefused: forged` then put a line
-   reading `refused: forged/...` at column zero on the `pool` page and in a
-   `sweep-all` REFUSED row. `refusal_reason` reads such a line as a refusal,
-   so a completed run exited MISUSED (measured by the review). Each name is
-   now clipped and then rendered through `escape_debug`, so the sentence stays
-   on one line. A name prints as it did when, and only when, `escape_debug`
-   prints each of the characters `clipped` keeps of it -- its first 64 -- as
-   itself, so a newline past the cut leaves it as it was; a combining mark
-   that opens a name and has Unicode's `Grapheme_Extend` property, such as
-   U+0301, is escaped, though the same mark inside one is not (corrected in
-   place by the fifth and sixth corrections).
-3. *The first correction's item 4: "the page's own head".* `head_under` was
-   under test. `run` still bound the page from it, and no test reached `run`,
-   because it checks the commit stamp first. The review replaced `out` with
-   the bare opening after `head_under` returned, and all 56 tests in its set
-   passed. Everything after the stamp, feed, rung and root checks is now
-   `pool::run_under`. `the_pool_page_is_its_head_and_then_only_appends`
-   drives it on a store whose surface is empty and requires the page to equal
-   the head. A non-empty surface is screened through `one_rung`, which reads
-   the root from the environment, so no test drives that path. The same test
-   reads `run_under`'s source instead, and requires three things: `out` is
-   bound from `head_under` once, it is never assigned, cleared or rewritten
-   after that, and the function calls neither `opening` nor
-   `not_on_the_surface` itself.
-4. *Item 6: "Each guard ... resets when it drops".* It cleared the seam. So
-   when an inner guard dropped, it switched off an outer guard that was still
-   in scope. Each guard now keeps the value it displaced and restores it on
-   drop, and its field is private.
-5. *Two doc comments.* `Rules::elite` said every admitted row is "per ONE
-   unit of the index, gross of the statutory charge stack". It now names the
-   unit of the instrument, and a share's GROSS OF EVERY CHARGE. The doc of
-   `a_stored_sweep_of_a_share_says_its_ranking_is_gross_of_every_charge` said
-   "An index's sweep is unchanged". The test now asserts that the NIFTY page
-   carries neither the label, `CASH_EQUITY_GROSS`, nor
-   `CORPORATE_ACTIONS_UNCHECKED`, and the doc says that it makes no
-   byte-for-byte comparison with an earlier index page.
-   `the_corrected_doc_comments_say_no_more_than_holds` reads both comments
-   from the source.
-
-**Tests, and what each is proven against (second correction).** Each
-regression below was applied to this tree, and the named tests were run and
-seen to fail. Three builds were used, and each build's regressions touch code
-no other named test reads. After each build the six edited files were
-restored from copies, and `cmp` found them identical.
-
-- *`misfiled` without `escape_debug`:*
-  `a_misfiled_directory_name_is_escaped_onto_one_line`,
-  `a_misfiled_directory_name_cannot_forge_a_refusal_of_the_run` ("the
-  misfiled month is one escaped row") and
-  `the_pool_page_names_each_directory_it_did_not_read` fail.
-- *`CostScopeFault` clearing the seam on drop:*
-  `a_nested_cost_scope_guard_restores_the_outer_one_when_it_drops` fails
-  ("the inner guard dropping must leave the outer one in force").
-  *`NoneClosedFault` clearing its flag:*
-  `a_nested_none_closed_guard_restores_the_outer_one_when_it_drops` fails
-  with the same message.
-- *The review's contradictory label:*
-  `every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate`
-  fails (`the FINDINGS label Err("does not say that none is subtracted")`).
-  *The label's earlier wording, "this engine subtracts none of them":* the
-  same test fails with the same message.
-- *`run_under` replacing `out` with the bare opening right after the head:*
-  `the_pool_page_is_its_head_and_then_only_appends` fails ("the page of an
-  empty surface is its head"). *The same line placed after the empty-surface
-  return:* the same test fails at its source check ("`out =` after the
-  head").
-- *Either doc comment restored:*
-  `the_corrected_doc_comments_say_no_more_than_holds` fails.
-
-Invariants AF-38 and AF-39 are corrected in place. They are new in this
-change and are not on `main`.
-
-**Third correction, 2026-09-24: what a third review upheld.** Corrected here,
-not in the text above.
-
-1. *The second correction's item 3: `run`, and what `run_under` returns.*
-   The source check read `run_under` for a list of rewrites of `out`. It did
-   not check what `run_under` returned, and it did not read `run` at all.
-   Each of three regressions left every test in the reviews' sets green
-   (measured by the reviews): `run` returning the bare opening in place of
-   `run_under`'s page, `run_under`'s empty-union branch returning a fresh
-   "nothing to pool" string, and `std::mem::replace(&mut out, String::new())`
-   after the empty-surface return, a rewrite the list did not name.
-   - *`run_under`: every mention of the page, not a list of rewrites.*
-     `the_pool_page_is_its_head_and_then_only_appends` now checks each
-     mention of the name `out` after the head against three shapes:
-     `writeln!(out, ..)`, `&mut out` handed to `render_per_symbol` or
-     `render_pooled`, and `Ok(out)`. Any other shape fails it. It also
-     requires every `Ok(` to be `Ok(out)`, every `return` to be
-     `return Ok(out);`, and the body's last value to be `Ok(out)`. A rewrite,
-     an alias or a closure over the page has to name it.
-   - *The two renderers.* What they do with the page they are handed is now
-     part of that claim. `the_renderers_only_append_to_the_page_they_are_handed`
-     hands each a page that already holds a head, and requires the head as
-     the prefix of what it returns. That is one input each, driven, and not
-     read from their source.
-   - *`run`.* The new `the_pool_verb_hands_on_run_unders_page_untouched`
-     reads `run`'s body. The body must end with
-     `run_under(&root, vendor, vendor_word, rung, from, to, support_ppm)`,
-     call it once, and hold no `Ok(`, `return`, `opening(`, `head_under(`,
-     `not_on_the_surface(`, `format!(`, `String::`, `writeln!(` or
-     `push_str(`. The tail is exact. The rest is a list of refused phrasings.
-   - *Still not driven.* No test build passes `run`'s stamp check, and a
-     non-empty surface is still screened through `one_rung`, which reads the
-     root from the environment. Giving `one_rung` the root was the review's
-     alternative. It was not taken: `descend` and the all-rungs range sweep
-     call `one_rung` too, and this correction does not change their path for
-     a test. AF-39 is corrected in place to state what is read and what is
-     driven.
-2. *The second correction's item 2: the symbol directory.* The escape was
-   added only in `stored::misfiled`, which names the exchange and segment
-   directories. `sweep-all` loads each held month by its symbol directory's
-   name, and printed that name raw twice: in `batch::one`'s row label, and in
-   `stored::swept_index`'s refusal of a word that resolves to nothing. With a
-   symbol directory named `X\nrefused: forged`, the review measured
-   `carries_refusal` true on the page of a completed run. `sweep_all_arm`
-   returns MISUSED whenever it is true (read from the source). The same
-   defect is on `main`. AF-39 said the forge was closed for every held
-   directory; that was new in this change, and false.
-   - *The fix is in the one place a refusal quotes a word.* `stored::clipped`
-     now passes what it keeps through `escape_debug`, after the cut. So
-     `swept_index`, `rung` and `misfiled` all quote escaped, and `misfiled`
-     no longer escapes a second time. `batch::one` escapes the symbol in its
-     label. A word `Symbol::new` admits -- at most 24 ASCII letters, digits,
-     `-`, `_` and `&` -- escapes to itself, so no month that can be swept is
-     labelled differently.
-   - *What a reader sees change:* a refused instrument or rung word that
-     carries a control character, a quote or a backslash is now quoted with
-     those characters escaped. `NIFTY` followed by a newline was quoted with
-     the newline itself; it is now quoted as `NIFTY\n`.
-     `every_spelling_of_an_instrument_word_lands_on_one_scope_or_the_surface_sentence`
-     pinned the raw echo for two such words, and now expects the escaped
-     word. No accepted word, run identity or store format changed.
-   - *`swept_index`'s doc said the eager value "is at most 67 bytes".* That
-     held only for ASCII, even before the escape. It now says at most the 643
-     bytes `clipped` can return: 64 characters, each at most a ten-byte
-     escape, and the three-byte mark. On the success path it says at most 24.
-     Both figures are read from the source, not measured.
-   - *The pool page.* It names no symbol directory that does not resolve, and
-     one carrying a control character never resolves. A case asserting that
-     was added to `the_pool_page_names_each_directory_it_did_not_read`. It
-     pins behaviour that already held, and no reverted fix makes it fail.
-3. *The second correction's item 1: the check's first clause.*
-   `the_subtraction_check_refuses_each_contradiction_of_the_header` listed
-   four rewrites, and each was refused by one of the other three clauses. So
-   deleting the requirement that a copy says "none is subtracted" left every
-   test green, and the label "this engine subtracts all of them, so the
-   ranking above is on GROSS returns" then passed the binding test (measured
-   by the review). A fifth case is that rewrite. It has one "subtract", no
-   "net" and no "deduct", so only the first clause refuses it. Each case must
-   now be refused with the reason of the clause it was written for. The
-   test's headline said it refuses "every way" of contradicting the header;
-   it now says "each listed way".
-4. *The check is a list, and a copy is now pinned beside it.* The review
-   appended "Every charge is taken off each trade before it is ranked." to
-   the FINDINGS label, keeping the list, the sentence, "GROSS OF EVERY
-   CHARGE" and "none is subtracted", and every test passed. The second
-   correction had stated that gap and kept it. It is closed here without the
-   composed source that correction rejected:
-   `every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate`
-   replaces the header's list and sentence in each copy with `<charges>` and
-   `<sentence>`, and requires what is left to equal words it writes for that
-   copy. The list and the sentence still follow the header. Every other word
-   of each copy is pinned, so a clause added to a copy fails until the test
-   is edited with it. It pins words; it does not read what a new clause
-   means.
-5. *Three texts new in this change were stale.* `EQUITY_RANKING_GROSS`'s doc
-   called it one of three copies in `cli` beside the header, and named
-   neither `runner::audit::CASH_EQUITY_GROSS` nor the "none is subtracted"
-   check. It now counts four copies and names both.
-   `the_corrected_doc_comments_say_no_more_than_holds` reads it.
-   `docs/06-limits.md` said "Only the charge list and the cost-excluded
-   sentence are held identical", and gave `stored::misfiled`'s cost as three
-   string comparisons, omitting the clip and escape of each name it prints.
-   Both bullets are corrected in place. One bullet is added: the `pool` page
-   past its head is read from the source, not driven.
-
-**Tests, and what each is proven against (third correction).** Four builds
-were used. Before them the five edited sources were copied aside. Each build
-applied its regressions to this tree and ran the 77 tests the filter
-`misfiled pool:: nested equity gross charge corrected_doc subtraction
-operator_boundary symbol_directory refused_word every_spelling enormous
-renderers` selects. After each build the five files were restored from the
-copies, and `cmp` found them identical. Each build's failures are exactly
-those listed below, and only in build 2 do two regressions meet in one test;
-that entry says so. With no regression, all 77 pass. Builds 1 and 2 ran
-before the scan of `out` moved into a helper, `mentions_of_the_page`, which
-clippy's line limit asked for. Builds 3 and 4 exercise that scan, and were
-run again after the move, with the same failures.
-
-- *Build 1:*
-  - `clipped` without the escape, and `misfiled` escaping again: this is
-    `stored.rs` as it was before this correction.
-    `a_refused_word_is_quoted_escaped_on_one_line`,
-    `a_symbol_directory_name_cannot_forge_a_refusal_of_the_run` and
-    `every_spelling_of_an_instrument_word_lands_on_one_scope_or_the_surface_sentence`
-    fail. Both `misfiled` tests pass.
-  - `run` returning the bare opening:
-    `the_pool_verb_hands_on_run_unders_page_untouched` fails ("`run` ends
-    by returning `run_under`'s page as it is").
-  - The first clause of `denies_subtraction` deleted:
-    `the_subtraction_check_refuses_each_contradiction_of_the_header` fails.
-    The review's label came back refused for calling a figure net, not with
-    the first clause's reason.
-  - `EQUITY_RANKING_GROSS`'s earlier doc restored:
-    `the_corrected_doc_comments_say_no_more_than_holds` fails.
-- *Build 2:*
-  - `batch::one`'s label unescaped:
-    `a_symbol_directory_name_cannot_forge_a_refusal_of_the_run` fails.
-  - `run_under`'s empty-union branch returning a fresh string:
-    `the_pool_page_is_its_head_and_then_only_appends` fails ("every `Ok(`
-    after the head returns `out` itself").
-  - The second clause deleted: the subtraction test fails on "a second claim
-    beside the fact". The sentence appended below is in the label this test
-    rewrites too. It has no "subtract", "deduct" or "net", and the premise
-    that the label itself passes the check held.
-  - The review's sentence appended to the FINDINGS label:
-    `every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate`
-    fails at the new pin. Every assertion before it passes.
-- *Build 3:*
-  - `std::mem::replace(&mut out, String::new())` after the empty-surface
-    return: `the_pool_page_is_its_head_and_then_only_appends` fails on that
-    mention of `out`.
-  - `render_per_symbol` clearing the page first:
-    `the_renderers_only_append_to_the_page_they_are_handed` fails ("pass 1
-    keeps the head").
-  - The third clause deleted: the subtraction test fails on "a deduction
-    beside the fact".
-- *Build 4:*
-  - `let _ = out.split_off(0);` after the empty-surface return:
-    `the_pool_page_is_its_head_and_then_only_appends` fails on that mention
-    of `out`.
-  - `render_pooled` clearing the page first: the renderers test fails
-    ("pass 2 keeps the head").
-  - The fourth clause deleted: the subtraction test fails on "a net figure
-    beside the fact".
-  - `run` ending with `run_under(..).map(|_| String::new())`: the `run`
-    test fails ("`run` ends by returning `run_under`'s page as it is").
-
-Invariants AF-38 and AF-39 are corrected in place again.
-
-**Fourth correction, 2026-09-24: what a fourth review upheld.** Corrected
-here, not in the text above.
-
-1. *The stamp never kept `run` from a test.* The first correction's item 4
-   said `pool::run` "checks the commit stamp first and which no test
-   reaches". The second correction's item 3 said no test reached `run`
-   "because it checks the commit stamp first". The third correction's item 1
-   said "No test build passes `run`'s stamp check", and its item 5 added a
-   `docs/06-limits.md` bullet on that premise. The premise was false. The
-   build script stamps a tree whose index and working tree equal HEAD, and a
-   clean checkout, CI's among them, is one; only a tree that differs from
-   HEAD builds unstamped. The reviews found the commit in a clean build's
-   test binary and drove `pool` on a generated store to a whole page
-   (measured by the reviews). What keeps an in-process test off a surface
-   with an instrument on it is the store root, which `run` and pass 1's
-   `one_rung` read from the environment, and the crate already drives public
-   commands past that by running the test binary again as a child with
-   `BRUTEX_STORE` set. With `pool::pool` dropping `run`'s page, the whole
-   `cli` library suite stayed green (measured by the reviews). AF-39, the
-   `docs/06-limits.md` bullet, the docs of `run_under` and `head_under`, and
-   the docs of three `pool` tests repeated the claim, and each is corrected
-   in place.
-   - *Driven.* `the_pool_verb_prints_its_whole_page_on_a_generated_store`
-     runs itself again as a child. The child inherits no `BRUTEX_` variable
-     from the shell that ran the suite, and is given three: `BRUTEX_STORE`,
-     naming a generated store, `BRUTEX_LOG_DIR`, inside it, and
-     `BRUTEX_TEST_POOL_VERB_PAGE`, its own marker (corrected in place by the
-     fifth correction). It dispatches `pool` twice through `crate::dispatch`,
-     which goes through `pool_arm`, `pool::pool`, `run` and `run_under`:
-     - At `5min` and 200000 ppm over the generated NIFTY month, the page
-       starts with `head_under`'s head. Then comes pass 1's table, with
-       NIFTY's 600 bars, no refused row and no unread frontier, then pass 2's
-       table over one instrument with none unpriced, and the page ends with
-       the in-sample warning.
-     - At `60min`, over an unreadable `NSE/CASH/RELIANCE` month beside
-       `BSE/CASH/RELIANCE`, the page is exactly three things: the head
-       naming the BSE directory, pass 1's table refusing RELIANCE for its
-       unreadable month, and the nothing-to-pool line.
-
-     Both pages exit OK and neither is a refusal. In an unstamped build the
-     child requires the stamp refusal, MISUSED and no ledger. The priced page
-     names its support rather than `auto`, whose probe has a ceiling that
-     scales with the machine's core count (read from the source), so that
-     page's support does not depend on the machine it runs on.
-   - *Still read from the source.* A mutation run builds a tree that is not
-     HEAD, so it is unstamped, and there the driven test takes its
-     stamp-refusal branch. The third correction's source reads stay, and one
-     is added (item 2).
-   - *The third correction's alternative stays rejected.* Giving `one_rung`
-     the root is still not taken. Its reason now is that no test needs it:
-     the verb is reached from a child process with `one_rung` unchanged.
-2. *The last two links: `pool::pool` and `pool_arm`.* The third correction
-   pinned `run` and stopped there. Two links come after it:
-   - `pool::pool` turns `run`'s result into text.
-   - `lib.rs`'s `pool_arm` appends that text to what the binary prints.
-
-   `the_pool_verb_and_its_arm_print_runs_page_as_it_is` reads both bodies,
-   so a mutation run is held too:
-   - `pool::pool`'s whole text is pinned.
-   - `pool_arm`'s arm that runs the verb is pinned line for line.
-   - Every other mention of `out` in `pool_arm` must be its parameter or a
-     `refuse(out, ..)`.
-
-   AF-39's heading describes the page `cli pool` prints, and a test now
-   reaches that page.
-3. *`clipped`'s order was not under test.* The third correction's item 2
-   said `stored::clipped` escapes what it keeps "after the cut", and
-   `clipped`'s doc rests its cost on that order: the escape walks at most
-   the 64 characters kept. The test's one long input, 64 `N`s and a
-   newline, reads the same in either order, and escaping the whole word
-   before the cut passed every test (measured by the reviews).
-   `a_refused_word_is_quoted_escaped_on_one_line` now also quotes 63 `N`s
-   and a newline, and 63 `N`s, a newline and an `N`, through both
-   `swept_index` and `rung`. Kept and then escaped, each quotes the newline
-   whole as `\n`; escaped and then kept, the cut leaves a lone backslash.
-   `clipped` itself did not change.
-4. *Four sentences said more than holds about the escape.* The third
-   correction's item 2 said "The fix is in the one place a refusal quotes a
-   word". `docs/06-limits.md` said `stored::clipped` is used by "every
-   refusal that quotes a word or a directory name", `misfiled`'s doc said
-   "for every word a refusal quotes", and the doc of
-   `a_refused_word_is_quoted_escaped_on_one_line` said "every refusal that
-   quotes a caller's word or a directory's name is one line". `parse_vendor`,
-   `swept_rung` and `pool_arm`'s rung refusal quote the word they are handed
-   raw (read from the source). A feed word carrying a newline, typed to
-   `pool` or `sweep-all`, was refused as the whole command, across two lines
-   (measured by the review). Such a refusal is the command's own, and
-   forges no completed run. `misfiled`'s doc, the test's doc and the
-   `docs/06-limits.md` sentence are narrowed in place to what quotes through
-   `clipped`: `misfiled`'s three names and the word `swept_index` and `rung`
-   refuse. `batch::one`'s row label escapes the symbol itself. The third
-   correction's sentence is superseded here. A new `docs/06-limits.md`
-   bullet names the three raw refusals, and says that whether any of their
-   callers hands them a word that was not typed was not examined.
-   - *What a reader sees change, restated.* The third correction's item 2
-     named a control character, a quote and a backslash. `escape_debug`
-     escapes more than those: a format character such as U+200B, a
-     separator other than the space, such as U+00A0 or U+2028, and a
-     combining mark that opens the word and has Unicode's `Grapheme_Extend`
-     property, such as U+0301 (narrowed in place by the sixth correction). A
-     combining mark inside a word prints as itself. The test now
-     quotes each of those four characters, and a word with a combining
-     mark inside it. These cases pin behaviour that already held, and no
-     reverted fix makes them fail.
-
-**Tests, and what each is proven against (fourth correction).** The set is
-the 32 tests the filter `pool:: refused_word misfiled symbol_directory
-every_spelling enormous` selects, except the unstamped `pool_arm` run, which
-ran the 23 `pool::` tests. Unstamped runs used this tree with the change
-uncommitted: the first printed the persistence-disabled warning, and in the
-second the child failed on its stamp-refusal branch. Stamped runs used a
-throwaway worktree: the change was committed there on a detached HEAD,
-and each regression was committed on top of it, one per build, so every
-build was of a tree equal to its HEAD. No stamped build printed that
-warning, and the first one's test binary held its commit. After each
-unstamped run the edited files were restored from copies.
-
-- *No regression, stamped:* all 32 pass. The driven test, run alone three
-  times, took 0.88 s, 0.94 s and 0.91 s of wall time. Its support is
-  200000 ppm: in a stamped probe build that was never committed on this
-  branch, the same page took 7.9 s at 50000 ppm and 0.69 s at 200000 ppm,
-  measured once each.
-- *`pool::pool`'s `Ok(text) => text` returning `String::new()`:*
-  - Stamped: `the_pool_verb_and_its_arm_print_runs_page_as_it_is` fails at
-    its pin of `pool`, and
-    `the_pool_verb_prints_its_whole_page_on_a_generated_store` fails ("the
-    page opens with `head_under`'s head").
-  - Unstamped: the pin fails and the driven test passes, on its
-    stamp-refusal branch. That gap is why the pin exists.
-- *`pool_arm` without `out.push_str(&text);`:* both tests fail, stamped and
-  unstamped. Unstamped, the child finds an empty page where the stamp
-  refusal should be. A first stamped attempt at this regression matched the
-  same line in `elite_arm`, which comes first in `lib.rs`, and left all 32
-  green; it was rerun on `pool_arm`'s line.
-- *`run` ending with `.map(|_| opening(vendor_word, rung, from, to,
-  support_ppm, &[]))`, the bare opening in place of `run_under`'s page:*
-  stamped, `the_pool_verb_hands_on_run_unders_page_untouched` fails ("`run`
-  ends by returning `run_under`'s page as it is"), and so does the driven
-  test ("the page opens with `head_under`'s head").
-- *`run_under`'s empty-union branch returning a fresh "nothing to pool"
-  string:* stamped, `the_pool_page_is_its_head_and_then_only_appends` fails
-  ("every `Ok(` after the head returns `out` itself"), and so does the
-  driven test ("pass 1 refuses RELIANCE").
-- *`clipped` escaping before it cuts
-  (`word.escape_debug().take(KEEP)`):* unstamped,
-  `a_refused_word_is_quoted_escaped_on_one_line` fails on 63 `N`s and a
-  newline, which came back quoted with a lone backslash. This ran in the
-  same build as the unstamped `pool::pool` regression; the two touch
-  different tests, and those two tests were the build's only failures.
-
-The whole `cli` suite then ran stamped in the throwaway on the change with
-no regression: the library's 1469 tests passed with 1 ignored, and the
-three integration files' 38 tests and the one doc test passed. After it,
-the driven test's child was split into two helpers, one per page, for
-clippy's line limit; no assertion changed. On the split, stamped, the 32
-pass, the driven test alone took 0.74 s, 0.75 s and 0.77 s, and the
-`pool::pool` regression fails the same two tests with the same message.
-
-Invariant AF-39 is corrected in place again.
-
-**Fifth correction, 2026-09-25: what a fifth review found.** Three sentences
-new in this change were false when they were written. Unlike the corrections
-above, each is corrected where it stands, and listed here. One limit is
-answered, and one refusal's quote changes.
-
-1. *The driven test's child.* The doc of
-   `the_pool_verb_prints_its_whole_page_on_a_generated_store`, AF-39 and the
-   fourth correction's item 1 said the child's environment names a generated
-   store and holds no `BRUTEX_` variable besides. The test removes every
-   `BRUTEX_` variable the child would inherit, and then gives it three:
-   `BRUTEX_STORE`, `BRUTEX_LOG_DIR` and its own marker,
-   `BRUTEX_TEST_POOL_VERB_PAGE` (read from the source by the review). Neither
-   extra variable changes the page. The three texts now name all three, and
-   say the child inherits no `BRUTEX_` variable from the shell that ran the
-   suite. `each_variable_the_driven_pool_test_gives_its_child_is_named`, in
-   the new `crates/cli/tests/pool_and_escape_docs.rs`, reads the names from
-   the test's own `.env(` calls and its removal loop, and requires each of
-   the three texts to name every one.
-2. *"Printable" words.* `clipped`'s doc, `misfiled`'s doc, the docs of
-   `a_misfiled_directory_name_is_escaped_onto_one_line` and
-   `a_refused_word_is_quoted_escaped_on_one_line`, and the second
-   correction's item 2 each said that a word or name of printable
-   characters, with no quote and no backslash, is quoted as it was.
-   `escape_debug` escapes a combining mark that opens a string and has
-   Unicode's `Grapheme_Extend` property, as U+0301 does, and prints the same
-   mark as itself inside one. So U+0301 followed by `NIFTY` is quoted as
-   the text `\u{301}NIFTY`, and `N` then U+0301 then `IFTY` is quoted as
-   typed. The refused-word test already asserted both, and the review
-   measured both with `rustc` outside the repository; this correction
-   recorded no measurement of its own. Each text then said a word is quoted
-   as it was only when `escape_debug` prints each of its characters as
-   itself, and named the combining mark. That rule was false as well, and
-   so was this item's claim of a second measurement: the sixth correction
-   names both and corrects this item in place.
-   `misfiled` escapes its three names one at a time, so a combining mark that
-   opens the segment is escaped as well. The misfiled test gains that case,
-   and one with the mark inside the segment. Those two cases pin behaviour
-   that already held, and no reverted fix makes them fail.
-   `no_text_says_a_printable_word_is_quoted_as_typed` reads the five texts.
-3. *`parse_vendor`'s callers that are not typed.* The fourth correction's
-   item 4 added a `docs/06-limits.md` bullet which ended by saying it was not
-   examined whether any caller of the three raw refusals hands them a word
-   that was not typed. One search answers it for `parse_vendor` (found by the
-   review). Two of its callers hand it a feed word decoded from stored bytes:
-   `index_stop_search_reader.rs`, for a saved single-stop search declaration,
-   and `index_stop_source_context_codec.rs`, for a saved original source
-   snapshot. Read from the source, each decoder is reached from one `api`
-   route only, `/index-stop-ranking.json` and `/index-stop-candles.json`
-   respectively. Its refusal refuses that whole response, with the sentence
-   inside a JSON string, so neither could forge a completed page. No `cli`
-   command reaches either decoder.
-   - *The quote changes anyway.* `parse_vendor` now quotes the refused word
-     through `stored::clipped`, which is made `pub(crate)` for it. A word
-     from stored bytes is then quoted escaped wherever the refusal is
-     printed, and a caller added later inherits that.
-     `a_refused_feed_word_is_quoted_escaped_on_one_line` drives
-     `parse_vendor`, and
-     `a_saved_declarations_feed_word_is_refused_on_one_line` and
-     `a_saved_snapshots_feed_word_is_refused_on_one_line` drive each decoder
-     with the feed `X\nrefused: forged` spliced into bytes it otherwise
-     accepts. AF-39 names all three.
-   - *What a reader sees change:* a refused feed word longer than 64
-     characters, or holding a character `escape_debug` does not print as
-     itself, is now quoted cut and escaped. `bogus` is quoted as before. No
-     accepted feed word, run identity, store format or exit status changed.
-     The quote no longer grows with the word: `clipped` reads at most 65 of
-     its characters. That is read from the source, not measured.
-   - *The bullet is rewritten in place.* It names both callers and both
-     routes. `swept_rung` and `pool_arm`'s rung refusal still quote raw.
-     `pool_arm`'s one caller is `dispatch`'s `pool` arm, whose rung is typed.
-     `cli::swept_rung` has eleven call sites (this said eight until the sixth
-     correction), and the chains above them were not all followed to their
-     end; the bullet says so. `batch.rs` has a
-     `swept_rung` of its own, whose raw quote only a word `stored::rung` has
-     already accepted can reach.
-   - *Two texts listed `clipped`'s users.* `misfiled`'s doc named the words
-     quoted through `clipped`. The refused-word test's doc named
-     `parse_vendor` among the raw refusals. Both now name `parse_vendor`
-     among `clipped`'s users, and so does the `docs/06-limits.md` bullet on
-     `misfiled`'s cost. The fourth correction's item 4 is superseded here
-     where it says the bullet leaves the question unexamined.
-   - `the_raw_quote_limit_names_parse_vendors_stored_callers` reads the two
-     decoder calls, `parse_vendor`'s quote and the bullet together.
-
-The three tests in `crates/cli/tests/pool_and_escape_docs.rs` read the
-documents at compile time. They are a separate test crate so that the
-library's own tests are not rebuilt whenever the ledger changes.
-
-**Tests, and what each is proven against (fifth correction).** Each
-regression below was applied alone to this tree, with the change
-uncommitted, and the named tests were run and seen to fail. The edited file
-was then restored from a copy. After the last regression, `shasum` found all
-six edited files as they had been before the first. Each regression ran
-`crates/cli/tests/pool_and_escape_docs.rs`; the `parse_vendor` one also ran
-the library tests the filter `feed_word` selects.
-
-- *The driven test's doc, AF-39's sentence, or the fourth correction's item
-  1, each restored alone:*
-  `each_variable_the_driven_pool_test_gives_its_child_is_named` fails where
-  it refuses the old sentence. The file's other two tests pass.
-- *`clipped`'s doc, `misfiled`'s doc, the misfiled test's doc, the
-  refused-word test's doc, or the second correction's item 2, each restored
-  alone:* `no_text_says_a_printable_word_is_quoted_as_typed` fails where it
-  refuses "printable". The file's other two tests pass.
-- *The `docs/06-limits.md` bullet restored:*
-  `the_raw_quote_limit_names_parse_vendors_stored_callers` fails at "was not
-  examined".
-- *`parse_vendor` quoting `{word}` raw again:*
-  `a_refused_feed_word_is_quoted_escaped_on_one_line`,
-  `a_saved_declarations_feed_word_is_refused_on_one_line` and
-  `a_saved_snapshots_feed_word_is_refused_on_one_line` each fail at the
-  check of how the word is quoted, and
-  `the_raw_quote_limit_names_parse_vendors_stored_callers` fails at its read
-  of `parse_vendor`'s quote.
-
-With no regression, the file's three tests pass, and so do the 34 library
-tests the filter `feed_word refused_word misfiled symbol_directory
-every_spelling every_feed pool::` selects. After the regressions, `cargo fmt`
-re-wrapped three of the new tests and one doc sentence was reworded; no
-assertion changed.
-
-The change was then committed, and the `cli` binary built from that clean
-commit carried it as its stamp. Run with an empty store, `cli pool` given
-the feed word `zerodha`, a newline and `refused: X`, at `60min` from 2026-07
-to 2026-07 with `auto`, printed `refused: ` and the word with its newline
-quoted as its escape, on one line, and exited 2. Given `zerodha` and the
-rung word `60min`, a newline and `refused: Y`, it printed the rung refusal
-across two lines, as before, and exited 2.
-
-Invariant AF-39 is corrected in place again.
-
-**Sixth correction, 2026-09-25: what a sixth review found.** Every text
-below is new in this change, and each is corrected where it stands and listed
-here. No behaviour changed: no refusal, page, run identity, store format or
-exit status.
-
-1. *The rule that replaced "printable".* The fifth correction made five texts
-   say a word is quoted as before only when `escape_debug` prints each of its
-   characters as itself. `clipped` cuts to 64 characters before it escapes,
-   so a character after the sixty-fourth is dropped, not escaped: 64 `N`s and
-   then a newline are quoted as they were before the escape, though a newline
-   is not printed as itself. The refused-word test's own body asserted that
-   case beneath the doc that denied it (found by a review, which measured it
-   with `rustc` outside the repository). The five texts -- `clipped`'s doc,
-   `misfiled`'s doc, the docs of
-   `a_misfiled_directory_name_is_escaped_onto_one_line` and
-   `a_refused_word_is_quoted_escaped_on_one_line`, and the second
-   correction's item 2 -- now say a word is quoted as before when, and only
-   when, `escape_debug` prints each of the characters `clipped` keeps, the
-   first 64, as itself, and say what becomes of a character past the cut.
-   The fifth correction's item 2 keeps its record of what it wrote, and says
-   the rule was false. `no_text_says_a_printable_word_is_quoted_as_typed` now
-   requires the new wording and refuses the fifth correction's.
-   - *Pinned as behaviour.* The refused-word test also quotes 64 `N`s, a
-     newline and `refused: forged` through `swept_index`: the quote is the 64
-     `N`s and the mark, on one line, and does not read as a refusal. A new
-     test, `a_word_is_quoted_as_before_exactly_when_what_clipped_keeps_prints_as_itself`,
-     finds `clipped` returning what the cut before the escape returned for
-     the words whose kept characters each print as themselves, and something
-     else for the words holding a kept character that does not. The misfiled
-     test gains a segment of 64 `C`s, a newline and `refused: forged`, named
-     as its first 64 characters and the mark. These cases pin behaviour that
-     already held, and no reverted fix makes them fail. AF-39 now names the
-     new test.
-2. *The opening combining mark, and the separators.* `clipped`'s doc, the
-   second correction's item 2, the fourth correction's item 4, the fifth
-   correction's item 2, AF-39 and a comment in the refused-word test said
-   `escape_debug` escapes a combining mark that opens the word, and some of
-   them named a format or separator character among what it escapes. The
-   `core` source of the pinned toolchain, 1.97.1 in `rust-toolchain.toml`,
-   read from the `rust-src` installed beside it, says which characters it
-   escapes.
-   `str::escape_debug` escapes its first character with
-   `EscapeDebugExtArgs::ESCAPE_ALL` and each later one with
-   `escape_grapheme_extended: false` (`library/core/src/str/mod.rs`).
-   `char::escape_debug_ext` escapes a character when
-   `args.escape_grapheme_extended && self.is_grapheme_extended()`, and
-   otherwise when it is not printable (`library/core/src/char/methods.rs`).
-   `library/core/src/unicode/printable.py`, which generates the table
-   `is_printable` reads, yields as escaped every character whose category
-   is one of `Cc Cf Cs Co Cn Zl Zp Zs`, the space excepted. So
-   a combining mark is escaped at the start of a word only when it has
-   Unicode's `Grapheme_Extend` property, and a separator other than the space
-   is escaped anywhere in one. U+0903 and U+093F, spacing marks without the
-   property, print as themselves opening a word; U+09BE, a spacing mark with
-   it, is escaped there and prints as itself inside a word (found by a
-   review, which measured U+0903, U+093F, U+09BE and the space with `rustc`
-   1.93.1 outside the repository). Each text now names the property beside
-   the opening mark, and each separator it names is one other than the space.
-   - *Pinned as behaviour.* The refused-word test now quotes U+20DD and
-     U+09BE opening a word, each escaped, and U+0903 and U+093F opening a
-     word, U+09BE inside one and a space inside one, each as typed. The new
-     test above puts each character `char::is_control` or
-     `char::is_whitespace` accepts, the space excepted, inside a word, and
-     finds `clipped` escaping it, so no such word is quoted as before. The
-     misfiled test gains a segment that opens with U+0903, named as it is.
-     These pin behaviour that already held, and the suite measures each
-     under the pinned toolchain whenever it runs.
-   - `each_text_names_only_the_characters_escape_debug_escapes` reads the
-     five texts above, AF-39, the fourth correction's item 4, the fifth
-     correction's item 2 and the refused-word test's comments. It requires
-     each to name the property beside the opening mark, refuses the words
-     "format or separator", and requires every "a separator" to be one other
-     than the space. It also requires the two tests to still quote the cases
-     named here.
-3. *The fifth correction's measurement.* Its item 2 said the review and that
-   correction each measured U+0301 with `rustc` outside the repository. No
-   record of that correction's own measurement was found (found by a review).
-   The sentence now says the review measured it and the correction recorded
-   none, and `each_text_names_only_the_characters_escape_debug_escapes`
-   refuses the old sentence. This correction rests on no probe of its own
-   either: it rests on the toolchain source quoted in item 2 and on the tests
-   named there.
-4. *`cli::swept_rung`'s call sites.* The `docs/06-limits.md` bullet said its
-   "eight call sites each take the rung as a parameter", and the fifth
-   correction's item 3 said it "has eight call sites". It had eleven (found
-   by two reviews, each counting with `grep`), and `sweep_audited_stored`
-   takes its rung from the `sweep-audited-stored` command's own argument
-   list, not as a parameter (found by one of them). Both texts now say
-   eleven. The bullet names each site and where its rung comes from, and
-   says why the `pool` verb never reaches the refusal in `pool::run`:
-   `pool_arm` hands `pool::pool` only a rung it found among `EVERY_RUNG`'s
-   entries, and `swept_rung` accepts each of them.
-   `the_raw_quote_limit_counts_and_names_every_call_of_swept_rung` finds
-   every call of `cli::swept_rung` in the `.rs` files under `crates/cli/src`
-   when it runs. It requires both texts to give that count in words and the
-   bullet to name each file, and each `lib.rs` function, that calls it, and
-   it reads where each call's rung comes from.
-   `the_pool_verb_reaches_swept_rung_only_with_a_rung_it_accepts` reads each
-   link from `dispatch`'s `pool` arm through `pool_arm` and `pool::pool` to
-   `swept_rung`'s acceptance of every `EVERY_RUNG` entry.
-5. *Two docs of `crates/cli/tests/pool_and_escape_docs.rs`.* Its module doc
-   said no other test reads a doc comment, an invariant row, a decision or a
-   limit. `cli`'s `the_corrected_doc_comments_say_no_more_than_holds` reads
-   doc comments of `lib.rs`, tests in `core/src/universe.rs` and
-   `store/tests/libm_key.rs` read this file and `docs/06-limits.md` (found by
-   a review), and `core/tests/cost_invariants.rs` reads
-   `docs/04-invariants.md` (found by this correction with `grep`). The claim
-   is dropped, and so is the module doc's claim that each text the file reads
-   described code in this crate, which item 3's does not. The doc of
-   `each_variable_the_driven_pool_test_gives_its_child_is_named` said a
-   variable added to the child fails that test until the three texts name
-   it; it fails until that test's own list names it too (found by a review),
-   and the doc now says so. `this_crates_own_docs_say_no_more_than_holds`
-   reads both. The file gains that test, the two of item 4 and
-   `each_text_names_only_the_characters_escape_debug_escapes`; the fifth
-   correction's note on the file's three tests speaks of those three.
-
-**Seventh correction, 2026-09-26: what the attack rounds found.** Two rounds
-of attacks on this change, and the votes that upheld their findings, found the
-defects below. Each text new in this change is corrected where it stands and
-listed here; an entry or row that is on `main` is not edited. An item that
-changes what an operator reads, or the exit status a script sees, says so.
-
-1. *A run whose every instrument or month refuses.* When every instrument on
-   its surface refused in pass 1, `pool` printed the stored banner, a
-   `REFUSED` row for each and "nothing to pool", and exited OK. `sweep-all`
-   did the same over its months, with `0 swept · N refused`. An indented
-   `REFUSED` row is not a refusal to `carries_refusal`, so a script that ran
-   either and then its next step went on without a confirmed result.
-   `range_over` refuses in that case, for the reason its comment gives, and
-   this entry's own pool test asserted the OK exit, and the two `sweep-all`
-   tests of a forged directory asserted that such a page is not a refusal
-   (found by a review, which reached it with month 13, a backwards span and
-   an unreadable month).
-   `pool::at_least_one_screened` and `batch::at_least_one_filed` now refuse
-   such a run with the count and every instrument's or month's reason,
-   printed as `refused: ` at column zero with no banner, so the verb exits
-   MISUSED. `pool_arm` also refuses a month outside 1..=12 and a FROM after
-   TO before it reads the store: it checked neither, so a store with no
-   instrument on the surface printed its page over month 13 and exited OK. A
-   pool with one successful outcome, a walk with one swept and filed month, and a
-   store holding no month of the feed and rung print what they printed
-   before this item.
-   *Behaviour change:* the page and exit status of those runs.
-   - The driven pool test's `60min` case, one unreadable RELIANCE month
-     beside a BSE directory, now requires the refusal and MISUSED.
-     `the_pool_page_is_its_head_and_then_only_appends` reads the new call's
-     place in `run_under`, because the driven test reaches it only in a
-     stamped build. The `sweep-all` tests that read rows of a completed run
-     (the two forging tests, the misfiled test, the continued walk and the
-     stock note) now run beside a generated month that sweeps, and the
-     filter test reads its count from the refusal. The filter test had
-     asserted the census line's `3 spot instrument-month(s); 1 match`, and the
-     continued walk `1 refused`, which a refused run no longer prints; the
-     continued walk now asserts its own census line,
-     `store holds 6 spot instrument-month(s); 3 match this feed and rung`, and
-     `1 swept · 2 refused`, and the filter test that its store holds three
-     months. The misfiled test also pins `1 swept · 6 refused` and its census
-     of ten stored months, seven matching the feed and rung. AF-39's sentence about the `60min` page is corrected in place,
-     and AF-70 states the rule.
-2. *An empty month on `sweep-stored`.* `stored_sweep_inputs` refused a month
-   whose file exists and holds no record, the file a writer's open leaves
-   before its first append, with "every signal session has a minute gap; no
-   sweepable bars remain". No gap had been measured and nothing had been
-   withheld (found by a review). It now refuses with words of its own, such
-   as "the 5min month 2025-04 is stored and holds no bar. Nothing was swept",
-   before it loads the execution minutes, and the minute-gap sentence is left
-   to a month whose every session was withheld. *Behaviour change:* that
-   refusal's words. AF-71 states it.
-3. *Months the catalog cannot file.* `store::catalog` files a month only
-   under a feed and a rung directory spelt exactly as this engine spells
-   them, and counts `.bin` files at a month's depth before parsing their
-   stems, store-wide, in `unknown_vendor`
-   and `unknown_rung`, without its name. `pool` and `sweep-all` read neither
-   count, so a month under `bars/Zerodha/...` or a `60MIN` directory was
-   dropped from both reports with no word, and the pool's empty-surface line
-   said the store held no month at the path a load reads, although on a
-   case-insensitive volume a load of `zerodha` opens `Zerodha` (found by a
-   review, which measured the operator's store volume as case-insensitive).
-   The pool's head now gives both counts in a NOT CATALOGUED block and says
-   what a case-insensitive volume does with such a directory, its
-   empty-surface line says what the catalog found "spelt exactly", and
-   `sweep-all` prints the two counts under its census line. A store whose
-   every month was filed prints neither. The catalog is `store`'s and is
-   unchanged, and it keeps no name of what it could not file, so both
-   reports give counts and not names. *Behaviour change:* those lines. AF-72
-   states them.
-4. *Where a lifted FINDINGS block travels.* Five texts new in this change
-   said `range-all` and `pool` pass 1 keep sections lifted out of a report:
-   `equity_ranking_statement`'s doc, the doc of `runner::audit`'s
-   `every_charge_statement_line_is_indented_so_a_lifted_audit_block_keeps_it_whole`,
-   the doc of `a_stock_ranking_states_corporate_actions_inside_its_findings_block`,
-   the `docs/06-limits.md` bullet on a stock report saying it up to three
-   times, and item 1 of this entry. Pass 1 keeps each instrument's
-   `one_rung(..).outcome` alone and prints a table of that record's fields,
-   so no FINDINGS block reaches a pool page (found by a review). `range-all`
-   and `range-rung` are what print the sections `one_rung` lifts through
-   `validation_note`. Each text now names those two, and
-   `equity_ranking_statement`'s doc says pass 1 is not such a lift. D-0694's
-   item 5 says the same of `pool`; that entry belongs to another piece of
-   this change and is not edited here. `no_text_says_pool_pass_1_lifts_a_section`
-   reads the five texts, and reads from `pool.rs` that pass 1 keeps only
-   the outcome.
-5. *A misfiled directory holding two months.* `store::catalog::walk` lists
-   one holding per month, and `surface_under` names a misfiled directory once
-   because its map is keyed by the three directory names. Every pool fixture
-   held one month in each directory, so a surface that named a directory once
-   per month passed every pool test (found by a review). The tests'
-   `store_holding` now writes two months into every directory it makes, and
-   checks that the catalog lists both. AF-35 says so. No behaviour changed.
-6. *AF-31 and AF-32.* Each ended by saying its change had "no decision entry
-   yet", while this entry records both changes and quotes those words as the
-   reason it exists (found by a review). Both rows are new in this change and
-   now name D-0696. `no_invariant_row_says_its_change_has_no_decision_entry`
-   refuses the phrase anywhere in `docs/04-invariants.md`.
-7. *The commit this entry records.* This entry named it thirteen times by a
-   hash that is in neither this history nor `main`'s. This history carries it
-   as 12916123, cherry-picked from c8c5383c: the two have the same subject,
-   the same author date and the same `git patch-id --stable` (found by two
-   reviews; this correction measured the ancestry with
-   `git merge-base --is-ancestor` and both patch ids). Every citation now
-   names 12916123.
-   `d_0696_cites_the_commit_it_records_by_its_hash_in_this_history` refuses
-   the other hash anywhere in this entry but where it says what 12916123 was
-   cherry-picked from. It runs no `git`, so it does not check a hash cited
-   later. D-0693's citations belong to another piece of this change and are
-   not edited here.
-8. *The budget refusal comes before a read.* AF-05 and the D-0685 limit say
-   a run that records refuses a usable `BRUTEX_SCREEN_BUDGET_MS` before it
-   reads its source or writes anything.
-   `recorded_runs_refuse_a_screen_budget_before_reading_or_writing` gave its
-   child a whole store, so a kernel that read its months and only then
-   refused the budget answered with the same sentence, wrote nothing, and
-   passed (found by a review). The child's store is now a second generated
-   store whose every month file holds bytes no reader accepts, so a kernel
-   that reads first answers with the store's refusal and fails the child's
-   exact comparison; the run with a stated cap that follows keeps the whole
-   store. No behaviour changed, and neither AF-05 nor the limit is edited:
-   the test now proves what they say.
-9. *The Boolean research heading on a stock's page.* AF-16 says the Boolean
-   research header of a scope holding a cash family states gross of every
-   charge and corporate actions unchecked, and its test reads
-   `research_heading` alone. Every test that drove `Prepared::new` did it
-   over NIFTY, so the line that puts the heading on the page could print the
-   index's heading over a stock with every test green (found by a review).
-   `the_prepared_page_over_a_stock_opens_with_its_gross_heading` drives
-   `Prepared::new` from a child over `RELIANCE`, `NIFTY,RELIANCE` and
-   `NIFTY`, and AF-73 states what it asserts. AF-16 belongs to D-0694 and is
-   not edited here. No behaviour changed.
-10. *`sweep-stored`'s own door.* AF-31, AF-33 and AF-38, and the doc of
-    `a_stored_sweep_of_a_share_says_its_ranking_is_gross_of_every_charge`,
-    speak of `sweep-stored`, and that test and
-    `a_ranked_stored_sweep_of_a_share_states_corporate_actions_inside_its_findings`
-    drove `sweep-audited-stored`'s door: `Traded::sweep` makes the two calls
-    `sweep_audited_stored` makes. The one test that reached
-    `sweep_stored_kernel` over a share ran extinct and ranked nothing (found
-    by a review). Both tests now assert each page from `Traded::sweep_stored`,
-    which calls `sweep_stored_kernel`, and from `Traded::sweep`. AF-38 says
-    so. No behaviour changed.
-
-**Eighth correction, 2026-09-26: refusals retain the work that happened.**
-The two verification lenses found three should-fix items and three nits in
-the seventh correction. This correction changes only D-0696's CLI surface;
-text already on `main` at `96194c11` remains untouched.
-
-1. The whole-run refusal had equated an unrecorded result with a sweep that
-   never ran. `batch::Row::ran` now marks the completed call to the ladder,
-   independently of the later ledger/evidence result. The refusal counts
-   rows before and after that call separately, keeps the census and every
-   row's reason, and claims only that none was swept and filed without a
-   refusal. `a_walk_whose_swept_month_could_not_be_filed_says_it_swept`
-   makes the generated store's ledger path a directory: one month sweeps,
-   two refuse before sweeping, and the swept month's `not recorded` reason
-   names that path. Pool outcomes are strings without a stage field, so the
-   pool makes no count of instruments that ran. It retains each reason,
-   including halted and unrecorded outcomes, and the head's NOT ON THE
-   SURFACE and NOT CATALOGUED blocks. The all-refused pool test asserts all
-   of those strings. AF-39 and AF-70 describe the resulting output.
-2. A stamped child now calls `dispatch` for `sweep-all` and `pool` over the
-   same four generated misfiled months. It requires MISUSED, a column-zero
-   refusal, four batch refusal rows and both pool directory reasons. The
-   unstamped path checks the build-stamp refusal, while
-   `sweep_all_keeps_the_column_zero_refusal_and_dispatch_status` pins the
-   actual wrapper and arm in every build. The old test constructed its own
-   `refused: ` prefix and could not catch a broken verb. AF-70 names both
-   checks. The file also carries `#![cfg(test)]` on its first line, as the
-   other out-of-line batch tests do. Gate 11 cannot follow the nested
-   path-qualified declaration, so it classified the assertions as shipping
-   code until this explicit marker was added; the compiler's existing outer
-   test guard already excluded them from non-test builds. No gate allowlist
-   is widened.
-3. The misfiled-month test again asserts the whole tally, `1 swept · 6
-   refused`, plus ten stored months of which seven match. The seventh
-   correction's restored-count list now includes it.
-4. The empty `5min` fixture now has damaged execution minutes beside it.
-   Loading those minutes first produces a different refusal. The test still
-   requires the empty-month sentence and no ledger or sweep evidence, so
-   AF-71's ordering claim is exercised rather than inferred.
-5. Both census outputs now say `.bin file(s) at a month's depth`. The pool
-   fixture includes `notes.bin` beside each month: the catalog counts those
-   files before parsing their stems. AF-72 describes the resulting two files
-   in each bucket. The catalog itself is unchanged.
-6. `pool::head_under` refuses an empty surface when its selected feed/rung
-   has misfiled swept holdings, retaining their reasons without the opening
-   banner. A fresh store remains a page. The direct misfiled-store test and
-   the stamped dispatch child prove the refusal; the existing page-shape
-   test now uses a fresh store. The former contrary assertion is superseded
-   by these tests, not discarded without a replacement.
-7. The tests-bite journal also recorded a surviving documentation mutation:
-   `No other test reads` passed the guard that matched only lowercase text.
-   The module-doc check now folds ASCII case. Its regression checks lower,
-   sentence and upper case, plus a sentence without that claim, so reverting
-   only the case fold fails `the_module_doc_claim_guard_catches_each_ascii_case`.
-   The existing module-doc assertion uses that same predicate. AF-39 names
-   both checks. No operator behaviour changes for this test correction.
-
-These are reporting and test changes. No stored record format, condition bit,
-run identity term, lockfile, front-end file or market-data input is changed.
-The remaining full-suite, mutation and coverage measurements are kept in the
-operator's CLI repair evidence; this paragraph makes no completion claim.
