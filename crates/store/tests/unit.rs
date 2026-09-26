@@ -362,9 +362,10 @@ fn negative_prices_are_not_sane_however_well_ordered() {
                 ..real
             },
         ),
-        // Isolate the final sign check too: the earlier negative low above
-        // short-circuits it. Ordering also rejects this case, so this is not
-        // evidence that the redundant close-sign clause has a unique mutant.
+        // Isolate these sign checks too: the earlier negative open/low above
+        // short-circuit them. Ordering also rejects these cases, so this is
+        // not evidence that either redundant sign clause has a unique mutant.
+        ("high alone", Bar { high: -1, ..real }),
         ("close alone", Bar { close: -1, ..real }),
     ] {
         assert!(!bar.ohlc_is_sane(), "{name} below zero must be refused");
