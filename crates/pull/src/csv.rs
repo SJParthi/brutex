@@ -43,8 +43,8 @@
 //! [`fields_of`], however many commas the line holds, and parsed into integers
 //! in place. Until D-0721 this paragraph said the same while every row collected
 //! its fields into a vector sized to its commas, before the field count was
-//! checked. Held by `tests::decode_rows_collects_nothing_per_row` and
-//! `tests::a_lines_fields_land_in_a_fixed_array_and_are_counted_whole`.
+//! checked. Held by `pull::csv::decode_rows_collects_nothing_per_row` and
+//! `pull::csv::a_lines_fields_land_in_a_fixed_array_and_are_counted_whole`.
 //!
 //! **A row costs time linear in its line's bytes, and no line-length cap
 //! exists.** `body.lines()` finds the line's end and `line.split(',')` in
@@ -55,7 +55,10 @@
 //! **The row vector is not reserved.** [`decode`] takes no bound and
 //! `decode_rows` starts from `Vec::new()`, so an append is amortised O(1), not
 //! worst-case O(1). This paragraph used to say the vector was reserved from a
-//! caller-supplied bound, and no caller supplies one.
+//! caller-supplied bound, and no caller supplies one. **UNVERIFIED as a
+//! measurement:** the amortised bound is `Vec::push`'s own, argued from the
+//! code, and `crates/pull/benches/ratio.rs` does not time [`decode`].
+//! `docs/06-limits.md` records it, D-0721.
 
 use crate::fetch::{FetchError, MAX_ROWS, RawRow};
 use crate::vendor::DateFormat;
