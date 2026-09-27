@@ -62,23 +62,37 @@ causal signal column and preparing the existing execution/forward series. The
 new `Checkpoint::validate_for` precheck runs before any historical depth evidence
 is copied into a new attempt.
 
-The CLI wrapper starts with `BRTXAN01`, an exact depth-row count and an exact
-engine-payload byte length. It then stores each original `DepthRow` as its ten
-existing 64-bit fields and the engine payload. Thus earlier per-depth admitted
-and pair counters survive exactly rather than being guessed from the final
-counter. A fallible buffer limits the complete journal record to 64 MiB. Exceeding
-that physical admission refuses the attempt before advancing; it is not called
+The CLI wrapper is version 2, `and-checkpoint-v2` (D-0712). Version 1
+(`BRTXAN01`) wrote the whole engine payload, every retained level, into one
+64 MiB journal entry at every boundary, so a history past that admission
+refused after building the level that crossed it, and a rerun rebuilt the same
+level and refused again. Version 2 writes, at the boundary for depth `k`, only
+level `k`'s engine bytes (`CheckpointView::write_current_to`) as chunk entries
+of at most 32 MiB, each headed by `BRTXAC02`, its depth, its index within the
+level and the sequence of the boundary before it. It then writes one boundary
+record, `BRTXAB02`: an exact depth-row count, engine-prefix length and chunk
+count, each original `DepthRow` as its ten existing 64-bit fields, this
+boundary's engine prefix (`CheckpointView::write_prefix_to`: header, offers,
+exclusions) and, per level, each chunk's sequence, length and seal. Thus
+earlier per-depth admitted and pair counters survive exactly rather than being
+guessed from the final counter. The prefix followed by every level in depth
+order is `write_to`'s payload byte for byte. A chunk or boundary record that
+cannot fit one entry refuses the attempt before advancing; it is not called
 extinction or silently truncated.
 
-The shared immutable checkpoint journal seals and acknowledges the complete
-wrapper before its corresponding attempt depth is appended. If that depth
-append fails, the new checkpoint remains recoverable, the attempt refuses, and
-no next depth starts. A new attempt restores only the prior depth rows; the
-engine's first resumed callback appends the current row exactly once. Replaying
-an unchanged terminal checkpoint adds no duplicate checkpoint reservation.
-The final self-contained checkpoint is reopened and compared with its exact
-acknowledged sequence and seal before a rankable run is returned. A test changes
-the checkpoint after its final callback and requires a refused attempt.
+The shared immutable checkpoint journal seals and acknowledges a boundary's
+chunks and then its record before its corresponding attempt depth is appended.
+If that depth append fails, the new checkpoint remains recoverable, the attempt
+refuses, and no next depth starts. Recovery reads the newest boundary record;
+when the newest entry is a chunk whose boundary never landed, it reads the
+boundary that chunk names, and that one level is rebuilt. A new attempt
+restores only the prior depth rows; the engine's first resumed callback appends
+the current row exactly once. Replaying an unchanged terminal checkpoint adds
+no duplicate checkpoint reservation. The final boundary record is reopened and
+compared with its exact acknowledged sequence and seal, and every chunk it
+names with its recorded seal, before a rankable run is returned. A test changes
+the boundary record, and another a chunk, after the final callback and requires
+a refused attempt.
 Only this stored single-month sweep entry point is wired here; other entry
 points do not inherit resumability from compiling the engine API.
 
@@ -114,10 +128,12 @@ counters; this is not a per-pair hard work or latency bound.
 ## Resource and verification limits
 
 The checkpoint callback happens at level boundaries. Work in an interrupted
-in-progress level is repeated from the last durable completed level. A complete
-checkpoint rewrite costs O(retained history); saving every level can repeatedly
-write earlier levels. Neither serialization nor reading/ranking/searching a
-growing result set is claimed to have O(1) time or space.
+in-progress level is repeated from the last durable completed level. A boundary
+writes its own level's bytes and a boundary record that lists every depth row
+and every chunk so far; it no longer rewrites earlier levels (D-0712). Resuming
+and completing still read every chunk. Neither serialization nor
+reading/ranking/searching a growing result set is claimed to have O(1) time or
+space.
 
 The requested support-lane policy is matched exactly. Its existing runtime CPU
 upper bound can differ between hosts; successful support results remain

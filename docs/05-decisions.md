@@ -38436,3 +38436,138 @@ cursor (`580:16`, `587:20`, `601:24`, each `+=` to `-=`). A timeout is not
 counted as caught here. Gate 18 still cannot see this file, as D-0691 records,
 so a later change to it has mutation evidence only if its author collects it
 this way.
+
+### D-0711 — Hash a Boolean family's source once and attest each side once, not per program — 2026-09-27
+
+W2-cli2-3. For every program × side of a Boolean catalog family, `produce_side`
+in `crates/cli/src/boolean_candidate_v1.rs` ran two passes that read no
+program: `runner::identity::data_digest_with_daily_reference` over the signal,
+exact-minute and daily streams, and `attest_training` over the side's TRAINING
+slice. `execution_run` in `boolean_oos_v1.rs` ran the same digest for every
+program × side of the later comparison. The runner documents the attestation
+as the once-per-slice half: a caller "pricing many candidates over one slice
+reads the slice once and not once per candidate" (`attest_training`,
+`crates/runner/src/exit_grid_policy.rs`).
+
+**Reproduced first, on `origin/main` (96194c11).** With a thread-local counter
+added at each of those three call sites and nothing else changed, the test
+fixture's three-program family made 6 digests and 6 attestations in TRAINING
+(`left: (6, 6)`), and its later comparison 6 digests (`left: (6, 0)`).
+
+**The change.** `SourceDigest` hashes the three streams the first time a
+program asks and returns the stored digest after; `PricedSide` attests its side
+the first time a program prices it and returns the stored attestation after.
+Both live for one family's `compute`, and the later comparison holds its own
+`SourceDigest`. The same family now makes 1 digest and 2 attestations, and its
+later comparison 1 digest. With only the reuse removed (each call hashing or
+attesting again, the counters kept) the two tests fail again with `(6, 6)` and
+`(6, 0)`.
+
+**First use, not ahead of the loop.** A refusal of either pass still meets the
+first program's first side where it did on `origin/main`: the digest before
+that side's attempt begins, the attestation inside it. Hoisting the attestation
+ahead of the program loop would refuse before any per-program attempt exists,
+changing the evidence a refused family leaves.
+
+**Same bytes.** The fixture family's identity and completion digest, and its
+later comparison's, printed from `origin/main` and from this change, are equal:
+training `0ba9c5e1…83de` completing `6b002064…a77b`, later comparison
+`6ae73684…7537` completing `7f455d4c…1b77`, from two fixture roots each.
+
+**Not closed here.** Each program × side still mints its run through
+`ExpressionExecutionRunV1::new_with_daily_reference`, whose runner constructor
+hashes the three streams again (`let expected_data_digest =
+crate::identity::data_digest_with_daily_reference(`), checks the execution
+subslice (`require_exact_execution_subslice(reference_minute_context,
+evaluated_execution_1m)?;`) and hashes the execution bars
+(`execution_digest: crate::identity::data_digest(exact_execution),`), and the
+later comparison's `evaluate_expression_oos` hashes the later bars per program
+(`let execution = crate::identity::data_digest(bars);`). Those are runner
+passes, ledgered as W3-runner2-3, W3-runner2-5 and W3-runner2-4 for the runner
+group, and recorded in `docs/06-limits.md`.
+
+### D-0712 — Save each AND checkpoint boundary's own level, never the whole history again — 2026-09-27
+
+AC-whp-o1-0. `cli::and_checkpoint`, which `stored_month_kernel` calls for
+`sweep-stored` and `sweep-audited-stored`, re-encoded every retained level into
+one in-memory buffer at every level boundary (`let payload = encode(view,
+&rows)?;`, then `journal.publish(&payload, MAX_BYTES)?`) under a 64 MiB
+admission (`const MAX_BYTES: u64 = 64 * 1024 * 1024;`).
+
+**Reproduced first, on `origin/main` (96194c11).** Twenty-one live conditions
+true together on two of three bars. Attempt 1 acknowledged depths 1 to 10 (21,
+210, 1,330, 5,985, 20,349, 54,264, 116,280, 203,490, 293,930 and 352,716
+survivors), built depth 11 and refused with `checkpoint sink refused:
+checkpoint I/O refused: AND checkpoint exceeds 64 MiB byte admission`. Attempt
+2 under the same identity acknowledged depth 10 again, rebuilt depth 11 and
+refused with the same words. The test
+`a_production_history_past_64_mib_completes_and_replays_without_recomputing`,
+run there with only a namespace constant added, failed with that error.
+
+**The change: version 2, `and-checkpoint-v2`.** At the boundary for depth `k`
+the level's engine bytes, from the new `CheckpointView::write_current_to`, are
+published as chunk entries of at most 32 MiB of level bytes (`CHUNK_BYTES`),
+each headed by `BRTXAC02`, the depth, its index within the level and the
+sequence of the boundary before it. Then one boundary record, `BRTXAB02`: the
+depth rows, this boundary's engine prefix from the new
+`CheckpointView::write_prefix_to` (header, offers, exclusions), and each level's
+chunks by sequence, length and seal. Resuming reads the newest boundary record,
+or, when the newest entry is a chunk an interrupted boundary never
+acknowledged, the boundary that chunk names, and streams the prefix and every
+chunk through `Checkpoint::read_from`, each chunk checked against its recorded
+seal, length, depth and index. The final boundary and every chunk it names are
+reopened before a rankable run returns, as the whole version-1 payload was.
+`write_to` is now `write_prefix_to` followed by every level as
+`write_current_to` writes it, and an engine test holds a boundary's prefix
+followed by every level saved so far equal to `write_to` byte for byte.
+
+**After.** The same production-size test completes: 2,097,151 survivors, a
+history over 64 MiB, and a replay of the completed identity makes one callback
+and publishes nothing. With `and_checkpoint.rs` alone put back to `origin/main`
+and that test run against it, it fails again with the version-1 refusal.
+
+**Not changed.** The walk, the depth rows, the ranking and the run's nine
+identity terms. The version-1 namespace is still accepted by `Journal::open`,
+and nothing writes it. A version-1 journal is not resumed by this build: the
+stored run identity carries the build's commit (`let id = identity(&Run {` …
+`commit,` in `stored_month_kernel`), so a journal an earlier build wrote was
+never under this build's identity. The retained history is still held in
+memory, as `docs/20-sweep-resume.md` states. What a boundary still writes, and
+what resuming reads, is recorded in `docs/06-limits.md`.
+
+### D-0713 — Record that a resumed Boolean campaign rung prices its pinned families again — 2026-09-27
+
+W2-cli2-8. Recorded, not fixed.
+
+**Reproduced first, on `origin/main` (96194c11).** A one-rung (1min) campaign
+is refused after its Families stage was published, by a regular file where the
+statistics namespace must be created: the row is saved `Refused` with the
+family's completion pin and no statistics link. With the file removed the same
+campaign resumes and completes the rung under the same pin, and the family's
+latest candidate attempt is 9 where the attempt that produced the pin was 1:
+the pinned family was priced again. `execute_rung` hands the rung to
+`prepared.input.run(rung, &prepared.programs, out, |stage| {` with no pins,
+and `produce_identified` always reaches `let produced = compute(&request,
+&source, identity, commit);`. The recorded pins are only compared (`"campaign
+retry candidate completion differs"`).
+
+**Why it is not fixed here.** Skipping a pinned family needs the family back
+as the `CommittedBooleanFamilyV1` that statistics consumes by value
+(`statistics::produce(root, families, plan.procedure, plan.bounds)?`). That
+value carries runner capabilities the saved body does not hold: each selected
+row's `SelectedExpressionExitV1`, each program × side's
+`ExpressionTrainingAnchorV1` and both sides' resolutions. The body reader
+rebuilds rows with `selected: None,`. Reopening a pinned family without pricing
+it therefore needs a runner-side way to re-mint those capabilities from sealed
+bytes, which is a design change to the runner's capability model rather than a
+cli repair.
+
+**The limit, stated.** A resume skips only a rung already completed
+(`.is_some_and(|row| row.status == Status::Completed)`); any other row goes
+back through `execute_rung`, whose run maps every family of the scope
+(`self.scope.families()` then `.par_iter()`). So a rung saved `Refused`, as
+tested, or left `Running` by an interrupted process, prices all its families
+again, pinned or not, and the recorded pin must equal the new one or the retry
+refuses. It is recorded in `docs/06-limits.md` and pinned by
+`a_resumed_refused_rung_prices_its_pinned_family_again`, which a fix must
+change.
