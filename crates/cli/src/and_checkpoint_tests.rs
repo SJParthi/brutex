@@ -16,6 +16,9 @@ const SMALL: Limits = Limits {
     entry: 4096,
     chunk: 1024,
 };
+const LENGTHS: &str = "AND checkpoint boundary has invalid exact lengths";
+const LEVEL: &str = "AND checkpoint boundary names an empty or excess level";
+const ORDER: &str = "AND checkpoint boundary chunk order or length is invalid";
 
 fn column() -> Result<engine::column::Column, String> {
     let full = POSITIONS
@@ -372,6 +375,44 @@ fn a_first_boundary_that_never_landed_restarts_and_its_refusal_names_the_sizes()
     Ok(())
 }
 
+/// A boundary record exactly one entry's admission long lands; the admission
+/// is inclusive. Level 1 is eight chunks of at most 64 bytes, published as
+/// sequences 1 to 8, and its record at sequence 9 is 760 bytes, which with the
+/// journal's 96-byte envelope is the whole admission. The depth-2 record is
+/// longer and refuses, naming its depth.
+#[test]
+fn a_boundary_record_exactly_one_entry_long_lands() -> Result<(), String> {
+    let scratch = Scratch::new().map_err(error)?;
+    let attempt = sweep_evidence::begin(&scratch.0, ID, Operation::Sweep)?;
+    let exact = Limits {
+        entry: 760 + ENVELOPE,
+        chunk: 64,
+    };
+    let refused = walk_within(
+        &scratch.0,
+        &attempt,
+        Ladder::with_min_hits(1),
+        &column()?,
+        &POSITIONS,
+        exact,
+        &mut |_| Ok(()),
+    )
+    .err()
+    .ok_or("the depth-2 boundary record must refuse")?;
+    assert!(
+        refused.contains("boundary record at depth 2 needs"),
+        "{refused}"
+    );
+    drop(attempt);
+    let journal = Journal::open(&scratch.0, NAMESPACE, ID)?;
+    let saved = journal.read(9, MAX_BYTES)?;
+    assert_eq!(saved.payload.len(), 760);
+    let boundary = decode_boundary(&saved.payload, 9)?;
+    assert_eq!(boundary.rows.len(), 1);
+    assert_eq!(boundary.levels.iter().map(Vec::len).sum::<usize>(), 8);
+    Ok(())
+}
+
 #[test]
 fn depth_evidence_failure_stops_after_the_just_published_recovery_point() -> Result<(), String> {
     let scratch = Scratch::new().map_err(error)?;
@@ -413,11 +454,12 @@ fn depth_evidence_failure_stops_after_the_just_published_recovery_point() -> Res
     Ok(())
 }
 
-/// Every count, length, order and seal in a boundary record is exact: each
-/// altered alone refuses, and nothing is truncated or padded.
-#[test]
-fn boundary_counts_lengths_order_and_seals_refuse_exactly() -> Result<(), String> {
-    let scratch = Scratch::new().map_err(error)?;
+/// A SMALL walk paused after its depth-2 boundary: level 1 is one chunk
+/// (sequence 1) and level 2 two (sequences 3 and 4), named by the boundary
+/// record at sequence 5.
+fn paused_at_depth_two(
+    scratch: &Scratch,
+) -> Result<(Journal, crate::search_checkpoint::Saved, Boundary), String> {
     let attempt = sweep_evidence::begin(&scratch.0, ID, Operation::Sweep)?;
     assert!(
         walk_within(
@@ -435,8 +477,10 @@ fn boundary_counts_lengths_order_and_seals_refuse_exactly() -> Result<(), String
         )
         .is_err()
     );
+    drop(attempt);
     let journal = Journal::open(&scratch.0, NAMESPACE, ID)?;
     let saved = journal.latest(MAX_BYTES)?.ok_or("checkpoint")?;
+    assert_eq!(saved.sequence, 5);
     let boundary = decode_boundary(&saved.payload, saved.sequence)?;
     assert_eq!(boundary.rows.len(), 2);
     assert_eq!(
@@ -444,72 +488,154 @@ fn boundary_counts_lengths_order_and_seals_refuse_exactly() -> Result<(), String
         [1, 2]
     );
     replay(&journal, &boundary, ID, SMALL)?;
-    let prefix = boundary.prefix.len();
-    let pieces_at = BOUNDARY_HEADER + 2 * DEPTH_BYTES + prefix;
-    for (offset, word) in [
-        (0, 0),
-        (8, 0),
-        (8, 386),
-        (16, 0),
-        (24, 1),
-        (24, 4),
-        (BOUNDARY_HEADER + 8 * 8, 2),
-        (pieces_at, 0),
-        (pieces_at, 2),
-        (pieces_at + 8, 0),
-        (pieces_at + 8, 3),
-        (pieces_at + 8 + 8, 0),
+    Ok((journal, saved, boundary))
+}
+
+/// Every count, length and order in a boundary record is exact: each altered
+/// alone refuses in its own words, and nothing is truncated or padded.
+#[test]
+fn boundary_counts_lengths_and_order_refuse_exactly() -> Result<(), String> {
+    let scratch = Scratch::new().map_err(error)?;
+    let (journal, saved, boundary) = paused_at_depth_two(&scratch)?;
+    let pieces_at = BOUNDARY_HEADER + 2 * DEPTH_BYTES + boundary.prefix.len();
+    // The word after level 1's one chunk is level 2's chunk count.
+    for (offset, word, refusal) in [
+        (0, 0, "unsupported AND checkpoint boundary version"),
+        (8, 0, LENGTHS),
+        (8, 386, LENGTHS),
+        (16, 0, LENGTHS),
+        (24, 1, LENGTHS),
+        (24, 4, LENGTHS),
+        (
+            BOUNDARY_HEADER + 8 * 8,
+            2,
+            "invalid depth reconciliation byte",
+        ),
+        (pieces_at, 0, LEVEL),
+        (pieces_at, 4, LEVEL),
+        (pieces_at + 8 + PIECE_BYTES, 3, LEVEL),
+        (pieces_at + 8, 0, ORDER),
+        (pieces_at + 8, 3, ORDER),
+        (pieces_at + 8 + 8, 0, ORDER),
     ] {
         let mut altered = saved.payload.clone();
         altered
             .get_mut(offset..offset + 8)
             .ok_or("fixture field")?
             .copy_from_slice(&u64::to_le_bytes(word));
-        assert!(
-            decode_boundary(&altered, saved.sequence)
-                .and_then(|decoded| replay(&journal, &decoded, ID, SMALL))
-                .is_err(),
+        assert_eq!(
+            decode_boundary(&altered, saved.sequence).err().as_deref(),
+            Some(refusal),
             "offset {offset} word {word}"
         );
     }
+    // Level 1 naming two chunks misreads what follows it and still refuses.
+    let mut altered = saved.payload.clone();
+    altered
+        .get_mut(pieces_at..pieces_at + 8)
+        .ok_or("fixture field")?
+        .copy_from_slice(&u64::to_le_bytes(2));
     assert!(
-        decode_boundary(&saved.payload, 1).is_err(),
+        decode_boundary(&altered, saved.sequence)
+            .and_then(|decoded| replay(&journal, &decoded, ID, SMALL))
+            .is_err()
+    );
+    assert_eq!(
+        decode_boundary(&saved.payload, 1).err().as_deref(),
+        Some("AND checkpoint boundary chunks do not precede it exactly"),
         "chunks must precede their boundary"
     );
-    let mut resealed = boundary.levels.clone();
-    let seal = resealed
-        .get_mut(1)
-        .and_then(|level| level.first_mut())
-        .ok_or("level 2 chunk")?;
-    seal.seal = [0; 32];
-    let forged = Boundary {
+    Ok(())
+}
+
+/// Replay reads each named chunk only as its boundary record describes it: a
+/// changed seal, a changed length or levels in the wrong depth order refuse
+/// as a chunk that differs from its record, and a foreign identity refuses.
+#[test]
+fn replayed_chunks_must_match_their_seals_lengths_and_depths() -> Result<(), String> {
+    const DIFFERS: &str = "AND checkpoint chunk differs from its boundary record";
+    let scratch = Scratch::new().map_err(error)?;
+    let (journal, _, boundary) = paused_at_depth_two(&scratch)?;
+    let with = |levels: Vec<Vec<Piece>>| Boundary {
         rows: boundary.rows.clone(),
         prefix: boundary.prefix.clone(),
-        levels: resealed,
+        levels,
     };
-    assert!(replay(&journal, &forged, ID, SMALL).is_err(), "seal");
+    let mut resealed = boundary.levels.clone();
+    resealed
+        .get_mut(1)
+        .and_then(|level| level.first_mut())
+        .ok_or("level 2 chunk")?
+        .seal = [0; 32];
     let mut stretched = boundary.levels.clone();
     stretched
         .get_mut(1)
         .and_then(|level| level.get_mut(1))
         .ok_or("level 2 second chunk")?
         .length += 1;
-    let forged = Boundary {
-        rows: boundary.rows.clone(),
-        prefix: boundary.prefix.clone(),
-        levels: stretched,
-    };
-    assert!(replay(&journal, &forged, ID, SMALL).is_err(), "length");
-    let swapped = Boundary {
-        rows: boundary.rows.clone(),
-        prefix: boundary.prefix.clone(),
-        levels: boundary.levels.iter().rev().cloned().collect(),
-    };
-    assert!(
-        replay(&journal, &swapped, ID, SMALL).is_err(),
-        "depth order"
-    );
+    let swapped = boundary.levels.iter().rev().cloned().collect();
+    for (case, levels) in [
+        ("seal", resealed),
+        ("length", stretched),
+        ("depth order", swapped),
+    ] {
+        let refused = replay(&journal, &with(levels), ID, SMALL)
+            .err()
+            .ok_or(case)?;
+        assert!(refused.contains(DIFFERS), "{case}: {refused}");
+    }
     assert!(replay(&journal, &boundary, [0; 32], SMALL).is_err());
+    Ok(())
+}
+
+/// A boundary record of zeros under a header naming these counts, sized
+/// exactly as those counts require.
+fn forged(count: usize, prefix: usize, pieces: usize) -> Result<Vec<u8>, String> {
+    let bytes = boundary_bytes(count, prefix, pieces).ok_or("forged size")?;
+    let mut out = vec![0; bytes];
+    for (index, word) in [
+        u64::from_le_bytes(BOUNDARY_MAGIC),
+        count as u64,
+        prefix as u64,
+        pieces as u64,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        out.get_mut(index * 8..index * 8 + 8)
+            .ok_or("forged header")?
+            .copy_from_slice(&word.to_le_bytes());
+    }
+    Ok(out)
+}
+
+/// Counts whose record length agrees with them are still held to their
+/// bounds: no rows, more than `MAX_ROWS`, and fewer chunks than rows each
+/// refuse as invalid lengths. At exactly `MAX_ROWS` the counts pass and the
+/// zeroed first level is what refuses. A byte past the counted length refuses
+/// as invalid lengths too.
+#[test]
+fn boundary_counts_are_held_to_their_bounds_where_the_length_agrees() -> Result<(), String> {
+    for (count, prefix, pieces, refusal) in [
+        (0, 8, 0, LENGTHS),
+        (MAX_ROWS + 1, 0, MAX_ROWS + 1, LENGTHS),
+        (2, 0, 1, LENGTHS),
+        (MAX_ROWS, 0, MAX_ROWS, LEVEL),
+    ] {
+        assert_eq!(
+            decode_boundary(&forged(count, prefix, pieces)?, u64::MAX)
+                .err()
+                .as_deref(),
+            Some(refusal),
+            "{count} rows, {prefix} prefix bytes, {pieces} chunks"
+        );
+    }
+    let mut longer = forged(1, 0, 1)?;
+    longer.push(0);
+    assert_eq!(
+        decode_boundary(&longer, u64::MAX).err().as_deref(),
+        Some(LENGTHS)
+    );
     Ok(())
 }
 
@@ -524,28 +650,34 @@ fn an_entry_recovery_cannot_place_refuses() -> Result<(), String> {
             .chain([0; 56])
             .collect::<Vec<u8>>()
     };
-    for (case, payload) in [
-        ("unknown magic", b"not a checkpoint entry".to_vec()),
-        ("depth-2 chunk after no boundary", chunk(2, 0)),
-        ("chunk naming a later boundary", chunk(1, 9)),
+    for (payload, refusal) in [
+        (
+            b"not a checkpoint entry".to_vec(),
+            "unsupported AND checkpoint entry",
+        ),
+        (
+            chunk(2, 0),
+            "AND orphan chunk follows no boundary but is not depth 1",
+        ),
+        (chunk(1, 9), "AND orphan chunk names a later boundary"),
+        (chunk(2, 1), "AND orphan chunk names a later boundary"),
     ] {
         let scratch = Scratch::new().map_err(error)?;
         let mut journal = Journal::open(&scratch.0, NAMESPACE, ID)?;
-        journal.publish(&payload, MAX_BYTES)?;
+        assert_eq!(journal.publish(&payload, MAX_BYTES)?.0, 1);
         drop(journal);
         let attempt = sweep_evidence::begin(&scratch.0, ID, Operation::Sweep)?;
-        assert!(
-            walk(
-                &scratch.0,
-                &attempt,
-                Ladder::with_min_hits(1),
-                &column()?,
-                &POSITIONS,
-                &mut |_| Ok(()),
-            )
-            .is_err(),
-            "{case}"
-        );
+        let refused = walk(
+            &scratch.0,
+            &attempt,
+            Ladder::with_min_hits(1),
+            &column()?,
+            &POSITIONS,
+            &mut |_| Ok(()),
+        )
+        .err()
+        .ok_or(refusal)?;
+        assert_eq!(refused, refusal);
     }
     // A chunk after a real boundary must be the level after it.
     let scratch = Scratch::new().map_err(error)?;
@@ -762,6 +894,14 @@ fn a_production_history_past_64_mib_completes_and_replays_without_recomputing() 
         .map(|level| 56 + 56 * level.frequent.len() as u64)
         .sum::<u64>();
     assert!(history > MAX_BYTES, "{history} bytes of history");
+    // Each level is saved as one chunk entry per 32 MiB of its own bytes.
+    let (_, boundary) = newest_boundary(&scratch.0)?;
+    assert_eq!(boundary.levels.len(), walked.levels.len());
+    for (level, pieces) in walked.levels.iter().zip(&boundary.levels) {
+        let bytes = 56 + 56 * level.frequent.len() as u64;
+        assert_eq!(pieces.len() as u64, bytes.div_ceil(32 << 20));
+        assert_eq!(pieces.iter().map(|piece| piece.length).sum::<u64>(), bytes);
+    }
 
     let journal = Journal::open(&scratch.0, NAMESPACE, ID)?;
     let next = journal.next_sequence();

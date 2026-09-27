@@ -327,7 +327,10 @@ impl Chunks<'_> {
     }
 
     fn finish(mut self) -> Result<Vec<Piece>, String> {
-        if self.buffer.len() > CHUNK_HEADER {
+        // A buffer is empty between chunks, and otherwise holds its header
+        // and at least one level byte: `write` adds the header only with bytes
+        // to follow it.
+        if !self.buffer.is_empty() {
             self.publish()?;
         }
         if self.pieces.is_empty() {
