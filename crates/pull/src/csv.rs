@@ -1499,24 +1499,49 @@ mod tests {
 
     /// Every layout this decoder reads fits the fixed field array, and the
     /// widest fills it. D-0721.
+    ///
+    /// **THE LAYOUTS ARE WALKED THROUGH A MATCH, NOT LISTED BY HAND.** A list
+    /// written here would not grow when `Columns` did, and a fifth layout
+    /// wider than `MAX_FIELDS` would have every row refused as a
+    /// `FieldCount` whose `got` equals its `want`. `after` matches every
+    /// variant with no wildcard arm, so a variant added to `Columns` does not
+    /// compile until `after` gives it an arm. `Columns` is
+    /// `#[non_exhaustive]`, which binds other crates and not this one.
+    ///
+    /// The walk also checks each layout's discriminant against its place, so
+    /// a variant declared anywhere but last and left off the walk shifts a
+    /// discriminant and fails here. One declared last whose predecessor's arm
+    /// still returns `None` is not walked; its own `None` arm, beside
+    /// another, is what shows it.
     #[test]
     fn every_layout_fits_the_fixed_field_array() {
-        for columns in [
-            Columns::TrueDataIndex,
-            Columns::TrueDataFutures,
-            Columns::Gdfl,
-            Columns::TrueDataFno,
-        ] {
+        /// The layout declared after `columns`, or `None` after the last.
+        const fn after(columns: Columns) -> Option<Columns> {
+            match columns {
+                Columns::TrueDataIndex => Some(Columns::TrueDataFutures),
+                Columns::TrueDataFutures => Some(Columns::Gdfl),
+                Columns::Gdfl => Some(Columns::TrueDataFno),
+                Columns::TrueDataFno => None,
+            }
+        }
+
+        let mut widest = 0;
+        let mut place: usize = 0;
+        let mut next = Some(Columns::TrueDataIndex);
+        while let Some(columns) = next {
+            assert_eq!(
+                columns as usize, place,
+                "{columns:?} is walked in the order it is declared"
+            );
             assert!(
                 columns.count() <= MAX_FIELDS,
                 "{columns:?} has {} fields and the array holds {MAX_FIELDS}",
                 columns.count()
             );
+            widest = widest.max(columns.count());
+            place = place.saturating_add(1);
+            next = after(columns);
         }
-        assert_eq!(
-            Columns::Gdfl.count(),
-            MAX_FIELDS,
-            "the widest layout fills it"
-        );
+        assert_eq!(widest, MAX_FIELDS, "the widest layout fills it");
     }
 }

@@ -38419,7 +38419,14 @@ so no caller supplies one. Ledger row W1-pull1-3.
 - A row's fields are borrowed into a `[&str; MAX_FIELDS]` array by `fields_of`.
   `MAX_FIELDS` is 10, the widest layout's count, and
   `every_layout_fits_the_fixed_field_array` pins every layout inside it.
-  Every field is still counted, so `CsvError::FieldCount` reports the line's
+  It walks the layouts through `after`, a match on `Columns` with no
+  wildcard arm, so a layout added to the enum does not compile until the
+  test names it. Its first version listed the four by hand, and review
+  found that a fifth layout of 11 fields would have passed it while
+  `fields_of` refused every row as `FieldCount` with `got` equal to `want`.
+  With such a layout appended, the old test passed, the new one did not
+  compile until `after` named it, and once named it failed at "Wide has 11
+  fields and the array holds 10". Every field is still counted, so `CsvError::FieldCount` reports the line's
   true width as before, but only the first ten are kept, and nothing is
   allocated for the rest. A `want` wider than the array is refused rather
   than read short.
