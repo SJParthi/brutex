@@ -8772,10 +8772,15 @@ claimed the opposite.
   returns, which is what makes a malformed member refuse the folder before
   any bar is written. Closing the limit there needs a decision between a
   second decoding pass and giving that up.
-- **The census path does not need them.** It keeps only the reach, the
-  instrument names and the rejected members, and holds every row because it
-  shares the walk. Closing it there would be a walk that folds each member
-  into the census and drops its rows before decoding the next.
+- **The census path does not need them.** What it returns holds no row.
+  `folder::read_census` returns a `Census`, whose fields are
+  `pub reach: Reach`, `pub instruments: Vec<String>`,
+  `pub collisions: usize` and `pub rejected: Vec<Rejected>`. A `Rejected` is
+  `pub path: PathBuf` and `pub why: String`, and `Reach` is an enum deriving
+  `Copy`. `folder::read_reach` returns `Result<Reach, FolderError>`. Both hold every row while they walk, because
+  `read_census` walks through `archive::read_dir_reporting` and `read_reach`
+  through `archive::read_dir`. Closing it there would be a walk that folds
+  each member into the census and drops its rows before decoding the next.
 
 ## A CSV row costs time linear in its line, and neither a line nor a member is capped — D-0721, 26 September 2026
 
