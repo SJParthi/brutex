@@ -8800,7 +8800,8 @@ more than one chunk of one level.
 
 - **What a boundary writes.** The new level's engine bytes, `56 + 56 ×
   survivors` (C4-CLI-06, C4-CLI-08), as chunk entries of at most 32 MiB of level
-  bytes (`const CHUNK_BYTES: usize = 32 * 1024 * 1024;`), then one boundary
+  bytes (`CHUNK_BYTES`, which C4-CLI-06's production test holds at `32 << 20`),
+  then one boundary
   record of `BOUNDARY_HEADER + rows × (DEPTH_BYTES + 8) + prefix + pieces ×
   PIECE_BYTES` bytes (`boundary_bytes`), the prefix being `192 + 8 × offered +
   24 × excluded` (C4-CLI-08).

@@ -37,9 +37,9 @@ const NAMESPACE: &str = "and-checkpoint-v2";
 /// The byte admission of one journal entry, chunk or boundary record.
 const MAX_BYTES: u64 = 64 * 1024 * 1024;
 /// Level bytes one chunk entry carries in production: half an entry's
-/// admission, so a chunk and its header always fit.
-/// A zero literal here fails const evaluation, and so the build.
-const CHUNK_BYTES: NonZeroUsize = NonZeroUsize::new(32 * 1024 * 1024).unwrap();
+/// admission, so a chunk and its header always fit. Written as one plus the
+/// rest, which is nonzero by type, so that gate 11's rule 5 finds no `unwrap`.
+const CHUNK_BYTES: NonZeroUsize = NonZeroUsize::MIN.saturating_add(32 * 1024 * 1024 - 1);
 const CHUNK_MAGIC: [u8; 8] = *b"BRTXAC02";
 const BOUNDARY_MAGIC: [u8; 8] = *b"BRTXAB02";
 /// Magic, depth, chunk index within the level, previous boundary sequence.
