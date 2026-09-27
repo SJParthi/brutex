@@ -38415,20 +38415,28 @@ watching the shared `packed-refs`.
 
 **After.** The same scratch crate holding this change's file printed `357
 mutants tested in 12m: 8 missed, 323 caught, 17 unviable, 9 timeouts`, and
-every mutant the ledger names above is in its caught list. Each of the 8
-survivors changes nothing this platform can observe:
+every mutant the ledger names above is in its caught list. Five of the 8
+survivors change nothing this platform can observe:
 
 - `247:9` and `318:13`, `||` to `&&` between "empty" and "starts with `/`" for
   a ref or an index name. The next clause refuses any empty segment, which both
   cases have.
 - `271:34`, `||` to `&&` skipping `#` and `^` lines in `packed-refs`. Neither
   kind of line has the `<40 hex> <ref>` shape the lookup requires.
-- `511:20` twice and `511:40`, the pack index's minimum length. A shorter file
-  fails a later bounded read and is refused the same way.
 - `787:5`, the `cfg(not(unix))` `executable`, which this platform does not
   compile.
 - `1077:44`, `|` to `^` joining two hexadecimal nibbles, whose bits do not
   overlap.
+
+The other three are survivors, not equivalents: `511:20` (`<` to `==` and to
+`<=`) and `511:40` (`+` to `-`), the pack index's minimum length
+`PACK_INDEX_HEADER + 40` (`if bytes.len() < PACK_INDEX_HEADER + 40`). A file
+they judge differently from the original is at most that long, so for it to
+list HEAD's tree its last 20 bytes, which must be the SHA-1 of every byte
+before them (`if Sha1::digest(bytes.get(..body_len)?).as_slice() !=
+bytes.get(body_len..)?`), overlap its own entry table. A fixture could build
+one only by searching for a digest whose bytes agree with that table, and no
+test here does.
 
 The nine timeouts are six mutants of `pack_offset`'s binary search (`527:15`,
 `528:26`, `528:34`, `528:41`, `532:54` twice) and three of `apply_delta`'s
