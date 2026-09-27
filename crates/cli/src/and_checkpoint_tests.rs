@@ -858,6 +858,8 @@ fn final_checkpoint_corruption_after_callback_cannot_return_a_completed_sweep() 
 #[test]
 fn a_production_history_past_64_mib_completes_and_replays_without_recomputing() -> Result<(), String>
 {
+    // The production door's sizes, checked before the walk they govern.
+    assert_eq!((PRODUCTION.entry, PRODUCTION.chunk), (64 << 20, 32 << 20));
     let positions = runner::live_positions()
         .into_iter()
         .take(21)
