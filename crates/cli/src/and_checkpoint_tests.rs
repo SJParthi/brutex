@@ -14,8 +14,14 @@ const ID: [u8; 32] = [0x37; 32];
 /// needs four chunks.
 const SMALL: Limits = Limits {
     entry: 4096,
-    chunk: 1024,
+    chunk: chunk(1024),
 };
+
+/// A test chunk size, from a nonzero literal at every call.
+#[expect(clippy::unwrap_used, reason = "nonzero test literals")]
+const fn chunk(bytes: usize) -> NonZeroUsize {
+    NonZeroUsize::new(bytes).unwrap()
+}
 const LENGTHS: &str = "AND checkpoint boundary has invalid exact lengths";
 const LEVEL: &str = "AND checkpoint boundary names an empty or excess level";
 const ORDER: &str = "AND checkpoint boundary chunk order or length is invalid";
@@ -234,7 +240,7 @@ fn a_history_past_one_entrys_admission_completes_one_level_per_boundary() -> Res
         );
         assert_eq!(
             pieces.len() as u64,
-            bytes.div_ceil(SMALL.chunk as u64),
+            bytes.div_ceil(SMALL.chunk.get() as u64),
             "depth {} split into the fewest chunks",
             depth + 1
         );
@@ -323,7 +329,7 @@ fn a_first_boundary_that_never_landed_restarts_and_its_refusal_names_the_sizes()
     let column = column()?;
     let tight = Limits {
         entry: 32 + 64 + ENVELOPE,
-        chunk: 64,
+        chunk: chunk(64),
     };
     let first = sweep_evidence::begin(&scratch.0, ID, Operation::Sweep)?;
     let refused = walk_within(
@@ -386,7 +392,7 @@ fn a_boundary_record_exactly_one_entry_long_lands() -> Result<(), String> {
     let attempt = sweep_evidence::begin(&scratch.0, ID, Operation::Sweep)?;
     let exact = Limits {
         entry: 760 + ENVELOPE,
-        chunk: 64,
+        chunk: chunk(64),
     };
     let refused = walk_within(
         &scratch.0,
@@ -723,37 +729,31 @@ fn an_entry_recovery_cannot_place_refuses() -> Result<(), String> {
 
 #[test]
 fn a_chunk_that_cannot_fit_one_entry_refuses_before_publishing() -> Result<(), String> {
-    for limits in [
-        Limits {
-            entry: MAX_BYTES,
-            chunk: 0,
-        },
-        Limits {
-            entry: 32 + 64 + ENVELOPE - 1,
-            chunk: 64,
-        },
-    ] {
-        let scratch = Scratch::new().map_err(error)?;
-        let attempt = sweep_evidence::begin(&scratch.0, ID, Operation::Sweep)?;
-        let refused = walk_within(
-            &scratch.0,
-            &attempt,
-            Ladder::with_min_hits(1),
-            &column()?,
-            &POSITIONS,
-            limits,
-            &mut |_| Ok(()),
-        )
-        .err()
-        .ok_or("an unfit chunk must refuse")?;
-        assert!(
-            refused.contains("does not fit one journal entry"),
-            "{refused}"
-        );
-        drop(attempt);
-        let journal = Journal::open(&scratch.0, NAMESPACE, ID)?;
-        assert_eq!(journal.next_sequence(), 1, "nothing was published");
-    }
+    // One byte short of a 64-byte chunk, its 32-byte header and the envelope.
+    let limits = Limits {
+        entry: 32 + 64 + ENVELOPE - 1,
+        chunk: chunk(64),
+    };
+    let scratch = Scratch::new().map_err(error)?;
+    let attempt = sweep_evidence::begin(&scratch.0, ID, Operation::Sweep)?;
+    let refused = walk_within(
+        &scratch.0,
+        &attempt,
+        Ladder::with_min_hits(1),
+        &column()?,
+        &POSITIONS,
+        limits,
+        &mut |_| Ok(()),
+    )
+    .err()
+    .ok_or("an unfit chunk must refuse")?;
+    assert!(
+        refused.contains("does not fit one journal entry"),
+        "{refused}"
+    );
+    drop(attempt);
+    let journal = Journal::open(&scratch.0, NAMESPACE, ID)?;
+    assert_eq!(journal.next_sequence(), 1, "nothing was published");
     Ok(())
 }
 
@@ -859,7 +859,10 @@ fn final_checkpoint_corruption_after_callback_cannot_return_a_completed_sweep() 
 fn a_production_history_past_64_mib_completes_and_replays_without_recomputing() -> Result<(), String>
 {
     // The production door's sizes, checked before the walk they govern.
-    assert_eq!((PRODUCTION.entry, PRODUCTION.chunk), (64 << 20, 32 << 20));
+    assert_eq!(
+        (PRODUCTION.entry, PRODUCTION.chunk.get()),
+        (64 << 20, 32 << 20)
+    );
     let positions = runner::live_positions()
         .into_iter()
         .take(21)

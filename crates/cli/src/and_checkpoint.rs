@@ -23,6 +23,7 @@
 //! No entry holds more than one chunk of one level. D-0712.
 
 use std::io::{self, Read, Write};
+use std::num::NonZeroUsize;
 use std::path::Path;
 
 use engine::resume::{Checkpoint, CheckpointView};
@@ -37,7 +38,8 @@ const NAMESPACE: &str = "and-checkpoint-v2";
 const MAX_BYTES: u64 = 64 * 1024 * 1024;
 /// Level bytes one chunk entry carries in production: half an entry's
 /// admission, so a chunk and its header always fit.
-const CHUNK_BYTES: usize = 32 * 1024 * 1024;
+/// A zero literal here fails const evaluation, and so the build.
+const CHUNK_BYTES: NonZeroUsize = NonZeroUsize::new(32 * 1024 * 1024).unwrap();
 const CHUNK_MAGIC: [u8; 8] = *b"BRTXAC02";
 const BOUNDARY_MAGIC: [u8; 8] = *b"BRTXAB02";
 /// Magic, depth, chunk index within the level, previous boundary sequence.
@@ -58,8 +60,9 @@ const MAX_ROWS: usize = 385;
 struct Limits {
     /// Byte admission of one journal entry.
     entry: u64,
-    /// Level bytes per chunk entry.
-    chunk: usize,
+    /// Level bytes per chunk entry. Never zero, so every pass of the chunk
+    /// writer takes at least one byte.
+    chunk: NonZeroUsize,
 }
 
 const PRODUCTION: Limits = Limits {
@@ -278,11 +281,10 @@ fn publish_level(
     previous: u64,
     limits: Limits,
 ) -> Result<Vec<Piece>, String> {
-    if limits.chunk == 0
-        || u64::try_from(CHUNK_HEADER + limits.chunk)
-            .map_err(error)?
-            .checked_add(ENVELOPE)
-            .is_none_or(|bytes| bytes > limits.entry)
+    if u64::try_from(CHUNK_HEADER + limits.chunk.get())
+        .map_err(error)?
+        .checked_add(ENVELOPE)
+        .is_none_or(|bytes| bytes > limits.entry)
     {
         return Err("AND checkpoint chunk does not fit one journal entry".into());
     }
@@ -358,14 +360,14 @@ impl Write for Chunks<'_> {
                     self.buffer.extend_from_slice(&word.to_le_bytes());
                 }
             }
-            let room = (CHUNK_HEADER + self.limits.chunk).saturating_sub(self.buffer.len());
+            let room = (CHUNK_HEADER + self.limits.chunk.get()).saturating_sub(self.buffer.len());
             let (now, later) = rest.split_at(room.min(rest.len()));
             self.buffer
                 .try_reserve(now.len())
                 .map_err(io::Error::other)?;
             self.buffer.extend_from_slice(now);
             rest = later;
-            if self.buffer.len() == CHUNK_HEADER + self.limits.chunk {
+            if self.buffer.len() == CHUNK_HEADER + self.limits.chunk.get() {
                 self.publish().map_err(io::Error::other)?;
             }
         }
