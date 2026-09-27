@@ -300,7 +300,13 @@ fn publish_level(
     writer.finish()
 }
 
-/// A writer that publishes every `limits.chunk` bytes as one chunk entry.
+/// A writer that publishes every `limits.chunk` level bytes as one chunk
+/// entry.
+///
+/// A full chunk is published when the next byte for its level arrives, or by
+/// [`Chunks::finish`], and the caller takes the buffer before publishing it.
+/// So every pass of the write loop starts below a full chunk and takes at
+/// least one byte, whatever `publish` does.
 struct Chunks<'a> {
     journal: &'a mut Journal,
     depth: u64,
@@ -312,19 +318,18 @@ struct Chunks<'a> {
 }
 
 impl Chunks<'_> {
-    fn publish(&mut self) -> Result<(), String> {
-        let length = self
-            .buffer
+    /// Publishes one chunk, header first, and records its piece.
+    fn publish(&mut self, chunk: &[u8]) -> Result<(), String> {
+        let length = chunk
             .len()
             .checked_sub(CHUNK_HEADER)
             .ok_or("AND checkpoint chunk header missing")?;
-        let (sequence, seal) = self.journal.publish(&self.buffer, self.limits.entry)?;
+        let (sequence, seal) = self.journal.publish(chunk, self.limits.entry)?;
         self.pieces.push(Piece {
             sequence,
             length: u64::try_from(length).map_err(error)?,
             seal,
         });
-        self.buffer.clear();
         Ok(())
     }
 
@@ -332,8 +337,9 @@ impl Chunks<'_> {
         // A buffer is empty between chunks, and otherwise holds its header
         // and at least one level byte: `write` adds the header only with bytes
         // to follow it.
-        if !self.buffer.is_empty() {
-            self.publish()?;
+        let last = std::mem::take(&mut self.buffer);
+        if !last.is_empty() {
+            self.publish(&last)?;
         }
         if self.pieces.is_empty() {
             return Err("AND checkpoint level wrote no bytes".into());
@@ -344,8 +350,13 @@ impl Chunks<'_> {
 
 impl Write for Chunks<'_> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let full = CHUNK_HEADER + self.limits.chunk.get();
         let mut rest = bytes;
         while !rest.is_empty() {
+            if self.buffer.len() == full {
+                let chunk = std::mem::take(&mut self.buffer);
+                self.publish(&chunk).map_err(io::Error::other)?;
+            }
             if self.buffer.is_empty() {
                 let index = u64::try_from(self.pieces.len()).map_err(io::Error::other)?;
                 self.buffer
@@ -360,16 +371,13 @@ impl Write for Chunks<'_> {
                     self.buffer.extend_from_slice(&word.to_le_bytes());
                 }
             }
-            let room = (CHUNK_HEADER + self.limits.chunk.get()).saturating_sub(self.buffer.len());
+            let room = full.saturating_sub(self.buffer.len());
             let (now, later) = rest.split_at(room.min(rest.len()));
             self.buffer
                 .try_reserve(now.len())
                 .map_err(io::Error::other)?;
             self.buffer.extend_from_slice(now);
             rest = later;
-            if self.buffer.len() == CHUNK_HEADER + self.limits.chunk.get() {
-                self.publish().map_err(io::Error::other)?;
-            }
         }
         Ok(bytes.len())
     }

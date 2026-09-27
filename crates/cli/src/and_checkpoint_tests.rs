@@ -261,6 +261,72 @@ fn a_history_past_one_entrys_admission_completes_one_level_per_boundary() -> Res
     Ok(())
 }
 
+/// A chunk size that is not a multiple of eight ends chunks inside the
+/// engine's eight-byte words. Every chunk but a level's last carries exactly
+/// that many bytes, a level's chunks carry exactly its bytes, and a walk
+/// paused at depth 2 resumes through those split words to the uninterrupted
+/// answer.
+#[test]
+fn a_chunk_boundary_inside_a_word_splits_and_replays_exactly() -> Result<(), String> {
+    let odd = Limits {
+        entry: 4096,
+        chunk: chunk(1001),
+    };
+    let scratch = Scratch::new().map_err(error)?;
+    let ladder = Ladder::with_min_hits(1).with_support_lanes(1);
+    let column = column()?;
+    let expected = ladder.walk_column(&column, &POSITIONS, &|_, _, _| {});
+    let first = sweep_evidence::begin(&scratch.0, ID, Operation::Sweep)?;
+    let paused = walk_within(
+        &scratch.0,
+        &first,
+        ladder,
+        &column,
+        &POSITIONS,
+        odd,
+        &mut |view| {
+            if view.current().k == 2 {
+                Err("pause".into())
+            } else {
+                Ok(())
+            }
+        },
+    );
+    assert!(paused.is_err());
+    drop(first);
+    let attempt = sweep_evidence::begin(&scratch.0, ID, Operation::Sweep)?;
+    let mut visited = Vec::new();
+    let resumed = walk_within(
+        &scratch.0,
+        &attempt,
+        ladder,
+        &column,
+        &POSITIONS,
+        odd,
+        &mut |view| {
+            visited.push(view.current().k);
+            Ok(())
+        },
+    )?;
+    assert_eq!(resumed, expected);
+    assert_eq!(visited.first().copied(), Some(2), "resumed, not restarted");
+    attempt.finish(Completion::Completed)?;
+    let (_, boundary) = newest_boundary(&scratch.0)?;
+    assert_eq!(boundary.levels.len(), expected.levels.len());
+    let mut whole_chunks = 0;
+    for (level, pieces) in expected.levels.iter().zip(&boundary.levels) {
+        let bytes = 56 + 56 * level.frequent.len() as u64;
+        assert_eq!(pieces.iter().map(|piece| piece.length).sum::<u64>(), bytes);
+        assert_eq!(pieces.len() as u64, bytes.div_ceil(1001));
+        let (last, whole) = pieces.split_last().ok_or("a level has a chunk")?;
+        assert!(whole.iter().all(|piece| piece.length == 1001));
+        assert!(last.length <= 1001);
+        whole_chunks += whole.len();
+    }
+    assert!(whole_chunks > 0, "some chunk ended inside a word");
+    Ok(())
+}
+
 /// A boundary interrupted after its chunks and before its record leaves an
 /// orphan chunk as the newest entry. Recovery follows that chunk's back
 /// pointer to the boundary before it, resumes there, and rebuilds only the
