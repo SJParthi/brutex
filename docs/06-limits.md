@@ -8803,10 +8803,11 @@ all it proves.
   term sixteen stays `0`, and the report names the value under `KNOB REFUSED`.
   The strict range audit refuses it anyway, as it refuses every unusable
   setting.
-- **The browser still offers the field.** `web/src/routes/backtest/+page.svelte`,
-  `web/src/lib/receipt-batch.js` and the built bundle still render
-  `screen_budget_ms`. Filling it now returns the named 400 refusal instead of
-  starting a run. Removing the control is front-end work not done here.
+- **The browser no longer offers the field (closed 2026-09-27, D-0685).**
+  `web/src/routes/backtest/+page.svelte` and `web/src/lib/receipt-batch.js`
+  drop `screen_budget_ms`, and the built bundle is rebuilt from them.
+  `web/tests/receipt-batch.test.js` checks that every setting the backtest page
+  offers is one the server's `KNOBS` accepts.
 - **A rung swept alone and the same rung inside `range-all` are two run
   identities.** `ceiling_asked`'s doc said they were one piece of work keyed
   once. They are not: `Params::of(ladder)` hashes the ceiling the ladder was

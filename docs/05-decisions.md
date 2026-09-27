@@ -38278,6 +38278,17 @@ built bundle. Filling it now returns the named 400 refusal. Removing the
 control is front-end work for a separate change and is recorded in
 `docs/06-limits.md`.
 
+**Done, 2026-09-27.** The browser no longer offers it.
+`web/src/lib/receipt-batch.js` drops `screen_budget_ms` from `STRICT_KNOBS`,
+the backtest page drops it from `KNOB_FIELDS` and from the form's state, and
+`web/build` is rebuilt from that source. `web/tests/receipt-batch.test.js`
+pins both halves. `strict setting names match the shared HTTP contract` holds
+`STRICT_KNOBS` to the server's fifteen `KNOBS` less `support_ppm` and
+`sizing_rate_bp`. `every setting the backtest page offers is one the server
+accepts` holds `KNOB_FIELDS` to `KNOBS`. The second failed on the page that
+still offered the budget. CI's Gate W found the first stale: it still expected
+sixteen.
+
 ### D-0686 — Census-backed GET routes take the stamped census, not a fresh manifest read — 2026-09-23
 
 **The defect.** `census_now` has been cached on the manifests' modified times
