@@ -4967,33 +4967,77 @@ mod tests {
     /// with no declared length the pre-read check has nothing to check, and
     /// what the answer costs is decided entirely by the read loop.
     fn flooding_listener(header: &'static str, frame: usize, chunks: usize) -> String {
-        use std::io::{Read as _, Write as _};
+        counted_flood(header, frame, chunks).0
+    }
+
+    /// How far a [`counted_flood`] got before it ended.
+    #[derive(Debug)]
+    struct Flooded {
+        /// Body bytes the socket accepted, the header not counted.
+        sent: usize,
+        /// Whether all `chunks` frames went out. `false` means a write failed,
+        /// which on loopback is the client hanging up.
+        finished: bool,
+    }
+
+    /// [`flooding_listener`], and a report of how many body bytes the socket
+    /// accepted before the flood ended. D-0723.
+    ///
+    /// A refusal naming the cap says the client refused. It does not say WHEN
+    /// the client stopped reading: a reader that held the whole answer and
+    /// measured it afterwards refuses in the same words. The other end of the
+    /// socket is the witness to where the read stopped. The report is sent
+    /// once the thread is done, so the caller waits on it with a timeout
+    /// rather than joining a thread that might never be accepted.
+    fn counted_flood(
+        header: &'static str,
+        frame: usize,
+        chunks: usize,
+    ) -> (String, std::sync::mpsc::Receiver<Flooded>) {
+        use std::io::{ErrorKind, Read as _, Write as _};
         let socket = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
         let addr = socket.local_addr().expect("an address");
+        let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let Ok((mut stream, _)) = socket.accept() else {
                 return;
             };
             let mut buf = [0u8; 4096];
             let _request = stream.read(&mut buf);
-            if stream.write_all(header.as_bytes()).is_err() {
-                return;
-            }
+            let mut sent: usize = 0;
+            let mut finished = stream.write_all(header.as_bytes()).is_ok();
             let filler = vec![b'x'; frame];
-            for _ in 0..chunks {
-                // THE CLIENT HANGING UP IS THE EXPECTED END, NOT A FAILURE.
-                // Once it has seen more than it will hold it drops the
-                // response, the connection resets, and this write fails — which
-                // is the signal to stop rather than something to report. Rust
-                // ignores SIGPIPE at startup, so this is an `Err` and not a
-                // killed test process.
-                if stream.write_all(&filler).is_err() {
-                    return;
+            'frames: for _ in 0..chunks {
+                if !finished {
+                    break;
+                }
+                let mut rest = filler.as_slice();
+                while !rest.is_empty() {
+                    // THE CLIENT HANGING UP IS THE EXPECTED END, NOT A FAILURE.
+                    // Once it has seen more than it will hold it drops the
+                    // response, the connection resets, and this write fails —
+                    // which is the signal to stop and report how far it got.
+                    // Rust ignores SIGPIPE at startup, so this is an `Err` and
+                    // not a killed test process. Every byte the socket accepts
+                    // is counted, not every whole frame.
+                    match stream.write(rest) {
+                        Ok(n) if n > 0 => {
+                            sent = sent.saturating_add(n);
+                            rest = rest.get(n..).unwrap_or_default();
+                        }
+                        Err(why) if why.kind() == ErrorKind::Interrupted => {}
+                        Ok(_) | Err(_) => {
+                            finished = false;
+                            break 'frames;
+                        }
+                    }
                 }
             }
             let _flushed = stream.flush();
+            drop(stream);
+            let _reported = tx.send(Flooded { sent, finished });
         });
-        format!("http://{addr}")
+        (format!("http://{addr}"), rx)
     }
 
     /// **THE CREDENTIAL MUST NOT FOLLOW A REDIRECT.**
@@ -5216,10 +5260,16 @@ mod tests {
     /// `post_json` read its success body with `text()`, which holds the whole
     /// answer before anything can look at its size. The bars path had stopped
     /// doing that; the rolling path, which `api` sends once per cell of its
-    /// "`offsets × sides × cadences × ordinals`" cross product, had not. This
-    /// floods one frame past `MAX_RESPONSE_BYTES` with no `Content-Length`, so
-    /// the bound has to live in the read loop, and asserts the answer is
-    /// refused rather than returned.
+    /// "`offsets × sides × cadences × ordinals`" cross product, had not.
+    ///
+    /// This offers 64 MiB more than `MAX_RESPONSE_BYTES` with no
+    /// `Content-Length`, so the bound has to live in the read loop, and holds
+    /// WHERE the read stopped as well as that it refused. A reader that held
+    /// the whole answer and measured it afterwards would refuse in the same
+    /// words, so the refusal alone cannot tell the two apart. The server can:
+    /// the client must hang up before the flood ends, with fewer than 32 MiB
+    /// past the cap accepted by the socket. The margin is room for bytes in
+    /// flight between the two ends, which this test does not measure.
     ///
     /// The refusal carries the vendor's status, 200, rather than none, so it is
     /// not read as a transport blip: `api::server::step` maps a status it has
@@ -5227,14 +5277,32 @@ mod tests {
     #[test]
     fn a_rolling_answer_with_no_declared_length_is_abandoned_past_the_cap() {
         const FRAME: usize = 64 * 1024;
-        let chunks = MAX_RESPONSE_BYTES.div_euclid(FRAME).saturating_add(1);
-        let url = flooding_listener(
+        const EXCESS: usize = 64 * 1024 * 1024;
+        let offered = MAX_RESPONSE_BYTES.saturating_add(EXCESS);
+        let (url, report) = counted_flood(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
              Connection: close\r\n\r\n",
             FRAME,
-            chunks,
+            offered.div_euclid(FRAME),
         );
         let outcome = source_of(spec(PriceScale::Rupees), "SUPERSECRET").block_on_post(&url);
+
+        // THE READ STOPPED AT THE CAP, NOT AFTER THE ANSWER ENDED.
+        let flooded = report
+            .recv_timeout(core::time::Duration::from_secs(30))
+            .expect("the flood reports how far it got");
+        assert!(
+            !flooded.finished,
+            "the client hangs up before the flood ends: {} of {offered} bytes \
+             went out",
+            flooded.sent
+        );
+        assert!(
+            flooded.sent < MAX_RESPONSE_BYTES.saturating_add(EXCESS / 2),
+            "the read stops at the cap, not at the end of the answer: {} of \
+             {offered} bytes went out",
+            flooded.sent
+        );
 
         let refusal = match outcome {
             Ok(body) => panic!(

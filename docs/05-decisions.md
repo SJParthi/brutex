@@ -38501,7 +38501,9 @@ The bars path (`window_async`) checks the declared length against
 `MAX_RESPONSE_BYTES` (`pub const MAX_RESPONSE_BYTES: usize = 64 * 1024 *
 1024;`), the cap the bars window uses, because a rolling answer is a window
 of bars. An answer declaring more is refused before its body is read. One
-that declares nothing and runs past the cap is abandoned at the cap. Both
+that declares nothing is abandoned once the bytes held would pass the cap:
+`if held.len().saturating_add(chunk.len()) > cap` refuses before the chunk
+that would cross it is kept. Both
 refusals carry the vendor's status, so `api::server::step` reads them through
 `Some(_) => Step::Answered` and does not re-ask. The bars window files the
 same overrun as a transport failure instead; the rolling path takes
@@ -38515,10 +38517,16 @@ exact or refuses them as "body is not UTF-8", which is the loud refusal
 `CLAUDE.md` §4 asks for in place of a silent repair.
 
 **Proof.**
-`a_rolling_answer_with_no_declared_length_is_abandoned_past_the_cap` floods
-64 KiB frames one frame past the cap with no `Content-Length`. On origin/main
-`post_json` returned all of it, "67174400 bytes were held". Now it refuses
-under status 200, naming the cap.
+`a_rolling_answer_with_no_declared_length_is_abandoned_past_the_cap` offers
+64 MiB more than the cap, in 64 KiB frames, with no `Content-Length`, and the
+server counts every body byte its socket accepts. It asserts that the client
+hangs up before the flood ends, with fewer than 32 MiB past the cap sent, and
+then that the answer is refused under status 200 naming the cap. The refusal
+alone did not hold where the read stopped. A review break that read the whole
+body and checked its size after the loop refused in the same words and left
+every `http::` test green. It now fails at "the client hangs up before the
+flood ends: 134217728 of 134217728 bytes went out". So does origin/main's
+`text()`, and so does this tree with only the bounded read reverted.
 `a_rolling_answer_declaring_more_than_the_cap_is_refused_before_reading`
 sends a `Content-Length` one past the cap. On origin/main that came back as a
 transport refusal with no status (`left: None`, `right: Some(200)`). Now it

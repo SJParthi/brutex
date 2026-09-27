@@ -8802,10 +8802,19 @@ success body through `strict_discovery_body` with `MAX_RESPONSE_BYTES`
 (C4-PULL-04). Until D-0723 it read the whole answer with `text()` and no cap,
 while its `# Cost` said O(1).
 
-- **One request costs time and memory linear in the answer's bytes, up to
-  the cap.** `pub const MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;`. An
-  answer declaring more is refused before its body is read, and one declaring
-  nothing is abandoned once the bytes held would pass the cap.
+- **One request costs time linear in the answer's bytes, and the bytes held
+  never pass the cap.** `pub const MAX_RESPONSE_BYTES: usize = 64 * 1024 *
+  1024;`. An answer declaring more is refused before its body is read, and one
+  declaring nothing is abandoned once the bytes held would pass the cap:
+  `if held.len().saturating_add(chunk.len()) > cap` refuses before that chunk
+  is kept. C4-PULL-04's flood test offers 64 MiB past the cap and asserts the
+  client hangs up with fewer than 32 MiB past it sent.
+- **The buffer's allocation is not held to the cap the way its bytes are.**
+  `strict_discovery_body` starts from `let mut held = Vec::new();` and grows
+  it with `held.extend_from_slice(&chunk);`, and no `reserve` or
+  `with_capacity` bounds its capacity. So the allocation is whatever `Vec`'s
+  growth gives on the way to the cap, and it can be larger than the bytes
+  held. How large it grows has not been measured.
 - **The cap is the bars window's, not a measured rolling size.** No real
   rolling answer's size has been measured here, so how far below the cap a
   real answer sits is unmeasured.
