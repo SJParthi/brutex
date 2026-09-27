@@ -1843,11 +1843,13 @@ struct SocketAt {
 #[cfg(unix)]
 impl SocketAt {
     /// Bind a socket at `path` through a link under `/tmp` named for this
-    /// process and `name`.
+    /// process and `name`. The `sock-` in the link's name keeps it apart from
+    /// `crate::scratch::path(name)`, which is `/tmp` too wherever `TMPDIR` is
+    /// unset. `a_socket_link_is_never_named_as_a_fixture_root` pins that.
     fn new(path: &Path, name: &str) -> Self {
         let dir = path.parent().expect("a socket path inside a directory");
         let file = path.file_name().expect("a socket path that names a file");
-        let link = Path::new("/tmp").join(format!("brutex-{}-{name}", std::process::id()));
+        let link = Path::new("/tmp").join(format!("brutex-sock-{}-{name}", std::process::id()));
         let _stale = fs::remove_file(&link);
         std::os::unix::fs::symlink(dir, &link)
             .expect("a link under /tmp to the socket's directory");
@@ -1865,6 +1867,29 @@ impl Drop for SocketAt {
     fn drop(&mut self) {
         let _removed = fs::remove_file(&self.link);
     }
+}
+
+/// A SOCKET'S LINK IS NEVER NAMED AS A FIXTURE'S OWN ROOT. D-0695.
+///
+/// `crate::scratch::path` names a fixture's root under `TMPDIR`, and
+/// `SocketAt` names its link under `/tmp`. Where `TMPDIR` is unset, as on the
+/// Linux CI runner, both are under `/tmp`. The link was named exactly as the
+/// root of a fixture of the same name, so the three tests that pass one name to
+/// both found their own fixture directory where the link belonged, and failed
+/// there with `AlreadyExists`. The final components differ now, so the two
+/// cannot meet in any directory.
+#[cfg(unix)]
+#[test]
+fn a_socket_link_is_never_named_as_a_fixture_root() {
+    let fixture = Fixture::new("cr-link-name");
+    let dir = fixture.root.join("manifest");
+    fs::create_dir_all(&dir).expect("a manifest directory");
+    let socket = SocketAt::new(&dir.join("groww.man"), "cr-link-name");
+    assert_ne!(
+        socket.link.file_name(),
+        fixture.root.file_name(),
+        "a link named as the fixture root collides with it wherever TMPDIR is /tmp"
+    );
 }
 
 /// A SOCKET IS BOUND AT A MANIFEST PATH TOO LONG FOR A SOCKET ADDRESS. D-0695.
