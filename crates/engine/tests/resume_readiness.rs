@@ -940,3 +940,47 @@ fn serialized_resource_tags_preserve_terminal_refusal_and_reject_contradictions(
         Err(Error::Invalid("singleton accounting"))
     ));
 }
+
+/// A durable caller that saves one level per boundary rebuilds `write_to`
+/// exactly from its newest boundary's prefix followed by every level it saved,
+/// in depth order. The prefix is `192 + 8 × offered + 24 × excluded` bytes and
+/// a level is `56 + 56 × survivors`, so neither half grows with the retained
+/// history. D-0712.
+#[test]
+fn a_boundary_prefix_and_every_level_saved_so_far_are_write_to_byte_for_byte() {
+    let column = Column::try_from_rows(&masks(9, true)).expect("column");
+    let mut live = POSITIONS.to_vec();
+    live.extend([6, 384, u32::MAX, 6]);
+    let ladder = Ladder::with_min_hits(1).with_support_lanes(1);
+    let mut saved = Vec::new();
+    let mut boundaries = 0_u32;
+    let mut excluded = 0;
+    let mut survivors = 0;
+    ladder
+        .walk_checkpointed(&column, &live, IDENTITY, &mut |view| {
+            let mut level = Vec::new();
+            view.write_current_to(&mut level).expect("level");
+            assert_eq!(level.len(), 56 + 56 * view.current().frequent.len());
+            saved.extend_from_slice(&level);
+            let mut prefix = Vec::new();
+            view.write_prefix_to(&mut prefix).expect("prefix");
+            let whole = encode(view);
+            let decoded = decode(&whole);
+            assert_eq!(
+                prefix.len(),
+                192 + 8 * live.len() + 24 * decoded.excluded().len()
+            );
+            assert_eq!([prefix, saved.clone()].concat(), whole);
+            boundaries += 1;
+            excluded = excluded.max(decoded.excluded().len());
+            survivors += view.current().frequent.len();
+            Ok(())
+        })
+        .expect("walk");
+    assert!(boundaries >= 3, "{boundaries} boundaries");
+    assert!(excluded >= 3, "the prefix carries exclusions: {excluded}");
+    assert!(
+        survivors > 8,
+        "levels past the first hold survivors: {survivors}"
+    );
+}
