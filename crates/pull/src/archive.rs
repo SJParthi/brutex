@@ -29,8 +29,8 @@
 //! pretending otherwise would be the false-claim shape this repository keeps
 //! catching itself in.
 //!
-//! What is bounded: [`MAX_MEMBERS`] caps the walk, and one file is open at a
-//! time.
+//! What is bounded: [`MAX_MEMBERS`] caps the walk, the members a census
+//! rejects counted with the ones it decodes, and one file is open at a time.
 //!
 //! **MEMORY IS NOT BOUNDED TO ONE FILE, AND THIS PARAGRAPH USED TO SAY IT
 //! WAS.** It said each file's rows were decoded and passed along, never
@@ -46,9 +46,12 @@
 //! member sorts. Held by
 //! `pipeline::a_malformed_member_that_sorts_last_refuses_the_run_before_any_bar_is_written`.
 //! Handing members on one at a time would give that up or would need a second
-//! decoding pass, and neither is decided here. The only ceiling is a count:
-//! [`MAX_MEMBERS`] members, each refused by [`csv::decode`] past
-//! [`crate::fetch::MAX_ROWS`] rows. `docs/06-limits.md` records it, D-0720.
+//! decoding pass, and neither is decided here. The ceilings are counts:
+//! [`MAX_MEMBERS`] members, decoded and rejected together, each decoded one
+//! refused by [`csv::decode`] past [`crate::fetch::MAX_ROWS`] rows. A census
+//! also keeps one finding per rejected member, its path and at most
+//! [`MAX_FINDING_BYTES`] of its refusal with a note of what was not kept.
+//! `docs/06-limits.md` records it, D-0720 and D-0725.
 //!
 //! Ordering the members is O(n log n) and **it happens once per walk**, at the
 //! foot of [`walk`] rather than at the foot of each directory. It used to sit
@@ -72,7 +75,9 @@
 //! rather than asserted here:
 //! `pull::pipeline::a_directory_past_the_member_cap_is_refused_at_the_cap` for
 //! the cap — a directory one member past [`MAX_MEMBERS`] is refused at the cap
-//! rather than walked to the end and then complained about — and
+//! rather than walked to the end and then complained about — with
+//! `pull::pipeline::a_census_past_the_member_cap_is_refused_at_the_cap_counting_its_rejects`
+//! for the census walk, and
 //! `tests::the_members_are_sorted_once_per_walk_not_once_per_directory` for the
 //! ordering.
 
@@ -87,7 +92,32 @@ use crate::fetch::RawRow;
 /// `docs/07-o1-architecture.md` law 5 — bound every input at the boundary. One
 /// GDFL day holds 12,132 contracts, so this is roughly four such days and still
 /// refuses a directory somebody pointed at their home folder.
+///
+/// **A census counts the members it rejects as well as the ones it decodes.**
+/// It compared only the decoded ones, so [`read_dir_reporting`] over a folder
+/// of malformed files read every one of them, past this cap, and kept a
+/// finding for each. Held by
+/// `pull::pipeline::a_census_past_the_member_cap_is_refused_at_the_cap_counting_its_rejects`,
+/// D-0725.
 pub const MAX_MEMBERS: usize = 50_000;
+
+/// The most bytes of a decoder's refusal one census finding keeps.
+///
+/// A refusal that quotes a field quotes it whole, and a field is as long as
+/// its line, so a finding that kept the whole sentence was bounded only by the
+/// file. A longer sentence keeps its first bytes up to this bound, cut back to
+/// a character boundary, and a note of how many bytes it did not keep. A
+/// sentence that fits is kept whole.
+///
+/// **Chosen, not measured.** No real refusal's length has been measured here.
+/// Rendered around an empty field, each [`CsvError`] variant and each date
+/// format it can name is shorter than this, so an ordinary field fits beside
+/// it. Held by
+/// `pull::pipeline::a_census_finding_keeps_at_most_the_finding_cap_of_its_refusal`,
+/// `tests::a_finding_is_whole_up_to_the_cap_and_trimmed_past_it` and
+/// `tests::every_refusal_sentence_fits_the_finding_cap_before_its_field`,
+/// D-0725.
+pub const MAX_FINDING_BYTES: usize = 1024;
 
 /// Why a directory did not yield rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,7 +160,7 @@ pub enum ArchiveError {
     },
     /// More members than [`MAX_MEMBERS`].
     TooManyMembers {
-        /// How many were seen before stopping.
+        /// How many were seen before stopping, decoded and rejected together.
         members: usize,
         /// The bound.
         cap: usize,
@@ -398,7 +428,39 @@ pub struct Rejected {
     /// The file, so the operator can look at the one that is different.
     pub path: PathBuf,
     /// Why, in the decoder's own words — the field count it found and expected.
+    ///
+    /// At most [`MAX_FINDING_BYTES`] of them. A longer sentence, one quoting a
+    /// long field, keeps its first bytes and a note of how many it did not
+    /// keep. D-0725.
     pub why: String,
+}
+
+/// A rejected member's refusal as a census keeps it.
+///
+/// Whole when it fits in [`MAX_FINDING_BYTES`]. Otherwise its first bytes up
+/// to that bound, cut back to a character boundary, then
+/// ` [trimmed: N of M bytes not kept]`. The note says a sentence was cut, so a
+/// trimmed finding is never read as the whole one.
+///
+/// The sentence is rendered whole before it is cut, so a rejected member costs
+/// its refusal's length for that moment, as reading the member whole already
+/// costs its file's. What the census keeps is the cut copy, allocated to its
+/// own length.
+fn finding(why: &CsvError) -> String {
+    let whole = why.to_string();
+    if whole.len() <= MAX_FINDING_BYTES {
+        return whole;
+    }
+    let end = whole.floor_char_boundary(MAX_FINDING_BYTES);
+    let note = format!(
+        " [trimmed: {} of {} bytes not kept]",
+        whole.len().saturating_sub(end),
+        whole.len()
+    );
+    let mut kept = String::with_capacity(end.saturating_add(note.len()));
+    kept.push_str(whole.get(..end).unwrap_or_default());
+    kept.push_str(&note);
+    kept
 }
 
 /// WHAT A MEMBER THAT WILL NOT DECODE DOES TO THE WALK.
@@ -447,10 +509,20 @@ enum Malformed {
 ///
 /// # Cost
 ///
-/// [`read_dir`]'s, memory included: the returned vector holds every decoded
-/// row of the walk. A census writes nothing, so unlike the ingest path it has
-/// no need to hold them all at once; it does because it shares this walk.
-/// `docs/06-limits.md` records that as well, D-0720.
+/// [`read_dir`]'s time, O(members), and more memory than [`read_dir`]'s. The
+/// returned vector holds every decoded row of the walk, and beside it the
+/// census keeps one [`Rejected`] per member that would not decode: its path
+/// and at most [`MAX_FINDING_BYTES`] of its refusal with a note of what was not
+/// kept. Decoded and rejected members count together against
+/// [`MAX_MEMBERS`], so a folder of malformed files is refused at the cap
+/// rather than read to its end. Every member visited, decoded or rejected, is
+/// read whole first. Held by
+/// `pull::pipeline::a_census_past_the_member_cap_is_refused_at_the_cap_counting_its_rejects`
+/// and `pull::pipeline::a_census_finding_keeps_at_most_the_finding_cap_of_its_refusal`.
+///
+/// A census writes nothing, so unlike the ingest path it has no need to hold
+/// the rows all at once; it does because it shares this walk.
+/// `docs/06-limits.md` records that as well, D-0720 and D-0725.
 pub fn read_dir_reporting(
     dir: &Path,
     columns: Columns,
@@ -520,7 +592,8 @@ fn walk(
     // call had returned — its result was already "every member, by path". The
     // inner sorts only re-ordered a prefix that the outer one was about to
     // order again, and nothing between them reads a position: the loop only
-    // pushes, and the `MAX_MEMBERS` guard reads `out.len()`. `sort_by` is
+    // pushes, and the `MAX_MEMBERS` guard reads `out.len()` and
+    // `rejected.len()`, lengths and not positions. `sort_by` is
     // stable, so even two members carrying the same path — which a filesystem
     // cannot yield, though the type permits it — come out in the same relative
     // order either way. CLAUDE.md §3 rule 5, same inputs same outputs byte for
@@ -665,9 +738,15 @@ fn descend(
         {
             return Err(ArchiveError::PathEscapes { path });
         }
-        if out.len() >= MAX_MEMBERS {
+        // THE REJECTED MEMBERS COUNT TOO. This read `out.len()` alone, and a
+        // census walk (`Malformed::Collect`) pushes a malformed member onto
+        // `rejected`, never onto `out`, so a folder of malformed files was
+        // read past the cap. An ingest walk's `rejected` stays empty, so its
+        // count is the one it always was. D-0725.
+        let seen = out.len().saturating_add(rejected.len());
+        if seen >= MAX_MEMBERS {
             return Err(ArchiveError::TooManyMembers {
-                members: out.len(),
+                members: seen,
                 cap: MAX_MEMBERS,
             });
         }
@@ -688,7 +767,7 @@ fn descend(
                 }
                 Malformed::Collect => {
                     rejected.push(Rejected {
-                        why: why.to_string(),
+                        why: finding(&why),
                         path,
                     });
                     continue;
@@ -776,8 +855,8 @@ pub fn total_rows(members: &[Member]) -> usize {
               keep panics out of the crate rather than out of its tests"
 )]
 mod tests {
-    use super::{ArchiveError, SORTS, read_dir};
-    use crate::csv::Columns;
+    use super::{ArchiveError, MAX_FINDING_BYTES, SORTS, finding, read_dir};
+    use crate::csv::{Columns, CsvError};
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -1022,6 +1101,118 @@ mod tests {
                 "archive.rs still claims {needle:?}, and the walk holds every \
                  decoded member until it returns"
             );
+        }
+    }
+
+    /// **A FINDING IS WHOLE UP TO THE CAP, AND TRIMMED PAST IT.** D-0725.
+    ///
+    /// Three sentences around the boundary: one exactly `MAX_FINDING_BYTES`
+    /// long, kept whole; one a byte longer, which keeps the cap's worth and
+    /// notes the one byte it did not keep; and one whose cap falls inside a
+    /// three-byte character, which is cut back to the last whole character
+    /// rather than split or dropped.
+    #[test]
+    fn a_finding_is_whole_up_to_the_cap_and_trimmed_past_it() {
+        let time = |got: String| CsvError::TimeMalformed { line: 1, got };
+        let frame = time(String::new()).to_string().len();
+
+        // EXACTLY AT THE CAP: whole.
+        let at = time("A".repeat(MAX_FINDING_BYTES - frame));
+        let whole = at.to_string();
+        assert_eq!(
+            whole.len(),
+            MAX_FINDING_BYTES,
+            "the fixture sits on the cap"
+        );
+        assert_eq!(finding(&at), whole, "a sentence that fits is kept whole");
+
+        // ONE BYTE PAST IT: the cap's worth, and a note of the one byte.
+        let past = time("A".repeat(MAX_FINDING_BYTES + 1 - frame));
+        let whole = past.to_string();
+        assert_eq!(
+            finding(&past),
+            format!(
+                "{} [trimmed: 1 of {} bytes not kept]",
+                whole.get(..MAX_FINDING_BYTES).expect("ASCII"),
+                MAX_FINDING_BYTES + 1
+            )
+        );
+
+        // THE CAP INSIDE A CHARACTER: cut back to the last whole one.
+        let wide = time("\u{20ac}".repeat(MAX_FINDING_BYTES));
+        let whole = wide.to_string();
+        let end = (0..=MAX_FINDING_BYTES)
+            .rev()
+            .find(|&at| whole.is_char_boundary(at))
+            .expect("the start is a boundary");
+        assert!(
+            end < MAX_FINDING_BYTES,
+            "the fixture puts the cap inside a character, at {end}"
+        );
+        assert_eq!(
+            finding(&wide),
+            format!(
+                "{} [trimmed: {} of {} bytes not kept]",
+                whole.get(..end).expect("a boundary"),
+                whole.len() - end,
+                whole.len()
+            ),
+            "every whole character up to the cap, and none of the one it splits"
+        );
+    }
+
+    /// **EVERY REFUSAL SENTENCE FITS THE FINDING CAP BEFORE ITS FIELD IS
+    /// ADDED.** D-0725.
+    ///
+    /// `MAX_FINDING_BYTES` says an ordinary field fits beside any sentence the
+    /// decoder writes, and this is the check behind it: each refusal, rendered
+    /// around an empty field, is shorter than the cap, so a trimmed finding is
+    /// one whose field was long.
+    #[test]
+    fn every_refusal_sentence_fits_the_finding_cap_before_its_field() {
+        use crate::vendor::DateFormat;
+        let dates = [
+            DateFormat::DashedYmd,
+            DateFormat::CompactYmd,
+            DateFormat::SlashedDmy,
+            DateFormat::CompactDmy,
+            DateFormat::DashedYmdMidnight,
+        ]
+        .map(|format| CsvError::DateMalformed {
+            line: usize::MAX,
+            got: String::new(),
+            format,
+        });
+        for refusal in dates.into_iter().chain([
+            CsvError::FieldCount {
+                line: usize::MAX,
+                got: usize::MAX,
+                want: usize::MAX,
+            },
+            CsvError::TimeMalformed {
+                line: usize::MAX,
+                got: String::new(),
+            },
+            CsvError::PriceMalformed {
+                line: usize::MAX,
+                got: String::new(),
+            },
+            CsvError::OpenInterestSentinel {
+                line: usize::MAX,
+                got: String::new(),
+            },
+            CsvError::TooManyRows {
+                rows: usize::MAX,
+                cap: usize::MAX,
+            },
+        ]) {
+            let sentence = refusal.to_string();
+            assert!(
+                sentence.len() < MAX_FINDING_BYTES,
+                "{} bytes before any field: {sentence}",
+                sentence.len()
+            );
+            assert_eq!(finding(&refusal), sentence, "and it is kept whole");
         }
     }
 }

@@ -8764,10 +8764,12 @@ file, whether the walk is an ingest (`ingest::from_dir`) or a census
 (`folder::read_census` and `folder::read_reach`). Until D-0720 `archive.rs`
 claimed the opposite.
 
-- **The only ceilings are counts.** `MAX_MEMBERS` members
+- **The ceilings on rows are counts.** `MAX_MEMBERS` members
   (`pub const MAX_MEMBERS: usize = 50_000;`), each refused by `csv::decode`
   past `fetch::MAX_ROWS` rows. No byte figure for a real folder has been
-  measured.
+  measured. A census also keeps a finding per member it rejects, and until
+  D-0725 neither their number nor their length was capped; the D-0725 entry
+  below records both bounds.
 - **The ingest path needs the rows held.** It writes nothing until the walk
   returns, which is what makes a malformed member refuse the folder before
   any bar is written. Closing the limit there needs a decision between a
@@ -8825,3 +8827,28 @@ while its `# Cost` said O(1).
   real answer sits is unmeasured.
 - **Nothing here bounds how many rolling requests one run sends.** That is
   the `api` cross product's count, and this entry does not change it.
+
+## A census visits at most `MAX_MEMBERS` members and keeps a bounded part of each refusal — D-0725, 28 September 2026
+
+`archive::read_dir_reporting`, the census walk `folder::read_census` goes
+through, keeps a member that will not decode as a `Rejected` finding and walks
+on. Until D-0725 its cap compared only the members that decoded
+(`if out.len() >= MAX_MEMBERS {`), and each finding kept the decoder's
+sentence whole, so neither the number of findings nor their length had a
+ceiling (C4-PULL-05).
+
+- **Decoded and rejected members count together.** `descend` compares
+  `out.len().saturating_add(rejected.len())` with `MAX_MEMBERS`, so a census
+  visits at most `MAX_MEMBERS` members whatever they hold. An ingest walk
+  never pushes onto `rejected`, so its bound is unchanged.
+- **A finding keeps at most `MAX_FINDING_BYTES` of its refusal.**
+  `pub const MAX_FINDING_BYTES: usize = 1024;`. A longer sentence keeps its
+  first bytes up to that bound, cut back to a character boundary, and
+  ` [trimmed: N of M bytes not kept]`. Each finding also keeps its member's
+  path. The bound is chosen, not measured: no real refusal's length has been
+  measured here.
+- **What a rejected member costs on the way is not capped.** It is read whole
+  with `fs::read(&path)`, as every member is (the D-0721 entry above), and
+  `finding` renders its sentence whole with `let whole = why.to_string();`
+  before cutting it. Both are that member's locals, gone before the next
+  member is read. What the census keeps is the cut copy.

@@ -38614,3 +38614,66 @@ reverted, and under each review break, they fail at "4,096 more rows made 8193
 more allocating calls (8203 for 4,096 rows, 16396 for 8,192): a row allocates"
 and "refusing a 1000000-byte line allocated 33554666 bytes: its fields were
 held". Here both pass. C4-PULL-02.
+
+### D-0725 — A census counts the members it rejects against `MAX_MEMBERS`, and keeps a bounded part of each refusal — 2026-09-28
+
+Review of D-0720 found its replacement cost sentences stating a bound the
+census walk does not have. `read_dir_reporting`'s `# Cost` said "[`read_dir`]'s,
+memory included", the D-0720 limits entry said "The only ceilings are counts.
+`MAX_MEMBERS` members …", and the module doc kept "[`MAX_MEMBERS`] caps the
+walk". `descend` checked `if out.len() >= MAX_MEMBERS {`, and a census
+(`Malformed::Collect`) pushes a malformed member with
+`rejected.push(Rejected { why: why.to_string(), path });` and `continue;`,
+never onto `out`. So a census read every malformed member of a folder, past
+the cap, and kept a finding for each. `CsvError`'s `Display` quotes the bad
+field whole (`"line {line}: date {got:?} is not {format:?}"`), so a finding's
+length was bounded only by its file. The review measured a folder of
+`MAX_MEMBERS + 3` one-field members returning `Ok` with 50003 findings, and a
+member with a 1,000,000-byte date field kept as a 1000033-byte finding.
+
+**Decision: bound both, rather than describe them as unbounded.**
+
+- `descend` compares `out.len().saturating_add(rejected.len())` with
+  `MAX_MEMBERS` and reports that sum as `TooManyMembers::members`. A census
+  now visits at most `MAX_MEMBERS` members, decoded and rejected together.
+  An ingest walk (`Malformed::Refuse`) never pushes onto `rejected`, so its
+  bound and its refusal are unchanged.
+- A finding keeps at most `MAX_FINDING_BYTES`
+  (`pub const MAX_FINDING_BYTES: usize = 1024;`) of the decoder's sentence.
+  A longer one keeps its first bytes up to that bound, cut back to a
+  character boundary with `floor_char_boundary`, followed by
+  ` [trimmed: N of M bytes not kept]`, so a trimmed finding says it was
+  trimmed. The copy is allocated to its own length. A sentence that fits is
+  kept whole.
+- The bound is chosen, not measured. No real refusal's length has been
+  measured here. Every `CsvError` variant, rendered around an empty field
+  with each date format, is shorter than it, so an ordinary field fits.
+
+**Not chosen.** Stating the census as unbounded and leaving it so. The route
+behind it, `GET /folder.json`, reads a folder an operator points at, and
+`MAX_MEMBERS` already said "The most members one walk will visit".
+
+**What stays unbounded.** A member is read whole with `fs::read(&path)`
+before it is decoded or rejected, which the D-0721 limits entry records, and
+the sentence is rendered whole with `let whole = why.to_string();` before it
+is cut. Both are one member's locals, gone before the next member is read.
+The census still holds every decoded row, as D-0720 records.
+
+**Proof.**
+`a_census_past_the_member_cap_is_refused_at_the_cap_counting_its_rejects`
+walks `MAX_MEMBERS + 1` members, the even-numbered ones empty and the odd
+ones one field where five are declared, so neither kind alone reaches the cap,
+and requires `TooManyMembers { members: MAX_MEMBERS, cap: MAX_MEMBERS }`.
+`a_census_finding_keeps_at_most_the_finding_cap_of_its_refusal` requires the
+1,000,000-byte field's finding to be exactly the sentence's first
+`MAX_FINDING_BYTES` bytes and its note, with a capacity under twice the cap,
+and a three-field member's finding to equal its refusal whole. On origin/main
+(with only the constant added so the tests compile), and again with only the
+two fixed lines reverted, they fail at "the census walked past the cap: 25001
+decoded and 25000 rejected, 50001 members against a cap of 50000" and "the
+first 1024 bytes of the sentence and a note of the rest; got 1000033 bytes".
+Both pass here. `a_finding_is_whole_up_to_the_cap_and_trimmed_past_it` holds
+the boundary: a sentence exactly at the cap is whole, one a byte past it notes
+one byte, and a cap inside a three-byte character is cut back to the last
+whole one. `every_refusal_sentence_fits_the_finding_cap_before_its_field`
+holds the sizing. C4-PULL-05. `docs/06-limits.md` records the bounds.

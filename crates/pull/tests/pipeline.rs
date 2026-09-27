@@ -51,7 +51,7 @@ use std::mem::discriminant;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use pull::archive::{self, ArchiveError, MAX_MEMBERS};
+use pull::archive::{self, ArchiveError, MAX_FINDING_BYTES, MAX_MEMBERS};
 use pull::csv::{Columns, CsvError, decode};
 use pull::fetch::{
     self, BarRequest, BarSource, FakeSource, FetchError, MAX_ROWS, ParallelArrays, RawRow,
@@ -317,6 +317,119 @@ fn a_directory_past_the_member_cap_is_refused_at_the_cap() {
             cap: MAX_MEMBERS,
         },
         "the walk stopped AT the bound, and the refusal carries both numbers"
+    );
+}
+
+/// **A CENSUS COUNTS THE MEMBERS IT REJECTS AGAINST THE SAME CAP.** D-0725.
+///
+/// [`archive::read_dir_reporting`] keeps a member that will not decode as a
+/// finding and walks on. The cap compared only the members that had decoded,
+/// so a folder of malformed files was read to its end, past [`MAX_MEMBERS`],
+/// and kept one finding for every one of them.
+///
+/// Every even-numbered member is empty and decodes to no rows; every odd one
+/// is one field where five are declared, and is rejected. Either kind alone
+/// stays under the cap, so only a count of both reaches it. Which kind the
+/// walk meets first is the filesystem's order, and the number of members seen
+/// when the cap is reached does not depend on it.
+#[test]
+fn a_census_past_the_member_cap_is_refused_at_the_cap_counting_its_rejects() {
+    let scratch = Scratch::new("CENSUSCAP");
+    let dir = scratch.root.join("ARCHIVE");
+    fs::create_dir_all(&dir).expect("a scratch archive");
+    for i in 0..=MAX_MEMBERS {
+        let body = if i % 2 == 0 { "" } else { "x\n" };
+        fs::write(dir.join(format!("F{i}.csv")), body).expect("a member");
+    }
+
+    let refused = match archive::read_dir_reporting(&dir, Columns::TrueDataIndex) {
+        Ok((members, rejected)) => panic!(
+            "the census walked past the cap: {} decoded and {} rejected, {} \
+             members against a cap of {MAX_MEMBERS}",
+            members.len(),
+            rejected.len(),
+            members.len() + rejected.len()
+        ),
+        Err(why) => why,
+    };
+    assert_eq!(
+        refused,
+        ArchiveError::TooManyMembers {
+            members: MAX_MEMBERS,
+            cap: MAX_MEMBERS,
+        },
+        "the census stops AT the bound, its rejected members counted with the \
+         ones that decoded"
+    );
+}
+
+/// **A CENSUS FINDING KEEPS AT MOST [`MAX_FINDING_BYTES`] OF ITS REFUSAL.**
+/// D-0725.
+///
+/// A refusal that quotes a field quotes it whole, and a field is as long as
+/// its line. A finding kept the decoder's sentence whole, so its length was
+/// bounded only by the file. The one here quotes a date field of 1,000,000
+/// bytes and keeps its first [`MAX_FINDING_BYTES`] bytes and a note of how
+/// many it did not keep. A refusal that fits is kept whole, in the decoder's
+/// own words.
+#[test]
+fn a_census_finding_keeps_at_most_the_finding_cap_of_its_refusal() {
+    let scratch = Scratch::new("FINDING");
+    let dir = scratch.root.join("ARCHIVE");
+    fs::create_dir_all(&dir).expect("a scratch archive");
+    let field = "A".repeat(1_000_000);
+    fs::write(dir.join("WIDE.csv"), format!("{field},09:15:01,1,0,0\n")).expect("a member");
+    fs::write(dir.join("SHORT.csv"), "20221003,09:15:01,38445.65\n").expect("three fields");
+
+    let (members, rejected) =
+        archive::read_dir_reporting(&dir, Columns::TrueDataIndex).expect("the census walks");
+    assert!(members.is_empty(), "neither member decodes");
+    assert_eq!(rejected.len(), 2, "both are findings");
+
+    let wide = rejected
+        .iter()
+        .find(|bad| bad.path.ends_with("WIDE.csv"))
+        .expect("the wide member is a finding");
+    let whole = CsvError::DateMalformed {
+        line: 1,
+        got: field,
+        format: DateFormat::CompactYmd,
+    }
+    .to_string();
+    let expected = format!(
+        "{} [trimmed: {} of {} bytes not kept]",
+        &whole[..MAX_FINDING_BYTES],
+        whole.len() - MAX_FINDING_BYTES,
+        whole.len()
+    );
+    // Compared without printing either side: a failure here is a sentence a
+    // million bytes long.
+    assert!(
+        wide.why == expected,
+        "the first {MAX_FINDING_BYTES} bytes of the sentence and a note of the \
+         rest; got {} bytes, ending {:?}",
+        wide.why.len(),
+        wide.why.get(wide.why.len().saturating_sub(48)..)
+    );
+    assert!(
+        wide.why.capacity() < 2 * MAX_FINDING_BYTES,
+        "and it holds no more than it shows: capacity {}",
+        wide.why.capacity()
+    );
+
+    let short = rejected
+        .iter()
+        .find(|bad| bad.path.ends_with("SHORT.csv"))
+        .expect("the short member is a finding");
+    assert_eq!(
+        short.why,
+        CsvError::FieldCount {
+            line: 1,
+            got: 3,
+            want: 5,
+        }
+        .to_string(),
+        "a refusal under the cap is kept whole, in the decoder's own words"
     );
 }
 
