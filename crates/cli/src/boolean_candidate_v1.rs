@@ -903,18 +903,16 @@ impl<'a> PricedSide<'a> {
     }
 
     fn attested(&mut self, shared: &Shared<'a>) -> Result<&AttestedTrainingV1<'a>, String> {
-        if self.attested.is_none() {
+        let attested = if let Some(attested) = self.attested.take() {
+            attested
+        } else {
             #[cfg(test)]
             tests::count(&tests::ATTESTATIONS);
-            self.attested = Some(
-                self.resolved
-                    .attest_training(shared.series, shared.column, shared.horizon)
-                    .map_err(display)?,
-            );
-        }
-        self.attested
-            .as_ref()
-            .ok_or_else(|| "Boolean TRAINING attestation absent".to_owned())
+            self.resolved
+                .attest_training(shared.series, shared.column, shared.horizon)
+                .map_err(display)?
+        };
+        Ok(self.attested.insert(attested))
     }
 }
 
