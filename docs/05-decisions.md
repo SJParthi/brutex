@@ -38431,10 +38431,28 @@ so no caller supplies one. Ledger row W1-pull1-3.
   `docs/06-limits.md` records both. No real line or member length has been
   measured here, so neither cap is set.
 
-**Proof.** `decode_rows_collects_nothing_per_row` reads `decode_rows`'s own
-text and fails if it collects. A counting allocator would be the direct test,
-and it needs `unsafe`, which every crate root forbids. It failed on origin/main,
-passes here, and fails again with only the fixed array reverted.
+**Proof.** The allocator's calls are counted, in
+`crates/pull/tests/allocation.rs` (D-0724).
+`twice_the_rows_cost_no_allocation_per_row` decodes 4,096 rows and then 8,192
+and allows the second at most four more allocating calls.
+`a_line_of_a_million_commas_is_refused_without_allocating_for_its_fields`
+requires the refusal `FieldCount { line: 1, got: 1_000_001, want: 5 }` and
+fewer bytes allocated on the way to it than the line's 1,000,000. On
+origin/main they failed at "4,096 more rows made 8193 more allocating calls
+(8203 for 4,096 rows, 16396 for 8,192): a row allocates" and "refusing a
+1000000-byte line allocated 33554666 bytes: its fields were held". They pass
+here and fail again, with the same two messages, with only the fixed array
+reverted, and under each of the two review breaks that put a per-row collect
+back: a `Vec` collected inside `fields_of`, and a turbofish collect in
+`decode_rows`.
+
+That proof replaced `decode_rows_collects_nothing_per_row`, which read
+`decode_rows`'s own text for `.collect(`. Both review breaks left it and every
+other CSV test green. Its stated reason for not counting, that a counting
+allocator needs `unsafe` and every crate root forbids it, was wrong: an
+integration test is its own crate, and Gate 16 reads only `src/lib.rs` and
+`src/main.rs`.
+
 `a_lines_fields_land_in_a_fixed_array_and_are_counted_whole` holds `fields_of`:
 exact counts accepted, short and long lines refused with their true count, a
 line of 1,000,000 commas counted as 1,000,001 fields, and a width past the
@@ -38537,3 +38555,55 @@ is refused under 200 before the body is read.
 byte for byte. The three refusal tests failed on origin/main, pass here, and
 fail again with only the read reverted. C4-PULL-04. `docs/06-limits.md`
 records the bound.
+
+### D-0724 — Count the allocator from one integration test crate, the workspace's first unsafe exception — 2026-09-27
+
+D-0721 made `crates/pull/src/csv.rs`'s "No allocation per row" true and proved
+it with `decode_rows_collects_nothing_per_row`, which read `decode_rows`'s own
+text for `.collect(`. Review put a per-row allocation back twice. One was
+`let all: Vec<&str> = line.split(',').collect();` inside `fields_of`, whose
+text no test read. The other was
+`let _per_row = line.split(',').collect::<Vec<&str>>();` in `decode_rows`,
+which the needle did not match. Both left all 16 CSV tests green. A text search
+finds the spellings it knows, and the claim is about an allocation.
+
+The test's reason for not counting allocations was that a counting allocator
+"needs `unsafe` and every crate root forbids it". Only the first half holds.
+Implementing `GlobalAlloc` is `unsafe`. But Gate 16 reads
+`f="crates/${c}/src/${base}.rs"` for `base` in `lib main`, and an integration
+test under `crates/<c>/tests/` is compiled as a crate of its own. The workspace
+lint is `unsafe_code = "deny"`, a level an allow overrides. Gate 5 counts
+`allow(unsafe_code)` over tracked `.rs` files and fails
+`if [ "$n" -gt 3 ]; then`, and before this entry
+`git ls-files '*.rs' | xargs grep -oh 'allow(unsafe_code)'` found none.
+
+**Decision: count allocations directly, in `crates/pull/tests/allocation.rs`,
+with the exception at that crate's root and nowhere else.**
+
+- The file sets `#![allow(unsafe_code)]` on one line, so Gate 5 counts it: one
+  exception of the three it permits.
+- `Counting` implements `GlobalAlloc` by forwarding every method to `System`
+  with the arguments it was given. Before forwarding, `alloc`, `alloc_zeroed`
+  and `realloc` add one call and the bytes asked for to two thread-local
+  `Cell<usize>` counts with `const` initialisers, so tests on other threads of
+  that binary cannot move them.
+- `crates/pull/src/lib.rs` still carries `#![forbid(unsafe_code)]`, as every
+  crate root Gate 16 reads does. The unsafe code is in a test crate that links
+  the library, and no library or binary target contains it.
+- `decode_rows_collects_nothing_per_row` is removed. The two allocation tests
+  hold what it was written to hold, and both review breaks fail them.
+
+**Not chosen.** A counting-allocator crate would put a package in `Cargo.lock`,
+which this batch keeps byte-identical, and it would hold the same `unsafe`
+inside a dependency. A wider text search stays a list of spellings.
+
+**What it cannot see.** It counts only the calling thread's allocations.
+It counts calls and bytes asked for, not bytes live at any moment.
+
+**Proof.** `twice_the_rows_cost_no_allocation_per_row` and
+`a_line_of_a_million_commas_is_refused_without_allocating_for_its_fields`, in
+`crates/pull/tests/allocation.rs`. On origin/main, with only the fixed array
+reverted, and under each review break, they fail at "4,096 more rows made 8193
+more allocating calls (8203 for 4,096 rows, 16396 for 8,192): a row allocates"
+and "refusing a 1000000-byte line allocated 33554666 bytes: its fields were
+held". Here both pass. C4-PULL-02.

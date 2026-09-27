@@ -43,8 +43,16 @@
 //! [`fields_of`], however many commas the line holds, and parsed into integers
 //! in place. Until D-0721 this paragraph said the same while every row collected
 //! its fields into a vector sized to its commas, before the field count was
-//! checked. Held by `pull::csv::decode_rows_collects_nothing_per_row` and
+//! checked. Held by counting the allocator's calls, in
+//! `crates/pull/tests/allocation.rs`:
+//! `pull::allocation::twice_the_rows_cost_no_allocation_per_row` decodes 4,096
+//! and then 8,192 rows and allows the second at most four more allocating
+//! calls, and
+//! `pull::allocation::a_line_of_a_million_commas_is_refused_without_allocating_for_its_fields`
+//! refuses such a line having allocated fewer bytes than the line holds. The
+//! array itself is held by
 //! `pull::csv::a_lines_fields_land_in_a_fixed_array_and_are_counted_whole`.
+//! D-0724.
 //!
 //! **A row costs time linear in its line's bytes, and no line-length cap
 //! exists.** `body.lines()` finds the line's end and `line.split(',')` in
@@ -1436,32 +1444,6 @@ mod tests {
                  can be found again"
             );
         }
-    }
-
-    /// **A ROW'S FIELDS ARE NOT COLLECTED INTO A VECTOR PER ROW.** D-0721.
-    ///
-    /// The module doc said "No allocation per row" while `decode_rows`
-    /// collected every line into a `Vec<&str>` sized to its commas, before the
-    /// field count was checked: one heap allocation per row, as large as the
-    /// line made it. No allocator can be counted from a test here, because a
-    /// counting allocator needs `unsafe` and every crate root forbids it, so
-    /// the pass's own text is what is held: its body must not collect. The
-    /// needles are assembled at run time so this test's own source cannot match
-    /// them.
-    #[test]
-    fn decode_rows_collects_nothing_per_row() {
-        let source = include_str!("csv.rs");
-        let head = format!("{}{}", "fn decode_", "rows(");
-        let start = source.find(&head).expect("decode_rows is defined here");
-        let rest = source.get(start..).expect("from its head");
-        let end = rest.find("\n}\n").expect("and closed at column zero");
-        let body = rest.get(..end).expect("its body");
-        let collect = format!("{}{}", ".collect", "(");
-        assert!(
-            !body.contains(&collect),
-            "decode_rows collects into a vector, which is one heap allocation \
-             per row"
-        );
     }
 
     /// **A LINE'S FIELDS LAND IN A FIXED ARRAY, AND ARE COUNTED WHOLE.**
