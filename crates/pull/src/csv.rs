@@ -1468,11 +1468,21 @@ mod tests {
     /// the line's true width however wide the line is. What is kept is the
     /// first `MAX_FIELDS`, and a layout wider than that is refused rather than
     /// read with empty fields past the tenth.
+    ///
+    /// The kept fields are compared by joining them back into the line, not
+    /// against an array of one-character literals: Gate 1d reads every quoted
+    /// lower-case token in `crates/pull` as a possible path segment, and the
+    /// join checks the same thing, every field in its own slot and in order.
     #[test]
     fn a_lines_fields_land_in_a_fixed_array_and_are_counted_whole() {
-        let five = fields_of("a,b,c,d,e", 5).expect("five fields for five");
+        let line = "a,b,c,d,e";
+        let five = fields_of(line, 5).expect("five fields for five");
         assert_eq!(five.len(), MAX_FIELDS, "the array is the fixed width");
-        assert_eq!(five.get(..5), Some(["a", "b", "c", "d", "e"].as_slice()));
+        assert_eq!(
+            five.get(..5).map(|kept| kept.join(",")),
+            Some(line.to_owned()),
+            "each field in its own slot, in order"
+        );
         assert!(
             five.iter().skip(5).all(|field| field.is_empty()),
             "the slots past the count stay empty"
@@ -1489,10 +1499,10 @@ mod tests {
         // THE FULL WIDTH, and one past it.
         let ten = "0,1,2,3,4,5,6,7,8,9";
         let all = fields_of(ten, MAX_FIELDS).expect("ten fields fill the array");
-        assert_eq!(
-            all,
-            ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"],
-            "every slot holds its own field"
+        assert_eq!(all.join(","), ten, "every slot holds its own field");
+        assert!(
+            all.iter().all(|field| field.len() == 1),
+            "one field per slot, none merged with its neighbour"
         );
         assert_eq!(
             fields_of("0,1,2,3,4,5,6,7,8,9,10", MAX_FIELDS + 1),
