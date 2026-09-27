@@ -5289,8 +5289,8 @@ mod tests {
 
         // THE READ STOPPED AT THE CAP, NOT AFTER THE ANSWER ENDED.
         let flooded = report
-            .recv_timeout(core::time::Duration::from_secs(30))
-            .expect("the flood reports how far it got");
+            .recv_timeout(core::time::Duration::from_secs(5))
+            .expect("the flood reports how far it got, and a client that never connected gets no report");
         assert!(
             !flooded.finished,
             "the client hangs up before the flood ends: {} of {offered} bytes \
