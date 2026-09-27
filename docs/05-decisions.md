@@ -38485,3 +38485,47 @@ drives `chain::month` for `BAJAJ-AUTO`: both of its contracts are filed, and
 nothing, and it fails again with only the reader reverted.
 `a_hyphenated_name_with_a_malformed_tail_is_still_refused` holds malformed
 hyphenated names refused as their plain twins are. C4-PULL-03.
+
+### D-0723 — Bound the rolling answer's body read at `MAX_RESPONSE_BYTES`, and keep its bytes exact — 2026-09-27
+
+`HttpSource::post_json`, the rolling (Dhan expired-options) POST, read its
+success body with `let body = answer.text().await…`. That holds the whole
+answer before anything can look at its size, and nothing looked afterwards.
+The bars path (`window_async`) checks the declared length against
+`MAX_RESPONSE_BYTES` and reads under that cap, and discovery
+(`Discovery::get`) reads through `strict_discovery_body` under
+`masters::MAX_BODY_BYTES`. The rolling path had no cap at all, and its
+`# Cost` said "One request, one permit. O(1)." Ledger row W1-pull2-2.
+
+**Decision.** `post_json` reads through `strict_discovery_body` with
+`MAX_RESPONSE_BYTES` (`pub const MAX_RESPONSE_BYTES: usize = 64 * 1024 *
+1024;`), the cap the bars window uses, because a rolling answer is a window
+of bars. An answer declaring more is refused before its body is read. One
+that declares nothing and runs past the cap is abandoned at the cap. Both
+refusals carry the vendor's status, so `api::server::step` reads them through
+`Some(_) => Step::Answered` and does not re-ask. The bars window files the
+same overrun as a transport failure instead; the rolling path takes
+discovery's classification because it shares discovery's reader and its
+`chain::Refusal` type.
+
+**One behaviour change beyond the cap, and it is deliberate.** `text()`
+decoded lossily: an invalid byte became U+FFFD and the body was returned as
+if the vendor had sent that character. The shared reader keeps the bytes
+exact or refuses them as "body is not UTF-8", which is the loud refusal
+`CLAUDE.md` §4 asks for in place of a silent repair.
+
+**Proof.**
+`a_rolling_answer_with_no_declared_length_is_abandoned_past_the_cap` floods
+64 KiB frames one frame past the cap with no `Content-Length`. On origin/main
+`post_json` returned all of it, "67174400 bytes were held". Now it refuses
+under status 200, naming the cap.
+`a_rolling_answer_declaring_more_than_the_cap_is_refused_before_reading`
+sends a `Content-Length` one past the cap. On origin/main that came back as a
+transport refusal with no status (`left: None`, `right: Some(200)`). Now it
+is refused under 200 before the body is read.
+`a_rolling_answer_that_is_not_utf8_is_refused_not_repaired` returned
+`"{\u{fffd}}"` on origin/main and is now refused naming UTF-8.
+`a_rolling_answer_under_the_cap_is_returned_exactly` holds the success path
+byte for byte. The three refusal tests failed on origin/main, pass here, and
+fail again with only the read reverted. C4-PULL-04. `docs/06-limits.md`
+records the bound.

@@ -8794,3 +8794,20 @@ it collected them into a vector sized to the line's commas.
   `let mut rows: Vec<RawRow> = Vec::new();` and `decode` takes no bound, so an
   append is amortised O(1), not worst-case O(1). The module doc used to say
   otherwise.
+
+## A rolling answer is read under `MAX_RESPONSE_BYTES` — D-0723, 27 September 2026
+
+`HttpSource::post_json`, the rolling (Dhan expired-options) POST, now reads its
+success body through `strict_discovery_body` with `MAX_RESPONSE_BYTES`
+(C4-PULL-04). Until D-0723 it read the whole answer with `text()` and no cap,
+while its `# Cost` said O(1).
+
+- **One request costs time and memory linear in the answer's bytes, up to
+  the cap.** `pub const MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;`. An
+  answer declaring more is refused before its body is read, and one declaring
+  nothing is abandoned once the bytes held would pass the cap.
+- **The cap is the bars window's, not a measured rolling size.** No real
+  rolling answer's size has been measured here, so how far below the cap a
+  real answer sits is unmeasured.
+- **Nothing here bounds how many rolling requests one run sends.** That is
+  the `api` cross product's count, and this entry does not change it.

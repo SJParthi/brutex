@@ -2313,8 +2313,11 @@ impl HttpSource {
     ///
     /// # Cost
     ///
-    /// One request, one permit. O(1). Unchanged — the type carries a number the
-    /// function had already computed.
+    /// One request and one permit, and a body read linear in the answer's
+    /// bytes, held to [`MAX_RESPONSE_BYTES`]. An answer declaring more is
+    /// refused before the read and one that runs past the cap is abandoned
+    /// there. Until D-0723 this said O(1) while `text()` held the whole answer
+    /// with no cap at all.
     ///
     /// **UNVERIFIED as a measurement.** The bound is argued from the
     /// shape of the code and no bench in this workspace times it.
@@ -2336,7 +2339,7 @@ impl HttpSource {
         // NOTHING ANSWERED, SO THERE IS NO STATUS TO CARRY — a dropped socket, a
         // DNS failure or a timeout. The caller's ladder sizes a blip differently
         // from a backend that answered 500, and only this arm can say which.
-        let answer = builder
+        let mut answer = builder
             .header(name, value)
             .header("content-type", "application/json")
             .body(body)
@@ -2369,10 +2372,16 @@ impl HttpSource {
         }
         // A FAILED BODY READ IS A TRANSPORT FAILURE, NOT A REFUSAL. The status
         // was already a success; what failed is the socket delivering the rest.
-        let body = answer
-            .text()
-            .await
-            .map_err(|why| Refusal::transport(format!("{why}")))?;
+        //
+        // AND THE READ IS BOUNDED, AT THE BARS WINDOW'S OWN CAP. This was
+        // `answer.text()`, which holds the whole answer before anything can
+        // look at its size, and nothing looked afterwards. A rolling answer is
+        // a window of bars, so it is held to `MAX_RESPONSE_BYTES` as
+        // `window_async` is, through the reader discovery already uses: a
+        // declared length past the cap is refused before the read, and an
+        // undeclared one is abandoned at the cap. Both refusals carry the
+        // vendor's status. D-0723.
+        let body = strict_discovery_body(&mut answer, MAX_RESPONSE_BYTES).await?;
         self.keep_first(crate::capture::Method::Post, url, &body);
         Ok(body)
     }
@@ -2406,6 +2415,10 @@ impl HttpSource {
 }
 
 /// A successful discovery document must be bounded and preserve exact UTF-8.
+///
+/// A rolling answer too: [`HttpSource::post_json`] reads through this with
+/// [`MAX_RESPONSE_BYTES`], and `Discovery::get` with
+/// `crate::masters::MAX_BODY_BYTES`. D-0723.
 async fn strict_discovery_body(
     answer: &mut reqwest::Response,
     cap: usize,
@@ -5197,6 +5210,136 @@ mod tests {
         );
     }
 
+    /// **A ROLLING ANSWER WITH NO DECLARED LENGTH STOPS AT THE SAME CAP.**
+    /// D-0723.
+    ///
+    /// `post_json` read its success body with `text()`, which holds the whole
+    /// answer before anything can look at its size. The bars path had stopped
+    /// doing that; the rolling path, which `api` sends once per cell of its
+    /// "`offsets × sides × cadences × ordinals`" cross product, had not. This
+    /// floods one frame past `MAX_RESPONSE_BYTES` with no `Content-Length`, so
+    /// the bound has to live in the read loop, and asserts the answer is
+    /// refused rather than returned.
+    ///
+    /// The refusal carries the vendor's status, 200, rather than none, so it is
+    /// not read as a transport blip: `api::server::step` maps a status it has
+    /// no other arm for to `Some(_) => Step::Answered` and does not re-ask.
+    #[test]
+    fn a_rolling_answer_with_no_declared_length_is_abandoned_past_the_cap() {
+        const FRAME: usize = 64 * 1024;
+        let chunks = MAX_RESPONSE_BYTES.div_euclid(FRAME).saturating_add(1);
+        let url = flooding_listener(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+             Connection: close\r\n\r\n",
+            FRAME,
+            chunks,
+        );
+        let outcome = source_of(spec(PriceScale::Rupees), "SUPERSECRET").block_on_post(&url);
+
+        let refusal = match outcome {
+            Ok(body) => panic!(
+                "a rolling answer past the cap is refused, not returned: {} bytes \
+                 were held",
+                body.len()
+            ),
+            Err(refusal) => refusal,
+        };
+        assert_eq!(refusal.status, Some(200), "the vendor did answer");
+        assert!(
+            refusal.detail.contains("ceiling")
+                && refusal.detail.contains(&MAX_RESPONSE_BYTES.to_string()),
+            "it names the cap: {}",
+            refusal.detail
+        );
+        assert!(
+            !refusal.credential_dead,
+            "a size says nothing about a token"
+        );
+    }
+
+    /// **A ROLLING ANSWER DECLARING MORE THAN THE CAP IS REFUSED BEFORE ITS
+    /// BODY IS READ.** D-0723.
+    ///
+    /// Two bytes follow a `Content-Length` one past the cap. `text()` waited
+    /// for the declared length and failed as a dropped socket, a transport
+    /// refusal carrying no status. Checked against the header first, it is
+    /// the vendor's own claim that is refused, under the status it came with.
+    #[test]
+    fn a_rolling_answer_declaring_more_than_the_cap_is_refused_before_reading() {
+        let declared = MAX_RESPONSE_BYTES.saturating_add(1);
+        let (url, seen, _) = listener(Some(format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+             Content-Length: {declared}\r\nConnection: close\r\n\r\n{{}}"
+        )));
+        let outcome = source_of(spec(PriceScale::Rupees), "SUPERSECRET").block_on_post(&url);
+
+        assert!(
+            seen.recv_timeout(core::time::Duration::from_secs(5))
+                .is_ok(),
+            "the request has to go out, or this proves nothing"
+        );
+        let refusal = outcome.expect_err("a declared length past the cap is refused");
+        assert_eq!(refusal.status, Some(200), "under the status it came with");
+        assert!(
+            refusal.detail.contains("ceiling"),
+            "and it says the cap was the reason: {}",
+            refusal.detail
+        );
+    }
+
+    /// **A ROLLING ANSWER UNDER THE CAP COMES BACK BYTE FOR BYTE.** D-0723.
+    #[test]
+    fn a_rolling_answer_under_the_cap_is_returned_exactly() {
+        let body = r#"{"data":{"ce":{"close":[101.5]}}}"#;
+        let (url, _seen, _) = listener(Some(format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )));
+        let got = source_of(spec(PriceScale::Rupees), "SUPERSECRET")
+            .block_on_post(&url)
+            .expect("a small answer is returned");
+        assert_eq!(got, body);
+    }
+
+    /// **A ROLLING ANSWER THAT IS NOT UTF-8 IS REFUSED, NOT REPAIRED.** D-0723.
+    ///
+    /// `text()` decoded lossily: an invalid byte became U+FFFD and the body
+    /// was returned as if the vendor had sent that character. The bounded read
+    /// is the one discovery already used, and it keeps the bytes exact or
+    /// refuses them by name.
+    #[test]
+    fn a_rolling_answer_that_is_not_utf8_is_refused_not_repaired() {
+        use std::io::{Read as _, Write as _};
+        let socket = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+        let addr = socket.local_addr().expect("an address");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = socket.accept().expect("the request");
+            let mut request = [0u8; 4096];
+            let received = stream.read(&mut request).expect("the request bytes");
+            assert!(received > 0, "the client sent a request");
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\n{\xff}",
+                )
+                .expect("the answer");
+        });
+        let outcome = source_of(spec(PriceScale::Rupees), "SUPERSECRET")
+            .block_on_post(&format!("http://{addr}"));
+        server.join().expect("the fixture server");
+
+        let refusal = match outcome {
+            Ok(body) => panic!("an invalid byte is refused, not replaced: {body:?}"),
+            Err(refusal) => refusal,
+        };
+        assert_eq!(refusal.status, Some(200));
+        assert!(
+            refusal.detail.contains("UTF-8"),
+            "it names what was wrong with the body: {}",
+            refusal.detail
+        );
+    }
+
     /// A refusal body is read only as far as it will ever be quoted.
     ///
     /// The refusal path had **no** size check at all — `trim` cut the error
@@ -6062,6 +6205,15 @@ mod tests {
                 .build()
                 .expect("a runtime")
                 .block_on(self.0.window_async(request))
+        }
+
+        /// One rolling POST to `url`, driven to its answer.
+        fn block_on_post(&self, url: &str) -> Result<String, crate::chain::Refusal> {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime")
+                .block_on(self.0.post_json(url, "{}".to_owned()))
         }
     }
 
