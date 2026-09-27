@@ -8754,3 +8754,22 @@ further indicators run, at 51, verified them.
 - **The fixtures are synthetic.** C-R-05's volume is 1,000 to 1,010 on every
   bar. A real equity month with zero-volume bars or wider prices is not
   timed.
+
+## The commit-stamp verifier's mutation evidence, measured — D-0710, 27 September 2026
+
+Gate 18 still cannot mutate `crates/cli/build_provenance.rs` (D-0691), so the
+figures below come from a scratch crate outside any checkout that holds the file
+and `commit_stamp.rs` verbatim, run with `CARGO_TARGET_DIR` unset so each mutant
+is rebuilt in its own copy.
+
+- **Before D-0710, on `origin/main`:** `357 mutants tested in 8m: 131 missed,
+  207 caught, 17 unviable, 2 timeouts`.
+- **After:** `357 mutants tested in 12m: 8 missed, 323 caught, 17 unviable, 9
+  timeouts`.
+- **The eight survivors** are listed in D-0710 with the reason each changes
+  nothing observable on this platform: three redundant `||` clauses, the pack
+  index's minimum-length pre-check (three mutants), the non-Unix `executable`
+  and `|` between disjoint nibbles.
+- **The nine timeouts** are six mutants of `pack_offset`'s binary search and
+  three of `apply_delta`'s cursor, named in D-0710. They are reported, not
+  counted as caught.

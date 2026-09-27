@@ -38371,3 +38371,68 @@ here came from a scratch crate outside the repository, holding the verbatim
 same hunks: 9 mutants, 7 caught, 0 missed, 2 unviable, 0 timeouts. The two
 unviable ones construct `Entry::default()`, which does not exist. That is a
 type error, not a lint.
+
+### D-0710 — Make the commit-stamp tests decode a delta the proof reads, and pin the verifier's bounds — 2026-09-27
+
+GAP14-55. The tests of `crates/cli/build_provenance.rs` never decoded a delta.
+`plan_delta` deltified the first two blobs, and `verify` reads no blob object:
+`worktree_matches` hashes the working file instead. So no test reached
+`apply_delta` on the proof's path, the `REF_DELTA` arm never ran, and the
+loose-object hash check, the symlink content check and the linked-worktree
+watch could each be flipped with the whole suite green.
+
+**Reproduced first, on `origin/main` (96194c11).** `cargo mutants` does not
+discover this file (D-0691), so the evidence comes from a scratch crate outside
+any checkout that holds `origin/main`'s `build_provenance.rs` and
+`commit_stamp.rs` verbatim as library modules, run with `CARGO_TARGET_DIR`
+unset so each mutant builds in its own copy (its log reads `Dirty bpprobe`,
+then `Compiling bpprobe`). The full run printed `357 mutants tested in 8m: 131
+missed, 207 caught, 17 unviable, 2 timeouts`. The missed list includes every
+mutant the ledger names: `395:58` (`||` to `&&` in `read_bytes`), `479:54` (`+`
+to `-` and to `*` in the `REF_DELTA` depth), `571:5` (`apply_delta` replaced by
+`None`, `Some(vec![])`, `Some(vec![0])` and `Some(vec![1])`), `771:65` (`==` to
+`!=` for a symlink) and `69:24` (`==` to `!=` choosing the watched
+`packed-refs`).
+
+**The change is test-only.** Every hunk is inside `mod tests`. The fixture now
+stores HEAD's root tree, the first object below the commit that `verify`
+decodes, as an `OFS_DELTA` or a `REF_DELTA` against a base tree of 300
+pseudo-random bytes followed by the tree. The delta is one literal byte and a
+copy from offset 301 (0x12D, two offset bytes), and the fixture asserts the
+`OFS_DELTA` distance needs more than one seven-bit group. A copy one byte early
+must refuse. Further tests pin: every copy argument byte, a skipped byte, a copy
+with no offset byte and the implicit 0x10000 size; every way a delta can
+misdescribe its result; delta chains of exactly `MAX_DELTA_DEPTH` and one more
+on both delta paths; trees 128 levels below the root and one more; tree entry
+names and modes; loose objects whose body or declared size is false; pack
+entries whose header misstates a size; pack and pack-index versions and magic;
+every entry through the 64-bit offset table; an object found in a second pack
+past misses in the first; every object kind loose and packed; index versions,
+extensions, name lengths (including the saturated 0xFFF) and names; HEAD
+through packed refs and a traversing HEAD ref; a tracked symlink; an executable
+bit; a `.gitignore` comment; the watched directories; and a linked worktree
+watching the shared `packed-refs`.
+
+**After.** The same scratch crate holding this change's file printed `357
+mutants tested in 12m: 8 missed, 323 caught, 17 unviable, 9 timeouts`, and
+every mutant the ledger names above is in its caught list. Each of the 8
+survivors changes nothing this platform can observe:
+
+- `247:9` and `318:13`, `||` to `&&` between "empty" and "starts with `/`" for
+  a ref or an index name. The next clause refuses any empty segment, which both
+  cases have.
+- `271:34`, `||` to `&&` skipping `#` and `^` lines in `packed-refs`. Neither
+  kind of line has the `<40 hex> <ref>` shape the lookup requires.
+- `511:20` twice and `511:40`, the pack index's minimum length. A shorter file
+  fails a later bounded read and is refused the same way.
+- `787:5`, the `cfg(not(unix))` `executable`, which this platform does not
+  compile.
+- `1077:44`, `|` to `^` joining two hexadecimal nibbles, whose bits do not
+  overlap.
+
+The nine timeouts are six mutants of `pack_offset`'s binary search (`527:15`,
+`528:26`, `528:34`, `528:41`, `532:54` twice) and three of `apply_delta`'s
+cursor (`580:16`, `587:20`, `601:24`, each `+=` to `-=`). A timeout is not
+counted as caught here. Gate 18 still cannot see this file, as D-0691 records,
+so a later change to it has mutation evidence only if its author collects it
+this way.
