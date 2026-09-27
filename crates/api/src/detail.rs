@@ -561,6 +561,36 @@ mod tests {
         preflight, run, window,
     };
 
+    /// ONLY AN ABSENT LEDGER IS AN ABSENCE.
+    ///
+    /// `recorded_underlying` answers `None` for a ledger path that does not
+    /// exist and refuses one that cannot be inspected at all. A store root
+    /// that is a file makes the ledger's path fail with "not a directory",
+    /// not "not found": that is a broken store, not an empty one. Nothing held
+    /// the difference: a mutant that took every metadata error for `NotFound`
+    /// survived the whole suite (Gate 18 on PR #19).
+    #[cfg(unix)]
+    #[test]
+    fn only_an_absent_ledger_answers_no_underlying() {
+        let root = crate::scratch::path("detail-ledger-not-a-directory");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(&root);
+        assert_eq!(
+            super::recorded_underlying(&root, &[0; 32]),
+            Ok(None),
+            "an absent store holds no ledger"
+        );
+        std::fs::write(&root, b"a file where the store root belongs")
+            .expect("a file at the store root");
+        let refused = super::recorded_underlying(&root, &[0; 32]);
+        std::fs::remove_file(&root).expect("remove the fixture file");
+        let why = refused.expect_err("a ledger path under a file cannot be inspected");
+        assert!(
+            why.starts_with("ledger path cannot be inspected: "),
+            "{why}"
+        );
+    }
+
     /// THE BLOCKING TASK'S ORDER, KEPT: PAGE, THEN STORE ROOT, THEN IDENTITY.
     ///
     /// A request with several faults is refused for the one the blocking task

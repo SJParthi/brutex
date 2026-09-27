@@ -25,7 +25,12 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let root = crate::scratch::path("gap-peer-venue-identity");
+        Self::named("gap-peer-venue-identity")
+    }
+
+    /// A fixture under its own scratch name, so two tests never share one.
+    fn named(name: &str) -> Self {
+        let root = crate::scratch::path(name);
         fs::create_dir(&root).expect("exclusively claim generated fixture");
         let masters = root.join("masters");
         fs::create_dir(&masters).expect("offline empty masters");
@@ -249,4 +254,65 @@ async fn gap_audit_peers_must_match_both_exchange_and_segment() {
     for (path, original) in &fixture.originals {
         assert_eq!(&fs::read(path).expect("read-only source"), original);
     }
+}
+
+/// AN NSE CASH STOCK CONSULTS NO PEER, EVEN ONE THAT HOLDS THE SAME STOCK.
+///
+/// A peer's auction eligibility is not this stock's, so `gaps_json` audits an
+/// NSE cash equity with no peer calendar: another vendor's copy of the same
+/// stock never votes and is never named. The exchange half of that condition
+/// had no test: a mutant that made `asked.exchange == "NSE"` a `!=` sent an
+/// NSE stock to the peer vote and survived the whole suite (Gate 18 on
+/// PR #19). The same two feeds holding an index do vote, which is the
+/// control: the peer here is one the index audit counts.
+#[tokio::test]
+async fn an_nse_cash_stock_consults_no_peer_even_one_holding_it() {
+    let mut fixture = Fixture::named("gap-peer-nse-cash-stock");
+    let hole = pull::calendar::OPEN_MINUTE + 10;
+    fixture.write(
+        Vendor::Dhan,
+        Exchange::Nse,
+        Segment::Cash,
+        "SUBJECT",
+        Some(hole),
+    );
+    fixture.write(Vendor::Groww, Exchange::Nse, Segment::Cash, "SUBJECT", None);
+    let uri = "/gaps.json?feed=dhan&exchange=NSE&segment=CASH&symbol=SUBJECT&timeframe=1min&month=2024-01"
+        .parse()
+        .expect("fixture URI");
+    let (status, _, body) =
+        gaps_json(axum::extract::State(Loaded::clone(&fixture.site)), uri).await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    let stock: Value = serde_json::from_str(&body).expect("actual gap response");
+    assert_eq!(
+        stock["calendar"]["voted_by"],
+        serde_json::json!([]),
+        "{body}"
+    );
+    assert_eq!(
+        stock["calendar"]["unreadable"],
+        serde_json::json!([]),
+        "{body}"
+    );
+
+    fixture.write(
+        Vendor::Dhan,
+        Exchange::Nse,
+        Segment::Index,
+        "SUBJECT",
+        Some(hole),
+    );
+    fixture.write(
+        Vendor::Groww,
+        Exchange::Nse,
+        Segment::Index,
+        "SUBJECT",
+        None,
+    );
+    let index = fixture.get().await;
+    assert_eq!(
+        index["calendar"]["voted_by"],
+        serde_json::json!(["groww:SUBJECT"]),
+        "the control: the same peer votes for an index"
+    );
 }
