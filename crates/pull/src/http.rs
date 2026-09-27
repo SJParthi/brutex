@@ -5308,30 +5308,40 @@ mod tests {
     /// was returned as if the vendor had sent that character. The bounded read
     /// is the one discovery already used, and it keeps the bytes exact or
     /// refuses them by name.
+    ///
+    /// The fixture server is never joined. It reports the request it read
+    /// over a channel instead, so a `post_json` that never connects fails this
+    /// test at a five-second wait rather than hanging it on `accept`.
     #[test]
     fn a_rolling_answer_that_is_not_utf8_is_refused_not_repaired() {
         use std::io::{Read as _, Write as _};
         let socket = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
         let addr = socket.local_addr().expect("an address");
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = socket.accept().expect("the request");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = socket.accept() else {
+                return;
+            };
             let mut request = [0u8; 4096];
-            let received = stream.read(&mut request).expect("the request bytes");
-            assert!(received > 0, "the client sent a request");
-            stream
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\n{\xff}",
-                )
-                .expect("the answer");
+            let received = stream.read(&mut request).unwrap_or(0);
+            let _written = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\n{\xff}",
+            );
+            let _flushed = stream.flush();
+            let _sent = tx.send(received);
         });
         let outcome = source_of(spec(PriceScale::Rupees), "SUPERSECRET")
             .block_on_post(&format!("http://{addr}"));
-        server.join().expect("the fixture server");
 
         let refusal = match outcome {
             Ok(body) => panic!("an invalid byte is refused, not replaced: {body:?}"),
             Err(refusal) => refusal,
         };
+        assert!(
+            rx.recv_timeout(core::time::Duration::from_secs(5))
+                .is_ok_and(|received| received > 0),
+            "the request has to reach the fixture, or this proves nothing"
+        );
         assert_eq!(refusal.status, Some(200));
         assert!(
             refusal.detail.contains("UTF-8"),
