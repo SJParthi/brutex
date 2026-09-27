@@ -443,3 +443,26 @@ fn optional_fold_proof_refuses_foreign_month_partitions_and_additional_memory_bo
     );
     Ok(())
 }
+
+/// A later comparison hashes its source's three streams once for the family,
+/// not once per program × side: one digest across these three programs' six
+/// groups, where each group used to hash them afresh. It attests nothing
+/// through [`super::super::PricedSide`]. W2-cli2-3.
+#[test]
+fn a_later_comparison_digests_its_source_once() -> Result<(), String> {
+    use super::super::tests::{passes, programs};
+    let fixture = Fixture::new()?;
+    let training = fixture.produce("NIFTY", &programs()?)?;
+    let inputs = config(&fixture)?;
+    let before = passes();
+    let observed = produce_identified(
+        &training,
+        later(&fixture, &inputs),
+        "generated-boolean-candidate-fixture",
+    )?;
+    let after = passes();
+    assert_eq!(training.anchors.len(), 6, "three programs, both sides");
+    assert_eq!(observed.rows().len(), training.rows().len());
+    assert_eq!((after.0 - before.0, after.1 - before.1), (1, 0));
+    Ok(())
+}

@@ -534,3 +534,43 @@ fn complete_generated_months_measure_actual_accepted_periods_before_stats_fixtur
     assert!(sessions.days.len().is_multiple_of(2));
     Ok(())
 }
+
+std::thread_local! {
+    /// Source digests [`super::SourceDigest`] has hashed on this thread.
+    pub(super) static DIGESTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// TRAINING attestations [`super::PricedSide`] has made on this thread.
+    pub(super) static ATTESTATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+pub(super) fn count(counter: &'static std::thread::LocalKey<std::cell::Cell<u64>>) {
+    counter.with(|count| count.set(count.get() + 1));
+}
+
+/// Source digests and TRAINING attestations made on this thread so far.
+pub(super) fn passes() -> (u64, u64) {
+    (
+        DIGESTS.with(std::cell::Cell::get),
+        ATTESTATIONS.with(std::cell::Cell::get),
+    )
+}
+
+/// A TRAINING family hashes its source's three streams once and attests each
+/// side's slice once, however many programs its catalog holds. Each program ×
+/// side used to do both afresh: six digests and six attestations for these
+/// three programs. W2-cli2-3.
+#[test]
+fn a_family_digests_its_source_once_and_attests_each_side_once() -> Result<(), String> {
+    let fixture = Fixture::new()?;
+    let programs = programs()?;
+    let before = passes();
+    let family = fixture.produce("NIFTY", &programs)?;
+    let after = passes();
+    let priced = family
+        .rows()
+        .iter()
+        .map(|row| (row.program_index(), row.side() == Side::Short))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(priced.len(), 6, "three programs, both sides, all priced");
+    assert_eq!((after.0 - before.0, after.1 - before.1), (1, 2));
+    Ok(())
+}
