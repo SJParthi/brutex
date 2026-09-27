@@ -43625,3 +43625,44 @@ does not inject a failed write into a running telemetry sink. No production
 source changed. AF-28l records that boundary. The full API suite and package
 clippy were still pending at this checkpoint; these focused results do not
 replace them or the historical mutation evidence above.
+
+### D-0697 — Size Gate 18's mutation jobs from a measured run, and kill the two survivors it found — 2026-09-28
+
+**What happened.** On PR #19 (run 36318672418), Gate 18 planned 495 in-diff
+mutation cases into three jobs of 165. All three were cancelled at the
+240-minute job limit. Before that they had tested 239 cases: 178 caught, 59
+unviable, 0 timed out, and 2 missed. The other 256 cases never ran. None was
+excluded and none was counted as caught; the jobs ran out of time.
+
+**Why the plan was too big.** `.github/mutation_gate.rs` sized a job as
+`(240 − RESERVE_MINUTES) × 60 × 2 workers ÷ ESTIMATED_CASE_SECONDS`, with 40
+minutes reserved and 120 seconds a case, so 200 cases a job. Its own summary
+line called the 120 seconds an estimate. Measured on that run: setup and the
+required clean baseline (D-0654) took about 80 to 91 minutes of each job
+(baseline tests alone 4,338 to 4,893 seconds), and the shards then spent about
+202 to 259 worker-seconds a case.
+
+**The change.** `RESERVE_MINUTES` is 100 and `ESTIMATED_CASE_SECONDS` is 270:
+the worst measured baseline and the worst measured case cost, each with a
+margin. A job now holds 62 cases, so 495 cases plan to 8 jobs, which the
+matrix's `max-parallel: 8` runs at once. The matrix limit of 256 jobs now
+covers 15,872 cases, and a larger diff is still refused by name rather than
+sampled. Every case is still planned, assigned exactly once and reconciled
+(D-0629); only the size of each job changed. The planner's own tests pin 62,
+8 jobs for 495 cases, and the new ceiling. Both figures remain estimates, not
+guarantees: a case that takes longer, or a slower runner, can still exhaust a
+job.
+
+**The two survivors.** Each was a missing test, and each has one now:
+
+- `crates/api/src/detail.rs`: `recorded_underlying` answered `None` for a
+  ledger path that does not exist and refused one that cannot be inspected,
+  but a mutant taking every metadata error for `NotFound` survived.
+  `only_an_absent_ledger_answers_no_underlying` puts a file where the store
+  root belongs, so the ledger's path fails with "not a directory", and
+  requires the refusal; an absent store still answers `None`.
+- `crates/api/src/server.rs`: `gaps_json` audits an NSE cash stock with no
+  peer calendar, but a mutant turning `asked.exchange == "NSE"` into `!=`
+  survived. `an_nse_cash_stock_consults_no_peer_even_one_holding_it` gives a
+  second vendor the same stock and requires that nothing votes and nothing is
+  named; the same two feeds holding an index do vote, as the control.
