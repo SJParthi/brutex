@@ -25,6 +25,7 @@ const fn chunk(bytes: usize) -> NonZeroUsize {
 const LENGTHS: &str = "AND checkpoint boundary has invalid exact lengths";
 const LEVEL: &str = "AND checkpoint boundary names an empty or excess level";
 const ORDER: &str = "AND checkpoint boundary chunk order or length is invalid";
+const UNNAMED: &str = "AND checkpoint boundary chunks do not precede it exactly";
 
 fn column() -> Result<engine::column::Column, String> {
     let full = POSITIONS
@@ -586,6 +587,7 @@ fn boundary_counts_lengths_and_order_refuse_exactly() -> Result<(), String> {
         (pieces_at, 0, LEVEL),
         (pieces_at, 4, LEVEL),
         (pieces_at + 8 + PIECE_BYTES, 3, LEVEL),
+        (pieces_at + 8 + PIECE_BYTES, 1, UNNAMED),
         (pieces_at + 8, 0, ORDER),
         (pieces_at + 8, 3, ORDER),
         (pieces_at + 8 + 8, 0, ORDER),
@@ -614,7 +616,7 @@ fn boundary_counts_lengths_and_order_refuse_exactly() -> Result<(), String> {
     );
     assert_eq!(
         decode_boundary(&saved.payload, 1).err().as_deref(),
-        Some("AND checkpoint boundary chunks do not precede it exactly"),
+        Some(UNNAMED),
         "chunks must precede their boundary"
     );
     Ok(())

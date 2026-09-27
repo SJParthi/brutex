@@ -515,7 +515,9 @@ fn decode_boundary(bytes: &[u8], sequence: u64) -> Result<Boundary, String> {
         }
         levels.push(level);
     }
-    if last >= sequence || named != pieces || !input.is_empty() {
+    // The record's exact length leaves `(pieces - named) × PIECE_BYTES` bytes
+    // unread here, so every piece is named exactly when the input is spent.
+    if last >= sequence || named != pieces {
         return Err("AND checkpoint boundary chunks do not precede it exactly".into());
     }
     let mut owned = Vec::new();
