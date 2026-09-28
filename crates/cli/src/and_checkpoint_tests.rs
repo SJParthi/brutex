@@ -626,10 +626,13 @@ fn boundary_counts_lengths_and_order_refuse_exactly() -> Result<(), String> {
 }
 
 /// Replay reads each named chunk only as its boundary record describes it: a
-/// changed seal, a changed length or levels in the wrong depth order refuse
-/// as a chunk that differs from its record, and a foreign identity refuses.
+/// changed seal, a changed length, levels in the wrong depth order, or a
+/// level's two chunks named in each other's places refuse as a chunk that
+/// differs from its record, and a foreign identity refuses. Named in each
+/// other's places, each chunk still carries its own seal, length and depth,
+/// so only the index in its header disagrees.
 #[test]
-fn replayed_chunks_must_match_their_seals_lengths_and_depths() -> Result<(), String> {
+fn replayed_chunks_must_match_their_seals_lengths_depths_and_indexes() -> Result<(), String> {
     const DIFFERS: &str = "AND checkpoint chunk differs from its boundary record";
     let scratch = Scratch::new().map_err(error)?;
     let (journal, _, boundary) = paused_at_depth_two(&scratch)?;
@@ -651,10 +654,13 @@ fn replayed_chunks_must_match_their_seals_lengths_and_depths() -> Result<(), Str
         .ok_or("level 2 second chunk")?
         .length += 1;
     let swapped = boundary.levels.iter().rev().cloned().collect();
+    let mut exchanged = boundary.levels.clone();
+    exchanged.get_mut(1).ok_or("level 2")?.reverse();
     for (case, levels) in [
         ("seal", resealed),
         ("length", stretched),
         ("depth order", swapped),
+        ("chunk index", exchanged),
     ] {
         let refused = replay(&journal, &with(levels), ID, SMALL)
             .err()
