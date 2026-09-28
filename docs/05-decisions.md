@@ -38445,7 +38445,7 @@ counted as caught here. Gate 18 still cannot see this file, as D-0691 records,
 so a later change to it has mutation evidence only if its author collects it
 this way.
 
-### D-0711 — Hash a Boolean family's source once and attest each side once, not per program — 2026-09-27
+### D-0711 — Hash a Boolean family's source once in cli and attest each side once, not per program — 2026-09-27
 
 W2-cli2-3. For every program × side of a Boolean catalog family, `produce_side`
 in `crates/cli/src/boolean_candidate_v1.rs` ran two passes that read no
@@ -38466,10 +38466,12 @@ fixture's three-program family made 6 digests and 6 attestations in TRAINING
 program asks and returns the stored digest after; `PricedSide` attests its side
 the first time a program prices it and returns the stored attestation after.
 Both live for one family's `compute`, and the later comparison holds its own
-`SourceDigest`. The same family now makes 1 digest and 2 attestations, and its
-later comparison 1 digest. With only the reuse removed (each call hashing or
-attesting again, the counters kept) the two tests fail again with `(6, 6)` and
-`(6, 0)`.
+`SourceDigest`. In cli the same family now makes 1 digest and 2 attestations,
+and its later comparison 1 digest. These are cli's passes only; the runner's,
+below, are unchanged, so the family still hashes its three streams once per
+program × side as well as once in cli. With only the reuse removed (each call
+hashing or attesting again, the counters kept) the two tests fail again with
+`(6, 6)` and `(6, 0)`.
 
 **First use, not ahead of the loop.** A refusal of either pass still meets the
 first program's first side where it did on `origin/main`: the digest before
@@ -38492,7 +38494,10 @@ evaluated_execution_1m)?;`) and hashes the execution bars
 later comparison's `evaluate_expression_oos` hashes the later bars per program
 (`let execution = crate::identity::data_digest(bars);`). Those are runner
 passes, ledgered as W3-runner2-3, W3-runner2-5 and W3-runner2-4 for the runner
-group, and recorded in `docs/06-limits.md`.
+group, and recorded in `docs/06-limits.md`. W2-cli2-3 is therefore not
+closed: its ledger item counts these runner passes with the cli ones (`the
+cost is about 5-6 extra O(N) hashing/validation passes per program x side`),
+and only the two cli passes are removed here.
 
 ### D-0712 — Save each AND checkpoint boundary's own level, never the whole history again — 2026-09-27
 

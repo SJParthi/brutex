@@ -824,10 +824,14 @@ struct Remaining {
 /// asks for it and reused by every later one.
 ///
 /// It reads no program: its inputs are the signal, exact-minute and daily
-/// streams and their binding, all fixed for the family. Each program × side
-/// used to hash them afresh, in TRAINING and again in the later comparison.
-/// Hashing on first use rather than ahead of the loop leaves a refusal where it
-/// was, at the first program. W2-cli2-3.
+/// streams and their binding, all fixed for the family. cli used to hash them
+/// afresh for each program × side, in TRAINING and again in the later
+/// comparison. Hashing on first use rather than ahead of the loop leaves a
+/// refusal where it was, at the first program. W2-cli2-3.
+///
+/// This is cli's digest only. Minting each program × side's run through
+/// `ExpressionExecutionRunV1::new_with_daily_reference` still hashes the same
+/// streams in the runner (W3-runner2-3, D-0711).
 struct SourceDigest<'a> {
     source: &'a Source,
     digest: Option<[u8; 32]>,

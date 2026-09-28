@@ -554,12 +554,19 @@ pub(super) fn passes() -> (u64, u64) {
     )
 }
 
-/// A TRAINING family hashes its source's three streams once and attests each
-/// side's slice once, however many programs its catalog holds. Each program ×
-/// side used to do both afresh: six digests and six attestations for these
-/// three programs. W2-cli2-3.
+/// cli's own passes over a TRAINING family's source: [`super::SourceDigest`]
+/// hashes the three streams once and [`super::PricedSide`] attests each side's
+/// slice once, however many programs the catalog holds, where cli used to do
+/// both afresh for every program × side. W2-cli2-3.
+///
+/// **This counts cli's passes, not the family's.** The runner still hashes
+/// the same three streams for every program × side: `produce_side` mints each
+/// run through `ExpressionExecutionRunV1::new_with_daily_reference`, whose
+/// runner constructor begins `let expected_data_digest =
+/// crate::identity::data_digest_with_daily_reference(`. That pass is
+/// W3-runner2-3's, and D-0711 records it as not closed here.
 #[test]
-fn a_family_digests_its_source_once_and_attests_each_side_once() -> Result<(), String> {
+fn cli_digests_a_familys_source_once_and_attests_each_side_once() -> Result<(), String> {
     let fixture = Fixture::new()?;
     let programs = programs()?;
     let before = passes();

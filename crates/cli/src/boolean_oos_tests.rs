@@ -444,12 +444,20 @@ fn optional_fold_proof_refuses_foreign_month_partitions_and_additional_memory_bo
     Ok(())
 }
 
-/// A later comparison hashes its source's three streams once for the family,
-/// not once per program × side: one digest across these three programs' six
-/// groups, where each group used to hash them afresh. It attests nothing
-/// through [`super::super::PricedSide`]. W2-cli2-3.
+/// cli's own pass over a later comparison's source: one
+/// [`super::super::SourceDigest`] digest across these three programs' six
+/// groups, where cli used to hash the three streams afresh for each group. It
+/// attests nothing through [`super::super::PricedSide`]. W2-cli2-3.
+///
+/// **This counts cli's pass, not the comparison's.** Each group's run is still
+/// minted through `ExpressionExecutionRunV1::new_with_daily_reference`, whose
+/// runner constructor hashes the same three streams again (`let
+/// expected_data_digest = crate::identity::data_digest_with_daily_reference(`),
+/// and `evaluate_expression_oos` hashes the later bars for each group (`let
+/// execution = crate::identity::data_digest(bars);`). Both are runner passes,
+/// W3-runner2-3 and W3-runner2-4, recorded in D-0711.
 #[test]
-fn a_later_comparison_digests_its_source_once() -> Result<(), String> {
+fn cli_digests_a_later_comparisons_source_once() -> Result<(), String> {
     use super::super::tests::{passes, programs};
     let fixture = Fixture::new()?;
     let training = fixture.produce("NIFTY", &programs()?)?;

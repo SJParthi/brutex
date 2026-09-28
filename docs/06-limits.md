@@ -8778,10 +8778,13 @@ is rebuilt in its own copy.
 
 ## Boolean catalog passes per program × side — D-0711, 27 September 2026
 
-- **Once per family now.** The three-stream source digest, in TRAINING and in
-  the later comparison, and each side's TRAINING attestation. Counted, not
-  timed: 1 digest and 2 attestations for the fixture's three-program family,
-  and 1 digest for its later comparison (C4-CLI-05).
+- **Once per family now, in cli only.** cli's own three-stream source digest
+  (`SourceDigest`), in TRAINING and in the later comparison, and each side's
+  TRAINING attestation (`PricedSide`). Counted, not timed: 1 cli digest and 2
+  attestations for the fixture's three-program family, and 1 cli digest for
+  its later comparison (C4-CLI-05). The family's three-stream digests are not
+  one: the runner hashes the same streams again for every program × side, as
+  the next item states.
 - **Still once per program × side, in the runner.** Minting each run through
   `ExecutionRunV1::new_with_daily_reference` hashes the three streams again
   (`let expected_data_digest =
