@@ -2716,6 +2716,82 @@ mod tests {
         }
     }
 
+    /// The one object [`least_pack_index`] lists.
+    const LEAST: &[u8] = b"a pack index at its least length\n";
+
+    /// Writes a version-2 pack index `PACK_INDEX_HEADER + 40 - short` bytes
+    /// long that lists [`LEAST`] alone, and a pack holding it where that index
+    /// says, and returns its id.
+    ///
+    /// So short an index has no room for its entry table AND its trailer: its
+    /// last 20 bytes, which must be the SHA-1 of every byte before them, are
+    /// read back as the entry's CRC and offset too, and one byte short, their
+    /// first byte is also the last byte of the entry's id. `pack_offset` reads
+    /// no fanout word but the last, so the first carries `nonce`, found once by
+    /// search so that the SHA-1 names an offset under 1 MiB and, one byte
+    /// short, begins with the id's last byte. The assertions below hold those
+    /// properties, so nothing about either file is out of format but its
+    /// length.
+    fn least_pack_index(scratch: &Scratch, short: usize, nonce: u32) -> [u8; OID_LEN] {
+        let oid = object_oid("blob", LEAST);
+        let mut index = vec![0xff, b't', b'O', b'c'];
+        index.extend_from_slice(&2_u32.to_be_bytes());
+        index.extend_from_slice(&nonce.to_be_bytes());
+        index.extend_from_slice(&[0; 254 * 4]);
+        index.extend_from_slice(&1_u32.to_be_bytes());
+        index.extend_from_slice(&oid[..OID_LEN - short]);
+        let trailer = Sha1::digest(&index);
+        index.extend_from_slice(&trailer);
+        assert_eq!(index.len(), PACK_INDEX_HEADER + 40 - short);
+        assert_eq!(
+            index[PACK_INDEX_HEADER..PACK_INDEX_HEADER + OID_LEN],
+            oid,
+            "short {short}: the entry's id is whole"
+        );
+        let slot = PACK_INDEX_HEADER + OID_LEN + 4;
+        let offset =
+            usize::try_from(be_u32(&index[slot..slot + 4]).expect("offset slot")).expect("offset");
+        assert!(
+            (12..1 << 20).contains(&offset),
+            "short {short}: nonce {nonce} names offset {offset}"
+        );
+        let mut pack = b"PACK".to_vec();
+        pack.extend_from_slice(&2_u32.to_be_bytes());
+        pack.extend_from_slice(&1_u32.to_be_bytes());
+        pack.resize(offset, 0);
+        write_pack_header(&mut pack, 3, LEAST.len());
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(LEAST).expect("compress least");
+        pack.extend_from_slice(&encoder.finish().expect("finish least"));
+        let directory = scratch.0.join(".git/objects/pack");
+        fs::write(directory.join("pack-least.pack"), pack).expect("least pack");
+        fs::write(directory.join("pack-least.idx"), index).expect("least index");
+        oid
+    }
+
+    /// A pack index is at least `PACK_INDEX_HEADER + 40` bytes, its header and
+    /// its two trailing checksums. One of exactly that length, listing one
+    /// object, is read; one a byte shorter, in format in every other way, is
+    /// not. The three mutants D-0710 first recorded as survivors on that bound
+    /// each fail this test.
+    #[test]
+    fn a_pack_index_of_exactly_its_least_length_is_read_and_a_byte_shorter_is_not() {
+        let scratch = Scratch::store("least-index");
+        let oid = least_pack_index(&scratch, 0, 4_929);
+        let object = scratch
+            .objects()
+            .read_oid(&encode_oid(oid))
+            .expect("an index of exactly the least length is read");
+        assert_eq!((object.kind, object.data.as_slice()), ("blob", LEAST));
+
+        let scratch = Scratch::store("short-index");
+        let oid = least_pack_index(&scratch, 1, 235_050);
+        assert!(
+            scratch.objects().read_oid(&encode_oid(oid)).is_none(),
+            "an index a byte shorter is not read"
+        );
+    }
+
     /// A repository may hold several packs. An object is looked up in each
     /// index in turn, so the search for one the first index does not hold must
     /// end, whether it sorts before, between or after that index's entries.

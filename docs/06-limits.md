@@ -8764,14 +8764,15 @@ is rebuilt in its own copy.
 
 - **Before D-0710, on `origin/main`:** `357 mutants tested in 8m: 131 missed,
   207 caught, 17 unviable, 2 timeouts`.
-- **After:** `357 mutants tested in 12m: 8 missed, 323 caught, 17 unviable, 9
-  timeouts`.
-- **The eight survivors** are listed in D-0710. Five change nothing
-  observable on this platform: three redundant `||` clauses, the non-Unix
-  `executable` and `|` between disjoint nibbles. Three, all on the pack index's
-  minimum-length pre-check, are NOT equivalent: a pack index that tells them
-  apart must end in the SHA-1 of its own body over bytes of its own entry
-  table, and no test builds one. They remain survivors.
+- **After D-0710's first round:** `357 mutants tested in 12m: 8 missed, 323
+  caught, 17 unviable, 9 timeouts`.
+- **After its review round, 28 September:** `357 mutants tested in 13m: 5
+  missed, 326 caught, 17 unviable, 9 timeouts`.
+- **The five survivors** are listed in D-0710 and change nothing observable on
+  this platform: three redundant `||` clauses, the non-Unix `executable` and
+  `|` between disjoint nibbles. The three the first round left on the pack
+  index's minimum-length pre-check are caught by a pack index built at exactly
+  that length, and one a byte shorter, from a searched nonce (D-0710).
 - **The nine timeouts** are six mutants of `pack_offset`'s binary search and
   three of `apply_delta`'s cursor, named in D-0710. They are reported, not
   counted as caught.

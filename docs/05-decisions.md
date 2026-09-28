@@ -38435,8 +38435,20 @@ they judge differently from the original is at most that long, so for it to
 list HEAD's tree its last 20 bytes, which must be the SHA-1 of every byte
 before them (`if Sha1::digest(bytes.get(..body_len)?).as_slice() !=
 bytes.get(body_len..)?`), overlap its own entry table. A fixture could build
-one only by searching for a digest whose bytes agree with that table, and no
-test here does.
+one only by searching for a digest whose bytes agree with that table.
+
+**Review round, 28 September: the three are caught.** That search was run once,
+offline, and its results are fixed in the test
+`a_pack_index_of_exactly_its_least_length_is_read_and_a_byte_shorter_is_not`.
+`pack_offset` reads no fanout word but the last, so the first carries a nonce:
+4,929 makes the SHA-1 of a 1,052-byte body name offset 2,298, and 235,050 makes
+that of a 1,051-byte body begin with the listed id's last byte and name offset
+34,834. The test asserts both properties, puts the object at that offset, and
+requires an index of exactly `PACK_INDEX_HEADER + 40` bytes to be read and one
+a byte shorter not to be. Each of the three mutants, applied alone in the
+scratch crate, fails it. The whole run over this file then printed `357 mutants
+tested in 13m: 5 missed, 326 caught, 17 unviable, 9 timeouts`: the five missed
+are the five listed above as unobservable, and the timeouts are the nine below.
 
 The nine timeouts are six mutants of `pack_offset`'s binary search (`527:15`,
 `528:26`, `528:34`, `528:41`, `532:54` twice) and three of `apply_delta`'s
