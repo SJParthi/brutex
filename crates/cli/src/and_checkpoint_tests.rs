@@ -1247,3 +1247,45 @@ fn a_production_level_past_one_chunk_splits_and_resumes_through_its_orphans() ->
     );
     Ok(())
 }
+
+/// A replay releases the chunk it has finished with BEFORE it reads the next,
+/// so at most one chunk payload is held beside the checkpoint being rebuilt.
+/// Here level 1's chunk is read, and then the replay is pointed at an entry
+/// the journal does not hold: that read fails, and level 1's chunk is already
+/// gone.
+#[test]
+fn a_replay_releases_each_chunk_before_reading_the_next() -> Result<(), String> {
+    let scratch = Scratch::new().map_err(error)?;
+    let (journal, _, boundary) = paused_at_depth_two(&scratch)?;
+    let mut levels = boundary.levels.clone();
+    levels
+        .get_mut(1)
+        .and_then(|level| level.first_mut())
+        .ok_or("level 2 chunk")?
+        .sequence = 999;
+    let first = *levels
+        .first()
+        .and_then(|level| level.first())
+        .ok_or("level 1 chunk")?;
+    let mut stream = Replay {
+        journal: &journal,
+        limits: SMALL,
+        prefix: &[],
+        levels: &levels,
+        level: 0,
+        piece: 0,
+        chunk: Vec::new(),
+        at: 0,
+    };
+    assert_eq!(stream.load(), Ok(true));
+    assert_eq!(
+        stream.chunk.len() as u64,
+        CHUNK_HEADER as u64 + first.length
+    );
+    assert!(stream.load().is_err(), "entry 999 was never published");
+    assert!(
+        stream.chunk.is_empty(),
+        "level 1's chunk was released before entry 999 was read"
+    );
+    Ok(())
+}

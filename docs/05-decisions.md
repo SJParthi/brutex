@@ -38584,3 +38584,25 @@ again, pinned or not, and the recorded pin must equal the new one or the retry
 refuses. It is recorded in `docs/06-limits.md` and pinned by
 `a_resumed_refused_rung_prices_its_pinned_family_again`, which a fix must
 change.
+
+### D-0714 — Release each AND checkpoint chunk before a replay reads the next — 2026-09-28
+
+Review finding on D-0712. The `Replay` comment in `cli::and_checkpoint` said "at
+most one chunk is held beside the checkpoint being rebuilt", and no test backed
+it. `Replay::load` read the next chunk (`let saved =
+self.journal.read(piece.sequence, self.limits.entry)?;`) while `self.chunk`
+still owned the previous one, which was dropped only at `self.chunk =
+saved.payload;`. So two chunk payloads, each up to `CHUNK_BYTES` of level bytes
+and a header, were live at once.
+
+**Reproduced first, at 1648a0f8.** `a_replay_releases_each_chunk_before_reading_the_next`
+reads level 1's chunk, then points the replay at an entry the journal never
+published: the read fails, and the test requires level 1's chunk to be released
+already. Against 1648a0f8's `and_checkpoint.rs` it failed at that assertion
+("level 1's chunk was released before entry 999 was read").
+
+**The change.** `load` sets `self.chunk = Vec::new();` before the read, and the
+test passes. Only that line separates the two runs' `load`.
+
+**Not changed.** A replay still streams every chunk once, and the checkpoint it
+rebuilds is still held whole in memory (`docs/20-sweep-resume.md`).

@@ -562,8 +562,9 @@ fn replay(
 }
 
 /// The prefix, then every named chunk's level bytes, in depth order. Each
-/// chunk is read only when the decoder reaches it, so at most one chunk is
-/// held beside the checkpoint being rebuilt.
+/// chunk is read only when the decoder reaches it, and the one before it is
+/// released first (`self.chunk = Vec::new();` ahead of the read), so at most
+/// one chunk payload is held beside the checkpoint being rebuilt.
 struct Replay<'a> {
     journal: &'a Journal,
     limits: Limits,
@@ -585,6 +586,9 @@ impl Replay<'_> {
                 self.piece = 0;
                 continue;
             };
+            // Release the chunk just read before reading the next, so two
+            // chunk payloads are never held at once.
+            self.chunk = Vec::new();
             let saved = self.journal.read(piece.sequence, self.limits.entry)?;
             let [_, depth, index, _] = chunk_header(&saved.payload)?;
             if saved.seal != piece.seal

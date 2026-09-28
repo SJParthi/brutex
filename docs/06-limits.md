@@ -8819,7 +8819,9 @@ more than one chunk of one level.
 - **What still reads the whole history.** A resumed attempt streams every
   chunk through the engine's decoder, and a completed walk reopens every chunk
   once before it returns, as version 1 reopened its one payload. The retained
-  history is still held in memory, as `docs/20-sweep-resume.md` states.
+  history is still held in memory, as `docs/20-sweep-resume.md` states. A
+  replay holds one chunk payload at a time: it releases each before it reads
+  the next (C4-CLI-10).
 - **Orphans.** A boundary interrupted after its chunks leaves them in the
   journal unreferenced, and the next attempt rebuilds that one level
   (C4-CLI-07).
