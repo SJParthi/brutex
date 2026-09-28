@@ -1123,3 +1123,127 @@ fn a_production_history_past_64_mib_completes_and_replays_without_recomputing() 
     assert_eq!(journal.next_sequence(), next, "replay publishes nothing");
     Ok(())
 }
+
+/// **A production level past one chunk.** Twenty-two live conditions true
+/// together on two of three bars: levels 10 and 11 are C(22, 10) = 646,646
+/// and C(22, 11) = 705,432 survivors, each past 32 MiB of level bytes, so at
+/// the production sizes each is saved as two chunks, the first full, and every
+/// other level through 11 as one. The walk is paused after depth 11, and depth
+/// 11's boundary record is made never to have landed, orphaning its two
+/// chunks: the next attempt resumes at depth 10, rebuilds depth 11, and ends at
+/// the uninterrupted answer, every level in the fewest 32 MiB chunks; replaying
+/// the completed identity makes one callback and publishes nothing.
+#[test]
+fn a_production_level_past_one_chunk_splits_and_resumes_through_its_orphans() -> Result<(), String>
+{
+    let positions = runner::live_positions()
+        .into_iter()
+        .take(22)
+        .collect::<Vec<_>>();
+    assert_eq!(positions.len(), 22);
+    let full = positions
+        .iter()
+        .copied()
+        .fold(ConditionMask::ZERO, ConditionMask::with_bit);
+    let column =
+        engine::column::Column::try_from_rows(&[full, full, ConditionMask::ZERO]).map_err(error)?;
+    let ladder = Ladder::with_min_hits(1).with_support_lanes(1);
+    let expected = ladder.walk_column(&column, &positions, &|_, _, _| {});
+    let chunk = PRODUCTION.chunk.get() as u64;
+    assert_eq!(chunk, 32 << 20);
+
+    let scratch = Scratch::new().map_err(error)?;
+    let first = sweep_evidence::begin(&scratch.0, ID, Operation::Sweep)?;
+    let paused = walk(
+        &scratch.0,
+        &first,
+        ladder,
+        &column,
+        &positions,
+        &mut |view| {
+            if view.current().k == 11 {
+                Err("pause after depth 11".into())
+            } else {
+                Ok(())
+            }
+        },
+    );
+    assert!(paused.is_err());
+    drop(first);
+    let (last, boundary) = newest_boundary(&scratch.0)?;
+    assert_eq!(boundary.rows.len(), 11);
+    assert_eq!(
+        boundary.levels.iter().map(Vec::len).collect::<Vec<_>>(),
+        [1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2]
+    );
+    for (depth, survivors) in [(10, 646_646_u64), (11, 705_432)] {
+        let pieces = boundary.levels.get(depth - 1).ok_or("split level")?;
+        assert_eq!(
+            expected
+                .levels
+                .get(depth - 1)
+                .map(|level| level.frequent.len() as u64),
+            Some(survivors)
+        );
+        assert_eq!(pieces.first().map(|piece| piece.length), Some(chunk));
+        assert_eq!(
+            pieces.iter().map(|piece| piece.length).sum::<u64>(),
+            56 + 56 * survivors
+        );
+    }
+    // Depth 11's record never landed: its two chunks are orphans.
+    fs::remove_file(
+        namespace(&scratch.0)?
+            .join(format!("{last:016x}"))
+            .join("complete"),
+    )
+    .map_err(error)?;
+
+    let attempt = sweep_evidence::begin(&scratch.0, ID, Operation::Sweep)?;
+    let mut visited = Vec::new();
+    let resumed = walk(
+        &scratch.0,
+        &attempt,
+        ladder,
+        &column,
+        &positions,
+        &mut |view| {
+            visited.push(view.current().k);
+            Ok(())
+        },
+    )?;
+    attempt.finish(Completion::Completed)?;
+    assert_eq!(resumed, expected);
+    assert_eq!(visited.first().copied(), Some(10), "resumed at depth 10");
+    let (_, done) = newest_boundary(&scratch.0)?;
+    assert_eq!(done.levels.len(), expected.levels.len());
+    for (level, pieces) in expected.levels.iter().zip(&done.levels) {
+        let bytes = 56 + 56 * level.frequent.len() as u64;
+        assert_eq!(pieces.len() as u64, bytes.div_ceil(chunk));
+        assert_eq!(pieces.iter().map(|piece| piece.length).sum::<u64>(), bytes);
+    }
+
+    let next = Journal::open(&scratch.0, NAMESPACE, ID)?.next_sequence();
+    let replay = sweep_evidence::begin(&scratch.0, ID, Operation::Sweep)?;
+    let mut callbacks = 0;
+    let replayed = walk(
+        &scratch.0,
+        &replay,
+        ladder,
+        &column,
+        &positions,
+        &mut |_| {
+            callbacks += 1;
+            Ok(())
+        },
+    )?;
+    replay.finish(Completion::Completed)?;
+    assert_eq!(replayed, expected);
+    assert_eq!(callbacks, 1, "the completed boundary is acknowledged");
+    assert_eq!(
+        Journal::open(&scratch.0, NAMESPACE, ID)?.next_sequence(),
+        next,
+        "replay publishes nothing"
+    );
+    Ok(())
+}
