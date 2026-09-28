@@ -1124,6 +1124,23 @@ fn a_production_history_past_64_mib_completes_and_replays_without_recomputing() 
     Ok(())
 }
 
+/// The first `conditions` live positions, true together on two of three bars,
+/// so every one of their combinations is frequent.
+fn all_frequent(conditions: usize) -> Result<(Vec<u32>, engine::column::Column), String> {
+    let positions = runner::live_positions()
+        .into_iter()
+        .take(conditions)
+        .collect::<Vec<_>>();
+    assert_eq!(positions.len(), conditions);
+    let full = positions
+        .iter()
+        .copied()
+        .fold(ConditionMask::ZERO, ConditionMask::with_bit);
+    let column =
+        engine::column::Column::try_from_rows(&[full, full, ConditionMask::ZERO]).map_err(error)?;
+    Ok((positions, column))
+}
+
 /// **A production level past one chunk.** Twenty-two live conditions true
 /// together on two of three bars: levels 10 and 11 are C(22, 10) = 646,646
 /// and C(22, 11) = 705,432 survivors, each past 32 MiB of level bytes, so at
@@ -1136,17 +1153,7 @@ fn a_production_history_past_64_mib_completes_and_replays_without_recomputing() 
 #[test]
 fn a_production_level_past_one_chunk_splits_and_resumes_through_its_orphans() -> Result<(), String>
 {
-    let positions = runner::live_positions()
-        .into_iter()
-        .take(22)
-        .collect::<Vec<_>>();
-    assert_eq!(positions.len(), 22);
-    let full = positions
-        .iter()
-        .copied()
-        .fold(ConditionMask::ZERO, ConditionMask::with_bit);
-    let column =
-        engine::column::Column::try_from_rows(&[full, full, ConditionMask::ZERO]).map_err(error)?;
+    let (positions, column) = all_frequent(22)?;
     let ladder = Ladder::with_min_hits(1).with_support_lanes(1);
     let expected = ladder.walk_column(&column, &positions, &|_, _, _| {});
     let chunk = PRODUCTION.chunk.get() as u64;
