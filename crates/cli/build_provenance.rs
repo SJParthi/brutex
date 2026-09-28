@@ -1419,6 +1419,24 @@ mod tests {
         Ofs,
         /// The root tree as a `REF_DELTA` naming that base by id.
         Reference,
+        /// The root tree whole, under its own id, but with bytes that are not
+        /// that id's: see [`misnamed_tree`].
+        Misnamed,
+    }
+
+    /// HEAD's root tree with its `crates` entry's mode written `040000`
+    /// instead of `40000`. Octal parsing reads both as the same mode, so these
+    /// bytes list exactly the entries HEAD's tree lists, and only their id
+    /// differs from the one HEAD names.
+    fn misnamed_tree(tree: &[u8]) -> Vec<u8> {
+        let at = tree
+            .windows(13)
+            .position(|window| window == b"40000 crates\0")
+            .expect("root tree lists crates");
+        let mut misnamed = tree[..at].to_vec();
+        misnamed.push(b'0');
+        misnamed.extend_from_slice(&tree[at..]);
+        misnamed
     }
 
     /// Which offset table a fixture pack index uses for its entries.
@@ -1696,9 +1714,10 @@ mod tests {
         )
     }
 
-    /// Moves every loose object into one pack. Unless `Plain`, HEAD's root
-    /// tree -- which `verify` must decode to walk HEAD -- is stored as a delta
-    /// against a padded base tree written ahead of every other object.
+    /// Moves every loose object into one pack. For `Ofs` and `Reference`,
+    /// HEAD's root tree -- which `verify` must decode to walk HEAD -- is stored
+    /// as a delta against a padded base tree written ahead of every other
+    /// object; for `Misnamed` it is stored whole as [`misnamed_tree`]'s bytes.
     fn move_loose_objects_to_pack(
         fixture: &Fixture,
         delta: DeltaFixture,
@@ -1707,7 +1726,7 @@ mod tests {
     ) {
         let object_root = fixture.root.join(".git/objects");
         let tree = read_loose(&loose_path(&fixture.root, fixture.tree)).1;
-        let base = (!matches!(delta, DeltaFixture::Plain)).then(|| {
+        let base = matches!(delta, DeltaFixture::Ofs | DeltaFixture::Reference).then(|| {
             let mut data = padding();
             data.extend_from_slice(&tree);
             write_object(&fixture.root, "tree", &data)
@@ -1735,6 +1754,16 @@ mod tests {
                     Base::Ref(base.expect("reference base")),
                     root_tree_delta(&tree, intact),
                 ),
+                DeltaFixture::Misnamed if object.oid == fixture.tree => {
+                    let misnamed = misnamed_tree(&tree);
+                    PackEntry {
+                        oid: object.oid,
+                        kind: 2,
+                        base: Base::Whole,
+                        declared: misnamed.len(),
+                        payload: misnamed,
+                    }
+                }
                 _ => PackEntry::whole(object.kind, object.data.clone()),
             })
             .collect::<Vec<_>>();
@@ -2175,12 +2204,25 @@ mod tests {
     }
 
     /// The converse, and the proof the delta above is on the path: a copy one
-    /// byte early is in range and the right length, and yields a tree whose
-    /// id is not the one HEAD names, so the tree cannot be proved.
+    /// byte early is in range and the right length, and yields other bytes --
+    /// the tree's first byte twice, so its first entry's mode reads `1100644`
+    /// -- whose id is not the one HEAD names, so the tree cannot be proved.
+    ///
+    /// Two checks refuse those bytes: the packed object's id check, and the
+    /// tree walk's mode check behind it. So this test does not pin the id
+    /// check on its own; [`a_packed_object_whose_bytes_are_not_its_id_refuses`]
+    /// is the case only the id check can refuse.
     #[test]
     fn a_root_tree_delta_that_yields_other_bytes_refuses() {
         for delta_fixture in [DeltaFixture::Ofs, DeltaFixture::Reference] {
             let fixture = Fixture::new();
+            let tree = read_loose(&loose_path(&fixture.root, fixture.tree)).1;
+            let mut base = padding();
+            base.extend_from_slice(&tree);
+            let yielded = apply_delta(&base, &root_tree_delta(&tree, false))
+                .expect("in range and the right length");
+            assert!(yielded.starts_with(b"1100644 "), "{delta_fixture:?}");
+            assert_ne!(object_oid("tree", &yielded), fixture.tree);
             move_loose_objects_to_pack(&fixture, delta_fixture, Offsets::Small, false);
             let verification = fixture.verify(None);
             assert!(verification.commit.is_none(), "{delta_fixture:?}");
@@ -2189,6 +2231,33 @@ mod tests {
                 "{delta_fixture:?}"
             );
         }
+    }
+
+    /// A packed object is proved only when its bytes are the id it is stored
+    /// under. HEAD's root tree is packed whole under its own id, as
+    /// [`misnamed_tree`]'s bytes: walked under their true id they list exactly
+    /// HEAD's entries, so no check but the packed id check can tell them from
+    /// the tree HEAD names, and it refuses them.
+    #[test]
+    fn a_packed_object_whose_bytes_are_not_its_id_refuses() {
+        let fixture = Fixture::new();
+        let tree = read_loose(&loose_path(&fixture.root, fixture.tree)).1;
+        let misnamed = misnamed_tree(&tree);
+        let true_id = write_object(&fixture.root, "tree", &misnamed);
+        assert_ne!(true_id, fixture.tree);
+        let mut listed = BTreeMap::new();
+        let store = ObjectStore::new(&fixture.root.join(".git"));
+        assert!(walk_tree(&store, true_id, "", &mut listed, 0));
+        assert_eq!(
+            listed, fixture.entries,
+            "the misnamed bytes list HEAD's entries"
+        );
+        fs::remove_file(loose_path(&fixture.root, true_id)).expect("remove true-id copy");
+
+        move_loose_objects_to_pack(&fixture, DeltaFixture::Misnamed, Offsets::Small, true);
+        let verification = fixture.verify(None);
+        assert!(verification.commit.is_none());
+        assert_eq!(verification.reason, "the HEAD tree cannot be proved");
     }
 
     /// Every entry reached through the 64-bit offset table: the 31-bit slot
