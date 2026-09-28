@@ -916,6 +916,118 @@ fn final_checkpoint_corruption_after_callback_cannot_return_a_completed_sweep() 
     Ok(())
 }
 
+/// Replaces entry `sequence` of this identity's journal under `root` with
+/// `payload`, VALIDLY sealed: published at the same sequence through a second
+/// journal under another root and copied over, header, seal and completion
+/// marker alike. The journal's own read accepts it; only a comparison with the
+/// seal recorded when the original was published can tell them apart.
+fn reseal(root: &Path, sequence: u64, payload: &[u8]) -> Result<(), String> {
+    let other = Scratch::new().map_err(error)?;
+    let mut journal = Journal::open(&other.0, NAMESPACE, ID)?;
+    while journal.next_sequence() < sequence {
+        journal.publish(b"filler", MAX_BYTES)?;
+    }
+    assert_eq!(journal.publish(payload, MAX_BYTES)?.0, sequence);
+    drop(journal);
+    let from = namespace(&other.0)?.join(format!("{sequence:016x}"));
+    let to = namespace(root)?.join(format!("{sequence:016x}"));
+    for file in ["payload", "complete"] {
+        fs::copy(from.join(file), to.join(file)).map_err(error)?;
+    }
+    Ok(())
+}
+
+/// The payload of entry `sequence`, read from its file around the journal's
+/// 64-byte header and 32-byte seal, while the walk owns the journal.
+fn payload_of(root: &Path, sequence: u64) -> Result<Vec<u8>, String> {
+    let bytes = fs::read(
+        namespace(root)?
+            .join(format!("{sequence:016x}"))
+            .join("payload"),
+    )
+    .map_err(error)?;
+    Ok(bytes
+        .get(64..bytes.len().saturating_sub(32))
+        .ok_or("entry payload")?
+        .to_vec())
+}
+
+/// **A replacement that is itself validly sealed is refused by the recorded
+/// seals, not by the journal.** After the terminal callback, the final
+/// boundary record is replaced by one whose engine prefix differs in one byte,
+/// or level 1's chunk by one whose level bytes do, each resealed at its own
+/// sequence so that the journal's read accepts it. The walk refuses in the
+/// comparison's own words, the attempt is refused, and the journal still
+/// reads the replacement back: nothing but the comparison with the seal
+/// acknowledged at publication refused it.
+#[test]
+fn a_resealed_final_boundary_or_chunk_is_refused_by_its_recorded_seal() -> Result<(), String> {
+    for (replace_boundary, refusal) in [
+        (
+            true,
+            "AND final checkpoint differs from its acknowledged publication",
+        ),
+        (
+            false,
+            "AND final checkpoint chunk differs from its acknowledgment",
+        ),
+    ] {
+        let scratch = Scratch::new().map_err(error)?;
+        let attempt = sweep_evidence::begin(&scratch.0, ID, Operation::Sweep)?;
+        let mut replaced = None;
+        let result = walk_within(
+            &scratch.0,
+            &attempt,
+            Ladder::with_min_hits(1),
+            &column()?,
+            &POSITIONS,
+            SMALL,
+            &mut |view| {
+                if !view.terminal() {
+                    return Ok(());
+                }
+                let sequence = if replace_boundary {
+                    fs::read_dir(namespace(&scratch.0)?)
+                        .map_err(error)?
+                        .filter_map(|entry| {
+                            u64::from_str_radix(&entry.ok()?.file_name().into_string().ok()?, 16)
+                                .ok()
+                        })
+                        .max()
+                        .ok_or("no entry")?
+                } else {
+                    1
+                };
+                let mut payload = payload_of(&scratch.0, sequence)?;
+                let at = if replace_boundary {
+                    // The engine prefix's first byte, after the header and
+                    // every depth row; the record still decodes.
+                    let rows = decode_boundary(&payload, sequence)?.rows.len();
+                    BOUNDARY_HEADER + rows * DEPTH_BYTES
+                } else {
+                    // Level 1's first byte, after the chunk header.
+                    CHUNK_HEADER
+                };
+                *payload.get_mut(at).ok_or("replaced byte")? ^= 1;
+                if replace_boundary {
+                    decode_boundary(&payload, sequence)?;
+                }
+                reseal(&scratch.0, sequence, &payload)?;
+                replaced = Some((sequence, payload));
+                Ok(())
+            },
+        );
+        assert_eq!(result.err().as_deref(), Some(refusal));
+        drop(attempt);
+        let evidence = sweep_evidence::read(&scratch.0, ID, MAX_BYTES)?.ok_or("attempt missing")?;
+        assert_eq!(evidence.completion, Completion::Refused);
+        let (sequence, payload) = replaced.ok_or("nothing was replaced")?;
+        let journal = Journal::open(&scratch.0, NAMESPACE, ID)?;
+        assert_eq!(journal.read(sequence, MAX_BYTES)?.payload, payload);
+    }
+    Ok(())
+}
+
 /// **The reproduction at production size, through the production door.**
 /// Twenty-one live conditions true together on two of three bars make every
 /// one of their 2,097,151 combinations frequent, so the retained history

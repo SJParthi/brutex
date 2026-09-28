@@ -92,7 +92,10 @@ no duplicate checkpoint reservation. The final boundary record is reopened and
 compared with its exact acknowledged sequence and seal, and every chunk it
 names with its recorded seal, before a rankable run is returned. A test changes
 the boundary record, and another a chunk, after the final callback and requires
-a refused attempt.
+a refused attempt. Another replaces each with a validly resealed entry, one the
+journal's own read accepts, and requires the refusal of the seal comparison
+itself: "AND final checkpoint differs from its acknowledged publication" for the
+record, "AND final checkpoint chunk differs from its acknowledgment" for a chunk.
 Only this stored single-month sweep entry point is wired here; other entry
 points do not inherit resumability from compiling the engine API.
 
