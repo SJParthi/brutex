@@ -582,7 +582,9 @@ pub fn decode(body: &str, columns: Columns) -> Result<Vec<RawRow>, CsvError> {
 ///
 /// A row's fields are held in an array this wide rather than collected into a
 /// vector, so a row allocates nothing whatever its line holds. Every layout
-/// fits, held by `tests::every_layout_fits_the_fixed_field_array`. D-0721.
+/// `tests::every_layout_fits_the_fixed_field_array` walks fits, and that
+/// test's own doc names the one way a new layout is named there and not
+/// walked. D-0721.
 const MAX_FIELDS: usize = 10;
 
 /// One line's fields, borrowed into a fixed array, when it has exactly `want`
