@@ -134,16 +134,20 @@ pub fn ist_day(ts_micros: i64) -> i64 {
 /// records three of them as VERIFIED full 375-bar sessions — the Budget
 /// Saturdays 2020-02-01 and 2025-02-01 and the Budget Sunday 2026-02-01. Two
 /// more are on disk: the disaster-recovery Saturdays 2024-03-02 and 2024-05-18,
-/// 105 bars each. Five weekend sessions, **1,335 real trading bars**, measured
-/// in the operator's own store — none of them a defect.
+/// 105 bars each. And a sixth: the full 375-bar session of Saturday 2024-01-20.
+/// Six weekend sessions, **1,710 real trading bars**, measured in the
+/// operator's own store — none of them a defect. (This read five sessions and
+/// 1,335 bars until D-0694; the charter records that count as the one that
+/// omitted 2024-01-20.)
 ///
 /// # What the behaviour actually costs, stated rather than denied
 ///
-/// On those 1,335 bars all five weekday positions are false. That is not
+/// On those 1,710 bars all five weekday positions are false. That is not
 /// *wrong* under §4 — a session the vocabulary cannot name is honestly unnamed
 /// — but it is not free either: a weekday-conditioned candidate has those bars
 /// in its support DENOMINATOR and never in its numerator, so its measured
-/// support is diluted by 0.21% of the series.
+/// support is diluted by 0.28% of the series, the charter's figure over the
+/// `zerodha` feed's 618,296 one-minute NIFTY bars.
 ///
 /// Naming a weekend session would need a sixth and seventh position, and
 /// `CLAUDE.md` §3 rule 8 makes appending bits a decision rather than a tidy-up.

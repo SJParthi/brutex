@@ -150,8 +150,9 @@ fn cash_symbols() -> Vec<&'static str> {
         .copied()
         // F&O membership includes index underlyings. Positively identify cash
         // equities through the existing total-market index before resolving a
-        // sweep key; swept_index's fallback alone can construct a cash key for
-        // an index outside the two swept spot indices.
+        // sweep key. swept_index's cash fallback accepted an index outside the
+        // two swept spot indices until D-0682 made core refuse it; this filter
+        // stays as a second, independent check that the name is a share.
         .filter(|symbol| brutex_core::universe::NTM_INDEX.contains(symbol))
         .filter(|symbol| {
             crate::stored::swept_index(symbol).is_ok_and(|key| key.kind == Kind::Equity)
@@ -216,6 +217,10 @@ fn render(holdings: &Holdings, vendor: Vendor, window: ResearchWindow) -> String
         holdings.census.spot,
         holdings.census.with_contract
     );
+    // EVERY ROW ABOVE IS A STOCK, so the statement every report over a stock
+    // carries is carried here too, beside the no-charges discovery policy it
+    // qualifies. D-0694.
+    let _ = writeln!(out, "{}", runner::audit::CORPORATE_ACTIONS_UNCHECKED);
     out
 }
 
@@ -336,6 +341,23 @@ mod tests {
         assert!(text.contains("No stock search was started"));
     }
 
+    /// Every row of this inventory is a stock, so it carries the statement
+    /// every report over a stock carries, after the discovery policy. D-0694.
+    #[test]
+    fn the_stock_inventory_states_corporate_actions_are_unchecked() {
+        let window = ResearchWindow::at(clock(2026, 9, 5)).unwrap();
+        let text = render(&Holdings::default(), Vendor::Zerodha, window);
+        assert!(
+            text.ends_with(&format!("{}\n", runner::audit::CORPORATE_ACTIONS_UNCHECKED)),
+            "{text}"
+        );
+        assert!(
+            text.find("Discovery policy requested: no charges")
+                < text.find(runner::audit::CORPORATE_ACTIONS_UNCHECKED),
+            "{text}"
+        );
+    }
+
     #[test]
     fn cash_inventory_never_relabels_an_index_as_a_stock() {
         let symbols = cash_symbols();
@@ -350,6 +372,26 @@ mod tests {
                 .all(|symbol| brutex_core::universe::NTM_INDEX.contains(symbol)
                     && brutex_core::universe::FNO_INDEX.contains(symbol))
         );
+    }
+
+    /// **The cash inventory is exactly the 208 F&O shares, in list order, and
+    /// the same list every time it is asked.** D-0682.
+    ///
+    /// The test above pins five exclusions and two inclusions, so a filter that
+    /// dropped any other share -- or let a sixth index through -- passed it.
+    /// This pins the whole list against core's two constants.
+    #[test]
+    fn cash_inventory_is_exactly_the_fno_underlyings_less_the_index_names() {
+        use brutex_core::universe::{FNO_INDEX_UNDERLYINGS, FNO_UNDERLYINGS};
+        let expected: Vec<&str> = FNO_UNDERLYINGS
+            .iter()
+            .copied()
+            .filter(|name| !FNO_INDEX_UNDERLYINGS.contains(name))
+            .collect();
+        assert_eq!(expected.len(), 208, "213 underlyings less 5 index names");
+        let first = cash_symbols();
+        assert_eq!(first, expected);
+        assert_eq!(cash_symbols(), first, "a rerun lists the same shares");
     }
 
     #[test]

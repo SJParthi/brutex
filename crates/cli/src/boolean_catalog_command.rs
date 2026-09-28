@@ -427,6 +427,71 @@ mod tests {
         }
     }
 
+    /// A Boolean research scope holding a stock opens by saying its totals are
+    /// gross of every charge and corporate actions are unchecked; a scope of
+    /// the two indices opens exactly as it did before. D-0694.
+    #[test]
+    fn a_stock_research_scope_states_corporate_actions_are_unchecked_and_an_index_scope_does_not() {
+        const BEFORE: &str = "\nEXPLICIT BOOLEAN CATALOG RESEARCH. This is the complete supplied catalog, not exhaustive Boolean grammar search or Selection V6. Intraday only;15:10IST deadline.\n";
+        for symbols in ["NIFTY,RELIANCE", "RELIANCE", "BANKNIFTY,TCS"] {
+            let heading = prepared::research_heading(&scope(symbols).unwrap());
+            assert_eq!(
+                heading,
+                format!(
+                    "{}{}{BEFORE}",
+                    crate::STORED_PROVENANCE,
+                    runner::audit::CostScope::CashEquity.report_note()
+                ),
+                "{symbols}"
+            );
+            assert!(heading.contains(runner::audit::CORPORATE_ACTIONS_UNCHECKED));
+        }
+        for symbols in ["NIFTY,BANKNIFTY", "NIFTY"] {
+            assert_eq!(
+                prepared::research_heading(&scope(symbols).unwrap()),
+                format!("{}{BEFORE}", crate::STORED_PROVENANCE),
+                "an index scope is unchanged: {symbols}"
+            );
+        }
+    }
+
+    /// **The note a Boolean payload carries is the research heading's own.**
+    /// D-0694, AF-19.
+    ///
+    /// `api` serves the same research as JSON and has no arrow to `runner`,
+    /// so it takes the note from `research_equity_note`. The heading decides
+    /// its note there too, so the text page and the JSON cannot disagree on
+    /// which scope is a stock's or on what it says.
+    #[test]
+    fn the_public_research_note_is_the_research_headings_own() {
+        const BEFORE: &str = "\nEXPLICIT BOOLEAN CATALOG RESEARCH. This is the complete supplied catalog, not exhaustive Boolean grammar search or Selection V6. Intraday only;15:10IST deadline.\n";
+        for (symbols, cash) in [
+            ("NIFTY,RELIANCE", true),
+            ("RELIANCE", true),
+            ("BANKNIFTY,TCS", true),
+            ("NIFTY,BANKNIFTY", false),
+            ("NIFTY", false),
+        ] {
+            let scope = scope(symbols).unwrap();
+            let note = crate::research_equity_note(scope.families().iter().copied());
+            assert_eq!(
+                note,
+                if cash {
+                    runner::audit::CostScope::CashEquity.report_note()
+                } else {
+                    String::new()
+                },
+                "{symbols}"
+            );
+            assert_eq!(
+                prepared::research_heading(&scope),
+                format!("{}{note}{BEFORE}", crate::STORED_PROVENANCE),
+                "{symbols}"
+            );
+        }
+        assert_eq!(crate::research_equity_note([]), "", "no family, no note");
+    }
+
     #[test]
     fn scope_is_canonical_and_never_widens_into_references_or_derivatives() {
         let first = scope("RELIANCE,NIFTY,BANKNIFTY").unwrap();

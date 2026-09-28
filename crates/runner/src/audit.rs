@@ -37,6 +37,8 @@
 
 use core::fmt::Write as _;
 
+use brutex_core::instrument::Kind;
+
 use crate::bootstrap::Verdict;
 use crate::grid::{Cell, Grid};
 use crate::pbo::Pbo;
@@ -62,6 +64,179 @@ fn permille(part: u64, whole: u64) -> String {
     }
     let tenths = part.saturating_mul(1_000) / whole;
     format!("{}.{}%", tenths / 10, tenths % 10)
+}
+
+/// Which charge statement leads the audit: decided by what the swept
+/// instrument IS, never by anything its bars say.
+///
+/// # The header used to have no way to know
+///
+/// [`render_selected`] took no instrument and printed one header for every
+/// run: *"INDEX SPOT run. There is no brokerage, STT, stamp or GST"*. That is
+/// true of an index level, which cannot be bought, and it was the only kind of
+/// run there was. D-0506 then widened the sweep to the cash equities of the F&O
+/// underlyings, and the same sentence went on being printed over a stock -- a
+/// real share trade, which pays every one of those charges. The header's own
+/// last paragraph predicted it: *"this header would be WRONG the day a stock is
+/// swept"*.
+///
+/// # Why two variants and not the instrument kind
+///
+/// A futures or options contract is never swept (`CLAUDE.md` §1), and neither
+/// statement below describes one. [`CostScope::of`] therefore answers `None`
+/// for a contract, so a caller holding one must refuse rather than borrow a
+/// label written for something else. D-0681.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CostScope {
+    /// A spot index level. It is not tradeable, so no charge exists for the
+    /// figures to be gross of. The header is the one every index run has
+    /// always carried, byte for byte.
+    IndexSpot,
+    /// A cash equity. Every charge on a share trade exists, this engine has no
+    /// path that computes any of them, and so every figure -- including the
+    /// ranking that chose the combination -- is GROSS OF EVERY CHARGE.
+    CashEquity,
+}
+
+impl CostScope {
+    /// The scope of a swept instrument kind, or `None` for a contract.
+    ///
+    /// One `match` on a `Copy` discriminant; no bar is read, so the answer is
+    /// the same before the first bar as after the last.
+    #[must_use]
+    pub const fn of(kind: Kind) -> Option<Self> {
+        match kind {
+            Kind::Index => Some(Self::IndexSpot),
+            Kind::Equity => Some(Self::CashEquity),
+            Kind::Future { .. } | Kind::Option { .. } => None,
+        }
+    }
+
+    /// The charge and corporate-action statement a report that is NOT an
+    /// audit carries for this scope, or nothing for an index. D-0694.
+    ///
+    /// An audit opens with the full header [`render`] prints. Every other
+    /// report that ranks a cash equity -- a stored sweep, a range table, a
+    /// descent, a threshold search, a saved top list -- carries this shorter
+    /// statement instead: the same GROSS OF EVERY CHARGE fact D-0681 put in
+    /// the audit, then [`CORPORATE_ACTIONS_UNCHECKED`]. `CLAUDE.md` §1 asks
+    /// for the first on every report that ranks an equity; the operator's
+    /// answer recorded in D-0694 asks for the second beside it.
+    ///
+    /// Empty for an index, and that is the point rather than an omission: an
+    /// index never splits (D-0018), and every index report stays byte for
+    /// byte what it was.
+    #[must_use]
+    pub fn report_note(self) -> String {
+        match self {
+            Self::IndexSpot => String::new(),
+            Self::CashEquity => format!("{CASH_EQUITY_GROSS}\n\n{CORPORATE_ACTIONS_UNCHECKED}\n\n"),
+        }
+    }
+}
+
+/// What a cash-equity report that is not an audit states about charges.
+/// D-0694.
+///
+/// The one-paragraph form of what [`equity_header`] says at length: every
+/// total is gross of every charge a share trade pays, and the result is
+/// cost-excluded research with no Selection V6 or execution authority. Its
+/// cost-excluded sentence is the header's own, word for word, as D-0696 asks
+/// of every copy; the first version of this paragraph left out the Selection
+/// V6 clause (AF-19). It names no rate, for the reason the audit header names
+/// none: `docs/00-charter.md` records no source for one.
+pub const CASH_EQUITY_GROSS: &str = "  CASH EQUITY. EVERY TOTAL BELOW IS GROSS OF EVERY CHARGE: brokerage,\n  \
+     STT, stamp duty, exchange charges, the SEBI fee and GST apply to a\n  \
+     share trade and none is subtracted. COST-EXCLUDED RESEARCH, NOT A NET\n  \
+     RESULT (D-0509, D-0525, D-0681). No equity result carries Selection V6\n  \
+     or execution authority until a charter-sourced equity charge stack\n  \
+     exists.";
+
+/// What every report that ranks or audits a cash equity states about
+/// corporate actions. D-0694.
+///
+/// D-0018 requires a suspected split or bonus -- an unexplained overnight
+/// gap beyond a threshold -- to refuse its window and name the date.
+/// `docs/00-charter.md` names no verified split-and-bonus source and D-0018
+/// names no number, so no threshold exists and no detector runs
+/// (`docs/06-limits.md` §41.3). An unadjusted 1:5 split is a fake 80%
+/// overnight crash and every bar-shape condition fires on it.
+///
+/// The operator chose, on 2026-09-23, to keep ranking equities for discovery
+/// and to say so on every such report rather than refuse them. This is the
+/// sentence that says so. An index never splits, so no index report carries
+/// it.
+pub const CORPORATE_ACTIONS_UNCHECKED: &str = "  CORPORATE ACTIONS ARE UNCHECKED (D-0018, D-0694). No split, bonus or\n  \
+     demerger detection has run over these bars, so an overnight jump in\n  \
+     them can be a corporate action rather than a market move. D-0018\n  \
+     requires such a window to be refused with its date named; no\n  \
+     threshold for that detector is sourced, so none was applied.";
+
+/// The charge statement for an index-spot run, byte-identical to the header
+/// every run printed before D-0681.
+///
+/// Its last paragraph is left as written even though the day it warns about
+/// has come: it is still true of an index, it is what every stored index
+/// report already carries, and the stock case it names is now answered by
+/// [`equity_header`] rather than by this text.
+fn index_header(out: &mut String) {
+    let _ = writeln!(
+        out,
+        "  INDEX SPOT run. There is no brokerage, STT, stamp or GST, because\n  \
+         an INDEX is not tradeable: no order is placed, so nothing charges\n  \
+         for one.\n\n  \
+         NEITHER BLOCK BELOW CHARGES A TICK, AND THIS LINE USED TO SAY ONE\n  \
+         OF THEM DID. Both TRADES and EXIT GRID fill at prices the bar\n  \
+         actually printed -- the open on the kind reading, the printed\n  \
+         extreme on the harsh one -- because a price a tick outside the bar\n  \
+         is one nothing traded at, and naming it would be the invention §3\n  \
+         rule 1 forbids. The sentence this replaces credited TRADES with two\n  \
+         ticks a round trip through `costs::fill::worst_case_fills`, and\n  \
+         NOTHING in this crate calls that function.\n\n  \
+         SO EVERY TOTAL BELOW IS GROSS OF THE SPREAD. The two blocks differ\n  \
+         in WHICH printed price each leg takes and in nothing else. There is\n  \
+         no slippage allowance in either, and the cost of crossing the\n  \
+         spread is measured nowhere in this run.\n\n  \
+         THIS IS SCOPED TO AN INDEX AND TO NOTHING ELSE. A STOCK spot IS\n  \
+         tradeable -- you buy real shares -- so brokerage, STT, stamp, the\n  \
+         exchange charge and GST all apply there, and so do they on options.\n  \
+         `costs::scope::Segment` has no equity-spot variant today, so that\n  \
+         charge path does not exist yet and this header would be WRONG the\n  \
+         day a stock is swept."
+    );
+}
+
+/// The charge statement for a cash-equity run. D-0681.
+///
+/// Every clause is a fact about THIS code or about what a share trade pays,
+/// and no clause names a rate: `docs/00-charter.md` records no source for an
+/// equity charge rate, and quoting one would be the invention `CLAUDE.md` §3
+/// rule 1 forbids. The tick paragraph is the same fact the index header
+/// states, because both blocks fill at printed prices whatever the instrument.
+///
+/// It ends with [`CORPORATE_ACTIONS_UNCHECKED`], beside the charge statement
+/// and before any figure, because both are facts about what the totals below
+/// are made of. D-0694.
+fn equity_header(out: &mut String) {
+    let _ = writeln!(
+        out,
+        "  CASH EQUITY run. EVERY TOTAL BELOW IS GROSS OF EVERY CHARGE.\n  \
+         A stock IS tradeable -- you buy real shares -- so brokerage, STT,\n  \
+         stamp duty, exchange charges, the SEBI fee and GST all apply to a\n  \
+         share trade. This engine has no equity charge path:\n  \
+         `costs::scope::Segment` has no equity variant, so NONE of those\n  \
+         charges is subtracted anywhere in this run, and the ranking that\n  \
+         chose this combination is on GROSS returns.\n\n  \
+         THIS IS COST-EXCLUDED RESEARCH, NOT A NET RESULT (D-0509, D-0525,\n  \
+         D-0681). No equity result carries Selection V6 or execution\n  \
+         authority until a charter-sourced equity charge stack exists.\n\n  \
+         NEITHER BLOCK BELOW CHARGES A TICK EITHER. Both TRADES and EXIT GRID\n  \
+         fill at prices the bar actually printed -- the open on the kind\n  \
+         reading, the printed extreme on the harsh one -- so every total is\n  \
+         also GROSS OF THE SPREAD, and the cost of crossing the spread is\n  \
+         measured nowhere in this run.\n\n\
+         {CORPORATE_ACTIONS_UNCHECKED}"
+    );
 }
 
 /// Everything, in one call.
@@ -103,8 +278,17 @@ fn permille(part: u64, whole: u64) -> String {
 /// stack, and the figures here would then be gross of it until
 /// `costs::trip::price` is wired. This paragraph is the record of which of
 /// those two worlds a reader is in.
+///
+/// # What is NOT in these figures, for a cash-equity run
+///
+/// **Every charge.** A stock is bought as real shares, so brokerage, STT,
+/// stamp duty, exchange charges, the SEBI fee and GST all apply, and no path
+/// in this engine computes any of them. The `scope` argument is what tells the
+/// header which of the two statements is true; it was absent until D-0681, and
+/// the index statement was printed over stocks for as long as it was.
 #[must_use]
 pub fn render(
+    scope: CostScope,
     taken: Option<&Trades>,
     exits: Option<&Grid>,
     folds: Option<&Validated>,
@@ -112,7 +296,7 @@ pub fn render(
     boot: Option<(Option<&Verdict>, Option<&Verdict>, usize)>,
     rows: usize,
 ) -> String {
-    render_selected(taken, exits, None, folds, overfit, boot, rows)
+    render_selected(scope, taken, exits, None, folds, overfit, boot, rows)
 }
 
 /// [`render`] with the policy-selected cell named explicitly.
@@ -122,8 +306,18 @@ pub fn render(
 /// selected; falling back to `best()` here would put one exit in the ledger and
 /// a different strategy report below the same audit. `None` preserves the
 /// unconstrained historical rendering for callers that apply no policy.
+///
+/// `scope` chooses the charge statement that leads the report and the words
+/// of the strategy report's two ranked totals, which [`strategy_report`]
+/// calls net profit for an index and a gross total for a stock. Every other
+/// byte below the header is the same for either scope.
 #[must_use]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the cost scope joins seven independent optional sections; bundling them would hide which section a caller did not supply, which this render exists to name"
+)]
 pub fn render_selected(
+    scope: CostScope,
     taken: Option<&Trades>,
     exits: Option<&Grid>,
     selected: Option<&Cell>,
@@ -134,30 +328,10 @@ pub fn render_selected(
 ) -> String {
     let mut out = String::with_capacity(4_096);
     let _ = writeln!(out, "AUDIT");
-    let _ = writeln!(
-        out,
-        "  INDEX SPOT run. There is no brokerage, STT, stamp or GST, because\n  \
-         an INDEX is not tradeable: no order is placed, so nothing charges\n  \
-         for one.\n\n  \
-         NEITHER BLOCK BELOW CHARGES A TICK, AND THIS LINE USED TO SAY ONE\n  \
-         OF THEM DID. Both TRADES and EXIT GRID fill at prices the bar\n  \
-         actually printed -- the open on the kind reading, the printed\n  \
-         extreme on the harsh one -- because a price a tick outside the bar\n  \
-         is one nothing traded at, and naming it would be the invention §3\n  \
-         rule 1 forbids. The sentence this replaces credited TRADES with two\n  \
-         ticks a round trip through `costs::fill::worst_case_fills`, and\n  \
-         NOTHING in this crate calls that function.\n\n  \
-         SO EVERY TOTAL BELOW IS GROSS OF THE SPREAD. The two blocks differ\n  \
-         in WHICH printed price each leg takes and in nothing else. There is\n  \
-         no slippage allowance in either, and the cost of crossing the\n  \
-         spread is measured nowhere in this run.\n\n  \
-         THIS IS SCOPED TO AN INDEX AND TO NOTHING ELSE. A STOCK spot IS\n  \
-         tradeable -- you buy real shares -- so brokerage, STT, stamp, the\n  \
-         exchange charge and GST all apply there, and so do they on options.\n  \
-         `costs::scope::Segment` has no equity-spot variant today, so that\n  \
-         charge path does not exist yet and this header would be WRONG the\n  \
-         day a stock is swept."
-    );
+    match scope {
+        CostScope::IndexSpot => index_header(&mut out),
+        CostScope::CashEquity => equity_header(&mut out),
+    }
     let _ = writeln!(out);
 
     match taken {
@@ -183,7 +357,7 @@ pub fn render_selected(
                         "the final admitted screen row; it may differ from the grid's unconstrained BEST",
                     );
                 }
-                strategy_report(&mut out, chosen, &exit_name(chosen));
+                strategy_report(&mut out, chosen, &exit_name(chosen), scope);
             }
         }
         None => absent(&mut out, "EXIT GRID"),
@@ -614,22 +788,38 @@ fn excursion_block(out: &mut String, cell: &Cell) {
 /// mean of 30 ppm across ten thousand trades is entirely consistent with one
 /// trade that went 4,000 ppm against, and that one trade is the one that takes
 /// the account out. Every other figure here is a summary; that one is a bound.
-pub fn strategy_report(out: &mut String, cell: &Cell, name: &str) {
+///
+/// # The two ranked totals are named by the scope
+///
+/// An index's two totals are "net profit": net of the losing trades, and no
+/// charge exists for them to be gross of. A stock's are not net of anything
+/// its trades pay, and the header above them says "NOT A NET RESULT", so for
+/// [`CostScope::CashEquity`] they are "total P&L" and each says it is gross of
+/// every charge. Every other row is the same for either scope. D-0681.
+pub fn strategy_report(out: &mut String, cell: &Cell, name: &str, scope: CostScope) {
     let _ = writeln!(out, "STRATEGY REPORT — exit variant {name}");
     let losers = cell.trades.saturating_sub(cell.wins);
     let pf = cell.profit_factor_bp();
+    let [(worst, worst_note), (best, best_note)] = match scope {
+        CostScope::IndexSpot => [
+            ("net profit, worst-case fills", "what selection ranks on"),
+            ("net profit, best-case fills", "both fills at the open"),
+        ],
+        CostScope::CashEquity => [
+            (
+                "total P&L, worst-case fills",
+                "what selection ranks on, gross of every charge",
+            ),
+            (
+                "total P&L, best-case fills",
+                "both fills at the open, gross of every charge",
+            ),
+        ],
+    };
 
     for (label, value, note) in [
-        (
-            "net profit, worst-case fills",
-            money(cell.pessimistic),
-            "what selection ranks on",
-        ),
-        (
-            "net profit, best-case fills",
-            money(cell.optimistic),
-            "both fills at the open",
-        ),
+        (worst, money(cell.pessimistic), worst_note),
+        (best, money(cell.optimistic), best_note),
         (
             "gross profit",
             money(cell.gross_win),
@@ -1213,7 +1403,10 @@ mod tests {
             "the better rung must sort above the saturated one:\n{out}"
         );
     }
-    use super::{bootstrap, grid, overfitting, render_selected, trades, walk_forward};
+    use super::{
+        CASH_EQUITY_GROSS, CORPORATE_ACTIONS_UNCHECKED, CostScope, bootstrap, grid, overfitting,
+        render_selected, trades, walk_forward,
+    };
     use crate::pbo::{Placement, probability_of_overfitting};
     use crate::trade::{Trade, Trades};
     use crate::validate::Validated;
@@ -1350,7 +1543,7 @@ mod tests {
         // A section that is silently missing reads as "the run did not do this".
         // A run that HAD no walk-forward and a render that was not GIVEN one are
         // different facts, and only one of them is a finding.
-        let out = super::render(None, None, None, None, None, 10);
+        let out = super::render(CostScope::IndexSpot, None, None, None, None, None, 10);
         for section in [
             "TRADES",
             "EXIT GRID",
@@ -1378,7 +1571,7 @@ mod tests {
         // brokerage, STT, stamp or GST to be gross of. `costs::scope` says so.
         // The header records which of the two worlds a reader is in, because
         // the answer changes the moment options land.
-        let out = super::render(None, None, None, None, None, 10);
+        let out = super::render(CostScope::IndexSpot, None, None, None, None, None, 10);
         assert!(out.contains("no brokerage"));
 
         // NEITHER BLOCK CHARGES A TICK, AND THE HEADER MUST SAY SO.
@@ -1434,6 +1627,665 @@ mod tests {
             out.contains("no equity-spot variant"),
             "the gap must be named: `costs::scope::Segment` cannot represent a \
              stock at all, so the charge path does not exist yet"
+        );
+    }
+
+    /// The index header every run carried before D-0681, spelled out line by
+    /// line rather than through the code's own string continuations, so a
+    /// change to either spelling is a failure here.
+    const INDEX_HEADER_BEFORE_D0681: &str = concat!(
+        "AUDIT\n",
+        "  INDEX SPOT run. There is no brokerage, STT, stamp or GST, because\n",
+        "  an INDEX is not tradeable: no order is placed, so nothing charges\n",
+        "  for one.\n",
+        "\n",
+        "  NEITHER BLOCK BELOW CHARGES A TICK, AND THIS LINE USED TO SAY ONE\n",
+        "  OF THEM DID. Both TRADES and EXIT GRID fill at prices the bar\n",
+        "  actually printed -- the open on the kind reading, the printed\n",
+        "  extreme on the harsh one -- because a price a tick outside the bar\n",
+        "  is one nothing traded at, and naming it would be the invention §3\n",
+        "  rule 1 forbids. The sentence this replaces credited TRADES with two\n",
+        "  ticks a round trip through `costs::fill::worst_case_fills`, and\n",
+        "  NOTHING in this crate calls that function.\n",
+        "\n",
+        "  SO EVERY TOTAL BELOW IS GROSS OF THE SPREAD. The two blocks differ\n",
+        "  in WHICH printed price each leg takes and in nothing else. There is\n",
+        "  no slippage allowance in either, and the cost of crossing the\n",
+        "  spread is measured nowhere in this run.\n",
+        "\n",
+        "  THIS IS SCOPED TO AN INDEX AND TO NOTHING ELSE. A STOCK spot IS\n",
+        "  tradeable -- you buy real shares -- so brokerage, STT, stamp, the\n",
+        "  exchange charge and GST all apply there, and so do they on options.\n",
+        "  `costs::scope::Segment` has no equity-spot variant today, so that\n",
+        "  charge path does not exist yet and this header would be WRONG the\n",
+        "  day a stock is swept.\n",
+        "\n",
+    );
+
+    /// A populated render under one scope: trades, a grid, an explicit
+    /// selection, folds, PBO and a bootstrap slot, so the body below the
+    /// header is not merely the absent-section text.
+    fn populated_render(scope: CostScope) -> String {
+        let taken = Trades {
+            eligible: Vec::new(),
+            occupancy: Vec::new(),
+            trades: vec![
+                Trade {
+                    signal_bar: 0,
+                    entry_bar: 1,
+                    exit_bar: 5,
+                    best: 10,
+                    worst: -5,
+                    forced: false,
+                };
+                3
+            ],
+            signals: 50,
+            while_open: 45,
+            too_late: 2,
+        };
+        let g = populated_grid();
+        let selected = g.cells.get(1).expect("the stop-only policy selection");
+        render_selected(
+            scope,
+            Some(&taken),
+            Some(&g),
+            Some(selected),
+            Some(&Validated::default()),
+            Some(&probability_of_overfitting(&[])),
+            Some((None, None, 0)),
+            10,
+        )
+    }
+
+    /// AN INDEX RUN'S HEADER IS UNCHANGED, BYTE FOR BYTE. D-0681 gave the
+    /// render a scope so a stock would stop being told it pays no brokerage;
+    /// it did not reword a single byte of what every index report says.
+    #[test]
+    fn an_index_audit_header_is_byte_identical_to_the_one_before_d0681() {
+        for out in [
+            super::render(CostScope::IndexSpot, None, None, None, None, None, 10),
+            populated_render(CostScope::IndexSpot),
+        ] {
+            assert_eq!(
+                out.get(..INDEX_HEADER_BEFORE_D0681.len()),
+                Some(INDEX_HEADER_BEFORE_D0681),
+                "the index header drifted:\n{out}"
+            );
+            assert!(
+                out.get(INDEX_HEADER_BEFORE_D0681.len()..)
+                    .is_some_and(|body| body.starts_with("TRADES\n")),
+                "the header must end exactly where TRADES begins:\n{out}"
+            );
+        }
+    }
+
+    /// A CASH-EQUITY RUN IS LABELLED GROSS OF EVERY CHARGE, AND NEVER AS AN
+    /// INDEX. D-0681.
+    ///
+    /// Before the scope existed every stock audit opened with *"INDEX SPOT
+    /// run. There is no brokerage, STT, stamp or GST"* -- a true sentence
+    /// about an index, printed over real share trades that pay every one of
+    /// those. The engine ranks equities on gross returns (D-0509, D-0525); the
+    /// defect was only that the report said the charges did not exist.
+    #[test]
+    fn an_equity_audit_is_gross_of_every_charge_and_never_labelled_an_index() {
+        for out in [
+            super::render(CostScope::CashEquity, None, None, None, None, None, 10),
+            populated_render(CostScope::CashEquity),
+        ] {
+            assert!(
+                out.starts_with(
+                    "AUDIT\n  CASH EQUITY run. EVERY TOTAL BELOW IS GROSS OF EVERY CHARGE.\n"
+                ),
+                "the gross statement must be the first thing the header says:\n{out}"
+            );
+            for index_claim in ["INDEX SPOT run", "no brokerage", "There is no"] {
+                assert!(
+                    !out.contains(index_claim),
+                    "{index_claim:?} is the index's statement and false of a \
+                     share trade:\n{out}"
+                );
+            }
+            for charge in SHARE_TRADE_CHARGES {
+                assert!(
+                    out.contains(charge),
+                    "{charge} applies to a share trade and must be named:\n{out}"
+                );
+            }
+            for disclosure in [
+                "apply to a\n  share trade",
+                "This engine has no equity charge path",
+                "the ranking that\n  chose this combination is on GROSS returns",
+                "COST-EXCLUDED RESEARCH, NOT A NET RESULT",
+                "No equity result carries Selection V6 or execution\n  authority",
+                "NEITHER BLOCK BELOW CHARGES A TICK",
+                "GROSS OF THE SPREAD",
+            ] {
+                assert!(
+                    out.contains(disclosure),
+                    "the equity header must say {disclosure:?}:\n{out}"
+                );
+            }
+        }
+    }
+
+    /// The strategy report's two ranked-total rows, label and note, as an
+    /// index prints them and as a stock prints them. A label is matched with
+    /// the padding the report gives it, so a swap cannot leave a column
+    /// misaligned by the difference in length.
+    const INDEX_TOTALS: [(&str, &str); 2] = [
+        ("net profit, worst-case fills", "what selection ranks on"),
+        ("net profit, best-case fills", "both fills at the open"),
+    ];
+    const EQUITY_TOTALS: [(&str, &str); 2] = [
+        (
+            "total P&L, worst-case fills",
+            "what selection ranks on, gross of every charge",
+        ),
+        (
+            "total P&L, best-case fills",
+            "both fills at the open, gross of every charge",
+        ),
+    ];
+
+    /// One ranked-total row's label, as the report pads it.
+    fn padded(label: &str) -> String {
+        format!("  {label:<32}")
+    }
+
+    /// THE SCOPE CHANGES THE HEADER AND THE TWO RANKED-TOTAL ROWS' WORDS, AND
+    /// NOTHING ELSE. Every other byte below the header is the same for either
+    /// scope, so no figure can differ between an index report and an equity
+    /// report except by the bars that produced it. The two rows are the ones
+    /// an index calls "net profit": a stock's totals are gross of every
+    /// charge, so there they are named as totals and say so.
+    #[test]
+    fn the_scope_changes_the_header_and_the_ranked_total_rows_words_only() {
+        let index = populated_render(CostScope::IndexSpot);
+        let equity = populated_render(CostScope::CashEquity);
+        let body = |out: &str| {
+            out.split_once("\nTRADES\n")
+                .map(|(_, rest)| rest.to_owned())
+        };
+        assert_ne!(index, equity, "the two scopes must print different headers");
+        let index_body = body(&index).expect("the index render carries TRADES");
+        let mut equity_body = body(&equity).expect("the equity render carries TRADES");
+        for ((equity_label, equity_note), (index_label, index_note)) in
+            EQUITY_TOTALS.into_iter().zip(INDEX_TOTALS)
+        {
+            for (equity_words, index_words) in [
+                (padded(equity_label), padded(index_label)),
+                (format!("  {equity_note}\n"), format!("  {index_note}\n")),
+            ] {
+                assert_eq!(
+                    equity_body.matches(&equity_words).count(),
+                    1,
+                    "the equity report says {equity_words:?} once:\n{equity_body}"
+                );
+                equity_body = equity_body.replacen(&equity_words, &index_words, 1);
+            }
+        }
+        assert_eq!(
+            index_body, equity_body,
+            "every other byte below the header must be identical across scopes"
+        );
+    }
+
+    /// A STOCK'S STRATEGY REPORT NEVER CALLS A TOTAL NET PROFIT, AND SAYS THE
+    /// ONE SELECTION RANKS ON IS GROSS OF EVERY CHARGE.
+    ///
+    /// The equity header says "THIS IS COST-EXCLUDED RESEARCH, NOT A NET
+    /// RESULT", and the report under it printed a rupee "net profit" as the
+    /// figure selection ranks on. That is the reading `CLAUDE.md` §1 requires
+    /// every equity report to rule out. D-0681.
+    #[test]
+    fn an_equity_strategy_report_names_its_totals_gross_and_never_net_profit() {
+        let equity = populated_render(CostScope::CashEquity);
+        let report = equity
+            .split_once("STRATEGY REPORT")
+            .map(|(_, rest)| rest)
+            .expect("the populated render carries a strategy report");
+        assert!(
+            !report.to_lowercase().contains("net profit"),
+            "a stock's totals are gross of every charge, not net:\n{report}"
+        );
+        let ranked = report
+            .lines()
+            .find(|line| line.contains("worst-case fills"))
+            .expect("the row selection ranks on");
+        assert!(
+            ranked
+                .trim_start()
+                .starts_with("total P&L, worst-case fills")
+                && ranked.ends_with("what selection ranks on, gross of every charge"),
+            "the ranked row says it is a gross total: {ranked}"
+        );
+        let index = populated_render(CostScope::IndexSpot);
+        assert!(
+            index.contains("  net profit, worst-case fills"),
+            "an index report keeps the words it has always printed:\n{index}"
+        );
+    }
+
+    /// The scope is the instrument's KIND, and a contract has none.
+    #[test]
+    fn the_cost_scope_is_decided_by_the_kind_and_a_contract_has_none() {
+        use brutex_core::instrument::{Expiry, Kind, OptionSide};
+        use brutex_core::price::Paisa;
+
+        assert_eq!(CostScope::of(Kind::Index), Some(CostScope::IndexSpot));
+        assert_eq!(CostScope::of(Kind::Equity), Some(CostScope::CashEquity));
+        let expiry = Expiry::new(2026, 9, 29).expect("a real expiry date");
+        assert_eq!(
+            CostScope::of(Kind::Future { expiry }),
+            None,
+            "a futures contract is never swept and neither header describes one"
+        );
+        assert_eq!(
+            CostScope::of(Kind::Option {
+                expiry,
+                strike: Paisa::from_raw(2_500_000),
+                side: OptionSide::Put,
+            }),
+            None,
+            "an options contract is never swept and neither header describes one"
+        );
+    }
+
+    /// Both scopes, so a property of the charge statement is checked on the
+    /// statement every index run prints and on the one every stock run prints.
+    const SCOPES: [CostScope; 2] = [CostScope::IndexSpot, CostScope::CashEquity];
+
+    /// Every charge the equity statement says a share trade pays, as it names
+    /// them.
+    const SHARE_TRADE_CHARGES: [&str; 6] = [
+        "brokerage",
+        "STT",
+        "stamp duty",
+        "exchange charges",
+        "SEBI fee",
+        "GST",
+    ];
+
+    /// The first rate unit or currency `text` names, or `None`.
+    ///
+    /// `docs/00-charter.md` sources no equity charge rate, so none may be
+    /// printed (`CLAUDE.md` §3 rule 1). A rate in digits is caught by the
+    /// digit checks each caller makes; a rate written in words carries no
+    /// digit, and "Rs twenty an order" passed every test in this module until
+    /// this function named the currency as the rupee, the paisa and its
+    /// plural, the sign, `Rs` and `INR`. The last two are matched as whole
+    /// words, not substrings, because as substrings they sit inside ordinary
+    /// words: `rs` in "harsh", which the equity statement says, and in "bars",
+    /// which [`CORPORATE_ACTIONS_UNCHECKED`] says, and `inr` in "inroad".
+    ///
+    /// Outside this check: a currency not named above, and a number spelled
+    /// out with no unit and no named currency beside it. The statement's own
+    /// "the harsh one" rules out banning number words.
+    fn rate_named(text: &str) -> Option<&'static str> {
+        let lower = text.to_ascii_lowercase();
+        [
+            "%",
+            "per cent",
+            "percent",
+            "basis point",
+            "bps",
+            "rupee",
+            "paisa",
+            "paise",
+            "₹",
+        ]
+        .into_iter()
+        .find(|unit| lower.contains(unit))
+        .or_else(|| {
+            lower
+                .split(|c: char| !c.is_ascii_alphanumeric())
+                .find_map(|word| ["rs", "inr"].into_iter().find(|currency| word == *currency))
+        })
+    }
+
+    /// The charge statement alone: everything between the `AUDIT` heading and
+    /// the `TRADES` heading, which is exactly what the scope writes.
+    ///
+    /// Panics rather than answering an empty string, because an empty
+    /// statement has no lines and would satisfy every per-line assertion below
+    /// for the wrong reason.
+    fn charge_statement(out: &str) -> &str {
+        out.strip_prefix("AUDIT\n")
+            .and_then(|rest| rest.split_once("\nTRADES\n"))
+            .map(|(statement, _)| statement)
+            .filter(|statement| !statement.trim().is_empty())
+            .expect("a render opens with AUDIT, then its charge statement, then TRADES")
+    }
+
+    /// THE CHARGE STATEMENT IS ONE INDENTED BLOCK, SO A LIFTED `AUDIT`
+    /// SECTION KEEPS ALL OF IT.
+    ///
+    /// `range-all` and `range-rung` discard each rung's audit report and keep
+    /// only sections lifted out of it (`cli`'s `validation_note`, through
+    /// `section_note`), and that lift ends a section at its first unindented,
+    /// non-blank line. The equity statement is four paragraphs split by blank
+    /// lines. One line of it written at column zero would end the lift there,
+    /// and a `range-all` table would keep "GROSS OF EVERY CHARGE" while
+    /// dropping "COST-EXCLUDED RESEARCH, NOT A NET RESULT": a disclaimer cut
+    /// away from the figures it qualifies, which is the §4 shape the lift was
+    /// written to close.
+    #[test]
+    fn every_charge_statement_line_is_indented_so_a_lifted_audit_block_keeps_it_whole() {
+        for scope in SCOPES {
+            for out in [
+                super::render(scope, None, None, None, None, None, 10),
+                populated_render(scope),
+            ] {
+                let statement = charge_statement(&out);
+                assert!(
+                    statement.contains("\n\n  "),
+                    "{scope:?}: the statement must hold a blank line between \
+                     paragraphs, the case a blank-line terminator would cut:\n{out}"
+                );
+                for line in statement.lines() {
+                    assert!(
+                        line.is_empty() || line.starts_with("  "),
+                        "{scope:?}: {line:?} is not indented, so a lifted AUDIT \
+                         block would end on it:\n{out}"
+                    );
+                }
+                assert_eq!(
+                    out.lines()
+                        .skip(1)
+                        .find(|line| !line.trim().is_empty() && !line.starts_with(' ')),
+                    Some("TRADES"),
+                    "{scope:?}: the first unindented line after AUDIT must be the \
+                     next heading, so the lift ends exactly where the statement \
+                     does:\n{out}"
+                );
+            }
+        }
+    }
+
+    /// NO LINE OF EITHER CHARGE STATEMENT READS AS A REFUSAL.
+    ///
+    /// Nine `cli` command arms take their exit code from a scan of the rendered
+    /// page (`carries_refusal`): a line that starts `refused` at column zero,
+    /// or whose text after its indentation starts `REFUSED. `, `REFUSED -- ` or
+    /// `RESULT NOT RECORDED`. The equity statement is written in capitals on
+    /// purpose, which is the case that scan reads. A line of it beginning with
+    /// one of those words would give every completed stock audit a failing exit
+    /// code, and `cli audit ... && <next step>` would stop on a run that
+    /// finished. Checked after trimming and in either case -- stricter than
+    /// the scan -- so a spelling the scan learns later cannot start matching
+    /// this text unseen.
+    #[test]
+    fn no_charge_statement_line_reads_as_a_refusal() {
+        for scope in SCOPES {
+            let out = populated_render(scope);
+            let statement = charge_statement(&out);
+            for line in statement.lines() {
+                let opening = line.trim_start().to_ascii_lowercase();
+                for refusal in ["refused", "result not recorded"] {
+                    assert!(
+                        !opening.starts_with(refusal),
+                        "{scope:?}: {line:?} opens like a refusal, so a completed \
+                         audit would be read as a refused one:\n{out}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// THE EQUITY STATEMENT NAMES EVERY CHARGE AND QUOTES NO RATE.
+    ///
+    /// `docs/00-charter.md` records no source for an equity charge rate, so a
+    /// rate printed here would be the invention `CLAUDE.md` §3 rule 1 forbids,
+    /// however familiar the number. The only digits the statement may carry are
+    /// the decision references that justify it (`D-0509`) and the name of the
+    /// selection policy it withholds (`Selection V6`); no per cent sign, no
+    /// basis points and no currency may appear.
+    ///
+    /// Both halves of that heading are checked here. This test once checked a
+    /// single charge, `STT`, as a guard that the fixture was the right
+    /// statement, so a statement that dropped "the SEBI fee" still passed it;
+    /// each of [`SHARE_TRADE_CHARGES`] is required now. "No currency" is checked
+    /// as the forms [`rate_named`] names, whose own comment states what that
+    /// leaves out, and the phrases below prove the check is not vacuous.
+    #[test]
+    fn the_equity_charge_statement_names_no_rate() {
+        let out = super::render(CostScope::CashEquity, None, None, None, None, None, 10);
+        let statement = charge_statement(&out);
+        for charge in SHARE_TRADE_CHARGES {
+            assert!(
+                statement.contains(charge),
+                "{charge} applies to a share trade, so the statement must name \
+                 it:\n{out}"
+            );
+        }
+        assert_eq!(
+            rate_named(statement),
+            None,
+            "the statement names a charge rate the charter does not source:\n{out}"
+        );
+        for (rate, unit) in [
+            ("a charge of 1% a side", "%"),
+            ("three basis points a side", "basis point"),
+            ("twenty rupees an order", "rupee"),
+            ("ten paise a share", "paise"),
+            ("Rs twenty an order", "rs"),
+            ("Rs. twenty an order", "rs"),
+            ("twenty INR an order", "inr"),
+            ("₹20 an order", "₹"),
+        ] {
+            assert_eq!(rate_named(rate), Some(unit), "{rate:?} names a rate");
+        }
+        assert_eq!(
+            rate_named("the harsh fill over these bars made no inroad"),
+            None,
+            "a currency abbreviation inside an ordinary word is not a currency"
+        );
+        let numbered: Vec<&str> = statement
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+            .filter(|token| token.bytes().any(|b| b.is_ascii_digit()))
+            .collect();
+        assert!(
+            numbered.contains(&"D-0681"),
+            "the statement must cite the decision that wrote it: {numbered:?}"
+        );
+        for token in numbered {
+            let decision = token
+                .strip_prefix("D-")
+                .is_some_and(|n| n.len() == 4 && n.bytes().all(|b| b.is_ascii_digit()));
+            assert!(
+                decision || token == "V6",
+                "{token:?} is a number that is neither a decision reference nor \
+                 the Selection V6 name, and could be read as a rate:\n{out}"
+            );
+        }
+    }
+
+    /// THE STATEMENT IS DECIDED BY THE SCOPE ALONE, AND A RERUN IS THE SAME
+    /// BYTES (`CLAUDE.md` §3 rule 5).
+    ///
+    /// [`CostScope`]'s own contract is that the statement is decided by what
+    /// the swept instrument IS, never by anything its bars say. So a render
+    /// given no section and one given every section open with the same
+    /// statement, and two renders of the same inputs are identical.
+    #[test]
+    fn the_charge_statement_depends_on_the_scope_alone_and_a_rerun_is_byte_identical() {
+        for scope in SCOPES {
+            let bare = super::render(scope, None, None, None, None, None, 10);
+            let first = populated_render(scope);
+            let second = populated_render(scope);
+            assert_eq!(
+                first, second,
+                "{scope:?}: the same inputs must render the same bytes"
+            );
+            assert_eq!(
+                charge_statement(&bare),
+                charge_statement(&first),
+                "{scope:?}: the statement must not depend on what the run produced"
+            );
+        }
+    }
+
+    /// A CASH-EQUITY AUDIT SAYS CORPORATE ACTIONS ARE UNCHECKED, BESIDE ITS
+    /// CHARGE STATEMENT, AND AN INDEX AUDIT NEVER DOES. D-0694.
+    ///
+    /// No split, bonus or demerger detector exists (D-0018 names no threshold
+    /// and the charter names no source), so an overnight jump in a stock's
+    /// bars can be a corporate action. The operator chose to keep ranking
+    /// stocks and to say so; an index never splits and says nothing.
+    #[test]
+    fn an_equity_audit_states_corporate_actions_are_unchecked_and_an_index_audit_does_not() {
+        for out in [
+            super::render(CostScope::CashEquity, None, None, None, None, None, 10),
+            populated_render(CostScope::CashEquity),
+        ] {
+            let header = out
+                .split_once("\nTRADES\n")
+                .map(|(header, _)| header)
+                .expect("an audit carries its TRADES section");
+            assert!(
+                header.ends_with(&format!("{CORPORATE_ACTIONS_UNCHECKED}\n")),
+                "the statement must close the charge header, before any figure:\n{out}"
+            );
+            for fact in [
+                "CORPORATE ACTIONS ARE UNCHECKED (D-0018, D-0694)",
+                "No split, bonus or\n  demerger detection has run",
+                "can be a corporate action rather than a market move",
+                "no\n  threshold for that detector is sourced",
+            ] {
+                assert!(header.contains(fact), "missing {fact:?}:\n{out}");
+            }
+            assert_eq!(
+                out.matches("CORPORATE ACTIONS").count(),
+                1,
+                "said once, in the header:\n{out}"
+            );
+        }
+        for out in [
+            super::render(CostScope::IndexSpot, None, None, None, None, None, 10),
+            populated_render(CostScope::IndexSpot),
+        ] {
+            for equity_only in ["CORPORATE ACTIONS", "D-0694", "demerger"] {
+                assert!(
+                    !out.contains(equity_only),
+                    "an index never splits, so {equity_only:?} is not its statement:\n{out}"
+                );
+            }
+        }
+    }
+
+    /// THE NON-AUDIT NOTE IS GROSS, THEN CORPORATE ACTIONS, FOR A STOCK, AND
+    /// NOTHING AT ALL FOR AN INDEX. D-0694.
+    #[test]
+    fn a_report_note_is_gross_then_corporate_actions_for_a_stock_and_empty_for_an_index() {
+        assert_eq!(
+            CostScope::IndexSpot.report_note(),
+            "",
+            "an index report must stay byte for byte what it was"
+        );
+        let note = CostScope::CashEquity.report_note();
+        assert_eq!(
+            note,
+            format!("{CASH_EQUITY_GROSS}\n\n{CORPORATE_ACTIONS_UNCHECKED}\n\n")
+        );
+        assert!(
+            note.starts_with("  CASH EQUITY. EVERY TOTAL BELOW IS GROSS OF EVERY CHARGE"),
+            "{note}"
+        );
+        for fact in [
+            "brokerage",
+            "STT",
+            "stamp duty",
+            "exchange charges",
+            "SEBI fee",
+            "GST",
+            "COST-EXCLUDED RESEARCH, NOT A NET RESULT",
+            "No equity result carries Selection V6",
+            "D-0681",
+            "CORPORATE ACTIONS ARE UNCHECKED (D-0018, D-0694)",
+        ] {
+            // Read as words: a phrase wrapped across two indented lines is
+            // still the phrase.
+            let flat = note.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(flat.contains(fact), "missing {fact:?}:\n{note}");
+        }
+        assert!(
+            note.find("GROSS OF EVERY CHARGE") < note.find("CORPORATE ACTIONS"),
+            "the corporate-action statement sits beside and after the charge one:\n{note}"
+        );
+    }
+
+    /// THE CORPORATE-ACTION SENTENCE KEEPS THE CHARGE STATEMENT'S PROPERTIES
+    /// WHEREVER IT TRAVELS. D-0694.
+    ///
+    /// The four tests above pin the audit header, where
+    /// [`CORPORATE_ACTIONS_UNCHECKED`] closes the equity statement. It also
+    /// travels without that header: into every stored banner through
+    /// [`CostScope::report_note`], into a ranked stock's FINDINGS block, the
+    /// pool and the research inventory. So the sentence and the note are
+    /// checked on their own, for the same three properties: every line blank
+    /// or indented, so a lifted block keeps it whole; no line opening like a
+    /// refusal, so no completed stock run exits as a failure; and no rate --
+    /// no unit or currency that [`rate_named`] finds, the check the equity
+    /// statement gets, and its only digits are decision references, D-0018
+    /// and D-0694 in the sentence, and the name Selection V6 in the gross
+    /// paragraph, because `docs/00-charter.md` sources no split threshold
+    /// (`docs/06-limits.md` §41.3) and no charge rate. The name is the one
+    /// D-0696's rate check in `cli` also allows; the gross paragraph carries
+    /// it since AF-19.
+    #[test]
+    fn the_corporate_action_sentence_keeps_the_charge_statement_properties_wherever_it_travels() {
+        let note = CostScope::CashEquity.report_note();
+        for (what, text) in [
+            ("the sentence", CORPORATE_ACTIONS_UNCHECKED),
+            ("the gross paragraph", CASH_EQUITY_GROSS),
+            ("the note", note.as_str()),
+        ] {
+            assert!(text.lines().count() > 1, "{what} spans lines:\n{text}");
+            for line in text.lines() {
+                assert!(
+                    line.is_empty() || line.starts_with("  "),
+                    "{what}: {line:?} is not indented, so a lifted block would end on it"
+                );
+                let opening = line.trim_start().to_ascii_lowercase();
+                for refusal in ["refused", "result not recorded"] {
+                    assert!(
+                        !opening.starts_with(refusal),
+                        "{what}: {line:?} opens like a refusal"
+                    );
+                }
+            }
+            assert_eq!(rate_named(text), None, "{what} names a rate:\n{text}");
+            for token in text
+                .replace("Selection V6", "Selection")
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+                .filter(|token| token.bytes().any(|b| b.is_ascii_digit()))
+            {
+                // `V6` is the Selection V6 the gross paragraph withholds, the one
+                // name the header test allows too (D-0696). The sentence names no
+                // policy, so it may carry none.
+                assert!(
+                    token
+                        .strip_prefix("D-")
+                        .is_some_and(|n| n.len() == 4 && n.bytes().all(|b| b.is_ascii_digit()))
+                        || (what != "the sentence"
+                            && token == "V6"
+                            && text.contains("Selection V6")),
+                    "{what}: {token:?} is a number that is neither a decision reference nor \
+                     the Selection V6 name:\n{text}"
+                );
+            }
+        }
+        for cited in ["D-0018", "D-0694"] {
+            assert!(
+                CORPORATE_ACTIONS_UNCHECKED.contains(cited),
+                "the sentence cites {cited}"
+            );
+        }
+        assert!(
+            !CORPORATE_ACTIONS_UNCHECKED.ends_with('\n'),
+            "every caller ends the line itself, so the sentence carries no newline of its own"
         );
     }
 
@@ -1550,7 +2402,16 @@ mod tests {
             Some(selected),
             "the fixture must separate policy selection from unconstrained best"
         );
-        let out = render_selected(None, Some(&g), Some(selected), None, None, None, 10);
+        let out = render_selected(
+            CostScope::IndexSpot,
+            None,
+            Some(&g),
+            Some(selected),
+            None,
+            None,
+            None,
+            10,
+        );
         assert!(
             out.contains("durable selected exit") && out.contains("0/-/-"),
             "the report must name the explicitly selected stop-only variant: {out}"
@@ -1770,6 +2631,7 @@ mod tests {
         let folds = Validated::default();
         let over = probability_of_overfitting(&[]);
         let out = super::render(
+            CostScope::IndexSpot,
             Some(&taken),
             Some(&grid_in),
             Some(&folds),

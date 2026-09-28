@@ -358,3 +358,28 @@ fn compound_scope_revalidates_after_callback_and_releases_every_owner() -> Resul
     Observation::with_current_many(&[&first, &restored], scratch, || Ok(()))?;
     Ok(())
 }
+
+/// A dropped publication frees its namespace while a duplicate of the owner
+/// descriptor is still open — the reference a child spawned by another thread
+/// holds until its exec. While `Pending` released only by closing its
+/// descriptor, that reference kept the exclusive owner lock and the next
+/// publisher was refused as "already owned". D-0693.
+///
+/// Here rather than beside the other candidate tests because `Pending`'s owner
+/// is private to the persistence module, and this file is inside it.
+#[test]
+fn a_dropped_pending_owner_is_released_despite_a_duplicated_descriptor() -> Result<(), String> {
+    let fixture = Fixture::new()?;
+    let pending = super::super::prepare_in_namespace(&fixture.output, NAMESPACES[0], ID, BODY)?;
+    let child = pending.owner.try_clone().map_err(super::display)?;
+    let refused = super::super::prepare_in_namespace(&fixture.output, NAMESPACES[0], ID, BODY)
+        .err()
+        .ok_or("the premise: a live publication excludes a second publisher")?;
+    assert!(refused.contains("already owned"), "{refused}");
+    drop(pending);
+
+    let again = super::super::prepare_in_namespace(&fixture.output, NAMESPACES[0], ID, BODY)?;
+    drop(again);
+    drop(child);
+    Ok(())
+}

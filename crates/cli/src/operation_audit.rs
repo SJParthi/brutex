@@ -22,6 +22,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use store::flock::Flock;
+
 const BYTES: usize = 256;
 const STRIDE: u64 = 256;
 const MAGIC: &[u8; 8] = b"BXOPAU01";
@@ -515,13 +517,21 @@ pub fn begin(root: &Path, origin: Origin, label: &str) -> Result<Attempt, String
     let base = base(root);
     directory(&root.join("audit"))?;
     directory(&base)?;
-    let mut index = options()
-        .read(true)
-        .append(true)
-        .create(true)
-        .open(base.join("index.bin"))
-        .map_err(error)?;
-    index.try_lock().map_err(lock_error)?;
+    // The index lock is released by name on success and by the guard's
+    // explicit unlock on every refusal, never by closing the descriptor: a
+    // duplicate left in a child another thread spawned would otherwise hold it
+    // and report this journal busy with no writer alive (D-0693).
+    let index_path = base.join("index.bin");
+    let mut index = Flock::try_lock(
+        options()
+            .read(true)
+            .append(true)
+            .create(true)
+            .open(&index_path)
+            .map_err(error)?,
+        index_path.as_path(),
+    )
+    .map_err(lock_error)?;
     let bytes = length(&index)?;
     let ordinal = (bytes / STRIDE)
         .checked_add(1)
@@ -546,8 +556,8 @@ pub fn begin(root: &Path, origin: Origin, label: &str) -> Result<Attempt, String
         label: label.to_owned(),
     };
     let image = record.encode()?;
-    write_synced(&mut index, &image)?;
-    index.unlock().map_err(error)?;
+    write_synced(&mut *index, &image)?;
+    index.release().map_err(|u| error(u.why))?;
     let mut file = options()
         .read(true)
         .append(true)
@@ -583,13 +593,15 @@ pub fn read(root: &Path, id: u64) -> Result<Option<Record>, String> {
         .filter(|value| *value > 0)
         .ok_or_else(|| error("ID is outside the durable invocation namespace"))?;
     let base = base(root);
-    let mut index = match options().read(true).open(base.join("index.bin")) {
+    let index_path = base.join("index.bin");
+    let index = match options().read(true).open(&index_path) {
         Ok(file) => file,
         Err(why) if why.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(why) => return Err(error(why)),
     };
-    index.try_lock_shared().map_err(lock_error)?;
+    let mut index = Flock::try_lock_shared(index, index_path.as_path()).map_err(lock_error)?;
     if ordinal > length(&index)? / STRIDE {
+        index.release().map_err(|u| error(u.why))?;
         return Ok(None);
     }
     let started = at(&mut index, ordinal - 1)?;
@@ -597,7 +609,7 @@ pub fn read(root: &Path, id: u64) -> Result<Option<Record>, String> {
         return Err(error("invocation start does not match its exact address"));
     }
     index.sync_all().map_err(error)?;
-    index.unlock().map_err(error)?;
+    index.release().map_err(|u| error(u.why))?;
     let mut file = match options().read(true).open(own(&base, id)) {
         Ok(file) => file,
         Err(why) if why.kind() == io::ErrorKind::NotFound => return Ok(Some(started)),

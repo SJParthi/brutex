@@ -594,7 +594,8 @@
       label: 'maximum combinations to price',
       note: 'Resource limit: how many screened combinations receive stop, target and trailing-exit comparisons.'
     },
-    { key: 'screen_budget_ms', label: 'pricing screen budget (milliseconds)', note: 'Optional positive whole milliseconds. The server validates the budget; blank leaves the setting to the server.' },
+    // No pricing screen budget: the server refuses `screen_budget_ms` by name
+    // on every run that records (D-0685). `screen_cap` bounds the screen.
     { key: 'horizon_bars', label: 'exit horizon (bars or rung)', note: 'Optional positive bar count or “rung”. The fixed 15:10 IST forced exit still applies.' },
     {
       key: 'top',
@@ -654,7 +655,6 @@
   let engine = $state({
     support_ppm: '',
     screen_cap: '',
-    screen_budget_ms: '',
     horizon_bars: '',
     top: '',
     validate: '',

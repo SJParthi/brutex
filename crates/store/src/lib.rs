@@ -14,6 +14,7 @@
 //! | [`path`] | the only way a store path is built |
 //! | [`catalog`] | what the store HOLDS, walked back off the tree |
 //! | [`mod@file`] | the bytes actually reaching the disk, and every refusal |
+//! | [`flock`] | the advisory-lock guard, released by unlock and never by close |
 //!
 //! # Seven properties the types enforce rather than document
 //!
@@ -57,13 +58,17 @@ pub mod catalog;
 pub mod checksum_audit;
 pub mod crc;
 pub mod file;
+/// The advisory-lock guard: every lock with an early return or an owner is
+/// released by `File::unlock`, never by close (D-0693).
+pub mod flock;
 pub mod format;
 pub mod header;
 pub mod layout;
 pub mod path;
 pub mod repair;
 
-/// Proof that this crate's seven `telemetry::emit` sites reach a file, driven
+/// Proof that this crate's nine `telemetry::emit` sites — `store.flock`'s
+/// unreleased-lock note among them (D-0693) — reach a file, driven
 /// through the production calls that own them. Compiled only under `cfg(test)`
 /// — it installs the process-wide sink, which is a property of the test binary
 /// and not of the store.

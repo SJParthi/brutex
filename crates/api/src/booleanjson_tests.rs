@@ -17,15 +17,21 @@ fn words(out: &mut Vec<u8>, values: &[u64]) {
     }
 }
 pub(crate) fn fixture(name: &str) -> PathBuf {
+    fixture_for(
+        name,
+        brutex_core::instrument::InstrumentKey::index(
+            brutex_core::instrument::Exchange::Nse,
+            "NIFTY",
+        )
+        .unwrap(),
+    )
+}
+/// [`fixture`] over `key`'s family, every other byte the same.
+pub(crate) fn fixture_for(name: &str, key: brutex_core::instrument::InstrumentKey) -> PathBuf {
     let root = crate::scratch::path(name);
     fs::create_dir_all(&root).unwrap();
     let directory = root.join("boolean-candidates-v1").join(ID);
     fs::create_dir_all(&directory).unwrap();
-    let key = brutex_core::instrument::InstrumentKey::index(
-        brutex_core::instrument::Exchange::Nse,
-        "NIFTY",
-    )
-    .unwrap();
     let family = cli::boolean_observation::ResearchFamilyV1::new(key).unwrap();
     let program = vocab::expression::Expression::parse("0 | !1").unwrap();
     let mut body = b"BRBOOL01".to_vec();
@@ -270,4 +276,101 @@ async fn public_handler_refuses_bad_selectors_before_reading_any_root() {
         serde_json::from_str::<Value>(&body).unwrap()["status"],
         "refused"
     );
+}
+
+/// The page the catalog under `root` serves for `suffix`, pinned to that
+/// catalog's own completion after the first page.
+fn page_of(root: &Path, suffix: &str) -> Value {
+    let first = render(root, &Asked::parse(&format!("identity={ID}")).unwrap()).unwrap();
+    if suffix.is_empty() {
+        return first;
+    }
+    let pin = first["completion"].as_str().unwrap();
+    render(
+        root,
+        &Asked::parse(&format!("identity={ID}&completion={pin}&{suffix}")).unwrap(),
+    )
+    .unwrap()
+}
+
+/// **A stock family's catalog page says what its figures are made of; an
+/// index family's is the page it was.** D-0694, AF-19.
+///
+/// A catalog page serves per-coordinate trades, wins and pessimistic and
+/// optimistic totals, per-trade best and worst, and per-session returns. The
+/// text heading over the same research states `cli::research_equity_note`
+/// for a scope holding a cash stock, and the JSON carried only `"cash":true`.
+/// Two catalogs identical but for the family are compared on every page
+/// kind: the stock's carries the note, the index's has no such key, and
+/// with the note and the family's own fields set aside the two pages are
+/// equal, so the note is the only thing the stock's page adds.
+#[test]
+fn a_stock_catalog_carries_the_equity_note_and_an_index_catalog_does_not() {
+    let _cache = CACHE_TEST.lock().unwrap();
+    let index = fixture("boolean-api-equity-index");
+    let stock = fixture_for(
+        "boolean-api-equity-stock",
+        brutex_core::instrument::InstrumentKey::cash(
+            brutex_core::instrument::Exchange::Nse,
+            "RELIANCE",
+        )
+        .unwrap(),
+    );
+    let family = cli::boolean_observation::ResearchFamilyV1::new(
+        brutex_core::instrument::InstrumentKey::cash(
+            brutex_core::instrument::Exchange::Nse,
+            "RELIANCE",
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let note = cli::research_equity_note([family]);
+    assert_eq!(
+        note,
+        cli::equity_note_for("RELIANCE"),
+        "one wording for a stock, whichever payload carries it"
+    );
+    for part in ["GROSS OF EVERY CHARGE", "CORPORATE ACTIONS ARE UNCHECKED"] {
+        assert!(note.contains(part), "premise, {part}: {note}");
+    }
+    for suffix in [
+        "",
+        "kind=programs",
+        "kind=trades&candidate=0",
+        "kind=sessions&candidate=0",
+        "kind=grid&side=short&axis=stop",
+    ] {
+        let mut index_page = page_of(&index, suffix);
+        let mut stock_page = page_of(&stock, suffix);
+        assert_eq!(stock_page["cash"], true, "premise: {suffix}");
+        assert_eq!(index_page["cash"], false, "premise: {suffix}");
+        assert_eq!(
+            stock_page.get("equity_note"),
+            Some(&json!(note)),
+            "{suffix:?}: a stock family's page"
+        );
+        assert_eq!(
+            index_page.get("equity_note"),
+            None,
+            "{suffix:?}: an index family's page"
+        );
+        for page in [&mut index_page, &mut stock_page] {
+            let object = page.as_object_mut().unwrap();
+            for own in [
+                "equity_note",
+                "instrument",
+                "cash",
+                "membership_digest",
+                "completion",
+            ] {
+                object.remove(own);
+            }
+        }
+        assert_eq!(
+            stock_page, index_page,
+            "{suffix:?}: the note is the only thing a stock's page adds"
+        );
+    }
+    fs::remove_dir_all(index).unwrap();
+    fs::remove_dir_all(stock).unwrap();
 }

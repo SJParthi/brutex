@@ -12,7 +12,18 @@ use std::fs;
 const ID: [u8; 32] = [0x24; 32];
 const ORIGINAL: [u8; 32] = [0x42; 32];
 fn fixture(name: &str) -> PathBuf {
-    let root = crate::booleanjson::tests::fixture(name);
+    fixture_for(
+        name,
+        brutex_core::instrument::InstrumentKey::index(
+            brutex_core::instrument::Exchange::Nse,
+            "NIFTY",
+        )
+        .unwrap(),
+    )
+}
+/// [`fixture`] over `key`'s family, every other byte the same.
+fn fixture_for(name: &str, key: brutex_core::instrument::InstrumentKey) -> PathBuf {
+    let root = crate::booleanjson::tests::fixture_for(name, key);
     let parent = root
         .join("boolean-candidates-v1")
         .join(crate::server::hex32(ORIGINAL));
@@ -183,4 +194,79 @@ async fn public_later_route_refuses_invalid_selectors_without_accessing_a_store(
     assert_eq!(reply.0, StatusCode::BAD_REQUEST);
     let body: Value = serde_json::from_str(&reply.2).unwrap();
     assert_eq!(body["rows"], json!([]));
+}
+
+/// **A stock family's later comparison says what its figures are made of; an
+/// index family's is the page it was.** D-0694, AF-19.
+///
+/// The later page serves each coordinate's training and later cells, the
+/// later trades and the later sessions' returns. Two comparisons identical
+/// but for the family are read on every page kind: the stock's carries
+/// `cli::research_equity_note`, the Boolean research heading's own note, the
+/// index's has no such key, and with the note and the family's own fields set
+/// aside the two pages are equal.
+#[test]
+fn a_stock_later_comparison_carries_the_equity_note_and_an_index_one_does_not() {
+    let reliance = brutex_core::instrument::InstrumentKey::cash(
+        brutex_core::instrument::Exchange::Nse,
+        "RELIANCE",
+    )
+    .unwrap();
+    let index = fixture("boolean-later-equity-index");
+    let stock = fixture_for("boolean-later-equity-stock", reliance);
+    let note =
+        cli::research_equity_note([
+            cli::boolean_observation::ResearchFamilyV1::new(reliance).unwrap()
+        ]);
+    assert!(
+        note.contains("CORPORATE ACTIONS ARE UNCHECKED"),
+        "premise: {note}"
+    );
+    let page = |root: &Path, suffix: &str| {
+        let reader = LaterPeriod::open(root, ID, crate::detail::MAX_SCAN_BYTES).unwrap();
+        let pin = crate::server::hex32(reader.completion_digest());
+        let query = if suffix.is_empty() {
+            format!("identity={}", crate::server::hex32(ID))
+        } else {
+            format!(
+                "identity={}&completion={pin}&{suffix}",
+                crate::server::hex32(ID)
+            )
+        };
+        project(&reader, &Asked::parse(&query).unwrap()).unwrap()
+    };
+    for suffix in ["", "kind=trades&candidate=1", "kind=sessions&candidate=1"] {
+        let mut index_page = page(&index, suffix);
+        let mut stock_page = page(&stock, suffix);
+        assert_eq!(stock_page["cash"], true, "premise: {suffix}");
+        assert_eq!(
+            stock_page.get("equity_note"),
+            Some(&json!(note)),
+            "{suffix:?}: a stock family's later page"
+        );
+        assert_eq!(
+            index_page.get("equity_note"),
+            None,
+            "{suffix:?}: an index family's later page"
+        );
+        for page in [&mut index_page, &mut stock_page] {
+            let object = page.as_object_mut().unwrap();
+            for own in [
+                "equity_note",
+                "instrument",
+                "cash",
+                "membership_digest",
+                "completion",
+                "parent",
+            ] {
+                object.remove(own);
+            }
+        }
+        assert_eq!(
+            stock_page, index_page,
+            "{suffix:?}: the note is the only thing a stock's page adds"
+        );
+    }
+    fs::remove_dir_all(index).unwrap();
+    fs::remove_dir_all(stock).unwrap();
 }

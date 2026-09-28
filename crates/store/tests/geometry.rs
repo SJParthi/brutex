@@ -465,6 +465,30 @@ fn an_overlay_is_not_a_bar_file_and_no_reader_can_take_it_for_one() {
     assert_eq!(Layout::OVERLAY.record_stride(), OVERLAY_STRIDE);
 }
 
+/// Every truncated overlay record refuses; a complete record retains its values.
+#[test]
+fn an_overlay_decoder_refuses_every_truncated_record_without_zero_filling() {
+    use store::format::{FormatError, OI_NULL, Overlay};
+
+    let overlay = Overlay {
+        ts_micros: 12_345,
+        spot: 2_465_000,
+        iv_micros: OI_NULL,
+    };
+    let image = overlay.image();
+    for len in 0..image.len() {
+        assert_eq!(
+            Overlay::decode(&image[..len]),
+            Err(FormatError::RecordTooShort { len }),
+            "truncation at byte {len} must not fabricate the absent tail"
+        );
+    }
+    assert_eq!(Overlay::decode(&image), Ok(overlay));
+    let mut followed = image.to_vec();
+    followed.extend_from_slice(&[0xa5; 7]);
+    assert_eq!(Overlay::decode(&followed), Ok(overlay));
+}
+
 /// **AN ABSENT VALUE AND A ZERO ARE DIFFERENT, AND STAY DIFFERENT.**
 ///
 /// Both overlay fields carry real readings where zero is meaningful: a spot of

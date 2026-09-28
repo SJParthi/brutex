@@ -453,9 +453,10 @@ pub static FRONTIER: Cached<cli::frontier::Frontier> = Cached::new();
 
 static PARENTS: Cached<cli::result_set::CommittedParents> = Cached::new();
 
-/// Refreshes both parent indexes once and returns one owned receipt before
-/// the caller refreshes any child. Cold open is O(history); warm refresh is
-/// O(new parent rows), with each file still subject to the HTTP byte ceiling.
+/// Refreshes both parent indexes once and returns one owned receipt, with
+/// the instrument its ledger parent names, before the caller refreshes any
+/// child. Cold open is O(history); warm refresh is O(new parent rows), with
+/// each file still subject to the HTTP byte ceiling.
 ///
 /// # Errors
 /// Returns parent generation/integrity/size failures and missing committed
@@ -463,13 +464,88 @@ static PARENTS: Cached<cli::result_set::CommittedParents> = Cached::new();
 pub fn committed_receipt(
     root: &Path,
     identity: &[u8; 32],
-) -> Result<Option<cli::result_set::Receipt>, String> {
+) -> Result<Option<cli::result_set::Committed>, String> {
     PARENTS.with_verified(
         root,
         || cli::result_set::CommittedParents::open_read_bounded(root, MAX_SCAN_BYTES),
         cli::result_set::CommittedParents::refresh,
-        |parents| parents.receipt(identity),
+        |parents| parents.committed(identity),
     )?
+}
+
+static LEDGER: Cached<cli::results::Results> = Cached::new();
+
+/// The instrument the results ledger records for `identity`, or `None` when
+/// no ledger row names it, a store with no ledger or an empty one included.
+///
+/// For a reader whose own file is keyed by identity and is not a receipted
+/// child: `/sweep-evidence.json` and the AND-mask `/candidate-trades.json`.
+/// It reads the ledger alone, so a damaged receipt sidecar cannot refuse a
+/// saved attempt that never had a receipt. Cold open is O(history); warm
+/// refresh is O(new rows), under the same byte ceiling. Nothing is created:
+/// an absent or empty ledger is answered before any open.
+///
+/// AN EMPTY LEDGER IS AN ABSENCE, as `cli::results::Results::open_read` says
+/// on its own read path: no run has been recorded, which is not an error. A
+/// zero-byte `runs.bin` is what `Results::open` leaves when it stops between
+/// creating the file and writing its header, and the next writer gives it
+/// its header. The length is measured from the path's metadata, one call,
+/// rather than by matching the words of the read path's refusal.
+///
+/// # Errors
+/// Returns a damaged, changed or over-limit ledger, never a guessed `None`.
+pub fn recorded_underlying(root: &Path, identity: &[u8; 32]) -> Result<Option<String>, String> {
+    match std::fs::metadata(cli::results::Results::path(root)) {
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(why) => return Err(format!("ledger path cannot be inspected: {why}")),
+        Ok(ledger) if ledger.len() == 0 => return Ok(None),
+        Ok(_) => {}
+    }
+    let parent = LEDGER.with_verified(
+        root,
+        || cli::results::Results::open_read_bounded(root, MAX_SCAN_BYTES),
+        cli::results::Results::refresh,
+        |ledger| ledger.of_identity(identity),
+    )??;
+    Ok(parent.map(|row| cli::results::read_field(&row.underlying)))
+}
+
+/// The `"equity_note"` member, leading comma included, that a payload over
+/// one recorded run carries when that run's instrument is a swept stock, and
+/// nothing for any other run.
+///
+/// The text is `cli::equity_note_for`, the stored banner's own: gross of
+/// every charge, then corporate actions unchecked. `/backtest.json`,
+/// `/frontier.json`, `/trades.json` and `/sweep-evidence.json` all take it
+/// from here, so one instrument cannot be described two ways, and an index
+/// run's payload gains no key and is the bytes it was. D-0694, AF-19.
+#[must_use]
+pub fn equity_note_member(underlying: Option<&str>) -> String {
+    let note = underlying.map_or_else(String::new, cli::equity_note_for);
+    if note.is_empty() {
+        return note;
+    }
+    format!(r#","equity_note":{}"#, crate::render::json_string(&note))
+}
+
+/// [`equity_note_member`] for a payload built as a `serde_json::Value`: puts
+/// `note` in as the `"equity_note"` member when it says anything, and adds
+/// no key when it is empty, so an index payload is the value it was.
+///
+/// `note` is always one of `cli`'s own wordings, `cli::equity_note_for` for a
+/// recorded run or `cli::research_equity_note` for Boolean research families,
+/// and both are `runner::audit::CostScope::report_note`. D-0694, AF-19.
+///
+/// # Errors
+/// Refuses a payload that is not a JSON object rather than dropping the note.
+pub fn put_equity_note(body: &mut serde_json::Value, note: String) -> Result<(), String> {
+    if note.is_empty() {
+        return Ok(());
+    }
+    body.as_object_mut()
+        .ok_or("a payload that is not a JSON object cannot carry its equity note")?
+        .insert("equity_note".to_owned(), serde_json::Value::String(note));
+    Ok(())
 }
 
 #[cfg(test)]
@@ -484,6 +560,36 @@ mod tests {
         Cached, IDENTITY_REFUSAL, MAX_PAGE_ROWS, MAX_QUERY_BYTES, MAX_SCAN_BYTES, Page, Selector,
         preflight, run, window,
     };
+
+    /// ONLY AN ABSENT LEDGER IS AN ABSENCE.
+    ///
+    /// `recorded_underlying` answers `None` for a ledger path that does not
+    /// exist and refuses one that cannot be inspected at all. A store root
+    /// that is a file makes the ledger's path fail with "not a directory",
+    /// not "not found": that is a broken store, not an empty one. Nothing held
+    /// the difference: a mutant that took every metadata error for `NotFound`
+    /// survived the whole suite (Gate 18 on PR #19).
+    #[cfg(unix)]
+    #[test]
+    fn only_an_absent_ledger_answers_no_underlying() {
+        let root = crate::scratch::path("detail-ledger-not-a-directory");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(&root);
+        assert_eq!(
+            super::recorded_underlying(&root, &[0; 32]),
+            Ok(None),
+            "an absent store holds no ledger"
+        );
+        std::fs::write(&root, b"a file where the store root belongs")
+            .expect("a file at the store root");
+        let refused = super::recorded_underlying(&root, &[0; 32]);
+        std::fs::remove_file(&root).expect("remove the fixture file");
+        let why = refused.expect_err("a ledger path under a file cannot be inspected");
+        assert!(
+            why.starts_with("ledger path cannot be inspected: "),
+            "{why}"
+        );
+    }
 
     /// THE BLOCKING TASK'S ORDER, KEPT: PAGE, THEN STORE ROOT, THEN IDENTITY.
     ///

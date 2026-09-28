@@ -199,3 +199,344 @@ fn daily_and_weekly_pages_require_exact_setting_parent_pin_and_bounded_period_se
     assert!(Asked::parse(&format!("identity={ID}&setting=0"), Model::Qualification).is_err());
     assert!(Asked::parse(&format!("identity={ID}&period=full"), Model::Qualification).is_err());
 }
+
+/// Whether `call` is a statement at the top level of the function `body`, as
+/// rustfmt indents one, and every `return` written before it returns exactly
+/// an `Err`: a `return Err(` whose expression ends where that call's
+/// parenthesis closes.
+///
+/// Before the call, a `?` can only return an error, so a page can leave the
+/// function before the call only by a `return`, and every such `return` is
+/// refused, however it is spelled. A call under a condition, a loop or a
+/// closure is indented deeper and is not found. A `return` inside a closure
+/// before the call is refused too, though it leaves only the closure. A word
+/// inside a string or a line or nested block comment is not code: these are
+/// removed before locating the call as well as before checking returns. The
+/// text after the call is not checked for returns, so a page built after it
+/// is not held to the call. This remains a rustfmt/source-shape check, not a
+/// control-flow proof or a rendered-response fixture.
+pub(crate) fn on_every_page(body: &str, call: &str) -> bool {
+    code_only(body)
+        .split_once(&format!("\n    {call}"))
+        .is_some_and(|(before, _)| only_errors_return(before))
+}
+
+/// `code` with cooked/raw string contents removed and line/nested block
+/// comments blanked, preserving comment newlines and indentation. Byte and C
+/// string prefixes leave the same quote or raw-string opener. This is not a
+/// Rust parser: a `'"'` character literal would be read as opening a string;
+/// the bodies this is applied to hold none.
+fn code_only(code: &str) -> String {
+    let mut out = String::with_capacity(code.len());
+    let mut chars = code.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == 'r' {
+            let mut after = chars.clone();
+            let mut hashes = 0;
+            while after.next_if_eq(&'#').is_some() {
+                hashes += 1;
+            }
+            if after.next() == Some('"') {
+                chars = after;
+                while let Some(inner) = chars.next() {
+                    if inner == '"' {
+                        let mut end = chars.clone();
+                        if (0..hashes).all(|_| end.next() == Some('#')) {
+                            chars = end;
+                            break;
+                        }
+                    }
+                }
+                out.push_str("r\"\"");
+                continue;
+            }
+        }
+        if c == '"' {
+            out.push('"');
+            while let Some(inner) = chars.next() {
+                match inner {
+                    '\\' => {
+                        chars.next();
+                    }
+                    '"' => break,
+                    _ => {}
+                }
+            }
+            out.push('"');
+        } else if c == '/' && chars.peek() == Some(&'/') {
+            chars.next();
+            out.push_str("  ");
+            for rest in chars.by_ref() {
+                out.push(if rest == '\n' { '\n' } else { ' ' });
+                if rest == '\n' {
+                    break;
+                }
+            }
+        } else if c == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            out.push_str("  ");
+            let mut depth = 1;
+            while let Some(inner) = chars.next() {
+                out.push(if inner == '\n' { '\n' } else { ' ' });
+                if inner == '/' && chars.peek() == Some(&'*') {
+                    chars.next();
+                    out.push(' ');
+                    depth += 1;
+                } else if inner == '*' && chars.peek() == Some(&'/') {
+                    chars.next();
+                    out.push(' ');
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Whether every `return` keyword in `code` returns exactly an `Err`: it is
+/// written `return Err(`, and its expression ends where that call's
+/// parenthesis closes, at a `;`, a `,` or a `}` after any whitespace. So
+/// `return Err(why).or_else(|_| page)`, which returns the page, is refused. A
+/// word such as `returned` is no keyword. The parentheses are counted in the
+/// text [`code_only`] leaves, so one inside a string is not counted, and one
+/// in a character literal would be; the bodies this is applied to hold none.
+fn only_errors_return(code: &str) -> bool {
+    let part_of_a_word =
+        |byte: Option<&u8>| byte.is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_');
+    code.match_indices("return").all(|(at, _)| {
+        let bytes = code.as_bytes();
+        let keyword = !part_of_a_word(at.checked_sub(1).and_then(|before| bytes.get(before)))
+            && !part_of_a_word(bytes.get(at + "return".len()));
+        !keyword
+            || code[at..]
+                .strip_prefix("return Err(")
+                .is_some_and(ends_where_it_closes)
+    })
+}
+
+/// Whether `rest`, the text after an opening `(`, closes that parenthesis and
+/// then, past any whitespace, ends the expression with a `;`, a `,` or a `}`.
+fn ends_where_it_closes(rest: &str) -> bool {
+    let mut open = 1_usize;
+    for (at, c) in rest.char_indices() {
+        match c {
+            '(' => open += 1,
+            ')' if open == 1 => {
+                return rest[at + 1..].trim_start().starts_with([';', ',', '}']);
+            }
+            ')' => open -= 1,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// **THE SOURCE RULE REFUSES A PAGE RETURNED BEFORE THE CALL, HOWEVER ITS
+/// `return` IS SPELLED, AND ADMITS AN EARLY ERROR.** D-0694, AF-19.
+///
+/// The rule once refused only the letters `return Ok`, and a
+/// `render_with_budget` that returned `statistics(reader, asked)` before its
+/// call on a read with a completion pin passed the test below, which applies
+/// the rule to that function, while every such page went out without the
+/// note.
+#[test]
+fn the_source_rule_refuses_every_early_return_but_an_error() {
+    const CALL: &str = "crate::detail::put_equity_note(&mut body, note)?;";
+    let body =
+        |before: &str| format!("\n    let mut body = page()?;{before}\n    {CALL}\n    Ok(body)");
+    for early in [
+        "\n    if pinned {\n        return statistics(reader, asked);\n    }",
+        "\n    if pinned {\n        return Ok(body);\n    }",
+        "\n    let body = match cached {\n        Some(page) => return page,\n        None => body,\n    };",
+        "\n    let said = \"a \\\"quoted\\\" word\";\n    if pinned {\n        return page;\n    }",
+        "\n    let link = \"http://host\";\n    if pinned {\n        return page;\n    }",
+        "\n    if pinned {\n        return Err(String::new()).or_else(|_| statistics(reader, asked));\n    }",
+        "\n    if pinned {\n        return Err(why)\n            .or_else(|_| statistics(reader, asked));\n    }",
+    ] {
+        assert!(
+            !on_every_page(&body(early), CALL),
+            "a page returned before the call: {early}"
+        );
+    }
+    for admitted in [
+        "",
+        "\n    if stale {\n        return Err(\"changed\".into());\n    }",
+        "\n    if stale {\n        return Err(format!(\"changed ({})\", body.len()));\n    }",
+        "\n    let body = match cached {\n        Err(why) => return Err(why),\n        Ok(page) => page,\n    };",
+        "\n    let body = match cached {\n        Err(why) => { return Err(why) }\n        Ok(page) => page,\n    };",
+        "\n    let returned = body.len();",
+        "\n    let scope = \"no future-return guarantee\";",
+        "\n    // return the page only once it carries the note",
+    ] {
+        assert!(
+            on_every_page(&body(admitted), CALL),
+            "nothing returns a page before the call: {admitted}"
+        );
+    }
+    assert!(
+        !on_every_page(&format!("\n    if pinned {{\n        {CALL}\n    }}"), CALL),
+        "a call under a condition is not a statement of the body"
+    );
+}
+
+/// Replace the one real statement in a source body with non-code that still
+/// spells it. These are source-predicate controls, not rendered responses.
+fn rejects_a_note_call_that_is_only_text(source: &str, function: &str, call: &str) {
+    let body = source
+        .split_once(&format!("\nfn {function}("))
+        .and_then(|(_, tail)| tail.split_once("\n}\n"))
+        .map(|(body, _)| body)
+        .unwrap();
+    assert!(on_every_page(body, call), "the actual {function} statement");
+    assert_eq!(body.matches(call).count(), 1, "one replacement site");
+    let mut admitted = Vec::new();
+    for (kind, replacement) in [
+        ("block comment", format!("/*\n    {call}\n    */")),
+        (
+            "nested block comment",
+            format!("/* outer /* inner */\n    {call}\n    */"),
+        ),
+        (
+            "quoted string",
+            format!("let _ = \"an escaped \\\" quote\n    {call}\n    \";"),
+        ),
+        (
+            "raw string",
+            format!("let _ = r##\"an interior \" and \"#\n    {call}\n    \"##;"),
+        ),
+        (
+            "line comments",
+            call.lines()
+                .map(|line| format!("// {line}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+    ] {
+        if on_every_page(&body.replacen(call, &replacement, 1), call) {
+            admitted.push(kind);
+        }
+    }
+    assert!(
+        admitted.is_empty(),
+        "{function} accepted a note call only in: {admitted:?}"
+    );
+}
+
+#[test]
+fn the_source_rule_rejects_a_noncode_note_in_render_with_budget() {
+    rejects_a_note_call_that_is_only_text(
+        include_str!("booleanevidencejson.rs"),
+        "render_with_budget",
+        "crate::detail::put_equity_note(&mut body, equity_note(reader))?;",
+    );
+}
+
+#[test]
+fn the_source_rule_rejects_a_noncode_note_in_search_detail() {
+    rejects_a_note_call_that_is_only_text(
+        include_str!("booleansearchjson.rs"),
+        "detail",
+        "crate::detail::put_equity_note(\n        &mut body,\n        crate::booleanevidencejson::sources_note(source.original().statistics().sources()),\n    )?;",
+    );
+}
+
+#[test]
+fn the_source_rule_ignores_noncode_without_hiding_early_returns() {
+    const CALL: &str = "crate::detail::put_equity_note(&mut body, note)?;";
+    for hidden in [
+        "// return page; a quote \" and /* are comment text".to_owned(),
+        format!("/* a quote \" and // stay in this comment\n    {CALL}\n    return page; */"),
+        format!("/* outer /* inner */\n    {CALL}\n    return page; */"),
+        format!("let _ = \"an escaped \\\" quote /* and //\n    {CALL}\n    return page;\";"),
+        format!("let _ = r##\"a quote \" and \"#\n    {CALL}\n    return page;\"##;"),
+        format!("let _ = br#\"a quote \"\n    {CALL}\n    return page;\"#;"),
+        format!("let _ = cr\"\n    {CALL}\n    return page;\";"),
+    ] {
+        let body = |before: &str| format!("\n    {hidden}\n    {before}\n    {CALL}\n    Ok(body)");
+        assert!(on_every_page(&body(""), CALL), "non-code: {hidden}");
+        assert!(
+            on_every_page(&body("return Err(why);"), CALL),
+            "an early error remains allowed: {hidden}"
+        );
+        assert!(
+            !on_every_page(&body("return statistics(reader, asked);"), CALL),
+            "a non-code call must not hide a later page return: {hidden}"
+        );
+    }
+}
+
+/// **A statistics, admission or qualification page over a stock family
+/// states the equity note; a page over indices does not.** D-0694, AF-19.
+///
+/// Each of the three pages serves a candidate's trades, wins and returns
+/// from saved statistics whose linked sources name their families. The page
+/// carries `cli::research_equity_note` over those sources, the Boolean
+/// research heading's own decision, so one cash source is enough and a page
+/// of index sources gains no key. The three readers are saved evidence this
+/// crate has no fixture for, so no page of theirs is rendered here with a
+/// stock family: `render_with_budget` is held to putting the note in, over
+/// each reader's own sources, by its source. The call must be a statement at
+/// the top level of its body, and every `return` before it must return an
+/// `Err`, so no page can be returned before the call is made. A call made
+/// only when a completion was asked for is indented under its condition and
+/// fails here; the same call passed when this checked only that the line was
+/// present.
+#[test]
+fn a_page_over_a_stock_source_states_the_equity_note_and_an_index_page_does_not() {
+    let family = |key: Result<brutex_core::instrument::InstrumentKey, _>| {
+        cli::boolean_observation::ResearchFamilyV1::new(key.unwrap()).unwrap()
+    };
+    let nse = brutex_core::instrument::Exchange::Nse;
+    let source = |family| StatisticsSource {
+        family,
+        identity: [1; 32],
+        completion: [2; 32],
+        coordinates: 2,
+    };
+    let nifty = source(family(brutex_core::instrument::InstrumentKey::index(
+        nse, "NIFTY",
+    )));
+    let bank = source(family(brutex_core::instrument::InstrumentKey::index(
+        nse,
+        "BANKNIFTY",
+    )));
+    let reliance = source(family(brutex_core::instrument::InstrumentKey::cash(
+        nse, "RELIANCE",
+    )));
+    let note = cli::research_equity_note([reliance.family]);
+    assert!(
+        note.contains("CORPORATE ACTIONS ARE UNCHECKED"),
+        "premise: {note}"
+    );
+    assert_eq!(sources_note(&[nifty, bank]), "");
+    assert_eq!(sources_note(&[]), "");
+    assert_eq!(sources_note(&[nifty, reliance]), note);
+
+    let text = include_str!("booleanevidencejson.rs");
+    let body = |name: &str| {
+        text.split_once(&format!("\nfn {name}("))
+            .and_then(|(_, tail)| tail.split_once("\n}\n"))
+            .map(|(body, _)| body)
+            .unwrap()
+    };
+    assert!(
+        on_every_page(
+            body("render_with_budget"),
+            "crate::detail::put_equity_note(&mut body, equity_note(reader))?;"
+        ),
+        "every page of the three models carries the note"
+    );
+    let note_of = body("equity_note");
+    for arm in [
+        "Reader::Statistics(reader) => reader.sources(),",
+        "Reader::Admission(reader) => reader.statistics().sources(),",
+        "Reader::Qualification(reader) => reader.original().statistics().sources(),",
+    ] {
+        assert!(note_of.contains(arm), "{arm}: each model's own sources");
+    }
+}

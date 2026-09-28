@@ -63,8 +63,14 @@ pub enum InstrumentError {
     /// stored — futures and options contracts are, and so is any cash equity
     /// — but `docs/00-charter.md` section 1 fixes the swept surface at two
     /// shapes: the NSE spot indices NIFTY and BANKNIFTY, and the NSE cash
-    /// equities of the 213 F&O underlyings (D-0506). Widening it requires a
-    /// decision-ledger entry rather than a caller passing a different string.
+    /// equities of the F&O underlyings that are shares, 208 of the 213
+    /// (D-0506). The other five are indices and have no cash equity, so a cash
+    /// key named after one is refused here too (D-0682). Widening it requires
+    /// a decision-ledger entry rather than a caller passing a different string.
+    ///
+    /// The rendered message used to end *"the engine surface is fixed at
+    /// two"*, which was true of two INSTRUMENTS until D-0506 and has since
+    /// read as a count the surface no longer has. It names the two shapes now.
     NotSweepable,
     /// The identifier was empty or malformed.
     Malformed,
@@ -94,7 +100,8 @@ impl fmt::Display for InstrumentError {
         match self {
             Self::UnknownExchange => f.write_str("unknown exchange"),
             Self::NotSweepable => f.write_str(
-                "instrument is storable but not sweepable; the engine surface is fixed at two",
+                "instrument is storable but not sweepable; the engine surface is two NSE spot \
+                 indices and the NSE cash equities of the F&O underlyings that are shares",
             ),
             Self::Malformed => f.write_str("malformed instrument identifier"),
             Self::FieldTooWide { field, len } => write!(
@@ -183,6 +190,21 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// D-0682. The refusal names the surface's two shapes and no stale count.
+    /// "Fixed at two" described two instruments, which the surface stopped
+    /// being at D-0506.
+    #[test]
+    fn not_sweepable_names_both_shapes_of_the_surface_and_no_stale_count() {
+        let why = InstrumentError::NotSweepable.to_string();
+        assert!(why.contains("storable but not sweepable"), "{why}");
+        assert!(why.contains("two NSE spot indices"), "{why}");
+        assert!(
+            why.contains("cash equities of the F&O underlyings that are shares"),
+            "{why}"
+        );
+        assert!(!why.contains("fixed at two"), "{why}");
     }
 
     #[test]

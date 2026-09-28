@@ -196,12 +196,16 @@ fn project(reader: &LaterPeriod, asked: &Asked) -> Result<Value, String> {
         .checked_add(parent.body_bytes())
         .and_then(|n| n.checked_add(224))
         .ok_or("later comparison byte count overflow")?;
-    let body = json!({"schema_version":1,"status":"saved","authority":"authenticated-later-comparison-observation","identity":crate::server::hex32(reader.identity()),"completion":crate::server::hex32(pin),
+    let mut body = json!({"schema_version":1,"status":"saved","authority":"authenticated-later-comparison-observation","identity":crate::server::hex32(reader.identity()),"completion":crate::server::hex32(pin),
         "parent":{"identity":crate::server::hex32(summary.parent),"completion":crate::server::hex32(summary.parent_completion)},"cohort":crate::server::hex32(parent.cohort_digest()),"instrument":family.instrument().to_string(),"cash":family.is_cash(),"membership_digest":crate::server::hex32(family.membership_digest()),
         "program_count":reader.programs().len().to_string(),"coordinate_count":reader.coordinate_count().to_string(),"training_session_count":parent.sessions().len().to_string(),"session_count":reader.sessions().len().to_string(),"grids":parent.grids().iter().map(crate::booleanjson::grid_summary).collect::<Vec<_>>(),
         "later":{"source":crate::server::hex32(summary.source),"execution":crate::server::hex32(summary.execution),"first_micros":summary.first_micros.to_string(),"last_micros":summary.last_micros.to_string(),"bars":summary.bars.to_string(),"from":format!("{fy:04}-{fm:02}"),"to":format!("{ty:04}-{tm:02}")},
         "kind":asked.kind,"candidate":asked.candidate.map(|n|n.to_string()),"offset":asked.offset.to_string(),"limit":asked.limit,"total":total.to_string(),"next":next.map(|n|n.to_string()),"page_complete":true,"selected":selected,"rows":rows,"admitted_bytes":admitted_bytes.to_string(),"refusal":null,
         "scope":"Complete frozen training-coordinate population compared on the explicit later period. Saved bodies and original receipt are authenticated; current raw OHLCV is not reread. Cost-excluded research only, with no selection, admission, full-campaign or future-profitability approval."});
+    // A STOCK FAMILY'S LATER PAGE SAYS WHAT ITS FIGURES ARE MADE OF, as its
+    // training catalog's page does. An index family's gains no key. D-0694,
+    // AF-19.
+    crate::detail::put_equity_note(&mut body, cli::research_equity_note([family]))?;
     reader.require_current()?;
     Ok(body)
 }

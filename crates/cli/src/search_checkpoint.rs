@@ -7,15 +7,23 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+use store::flock::Flock;
+
 const MAGIC: &[u8; 8] = b"BTXCHK01";
 const HEADER: usize = 64;
 pub(crate) const DIRECTORY_LIMIT: usize = 1_000_000;
 
 /// An exclusively owned search checkpoint namespace.
+///
+/// Every advisory lock this type takes is released by an explicit unlock,
+/// never by closing its descriptor: a descriptor duplicated into a child
+/// another thread spawned would otherwise keep it, and the next shared read of
+/// the same file would refuse as busy (D-0693).
 pub(crate) struct Journal {
     directory: PathBuf,
     identity: [u8; 32],
-    owner: File,
+    /// The namespace's exclusive owner lock, released when the journal drops.
+    owner: Flock<File>,
     next: u64,
     latest: Option<u64>,
     interrupted: u64,
@@ -141,10 +149,10 @@ impl Journal {
         let directory = base.join(hex(&identity));
         durable_directory(&base, &directory)?;
         let owner_path = directory.join("owner.lock");
-        let owner = open_owner(&owner_path)?;
-        owner.try_lock().map_err(|why| {
-            format!("this exact search is already owned or cannot be locked: {why}")
-        })?;
+        let owner =
+            Flock::try_lock(open_owner(&owner_path)?, owner_path.clone()).map_err(|why| {
+                format!("this exact search is already owned or cannot be locked: {why}")
+            })?;
         File::open(&directory)
             .map_err(error)?
             .sync_all()
@@ -224,13 +232,18 @@ impl Journal {
             .sync_all()
             .map_err(error)?;
         let path = directory.join("payload");
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(error)?;
-        file.lock().map_err(error)?;
+        let mut file = Flock::lock(
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .map_err(error)?,
+            path.as_path(),
+        )
+        .map_err(error)?;
+        #[cfg(test)]
+        tests::payload_locked(&file);
         let header = header_of(self.identity, sequence, length);
         let mut hash = brutex_core::blake3::Hasher::new();
         hash.update(&header);
@@ -259,6 +272,12 @@ impl Journal {
         if regular_bytes(&directory.join("complete"), 32)? != seal {
             return Err("checkpoint marker changed before acknowledgment".to_owned());
         }
+        // The payload lock is released by name before the publication is
+        // acknowledged. Closing the descriptor alone left it held by any
+        // duplicate a spawned child still carried, and `latest` then refused
+        // this very checkpoint as busy. A refused release leaves `latest` and
+        // `acknowledged` unadvanced and poisons the writer through `publish`.
+        file.release().map_err(|u| u.to_string())?;
         // Only this acknowledged publication updates the cached latest position.
         // A later reopen validates the marker and all bytes again.
         self.latest = Some(sequence);
@@ -474,9 +493,11 @@ fn read_saved(
     if !metadata.file_type().is_file() || metadata.len() > max_bytes {
         return Err("checkpoint payload exceeds its type or byte admission".to_owned());
     }
-    let mut file = crate::readonly_file::open(&path).map_err(error)?;
-    file.try_lock_shared()
-        .map_err(|why| format!("checkpoint payload is busy or cannot be read: {why}"))?;
+    let mut file = Flock::try_lock_shared(
+        crate::readonly_file::open(&path).map_err(error)?,
+        path.as_path(),
+    )
+    .map_err(|why| format!("checkpoint payload is busy or cannot be read: {why}"))?;
     let before = crate::result_set::file_generation(&file, &path)?;
     let mut header = [0; HEADER];
     file.read_exact(&mut header).map_err(error)?;
@@ -508,6 +529,7 @@ fn read_saved(
     if regular_bytes(&marker, 32)? != expected {
         return Err("checkpoint completion marker changed".to_owned());
     }
+    file.release().map_err(|u| u.to_string())?;
     Ok(Saved {
         sequence,
         payload,

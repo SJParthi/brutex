@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use super::{BooleanCoordinateV1, Expression, ResearchFamilyV1, Side, display};
 use brutex_core::blake3::hash;
+use store::flock::Flock;
 
 #[path = "boolean_observation_file.rs"]
 mod observation;
@@ -31,9 +32,15 @@ fn known_namespace(namespace: &str) -> Result<(), String> {
     }
 }
 
+/// A publication in progress, holding its namespace's exclusive owner lock.
+///
+/// The lease is released by an explicit unlock when this drops, never by
+/// closing the descriptor: a duplicate left in a child another thread spawned
+/// would otherwise keep the namespace "already owned" for the next publisher
+/// (D-0693).
 pub(crate) struct Pending {
     directory: PathBuf,
-    owner: File,
+    owner: Flock<File>,
     generation: crate::result_set::FileGeneration,
 }
 impl Pending {
@@ -100,10 +107,11 @@ pub(crate) fn prepare_in_namespace(
         Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(why) => return Err(display(why)),
     }
-    let owner = crate::readonly_file::open(&owner_path).map_err(display)?;
-    owner.try_lock().map_err(|why| {
-        format!("Boolean candidate namespace already owned or lock refused: {why}")
-    })?;
+    let owner = Flock::try_lock(
+        crate::readonly_file::open(&owner_path).map_err(display)?,
+        owner_path.clone(),
+    )
+    .map_err(|why| format!("Boolean candidate namespace already owned or lock refused: {why}"))?;
     let generation = crate::result_set::file_generation(&owner, &owner_path)?;
     if owner.metadata().map_err(display)?.len() != 0 {
         return Err("Boolean candidate owner contains unexpected bytes".to_owned());
@@ -204,15 +212,21 @@ fn write_or_equal(path: &Path, body: &[u8]) -> Result<(), String> {
 }
 
 pub(super) fn read_exact(path: &Path, max_bytes: u64) -> Result<Vec<u8>, String> {
-    read_held(path, max_bytes).map(|(_, _, body)| body)
+    let (held, _, body) = read_held(path, max_bytes)?;
+    held.release().map_err(|u| u.to_string())?;
+    Ok(body)
 }
+/// Reads a whole file under a shared lock and hands the lock back still held.
+/// Every refusal here releases it through the guard's explicit unlock.
 pub(super) fn read_held(
     path: &Path,
     max_bytes: u64,
-) -> Result<(File, crate::result_set::FileGeneration, Vec<u8>), String> {
-    let mut file = crate::readonly_file::open(path).map_err(display)?;
-    file.try_lock_shared()
-        .map_err(|why| format!("Boolean evidence is busy or cannot be locked: {why}"))?;
+) -> Result<(Flock<File>, crate::result_set::FileGeneration, Vec<u8>), String> {
+    let mut file = Flock::try_lock_shared(
+        crate::readonly_file::open(path).map_err(display)?,
+        path.to_path_buf(),
+    )
+    .map_err(|why| format!("Boolean evidence is busy or cannot be locked: {why}"))?;
     let before = crate::result_set::file_generation(&file, path)?;
     let bytes = file.metadata().map_err(display)?.len();
     if bytes > max_bytes {

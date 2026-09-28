@@ -81,6 +81,7 @@ use runner::validate::{
     AnchoredSearchValidationV4, walk_forward_projected_prepared_anchored_search_v4,
 };
 use runner::{ClosureVerdict, PopulationMember, PopulationRun, Sweeper};
+use store::flock::Flock;
 
 use crate::population::{
     ClosureV1, CompletionReconciliationV2, ExitCellsPerMaskV2, ExitCoordinateV1,
@@ -3243,21 +3244,25 @@ impl CandidateUniverseLedgerV1 {
     ) -> Result<Self, CandidateUniverseRefusal> {
         let (row_path, receipt_path, lock_path) = candidate_ledger_paths(root)?;
         let writer_lock = open_file(&lock_path, writable, writable)?;
-        if writable {
-            writer_lock.lock().map_err(|why| {
+        // The open lock is released by name on success and by the guard's
+        // explicit unlock on every refusal, never by closing a descriptor: the
+        // ledger keeps a duplicate of this one, and a child another thread
+        // spawned may hold a third (D-0693).
+        let held = if writable {
+            Flock::lock(&writer_lock, lock_path.as_path()).map_err(|why| {
                 format!(
                     "cannot lock candidate writer {}: {why}",
                     lock_path.display()
                 )
-            })?;
+            })?
         } else {
-            writer_lock.lock_shared().map_err(|why| {
+            Flock::lock_shared(&writer_lock, lock_path.as_path()).map_err(|why| {
                 format!(
                     "cannot take shared candidate lock {}: {why}",
                     lock_path.display()
                 )
-            })?;
-        }
+            })?
+        };
         let ledger_lock = writer_lock.try_clone().map_err(|why| {
             format!(
                 "cannot clone candidate writer lock {}: {why}",
@@ -3265,7 +3270,7 @@ impl CandidateUniverseLedgerV1 {
             )
         })?;
         let lock_generation = file_generation(&writer_lock, &lock_path)?;
-        let opened = (|| {
+        let opened: Result<Self, CandidateUniverseRefusal> = (|| {
             let mut row_file = open_file(&row_path, writable, writable)?;
             let mut receipt_file = open_file(&receipt_path, writable, writable)?;
             if writable {
@@ -3320,16 +3325,15 @@ impl CandidateUniverseLedgerV1 {
             ledger.scan()?;
             Ok(ledger)
         })();
-        let released = writer_lock.unlock().map_err(|why| {
+        let ledger = opened?;
+        held.release().map_err(|u| {
             format!(
-                "cannot release candidate open lock {}: {why}",
-                lock_path.display()
+                "cannot release candidate open lock {}: {}",
+                lock_path.display(),
+                u.why
             )
-        });
-        match (opened, released) {
-            (Ok(ledger), Ok(())) => Ok(ledger),
-            (Err(why), _) | (Ok(_), Err(why)) => Err(why),
-        }
+        })?;
+        Ok(ledger)
     }
 
     fn scan(&mut self) -> Result<(), CandidateUniverseRefusal> {

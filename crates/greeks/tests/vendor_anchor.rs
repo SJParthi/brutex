@@ -105,7 +105,7 @@
 //! rate or a hardcoded constant near 10%; which day count and which divisor
 //! generate `T`; whether the carry is zero; whether the model is spot BSM or
 //! forward Black-76; and the NIFTY strike interval, which no source in
-//! `docs/00-charter.md` states. See `docs/06-limits.md` §18.
+//! `docs/00-charter.md` states. See `docs/06-limits.md` §29.
 
 // The same exceptions every test module in this workspace takes, plus the two
 // this crate exists for. See the crate documentation and D-0046.

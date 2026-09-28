@@ -2139,8 +2139,132 @@ rows.
 `iterations` count from this crate must never enter the blake3 run identity of
 `CLAUDE.md` §3 rule 3 and must never be compared byte-for-byte across machines;
 a consumer that branches on `GreeksError` variant or records `method` must
-treat that as a property of the machine it ran on. Nothing in this repository
-does any of it today. Invariant G-10 is narrowed to what its test proves.
+treat that as a property of the machine it ran on. No run identity takes one.
+**One path does compare them across machines, and across libm builds on one
+machine: the store's overlap check, when a `.grk` file is resumed under a libm
+other than the one that began it.** Invariant G-10 is narrowed to what its test
+proves.
+
+**Until D-0692 this rule ended "Nothing in this repository does any of it
+today", and that had been false since D-0217 and D-0218.** The `.grk` sidecar
+persists libm-dependent bits. `api`'s `greek_records` builds one
+`store::format::Greek` per priced row, and `pull::ingest::write_greeks` appends
+the batch through `BarFile::append`. The record holds the volatility, the five
+greeks and the rate as `f64`, and `Greek::image` writes each with
+`to_le_bytes`, unrounded, as `CLAUDE.md` §7 requires of a statistical value.
+All five greeks go through `d1`'s `ln` and through `exp` in the normal density
+or CDF, so their last bits depend on the libm, as the table above measures for
+prices and solved volatilities.
+
+**What a resume under a different libm then does.** A batch that does not
+follow the committed range fails `Header::advance` with
+`FormatError::TimestampsOutOfOrder`, and `append` asks `already_stored`, then
+`suffix_that_follows`, whether the overlap is already on disk. Both compare
+records with `!=`, and `Greek`'s `PartialEq` is derived: IEEE-754 equality per
+`f64` field, which on the finite values `Greek::is_sane` admits is bit equality
+except that `0.0 == -0.0`. Under the libm build that wrote the file, a re-run
+is expected to recompute the same bits and answer `AlreadyPresent`; the
+paragraphs below say how far that is proved. Under a libm that rounds one `exp`
+or `ln` differently, one field of one overlapping row fails the
+comparison, and the whole batch is refused through the door `append`'s comment
+reserves for "a genuine conflict. The vendor restated history, or bars arrived
+out of order". The operator reads `<path>: timestamp <first offered> does not
+follow <last held>`: a timestamp fault, for timestamps the file already holds,
+when the difference is in an `f64`'s last bits. The new days in that batch are
+refused with the overlap. The Groww chain path counts the rows as refused ("the
+greeks were computed and could not be filed"); the Dhan rolling path records a
+failure for that contract-month. Re-running the refused window under the libm
+build that wrote the file, before anything later is appended, is expected to
+file it. If that build is gone, for example because an OS update replaced it,
+that recovery is not available. Once a later window is appended, the refused
+days are a gap the append-only file cannot fill.
+
+**A resume that does not overlap is not checked at all.** Nothing records or
+compares the libm build: neither the header nor the provenance word has a field
+for it, and `Header::advance` accepts a batch whose first timestamp follows the
+last one committed, without reading any stored row or comparing any field but
+the timestamps. A plain forward append under another libm, or after an OS
+update, is accepted without comment, and the file then holds rows from two libm
+builds with nothing saying which rows came from which. Re-offering a window
+written before the switch is then refused under the new build whenever its bits
+differ, and one written after it is refused under the old build the same way. D-0692 keys a `.grk` resume to the
+libm build that began the series as an operating rule, not an enforced one, and
+the second hardening it records is what would enforce it. Driven by
+`crates/store/tests/libm_key.rs`, with a second libm modelled as a one-ulp move
+in `delta`: `a_forward_append_under_another_libm_is_committed_and_names_no_build`
+shows the forward append committed and the file differing from a single-build
+file only in the moved `delta` fields, and
+`after_a_mixed_resume_neither_libm_build_re_files_the_whole_month` drives the
+two refusals. **Neither can see the key enforced, so neither pins this
+paragraph.** The first fails if the store comes to refuse that forward append,
+or if a byte of the `.grk` outside the moved fields comes to depend on them. It
+cannot fail because the store records or checks a libm build: both modelled
+builds are one real libm in one process, so a stamp the store writes, into the
+`.grk` header or into a file beside it, comes out the same in both files and a
+check against it passes, and a stamp a caller packs into the provenance word
+never reaches the tests, which build the provenance themselves. Tried at
+`eecca4da`, a commit of the branch D-0692 was written on, which `main`'s
+squash merge does not keep: a stamp the store
+wrote into the `.grk` header region on the first append, refusing an append
+whenever the held stamp differed from its own, refused a forward append once
+the held stamp was altered, and every test in the `store` suite passed. No
+file under `crates/` but `libm_key.rs` names D-0692, and the only others that
+cite §29 are four files of `crates/greeks`, which cite it for what it records
+about that crate and read no document; the sixth test of `libm_key.rs` checks
+both. It reads a citation that wraps across two lines as one phrase, and takes
+every "§29" or "section 29" under `crates/` for a citation, whatever document
+it names, so a citation is seen however the register is named. So the key can be
+enforced without failing any test that would send its author back to either
+text, and the entry that enforces it has to correct this paragraph and D-0692's
+caveat itself.
+
+**"Within one target" above means within one libm build, and the target triple
+does not fix that.** Measured on this machine (macOS 26.6.2, aarch64), from
+the source at `96194c11`: the release `api` executable, which writes `.grk`,
+and the release `greeks` unit-test executable each carry `_exp` and `_log` as
+undefined symbols that `nm -m` reports as bound from libSystem, and `otool -L`
+lists `/usr/lib/libSystem.B.dylib` as a dynamic library of each (D-0692 gives
+the build commands). The libm that computes a stored greek is the one the
+operating system supplies when the process loads, so an OS update can change it
+on the same machine under the same target triple, and a resume after one is the
+same hazard as a resume on another machine. Whether any macOS update has in
+fact changed an `exp` or `ln` result is not measured.
+
+**Within one libm build, reproduction across processes is argued, not
+measured.** G-10's test, `greeks::solver::the_solver_is_idempotent_to_the_bit`,
+covers the solved volatility within one process and one target. A resume in a
+new process rests on D-0046's reading of the crate (no clock, no randomness, no
+hash iteration and no threading in its non-test code) and on one libm build
+returning the same result for the same argument. No `.grk` window was written
+by one process and re-offered by another to check it, and whether one libm
+build gives the same bits on two different CPUs is not measured either.
+
+Not measured: no cross-libm `.grk` resume was run, so how often a real batch
+trips is unknown. D-0692 records the choice to keep the bits unrounded and two
+hardenings that were not made: naming the likely cause in the refusal, and
+stamping the libm build into the `.grk` provenance. It also records why a
+target-independent `exp` and `ln`, the one option considered that would remove
+the refusal without accepting a genuinely different row, is deferred rather
+than rejected.
+
+**Outside this crate `ln` and `exp` only set thresholds, and a libm moves a
+decision there only at an exact knife-edge.** Non-test source outside
+`crates/greeks` calls them at seven sites (grep, D-0692): Hansen's SPA
+keep-gate `−√(2 ln ln n)` in `runner::bootstrap::spa` and `spa_receipt_v1`
+(`bootstrap.rs` lines 543 and 713) and in the `family_pass` child module's
+`Family::new` (`bootstrap_family_pass.rs` line 269);
+`runner::significance::expected_max_t`; the tail quantile behind
+`bonferroni_t` and `expected_max_bailey`; the normal CDF behind
+`significance::p_value`; and `cli::live::expected_rewrites`. The last two have
+no non-test caller. No result of any of them is stored as `f64` bits. The gate
+decides which strategies the SPA bootstrap recentres; `bonferroni_t` decides
+which rows `runner::report` marks as clearing the bar and, as `bar_milli` in
+thousandths, which rows `/live.json` flags. Each decision can differ between
+two libms only for a statistic lying between the two libms' values of the same
+threshold. The G8 audit of 2026-09-23 reported, and this section did not
+re-measure, that 72 of the SPA gate values for n = 4..3,000 differ between two
+libms, that Apple's libm misrounds `ln(ln 389)`, and that neither the `{:.2}`
+rendered thresholds nor `bar_milli` changed on any of 1.97M inputs.
 
 One side effect worth recording: the repaired `Indeterminate` numerator also
 tightens cross-libm agreement, because the points it now refuses are the
@@ -2308,6 +2432,15 @@ Publishing the spot would not fix it: a 1% error in `S` moves `r` by only about
 - **Whether this crate's output is reproducible on x86_64 glibc.** Two libms
   were compared, both reachable from this machine. glibc's was not one of them,
   and no claim is made about it.
+- **How often a `.grk` resume under a different libm is refused.** The
+  mechanism is read from the code above; no such resume was run. D-0692.
+- **Whether a held `.grk` window, re-offered under the same libm build in a new
+  process, recomputes the same bits and so is `AlreadyPresent`.** A window
+  whose inputs changed, such as a rate supplied late, is refused under any
+  build, as it should be. Argued from D-0046 and G-10, whose test covers one
+  process; not run for `.grk`. Nor whether any macOS update has changed an
+  `exp` or `ln` result, which would make a resume on the same machine the
+  cross-libm case. D-0692.
 
 ### Mutation testing: 320 killed, 2 alive, and both are named
 
@@ -2847,6 +2980,20 @@ and `Segment::Fno` row is refused in both columns. On the census D-0067 measured
 that is 31,282 of 31,493 keys (99.33%); on this machine's it is 205 of 206
 (99.5%). The refusal is the honest answer and it is also a severe limitation of
 the feature, and both halves of that sentence are true at once.
+
+*Extended 2026-09-23, D-0694.* The same missing threshold means no swept
+report can detect a split either. So every report that ranks or audits a cash
+equity now states, beside its gross-of-every-charge label, that corporate
+actions are unchecked. It detects nothing, and a stock month with a split still
+ranks. See the D-0694 section at the end of this file.
+
+*Corrected 2026-09-24, AF-19.* "Every report that ranks or audits a cash
+equity now states" was more than held. The D-0694 section at the end of this
+file listed surfaces without the statement, and one of them, `cli results`,
+ranks. `cli results`, `/backtest.json`, `/frontier.json`, `/trades.json`,
+`/sweep-evidence.json`, the AND-mask `/candidate-trades.json` and the Boolean
+research payloads carry it now, and that section says which surfaces still do
+not.
 
 ### 41.4 Even with a threshold, this field flags a month and cannot name a day
 
@@ -4735,6 +4882,17 @@ the source arrays with the crate's own hash:
   non-member already reaches 41 in one call. Measured mean over the 750 real
   Total Market names is 7.6 steps, and 8.4 over 5,000 non-members — nothing is
   measurably slow, the constant is real, the number is wrong.
+
+*Added 2026-09-23, AF-54.* The ledger holds one more copy of this kind. D-0506
+quotes six probes on a hit and eleven on a miss for `FNO_INDEX`. Those are
+`NTM_INDEX`'s figures over 750 members. `FNO_INDEX` measures 7 on a hit and 10
+on a miss over its 213, so the hit figure D-0506 gives is one step short.
+Neither pair exceeds the bounds the probe tests pin, 8 on a hit and 12 on a
+miss. The ledger is append-only, so D-0506 keeps its sentence and this is the
+correction. `InstrumentKey::is_sweepable` quoted the same pair until AF-51
+corrected it, and
+`core::universe::the_worst_probes_quoted_in_prose_are_the_measured_ones` pins
+all four measured figures.
 
 ### Floor-relative budgets: thirteen of thirteen crates — CLOSED
 
@@ -8544,6 +8702,46 @@ none of them; each is what a gate would have measured had it been allowed to.
   59 files have production items after that line, `server.rs` among them, so
   browser code added there would pass the gate. No such code exists today.
 
+## Cash-equity audits are gross of every charge — D-0681, 23 September 2026
+
+- **Every figure in a cash-equity audit is gross of every charge.** That
+  covers the trades, the exit grid and the ranking that chose the
+  combination. Brokerage, STT, stamp duty, exchange charges, the SEBI fee and
+  GST all apply to a share trade, and none is subtracted: no equity charge
+  path exists (`costs::scope::Segment` has no equity variant), and
+  `docs/00-charter.md` records no rate to build one from. How much this
+  leaves out is UNMEASURED. The audit now says so in its first lines. Until
+  D-0681 it said the opposite: that there was no brokerage, STT, stamp or
+  GST.
+- **Generated-bar audits keep the index header.** They name no instrument,
+  and the `PROVENANCE` banner above them already says every figure describes
+  the generator.
+- **Only the audit header was corrected.** Other surfaces that print stock
+  results were not checked for their cost statements in this change. The
+  `cli pool` report already states that it charges nothing (D-0509).
+- **Equities are ranked gross, by the operator's decision.** `CLAUDE.md` §1
+  now allows labelled, cost-excluded ranking of equities as research. No
+  equity result may enter Selection V6 or execution authority until a
+  charter-sourced equity charge stack exists, and none exists. So a ranking
+  that would reorder once charges apply is disclosed, not prevented. D-0681.
+
+## The cash half of the sweep surface is 208 shares, not 213 names — D-0682
+
+- **The count changed.** `is_sweepable` refuses a cash key named after any of
+  the five F&O index underlyings (`core::universe::FNO_INDEX_UNDERLYINGS`).
+  The cash half of the surface is 208 shares. Any figure that multiplies the
+  search by 213 now overstates it by five names. D-0506's roughly 2.5 billion
+  trials is one such figure, and it was not recomputed here.
+- **The split is a snapshot.** Index or share is read from the transcribed F&O
+  list's ISIN column, at the same 213-name snapshot as `FNO_UNDERLYINGS`. A
+  refresh that adds an index underlying fails
+  `core::universe::the_fno_index_underlyings_are_exactly_the_fno_names_with_no_isin`
+  until the constant names it. Nothing updates it automatically.
+- **The added comparisons are not timed.** On an `FNO_INDEX` hit the cash arm
+  walks the fixed five-name array: at most five string comparisons. No bench
+  row times `is_sweepable`, so this is a count taken from the code, not a
+  measurement.
+
 ## The hand-drawn crate graphs are checked by nothing — D-0683, 23 September 2026
 
 `core/tests/graph.rs` parses only the table in `docs/01-architecture.md` §1. Its
@@ -8583,6 +8781,41 @@ all it proves.
   number resolves only through D-0104's and D-0684's tables and the subject
   written beside it, and a citation of main's D-0035 to D-0037 in `main`'s
   history resolves only through D-0684's mapping.
+
+## Screen budget refused on recorded runs — D-0685, 23 September 2026
+
+- **A budget never reaches a recorded run.** `BRUTEX_SCREEN_BUDGET_MS` derives
+  the number of candidates the exit grid prices from a wall-clock calibration.
+  The run identity folds the budget and the stated `screen_cap`, never the
+  derived cap, so one identity could record two answers. Every run that records
+  now refuses a usable budget by name before it reads its source or writes
+  anything, and the HTTP routes refuse a body that names `screen_budget_ms`.
+  `BRUTEX_SCREEN_CAP` is the deterministic way to bound the screen.
+- **The unrecorded generated-bar `audit` still honours the budget, and its
+  output is not reproducible when it does.** Two runs at one budget can price
+  512 candidates on one machine state and 1,024 on another: one nanosecond
+  across a power of two halves the cap
+  (`quantised_caps_split_at_a_power_of_two_however_close_the_timings`). That
+  report has no identity and writes no record, so nothing is recorded under a
+  false claim. Its figures still depend on timing.
+- **A value the budget reader cannot parse is not refused on the non-strict
+  recorded paths.** It is not a budget: the cap stays `screen_cap`, identity
+  term sixteen stays `0`, and the report names the value under `KNOB REFUSED`.
+  The strict range audit refuses it anyway, as it refuses every unusable
+  setting.
+- **The browser no longer offers the field (closed 2026-09-27, D-0685).**
+  `web/src/routes/backtest/+page.svelte` and `web/src/lib/receipt-batch.js`
+  drop `screen_budget_ms`, and the built bundle is rebuilt from them.
+  `web/tests/receipt-batch.test.js` checks that every setting the backtest page
+  offers is one the server's `KNOBS` accepts.
+- **A rung swept alone and the same rung inside `range-all` are two run
+  identities.** `ceiling_asked`'s doc said they were one piece of work keyed
+  once. They are not: `Params::of(ladder)` hashes the ceiling the ladder was
+  given, which `range-all` divides by the number of rungs sharing the machine,
+  and that ceiling decides whether the walk halts
+  (`the_run_identity_still_folds_the_divided_ceiling_the_ladder_was_given`).
+  The ledger therefore records them separately. That is correct for the answer,
+  but a result's identity can depend on how many rungs ran beside it.
 
 ## Census-backed GET routes: a `stat` per vendor when nothing changed, not a manifest read — D-0686, 23 September 2026
 
@@ -8671,6 +8904,39 @@ after this change. The byte ceiling above is the reader's refusal limit, not a
 size seen on the operator's disk. The 5.56 MB §41.1 quotes is D-0067's
 measurement, not a new one.
 
+**Corrected 24 September 2026 (D-0695).** Four statements above are stale.
+Commit `950ead28`, which `main`'s squash merge does not keep, changed them,
+and the repair D-0695 records changed them again. The text above is kept as
+it was written.
+
+* *"The census itself is five `stat` calls."* It is five, or six when no
+  manifest answered with a modified time: the store root is then asked whether
+  it is a directory.
+* *"No manifest and no store root share one stamp … it is not changed here."*
+  Both halves are closed. The key carries whether the root is a directory, and
+  since D-0695 each manifest is keyed on what its `stat` said: a time,
+  `NotFound`, or the error's kind. So a missing root, a root that is a file, a
+  manifest directory that is a file (`ENOTDIR`) and an unsearchable manifest
+  directory (`EACCES`) are each told apart from an empty store and from one
+  another. One same-stamp case remains: a permission change on an existing
+  manifest FILE keeps its modified time, so a census cached "held" is served
+  held after the file becomes unreadable, until the stamp moves. That is the
+  same-modified-time gap in the first bullet.
+* *"The three D-0686 routes answer the same either way, because neither state
+  contributes an entry."* No longer. `/calendar.json` answers 503 naming an
+  unreadable census and 200 for an absent one. `/bars` names unreadable
+  censuses in its refusal, and refuses outright when the asked feed's own
+  census is unreadable. `/gaps.json` lists unreadable peers under
+  `calendar.unreadable`.
+* *"`/bars` segment lookup: `held_entries` per vendor, in `Vendor::ALL` order,
+  until a vendor holds the name."* The asked feed's census (`?vendor=`, Dhan
+  when absent) is walked first, then the others in `Vendor::ALL` order, until a
+  feed holds the name. Within a feed, every entry is now compared with the name,
+  not only those up to the first match, so that a name held under two
+  identities is refused. `held_entries` had already built and sorted that whole
+  list, so the cost class is unchanged: per request, it grows with the entries
+  of the feeds walked.
+
 ## A tail block sealed past the commit is admitted on proof, at a stated cost — D-0688
 
 - **The tail block's first verification per handle adds one `fstat`.** It is
@@ -8694,7 +8960,10 @@ measurement, not a new one.
   is unchanged.
 - **The directory `fsync` after creating a `.crc` is not observable by any
   test.** It runs on each writer open of a month with no committed records, so
-  a month reopened while still empty pays one directory flush each time.
+  a month reopened while still empty pays one directory flush each time. What
+  a test does observe is that the flush is issued with its refusal returned
+  (AF-41) and that it follows the sidecar's create (AF-45); that it reached
+  stable storage is the part no test here sees.
 - **Bit rot in the newest header slot cannot be told from a torn slot write,
   and is read as the previous commit.** Both fail that slot's own checksum.
   Before D-0688 the previous commit's tail block, sealed over the newer
@@ -8754,3 +9023,844 @@ further indicators run, at 51, verified them.
 - **The fixtures are synthetic.** C-R-05's volume is 1,000 to 1,010 on every
   bar. A real equity month with zero-volume bars or wider prices is not
   timed.
+
+## Advisory file locks are released by unlock, not by close — D-0693, 23 September 2026
+
+`store::flock::Flock` releases every lock that has an early return or an owner
+by `File::unlock`. What that does not cover, stated rather than implied away:
+
+- **About 150 bracket sites still call `File::lock` and `File::unlock`
+  directly, and only a release binary is sure to reach the unlock.** Each takes
+  a lock, runs a closure or one call, unlocks, and only then combines the two
+  results. The release profile sets `panic = "abort"`, so there a panic
+  between the lock and the unlock ends the process. **The dev profile does not
+  set it and unwinds, and so does every test build.** The dev build is not
+  only for tests: `Cargo.toml`'s `[profile.dev]` comment records that the
+  operator's IntelliJ Run button builds and runs `target/debug/api` under
+  `dev`. `overflow-checks` is on there, so an arithmetic overflow inside a
+  bracket's closure is a panic that unwinds past the unlock in the binary the
+  operator actually runs. What the unwind leaves depends on who owns the file:
+  - *A file local to the unwound frames* closes as they unwind. The lock is
+    released by close, and a duplicate descriptor in a child can then hold it
+    until the child execs.
+  - *A file a longer-lived owner holds* is not closed by the unwind. Tokio
+    reports a panicking task as a `JoinError`, `api::detail::run` turns it
+    into `RunError::Join`, and the api keeps serving, so the lock stays held
+    on the owner's own descriptor until that owner drops, not merely until
+    close. `api::detail::FRONTIER` is one such owner: it keeps one
+    `cli::frontier::Frontier` for the process, `with_verified` recovers a
+    poisoned cache with `PoisonError::into_inner` and keeps the same handle,
+    and `Frontier`'s reads bracket `self.file.lock_shared()` and
+    `self.file.unlock()`. A panic inside that bracket, on the
+    `spawn_blocking` path `/frontier.json` runs on, would leave the shared
+    lock on the cached handle, and `append_all`'s blocking exclusive `lock()`
+    in a sweep would wait until the cache let the handle go. That consequence
+    is read from the code. It has not been reproduced.
+
+  D-0693 lists the sites. Converting them is a follow-up.
+- **The race was never reproduced here with a real spawn.** macOS applies
+  `CLOEXEC` inside `posix_spawn` atomically, so no child ever holds a
+  duplicate there. Every regression uses `File::try_clone` as the duplicate.
+  It is the same second reference to the same open file description, made
+  deterministically. The Linux fork-to-exec window that CI hit has not been
+  run on this machine.
+- **A refused unlock is logged, not returned, when it happens in `Drop`.** The
+  lock may then last until its open file description is unlocked again or
+  every descriptor that refers to it has closed. The `store.flock` warning
+  names the file. It reaches a log only in a process
+  that installed a telemetry sink, and the default floor, `Info`, keeps a
+  `Warn`. In a process with no sink the note goes nowhere.
+- **A success-path release that is refused turns the success into a
+  failure.** That is deliberate: the caller hears of it in its own error
+  type. For `store::repair::publish` the revision is already written when the
+  source lock's release is refused, so that error says
+  `publication_may_be_visible: true`. `pull::masters::land_validated` returns
+  `Landed`, which cannot carry an unlock failure after a committed replace,
+  so its lock is released by `Drop` and a refusal is only logged.
+- **Cost.** A release is one `flock(LOCK_UN)` syscall that closing alone did
+  not make. The duplicate-descriptor idiom adds one `dup` at open for the
+  recovery journal, the result-set receipts, the results ledger, the
+  expression evidence writer and the Boolean observation owner. An owned
+  guard holds one `PathBuf` for the path its refusal would name. A borrowed
+  guard allocates nothing. None of this is on a per-bar or per-candidate path,
+  and none of it is measured.
+- **Only the test locks that a test's success depends on were converted.**
+  Probes that expect `WouldBlock`, and fixtures that unlock by name, still use
+  `File` directly.
+- **Corrected 2026-09-25.** Two statements above were incomplete, and they
+  were completed here then, not edited. On 2026-09-26 the first of them, and
+  its completion below, were narrowed in place: a later release over the same
+  owner frees the lock while the owner is still open (D-0693 item 9).
+  - *A refused unlock in `Drop`.* For a guard over a borrowed file the drop
+    closes nothing, and the owner's descriptor is one of those that must
+    close, so the lock can outlast the guard while the owner keeps the file
+    open, until a later guard over the same owner releases it or the owner
+    closes. `cli`'s observation `ReadLease` holds such a guard.
+  - *A refused success-path release.* Only `store` can make an unlock refuse
+    under test: the refusal is injected through a seam in `store::flock`'s
+    `#[cfg(test)]` test module, and every other crate builds `store` without
+    `cfg(test)`. So the branches that turn a refused `release()` into an
+    error in `pull`'s cash-session cache, in `api` and in `cli` run under no
+    test. In `store`, `repair::tests` drives both of `repair`'s. D-0693.
+
+## Corporate actions are stated, not detected, and one more stored door withholds holed sessions — D-0694, 23 September 2026
+
+- **The statement detects nothing.** Every report that ranks or audits a cash
+  equity now says corporate actions are unchecked. No split, bonus or demerger
+  detector exists, because no threshold for D-0018's refusal is sourced
+  (§41.3). A month holding an unadjusted split still ranks, and its fake
+  overnight crash still fires every bar-shape and gap condition. The sentence
+  tells the reader that. It does not protect them.
+- **Where the sentence is not.** No JSON projection carries it, as none
+  carries D-0681's gross label: `/frontier.json`, `/trades.json` and
+  `/backtest.json` serve a recorded stock run's figures with neither, and the
+  Boolean saved-evidence views carry `"cash": true` for a stock family and a
+  cost-excluded scope sentence, but no corporate-action statement. The web
+  pages that render them were not changed. `cli results` lists recorded runs,
+  a stock's among them, with their worst and best figures and no statement: it
+  is a listing of the ledger rather than a ranking or an audit, and it was
+  left as it was. Expression V1, which evaluates one named expression and
+  ranks nothing, is unchanged, and so are `fold-audit`, `checksum-audit-stored`
+  and `verify`, which check stored bytes rather than rank anything. The
+  browser's command results and `/engine/top.json` carry the report text, so
+  the sentence reaches them through that text.
+- **A stock report can say it up to three times.** A stored stock audit that
+  renders says it in the provenance banner, again at the end of its FINDINGS
+  block, and again at the end of its AUDIT header. A ranked `sweep-stored` over
+  a stock says it in the banner and in FINDINGS. Each copy serves a reader who
+  sees only that part: the banner covers the whole page, extinct or not; the
+  FINDINGS copy is what `range-all` and `range-rung` keep when they lift a
+  ranking out of a report; and the header copy travels with a lifted AUDIT
+  block. That is repetition, not contradiction, and all three are the one
+  constant `runner::audit::CORPORATE_ACTIONS_UNCHECKED`.
+- **The ordinary `sweep-stored` door withholds holed sessions now.** Five doors
+  withhold: `sweep-stored`, `auto-stored`, `audit-range`, `screen` and `pool`.
+  The withholding costs what `crate::minute_gaps` already records: one pass
+  over the execution minutes and one over the signal bars, O(bars) setup work
+  and not one of the five operations `CLAUDE.md` §3 rule 4 bounds. UNVERIFIED
+  as a measured figure. No bench times it.
+- **The execution minutes stay whole, as on the other four doors.** Only the
+  signal bars lose a holed day. That is enough because every trade closes by
+  15:10 IST on its own session (`runner::outcome::FORCED_EXIT_MINUTE`), so no
+  outcome reaches into the next day, and with no signal bar on a withheld day
+  none of that day's minutes is looked up. Read from the source, not
+  measured.
+- **Doors that still keep holed sessions.** `audit-stored`,
+  `sweep-audited-stored`, `sweep-all`, the expression search and expression,
+  and the Boolean research loaders never call `crate::minute_gaps`. On `1min`
+  they still compare the bars on either side of an intraday hole as
+  neighbours. On a coarse rung the exact-minute overlay refuses instead. The
+  operator's answer named one door. Each of these would need its own answer,
+  because each one's identity would move.
+- **Every ordinary `sweep-stored` identity moved, gap-free months included.**
+  The door folds `minute_gaps::MINUTE_GAP_POLICY` into its params, so a
+  rerun of a month recorded before D-0694 records a new row under a new
+  identity rather than matching the old one. The old rows stay valid under the
+  identities they were recorded with, and nothing re-keys them. No field of a
+  recorded row says which rule computed it. Only the identity differs, and a
+  hash cannot be read back for the term. The other four doors bind no such
+  version: their identity moves only through the data digest over the bars
+  they kept, so a gap-free month keys the same under their rule as without it.
+
+- **Corrected 2026-09-24, AF-19.** Four statements above were wrong or have
+  changed, and they are corrected here rather than edited:
+  - *Where the sentence is not.* `cli results` ranks: it names a BEST COMPLETE
+    RUN on the worst-case total. It now states the note before its table
+    whenever a run it prints a figure for is a stock. `/backtest.json`,
+    `/frontier.json`, `/trades.json`, `/sweep-evidence.json` and the AND-mask
+    `/candidate-trades.json` give a stock's run an `equity_note`, and an index
+    run's payload gains no key. All but the first name no instrument, so the
+    run's ledger row does. The Boolean research payloads carry
+    `cli::research_equity_note` when a family they serve is cash, and a
+    payload of index families gains no key. Still without it are
+    `/sweep-evidence.json` and the AND-mask `/candidate-trades.json` for an
+    attempt no ledger row names (running, refused or killed before its
+    commit, or an operation that records no row), `/live.json` (its file
+    records no instrument), `/expression-search.json` and the expression
+    model of `/candidate-trades.json` (keyed by the search's identity and by
+    `candidate_identity`, and no ledger row carries either), and
+    `/boolean-qualified-campaign.json` and the qualified-search overview
+    (states, links and counts, and no family's figure). That list comes from
+    reading the route table, and nothing checks it against every payload. No
+    page under `web/` renders `equity_note`.
+  - *The FINDINGS copy.* `pool` pass 1 lifts no section. It keeps only each
+    rung's outcome, and its opening carries the sentence. `range-all` and
+    `range-rung` are what print a lifted FINDINGS block.
+  - *The execution minutes.* On a coarse rung they stay whole. On `1min` the
+    signal bars ARE the execution bars, so a withheld day leaves both, as on
+    `screen`, and `GapExclusion::one_series` counts them.
+  - *The withheld line* prints only when a signal bar was withheld, as on
+    `screen`, and not whenever a holed minute day was measured.
+- **`/sweep-evidence.json` reads the ledger now**, and so does the AND-mask
+  `/candidate-trades.json`. Each looks up the identity's ledger row on every
+  saved page, through a cached, byte-bounded ledger handle: O(history) cold,
+  O(new rows) warm. A damaged or over-limit ledger refuses the page, where
+  before the ledger was not read at all. An absent or zero-byte `runs.bin` is
+  answered as no row from the path's metadata, one call, before any open, so
+  either serves the page served before. That includes a ledger truncated to
+  zero bytes after this process read it: it is answered as no row, not
+  refused as a shrink, as a deleted ledger already was. No bench times this.
+  AF-19.
+- **`/backtest.json` repeats the note on every stock run object.** The member
+  is 729 bytes, measured on the repaired tree, and the route has no response
+  byte ceiling. Computed from that, not measured: a page of `DEFAULT_LIMIT`
+  (500) stock runs grows by about 365 KB, and one of `MAX_RUNS` (20,000) by
+  about 14.6 MB. Serving the note once at the top level would bound it; that
+  is a change to the payload's shape and is not made here. AF-19.
+- **A recorded row's note is decided when it is rendered.** `top`,
+  `/engine/top.json`, `cli results`, `/backtest.json`, `/frontier.json`,
+  `/trades.json`, `/sweep-evidence.json` and the AND-mask
+  `/candidate-trades.json` resolve a row's underlying against the compiled F&O
+  list. A ledger record carries no instrument kind, so a share later removed
+  from that list would lose the statement on its old rows. Recording the kind
+  is a new ledger version, and it is not done. The Boolean payloads do not
+  depend on the list at render time: a family records its kind, and a cash
+  family no longer in the membership snapshot is refused when decoded.
+- **Corrected 2026-09-25.** *Doors that still keep holed sessions* missed
+  one, and it is added here rather than edited in: the strict audited range
+  (`audit-audited-range`, `audited_range_command::run`) keeps holed sessions
+  too: it never calls `crate::minute_gaps`. It builds its column from the
+  span `audited_range::RangeInputs::load` returns, with no session withheld.
+  Its identity would move with an answer, as each of the others' would.
+  D-0694.
+
+## Every equity ranking is labelled gross, and a stored instrument is read only at its own path — D-0696, 23 September 2026
+
+- **The label reaches more surfaces than D-0681's header did, and not every
+  one.** The FINDINGS block of every ranked equity page carries it, `cli top`
+  and `api`'s `/engine/top.json` read a share's `mean` per ONE share, and every
+  `pool` page names the charges. That extends D-0681's "only the audit header
+  was corrected". The front end under `web/` was not examined for its own
+  copies of these texts, and no test there binds them.
+- **The three `cli` copies are bound to the header by a test, not built from
+  it.** `EQUITY_RANKING_GROSS`, `SHARE_MEAN_LEGEND` and
+  `pool::EQUITY_TOTALS_GROSS` are literals. One test reads the charge list and
+  the cost-excluded sentence out of `runner::audit::render` and fails when a
+  copy lacks either or quotes a rate. Each copy's other words differ from the
+  header's. Since the third correction the same test pins them per copy, so a
+  change to them fails until the test is edited with it.
+- **One exit is reached only through a test seam.** A completed audit whose
+  ranker kept rows of which none is closed prints the label and then the AUDIT
+  refusal. No generated store reaches it: a retained non-closed row always has
+  a closed equal-support superset ranked above it, under every lens. That is
+  read from `runner::rank`'s orderings, not measured over every store and lens.
+  `NoneClosedFault` drives the real branch, and `CostScopeFault` does the same
+  for a contract reaching the four scope decisions. Both are `#[cfg(test)]`
+  and compiled out of every other build.
+- **A directory spelt otherwise than the writer spells it is named and not
+  read, even where the filesystem would open it.** `pool` and `sweep-all`
+  compare the exchange, segment and symbol directories byte for byte with the
+  resolved key's path. On a case-insensitive filesystem, a load of
+  `NSE-RELIANCE` would open `NSE/CASH/reliance`. It is still not read, so that
+  one store gives one surface wherever it is mounted. The writer never
+  produces such a directory. One made by hand holds months no sweep reads
+  until it is renamed. On a case-insensitive filesystem the writer's own
+  months can land in one too: if `NSE/CASH/reliance` already exists, a write
+  to `NSE/CASH/RELIANCE` is filed under the existing spelling. That case is
+  read from the code and was not reproduced.
+- **`sweep-all`'s row label still omits the exchange.** A misfiled month is
+  refused under the same label as the canonical month it resolves to. Only its
+  sentence, which names its own directory, tells the two rows apart.
+- **The NOT ON THE SURFACE block is listed whole.** It holds one line per
+  distinct held directory that names a swept instrument at a path its load
+  does not read, with no cap. A store holding BSE months of many F&O names
+  prints one line for each such directory on every `pool` page.
+- **Cost, unmeasured.** `stored::misfiled` is three string comparisons per
+  holding the catalog lists, paid once per `pool` or `sweep-all` run and never
+  per bar or per candidate. A holding it names as misfiled also has each of
+  its three names clipped to at most 64 characters and escaped, through
+  `stored::clipped`, which `stored::swept_index`'s, `stored::rung`'s and
+  `parse_vendor`'s refusals quote through as well. `sweep-all` also escapes
+  each held month's symbol directory once for its row label. No bench times
+  any of it.
+- **Not every refusal quotes through `stored::clipped` (corrected 25 September
+  2026).** `parse_vendor` does, since D-0696's fifth correction, because not
+  every word it refuses is typed. Two of its callers hand it a feed word
+  decoded from stored bytes: the feed of a saved single-stop search
+  declaration (`index_stop_search_reader.rs`) and the feed of a saved
+  original source snapshot (`index_stop_source_context_codec.rs`). Read from
+  the source, the first decoder is reached only through the `api` route
+  `/index-stop-ranking.json` and the second only through
+  `/index-stop-candles.json`. Either refusal refuses that whole response:
+  status `refused`, no rows, and the sentence inside a JSON string. No `cli`
+  command reaches either decoder. A test hands each decoder the feed
+  `X\nrefused: forged` and finds it quoted escaped, on one line. Quoted
+  through `clipped`, the word is also cut to 64 characters, so the refusal no
+  longer grows with it. `swept_rung` and `pool_arm`'s rung refusal still
+  quote the word they are handed raw. Before this correction, a feed word
+  carrying a newline, typed to `pool` or to `sweep-all`, was refused as the
+  whole command, and the refusal was printed across two lines; so was such a
+  rung word typed to `pool` (each measured by a review). The feed word is now
+  quoted on one line, and the rung word typed to `pool` still is not; both
+  were measured on `pool` only, with a stamped build of D-0696's fifth
+  correction. Each such refusal is the command's own and forges no completed
+  run. `pool_arm`'s one caller is `dispatch`'s `pool` arm, a typed argument.
+  `cli::swept_rung` has eleven call sites (this said eight until D-0696's
+  sixth correction). One is in `pool.rs`, in `pool::run`. The `pool` verb
+  reaches it only through `pool_arm`, which hands `pool::pool` a rung only
+  after finding it among `EVERY_RUNG`'s entries, and `swept_rung` accepts
+  every one of those, so the verb never reaches that refusal. The other ten
+  are `sweep_audited_stored`, `sweep_stored_inner`, `auto_stored_inner`,
+  `audit_stored_inner`, `audit_range_inner` and `screen_range_inner` in
+  `lib.rs`, and one each in `audited_stored.rs`, `audited_range.rs`,
+  `expression.rs` and `expression_search.rs`. Each of those takes the rung it
+  checks as a parameter or a field of one, except `sweep_audited_stored`,
+  which takes it from the `sweep-audited-stored` command's own argument
+  list; the chains above them were not all followed to their end. `batch.rs`
+  has a `swept_rung` of its own that quotes raw too, but only a word
+  `stored::rung` has already accepted as a stored rung reaches that quote.
+
+- **Four copies are bound, and one of them is `runner`'s (correction,
+  24 September 2026).** The second bullet above named three.
+  `runner::audit::CASH_EQUITY_GROSS` (D-0694), which `CostScope::report_note`
+  prints at the head of every stored share page, of `sweep-all` over a stock
+  and of the Boolean research heading over a cash family, was a fourth that no
+  test bound, and it lacked the header's Selection V6 clause. It now carries
+  the header's sentence, and the same test reads it. A share's page still
+  states the charge fact more than once, in lead-in words that differ: the
+  banner's "EVERY TOTAL BELOW", the FINDINGS label's "EVERY FIGURE IN THIS
+  RANKING", `top`'s "per ONE share", and an audit header's own paragraphs.
+  The charge list and the cost-excluded sentence are held identical to the
+  header's, and each copy states the header's fact in the same words, "none
+  is subtracted". The lead-in words around them are pinned per copy by the
+  same test. That test holds today's words; it does not read what a new
+  clause means.
+- **The `pool` page past its head is driven only in a stamped build
+  (correction, 24 September 2026).** This bullet said no test build passes
+  `pool::run`'s commit-stamp check. That was false: the build script stamps a
+  tree equal to HEAD, and a clean checkout is one. A surface with an
+  instrument on it is screened through `one_rung`, which reads the store root
+  from the environment, so the verb is driven from a child process whose
+  environment names a generated store: `pool` dispatched through
+  `crate::dispatch`, the command table `cli::run_durable` reaches from the
+  binary, once over the generated NIFTY month through both passes, and once
+  over an unreadable share month beside a BSE directory. The lease and audit
+  `run_durable` wraps around that table are not on this path. A build of any
+  other tree -- an uncommitted edit, or a mutation run -- is unstamped and
+  refuses both before a bar is read. There the page past its head is held only
+  by reading the source: `pool_arm`'s arm and `pool::pool` are pinned, `run`
+  returns `run_under`'s page as its tail, and every mention of the page in
+  `run_under` after its head is an append or its return. The two renderers
+  that append to it are driven on one input each. No test pools two
+  instruments, or a cash equity, end to end: the driven pages are one index
+  and one refused share, and `fold` over two instruments is driven only
+  directly.
+
+## Screen-budget refusals and census faults on the api routes — D-0695, 24 September 2026
+
+- **The pages do not show the new census facts yet.** `/gaps.json` lists
+  unreadable peer censuses under `calendar.unreadable`, and
+  `web/src/routes/gaps/+page.svelte` does not read the field: the page names
+  only the peers that voted, or "the typed calendar table". `/ingest` shows
+  "/calendar.json answered 503" and drops the refusal and census note the body
+  carries. The failure is named on the wire and not yet where the operator
+  reads it. D-0695 was backend only. Rendering both is front-end work, and it
+  must rebuild `web/build` in the same change (Gate W1).
+- **Which command words refuse a server budget is a list `api` keeps.**
+  `Command::prices_a_screen` names `audit-range` and `screen`, because those are
+  the words whose `cli` kernels call `recorded_budget_refusal`. The rule for
+  whether a budget is usable is `cli`'s, called. The list of words is not, and
+  cannot be one call, because asking a `cli` entry point from `api` would run
+  it. A kernel that starts or stops refusing a budget must change the list.
+  Tests pin `api`'s side of it at the route, not `cli`'s.
+- **The environment-budget refusal writes no telemetry event.** The
+  unstamped-build refusal beside it on `/backtest/run` writes one. The HTTP
+  request journal records the 503 (D-0568), so the refusal is not lost, but
+  `/logs` does not show it.
+- **One census fault is still served stale.** A permission change on an
+  existing manifest file keeps its modified time, so the cache key does not
+  move and a census cached "held" is served after the file becomes unreadable,
+  until the next write moves the stamp. This is D-0686's same-stamp gap.
+- **`/bars` still steps over an unreadable census of a feed other than the
+  asked one.** When the asked feed's census was read and does not hold the
+  name, and a later feed places it, that feed's identity is used and the
+  unreadable census's note is not shown. This is D-0339's resolution of a
+  hand-typed URL, not a guess at the asked feed's own filing, and it is not
+  changed.
+- **One census fact, two statuses, and a case fold on two routes of five.**
+  `/bars` refuses a name held under two identities with 400, and
+  `/calendar.json` refuses the same fact with 409. `/bars` and `/calendar.json`
+  fold `symbol` to its stored case. `/bars.json`, `/bars/window.json` and
+  `/gaps.json` do not, so `adanient` can be found on one route and not on
+  another. The ambiguity check compares only the halves the census supplies and
+  does not filter by the half the caller gave, so `?exchange=NSE` over a feed
+  holding a name as `BSE/CASH` and `NSE/INDEX` is refused as ambiguous.
+- **Not measured.** No latency was taken for any route. The census key's cost
+  is counted from the code (five `stat` calls, and a sixth when no manifest
+  answered with a time), not timed.
+
+**Corrected 24 September 2026, on a second review (D-0695).** Two bullets
+above, one in this file's D-0686 correction and one in the D-0686 section
+itself are stale or incomplete. The text above is kept as it was written.
+
+* *"One census fault is still served stale."* That bullet named only the
+  harmless direction. The other one was a defect. A manifest file this process
+  could not read when the cache was cold stayed "unreadable" after its
+  permission was repaired. So `/calendar.json` answered 503 and `/bars`
+  refused, over a store that could be read, until the next pull or a restart.
+  Both directions are now closed. Each existing manifest is also keyed on its
+  status-change time, which `chmod` and `chown` move. That time comes from the
+  same `stat`, so a request against an unchanged store still costs five `stat`
+  calls, or six when no manifest answered with a time.
+* The D-0686 correction's *"One same-stamp case remains: a permission change
+  on an existing manifest FILE …"* is closed the same way.
+* D-0686's *"The key is the modified time and nothing else."* The key is now
+  the modified time and the status-change time. Every write moves the
+  status-change time, so a rewrite that keeps the modified time is seen on the
+  next request. The only case still missed is two changes inside one tick of
+  the filesystem's clock, until a later change moves either time. That tick is
+  **UNMEASURED** on the operator's volume and on CI's. `calendar_of::cached`
+  is still keyed on the modified time alone, as that section says. Outside
+  Unix, `std` exposes no status-change time, and the key is the modified time
+  alone, as it was.
+* *"`/bars` still steps over an unreadable census of a feed other than the
+  asked one."* Still true, and still not changed. It is now pinned by
+  `bars_steps_over_another_feeds_unreadable_census_to_a_third_feeds_identity`.
+  Before that test, a `/bars` that refused on every unreadable census it walked
+  passed every test.
+
+**Corrected 24 September 2026, on a third review (D-0695).** The correction
+above says "*Both directions are now closed*" and "*The only case still missed
+is two changes inside one tick of the filesystem's clock*". Neither was true of
+one case. One bullet of the section itself is also wrong, about `/logs`, and
+one limit the second correction left out is added, about `calendar_of::cached`.
+The text above is kept as it was written.
+
+* *A census that contradicts its own key was cached, and served until a
+  manifest was next written.* The stamps are taken before the read. A store
+  root that was gone for one read, a manifest stamped present that reads
+  `NotFound`, or a manifest read that fails with an error moving neither time
+  (`EIO`, `EMFILE`) leaves every stamp where it was. Its census was cached
+  anyway. All five feeds could be "unreadable", so `/calendar.json` answered
+  503 and `/bars` refused over a store that reads. Or all five could be
+  "absent", so `/calendar.json` answered 200 with no sessions and `/bars` said
+  no feed holds the name. Since D-0695's third repair, a read is cached only
+  when every row is what its own stamp says the disk would give. Anything else
+  is served to the request that read it and not kept. D-0695 lists the rule
+  line by line.
+* **What is still true.** The request that meets such a fault answers what it
+  read. That includes the race inside `census::read_all` between its root
+  check and its manifest reads, which predates every cache. The next request
+  reads again.
+* **A new cost, while a fault persists.** An I/O error its manifest's stamp
+  cannot see is read again on every `census_now` request until it ends. That is
+  any kind other than `PermissionDenied` or `IsADirectory`, from a manifest
+  whose `stat` succeeds. Each such request reads every vendor's manifest, as
+  every request did before D-0686, and `read_vendor` warns once per request.
+  Unchanged stores, and faults the stamp records, still cost five `stat`
+  calls, or six when no manifest answered with a time. The rule adds no
+  syscall. No such fault was produced on a real disk. The tests give the read
+  the census the error maps to. **UNMEASURED**: how often, if ever, the
+  operator's volume returns one.
+* **A `PermissionDenied` read is kept on the word of the file's own status.**
+  A `chmod` or `chown` of the manifest moves its status-change time, so that
+  fault's end is seen. The same error can come from elsewhere: a directory on
+  the way made unsearchable after the stamp and searchable again before the
+  next request, or a control that is not recorded on the file. Either leaves
+  the stamp where it was, and the refusal is served until the manifest next
+  changes. Read from the code, not produced. Whether the operator's system has
+  such a control was not checked.
+* Of the ways a manifest can change and keep its stamp, the key still misses
+  only two changes inside one tick. That is now pinned by a check that no term
+  of the key other than the status-change time moves on a rewrite at the same
+  modified time. A wider key fails
+  `a_rewrite_that_keeps_the_stamp_is_served_stale_until_the_stamp_moves` and
+  must update this section.
+* *"The environment-budget refusal writes no telemetry event … `/logs` does
+  not show it."* The first half is still true. The second is not. On the
+  production router, `logs::note_request` records every 5xx as an
+  `api.request` `served` event at Error level, with its method, path and
+  status. So `/logs` shows the 503, and not why. D-0695 corrects the reason it
+  gave for leaving the event out.
+* `calendar_of::cached` is keyed on the manifest's modified time and the
+  series, and not on the months the census hands it. Since the second
+  correction the census is read again after a rewrite that keeps the modified
+  time, and that cache is not. So `/calendar.json` can pair a fresher census
+  with a calendar derived from the months held before, until the modified time
+  moves. This is the same-modified-time gap D-0686 recorded for that cache, now
+  beside a census that no longer shares it. Not changed, and no test drives it.
+
+**Corrected 24 September 2026, on a fourth review (D-0695).** One limit the
+third correction left out is added, about the calendar cache, and one of its
+bullets is wrong. The text above is kept as it was written.
+
+* *A calendar derived without a bar file its census holds was served as the
+  store's, and kept.* `calendar_of::cached` threw away `derive`'s report and
+  cached its calendar under the manifest's modified time, whatever the report
+  said. A bar directory moved aside for one request, a store root gone after
+  the census was read, or an I/O error opening a held file moves no manifest.
+  So `/calendar.json` answered `200 {"sessions":0}` for that request, and went
+  on answering it after the fault ended, until the next pull wrote the
+  manifest. The review measured both halves with `bars/dhan` moved aside for
+  one request. `/gaps.json`'s peer vote and the ingest path's calendar
+  observation read through the same cache. Since D-0695's fourth repair,
+  `derive` records every daily or minute file it could not open, and a
+  derivation is kept only when the caller's census holds none of them. One
+  that is not kept answers its own request: `/calendar.json` refuses it with
+  503 and names the first file and the count, `/gaps.json` names the peer as
+  `feed:symbol` under `calendar.unreadable` and counts no vote from it, and the
+  ingest path takes no observation for that call. The next request derives
+  again.
+* **What is still kept.** A held file that opened and whose records fail their
+  checks is kept, as a manifest whose bytes do not decode is kept by the
+  census cache. That includes a record read that fails for a reason that does
+  not persist, such as an I/O error inside a file that opened. Read from the
+  code, not produced. A file the census does not hold is not a fault, so a
+  month held at one rung and not the other is still kept.
+* **A new cost and a new refusal, while a held file will not open.** Until it
+  opens, that series is derived again on every request that reaches it, and
+  `/calendar.json` answers 503 on every request. On the exchange branch, one
+  such series refuses the feed's whole exchange calendar. `derive` is
+  documented at 0.28 s for one instrument across 81 months; what a derivation
+  that fails to open files costs is **UNMEASURED**. A store whose census holds
+  bar files that are not on disk, such as a partial copy, answered a calendar
+  without those months and now answers 503. `/ingest` shows "/calendar.json
+  answered 503" and not the refusal, as for an unreadable census: it reads no
+  body from a status that is not a success (read from
+  `web/src/routes/ingest/+page.svelte`). The browser follow-up above is where
+  either would be rendered.
+* *"No such fault was produced on a real disk"*, in the third correction's
+  bullet on a new cost, is wrong. A Unix socket at a manifest path answers
+  `stat` and fails every open. On the macOS laptop this repair ran on, the
+  refusal read "Operation not supported on socket (os error 102)".
+  `a_manifest_that_stats_but_will_not_open_is_not_cached` reads it through
+  `read_vendor` on every request while it stays, and keeps the read once it is
+  gone. `EIO` and `EMFILE` were still not produced; for those the tests give
+  the read what `Census::of_io_error` makes of each.
+
+**Corrected 24 September 2026, on a fifth review (D-0695).** One bullet of the
+third correction is incomplete, and one sentence of the fourth was pinned for
+less than it says. The text above is kept as it was written.
+
+* The third correction's last bullet says `calendar_of::cached` can pair a
+  fresher census with a calendar derived from the months held before, "until
+  the modified time moves", and names only a rewrite that keeps the modified
+  time. There was a second way, and it needed no such rewrite. `cached` took
+  its key with its own `stat` of the manifest, after its caller's census had
+  been read. A pull that installed a manifest between the two had the calendar
+  of the older census's months kept under the NEWER modified time. Every later
+  request read the newer census and was served that calendar until the
+  manifest was written again, which can be the next day's pull. The exchange
+  branch of `/calendar.json` took that `stat` once per series, and `/ingest`
+  polls the route while a pull runs, so the window was an ordinary one. Since
+  D-0695's fifth repair, every caller hands `cached` the modified time from the
+  stamps its census was read under, which are taken before the read. A
+  calendar is never kept under a time newer than its months, and an install
+  moves the next request's key, which misses and derives again. The request
+  that met the install answers what its own census held.
+* **What is still true.** The same-modified-time lag the third correction
+  names stands: this cache is keyed on the modified time alone, not also on the
+  status-change time the census cache carries. And a request holding an older
+  census can replace a calendar a newer request kept, under its own older key;
+  the next request misses and derives again. That costs a derivation and
+  serves nothing stale. Read from the code, not produced.
+* The fourth correction says `/gaps.json` "counts no vote from" a peer named
+  under `calendar.unreadable`. That is what the code does. But the only test of
+  it moved every bar file of the peer aside, so the peer had no session to vote
+  and was dropped by another check, and a review removed the skip with every
+  test still passing. A test now moves one held month of two aside, so the
+  peer still has a session, and requires that it is named and does not vote.
+* **No syscall is added.** The key comes from the `stat` calls the census
+  already takes, and the `stat` `cached` took per series is gone. A census
+  that is kept now copies its five stamps once, because the request that read
+  it keeps them too. Not timed.
+
+**Corrected 25 September 2026, on a sixth review (D-0695).** The fifth
+correction's first bullet is incomplete, its "Not timed" cost rested on a key
+no test checked, and two behaviours raised earlier were stated nowhere. The
+text above is kept as it was written.
+
+* The first bullet says a calendar is never kept under a time newer than its
+  months, and that an install moves the next request's key, which then
+  misses. Both are true, and they do not make every kept calendar current.
+  `census_now_stamped` hands its stamps to every request, including one whose
+  census `read_as_stamped` refused to keep because the read contradicts them.
+  The case a review produced is a store root gone after `read_all`'s own
+  check. Every feed then reads "absent", while Dhan's stamp still names its
+  manifest. The symbol branch of `/calendar.json` derived NIFTY over no
+  months, and that empty calendar was kept under Dhan's unmoved modified time.
+  After the root came back, both branches answered no session, the peer vote
+  dropped Dhan without naming it, and the ingest path observed nothing, until
+  Dhan's manifest was next written. That held whether the root came back
+  before the route derived or after it answered. The second case was new with
+  the fifth repair: before it, `cached`'s own `stat` under a missing root found
+  no time. Since this correction, `CensusStamps::modified` takes the row and
+  hands a time only where `stamp_could_read` says the stamp could have read it.
+  So such a calendar is answered to its request and not kept. This is asked
+  per feed, so a fault on another feed's manifest does not turn this feed's
+  calendar cache off.
+* **What the request that met the fault answers is unchanged.** It answers
+  what its census read. For the symbol branch that is `200` with no session,
+  over a store that holds NIFTY, for that one request. The census cache makes
+  the same trade for its own racing read.
+* **The cache's key and its hit are now tested; the hit's cost is still not
+  timed.** The fifth correction says "no syscall is added" and states a hit's
+  cost as one map probe. No test showed that any caller kept a calendar at
+  all: `CensusStamps::modified` answering `None` turned the cache off, the
+  cost went back to a derivation per request (0.28 s per instrument over 81
+  months, as `calendar_of::cached` records), and every test still passed. A
+  test now requires each of the four callers to keep NIFTY's calendar under
+  Dhan's own modified time, and its second call to meet the same calendar.
+  `modified` now asks `stamp_could_read` once per call, one `match` over the
+  row's state and its one stamp: no syscall, no walk, and not timed.
+* **What `cached` asks the census, counted; what each question costs, read.**
+  AF-28e said `cached` asks the caller's census "one hash probe per such file".
+  A test now counts the questions: once per file the derivation could not
+  open, none for a file that opened, none on a hit. What one question costs in
+  production is read from the source: `census_holds` calls
+  `VendorCensus::rows_for` once, which is one `Manifest::entry`, one
+  `HashMap::get` on the manifest's index. That is expected O(1) per question, as
+  any hash probe is, and O(files that did not open) per derivation. Not timed.
+* **A month a writer holds answers 503 on `/calendar.json`.** A derivation
+  opens each held month through `BarFile::open_existing`, whose shared lock a
+  writer's exclusive lock refuses with `StoreError::Locked`, and a pull's
+  ingest appends through `BarFile::open_or_create`, which holds that exclusive
+  lock. The refused month is a held file that did not open, so both branches
+  answer 503 `"bars":"unopened"` while the writer holds it, and keep nothing.
+  A throwaway probe held a writer on Dhan's NIFTY 2025-05 daily file: both
+  branches answered 503, quoting "another writer holds ...2025-05.lock", and
+  200 with the one session once the writer was dropped. The `/ingest` page
+  reads `/calendar.json?feed=…` and shows "/calendar.json answered 503" and no
+  calendar on a status that is not a success. So a pull writing a month the
+  census already holds can leave that page without its calendar until it next
+  loads one. Not changed; D-0695 records it under "Still not done".
+* **`/gaps.json` answers a partial agreement that `/calendar.json` refuses.** A
+  peer with a held file that did not open is named under
+  `calendar.unreadable` and does not vote, and the remaining peers' agreement
+  is answered `200`. `/calendar.json`'s exchange branch answers 503 for the
+  same state, because a union cannot tell a missing witness from a closed day.
+  The `/gaps.json` answer is named, not silent, but a day only the unopened
+  peer proved reads there as no session. A throwaway probe, with Dhan holding
+  NIFTY for May and June, Groww holding it for May, and Dhan's June daily file
+  moved aside, had `/gaps.json` answer 200 with a one-session calendar voted by
+  `groww:NIFTY` and `dhan:NIFTY` unreadable, while `/calendar.json?feed=dhan`
+  answered 503. Not changed; D-0695 records it under "Still not done".
+
+**Corrected 25 September 2026, on a seventh review (D-0695).** The sixth
+correction's per-feed sentence was pinned by no test, one cost of the
+calendar cache was unbounded and stated nowhere, and one answer of the
+exchange branch was stated nowhere. The text above is kept as it was written.
+
+* The sixth correction's first bullet ends "This is asked per feed, so a
+  fault on another feed's manifest does not turn this feed's calendar cache
+  off." That is what the code does, and no test showed it: a review switched
+  in a rule on the whole read, no time for any row while the census cache
+  declines the read, and the whole `api` lib passed. Under that rule a fault
+  on one feed's manifest that the census cache does not keep (a socket at the
+  path, `EIO`, `EMFILE`) would have every request derive every other feed's
+  calendars again, 0.28 s per instrument, for as long as the fault lasts. A
+  test now binds a socket at Groww's manifest path and requires each of the
+  four callers to keep Dhan's calendar under Dhan's own modified time and meet
+  it on its next call.
+* **The calendar cache grew by one entry per distinct name no census holds.**
+  The symbol branch of `/calendar.json` kept the empty calendar it derives for
+  such a name, under a key built from the request's own text, and nothing
+  evicts from that map. A review sent 2,000 such names and the map went from 9
+  entries to 2,009, for the life of the process. Since this correction an
+  unheld name is derived for its own request and not kept. The map then holds
+  at most one entry per identity (feed, exchange, segment, symbol) that a
+  census has held since the process started; an identity no census holds any
+  longer stays until a restart, because nothing evicts. What an unheld name
+  costs per request is one derivation over no months, which opens no file.
+  Read from the code, not timed.
+* **A name no census holds is still answered 200 with no session.** That
+  includes a held name spelled with a leading or trailing space, a NUL, a
+  zero-width space or full-width letters, which `Symbol::new` refuses and so
+  does not fold to the stored case; lower and mixed case fold and answer the
+  held name's sessions. Not changed; D-0695 records it under "Still not done".
+* **The exchange branch of `/calendar.json` agrees BSE series into the feed's
+  calendar.** It derives every spot identity the feed's census holds, BSE
+  among them, and agrees them into one calendar. D-0660's venue filter
+  reached only `/gaps.json`'s peer vote. A review's throwaway probe had Dhan
+  hold NIFTY as NSE INDEX, its bar on 2025-05-02, and SENSEX as BSE INDEX, its
+  bar on Saturday 2025-05-03: `/calendar.json?feed=dhan` answered two
+  sessions, derived from NIFTY and SENSEX, and `symbol=NIFTY` one. So a day
+  only stored BSE data traded, which `CLAUDE.md` §1 keeps on disk, is answered
+  to `/ingest` as a session. A held BSE file that does not open also refuses
+  the whole answer with 503; read from the code, not produced. Not changed;
+  D-0695 records it under "Still not done".
+* **The sixth correction's per-row refusal now decides no kept calendar.**
+  The only derivation it could refuse was the symbol branch's over a census
+  row read absent under a stamp that found its manifest, where every name is
+  unheld, and the unheld-name skip declines that first. It is kept for a
+  caller added later, and a unit test pins it alone.
+
+**Corrected 25 September 2026, on an eighth review (D-0695).** Two bullets
+above say the request that meets a read its stamps contradict answers what it
+read, and the seventh correction's last bullet says what declines the one
+derivation the sixth correction's refusal could refuse. None of the three
+holds for a row read absent that its stamp could not have read. The third
+correction's cost bullet also leaves out two costs and compares them with the
+wrong baseline, and D-0686's correction in §40.5 is not true while that cost
+is paid. The text above is kept as it was written.
+
+* The third correction's "*What is still true.* The request that meets such a
+  fault answers what it read" and the sixth correction's "*What the request
+  that met the fault answers is unchanged.*" held for every row. A row read
+  absent then said its feed holds nothing where the stamp taken just before
+  the read had found the manifest, and the third correction had called that
+  answer, cached, the fallback `CLAUDE.md` §4 bans. A review moved the store
+  root aside just after `read_all`'s own check, over a store holding NIFTY on
+  Dhan: the racing request's `/calendar.json` answered 200 with no session on
+  both branches and its peer vote named no feed unreadable, while the next
+  request answered 503. Since this correction such a row is served
+  unreadable, naming the contradiction, to the request that read it: both
+  branches of `/calendar.json` answer 503 and the peer vote names `dhan`
+  unreadable. The read is not kept, so the next request reads again. The cost
+  is one index and one `stamp_could_read` per row, and no syscall. Not timed.
+* **What the request still answers as read.** A row read held keeps its bytes
+  even under a stamp that found no manifest, as a first manifest installed
+  inside the read is. A row read unreadable keeps its own words. A row read
+  absent under a stamp that found no manifest, below a root the stamps saw as
+  a directory, is served absent. None of these is changed.
+* **An absence that is real and newer than its stamp is refused too, for one
+  request.** The rule cannot tell why the disk answered differently from the
+  stamps: a root gone after its check, a manifest removed, a stamp's fault
+  that ended with no manifest behind it, or a root that was not a directory
+  when stamped and is one, without a manifest, when read. Each of those rows
+  reads absent under a stamp that could not have read that, and is served
+  unreadable to that request and not kept, so the next request reads again.
+* The seventh correction's last bullet ends "the unheld-name skip declines
+  that first". The row it names is now served unreadable, and
+  `/calendar.json` refuses it before either branch derives. The two root-race
+  tests now pass with both the sixth correction's refusal and the unheld-name
+  skip removed; each of those is pinned alone by a test of its own.
+* **What a fault the census cache declines costs per request, completed.**
+  The third correction's "*A new cost, while a fault persists*" names a read
+  of every vendor's manifest and one `read_vendor` warning per request. Two
+  more costs are paid on each such request. Every `census_now` caller is
+  handed a census `census::held_entries` built from that read, which collects
+  every held entry of every feed and sorts them
+  (`out.sort_unstable_by(...)`). And `/store.json` encodes its body again and
+  hashes it for its ETag (`census_etag`, a blake3 of the body), because
+  `store_wire::Cache` reuses a body only for the census `Arc` it was built
+  from (`current.source.ptr_eq(&Arc::downgrade(source))`), and a read the
+  cache declines is a new `Arc` on every request. With a Unix socket at
+  Groww's manifest path, each of three `/store.json?feed=dhan` requests
+  reads Dhan's manifest again and answers equal bytes from a new allocation;
+  once the socket is gone, one request reads, and the next reads nothing and
+  answers the same allocation. `a_fault_the_census_cache_declines_rebuilds_the_store_body_on_every_request`
+  pins both halves. Counted by that test, not timed.
+* **"As every request did before D-0686" is true of three routes, not of
+  every caller.** It holds for the routes D-0686 moved onto the census cache,
+  which `census_now_reading`'s own comment names: both branches of
+  `/calendar.json`, `/gaps.json` through `peer_calendar`, and `/bars` through
+  `locate_series` whenever `?exchange=` or `?segment=` is omitted. Each called
+  `read_all` directly before D-0686. Every other `census_now` caller,
+  `/store.json` among them, was served from the census cache before D-0695's
+  third repair whatever its read had met, because that cache kept every read:
+  so none of them paid this per request before it.
+* **D-0686's correction in §40.5 is not true while such a fault lasts.** It
+  says "a request against an unchanged store reads no manifest and walks no
+  entry. Both are paid once per manifest change". A fault the census cache
+  declines can leave the stamps unchanged. While each read remains
+  uncacheable, each request attempts every manifest, collects and sorts the
+  readable held keys and, on `/store.json`, encodes and hashes its body.
+  Once the socket fault in the test ends, the next request pays them once
+  and the rest are served from both caches, as that test pins. A stamp
+  failure does not by itself make a census uncacheable: `read_as_stamped`
+  can retain an I/O refusal matching that stamp's error kind. Repeated work
+  here means a read that fails cache admission, not every unreadable census.
+* **Why this is not made constant per request.** A read the stamps cannot
+  vouch for is read again because no key records when its fault ends. Keeping
+  the body across such reads would still leave manifest read/decode, index
+  reconstruction and held-key collection, then the sort, on every declined
+  read; skipping those as well means serving a census the key cannot vouch
+  for, which is what the third correction removed. Separate the costs:
+  read/decode and collection grow with the bytes, records and index storage
+  examined, with hash-index operations qualified as expected/amortised;
+  `held_entries` comparison-sorts H held keys across feeds before
+  deduplication in `O(H log H)`, then deduplicates in `O(H)`; `/store.json`
+  encodes the rows it traverses into B response bytes and hashes those bytes
+  for its ETag in `O(B)`. This gives no general linear or constant-time
+  bound for the complete repeated request. The read/allocation test does not count
+  sort comparisons or measure this complexity. **UNMEASURED**: latency,
+  sort scaling and how often, if ever, the operator's volume returns such
+  an uncacheable fault.
+
+**Corrected 26 September 2026, on a ninth review (D-0695).** The eighth
+correction's second bullet says a row read absent under a stamp that found no
+manifest, below a root the stamps saw as a directory, is served absent. That
+holds only while the stamps are taken of one state of the store. Its first
+bullet's cost, "one index and one `stamp_could_read` per row, and no
+syscall", holds only for a row left unchanged: see the last bullet below.
+The text above is kept as it was written.
+
+* **Stamps a changing root tore vouched for an empty store.**
+  `manifest_stamps` stats the five manifests and asks the root only when none
+  of them answered with a time (`std::fs::metadata(store_root).is_ok_and(|meta|
+  meta.is_dir())`). A root away for those five `stat` calls and back for its
+  own check stamps five missing manifests under a root that is a directory:
+  the key of an empty store, over a store that holds Dhan's manifest. Away
+  again once `read_all`'s own check has passed, every row reads absent, those
+  stamps could have read each one, and the request was answered an empty
+  store: a review renamed a store root aside and back in a tight loop and saw
+  `/calendar.json?feed=dhan&symbol=NIFTY` answer `200` with no session, and a
+  peer vote with no calendar, no voter and no feed named unreadable. The read
+  was also kept under the torn key.
+* **Since this correction such an absence is stamped again after the read.**
+  A miss whose read still has a row absent takes `manifest_stamps` again, and
+  an absence is served only where both stampings found no manifest, below a
+  root both saw as a directory. With the root back by then, the manifest the
+  read missed is found; with it away, no directory is seen. Either way the row
+  is served unreadable, as `CONTRADICTED_ABSENCE` says, and nothing is kept.
+  `an_absence_under_stamps_a_changing_root_tore_is_stamped_again_after_the_read`
+  drives both through torn stamps handed to `census_now_stamping`.
+* **Its cost.** One more `manifest_stamps`: five `stat` calls, and a sixth
+  when none of them found a manifest with a time. It is paid only on a miss
+  whose read still has a row absent after the stamps taken before it; a read
+  with none, a read whose every absence those stamps already contradict, and
+  every hit, pay nothing more. `a_miss_is_stamped_again_only_when_a_row_reads_absent`
+  counts the stampings: one on a miss over a store with every feed's
+  manifest, two on a miss over a store with four feeds absent, one on a miss
+  over that store stamped with its root moved aside and read with it back,
+  and one on each hit. Counted, not timed.
+* **What is still answered an empty store.** Stamps taken again that tear the
+  same way vouch for the absence too. A root that is away for both stampings'
+  manifest `stat` calls and for the manifest reads, and back for both root
+  checks and for `read_all`'s own, is still answered an empty store, and that
+  read is kept under the torn key: a later request whose stamps tear the same
+  way is served it without reading, until a request whose stamps do not tear,
+  which reads again. Every check here is a `stat` by path, each seeing the root
+  as it is at that instant, so the race is narrowed, not closed. The same test
+  pins this residual as it stands. **UNMEASURED**: how often, if ever, a real
+  volume changes that way; the review's loop renamed the root as fast as it
+  could.
+* **A newer manifest is refused for one request, as a newer absence is.** The
+  eighth correction's "An absence that is real and newer than its stamp is
+  refused too, for one request" gains a case: a feed's first manifest
+  installed after the read and before the stamps taken again. That row read
+  absent, and those stamps found its manifest, so it is served unreadable to
+  that request and read on the next. Each row is asked its own stamp, so a
+  manifest rewritten for another feed in that window changes no absence, and
+  the read is kept under the stamps taken before it, which the next request's
+  no longer match.
+  `what_changes_between_the_read_and_its_second_stamping_decides_only_its_own_row`
+  pins both.
+* **Such a row is now logged.** `read_vendor`'s own line for it says "absent",
+  at `Debug`, which the default floor does not write. Each row
+  `refuse_contradicted_absences` changes now writes one `api.census` line at
+  `Warn`, "absence contradicted by its stamp", naming the feed, the manifest's
+  path and `CONTRADICTED_ABSENCE`, one line for each row it changes and none
+  for any other. `an_absence_its_stamps_contradict_is_logged_at_warn` reads
+  them back from the installed sink.
+* **What that line costs.** A row `refuse_contradicted_absences` leaves
+  unchanged costs one index and one `stamp_could_read`, and no syscall. A row
+  it changes also costs its line, through `telemetry::emit_if!`: the level
+  check alone when no sink is installed or the sink's floor for `api.census`
+  is above `Warn`. Otherwise it costs the event the macro builds, whose
+  `path` field formats the manifest's path into a new `String`
+  (`row.path.display().to_string()`), and what `Sink::emit` costs, including
+  the sink's lock (`self.inner.lock()`), a read of the clock inside it
+  (`inner.stamp(now_millis())`), the line formatted into the sink's buffer
+  (`line(&mut inner.buf, inner.seq, at, run, event)`), and a `write_all` of
+  the line to its log file (`inner.target.append(&inner.buf)`, which for the
+  `FileTarget` every installed sink opens is `self.file.write_all(bytes)`),
+  after a rotation when the line would carry the current file past its
+  bound. When that write fails, a second write ends the fragment
+  (`inner.target.append(b"\n")`), and a notice goes to stderr once per sink
+  (`self.report(&why)`). At most one line per feed per call. Not timed.
+  `what_refusing_an_absence_costs_is_what_its_doc_says` holds the function's
+  doc to its body, read off the source, and
+  `what_a_changed_rows_line_costs_is_named_in_part_and_read_off_the_source`
+  finds each part named here and in that doc in the source that pays it.

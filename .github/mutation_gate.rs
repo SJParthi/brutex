@@ -7,8 +7,14 @@ use std::path::Path;
 use std::process::ExitCode;
 
 const JOB_MINUTES: usize = 240;
-const RESERVE_MINUTES: usize = 40;
-const ESTIMATED_CASE_SECONDS: usize = 120;
+// Calibrated from PR #19's run 36318672418 (D-0697). Setup and the required
+// clean baseline took about 80 to 91 minutes of each 240-minute job before a
+// mutant ran, and the shards then spent about 202 to 259 worker-seconds per
+// case. The old 40 minutes and 120 seconds packed 165 cases into each of three
+// jobs, and all three hit the 240-minute limit with 256 of 495 cases untested.
+// These are still estimates: the worst measured case cost plus a margin.
+const RESERVE_MINUTES: usize = 100;
+const ESTIMATED_CASE_SECONDS: usize = 270;
 const WORKERS: usize = 2;
 const MAX_JOBS: usize = 256;
 const CASES_PER_JOB: usize =
@@ -191,13 +197,14 @@ mod tests {
 
     #[test]
     fn capacity_and_empty_matrix_are_explicit() {
-        assert_eq!(CASES_PER_JOB, 200);
+        assert_eq!(CASES_PER_JOB, 62);
         assert_eq!(job_count(0), Ok(1));
-        assert_eq!(job_count(200), Ok(1));
-        assert_eq!(job_count(201), Ok(2));
-        assert_eq!(job_count(49_810), Ok(250));
-        assert_eq!(job_count(51_200), Ok(256));
-        assert!(job_count(51_201).is_err());
+        assert_eq!(job_count(62), Ok(1));
+        assert_eq!(job_count(63), Ok(2));
+        assert_eq!(job_count(495), Ok(8));
+        assert_eq!(job_count(15_810), Ok(255));
+        assert_eq!(job_count(15_872), Ok(256));
+        assert!(job_count(15_873).is_err());
         assert_eq!(
             matrix(0).unwrap(),
             "{\"include\":[{\"index\":0,\"shard\":\"0/1\",\"expected\":0}]}"
@@ -206,7 +213,7 @@ mod tests {
 
     #[test]
     fn large_plan_partitions_every_case_once_without_sampling() {
-        let all = generated(49_810);
+        let all = generated(15_810);
         let total = job_count(all.len()).unwrap();
         let mut seen = BTreeSet::new();
         for index in 0..total {
@@ -222,7 +229,7 @@ mod tests {
 
     #[test]
     fn wrong_missing_reordered_and_foreign_assignments_refuse() {
-        let all = generated(201);
+        let all = generated(CASES_PER_JOB + 1);
         let assigned: Vec<_> = all.iter().step_by(2).cloned().collect();
         assert!(require_partition(&all, &assigned, "0/2").is_ok());
         for bad in ["0/0", "2/2", "0/257", "one/two", "0/1"] {

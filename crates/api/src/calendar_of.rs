@@ -135,6 +135,28 @@ pub struct Report {
     /// no sessions, and reporting it as one is how a calendar acquires a
     /// holiday that never happened.
     pub unreadable: Vec<String>,
+    /// Every file this derivation asked for and could not open, daily or
+    /// minute, in the order it asked.
+    ///
+    /// Beside [`Self::unreadable`] and not folded into it, because the two
+    /// answer different questions. `unreadable` names what the calendar lacks,
+    /// and an absent minute file is not in it: that month's days are open and
+    /// unsized, not missing. This names what the disk did not give, which is
+    /// what [`cached`] holds against what the census says the disk holds. A
+    /// file the census holds and a derivation could not open is a read that
+    /// did not reach the store, and its calendar is not kept. D-0695.
+    pub unopened: Vec<Unopened>,
+}
+
+/// One file [`derive`] asked for and could not open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unopened {
+    /// The rung it asked for: `1day` or `1min`, the two a calendar reads.
+    pub rung: Timeframe,
+    /// The month it asked for.
+    pub month: YearMonth,
+    /// The refusal, in `bars::open`'s own words.
+    pub reason: String,
 }
 
 /// Derive the calendar for one instrument from what the store holds.
@@ -146,7 +168,8 @@ pub struct Report {
 ///
 /// `months` is the set to consider — normally every month the census names for
 /// this instrument. A month absent from the store is skipped and recorded in
-/// [`Report::unreadable`], never treated as a run of holidays.
+/// [`Report::unreadable`], never treated as a run of holidays. Every file that
+/// did not open, at either rung, is also recorded in [`Report::unopened`].
 pub fn derive(
     store_root: &Path,
     vendor: Vendor,
@@ -163,7 +186,11 @@ pub fn derive(
     // this module must not do.
     let mut traded: BTreeMap<i64, Vec<(u16, u16)>> = BTreeMap::new();
     for month in months {
-        match read_days(
+        // OPENED HERE, AND READ BELOW, so a file that did not open is told
+        // apart from one that opened and would not read. Both are named in
+        // `unreadable`. Only the first is `unopened`: it is what `cached` holds
+        // against the census. D-0695.
+        let days = open_rung(
             store_root,
             vendor,
             exchange,
@@ -171,7 +198,16 @@ pub fn derive(
             symbol,
             Timeframe::DAY_1,
             *month,
-        ) {
+        )
+        .inspect_err(|reason| {
+            report.unopened.push(Unopened {
+                rung: Timeframe::DAY_1,
+                month: *month,
+                reason: reason.clone(),
+            });
+        })
+        .and_then(|file| read_days(&file, *month));
+        match days {
             Ok(days) => {
                 for (day, _) in days {
                     traded.entry(day).or_default();
@@ -185,8 +221,19 @@ pub fn derive(
     for month in months {
         let sessions = traded.keys().filter(|day| in_month(**day, *month)).count();
         let expected = (sessions as u64).saturating_mul(FULL);
-        match minute_count(store_root, vendor, exchange, segment, symbol, *month) {
-            Some(held) if held == expected => {
+        // ONE OPEN FOR THE COUNTER AND THE WALK. The walk opened the month a
+        // second time, so a file could count and then fail to open for the walk.
+        // Its refusal was recorded, but not as a file that did not open.
+        match open_rung(
+            store_root,
+            vendor,
+            exchange,
+            segment,
+            symbol,
+            Timeframe::MINUTE_1,
+            *month,
+        ) {
+            Ok(file) if file.records() == expected => {
                 // EVERY DAY IN THIS MONTH IS A FULL SESSION, by arithmetic. A
                 // walk could find nothing a subtraction has not already proved,
                 // so it is not made.
@@ -197,12 +244,12 @@ pub fn derive(
                     }
                 }
             }
-            Some(_) => {
+            Ok(file) => {
                 report.months_walked = report.months_walked.saturating_add(1);
                 // THE MINUTE SIDE'S REFUSAL IS RECORDED, AND IT WAS THE ONE
                 // `Err` IN THIS FUNCTION THAT WAS NOT.
                 //
-                // Fourteen lines above, the daily read does
+                // Above, the daily read does
                 // `Err(why) => report.unreadable.push(why)`, and
                 // `Report::unreadable`'s own doc says *"Named, never silent. A
                 // month that failed to open is not a month with no sessions."*
@@ -210,7 +257,7 @@ pub fn derive(
                 // been incremented, so the report claimed a walk that never
                 // happened and every day in the month fell to
                 // `OpenLengthUnmeasured` with nothing saying why.
-                match read_minute_spans(store_root, vendor, exchange, segment, symbol, *month) {
+                match read_minute_spans(&file, *month) {
                     Ok(days) => {
                         for (day, runs) in days {
                             // `get_mut`, NEVER `insert`. A minute bar on a day
@@ -227,8 +274,14 @@ pub fn derive(
             }
             // NO MINUTE FILE AT ALL. Every day in it keeps `None`, which becomes
             // `OpenLengthUnmeasured` — the exchange traded and this build cannot
-            // say for how long. Not a hole, and not a holiday.
-            None => {}
+            // say for how long. Not a hole, and not a holiday. So it is not
+            // `unreadable`. It is `unopened`, because whether it should have
+            // opened is the census's to say, not this function's.
+            Err(reason) => report.unopened.push(Unopened {
+                rung: Timeframe::MINUTE_1,
+                month: *month,
+                reason,
+            }),
         }
     }
 
@@ -256,8 +309,14 @@ fn day_month(epoch_day: i64) -> Option<(u16, u8)> {
     Some((day.year(), day.month()))
 }
 
-/// Every distinct IST day a rung holds a bar for, with its bar count.
-fn read_days(
+/// One rung's file for one month, opened for reading and not yet read.
+///
+/// **One header read, no records.** `records()` on what this returns is the
+/// minute counter that makes the common month free: see the module header.
+/// It was two helpers, one of which folded every refusal into "no minute file"
+/// with `.ok()`, so a minute file that did not open could not be told from one
+/// the store never held.
+fn open_rung(
     store_root: &Path,
     vendor: Vendor,
     exchange: &str,
@@ -265,10 +324,14 @@ fn read_days(
     symbol: &str,
     rung: Timeframe,
     month: YearMonth,
-) -> Result<Vec<(i64, u32)>, String> {
-    let file = crate::bars::open(
+) -> Result<store::file::BarFile, String> {
+    crate::bars::open(
         store_root, vendor, exchange, segment, symbol, rung, month, None,
-    )?;
+    )
+}
+
+/// Every distinct IST day a daily file holds a bar for, with its bar count.
+fn read_days(file: &store::file::BarFile, month: YearMonth) -> Result<Vec<(i64, u32)>, String> {
     // AN UNREADABLE DAILY BAR IS NOT A HOLIDAY, AND SKIPPING IT MADE ONE.
     //
     // This loop was `if let Ok(bar) = file.read_record(index)`, so a record
@@ -324,51 +387,8 @@ fn read_days(
     Ok(out.into_iter().collect())
 }
 
-/// How many minute bars a month holds, from the header counter alone.
-///
-/// **One header read, no records.** This is what makes the common month free:
-/// see the module header.
-fn minute_count(
-    store_root: &Path,
-    vendor: Vendor,
-    exchange: &str,
-    segment: &str,
-    symbol: &str,
-    month: YearMonth,
-) -> Option<u64> {
-    crate::bars::open(
-        store_root,
-        vendor,
-        exchange,
-        segment,
-        symbol,
-        Timeframe::MINUTE_1,
-        month,
-        None,
-    )
-    .ok()
-    .map(|file| file.records())
-}
-
-/// The first minute, last minute and count for each day in a minute month.
-fn read_minute_spans(
-    store_root: &Path,
-    vendor: Vendor,
-    exchange: &str,
-    segment: &str,
-    symbol: &str,
-    month: YearMonth,
-) -> Result<DayRuns, String> {
-    let file = crate::bars::open(
-        store_root,
-        vendor,
-        exchange,
-        segment,
-        symbol,
-        Timeframe::MINUTE_1,
-        month,
-        None,
-    )?;
+/// The first minute, last minute and count for each day in a minute file.
+fn read_minute_spans(file: &store::file::BarFile, month: YearMonth) -> Result<DayRuns, String> {
     // THE CONTIGUOUS RUNS, NOT THE OUTER SPAN.
     //
     // An earlier draft kept only the first and last minute of each day and let
@@ -632,6 +652,217 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// **ONLY A DERIVATION THAT OPENED EVERY FILE THE CENSUS HOLDS IS KEPT.**
+    /// D-0695.
+    ///
+    /// `cached` is keyed on the manifest's modified time, and a bar file that
+    /// does not open moves no manifest, so a calendar derived through one was
+    /// served until the next pull. The key is the one the caller hands it,
+    /// from the stamps its census was read under, and the first case also
+    /// checks that a call under another stamp, or none, derives again rather
+    /// than meeting the kept calendar. January's daily file is on disk and
+    /// February's is not; neither month has a minute file. Whether each absence
+    /// is a fault is the census's to say, so `holds` says it three ways, each
+    /// over a cold cache:
+    ///
+    /// * **January at the daily rung only.** February is held at no rung this
+    ///   reads, and January's minutes were never held, so nothing that failed to
+    ///   open is held: the calendar is kept, and the second call is the same
+    ///   `Arc`. A rule that declined every derivation naming a month
+    ///   `unreadable` fails here, and would re-derive such a store on every
+    ///   request.
+    /// * **Both months at the daily rung.** February's daily file is held and
+    ///   did not open: its refusal is named, the calendar still carries
+    ///   January's session, and nothing is kept, so the second call derives
+    ///   again.
+    /// * **January at the minute rung too.** Its minute file is held and did
+    ///   not open, which the derivation used to fold into "no minute file" and
+    ///   keep.
+    #[test]
+    fn a_derivation_is_kept_only_when_every_file_it_could_not_open_is_unheld() {
+        use std::sync::Arc;
+        /// What `cached` asks of each file that did not open.
+        type Holds<'a> = &'a dyn Fn(Timeframe, YearMonth) -> bool;
+        let root = crate::scratch::path("calendar-of-kept");
+        let _ = std::fs::remove_dir_all(&root);
+        let january = YearMonth::new(2026, 1).expect("a real month");
+        let february = YearMonth::new(2026, 2).expect("a real month");
+        let monday = epoch_day(2026, 1, 5);
+        write_bars(&root, Timeframe::DAY_1, january, &[stamp(monday, OPEN)]);
+        // THE STAMP `cached` KEYS ON is the caller's, handed in: no manifest is
+        // on disk for it to find, and it must not look for one.
+        let stamped = Some(std::time::SystemTime::UNIX_EPOCH);
+        let months = [january, february];
+        let call = |cache: &Cache, holds: Holds<'_>| {
+            cached(
+                cache,
+                &root,
+                Vendor::Zerodha,
+                "NSE",
+                "INDEX",
+                "NIFTY",
+                stamped,
+                &months,
+                holds,
+            )
+        };
+
+        let cache = Cache::default();
+        let january_daily = |rung, month| rung == Timeframe::DAY_1 && month == january;
+        let first = call(&cache, &january_daily);
+        assert!(first.unopened.is_empty(), "{:?}", first.unopened);
+        assert_eq!(first.calendar.sessions(), 1);
+        assert_eq!(cache.lock().map_or(0, |held| held.len()), 1, "kept");
+        let again = call(&cache, &january_daily);
+        assert!(
+            Arc::ptr_eq(&first.calendar, &again.calendar),
+            "the second call is the kept calendar"
+        );
+        assert!(again.unopened.is_empty(), "a hit names nothing");
+        // KEPT UNDER THE STAMP IT WAS HANDED, AND ONLY THAT ONE: a caller whose
+        // census was read under another stamp derives again, and so does every
+        // caller with no stamp, whose derivation is not kept.
+        let under = |other| {
+            cached(
+                &cache,
+                &root,
+                Vendor::Zerodha,
+                "NSE",
+                "INDEX",
+                "NIFTY",
+                other,
+                &months,
+                january_daily,
+            )
+            .calendar
+        };
+        let later = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
+        assert!(
+            !Arc::ptr_eq(&first.calendar, &under(Some(later))),
+            "another stamp derives again"
+        );
+        let unstamped = under(None);
+        assert!(
+            !Arc::ptr_eq(&unstamped, &under(None)),
+            "no stamp derives again every call"
+        );
+
+        let cases: [(&str, Holds<'_>, &str); 2] = [
+            (
+                "both months at the daily rung",
+                &|rung, _| rung == Timeframe::DAY_1,
+                "2026-02",
+            ),
+            (
+                "January at the minute rung too",
+                &|_, month| month == january,
+                "2026-01",
+            ),
+        ];
+        for (what, holds, named) in cases {
+            let cache = Cache::default();
+            let first = call(&cache, holds);
+            assert_eq!(first.unopened.len(), 1, "{what}: {:?}", first.unopened);
+            assert!(
+                first.unopened.iter().all(|why| why.contains(named)),
+                "{what}: the held file is named: {:?}",
+                first.unopened
+            );
+            assert_eq!(
+                first.calendar.sessions(),
+                1,
+                "{what}: January's session is still derived"
+            );
+            assert_eq!(
+                cache.lock().map_or(1, |held| held.len()),
+                0,
+                "{what}: not kept"
+            );
+            let again = call(&cache, holds);
+            assert!(
+                !Arc::ptr_eq(&first.calendar, &again.calendar),
+                "{what}: the second call derives again"
+            );
+            assert_eq!(again.unopened, first.unopened, "{what}: and meets it again");
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **`holds` IS ASKED ONCE PER FILE THAT DID NOT OPEN, AND NOT AT ALL ON A
+    /// HIT OR FOR A DERIVATION THAT OPENED EVERY FILE.** D-0695.
+    ///
+    /// AF-28e states what `cached` costs its caller's census: one question per
+    /// file the derivation could not open. The test above counts nothing, so
+    /// asking for every file asked for, or twice for each, passed it. Here
+    /// January's daily file is the only one on disk, over January and February:
+    /// four files are asked for and three do not open, February's daily file
+    /// and both minute files. `holds` says none of them is held, so the
+    /// calendar is kept, and it must have been asked about exactly those three,
+    /// once each, in the order `derive` asked for them. The second call is a
+    /// hit and asks nothing. Then, with January's minute file written too, a
+    /// cold call over January alone opens every file it asks for, and asks
+    /// nothing either.
+    #[test]
+    fn holds_is_asked_once_per_file_that_did_not_open_and_never_on_a_hit() {
+        use std::sync::Arc;
+        let root = crate::scratch::path("calendar-of-holds-asked");
+        let _ = std::fs::remove_dir_all(&root);
+        let january = YearMonth::new(2026, 1).expect("a real month");
+        let february = YearMonth::new(2026, 2).expect("a real month");
+        let monday = epoch_day(2026, 1, 5);
+        write_bars(&root, Timeframe::DAY_1, january, &[stamp(monday, OPEN)]);
+        let asked = std::cell::RefCell::new(Vec::new());
+        let holds = |rung, month| {
+            asked.borrow_mut().push((rung, month));
+            false
+        };
+        let call = |cache: &Cache, months: &[YearMonth]| {
+            cached(
+                cache,
+                &root,
+                Vendor::Zerodha,
+                "NSE",
+                "INDEX",
+                "NIFTY",
+                Some(std::time::SystemTime::UNIX_EPOCH),
+                months,
+                holds,
+            )
+        };
+
+        let cache = Cache::default();
+        let first = call(&cache, &[january, february]);
+        assert!(first.unopened.is_empty(), "{:?}", first.unopened);
+        assert_eq!(
+            asked.take(),
+            vec![
+                (Timeframe::DAY_1, february),
+                (Timeframe::MINUTE_1, january),
+                (Timeframe::MINUTE_1, february),
+            ],
+            "once per file that did not open, and never for January's daily file"
+        );
+        let again = call(&cache, &[january, february]);
+        assert!(
+            Arc::ptr_eq(&first.calendar, &again.calendar),
+            "the second call is the kept calendar"
+        );
+        assert_eq!(asked.take(), Vec::new(), "a hit asks nothing");
+
+        write_bars(&root, Timeframe::MINUTE_1, january, &[stamp(monday, OPEN)]);
+        let opened = call(&Cache::default(), &[january]);
+        assert!(opened.unopened.is_empty(), "{:?}", opened.unopened);
+        assert_eq!(opened.calendar.sessions(), 1, "January's session");
+        assert_eq!(
+            asked.take(),
+            Vec::new(),
+            "a derivation that opened every file asks nothing"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// 09:15 IST, the first minute of a session.
     const OPEN: u16 = pull::calendar::OPEN_MINUTE;
     /// 15:29 IST, the last.
@@ -832,20 +1063,20 @@ mod against_the_real_store {
     }
 }
 
-/// The manifest file whose modification time keys the cache.
-///
-/// One file per vendor, rewritten on every pull that stores anything, so its
-/// mtime is the cheapest honest "has the store changed" signal available — one
-/// `stat`, no directory walk, no counter to maintain.
-fn manifest_stamp(store_root: &Path, vendor: Vendor) -> Option<std::time::SystemTime> {
-    std::fs::metadata(
-        store_root
-            .join("manifest")
-            .join(format!("{}.man", vendor.as_str())),
-    )
-    .ok()?
-    .modified()
-    .ok()
+/// A calendar [`cached`] answered, and every file the caller's census holds that
+/// the derivation behind it could not open.
+#[derive(Debug, Clone)]
+pub struct Derived {
+    /// The calendar, shared with the cache when it was kept there.
+    pub calendar: std::sync::Arc<Calendar>,
+    /// The refusal of each file `holds` said the store holds and this request's
+    /// derivation could not open, in the order [`derive`] asked for them.
+    ///
+    /// Empty on a cache hit and on every derivation that was kept, which are the
+    /// same set: a derivation is kept only when this is empty. When it is not,
+    /// [`Self::calendar`] lacks what those files would have proved, and a caller
+    /// must not answer it as the store's calendar.
+    pub unopened: Vec<String>,
 }
 
 /// The calendar for one instrument, derived once per store change.
@@ -855,13 +1086,81 @@ fn manifest_stamp(store_root: &Path, vendor: Vendor) -> Option<std::time::System
 /// `derive` measured **0.28 s** for one instrument across 81 months — fine once
 /// after a pull, and not fine on a page that polls every two seconds. This
 /// returns the cached answer when the vendor's manifest has not been rewritten
-/// since it was built, which is one `stat` and one map probe.
+/// since it was built, which is one map probe.
+///
+/// # The key is the caller's, taken before its census was read
+///
+/// `stamp` is the modified time of the vendor's manifest from the stamps the
+/// caller's census was read under: `server::census_now_stamped`, whose stamps
+/// are taken BEFORE its read on a miss. `months` and `holds` come from that
+/// census, so the three share one moment, and a calendar is never kept under a
+/// time newer than the months it was derived from.
+///
+/// This function took the key itself, one `stat` of the manifest after the
+/// census had been read. A pull that installed a manifest between the two had
+/// the calendar derived from the OLDER census's months kept under the NEWER
+/// modified time, and every later request, reading the newer census, hit it
+/// until the manifest was next written. A review measured it: a June bar and a
+/// manifest naming May and June installed between the census and this call,
+/// then three `/calendar.json` requests that each answered one session where a
+/// cold derivation answered two. Taken before the census, the key is older
+/// than what it keys: the next request's stamp differs, misses, and derives
+/// again, which costs one derivation. It is the order D-0695 gave the census
+/// cache for the same reason. The `stat` this took per call is gone too, and
+/// on the exchange branch of `/calendar.json` that was one per series.
+///
+/// That alone did not make every kept calendar current. The stamps come with
+/// every census, including one whose read contradicts them, which the census
+/// cache refuses to keep: a store root gone after `read_all`'s own check reads
+/// the feed "absent" under a stamp of its manifest. The symbol branch of
+/// `/calendar.json` derived over no months from such a read and this kept the
+/// empty calendar under that unmoved time, so every caller was served it after
+/// the root came back, until the manifest was next written. The caller's
+/// stamp is therefore `None` for a census row the stamp could not have read
+/// (`server::CensusStamps::modified`), and a derivation from it is answered to
+/// its request and not kept. D-0695.
 ///
 /// **A store that has never been written has no manifest and therefore no
-/// stamp.** That case re-derives every call, which is correct rather than
-/// unfortunate: an empty store derives an empty calendar in microseconds, and
-/// caching "I found nothing" against a key that cannot change would answer
-/// `Unmeasured` for ever once the first pull landed.
+/// stamp**, and neither does one whose `stat` failed: `stamp` is `None`. That
+/// case re-derives every call, which is correct rather than unfortunate: an
+/// empty store derives an empty calendar in microseconds, and caching "I found
+/// nothing" against a key that cannot change would answer `Unmeasured` for
+/// ever once the first pull landed.
+///
+/// # Only a derivation that opened every file the census holds is kept
+///
+/// The key is the manifest's modified time, and the manifest is what says which
+/// bar files the store holds. A derivation that could not open one of them did
+/// not read the store its key names: a bar directory moved aside for one
+/// request, a store root gone after the census was read, an I/O error on open.
+/// None of these moves the manifest, so the calendar derived through one --
+/// empty, or short of the months that failed -- was cached under the same key
+/// and served until the next pull wrote the manifest, long after the fault
+/// ended. A review measured it: with `bars/dhan` moved aside for one request
+/// and put back, `/calendar.json` still answered `{"sessions":0}` while `/bars`
+/// served the month. The census cache in front of this one had been given the
+/// same rule by D-0695; this cache had not.
+///
+/// So `holds` answers, for a rung and a month, whether the caller's census
+/// holds that file of this series, and a derivation is kept only when every
+/// file it could not open is one `holds` says the store does not hold. A month
+/// held at the minute rung and not the daily one opens no daily file and is
+/// still kept, because the census says so, and so is a minute file the store
+/// never held. A held file whose records fail their checks did open, and is
+/// kept too, as the census cache keeps a manifest whose bytes do not decode:
+/// damaged bytes do not heal between two requests, and a pull that rewrites
+/// them moves the manifest. Anything else answers the request that derived it,
+/// with [`Derived::unopened`] naming each held file that did not open, and is
+/// derived again on the next request. `holds` is asked only about files that
+/// did not open, so a derivation that opened everything costs no probe. D-0695.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the cache, the root and the four terms of the series' address that \
+              `bars::open` also takes one by one (it declares its own count, for \
+              the reason it gives), then what one census says: the stamp it was \
+              read under, the months, and which of those files exist; a struct for \
+              any of them would be a second spelling of one address in the crate"
+)]
 pub fn cached(
     site_calendars: &Cache,
     store_root: &Path,
@@ -869,9 +1168,10 @@ pub fn cached(
     exchange: &str,
     segment: &str,
     symbol: &str,
+    stamp: Option<std::time::SystemTime>,
     months: &[YearMonth],
-) -> std::sync::Arc<Calendar> {
-    let stamp = manifest_stamp(store_root, vendor);
+    holds: impl Fn(Timeframe, YearMonth) -> bool,
+) -> Derived {
     // THE KEY IS THE WHOLE PATH THIS DERIVATION READS, NOT JUST THE NAME.
     //
     // It was `(vendor, symbol)`, which was safe only for as long as every
@@ -900,19 +1200,31 @@ pub fn cached(
             && *at == now
         {
             // A REFCOUNT BUMP, NOT A COPY. See [`Cache`].
-            return std::sync::Arc::clone(calendar);
+            return Derived {
+                calendar: std::sync::Arc::clone(calendar),
+                unopened: Vec::new(),
+            };
         }
     }
 
-    let (calendar, _report) = derive(store_root, vendor, exchange, segment, symbol, months);
+    let (calendar, report) = derive(store_root, vendor, exchange, segment, symbol, months);
+    // WHAT THE DISK DID NOT GIVE, HELD AGAINST WHAT THE CENSUS SAYS IT HOLDS.
+    let unopened: Vec<String> = report
+        .unopened
+        .into_iter()
+        .filter(|file| holds(file.rung, file.month))
+        .map(|file| file.reason)
+        .collect();
     let calendar = std::sync::Arc::new(calendar);
-    if let Some(now) = stamp {
+    if let Some(now) = stamp
+        && unopened.is_empty()
+    {
         let mut held = site_calendars
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         held.insert(key, (now, std::sync::Arc::clone(&calendar)));
     }
-    calendar
+    Derived { calendar, unopened }
 }
 
 /// The calendar as JSON: which days traded, and how many minute bars each owes.

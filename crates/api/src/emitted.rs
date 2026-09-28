@@ -1523,9 +1523,12 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     /// the instrument and the reason made the proof a three-line call.
     /// 13 -> 14: `pull.cash_session dated eligibility verified`, driven by
     /// `server::tests::dated_cash_session_evidence_is_logged_with_resolved_counts`.
+    /// 18 -> 19 at D-0695's ninth repair: `api.census absence contradicted by
+    /// its stamp`, driven by
+    /// `server::census_request_tests::an_absence_its_stamps_contradict_is_logged_at_warn`.
     // Four additional refusal sites are read back by the partial/interrupted
     // broker basket, recovery resume refusal, and partial cash replay tests.
-    const REACHED_IN_SERVER_TESTS: usize = 18;
+    const REACHED_IN_SERVER_TESTS: usize = 19;
     // Both production recovery boundaries are emitted and read back through
     // this installed sink by recovery::tests::
     // recovery_boundary_events_are_read_back_from_the_installed_sink.
@@ -1613,9 +1616,13 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // 37 -> 38 at D-0297: the commit gate's refusal, driven in the table above
     // rather than added to the unreachable list, because an unstamped build is
     // exactly what `cargo test` is and the row costs nothing to reach.
+    //
+    // 57 -> 58 at D-0695's ninth repair: a census row served unreadable
+    // because its stamps contradict its absence, driven in `server`'s census
+    // request tests.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 57,
+        lib_sites, 58,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"

@@ -2478,10 +2478,12 @@ async fn gaps_json(
         return refuse("minute coverage requires timeframe=1min; coarser bars cannot prove their source minutes".to_owned());
     }
     let peers = if asked.exchange == "NSE" && asked.segment == "CASH" && asked.contract.is_none() {
-        // A peer's auction eligibility is not this stock's eligibility.
+        // A peer's auction eligibility is not this stock's eligibility. No
+        // peer is consulted, so none can be named as unreadable either.
         PeerCalendar {
             calendar: None,
             from: Vec::new(),
+            unreadable: Vec::new(),
         }
     } else {
         peer_calendar(&site, &asked)
@@ -2600,9 +2602,17 @@ fn gaps_body(
         .map(|name| render::json_string(name))
         .collect::<Vec<_>>()
         .join(",");
+    // A PEER THAT COULD NOT BE READ IS NAMED, not counted as a peer that held
+    // nothing: see `PeerCalendar::unreadable`.
+    let unreadable = peers
+        .unreadable
+        .iter()
+        .map(|name| render::json_string(name))
+        .collect::<Vec<_>>()
+        .join(",");
 
     format!(
-        r#"{{"expected":{expected},"held":{held},"lost_minutes":{lost},"unmeasured_minutes":{unmeasured},"months":{},"months_absent":{absent_files},"truncated":{truncated_range},"calendar":{{"first":{},"last":{},"days":{calendar_days},"source":"{source}","stale":{stale},"covers_span":{covers_span},"voted_by":[{voted}]}},"month":[{rows}]}}"#,
+        r#"{{"expected":{expected},"held":{held},"lost_minutes":{lost},"unmeasured_minutes":{unmeasured},"months":{},"months_absent":{absent_files},"truncated":{truncated_range},"calendar":{{"first":{},"last":{},"days":{calendar_days},"source":"{source}","stale":{stale},"covers_span":{covers_span},"voted_by":[{voted}],"unreadable":[{unreadable}]}},"month":[{rows}]}}"#,
         months.len(),
         day_text(first_known),
         day_text(last_known),
@@ -2638,19 +2648,50 @@ struct PeerCalendar {
     calendar: Option<pull::calendar::Calendar>,
     /// The `feed:symbol` readings that voted, sorted, for the answer to name.
     from: Vec<String>,
+    /// Every feed whose census could not be read, in `Vendor::ALL` order.
+    ///
+    /// Such a census contributes no series, so without this list a damaged
+    /// counter fell back to the table with `voted_by: []` -- the same answer
+    /// as a store with no peers at all, which is the failure `CLAUDE.md` §4
+    /// bans. A peer that might have voted and could not be read is named.
+    ///
+    /// Then, as `feed:symbol` in the order they were walked, every peer series
+    /// with a bar file its census holds and its derivation could not open. Its
+    /// calendar lacks what that file would have proved, so it does not vote,
+    /// and `calendar_of::cached` does not keep it. D-0695.
+    unreadable: Vec<String>,
 }
 
 /// Build a [`PeerCalendar`] for the series `asked` addresses.
 fn peer_calendar(site: &Loaded, asked: &Addressed) -> PeerCalendar {
+    peer_calendar_reading(site, asked, census_now_stamped)
+}
+
+/// [`peer_calendar`], with the census it derives from passed in.
+///
+/// Production passes [`census_now_stamped`] and nothing else, for the reason
+/// [`calendar_json_reading`] gives: a test installs a newer manifest after the
+/// census is read and before a peer's calendar is kept. D-0695.
+fn peer_calendar_reading(
+    site: &Site,
+    asked: &Addressed,
+    census: impl FnOnce(&Site) -> (CensusStamps, CensusNow),
+) -> PeerCalendar {
     // A FRESH CENSUS, for the reason D-0318 records: a list captured before the
     // store had anything in it reports a complete store as short.
     //
     // FRESH ON THE MANIFESTS' STAMPS, NOT RE-READ PER REQUEST. `census_now`
     // re-reads a manifest whose modified time moved and shares the cached
     // census otherwise, so a pull is still visible on the next audit and a
-    // steady-state audit reads no manifest bytes. D-0686.
-    let (fresh, _) = census_now(site);
+    // steady-state audit reads no manifest bytes. D-0686. Those stamps key
+    // each peer's kept calendar: see `census_now_stamped`.
+    let (stamps, (fresh, _)) = census(site);
     let mut readings: Vec<(String, pull::calendar::Calendar)> = Vec::new();
+    let mut unreadable: Vec<String> = fresh
+        .iter()
+        .filter(|census| matches!(census.state, census::Census::Unreadable { .. }))
+        .map(|census| census.vendor.as_str().to_owned())
+        .collect();
     for vendor_census in fresh.as_slice() {
         let by_series =
             spot_months_by_identity(&census::held_entries(std::slice::from_ref(vendor_census)));
@@ -2672,15 +2713,28 @@ fn peer_calendar(site: &Loaded, asked: &Addressed) -> PeerCalendar {
             }
             let months: Vec<store::path::YearMonth> =
                 by_series.get(&key).cloned().unwrap_or_default();
-            let calendar = crate::calendar_of::cached(
+            let derived = crate::calendar_of::cached(
                 &site.calendars,
                 &site.store_root,
                 vendor_census.vendor,
                 exchange.as_str(),
                 segment.as_str(),
                 symbol.as_str(),
+                stamps.modified(vendor_census),
                 &months,
+                census_holds(Some((vendor_census, key))),
             );
+            // A PEER WHOSE HELD FILE DID NOT OPEN IS NAMED, NOT COUNTED AS A
+            // PEER THAT TRADED NOTHING THERE. See `PeerCalendar::unreadable`.
+            if !derived.unopened.is_empty() {
+                unreadable.push(format!(
+                    "{}:{}",
+                    vendor_census.vendor.as_str(),
+                    symbol.as_str()
+                ));
+                continue;
+            }
+            let calendar = derived.calendar;
             // A SERIES THIS FEED HOLDS NOTHING FOR IS NOT A VOTE FOR ANYTHING —
             // counting an empty calendar as agreement would let an absence
             // close the exchange.
@@ -2700,6 +2754,7 @@ fn peer_calendar(site: &Loaded, asked: &Addressed) -> PeerCalendar {
         return PeerCalendar {
             calendar: None,
             from: Vec::new(),
+            unreadable,
         };
     }
     let (agreed, _clashes) = crate::calendar_of::agree(&readings);
@@ -2707,6 +2762,7 @@ fn peer_calendar(site: &Loaded, asked: &Addressed) -> PeerCalendar {
     PeerCalendar {
         calendar: Some(agreed),
         from,
+        unreadable,
     }
 }
 
@@ -3263,11 +3319,11 @@ fn render_window(window: &bars::Window, scanned: bool) -> String {
 ///
 /// `Arc` makes a hit a refcount bump. Nothing else changes: the payloads are
 /// read-only after construction, every consumer reaches them through `Deref`,
-/// and the stamps stay a plain `Vec` because they are small and compared rather
+/// and the stamps stay plain values because they are small and compared rather
 /// than handed out.
 pub type CensusCache = std::sync::Mutex<
     Option<(
-        Vec<Option<std::time::SystemTime>>,
+        CensusStamps,
         std::sync::Arc<Vec<crate::census::VendorCensus>>,
         std::sync::Arc<Vec<(crate::census::Series, store::path::YearMonth)>>,
     )>,
@@ -3289,6 +3345,76 @@ pub type CensusNow = (
 );
 
 pub(crate) fn census_now(site: &Site) -> CensusNow {
+    census_now_stamped(site).1
+}
+
+/// [`census_now`], and the stamps that census is no older than.
+///
+/// # Why a caller needs the stamps
+///
+/// On a miss they are the stamps taken BEFORE the read, and on a hit the ones
+/// just taken, which equal the key the census was kept under. Either way the
+/// census was read no earlier than they were taken.
+///
+/// `calendar_of::cached` keeps a calendar derived from a census's months, and
+/// it took its key itself: one `stat` of the manifest, AFTER the caller's
+/// census had been read. A pull that installed a manifest between the two had
+/// the calendar derived from the OLDER census's months kept under the NEWER
+/// modified time, and every later request hit it until the manifest was next
+/// written, which can be the next day's pull. That is the order
+/// [`census_now_reading`] refuses for the census itself. So the three callers
+/// that derive a calendar take the census through here and hand `cached` the
+/// feed's modified time from these stamps ([`CensusStamps::modified`]). A
+/// manifest installed after them moves the next request's stamp, which then
+/// misses. D-0695.
+///
+/// # They come with a census the cache refused, too
+///
+/// A read [`read_as_stamped`] refuses to keep is still this request's answer,
+/// and these are still the stamps taken before it, which that read
+/// contradicts: a store root gone after `read_all`'s own check reads every
+/// feed "absent" under a stamp of a manifest that exists. (Since D-0695's
+/// eighth repair that row is handed to the request unreadable, not absent:
+/// see [`refuse_contradicted_absences`].) A key taken from them for such a
+/// row kept the calendar derived from it under a time the fault had not
+/// moved, and served it after the fault had ended, until the manifest was
+/// next written. So [`CensusStamps::modified`] takes the row as well, and
+/// hands a time only for one its stamp could have read. D-0695.
+pub(crate) fn census_now_stamped(site: &Site) -> (CensusStamps, CensusNow) {
+    census_now_reading(site, census::read_all)
+}
+
+/// [`census_now_stamped`], with the read a miss rebuilds from passed in.
+///
+/// Production passes [`census::read_all`] and nothing else. The parameter is
+/// here so a test can install a newer manifest AFTER the read and before the
+/// cache is written -- the one interleaving that decides whether the stamps
+/// must be taken BEFORE the read -- on every run, rather than by racing threads
+/// and meeting it only when the scheduler happens to: a review measured the
+/// racing test catching stamps-after-the-read in 7 of 20 runs. Taken after the
+/// read, the stamps would name the newer image while the census held the older
+/// one, and every later request would hit the stale census for as long as the
+/// manifest stayed unchanged. D-0695.
+fn census_now_reading(
+    site: &Site,
+    read: impl FnOnce(&std::path::Path) -> Vec<census::VendorCensus>,
+) -> (CensusStamps, CensusNow) {
+    census_now_stamping(site, manifest_stamps, read)
+}
+
+/// [`census_now_reading`], with the stamping passed in as well.
+///
+/// Production passes [`manifest_stamps`] and nothing else. The parameter is
+/// here so a test can hand the request stamps a store root that changes while
+/// they are taken makes: five manifests stamped missing while the root was
+/// away, under a root seen as a directory because it was back for its own
+/// check. No test can make a real root do that on demand; a review met it by
+/// renaming a root aside and back in a tight loop. D-0695.
+fn census_now_stamping(
+    site: &Site,
+    mut stamp: impl FnMut(&std::path::Path) -> CensusStamps,
+    read: impl FnOnce(&std::path::Path) -> Vec<census::VendorCensus>,
+) -> (CensusStamps, CensusNow) {
     // CACHED ON THE MANIFESTS' OWN STAMPS, because this is FIVE per-request
     // paths and it reads the whole store on every one of them.
     //
@@ -3313,11 +3439,14 @@ pub(crate) fn census_now(site: &Site) -> CensusNow {
     // manifest is the only thing that can change what a census says, so the
     // modified-time of each vendor's manifest is exactly the key. A pull
     // rewrites them and the next request rebuilds; nothing else can go stale.
+    // A permission change could, because it moves no modified time and does
+    // decide whether a manifest reads, so since D-0695 the key also carries the
+    // status-change time from the same `stat`; see `manifest_stamps`.
     //
     // The lock is released BEFORE `read_all`, so a rebuild never serialises the
     // other requests -- the mistake that would turn a cache into a global
     // bottleneck, and the reason `calendar_of` scopes its guard the same way.
-    let stamps = manifest_stamps(&site.store_root);
+    let stamps = stamp(&site.store_root);
     {
         // READ THROUGH A POISONED LOCK rather than around it: a panic while
         // holding it means another request died, the map is still readable, and
@@ -3334,14 +3463,49 @@ pub(crate) fn census_now(site: &Site) -> CensusNow {
             // `CensusCache` for what this used to cost and why the `Arc` is not
             // decoration.
             return (
-                std::sync::Arc::clone(censuses),
-                std::sync::Arc::clone(entries),
+                stamps,
+                (
+                    std::sync::Arc::clone(censuses),
+                    std::sync::Arc::clone(entries),
+                ),
             );
         }
     }
 
-    let censuses = std::sync::Arc::new(census::read_all(&site.store_root));
+    // THE STAMPS ABOVE ARE OLDER THAN THIS READ, AND MUST BE. A manifest
+    // installed between the two keys a newer census under an older stamp, which
+    // the next request's stamp no longer matches, so it reads again: stale for
+    // at most that one request. The other order keys an older census under a
+    // newer stamp, which is stale until the manifest next changes. See
+    // `census_now_reading`'s doc.
+    let mut censuses = read(&site.store_root);
+    // AND A ROW READ ABSENT THAT ITS STAMP CONTRADICTS IS NOT ANSWERED AS AN
+    // EMPTY FEED, to this request either. It is served unreadable, naming why.
+    // See `refuse_contradicted_absences`. D-0695.
+    refuse_contradicted_absences(&stamps, &mut censuses);
+    // AND AN ABSENCE STILL STANDING IS STAMPED AGAIN, AFTER THE READ, because
+    // the stamps before it can tear: a root away for the five manifest `stat`
+    // calls and back for its own check is an empty store's key. An absence
+    // those stamps vouch for is served only if these could have read it too.
+    // Five or six more `stat` calls, and only on a miss that read an absence.
+    // See `refuse_contradicted_absences`. D-0695.
+    if censuses
+        .iter()
+        .any(|row| matches!(row.state, census::Census::Absent))
+    {
+        refuse_contradicted_absences(&stamp(&site.store_root), &mut censuses);
+    }
+    let censuses = std::sync::Arc::new(censuses);
     let entries = std::sync::Arc::new(census::held_entries(&censuses));
+    // AND ONLY A CENSUS THE STAMPS COULD HAVE READ IS KEPT UNDER THEM. A read
+    // that contradicts its own key -- a root gone for this one read, a manifest
+    // stamped present and read absent, an I/O error that moved no time -- is
+    // this request's answer and nobody else's. Kept, it outlived the fault for
+    // as long as the stamps stood still, because the fault had not moved them:
+    // a 503, or an empty store, over a store that reads. See `read_as_stamped`.
+    if !read_as_stamped(&stamps, &censuses) {
+        return (stamps, (censuses, entries));
+    }
     {
         let mut held = site
             .census
@@ -3355,41 +3519,422 @@ pub(crate) fn census_now(site: &Site) -> CensusNow {
             && *at == stamps
         {
             return (
-                std::sync::Arc::clone(current_censuses),
-                std::sync::Arc::clone(current_entries),
+                stamps,
+                (
+                    std::sync::Arc::clone(current_censuses),
+                    std::sync::Arc::clone(current_entries),
+                ),
             );
         }
         *held = Some((
-            stamps,
+            stamps.clone(),
             std::sync::Arc::clone(&censuses),
             std::sync::Arc::clone(&entries),
         ));
     }
-    (censuses, entries)
+    (stamps, (censuses, entries))
 }
 
-/// Every vendor manifest's modified time, in a fixed order.
+/// What every vendor manifest's `stat` said, in a fixed order.
 ///
 /// # Why a vector and not one stamp
 ///
 /// A census is over ALL vendors, so any one of them being rewritten makes it
-/// stale. `calendar_of::manifest_stamp` takes a single vendor because a calendar
-/// is derived per vendor; this is the same idea over the set.
+/// stale. A calendar is derived per vendor, so `calendar_of::cached` is keyed on
+/// one vendor's modified time, taken from these stamps by
+/// [`CensusStamps::modified`]. It took its own `stat` until D-0695's fifth
+/// repair, one taken after the census; see `census_now_stamped`.
 ///
-/// A vendor whose manifest does not exist contributes `None` rather than being
-/// skipped, so a manifest APPEARING changes the key. Skipping it would make the
+/// A vendor whose manifest does not exist contributes a stamp (`None`, and
+/// since D-0695 [`ManifestStamp::Missing`]) rather than being skipped, so a
+/// manifest APPEARING changes the key. Skipping it would make the
 /// first pull for a new vendor invisible to every cached page.
-fn manifest_stamps(store_root: &std::path::Path) -> Vec<Option<std::time::SystemTime>> {
+///
+/// # And whether the store root answered, because `None` alone cannot say
+///
+/// A missing manifest and an unreachable store root both stat as `None`, while
+/// [`census::read_all`] answers the first "absent" and the second "unreadable".
+/// Keyed on the manifests alone, a census cached in one state was served in the
+/// other -- a detached volume reported as a fresh store, or a reattached empty
+/// one as an outage -- until a manifest appeared. So when NO manifest answered,
+/// the root is asked once whether it is a directory, which is the question
+/// `read_all` asks first. A manifest that answered already proves the root did,
+/// so a store that holds anything pays nothing for this: five `stat` calls, and
+/// a sixth only when all five found nothing.
+///
+/// # And WHY a manifest did not answer, because "missing" and "refused" differ
+///
+/// The key above still folded every `stat` error into the one `None` a missing
+/// manifest has, while [`census::read_vendor`] answers `NotFound` "absent" and
+/// every other error "unreadable". A manifest directory that is a regular file
+/// (`ENOTDIR`) or one this process may not search (`EACCES`) therefore keyed
+/// exactly as an empty store: a census cached "absent" was served "absent"
+/// over the fault and `/calendar.json` answered 200 with no sessions, and a
+/// census cached "unreadable" outlived the repair and answered 503 over an
+/// empty store. Each manifest is now keyed on what its one `stat` said -- a
+/// time, missing, or the kind of fault -- so the same call per vendor draws the
+/// three lines `read_vendor` draws. The root is still asked only when no
+/// manifest answered with a time, exactly the condition it was asked on
+/// before, so this costs no syscall. D-0695.
+///
+/// # And when the manifest FILE's own status changed, because a mode is not a write
+///
+/// A manifest that exists was keyed on its modified time alone, and `chmod` and
+/// `chown` do not move that time. A manifest file this process could not read
+/// when the cache was cold -- written by a pull run as another user -- was
+/// cached "unreadable" under a time the permission repair left where it was, so
+/// `/calendar.json` kept answering 503 and `/bars` kept refusing over a store
+/// that could be read again, until the next pull or a restart. The other
+/// direction served "held" over a file that had stopped being readable. The
+/// same `stat` also carries the status-change time, which both calls move, so
+/// it is now part of the key: no syscall is added. It narrows D-0686's
+/// same-modified-time gap as well, because every write moves it too; what is
+/// left is two changes inside one tick of the filesystem's clock. D-0695.
+fn manifest_stamps(store_root: &std::path::Path) -> CensusStamps {
     let dir = store_root.join("manifest");
-    brutex_core::vendor::Vendor::ALL
+    let manifests: Vec<ManifestStamp> = brutex_core::vendor::Vendor::ALL
         .iter()
         .map(|vendor| {
-            std::fs::metadata(dir.join(format!("{}.man", vendor.as_str())))
-                .ok()
-                .and_then(|meta| meta.modified().ok())
+            match std::fs::metadata(dir.join(format!("{}.man", vendor.as_str()))).and_then(|meta| {
+                Ok(ManifestStamp::At {
+                    modified: meta.modified()?,
+                    changed: status_changed(&meta),
+                })
+            }) {
+                Ok(stamp) => stamp,
+                Err(why) if why.kind() == std::io::ErrorKind::NotFound => ManifestStamp::Missing,
+                Err(why) => ManifestStamp::Faulted(why.kind()),
+            }
         })
-        .collect()
+        .collect();
+    let root_is_dir = manifests
+        .iter()
+        .any(|stamp| matches!(stamp, ManifestStamp::At { .. }))
+        || std::fs::metadata(store_root).is_ok_and(|meta| meta.is_dir());
+    CensusStamps {
+        manifests,
+        root_is_dir,
+    }
 }
+
+/// Whether every census in `censuses` is one `stamps` could have read, with
+/// nothing changed between the two.
+///
+/// # Why the cache asks, since D-0695
+///
+/// The stamps are taken BEFORE the read, and must be (see
+/// [`census_now_reading`]). A change between the two is therefore met by the
+/// next request, whose stamps differ -- unless the change undid itself first. A
+/// store root gone when `read_all` asked for it and back before the next
+/// request, a root gone just after `read_all`'s own check (every manifest then
+/// reads `NotFound`, which is "absent"), or a manifest read that failed with an
+/// error no time records (`EIO`, `EMFILE`) all leave every stamp where it was.
+/// Cached, that census was served as the store's for as long as the manifests
+/// stood still: all five feeds "unreadable", so `/calendar.json` answered 503
+/// and `/bars` refused, or all five "absent", so `/calendar.json` answered 200
+/// with no sessions and `/bars` said no feed holds the name. A review drove
+/// both through [`census_now_reading`] with the root moved aside inside the
+/// read.
+///
+/// So a read is kept only when each census is what its own stamp says the disk
+/// would give:
+///
+/// * `read_all`'s root refusal, only under a root the stamps did not see as a
+///   directory, and any other census only under one they did;
+/// * absent, only where the stamp found no manifest;
+/// * held, or refused by this reader (past the size bound, or bytes that do not
+///   decode), only where the stamp found one -- its bytes are what the
+///   modified and status-change times vouch for;
+/// * an I/O refusal where the stamp found a manifest, only for the kinds its
+///   own status decides: `PermissionDenied`, which a `chmod` or `chown` ends
+///   by moving the status-change time, and `IsADirectory`, which only a
+///   replacement ends. Any other kind moved no time, so no stamp can say when
+///   it ends;
+/// * an I/O refusal where the stamp itself failed, only of the same kind: the
+///   stamp then records the fault, and its end moves the stamp.
+///
+/// Anything else is served to the request that read it and not kept, so the
+/// next request reads again. A row of it read absent that its own stamp could
+/// not have read is served unreadable, not absent: see
+/// [`refuse_contradicted_absences`]. A fault that persists is then read, and
+/// its `api.census` warning emitted, on every request until it ends -- the cost
+/// `docs/06-limits.md`'s D-0695 section states. A census row out of
+/// `Vendor::ALL` order, or a count other than one per vendor, is never kept
+/// either: `census::read_all` yields neither.
+///
+/// `PermissionDenied` is kept on the word of the file's own status. The same
+/// error from a directory on the way, made unsearchable after the stamp and
+/// searchable again before the next request, moves no stamp, and is served
+/// until the manifest next changes. `docs/06-limits.md` states that too.
+fn read_as_stamped(stamps: &CensusStamps, censuses: &[census::VendorCensus]) -> bool {
+    censuses.len() == stamps.manifests.len()
+        && censuses
+            .iter()
+            .zip(&stamps.manifests)
+            .zip(brutex_core::vendor::Vendor::ALL)
+            .all(|((read, stamp), vendor)| {
+                read.vendor == vendor && stamp_could_read(*stamp, stamps.root_is_dir, &read.state)
+            })
+}
+
+/// Whether one vendor's `stamp`, under a root the stamps saw as a directory or
+/// not, could have read `state`. See [`read_as_stamped`] for each line.
+fn stamp_could_read(stamp: ManifestStamp, root_is_dir: bool, state: &census::Census) -> bool {
+    use census::{Census, Fault};
+    use std::io::ErrorKind;
+    if let Census::Unreadable {
+        fault: Fault::Root, ..
+    } = *state
+    {
+        return !root_is_dir;
+    }
+    root_is_dir
+        && match (state, stamp) {
+            (Census::Absent, ManifestStamp::Missing)
+            | (
+                Census::Held { .. }
+                | Census::Unreadable {
+                    fault:
+                        Fault::Refused
+                        | Fault::Io(ErrorKind::PermissionDenied | ErrorKind::IsADirectory),
+                    ..
+                },
+                ManifestStamp::At { .. },
+            ) => true,
+            (
+                Census::Unreadable {
+                    fault: Fault::Io(read),
+                    ..
+                },
+                ManifestStamp::Faulted(stamped),
+            ) => *read == stamped,
+            _ => false,
+        }
+}
+
+/// Why a row [`refuse_contradicted_absences`] changed is unreadable, in the
+/// words its note and every refusal that quotes the note carry.
+const CONTRADICTED_ABSENCE: &str = "this read found no manifest here, and the stamps \
+     taken of the store just before or just after it contradict that, so it cannot \
+     say what this feed holds and is not answered as a feed that holds nothing. The \
+     next request reads again";
+
+/// Each row of `censuses` read absent that its own stamp could not have read,
+/// served unreadable instead, as [`CONTRADICTED_ABSENCE`] says.
+///
+/// # Why, since D-0695's eighth repair
+///
+/// [`read_as_stamped`] keeps such a read out of the cache, and the request that
+/// made it was still handed it as read. A store root gone just after
+/// `read_all`'s own check reads every feed `NotFound`, which is absent, while
+/// Dhan's stamp still names its manifest. So that request's `/calendar.json`
+/// answered `200` with no session on both branches, and its `/gaps.json` peer
+/// vote agreed nothing and named no feed unreadable: an empty store, over a
+/// store that holds NIFTY, the fallback `CLAUDE.md` §4 bans. The next request,
+/// over the same missing root, answered 503. A review measured both.
+///
+/// Absent is the one state that says a feed holds nothing, so it is the one a
+/// contradicted row may not say. Served unreadable, the row is refused where
+/// every unreadable census is: `/calendar.json` answers 503 on both branches,
+/// the peer vote names the feed, and `/bars` refuses it when it is the asked
+/// feed's. A contradicted row read held, as a first manifest installed inside
+/// the read is under a stamp that found none, keeps the bytes it read, and a
+/// contradicted row read unreadable keeps its own words. Neither is changed,
+/// and neither is kept: the cache keeps no read with a contradicted row.
+///
+/// A read no stamp contradicts is unchanged, so [`read_as_stamped`] keeps
+/// what it kept before, and a changed row is never kept, because
+/// [`stamp_could_read`] vouches for no [`census::Fault::Contradicted`].
+///
+/// # What it costs, since D-0695's tenth repair
+///
+/// A row it leaves unchanged costs one index into the stamps and one
+/// [`stamp_could_read`], and no syscall. A row it changes also costs the line
+/// below, through `telemetry::emit_if!`: the level check alone when no sink
+/// is installed, or when the floor the sink applies to `api.census` is above
+/// `Warn`. Otherwise it costs the event the macro builds, whose `path` field
+/// formats the manifest's path into a new `String`, and what
+/// `telemetry::Sink::emit` costs, including the sink's lock, a read of the
+/// clock inside it, the line formatted into the sink's buffer, and a
+/// `write_all` of the line to its log file, after a rotation of its files
+/// when the line would carry the current one past its bound. When that write
+/// fails, a second write ends the fragment, and a notice goes to stderr once
+/// per sink. So a call writes at most one line per feed. Not timed.
+///
+/// # Each row it changes is logged, since D-0695's ninth repair
+///
+/// `census::read_vendor` logs every row it reads, a row read absent at
+/// `Debug`, which the default floor does not write, and under the state this
+/// request is then not served. This changed the row and logged nothing, so a
+/// reader of `/logs` after the refusal found no trace of it. Each row changed
+/// here writes one `api.census` line at `Warn`, "absence contradicted by its
+/// stamp", naming the feed, the manifest's path and [`CONTRADICTED_ABSENCE`],
+/// as an unreadable row `read_vendor` reads is written at `Warn`. That is at
+/// most one line per feed per call, and only for a row this changes.
+///
+/// # And again with stamps taken after the read, since D-0695's ninth repair
+///
+/// The stamps taken before the read can tear. [`manifest_stamps`] asks the
+/// root only when no manifest answered with a time, so a root away for the
+/// five manifest `stat` calls and back for its own check stamps five missing
+/// manifests under a root that is a directory: an empty store's key, over a
+/// store that holds a manifest. Away again once `read_all`'s own check has
+/// passed, every row reads absent, and those stamps could have read each one,
+/// so this changed nothing: the request was answered an empty store, and the
+/// read was kept under the torn key. A review met it with a root renamed aside
+/// and back in a tight loop.
+///
+/// So [`census_now_stamping`] stamps again after the read when any row still
+/// reads absent, and hands those stamps here too. An absence is served only
+/// where both stampings found no manifest, below a root both saw as a
+/// directory. With the root back, the stamps taken again find the manifest
+/// the read missed, and with it away they see no directory, so the row is
+/// served unreadable and nothing is kept. It asks each row its own stamp, so a manifest rewritten
+/// for another feed in between changes no absence, while a first manifest
+/// installed for this feed in between is served unreadable to that request,
+/// which cannot tell it from a root that came back.
+///
+/// What is left: stamps taken again that tear the same way vouch for the
+/// absence too. A root that is away for both stampings' manifest `stat` calls
+/// and for the read, and back for both root checks and for `read_all`'s own,
+/// is still answered an empty store, and that read is kept under the torn key
+/// and served, without reading, to a later request whose stamps tear the same
+/// way, until a request whose stamps do not. `docs/06-limits.md` states it.
+fn refuse_contradicted_absences(stamps: &CensusStamps, censuses: &mut [census::VendorCensus]) {
+    for row in censuses {
+        let vouched = stamps
+            .manifests
+            .get(row.vendor as usize)
+            .is_some_and(|stamp| stamp_could_read(*stamp, stamps.root_is_dir, &row.state));
+        if matches!(row.state, census::Census::Absent) && !vouched {
+            // LOGGED HERE, because the read's own line for this row said
+            // "absent", at `Debug`: below the default floor, and not the state
+            // this request is served. See this function's doc. D-0695.
+            let _dropped_when_filtered = telemetry::emit_if!(
+                telemetry::Level::Warn,
+                "api.census",
+                "absence contradicted by its stamp",
+                "vendor" => telemetry::Value::Str(row.vendor.as_str()),
+                "path" => telemetry::Value::Str(&row.path.display().to_string()),
+                "why" => telemetry::Value::Str(CONTRADICTED_ABSENCE),
+            );
+            row.state = census::Census::Unreadable {
+                reason: CONTRADICTED_ABSENCE.to_owned(),
+                fault: census::Fault::Contradicted,
+            };
+        }
+    }
+}
+
+/// What [`census_now`]'s cache is keyed on: what each vendor manifest's `stat`
+/// said, and whether the store root was a directory. See [`manifest_stamps`].
+///
+/// An equality key, not an ordering: a stamp that moves backwards -- an older
+/// image restored with its older time -- is a different key and is re-read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CensusStamps {
+    /// One per `Vendor::ALL` entry.
+    manifests: Vec<ManifestStamp>,
+    /// Whether the root is a directory; `true` without asking when any
+    /// manifest answered with a modified time.
+    root_is_dir: bool,
+}
+
+impl CensusStamps {
+    /// The modified time the `stat` of `row`'s own manifest found, when it
+    /// found one and could have read `row`: what `calendar_of::cached` keeps a
+    /// calendar derived from `row` under. See [`census_now_stamped`].
+    ///
+    /// One index, not a search: [`manifest_stamps`] builds one stamp per
+    /// `Vendor::ALL` entry in that order, and `Vendor::ALL` is in declaration
+    /// order, appended and never inserted, which `merge::Entry::ids` indexes by
+    /// the same `vendor as usize`. A missing manifest or one whose `stat` failed
+    /// has no time, and a calendar derived under it is not kept, as it was not
+    /// when `cached` asked the manifest itself.
+    ///
+    /// # Only for a row the stamp could have read
+    ///
+    /// [`census_now_stamped`] hands its stamps to every request, including one
+    /// whose census [`read_as_stamped`] refused to keep. A calendar derived
+    /// from such a read was kept under a time the fault had not moved and
+    /// served to every request after it. A review measured it with a store root
+    /// gone after `read_all`'s own check: Dhan read "absent" under a stamp of
+    /// its manifest, the symbol branch of `/calendar.json` derived NIFTY over no
+    /// months and kept that empty calendar, and once the root was back both
+    /// branches answered no session, the peer vote lost Dhan and the ingest
+    /// path observed nothing, until Dhan's manifest was next written. So a time
+    /// is handed only where [`stamp_could_read`] says this row is one the stamp
+    /// could have read, the rule the census cache keeps a whole read by. It is
+    /// asked per row, so a fault on another feed's manifest does not turn this
+    /// feed's calendar cache off, which
+    /// `a_fault_on_another_feeds_manifest_leaves_this_feeds_calendar_kept`
+    /// pins for every caller. D-0695.
+    ///
+    /// # No caller today reaches the refusal
+    ///
+    /// Since D-0695's seventh repair the symbol branch keeps nothing for a name
+    /// its census does not hold, which covers the case above as well. Since the
+    /// eighth, that case's row is served unreadable, and `/calendar.json`
+    /// refuses it before either branch derives. The other callers derive only
+    /// for a row's held series, and a held row under a stamp that found a time
+    /// always passes. So no calendar any caller keeps
+    /// today is decided by this refusal. It stays at the one function every key
+    /// comes from, so a caller added later that derives from a row its stamp
+    /// contradicts is covered, and its unit test pins it.
+    pub(crate) fn modified(&self, row: &census::VendorCensus) -> Option<std::time::SystemTime> {
+        match self.manifests.get(row.vendor as usize).copied() {
+            Some(stamp @ ManifestStamp::At { modified, .. })
+                if stamp_could_read(stamp, self.root_is_dir, &row.state) =>
+            {
+                Some(modified)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// One vendor manifest's part of [`CensusStamps`]: what its `stat` said.
+///
+/// Three outcomes because [`census::read_vendor`] draws the same three lines
+/// from the same call: a file it goes on to read, `NotFound` it calls absent,
+/// and any other error it calls unreadable. Two outcomes sharing one key are two
+/// census states the cache cannot tell apart. D-0695.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ManifestStamp {
+    /// It exists: last modified then, and its status last changed then.
+    At {
+        /// The modified time, which a write moves.
+        modified: std::time::SystemTime,
+        /// The status-change time, which a write, a `chmod` and a `chown` all
+        /// move. See [`manifest_stamps`].
+        changed: StatusChanged,
+    },
+    /// `NotFound`: no manifest, or no directory or root on the way to one.
+    Missing,
+    /// Any other error, by kind: `NotADirectory` where a directory on the way
+    /// is a file, `PermissionDenied` where one may not be searched.
+    Faulted(std::io::ErrorKind),
+}
+
+/// A manifest's status-change time, `st_ctime` in seconds and nanoseconds.
+#[cfg(unix)]
+type StatusChanged = (i64, i64);
+
+/// No status-change time: outside Unix, `std` exposes none, and the key is the
+/// modified time alone, as it was before D-0695.
+#[cfg(not(unix))]
+type StatusChanged = ();
+
+/// What `meta`'s one `stat` said about when its status last changed.
+#[cfg(unix)]
+fn status_changed(meta: &std::fs::Metadata) -> StatusChanged {
+    use std::os::unix::fs::MetadataExt as _;
+    (meta.ctime(), meta.ctime_nsec())
+}
+
+/// Nothing: see [`StatusChanged`].
+#[cfg(not(unix))]
+fn status_changed(_meta: &std::fs::Metadata) -> StatusChanged {}
 
 /// Why one percentage is not a number.
 ///
@@ -4489,8 +5034,8 @@ pub struct Site {
     /// is a single decision over three numbers, and splitting it would let a
     /// request the day window refused still drain the second window.
     pub budgets: std::sync::Mutex<Vec<Option<SharedGovernor>>>,
-    /// The derived trading calendar per instrument, and the manifest mtime it
-    /// was derived at.
+    /// The derived trading calendar per instrument, and the manifest mtime the
+    /// census it was derived from was read under.
     ///
     /// # Why a cache and not a startup snapshot
     ///
@@ -4501,8 +5046,10 @@ pub struct Site {
     /// run of holidays, which is the confident-wrong-answer failure the whole
     /// calendar exists to remove.
     ///
-    /// So it is keyed on the manifest's modification time. A hit is one `stat`
-    /// and one map probe; a miss re-derives. `crate::calendar_of::derive`
+    /// So it is keyed on the manifest's modification time, as stamped before
+    /// the census that supplied the months was read (D-0695; see
+    /// `census_now_stamped`). A hit is one map probe, the `stat` being the
+    /// census's own; a miss re-derives. `crate::calendar_of::derive`
     /// measured 0.28 s for one instrument across 81 months, which is affordable
     /// once after a pull and not affordable on a page that polls every two
     /// seconds — which is the whole reason this field exists rather than the
@@ -5534,9 +6081,24 @@ fn land_one_scheduled(
 /// Read existing index observations for diagnostics, never schedule authority.
 /// The cached calendar is keyed by feed and full identity and invalidated by
 /// manifest changes. No vendor fetch or calendar construction from this response.
+/// A derivation that could not open a bar file the census holds is `None`, as
+/// no observation, and is not cached (D-0695).
 fn ingestion_observations(
     landed: &BrokerWindow,
     site: &Site,
+) -> Option<std::sync::Arc<pull::calendar::Calendar>> {
+    ingestion_observations_reading(landed, site, census_now_stamped)
+}
+
+/// [`ingestion_observations`], with the census it derives from passed in.
+///
+/// Production passes [`census_now_stamped`] and nothing else, for the reason
+/// [`calendar_json_reading`] gives. The cached calendar is keyed on the feed's
+/// manifest as stamped before that census was read. D-0695.
+fn ingestion_observations_reading(
+    landed: &BrokerWindow,
+    site: &Site,
+    census: impl FnOnce(&Site) -> (CensusStamps, CensusNow),
 ) -> Option<std::sync::Arc<pull::calendar::Calendar>> {
     if landed.exchange != "NSE"
         || landed.contract.is_some()
@@ -5550,35 +6112,45 @@ fn ingestion_observations(
     } else {
         "NIFTY"
     };
-    let (fresh, _) = census_now(site);
+    let (stamps, (fresh, _)) = census(site);
     let vendor = fresh
         .iter()
         .find(|census| census.vendor == landed.store_vendor)?;
     let held = census::held_entries(std::slice::from_ref(vendor));
+    // The series' own identity, typed, for `census_holds`: set exactly when a
+    // month is found, so it is also the emptiness check below.
+    let mut identity = None;
     let mut months: Vec<_> = held
         .iter()
         .filter_map(|(series, month)| {
-            (series.exchange.as_str() == "NSE"
+            let spot = series.exchange.as_str() == "NSE"
                 && series.segment.as_str() == "INDEX"
                 && series.symbol.as_str() == symbol
-                && series.contract.is_none())
-            .then_some(*month)
+                && series.contract.is_none();
+            if spot {
+                identity = Some((series.exchange, series.segment, series.symbol));
+            }
+            spot.then_some(*month)
         })
         .collect();
     months.sort_unstable();
     months.dedup();
-    if months.is_empty() {
-        return None;
-    }
-    Some(crate::calendar_of::cached(
+    let identity = identity?;
+    let derived = crate::calendar_of::cached(
         &site.calendars,
         &site.store_root,
         landed.store_vendor,
         "NSE",
         "INDEX",
         symbol,
+        stamps.modified(vendor),
         &months,
-    ))
+        census_holds(Some((vendor, identity))),
+    );
+    // A DERIVATION THAT DID NOT OPEN A HELD FILE OBSERVED LESS THAN THE STORE
+    // HOLDS, and its days would attest nothing it did not read: no observation
+    // rather than a short one. `cached` does not keep it. D-0695.
+    derived.unopened.is_empty().then_some(derived.calendar)
 }
 
 fn land_bodies_scheduled(
@@ -6351,7 +6923,7 @@ fn ladder_refusal(
         .map(|c| &c.state);
 
     let gate = match state {
-        Some(census::Census::Unreadable { reason }) => {
+        Some(census::Census::Unreadable { reason, .. }) => {
             return Some(format!(
                 "the pull order cannot be checked, so nothing was asked for. \
                  {}'s census exists and would not load — {reason}. Until it \
@@ -14288,15 +14860,19 @@ async fn bars_get(
 /// this build has no feed for — render the same shape, so they share it. A
 /// second copy is a second place for the two to drift into describing the
 /// store differently.
+///
+/// The status is the caller's: those two answer 400, and [`unlocatable`]
+/// answers 503 where a census could not be read. D-0695.
 fn bars_refusal(
     site: &Site,
+    status: axum::http::StatusCode,
     symbol: &str,
     segment: &str,
     vendor: &str,
-    trouble: &'static str,
+    trouble: &str,
 ) -> (axum::http::StatusCode, String) {
     (
-        axum::http::StatusCode::BAD_REQUEST,
+        status,
         render::bars_page(&render::BarsView {
             symbol,
             segment,
@@ -14318,7 +14894,7 @@ fn bars_refusal(
 
 /// The exchange and segment to read one symbol's bars from.
 ///
-/// Empty strings mean **nothing held under that name and nothing asked** — the
+/// [`Unlocated`] means **nothing placed under that name and nothing asked** — the
 /// caller refuses rather than probing a guessed path. Extracted from
 /// [`bars_html`] rather than inlined because that function is already at
 /// clippy's line ceiling, and because the precedence rule below is worth
@@ -14344,66 +14920,230 @@ fn bars_refusal(
 /// worse answer. Refused only when the census does not hold the name at all,
 /// which is the honest reply to "show me the bars for something nothing has
 /// stored". D-0339.
-fn locate_series(site: &Site, query: &str, symbol: &str) -> Option<(String, String)> {
+///
+/// # The asked feed's own identity, and only one of it
+///
+/// [`bars_html`] opens `?vendor=`'s file (Dhan when the parameter is absent,
+/// `ingest::parse_vendor`'s default), so the exchange and segment must be the
+/// ones THAT feed filed the name under. The walk used to take the first vendor
+/// in `Vendor::ALL` order that held the name: Groww holding `ADANIENT` as an
+/// INDEX series sent `?vendor=dhan` to Dhan's INDEX path, and it answered 404
+/// for bars filed one directory over under CASH. The asked feed is now walked
+/// first, and the others after it in `Vendor::ALL` order as before.
+///
+/// A feed that holds one name under two identities would have its census supply
+/// two different answers, and the walk silently took whichever sorted first,
+/// where `/calendar.json` refuses the same census as ambiguous. That is refused
+/// here too, with both identities named. Only the halves the census SUPPLIES
+/// are compared: a caller who gave `?segment=CASH` has already chosen between
+/// `NSE/CASH` and `NSE/INDEX`, and the census is asked only for the exchange.
+///
+/// An unreadable census holds nothing this can see, so it is stepped over as
+/// before, and its note is carried to the refusal: "no feed holds that name" is
+/// not the true reason when one feed's counter could not be read.
+///
+/// # Except the ASKED feed's own, which is refused, not stepped over. D-0695.
+///
+/// Stepping over it walked on to the other feeds, and when one of them held the
+/// name its identity was returned and the ASKED feed's file opened at it --
+/// exactly the other-feed guess the paragraph above refuses -- and the note was
+/// dropped, because notes surfaced only when nothing was found. The page then
+/// answered for a path nothing placed, with no word that the feed's own counter
+/// could not be read: the fallback that hides a failure `CLAUDE.md` §4 bans.
+/// Only that census can say where that feed filed the name, so when it cannot
+/// be read and the caller did not give the pair, the route refuses and names
+/// it, as `/calendar.json` does.
+fn locate_series(site: &Site, query: &str, symbol: &str) -> Result<(String, String), Unlocated> {
     let asked_exchange = param(query, "exchange");
     let asked_segment = param(query, "segment");
     // AN EXPLICIT PAIR WINS OUTRIGHT AND COSTS NO CENSUS READ. The census
     // answers a question the caller did not ask; it must never override one
     // they did, and it must not be walked to confirm one either.
     if !asked_exchange.is_empty() && !asked_segment.is_empty() {
-        return Some((asked_exchange, asked_segment));
+        return Ok((asked_exchange, asked_segment));
     }
-    // THE CACHED CENSUS, walked per vendor in `Vendor::ALL` order exactly as
-    // the direct `read_all` was, so the first holder found is the same one.
-    // What changed is only that an unchanged manifest is not re-read for every
-    // hand-typed `/bars` URL. D-0686.
+    // THE CACHED CENSUS, so an unchanged manifest is not re-read for every
+    // hand-typed `/bars` URL. D-0686. At most `Vendor::ALL` censuses, each
+    // walked once through `held_entries`, as before.
     let (censuses, _) = census_now(site);
-    let located = censuses
+    let asked_vendor = ingest::parse_vendor(&param(query, "vendor"));
+    let asked_first = censuses
         .iter()
-        .flat_map(|c| census::held_entries(std::slice::from_ref(c)))
-        .find(|(series, _)| series.contract.is_none() && series.symbol.as_str() == symbol)
-        .map(|(series, _)| {
-            (
-                series.exchange.as_str().to_owned(),
-                series.segment.as_str().to_owned(),
-            )
-        });
-    // NOTHING HELD AND NOTHING ASKED IS `None`, NOT AN EMPTY PAIR. There is no
-    // path to probe, and guessing one answers "does not exist" for a reason
+        .filter(|census| Some(census.vendor) == asked_vendor);
+    let the_rest = censuses
+        .iter()
+        .filter(|census| Some(census.vendor) != asked_vendor);
+    // What the census would supply: only the halves the caller left out.
+    let supplied = |identity: (
+        brutex_core::instrument::Exchange,
+        brutex_core::instrument::Segment,
+    )| {
+        (
+            asked_exchange.is_empty().then_some(identity.0),
+            asked_segment.is_empty().then_some(identity.1),
+        )
+    };
+    let mut unreadable = Vec::new();
+    for vendor_census in asked_first.chain(the_rest) {
+        if matches!(vendor_census.state, census::Census::Unreadable { .. }) {
+            // THE ASKED FEED'S OWN COUNTER IS THE ONLY AUTHORITY FOR ITS PATH.
+            if Some(vendor_census.vendor) == asked_vendor {
+                return Err(Unlocated::AskedUnreadable(vendor_census.note()));
+            }
+            unreadable.push(vendor_census.note());
+            continue;
+        }
+        let mut held = None;
+        for (series, _) in census::held_entries(std::slice::from_ref(vendor_census)) {
+            if series.contract.is_some() || series.symbol.as_str() != symbol {
+                continue;
+            }
+            let identity = (series.exchange, series.segment);
+            match held {
+                None => held = Some(identity),
+                Some(seen) if supplied(seen) == supplied(identity) => {}
+                Some(seen) => {
+                    return Err(Unlocated::Ambiguous {
+                        vendor: vendor_census.vendor,
+                        first: seen,
+                        second: identity,
+                    });
+                }
+            }
+        }
+        if let Some((exchange, segment)) = held {
+            return Ok((
+                if asked_exchange.is_empty() {
+                    exchange.as_str().to_owned()
+                } else {
+                    asked_exchange
+                },
+                if asked_segment.is_empty() {
+                    segment.as_str().to_owned()
+                } else {
+                    asked_segment
+                },
+            ));
+        }
+    }
+    // NOTHING HELD AND NOTHING ASKED IS A REFUSAL, NOT AN EMPTY PAIR. There is
+    // no path to probe, and guessing one answers "does not exist" for a reason
     // that is not the true one — the whole defect this replaces.
-    let (found_exchange, found_segment) = located?;
-    Some((
-        if asked_exchange.is_empty() {
-            found_exchange
-        } else {
-            asked_exchange
-        },
-        if asked_segment.is_empty() {
-            found_segment
-        } else {
-            asked_segment
-        },
-    ))
+    Err(Unlocated::NotHeld(unreadable))
 }
 
-/// The refusal for a symbol no feed in this store holds.
+/// Why [`locate_series`] found no exchange and segment to read.
+#[derive(Debug, PartialEq, Eq)]
+enum Unlocated {
+    /// No census that could be read holds a spot series under the name. Each
+    /// census that could NOT be read is carried as its note, because a name one
+    /// of them holds is invisible from here.
+    NotHeld(Vec<String>),
+    /// The census of the feed whose file this route opens could not be read,
+    /// carried as its note. Another feed's identity would be a guess. D-0695.
+    AskedUnreadable(String),
+    /// The first feed walked that holds the name would supply two different
+    /// identities for it.
+    Ambiguous {
+        /// Whose census holds both.
+        vendor: Vendor,
+        /// The identity met first.
+        first: (
+            brutex_core::instrument::Exchange,
+            brutex_core::instrument::Segment,
+        ),
+        /// The identity that disagreed with it.
+        second: (
+            brutex_core::instrument::Exchange,
+            brutex_core::instrument::Segment,
+        ),
+    },
+}
+
+/// A query's `symbol` in the case the store files it under.
+///
+/// Every stored name went through `Symbol::new`, which upper-cases `a-z`, so
+/// `adanient` and `ADANIENT` name one series. `/bars` and `/calendar.json`
+/// compared the raw parameter byte for byte, refusing or answering zero
+/// sessions for a name the census holds. A value `Symbol::new` refuses names
+/// nothing the store could hold and is returned unchanged, so it still matches
+/// nothing and is still refused or answered empty exactly as before.
+fn stored_case(raw: String) -> String {
+    match brutex_core::symbol::Symbol::new(&raw) {
+        Ok(symbol) => symbol.as_str().to_owned(),
+        Err(_) => raw,
+    }
+}
+
+/// The refusal for a symbol [`locate_series`] could not place.
 ///
 /// Its own function so [`bars_html`] stays under clippy's line ceiling, and
 /// because the sentence is the point: it names why the route could not LOOK,
 /// which is a different fact from a month being absent — and answering the
 /// second when the first is true is what the `"INDEX"` default did.
-fn unlocatable(site: &Site, symbol: &str) -> (axum::http::StatusCode, String) {
-    bars_refusal(
-        site,
-        symbol,
-        "—",
-        "—",
-        "no feed in this store holds a spot series under that name, so there \
-         is no exchange or segment to read it from. Refused rather than \
-         guessed: a guessed path answers \"does not exist\" for a reason that \
-         is not the true one. Pass ?exchange= and ?segment= explicitly to \
-         address a series the census does not carry.",
-    )
+///
+/// # 503 where a census could not be read, since D-0695's eleventh repair
+///
+/// Every arm answered 400. Two of them refuse because a census could not be
+/// read: the asked feed's own, or another feed's when no census that could be
+/// read holds the name. That is the store's fault, not the request's, and the
+/// same request is answered once the census reads again, as
+/// [`CONTRADICTED_ABSENCE`] tells the reader of one such census ("The next
+/// request reads again"). `/calendar.json` answers the same census state 503.
+/// So those two arms answer 503, and a name no census holds and a name one
+/// feed holds twice are still refused with 400.
+fn unlocatable(site: &Site, symbol: &str, why: &Unlocated) -> (axum::http::StatusCode, String) {
+    use axum::http::StatusCode;
+    const EXPLICIT: &str = "Pass ?exchange= and ?segment= explicitly to address a series the \
+                            census does not place.";
+    let (status, sentence) = match *why {
+        Unlocated::NotHeld(ref unreadable) if unreadable.is_empty() => (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "no feed in this store holds a spot series under that name, so there \
+                 is no exchange or segment to read it from. Refused rather than \
+                 guessed: a guessed path answers \"does not exist\" for a reason that \
+                 is not the true one. {EXPLICIT}"
+            ),
+        ),
+        Unlocated::NotHeld(ref unreadable) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "no census that could be read holds a spot series under that name, and \
+                 {} could not be read: {}. Whether one of them holds it is unknown, so \
+                 no path was guessed. {EXPLICIT}",
+                unreadable.len(),
+                unreadable.join(" · ")
+            ),
+        ),
+        Unlocated::AskedUnreadable(ref note) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "the asked feed's own census could not be read: {note}. This page opens \
+                 that feed's file, and only its census says which exchange and segment \
+                 it filed the name under; another feed's answer would be a guessed path, \
+                 and a guessed path answers \"does not exist\" for a reason that is not \
+                 the true one. No path was guessed. {EXPLICIT}"
+            ),
+        ),
+        Unlocated::Ambiguous {
+            vendor,
+            first,
+            second,
+        } => (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "ambiguous stored symbol: {} holds {symbol} as {}/{} and as {}/{}, two \
+                 different series. Refused rather than picking one. {EXPLICIT}",
+                vendor.as_str(),
+                first.0.as_str(),
+                first.1.as_str(),
+                second.0.as_str(),
+                second.1.as_str()
+            ),
+        ),
+    };
+    bars_refusal(site, status, symbol, "—", "—", &sentence)
 }
 
 /// One month of bars, or a named refusal.
@@ -14427,11 +15167,12 @@ fn unlocatable(site: &Site, symbol: &str) -> (axum::http::StatusCode, String) {
 /// that split it in the first place.
 #[must_use]
 pub fn bars_html(site: &Site, query: &str) -> (axum::http::StatusCode, String) {
-    let symbol = param(query, "symbol");
+    let symbol = stored_case(param(query, "symbol"));
     // THE SEGMENT COMES FROM THE CENSUS, NEVER FROM A DEFAULT — see
     // `locate_series` for what the default was and what it cost.
-    let Some((exchange, segment)) = locate_series(site, query, &symbol) else {
-        return unlocatable(site, &symbol);
+    let (exchange, segment) = match locate_series(site, query, &symbol) {
+        Ok(pair) => pair,
+        Err(why) => return unlocatable(site, &symbol, &why),
     };
     // ONE PARSER, shared with the pull form. This route had its own copy that
     // compared with `==` while `ingest::parse_vendor` used
@@ -14444,6 +15185,7 @@ pub fn bars_html(site: &Site, query: &str) -> (axum::http::StatusCode, String) {
     let Some(vendor) = ingest::parse_vendor(&asked_vendor) else {
         return bars_refusal(
             site,
+            axum::http::StatusCode::BAD_REQUEST,
             &symbol,
             &segment,
             "—",
@@ -14463,6 +15205,7 @@ pub fn bars_html(site: &Site, query: &str) -> (axum::http::StatusCode, String) {
     let Some(month) = month else {
         return bars_refusal(
             site,
+            axum::http::StatusCode::BAD_REQUEST,
             &symbol,
             &segment,
             vendor.as_str(),
@@ -15490,23 +16233,33 @@ fn announce_universe(read: &Read) -> bool {
 ///
 /// # Held by the OS, released by the OS
 ///
-/// `File::try_lock` is an advisory lock on the open file description. It is
-/// released when the handle closes, which includes a process that was killed —
-/// so an abandoned lock file never wedges the next start, the way a PID file
-/// written by hand does. The handle is kept alive for the whole session by this
-/// value; nothing reads it again.
+/// `File::try_lock` is an advisory lock on the open file description. The
+/// kernel releases it when the last descriptor referring to that description
+/// closes, which includes a process that was killed — so an abandoned lock
+/// file never wedges the next start, the way a PID file written by hand does.
+/// The handle is kept alive for the whole session by this value.
+///
+/// A live process releases it by an explicit unlock, never by closing its
+/// handle: a descriptor duplicated into a child another thread spawned would
+/// otherwise keep the lock alive after this value is gone, and the next serve
+/// over the same store would be refused by an instance that no longer exists
+/// (D-0693).
 #[derive(Debug)]
 struct ServeLock {
     /// The locked handle. `None` when this process already holds the lock — see
     /// [`take_serve_lock`].
-    _held: Option<std::fs::File>,
+    held: Option<store::flock::Flock<std::fs::File>>,
     /// The store this lock is over, canonical, so [`Drop`] releases the same
     /// key that was taken.
     root: PathBuf,
 }
 
 impl Drop for ServeLock {
+    /// Unlocks the file BEFORE freeing the in-process key. The other order
+    /// leaves a window in which a second serve in this process takes the key,
+    /// finds the file still locked, and refuses itself.
     fn drop(&mut self) {
+        drop(self.held.take());
         if let Ok(mut held) = serving_roots().lock() {
             held.remove(&self.root);
         }
@@ -15583,7 +16336,7 @@ fn take_serve_lock(store_root: &Path, addr: std::net::SocketAddr) -> Result<Serv
         Err(poisoned) => {
             if !poisoned.into_inner().insert(key.clone()) {
                 return Ok(ServeLock {
-                    _held: None,
+                    held: None,
                     root: key,
                 });
             }
@@ -15591,7 +16344,7 @@ fn take_serve_lock(store_root: &Path, addr: std::net::SocketAddr) -> Result<Serv
         Ok(mut held) => {
             if !held.insert(key.clone()) {
                 return Ok(ServeLock {
-                    _held: None,
+                    held: None,
                     root: key,
                 });
             }
@@ -15613,35 +16366,38 @@ fn take_serve_lock(store_root: &Path, addr: std::net::SocketAddr) -> Result<Serv
             ));
         }
     };
-    if let Err(refusal) = file.try_lock() {
-        // WHO HOLDS IT, NOT MERELY THAT SOMEBODY DOES. The holder wrote its
-        // address and pid into this file after taking the lock, and reading a
-        // locked file is not itself a locked operation.
-        let held_by = std::fs::read_to_string(&path).unwrap_or_default();
-        let held_by = held_by.trim();
-        release_root(&key);
-        return Err(format!(
-            "REFUSED: another brutex api is already serving this store.\n  \
-             store: {}\n  lock:  {} ({refusal})\n  held by: {}\n\
-             Two servers over one store run two autopilots against one \
-             append-only tree and spend one shared vendor token's quota twice. \
-             A different port is not a second store. Stop the other instance, \
-             or point this one at another BRUTEX_STORE.",
-            store_root.display(),
-            path.display(),
-            if held_by.is_empty() {
-                "an instance that had not yet stamped the file"
-            } else {
-                held_by
-            }
-        ));
-    }
+    let file = match store::flock::Flock::try_lock(file, path.clone()) {
+        Ok(held) => held,
+        Err(refusal) => {
+            // WHO HOLDS IT, NOT MERELY THAT SOMEBODY DOES. The holder wrote its
+            // address and pid into this file after taking the lock, and reading a
+            // locked file is not itself a locked operation.
+            let held_by = std::fs::read_to_string(&path).unwrap_or_default();
+            let held_by = held_by.trim();
+            release_root(&key);
+            return Err(format!(
+                "REFUSED: another brutex api is already serving this store.\n  \
+                 store: {}\n  lock:  {} ({refusal})\n  held by: {}\n\
+                 Two servers over one store run two autopilots against one \
+                 append-only tree and spend one shared vendor token's quota twice. \
+                 A different port is not a second store. Stop the other instance, \
+                 or point this one at another BRUTEX_STORE.",
+                store_root.display(),
+                path.display(),
+                if held_by.is_empty() {
+                    "an instance that had not yet stamped the file"
+                } else {
+                    held_by
+                }
+            ));
+        }
+    };
     // STAMPED AFTER THE LOCK IS HELD, so the value a refused instance reads was
     // written by the instance that actually holds it.
     let stamp = format!("addr={addr} pid={}\n", std::process::id());
-    let _ignored_stamp = std::io::Write::write_all(&mut (&file), stamp.as_bytes());
+    let _ignored_stamp = std::io::Write::write_all(&mut &*file, stamp.as_bytes());
     Ok(ServeLock {
-        _held: Some(file),
+        held: Some(file),
         root: key,
     })
 }
@@ -16637,6 +17393,7 @@ mod tests {
             path: PathBuf::from("/nonexistent/ladder-gate/broken.man"),
             state: census::Census::Unreadable {
                 reason: "entry 4 fails its own checksum".to_owned(),
+                fault: census::Fault::Refused,
             },
         }];
         let why = ladder_refusal(
@@ -17647,6 +18404,77 @@ mod tests {
         }
     }
 
+    /// AN OBSERVATION DERIVED WHILE A HELD BAR FILE WOULD NOT OPEN IS WITHHELD,
+    /// AND NOT KEPT. D-0695.
+    ///
+    /// Zerodha's daily NIFTY bar is landed, so its census holds that month at
+    /// the daily rung. With `bars/zerodha` moved aside for one call, the
+    /// derivation behind the observation opens nothing the census holds. That
+    /// call used to answer an empty calendar and keep it under the manifest's
+    /// modified time, which the fault does not move, so the next call observed
+    /// nothing either, with the bars back. Now the call that meets it answers no
+    /// observation, and the next derives again and sees the day the bar proves:
+    /// open, with no minute file to size it.
+    #[test]
+    fn an_observation_derived_while_the_bars_were_away_is_withheld_and_not_kept() {
+        use pull::fetch::{RawRow, RawWindow};
+        use pull::session::{IST_OFFSET_SECS, Window};
+        use pull::vendor::{Feed, Granularity, Listing, Transport};
+        let (site, _) = readiness_fixture("observations-away", "INE002A01018");
+        let date = day(2026, 9, 4);
+        let midnight = i64::from(date.days_from_epoch()) * 86_400 - IST_OFFSET_SECS;
+        let Transport::Http(spec) = Feed::Zerodha.descriptor().transport else {
+            panic!("HTTP descriptor");
+        };
+        let window = Window::new(date, date).unwrap();
+        let mut landed = BrokerWindow {
+            listing: Listing::Index,
+            contract: None,
+            unfetched: None,
+            instrument: "NIFTY".to_owned(),
+            origin: "test only".to_owned(),
+            spec,
+            exchange: "NSE",
+            segment: "INDEX",
+            store_vendor: Vendor::Zerodha,
+            window,
+            granularity: Granularity::Day1,
+            bodies: vec![(
+                window,
+                RawWindow {
+                    rows: vec![RawRow {
+                        timestamp: midnight,
+                        open: 100,
+                        high: 100,
+                        low: 100,
+                        close: 100,
+                        volume: 0,
+                        open_interest: None,
+                    }],
+                },
+            )],
+        };
+        let daily = super::land_one(&landed, &site);
+        assert_eq!(daily.bars_committed, 1, "{:?}", daily.failures);
+        landed.granularity = Granularity::Minute1;
+        let bars = site.store_root.join("bars").join("zerodha");
+        let aside = bars.with_extension("aside");
+        std::fs::rename(&bars, &aside).unwrap();
+        let away = super::ingestion_observations(&landed, &site);
+        std::fs::rename(&aside, &bars).unwrap();
+        assert!(
+            away.is_none(),
+            "a derivation that opened no held file observes nothing: {:?}",
+            away.map(|calendar| calendar.sessions())
+        );
+        let back = super::ingestion_observations(&landed, &site)
+            .expect("the next call derives again, with the bars back");
+        assert_eq!(
+            back.kind_of(i64::from(date.days_from_epoch())),
+            pull::calendar::DayKind::OpenLengthUnmeasured
+        );
+    }
+
     async fn cash_month_replay_fixture(
         tag: &str,
     ) -> (Site, BrokerWindow, brutex_core::instrument::InstrumentKey) {
@@ -18419,15 +19247,21 @@ mod tests {
 
         // THE OTHER INSTANCE. It writes its own stamp first, so the refusal can
         // quote it the way a real holder's would be quoted.
-        let squatter = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(root.join(SERVE_LOCK))
-            .expect("the lock file");
-        squatter.try_lock().expect("nothing else holds it");
-        std::io::Write::write_all(&mut (&squatter), b"addr=127.0.0.1:8080 pid=4242\n")
+        // A guard, so the `drop` below unlocks explicitly: this test binary
+        // spawns children, and a lock released only by close can survive in
+        // one of them and refuse the take that must succeed (D-0693).
+        let squatter = store::flock::Flock::try_lock(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(root.join(SERVE_LOCK))
+                .expect("the lock file"),
+            root.join(SERVE_LOCK),
+        )
+        .expect("nothing else holds it");
+        std::io::Write::write_all(&mut &*squatter, b"addr=127.0.0.1:8080 pid=4242\n")
             .expect("stamp");
 
         let refused = take_serve_lock(&root, "127.0.0.1:9999".parse().expect("an address"))
@@ -18468,6 +19302,41 @@ mod tests {
         let taken = take_serve_lock(&root, "127.0.0.1:9999".parse().expect("an address"))
             .expect("the store is free once the other instance is gone");
         drop(taken);
+    }
+
+    /// **A dropped serve lock is released while a duplicate of its descriptor
+    /// is still open.** D-0693.
+    ///
+    /// The duplicate is the model of the reference a child spawned by another
+    /// thread holds until its exec. While closing the handle was the release,
+    /// that reference kept `serve.lock` held after the `ServeLock` was gone,
+    /// and the next serve over the same store was refused as "already serving
+    /// this store" by an instance that no longer existed.
+    #[test]
+    fn a_dropped_serve_lock_is_released_despite_a_duplicated_descriptor() {
+        let root = crate::scratch::path("serve-lock-dup");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let addr: std::net::SocketAddr = "127.0.0.1:9999".parse().expect("an address");
+
+        let first = take_serve_lock(&root, addr).expect("a free store");
+        let child = first
+            .held
+            .as_deref()
+            .expect("the first serve in this process holds the file lock")
+            .try_clone()
+            .expect("the duplicate a spawned child would hold");
+        drop(first);
+
+        let second = take_serve_lock(&root, addr)
+            .expect("the dropped serve lock was released despite the duplicate");
+        assert!(
+            second.held.is_some(),
+            "and this serve holds the file lock itself, not an in-process pass"
+        );
+        drop(second);
+        drop(child);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A configured store is an existing capability, never a directory the
@@ -21707,9 +22576,9 @@ mod tests {
         assert_eq!(
             status,
             axum::http::StatusCode::BAD_REQUEST,
-            "a refusal is a 400 and a rendered page — the same status every \
-             other arm of this route answers with, never a 500 and never a 200 \
-             carrying an empty month"
+            "a name no census holds is refused with a 400 and a rendered page, \
+             never a 500 and never a 200 carrying an empty month; only a census \
+             that could not be read answers 503 (D-0695)"
         );
         assert!(
             body.contains("no feed in this store holds a spot series under that name"),
@@ -22083,11 +22952,14 @@ mod tests {
             );
             return;
         };
+        // A probe that ACQUIRES the real lock releases it through the guard's
+        // explicit unlock before `run` takes it, never by close (D-0693).
+        let lock_path = root.join("serve.lock");
         let busy = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .open(root.join("serve.lock"))
-            .is_ok_and(|file| file.try_lock().is_err());
+            .open(&lock_path)
+            .is_ok_and(|file| store::flock::Flock::try_lock(file, lock_path.clone()).is_err());
         if busy {
             // A HELD STORE IS A REFUSAL AND IT NAMES THE HOLDER. This is the
             // same path `run_refuses_a_store_another_server_holds` pins; what is
@@ -29991,8 +30863,9 @@ async fn indexmap_json(
 ///
 /// # Cost
 ///
-/// One `stat` and one map probe on a hit; a re-derivation only after the
-/// vendor's manifest has been rewritten, which is what a pull does. See
+/// One map probe per series on a hit, keyed on the stamp the census's own
+/// `stat` calls already took; a re-derivation only after the vendor's manifest
+/// has been rewritten, which is what a pull does. See
 /// [`crate::calendar_of::cached`].
 /// The condition vocabulary, so a stored mask can be read as names.
 ///
@@ -30141,6 +31014,121 @@ fn spot_months_by_identity(
     by_series
 }
 
+/// One `/calendar.json` answer: status, content type, body.
+type CalendarAnswer = (
+    axum::http::StatusCode,
+    [(axum::http::HeaderName, &'static str); 1],
+    String,
+);
+
+/// The answer `/calendar.json` gives a feed whose census could not be read.
+///
+/// # Why a refusal, and not the empty calendar it used to be
+///
+/// An unreadable census contributes no entry, so both branches below found no
+/// series and answered `200 {"sessions":0,"days":[]}` -- byte for byte the
+/// answer for a feed that holds nothing. The ingest page reads that as "the
+/// store holds no bars for this feed", which is a claim about the store made
+/// from a fact about its counter: the fallback that hides a failure `CLAUDE.md`
+/// §4 bans, and the one D-0124 already refused on `/store.json`. So the answer
+/// is 503, the state is named, and the census's own note says which file and
+/// why. An ABSENT census is still the ordinary state and still answers 200.
+///
+/// `own` is the asked feed's census, found once by `calendar_json` for this
+/// and for `census_holds`, so the route searches the census rows once.
+fn unreadable_calendar(own: Option<&census::VendorCensus>, feed: Vendor) -> Option<CalendarAnswer> {
+    let damaged = own.filter(|census| matches!(census.state, census::Census::Unreadable { .. }))?;
+    Some((
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/json; charset=utf-8",
+        )],
+        serde_json::json!({
+            "status": "refused",
+            "feed": feed.as_str(),
+            "census": "unreadable",
+            "refusal": format!(
+                "{}. This feed's census could not be read, so which series it holds \
+                 is unknown and no calendar was derived; an empty one would claim \
+                 the store holds no bars.",
+                damaged.note()
+            ),
+        })
+        .to_string(),
+    ))
+}
+
+/// Whether a census holds one spot series' file at a rung and a month: what
+/// `calendar_of::cached` asks of each file a derivation could not open.
+///
+/// One hash probe into the manifest `census_now` already read, per file that
+/// did not open. `None` -- no census for the feed, or no series the census
+/// names -- holds nothing, so an unopened file of a series the census does not
+/// hold keeps its calendar, as a month held at one rung and not the other does.
+fn census_holds(
+    held: Option<(&census::VendorCensus, SpotIdentity)>,
+) -> impl Fn(store::path::Timeframe, store::path::YearMonth) -> bool + '_ {
+    move |rung, month| {
+        held.is_some_and(|(census, (exchange, segment, symbol))| {
+            census
+                .rows_for(
+                    &census::Series {
+                        contract: None,
+                        exchange,
+                        segment,
+                        symbol,
+                        timeframe: rung,
+                    }
+                    .at(month),
+                )
+                .is_some()
+        })
+    }
+}
+
+/// The answer `/calendar.json` gives when a bar file this feed's census holds
+/// could not be opened for the derivation.
+///
+/// # Why a refusal, and why it is not kept
+///
+/// `calendar_of::derive` names a month it could not open and derives the
+/// calendar without it, and `cached` used to throw that report away. So a bar
+/// directory gone for one request answered `200 {"sessions":0}` -- the empty
+/// calendar `unreadable_calendar` refuses for an unreadable census -- and the
+/// days a month that did not open would have proved were closed days in any
+/// calendar that spanned it. The census says the file is there, so the store
+/// disagrees with its own counter for this read. The answer is 503, the first
+/// refusal is quoted, and the count says how many there were: a store root gone
+/// for the request refuses every held month, and naming each would grow the
+/// body with the store. `cached` keeps no such derivation, so the next request
+/// derives again. D-0695.
+fn unopened_calendar(feed: Vendor, symbol: &str, unopened: &[String]) -> CalendarAnswer {
+    (
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/json; charset=utf-8",
+        )],
+        serde_json::json!({
+            "status": "refused",
+            "feed": feed.as_str(),
+            "symbol": symbol,
+            "bars": "unopened",
+            "unopened": unopened.len(),
+            "refusal": format!(
+                "{} bar file(s) this feed's census holds for {symbol} could not be \
+                 opened, the first: {}. The days they would prove are unknown, so no \
+                 calendar is answered; one derived without them would put a holiday \
+                 in the calendar that never happened.",
+                unopened.len(),
+                unopened.first().map_or("", String::as_str),
+            ),
+        })
+        .to_string(),
+    )
+}
+
 fn calendar_conflict_json(
     feed: Vendor,
     symbol: &str,
@@ -30167,11 +31155,27 @@ fn calendar_conflict_json(
 async fn calendar_json(
     axum::extract::State(site): axum::extract::State<Loaded>,
     uri: axum::http::Uri,
-) -> (
-    axum::http::StatusCode,
-    [(axum::http::HeaderName, &'static str); 1],
-    String,
-) {
+) -> CalendarAnswer {
+    calendar_json_reading(&site, &uri, census_now_stamped)
+}
+
+/// [`calendar_json`], with the census it derives from passed in.
+///
+/// Production passes [`census_now_stamped`] and nothing else. The parameter is
+/// here so a test can install a newer manifest AFTER this route's census is
+/// read and before its calendar is kept -- the interleaving that decides
+/// whether the calendar is kept under its census's stamp or a later one -- on
+/// every run, as [`census_now_reading`]'s parameter does for the census. D-0695.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one stamped census shared by both branches, refused once before either when \
+              it cannot be read; splitting the branches apart would re-take it per branch"
+)]
+fn calendar_json_reading(
+    site: &Site,
+    uri: &axum::http::Uri,
+    census: impl FnOnce(&Site) -> (CensusStamps, CensusNow),
+) -> CalendarAnswer {
     let json = "application/json; charset=utf-8";
     let query = uri.query().unwrap_or("");
     let asked = param(query, "feed");
@@ -30182,6 +31186,24 @@ async fn calendar_json(
             no_such_feed_json(&asked),
         );
     };
+    // ONE STAMPED CENSUS FOR EITHER BRANCH, and a feed whose census cannot be
+    // read is refused before either derives anything. See `unreadable_calendar`.
+    // Its stamps key every calendar either branch keeps: see
+    // `census_now_stamped`.
+    let (stamps, (fresh, _)) = census(site);
+    // THE ASKED FEED'S OWN ROW, FOUND ONCE: the refusal just below reads its
+    // state, and each branch asks it through `census_holds` whether a bar file
+    // a derivation could not open is one it holds. `census_now` yields one row
+    // per `Vendor::ALL` entry, so this sees at most `FEED_COUNT` rows.
+    let own = fresh.iter().find(|census| census.vendor == feed);
+    if let Some(refused) = unreadable_calendar(own, feed) {
+        return refused;
+    }
+    // THE KEY EVERY CALENDAR BELOW IS KEPT UNDER: this feed's manifest as it
+    // was stamped before `fresh` was read, never a `stat` taken after it, and
+    // only when that stamp could have read this feed's row. See
+    // `census_now_stamped` and `CensusStamps::modified`.
+    let stamp = own.and_then(|row| stamps.modified(row));
     // NO SYMBOL MEANS THE EXCHANGE'S OWN CALENDAR, AGREED RATHER THAN BORROWED.
     //
     // This used to answer 400, on the reasoning that a derived calendar is one
@@ -30196,7 +31218,7 @@ async fn calendar_json(
     // instrument this feed holds and agree them, and to ship the agreement's
     // own evidence beside it — who it was derived from, and every day they read
     // differently. See `calendar_of::agree` for why that is a union.
-    let symbol = param(query, "symbol");
+    let symbol = stored_case(param(query, "symbol"));
     if symbol.is_empty() {
         // A FRESH CENSUS, NOT `site.entries`.
         //
@@ -30229,8 +31251,8 @@ async fn calendar_json(
         // per-request manifest read. This was a direct `read_all` -- every
         // vendor's whole manifest, read on every request -- beside a cache
         // that already answered the same question from one `stat` per vendor.
-        // A rewritten manifest moves its stamp and is re-read. D-0686.
-        let (fresh, _) = census_now(&site);
+        // A rewritten manifest moves its stamp and is re-read. D-0686. Taken
+        // once, above the branch, as `fresh`.
         let mut readings: Vec<(String, pull::calendar::Calendar)> = Vec::new();
         // THE SAME FRESH READING, WALKED ONCE. Filtering `site.entries` here
         // would have re-introduced the staleness two lines after fixing it —
@@ -30301,15 +31323,25 @@ async fn calendar_json(
             let (exchange, segment, symbol) = key;
             let months: Vec<store::path::YearMonth> =
                 by_series.get(&key).cloned().unwrap_or_default();
-            let calendar = crate::calendar_of::cached(
+            let derived = crate::calendar_of::cached(
                 &site.calendars,
                 &site.store_root,
                 feed,
                 exchange.as_str(),
                 segment.as_str(),
                 symbol.as_str(),
+                stamp,
                 &months,
+                census_holds(own.map(|census| (census, key))),
             );
+            // ONE INSTRUMENT'S HELD FILE THAT DID NOT OPEN REFUSES THE AGREEMENT.
+            // Left out, it votes for nothing, which the union reads as no
+            // session wherever it was the one witness, and that agreement would
+            // be answered as the exchange's. See `unopened_calendar`.
+            if !derived.unopened.is_empty() {
+                return unopened_calendar(feed, symbol.as_str(), &derived.unopened);
+            }
+            let calendar = derived.calendar;
             // A SYMBOL THIS FEED HOLDS NOTHING FOR IS NOT A VOTE FOR ANYTHING.
             // `entries` spans every vendor, so asking Zerodha's store for an
             // instrument only Dhan carries reads no files and returns an empty
@@ -30349,6 +31381,8 @@ async fn calendar_json(
         brutex_core::instrument::Exchange,
         brutex_core::instrument::Segment,
     )> = None;
+    // The stored name that goes with `held`, kept for `census_holds`.
+    let mut named: Option<brutex_core::symbol::Symbol> = None;
     let mut months: Vec<store::path::YearMonth> = Vec::new();
     // THIS FEED'S CENSUS ONLY — the same filter the exchange branch takes, and
     // for the same measured reason: `Series` carries no vendor, so without it
@@ -30357,9 +31391,8 @@ async fn calendar_json(
     //
     // THE SAME STAMPED CENSUS the exchange branch reads, so the two branches
     // still agree about what the store holds and neither re-reads an unchanged
-    // manifest per request. D-0686.
-    let (censuses, _) = census_now(&site);
-    for (series, month) in censuses
+    // manifest per request. D-0686. It is `fresh`, taken above the branch.
+    for (series, month) in fresh
         .iter()
         .filter(|census| census.vendor == feed)
         .flat_map(|c| census::held_entries(std::slice::from_ref(c)))
@@ -30375,6 +31408,7 @@ async fn calendar_json(
         match held {
             None => {
                 held = Some(identity);
+                named = Some(series.symbol);
                 months.push(month);
             }
             Some(seen) if seen == identity => months.push(month),
@@ -30404,15 +31438,34 @@ async fn calendar_json(
         brutex_core::instrument::Segment::Index,
     ));
 
-    let calendar = crate::calendar_of::cached(
+    let series = held
+        .zip(named)
+        .map(|((exchange, segment), symbol)| (exchange, segment, symbol));
+    // A NAME THIS FEED'S CENSUS DOES NOT HOLD IS DERIVED FOR ITS OWN REQUEST
+    // AND NOT KEPT. Its key is built from the request's own text, and nothing
+    // evicts from `site.calendars`, so keeping it let every distinct unheld
+    // name grow the map for the life of the process: a review sent 2,000 and
+    // the map went from 9 entries to 2,009. With no stamp, `cached` neither
+    // looks it up nor keeps it, and a derivation over no months opens no file.
+    // The map is then bounded by the identities the feeds' censuses have held.
+    // D-0695.
+    let derived = crate::calendar_of::cached(
         &site.calendars,
         &site.store_root,
         feed,
         exchange.as_str(),
         segment.as_str(),
         &symbol,
+        held.and(stamp),
         &months,
+        census_holds(own.zip(series)),
     );
+    // A HELD MONTH THAT DID NOT OPEN IS NOT A MONTH WITHOUT SESSIONS. See
+    // `unopened_calendar`.
+    if !derived.unopened.is_empty() {
+        return unopened_calendar(feed, &symbol, &derived.unopened);
+    }
+    let calendar = derived.calendar;
     (
         axum::http::StatusCode::OK,
         [(axum::http::header::CONTENT_TYPE, json)],

@@ -48,6 +48,7 @@ use std::os::unix::fs::MetadataExt as _;
 use brutex_core::blake3::Hasher;
 use indicators::{Candle, evaluator::CHARTER_NON_REGULAR_IST_DAYS};
 use runner::identity::DailyReferenceBinding;
+use store::flock::Flock;
 
 use crate::candidate_universe::{
     CANDIDATE_SIGNAL_RUNGS_SECONDS_V1, CandidateExecutionStreamV1, CandidatePreAdmissionInputsV1,
@@ -1030,28 +1031,32 @@ impl PreAdmissionDataLedgerV1 {
         let lock_path = root.join(LOCK_FILE);
         let data_path = root.join(DATA_FILE);
         let lock_file = open_file(&lock_path, writable, writable)?;
-        if writable {
-            lock_file.lock().map_err(|why| {
+        // The open lock is released by name on success and by the guard's
+        // explicit unlock on every refusal, never by closing a descriptor: the
+        // ledger keeps a duplicate of this one, and a child another thread
+        // spawned may hold a third (D-0693).
+        let held = if writable {
+            Flock::lock(&lock_file, lock_path.as_path()).map_err(|why| {
                 format!(
                     "cannot lock pre-admission writer {}: {why}",
                     lock_path.display()
                 )
-            })?;
+            })?
         } else {
-            lock_file.lock_shared().map_err(|why| {
+            Flock::lock_shared(&lock_file, lock_path.as_path()).map_err(|why| {
                 format!(
                     "cannot take shared pre-admission lock {}: {why}",
                     lock_path.display()
                 )
-            })?;
-        }
+            })?
+        };
         let held_lock = lock_file.try_clone().map_err(|why| {
             format!(
                 "cannot clone pre-admission lock {}: {why}",
                 lock_path.display()
             )
         })?;
-        let opened = (|| {
+        let opened: Result<Self, PreAdmissionDataRefusal> = (|| {
             let mut data_file = open_file(&data_path, writable, writable)?;
             if writable {
                 ensure_header(&mut data_file, &data_path)?;
@@ -1076,16 +1081,15 @@ impl PreAdmissionDataLedgerV1 {
             ledger.scan()?;
             Ok(ledger)
         })();
-        let released = lock_file.unlock().map_err(|why| {
+        let ledger = opened?;
+        held.release().map_err(|u| {
             format!(
-                "cannot release pre-admission open lock {}: {why}",
-                lock_path.display()
+                "cannot release pre-admission open lock {}: {}",
+                lock_path.display(),
+                u.why
             )
-        });
-        match (opened, released) {
-            (Ok(ledger), Ok(())) => Ok(ledger),
-            (Err(why), _) | (Ok(_), Err(why)) => Err(why),
-        }
+        })?;
+        Ok(ledger)
     }
 
     fn scan(&mut self) -> Result<(), PreAdmissionDataRefusal> {
@@ -2318,28 +2322,32 @@ impl PreAdmissionDataLedgerV2 {
         let lock_path = root.join(LOCK_FILE_V2);
         let data_path = root.join(DATA_FILE_V2);
         let lock_file = open_file(&lock_path, writable, writable)?;
-        if writable {
-            lock_file.lock().map_err(|why| {
+        // The open lock is released by name on success and by the guard's
+        // explicit unlock on every refusal, never by closing a descriptor: the
+        // ledger keeps a duplicate of this one, and a child another thread
+        // spawned may hold a third (D-0693).
+        let held = if writable {
+            Flock::lock(&lock_file, lock_path.as_path()).map_err(|why| {
                 format!(
                     "cannot lock pre-admission V2 writer {}: {why}",
                     lock_path.display()
                 )
-            })?;
+            })?
         } else {
-            lock_file.lock_shared().map_err(|why| {
+            Flock::lock_shared(&lock_file, lock_path.as_path()).map_err(|why| {
                 format!(
                     "cannot take shared pre-admission V2 lock {}: {why}",
                     lock_path.display()
                 )
-            })?;
-        }
+            })?
+        };
         let held_lock = lock_file.try_clone().map_err(|why| {
             format!(
                 "cannot clone pre-admission V2 lock {}: {why}",
                 lock_path.display()
             )
         })?;
-        let opened = (|| {
+        let opened: Result<Self, PreAdmissionDataRefusal> = (|| {
             let mut data_file = open_file(&data_path, writable, writable)?;
             if writable {
                 ensure_header_v2(&mut data_file, &data_path)?;
@@ -2364,16 +2372,15 @@ impl PreAdmissionDataLedgerV2 {
             ledger.scan()?;
             Ok(ledger)
         })();
-        let released = lock_file.unlock().map_err(|why| {
+        let ledger = opened?;
+        held.release().map_err(|u| {
             format!(
-                "cannot release pre-admission V2 open lock {}: {why}",
-                lock_path.display()
+                "cannot release pre-admission V2 open lock {}: {}",
+                lock_path.display(),
+                u.why
             )
-        });
-        match (opened, released) {
-            (Ok(ledger), Ok(())) => Ok(ledger),
-            (Err(why), _) | (Ok(_), Err(why)) => Err(why),
-        }
+        })?;
+        Ok(ledger)
     }
 
     fn scan(&mut self) -> Result<(), PreAdmissionDataRefusal> {

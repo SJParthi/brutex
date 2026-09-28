@@ -97,6 +97,9 @@ impl Inputs {
                 execution_bars,
                 daily,
                 exact_minute,
+                // This door applies no minute-gap rule and keeps its identity:
+                // D-0694 answered for the ordinary door alone.
+                minute_gaps: None,
             },
             guards: collector.guards,
             roles,

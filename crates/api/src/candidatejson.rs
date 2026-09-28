@@ -182,8 +182,21 @@ fn render(root: &Path, asked: &Asked) -> Result<String, String> {
     if asked.digest.is_some_and(|digest| digest != summary.digest) {
         return Err("candidate catalog changed; restart from its first page".to_owned());
     }
+    // A STOCK AUDIT'S PRICED CANDIDATES SAY WHAT THEY ARE MADE OF. Each page
+    // serves per-trade best, worst, adverse and favourable figures, and a
+    // RELIANCE audit's were served with neither the gross label nor the
+    // corporate-action sentence. An AND-mask capture is keyed by the audit's
+    // run identity, the one the results ledger records, so its row names the
+    // instrument, as it does for `/sweep-evidence.json`. An expression
+    // capture comes from the expression search, keyed by `candidate_identity`,
+    // which no ledger row carries; it is not looked up. D-0694, AF-19.
+    let note = match summary.model {
+        Model::And => crate::detail::recorded_underlying(root, &summary.identity)?
+            .map_or_else(String::new, |underlying| cli::equity_note_for(&underlying)),
+        Model::Expression => String::new(),
+    };
     if summary.tiers == 0 {
-        return empty_catalog(&summary, asked);
+        return empty_catalog(&summary, asked, note);
     }
     let tier = candidate_trades::tier(root, &summary, asked.tier, crate::detail::MAX_SCAN_BYTES)?;
     let (kind, total, rows, selected) = match (asked.rank, asked.direction) {
@@ -247,13 +260,17 @@ fn render(root: &Path, asked: &Asked) -> Result<String, String> {
         .checked_add(rows.len() as u64)
         .filter(|end| *end < total)
         .map(|value| value.to_string());
-    Ok(json!({"schema_version":1,"status":"saved","model":summary.model.as_str(),"expression":expression_json(summary.expression()),"identity":crate::server::hex32(summary.identity),"attempt":summary.attempt.to_string(),"catalog_digest":crate::server::hex32(summary.digest),"execution_digest":crate::server::hex32(summary.execution_digest),"capture":"sealed-pricing-evidence","audit_completion":lifecycle.map(|value|value.completion.as_str()),"kind":kind,"tier_count":summary.tiers.to_string(),"candidate_side_count":summary.candidates.to_string(),"tier":tier_json(&tier),"offset":asked.offset.to_string(),"limit":asked.limit,"total_count":total.to_string(),"next_offset":next,"page_complete":true,"selected":selected,"rows":rows,"refusal":null}).to_string())
+    let mut body = json!({"schema_version":1,"status":"saved","model":summary.model.as_str(),"expression":expression_json(summary.expression()),"identity":crate::server::hex32(summary.identity),"attempt":summary.attempt.to_string(),"catalog_digest":crate::server::hex32(summary.digest),"execution_digest":crate::server::hex32(summary.execution_digest),"capture":"sealed-pricing-evidence","audit_completion":lifecycle.map(|value|value.completion.as_str()),"kind":kind,"tier_count":summary.tiers.to_string(),"candidate_side_count":summary.candidates.to_string(),"tier":tier_json(&tier),"offset":asked.offset.to_string(),"limit":asked.limit,"total_count":total.to_string(),"next_offset":next,"page_complete":true,"selected":selected,"rows":rows,"refusal":null});
+    crate::detail::put_equity_note(&mut body, note)?;
+    Ok(body.to_string())
 }
-fn empty_catalog(summary: &Summary, asked: &Asked) -> Result<String, String> {
+fn empty_catalog(summary: &Summary, asked: &Asked, note: String) -> Result<String, String> {
     if asked.tier != 0 || asked.offset != 0 || asked.rank.is_some() {
         return Err("empty candidate catalog has only its initial metadata page".to_owned());
     }
-    Ok(json!({"schema_version":1,"status":"saved","model":summary.model.as_str(),"expression":expression_json(summary.expression()),"identity":crate::server::hex32(summary.identity),"attempt":summary.attempt.to_string(),"catalog_digest":crate::server::hex32(summary.digest),"execution_digest":crate::server::hex32(summary.execution_digest),"capture":"sealed-pricing-evidence","audit_completion":null,"kind":"candidates","tier_count":"0","candidate_side_count":"0","tier":null,"offset":"0","limit":asked.limit,"total_count":"0","next_offset":null,"page_complete":true,"selected":null,"rows":[],"refusal":null}).to_string())
+    let mut body = json!({"schema_version":1,"status":"saved","model":summary.model.as_str(),"expression":expression_json(summary.expression()),"identity":crate::server::hex32(summary.identity),"attempt":summary.attempt.to_string(),"catalog_digest":crate::server::hex32(summary.digest),"execution_digest":crate::server::hex32(summary.execution_digest),"capture":"sealed-pricing-evidence","audit_completion":null,"kind":"candidates","tier_count":"0","candidate_side_count":"0","tier":null,"offset":"0","limit":asked.limit,"total_count":"0","next_offset":null,"page_complete":true,"selected":null,"rows":[],"refusal":null});
+    crate::detail::put_equity_note(&mut body, note)?;
+    Ok(body.to_string())
 }
 fn validate_window(total: u64, offset: u64, count: usize) -> Result<(), String> {
     if (total == 0 && offset != 0)
@@ -549,6 +566,173 @@ mod tests {
         );
         Ok(())
     }
+    /// **A stock audit's AND-mask capture says what its figures are made of;
+    /// an index's, an unrecorded one's and an expression capture's are the
+    /// bytes they were.** D-0694, AF-19.
+    ///
+    /// An AND-mask capture is keyed by the audit's own run identity, which
+    /// is the identity the results ledger records, so the ledger row names
+    /// the instrument exactly as it does for `/sweep-evidence.json`. Every
+    /// capture is read before its ledger row exists and again after, so the
+    /// comparison is over the same bytes: an index page does not move, and a
+    /// stock page gains `equity_note` and nothing else, on the saved page
+    /// with rows and on the empty catalog alike. An expression capture is
+    /// keyed by `candidate_identity`, which no ledger row carries, so even a
+    /// row naming RELIANCE under that identity adds nothing to it.
+    #[test]
+    fn an_and_mask_capture_of_a_stock_carries_the_equity_note_and_others_do_not()
+    -> Result<(), String> {
+        let root = crate::scratch::path("candidate-api-equity-note");
+        let _ = std::fs::remove_dir_all(&root);
+        // (identity, instrument its ledger row names, a tier with rows)
+        let captures = [
+            ([0xb1_u8; 32], "NIFTY", true),
+            ([0xb2; 32], "RELIANCE", true),
+            ([0xb3; 32], "BANKNIFTY", false),
+            ([0xb4; 32], "RELIANCE", false),
+        ];
+        let pages = captures
+            .iter()
+            .map(|&(identity, underlying, rows)| {
+                and_capture(&root, identity, rows).map(|query| (query, underlying, rows))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let expression_id = [0xb5_u8; 32];
+        let expression_query = expression_capture(&root, expression_id)?;
+        let read = |query: &str| -> Result<String, String> { render(&root, &Asked::parse(query)?) };
+        let before = pages
+            .iter()
+            .map(|(query, _, _)| read(query))
+            .collect::<Result<Vec<_>, _>>()?;
+        let expression_before = read(&expression_query)?;
+        for body in before.iter().chain([&expression_before]) {
+            assert!(body.contains(r#""status":"saved""#), "premise: {body}");
+            assert!(
+                !body.contains("equity_note"),
+                "no ledger row names this capture's instrument yet: {body}"
+            );
+        }
+        for (identity, underlying, _) in captures {
+            crate::sweepevidence::tests::ledger_row(&root, identity, underlying);
+        }
+        crate::sweepevidence::tests::ledger_row(&root, expression_id, "RELIANCE");
+        let note = cli::equity_note_for("RELIANCE");
+        for part in ["GROSS OF EVERY CHARGE", "CORPORATE ACTIONS ARE UNCHECKED"] {
+            assert!(note.contains(part), "premise, {part}: {note}");
+        }
+        for ((query, underlying, rows), before) in pages.iter().zip(&before) {
+            let after = read(query)?;
+            let what = format!("{underlying}, rows={rows}");
+            if *underlying == "RELIANCE" {
+                let mut value: Value =
+                    serde_json::from_str(&after).map_err(|why| why.to_string())?;
+                let said = value
+                    .as_object_mut()
+                    .and_then(|body| body.remove("equity_note"));
+                assert_eq!(
+                    said,
+                    Some(json!(note)),
+                    "{what}: the stored banner's own note"
+                );
+                assert_eq!(
+                    value,
+                    serde_json::from_str::<Value>(before).map_err(|why| why.to_string())?,
+                    "{what}: the note is the only thing a stock's capture adds"
+                );
+            } else {
+                assert_eq!(&after, before, "{what}: an index capture's page");
+            }
+            if *rows {
+                // The exact trade page of one candidate is the same body.
+                let digest = serde_json::from_str::<Value>(before)
+                    .map_err(|why| why.to_string())?
+                    .get("catalog_digest")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .ok_or("premise: the catalog digest")?;
+                let trades = read(&format!("{query}&digest={digest}&rank=1&direction=long"))?;
+                let trades: Value = serde_json::from_str(&trades).map_err(|why| why.to_string())?;
+                assert_eq!(trades.get("kind"), Some(&json!("trades")), "premise");
+                assert_eq!(
+                    trades.get("equity_note"),
+                    (*underlying == "RELIANCE").then(|| json!(note)).as_ref(),
+                    "{what}: the trade page"
+                );
+            }
+        }
+        assert_eq!(
+            read(&expression_query)?,
+            expression_before,
+            "an expression capture is keyed by an identity no ledger row carries"
+        );
+        let _ = std::fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    /// A sealed AND-mask capture for an audit attempt of `identity`, with one
+    /// tier holding one candidate on both sides when `rows`, and no tier
+    /// otherwise; answers the page-zero query for it.
+    fn and_capture(root: &Path, identity: [u8; 32], rows: bool) -> Result<String, String> {
+        #[expect(
+            clippy::default_trait_access,
+            reason = "the public capture API infers Column without adding an api-to-indicators graph edge"
+        )]
+        let column = Default::default();
+        #[expect(
+            clippy::default_trait_access,
+            reason = "the public capture API infers Grid without adding an api-to-runner graph edge"
+        )]
+        let grid = Default::default();
+        let attempt =
+            cli::sweep_evidence::begin(root, identity, cli::sweep_evidence::Operation::Audit)?;
+        let capture = candidate_trades::Capture::begin(root, &attempt, &[], &column)?;
+        if rows {
+            let tier = capture.tier(Tier {
+                eligible: 1,
+                evaluated: 1,
+                ..no_cell_tier()
+            })?;
+            for direction in [Direction::Long, Direction::Short] {
+                capture.record(
+                    &tier,
+                    &candidate_trades::Evaluated {
+                        rank: 1,
+                        mask: &vocab::ConditionMask::default(),
+                        direction,
+                        grid: &grid,
+                        selected: None,
+                    },
+                )?;
+            }
+        }
+        capture.finish()?;
+        Ok(format!(
+            "identity={}&attempt={}",
+            crate::server::hex32(identity),
+            attempt.token()
+        ))
+    }
+
+    /// A sealed expression-model capture under `identity`; answers its query.
+    fn expression_capture(root: &Path, identity: [u8; 32]) -> Result<String, String> {
+        #[expect(
+            clippy::default_trait_access,
+            reason = "the public capture API infers Column without adding an api-to-indicators graph edge"
+        )]
+        let column = Default::default();
+        let attempt =
+            cli::sweep_evidence::begin(root, identity, cli::sweep_evidence::Operation::Expression)?;
+        let expression =
+            vocab::expression::Expression::parse("0 | !1").map_err(|why| format!("{why:?}"))?;
+        candidate_trades::Capture::begin_expression(root, &attempt, &[], &column, &expression)?
+            .finish()?;
+        Ok(format!(
+            "identity={}&attempt={}&model=expression",
+            crate::server::hex32(identity),
+            attempt.token()
+        ))
+    }
+
     fn no_cell_tier() -> Tier {
         Tier {
             index: 0,

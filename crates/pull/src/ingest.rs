@@ -134,6 +134,7 @@ use std::path::{Path, PathBuf};
 use brutex_core::instrument::{Exchange, Segment};
 use brutex_core::vendor::Vendor;
 use store::file::BarFile;
+use store::flock::Flock;
 use store::format::Bar;
 use store::header::Header;
 use store::path::{FileKind, PathParts, StorePath, Timeframe};
@@ -2970,10 +2971,14 @@ fn read_census(path: &Path, vendor: Vendor) -> Result<Manifest, String> {
 /// install, and [`install_locked`] takes a reference to it so the install
 /// cannot be reached without it.
 ///
-/// Dropping the [`File`] is what releases the month, so the field is live for
-/// its whole life and read exactly once, by the compiler-generated drop.
+/// Dropping the guard is what releases the census, so the field is live for
+/// its whole life and read exactly once, by the compiler-generated drop. The
+/// guard unlocks explicitly rather than by closing the [`File`]: a descriptor
+/// duplicated into a child another thread spawned would otherwise hold the
+/// census lock past the run that took it, and the next run would be refused
+/// as if one were still installing (D-0693).
 struct CensusLock {
-    _held: Option<fs::File>,
+    _held: Option<Flock<fs::File>>,
 }
 
 impl CensusLock {
@@ -3083,17 +3088,17 @@ impl CensusLock {
             // Every other cause is the path's, and the install reports it.
             Err(_) => return Ok(Self { _held: None }),
         };
-        if lock.try_lock().is_err() {
-            return Err(format!(
+        match Flock::try_lock(lock, lock_path.clone()) {
+            Ok(held) => Ok(Self { _held: Some(held) }),
+            Err(_) => Err(format!(
                 "another ingest holds the census lock at {}. Refused rather \
                  than queued: two runs installing at once silently discard one, and \
                  the loser's receipt still reads 'every row accounted for' \
                  because its own books balanced. Wait for the other run and try \
                  again.",
                 lock_path.display()
-            ));
+            )),
         }
-        Ok(Self { _held: Some(lock) })
     }
 }
 
@@ -3461,6 +3466,44 @@ mod tests {
             "nothing was published at the live path either"
         );
 
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// **A DROPPED CENSUS LOCK IS RELEASED WHILE A DUPLICATE OF ITS DESCRIPTOR
+    /// IS STILL OPEN.** D-0693.
+    ///
+    /// The duplicate is the model of the reference a child spawned by another
+    /// thread holds until its exec. While closing the descriptor was the
+    /// release, that reference kept the lock alive and the next run was refused
+    /// as "another ingest holds the census lock" with no other ingest running.
+    #[test]
+    #[expect(
+        clippy::used_underscore_binding,
+        reason = "the duplicate is taken of the held lock itself, which is the \
+                  field whose drop this test is about"
+    )]
+    fn a_dropped_census_lock_is_released_despite_a_duplicated_descriptor() {
+        let root = scratch("census-lock-dup");
+        let census = root.join("manifest").join("dhan.man");
+
+        let first = CensusLock::take(&census).unwrap_or_else(|why| panic!("a free lock: {why}"));
+        let child = first
+            ._held
+            .as_deref()
+            .expect("an openable lock path holds the lock")
+            .try_clone()
+            .expect("the duplicate a spawned child would hold");
+        let Err(busy) = CensusLock::take(&census) else {
+            panic!("the premise: a held census lock refuses a second run")
+        };
+        assert!(busy.contains("another ingest holds"), "{busy}");
+        drop(first);
+
+        let second = CensusLock::take(&census).unwrap_or_else(|why| {
+            panic!("the dropped lock was released despite the duplicate: {why}")
+        });
+        drop(second);
+        drop(child);
         std::fs::remove_dir_all(&root).ok();
     }
 

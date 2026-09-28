@@ -45,6 +45,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use brutex_core::vendor::Vendor;
+use store::flock::Flock;
 
 /// The smallest body that can be a real master, in bytes.
 ///
@@ -820,8 +821,9 @@ pub fn path_of(dir: &Path, source: &Source) -> PathBuf {
 ///
 /// The name is a function of the target, so two calls for one source meet on
 /// one inode while different sources remain independent. A persistent inode
-/// is intentional: the kernel releases the lock with the handle, including on
-/// process death, so there is no stale PID sentinel for an operator to clear.
+/// is intentional: a live process unlocks it explicitly through its guard, and
+/// the kernel releases it on process death, so there is no stale PID sentinel
+/// for an operator to clear.
 fn lock_path_of(dir: &Path, source: &Source) -> PathBuf {
     dir.join(format!(".{}.lock", source.file))
 }
@@ -832,7 +834,11 @@ fn lock_path_of(dir: &Path, source: &Source) -> PathBuf {
 /// than reported as a vendor failure. The network body is already in memory at
 /// this boundary, so the critical section is one bounded local replacement,
 /// not a socket wait.
-fn lock_source(dir: &Path, source: &Source) -> Result<File, String> {
+///
+/// The guard unlocks explicitly when the landing drops it, rather than by
+/// closing the descriptor: a descriptor duplicated into a child another thread
+/// spawned would otherwise hold the source past its owner (D-0693).
+fn lock_source(dir: &Path, source: &Source) -> Result<Flock<File>, String> {
     let path = lock_path_of(dir, source);
     let file = OpenOptions::new()
         .read(true)
@@ -841,9 +847,8 @@ fn lock_source(dir: &Path, source: &Source) -> Result<File, String> {
         .truncate(false)
         .open(&path)
         .map_err(|why| format!("{} could not be opened for locking — {why}", path.display()))?;
-    file.lock()
-        .map_err(|why| format!("{} could not be locked — {why}", path.display()))?;
-    Ok(file)
+    Flock::lock(file, path.clone())
+        .map_err(|why| format!("{} could not be locked — {why}", path.display()))
 }
 
 /// Removes a failed partial and keeps both failures when cleanup also refuses.

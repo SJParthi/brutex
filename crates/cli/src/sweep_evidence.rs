@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
+use store::flock::Flock;
+
 const HEADER: u64 = 16;
 const EVENTS: [u8; 8] = *b"BRSWAT01";
 const DEPTHS: [u8; 8] = *b"BRSWDP01";
@@ -1485,7 +1487,7 @@ fn page<const N: usize>(
         e.ranked_rows
     };
     let path = detail_path(root, e, kind);
-    let mut file = match File::open(&path) {
+    let file = match File::open(&path) {
         Ok(file) => file,
         Err(why) if why.kind() == std::io::ErrorKind::NotFound => {
             return if expected > 0 || (kind == "ranked" && e.ranked_available) {
@@ -1496,7 +1498,10 @@ fn page<const N: usize>(
         }
         Err(why) => return Err(io_error(why)),
     };
-    file.lock_shared().map_err(io_error)?;
+    // Released by name below and by the guard's explicit unlock on every
+    // refusal, never by closing the descriptor: a duplicate left in a child
+    // another thread spawned would otherwise keep the page locked (D-0693).
+    let mut file = Flock::lock_shared(file, path.as_path()).map_err(io_error)?;
     let generation = crate::result_set::file_generation(&file, &path)?;
     let result = (|| {
         bound(&file, max_bytes)?;
@@ -1532,16 +1537,13 @@ fn page<const N: usize>(
         }
         Ok(rows)
     })();
-    let result = result.and_then(|rows| {
+    let rows = result.and_then(|rows| {
         let observed = crate::result_set::file_generation(&file, &path)?;
         crate::result_set::require_generation_unchanged(generation, observed, &path)?;
         Ok(rows)
-    });
-    let released = file.unlock().map_err(io_error);
-    match (result, released) {
-        (Ok(rows), Ok(())) => Ok(rows),
-        (Err(why), _) | (_, Err(why)) => Err(why),
-    }
+    })?;
+    file.release().map_err(|u| io_error(u.why))?;
+    Ok(rows)
 }
 
 #[cfg(test)]

@@ -159,7 +159,10 @@ fn report(root: &Path, pair: Option<&(String, String)>) -> Result<String, String
         Err(why) if why.contains("nothing was created") || why.contains("nothing was written") => return Ok("  NO RUN HAS BEEN RECORDED YET. The ledger does not exist or holds nothing — sweep something and it appears here.\n".to_owned()),
         Err(why) => return Err(why),
     };
-    let receipt = crate::detail::committed_receipt(root, &row.identity)?;
+    // The instrument is `row`'s own, which `render_top_record` states from;
+    // only the receipt is needed here.
+    let receipt =
+        crate::detail::committed_receipt(root, &row.identity)?.map(|committed| committed.receipt);
     if receipt.is_some_and(|receipt| receipt.frontier_rows > MAX_RESULT_ROWS) {
         return Err("top result exceeds the 4096-row detail bound; no prefix was read".to_owned());
     }

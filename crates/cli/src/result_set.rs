@@ -28,6 +28,7 @@ use std::os::unix::fs::MetadataExt as _;
 use std::os::windows::fs::MetadataExt as _;
 
 use crate::results::Refusal;
+use store::flock::Flock;
 
 /// `BRUTEXRC`: the result-detail receipt, distinct from every detail file.
 const MAGIC: [u8; 8] = *b"BRUTEXRC";
@@ -236,6 +237,31 @@ pub struct Receipts {
     max_bytes: Option<u64>,
 }
 
+/// The open-time validation lock over `file`, exclusive for the writer's door
+/// and shared for the readers'.
+///
+/// Taken on a duplicate of the descriptor, so `file` stays free to be written
+/// and moved into the `Receipts` while the lock is held. The lock belongs to
+/// the open file description, so the duplicate's guard takes and releases the
+/// very lock `file` sees. It is released by an explicit unlock, never by
+/// closing a descriptor: a duplicate left in a child another thread spawned
+/// would otherwise keep it (D-0693).
+fn validation_lock(file: &File, path: &Path, exclusive: bool) -> Result<Flock<File>, Refusal> {
+    let refused = |why: std::io::Error| {
+        format!(
+            "{} could not be locked for validation: {why}",
+            path.display()
+        )
+    };
+    let duplicate = file.try_clone().map_err(refused)?;
+    if exclusive {
+        Flock::lock(duplicate, path.to_path_buf())
+    } else {
+        Flock::lock_shared(duplicate, path.to_path_buf())
+    }
+    .map_err(refused)
+}
+
 impl Receipts {
     /// The receipt path beside the ledger and both detail files.
     #[must_use]
@@ -253,13 +279,8 @@ impl Receipts {
         let path = Self::path(root);
         let file = File::open(&path)
             .map_err(|why| format!("{} could not be opened: {why}", path.display()))?;
-        file.lock_shared().map_err(|why| {
-            format!(
-                "{} could not be locked for validation: {why}",
-                path.display()
-            )
-        })?;
-        Self::from_file(file, path, None)
+        let lock = validation_lock(&file, &path, false)?;
+        Self::from_file(file, lock, path, None)
     }
 
     /// Opens for reading only when the receipt manifest fits `max_bytes`.
@@ -276,13 +297,8 @@ impl Receipts {
         let path = Self::path(root);
         let file = File::open(&path)
             .map_err(|why| format!("{} could not be opened: {why}", path.display()))?;
-        file.lock_shared().map_err(|why| {
-            format!(
-                "{} could not be locked for validation: {why}",
-                path.display()
-            )
-        })?;
-        Self::from_file(file, path, Some(max_bytes))
+        let lock = validation_lock(&file, &path, false)?;
+        Self::from_file(file, lock, path, Some(max_bytes))
     }
 
     /// Opens for append, creating a fresh header when the file does not exist.
@@ -303,12 +319,7 @@ impl Receipts {
             .truncate(false)
             .open(&path)
             .map_err(|why| format!("{} could not be opened: {why}", path.display()))?;
-        file.lock().map_err(|why| {
-            format!(
-                "{} could not be locked for validation: {why}",
-                path.display()
-            )
-        })?;
+        let lock = validation_lock(&file, &path, true)?;
         if file
             .metadata()
             .map_err(|why| format!("{} could not be measured: {why}", path.display()))?
@@ -317,10 +328,18 @@ impl Receipts {
         {
             write_header(&mut file, &path)?;
         }
-        Self::from_file(file, path, None)
+        Self::from_file(file, lock, path, None)
     }
 
-    fn from_file(mut file: File, path: PathBuf, max_bytes: Option<u64>) -> Result<Self, Refusal> {
+    /// Validates the whole file under `lock`, a guard over a duplicate of
+    /// `file`'s own descriptor, and releases it by name on success. Every
+    /// refusal releases it through the guard's explicit unlock.
+    fn from_file(
+        mut file: File,
+        lock: Flock<File>,
+        path: PathBuf,
+        max_bytes: Option<u64>,
+    ) -> Result<Self, Refusal> {
         let len = file
             .metadata()
             .map_err(|why| format!("{} could not be measured: {why}", path.display()))?
@@ -357,10 +376,11 @@ impl Receipts {
                 generation.len
             ));
         }
-        file.unlock().map_err(|why| {
+        lock.release().map_err(|u| {
             format!(
-                "{} could not release its validation lock: {why}",
-                path.display()
+                "{} could not release its validation lock: {}",
+                path.display(),
+                u.why
             )
         })?;
         Ok(Self {
@@ -770,24 +790,45 @@ impl CommittedParents {
         Ok(())
     }
 
-    /// Return owned receipt evidence from the last successful parent refresh.
+    /// Return owned receipt evidence from the last successful parent refresh,
+    /// with the instrument the ledger parent names.
+    ///
+    /// The parent row is read to confirm the commit in any case. Its
+    /// underlying was dropped there, so `/frontier.json` and `/trades.json`
+    /// served a stock's ranked and chosen figures with no way to say what
+    /// they are made of. It now travels with the receipt from the same
+    /// snapshot, and the caller decides the statement from it. D-0694, AF-19.
     ///
     /// # Errors
     /// Refuses a corrupt parent or committed row lacking a sealed receipt.
-    pub fn receipt(&mut self, identity: &[u8; 32]) -> Result<Option<Receipt>, Refusal> {
+    pub fn committed(&mut self, identity: &[u8; 32]) -> Result<Option<Committed>, Refusal> {
         if !self.valid {
             return Err("parent evidence has not passed its latest refresh; cached receipts are unavailable".to_owned());
         }
         let Some(ledger) = &mut self.ledger else {
             return Ok(None);
         };
-        if ledger.of_identity(identity)?.is_none() {
+        let Some(parent) = ledger.of_identity(identity)? else {
             return Ok(None);
-        }
-        self.receipts.as_ref().and_then(|receipts| receipts.of_identity(identity)).map(Some).ok_or_else(|| format!(
+        };
+        let receipt = self.receipts.as_ref().and_then(|receipts| receipts.of_identity(identity)).ok_or_else(|| format!(
             "run {} has a results-ledger parent but no validated detail receipt; its children are not exposed", identity_hex(identity)
-        ))
+        ))?;
+        Ok(Some(Committed {
+            receipt,
+            underlying: crate::results::read_field(&parent.underlying),
+        }))
     }
+}
+
+/// One committed run as a detail reader sees it: the sealed receipt, and the
+/// instrument its ledger parent names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Committed {
+    /// The exact child counts and trade policy the run committed.
+    pub receipt: Receipt,
+    /// The ledger parent's instrument, padding removed, exactly as recorded.
+    pub underlying: String,
 }
 
 /// The committed-receipt read gate with a hard ceiling on each parent file.
@@ -1348,5 +1389,49 @@ mod tests {
         assert!(why.contains("reads version 2"), "{why}");
         assert!(!why.contains("not a 16-byte header"), "{why}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **`docs/16-sweep-evidence.md` names only methods `CommittedParents`
+    /// has.** AF-19.
+    ///
+    /// Its read contract says which methods give the cached parent snapshot.
+    /// D-0694's repair renamed `receipt` to `committed`, which returns the
+    /// receipt with the ledger parent's instrument, and the document went on
+    /// naming `receipt` in the present tense. Nothing read it against the
+    /// code. Each name in that sentence must be a `pub fn` inside
+    /// `impl CommittedParents`, and the method the API calls must be one of
+    /// them.
+    #[test]
+    fn the_sweep_evidence_read_contract_names_only_methods_committed_parents_has() {
+        let doc = include_str!("../../../docs/16-sweep-evidence.md");
+        let source = include_str!("result_set.rs");
+        let from = doc
+            .find("`CommittedParents::")
+            .expect("the read contract names CommittedParents");
+        let sentence = doc
+            .get(from..)
+            .and_then(|tail| tail.split_once(" provide").map(|(named, _)| named))
+            .expect("the sentence says what the methods provide");
+        let named: Vec<&str> = sentence
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .map(|name| name.trim_start_matches("CommittedParents::"))
+            .collect();
+        assert!(
+            named.len() >= 3 && named.contains(&"committed"),
+            "the contract names the snapshot's methods, `committed` among them: {named:?}"
+        );
+        let body = source
+            .split_once("\nimpl CommittedParents {\n")
+            .and_then(|(_, tail)| tail.split_once("\n}\n"))
+            .map(|(body, _)| body)
+            .expect("the impl block");
+        for name in named {
+            assert!(
+                body.contains(&format!("    pub fn {name}(")),
+                "docs/16 names `CommittedParents::{name}`, which is not a method of it"
+            );
+        }
     }
 }

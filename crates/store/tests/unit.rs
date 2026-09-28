@@ -362,6 +362,11 @@ fn negative_prices_are_not_sane_however_well_ordered() {
                 ..real
             },
         ),
+        // Isolate these sign checks too: the earlier negative open/low above
+        // short-circuit them. Ordering also rejects these cases, so this is
+        // not evidence that either redundant sign clause has a unique mutant.
+        ("high alone", Bar { high: -1, ..real }),
+        ("close alone", Bar { close: -1, ..real }),
     ] {
         assert!(!bar.ohlc_is_sane(), "{name} below zero must be refused");
     }
@@ -1476,6 +1481,34 @@ fn a_slot_naming_an_unknown_version_is_refused_by_number() {
 }
 
 #[test]
+fn a_file_identity_refusal_outranks_slot_damage_in_either_slot_order() {
+    let mut unknown = genesis_slot();
+    unknown[8..10].copy_from_slice(&7u16.to_le_bytes());
+    let mut damaged = genesis_slot();
+    damaged[24] ^= 1;
+    assert_eq!(
+        Header::decode(&unknown),
+        Err(FormatError::UnknownVersion(7))
+    );
+    assert!(matches!(
+        Header::decode(&damaged),
+        Err(FormatError::SlotChecksum { .. })
+    ));
+    for slots in [[unknown, damaged], [damaged, unknown]] {
+        let mut region = vec![0; usize::try_from(HEADER_LEN).expect("small header")];
+        for (index, slot) in slots.iter().enumerate() {
+            let start = index * usize::try_from(SLOT_STRIDE).expect("small slot stride");
+            region[start..start + SLOT_LEN].copy_from_slice(slot);
+        }
+        assert_eq!(
+            Header::read_region(&region, region.len() as u64),
+            Err(FormatError::UnknownVersion(7)),
+            "the later damaged slot must not replace a more informative file identity"
+        );
+    }
+}
+
+#[test]
 fn a_version_one_file_is_named_retired_rather_than_reported_as_destroyed() {
     // A file written to the geometry docs/02-store-format.md described before
     // this change: a 64-byte header, magic BRUTEXB1, version 1, stride 56,
@@ -1813,6 +1846,114 @@ fn a_tail_checksum_the_proof_cannot_reach_is_still_refused() {
     );
 }
 
+/// The proof at every geometry this build seals, for every commit inside one
+/// block and every extent that commit could have been sealed through. D-0688.
+///
+/// The two tests above use the bar geometry only. The overlay (24-byte records,
+/// 170 to a block) and the computed greeks (80-byte records, 51 to a block)
+/// seal through the same `block::seal`, so an interrupted append of either
+/// reaches the same proof with a different stride and a different room.
+///
+/// For every commit `n` in `1..=rpb`, handed every byte of the block and one
+/// record more past the commit:
+///
+/// * every extent `n..=rpb` is admitted, naming its own count — 2,701, 14,535
+///   and 1,326 admissions;
+/// * the extent one record past the block's NOMINAL end is refused although its
+///   bytes were handed in, naming the committed extent's checksum;
+/// * for every admitted extent, one flipped committed bit is refused, naming
+///   the checksum of the damaged bytes. The damaged RECORD walks down from the
+///   last committed one as the extent grows, wrapping inside the commit, so
+///   the extent that seals exactly the commit damages record `n - 1` and every
+///   record of the block is damaged at some commit — which the test counts
+///   rather than states. The bit inside the record moves with `n` and the
+///   extent.
+///
+/// That last clause once said the bit covered every record while it was
+/// `(through × 131 + n × 7) mod (n × stride × 8)`, which never reaches past
+/// record 22 at the bar geometry: 50 of 73, 47 of 170 and 40 of 51 records
+/// were never damaged anywhere.
+///
+/// Every stored number is `crc32c` over bytes this test lays out, never one the
+/// function under test produced.
+#[test]
+fn the_proof_admits_every_extent_inside_the_block_at_every_geometry_and_nothing_else() {
+    for (layout, stride, rpb, admissions) in [
+        (Layout::V2, 56usize, 73usize, 2_701usize),
+        (Layout::OVERLAY, 24, 170, 14_535),
+        (Layout::GREEKS, 80, 51, 1_326),
+    ] {
+        assert_eq!(
+            (layout.record_stride(), layout.records_per_block()),
+            (
+                u64::try_from(stride).expect("small"),
+                u64::try_from(rpb).expect("small")
+            ),
+            "the premise: the geometry this row names"
+        );
+        // One block and one record more, and the checksum of each whole-record
+        // prefix of it.
+        let file = ramp((rpb + 1) * stride);
+        let prefix: Vec<u32> = (0..=rpb + 1)
+            .map(|records| crc32c(&file[..records * stride]))
+            .collect();
+        let mut admitted = 0usize;
+        let mut damaged_records = vec![false; rpb];
+        for n in 1..=rpb {
+            let header = sealed_at(u64::try_from(n).expect("small"));
+            let committed = &file[..n * stride];
+            let past = &file[n * stride..];
+            let mut damaged = committed.to_vec();
+            for (through, &stored) in prefix.iter().enumerate().take(rpb + 1).skip(n) {
+                assert_eq!(
+                    block::verify_through(&header, layout, 0, committed, past, stored),
+                    Ok(u64::try_from(through).expect("small")),
+                    "stride {stride}: {n} committed, sealed through {through}"
+                );
+                admitted += 1;
+
+                let record = n - 1 - (through - n) % n;
+                let bit = record * stride * 8 + (through * 131 + n * 7) % (stride * 8);
+                damaged_records[bit / (stride * 8)] = true;
+                damaged[bit / 8] ^= 1 << (bit % 8);
+                assert_eq!(
+                    block::verify_through(&header, layout, 0, &damaged, past, stored),
+                    Err(FormatError::BlockChecksum {
+                        block: 0,
+                        stored,
+                        computed: crc32c(&damaged),
+                    }),
+                    "stride {stride}: {n} committed, sealed through {through}, bit {bit} flipped"
+                );
+                damaged[bit / 8] ^= 1 << (bit % 8);
+            }
+            assert_eq!(
+                block::verify_through(&header, layout, 0, committed, past, prefix[rpb + 1]),
+                Err(FormatError::BlockChecksum {
+                    block: 0,
+                    stored: prefix[rpb + 1],
+                    computed: prefix[n],
+                }),
+                "stride {stride}: {n} committed, an extent past the block's nominal end"
+            );
+        }
+        assert_eq!(
+            admitted, admissions,
+            "stride {stride}: every extent inside the block"
+        );
+        let undamaged: Vec<usize> = damaged_records
+            .iter()
+            .enumerate()
+            .filter_map(|(record, &hit)| (!hit).then_some(record))
+            .collect();
+        assert_eq!(
+            undamaged,
+            Vec::<usize>::new(),
+            "stride {stride}: every record of the block is damaged at some commit"
+        );
+    }
+}
+
 // ===========================================================================
 // Paths
 // ===========================================================================
@@ -2014,6 +2155,41 @@ fn a_case_variant_is_refused_not_a_second_prefix() {
         .to_string(),
         "bars/groww/NSE/INDEX/NIFTY/1min/2024-06.bin",
     );
+}
+
+#[test]
+fn a_store_path_propagates_a_refused_output_sink() {
+    struct BoundedOutput {
+        remaining: usize,
+        text: String,
+    }
+    impl std::fmt::Write for BoundedOutput {
+        fn write_str(&mut self, text: &str) -> std::fmt::Result {
+            if text.len() > self.remaining {
+                return Err(std::fmt::Error);
+            }
+            self.remaining -= text.len();
+            self.text.push_str(text);
+            Ok(())
+        }
+    }
+    let path = StorePath::new(parts(Vendor::Groww, "NIFTY")).expect("canonical path");
+    let complete = path.to_string();
+    for capacity in 0..=complete.len() {
+        let mut output = BoundedOutput {
+            remaining: capacity,
+            text: String::new(),
+        };
+        let result = std::fmt::write(&mut output, format_args!("{path}"));
+        if capacity == complete.len() {
+            assert_eq!(result, Ok(()));
+            assert_eq!(output.text, complete);
+        } else {
+            assert_eq!(result, Err(std::fmt::Error));
+            assert!(output.text.len() <= capacity);
+            assert!(complete.starts_with(&output.text));
+        }
+    }
 }
 
 #[test]

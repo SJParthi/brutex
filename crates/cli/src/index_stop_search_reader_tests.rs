@@ -136,6 +136,38 @@ fn truncation_trailing_unknown_policy_unpinned_context_and_nested_envelopes_refu
     Ok(())
 }
 
+/// **A saved declaration's feed word is refused on one line.** D-0696.
+///
+/// The feed is decoded from the saved bytes and handed to `parse_vendor`,
+/// so it is not a typed word. A newline in it is quoted escaped, and the
+/// refusal carries no control character.
+#[test]
+fn a_saved_declarations_feed_word_is_refused_on_one_line() -> Result<(), String> {
+    // The feed is the second text, after the magic and `NSE-NIFTY`: 8 bytes
+    // of magic, then an 8-byte length and 9 bytes, then an 8-byte length and
+    // `zerodha`'s 7 bytes.
+    let tail = legacy(1)?.get(40..).ok_or("generated tail")?.to_vec();
+    let with_feed = |feed: &str| -> Result<Vec<u8>, String> {
+        let mut raw = b"BRISSD01".to_vec();
+        for text in ["NSE-NIFTY", feed] {
+            raw.extend_from_slice(&u64::try_from(text.len()).map_err(display)?.to_le_bytes());
+            raw.extend_from_slice(text.as_bytes());
+        }
+        raw.extend_from_slice(&tail);
+        Ok(raw)
+    };
+    assert_eq!(with_feed("zerodha")?, legacy(1)?, "premise: the splice");
+    let Err(why) = Declaration::decode(&with_feed("X\nrefused: forged")?) else {
+        return Err("a declaration naming no feed was admitted".into());
+    };
+    assert!(
+        why.starts_with("`X\\nrefused: forged` is not a feed this build knows: "),
+        "{why:?}"
+    );
+    assert!(!why.contains(|c: char| c.is_control()), "{why:?}");
+    Ok(())
+}
+
 #[test]
 fn pinned_prefix_survives_new_pending_checkpoint_without_relabelling_or_future_reads()
 -> Result<(), String> {

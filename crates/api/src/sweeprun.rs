@@ -263,6 +263,13 @@ pub enum Refusal {
     Unstamped(String),
     /// No exact telemetry attempt key can be allocated.
     Unobservable(String),
+    /// This server's own environment sets something no recorded run may take,
+    /// so every run the route could start would refuse.
+    ///
+    /// 503 for the reason [`Self::Unstamped`] gives: the body is fine and
+    /// nothing is in flight, and the fix -- unset it and restart -- is on the
+    /// server's side.
+    Environment(String),
     //
     // THERE WAS A `Support` VARIANT HERE AND IT IS GONE. It refused a
     // threshold of zero, which makes every combination frequent so the
@@ -285,13 +292,15 @@ impl Refusal {
             | Self::Span(ref s)
             | Self::Busy(ref s)
             | Self::Unstamped(ref s)
-            | Self::Unobservable(ref s) => s,
+            | Self::Unobservable(ref s)
+            | Self::Environment(ref s) => s,
         }
     }
 
     /// The status this refusal answers with.
     ///
-    /// `Busy` is 409, `Unstamped` is 503 and the rest are 400. A second press
+    /// `Busy` is 409, `Unstamped`, `Unobservable` and `Environment` are 503,
+    /// and the rest are 400. A second press
     /// is a CONFLICT with work already happening, not a malformed request, and
     /// answering it 400 would tell the operator to fix a body that is perfectly
     /// good. An unstamped build is neither: the body is fine and nothing is in
@@ -301,7 +310,7 @@ impl Refusal {
     pub const fn status(&self) -> axum::http::StatusCode {
         match *self {
             Self::Busy(_) => axum::http::StatusCode::CONFLICT,
-            Self::Unstamped(_) | Self::Unobservable(_) => {
+            Self::Unstamped(_) | Self::Unobservable(_) | Self::Environment(_) => {
                 axum::http::StatusCode::SERVICE_UNAVAILABLE
             }
             _ => axum::http::StatusCode::BAD_REQUEST,
@@ -368,6 +377,68 @@ fn stamp_refusal(stamp: Option<&str>) -> Option<Refusal> {
     ))
 }
 
+/// The refusal a usable `BRUTEX_SCREEN_BUDGET_MS` in this server's own
+/// environment owes a route whose run prices the exit-grid screen, before the
+/// run slot, the execution lease and the run's invocation record. D-0685.
+///
+/// # Why here, when `cli` already refuses it
+///
+/// `cli::one_rung` and the stored kernels refuse a usable budget on every run
+/// that records, and they are right to. But they refuse inside the run, and the
+/// run starts only after this crate has claimed the in-process slot, taken the
+/// execution lease and written an invocation record. A budget set in the
+/// server's environment cannot change while it runs, so every press would take
+/// the slot and write the store for a refusal no wait can fix -- the case
+/// [`stamp_refusal`] already refuses early for an unstamped build.
+///
+/// # The predicate is `cli`'s own, called and not restated. D-0695.
+///
+/// This used to restate `cli`'s rule -- the same reader, then trimmed, a `u64`,
+/// above zero -- because the function that holds it was private. A restated
+/// rule is a second authority for one fact: the first change to `cli`'s
+/// `positive_count` (a ceiling, say) would have left this copy behind, and a
+/// route would then answer 503 to a value the engine accepts.
+/// [`cli::recorded_budget_refusal`] is public now, and this asks it, as
+/// [`stamp_refusal`] asks [`cli::is_canonical_commit_stamp`]. A value that rule
+/// cannot use is no budget -- `cli` names it under `KNOB REFUSED` and runs
+/// without one -- so it is not refused here either.
+///
+/// # What the sentence claims, and what it no longer does
+///
+/// It said "nothing was written". On the production router that was false the
+/// moment it was sent: `operation_audit::note_request` journals every sweep
+/// route's request (D-0568) -- its start before the handler runs, its 503
+/// after. What this refusal keeps unwritten is the RUN's state: no slot, no
+/// lease, no run invocation record. That is all the sentence says now, and it
+/// names the journal row that is written. D-0695.
+fn environment_budget_refusal() -> Option<Refusal> {
+    cli::recorded_budget_refusal().is_err().then(|| {
+        Refusal::Environment(format!(
+            "BRUTEX_SCREEN_BUDGET_MS is set in this server's environment, and is refused: \
+             {BUDGET_NOT_RECORDABLE}. The engine refuses it on every run that records \
+             (D-0685). Refused before the run slot, the execution lease and the run's \
+             invocation record were taken, so no run started; this server's HTTP request \
+             journal still records the request itself (D-0568). Unset it and restart the \
+             server, and bound the screen with BRUTEX_SCREEN_CAP, a stated count."
+        ))
+    })
+}
+
+/// Why a recorded run takes no screen budget, in this file's one wording.
+///
+/// Both budget refusals here state it -- [`refuse_screen_budget`] for a body
+/// that names the field, [`environment_budget_refusal`] for this server's own
+/// environment -- and each adds its own subject and its own remedy. It was
+/// written out once in each, as two different sentences for one reason, which
+/// a review of D-0695 upheld as two sources of wording for one fact.
+/// `cli`'s private `SCREEN_BUDGET_NOT_RECORDABLE` gives the engine's own
+/// refusal in `cli`'s words; it names no route, so it is not this sentence.
+/// D-0695.
+const BUDGET_NOT_RECORDABLE: &str = "every run this route starts is recorded, and a screen \
+     budget derives how many candidates are priced from a \
+     wall-clock calibration the run identity cannot name, so one identity could \
+     record different answers";
+
 /// What one `POST /backtest/run` body asked for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Asked {
@@ -432,11 +503,20 @@ pub struct Asked {
 ///
 /// Ordered as an operator reads them: what to search, how much of it to price,
 /// how much to keep, then the admission rules.
-const KNOBS: [(&str, &str); 16] = [
+///
+/// # `screen_budget_ms` was here, and is now refused by name -- D-0685
+///
+/// Every run these routes start records. A screen budget derives how many
+/// candidates are priced from a wall-clock calibration that the run identity
+/// cannot name, so one identity could record two different answers. The field
+/// is therefore not in this table, and [`refuse_screen_budget`] refuses a body
+/// that names it rather than letting serde drop it: a budget the operator typed
+/// that silently did nothing would be the fallback `CLAUDE.md` §4 bans.
+/// `screen_cap` remains, because it is a stated count the identity folds.
+const KNOBS: [(&str, &str); 15] = [
     ("support_ppm", "BRUTEX_SUPPORT_PPM"),
     ("ceiling", "BRUTEX_CEILING"),
     ("screen_cap", "BRUTEX_SCREEN_CAP"),
-    ("screen_budget_ms", "BRUTEX_SCREEN_BUDGET_MS"),
     ("top", "BRUTEX_TOP"),
     ("validate", "BRUTEX_VALIDATE"),
     ("horizon_bars", "BRUTEX_HORIZON_BARS"),
@@ -542,7 +622,11 @@ struct WireBody {
     support_ppm: WireField<WireScalar>,
     ceiling: WireField<WireScalar>,
     screen_cap: WireField<WireScalar>,
-    screen_budget_ms: WireField<WireScalar>,
+    /// ANY JSON VALUE, because naming the field is the error. Decoded as a
+    /// `WireScalar`, a `null`, a fraction, an array, an object or an integer
+    /// past `u64::MAX` failed the decode first and got the decoder's generic
+    /// sentence instead of [`refuse_screen_budget`]'s. D-0685.
+    screen_budget_ms: WireField<serde::de::IgnoredAny>,
     top: WireField<WireScalar>,
     validate: WireField<WireScalar>,
     horizon_bars: WireField<WireScalar>,
@@ -579,7 +663,6 @@ impl WireBody {
             "support_ppm" => self.support_ppm.as_ref(),
             "ceiling" => self.ceiling.as_ref(),
             "screen_cap" => self.screen_cap.as_ref(),
-            "screen_budget_ms" => self.screen_budget_ms.as_ref(),
             "top" => self.top.as_ref(),
             "validate" => self.validate.as_ref(),
             "horizon_bars" => self.horizon_bars.as_ref(),
@@ -595,6 +678,22 @@ impl WireBody {
             _ => None,
         }
     }
+}
+
+/// Refuses a body that names `screen_budget_ms`, whatever its value. D-0685.
+///
+/// Kept in [`WireBody`] only so that it can be refused: dropped from the schema,
+/// serde would ignore it and a budget the operator typed would silently do
+/// nothing. Any value refuses, an empty one included, because this setting
+/// cannot be set at all -- naming it is the error.
+fn refuse_screen_budget(body: &WireBody) -> Result<(), Refusal> {
+    if body.screen_budget_ms.as_ref().is_some() {
+        return Err(Refusal::Malformed(format!(
+            "`screen_budget_ms` is refused: {BUDGET_NOT_RECORDABLE}. Omit it and bound \
+             the screen with `screen_cap`, a stated count. No setting was ignored."
+        )));
+    }
+    Ok(())
 }
 
 /// Parse exactly one complete JSON object before reading any field from it.
@@ -779,6 +878,17 @@ fn list_field(body: &WireBody, name: &str) -> Option<Vec<String>> {
 /// `from`, a support threshold of zero, or a rung the engine does not sweep.
 pub fn asked_from(body: &str) -> Result<Asked, Refusal> {
     let body = wire_body(body)?;
+    // REFUSED BEFORE ANY OTHER FIELD IS READ, on this route and on the two
+    // other body routes, [`descent_from`] and [`command_from`]. Those apply no
+    // knob, and that is why they once dropped the field instead: a budget the
+    // operator typed then silently did nothing. D-0685.
+    //
+    // READ, NOT DECODED: `wire_body` above has already checked every known
+    // field's JSON type, so a wrong-typed known field beside the budget
+    // (`"feed":5`, `"rungs":"5min"`) is refused as a malformed body before this
+    // line runs. The budget itself decodes as any value, so it is never the
+    // field that fails the decode. D-0695.
+    refuse_screen_budget(&body)?;
     asked_from_wire(&body)
 }
 
@@ -952,6 +1062,10 @@ pub use cli::EVERY_RUNG;
 /// a stop ceiling below one point, and a listing bound of zero.
 pub fn descent_from(body: &str) -> Result<AskedDescent, Refusal> {
     let body = wire_body(body)?;
+    // A DESCENT RECORDS AND ITS WALK PRICES THE SCREEN, so a budget named in its
+    // body is refused by name here, as [`asked_from`] refuses it, rather than
+    // decoded and dropped. D-0685.
+    refuse_screen_budget(&body)?;
     descent_from_wire(&body)
 }
 
@@ -1658,6 +1772,12 @@ pub(crate) fn run_with(
         return refused(&why);
     }
 
+    // BEFORE THE SLOT FOR THE SAME REASON: a budget in the server's own
+    // environment refuses every rung this run could sweep. D-0685.
+    if let Some(why) = environment_budget_refusal() {
+        return refused(&why);
+    }
+
     // THE SLOT IS CLAIMED UNDER THE LOCK AND THE WORK STARTS OUTSIDE IT.
     // Holding a std mutex across an await is the deadlock this pattern exists
     // to avoid, so the guard is dropped before anything is spawned.
@@ -1813,6 +1933,11 @@ pub(crate) fn descend_with(
     };
 
     if let Some(why) = stamp_refusal(stamp) {
+        return refused(&why);
+    }
+    // A descent's first step is `cli::one_rung`, which refuses a server budget;
+    // refused here instead, before the slot, as `run_with` does. D-0685.
+    if let Some(why) = environment_budget_refusal() {
         return refused(&why);
     }
 
@@ -2398,6 +2523,28 @@ impl Command {
         }
     }
 
+    /// Whether this ordinary command's run prices the exit-grid screen, and so
+    /// is refused by `cli` when `BRUTEX_SCREEN_BUDGET_MS` is usable. D-0685.
+    ///
+    /// `audit-range` reaches `audit_range_kernel` and `screen` reaches
+    /// `screen_range_kernel`, and both refuse the budget first. `auto-stored`,
+    /// `sweep-stored` and `sweep-all` sweep without pricing a screen, so a
+    /// budget cannot change what they record and they are not refused for one.
+    /// The strict word refuses the budget through its own admission, and the
+    /// two declared searches run other engines.
+    ///
+    /// THIS IS STILL A RESTATEMENT, of which `cli` kernels call
+    /// `cli::recorded_budget_refusal`, and it is named as one. Unlike the
+    /// budget rule it cannot be one call: the kernels sit behind five `cli`
+    /// entry points, and asking one of them from here would run it. What is
+    /// pinned is this crate's side: under a usable server budget the two words
+    /// here answer the 503, and every other word reaches its own admission at
+    /// the route (`server_budget_child`). A kernel that starts or stops
+    /// refusing a budget must change this list. D-0695.
+    const fn prices_a_screen(&self) -> bool {
+        matches!(*self, Self::AuditRange { .. } | Self::Screen { .. })
+    }
+
     /// The instrument this command reports against.
     ///
     /// `sweep-all` walks every instrument the feed holds at one rung, so it has
@@ -2544,6 +2691,12 @@ pub fn command_from(body: &str) -> Result<Command, Refusal> {
 
 /// [`command_from`] after strict JSON decoding and duplicate detection.
 fn command_from_wire(body: &WireBody) -> Result<Command, Refusal> {
+    // EVERY ORDINARY WORD, NOT ONLY THE STRICT ONE. `audit-range` and `screen`
+    // run the exit-grid screen a budget would bound, and every word here
+    // records; a budget named in the body is refused by name before the word
+    // is read, as [`asked_from`] refuses it. `strict_knobs` keeps its own
+    // refusal for the strict word. D-0685.
+    refuse_screen_budget(body)?;
     let word = field(body, "command")
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
@@ -2802,6 +2955,13 @@ fn command_with_configuration(
     };
 
     if let Some(why) = stamp_refusal(stamp) {
+        return refused(&why);
+    }
+    // Only the words whose run prices the screen; the strict word refuses the
+    // budget at every value through `validate_runtime` below. D-0685.
+    if asked.prices_a_screen()
+        && let Some(why) = environment_budget_refusal()
+    {
         return refused(&why);
     }
 
@@ -3073,6 +3233,7 @@ fn strict_request<'a>(
 }
 
 fn strict_knobs(body: &WireBody) -> Result<Vec<(&'static str, String)>, Refusal> {
+    refuse_screen_budget(body)?;
     for field_name in ["support_ppm", "sizing_rate_bp"] {
         if body.scalar(field_name).is_some() {
             return Err(Refusal::Malformed(format!(
@@ -3536,6 +3697,768 @@ mod tests {
                 vec![("BRUTEX_VALIDATE", "0".to_owned())],
                 "`{written}` must reach the engine as the only string it reads as off"
             );
+        }
+    }
+
+    /// The screen budget is refused by name rather than dropped: every run this
+    /// route starts records, and a budget's cap is decided by timing the run
+    /// identity cannot name. The stated screen cap still reaches the engine.
+    /// D-0685.
+    #[test]
+    fn a_screen_budget_is_refused_by_name_and_the_screen_cap_still_applies() {
+        assert!(
+            KNOBS
+                .iter()
+                .all(|(asked, name)| *asked != "screen_budget_ms"
+                    && *name != "BRUTEX_SCREEN_BUDGET_MS"),
+            "no request may set the budget"
+        );
+        for written in ["5000", "\"5000\"", "\"\"", "\"not-a-budget\""] {
+            let raw = format!(
+                r#"{{"feed":"zerodha","underlying":"NIFTY",{SPAN},"screen_budget_ms":{written}}}"#
+            );
+            let why = asked_from(&raw).expect_err("a budget cannot reach a recorded run");
+            assert_eq!(why.status(), axum::http::StatusCode::BAD_REQUEST);
+            assert!(
+                why.why().starts_with("`screen_budget_ms` is refused"),
+                "{written}: {}",
+                why.why()
+            );
+            assert!(
+                why.why().contains("No setting was ignored"),
+                "{}",
+                why.why()
+            );
+        }
+        let capped =
+            format!(r#"{{"feed":"zerodha","underlying":"NIFTY",{SPAN},"screen_cap":"7"}}"#);
+        assert_eq!(
+            asked_from(&capped)
+                .expect("a stated cap is a good body")
+                .knobs,
+            vec![("BRUTEX_SCREEN_CAP", "7".to_owned())]
+        );
+    }
+
+    /// The one refusal a body naming `screen_budget_ms` must get: 400, and the
+    /// budget's own sentence rather than a generic decoder complaint.
+    fn assert_budget_named<T: std::fmt::Debug>(result: Result<T, Refusal>, context: &str) {
+        let why = result.expect_err(context);
+        assert_eq!(
+            why.status(),
+            axum::http::StatusCode::BAD_REQUEST,
+            "{context}"
+        );
+        assert!(
+            why.why().starts_with("`screen_budget_ms` is refused"),
+            "{context}: {}",
+            why.why()
+        );
+        assert!(
+            why.why().contains(super::BUDGET_NOT_RECORDABLE),
+            "{context}: the reason is the file's one wording: {}",
+            why.why()
+        );
+    }
+
+    /// THE BUDGET'S REASON IS WORDED ONCE in this file's production code, and
+    /// both of its refusals state it. D-0695.
+    ///
+    /// The body refusal and the environment refusal each wrote the reason out,
+    /// as two different sentences for one fact. `BUDGET_NOT_RECORDABLE` now
+    /// holds it. `assert_budget_named` checks that the body refusal states it,
+    /// and `server_budget_through_the_journal` that the environment refusal
+    /// does. This counts the reason's own words in this file's production
+    /// source, everything before `mod tests`, which includes `top_json` below
+    /// the first `#[cfg(test)]`. Before counting, the `//!`, `///` or `//`
+    /// that opens a line is dropped, a `\` that ends a line is dropped with
+    /// the newline and the next line's leading whitespace, as the compiler
+    /// drops them inside a string literal, and every other run of whitespace
+    /// is made one space. So a second copy of those words fails here wrapped
+    /// across lines with a `\`, without one, or across the lines of a `//!`,
+    /// `///` or `//` comment. A paraphrase, a copy assembled from pieces, or a
+    /// copy wrapped behind any other mark that opens a line, such as the `*`
+    /// of a block comment, is not counted.
+    #[test]
+    fn the_budget_reason_is_worded_once() {
+        let production = include_str!("sweeprun.rs")
+            .split_once("\nmod tests {")
+            .expect("this file declares its tests module")
+            .0;
+        assert!(
+            production.contains("pub async fn top_json("),
+            "the production source reaches past the first `#[cfg(test)]`"
+        );
+        assert_eq!(
+            as_read(production)
+                .matches("wall-clock calibration the run identity cannot name")
+                .count(),
+            1,
+            "the budget's reason is spelt out more than once"
+        );
+    }
+
+    /// `source` with the `//!`, `///` or `//` that opens a line removed, each
+    /// `\`-newline continuation and the whitespace after it removed, and
+    /// every other run of whitespace made one space.
+    fn as_read(source: &str) -> String {
+        let uncommented = source
+            .lines()
+            .map(|line| {
+                let line = line.trim_start();
+                ["//!", "///", "//"]
+                    .into_iter()
+                    .find_map(|marker| line.strip_prefix(marker))
+                    .unwrap_or(line)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut pieces = uncommented.split("\\\n");
+        let mut joined = pieces.next().unwrap_or_default().to_owned();
+        for piece in pieces {
+            joined.push_str(piece.trim_start());
+        }
+        joined.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// `as_read` joins what the compiler joins inside a string literal, and
+    /// the lines of a line comment, and nothing else.
+    #[test]
+    fn a_wrapped_copy_reads_as_one_line() {
+        assert_eq!(
+            as_read("\"wall-clock \\\n        calibration the\n    run  identity\""),
+            "\"wall-clock calibration the run identity\""
+        );
+        assert_eq!(as_read("first\\\n  second\\\nthird"), "firstsecondthird");
+        assert_eq!(as_read("no continuation"), "no continuation");
+        // A LINE COMMENT'S LINES READ AS ONE, the marker that opens each line
+        // dropped, so a copy in a comment wrapped across lines is counted as a
+        // copy on one line is. A marker inside a line is kept. D-0695.
+        assert_eq!(
+            as_read("    /// wall-clock calibration the\n    //! run identity\n// cannot name"),
+            "wall-clock calibration the run identity cannot name"
+        );
+        assert_eq!(
+            as_read("call(); // wall-clock\n    //    calibration"),
+            "call(); // wall-clock calibration"
+        );
+        // Any other mark that opens a line is kept, and parts the words.
+        assert_eq!(
+            as_read("/* wall-clock\n * calibration */"),
+            "/* wall-clock * calibration */"
+        );
+    }
+
+    /// Every ordinary `POST /engine/command` word, as a good body names it.
+    const ORDINARY_WORDS: [&str; 6] = [
+        r#""command":"audit-range","rung":"15min","min_hits":500"#,
+        r#""command":"screen","rung":"15min","support_ppm":50000,"max_points":20,"top":25"#,
+        r#""command":"auto-stored","rung":"1min""#,
+        r#""command":"sweep-stored","rung":"15min","min_hits":500"#,
+        r#""command":"sweep-all","rung":"15min","min_hits":500"#,
+        r#""command":"audit-audited-range","rung":"5min","min_hits":500"#,
+    ];
+
+    /// NAMING THE FIELD IS THE ERROR, WHATEVER JSON VALUE CARRIES IT, ON EVERY
+    /// BODY ROUTE.
+    ///
+    /// `refuse_screen_budget` says any value refuses, an empty one included.
+    /// That held only for the four JSON types `WireScalar` decodes: `null`, a
+    /// fraction, an array, an object or an integer past `u64::MAX` failed the
+    /// scalar decode first and were refused with the decoder's generic sentence,
+    /// which never says the budget is not settable. Every value below is refused
+    /// with the budget's own sentence. A repeated key and a truncated body are
+    /// still refused as malformed JSON, because the object never parsed.
+    ///
+    /// AF-21 claimed this value by value for `/backtest/descend` and every
+    /// ordinary command word too, while only the run body was sent each value;
+    /// the other two held only because the three parsers share `wire_body`.
+    /// Every value now goes to all three parsers, with every ordinary word, AND
+    /// to the three route handlers, whose status and body are what the browser
+    /// receives. D-0695.
+    #[test]
+    fn a_screen_budget_is_refused_by_name_whatever_json_value_carries_it() {
+        let site = finisher_site("budget-any-value");
+        for written in [
+            "-1",
+            "0",
+            "true",
+            "false",
+            "18446744073709551615",
+            "\"  \"",
+            "\" 5000 \"",
+            "null",
+            "1.5",
+            "[5000]",
+            "{}",
+            "18446744073709551616",
+        ] {
+            let budget = format!(r#""screen_budget_ms":{written}"#);
+            let run = format!(r#"{{"feed":"zerodha","underlying":"NIFTY",{SPAN},{budget}}}"#);
+            assert_budget_named(asked_from(&run), written);
+            let descent = descent_body(&format!(
+                r#""rung":"15min","max_points":20,"top":25,{budget}"#
+            ));
+            assert_budget_named(descent_from(&descent), &format!("descend {written}"));
+            // NO STAMP, deliberately: a body's refusal comes before the build's,
+            // so a handler that answered anything but the budget's 400 here
+            // would be reading past the body it was sent.
+            let mut answers = vec![
+                ("run", super::run_with(&site, &run, None)),
+                ("descend", super::descend_with(&site, &descent, None)),
+            ];
+            for words in ORDINARY_WORDS {
+                let command = command_body(&format!("{words},{budget}"));
+                assert_budget_named(command_from(&command), &format!("{words} {written}"));
+                answers.push((words, super::command_with(&site, &command, None)));
+            }
+            for (route, (status, _, body)) in answers {
+                assert_eq!(
+                    status,
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "{route} {written}: {body}"
+                );
+                assert!(
+                    body.contains("`screen_budget_ms` is refused"),
+                    "{route} {written}: {body}"
+                );
+            }
+        }
+        for malformed in [
+            format!(
+                r#"{{"feed":"zerodha","underlying":"NIFTY",{SPAN},"screen_budget_ms":1,"screen_budget_ms":2}}"#
+            ),
+            format!(r#"{{"feed":"zerodha","underlying":"NIFTY",{SPAN},"screen_budget_ms":5000"#),
+        ] {
+            let why = asked_from(&malformed).expect_err("not one complete JSON object");
+            assert_eq!(why.status(), axum::http::StatusCode::BAD_REQUEST);
+            assert!(
+                why.why()
+                    .starts_with("the request body must be one complete JSON object"),
+                "{malformed}: {}",
+                why.why()
+            );
+        }
+    }
+
+    /// EVERY BODY ROUTE REFUSES THE BUDGET, NOT ONLY THE ONE THAT APPLIES KNOBS.
+    ///
+    /// `docs/06-limits.md` (D-0685) says the HTTP routes refuse a body that
+    /// names `screen_budget_ms`. `POST /backtest/descend` and every ordinary
+    /// `POST /engine/command` word decoded the field and then dropped it, so a
+    /// budget the operator typed silently did nothing on the descent and on
+    /// `audit-range` and `screen` -- the two words that run the exit-grid screen
+    /// a budget would bound. That is the fallback `refuse_screen_budget` exists
+    /// to refuse.
+    #[test]
+    fn a_screen_budget_is_refused_by_name_on_every_body_route() {
+        let descent = descent_body(r#""rung":"15min","max_points":20,"top":25"#);
+        assert!(descent_from(&descent).is_ok(), "the control body is good");
+        assert_budget_named(
+            descent_from(&descent_body(
+                r#""rung":"15min","max_points":20,"top":25,"screen_budget_ms":5000"#,
+            )),
+            "descend",
+        );
+        for words in ORDINARY_WORDS {
+            assert!(
+                command_from(&command_body(words)).is_ok(),
+                "control {words}"
+            );
+            assert_budget_named(
+                command_from(&command_body(&format!(
+                    r#"{words},"screen_budget_ms":5000"#
+                ))),
+                words,
+            );
+        }
+    }
+
+    /// WHICH REFUSAL A BODY WITH TWO FAULTS GETS, pinned on every body route.
+    ///
+    /// A body that is not one complete JSON object is refused as that first:
+    /// no field of it can be read. Past that, the budget is refused before any
+    /// other field is checked, so a budget beside a missing feed, a missing
+    /// command word or a generated-bar word names the budget. One order on all
+    /// three routes, so the same two faults never get two different answers.
+    ///
+    /// "Past that" includes every known field's JSON TYPE, which the decode
+    /// checks with the syntax; the test below pins that half. D-0695.
+    #[test]
+    fn the_budget_is_refused_before_every_other_field_and_after_the_json() {
+        let budget = r#""screen_budget_ms":5000"#;
+        assert_budget_named(
+            asked_from(&format!(r#"{{"underlying":"NIFTY",{SPAN},{budget}}}"#)),
+            "run without a feed",
+        );
+        assert_budget_named(
+            descent_from(&format!(r#"{{"underlying":"NIFTY",{SPAN},{budget}}}"#)),
+            "descent without a feed or rung",
+        );
+        for words in [
+            r#""rung":"15min""#,
+            r#""command":"sweep""#,
+            r#""command":"conquer""#,
+        ] {
+            assert_budget_named(
+                command_from(&command_body(&format!("{words},{budget}"))),
+                words,
+            );
+        }
+        let truncated = format!(r#"{{"feed":"zerodha","underlying":"NIFTY",{budget}"#);
+        for why in [
+            asked_from(&truncated).expect_err("truncated"),
+            descent_from(&truncated).expect_err("truncated"),
+            command_from(&truncated).expect_err("truncated"),
+        ] {
+            assert!(
+                why.why()
+                    .starts_with("the request body must be one complete JSON object"),
+                "{}",
+                why.why()
+            );
+        }
+    }
+
+    /// A KNOWN FIELD OF THE WRONG JSON TYPE BESIDE THE BUDGET IS REFUSED FIRST,
+    /// AS A MALFORMED BODY, on every body route.
+    ///
+    /// AF-21 said the budget is named "before any other field" and that only a
+    /// body that is not one complete JSON object is refused before it. That is
+    /// not the order the code keeps: `wire_body` decodes every known field's
+    /// JSON type before `refuse_screen_budget` reads the result, so a `feed`
+    /// that is a number, a `from_year` that is an array or `rungs` that is a
+    /// string fails the decode and gets the decoder's sentence. The budget is
+    /// named first only among bodies whose known fields are well typed, and it
+    /// can never be the field that fails the decode, because it decodes as any
+    /// value at all. D-0695 states this order; this pins it.
+    #[test]
+    fn a_wrong_typed_known_field_beside_the_budget_is_refused_as_malformed_first() {
+        let budget = r#""screen_budget_ms":5000"#;
+        for fault in [
+            r#""feed":5,"underlying":"NIFTY""#,
+            r#""feed":"zerodha","underlying":"NIFTY","from_year":[1]"#,
+            r#""feed":"zerodha","underlying":"NIFTY","rungs":"5min""#,
+        ] {
+            let body = format!("{{{fault},{budget}}}");
+            let commanded = format!(r#"{{{fault},"command":"screen",{budget}}}"#);
+            for (route, why) in [
+                ("run", asked_from(&body).expect_err("a wrong-typed field")),
+                (
+                    "descend",
+                    descent_from(&body).expect_err("a wrong-typed field"),
+                ),
+                (
+                    "command",
+                    command_from(&commanded).expect_err("a wrong-typed field"),
+                ),
+            ] {
+                assert_eq!(
+                    why.status(),
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "{route} {fault}"
+                );
+                assert!(
+                    why.why()
+                        .starts_with("the request body must be one complete JSON object"),
+                    "{route} {fault}: {}",
+                    why.why()
+                );
+            }
+        }
+    }
+
+    /// The child half of the test below reads its fixture root from this.
+    const SERVER_BUDGET_CHILD: &str = "BRUTEX_API_SERVER_BUDGET_CHILD";
+
+    /// A USABLE BUDGET IN THE SERVER'S OWN ENVIRONMENT IS REFUSED BEFORE THE
+    /// SLOT, AND THE STORE IS NOT TOUCHED.
+    ///
+    /// With `BRUTEX_SCREEN_BUDGET_MS=5000` in the server's environment and none
+    /// in the body, `POST /backtest/run` answered 202, took the execution lease
+    /// (`.sweep-execution-v1.lock`) and wrote an invocation record under
+    /// `audit/invocations-v1/`, and only then did `cli::one_rung` refuse the
+    /// budget. That refusal can never change while the server runs, so it must
+    /// not occupy the slot -- the rule `run_with` already keeps for an
+    /// unstamped build -- and D-0685's "before it reads its source or writes
+    /// anything" held only at the `cli` layer. The descent and the two command
+    /// words whose runs price the screen took the same path.
+    ///
+    /// In a child process because the budget must be in the ENVIRONMENT, which
+    /// a test cannot set in its own process; see `crate::isolated`.
+    ///
+    /// # One child per spelling, and why the padded two are here
+    ///
+    /// The rule trims before it parses, and nothing pinned that. The value
+    /// table in [`the_budget_rule_is_clis`] hands every value to
+    /// `cli::knobs::set`, which trims before it stores, so its `"\u{a0}5000"`
+    /// reached the rule already trimmed, and the only environment value any
+    /// child saw was an unpadded `5000`. Only the environment carries a value
+    /// untrimmed: `knobs::var` falls through to `std::env::var_os` and trims
+    /// nothing. A review removed the route's trim and this test stayed green,
+    /// while a padded server budget walked past the route's guard, took the
+    /// execution lease and wrote a run invocation record. Each
+    /// spelling below is a child of its own, with no knob set, and each must be
+    /// refused by all four routes and by the engine. D-0695.
+    #[tokio::test]
+    async fn a_usable_server_budget_is_refused_before_the_slot_and_writes_nothing() {
+        if let Some(root) = std::env::var_os(SERVER_BUDGET_CHILD) {
+            server_budget_child(std::path::Path::new(&root)).await;
+            return;
+        }
+        for (at, budget) in ["5000", " 5000\t", "\u{a0}5000"].into_iter().enumerate() {
+            let root = crate::scratch::path(&format!("server-screen-budget-{at}"));
+            let _ = std::fs::remove_dir_all(&root);
+            let store = root.join("store");
+            std::fs::create_dir_all(&store).expect("the child's empty store");
+            std::fs::create_dir_all(root.join("masters")).expect("the child's empty masters");
+            let out = crate::isolated::rerun(
+                "sweeprun::tests::a_usable_server_budget_is_refused_before_the_slot_and_writes_nothing",
+                &[
+                    (SERVER_BUDGET_CHILD, root.as_os_str()),
+                    ("BRUTEX_STORE", store.as_os_str()),
+                    ("BRUTEX_SCREEN_BUDGET_MS", std::ffi::OsStr::new(budget)),
+                ],
+            );
+            assert!(
+                out.contains("SERVER-BUDGET refused 4 routes"),
+                "{budget:?}: {out}"
+            );
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    /// Every file under `root`, with its length, in a stable order.
+    fn listing(root: &std::path::Path) -> Vec<(std::path::PathBuf, u64)> {
+        let mut out = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).expect("a readable fixture directory") {
+                let entry = entry.expect("a readable fixture entry");
+                let meta = entry.metadata().expect("fixture metadata");
+                if meta.is_dir() {
+                    pending.push(entry.path());
+                }
+                out.push((entry.path(), meta.len()));
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// One sweep route, called by the child below.
+    type Route<'a> = &'a dyn Fn() -> (axum::http::StatusCode, super::JsonHeaders, String);
+
+    /// The child half of the test above: the budget is in this process's
+    /// environment, and each route is asked with it there.
+    ///
+    /// # Why the child installs a sink
+    ///
+    /// AF-22 said the four routes "leave the in-process slot empty", and with
+    /// no sink that could not fail: a route that skipped the budget guard took
+    /// the lease, wrote the invocation record and then refused as
+    /// `Unobservable`, because its attempt marker had nowhere to land, all
+    /// before the slot is filled. A server always has a sink. With one here, a
+    /// route past the guard fills the slot and starts a run, so the slot
+    /// assertion is one the store listing does not stand in for. D-0695.
+    async fn server_budget_child(root: &std::path::Path) {
+        const STAMP: &str = "0123456789abcdef0123456789abcdef01234567";
+        telemetry::install(&telemetry::Config::new(root.join("logs")))
+            .expect("this child's one sink");
+        let store = root.join("store");
+        let site = std::sync::Arc::new(crate::server::Site::load(&root.join("masters"), &store));
+        let before = listing(&store);
+        let run = format!(r#"{{"feed":"zerodha","underlying":"NIFTY",{SPAN},"rungs":["5min"]}}"#);
+        let descent = descent_body(r#""rung":"15min","max_points":20,"top":25"#);
+        let audit = command_body(r#""command":"audit-range","rung":"15min","min_hits":500"#);
+        let screen = command_body(
+            r#""command":"screen","rung":"15min","support_ppm":50000,"max_points":20,"top":25"#,
+        );
+        // AN UNSTAMPED BUILD IS NAMED FIRST: the build is a fact decided before
+        // the environment, and the order is one on every route.
+        let (status, _, body) = super::descend_with(&site, &descent, None);
+        assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert!(body.contains("BRUTEX_COMMIT"), "{body}");
+        assert!(!body.contains("BRUTEX_SCREEN_BUDGET_MS"), "{body}");
+        assert_eq!(listing(&store), before, "unstamped descend wrote");
+
+        // ONE ROUTE AT A TIME, each checked before the next is called, so a
+        // route that writes is the one named.
+        let routes: [(&str, Route<'_>); 4] = [
+            ("run", &|| super::run_with(&site, &run, Some(STAMP))),
+            ("descend", &|| {
+                super::descend_with(&site, &descent, Some(STAMP))
+            }),
+            ("audit-range", &|| {
+                super::command_with(&site, &audit, Some(STAMP))
+            }),
+            ("screen", &|| {
+                super::command_with(&site, &screen, Some(STAMP))
+            }),
+        ];
+        for (route, answer) in routes {
+            let (status, _, body) = answer();
+            assert_eq!(
+                status,
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "{route}: {body}"
+            );
+            assert!(body.contains(r#""accepted":false"#), "{route}: {body}");
+            assert!(
+                body.contains("BRUTEX_SCREEN_BUDGET_MS is set in this server's environment"),
+                "{route}: {body}"
+            );
+            assert!(
+                site.sweep.lock().expect("the slot").is_none(),
+                "{route} occupied the slot"
+            );
+            assert_eq!(listing(&store), before, "{route} wrote into the store");
+        }
+
+        // THE ENVIRONMENT'S OWN SPELLING, WITH NO KNOB SET, READ BY THE ENGINE
+        // TOO. This child's value may be padded; only here does the rule's trim
+        // meet it, and the engine must refuse exactly what the routes refused.
+        assert!(
+            cli::range_over("zerodha", "NIFTY", &["5min"], (2025, 5), (2025, 5), None)
+                .contains("BRUTEX_SCREEN_BUDGET_MS is set"),
+            "the engine's reading of this environment"
+        );
+
+        server_budget_through_the_journal(&site, &store, &run).await;
+        only_the_screen_words_carry_the_budget();
+        the_budget_rule_is_clis();
+
+        // PAST THE GUARD, EVERY ROUTE MEETS ITS OWN ADMISSION, which here is
+        // the slot: one run is planted in flight, so a route that reaches the
+        // slot answers 409 and starts nothing. Planted rather than started, as
+        // `crate::emitted` plants its busy row.
+        *site.sweep.lock().expect("the slot") = Some(super::Progress::started(
+            "zerodha",
+            "NIFTY",
+            (2025, 5),
+            (2025, 5),
+            None,
+            0,
+            1,
+        ));
+
+        // THE WORDS WHOSE RUN PRICES NO SCREEN ARE NOT REFUSED FOR ONE, at the
+        // ROUTE and not only in `prices_a_screen`: nothing asked whether
+        // `command_with_configuration` consults the predicate at all, and with
+        // the guard applied to every word this suite stayed green. D-0695. The
+        // strict word refuses the budget through its own admission, in its own
+        // words and before the slot, and never with this route's sentence.
+        for words in &ORDINARY_WORDS[2..] {
+            let (status, _, body) = super::command_with(&site, &command_body(words), Some(STAMP));
+            assert!(
+                !body.contains("BRUTEX_SCREEN_BUDGET_MS is set in this server's environment"),
+                "{words} was refused a budget its run never prices: {body}"
+            );
+            if words.contains("audit-audited-range") {
+                assert!(
+                    body.contains("strict_runtime_settings_invalid")
+                        && body.contains("BRUTEX_SCREEN_BUDGET_MS"),
+                    "the strict word names the budget through its own admission: {body}"
+                );
+            } else {
+                assert_eq!(status, axum::http::StatusCode::CONFLICT, "{words}: {body}");
+            }
+        }
+
+        // A VALUE THE BUDGET READER CANNOT USE REFUSES NO ROUTE: it is no
+        // budget, and `cli` names it under KNOB REFUSED and runs without one.
+        // Each route goes on to its own admission, the planted run's slot.
+        cli::knobs::set("BRUTEX_SCREEN_BUDGET_MS", "0");
+        for (route, answer) in routes {
+            let (status, _, body) = answer();
+            assert!(
+                !body.contains("BRUTEX_SCREEN_BUDGET_MS"),
+                "{route} refused an unusable budget: {body}"
+            );
+            assert_eq!(status, axum::http::StatusCode::CONFLICT, "{route}: {body}");
+        }
+        cli::knobs::clear_all();
+        println!("SERVER-BUDGET refused 4 routes");
+    }
+
+    /// The server-budget refusal through the request journal the production
+    /// router wraps every sweep route in, and what that journal then holds.
+    ///
+    /// The refusal said "nothing was written". `audited_router_serving` wraps
+    /// `/backtest/run`, `/backtest/descend` and `/engine/command` in
+    /// `operation_audit::note_request`, which journals the request's start
+    /// before the handler runs and its 503 after, so on the router the operator
+    /// uses that sentence was false the moment it was sent -- and AF-22's
+    /// unchanged store held only because its test called the handler bare. The
+    /// sentence now claims only the run's state. What must hold is exactly
+    /// that: ONE journal row, the HTTP request's own, `Failed` at 503, no run
+    /// invocation beside it, and nothing new under the store outside `audit/`.
+    /// D-0695.
+    async fn server_budget_through_the_journal(
+        site: &crate::server::Loaded,
+        store: &std::path::Path,
+        run: &str,
+    ) {
+        const STAMP: &str = "0123456789abcdef0123456789abcdef01234567";
+        let before = listing(store);
+        let response = crate::operation_audit::request_audited(
+            store.to_path_buf(),
+            "POST /backtest/run".to_owned(),
+            async {
+                axum::response::IntoResponse::into_response(super::run_with(site, run, Some(STAMP)))
+            },
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        let body = axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .expect("the refusal's body");
+        let body = String::from_utf8_lossy(&body);
+        assert!(
+            body.contains("BRUTEX_SCREEN_BUDGET_MS is set in this server's environment"),
+            "{body}"
+        );
+        assert!(
+            body.contains(super::BUDGET_NOT_RECORDABLE),
+            "the reason is the file's one wording, as the body refusal's is: {body}"
+        );
+        assert!(
+            body.contains("HTTP request journal still records the request itself"),
+            "the sentence names the row the journal kept: {body}"
+        );
+        assert!(
+            !body.contains("nothing was written"),
+            "the journal wrote, so the sentence may not say otherwise: {body}"
+        );
+        assert!(
+            site.sweep.lock().expect("the slot").is_none(),
+            "the journalled refusal occupied the slot"
+        );
+        let rows = cli::operation_audit::page(store, None, 32).expect("the journal reads");
+        assert_eq!(
+            rows.len(),
+            1,
+            "one request, one row, and no run invocation beside it: {rows:?}"
+        );
+        let row = rows.first().expect("the request's own row");
+        assert_eq!(row.origin, cli::operation_audit::Origin::Http);
+        assert_eq!(row.label, "POST /backtest/run");
+        assert_eq!(row.phase, cli::operation_audit::Phase::Failed);
+        assert_eq!(row.response_status, 503);
+        let journal = store.join("audit");
+        for (path, _) in listing(store) {
+            assert!(
+                path.starts_with(&journal) || before.iter().any(|(was, _)| *was == path),
+                "{} appeared outside the request journal",
+                path.display()
+            );
+        }
+    }
+
+    /// The command words whose run prices a screen, and only those, carry the
+    /// server-budget refusal.
+    fn only_the_screen_words_carry_the_budget() {
+        // THE WORDS WHOSE RUN PRICES NO SCREEN ARE NOT REFUSED FOR ONE: their
+        // commands carry no budget and the predicate says so for each.
+        for (words, prices) in [
+            (
+                r#""command":"audit-range","rung":"15min","min_hits":500"#,
+                true,
+            ),
+            (
+                r#""command":"screen","rung":"15min","support_ppm":50000,"max_points":20,"top":25"#,
+                true,
+            ),
+            (r#""command":"auto-stored","rung":"1min""#, false),
+            (
+                r#""command":"sweep-stored","rung":"15min","min_hits":500"#,
+                false,
+            ),
+            (
+                r#""command":"sweep-all","rung":"15min","min_hits":500"#,
+                false,
+            ),
+            (
+                r#""command":"audit-audited-range","rung":"5min","min_hits":500"#,
+                false,
+            ),
+        ] {
+            let asked = super::command_from(&command_body(words)).expect("a good command");
+            assert_eq!(asked.prices_a_screen(), prices, "{words}");
+        }
+    }
+
+    /// The server-budget predicate is `cli`'s own rule, value by value.
+    ///
+    /// By construction since D-0695, because the route calls
+    /// `cli::recorded_budget_refusal`; kept as the guard against a copy of the
+    /// rule growing back. It cannot reach the TRIM: `cli::knobs::set` trims
+    /// before it stores, so every value below arrives trimmed. The padded
+    /// spellings the parent test puts in the ENVIRONMENT are what reach it.
+    fn the_budget_rule_is_clis() {
+        // THE SAME RULE AS `cli`'s, value by value. The knob store precedes the
+        // environment in `cli::knobs::var`, so each value is set there and both
+        // readers see it; `cli::range_over` refuses a usable budget in
+        // `one_rung` before it resolves the store.
+        for (value, usable) in [
+            ("5000", true),
+            ("+5000", true),
+            ("00001", true),
+            ("1", true),
+            ("18446744073709551615", true),
+            ("\u{a0}5000", true),
+            ("0", false),
+            ("-1", false),
+            ("abc", false),
+            ("18446744073709551616", false),
+            ("5_000", false),
+            ("0x10", false),
+            ("1e3", false),
+            ("\u{660}", false),
+            ("\u{ff11}\u{ff12}", false),
+        ] {
+            cli::knobs::set("BRUTEX_SCREEN_BUDGET_MS", value);
+            let here = super::environment_budget_refusal().is_some();
+            let there = cli::range_over("zerodha", "NIFTY", &["5min"], (2025, 5), (2025, 5), None)
+                .contains("BRUTEX_SCREEN_BUDGET_MS is set");
+            assert_eq!((here, there), (usable, usable), "{value:?}");
+        }
+        cli::knobs::clear_all();
+        assert!(
+            super::environment_budget_refusal().is_some(),
+            "cleared, the environment's own budget is read again"
+        );
+    }
+
+    /// A MISSPELT BUDGET KEY IS AN UNKNOWN FIELD, AND AN UNKNOWN FIELD SETS
+    /// NOTHING.
+    ///
+    /// `WireBody` ignores unknown fields for compatibility, so these spellings
+    /// are accepted and dropped rather than refused. What must hold is that
+    /// none of them reaches the knob store, so the run's identity and the
+    /// candidates it prices are exactly those of the same body without it. The
+    /// environment spelling is the likeliest slip and is included.
+    #[test]
+    fn a_misspelt_budget_key_reaches_no_knob() {
+        let plain = asked_from(&format!(
+            r#"{{"feed":"zerodha","underlying":"NIFTY",{SPAN}}}"#
+        ))
+        .expect("a good body");
+        for key in [
+            "Screen_Budget_Ms",
+            "SCREEN_BUDGET_MS",
+            "screen_budget_ms ",
+            "screen-budget-ms",
+            "screen_budget",
+            "BRUTEX_SCREEN_BUDGET_MS",
+        ] {
+            let raw = format!(r#"{{"feed":"zerodha","underlying":"NIFTY",{SPAN},"{key}":5000}}"#);
+            let asked = asked_from(&raw).expect("an unknown field is ignored");
+            assert!(asked.knobs.is_empty(), "{key}: {:?}", asked.knobs);
+            assert_eq!(asked, plain, "{key} changed what was asked");
         }
     }
 

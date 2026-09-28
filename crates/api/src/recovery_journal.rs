@@ -47,6 +47,7 @@ use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 
 use store::crc::crc32c;
+use store::flock::Flock;
 
 const RECORD_LEN: usize = 1_024;
 const RECORD_LEN_U64: u64 = 1_024;
@@ -234,8 +235,13 @@ impl Record {
 /// A locked progress file and the index recovered from its durable records.
 ///
 /// Callers may inspect `latest` and `order`; change them only through `append`.
-/// The sole file handle (including its exclusive lock) lives in `io` until
-/// this object is dropped. No clone or independent unlocked append is exposed.
+/// The sole writable file handle lives in `io` until this object is dropped,
+/// and its exclusive lock is held by `_lock`, a guard over a duplicate of that
+/// same descriptor. The lock belongs to the open file description, so the
+/// guard's explicit unlock on drop releases exactly the lock `io` writes
+/// under, and a duplicate left in a child another thread spawned cannot keep
+/// it after this object is gone (D-0693). No clone or independent unlocked
+/// append is exposed.
 #[derive(Debug)]
 pub(crate) struct Journal {
     /// Most recently synced state for each work key.
@@ -246,6 +252,9 @@ pub(crate) struct Journal {
     bytes: u64,
     poisoned: bool,
     named_file: Option<(PathBuf, u64, u64)>,
+    /// The exclusive lock, released by an explicit unlock when the journal
+    /// drops. `None` only for the in-memory fault fixture, which has no file.
+    _lock: Option<Flock<File>>,
 }
 
 impl Journal {
@@ -279,13 +288,19 @@ impl Journal {
             .create(create)
             .create_new(create_new)
             .open(path)?;
-        file.try_lock().map_err(|error| match error {
-            TryLockError::WouldBlock => io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "recovery journal is already exclusively locked; no work was admitted",
-            ),
-            TryLockError::Error(error) => error,
-        })?;
+        // A guard over a duplicate, so `file` stays free to be read through
+        // `&mut` and then moved into `io`. Every `?` below releases the lock
+        // through the guard's explicit unlock.
+        let lock =
+            Flock::try_lock(file.try_clone()?, path.to_path_buf()).map_err(
+                |error| match error {
+                    TryLockError::WouldBlock => io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "recovery journal is already exclusively locked; no work was admitted",
+                    ),
+                    TryLockError::Error(error) => error,
+                },
+            )?;
         let metadata = file.metadata()?;
         if !metadata.is_file() {
             return Err(invalid_data("recovery journal is not a regular file"));
@@ -318,6 +333,7 @@ impl Journal {
             bytes,
             poisoned: false,
             named_file: Some((path.to_owned(), metadata.dev(), metadata.ino())),
+            _lock: Some(lock),
         })
     }
 
@@ -504,23 +520,24 @@ pub(crate) struct Index {
 /// A live writer refuses the snapshot; callers must not infer an empty inventory.
 /// Cost is O(records) time and O(distinct work units) memory.
 pub(crate) fn snapshot(path: &Path) -> io::Result<Index> {
-    let mut file = File::open(path)?;
-    file.try_lock_shared().map_err(|error| match error {
-        TryLockError::WouldBlock => io::Error::new(
-            io::ErrorKind::WouldBlock,
-            "recovery journal has a writer; read-only inventory is unavailable",
-        ),
-        TryLockError::Error(error) => error,
-    })?;
+    let mut file =
+        Flock::try_lock_shared(File::open(path)?, path).map_err(|error| match error {
+            TryLockError::WouldBlock => io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "recovery journal has a writer; read-only inventory is unavailable",
+            ),
+            TryLockError::Error(error) => error,
+        })?;
     let metadata = file.metadata()?;
     if !metadata.is_file() {
         return Err(invalid_data("recovery journal is not a regular file"));
     }
     let index = replay(
-        &mut BufReader::with_capacity(REPLAY_BUFFER_BYTES, &mut file),
+        &mut BufReader::with_capacity(REPLAY_BUFFER_BYTES, &mut *file),
         metadata.len(),
     )?;
     unchanged_snapshot(metadata.len(), file.metadata()?.len())?;
+    file.release()?;
     Ok(index)
 }
 
@@ -657,6 +674,48 @@ mod tests {
     fn reseal(image: &mut [u8; RECORD_LEN]) {
         let crc = checksum(image);
         image[CRC_OFFSET..].copy_from_slice(&crc.to_le_bytes());
+    }
+
+    /// A DROPPED JOURNAL IS RELEASED WHILE A DUPLICATE OF ITS DESCRIPTOR IS
+    /// STILL OPEN. D-0693.
+    ///
+    /// The duplicate is the model of the reference a child spawned by another
+    /// thread holds until its exec. While closing the descriptor was the
+    /// release, `recovery` reopening the same journal right after a drop was
+    /// refused as "already exclusively locked" with no writer alive.
+    #[test]
+    #[expect(
+        clippy::used_underscore_binding,
+        reason = "the duplicate is taken of the journal's lock guard itself, \
+                  which is the field whose drop this test is about"
+    )]
+    fn a_dropped_recovery_journal_is_released_despite_a_duplicated_descriptor() {
+        let scratch = Scratch::new();
+        let mut journal = Journal::open(&scratch.path()).expect("create journal");
+        journal.append(record(7)).expect("durable append");
+        let child = journal
+            ._lock
+            .as_deref()
+            .expect("a journal on disk holds its lock")
+            .try_clone()
+            .expect("the duplicate a spawned child would hold");
+        assert_eq!(
+            Journal::open_existing(&scratch.path())
+                .map(|_| ())
+                .map_err(|error| error.kind()),
+            Err(io::ErrorKind::WouldBlock),
+            "the premise: a live journal refuses a second writer"
+        );
+        drop(journal);
+
+        let reopened = Journal::open_existing(&scratch.path())
+            .expect("the dropped journal unlocked despite the duplicate");
+        assert_eq!(reopened.order, vec![[7; 32]], "and it replays what it held");
+        drop(reopened);
+        let index = snapshot(&scratch.path())
+            .expect("a read-only snapshot is not refused by a writer that is gone");
+        assert_eq!(index.order, vec![[7; 32]]);
+        drop(child);
     }
 
     #[test]
@@ -1365,6 +1424,7 @@ mod tests {
             bytes: 0,
             poisoned: false,
             named_file: None,
+            _lock: None,
         };
         (journal, memory)
     }

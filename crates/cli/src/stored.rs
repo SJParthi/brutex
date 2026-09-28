@@ -1670,7 +1670,10 @@ pub const DAILY_INTEGRITY_NOTE: &str = "UNVERIFIED -- committed store records we
 pub const EXACT_MINUTE_INTEGRITY_NOTE: &str = "UNVERIFIED -- exact stored 1min records were read, but no independent checksum-scrub receipt was supplied";
 
 /// Stored one-day evidence ready for the causal anchored evaluator.
-#[derive(Clone, Debug)]
+///
+/// `PartialEq` so a test can say two loads are the same context in every
+/// field, and not only in the fields it thought to name (AF-19).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DailyContext {
     /// Every one-day OHLCV record that can influence the requested signal span.
     pub bars: Vec<Candle>,
@@ -1685,7 +1688,9 @@ pub struct DailyContext {
 }
 
 /// Same-feed, same-instrument stored one-minute evidence for `GapFib`.
-#[derive(Clone, Debug)]
+///
+/// `PartialEq` for the reason [`DailyContext`] gives.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExactMinuteContext {
     /// Complete one-minute context, including the preceding warm-up month.
     pub bars: Vec<Candle>,
@@ -1799,11 +1804,41 @@ pub(crate) fn rung(name: &str) -> Result<Timeframe, Refusal> {
 /// **UNVERIFIED as a measured bound.** No bench in this workspace
 /// times this, so the shape above is read from the source rather
 /// than measured. `CLAUDE.md` §3 rule 6.
-fn clipped(word: &str) -> String {
+///
+/// # And escaped, because a quoted word is not a line
+///
+/// What is kept is printed through `escape_debug`, so a control character in
+/// the word is quoted as its escape and the refusal stays on one line. The
+/// word is not always typed: `sweep-all` loads every held month by its symbol
+/// DIRECTORY's name, and a directory can be called anything a filesystem
+/// admits. One named `X\nrefused: forged` put `refused: forged` at column zero
+/// of a completed run, and [`crate::carries_refusal`] then read the whole run
+/// as refused (measured by the review, D-0696). A feed word can come from
+/// stored bytes as well, which is why `parse_vendor` quotes through this too.
+///
+/// A word is quoted exactly as before when, and only when, `escape_debug`
+/// prints each of the characters `clipped` keeps -- the first 64 -- as
+/// itself. A character past the cut is dropped, not escaped, so 64 `N`s and
+/// then a newline are quoted as they always were. Among the characters it
+/// escapes are a quote, a backslash, a control character, a format character
+/// such as U+200B, a separator other than the space, such as U+00A0 or
+/// U+2028, and a combining mark that opens the word and has Unicode's
+/// `Grapheme_Extend` property: U+0301 followed by `NIFTY` is quoted as the text
+/// `\u{301}NIFTY`, while the same mark after the `N` prints as itself. A
+/// spacing mark without that property, such as U+0903, prints as itself even
+/// when it opens the word (D-0696).
+///
+/// Clipped FIRST and escaped after, so the escape walks at most the 64
+/// characters kept and the cost above is unchanged. What comes back is at
+/// most 643 bytes -- 64 characters, each printed as itself or as an escape of
+/// at most ten bytes (`\u{10ffff}`), and the three-byte mark -- read from the
+/// source, not measured.
+pub(crate) fn clipped(word: &str) -> String {
     /// Characters of the offending word a refusal keeps.
     const KEEP: usize = 64;
 
-    let mut out: String = word.chars().take(KEEP).collect();
+    let kept: String = word.chars().take(KEEP).collect();
+    let mut out = kept.escape_debug().to_string();
     if word.chars().nth(KEEP).is_some() {
         out.push('…');
     }
@@ -1819,15 +1854,19 @@ fn clipped(word: &str) -> String {
 /// belonging to the sweep surface. Every stored-sweep entry door comes through
 /// this helper so the authoritative allow-list remains
 /// [`InstrumentKey::is_sweepable`] -- [`InstrumentKey::SWEPT`] for the indices
-/// and `FNO_INDEX` for the equities -- not a second string list in the CLI or
-/// API.
+/// and `FNO_INDEX` less `FNO_INDEX_UNDERLYINGS` for the equities -- not a
+/// second string list in the CLI or API.
 ///
 /// # How one word resolves to one of two shapes
 ///
 /// The two indices are tried first, by name. A word that is not one of them is
 /// tried as a cash equity. Both keys are built and both are checked, so the
 /// refusal a reader sees names the surface as it actually is rather than
-/// "not an index".
+/// "not an index". An F&O underlying that is an index -- `FINNIFTY`,
+/// `MIDCPNIFTY`, `NIFTYNXT50` -- fails both: it is not one of the two, and core
+/// refuses a cash key named after an index (D-0682). The refusal's share count
+/// is derived from core's two lists rather than written here, so it cannot
+/// drift from the predicate it describes.
 ///
 /// Every refusal is ONE SENTENCE, whatever the word did wrong. A malformed
 /// word, a well-formed word off the surface and a contract are three causes
@@ -1844,8 +1883,11 @@ fn clipped(word: &str) -> String {
 /// will print, which is why they share one value rather than each calling the
 /// cut.
 ///
-/// That value is built EAGERLY, on the success path too. It is at most 67 bytes
-/// and this function runs once per instrument-month load, never per bar and
+/// That value is built EAGERLY, on the success path too. It is at most the 643
+/// bytes [`clipped`] can return, and on the success path -- a word
+/// `Symbol::new` admitted, at most 24 ASCII letters, digits, `-`, `_` and `&`,
+/// none of which is escaped -- at most 24; this function runs once per
+/// instrument-month load, never per bar and
 /// never per candidate, so it is not one of the five operations `CLAUDE.md` §3
 /// rule 4 bounds. Buying that with a predictable shape — one clip, one
 /// sentence, no way for them to drift — is the better trade.
@@ -1857,10 +1899,13 @@ pub(crate) fn swept_index(underlying: &str) -> Result<InstrumentKey, Refusal> {
             .map(|(_, symbol)| *symbol)
             .collect::<Vec<_>>()
             .join(", ");
+        let shares = brutex_core::universe::FNO_UNDERLYINGS.len()
+            - brutex_core::universe::FNO_INDEX_UNDERLYINGS.len();
         format!(
             "`{named}` is not an instrument this engine sweeps: {why}. \
              The sweep surface is the NSE spot indices {indices} and the NSE \
-             cash equities of the 213 F&O underlyings (D-0506). Nothing was read."
+             cash equities of the {shares} F&O underlyings that are shares, not \
+             indices (D-0506, D-0682). Nothing was read."
         )
     };
     // THE INDEX FIRST, BY NAME. NIFTY and BANKNIFTY are indices and nothing
@@ -1871,13 +1916,94 @@ pub(crate) fn swept_index(underlying: &str) -> Result<InstrumentKey, Refusal> {
         return Ok(as_index);
     }
     // THEN THE CASH EQUITY. Same word, the stock's own price series. Sweepable
-    // only when the symbol is one of the 213 F&O underlyings.
+    // only when the symbol is an F&O underlying that is a share, not an index.
     let as_cash =
         InstrumentKey::cash(Exchange::Nse, underlying).map_err(|why| refuse(why.to_string()))?;
     as_cash
         .require_sweepable()
         .map_err(|why| refuse(why.to_string()))?;
     Ok(as_cash)
+}
+
+/// Why a stored holding whose symbol directory names `key` is not where `key`
+/// is read from, or `None` when it is. D-0696.
+///
+/// # A word is not a path
+///
+/// [`swept_index`] resolves a bare WORD, and every loader opens the one path
+/// [`StorePath::for_key`] builds from the key that word resolves to. A catalog
+/// holding carries three directories, and a caller that asked only whether
+/// its symbol directory resolved was answering a different question:
+/// `BSE/CASH/RELIANCE`, `NSE/INDEX/RELIANCE` and `NSE/CASH/reliance` all
+/// resolve to `NSE-RELIANCE`, and a load of that key opens
+/// `NSE/CASH/RELIANCE`. `pool` listed each as the instrument it was not, and
+/// `sweep-all` swept the NSE file once per such holding, under a label that
+/// could not tell the rows apart.
+///
+/// # Byte for byte, and on every filesystem the same
+///
+/// All three directories are compared exactly with the key's own path
+/// segments -- the spelling the writer writes. Folding case here would make
+/// the answer depend on the filesystem: on a case-insensitive one a load of
+/// `NSE-RELIANCE` opens `NSE/CASH/reliance`, and on the case-sensitive one CI
+/// runs it opens nothing. Compared exactly, one store lists one surface
+/// wherever it is mounted, and a directory spelt any other way is named by
+/// its caller rather than read under a name it does not carry.
+/// `research::render` already counts only the exact `NSE/CASH/<symbol>`
+/// spelling, for the same reason.
+///
+/// # Named escaped, because a directory name is not a line
+///
+/// The three directories are the operator's own names, and only the symbol
+/// has to resolve: an exchange or segment directory can be called anything a
+/// filesystem admits, a newline included. Interpolated raw, such a name put a
+/// line at column zero in the middle of the `pool` page and of a `sweep-all`
+/// REFUSED row, and a line reading `refused: ...` made a completed pool read
+/// as a refusal to every scanner that asks [`crate::carries_refusal`]. Each
+/// name is therefore named through [`clipped`], which clips it and then
+/// renders it through `escape_debug`, so a control character is printed as its
+/// escape and the sentence stays on one line. A name prints exactly as it did
+/// when, and only when, `escape_debug` prints each of the characters
+/// `clipped` keeps of it -- its first 64 -- as itself, which [`clipped`]'s doc
+/// spells out: a character past the cut is dropped, not escaped. Each of the
+/// three names is escaped on its own, so a combining mark that opens any one
+/// of them is escaped too when it has Unicode's `Grapheme_Extend` property, as
+/// U+0301 does. The escape was first written here alone, and the symbol
+/// directory -- which reaches [`swept_index`]'s refusal and `sweep-all`'s row
+/// label as a word -- still forged a refusal of the run; it now lives in
+/// [`clipped`], for every word quoted through it: this function's three
+/// names, the word [`swept_index`] and [`rung`] refuse, and the feed word
+/// `parse_vendor` refuses (D-0696).
+///
+/// UNVERIFIED performance: no bench times this. Read from the source, it is
+/// three comparisons of strings no longer than a path segment, once per
+/// holding the caller lists and never per bar; the escape walks at most the
+/// 64 characters [`clipped`] keeps of each name.
+pub(crate) fn misfiled(
+    key: &InstrumentKey,
+    exchange: &str,
+    segment: &str,
+    symbol: &str,
+) -> Option<Refusal> {
+    let own = (
+        key.exchange.as_str(),
+        key.segment.as_str(),
+        key.underlying.as_str(),
+    );
+    if (exchange, segment, symbol) == own {
+        return None;
+    }
+    Some(format!(
+        "`{}/{}/{}` is not where `{key}` is stored: a load of `{key}` reads `{}/{}/{}`, \
+         spelt exactly as the writer writes it. Nothing under this directory was read \
+         (D-0696)",
+        clipped(exchange),
+        clipped(segment),
+        clipped(symbol),
+        own.0,
+        own.1,
+        own.2
+    ))
 }
 
 /// UNVERIFIED performance: no named cost test or measured latency bound is established here.
@@ -1916,6 +2042,118 @@ pub(crate) const fn vwap_availability(key: &InstrumentKey) -> Availability {
         Kind::Equity => Availability::Present,
         Kind::Index | Kind::Future { .. } | Kind::Option { .. } => Availability::Absent,
     }
+}
+
+/// Which charge statement heads this instrument's audit: decided by WHAT the
+/// instrument is, exactly as [`vwap_availability`] is. D-0681.
+///
+/// An index is [`runner::audit::CostScope::IndexSpot`] -- no charge exists.
+/// A cash equity is [`runner::audit::CostScope::CashEquity`] -- every charge
+/// exists and none is subtracted, so the report says GROSS OF EVERY CHARGE
+/// rather than the index's "there is no brokerage".
+///
+/// # Errors
+///
+/// A futures or options contract. [`swept_index`] refuses one before any
+/// caller holds its key, and neither header describes one; unlike the VWAP
+/// verdict there is no harmless answer to fall back to, because each header
+/// makes a claim about charges that is false of a contract. So this refuses
+/// by name rather than borrowing a label.
+pub(crate) fn audit_cost_scope(key: &InstrumentKey) -> Result<runner::audit::CostScope, Refusal> {
+    #[cfg(test)]
+    let substituted = COST_SCOPE_KEY.with(std::cell::Cell::get);
+    #[cfg(test)]
+    let key = substituted.as_ref().unwrap_or(key);
+    runner::audit::CostScope::of(key.kind).ok_or_else(|| {
+        format!(
+            "`{key}` is a futures or options contract: the sweep surface holds \
+             none (CLAUDE.md section 1), and no audit header states its charges"
+        )
+    })
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static COST_SCOPE_KEY: std::cell::Cell<Option<InstrumentKey>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Test-only: the key [`audit_cost_scope`] judges in place of the one it is
+/// handed, for as long as the guard lives, on this thread only.
+///
+/// # Why a seam and not a fixture
+///
+/// [`swept_index`] refuses every contract before any caller holds a key, so no
+/// store, however it is seeded, can bring a contract to the four kernels that
+/// ask for the charge statement. Their `?` on this refusal therefore never ran
+/// in a test, and a kernel that swallowed it -- or that asked before a durable
+/// write it should not make -- would pass every fixture. The guard lets a test
+/// drive the refusal through each real call site on a real generated store.
+///
+/// # Nested, it restores what it replaced
+///
+/// It keeps the key it displaced and puts that back when it drops, rather than
+/// clearing the seam. Cleared, an inner guard dropping switched an outer one
+/// off while the outer was still in scope, and a test holding the outer then
+/// asserted against the real key without knowing it. The field is private, so
+/// no guard exists that did not come from [`CostScopeFault::install`].
+#[cfg(test)]
+pub(crate) struct CostScopeFault {
+    /// What the seam held before this guard was installed.
+    displaced: Option<InstrumentKey>,
+}
+
+#[cfg(test)]
+impl CostScopeFault {
+    pub(crate) fn install(key: InstrumentKey) -> Self {
+        let displaced = COST_SCOPE_KEY.with(|held| held.replace(Some(key)));
+        Self { displaced }
+    }
+}
+
+#[cfg(test)]
+impl Drop for CostScopeFault {
+    fn drop(&mut self) {
+        let displaced = self.displaced;
+        COST_SCOPE_KEY.with(|held| held.set(displaced));
+    }
+}
+
+/// What a stored report over this instrument states about its charges and
+/// corporate actions before any figure: decided by WHAT the instrument is,
+/// exactly as [`audit_cost_scope`] and [`vwap_availability`] are. D-0694.
+///
+/// A cash equity gets [`runner::audit::CostScope::report_note`] -- gross of
+/// every charge, then corporate actions unchecked. An index gets nothing, so
+/// every index report stays byte for byte what it was. A contract never
+/// heads a stored report, because [`swept_index`] refuses one first, and it
+/// gets nothing here rather than a statement written for something else.
+///
+/// One `match` on a `Copy` discriminant, and no bar is read, so the answer is
+/// the same before the first bar as after the last.
+pub(crate) fn equity_note(key: &InstrumentKey) -> String {
+    runner::audit::CostScope::of(key.kind)
+        .map_or_else(String::new, runner::audit::CostScope::report_note)
+}
+
+/// [`equity_note`] for a symbol as the operator typed it.
+///
+/// A symbol [`swept_index`] refuses gets nothing: the run it would head
+/// refuses by name before it prints a figure, so there is no report for the
+/// statement to stand beside.
+pub(crate) fn equity_note_for(underlying: &str) -> String {
+    swept_index(underlying).map_or_else(|_| String::new(), |key| equity_note(&key))
+}
+
+/// Whether any of these symbols is a swept cash equity. D-0694.
+///
+/// For a report over several instruments -- the pool, `sweep-all` -- which
+/// carries the corporate-action statement when any one of them can split and
+/// never when every one of them is an index.
+pub(crate) fn any_cash_equity<'a>(symbols: impl IntoIterator<Item = &'a str>) -> bool {
+    symbols
+        .into_iter()
+        .any(|symbol| swept_index(symbol).is_ok_and(|key| key.kind == Kind::Equity))
 }
 
 /// One instrument-month of real bars, or the reason there are none.
@@ -3278,6 +3516,59 @@ mod tests {
         );
     }
 
+    /// AF-02. An F&O underlying that is an INDEX, other than the two swept
+    /// ones, is refused by the surface sentence -- it used to come back as a
+    /// cash equity. The sentence's share count is core's, and every share is
+    /// still accepted as a cash equity. D-0682.
+    #[test]
+    fn an_fno_index_underlying_is_refused_by_the_surface_sentence() {
+        use brutex_core::universe::{FNO_INDEX, FNO_INDEX_UNDERLYINGS, FNO_UNDERLYINGS};
+
+        for name in ["FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50"] {
+            assert!(
+                FNO_INDEX.contains(name) && FNO_INDEX_UNDERLYINGS.contains(&name),
+                "{name} must be an F&O index underlying, or this proves nothing"
+            );
+            let why = swept_index(name).expect_err("an index has no cash equity to sweep");
+            assert!(
+                why.contains(&format!("`{name}` is not an instrument this engine sweeps")),
+                "{why}"
+            );
+            assert!(why.contains("storable but not sweepable"), "{why}");
+            assert!(
+                why.contains("The sweep surface is the NSE spot indices NIFTY, BANKNIFTY"),
+                "{why}"
+            );
+            assert!(
+                why.contains(
+                    "cash equities of the 208 F&O underlyings that are shares, not indices \
+                     (D-0506, D-0682). Nothing was read."
+                ),
+                "the share count is 213 less 5: {why}"
+            );
+        }
+
+        let mut indices = 0_usize;
+        let mut shares = 0_usize;
+        let mut refused = Vec::new();
+        for name in FNO_UNDERLYINGS {
+            match swept_index(name) {
+                Ok(key) if key.kind == Kind::Index => indices += 1,
+                Ok(key) => {
+                    assert_eq!(key.kind, Kind::Equity, "{name}");
+                    shares += 1;
+                }
+                Err(_) => refused.push(name),
+            }
+        }
+        assert_eq!(
+            (indices, shares),
+            (2, 208),
+            "NIFTY, BANKNIFTY and the shares"
+        );
+        assert_eq!(refused, ["FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50"]);
+    }
+
     #[test]
     fn exactly_the_two_core_sweep_keys_cross_the_stored_loader_guard() {
         assert_eq!(
@@ -3401,6 +3692,302 @@ mod tests {
             },
         };
         assert_eq!(vwap_availability(&option), Availability::Absent);
+    }
+
+    /// **The audit's charge statement is the KIND too, and a contract gets none.**
+    ///
+    /// D-0681. Every stored audit printed the index header -- "There is no
+    /// brokerage, STT, stamp or GST" -- over a stock. The scope now comes from
+    /// the same key `swept_index` resolved: an index keeps its header, an F&O
+    /// cash equity is labelled gross of every charge, and a contract is refused
+    /// by name, because both headers make a charge claim that is false of one.
+    #[test]
+    fn the_audit_cost_scope_is_decided_by_the_kind_and_refuses_a_contract() {
+        use brutex_core::instrument::{Expiry, Segment};
+        use brutex_core::symbol::Symbol;
+        use runner::audit::CostScope;
+
+        for (_, symbol) in InstrumentKey::SWEPT {
+            let index = swept_index(symbol).expect("a swept index");
+            assert_eq!(
+                audit_cost_scope(&index),
+                Ok(CostScope::IndexSpot),
+                "{symbol}: an index level has no charge to be gross of"
+            );
+        }
+        for symbol in ["RELIANCE", "HINDALCO", "TCS"] {
+            let cash = swept_index(symbol).expect("an F&O cash equity");
+            assert_eq!(cash.kind, Kind::Equity, "{symbol}: fixture premise");
+            assert_eq!(
+                audit_cost_scope(&cash),
+                Ok(CostScope::CashEquity),
+                "{symbol}: a share trade pays every charge, and none is subtracted"
+            );
+        }
+
+        let future = InstrumentKey {
+            exchange: Exchange::Nse,
+            segment: Segment::Fno,
+            underlying: Symbol::new("NIFTY").expect("valid"),
+            kind: Kind::Future {
+                expiry: Expiry::new(2026, 9, 29).expect("a real expiry"),
+            },
+        };
+        let refused = audit_cost_scope(&future).expect_err("a contract has no audit header");
+        assert!(
+            refused.contains(&future.to_string()) && refused.contains("contract"),
+            "the refusal must name the key and say why: {refused}"
+        );
+    }
+
+    /// The one sentence every refused instrument word ends in.
+    const SURFACE_SENTENCE: &str = "The sweep surface is the NSE spot indices NIFTY, BANKNIFTY \
+         and the NSE cash equities of the 208 F&O underlyings that are shares, not indices \
+         (D-0506, D-0682). Nothing was read.";
+
+    /// **Every spelling of an instrument word lands on one charge scope or on
+    /// the one surface sentence -- and a lower-case SHARE is still a share.**
+    ///
+    /// D-0681 decides the audit header from the key `swept_index` resolves, so
+    /// case folding is what keeps `reliance` from being labelled anything but a
+    /// cash equity. Whitespace is never trimmed into a match: an instrument
+    /// word with a stray space is a different word, refused as malformed rather
+    /// than guessed at. Names that are not F&O shares -- the three F&O indices,
+    /// the reference index, a near-miss spelling, a vendor suffix -- are
+    /// refused as storable but not sweepable.
+    #[test]
+    fn every_spelling_of_an_instrument_word_lands_on_one_scope_or_the_surface_sentence() {
+        use runner::audit::CostScope;
+
+        let scope = |word: &str| swept_index(word).and_then(|key| audit_cost_scope(&key));
+        for word in ["nifty", "Nifty", "NIFTY", "banknifty", "BankNifty"] {
+            assert_eq!(scope(word), Ok(CostScope::IndexSpot), "{word:?}");
+        }
+        for word in [
+            "reliance",
+            "Reliance",
+            "RELIANCE",
+            "m&m",
+            "M&M",
+            "bajaj-auto",
+            "BAJAJ-AUTO",
+        ] {
+            assert_eq!(scope(word), Ok(CostScope::CashEquity), "{word:?}");
+        }
+        for (word, why) in [
+            (" NIFTY", "malformed"),
+            ("NIFTY ", "malformed"),
+            ("NIFTY\n", "malformed"),
+            ("\tRELIANCE", "malformed"),
+            ("", "malformed"),
+            ("FINNIFTY", "storable but not sweepable"),
+            ("finnifty", "storable but not sweepable"),
+            ("MIDCPNIFTY", "storable but not sweepable"),
+            ("NIFTYNXT50", "storable but not sweepable"),
+            ("INDIAVIX", "storable but not sweepable"),
+            ("NIFTY50", "storable but not sweepable"),
+            ("RELIANCE-EQ", "storable but not sweepable"),
+            ("NIFTY_BANK", "storable but not sweepable"),
+        ] {
+            let refused = scope(word).expect_err("not on the engine surface");
+            assert!(
+                refused.starts_with(&format!(
+                    "`{}` is not an instrument this engine sweeps: ",
+                    word.escape_debug()
+                )),
+                "the refusal quotes the word first, a control character escaped (D-0696): {refused}"
+            );
+            assert!(
+                refused.contains(why),
+                "{word:?} must be refused as {why}: {refused}"
+            );
+            assert!(refused.ends_with(SURFACE_SENTENCE), "{word:?}: {refused}");
+        }
+    }
+
+    /// **A case variant of an F&O index underlying is refused like its
+    /// canonical spelling, quoting what was typed; a case variant of a swept
+    /// index is that index.** D-0682.
+    ///
+    /// `Symbol::new` upper-cases before core's sweep predicate runs, so
+    /// `finnifty` reached the same refusal as `FINNIFTY` -- but only the
+    /// canonical spellings were pinned, and a folding step moved after the
+    /// predicate would have let every lower-case index through as a share.
+    /// The refusal is a pure function of its argument, so it is also asked
+    /// twice and must not change (§3 rule 5).
+    #[test]
+    fn case_variants_of_an_fno_index_are_refused_and_of_a_swept_index_are_that_index() {
+        for word in [
+            "finnifty",
+            "FinNifty",
+            "fInNiFtY",
+            "midcpnifty",
+            "MidCpNifty",
+            "niftynxt50",
+            "NiftyNxt50",
+        ] {
+            let refused = swept_index(word).expect_err("an F&O index has no cash equity");
+            assert!(
+                refused.starts_with(&format!(
+                    "`{word}` is not an instrument this engine sweeps: instrument is \
+                     storable but not sweepable"
+                )),
+                "{refused}"
+            );
+            assert!(refused.ends_with(SURFACE_SENTENCE), "{refused}");
+        }
+        for (word, canonical) in [
+            ("nifty", "NIFTY"),
+            ("NiFtY", "NIFTY"),
+            ("banknifty", "BANKNIFTY"),
+            ("BankNifty", "BANKNIFTY"),
+        ] {
+            let key = swept_index(word).expect("a swept index in any case");
+            assert_eq!(
+                key,
+                InstrumentKey::index(Exchange::Nse, canonical).expect("valid"),
+                "{word}"
+            );
+            assert_eq!(key.kind, Kind::Index, "{word}");
+        }
+        for word in [
+            "FINNIFTY",
+            "INDIAVIX",
+            "SENSEX",
+            "ZZQXNOTFNO",
+            "finnifty",
+            "FINNIFT",
+            "FINNIFTYY",
+            "NIFTYNXT5",
+            "NIFTYNXT500",
+            "MIDCPNIFTY-",
+            "NIFTYIT",
+            "BANKEX",
+        ] {
+            let first = swept_index(word).expect_err("not on the engine surface");
+            assert!(first.contains("storable but not sweepable"), "{first}");
+            assert_eq!(
+                swept_index(word),
+                Err(first),
+                "{word}: a rerun must refuse byte for byte"
+            );
+        }
+    }
+
+    /// **A real FINNIFTY file is refused before it is read, under either
+    /// segment.** D-0682.
+    ///
+    /// The seeded-file guard was pinned for INDIAVIX only. FINNIFTY is the
+    /// sharper case: it is an F&O underlying, and until D-0682 the cash arm
+    /// accepted it -- so a store holding `NSE/CASH/FINNIFTY` was swept as a
+    /// share. Each file below exists, so absence cannot be what refuses it.
+    ///
+    /// # Why the file is damaged, which is what makes "before it is read" a
+    /// claim this test checks
+    ///
+    /// The first version seeded three valid bars. A loader that opened the
+    /// month, read every record and only then asked `swept_index` passed it
+    /// (D-0696): a valid file reads cleanly, so reading it first changed no
+    /// byte of the refusal. Each month below is written whole and then
+    /// overwritten with bytes no store reader admits, which the premise
+    /// proves through `BarFile::open_existing` itself. Any read before the
+    /// surface check therefore ends in the store's refusal, not in the surface
+    /// sentence -- so the refusal must be the surface sentence exactly, byte
+    /// for byte, and never a word about the file.
+    #[test]
+    fn a_seeded_fno_index_file_is_refused_before_it_is_read_under_either_segment() {
+        let surface = swept_index("FINNIFTY").expect_err("FINNIFTY is off the surface");
+        for (tag, key) in [
+            (
+                "finnifty-index",
+                InstrumentKey::index(Exchange::Nse, "FINNIFTY"),
+            ),
+            (
+                "finnifty-cash",
+                InstrumentKey::cash(Exchange::Nse, "FINNIFTY"),
+            ),
+        ] {
+            let r = root(tag);
+            let key = key.expect("FINNIFTY is a valid stored key");
+            let ym = YearMonth::new(2026, 8).expect("a real month");
+            let path =
+                StorePath::for_key(Vendor::Dhan, &key, Timeframe::MINUTE_1, ym, FileKind::Bars)
+                    .expect("a path for a stored key");
+            let on_disk = path.to_path_buf(&r);
+            let id = brutex_core::universe::fnv1a("FINNIFTY") as u32;
+            BarFile::open_or_create(&r, path, id)
+                .expect("a fresh month opens")
+                .append(&bars(3))
+                .expect("and takes its bars");
+            std::fs::write(&on_disk, b"NOT A BAR FILE: any reader refuses these bytes")
+                .expect("damage the seeded month");
+            assert!(on_disk.is_file(), "fixture premise: {}", on_disk.display());
+            let reread =
+                StorePath::for_key(Vendor::Dhan, &key, Timeframe::MINUTE_1, ym, FileKind::Bars)
+                    .expect("the same path");
+            assert!(
+                BarFile::open_existing(&r, reread, id).is_err(),
+                "fixture premise: a read of {} must fail, so reading it first cannot \
+                 end in the surface sentence",
+                on_disk.display()
+            );
+
+            let why = load(&r, Vendor::Dhan, "FINNIFTY", "1min", 2026, 8)
+                .expect_err("an F&O index never enters a sweep");
+            assert_eq!(why, surface, "{tag}: refused by the surface, not the file");
+            assert!(why.contains("storable but not sweepable"), "{tag}: {why}");
+            assert!(why.ends_with(SURFACE_SENTENCE), "{tag}: {why}");
+            let _ignored = std::fs::remove_dir_all(&r);
+        }
+    }
+
+    /// **The corporate-action note is the KIND as well: a stock gets it, an
+    /// index and a contract never do.** D-0694.
+    ///
+    /// The note heads every stored report that ranks a stock and is not an
+    /// audit. An index report must stay byte for byte what it was, because an
+    /// index never splits (D-0018), and a contract never heads a report.
+    #[test]
+    fn the_equity_note_is_decided_by_the_kind_and_an_index_or_contract_gets_none() {
+        use brutex_core::instrument::{Expiry, Segment};
+        use brutex_core::symbol::Symbol;
+        use runner::audit::{CORPORATE_ACTIONS_UNCHECKED, CostScope};
+
+        for (_, symbol) in InstrumentKey::SWEPT {
+            let index = swept_index(symbol).expect("a swept index");
+            assert_eq!(equity_note(&index), "", "{symbol}");
+            assert_eq!(equity_note_for(symbol), "", "{symbol}");
+        }
+        for symbol in ["RELIANCE", "HINDALCO", "TCS"] {
+            let cash = swept_index(symbol).expect("an F&O cash equity");
+            assert_eq!(equity_note(&cash), CostScope::CashEquity.report_note());
+            assert_eq!(equity_note_for(symbol), CostScope::CashEquity.report_note());
+            assert!(equity_note(&cash).contains(CORPORATE_ACTIONS_UNCHECKED));
+        }
+        let future = InstrumentKey {
+            exchange: Exchange::Nse,
+            segment: Segment::Fno,
+            underlying: Symbol::new("RELIANCE").expect("valid"),
+            kind: Kind::Future {
+                expiry: Expiry::new(2026, 9, 29).expect("a real expiry"),
+            },
+        };
+        assert_eq!(
+            equity_note(&future),
+            "",
+            "a contract heads no stored report"
+        );
+        assert_eq!(
+            equity_note_for("ZZQXNOTFNO"),
+            "",
+            "a refused symbol heads no report"
+        );
+
+        assert!(!any_cash_equity([]), "an empty surface holds no stock");
+        assert!(!any_cash_equity(["NIFTY", "BANKNIFTY"]));
+        assert!(!any_cash_equity(["NIFTY", "ZZQXNOTFNO", "FINNIFTY"]));
+        assert!(any_cash_equity(["NIFTY", "RELIANCE"]));
+        assert!(any_cash_equity(["TCS"]));
     }
 
     /// **An unbounded argument is cut before it reaches the refusal.**
@@ -4974,5 +5561,304 @@ mod tests {
              B x M / 2 bytes moved instead of B, and it makes this function's \
              own stated O(M + B) cost false"
         );
+    }
+
+    /// **A nested scope guard puts back what it displaced.** D-0696.
+    ///
+    /// The guard cleared the seam when it dropped, so an inner guard dropping
+    /// switched off an outer one still in scope: the outer's test then judged
+    /// the real key without knowing it.
+    #[test]
+    fn a_nested_cost_scope_guard_restores_the_outer_one_when_it_drops() {
+        use brutex_core::instrument::{Expiry, Segment};
+        let index = swept_index("NIFTY").expect("an index");
+        let contract = InstrumentKey {
+            exchange: Exchange::Nse,
+            segment: Segment::Fno,
+            underlying: brutex_core::symbol::Symbol::new("NIFTY").expect("valid"),
+            kind: Kind::Future {
+                expiry: Expiry::new(2025, 5, 29).expect("a real expiry"),
+            },
+        };
+        assert!(audit_cost_scope(&index).is_ok(), "premise: no guard held");
+        {
+            let _outer = CostScopeFault::install(contract);
+            assert!(audit_cost_scope(&index).is_err(), "the outer key is judged");
+            {
+                let _inner = CostScopeFault::install(index);
+                assert!(audit_cost_scope(&index).is_ok(), "the inner key is judged");
+            }
+            assert!(
+                audit_cost_scope(&index).is_err(),
+                "the inner guard dropping must leave the outer one in force"
+            );
+        }
+        assert!(
+            audit_cost_scope(&index).is_ok(),
+            "the outer guard dropping leaves the seam as it found it"
+        );
+    }
+
+    /// **A directory name cannot put a line on the page.** D-0696.
+    ///
+    /// Only the symbol directory has to resolve, so an exchange or segment
+    /// directory can carry a newline, and `misfiled` interpolated it raw: a
+    /// store holding `NSE/CASH/RELIANCE` beside an exchange directory named
+    /// `X\nrefused: forged` made the pool page print a column-zero line
+    /// `refused: forged/...`, and the completed pool read as a refusal
+    /// (measured by the review). Each name is now escaped on its own, so the
+    /// sentence is one line. A name prints as it always did when, and only
+    /// when, `escape_debug` prints each of the characters `clipped` keeps of
+    /// it -- its first 64 -- as itself, so a newline past the cut leaves it as
+    /// it was. A combining mark that opens a name and has Unicode's
+    /// `Grapheme_Extend` property, such as U+0301, is escaped; one inside a
+    /// name is not, and neither is U+0903, a spacing mark without that
+    /// property, even when it opens one.
+    #[test]
+    fn a_misfiled_directory_name_is_escaped_onto_one_line() {
+        let key = swept_index("RELIANCE").expect("a share");
+        // A newline past the sixty-fourth character is cut, not escaped, so a
+        // longer name is named as it was before the escape: its first 64
+        // characters and the mark.
+        let long = format!("{}\nrefused: forged", "C".repeat(64));
+        let long_shown = format!("`NSE/{}…/RELIANCE`", "C".repeat(64));
+        for (exchange, segment, symbol, shown) in [
+            (
+                "X\nrefused: forged",
+                "CASH",
+                "RELIANCE",
+                "`X\\nrefused: forged/CASH/RELIANCE`",
+            ),
+            ("NSE", "CA\rSH\t", "RELIANCE", "`NSE/CA\\rSH\\t/RELIANCE`"),
+            (
+                "NSE",
+                "IN\u{7}DEX",
+                "RELIANCE",
+                "`NSE/IN\\u{7}DEX/RELIANCE`",
+            ),
+            ("BSE", "CASH", "RELIANCE", "`BSE/CASH/RELIANCE`"),
+            // Each name is escaped on its own, so U+0301, a combining mark
+            // with the `Grapheme_Extend` property, is escaped when it opens
+            // the segment, and prints as itself inside it.
+            (
+                "NSE",
+                "\u{301}CASH",
+                "RELIANCE",
+                "`NSE/\\u{301}CASH/RELIANCE`",
+            ),
+            (
+                "NSE",
+                "CA\u{301}SH",
+                "RELIANCE",
+                "`NSE/CA\u{301}SH/RELIANCE`",
+            ),
+            // A spacing mark without the `Grapheme_Extend` property prints as
+            // itself even when it opens the segment.
+            (
+                "NSE",
+                "\u{903}CASH",
+                "RELIANCE",
+                "`NSE/\u{903}CASH/RELIANCE`",
+            ),
+            ("NSE", long.as_str(), "RELIANCE", long_shown.as_str()),
+        ] {
+            let why = misfiled(&key, exchange, segment, symbol).expect("misfiled");
+            assert!(why.starts_with(shown), "{shown}: {why:?}");
+            assert!(
+                !why.contains(|c: char| c.is_control()),
+                "{shown}: a control character reached the sentence: {why:?}"
+            );
+            assert!(
+                !crate::carries_refusal(&format!("    {why}\n")),
+                "{shown}: the named directory reads as a refusal: {why:?}"
+            );
+        }
+    }
+
+    /// **A word that names no instrument or rung is quoted escaped, on one
+    /// line.** D-0696.
+    ///
+    /// `misfiled` escaped the three directory names it prints, and
+    /// `swept_index` and `rung` quoted theirs raw through [`clipped`]. A symbol
+    /// directory reaches `swept_index` as a word -- `sweep-all` loads every
+    /// held month by its symbol directory's name -- so a directory named
+    /// `X\nrefused: forged` put `refused: forged` at column zero of a completed
+    /// run (measured by the review). [`clipped`] now escapes what it keeps, so
+    /// the refusals that quote through it -- `swept_index`'s, `rung`'s,
+    /// `misfiled`'s and `parse_vendor`'s -- are one line. A word is quoted
+    /// exactly as before when, and only when, `escape_debug` prints each of
+    /// the characters `clipped` keeps -- the first 64 -- as itself: a newline
+    /// past the cut is dropped, not escaped, and leaves the quote as it was. A
+    /// combining mark that opens the word and has Unicode's `Grapheme_Extend`
+    /// property, such as U+0301, is not printed as itself, though the same
+    /// mark inside a word is, and U+0903, a spacing mark without that
+    /// property, prints as itself even when it opens the word. Not every
+    /// refusal in the crate quotes through it: `swept_rung` and `pool_arm`'s
+    /// rung refusal still quote the word they are handed raw, and
+    /// `docs/06-limits.md` names them and what reaches them (D-0696).
+    #[test]
+    fn a_refused_word_is_quoted_escaped_on_one_line() {
+        for (word, shown) in [
+            ("X\nrefused: forged", "`X\\nrefused: forged`"),
+            ("NIFTY\n", "`NIFTY\\n`"),
+            ("\tRELIANCE\r", "`\\tRELIANCE\\r`"),
+            ("RE\u{7}L", "`RE\\u{7}L`"),
+        ] {
+            let why = swept_index(word).expect_err("no instrument");
+            assert!(
+                why.starts_with(&format!(
+                    "{shown} is not an instrument this engine sweeps: "
+                )),
+                "{shown}: {why:?}"
+            );
+            assert!(
+                !why.contains(|c: char| c.is_control()),
+                "{shown}: a control character reached the refusal: {why:?}"
+            );
+            assert!(
+                !crate::carries_refusal(&format!("    {why}\n")),
+                "{shown}: the quoted word reads as a refusal: {why:?}"
+            );
+            let rung_why = rung(word).expect_err("no rung");
+            assert!(
+                rung_why.starts_with(&format!("{shown} is not a rung this store carries.")),
+                "{shown}: {rung_why:?}"
+            );
+            assert!(
+                !rung_why.contains(|c: char| c.is_control()),
+                "{shown}: {rung_why:?}"
+            );
+        }
+        // The mark still says that something was cut: a newline past the
+        // sixty-fourth character is cut, not quoted, so the word is quoted as
+        // it was before the escape, and a line after the cut never reaches
+        // the refusal.
+        let long = format!("{}\n", "N".repeat(64));
+        let forged = format!("{}\nrefused: forged", "N".repeat(64));
+        for word in [&long, &forged] {
+            let why = swept_index(word).expect_err("no instrument");
+            assert!(
+                why.starts_with(&format!("`{}…` is not", "N".repeat(64))),
+                "{why:?}"
+            );
+            assert!(!why.contains(|c: char| c.is_control()), "{why:?}");
+            assert!(!crate::carries_refusal(&format!("    {why}\n")), "{why:?}");
+        }
+        // CLIPPED FIRST AND ESCAPED AFTER. The case above reads the same in
+        // either order, so it did not hold the order `clipped`'s cost rests on:
+        // escaping the whole word and then clipping walks all of it, and
+        // passed every test (measured by the review, D-0696). A newline AT the
+        // sixty-fourth character tells the two apart. Kept and then escaped,
+        // it is quoted whole as `\n`; escaped and then clipped, the cut lands
+        // inside its escape and leaves a lone backslash.
+        for (word, shown) in [
+            (
+                format!("{}\n", "N".repeat(63)),
+                format!("`{}\\n` is not", "N".repeat(63)),
+            ),
+            (
+                format!("{}\nN", "N".repeat(63)),
+                format!("`{}\\n…` is not", "N".repeat(63)),
+            ),
+        ] {
+            let why = swept_index(&word).expect_err("no instrument");
+            assert!(why.starts_with(&shown), "{shown}: {why:?}");
+            let rung_why = rung(&word).expect_err("no rung");
+            assert!(rung_why.starts_with(&shown), "{shown}: {rung_why:?}");
+        }
+        // Not only control characters: `escape_debug` also escapes a format
+        // character, a separator other than the space, and a combining mark
+        // that opens the word and has Unicode's `Grapheme_Extend` property, as
+        // U+0301, U+20DD and U+09BE do, so none of them is quoted as itself.
+        for (word, shown) in [
+            ("NIFTY\u{200b}", "`NIFTY\\u{200b}`"),
+            ("NIFTY\u{a0}X", "`NIFTY\\u{a0}X`"),
+            ("NIFTY\u{2028}refused", "`NIFTY\\u{2028}refused`"),
+            ("\u{301}NIFTY", "`\\u{301}NIFTY`"),
+            ("\u{20dd}NIFTY", "`\\u{20dd}NIFTY`"),
+            ("\u{9be}NIFTY", "`\\u{9be}NIFTY`"),
+        ] {
+            let why = swept_index(word).expect_err("no instrument");
+            assert!(
+                why.starts_with(&format!("{shown} is not")),
+                "{shown}: {why:?}"
+            );
+        }
+        // These words are quoted as they were typed: a combining mark inside
+        // one, U+09BE among them, so it is escaped above only because it
+        // opens the word; U+0903 and U+093F, spacing marks without the
+        // `Grapheme_Extend` property, opening one; and the space.
+        for word in [
+            "NIFTYX",
+            "1hour",
+            "RELIANCE-EQ",
+            "niftyé",
+            "N\u{301}IFTY",
+            "N\u{9be}IFTY",
+            "\u{903}NIFTY",
+            "\u{93f}NIFTY",
+            "NIFTY X",
+        ] {
+            let why = swept_index(word).expect_err("no instrument");
+            assert!(why.starts_with(&format!("`{word}` is not")), "{why:?}");
+        }
+    }
+
+    /// **A word is quoted as it was before the escape when, and only when,
+    /// `escape_debug` prints each of the characters `clipped` keeps as
+    /// itself.** D-0696.
+    ///
+    /// `clipped` cuts to 64 characters and escapes what it kept, so whether a
+    /// quote changed is decided by the kept characters alone: a newline past
+    /// the cut is dropped and changes nothing, and one that is the
+    /// sixty-fourth character is escaped. The docs stated the rule over the
+    /// whole word, which the first case refutes (found by a review). Every
+    /// control character, and every character `char::is_whitespace` accepts
+    /// other than the space, is escaped inside a word, so a word holding one
+    /// is not quoted as before; the space is.
+    #[test]
+    fn a_word_is_quoted_as_before_exactly_when_what_clipped_keeps_prints_as_itself() {
+        // `before` is the cut `clipped` made before it escaped anything.
+        let before = |word: &str| {
+            let mut out: String = word.chars().take(64).collect();
+            if word.chars().nth(64).is_some() {
+                out.push('…');
+            }
+            out
+        };
+        let long = format!("{}\n", "N".repeat(64));
+        let forged = format!("{}\nrefused: forged", "N".repeat(64));
+        let at_the_cut = format!("{}\n", "N".repeat(63));
+        for (word, as_before) in [
+            (long.as_str(), true),
+            (forged.as_str(), true),
+            ("N\u{301}IFTY", true),
+            ("\u{903}NIFTY", true),
+            ("NIFTY X", true),
+            (at_the_cut.as_str(), false),
+            ("\u{301}NIFTY", false),
+            ("NIFTY\u{a0}X", false),
+            ("X\nrefused: forged", false),
+        ] {
+            assert_eq!(clipped(word) == before(word), as_before, "{word:?}");
+        }
+        // Every control character, and every character `char::is_whitespace`
+        // accepts other than the space, is escaped inside a word.
+        let mut escaped = Vec::new();
+        for c in '\0'..=char::MAX {
+            if c == ' ' || !(c.is_control() || c.is_whitespace()) {
+                continue;
+            }
+            let word = format!("NIFTY{c}X");
+            assert_ne!(clipped(&word), before(&word), "{word:?}");
+            escaped.push(c);
+        }
+        for c in [
+            '\0', '\n', '\u{7f}', '\u{a0}', '\u{2028}', '\u{2029}', '\u{3000}',
+        ] {
+            assert!(escaped.contains(&c), "premise: {c:?} was checked");
+        }
+        let why = swept_index("NIFTY\u{3000}X").expect_err("no instrument");
+        assert!(why.starts_with("`NIFTY\\u{3000}X` is not"), "{why:?}");
     }
 }

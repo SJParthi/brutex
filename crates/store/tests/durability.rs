@@ -44,7 +44,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use brutex_core::vendor::Vendor;
-use store::file::{Action, BarFile, StoreError};
+use store::file::{Action, Appended, BarFile, StoreError};
+use store::format::{Bar, OI_NULL};
 use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
 
 /// Distinguishes two scratch trees taken in the same process.
@@ -74,6 +75,11 @@ impl Drop for Scratch {
 
 /// The month under test.
 fn bars_path() -> StorePath<'static> {
+    month_path(6)
+}
+
+/// A month of 2024 in the same directory as [`bars_path`].
+fn month_path(month: u8) -> StorePath<'static> {
     StorePath::new(PathParts {
         vendor: Vendor::Groww,
         exchange: "NSE",
@@ -81,7 +87,7 @@ fn bars_path() -> StorePath<'static> {
         symbol: "NIFTY",
         contract: None,
         timeframe: Timeframe::MINUTE_1,
-        month: YearMonth::new(2024, 6).expect("June 2024"),
+        month: YearMonth::new(2024, month).expect("a month of 2024"),
         file: FileKind::Bars,
     })
     .expect("a legal path")
@@ -137,6 +143,172 @@ fn a_directory_flush_the_host_refuses_is_returned_and_named() {
     let opened = BarFile::open_or_create(&scratch.root, bars_path(), 7)
         .expect("the same month, with the directory readable");
     assert_eq!(opened.records(), 0, "a fresh month holds no records");
+}
+
+/// The flush that makes a new SIDECAR's name durable is returned when the host
+/// refuses it, and only a month with nothing committed asks for it. D-0688.
+///
+/// `sync_all` on the `.crc` makes its bytes durable and not its directory
+/// entry, so the writer's door flushes the month's directory whenever it opens
+/// a month whose header commits nothing — the only state in which that door
+/// may have just created the sidecar. Lose the entry after the first commit and
+/// the month is sealed, holds records, and has no `.crc`, which no door will
+/// ever recreate.
+///
+/// Both months are made first, with the directory readable, so the bar file's
+/// own creation flush above is not the one this refuses: June is initialised
+/// and empty, and July beside it holds three bars. With the directory closed
+/// to reading, June's writer open is refused naming the DIRECTORY, and July's
+/// succeeds, because a month with committed records neither created a sidecar
+/// on this open nor asks for the flush.
+///
+/// This proves the flush is ISSUED and its refusal returned. That it reached
+/// stable storage is not observable here, as `docs/06-limits.md` says.
+#[cfg(unix)]
+#[test]
+fn a_sidecar_flush_the_host_refuses_is_returned_and_only_an_empty_month_asks_for_one() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let scratch = Scratch::new("NOSIDECARFLUSH");
+    let dir = bars_path()
+        .to_path_buf(&scratch.root)
+        .parent()
+        .expect("a rendered store path always has parents")
+        .to_path_buf();
+
+    let empty = BarFile::open_or_create(&scratch.root, bars_path(), 7).expect("an empty June");
+    assert_eq!(empty.records(), 0, "the premise: June commits nothing");
+    drop(empty);
+    let sidecar = bars_path()
+        .with_file(FileKind::Checksums)
+        .to_path_buf(&scratch.root);
+    assert!(
+        sidecar.is_file(),
+        "the premise: June's sidecar exists, so this open will not create it"
+    );
+    let mut held = BarFile::open_or_create(&scratch.root, month_path(7), 7).expect("a July");
+    let bars: Vec<Bar> = (0..3i64)
+        .map(|minute| Bar {
+            ts_micros: 1_719_805_500_000_000 + minute * 60_000_000,
+            open: 2_400_000,
+            high: 2_400_500,
+            low: 2_399_500,
+            close: 2_400_100,
+            volume: 1_000,
+            open_interest: OI_NULL,
+        })
+        .collect();
+    assert_eq!(
+        held.append(&bars),
+        Ok(Appended::Committed {
+            first_index: 0,
+            n_valid: 3
+        }),
+        "the premise: July commits three bars"
+    );
+    drop(held);
+
+    // Write and execute, and NOT read.
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o300)).expect("close the directory");
+    let refused = BarFile::open_or_create(&scratch.root, bars_path(), 7).map(|file| file.records());
+    let committed =
+        BarFile::open_or_create(&scratch.root, month_path(7), 7).map(|file| file.records());
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).expect("reopen the directory");
+
+    assert_eq!(
+        refused,
+        Err(StoreError::Denied {
+            path: dir.clone(),
+            action: Action::Open,
+        }),
+        "an empty month's writer open flushes the directory, and a refused \
+         flush is returned naming the directory rather than reported as success"
+    );
+    assert_eq!(
+        committed,
+        Ok(3),
+        "a month with committed records asks for no flush, so the closed \
+         directory does not refuse it"
+    );
+
+    // The permission bits, and not the fixture, were the refusal.
+    let reopened = BarFile::open_or_create(&scratch.root, bars_path(), 7)
+        .expect("the same month, with the directory readable");
+    assert_eq!(reopened.records(), 0);
+}
+
+/// The directory flush FOLLOWS the sidecar's creation, so it is the flush that
+/// publishes the new `.crc`'s name rather than one issued before the name
+/// existed. D-0688.
+///
+/// AF-41 says the writer's door flushes the month's directory after opening
+/// the sidecar, and its test cannot tell the order: June's `.crc` exists there
+/// already, so a flush moved ahead of the open is refused in the same words,
+/// and every test of this crate still passed with it moved. A flush ahead of
+/// the open publishes a directory the new name is not in yet, which leaves
+/// unguarded exactly the crash this flush exists for.
+///
+/// Here June is initialised and empty and its `.crc` is removed, which is the
+/// one state in which the writer's door may create the sidecar. With the
+/// directory closed to reading, the open is refused naming the directory, as
+/// in the test above, and the `.crc` EXISTS afterwards and is empty: the create
+/// ran, and then the flush that was to publish it was refused. A flush ahead of
+/// the open is refused before any create and leaves no `.crc`.
+///
+/// This proves the order of the two calls. That the flush reached stable
+/// storage is not observable here, as `docs/06-limits.md` says.
+#[cfg(unix)]
+#[test]
+fn the_sidecar_flush_follows_the_sidecars_creation_so_a_refused_flush_leaves_the_new_name() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let scratch = Scratch::new("SIDECARORDER");
+    let dir = bars_path()
+        .to_path_buf(&scratch.root)
+        .parent()
+        .expect("a rendered store path always has parents")
+        .to_path_buf();
+    let sidecar = bars_path()
+        .with_file(FileKind::Checksums)
+        .to_path_buf(&scratch.root);
+
+    let empty = BarFile::open_or_create(&scratch.root, bars_path(), 7).expect("an empty June");
+    assert_eq!(empty.records(), 0, "the premise: June commits nothing");
+    drop(empty);
+    fs::remove_file(&sidecar).expect("the premise: June's sidecar is there to remove");
+    assert!(
+        !sidecar.exists(),
+        "the premise: June has no sidecar, so the next writer open creates one"
+    );
+
+    // Write and execute, and NOT read: the `.crc` may be created inside, and
+    // the directory itself may not be opened for its flush.
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o300)).expect("close the directory");
+    let refused = BarFile::open_or_create(&scratch.root, bars_path(), 7).map(|file| file.records());
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).expect("reopen the directory");
+
+    assert_eq!(
+        refused,
+        Err(StoreError::Denied {
+            path: dir.clone(),
+            action: Action::Open,
+        }),
+        "the flush is refused naming the directory"
+    );
+    assert_eq!(
+        fs::metadata(&sidecar)
+            .map(|meta| (meta.is_file(), meta.len()))
+            .ok(),
+        Some((true, 0)),
+        "the refused flush came AFTER the sidecar's create: the new `.crc` is \
+         on disk, empty, and its name is what the flush was issued to publish"
+    );
+
+    // The permission bits, and not the fixture, were the refusal; the sidecar
+    // the refused open created is the one this open takes.
+    let reopened = BarFile::open_or_create(&scratch.root, bars_path(), 7)
+        .expect("the same month, with the directory readable");
+    assert_eq!(reopened.records(), 0);
 }
 
 /// D-0149 — a month interrupted inside `initialise` opens, at every size the

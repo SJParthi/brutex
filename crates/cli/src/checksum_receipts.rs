@@ -12,6 +12,7 @@ use brutex_core::instrument::InstrumentKey;
 use brutex_core::vendor::Vendor;
 use store::checksum_audit::{AuditedBarFile, Evidence};
 use store::file::BarFile;
+use store::flock::Flock;
 use store::format::Bar;
 use store::path::{FileKind, StorePath, Timeframe, YearMonth};
 
@@ -251,18 +252,16 @@ fn put(bytes: &mut [u8; BYTES], offset: usize, value: &[u8]) -> Result<(), Strin
 }
 
 pub(crate) struct Receipt {
-    file: File,
+    /// The shared lease, retained for this authority's whole life.
+    ///
+    /// Closing this descriptor alone can leave the lock held by a duplicate
+    /// inherited during a concurrent process spawn, so the guard releases it
+    /// by an explicit unlock when the receipt drops — and, unlike the silent
+    /// `let _ = unlock()` it replaces, logs a refused one (D-0693).
+    file: Flock<File>,
     path: PathBuf,
     generation: crate::result_set::FileGeneration,
     expected: [u8; BYTES],
-}
-impl Drop for Receipt {
-    fn drop(&mut self) {
-        // Closing this descriptor alone can leave the lock held by a duplicate
-        // inherited during a concurrent process spawn. The lease belongs to
-        // this typed owner; release it before the descriptor is closed.
-        let _ = self.file.unlock();
-    }
 }
 impl Receipt {
     fn open(path: &Path, expected: &[u8; BYTES]) -> Result<Self, String> {
@@ -272,7 +271,7 @@ impl Receipt {
         let generation = regular_generation(&file, path)?;
         // Retained for this authority's entire lifetime. Completed receipts are
         // reused through this same read door, so identical audits need no writer.
-        file.try_lock_shared().map_err(error)?;
+        let file = Flock::try_lock_shared(file, path.to_path_buf()).map_err(error)?;
         let receipt = Self {
             generation,
             file,

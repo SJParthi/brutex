@@ -238,10 +238,10 @@ mod tests {
             }
         }
 
-        fn fed<T: Hash>(value: &T) -> usize {
+        fn fed<T: Hash>(value: &T) -> u64 {
             let mut h = Counting::default();
             value.hash(&mut h);
-            h.0
+            h.finish()
         }
 
         let shortest = Symbol::new("A").expect("one character is a legal symbol");
@@ -254,6 +254,13 @@ mod tests {
             "a 1-byte symbol and a {SYMBOL_CAPACITY}-byte one must cost the \
              same to hash, or the dedup probe is O(len) after all"
         );
+        // Equal zero counts would also satisfy the comparison above. Require
+        // at least the fixed-width payload's byte count, and observe its
+        // result through Hasher::finish rather than bypassing that contract.
+        assert!(
+            fed(&shortest) >= u64::try_from(SYMBOL_CAPACITY).expect("capacity fits u64"),
+            "hashing must feed at least the fixed-width payload's byte count"
+        );
 
         // And the same through the key that is actually deduplicated on.
         let narrow = InstrumentKey::index(Exchange::Nse, "A").expect("legal");
@@ -263,6 +270,10 @@ mod tests {
             fed(&narrow),
             fed(&wide),
             "the key hashes in a fixed number of bytes whichever vendor named it"
+        );
+        assert!(
+            fed(&narrow) > fed(&shortest),
+            "an instrument key must hash its identity fields as well as its symbol"
         );
     }
 }

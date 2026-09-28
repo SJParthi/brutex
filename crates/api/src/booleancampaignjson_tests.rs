@@ -235,3 +235,154 @@ fn qualified_overview_authenticates_all_eight_initial_units_and_refuses_replacem
     );
     fs::remove_dir_all(root).unwrap();
 }
+
+/// A waiting campaign over `family` alone, saved as its one acknowledged
+/// snapshot under `root`, in the bytes `cli::boolean_campaign`'s codec and
+/// checkpoint reader admit: every rung expects one catalog of that family,
+/// and no child is complete, so no child receipt is read. Returns the
+/// campaign's identity and the snapshot's pin.
+fn save_waiting_campaign(
+    root: &Path,
+    family: cli::boolean_observation::ResearchFamilyV1,
+) -> ([u8; 32], [u8; 32]) {
+    use std::fs;
+    const REASON_BYTES: usize = 1024;
+    let (descriptor, programs, expected) = ([21; 32], [22; 32], [23; 32]);
+    let (program_count, from, to, horizon) = (1_u64, 202_401_u64, 202_402_u64, 60_u64);
+    let mut h = brutex_core::blake3::Hasher::new();
+    h.update(b"brutex-boolean-campaign-identity-v1\0");
+    h.update(&descriptor);
+    h.update(&programs);
+    for word in [program_count, from, to, horizon] {
+        h.update(&word.to_le_bytes());
+    }
+    for rung in cli::EVERY_RUNG {
+        h.update(&1_u64.to_le_bytes());
+        h.update(&(rung.len() as u64).to_le_bytes());
+        h.update(rung.as_bytes());
+        h.update(&family.encode());
+        h.update(&expected);
+    }
+    let identity = h.finalize();
+
+    let mut body = b"BRBCAM01".to_vec();
+    body.extend_from_slice(&identity);
+    body.extend_from_slice(&descriptor);
+    body.extend_from_slice(&programs);
+    // program count, family count, from, to, horizon, waiting, no predecessor
+    for word in [program_count, 1, from, to, horizon, 0, u64::MAX] {
+        body.extend_from_slice(&word.to_le_bytes());
+    }
+    body.resize(256, 0);
+    for _ in cli::EVERY_RUNG {
+        // waiting, two absent stage links, an empty reason
+        body.extend_from_slice(&0_u64.to_le_bytes());
+        body.resize(body.len() + 128, 0);
+        body.extend_from_slice(&0_u64.to_le_bytes());
+        body.resize(body.len() + REASON_BYTES, 0);
+        body.extend_from_slice(&family.encode());
+        body.extend_from_slice(&expected);
+        body.extend_from_slice(&[0; 32]);
+    }
+    assert_eq!(
+        body.len(),
+        256 + 8 * (1168 + 192),
+        "the codec's fixed width"
+    );
+
+    let directory = root
+        .join("boolean-campaign-v1")
+        .join(crate::server::hex32(identity));
+    fs::create_dir_all(directory.join("0000000000000001")).unwrap();
+    fs::write(directory.join("owner.lock"), []).unwrap();
+    let mut bytes = b"BTXCHK01".to_vec();
+    bytes.extend_from_slice(&identity);
+    bytes.extend_from_slice(&1_u64.to_le_bytes());
+    bytes.extend_from_slice(&(body.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(&[0; 8]);
+    bytes.extend_from_slice(&body);
+    let pin = brutex_core::blake3::hash(&bytes);
+    bytes.extend_from_slice(&pin);
+    fs::write(directory.join("0000000000000001/payload"), bytes).unwrap();
+    fs::write(directory.join("0000000000000001/complete"), pin).unwrap();
+    (identity, pin)
+}
+
+/// **A campaign that expects a stock family states the equity note; a
+/// campaign of indices does not.** D-0694, AF-19.
+///
+/// A campaign snapshot names each rung's expected catalogs and their family,
+/// and each catalog's figures are a stock's when its family is cash. The
+/// snapshot carries `cli::research_equity_note` over every expected family,
+/// the Boolean research heading's own decision, so one cash family anywhere
+/// is enough and a campaign of indices gains no key.
+///
+/// The helper is checked on hand-built rungs, and then `render` serves a
+/// saved campaign over RELIANCE and one over NIFTY, each read with no pin and
+/// with its own. The stock's page carries the note on both reads, and the
+/// index's carries no key. Until this test rendered a page it held `render`
+/// to the note by its source text, which a call made only on a pinned read
+/// passed.
+#[test]
+fn a_campaign_expecting_a_stock_family_states_the_equity_note_and_an_index_campaign_does_not() {
+    let family = |key: Result<brutex_core::instrument::InstrumentKey, _>| {
+        cli::boolean_observation::ResearchFamilyV1::new(key.unwrap()).unwrap()
+    };
+    let nse = brutex_core::instrument::Exchange::Nse;
+    let nifty = family(brutex_core::instrument::InstrumentKey::index(nse, "NIFTY"));
+    let reliance = family(brutex_core::instrument::InstrumentKey::cash(
+        nse, "RELIANCE",
+    ));
+    let rung = |families: &[cli::boolean_observation::ResearchFamilyV1]| Rung {
+        rung: "5min",
+        status: Status::Waiting,
+        reason: String::new(),
+        catalogs: families
+            .iter()
+            .map(|family| Catalog {
+                family: *family,
+                expected: [3; 32],
+                completion: None,
+            })
+            .collect(),
+        statistics: None,
+        admission: None,
+    };
+    let note = cli::research_equity_note([reliance]);
+    assert!(
+        note.contains("CORPORATE ACTIONS ARE UNCHECKED"),
+        "premise: {note}"
+    );
+    assert_eq!(equity_note(&[rung(&[nifty]), rung(&[nifty])]), "");
+    assert_eq!(equity_note(&[]), "");
+    assert_eq!(equity_note(&[rung(&[nifty, reliance])]), note);
+    assert_eq!(
+        equity_note(&[rung(&[nifty]), rung(&[reliance])]),
+        note,
+        "a stock family on any rung"
+    );
+
+    let root = crate::scratch::path("boolean-campaign-equity-note");
+    let _stale = std::fs::remove_dir_all(&root);
+    for (family, cash) in [(nifty, false), (reliance, true)] {
+        let (identity, saved_pin) = save_waiting_campaign(&root, family);
+        for pin in [None, Some(saved_pin)] {
+            let page = render(&root, &Asked { identity, pin }).unwrap();
+            let named = format!("{} (pin: {})", family.instrument(), pin.is_some());
+            assert_eq!(page["status"], "saved", "{named}: premise");
+            assert_eq!(page["rows"].as_array().unwrap().len(), 8, "{named}");
+            for row in page["rows"].as_array().unwrap() {
+                assert_eq!(
+                    row["expected_catalogs"][0]["cash"], cash,
+                    "{named}: premise, the family the rung expects"
+                );
+            }
+            assert_eq!(
+                page.get("equity_note"),
+                cash.then(|| json!(note)).as_ref(),
+                "{named}: a stock campaign's page states the note, an index one's has no key"
+            );
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}

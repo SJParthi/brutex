@@ -213,7 +213,10 @@ fn the_whole_pipeline_runs_and_every_stage_feeds_the_next() {
     );
 
     // ---- 8. everything -> one report ------------------------------------
+    // GENERATED BARS NAME NO INSTRUMENT, so they keep the index header every
+    // generated audit has always carried. D-0681 changed only the stock one.
     let report = audit::render(
+        audit::CostScope::IndexSpot,
         Some(&taken),
         Some(&exits),
         Some(&folds),
@@ -280,10 +283,133 @@ fn the_pipeline_refuses_a_slice_it_cannot_measure_rather_than_inventing_one() {
     );
     assert_eq!(folds.held_up(), 0);
 
-    let report = audit::render(Some(&taken), None, Some(&folds), None, None, 6);
+    let report = audit::render(
+        audit::CostScope::IndexSpot,
+        Some(&taken),
+        None,
+        Some(&folds),
+        None,
+        None,
+        6,
+    );
     assert!(
         report.contains("NOT SUPPLIED"),
         "sections that were not supplied must say so rather than reading as empty"
+    );
+}
+
+/// Bars to one audit, from nothing, under one charge scope.
+///
+/// Every stage is rebuilt on each call -- the bars, the column, the sweep, the
+/// closure, the trade walk and the grid -- so two calls share no state and a
+/// rerun is a rerun, not a second render of the same values.
+#[expect(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes."
+)]
+fn audited_from_nothing(scope: audit::CostScope) -> String {
+    let bars = synthetic::sessions(12);
+    let column = Column::build(&bars, &mut evaluator());
+    let swept = Sweeper::new(Ladder::with_min_hits(1_400).with_ceiling(50_000))
+        .run(&bars, &mut evaluator());
+    let mask = closed::closed(&swept.sweep)
+        .kept
+        .first()
+        .map(|kept| kept.mask)
+        .expect("the slice must keep a closed combination to trade");
+    let taken = trade::walk(&bars, &column, &mask, Horizon::DEFAULT, Direction::Long);
+    assert!(
+        !taken.trades.is_empty(),
+        "the kept combination must trade, so the report carries real figures"
+    );
+    let exits = grid::evaluate(
+        &bars,
+        &column,
+        &mask,
+        Horizon::DEFAULT,
+        Side::Long,
+        grid::Levels::derived(4),
+    );
+    audit::render(scope, Some(&taken), Some(&exits), None, None, None, 6)
+}
+
+/// A CASH-EQUITY AUDIT OF THE SAME BARS IS THE SAME BYTES ON A RERUN
+/// (`CLAUDE.md` §3 rule 5), AND IT DIFFERS FROM THE INDEX AUDIT OF THOSE BARS
+/// ONLY IN WHAT IT SAYS OF CHARGES: ITS HEADER, AND THE WORDS OF THE STRATEGY
+/// REPORT'S TWO RANKED TOTALS.
+///
+/// The unit tests render hand-built sections. This drives the real sequence --
+/// sweep, closure, trade walk, exit grid -- so a figure that came out of the
+/// sweep differently on a second run, or a figure the scope reached below the
+/// header, fails here even though every hand-built render agrees with itself.
+/// An index calls those two totals "net profit"; a stock's are gross of every
+/// charge and say so (D-0681). Their words are swapped back before the
+/// comparison, and every other byte below `TRADES` must match.
+#[test]
+#[expect(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes."
+)]
+fn an_equity_audit_is_byte_identical_on_a_rerun_and_differs_from_the_index_one_only_in_its_charge_words()
+ {
+    let equity = audited_from_nothing(audit::CostScope::CashEquity);
+    assert_eq!(
+        equity,
+        audited_from_nothing(audit::CostScope::CashEquity),
+        "the same bars must audit to the same bytes"
+    );
+    assert!(
+        equity
+            .starts_with("AUDIT\n  CASH EQUITY run. EVERY TOTAL BELOW IS GROSS OF EVERY CHARGE.\n"),
+        "a stock audit must open with the gross statement:\n{equity}"
+    );
+
+    let index = audited_from_nothing(audit::CostScope::IndexSpot);
+    assert!(
+        index.starts_with("AUDIT\n  INDEX SPOT run."),
+        "an index audit keeps the index statement:\n{index}"
+    );
+    let below = |report: &str| {
+        report
+            .split_once("\nTRADES\n")
+            .map(|(_, rest)| rest.to_owned())
+    };
+    assert!(
+        below(&equity).is_some_and(|rest| {
+            !rest.starts_with("  NOT SUPPLIED") && rest.contains("variants evaluated")
+        }),
+        "the equity audit must carry the swept trades and a populated exit grid:\n{equity}"
+    );
+    let mut swapped = below(&equity).expect("the equity audit carries TRADES");
+    for (stock, index_words) in [
+        (
+            "total P&L, worst-case fills     ",
+            "net profit, worst-case fills    ",
+        ),
+        (
+            "total P&L, best-case fills      ",
+            "net profit, best-case fills     ",
+        ),
+        (
+            "  what selection ranks on, gross of every charge\n",
+            "  what selection ranks on\n",
+        ),
+        (
+            "  both fills at the open, gross of every charge\n",
+            "  both fills at the open\n",
+        ),
+    ] {
+        assert_eq!(
+            swapped.matches(stock).count(),
+            1,
+            "the stock's strategy report says {stock:?} once:\n{equity}"
+        );
+        swapped = swapped.replacen(stock, index_words, 1);
+    }
+    assert_eq!(
+        Some(swapped),
+        below(&index),
+        "no figure may differ between the scopes except by the bars"
     );
 }
 

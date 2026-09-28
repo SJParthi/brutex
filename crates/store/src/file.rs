@@ -174,6 +174,7 @@ const MAX_ROW_LEN: usize = {
 
 /// The three widths, pinned so a format change is seen here.
 const _: () = assert!(MAX_ROW_LEN == 80);
+use crate::flock::Flock;
 use crate::header::Header;
 use crate::layout::Layout;
 use crate::path::{FileKind, StorePath};
@@ -787,7 +788,10 @@ pub enum Appended {
 ///
 /// Holds the month's advisory lock for as long as it lives. Dropping it closes
 /// the records and then releases the lock, in that order — the fields are
-/// declared in that order and Rust drops them in declaration order.
+/// declared in that order and Rust drops them in declaration order. The lock is
+/// released by an explicit unlock, not by closing its descriptor, so a
+/// duplicate of that descriptor left in a spawned child cannot keep the month
+/// locked after its owner is gone (D-0693).
 #[derive(Debug)]
 pub struct BarFile {
     /// The records.
@@ -877,11 +881,16 @@ pub struct BarFile {
     verified: AtomicU64,
     /// The advisory lock, held for its **drop** and never read again.
     ///
-    /// Underscored because that is what it is: closing this descriptor is what
+    /// Underscored because that is what it is: dropping this guard is what
     /// releases the month, so the field is live for its whole life and is
     /// touched exactly once, by the compiler-generated drop. Declared last so
     /// the records are closed before the lock is released.
-    _lock: Option<File>,
+    ///
+    /// A [`Flock`] and not a bare `File`, because closing the descriptor was
+    /// the release and a `flock` lock survives its close while any duplicate
+    /// of the descriptor is open — one inherited by a child another thread
+    /// spawned is enough. The guard unlocks explicitly. D-0693.
+    _lock: Option<Flock<File>>,
 }
 
 /// The only geometry a `.ovl` file may have.
@@ -985,11 +994,13 @@ impl BarFile {
         fault(fs::create_dir_all(&dir), &dir, Action::CreateDir)?;
 
         // The lock is taken before the bar file is opened, let alone measured.
-        // Everything below this line assumes exactly one writer.
-        let lock = fault(open_rw(&lock_path), &lock_path, Action::Open)?;
-        if let Err(refusal) = lock.try_lock() {
-            return Err(lock_fault(&lock_path, refusal));
-        }
+        // Everything below this line assumes exactly one writer. Every `?`
+        // below it releases the month through the guard's explicit unlock.
+        let lock = Flock::try_lock(
+            fault(open_rw(&lock_path), &lock_path, Action::Open)?,
+            lock_path.clone(),
+        )
+        .map_err(|refusal| lock_fault(&lock_path, refusal))?;
 
         let bars = fault(open_rw(&bars_path), &bars_path, Action::Open)?;
         let mut len = fault(bars.metadata(), &bars_path, Action::Measure)?.len();
@@ -1131,12 +1142,10 @@ impl BarFile {
         // file to hold a lock on would be the very write this function exists
         // to avoid.
         let lock = match File::open(&lock_path) {
-            Ok(handle) => {
-                if let Err(refusal) = handle.try_lock_shared() {
-                    return Err(lock_fault(&lock_path, refusal));
-                }
-                Some(handle)
-            }
+            Ok(handle) => Some(
+                Flock::try_lock_shared(handle, lock_path.clone())
+                    .map_err(|refusal| lock_fault(&lock_path, refusal))?,
+            ),
             Err(why) if why.kind() == io::ErrorKind::NotFound => None,
             Err(why) => return Err(classify(&lock_path, Action::Open, &why)),
         };
@@ -1174,9 +1183,11 @@ impl BarFile {
         }
         let bars_path = path.to_path_buf(root);
         let lock_path = path.with_file(FileKind::Lock).to_path_buf(root);
-        let lock =
-            crate::checksum_audit::open_regular(&lock_path).map_err(|why| why.to_string())?;
-        lock.try_lock_shared().map_err(|why| why.to_string())?;
+        let lock = Flock::try_lock_shared(
+            crate::checksum_audit::open_regular(&lock_path).map_err(|why| why.to_string())?,
+            lock_path.clone(),
+        )
+        .map_err(|why| why.to_string())?;
         let bars =
             crate::checksum_audit::open_regular(&bars_path).map_err(|why| why.to_string())?;
         let len = bars.metadata().map_err(|why| why.to_string())?.len();
@@ -1238,7 +1249,7 @@ impl BarFile {
         // drifts. `None` at the doors that have no `StorePath` to ask -- only
         // the test harness.
         crc_path: Option<PathBuf>,
-        lock: Option<File>,
+        lock: Option<Flock<File>>,
         len: u64,
         symbol_id: u32,
         timeframe_secs: u32,
@@ -1656,7 +1667,7 @@ impl BarFile {
                 .ok_or("strict checksum audit refuses a file born without checksums")?,
             lock: self
                 ._lock
-                .as_ref()
+                .as_deref()
                 .ok_or("strict checksum audit requires an existing held month lock")?,
             lock_path: self
                 .bars_path
@@ -4025,6 +4036,655 @@ mod tests {
         );
         drop(reader);
         scrub_month(&path);
+    }
+
+    /// A DROPPED MONTH IS RELEASED WHILE A DUPLICATE OF ITS LOCK DESCRIPTOR IS
+    /// STILL OPEN. D-0693.
+    ///
+    /// The duplicate is the model of the reference a child spawned by another
+    /// thread holds until its exec. While closing the descriptor was the
+    /// release, that reference kept the month's lock alive and the reopen below
+    /// was `StoreError::Locked`.
+    #[test]
+    #[expect(
+        clippy::used_underscore_binding,
+        reason = "the duplicate is taken of the month lock itself, which is the \
+                  field whose drop this test is about"
+    )]
+    fn a_dropped_month_is_released_despite_a_duplicated_descriptor() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+        let root =
+            std::env::temp_dir().join(format!("brutex-store-file-flockdup-{}", std::process::id()));
+        let _ignored = std::fs::remove_dir_all(&root);
+        let month = crate::path::StorePath::new(crate::path::PathParts {
+            vendor: brutex_core::vendor::Vendor::Groww,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: crate::path::Timeframe::MINUTE_1,
+            month: crate::path::YearMonth::new(2024, 6).expect("2024-06"),
+            file: crate::path::FileKind::Bars,
+        })
+        .expect("a legal path");
+
+        let writer = BarFile::open_or_create(&root, month, SYMBOL).expect("a fresh month opens");
+        let child = writer
+            ._lock
+            .as_deref()
+            .expect("the writer holds the month lock")
+            .try_clone()
+            .expect("the duplicate a spawned child would hold");
+        assert_eq!(
+            BarFile::open_or_create(&root, month, SYMBOL).map(|_| ()),
+            Err(StoreError::Locked {
+                path: month
+                    .with_file(crate::path::FileKind::Lock)
+                    .to_path_buf(&root),
+            }),
+            "the premise: a live writer refuses a second one"
+        );
+        drop(writer);
+
+        let again = BarFile::open_or_create(&root, month, SYMBOL)
+            .expect("the dropped writer unlocked the month despite the duplicate");
+        drop(again);
+        drop(child);
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
+
+    // =======================================================================
+    // The interrupted append at its edges — D-0688
+    //
+    // The three tests above build the crash in three shapes. These build the
+    // shapes an adversarial pass found no test for: a commit on a block
+    // boundary or one record short of one, the very first append, damage past
+    // the tail block's nominal end, a ragged tail behind the dead records, a
+    // second crash that rewrote them, repeated reads, and the size of the read
+    // the proof pays for.
+    // =======================================================================
+
+    /// A way into a month: the writer's door or the reader's.
+    type Door = fn(&Path) -> Result<BarFile, StoreError>;
+
+    /// Flips one bit inside record `index`, on disk.
+    fn flip_record(path: &Path, index: u64) {
+        let mut bytes = std::fs::read(path).expect("the month reads");
+        let at = usize::try_from(Layout::V2.offset_of(index).expect("an offset"))
+            .expect("an offset that fits");
+        bytes[at + 18] ^= 0b1000_0000;
+        std::fs::write(path, &bytes).expect("the month writes");
+    }
+
+    /// A commit on a block boundary, or one record short of one, survives a
+    /// dead append, and the whole batch offered again repairs it.
+    ///
+    /// On a boundary (73 and 146) the dead append re-sealed only the NEXT
+    /// block, so the tail entry is still the committed extent's and needs no
+    /// proof, and the tail block has no room for a record past the commit. One
+    /// short of a boundary (72 and 145) the tail block has room for exactly
+    /// one, the dead append sealed it full, and the proof is one extension
+    /// long. A premise pins which of the two each row is, so a row cannot
+    /// quietly stop testing the shape it names.
+    #[test]
+    fn a_dead_append_beside_a_commit_on_or_one_short_of_a_block_boundary_reads_and_repairs() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+
+        // (committed, lost to the crash, the count the tail entry covers)
+        for (committed, pending, sealed_through) in [
+            (73i64, 3i64, 73u64),
+            (146, 5, 146),
+            (72, 2, 73),
+            (72, 1, 73),
+            (145, 80, 146),
+        ] {
+            let tag = format!("pastboundary{committed}x{pending}");
+            let path = crash_between_seal_and_commit(&tag, committed, pending);
+            let n_valid = u64::try_from(committed).expect("small");
+            let total = n_valid + u64::try_from(pending).expect("small");
+            let tail = Layout::V2.block_of(n_valid - 1);
+            let entry = usize::try_from(tail).expect("small");
+            assert_eq!(
+                sealed_sum(&path, entry),
+                live_sum(&path, tail, sealed_through),
+                "{tag}: the premise, the tail entry covers {sealed_through} records"
+            );
+            assert_eq!(
+                sealed_sum(&path, entry) == live_sum(&path, tail, n_valid),
+                sealed_through == n_valid,
+                "{tag}: the premise, a proof is needed exactly when the entry is past the commit"
+            );
+
+            let reader = reopen_readonly(&path).expect("the month opens");
+            assert_eq!(reader.records(), n_valid, "{tag}: the header never moved");
+            for index in 0..committed {
+                let at = u64::try_from(index).expect("small");
+                assert_eq!(
+                    reader.read_record(at),
+                    Ok(bar(index)),
+                    "{tag}: record {index}"
+                );
+            }
+            assert_eq!(
+                reader.read_record(n_valid),
+                Err(StoreError::NotCommitted {
+                    index: n_valid,
+                    n_valid
+                }),
+                "{tag}: nothing past the commit is served"
+            );
+            drop(reader);
+
+            let mut writer = reopen(&path).expect("the writer opens");
+            let whole: Vec<Bar> = (0..committed + pending).map(bar).collect();
+            assert_eq!(
+                writer.append(&whole),
+                Ok(Appended::Committed {
+                    first_index: n_valid,
+                    n_valid: total,
+                }),
+                "{tag}: the whole batch offered again appends what follows the commit"
+            );
+            drop(writer);
+            let fresh = reopen_readonly(&path).expect("the month opens");
+            for index in 0..committed + pending {
+                let at = u64::try_from(index).expect("small");
+                assert_eq!(
+                    fresh.read_record(at),
+                    Ok(bar(index)),
+                    "{tag}: record {index} after the repair"
+                );
+            }
+            drop(fresh);
+            scrub_month(&path);
+        }
+    }
+
+    /// The very first append of a month died after sealing: the header is
+    /// generation 0 and commits nothing, while three records and a sidecar
+    /// sealed over them are on disk.
+    ///
+    /// Nothing is served, the writer's door reopens a month whose sidecar
+    /// already exists although nothing is committed, and the same batch
+    /// offered again commits from index 0.
+    #[test]
+    fn a_first_append_that_died_after_its_seal_leaves_an_empty_month_that_takes_the_batch_again() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+
+        let (path, mut file) = month("pastfirstever");
+        let region = std::fs::read(&path).expect("the month reads")[..32_768].to_vec();
+        let lost: Vec<Bar> = (0..3).map(bar).collect();
+        assert_eq!(
+            file.append(&lost),
+            Ok(Appended::Committed {
+                first_index: 0,
+                n_valid: 3
+            }),
+            "the append that is about to be interrupted"
+        );
+        drop(file);
+        let mut bytes = std::fs::read(&path).expect("the month reads");
+        bytes[..32_768].copy_from_slice(&region);
+        std::fs::write(&path, &bytes).expect("the month writes");
+        assert_eq!(
+            sealed_sum(&path, 0),
+            live_sum(&path, 0, 3),
+            "the premise: the sidecar is sealed over the three records nothing commits"
+        );
+
+        let reader = reopen_readonly(&path).expect("the month opens");
+        assert_eq!(reader.records(), 0, "generation 0 commits nothing");
+        assert_eq!(
+            reader.read_record(0),
+            Err(StoreError::NotCommitted {
+                index: 0,
+                n_valid: 0
+            }),
+            "and nothing is served from the records the dead append left"
+        );
+        drop(reader);
+
+        let mut writer = reopen(&path).expect("the writer opens beside the sidecar it left");
+        assert_eq!(
+            writer.append(&lost),
+            Ok(Appended::Committed {
+                first_index: 0,
+                n_valid: 3
+            }),
+            "the batch offered again commits from the start"
+        );
+        drop(writer);
+        let fresh = reopen_readonly(&path).expect("the month opens");
+        for index in 0..3 {
+            let at = u64::try_from(index).expect("small");
+            assert_eq!(fresh.read_record(at), Ok(bar(index)), "record {index}");
+        }
+        assert_eq!(sealed_sum(&path, 0), live_sum(&path, 0, 3));
+        drop(fresh);
+        scrub_month(&path);
+    }
+
+    /// Damage past the tail block's nominal end does not touch its proof, and
+    /// damage inside the extent the dead append sealed breaks it.
+    ///
+    /// Seventy committed, ten lost: block 0 is sealed over 73 and block 1 over
+    /// the other seven. Record 75 is in block 1, which nothing committed
+    /// reaches, so block 0 is still proved through 73. Record 72 is the last
+    /// record of block 0's sealed extent, so flipping it leaves no candidate
+    /// that matches and the committed bars are refused, naming the committed
+    /// extent's checksum. A fresh handle each time, so no cached verification
+    /// answers for the bytes as they were.
+    #[test]
+    fn a_flip_past_the_tail_blocks_nominal_end_leaves_its_proof_and_a_flip_inside_it_does_not() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+
+        let path = crash_between_seal_and_commit("pastnominalend", 70, 10);
+        flip_record(&path, 75);
+        let reader = reopen_readonly(&path).expect("the month opens");
+        assert_eq!(
+            reader.read_record(69),
+            Ok(bar(69)),
+            "still proved through 73"
+        );
+        assert_eq!(reader.read_record(0), Ok(bar(0)));
+        drop(reader);
+
+        flip_record(&path, 72);
+        let reader = reopen_readonly(&path).expect("the month opens");
+        let refusal = StoreError::BlockChecksum {
+            path: path.clone(),
+            block: 0,
+            stored: sealed_sum(&path, 0),
+            computed: live_sum(&path, 0, 70),
+        };
+        assert_eq!(reader.read_record(69), Err(refusal.clone()));
+        assert_eq!(reader.read_record(0), Err(refusal));
+        drop(reader);
+        scrub_month(&path);
+    }
+
+    /// A ragged tail behind the whole records past the commit changes nothing.
+    ///
+    /// Seventeen bytes are less than one record, so the past read stops at the
+    /// last WHOLE record the file holds. A read that rounded the ragged tail up
+    /// to a record would ask for bytes the file does not have and refuse a
+    /// block whose committed bytes are intact. The overlapping re-offer then
+    /// repairs the month with the ragged bytes still behind it.
+    #[test]
+    fn ragged_bytes_behind_the_records_past_the_commit_do_not_break_the_proof() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+
+        let path = crash_between_seal_and_commit("pastragged", 5, 3);
+        let mut bytes = std::fs::read(&path).expect("the month reads");
+        bytes.extend_from_slice(&[0xAB; 17]);
+        std::fs::write(&path, &bytes).expect("the month writes");
+        assert_eq!(
+            Layout::V2.ragged_tail_bytes(len_u64(bytes.len())),
+            17,
+            "the premise: the file ends seventeen bytes into a record"
+        );
+
+        let reader = reopen_readonly(&path).expect("a ragged tail opens");
+        for index in 0..5 {
+            let at = u64::try_from(index).expect("small");
+            assert_eq!(reader.read_record(at), Ok(bar(index)), "record {index}");
+        }
+        drop(reader);
+
+        let mut writer = reopen(&path).expect("the writer opens");
+        let whole: Vec<Bar> = (0..8).map(bar).collect();
+        assert_eq!(
+            writer.append(&whole),
+            Ok(Appended::Committed {
+                first_index: 5,
+                n_valid: 8
+            })
+        );
+        drop(writer);
+        let fresh = reopen_readonly(&path).expect("the month opens");
+        for index in 0..8 {
+            let at = u64::try_from(index).expect("small");
+            assert_eq!(fresh.read_record(at), Ok(bar(index)), "record {index}");
+        }
+        drop(fresh);
+        scrub_month(&path);
+    }
+
+    /// A second crash that rewrote a record past the commit, and died before
+    /// sealing, leaves an entry no extent matches — and a re-offer that
+    /// OVERLAPS cannot repair it, because it reads the tail block first.
+    ///
+    /// This is the false refusal `docs/06-limits.md` states under D-0688, held
+    /// to its words: the read is refused, the overlapping re-offer is refused
+    /// with the same checksum refusal, and a batch that strictly FOLLOWS the
+    /// commit writes without reading, re-seals the block over what is now on
+    /// disk, and the month reads again. The following batch is longer than
+    /// the one the first crash lost, so the entry it leaves is a new number
+    /// and the fresh reads prove the re-seal rather than a coincidence.
+    #[test]
+    fn a_second_crash_that_rewrote_the_past_refuses_an_overlapping_re_offer_until_one_follows() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+
+        let path = crash_between_seal_and_commit("pastsecondcrash", 5, 3);
+        let mut bytes = std::fs::read(&path).expect("the month reads");
+        let at = |index: u64| {
+            usize::try_from(Layout::V2.offset_of(index).expect("an offset"))
+                .expect("an offset that fits")
+        };
+        // The second append wrote a different record at index 5.
+        bytes.copy_within(at(1)..at(2), at(5));
+        std::fs::write(&path, &bytes).expect("the month writes");
+        let refusal = StoreError::BlockChecksum {
+            path: path.clone(),
+            block: 0,
+            stored: sealed_sum(&path, 0),
+            computed: live_sum(&path, 0, 5),
+        };
+
+        let reader = reopen_readonly(&path).expect("the month opens");
+        assert_eq!(reader.read_record(0), Err(refusal.clone()));
+        assert_eq!(reader.read_record(4), Err(refusal.clone()));
+        drop(reader);
+
+        let mut writer = reopen(&path).expect("the writer opens");
+        let overlapping: Vec<Bar> = (0..8).map(bar).collect();
+        assert_eq!(
+            writer.append(&overlapping),
+            Err(refusal),
+            "an overlapping re-offer reads the tail block before it could re-seal it"
+        );
+        let following: Vec<Bar> = (5..10).map(bar).collect();
+        assert_eq!(
+            writer.append(&following),
+            Ok(Appended::Committed {
+                first_index: 5,
+                n_valid: 10
+            }),
+            "a batch that strictly follows the commit reads nothing and re-seals"
+        );
+        drop(writer);
+        assert_eq!(sealed_sum(&path, 0), live_sum(&path, 0, 10));
+        let fresh = reopen_readonly(&path).expect("the month opens");
+        for index in 0..10 {
+            let at = u64::try_from(index).expect("small");
+            assert_eq!(fresh.read_record(at), Ok(bar(index)), "record {index}");
+        }
+        drop(fresh);
+        scrub_month(&path);
+    }
+
+    /// Reads of a month an interrupted append left are idempotent and write
+    /// nothing — `CLAUDE.md` §3 rule 5.
+    ///
+    /// Three read handles and the writer's, which is the one holding the
+    /// sidecar open for writing, each read every committed record and two past
+    /// the commit, twice, and each answer is the same. Neither file changes by
+    /// a byte: serving the tail on the proof must never become repairing it on
+    /// a read. Then the single-entry cache is made to miss on every read, by
+    /// alternating between a full block and the tail block, so the tail's
+    /// proof is re-run on each touch and must answer the same each time.
+    ///
+    /// Equal answers cannot show that the proof ran again, so the last half
+    /// proves it. A cache widened to keep every block it has passed proves the
+    /// tail once per handle, answers the alternation identically and writes
+    /// nothing, and this test passed with it (AF-47). The same handle walks the
+    /// same alternation with the tail's sidecar entry damaged before each touch
+    /// of the tail. Each of those six touches must be refused, which a proof
+    /// that did not run again cannot do. The same record must then read again
+    /// once the entry is put back.
+    ///
+    /// That leg changes the entry before every touch it checks, so a proof
+    /// remembered against the entry's value misses each time and passes it
+    /// (AF-48). The last leg leaves the entry alone and damages a record
+    /// instead: a committed one of block 1 the touch does not read, then one
+    /// the dead append left past the commit. Each of those twelve touches must
+    /// be refused too. That every touch of the tail runs the proof, the
+    /// undamaged ones included, is counted off the log by
+    /// `store::tail_proof::every_touch_of_the_tail_after_another_block_runs_its_proof_again`.
+    #[test]
+    fn reads_of_a_month_an_interrupted_append_left_are_idempotent_and_write_nothing() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+
+        let path = crash_between_seal_and_commit("pastidempotent", 70, 10);
+        let bin = std::fs::read(&path).expect("the month reads");
+        let crc = std::fs::read(sidecar_of(&path)).expect("the sidecar reads");
+        let expected: Vec<Result<Bar, StoreError>> = (0..72u64)
+            .map(|index| {
+                if index < 70 {
+                    Ok(bar(i64::try_from(index).expect("small")))
+                } else {
+                    Err(StoreError::NotCommitted { index, n_valid: 70 })
+                }
+            })
+            .collect();
+        let doors: [Door; 4] = [reopen_readonly, reopen_readonly, reopen_readonly, reopen];
+        for (handle, door) in doors.iter().enumerate() {
+            let file = door(&path).expect("the month opens");
+            for pass in 0..2 {
+                let got: Vec<_> = (0..72u64).map(|index| file.read_record(index)).collect();
+                assert_eq!(got, expected, "handle {handle}, pass {pass}");
+            }
+            drop(file);
+            assert_eq!(
+                std::fs::read(&path).expect("the month reads"),
+                bin,
+                "handle {handle} wrote nothing to the records"
+            );
+            assert_eq!(
+                std::fs::read(sidecar_of(&path)).expect("the sidecar reads"),
+                crc,
+                "handle {handle} wrote nothing to the sidecar"
+            );
+        }
+        scrub_month(&path);
+
+        // Eighty committed: block 0 is full and block 1 is the tail, sealed
+        // over ten by the dead append.
+        let path = crash_between_seal_and_commit("pastalternating", 80, 3);
+        let bin = std::fs::read(&path).expect("the month reads");
+        let crc = std::fs::read(sidecar_of(&path)).expect("the sidecar reads");
+        let reader = reopen_readonly(&path).expect("the month opens");
+        for round in 0..3i64 {
+            for index in [round, 73 + round, 72 - round, 79 - round] {
+                let at = u64::try_from(index).expect("small");
+                assert_eq!(
+                    reader.read_record(at),
+                    Ok(bar(index)),
+                    "round {round}, record {index}"
+                );
+            }
+        }
+        assert_eq!(std::fs::read(&path).expect("the month reads"), bin);
+        assert_eq!(
+            std::fs::read(sidecar_of(&path)).expect("the sidecar reads"),
+            crc
+        );
+
+        // THE PROOF RAN AGAIN, NOT MERELY THE SAME ANSWER. Block 1's entry is
+        // bytes 4..8 of the sidecar. It is damaged under the open handle after
+        // each touch of block 0, so a touch of the tail that is still served
+        // came from a cache, and one that is refused ran the proof again. The
+        // refusal names the damaged entry and the committed extent's checksum,
+        // which is what the proof computes first.
+        let mut damaged = crc.clone();
+        damaged[4] ^= 0b0000_0001;
+        let refusal = StoreError::BlockChecksum {
+            path: path.clone(),
+            block: 1,
+            stored: u32::from_le_bytes([damaged[4], damaged[5], damaged[6], damaged[7]]),
+            computed: live_sum(&path, 1, 80),
+        };
+        for round in 0..3i64 {
+            for (full, tail) in [(round, 73 + round), (72 - round, 79 - round)] {
+                let at = u64::try_from(tail).expect("small");
+                assert_eq!(
+                    reader.read_record(u64::try_from(full).expect("small")),
+                    Ok(bar(full)),
+                    "round {round}, record {full}"
+                );
+                std::fs::write(sidecar_of(&path), &damaged).expect("the sidecar writes");
+                assert_eq!(
+                    reader.read_record(at),
+                    Err(refusal.clone()),
+                    "round {round}, record {tail}: the tail's proof ran again"
+                );
+                std::fs::write(sidecar_of(&path), &crc).expect("the sidecar writes");
+                assert_eq!(
+                    reader.read_record(at),
+                    Ok(bar(tail)),
+                    "round {round}, record {tail}: and again with the entry back"
+                );
+            }
+        }
+        assert_eq!(std::fs::read(&path).expect("the month reads"), bin);
+        assert_eq!(
+            std::fs::read(sidecar_of(&path)).expect("the sidecar reads"),
+            crc
+        );
+
+        the_tail_refuses_a_damaged_record_on_each_alternating_touch(&reader, &path);
+        drop(reader);
+        assert_eq!(std::fs::read(&path).expect("the month reads"), bin);
+        assert_eq!(
+            std::fs::read(sidecar_of(&path)).expect("the sidecar reads"),
+            crc
+        );
+        scrub_month(&path);
+    }
+
+    /// The last leg of
+    /// `reads_of_a_month_an_interrupted_append_left_are_idempotent_and_write_nothing`,
+    /// on the handle it opened over eighty committed records and three lost.
+    ///
+    /// THE PROOF READ THE RECORDS AGAIN, NOT ONLY THE ENTRY. Every checked
+    /// touch of the leg before this one changed the entry, so a proof
+    /// remembered against the entry's value missed on each of them and passed
+    /// that leg (AF-48). Here the entry is left alone and the RECORDS are
+    /// damaged under the open handle, after a touch of block 0 and before each
+    /// touch of the tail: first a committed record of block 1 that the touch
+    /// does not read, then a record the dead append left past the commit,
+    /// inside the extent the entry was sealed over. Either is refused only by
+    /// a proof that read the block's bytes again. The refusal names the entry
+    /// the dead append sealed and the committed extent's checksum as it now
+    /// is, and the same record reads again once the bit is flipped back.
+    fn the_tail_refuses_a_damaged_record_on_each_alternating_touch(reader: &BarFile, path: &Path) {
+        let sealed = sealed_sum(path, 1);
+        for round in 0..3i64 {
+            for (full, tail) in [(round, 73 + round), (72 - round, 79 - round)] {
+                let at = u64::try_from(tail).expect("small");
+                for damaged in [152 - tail, 80 + round] {
+                    let hit = u64::try_from(damaged).expect("small");
+                    assert_eq!(
+                        reader.read_record(u64::try_from(full).expect("small")),
+                        Ok(bar(full)),
+                        "round {round}, record {full}"
+                    );
+                    flip_record(path, hit);
+                    assert_eq!(
+                        reader.read_record(at),
+                        Err(StoreError::BlockChecksum {
+                            path: path.to_path_buf(),
+                            block: 1,
+                            stored: sealed,
+                            computed: live_sum(path, 1, 80),
+                        }),
+                        "round {round}, record {tail}, record {damaged} damaged: \
+                         the tail's proof read the block again"
+                    );
+                    flip_record(path, hit);
+                    assert_eq!(
+                        reader.read_record(at),
+                        Ok(bar(tail)),
+                        "round {round}, record {tail}: and again with record {damaged} back"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The read the proof pays for is at most the tail block's room, however
+    /// long the dead batch was — `CLAUDE.md` §3 rule 4.
+    ///
+    /// A dead append of 300 records leaves over sixteen kilobytes past the
+    /// commit, and it could have been a whole month. The past read stops at
+    /// the tail block's NOMINAL end: 73 − 5 = 68 records for a commit of five,
+    /// and 146 − 80 = 66 for a commit of eighty, whose tail is block 1. It is
+    /// exactly the records that follow the commit, it is empty for a block
+    /// that is not the tail, and it is empty once the file ends at its commit.
+    /// No other test measures this: `block::verify_through` caps what it
+    /// USES at the block's room, so without this cap every read above still
+    /// passes while the read grows with the batch.
+    #[test]
+    fn the_past_read_is_at_most_the_tail_blocks_room_however_long_the_dead_batch() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+
+        let v2 = Layout::V2;
+        let offset = |index: u64| {
+            usize::try_from(v2.offset_of(index).expect("an offset")).expect("an offset that fits")
+        };
+        for (committed, room) in [(5i64, 68u64), (80, 66)] {
+            let tag = format!("pastcap{committed}");
+            let path = crash_between_seal_and_commit(&tag, committed, 300);
+            let n_valid = u64::try_from(committed).expect("small");
+            let bytes = std::fs::read(&path).expect("the month reads");
+            assert!(
+                bytes.len() >= offset(n_valid + 300),
+                "the premise: all 300 dead records are on disk"
+            );
+            let tail = v2.block_of(n_valid - 1);
+            let end = v2.offset_of(n_valid).expect("an offset");
+
+            let reader = reopen_readonly(&path).expect("the month opens");
+            let past = reader
+                .past_the_commit(tail, end)
+                .expect("the tail's past reads");
+            assert_eq!(
+                len_u64(past.len()),
+                room * v2.record_stride(),
+                "{tag}: the tail block's room and not the dead batch"
+            );
+            assert_eq!(
+                past,
+                bytes[offset(n_valid)..offset(n_valid + room)],
+                "{tag}: exactly the records that follow the commit"
+            );
+            if tail > 0 {
+                assert_eq!(
+                    reader.past_the_commit(tail - 1, end),
+                    Ok(Vec::new()),
+                    "{tag}: a block that is not the tail has nothing past the commit"
+                );
+            }
+            assert_eq!(
+                reader.read_record(n_valid - 1),
+                Ok(bar(committed - 1)),
+                "{tag}: and the tail reads on the proof"
+            );
+            drop(reader);
+
+            let mut writer = reopen(&path).expect("the writer opens");
+            let whole: Vec<Bar> = (0..committed + 300).map(bar).collect();
+            assert_eq!(
+                writer.append(&whole),
+                Ok(Appended::Committed {
+                    first_index: n_valid,
+                    n_valid: n_valid + 300
+                })
+            );
+            drop(writer);
+            let settled = reopen_readonly(&path).expect("the month opens");
+            let last = n_valid + 300;
+            assert_eq!(
+                settled.past_the_commit(
+                    v2.block_of(last - 1),
+                    v2.offset_of(last).expect("an offset")
+                ),
+                Ok(Vec::new()),
+                "{tag}: a file that ends at its commit has nothing past it"
+            );
+            drop(settled);
+            scrub_month(&path);
+        }
     }
 }
 

@@ -3,8 +3,10 @@ import { sweepOutcome } from './sweep.js';
 // This bounds browser bookkeeping, not the engine's search or support policy.
 export const MAX_RECEIPT_JOBS = 4096;
 export const STRICT_COMMAND = 'audit-audited-range';
+// No `screen_budget_ms`: the server refuses it by name on every run that
+// records (D-0685), so offering it could only produce that refusal.
 export const STRICT_KNOBS = Object.freeze([
-  'ceiling', 'screen_cap', 'screen_budget_ms', 'top', 'validate', 'horizon_bars',
+  'ceiling', 'screen_cap', 'top', 'validate', 'horizon_bars',
   'grid_rungs', 'grid_resolution', 'min_rr_bp', 'min_win_rate_bp', 'min_trades',
   'min_ret_over_dd_bp', 'min_weakest_bp', 'max_mae_ppm'
 ]);

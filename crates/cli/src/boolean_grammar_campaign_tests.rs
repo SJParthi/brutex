@@ -359,8 +359,14 @@ fn grammar_done_holds_and_rechecks_source_generation_before_and_after_acknowledg
         let identity = [23; 32];
         let path = scratch.0.join("retained-source-receipt");
         fs::write(&path, b"exact original receipt").unwrap();
-        let source = crate::readonly_file::open(&path).unwrap();
-        source.try_lock_shared().unwrap();
+        // A guard, so `drop(source)` below unlocks explicitly before the
+        // exclusive probe: this binary spawns children, and a lock released
+        // only by close can survive in one of them (D-0693).
+        let source = store::flock::Flock::try_lock_shared(
+            crate::readonly_file::open(&path).unwrap(),
+            path.clone(),
+        )
+        .unwrap();
         let before = crate::result_set::file_generation(&source, &path).unwrap();
         let batch = Batch::prepare(Cursor::new(&[30]).unwrap(), 0, 0, budget()).unwrap();
         let mut journal = Journal::open(&scratch.0, NAMESPACE, identity).unwrap();

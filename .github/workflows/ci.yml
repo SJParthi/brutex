@@ -1181,6 +1181,10 @@ jobs:
           #   dir-is-a-file lock-is-a-dir  scratch roots in `ingest.rs`, each
           #     named for the filesystem shape it puts in the writer's way -- a
           #     directory where a file belongs and the reverse.
+          #   census-lock-dup              a scratch root in `ingest.rs`, named
+          #     for the duplicated census-lock descriptor it arranges: a second
+          #     reference to the lock's open file description, the model of a
+          #     spawned child's copy (D-0693).
           #   interleaved                  a word asserted to appear IN a refusal
           #     sentence, so the message keeps naming the condition it refused.
           #   feed                         a scratch subdirectory in
@@ -1197,7 +1201,8 @@ jobs:
           # None is an org, an env, a vendor or a field of a credential. They are
           # listed because the scanner is shape-based, and a short lowercase word
           # has the same shape as a path segment whatever it means.
-          pull_fixture='dir-is-a-file lock-is-a-dir interleaved feed t z zzz'
+          pull_fixture='dir-is-a-file lock-is-a-dir census-lock-dup interleaved
+          feed t z zzz'
 
           # SIXTY-SEVEN MORE, IN FOUR GROUPS, ALL OF THEM ACCUMULATED WHILE THIS
           # GATE COULD NOT RUN. It sits behind gate 1e in the same job, so every
@@ -3079,7 +3084,19 @@ jobs:
           telemetry/src/record.rs:eprintln!:1
           telemetry/src/sink.rs:eprintln!:1'
           # Test-only measurements; production audit/recovery notices also emit.
+          #
+          # THREE MORE, one kind (D-0695): the STDOUT PROOF LINE of a test's
+          # child process. `crate::isolated::rerun` re-runs one test of the api
+          # test binary with a chosen environment, and each child prints one
+          # line its parent asserts on -- `FRONTIER-ADMITTED`, `SERVER-BUDGET`
+          # and `TRADES-ADMITTED` -- as proof the child took its own branch and
+          # did not pass by testing nothing. Each sits inside
+          # `#[cfg(test)] mod tests`, so no production path reaches it, and it
+          # is not a diagnostic: nothing is wrong when it prints.
           declared="$declared api/src/booleanlaunch_tests.rs:println!:2
+          api/src/frontierjson.rs:println!:1
+          api/src/sweeprun.rs:println!:1
+          api/src/trades.rs:println!:1
           api/src/recovery.rs:println!:1
           cli/src/boolean_candidate_tests.rs:eprintln!:2
           cli/src/index_stop_qualification_tests.rs:eprintln!:2
@@ -6025,6 +6042,17 @@ jobs:
           #     `censuses.iter().find(|c| c.vendor == feed)`, bounded by
           #     FEED_COUNT (5 today, capped at 8 by `VendorSet(u8)`). One is
           #     `self.unread`, the same per-vendor list.
+          #     server.rs 7 -> 8 (D-0695), and the census searches 9 -> 10: the
+          #     tenth is `calendar_json`'s, which finds the asked feed's census
+          #     once per request (it was `unreadable_calendar`'s until D-0695's
+          #     fourth repair, which also asks that row whether a bar file is
+          #     held, and moved the one search up rather than adding a second).
+          #     Its rows are `census_now`'s, and `census::read_all` and
+          #     `unreadable_root` yield exactly one row per `Vendor::ALL` entry,
+          #     so it sees at most FEED_COUNT rows, once per `/calendar.json`
+          #     request -- never per entry, per bar or per series.
+          #     `.filter().next()` would hide it from this rule at the same cost,
+          #     which is why it is declared rather than respelt.
           #   pull/vendor.rs -- `rung_routes`, `layouts` and the granularity rows
           #     are the descriptor's own `&'static` arrays, units long.
           #   pull/fno.rs -- `MONTHS`, twelve.
@@ -6100,7 +6128,7 @@ jobs:
           crates/api/src/audit_json.rs 1
           crates/api/src/autopilot.rs 1
           crates/api/src/backtest.rs 1
-          crates/api/src/server.rs 7
+          crates/api/src/server.rs 8
           crates/cli/src/lib.rs 7
           crates/cli/src/population_admission_v2.rs 1
           crates/cli/src/population_finalization_v2.rs 1

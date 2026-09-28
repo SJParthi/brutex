@@ -1127,6 +1127,29 @@ pub const FNO_UNDERLYINGS: [&str; 213] = [
     "ZYDUSLIFE",
 ];
 
+/// The members of [`FNO_UNDERLYINGS`] that are INDICES, not shares.
+///
+/// Not [`FNO_INDEX`], which is the membership table over all 213 names. These
+/// five are the underlyings of index futures and options, and nothing here is
+/// new information: the note above [`FNO_UNDERLYINGS`] already names them as
+/// the five that are indices, and [`FNO_UNDERLYINGS_ISIN`] carries
+/// [`ISIN_ABSENT`] at exactly their positions, because no numbering agency
+/// issues an index an ISIN. This constant gives those two facts one name, and
+/// `core::universe::the_fno_index_underlyings_are_exactly_the_fno_names_with_no_isin`
+/// fails the build if it ever stops being the ISIN-less positions of the F&O
+/// list, in the same order.
+///
+/// # Why it exists
+///
+/// An index has no cash equity. [`InstrumentKey::is_sweepable`]'s cash arm
+/// accepted every [`FNO_INDEX`] member, so a made-up `(NSE, Cash, Equity)` key
+/// named `FINNIFTY` passed as a sweepable stock. The cash arm refuses these
+/// five now. `NIFTY` and `BANKNIFTY` stay on the surface through the index
+/// arm, as [`InstrumentKey::SWEPT`], which is the shape they actually have.
+/// D-0682.
+pub const FNO_INDEX_UNDERLYINGS: [&str; 5] =
+    ["BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTY", "NIFTYNXT50"];
+
 /// The 50 NIFTY 50 constituents.
 ///
 /// Transcribed from
@@ -4812,6 +4835,46 @@ mod tests {
         worst
     }
 
+    /// The header's cost table as this build measures it, in the header's row
+    /// order: the table's name, its members counted from the array, its slots
+    /// read from the index type, then the worst hit and the worst miss.
+    fn measured_cost_table() -> [(&'static str, usize, usize, usize, usize); 6] {
+        fn row<const N: usize>(
+            table: &'static str,
+            idx: &MemberIndex<N>,
+            members: &[&str],
+        ) -> (&'static str, usize, usize, usize, usize) {
+            (
+                table,
+                members.len(),
+                N,
+                worst_probe(idx, members),
+                worst_miss_probe(idx),
+            )
+        }
+        [
+            row("NTM_INDEX", &NTM_INDEX, &NIFTY_TOTAL_MARKET),
+            row("FNO_INDEX", &FNO_INDEX, &FNO_UNDERLYINGS),
+            row("NIFTY_500_INDEX", &NIFTY_500_INDEX, &NIFTY_500),
+            row("NIFTY_200_INDEX", &NIFTY_200_INDEX, &NIFTY_200),
+            row("NIFTY_100_INDEX", &NIFTY_100_INDEX, &NIFTY_100),
+            row("NIFTY_50_INDEX", &NIFTY_50_INDEX, &NIFTY_50),
+        ]
+    }
+
+    /// A probe count spelled the way prose spells it. Anything above twelve
+    /// has already failed the miss bound.
+    fn in_words(n: usize) -> &'static str {
+        const WORDS: [&str; 13] = [
+            "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+            "eleven", "twelve",
+        ];
+        WORDS
+            .get(n)
+            .copied()
+            .expect("a worst case above twelve breaks the bound")
+    }
+
     #[test]
     fn the_probe_length_is_bounded_which_is_what_makes_it_o1() {
         // THE CLAIM UNDER TEST, AND ONLY HALF OF IT. `binary_search` cost ~10
@@ -4946,6 +5009,328 @@ mod tests {
         // ended at the empty slot this counted to.
         assert_eq!(NTM_INDEX.position("ZZZZNOTREAL"), None);
         assert!(NIFTY_50_INDEX.position("RELIANCE").is_some());
+    }
+
+    /// AF-51. THE WORST PROBES THIS CRATE'S PROSE QUOTES ARE THE MEASURED ONES.
+    ///
+    /// The two tests above pin BOUNDS, eight and twelve, with headroom on
+    /// purpose. The doc comments quote the MEASURED worst cases as numbers,
+    /// and nothing held those. `InstrumentKey::is_sweepable` quoted six on a
+    /// hit and eleven on a miss for `FNO_INDEX`. Those are `NTM_INDEX`'s
+    /// figures; `FNO_INDEX` measures seven and ten, so its stated hit worst
+    /// case was one step short, and both bound tests stayed green.
+    ///
+    /// The measurements are exact here. Every doc comment outside this test
+    /// module that quotes a worst probe of one of the six tables, or of the
+    /// NIFTY 500 at the size it was refused at, is looked for, by this test or
+    /// the next. This one looks for every row of this file's header table and
+    /// the sums drawn from it, `MemberIndex`, `MemberIndex::position`,
+    /// `nse_isin`, and the measured pair in `InstrumentKey::is_sweepable`'s
+    /// cost section in `instrument.rs`. The next looks for both rows of
+    /// `NIFTY_500_INDEX`'s table, the header's NIFTY 500 figure and the
+    /// sentence in `is_sweepable`'s cost section that names `NTM_INDEX`'s
+    /// pair, and for the two plain comments in this module that quote one.
+    /// Not searched: the docs of the AF-51, AF-54 and AF-55 tests, which
+    /// narrate the figures they correct, and `MemberIndex`'s "under 1.5",
+    /// which is a mean and not a worst case. `vendor.rs`'s series tables are
+    /// other tables, with their own test. Each is searched with the number
+    /// formatted in, so the sentence these tests search for never appears in
+    /// this file as a literal. A table edit that moves a worst case fails
+    /// here or there, and the message names the prose to correct in the same
+    /// change.
+    ///
+    /// AF-53. This paragraph used to say "every sentence" while the list
+    /// below held only the four named sites. The header, whose cost table
+    /// quotes both figures for all six tables, was not in it, so giving the
+    /// `FNO_INDEX` row `NTM_INDEX`'s 6 and 11 left this test green. Each row
+    /// is now formatted from the table it names: members from the array,
+    /// slots from the index type, both figures from the measurement.
+    ///
+    /// AF-55. After AF-53 the "measurements are exact" paragraph still said
+    /// "every doc comment" while three that quote a figure were searched by no
+    /// test. The next test searches them.
+    #[test]
+    fn the_worst_probes_quoted_in_prose_are_the_measured_ones() {
+        let rows = measured_cost_table();
+        let [(.., ntm_hit, ntm_miss), (.., fno_hit, fno_miss), ..] = rows;
+        assert_eq!(
+            (ntm_hit, ntm_miss, fno_hit, fno_miss),
+            (6, 11, 7, 10),
+            "the measured worst cases moved: correct every sentence checked below"
+        );
+
+        let universe = include_str!("universe.rs");
+        let instrument = include_str!("instrument.rs");
+        for (file, text, sentence) in [
+            (
+                "universe.rs, MemberIndex",
+                universe,
+                format!("/// is {ntm_hit} on a hit and {ntm_miss} on a miss."),
+            ),
+            (
+                "universe.rs, MemberIndex::position",
+                universe,
+                format!("measures {ntm_hit} on 750 members and {fno_hit} on 213"),
+            ),
+            (
+                "universe.rs, MemberIndex::position",
+                universe,
+                format!("measures {ntm_miss} on 750 members and {fno_miss} on 213"),
+            ),
+            (
+                "universe.rs, nse_isin",
+                universe,
+                format!("at most {ntm_hit} steps when the"),
+            ),
+            (
+                "universe.rs, nse_isin",
+                universe,
+                format!("at most {ntm_miss} when it is not"),
+            ),
+            (
+                "instrument.rs, InstrumentKey::is_sweepable",
+                instrument,
+                format!(
+                    "{} probes on a hit and {} on a miss",
+                    in_words(fno_hit),
+                    in_words(fno_miss)
+                ),
+            ),
+        ] {
+            assert!(
+                text.contains(&sentence),
+                "{file} must quote the measured figure: {sentence:?}"
+            );
+        }
+
+        // THE HEADER'S COST TABLE, EVERY ROW. Members and slots are read from
+        // the arrays and the index types, and both figures are measured, so
+        // no column of a row is taken from the row itself.
+        for (table, members, slots, hit, miss) in rows {
+            let row = format!("//! | `{table}` | {members} | {slots} | {hit} | {miss} |");
+            assert!(
+                universe.contains(&row),
+                "universe.rs's header must carry the measured row: {row:?}"
+            );
+        }
+
+        // AND THE SUMS THE HEADER TAKES FROM THAT TABLE. `of_equity` probes
+        // all six tables, so a name outside every tier costs the miss column's
+        // sum, and the hit column's is the figure it once quoted. The two-table
+        // pair is the same sum over `NTM_INDEX` and `FNO_INDEX` alone.
+        let hit_sum: usize = rows.iter().map(|&(.., hit, _)| hit).sum();
+        let miss_sum: usize = rows.iter().map(|&(.., miss)| miss).sum();
+        for sentence in [
+            format!("Six misses is at most **{miss_sum}** steps measured"),
+            format!("not the {hit_sum} the hit column sums to"),
+            format!("— {miss_sum} is just the honest constant"),
+            format!("//! and {hit_sum} was the flattering one."),
+            format!(
+                "//! it was {} rather than the {} this paragraph used to quote.",
+                ntm_miss + fno_miss,
+                ntm_hit + fno_hit
+            ),
+        ] {
+            assert!(
+                universe.contains(&sentence),
+                "universe.rs's header must quote the measured sum: {sentence:?}"
+            );
+        }
+
+        // `is_sweepable` probes `FNO_INDEX` and no other table, so the
+        // Total Market figures in its sentence are the defect this test
+        // exists for.
+        let foreign = format!(
+            "{} probes on a hit and {} on a miss",
+            in_words(ntm_hit),
+            in_words(ntm_miss)
+        );
+        assert!(
+            !instrument.contains(&foreign),
+            "instrument.rs quotes NTM_INDEX's figures for FNO_INDEX: {foreign:?}"
+        );
+    }
+
+    /// AF-55. THE NIFTY 500'S FIGURES AT BOTH SIZES, AND THE OTHER QUOTED
+    /// PROBES, ARE THE MEASURED ONES.
+    ///
+    /// After AF-53 the test above still said every doc comment quoting a worst
+    /// probe was looked for, while three were not: both rows of
+    /// `NIFTY_500_INDEX`'s table and the header's "13 hit steps". Giving the
+    /// shipped row a worst hit of 9 in place of 5 left it green.
+    ///
+    /// Those rows are formatted here the way the header's are: slots from the
+    /// index type, fill from the members over the slots, and the worst hit
+    /// from the walk. The 1024-slot table the refused row describes is built
+    /// here by the same `build` from the same array, and its worst hit must
+    /// exceed the hit bound of 8, since that is why it was refused. Two more
+    /// sites quote a measured figure and are searched for the same reason. The
+    /// second paragraph of `is_sweepable`'s cost section names six and eleven
+    /// as `NTM_INDEX`'s figures. The two plain comments in this module that
+    /// quote one are the miss test's headroom sentence and the NIFTY 500
+    /// figure in `the_hash_is_deterministic_and_the_tables_stay_half_empty`.
+    #[test]
+    fn the_nifty_500s_figures_at_both_sizes_and_the_other_quoted_probes_are_measured() {
+        const REFUSED: usize = 1024;
+        let rows = measured_cost_table();
+        let [(.., ntm_hit, ntm_miss), _, (_, members, slots, hit, _), ..] = rows;
+
+        // THE NIFTY 500 AT THE SIZE `build` PERMITS AND THE PROBE TEST REFUSED.
+        // `NIFTY_500_INDEX`'s doc sets that size against the one it ships at,
+        // and the header and the half-empty test quote the refused size's hit
+        // figure. So no column of either row is remembered.
+        let refused = MemberIndex::<REFUSED>::build(&NIFTY_500);
+        let refused_hit = worst_probe(&refused, &NIFTY_500);
+        assert!(
+            refused_hit > 8,
+            "NIFTY_500 in {REFUSED} slots measures {refused_hit}, inside the hit bound of 8, \
+             so NIFTY_500_INDEX's reason for shipping a quarter full is gone"
+        );
+        // Per mille, rounded half up, in integers: the fill column is printed
+        // to one decimal place and `float_arithmetic` is denied.
+        let fill = |slots: usize| {
+            let per_mille = (members * 2000 + slots) / (2 * slots);
+            format!("{}.{}%", per_mille / 10, per_mille % 10)
+        };
+        // The miss test's comment gives both bounds' headroom over the worst
+        // measured anywhere among the six.
+        let max_hit = rows.iter().fold(0, |most, &(.., hit, _)| most.max(hit));
+        let max_miss = rows.iter().fold(0, |most, &(.., miss)| most.max(miss));
+
+        let universe = include_str!("universe.rs");
+        let instrument = include_str!("instrument.rs");
+        for (site, text, sentence) in [
+            (
+                "universe.rs, NIFTY_500_INDEX, the refused row",
+                universe,
+                format!(
+                    "/// | NIFTY 500 | {REFUSED} | {} | **{refused_hit}** — over the bound of 8 |",
+                    fill(REFUSED)
+                ),
+            ),
+            (
+                "universe.rs, NIFTY_500_INDEX, the shipped row",
+                universe,
+                format!("/// | NIFTY 500 | {slots} | {} | {hit} |", fill(slots)),
+            ),
+            (
+                "universe.rs, the header",
+                universe,
+                format!(
+                    "//! bound was *measured* put the NIFTY 500 at {refused_hit} hit steps, and"
+                ),
+            ),
+            (
+                "universe.rs, the_hash_is_deterministic_and_the_tables_stay_half_empty",
+                universe,
+                format!("// {REFUSED} slots probed {refused_hit} times to prove"),
+            ),
+            (
+                "universe.rs, a_miss_probes_further_than_a_hit_and_its_bound_is_measured_too",
+                universe,
+                format!(
+                    "notice. 12 is {}",
+                    in_words(12_usize.saturating_sub(max_miss))
+                ),
+            ),
+            (
+                "universe.rs, a_miss_probes_further_than_a_hit_and_its_bound_is_measured_too",
+                universe,
+                format!("// bound of 8 leaves over its worst of {max_hit}."),
+            ),
+            (
+                "instrument.rs, InstrumentKey::is_sweepable",
+                instrument,
+                format!(
+                    "used to quote {} and {}, which are `NTM_INDEX`'s",
+                    in_words(ntm_hit),
+                    in_words(ntm_miss)
+                ),
+            ),
+        ] {
+            assert!(
+                text.contains(&sentence),
+                "{site} must quote the measured figure: {sentence:?}"
+            );
+        }
+    }
+
+    /// AF-54. D-0506 QUOTES `NTM_INDEX`'S PROBE FIGURES FOR `FNO_INDEX`, AND
+    /// THE LIMITS CORRECT IT BY NAME.
+    ///
+    /// D-0506 widened the surface to the F&O cash equities and gave
+    /// `FNO_INDEX` a worst case of six probes on a hit and eleven on a miss.
+    /// That is the sentence AF-51 corrected on `is_sweepable`, and those are
+    /// the Total Market figures. The ledger is append-only, so the entry keeps
+    /// its words, and nothing pointed a reader of it at the measured ones.
+    ///
+    /// `docs/06-limits.md` carries the correction, and both halves are held
+    /// here with every figure formatted from the measurement. D-0506's own
+    /// section still quotes the Total Market figures for `FNO_INDEX`, so the
+    /// correction is about something. Exactly one paragraph of the limits
+    /// quotes those words back, names them as `NTM_INDEX`'s, and gives
+    /// `FNO_INDEX`'s measured pair. Each paragraph is searched with its line
+    /// breaks folded to spaces, so rewrapping either file does not break the
+    /// search.
+    #[test]
+    fn d0506s_fno_probe_figures_are_ntm_indexs_and_the_limits_correct_them() {
+        let [
+            (.., ntm_members, _, ntm_hit, ntm_miss),
+            (.., fno_members, _, fno_hit, fno_miss),
+            ..,
+        ] = measured_cost_table();
+        assert_ne!(
+            (ntm_hit, ntm_miss),
+            (fno_hit, fno_miss),
+            "the two tables measure alike, so D-0506's figures would be right"
+        );
+        let fold = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let stale = format!(
+            "{} probes on a hit and {} on a miss",
+            in_words(ntm_hit),
+            in_words(ntm_miss)
+        );
+
+        // THE PREMISE: D-0506's section, from its heading to the next one.
+        let decisions = include_str!("../../../docs/05-decisions.md");
+        let (_, from) = decisions
+            .split_once("\n## D-0506\n")
+            .expect("D-0506 heads a section of the ledger");
+        let section = fold(
+            from.split_once("\n## ")
+                .map_or(from, |(section, _)| section),
+        );
+        let premise =
+            format!("index over `FNO_UNDERLYINGS`, with a test-pinned worst case of {stale}");
+        assert!(
+            section.contains(&premise),
+            "D-0506 no longer quotes {stale:?} for FNO_INDEX, so the correction is about nothing"
+        );
+
+        // THE CORRECTION, in one paragraph of the limits.
+        let limits = include_str!("../../../docs/06-limits.md");
+        let quoted = format!("D-0506 quotes {stale} for `FNO_INDEX`.");
+        let correcting: Vec<String> = limits
+            .split("\n\n")
+            .map(fold)
+            .filter(|paragraph| paragraph.contains(&quoted))
+            .collect();
+        assert_eq!(
+            correcting.len(),
+            1,
+            "exactly one paragraph of docs/06-limits.md must quote {quoted:?}"
+        );
+        for owed in [
+            format!("Those are `NTM_INDEX`'s figures over {ntm_members} members."),
+            format!(
+                "`FNO_INDEX` measures {fno_hit} on a hit and {fno_miss} on a miss over its {fno_members}"
+            ),
+        ] {
+            assert!(
+                correcting[0].contains(&owed),
+                "the paragraph correcting D-0506 must say {owed:?}"
+            );
+        }
     }
 
     #[test]
@@ -5562,6 +5947,132 @@ mod tests {
         assert_eq!(
             absent, expected,
             "the absent set is a MEASUREMENT and it changed"
+        );
+    }
+
+    /// AF-02. `FNO_INDEX_UNDERLYINGS` is READ from the F&O list's own ISIN
+    /// column, not typed from memory: the F&O names NSE prints no ISIN beside
+    /// are the indices, and every other name carries a well-formed one and is
+    /// therefore a share. The two halves together make the split exhaustive,
+    /// so the cash arm of `is_sweepable` refuses exactly the index names and
+    /// no share. D-0682.
+    #[test]
+    fn the_fno_index_underlyings_are_exactly_the_fno_names_with_no_isin() {
+        let isin_less: Vec<&str> = FNO_UNDERLYINGS
+            .iter()
+            .zip(FNO_UNDERLYINGS_ISIN.iter())
+            .filter(|(_, isin)| **isin == ISIN_ABSENT)
+            .map(|(name, _)| *name)
+            .collect();
+        assert_eq!(
+            isin_less, FNO_INDEX_UNDERLYINGS,
+            "the index underlyings are the ISIN-less F&O names, in list order"
+        );
+
+        let mut shares = 0_usize;
+        for (name, isin) in FNO_UNDERLYINGS.iter().zip(FNO_UNDERLYINGS_ISIN.iter()) {
+            if FNO_INDEX_UNDERLYINGS.contains(name) {
+                continue;
+            }
+            assert!(
+                Isin::new(isin).is_ok(),
+                "{name} is not an index, so it must carry a real ISIN: {isin:?}"
+            );
+            shares += 1;
+        }
+        assert_eq!(shares, 208, "213 F&O underlyings less 5 indices");
+        assert_eq!(
+            FNO_UNDERLYINGS.len() - FNO_INDEX_UNDERLYINGS.len(),
+            shares,
+            "every index name is an F&O underlying, so the difference is the share count"
+        );
+
+        for index in FNO_INDEX_UNDERLYINGS {
+            assert!(FNO_INDEX.contains(index), "{index} is an F&O underlying");
+            assert!(
+                !NTM_INDEX.contains(index),
+                "{index} is an index, not a Total Market share"
+            );
+        }
+        for (_, swept) in InstrumentKey::SWEPT {
+            assert!(
+                FNO_INDEX_UNDERLYINGS.contains(&swept),
+                "{swept} is swept as an index, and is one of the F&O index underlyings"
+            );
+        }
+    }
+
+    /// The counts the records give of the swept surface are the two lists'
+    /// counts. D-0682.
+    ///
+    /// The shares are `FNO_UNDERLYINGS` less `FNO_INDEX_UNDERLYINGS`, each of
+    /// those an F&O underlying, and the surface is the shares and the indices
+    /// `InstrumentKey::SWEPT` names, `NIFTY` and `BANKNIFTY` and no other. The
+    /// charter's scope row, both of D-0682's proposals and the applied
+    /// `CLAUDE.md` §1 state those counts, so a change to either list fails here until every
+    /// one of them is changed with it. Each text is read with its line breaks
+    /// and a quotation's `>` markers folded away, so rewrapping does not break
+    /// the search.
+    #[test]
+    fn the_surface_counts_the_records_give_are_the_two_lists_counts() {
+        for index in FNO_INDEX_UNDERLYINGS {
+            assert!(
+                FNO_UNDERLYINGS.contains(&index),
+                "{index} is an F&O underlying, so the difference counts the shares"
+            );
+        }
+        let shares = FNO_UNDERLYINGS.len() - FNO_INDEX_UNDERLYINGS.len();
+        let swept: Vec<&str> = InstrumentKey::SWEPT
+            .iter()
+            .map(|(_, symbol)| *symbol)
+            .collect();
+        assert_eq!(swept, ["NIFTY", "BANKNIFTY"], "the two swept indices");
+        let surface = shares + swept.len();
+
+        let fold = |text: &str| {
+            text.split_whitespace()
+                .filter(|word| *word != ">")
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let charter = fold(include_str!("../../../docs/00-charter.md"));
+        let row = format!("the {shares} F&O underlyings that are shares");
+        assert!(
+            charter.contains(&row),
+            "docs/00-charter.md's scope row must say {row:?}"
+        );
+
+        let decisions = include_str!("../../../docs/05-decisions.md");
+        let (_, from) = decisions
+            .split_once("\n### D-0682 ")
+            .expect("D-0682 heads an entry");
+        let entry = fold(from.split_once("\n### ").map_or(from, |(entry, _)| entry));
+        let law = fold(
+            include_str!("../../../CLAUDE.md")
+                .split_once("\n## 2.")
+                .expect("CLAUDE.md has a second section")
+                .0,
+        );
+        for proposed in [
+            format!(
+                "and {surface} instruments, {shares} shares and the two indices, multiply the \
+                 search by {surface}"
+            ),
+            format!("2. The **cash equities of the {shares} F&O underlyings that are shares**"),
+            "`core::universe::FNO_UNDERLYINGS` less the five indices \
+             `core::universe::FNO_INDEX_UNDERLYINGS` names"
+                .to_owned(),
+        ] {
+            for (name, text) in [("D-0682", &entry), ("CLAUDE.md §1", &law)] {
+                assert!(text.contains(&proposed), "{name} must state {proposed:?}");
+            }
+        }
+        assert!(entry.contains("the cash equities of the F&O underlyings that are shares, and the spot indices `NSE-NIFTY` and `NSE-BANKNIFTY` alone"),
+            "D-0682 must name spot indices separately from cash equities");
+        assert_eq!(
+            FNO_INDEX_UNDERLYINGS.len(),
+            5,
+            "the five indices named above"
         );
     }
 

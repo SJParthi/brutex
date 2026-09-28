@@ -104,9 +104,16 @@ pub enum Census {
     /// An I/O failure, or a manifest this build refuses — a header that does
     /// not decode, a counter the entry region cannot support, an entry that
     /// fails its own checksum.
+    ///
+    /// Also the configured store root, refused for every vendor
+    /// ([`Fault::Root`]), and, since D-0695, a row read absent that the stamps
+    /// taken just before or just after the read contradict
+    /// ([`Fault::Contradicted`]).
     Unreadable {
         /// What refused it, in the refusal's own words.
         reason: String,
+        /// Where the refusal came from. See [`Fault`].
+        fault: Fault,
     },
     /// A census that loaded.
     Held {
@@ -115,7 +122,52 @@ pub enum Census {
     },
 }
 
+/// Where an unreadable census's refusal came from.
+///
+/// The words are for the operator. This is for `server::census_now`, whose
+/// cache is keyed on what each manifest's `stat` said and must not keep a
+/// census that key cannot vouch for: a store root that was gone for one read,
+/// or an I/O error that moved no time. Folding these into one string left the
+/// cache nothing to tell them by. D-0695.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fault {
+    /// The configured store root was not a directory, or could not be asked:
+    /// [`read_all`]'s admission, one refusal for every vendor.
+    Root,
+    /// The file system refused this manifest -- its `stat` or its read -- with
+    /// this kind. `NotFound` is not one: that is [`Census::Absent`].
+    Io(std::io::ErrorKind),
+    /// This reader refused a file it could measure: past the size bound, or
+    /// bytes that do not decode as a manifest.
+    Refused,
+    /// This request's read found no manifest, and the stamps
+    /// `server::census_now_reading` took of the store just before it, or again
+    /// just after it, could not have read that. Put there by
+    /// `server::census_now_reading` in place of [`Census::Absent`], never by
+    /// this module. D-0695.
+    Contradicted,
+}
+
 impl Census {
+    /// What a manifest the file system refused is: absent on `NotFound`, the
+    /// ordinary state before a first pull, and unreadable on any other error,
+    /// with the error's own words and its kind.
+    ///
+    /// The one mapping [`read_vendor`] draws from an I/O error, named so a test
+    /// can give the census cache an error no test can make a real disk return
+    /// on demand (`EIO`, `EMFILE`) and still get exactly what a read would.
+    #[must_use]
+    pub fn of_io_error(error: &std::io::Error) -> Self {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            Self::Absent
+        } else {
+            Self::Unreadable {
+                reason: error.to_string(),
+                fault: Fault::Io(error.kind()),
+            }
+        }
+    }
+
     /// Which of the three states this is, as one stable word.
     ///
     /// A total match rather than a `matches!` at each call site: three states
@@ -201,7 +253,7 @@ impl VendorCensus {
                 self.vendor.as_str(),
                 self.path.display()
             ),
-            Census::Unreadable { ref reason } => format!(
+            Census::Unreadable { ref reason, .. } => format!(
                 "{} UNREADABLE · {} — at {}",
                 self.vendor.as_str(),
                 reason,
@@ -251,11 +303,11 @@ impl VendorCensus {
 pub fn read_vendor(root: &Path, vendor: Vendor) -> VendorCensus {
     let path = manifest_path(root, vendor);
     let state = match sized(&path) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Census::Absent,
-        Err(e) => Census::Unreadable {
-            reason: e.to_string(),
+        Err(e) => Census::of_io_error(&e),
+        Ok(Err(reason)) => Census::Unreadable {
+            reason,
+            fault: Fault::Refused,
         },
-        Ok(Err(reason)) => Census::Unreadable { reason },
         Ok(Ok(bytes)) => {
             // A file shorter than the header region is not sliced past its end;
             // it is handed over as it is, and the manifest decoder refuses it
@@ -271,6 +323,7 @@ pub fn read_vendor(root: &Path, vendor: Vendor) -> VendorCensus {
                 },
                 Err(why) => Census::Unreadable {
                     reason: why.to_string(),
+                    fault: Fault::Refused,
                 },
             }
         }
@@ -304,7 +357,12 @@ pub fn read_vendor(root: &Path, vendor: Vendor) -> VendorCensus {
     // census on **every request**". Two sites, one path, one answer.
     //
     // The fault arm stays loud. An unreadable manifest is per-vendor and does
-    // not recur per request once it is fixed.
+    // not recur per request once it is fixed. While it is NOT fixed it recurs
+    // per request in one case, by design: a fault its manifest's stamp cannot
+    // see -- an I/O error that moved no time -- is not kept by
+    // `server::census_now`'s cache (D-0695), so every request reads it again
+    // and warns again until it ends. That is a fault still happening, said
+    // once per request that met it, not a healthy read repeated.
     let (level, said) = match state {
         Census::Held { .. } => (telemetry::Level::Debug, "held"),
         Census::Absent => (telemetry::Level::Debug, "absent"),
@@ -342,6 +400,12 @@ pub fn read_vendor(root: &Path, vendor: Vendor) -> VendorCensus {
 /// THE SIZE IS CHECKED BEFORE THE READ. `read` on a file this process cannot
 /// hold is not an error it can report — it is an allocator failure or an OOM
 /// kill, and neither reaches the operator as "that manifest is too big".
+///
+/// The size is the length `stat` gives, which for a character device is 0
+/// whatever a read of it returns, so such a path is read, not refused, and
+/// nothing here bounds that read. Pinned as it stands by
+/// `a_character_device_at_a_manifest_path_passes_the_size_bound_and_is_read`,
+/// and recorded as not done in D-0695, with the FIFO its tenth repair found.
 fn sized(path: &Path) -> std::io::Result<Result<Vec<u8>, String>> {
     let size = std::fs::metadata(path)?.len();
     if size > MAX_MANIFEST_BYTES {
@@ -411,6 +475,7 @@ fn unreadable_root(root: &Path, reason: &str) -> Vec<VendorCensus> {
             path: manifest_path(root, vendor),
             state: Census::Unreadable {
                 reason: reason.to_owned(),
+                fault: Fault::Root,
             },
         })
         .collect()
@@ -1158,6 +1223,52 @@ mod tests {
             "the size arm fired at the bound itself: {at_bound}"
         );
         std::fs::remove_file(&p).expect("cleanup");
+    }
+
+    /// THE SIZE BOUND IS THE LENGTH `stat` GIVES, SO A CHARACTER DEVICE PASSES
+    /// IT AND IS READ, pinned as it stands. D-0695.
+    ///
+    /// `sized` takes the size from `std::fs::metadata(path)?.len()` and then
+    /// calls `std::fs::read`, which reads to the end. A character device's
+    /// length is 0 whatever a read of it returns, so a manifest path linked to
+    /// one passes the bound. `/dev/null` is what is read here, because its
+    /// read ends at once. `/dev/zero` has the same length of 0 and gives a
+    /// read a mebibyte of bytes here when asked for one, so nothing `sized`
+    /// checks bounds a read of it. D-0695's eleventh repair records this as
+    /// not done, beside the FIFO its tenth repair recorded: both are paths
+    /// that are not a regular file.
+    #[cfg(unix)]
+    #[test]
+    fn a_character_device_at_a_manifest_path_passes_the_size_bound_and_is_read() {
+        use std::io::Read as _;
+        use std::os::unix::fs::FileTypeExt as _;
+        for device in ["/dev/null", "/dev/zero"] {
+            let meta = std::fs::metadata(device).expect("the device");
+            assert!(
+                meta.file_type().is_char_device() && !meta.is_file(),
+                "{device} is a character device"
+            );
+            assert_eq!(meta.len(), 0, "{device}: the length `stat` gives");
+        }
+        let mut zeros = Vec::new();
+        std::fs::File::open("/dev/zero")
+            .expect("open /dev/zero")
+            .take(1 << 20)
+            .read_to_end(&mut zeros)
+            .expect("a bounded read of /dev/zero");
+        assert_eq!(zeros.len(), 1 << 20, "bytes past the length of 0");
+
+        let dir = root("character-device");
+        let path = manifest_path(&dir, Vendor::Dhan);
+        std::os::unix::fs::symlink("/dev/null", &path).expect("a link to a character device");
+        assert_eq!(
+            sized(&path)
+                .expect("the file system answers")
+                .expect("under the bound"),
+            Vec::<u8>::new(),
+            "passes the size bound and is read, not refused as no regular file"
+        );
+        std::fs::remove_file(&path).expect("cleanup");
     }
 
     #[test]

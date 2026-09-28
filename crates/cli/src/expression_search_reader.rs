@@ -8,6 +8,7 @@ use crate::search_checkpoint::{Saved, Snapshot};
 use runner::expression::Summary;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use store::flock::Flock;
 use vocab::expression_search::{Cursor, Step};
 
 /// Maximum checkpoint links visited in a page; some links contain no candidate.
@@ -247,9 +248,13 @@ impl Reader {
             return Err("search child has no completed expression receipt".to_owned());
         }
         let path = candidate_path(&self.root, candidate);
-        let file = crate::readonly_file::open(&path).map_err(debug)?;
-        file.try_lock_shared()
-            .map_err(|why| format!("search signal receipt is busy or cannot be read: {why}"))?;
+        // Released by name below and by the guard's explicit unlock on every
+        // refusal, never by close (D-0693).
+        let file = Flock::try_lock_shared(
+            crate::readonly_file::open(&path).map_err(debug)?,
+            path.as_path(),
+        )
+        .map_err(|why| format!("search signal receipt is busy or cannot be read: {why}"))?;
         let before = crate::result_set::file_generation(&file, &path)?;
         let size = std::fs::metadata(&path).map_err(debug)?.len();
         charge(
@@ -280,6 +285,7 @@ impl Reader {
                 "search child pricing predicate differs from its signal predicate".to_owned(),
             );
         }
+        file.release().map_err(|u| u.to_string())?;
         Ok(Row {
             ordinal,
             identity,

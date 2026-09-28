@@ -2,6 +2,7 @@
 use super::{Link, MAX_CHECKPOINTS, MAX_SNAPSHOT, NAMESPACE, Rung, Snapshot, State, Status, codec};
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
+use store::flock::Flock;
 
 /// Saved campaign overview. Child bodies and current raw files are not opened.
 pub struct Reader {
@@ -162,8 +163,11 @@ fn check_receipt(
     if owner.metadata().map_err(|why| why.to_string())?.len() != 0 {
         return Err("campaign child owner is not empty".into());
     }
-    owner
-        .try_lock_shared()
+    // Released by name below and by the guard's explicit unlock on every
+    // refusal between, never by closing the descriptor: a duplicate left in a
+    // child another thread spawned would otherwise keep the owner locked and
+    // refuse the publisher (D-0693).
+    let owner_lock = Flock::try_lock_shared(&owner, owner_path.as_path())
         .map_err(|why| format!("campaign child publication is busy: {why}"))?;
     let path = directory.join("complete.bin");
     let mut file = crate::readonly_file::open(&path).map_err(|why| why.to_string())?;
@@ -191,5 +195,5 @@ fn check_receipt(
         crate::result_set::file_generation(&owner, &owner_path)?,
         &owner_path,
     )?;
-    owner.unlock().map_err(|why| why.to_string())
+    owner_lock.release().map_err(|u| u.why.to_string())
 }

@@ -60,8 +60,21 @@ test('strict setting names match the shared HTTP contract, excluding absolute-su
   const table = rust.slice(rust.indexOf('const KNOBS:'), rust.indexOf('const KNOBS:') + 2500);
   assert.notEqual(rust.indexOf('const KNOBS:'), -1);
   const keys = [...table.matchAll(/\("([a-z_]+)",\s*"BRUTEX_[A-Z_]+"\)/g)].map(match => match[1]);
-  assert.equal(keys.length, 16);
+  assert.equal(keys.length, 15);
   assert.deepEqual([...STRICT_KNOBS].sort(), keys.filter(key => !['support_ppm', 'sizing_rate_bp'].includes(key)).sort());
+});
+
+test('every setting the backtest page offers is one the server accepts', () => {
+  const rust = readFileSync(new URL('../../crates/api/src/sweeprun.rs', import.meta.url), 'utf8');
+  const start = rust.indexOf('const KNOBS:');
+  assert.notEqual(start, -1);
+  const server = new Set([...rust.slice(start, rust.indexOf('];', start)).matchAll(/\("([a-z_]+)",\s*"BRUTEX_[A-Z_]+"\)/g)].map(match => match[1]));
+  const page = readFileSync(new URL('../src/routes/backtest/+page.svelte', import.meta.url), 'utf8');
+  const open = page.indexOf('const KNOB_FIELDS = [');
+  assert.notEqual(open, -1);
+  const offered = [...page.slice(open, page.indexOf('];', open)).matchAll(/key: '([a-z_]+)'/g)].map(match => match[1]);
+  assert.ok(offered.length > 0, 'the page offers settings');
+  assert.deepEqual(offered.filter(key => !server.has(key)), [], 'a setting the server refuses by name is only a refusal');
 });
 
 test('all four jobs wait for their own exact terminal status, including tokens above Number precision', async () => {

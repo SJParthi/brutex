@@ -116,3 +116,36 @@ async fn invalid_public_search_queries_refuse_before_reading_config_or_sources()
         assert_eq!(body["status"], "refused");
     }
 }
+
+/// **A search rung's detail over a stock family states the equity note.**
+/// D-0694, AF-19.
+///
+/// The detail serves the rung's qualification with its candidates' returns
+/// and probabilities. It carries the same note as `/boolean-qualification.json`
+/// over the same qualification's statistics sources, through
+/// `booleanevidencejson::sources_note` (whose cash and index cases are
+/// tested there), so the two views of one qualification cannot disagree. The
+/// search is saved evidence this crate has no fixture for, so no detail is
+/// rendered here with a stock family: `detail` is held to it by its source.
+/// The call must be a statement at the top level of `detail`, and every
+/// `return` before it must return an `Err`, the rule `booleanevidencejson`'s
+/// test applies. So a detail returned by a `return` before the call, however
+/// that `return` is spelled, or a call made on some reads only, fails here.
+/// The overview names counts and links and no family's figure, and carries
+/// no note.
+#[test]
+fn a_search_detail_states_its_qualifications_equity_note() {
+    let text = include_str!("booleansearchjson.rs");
+    let detail = text
+        .split_once("\nfn detail(")
+        .and_then(|(_, tail)| tail.split_once("\n}\n"))
+        .map(|(body, _)| body)
+        .unwrap();
+    assert!(
+        crate::booleanevidencejson::tests::on_every_page(
+            detail,
+            "crate::detail::put_equity_note(\n        &mut body,\n        crate::booleanevidencejson::sources_note(source.original().statistics().sources()),\n    )?;"
+        ),
+        "every rung detail carries its qualification's note"
+    );
+}

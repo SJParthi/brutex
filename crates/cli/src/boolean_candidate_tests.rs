@@ -330,15 +330,24 @@ fn observer_holds_publication_barrier_and_refuses_changed_owner() -> Result<(), 
     let fixture = Fixture::new()?;
     let first = fixture.produce("NIFTY", &programs()?)?;
     let path = first.directory.join("owner.lock");
-    let owner = crate::readonly_file::open(&path).map_err(display)?;
-    owner.try_lock().map_err(display)?;
+    // Guards, so each `drop(owner)` below unlocks explicitly: this test binary
+    // spawns children, and a lock released only by close can survive in one
+    // of them and refuse the open that must succeed (D-0693).
+    let owner = store::flock::Flock::try_lock(
+        crate::readonly_file::open(&path).map_err(display)?,
+        path.clone(),
+    )
+    .map_err(display)?;
     assert!(super::reader::Reader::open(&fixture.output, first.identity(), 33_554_432).is_err());
     // Complete valid bytes alone are insufficient until the publishing lease ends.
     first.require_current()?;
     drop(owner);
     let reader = super::reader::Reader::open(&fixture.output, first.identity(), 33_554_432)?;
-    let owner = crate::readonly_file::open(&path).map_err(display)?;
-    owner.try_lock().map_err(display)?;
+    let owner = store::flock::Flock::try_lock(
+        crate::readonly_file::open(&path).map_err(display)?,
+        path.clone(),
+    )
+    .map_err(display)?;
     assert!(
         reader
             .coordinates(reader.completion_digest(), 0, 1)

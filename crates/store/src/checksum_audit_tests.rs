@@ -154,11 +154,46 @@ fn strict_source_fifo_probe_cannot_wait_for_a_writer() -> Result<(), Box<dyn std
 }
 
 #[test]
+fn strict_audit_refuses_derived_record_families_through_both_public_doors() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
+    for kind in [FileKind::Overlay, FileKind::Greeks] {
+        let fixture = Fixture::new(1);
+        let path = fixture.path().with_file(kind);
+        let file = BarFile::open_or_create(&fixture.root, path, 7).expect("derived writer");
+        drop(file);
+        let physical = path.to_path_buf(&fixture.root);
+        let before = fs::read(&physical).expect("derived header");
+        let refusal = BarFile::open_existing(&fixture.root, path, 7)
+            .expect("ordinary reader accepts this family")
+            .audit_checksums(1_048_576)
+            .err()
+            .expect("bar-only checksum authority refuses derived geometry");
+        assert_eq!(
+            refusal,
+            "strict checksum audit refuses unsealed, unsupported, non-exact or over-limit input extents"
+        );
+        let refusal = BarFile::open_existing_audited(&fixture.root, path, 7, 1_048_576)
+            .err()
+            .expect("strict path door refuses the derived kind");
+        assert_eq!(
+            refusal,
+            "strict historical checksum audit requires a bar path"
+        );
+        assert_eq!(
+            fs::read(&physical).expect("unchanged derived bytes"),
+            before
+        );
+        fixture.audited().expect("neighboring bars still audit");
+    }
+}
+
+#[test]
 fn full_audit_matches_exact_file_images_at_all_partial_block_boundaries() {
     let _sink_is_mine = crate::emits::hold_the_sink();
     for count in [0, 1, 72, 73, 74, 146, 147] {
         let fixture = Fixture::new(count);
         let audited = fixture.audited().expect("full bounded audit");
+        assert_eq!(audited.path(), fixture.named(FileKind::Bars));
         let evidence = audited.evidence();
         let data = fs::read(fixture.named(FileKind::Bars)).expect("raw data");
         let sidecar = fs::read(fixture.named(FileKind::Checksums)).expect("raw sidecar");
@@ -298,6 +333,35 @@ fn warm_authority_refuses_mutation_replacement_and_deletion_of_every_held_file()
 }
 
 #[test]
+fn moving_each_held_file_aside_cannot_redirect_audited_authority_to_its_replacement() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
+    for kind in [FileKind::Bars, FileKind::Checksums, FileKind::Lock] {
+        let fixture = Fixture::new(1);
+        let audited = fixture.audited().expect("original authority");
+        let path = fixture.named(kind);
+        let saved = fixture.root.join("original-inode");
+        let bytes = fs::read(&path).expect("original bytes");
+        fs::rename(&path, &saved).expect("keep the original inode linked once");
+        fs::write(&path, &bytes).expect("byte-identical replacement at the original name");
+        let original = fs::metadata(&saved).expect("held inode still exists");
+        let replacement = fs::metadata(&path).expect("replacement exists");
+        assert_eq!(original.nlink(), 1);
+        assert_eq!(replacement.nlink(), 1);
+        assert_ne!(original.ino(), replacement.ino());
+        assert_eq!(
+            audited.require_current(),
+            Err(format!(
+                "checksum audit refuses an alias, non-regular file or replacement: {}",
+                path.display()
+            ))
+        );
+        assert!(audited.read_record(0).is_err());
+        assert_eq!(fs::read(&saved).expect("held bytes preserved"), bytes);
+        assert_eq!(fs::read(&path).expect("replacement untouched"), bytes);
+    }
+}
+
+#[test]
 fn aliases_and_unsealed_legacy_data_never_gain_a_strict_receipt() {
     let _sink_is_mine = crate::emits::hold_the_sink();
     for kind in [FileKind::Bars, FileKind::Checksums, FileKind::Lock] {
@@ -366,5 +430,70 @@ fn source_changes_after_the_initial_snapshot_cannot_mint_cold_audit_authority() 
             fs::read(path).expect("audit never repairs source bytes"),
             changed
         );
+    }
+}
+
+/// A CRC truncated after the cold snapshot refuses at the second block's read.
+/// This exercises the private audit body, not a public-open or warm-read race.
+#[test]
+fn a_post_snapshot_crc_truncation_names_the_read_and_preserves_faulted_bytes() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
+    let fixture = Fixture::new(74);
+    let original_evidence = fixture.audited().expect("healthy cold audit").evidence();
+    assert_eq!(original_evidence.blocks(), 2);
+    let unchanged = [FileKind::Bars, FileKind::Lock].map(|kind| {
+        let path = fixture.named(kind);
+        let bytes = fs::read(&path).expect("original source image");
+        (path, bytes)
+    });
+    let crc_path = fixture.named(FileKind::Checksums);
+    let original_crc = fs::read(&crc_path).expect("both original CRCs");
+    assert_eq!(original_crc.len(), 8);
+    let file = fixture.open().expect("original held files");
+    let input = file.checksum_inputs().expect("same exact handles");
+    let before = Generations::read(&input).expect("authenticated initial snapshot");
+
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&crc_path)
+        .expect("noncooperating fault writer")
+        .set_len(4)
+        .expect("truncate only the second CRC after snapshot");
+    let faulted_crc = fs::read(&crc_path).expect("post-fault CRC image");
+    assert_eq!(faulted_crc, original_crc[..4]);
+    let mut buffer = [0; BUFFER_BYTES];
+    verified_block(&input, file.header(), file.layout(), 0, &mut buffer)
+        .expect("the first block still verifies");
+    let host = File::open(&crc_path)
+        .expect("faulted CRC opens")
+        .read_exact_at(&mut [0; 4], 4)
+        .expect_err("the second CRC is genuinely absent");
+    assert_eq!(host.kind(), std::io::ErrorKind::UnexpectedEof);
+    let refusal = audit(&input, file.header(), file.layout(), before, 1_048_576)
+        .expect_err("an incomplete CRC read cannot mint evidence");
+    assert_eq!(
+        refusal,
+        format!("checksum audit read {} at 4: {host}", crc_path.display())
+    );
+    assert_eq!(
+        fs::read(&crc_path).expect("faulted CRC preserved"),
+        faulted_crc
+    );
+    for (path, bytes) in &unchanged {
+        assert_eq!(fs::read(path).expect("source preserved on refusal"), *bytes);
+    }
+
+    fs::write(&crc_path, &original_crc).expect("restore exact CRC bytes");
+    let restored = fixture.audited().expect("fresh audit after restoration");
+    assert_eq!(restored.evidence(), original_evidence);
+    for (index, row) in (0_u64..).zip((0..74).map(bar)) {
+        assert_eq!(restored.read_record(index).expect("restored row"), row);
+    }
+    assert_eq!(
+        fs::read(&crc_path).expect("restored CRC preserved"),
+        original_crc
+    );
+    for (path, bytes) in &unchanged {
+        assert_eq!(fs::read(path).expect("source preserved on success"), *bytes);
     }
 }

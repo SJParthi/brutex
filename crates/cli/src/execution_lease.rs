@@ -11,6 +11,8 @@
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 
+use store::flock::Flock;
+
 const NAME: &str = ".sweep-execution-v1.lock";
 
 /// A current inability to claim the store, distinct from a command outcome.
@@ -60,8 +62,11 @@ fn options() -> OpenOptions {
     options
 }
 
-fn lock(file: &File) -> Result<(), Refusal> {
-    file.try_lock().map_err(|why| match why {
+/// Takes the slot without waiting. The guard releases it by an explicit
+/// unlock, never by closing the descriptor: a duplicate left in a child
+/// another thread spawned would otherwise keep the store busy (D-0693).
+fn lock(file: File, path: &Path) -> Result<Flock<File>, Refusal> {
+    Flock::try_lock(file, path.to_path_buf()).map_err(|why| match why {
         fs::TryLockError::WouldBlock => Refusal::Busy,
         fs::TryLockError::Error(why) => unavailable(why),
     })
@@ -85,11 +90,12 @@ fn verify(file: &File, path: &Path) -> Result<(), Refusal> {
 }
 
 /// Owns the exclusive OS lease until normal completion, unwind or process exit.
-/// Dropping releases the descriptor; it never deletes the persistent lock path.
+/// Dropping unlocks the lease explicitly before its descriptor closes; it never
+/// deletes the persistent lock path.
 #[derive(Debug)]
 #[must_use = "retain the lease throughout computation and terminal audit"]
 pub struct Lease {
-    _file: File,
+    _file: Flock<File>,
 }
 
 impl Lease {
@@ -107,9 +113,9 @@ impl Lease {
             .truncate(false)
             .open(&path)
             .map_err(unavailable)?;
-        lock(&file)?;
-        verify(&file, &path)?;
-        Ok(Self { _file: file })
+        let held = lock(file, &path)?;
+        verify(&held, &path)?;
+        Ok(Self { _file: held })
     }
 }
 
@@ -126,8 +132,9 @@ pub fn probe(root: &Path) -> Result<(), Refusal> {
         Err(why) if why.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(why) => return Err(unavailable(why)),
     };
-    lock(&file)?;
-    verify(&file, &path)
+    let held = lock(file, &path)?;
+    verify(&held, &path)?;
+    held.release().map_err(unavailable)
 }
 
 #[cfg(test)]
@@ -170,6 +177,36 @@ mod tests {
         assert_eq!(probe(&root.0), Ok(()));
         assert!(root.0.join(NAME).exists());
         assert!(Lease::acquire(&root.0).is_ok());
+    }
+
+    /// A dropped lease frees the store while a duplicate of its descriptor is
+    /// still open — the reference a child spawned by another thread holds
+    /// until its exec. While closing the descriptor was the release, that
+    /// reference kept the slot and every later sweep was `Refusal::Busy` with
+    /// no sweep running. D-0693.
+    #[test]
+    #[expect(
+        clippy::used_underscore_binding,
+        reason = "the duplicate is taken of the lease's own lock, which is the \
+                  field whose drop this test is about"
+    )]
+    fn a_dropped_lease_is_released_despite_a_duplicated_descriptor() {
+        let root = Scratch::new();
+        let lease = Lease::acquire(&root.0).expect("first owner");
+        let child = lease
+            ._file
+            .try_clone()
+            .expect("the duplicate a spawned child would hold");
+        assert_eq!(probe(&root.0), Err(Refusal::Busy), "the premise");
+        drop(lease);
+        assert_eq!(
+            probe(&root.0),
+            Ok(()),
+            "the dropped lease was released despite the duplicate"
+        );
+        let again = Lease::acquire(&root.0).expect("and the slot can be claimed again");
+        drop(again);
+        drop(child);
     }
 
     #[test]

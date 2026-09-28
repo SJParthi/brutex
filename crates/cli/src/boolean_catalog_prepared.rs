@@ -36,6 +36,24 @@ pub(crate) struct Prepared {
     thresholds: indicators::pattern::Thresholds,
 }
 
+/// The provenance and scope statement every Boolean research report opens
+/// with. D-0694.
+///
+/// A scope holding a cash stock also states, before any figure, that its
+/// totals are gross of every charge and that corporate actions are
+/// unchecked -- the statement every report that ranks a stock carries. A
+/// scope of the two indices opens exactly as it did before D-0694. The note
+/// is [`crate::research_equity_note`], which `api` serves beside the same
+/// research as JSON (AF-19).
+pub(crate) fn research_heading(scope: &ResearchScopeV1) -> String {
+    let mut out = String::from(crate::STORED_PROVENANCE);
+    out.push_str(&crate::research_equity_note(
+        scope.families().iter().copied(),
+    ));
+    out.push_str("\nEXPLICIT BOOLEAN CATALOG RESEARCH. This is the complete supplied catalog, not exhaustive Boolean grammar search or Selection V6. Intraday only;15:10IST deadline.\n");
+    out
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum Stage<'a> {
     Families(&'a [Result<candidate::CommittedBooleanFamilyV1, String>]),
@@ -99,8 +117,7 @@ impl Prepared {
             Some((strict.max_records() / families).to_string().into()),
         )
         .map_err(|why| format!("shared family input budget: {why}"))?;
-        out.push_str(crate::STORED_PROVENANCE);
-        out.push_str("\nEXPLICIT BOOLEAN CATALOG RESEARCH. This is the complete supplied catalog, not exhaustive Boolean grammar search or Selection V6. Intraday only;15:10IST deadline.\n");
+        out.push_str(&research_heading(&scope));
         let _ = writeln!(
             out,
             "Saved evidence root: {}. Dashboard visibility requires the observing server's BRUTEX_STORE to name this output root; another server root is not searched.",

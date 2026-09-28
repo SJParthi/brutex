@@ -50,6 +50,8 @@ pub mod checksum_receipts;
 #[path = "../commit_stamp.rs"]
 mod commit_stamp;
 #[cfg(test)]
+mod equity_statement_tests;
+#[cfg(test)]
 mod operator_boundary_tests;
 mod readonly_file;
 #[cfg(test)]
@@ -1511,6 +1513,12 @@ const fn ppm_to_points_at(ppm: i64, reference: i64) -> i64 {
 /// arm makes the list harder to read as one.
 /// The `pool` arm: the same argument discipline as `range-rung`, minus the
 /// underlying — the store decides which instruments are on the surface.
+///
+/// A month outside 1..=12 and a span that runs backwards are refused here,
+/// before the store is read. Month 13 parsed as a `u8`, the pool never checked
+/// the span, and each instrument refused it on its own, so a store with no
+/// instrument on the surface printed its page and exited OK (found by a
+/// review, D-0696).
 fn pool_arm(
     out: &mut String,
     vendor: &str,
@@ -1528,23 +1536,36 @@ fn pool_arm(
             ),
         );
     };
+    let month = |word: &str| {
+        word.parse::<u8>()
+            .ok()
+            .filter(|m| (1..=12).contains(m))
+            .ok_or(())
+    };
     match (
         from.0.parse::<u16>(),
-        from.1.parse::<u8>(),
+        month(from.1),
         to.0.parse::<u16>(),
-        to.1.parse::<u8>(),
+        month(to.1),
         parse_support_choice(support_ppm),
     ) {
-        (Ok(fy), Ok(fm), Ok(ty), Ok(tm), Ok(h)) => {
+        (Ok(fy), Ok(fm), Ok(ty), Ok(tm), Ok(h)) if (fy, fm) <= (ty, tm) => {
             let text = pool::pool(vendor, known, (fy, fm), (ty, tm), h);
             let refused = carries_refusal(&text);
             out.push_str(&text);
             if refused { MISUSED } else { OK }
         }
+        (Ok(fy), Ok(fm), Ok(ty), Ok(tm), Ok(_)) => refuse(
+            out,
+            &format!(
+                "the range runs backwards: {fy}-{fm:02} is after {ty}-{tm:02}. Give FROM \
+                 first and TO second. Nothing was read."
+            ),
+        ),
         (Err(_), _, _, _, _) | (_, _, Err(_), _, _) => {
             refuse(out, "YEAR must be a number like 2026")
         }
-        (_, Err(_), _, _, _) | (_, _, _, Err(_), _) => refuse(out, "MONTH must be 1..=12"),
+        (_, Err(()), _, _, _) | (_, _, _, Err(()), _) => refuse(out, "MONTH must be 1..=12"),
         (_, _, _, _, Err(why)) => refuse(out, why),
     }
 }
@@ -2624,6 +2645,84 @@ a file some earlier pull wrote, and the run identity beneath names the exact
 column they came from. A figure here describes that instrument and that month.
 ";
 
+/// [`STORED_PROVENANCE`], then what a stock's figures are made of. D-0694.
+///
+/// Every stored report that ranks or audits ONE instrument opens with this.
+/// For a cash equity it adds [`stored::equity_note`]: gross of every charge
+/// (`CLAUDE.md` §1, D-0681) and corporate actions unchecked (D-0018, D-0694),
+/// before any figure. For an index it adds nothing: an index banner is
+/// [`STORED_PROVENANCE`] byte for byte. That is a claim about the banner and
+/// not about the whole report -- `sweep-stored`'s index report moved its
+/// identity and names withheld sessions since D-0694 (AF-17, AF-19).
+///
+/// An audit's own charge header says both again, at length, when it renders.
+/// The banner carries them as well because an audit that trades nothing
+/// renders no header -- "no combination met the threshold, so there is
+/// nothing to trade" -- and its support counts are still made of a stock's
+/// unadjusted bars.
+fn stored_provenance_of(key: &brutex_core::instrument::InstrumentKey) -> String {
+    let mut out = String::from(STORED_PROVENANCE);
+    out.push_str(&stored::equity_note(key));
+    out
+}
+
+/// [`stored_provenance_of`] for a symbol as the operator typed it.
+pub(crate) fn stored_provenance(underlying: &str) -> String {
+    let mut out = String::from(STORED_PROVENANCE);
+    out.push_str(&stored::equity_note_for(underlying));
+    out
+}
+
+/// What a report over `underlying` states before any figure, for a reader
+/// outside this crate. D-0694, AF-19.
+///
+/// A swept cash equity gets [`runner::audit::CostScope::report_note`] --
+/// gross of every charge, then corporate actions unchecked -- and anything
+/// else gets nothing, decided exactly as the stored banner decides it. `api`
+/// serves recorded runs as JSON and has no arrow to `runner`, so it takes the
+/// one wording from here rather than restating it.
+#[must_use]
+pub fn equity_note_for(underlying: &str) -> String {
+    stored::equity_note_for(underlying)
+}
+
+/// What Boolean research over `families` states before any figure, for a
+/// reader outside this crate. D-0694, AF-19.
+///
+/// When any family is a cash stock, the scope's figures include a stock's,
+/// so it gets [`runner::audit::CostScope::report_note`] for a cash equity:
+/// gross of every charge, then corporate actions unchecked. A scope of
+/// indices gets nothing. The Boolean research heading decides its own note
+/// here, so the text report and `api`'s JSON over the same research say the
+/// same thing about the same scope. `api` has no arrow to `runner`.
+#[must_use]
+pub fn research_equity_note(
+    families: impl IntoIterator<Item = runner::research_family::ResearchFamilyV1>,
+) -> String {
+    if families
+        .into_iter()
+        .any(runner::research_family::ResearchFamilyV1::is_cash)
+    {
+        runner::audit::CostScope::CashEquity.report_note()
+    } else {
+        String::new()
+    }
+}
+
+/// End a stored banner with one blank line, and never two.
+///
+/// A page that sets its first heading off from the banner by a blank line
+/// asks for it here. An index banner ends on its last provenance line, so it
+/// gets the blank line exactly as it always did. A stock banner already ends
+/// with the one [`stored::equity_note`] closes on, so adding another would
+/// give a stock's page one blank line more there than its index page. The
+/// `top` and elite-descent pages did exactly that until AF-19.
+fn blank_line_after_banner(banner: &mut String) {
+    if !banner.ends_with("\n\n") {
+        banner.push('\n');
+    }
+}
+
 /// The commit this binary was BUILT from, if the build proved and stamped it.
 ///
 /// # Why `option_env!` plus a process-free build proof, and not runtime Git
@@ -2900,6 +2999,15 @@ fn note_attempt(attempt: Option<u64>, event: &telemetry::Event<'_>) {
 ///
 /// Walks [`Vendor::ALL`], which is five entries and a compile-time constant, so
 /// no word can be accepted here that the store cannot then address.
+///
+/// The refused word is quoted through [`stored::clipped`], cut to 64
+/// characters and escaped, because it is not always typed: a saved single-stop
+/// search declaration and a saved original source snapshot each hand this
+/// function a feed word decoded from stored bytes. Quoted raw, a newline in
+/// such a word would print as a line of its own. An accepted feed never
+/// reaches the quote, and a refused word is quoted as before unless it is
+/// longer than 64 characters or holds a character `escape_debug` does not
+/// print as itself (D-0696).
 fn parse_vendor(word: &str) -> Result<Vendor, stored::Refusal> {
     Vendor::ALL
         .into_iter()
@@ -2907,7 +3015,8 @@ fn parse_vendor(word: &str) -> Result<Vendor, stored::Refusal> {
         .ok_or_else(|| {
             let known: Vec<&str> = Vendor::ALL.iter().map(|v| v.as_str()).collect();
             format!(
-                "`{word}` is not a feed this build knows: {}",
+                "`{}` is not a feed this build knows: {}",
+                stored::clipped(word),
                 known.join(", ")
             )
         })
@@ -2964,6 +3073,16 @@ pub(crate) struct StoredMonthInputs {
     pub(crate) execution_bars: Option<stored::Loaded>,
     pub(crate) daily: stored::DailyContext,
     pub(crate) exact_minute: stored::ExactMinuteContext,
+    /// The sessions this door withheld for an intraday minute hole, or `None`
+    /// for a door that applies no minute-gap rule. D-0694.
+    ///
+    /// `Some` is the ordinary `sweep-stored` door since D-0694: it withholds
+    /// exactly as `auto-stored`, `audit-range`, `screen` and `pool` do, and
+    /// binds [`crate::minute_gaps::MINUTE_GAP_POLICY`] into its identity even
+    /// when nothing was withheld. `None` is the checksum-audited door, which
+    /// the operator's answer did not reach; it withholds nothing and keeps the
+    /// identity it has always had.
+    pub(crate) minute_gaps: Option<crate::minute_gaps::GapExclusion>,
 }
 
 struct StoredSweepRequest<'a> {
@@ -3049,12 +3168,82 @@ fn sweep_stored_inner(
 
     let vendor = parse_vendor(vendor_word)?;
     let root = store_root()?;
-    let loaded = stored::load(&root, vendor, underlying, rung, year, month)?;
+    sweep_stored_kernel(StoredSweepRequest {
+        root,
+        vendor,
+        underlying,
+        rung,
+        year,
+        month,
+        min_hits,
+        commit,
+    })
+}
+
+/// The ordinary stored sweep after the operator's root and build are
+/// admitted. Private so generated tests can drive the door without the
+/// process environment, as [`audit_stored_kernel`] is.
+fn sweep_stored_kernel(request: StoredSweepRequest<'_>) -> Result<String, stored::Refusal> {
+    let inputs = stored_sweep_inputs(&request)?;
+    stored_month_kernel(request, &inputs, None)
+}
+
+/// The ordinary stored sweep's inputs, with every session whose one-minute
+/// series has an interior hole withheld. D-0694.
+///
+/// # The hole this closes
+///
+/// `auto-stored`, `audit-range`, `screen` and `pool` withhold such a day;
+/// this door did not. On a coarse rung the exact-minute overlay then refused
+/// the whole month on `MissingClosingMinute`. On `1min` it refused nothing:
+/// the evaluator folds one bar at a time, so the bar after a missing minute
+/// was compared with the bar before it -- every pattern, crossing and
+/// prior-bar position read two bars minutes apart as neighbours, and the
+/// masks it ranked were built on that.
+///
+/// # Exactly as the other four doors do it
+///
+/// The day list is MEASURED from the execution series with
+/// [`crate::minute_gaps::days_with_interior_gaps`] and never written down;
+/// [`crate::minute_gaps::withhold`] removes those days from the signal bars;
+/// and the daily and exact-minute contexts are derived afterwards, from the
+/// bars that remain, so all three agree. On a coarse rung the separately
+/// loaded execution series is left whole, as the other doors leave it: with no
+/// signal bar on a withheld day, none of its minutes is looked up. On `1min`
+/// there is no separate series -- the signal bars ARE the execution bars, as
+/// on `screen` -- so the day leaves both, and the exclusion counts its bars as
+/// minute bars too ([`crate::minute_gaps::GapExclusion::one_series`]). A
+/// month with no hole is copied unchanged.
+///
+/// The withheld sessions are carried to the report and named there, and
+/// [`crate::minute_gaps::MINUTE_GAP_POLICY`] enters the identity (see
+/// [`stored_month_params`]), so no run of this door shares an identity with
+/// one made before it withheld anything.
+fn stored_sweep_inputs(request: &StoredSweepRequest<'_>) -> Result<StoredMonthInputs, String> {
+    let StoredSweepRequest {
+        ref root,
+        vendor,
+        underlying,
+        rung,
+        year,
+        month,
+        ..
+    } = *request;
+    let mut loaded = stored::load(root, vendor, underlying, rung, year, month)?;
+    // AN EMPTY MONTH IS REFUSED AS EMPTY. `stored::load` returns a file that
+    // exists and holds no record as a month with no bars, and the check below
+    // then blamed minute gaps no one had measured, with nothing withheld
+    // (found by a review, D-0696).
+    if loaded.bars.is_empty() {
+        return Err(format!(
+            "the {rung} month {year}-{month:02} is stored and holds no bar. Nothing was swept"
+        ));
+    }
     let execution_bars = if rung == EXECUTION_RUNG {
         None
     } else {
         Some(stored::load(
-            &root,
+            root,
             vendor,
             underlying,
             EXECUTION_RUNG,
@@ -3072,39 +3261,76 @@ fn sweep_stored_inner(
             "the {EXECUTION_RUNG} execution series for {year}-{month:02} is malformed: {why}. Nothing was swept; repair or repull that exact feed/instrument/month"
         )
     })?;
+    let holed_days = crate::minute_gaps::days_with_interior_gaps(execution_slice);
+    let withheld = if holed_days.is_empty() {
+        0
+    } else {
+        let (kept, withheld) = crate::minute_gaps::withhold(&loaded.bars, &holed_days);
+        loaded.bars = kept;
+        withheld
+    };
+    if loaded.bars.is_empty() {
+        return Err("every signal session has a minute gap; no sweepable bars remain".to_owned());
+    }
     let daily = stored::load_daily_context(
-        &root,
+        root,
         vendor,
         underlying,
         ((year, month), (year, month)),
         &loaded.bars,
     )?;
     let exact_minute = stored::load_exact_minute_context(
-        &root,
+        root,
         vendor,
         underlying,
         ((year, month), (year, month)),
         &loaded.bars,
     )?;
-    stored_month_kernel(
-        StoredSweepRequest {
-            root,
-            vendor,
-            underlying,
-            rung,
-            year,
-            month,
-            min_hits,
-            commit,
-        },
-        &StoredMonthInputs {
-            loaded,
-            execution_bars,
-            daily,
-            exact_minute,
-        },
-        None,
-    )
+    // WHAT LEFT WHICH SERIES. On `1min` the withheld bars were the execution
+    // minutes as well, and the exclusion must not say "no minute bar was
+    // removed" of a series that lost a day.
+    let minute_gaps = if execution_bars.is_none() {
+        crate::minute_gaps::GapExclusion::one_series(holed_days, withheld)
+    } else {
+        crate::minute_gaps::GapExclusion::signal_only(holed_days, withheld)
+    };
+    Ok(StoredMonthInputs {
+        loaded,
+        execution_bars,
+        daily,
+        exact_minute,
+        minute_gaps: Some(minute_gaps),
+    })
+}
+
+/// The params term of a stored month's identity. D-0694.
+///
+/// `None` is the checksum-audited door, which applies no minute-gap rule: its
+/// params are the ladder alone, exactly as every run of it before D-0694.
+///
+/// `Some` is the ordinary door, which withholds holed sessions since D-0694.
+/// Its masks changed, so its identity must: the ladder is folded with
+/// [`crate::minute_gaps::MINUTE_GAP_POLICY`] through `Params::with_policy`,
+/// the mechanism `auto-stored` binds its AUTO-V1 tag with and `screen` and
+/// `audit-range` bind `policy_of` with. Not every door uses it:
+/// `sweep-audited-stored` and `sweep-all` bind the ladder alone. The
+/// VERSION is bound and not only its consequence, the rule
+/// `runner::identity::DailyReferenceBinding::swept_series_calendar_policy`
+/// states: a month with no hole computes the same bars under both rules, and
+/// two runs that agree by luck are still two different computations. Rows
+/// recorded before it keep their own identities and stay valid under them.
+///
+/// It is NOT `stored::EXACT_MINUTE_GAP_POLICY`, whose "gap" is the opening
+/// gap `GapFib` measures: that versions the exact-minute overlay, every
+/// stored door and saved receipt binds it, and its meaning did not change.
+fn stored_month_params(
+    ladder: Ladder,
+    minute_gaps: Option<&crate::minute_gaps::GapExclusion>,
+) -> Params {
+    let params = Params::of(ladder);
+    minute_gaps.map_or(params, |_| {
+        params.with_policy(&[u64::from(crate::minute_gaps::MINUTE_GAP_POLICY)])
+    })
 }
 
 #[expect(
@@ -3131,6 +3357,7 @@ fn stored_month_kernel(
         execution_bars,
         daily,
         exact_minute,
+        minute_gaps,
     } = inputs;
     if let Some(guard) = integrity {
         guard.require_current()?;
@@ -3162,7 +3389,10 @@ fn stored_month_kernel(
         direction: RunDirection::Undirected,
         instrument: &loaded.key,
         timeframe: loaded.timeframe,
-        params: Params::of(ladder),
+        // THE LADDER, AND THE MINUTE-GAP RULE THIS DOOR APPLIED. D-0694: the
+        // ordinary door withholds holed sessions and binds that rule's version;
+        // the checksum-audited door applies none and keeps the ladder alone.
+        params: stored_month_params(ladder, minute_gaps.as_ref()),
         data_digest: digest,
         commit,
         // THE FEED, READ OFF THE LOAD RATHER THAN OFF THE ARGUMENT.
@@ -3225,7 +3455,10 @@ fn stored_month_kernel(
     attempt.check()?;
     save_ranked_evidence(&attempt, &ranked.top)?;
 
-    let mut out = String::from(STORED_PROVENANCE);
+    // A STOCK'S REPORT SAYS WHAT ITS FIGURES ARE MADE OF, BEFORE ANY OF THEM:
+    // gross of every charge, and corporate actions unchecked. An index's is
+    // unchanged. D-0694.
+    let mut out = stored_provenance_of(&loaded.key);
     let _ = writeln!(
         out,
         "feed {} · {} · {} · {year}-{month:02} · {} bars · built at {commit}",
@@ -3234,6 +3467,23 @@ fn stored_month_kernel(
         loaded.timeframe,
         loaded.bars.len(),
     );
+    // WITHHELD SESSIONS ARE NAMED, the way `screen` names them: a sweep over
+    // fewer sessions than the month holds must say which, or its bar count
+    // describes a month the column never saw. D-0694.
+    //
+    // And only when a signal bar was withheld, as `screen` gates its line on
+    // `withheld > 0`. A holed minute day the signal rung holds no bar of
+    // removes nothing, and "0 signal bar(s)" would name a withholding that
+    // did not happen.
+    if let Some(gaps) = minute_gaps.as_ref().filter(|gaps| gaps.signal_bars() > 0) {
+        let _ = writeln!(
+            out,
+            "MINUTE-GAP SESSIONS WITHHELD: {} signal bar(s); IST dates: {}. The sweep uses the remaining {} signal bars.",
+            gaps.signal_bars(),
+            gaps.day_names().join(" "),
+            loaded.bars.len(),
+        );
+    }
     out.push_str(&daily_reference_note(daily, exact_minute));
     if let Some(guard) = integrity {
         out.push_str(&guard.note());
@@ -3311,6 +3561,14 @@ fn stored_month_kernel(
     // evidence for each and the bar that evidence must clear. Without it the
     // whole ladder is a counter.
     out.push_str(&runner::report::render_ranked_findings(&ranked, &outcome));
+    // A STOCK'S RANKING SAYS IT IS GROSS, as the audit's does. This verb has no
+    // AUDIT block, so without it a ranked share table carried no charge
+    // statement at all. D-0681. And that its corporate actions are unchecked,
+    // beside that label, so a lifted FINDINGS block keeps both. D-0694.
+    out.push_str(&equity_ranking_note(
+        audit::CostScope::of(loaded.key.kind),
+        &ranked,
+    ));
     Ok(out)
 }
 
@@ -3524,7 +3782,22 @@ fn auto_stored_inner(
     })?;
     let vendor = parse_vendor(vendor_word)?;
     let root = store_root()?;
-    let mut span = stored::load_span(&root, vendor, underlying, rung, from, to)?;
+    auto_stored_kernel(&root, vendor, underlying, rung, (from, to), commit)
+}
+
+/// [`auto_stored_inner`] after the operator's root and build are admitted.
+/// Private so generated tests can drive the search without the process
+/// environment, as [`audit_stored_kernel`] is.
+fn auto_stored_kernel(
+    root: &std::path::Path,
+    vendor: Vendor,
+    underlying: &str,
+    rung: &str,
+    months: ((u16, u8), (u16, u8)),
+    commit: &str,
+) -> Result<String, stored::Refusal> {
+    let (from, to) = months;
+    let mut span = stored::load_span(root, vendor, underlying, rung, from, to)?;
     let signal_length = stored::rung_length_micros(rung)?;
     // WITHHELD HERE TOO, AND LEAVING IT OUT MADE THE OTHER TWO USELESS.
     //
@@ -3540,15 +3813,15 @@ fn auto_stored_inner(
     // execution series. One extra span read on a sizing run is the right trade
     // against a refusal that stops the run dead. See `crate::minute_gaps` for
     // what is withheld and why it is measured rather than listed.
-    let minutes = stored::load_span(&root, vendor, underlying, EXECUTION_RUNG, from, to)?.bars;
+    let minutes = stored::load_span(root, vendor, underlying, EXECUTION_RUNG, from, to)?.bars;
     let holed_days = crate::minute_gaps::days_with_interior_gaps(&minutes);
     if !holed_days.is_empty() {
         let (kept, _withheld) = crate::minute_gaps::withhold(&span.bars, &holed_days);
         span.bars = kept;
     }
-    let daily = stored::load_daily_context(&root, vendor, underlying, (from, to), &span.bars)?;
+    let daily = stored::load_daily_context(root, vendor, underlying, (from, to), &span.bars)?;
     let exact_minute =
-        stored::load_exact_minute_context(&root, vendor, underlying, (from, to), &span.bars)?;
+        stored::load_exact_minute_context(root, vendor, underlying, (from, to), &span.bars)?;
     let (probe_ceiling, named) = match crate::knobs::var("BRUTEX_CEILING") {
         None => (SEARCH_CEILING, false),
         Some(_) => (ceiling_from_env()?, true),
@@ -3563,7 +3836,7 @@ fn auto_stored_inner(
         commit,
     );
     let id = identity(&run);
-    let attempt = sweep_evidence::begin(&root, id.bytes(), sweep_evidence::Operation::AutoSearch)?;
+    let attempt = sweep_evidence::begin(root, id.bytes(), sweep_evidence::Operation::AutoSearch)?;
     let availability = stored::vwap_availability(&span.key);
     let column = stored_anchored_column(
         &span.bars,
@@ -3608,13 +3881,13 @@ fn auto_stored_inner(
     // Honoured when named, `SEARCH_CEILING` when not -- and the report says
     // which, because a probe whose budget is invisible is a probe whose answer
     // cannot be read.
-    let found = auto_recorded(&root, &run, search_ladder, &column)?;
+    let found = auto_recorded(root, &run, search_ladder, &column)?;
     attempt.finish(sweep_completion(
         found.affordable && found.outcome.is_complete(),
         found.outcome.sweep.halted.as_ref(),
     ))?;
 
-    let mut out = String::from(STORED_PROVENANCE);
+    let mut out = stored_provenance_of(&span.key);
     // THE BUDGET THE ANSWER WAS FOUND UNDER, because the answer is meaningless
     // without it. This command's usage tells the operator to run it before
     // `range-all`, so its threshold is read as "what this machine can afford" --
@@ -5628,6 +5901,8 @@ fn audit_stored_kernel(request: StoredSweepRequest<'_>) -> Result<String, stored
         min_hits,
         commit,
     } = request;
+    // REFUSED BEFORE THE MONTH IS READ, as every recorded kernel does. D-0685.
+    recorded_budget_refusal()?;
     let loaded = stored::load(&root, vendor, underlying, rung, year, month)?;
     let signal_length = stored::rung_length_micros(rung)?;
     // A SINGLE-MONTH AUDIT HAS THE SAME EXECUTION CONTRACT AS A RANGE.
@@ -5789,6 +6064,8 @@ fn audit_stored_kernel(request: StoredSweepRequest<'_>) -> Result<String, stored
     // The stop is no longer forced at 2,000 ppm. An operator who wants one says
     // so -- and `BRUTEX_MAX_STOP_POINTS` now states it in index points, which
     // 2,000 ppm never did on a span whose reference is not 25,000.
+    // THE HEADER'S CHARGE STATEMENT COMES FROM THE SAME KEY. D-0681.
+    let cost = stored::audit_cost_scope(&loaded.key)?;
     let report = audit_bars(
         &evaluator_stored(availability),
         loaded.bars,
@@ -5856,6 +6133,7 @@ fn audit_stored_kernel(request: StoredSweepRequest<'_>) -> Result<String, stored
             // candidate can never be mistaken for a finding.
             validate,
             lens,
+            cost,
         },
     );
     // THE IDENTITY REACHES THE LOG, which is the half section 3 rule 3 cares
@@ -5931,7 +6209,7 @@ fn month_banner(
     bars: usize,
     commit: &str,
 ) -> String {
-    let mut header = String::from(STORED_PROVENANCE);
+    let mut header = stored_provenance(underlying);
     let _ = writeln!(
         header,
         "feed {feed} · {underlying} · {timeframe} · {year}-{month:02} · {bars} bars · built at {commit}"
@@ -5977,7 +6255,7 @@ fn span_banner(
     to: (u16, u8),
     commit: &str,
 ) -> String {
-    let mut header = String::from(STORED_PROVENANCE);
+    let mut header = stored_provenance(underlying);
     let _ = writeln!(
         header,
         "feed {} · {underlying} · {} · {}-{:02}..{}-{:02} · {} of {} months · {} bars · built at {commit}",
@@ -6252,6 +6530,10 @@ fn audit_range_kernel(request: StoredRangeAuditRequest<'_>) -> Result<String, st
         attempt,
         commit,
     } = request;
+    // BEFORE THE SPAN IS READ, as every recorded kernel does, and here it is
+    // load-bearing: `column_withholding_at_build` below writes a preparation
+    // attempt long before `audit_bars` could refuse. D-0685.
+    recorded_budget_refusal()?;
     let mut span = stored::load_span(&root, vendor, underlying, rung, from, to)?;
 
     note(
@@ -6505,6 +6787,7 @@ fn audit_range_kernel(request: StoredRangeAuditRequest<'_>) -> Result<String, st
     }
     header.push_str(&daily_reference_note(&daily, &exact_minute));
     let availability = stored::vwap_availability(&span.key);
+    let cost = stored::audit_cost_scope(&span.key)?;
     Ok(audit_bars(
         &evaluator_stored(availability),
         span.bars,
@@ -6595,6 +6878,7 @@ fn audit_range_kernel(request: StoredRangeAuditRequest<'_>) -> Result<String, st
             // day this changed: ranking by it before that fix would have
             // ordered by a wrong number, so the two changes belong together.
             lens,
+            cost,
         },
     ))
 }
@@ -7500,8 +7784,8 @@ pub fn render_top_record(
     damaged: Option<&str>,
     unreadable: &str,
 ) -> String {
-    let mut out = String::from(STORED_PROVENANCE);
-    out.push('\n');
+    let mut out = stored_provenance(&crate::results::read_field(&rows.underlying));
+    blank_line_after_banner(&mut out);
     let _ = writeln!(
         out,
         "\nTOP COMBINATIONS\n  feed {} · {} · {} · {}-{:02}..{}-{:02}\n  run {}",
@@ -7546,10 +7830,23 @@ pub fn render_top_record(
         );
     }
 
+    // A SHARE IS NOT A UNIT OF THE INDEX. This legend was one literal, so a
+    // RELIANCE run was told its mean was "per ONE unit of the index, gross of the
+    // statutory charge stack" -- the wrong instrument, and a charge statement
+    // that names no charge. The underlying is resolved exactly as the sweep
+    // resolved it; a cash equity is labelled as D-0681 labels its audit, and
+    // every other row keeps the index legend byte for byte.
+    let per_unit = if stored::swept_index(&crate::results::read_field(&rows.underlying))
+        .is_ok_and(|key| key.kind == brutex_core::instrument::Kind::Equity)
+    {
+        SHARE_MEAN_LEGEND
+    } else {
+        "ONE unit of the index, gross of the statutory charge stack."
+    };
     let _ = writeln!(
         out,
-        "\n  `mean` is the average forward move over the run's horizon, per ONE \
-         unit of the index, gross of the statutory charge stack.\n  `payoff` is \
+        "\n  `mean` is the average forward move over the run's horizon, per \
+         {per_unit}\n  `payoff` is \
          the mean WIN over the mean LOSS, in hundredths -- 300 reads 3.00. It \
          carries no stop, no target and no path,\n  so it does not say what a \
          stop would have done: it says which combinations are worth asking. \
@@ -7621,6 +7918,15 @@ fn newest_complete(
 /// reading picks whatever the flattering assumption helped most. A listing that
 /// ordered by the best case would quietly propose a different winner from the
 /// one every other surface names.
+///
+/// # A stock among the printed runs puts its statement above the table
+///
+/// Because the page ranks, it is a report that ranks a cash equity whenever a
+/// run it prints a figure for is a stock. Then, before the table, it states
+/// [`runner::audit::CostScope::report_note`]: gross of every charge
+/// (`CLAUDE.md` §1, D-0681) and corporate actions unchecked (D-0694), exactly
+/// as `sweep-all` does for a walk over several instruments. A listing of index
+/// runs gains nothing.
 ///
 /// # Cost
 ///
@@ -7703,6 +8009,11 @@ fn results_at(root: &std::path::Path, feed: Option<&str>, underlying: Option<&st
     );
     let _ = writeln!(out);
 
+    // THE BEST ROW, BY THE FIGURE SELECTION USES. Chosen before the table,
+    // because what it is decides what the page states above the table.
+    let best = best_complete_newest_first(&rows);
+    out.push_str(&listing_equity_note(&rows, best));
+
     let _ = writeln!(
         out,
         "  {:<9}{:<8}{:>16}{:>16}{:>7}{:>6}{:>6}{:>17}{:>17}{:>9}",
@@ -7750,9 +8061,8 @@ fn results_at(root: &std::path::Path, feed: Option<&str>, underlying: Option<&st
         );
     }
 
-    // THE BEST ROW, BY THE FIGURE SELECTION USES.
+    // THE BEST ROW, chosen above the table.
     let _ = writeln!(out);
-    let best = best_complete_newest_first(&rows);
     out.push_str(&best_complete_line(best));
     // AND WHAT IT RISKED, for the row just named. A total answers "how much did
     // it make" and nothing else; these answer "what did it risk to make it",
@@ -7761,6 +8071,35 @@ fn results_at(root: &std::path::Path, feed: Option<&str>, underlying: Option<&st
         out.push_str(&quality_block(best));
     }
     out
+}
+
+/// What [`results_at`] states above its table: a stock's figures say what they
+/// are made of before any of them -- gross of every charge, and corporate
+/// actions unchecked. D-0694, AF-19.
+///
+/// The listing RANKS -- it names a BEST COMPLETE RUN on the worst-case total
+/// and prices what that run risked -- so it is a report that ranks a cash
+/// equity whenever one of the runs it prints is a stock. It was left bare on
+/// the reasoning that it only lists the ledger, while `cli top` on the same
+/// row carried both statements. Decided on the rows whose figures the page
+/// prints, the table's first [`LIST_ROWS`] and the winner, by the same kind
+/// check the stored banner uses, so a listing of index runs is byte for byte
+/// what it was.
+fn listing_equity_note(
+    rows: &[crate::results::Record],
+    best: Option<&crate::results::Record>,
+) -> String {
+    let shown: Vec<String> = rows
+        .iter()
+        .take(LIST_ROWS)
+        .chain(best)
+        .map(|record| crate::results::read_field(&record.underlying))
+        .collect();
+    if stored::any_cash_equity(shown.iter().map(String::as_str)) {
+        audit::CostScope::CashEquity.report_note()
+    } else {
+        String::new()
+    }
 }
 
 /// One rung's `min_hits`, derived from that rung's own bar count.
@@ -8921,7 +9260,8 @@ impl Rules {
     /// # This is a FILTER, not a promise
     ///
     /// Every row it admits still carries the whole-workspace caveats: figures
-    /// are per ONE unit of the index, gross of the statutory charge stack, and
+    /// are per ONE unit of the instrument -- one unit of an index, or one
+    /// share, GROSS OF EVERY CHARGE a share trade pays (D-0506, D-0696) -- and
     /// selected out of a search whose multiplicity the screen does not correct
     /// for. A row passing `elite` is a candidate to investigate, not a result.
     #[must_use]
@@ -9491,7 +9831,9 @@ fn screen_cap() -> usize {
 /// Returns [`screen_cap`] unchanged when no budget is named, so every existing
 /// caller and every existing run is unaffected. With `BRUTEX_SCREEN_BUDGET_MS`
 /// set, a fixed prefix is priced and timed, and [`cap_within_budget`] turns that
-/// throughput into a count.
+/// throughput into a count. Only the unrecorded generated-bar audit reaches this
+/// with a budget: every run that records refuses the knob first, because the
+/// count this returns is decided by timing. D-0685.
 ///
 /// # The calibration is real work, and doing it twice is the cheaper mistake
 ///
@@ -9583,12 +9925,69 @@ const CALIBRATION_CANDIDATES: usize = 256;
 /// The operator's wall-clock target for one rung's exit grid, in milliseconds.
 ///
 /// `None` when unset, which keeps [`screen_cap`] exactly as it was -- a stated
-/// count rather than a derived one.
+/// count rather than a derived one. A run that records never reaches this with a
+/// value: [`recorded_budget_refusal`] refuses the knob first. D-0685.
 fn screen_budget_ms() -> Option<u64> {
     // THROUGH `knobs::count`. Same rule, same reason: it is the sixteenth term
     // of `policy_of` precisely because it moves the answer, and a budget that
     // did not parse silently became "no budget at all".
     crate::knobs::count("BRUTEX_SCREEN_BUDGET_MS")
+}
+
+/// The refusal every run that RECORDS gives when `BRUTEX_SCREEN_BUDGET_MS` is set.
+const SCREEN_BUDGET_NOT_RECORDABLE: &str = "BRUTEX_SCREEN_BUDGET_MS is set, and a run that records refuses it: the budget derives how many candidates are priced from a wall-clock calibration, so one run identity could record different answers (CLAUDE.md §3 rules 3 and 5). Nothing was recorded. Unset it and bound the screen with BRUTEX_SCREEN_CAP, a stated count the identity folds. D-0685.";
+
+/// Refuses `BRUTEX_SCREEN_BUDGET_MS` on a run that records, by name.
+///
+/// # Why a recorded run cannot take a budget at all -- D-0685
+///
+/// [`cap_for_budget`] times a calibration prefix and derives the priced cap from
+/// that wall-clock reading, so the candidates a budget prices depend on how busy
+/// the machine was. The identity folds the BUDGET (the sixteenth term of
+/// [`policy_of`]) and the STATED [`screen_cap`], never the derived cap, so two
+/// runs at one budget could price different candidate sets, record different
+/// answers and share one `RunId`. Folding the derived cap instead would not
+/// help: the same question would then record different answers under different
+/// identities, decided by timing.
+///
+/// So every run that records calls this before it reads or writes anything, and
+/// an operator who wants a bounded screen states the count with
+/// `BRUTEX_SCREEN_CAP`, which is deterministic and in the identity.
+///
+/// A value [`screen_budget_ms`] cannot use is NOT refused here. It is no budget:
+/// the cap stays the stated [`screen_cap`], the identity term stays `0`, and the
+/// report names the value under `KNOB REFUSED` -- the policy `knobs::refusals`
+/// documents for every count knob. The strict range audit refuses it anyway,
+/// because strict admission refuses every unusable setting.
+///
+/// The unrecorded generated-bar `audit` still honours the budget. It has no
+/// identity and writes no record, so there is nothing for the timing to split.
+///
+/// # Why `pub`
+///
+/// `api` refuses a budget in the SERVER's environment on its sweep routes
+/// before it claims the run slot, takes the execution lease or writes the run's
+/// invocation record: the value is fixed for the life of the process, so taking
+/// all three for a refusal no wait can fix would be the waste `api`'s
+/// `stamp_refusal` already refuses for an unstamped build. It decided "usable"
+/// by restating this rule -- the same reader, trim, parse and positivity --
+/// which is a second authority for one fact, correct until the first change to
+/// [`knobs::positive_count`]. It calls this instead, as it calls
+/// [`is_canonical_commit_stamp`] rather than restating the stamp rule. D-0695.
+///
+/// # Errors
+///
+/// [`SCREEN_BUDGET_NOT_RECORDABLE`] when `BRUTEX_SCREEN_BUDGET_MS`, read through
+/// [`knobs::var`] (the knob store, then the environment), is a usable budget.
+pub fn recorded_budget_refusal() -> Result<(), String> {
+    let usable = crate::knobs::var("BRUTEX_SCREEN_BUDGET_MS")
+        .as_deref()
+        .and_then(crate::knobs::positive_count);
+    if usable.is_some() {
+        Err(SCREEN_BUDGET_NOT_RECORDABLE.to_owned())
+    } else {
+        Ok(())
+    }
 }
 
 /// How many candidates a measured throughput says will fit in the budget.
@@ -9603,26 +10002,44 @@ fn screen_budget_ms() -> Option<u64> {
 /// six hundred and twenty-five, and that product is a POLICY number rather than
 /// a physical one.
 ///
-/// # It cannot be a wall-clock cut on the search itself
+/// # It cannot be a wall-clock cut on the search itself, and the cap still is one
 ///
 /// Stopping the loop when a timer expires would make the answer depend on how
 /// busy the machine was, and §3 rule 5 requires the same inputs to give the same
-/// outputs byte for byte. So the budget decides a CAP, the cap is fixed before
-/// the search starts, and the search is then exactly as deterministic as it was.
+/// outputs byte for byte. So the budget decides a CAP, fixed before the search
+/// starts, and the search GIVEN that cap is deterministic.
 ///
-/// # The cap is QUANTISED, and that is not cosmetic
+/// **This section used to claim the search "is then exactly as deterministic as
+/// it was". It is not.** The cap is computed FROM a wall-clock reading, so which
+/// candidates are priced, and therefore the answer, still depends on how busy
+/// the machine was. Moving the timer from the loop to the cap moved the
+/// dependence one step earlier; it did not remove it. That is why a run that
+/// records refuses the knob -- [`recorded_budget_refusal`], D-0685.
 ///
-/// `screen_cap` is folded into the run identity, so a cap that moved with every
-/// millisecond of timing jitter would give the same question a new identity on
-/// every run and fill the ledger with near-duplicates that are not duplicates to
-/// the dedup. Rounding down to a power of two means an idle machine and a busy
-/// one land on the same rung unless they differ by a factor of two -- at which
-/// point they really are different searches and deserve different identities.
+/// # The cap is QUANTISED, and that does NOT make it stable
+///
+/// This section claimed that, because `screen_cap` is folded into the run
+/// identity, a jittering cap would re-key every run, and that rounding down to a
+/// power of two kept an idle and a busy machine on one rung "unless they differ
+/// by a factor of two -- at which point they really are different searches and
+/// deserve different identities". Each part was false:
+///
+/// * the identity folds the STATED [`screen_cap`] and the budget, never the cap
+///   this function returns, so two caps at one budget shared one `RunId`;
+/// * two readings either side of a power of two land on different rungs however
+///   close they are: `quantised_caps_split_at_a_power_of_two_however_close_the_timings`
+///   halves the cap on a one-nanosecond difference; and
+/// * the two resulting searches did NOT get different identities.
+///
+/// What the quantisation does bound is the spread: readings within a factor of
+/// two land on the same rung or on adjacent ones. A bound on the spread is not
+/// equality, so it cannot make a budgeted run recordable.
 ///
 /// # Cost
 ///
-/// One multiply and one shift. The measurement it reads is taken once per rung,
-/// from a fixed-size calibration prefix, so nothing here is per candidate.
+/// One multiply, one divide, one `ilog2` and one shift. The measurement it reads
+/// is taken once per rung, from a fixed-size calibration prefix, so nothing here
+/// is per candidate.
 fn cap_within_budget(sampled: usize, elapsed_nanos: u128, budget_ms: u64, offered: usize) -> usize {
     if sampled == 0 || elapsed_nanos == 0 {
         return offered;
@@ -9875,6 +10292,14 @@ fn policy_of(
         //
         // Unset is `0`, which cannot collide with any budget an operator names
         // -- `screen_budget_ms` filters `n > 0`.
+        //
+        // AND FOLDING THE BUDGET WAS NOT ENOUGH. The budget decides the cap
+        // through a wall-clock calibration, so two runs at ONE budget could
+        // still price different candidate sets under one identity. Every run
+        // that records now refuses the knob before it reads or writes anything
+        // (`recorded_budget_refusal`, D-0685), so on a recorded run this term
+        // is always `0`. It stays, at this position, because positional
+        // identity is append-only.
         screen_budget_ms().unwrap_or(0),
         // THE SEVENTEENTH: THE RUNG COUNT THE WALK-FORWARD ACTUALLY PRICED.
         //
@@ -10410,11 +10835,12 @@ fn descent_banner(
     steps: usize,
 ) -> String {
     let ((fy, fm), (ty, tm)) = span;
-    let mut out = String::from(STORED_PROVENANCE);
+    let mut out = stored_provenance(underlying);
+    blank_line_after_banner(&mut out);
     let trades = floor.saturating_mul(bars) / 1_000_000;
     let _ = writeln!(
         out,
-        "\nELITE, SELF-TUNING\n  feed {vendor_word} · {underlying} · {rung} · \
+        "ELITE, SELF-TUNING\n  feed {vendor_word} · {underlying} · {rung} · \
          {fy}-{fm:02}..{ty}-{tm:02}\n  {bars} bars · floor {floor} ppm is about \
          {trades} round trip(s) — the fewest at which these rules can be \
          satisfied\n  by anything, so below it no combination passes however \
@@ -12615,6 +13041,18 @@ fn one_rung(
     attempt: Option<u64>,
 ) -> RungRow {
     let first_line = |why: String| why.lines().next().unwrap_or(&why).to_owned();
+    // BEFORE THE STORE IS RESOLVED: the support derivation below writes
+    // preparation and probe evidence before `audit_range` is reached. D-0685.
+    if let Err(why) = recorded_budget_refusal() {
+        return RungRow {
+            rung,
+            outcome: Err(why),
+            missing: Vec::new(),
+            excluded: stored::CalendarExclusion::none(),
+            retention: None,
+            validation: None,
+        };
+    }
     let root = match store_root() {
         Ok(root) => root,
         Err(why) => {
@@ -14021,7 +14459,7 @@ fn descend_banner(
     months: u64,
     cadence: Cadence,
 ) -> String {
-    let mut out = String::from(STORED_PROVENANCE);
+    let mut out = stored_provenance(underlying);
     let _ = writeln!(
         out,
         "feed {vendor_word} · {underlying} · {known} · {}-{:02}..{}-{:02} · \
@@ -14370,7 +14808,7 @@ fn range_opening(
     support_ppm: Option<u64>,
 ) -> String {
     let (from, to) = span;
-    let mut out = String::from(STORED_PROVENANCE);
+    let mut out = stored_provenance(underlying);
     let _ = writeln!(
         out,
         "feed {vendor_word} · {underlying} · {} · {}-{:02}..{}-{:02} · support {}",
@@ -14894,6 +15332,9 @@ fn screen_range_kernel(request: StoredScreenRequest<'_>) -> Result<String, store
         lens,
         validate,
     } = policy;
+    // REFUSED BEFORE THE SPAN IS READ, as every recorded kernel does. Each step
+    // of an `elite` descent arrives here. D-0685.
+    recorded_budget_refusal()?;
     let mut span = stored::load_span(&root, vendor, underlying, rung, from, to)?;
     let signal_length = stored::rung_length_micros(rung)?;
 
@@ -14969,6 +15410,7 @@ fn screen_range_kernel(request: StoredScreenRequest<'_>) -> Result<String, store
     let exact_minute =
         stored::load_exact_minute_context(&root, vendor, underlying, (from, to), &span.bars)?;
     let availability = stored::vwap_availability(&span.key);
+    let cost = stored::audit_cost_scope(&span.key)?;
 
     let ladder = ladder_for(min_hits)?;
     let horizon = horizon_for(&span.bars, rung != EXECUTION_RUNG);
@@ -15041,6 +15483,7 @@ fn screen_range_kernel(request: StoredScreenRequest<'_>) -> Result<String, store
             // The environment's ceiling -- see `AuditOptions::ceiling`.
             ceiling: None,
             validate,
+            cost,
         },
     ))
 }
@@ -15129,6 +15572,11 @@ fn audit_with(
             ceiling,
             validate: true,
             lens: runner::rank::Lens::Detectability,
+            // GENERATED BARS NAME NO INSTRUMENT, so they keep the index header
+            // every generated audit has always carried, byte for byte; the
+            // PROVENANCE banner above it already says every figure describes
+            // the generator and not any market. D-0681 changed only the stock one.
+            cost: audit::CostScope::IndexSpot,
         },
     )
 }
@@ -15232,6 +15680,14 @@ struct AuditOptions<'a> {
     /// absence for every unsupplied stage rather than a zero, so a page made
     /// this way states which questions it did not ask.
     validate: bool,
+    /// Which charge statement heads the audit. D-0681.
+    ///
+    /// A stored run takes it from its swept key through
+    /// [`stored::audit_cost_scope`]: an index keeps the header it has always
+    /// printed, and an F&O cash equity is labelled GROSS OF EVERY CHARGE
+    /// instead of being told, as every stock audit was until this field
+    /// existed, that there is no brokerage, STT, stamp or GST.
+    cost: audit::CostScope,
 }
 
 /// Borrowed causal evidence for stored walk-forward column rebuilds.
@@ -15677,25 +16133,33 @@ fn ceiling_from_env() -> Result<usize, String> {
 
 /// The ceiling BEFORE it is divided among concurrent sweeps.
 ///
-/// # Why the identity uses this one and the ladder uses the other
+/// # The identity folds this one AND the one the ladder was given
 ///
-/// [`policy_of`] folds the ceiling into the run identity, because a halted
-/// search and an exhaustive one over the same span are different answers and
-/// must not collide in the ledger. [`shared_out`] reads
-/// [`SWEEPS_SHARING_THIS_MACHINE`], which is a property of THIS PROCESS at THIS
-/// MOMENT and not of the run -- `range_over` raises it while its eight rungs are
-/// in flight and drops it after.
+/// [`policy_of`] folds this figure as its sixth term, because a halted search
+/// and an exhaustive one over the same span are different answers and must not
+/// collide in the ledger. [`shared_out`] reads [`SWEEPS_SHARING_THIS_MACHINE`],
+/// which `range_over` raises while its rungs are in flight and drops after, so
+/// this undivided figure is the half of the identity that names what the
+/// OPERATOR ASKED FOR and does not move with that counter.
 ///
-/// Folding the shared value into the identity therefore made one logical run key
-/// two different ways: `audit-range 60min` alone resolved 134,217,720 while the
-/// same rung inside `range-all` resolved 14,913,080, so the ledger's duplicate
-/// refusal stopped recognising them as the same run and the same work could be
-/// recorded twice. That is a regression introduced by the sharing fix and caught
-/// by an adversarial pass over it.
+/// **This doc used to go further, and two of its claims were false (D-0685).**
+/// It said that folding the shared value made "the same work" recordable twice
+/// -- `audit-range 60min` alone at 134,217,720 against the same rung inside
+/// `range-all` at 14,913,080 -- and that the divided figure is "a scheduling
+/// fact rather than a description of the search". Neither holds:
 ///
-/// The identity names what the OPERATOR ASKED FOR. What the ladder is given is
-/// that figure divided by however many sweeps are sharing the machine, which is
-/// a scheduling fact rather than a description of the search.
+/// * the divided figure is the ceiling the ladder is GIVEN, and it decides
+///   whether the walk halts. `range_rung_arm`'s doc says so: a rung inside the
+///   eight can halt where the same rung alone completes. The two runs are not
+///   the same work.
+/// * the identity still folds the divided figure, through `Params::of(ladder)`,
+///   whose `ceiling` is `ladder.ceiling()`. So the rung alone and the rung inside
+///   `range-all` still key differently, and they should.
+///   `the_run_identity_still_folds_the_divided_ceiling_the_ladder_was_given`
+///   pins it.
+///
+/// So the identity carries both: this figure for what was asked, and
+/// `Params::ceiling` for what the ladder actually had.
 fn ceiling_asked() -> Result<usize, String> {
     match crate::knobs::var("BRUTEX_CEILING") {
         None => Ok(whole_machine_ceiling()),
@@ -17642,6 +18106,104 @@ fn opening(banner: &str, refused: Option<&str>) -> String {
     out
 }
 
+/// The charge statement a ranked cash-equity table carries on the page that
+/// prints it.
+///
+/// # The ranking was printed where the label was not
+///
+/// D-0681 labelled a stock audit GROSS OF EVERY CHARGE at the head of its
+/// AUDIT block, and `runner::audit::render_selected` is the only writer of that
+/// block. Three pages print a ranked table of equity combinations and never
+/// reach it: an audit whose ladder halted or was not certified (the refusal
+/// returns before the render), an audit that kept rows but traded none
+/// (`nothing_to_trade`; no generated store reaches it, and its test drives it
+/// through the test-only `NoneClosedFault`), and every `sweep-stored` report.
+/// Each ranked shares by `mean` and `t` with no word that those figures carry
+/// every charge a share trade pays, which `CLAUDE.md` §1 requires of every
+/// equity ranking.
+///
+/// # Indented, and inside FINDINGS
+///
+/// Every line starts with two spaces, so [`section_note`] lifts it as part of
+/// the FINDINGS block it qualifies and no refusal scanner reads it: none starts
+/// `refused`, `REFUSED. `, `REFUSED -- ` or `RESULT NOT RECORDED`. No line
+/// names a rate, because `docs/00-charter.md` records no source for an equity
+/// charge (§3 rule 1).
+///
+/// # The audit header's own words, and a test that says so
+///
+/// This is one of four copies of the charge statement a share's page prints
+/// -- with [`SHARE_MEAN_LEGEND`], `pool`'s opening and
+/// `runner::audit::CASH_EQUITY_GROSS`, which every stored share banner carries
+/// -- and all four are held to what `runner::audit`'s equity header says. The
+/// first version of the three in this crate named their own decisions, and
+/// two dropped the header's Selection V6 clause (D-0696).
+/// `sweep_wiring_tests::every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate`
+/// reads the charge list and the cost-excluded sentence out of the header
+/// `runner::audit::render` prints, and fails if any copy lacks either; carries
+/// a digit or `%` outside its decision numbers and the name `Selection V6`;
+/// does not say "none is subtracted", which is the header's fact, or
+/// contradicts it by a phrasing `denies_subtraction` lists; or has any word
+/// around the list and the sentence other than the words that test pins for
+/// it.
+const EQUITY_RANKING_GROSS: &str = "  CASH EQUITY: EVERY FIGURE IN THIS RANKING IS GROSS OF EVERY CHARGE.\n  \
+     A share trade pays brokerage, STT, stamp duty, exchange charges, the SEBI\n  \
+     fee and GST, and none is subtracted, so the ranking above is on GROSS\n  \
+     returns. COST-EXCLUDED RESEARCH, NOT A NET RESULT (D-0509, D-0525,\n  \
+     D-0681). No equity result carries Selection V6 or execution authority\n  \
+     until a charter-sourced equity charge stack exists.\n\n";
+
+/// What `cli top` says a share's `mean` is per. D-0696.
+///
+/// The index legend it replaces for a share said "per ONE unit of the index,
+/// gross of the statutory charge stack". This is the tail of the legend's
+/// first sentence, from the unit to its last full stop, and its continuation
+/// lines carry the legend's two-space indent. The same test that binds
+/// [`EQUITY_RANKING_GROSS`] to the audit header binds this.
+const SHARE_MEAN_LEGEND: &str = "ONE share, GROSS OF EVERY CHARGE: brokerage, STT, stamp duty, exchange \
+     charges, the SEBI fee and GST all apply to a share trade\n  and none is subtracted. \
+     COST-EXCLUDED RESEARCH, NOT A NET RESULT (D-0509, D-0525, D-0681). No equity result \
+     carries\n  Selection V6 or execution authority until a charter-sourced equity charge \
+     stack exists.";
+
+/// What a ranked cash-equity table states in its FINDINGS block: the gross
+/// label, then [`audit::CORPORATE_ACTIONS_UNCHECKED`]. D-0694.
+///
+/// # Beside the label, because the lift keeps only the block
+///
+/// `range-all` and `range-rung` discard each rung's report and print the
+/// sections [`one_rung`] lifts out of it through [`validation_note`], FINDINGS
+/// among them. A stock's banner says corporate actions are unchecked, but a
+/// lifted FINDINGS block does not carry the banner with it. So the statement
+/// sits inside the block, after the gross label it stands beside, in the same
+/// indentation, and a lifted ranking keeps both.
+///
+/// `pool` pass 1 is NOT such a lift, whatever this comment said until D-0694's
+/// review: it keeps only each rung's `outcome` and prints no lifted section, so
+/// no FINDINGS block reaches a pool page. The pool's own opening carries the
+/// sentence when a stock is on its surface.
+///
+/// The wording is `runner::audit`'s constant and nothing else: the audit
+/// header, every stored banner and this block say the same sentence, so a
+/// change to it is one edit.
+fn equity_ranking_statement() -> String {
+    format!(
+        "{EQUITY_RANKING_GROSS}{}\n\n",
+        audit::CORPORATE_ACTIONS_UNCHECKED
+    )
+}
+
+/// [`equity_ranking_statement`] when a cash equity's ranking kept a row, else
+/// nothing: an index has no charge to be gross of and never splits, and an
+/// extinct sweep prints no ranking to qualify.
+fn equity_ranking_note(scope: Option<audit::CostScope>, ranked: &runner::rank::Ranked) -> String {
+    if scope == Some(audit::CostScope::CashEquity) && !ranked.top.is_empty() {
+        equity_ranking_statement()
+    } else {
+        String::new()
+    }
+}
+
 /// Render the streamed result and refuse before trading a partial frontier.
 fn ranked_opening(
     banner: &str,
@@ -17650,12 +18212,16 @@ fn ranked_opening(
     outcome: &runner::RankedOutcome,
     ranked: &runner::rank::Ranked,
     id: Option<&runner::identity::RunId>,
+    cost: audit::CostScope,
 ) -> Result<String, String> {
     let mut out = opening(banner, refused);
     out.push_str(execution_note);
     out.push_str(&runner::report::render_ranked(outcome, id));
     out.push_str(&streaming_note(ranked, outcome));
     out.push_str(&runner::report::render_ranked_findings(ranked, outcome));
+    // BEFORE EITHER EARLY EXIT BELOW AND IN `audit_bars_work`, so a halted or
+    // untraded equity ranking carries its charge statement too. D-0681.
+    out.push_str(&equity_ranking_note(Some(cost), ranked));
     if outcome.is_complete() {
         Ok(out)
     } else {
@@ -17709,9 +18275,64 @@ fn prepare_audit(
 fn retained_to_trade(
     ranked: &runner::rank::Ranked,
 ) -> Option<(Vec<&runner::rank::Scored>, &runner::rank::Scored)> {
+    #[cfg(test)]
+    if NONE_CLOSED.with(std::cell::Cell::get) {
+        return None;
+    }
     let by_evidence = retained_by_evidence(ranked);
     let first = by_evidence.first().copied()?;
     Some((by_evidence, first))
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static NONE_CLOSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Test-only: [`retained_to_trade`] answers as if no retained row were
+/// closed, for as long as the guard lives, on this thread only. D-0696.
+///
+/// # Why a seam and not a fixture
+///
+/// The exit it opens -- a completed ladder whose ranker kept rows of which
+/// none is closed -- is one no fixture in this suite reaches, and the reason
+/// is read from `runner::rank` rather than measured over every store: a
+/// retained row that is not closed has an immediate superset of equal support,
+/// so the same hits, the same score under every lens, and larger mask words,
+/// which is the last tie-break of every ordering. That superset therefore
+/// ranks above it, and so does the closed row its chain of such supersets
+/// ends in. A non-empty `top` of a complete run holds a closed row. Yet the
+/// page that exit prints ranks shares, and a test that never reached it let
+/// its charge statement be stripped with every other test green. The guard
+/// drives the real exit in `audit_bars_work` on a real generated audit.
+///
+/// # Nested, it restores what it replaced
+///
+/// As `stored::CostScopeFault` does: the guard keeps the flag it displaced
+/// and puts it back when it drops, so an inner guard dropping cannot switch
+/// off an outer one still in scope. The field is private, so no guard exists
+/// that did not come from [`NoneClosedFault::install`], and none can be
+/// dropped without having set the flag first.
+#[cfg(test)]
+pub(crate) struct NoneClosedFault {
+    /// What the flag was before this guard was installed.
+    displaced: bool,
+}
+
+#[cfg(test)]
+impl NoneClosedFault {
+    pub(crate) fn install() -> Self {
+        let displaced = NONE_CLOSED.with(|held| held.replace(true));
+        Self { displaced }
+    }
+}
+
+#[cfg(test)]
+impl Drop for NoneClosedFault {
+    fn drop(&mut self) {
+        let displaced = self.displaced;
+        NONE_CLOSED.with(|held| held.set(displaced));
+    }
 }
 
 /// Records the SWEEP HALF of a run that produced no tradeable answer, and says
@@ -17872,6 +18493,13 @@ fn audit_bars_guarded(
     opts: AuditOptions<'_>,
     source_check: Option<AuditSourceCheck<'_>>,
 ) -> String {
+    // EVERY RECORDED AUDIT PASSES HERE, so the screen budget is refused here
+    // before its attempt begins -- whichever verb called. D-0685.
+    if opts.recording.is_some()
+        && let Err(why) = recorded_budget_refusal()
+    {
+        return format!("refused: {why}\n");
+    }
     let attempt = match (opts.recording, id) {
         (Some(into), Some(run_id)) => match sweep_evidence::begin_with_validation(
             into.root,
@@ -17946,6 +18574,7 @@ fn audit_bars_work(
         lens,
         ceiling,
         validate,
+        cost,
     } = opts;
     let prepared_column = match (prepared_column, replay) {
         (None, Some(replay)) => match stored_anchored_column(
@@ -18093,6 +18722,7 @@ fn audit_bars_work(
         &outcome,
         &ranked,
         id,
+        cost,
     ) {
         Ok(out) => out,
         Err(mut refusal) => {
@@ -18534,6 +19164,7 @@ fn audit_bars_work(
     let (report, _committed) = record_and_finish(recording, id, &recorded, live);
     out.push_str(&report);
     out.push_str(&audit::render_selected(
+        cost,
         Some(&chosen.taken),
         Some(&chosen.exits),
         Some(&chosen.cell),
@@ -18858,7 +19489,17 @@ struct Recorded<'a> {
 
 /// Cross-process serialization for the four-file result commit. The file has
 /// no payload and is never deleted; it coordinates writers, not history.
-struct ResultSetLock(std::fs::File);
+///
+/// Released by name at the end of `record_all_attempt` and by the guard's
+/// explicit unlock on every other path — an unwind included — never by closing
+/// the descriptor: a duplicate left in a child another thread spawned would
+/// otherwise hold the next commit off (D-0693).
+///
+/// There is no `release` wrapper on this type. Its only body would be the
+/// guard's own release, and replacing that body with `Ok(())` would still
+/// unlock through the guard's `Drop` — a mutant no test could tell apart. The
+/// caller releases the guard directly instead.
+struct ResultSetLock(store::flock::Flock<std::fs::File>);
 
 impl ResultSetLock {
     fn acquire(root: &std::path::Path) -> Result<Self, String> {
@@ -18873,15 +19514,9 @@ impl ResultSetLock {
             .truncate(false)
             .open(&path)
             .map_err(|why| format!("{} could not be opened: {why}", path.display()))?;
-        file.lock()
+        let held = store::flock::Flock::lock(file, path.clone())
             .map_err(|why| format!("{} could not be locked: {why}", path.display()))?;
-        Ok(Self(file))
-    }
-
-    fn release(self) -> Result<(), String> {
-        self.0
-            .unlock()
-            .map_err(|why| format!("the result-set writer lock could not be released: {why}"))
+        Ok(Self(held))
     }
 }
 
@@ -19103,7 +19738,8 @@ fn record_all_attempt(
         Ok((report, committed, frontier_rows, trade_rows))
     })();
     let mut attempted = attempted;
-    if let Err(why) = cross_process.release() {
+    if let Err(store::flock::Unreleased { why: cause, .. }) = cross_process.0.release() {
+        let why = format!("the result-set writer lock could not be released: {cause}");
         append_result_set_release_warning(&mut attempted, &why);
     }
     attempted
@@ -19738,6 +20374,13 @@ mod tests {
         // streamed frontier correctly refuses before every stage below.
         let text = audit_run_within(12, 1_400, 50_000);
         assert!(text.starts_with(PROVENANCE), "provenance leads it too");
+        // GENERATED BARS NAME NO INSTRUMENT, so `audit_with` keeps the index
+        // header under the PROVENANCE banner, and no share's label. D-0681.
+        assert!(
+            text.contains("\nAUDIT\n  INDEX SPOT run. There is no brokerage"),
+            "the generated audit keeps the index header:\n{text}"
+        );
+        assert!(!text.contains("GROSS OF EVERY CHARGE"), "{text}");
         assert!(text.contains("BARS"), "the sweep report is still there");
         for section in [
             "TRADES",
@@ -20155,6 +20798,42 @@ mod tests {
                 why.contains(v.as_str()),
                 "and lists {} as an alternative: {why}",
                 v.as_str()
+            );
+        }
+    }
+
+    /// **A refused feed word is quoted through `stored::clipped`, on one
+    /// line.** D-0696.
+    ///
+    /// Two callers hand `parse_vendor` a feed word decoded from stored bytes,
+    /// a saved single-stop search declaration and a saved original source
+    /// snapshot, so the word it refuses is not always typed. It was quoted
+    /// raw: a newline in it printed as a line of its own, and one reading
+    /// `refused: ...` sat at column zero (measured by a review with a typed
+    /// word). Quoted through `clipped`, it is cut to 64 characters and escaped.
+    #[test]
+    fn a_refused_feed_word_is_quoted_escaped_on_one_line() {
+        let long = "z".repeat(65);
+        for (word, shown) in [
+            ("X\nrefused: forged", "`X\\nrefused: forged`".to_owned()),
+            ("zerodha\r", "`zerodha\\r`".to_owned()),
+            ("\u{301}zerodha", "`\\u{301}zerodha`".to_owned()),
+            (long.as_str(), format!("`{}…`", "z".repeat(64))),
+            ("bogus", "`bogus`".to_owned()),
+            ("z\u{301}erodha", "`z\u{301}erodha`".to_owned()),
+        ] {
+            let why = parse_vendor(word).expect_err("not a feed");
+            assert!(
+                why.starts_with(&format!("{shown} is not a feed this build knows: ")),
+                "{shown}: {why:?}"
+            );
+            assert!(
+                !why.contains(|c: char| c.is_control()),
+                "{shown}: a control character reached the refusal: {why:?}"
+            );
+            assert!(
+                !crate::carries_refusal(&format!("    {why}\n")),
+                "{shown}: the quoted word reads as a refusal: {why:?}"
             );
         }
     }
@@ -21268,6 +21947,13 @@ mod tests {
     /// of it. The ledger's duplicate refusal stopped recognising them as the same
     /// run, and the same work became recordable twice. Caught by an adversarial
     /// pass over the fix that introduced it.
+    ///
+    /// **Narrower than it reads (D-0685).** This pins the POLICY term only. The
+    /// `RunId` still folds the divided ceiling through `Params::of(ladder)`, so
+    /// the two runs do key differently, and correctly: the divided ceiling can
+    /// halt a walk the undivided one completes, so they are not the same work.
+    /// `the_run_identity_still_folds_the_divided_ceiling_the_ladder_was_given`
+    /// pins that half.
     #[test]
     fn the_identity_ceiling_does_not_move_when_sweeps_share_the_machine() {
         let _guard = crate::knobs::serially();
@@ -21290,6 +21976,73 @@ mod tests {
         assert_eq!(
             alone, 134_217_720,
             "and it is the operator's own figure, undivided"
+        );
+    }
+
+    /// The ceiling the LADDER is given still reaches the `RunId`, and it moves
+    /// with sharing. The test above pins only the policy term.
+    ///
+    /// `ceiling_asked`'s doc once said the divided figure is "a scheduling fact
+    /// rather than a description of the search". It decides whether the walk
+    /// halts, and `Params::of(ladder)` hashes it, so a rung alone and the same
+    /// rung inside `range-all` key differently. D-0685.
+    ///
+    /// Run in a CHILD process: the sharing counter is process-wide, and batch
+    /// and range tests raise and reset it without the knob lock.
+    #[test]
+    fn the_run_identity_still_folds_the_divided_ceiling_the_ladder_was_given() {
+        const CHILD: &str = "BRUTEX_TEST_DIVIDED_CEILING_IDENTITY";
+        if std::env::var_os(CHILD).is_none() {
+            let child = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args([
+                    "--exact",
+                    "tests::the_run_identity_still_folds_the_divided_ceiling_the_ladder_was_given",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(CHILD, "isolated")
+                .env("BRUTEX_CEILING", "134217720")
+                .output()
+                .expect("isolated sharing child");
+            assert!(
+                child.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&child.stdout),
+                String::from_utf8_lossy(&child.stderr)
+            );
+            assert!(String::from_utf8_lossy(&child.stdout).contains("1 passed"));
+            return;
+        }
+        let alone = ladder_for(1).expect("a positive ceiling");
+        let shared = {
+            let _many = crate::SharedBy::these(8);
+            ladder_for(1).expect("a positive ceiling")
+        };
+
+        assert_eq!(alone.ceiling(), 134_217_720, "alone, the operator's figure");
+        assert_eq!(
+            shared.ceiling(),
+            134_217_720 / 8,
+            "inside eight sharing sweeps, an eighth of it"
+        );
+        let key = crate::stored::swept_index("NIFTY").expect("known key");
+        let keyed = |ladder| {
+            runner::identity::identity(&runner::identity::Run {
+                mask: vocab::ConditionMask::default(),
+                direction: runner::identity::Direction::Undirected,
+                instrument: &key,
+                timeframe: "60min",
+                params: runner::identity::Params::of(ladder).with_policy(&[7]),
+                data_digest: [3; 32],
+                commit: "generated-identity-fixture",
+                feed: "zerodha",
+            })
+        };
+        assert_ne!(
+            keyed(alone),
+            keyed(shared),
+            "one policy slice, two ladder ceilings: the identity must differ, \
+             because a walk that halts and one that completes are two answers"
         );
     }
 
@@ -23271,7 +24024,7 @@ mod tests {
             started_tx.send(()).expect("announces its attempt");
             let second = super::ResultSetLock::acquire(&other_root).expect("second writer locks");
             acquired_tx.send(()).expect("announces acquisition");
-            second.release().expect("second writer unlocks");
+            second.0.release().expect("second writer unlocks");
         });
         started_rx.recv().expect("the other writer started");
         assert!(
@@ -23280,7 +24033,7 @@ mod tests {
                 .is_err(),
             "the second writer acquired while the first still held the result set"
         );
-        first.release().expect("first writer unlocks");
+        first.0.release().expect("first writer unlocks");
         acquired_rx
             .recv_timeout(std::time::Duration::from_secs(1))
             .expect("the second writer proceeds after release");
@@ -26384,8 +27137,11 @@ mod derived_floor_tests {
         assert_common_month_digest(source);
         for (name, inputs) in [
             (
-                "sweep_stored_inner",
-                "},&StoredMonthInputs{loaded,execution_bars,daily,exact_minute,},None,)",
+                // D-0694 moved the ordinary door's loads into
+                // `stored_sweep_inputs`, which withholds holed sessions;
+                // `sweep_stored_inner` admits the build and root and calls this.
+                "sweep_stored_kernel",
+                "letinputs=stored_sweep_inputs(&request)?;stored_month_kernel(request,&inputs,None)",
             ),
             ("sweep_audited_stored", "},inputs.data(),Some(&inputs),)"),
         ] {

@@ -137,8 +137,15 @@ struct Row {
     /// `None` only for a refused month, which performed no computation and so
     /// has nothing to identify.
     identity: Option<String>,
-    /// Present when the month could not be swept at all.
+    /// Present when the month could not be swept, and when it swept and
+    /// could not be filed: [`one`] sets `not recorded: ..` after its sweep
+    /// when the ledger append or the sweep evidence's finish refuses.
     refused: Option<String>,
+    /// Whether this month's ladder ran. `false` on every row [`one`] returns
+    /// before its sweep; `true` on the row it returns after, filed or not, so
+    /// a refusal of the whole walk counts the months that swept apart from
+    /// the months that never reached a sweep. D-0696.
+    ran: bool,
 }
 
 /// Every outcome, so a short report cannot hide a long tail of refusals.
@@ -353,16 +360,65 @@ fn sweep_under(
     for row in &rows {
         tally.fold(row);
     }
+    at_least_one_filed(&holdings.census, tally.offered, &rows)?;
 
+    // A STOCK AMONG THE MONTHS OFFERED PUTS ITS STATEMENT ON THE REPORT: gross
+    // of every charge, corporate actions unchecked. D-0694.
+    let equity_note = if stored::any_cash_equity(wanted.iter().map(|h| h.symbol.as_str())) {
+        runner::audit::CostScope::CashEquity.report_note()
+    } else {
+        String::new()
+    };
     Ok(render(
         vendor_word,
         rung,
         min_hits,
         commit,
+        &equity_note,
         &holdings.census,
         &tally,
         &rows,
     ))
+}
+
+/// Nothing, when a month was swept and filed or none was offered; the run's
+/// refusal when every month offered refused. D-0696.
+///
+/// `range_over` refuses when every rung refuses, and the pool when every
+/// instrument does, because the stored banner printed over nothing with a
+/// zero exit is the failure wearing a success's clothes `CLAUDE.md` §4 bans.
+/// This printed that banner, a `REFUSED` row per month and
+/// `0 swept · N refused`, and exited OK, because an indented `REFUSED` row is
+/// not a refusal to `carries_refusal` (found by a review). A store holding no
+/// month of the feed and rung is still a report, as it always was: a fresh
+/// clone has pulled nothing, and that is not a fault.
+///
+/// **A refused row is not always a month that never swept.** [`one`] files a
+/// month after its sweep, `filed.and_then(|_| attempt.finish(..))`, and a
+/// refusal there is a row whose ladder ran. The first version of this
+/// refusal said "nothing was swept" over such a month and kept only the first
+/// row's reason, so a ledger no month could be filed into was named nowhere
+/// (found by a review, which measured it with the ledger path a directory).
+/// So it counts the months that refused before sweeping apart from those
+/// that swept and then refused while being filed, and carries the census
+/// lines and every month's own row, as the report prints them, without the
+/// banner.
+fn at_least_one_filed(walk: &catalog::Census, offered: u64, rows: &[Row]) -> Result<(), String> {
+    if rows.is_empty() || rows.iter().any(|row| row.refused.is_none()) {
+        return Ok(());
+    }
+    let ran = rows.iter().filter(|row| row.ran).count();
+    let mut why = format!(
+        "none of the {} month(s) offered was swept and filed without a refusal: {} refused \
+         before sweeping, and {ran} swept and then refused while being filed. No completed \
+         result could be confirmed. Each month's own reason is below.\n",
+        rows.len(),
+        rows.len().saturating_sub(ran)
+    );
+    census_lines(&mut why, walk, offered);
+    why.push('\n');
+    month_lines(&mut why, rows);
+    Err(why.trim_end().to_owned())
 }
 
 /// Sweeps one instrument-month. Pure: it reads the store and returns a row.
@@ -374,13 +430,44 @@ fn sweep_under(
     reason = "one stored batch row keeps its signal, daily, exact-minute, identity, and refusal receipts together"
 )]
 fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row {
+    // THE SYMBOL IS A DIRECTORY'S NAME, ESCAPED. The feed, rung and month are
+    // parsed before a holding exists; the symbol directory is not, and it can
+    // be called anything a filesystem admits. Printed raw, one named
+    // `X\nrefused: forged` put `refused: forged` at column zero of a completed
+    // run (measured by the review, D-0696). A symbol `Symbol::new` admits --
+    // ASCII letters, digits, `-`, `_` and `&` -- escapes to itself, so every
+    // month that can be swept is labelled exactly as before.
     let label = format!(
         "{} {} {} {}",
         held.vendor.as_str(),
-        held.symbol,
+        held.symbol.escape_debug(),
         held.timeframe.as_str(),
         held.month
     );
+    // THE HOLDING'S OWN PATH, BEFORE ANY LOAD. `stored::load` takes a bare
+    // word and opens the path of the key that word resolves to, so a
+    // `BSE/CASH/RELIANCE` or `NSE/INDEX/RELIANCE` month swept the
+    // `NSE/CASH/RELIANCE` file under a label that omits the exchange: the same
+    // NSE month was counted once per such holding and nothing on the page
+    // said so. The rule is `pool`'s surface rule, `stored::misfiled`, and a
+    // misfiled month is refused by name here rather than skipped, because the
+    // census above already counted it as offered. A word that resolves to no
+    // swept key reaches `stored::load` and is refused there, as it always was.
+    // D-0696.
+    if let Ok(key) = stored::swept_index(&held.symbol)
+        && let Some(why) = stored::misfiled(&key, &held.exchange, &held.segment, &held.symbol)
+    {
+        return Row {
+            label,
+            bars: 0,
+            depth: 0,
+            kept: 0,
+            completed: false,
+            identity: None,
+            refused: Some(why),
+            ran: false,
+        };
+    }
     let loaded = match stored::load(
         root,
         held.vendor,
@@ -399,6 +486,7 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
                 completed: false,
                 identity: None,
                 refused: Some(why),
+                ran: false,
             };
         }
     };
@@ -422,6 +510,7 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
                 completed: false,
                 identity: None,
                 refused: Some(why),
+                ran: false,
             };
         }
     };
@@ -445,6 +534,7 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
                 completed: false,
                 identity: None,
                 refused: Some(why),
+                ran: false,
             };
         }
     };
@@ -459,6 +549,7 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
                 completed: false,
                 identity: None,
                 refused: Some(why),
+                ran: false,
             };
         }
     };
@@ -473,6 +564,7 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
                 completed: false,
                 identity: None,
                 refused: Some(why),
+                ran: false,
             };
         }
     };
@@ -549,6 +641,7 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
                 completed: false,
                 identity: Some(id.hex()),
                 refused: Some(why),
+                ran: false,
             };
         }
     };
@@ -570,6 +663,7 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
                 completed: false,
                 identity: Some(id.hex()),
                 refused: Some(why),
+                ran: false,
             };
         }
     };
@@ -664,31 +758,93 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
         completed,
         identity: Some(runner::identity::RunId::hex(&id)),
         refused,
+        ran: true,
     }
 }
 
 /// The report. One line per instrument-month, then the arithmetic.
+///
+/// `equity_note` follows the provenance banner: empty when every month
+/// offered was an index, and gross of every charge with corporate actions
+/// unchecked when any was a stock. D-0694.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one report over the whole walk; each argument is a separate fact it states, and bundling them would hide which one a caller left out"
+)]
 fn render(
     vendor_word: &str,
     rung: &str,
     min_hits: u64,
     commit: &str,
+    equity_note: &str,
     walk: &catalog::Census,
     tally: &Tally,
     rows: &[Row],
 ) -> String {
     let mut out = String::from(crate::STORED_PROVENANCE);
+    out.push_str(equity_note);
     let _ = writeln!(
         out,
         "feed {vendor_word} · rung {rung} · min_hits {min_hits} · built at {commit}"
     );
+    census_lines(&mut out, walk, tally.offered);
+    out.push('\n');
+    month_lines(&mut out, rows);
+
+    out.push('\n');
     let _ = writeln!(
         out,
-        "store holds {} spot instrument-month(s); {} match this feed and rung",
-        walk.spot, tally.offered
+        "{} swept · {} refused · {} bars · {} combinations kept",
+        tally.swept, tally.refused, tally.bars, tally.kept
     );
-    out.push('\n');
+    if tally.incomplete > 0 {
+        let _ = writeln!(
+            out,
+            "{} month(s) stopped on the candidate ceiling. §6 says depth is decided \
+             by extinction; those did not get that far and their depth is a floor, \
+             not an answer.",
+            tally.incomplete
+        );
+    }
+    if !tally.reconciles() {
+        let _ = writeln!(
+            out,
+            "CENSUS DOES NOT RECONCILE: {} offered, {} swept + {} refused. A month \
+             has been lost, which is the silent shortfall §4 bans.",
+            tally.offered, tally.swept, tally.refused
+        );
+    }
+    out
+}
 
+/// What the store holds, and how many months this feed and rung offered:
+/// the report's census lines, and the whole walk's refusal's too. D-0696.
+fn census_lines(out: &mut String, walk: &catalog::Census, offered: u64) {
+    let _ = writeln!(
+        out,
+        "store holds {} spot instrument-month(s); {offered} match this feed and rung",
+        walk.spot
+    );
+    // THE .bin FILES THE CATALOG COULD NOT FILE, counted rather than dropped. It
+    // compares the feed and rung directories exactly, and on a
+    // case-insensitive volume a load opens a directory spelt in another case
+    // (found by a review, D-0696).
+    if walk.unknown_vendor > 0 || walk.unknown_rung > 0 {
+        let _ = writeln!(
+            out,
+            "{} .bin file(s) at a month's depth under a feed directory and {} under a rung directory are \
+             spelt as no feed or rung this engine knows, and were not offered. On a \
+             case-insensitive volume a load opens such a directory when it differs from \
+             the feed or rung only in case.",
+            walk.unknown_vendor, walk.unknown_rung
+        );
+    }
+}
+
+/// One line per instrument-month, and its identity under each month that
+/// swept and was filed: the report's rows, and the whole walk's refusal's
+/// too. D-0696.
+fn month_lines(out: &mut String, rows: &[Row]) {
     for row in rows {
         if let Some(ref why) = row.refused {
             let _ = writeln!(out, "  REFUSED  {}  — {why}", row.label);
@@ -718,36 +874,15 @@ fn render(
             }
         }
     }
-
-    out.push('\n');
-    let _ = writeln!(
-        out,
-        "{} swept · {} refused · {} bars · {} combinations kept",
-        tally.swept, tally.refused, tally.bars, tally.kept
-    );
-    if tally.incomplete > 0 {
-        let _ = writeln!(
-            out,
-            "{} month(s) stopped on the candidate ceiling. §6 says depth is decided \
-             by extinction; those did not get that far and their depth is a floor, \
-             not an answer.",
-            tally.incomplete
-        );
-    }
-    if !tally.reconciles() {
-        let _ = writeln!(
-            out,
-            "CENSUS DOES NOT RECONCILE: {} offered, {} swept + {} refused. A month \
-             has been lost, which is the silent shortfall §4 bans.",
-            tally.offered, tally.swept, tally.refused
-        );
-    }
-    out
 }
 
 #[cfg(test)]
 #[path = "batch_stored_tests.rs"]
 mod stored_tests;
+
+#[cfg(test)]
+#[path = "batch_verb_tests.rs"]
+mod verb_tests;
 
 #[cfg(test)]
 #[expect(
@@ -768,6 +903,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("scratch root is creatable");
         root
+    }
+
+    /// `sweep_under` at `zerodha` and `1min`, at `u64::MAX`, over a generated
+    /// store in which NIFTY's May 2025 sweeps, beside a file of bytes no
+    /// reader accepts at each path in `rels`, below `bars/`.
+    ///
+    /// A GENERATED MONTH THAT SWEEPS, because a walk whose every month refuses
+    /// is refused as a whole since D-0696, and these tests read the rows of a
+    /// run that completed.
+    fn beside_a_swept_month(rels: &[&str]) -> String {
+        let _knobs = crate::knobs::serially();
+        crate::knobs::clear_all();
+        let text = crate::audited_stored::with_warmed_store(|root| {
+            for rel in rels {
+                let full = root.join("bars").join(rel);
+                std::fs::create_dir_all(full.parent().expect("has a parent")).expect("creatable");
+                std::fs::write(&full, b"not a bar file").expect("writable");
+            }
+            sweep_under(root, "zerodha", "1min", u64::MAX, "deadbeef").expect("the run completes")
+        });
+        crate::knobs::clear_all();
+        assert!(
+            text.contains("\n  zerodha NIFTY 1min 2025-05  "),
+            "premise: the generated month swept:\n{text}"
+        );
+        text
     }
 
     /// **Every offered month is swept or refused, and nothing else.**
@@ -812,25 +973,303 @@ mod tests {
     /// The property that matters at 54,000 months: one unreadable file must not
     /// abandon the other 53,999. Written as a bar path the catalog will offer
     /// and the loader will then reject, because that is the real failure —
-    /// a path that looks right and holds nothing.
+    /// a path that looks right and holds nothing. Beside it a generated month
+    /// sweeps, so the walk is seen to continue past the refusal.
     #[test]
     fn a_month_that_cannot_be_loaded_is_named_and_the_run_continues() {
-        let root = scratch("refused");
-        let dir = root.join("bars/groww/NSE/INDEX/NIFTY/1min");
-        std::fs::create_dir_all(&dir).expect("dirs are creatable");
-        std::fs::write(dir.join("2026-08.bin"), b"not a bar file").expect("writable");
-
-        let text = sweep_under(&root, "groww", "1min", 100, "deadbeef").expect("the run completes");
+        let text = beside_a_swept_month(&["zerodha/NSE/INDEX/BANKNIFTY/1min/2025-05.bin"]);
         assert!(
-            text.contains("REFUSED"),
-            "the month is named as refused: {text}"
+            text.contains("\n  REFUSED  zerodha BANKNIFTY 1min 2025-05  — "),
+            "the month is named as refused, by instrument: {text}"
         );
-        assert!(text.contains("NIFTY"), "and named by instrument: {text}");
-        assert!(text.contains("1 refused"), "and counted: {text}");
+        assert!(
+            text.contains("\n1 swept · "),
+            "and the walk swept on: {text}"
+        );
+        // The census line and the tally, counted: the store's five generated
+        // NIFTY months and the unreadable one are held, three of them at this
+        // feed and rung, and the unreadable month is among the refused.
+        assert!(
+            text.contains("store holds 6 spot instrument-month(s); 3 match this feed and rung\n"),
+            "six held, three matched: {text}"
+        );
+        assert!(
+            text.contains("\n1 swept · 2 refused"),
+            "and counted: {text}"
+        );
         assert!(
             !text.contains("DOES NOT RECONCILE"),
             "one refusal still reconciles: {text}"
         );
+        assert!(!crate::carries_refusal(&text), "{text}");
+    }
+
+    /// **A walk whose every month refuses is refused, and names every month
+    /// and its reason.** D-0696.
+    ///
+    /// It printed the stored banner, a `REFUSED` row per month and
+    /// `0 swept · 2 refused`, and exited OK, because an indented `REFUSED`
+    /// row is not a refusal to `carries_refusal` (found by a review). A walk
+    /// that swept a month, and a store holding no month of the feed and rung,
+    /// are each still a report. The refusal kept the first month's reason
+    /// alone until a second review; it now counts both months as refused
+    /// before sweeping, and carries the census line and both rows.
+    #[test]
+    fn a_walk_whose_every_month_refused_is_refused() {
+        let root = scratch("all-refused");
+        for rel in [
+            "groww/NSE/INDEX/NIFTY/1min/2026-08.bin",
+            "groww/NSE/CASH/RELIANCE/1min/2026-08.bin",
+        ] {
+            let full = root.join("bars").join(rel);
+            std::fs::create_dir_all(full.parent().expect("has a parent")).expect("creatable");
+            std::fs::write(&full, b"not a bar file").expect("writable");
+        }
+        let why =
+            sweep_under(&root, "groww", "1min", 100, "deadbeef").expect_err("every month refused");
+        let _ = std::fs::remove_dir_all(&root);
+        let (head, months) = why
+            .split_once("\n\n")
+            .expect("the count and the census, then the months");
+        assert_eq!(
+            head,
+            "none of the 2 month(s) offered was swept and filed without a refusal: 2 refused \
+             before sweeping, and 0 swept and then refused while being filed. No completed \
+             result could be confirmed. Each month's own reason is below.\n\
+             store holds 2 spot instrument-month(s); 2 match this feed and rung",
+            "{why}"
+        );
+        let months: Vec<&str> = months.lines().collect();
+        assert_eq!(months.len(), 2, "one line per month:\n{why}");
+        for (row, label) in months
+            .iter()
+            .zip(["groww RELIANCE 1min 2026-08", "groww NIFTY 1min 2026-08"])
+        {
+            let reason = row
+                .strip_prefix(&format!("  REFUSED  {label}  — "))
+                .expect("each month's row, as the report prints it");
+            assert!(
+                reason.contains("could not be read from the store"),
+                "{label}'s own reason: {why}"
+            );
+        }
+        assert!(
+            crate::carries_refusal(&format!("refused: {why}\n")),
+            "the verb prints it as a refusal"
+        );
+        assert!(!why.contains(crate::STORED_PROVENANCE), "{why}");
+    }
+
+    /// **A walk whose one swept month could not be filed says it swept, and
+    /// names why it was not filed.** D-0696.
+    ///
+    /// The ledger is a directory here, so the generated May sweeps and its
+    /// ledger append refuses, and the generated April and a damaged BANKNIFTY
+    /// month refuse before sweeping. The refusal said every month offered
+    /// refused, "so nothing was swept", and kept the first month's reason
+    /// alone, so the ledger no month could be filed into was named nowhere
+    /// (measured by a review, with the ledger a directory).
+    #[test]
+    fn a_walk_whose_swept_month_could_not_be_filed_says_it_swept() {
+        let _knobs = crate::knobs::serially();
+        crate::knobs::clear_all();
+        let (ledger, why) = crate::audited_stored::with_warmed_store(|root| {
+            let full = root.join("bars/zerodha/NSE/INDEX/BANKNIFTY/1min/2025-05.bin");
+            std::fs::create_dir_all(full.parent().expect("has a parent")).expect("creatable");
+            std::fs::write(&full, b"not a bar file").expect("writable");
+            let ledger = crate::results::Results::path(root);
+            std::fs::create_dir_all(&ledger).expect("the ledger's path is a directory");
+            let why = sweep_under(root, "zerodha", "1min", u64::MAX, "deadbeef")
+                .expect_err("no month was filed");
+            (ledger, why)
+        });
+        crate::knobs::clear_all();
+        assert!(
+            why.starts_with(
+                "none of the 3 month(s) offered was swept and filed without a refusal: 2 \
+                 refused before sweeping, and 1 swept and then refused while being filed. \
+                 No completed result could be confirmed. Each month's own reason is below.\n\
+                 store holds 6 spot instrument-month(s); 3 match this feed and rung\n\n"
+            ),
+            "{why}"
+        );
+        let filed = why
+            .lines()
+            .find_map(|line| line.strip_prefix("  REFUSED  zerodha NIFTY 1min 2025-05  — "))
+            .expect("the swept month's row");
+        assert!(
+            filed.starts_with("not recorded: ") && filed.contains(&ledger.display().to_string()),
+            "the swept month names the ledger it could not be filed into: {why}"
+        );
+        for label in [
+            "zerodha BANKNIFTY 1min 2025-05",
+            "zerodha NIFTY 1min 2025-04",
+        ] {
+            assert!(
+                why.contains(&format!("\n  REFUSED  {label}  — ")),
+                "{label} is named: {why}"
+            );
+        }
+        // April's own reason says its month was not swept; the run's line
+        // says no such thing of the run.
+        assert!(
+            !why.lines()
+                .take(2)
+                .any(|line| line.contains("nothing was swept")),
+            "{why}"
+        );
+        assert!(!why.contains(crate::STORED_PROVENANCE), "{why}");
+    }
+
+    /// **A walk that offers a stock states corporate actions are unchecked;
+    /// a walk over indices alone does not.** D-0694.
+    ///
+    /// The statement follows the provenance banner whenever any month offered
+    /// is a cash equity, refused or not: the report names that month, and the
+    /// reader must know what a stock's figures are made of before reading one.
+    #[test]
+    fn a_walk_offering_a_stock_states_corporate_actions_are_unchecked_and_an_index_walk_does_not() {
+        let indices = beside_a_swept_month(&[]);
+        assert!(
+            indices.starts_with(&format!("{}feed zerodha", crate::STORED_PROVENANCE)),
+            "an index walk is unchanged: {indices}"
+        );
+        assert!(!indices.contains("CORPORATE ACTIONS"), "{indices}");
+
+        let mixed = beside_a_swept_month(&["zerodha/NSE/CASH/RELIANCE/1min/2025-05.bin"]);
+        assert!(
+            mixed.starts_with(&format!(
+                "{}{}feed zerodha",
+                crate::STORED_PROVENANCE,
+                runner::audit::CostScope::CashEquity.report_note()
+            )),
+            "{mixed}"
+        );
+        assert!(mixed.contains("RELIANCE"), "{mixed}");
+    }
+
+    /// **A month held anywhere but its own key's path is refused by name, and
+    /// never swept as the NSE file it resolves to.** D-0696.
+    ///
+    /// `one` handed `held.symbol` to `stored::load`, which resolves the bare
+    /// word and opens that key's path. So a `BSE/CASH/RELIANCE` month and a
+    /// `NSE/INDEX/RELIANCE` month each swept `NSE/CASH/RELIANCE`, and the label
+    /// -- which omits the exchange -- printed the same NSE month three times.
+    /// Here only the canonical files are damaged, so a misfiled month that is
+    /// loaded refuses with the STORE's words about the NSE file; refused before
+    /// any load, it refuses with the misfiled sentence naming its own directory.
+    /// No two directories below differ only in case under one parent, so the
+    /// answer is the same on a case-insensitive filesystem.
+    #[test]
+    fn a_misfiled_month_is_refused_by_name_and_not_swept_as_its_nse_namesake() {
+        let text = beside_a_swept_month(&[
+            "zerodha/NSE/CASH/RELIANCE/1min/2026-08.bin",
+            "zerodha/NSE/INDEX/RELIANCE/1min/2026-08.bin",
+            "zerodha/BSE/CASH/RELIANCE/1min/2026-08.bin",
+            "zerodha/NSE/CASH/NIFTY/1min/2026-08.bin",
+            "zerodha/NSE/INDEX/NIFTY/1min/2026-08.bin",
+        ]);
+        for (dir, word) in [
+            ("NSE/INDEX/RELIANCE", "RELIANCE"),
+            ("BSE/CASH/RELIANCE", "RELIANCE"),
+            ("NSE/CASH/NIFTY", "NIFTY"),
+        ] {
+            let (exchange, rest) = dir.split_once('/').expect("exchange");
+            let (segment, symbol) = rest.split_once('/').expect("segment");
+            let key = crate::stored::swept_index(word).expect("a swept key");
+            let why = crate::stored::misfiled(&key, exchange, segment, symbol).expect("misfiled");
+            assert!(
+                text.contains(&format!(
+                    "  REFUSED  zerodha {symbol} 1min 2026-08  — {why}\n"
+                )),
+                "{dir} must be refused by its own directory, before any load:\n{text}"
+            );
+        }
+        // The two canonical months ARE loaded, and the damage is what refuses
+        // them -- once each, not once per directory that resolves to them.
+        assert_eq!(
+            text.matches("could not be read from the store").count(),
+            2,
+            "{text}"
+        );
+        // The census and the tally, whole: of the seven months at this feed
+        // and rung, one swept and six refused. The base pinned
+        // `0 swept · 5 refused` before the swept month stood beside them.
+        assert!(
+            text.contains("store holds 10 spot instrument-month(s); 7 match this feed and rung\n"),
+            "{text}"
+        );
+        assert!(text.contains("\n1 swept · 6 refused · "), "{text}");
+        assert!(!text.contains("DOES NOT RECONCILE"), "{text}");
+    }
+
+    /// **A directory name cannot forge a refusal of the run.** D-0696.
+    ///
+    /// Only the symbol directory has to resolve, and the REFUSED row named the
+    /// other two raw: an exchange directory named `X\nrefused: forged` split
+    /// the row, put `refused: forged/...` at column zero, and the completed run
+    /// read as a refusal (measured by the review). The row is one line, and
+    /// the name is printed escaped.
+    #[test]
+    fn a_misfiled_directory_name_cannot_forge_a_refusal_of_the_run() {
+        let text = beside_a_swept_month(&[
+            "zerodha/NSE/CASH/RELIANCE/1min/2026-08.bin",
+            "zerodha/X\nrefused: forged/CASH/RELIANCE/1min/2026-08.bin",
+        ]);
+        assert!(
+            text.contains(
+                "  REFUSED  zerodha RELIANCE 1min 2026-08  — `X\\nrefused: forged/CASH/RELIANCE` \
+                 is not where `NSE-RELIANCE` is stored"
+            ),
+            "the misfiled month is one escaped row:\n{text}"
+        );
+        assert!(
+            !text.lines().any(|line| line.starts_with("refused")),
+            "no line of a completed run opens as a refusal:\n{text}"
+        );
+        assert!(!crate::carries_refusal(&text), "{text}");
+    }
+
+    /// **Nor can the SYMBOL directory's name forge one.** D-0696.
+    ///
+    /// The test above names the exchange directory. The symbol directory is
+    /// printed twice on a REFUSED row -- in the row's label, and in
+    /// `stored::swept_index`'s refusal when the name resolves to nothing -- and
+    /// both printed it raw, so a symbol directory named `X\nrefused: forged`
+    /// put two lines at column zero and the completed run read as a refusal
+    /// (measured by the review). Each is printed escaped, so the row is one
+    /// line, and a directory that is a real instrument beside it is labelled
+    /// exactly as before.
+    #[test]
+    fn a_symbol_directory_name_cannot_forge_a_refusal_of_the_run() {
+        let text = beside_a_swept_month(&[
+            "zerodha/NSE/CASH/RELIANCE/1min/2026-08.bin",
+            "zerodha/NSE/CASH/X\nrefused: forged/1min/2026-08.bin",
+            "zerodha/NSE/CASH/T\tAB\r\u{7}/1min/2026-08.bin",
+        ]);
+        for shown in ["X\\nrefused: forged", "T\\tAB\\r\\u{7}"] {
+            assert!(
+                text.contains(&format!(
+                    "\n  REFUSED  zerodha {shown} 1min 2026-08  — `{shown}` is not an \
+                     instrument this engine sweeps: "
+                )),
+                "the unresolved symbol directory is one escaped row:\n{text}"
+            );
+        }
+        assert!(
+            text.contains("\n  REFUSED  zerodha RELIANCE 1min 2026-08  — "),
+            "the real instrument beside them keeps its own label:\n{text}"
+        );
+        assert!(
+            !text.lines().any(|line| line.starts_with("refused")),
+            "no line of a completed run opens as a refusal:\n{text}"
+        );
+        assert!(
+            !text.contains(|c: char| c.is_control() && c != '\n'),
+            "no control character but the line break reaches the page:\n{text}"
+        );
+        assert!(!crate::carries_refusal(&text), "{text}");
+        assert!(text.contains("\n1 swept · "), "{text}");
     }
 
     /// The feed and rung filter, so a run sweeps what was asked for and no more.
@@ -846,11 +1285,23 @@ mod tests {
             std::fs::create_dir_all(full.parent().expect("has a parent")).expect("creatable");
             std::fs::write(&full, b"x").expect("writable");
         }
-        let text = sweep_under(&root, "groww", "1min", 100, "deadbeef").expect("runs");
+        // Every month offered refuses, so the run is refused, and the
+        // refusal counts what the filter offered and carries the census line
+        // (D-0696).
+        let why = sweep_under(&root, "groww", "1min", 100, "deadbeef")
+            .expect_err("the one month offered refused");
+        let _ = std::fs::remove_dir_all(&root);
         assert!(
-            text.contains("3 spot instrument-month(s); 1 match"),
-            "three held, one matched: {text}"
+            why.starts_with(
+                "none of the 1 month(s) offered was swept and filed without a refusal: 1 \
+                 refused before sweeping, and 0 swept and then refused while being filed. \
+                 No completed result could be confirmed. Each month's own reason is below.\n\
+                 store holds 3 spot instrument-month(s); 1 match this feed and rung\n\n  \
+                 REFUSED  groww NIFTY 1min 2026-08  — "
+            ),
+            "three held, one matched: {why}"
         );
+        assert_eq!(why.lines().count(), 4, "one month's row: {why}");
     }
 
     /// An unknown feed refuses before the store is touched.
@@ -979,6 +1430,7 @@ mod tests {
             "1min",
             100,
             "deadbeef",
+            "",
             &store::catalog::Census::default(),
             &broken,
             &[],
@@ -987,6 +1439,55 @@ mod tests {
             text.contains("DOES NOT RECONCILE"),
             "the shortfall is announced, not swallowed: {text}"
         );
+    }
+
+    /// **The report counts the `.bin` files at a month's depth the catalog could not file under a
+    /// feed or a rung.** D-0696.
+    ///
+    /// `store::catalog` compares both directories exactly, so a month under
+    /// `bars/Zerodha/...` or a `60MIN` directory was offered to no sweep and
+    /// named nowhere, while on a case-insensitive volume a load of `zerodha`
+    /// opens `Zerodha` (found by a review). A walk that filed every month
+    /// prints no such line.
+    #[test]
+    fn the_report_counts_the_months_the_catalog_could_not_file() {
+        let tally = Tally::default();
+        let census = store::catalog::Census {
+            unknown_vendor: 2,
+            unknown_rung: 3,
+            ..store::catalog::Census::default()
+        };
+        let text = render("groww", "1min", 100, "deadbeef", "", &census, &tally, &[]);
+        assert!(
+            text.contains(
+                "\n2 .bin file(s) at a month's depth under a feed directory and 3 under a rung directory are \
+                 spelt as no feed or rung this engine knows, and were not offered. On a \
+                 case-insensitive volume a load opens such a directory when it differs from \
+                 the feed or rung only in case.\n"
+            ),
+            "{text}"
+        );
+        assert!(!crate::carries_refusal(&text), "{text}");
+        for (unknown_vendor, unknown_rung) in [(1, 0), (0, 1)] {
+            let census = store::catalog::Census {
+                unknown_vendor,
+                unknown_rung,
+                ..store::catalog::Census::default()
+            };
+            let text = render("groww", "1min", 100, "deadbeef", "", &census, &tally, &[]);
+            assert!(text.contains(" were not offered."), "{text}");
+        }
+        let quiet = render(
+            "groww",
+            "1min",
+            100,
+            "deadbeef",
+            "",
+            &store::catalog::Census::default(),
+            &tally,
+            &[],
+        );
+        assert!(!quiet.contains("were not offered"), "{quiet}");
     }
 
     /// A ceiling breach is reported as a floor on depth, not as an answer.
@@ -1007,6 +1508,7 @@ mod tests {
             "1min",
             100,
             "deadbeef",
+            "",
             &store::catalog::Census::default(),
             &tally,
             &[],
@@ -1015,6 +1517,24 @@ mod tests {
         assert!(
             text.contains("floor"),
             "and calls the depth a floor: {text}"
+        );
+        let complete = Tally {
+            incomplete: 0,
+            ..tally
+        };
+        let text = render(
+            "groww",
+            "1min",
+            100,
+            "deadbeef",
+            "",
+            &store::catalog::Census::default(),
+            &complete,
+            &[],
+        );
+        assert!(
+            !text.contains("month(s) stopped on the candidate ceiling"),
+            "no month stopped, so no ceiling warning belongs in the report: {text}"
         );
     }
 

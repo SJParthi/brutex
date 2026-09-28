@@ -244,8 +244,13 @@ fn every_spelling_of_a_dependency_is_seen() {
 /// is required to be spelt rather than left as an empty cell — an empty cell is
 /// indistinguishable from a row somebody forgot to finish.
 fn documented_graph() -> BTreeMap<String, BTreeSet<String>> {
+    documented_graph_from(ARCHITECTURE)
+}
+
+/// The same document parser, with supplied text so its row alternatives can be tested.
+fn documented_graph_from(document: &str) -> BTreeMap<String, BTreeSet<String>> {
     let members = member_names();
-    let section = ARCHITECTURE
+    let section = document
         .split("## 1. The graph")
         .nth(1)
         .expect("§1 exists; if it was renamed this test must be updated with it");
@@ -448,4 +453,107 @@ fn the_shareable_six_close_over_themselves() {
             );
         }
     }
+}
+
+/// A later header flushes the named dependency, including its package rename.
+#[test]
+fn named_dependencies_survive_following_package_and_dependency_headers() {
+    let manifest = r#"
+[dependencies.bc]
+package = "core"
+path = "../core"
+[package]
+name = "graph-fixture"
+[dependencies.store]
+path = "../store"
+[dev-dependencies.vocab]
+path = "../vocab"
+"#;
+    assert_eq!(
+        declarations(manifest),
+        vec![
+            ("bc".to_owned(), "package = \"core\"".to_owned()),
+            ("store".to_owned(), String::new()),
+            ("vocab".to_owned(), String::new()),
+        ]
+    );
+    assert_eq!(
+        declared_deps(manifest),
+        BTreeSet::from(["core".to_owned(), "store".to_owned(), "vocab".to_owned()])
+    );
+}
+
+/// A malformed line contributes no declaration and does not hide valid neighbors.
+#[test]
+fn a_dependency_line_without_equals_is_omitted() {
+    let manifest = "[dependencies]\ncore = \"1\"\nstore\nvocab = \"1\"\n";
+    assert_eq!(
+        declarations(manifest),
+        vec![
+            ("core".to_owned(), " \"1\"".to_owned()),
+            ("vocab".to_owned(), " \"1\"".to_owned()),
+        ]
+    );
+    assert_eq!(
+        declared_deps(manifest),
+        BTreeSet::from(["core".to_owned(), "vocab".to_owned()])
+    );
+}
+
+/// Even a package rename cannot turn an empty dependency name into a declaration.
+#[test]
+fn empty_dependency_names_are_omitted_before_package_resolution() {
+    for malformed in ["= { package = \"store\" }", ".path = \"../store\""] {
+        let manifest = format!("[dependencies]\ncore = \"1\"\n{malformed}\nvocab = \"1\"\n");
+        assert_eq!(
+            declarations(&manifest),
+            vec![
+                ("core".to_owned(), " \"1\"".to_owned()),
+                ("vocab".to_owned(), " \"1\"".to_owned()),
+            ],
+            "malformed declaration: {malformed}"
+        );
+        assert_eq!(
+            declared_deps(&manifest),
+            BTreeSet::from(["core".to_owned(), "vocab".to_owned()]),
+            "malformed declaration: {malformed}"
+        );
+    }
+}
+
+/// Short rows are omitted while complete rows retain both roots and real arrows.
+#[test]
+fn short_document_rows_do_not_hide_or_invent_graph_members() {
+    for short in ["| `store`", "| `store` |", "| `store` | storage |"] {
+        let document = format!(
+            "## 1. The graph\n\
+             | `core` | types | nothing | yes |\n\
+             {short}\n\
+             | `costs` | costs | `core` | yes |\n"
+        );
+        assert_eq!(
+            documented_graph_from(&document),
+            BTreeMap::from([
+                ("core".to_owned(), BTreeSet::new()),
+                ("costs".to_owned(), BTreeSet::from(["core".to_owned()])),
+            ]),
+            "short row: {short}"
+        );
+    }
+}
+
+/// A complete row for an unknown member is omitted without discarding valid rows.
+#[test]
+fn unknown_document_members_do_not_enter_the_graph() {
+    let document = "## 1. The graph\n\
+                    | `core` | types | nothing | yes |\n\
+                    | `not-a-workspace-member` | unknown | `core` | yes |\n\
+                    | `costs` | costs | `core` | yes |\n";
+    assert_eq!(
+        documented_graph_from(document),
+        BTreeMap::from([
+            ("core".to_owned(), BTreeSet::new()),
+            ("costs".to_owned(), BTreeSet::from(["core".to_owned()])),
+        ])
+    );
 }

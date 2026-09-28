@@ -8,6 +8,7 @@ use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use store::flock::Flock;
 
 const MAGIC: &[u8; 8] = b"BTXEXPR1";
 const HEADER: usize = 40 + runner::expression::ENCODED_LEN;
@@ -203,6 +204,11 @@ pub(crate) struct EvidenceWriter {
     pending: PathBuf,
     published: PathBuf,
     file: BufWriter<File>,
+    /// The writer's exclusive lock, on a duplicate of `file`'s descriptor so
+    /// the buffered writer keeps its `File`. Released by name at the end of
+    /// `finish`, and by the guard's explicit unlock if the writer is refused or
+    /// dropped first — never by closing a descriptor (D-0693).
+    lock: Flock<File>,
     hash: brutex_core::blake3::Hasher,
     observed: Summary,
     previous: Option<u64>,
@@ -216,14 +222,13 @@ impl EvidenceWriter {
         expression: &Expression,
     ) -> std::io::Result<Self> {
         let pending = directory.join("expression-v1.pending");
-        let mut file = BufWriter::new(
-            fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create_new(true)
-                .open(&pending)?,
-        );
-        file.get_ref().lock()?;
+        let opened = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&pending)?;
+        let lock = Flock::lock(opened.try_clone()?, pending.clone())?;
+        let mut file = BufWriter::new(opened);
         let mut hash = brutex_core::blake3::Hasher::new();
         let header = header_bytes(identity, expression);
         file.write_all(&header)?;
@@ -236,6 +241,7 @@ impl EvidenceWriter {
             pending,
             published: directory.join("expression-v1.rows"),
             file,
+            lock,
             hash,
             observed: Summary::default(),
             previous: None,
@@ -331,7 +337,9 @@ impl EvidenceWriter {
         if let Some(directory) = self.published.parent() {
             File::open(directory)?.sync_all()?;
         }
-        Ok(self.published)
+        let published = self.published;
+        self.lock.release()?;
+        Ok(published)
     }
 }
 
@@ -451,12 +459,14 @@ pub fn read(
         .checked_sub(minimum)
         .filter(|n| n.is_multiple_of(56))
         .ok_or_else(|| std::io::Error::other("expression evidence is torn"))?;
-    let mut file = crate::readonly_file::open(path)?;
-    file.try_lock_shared().map_err(|why| {
-        std::io::Error::other(format!(
-            "expression evidence is busy or cannot be read: {why}"
-        ))
-    })?;
+    // Released by name below and by the guard's explicit unlock on every
+    // refusal, never by close (D-0693).
+    let mut file =
+        Flock::try_lock_shared(crate::readonly_file::open(path)?, path).map_err(|why| {
+            std::io::Error::other(format!(
+                "expression evidence is busy or cannot be read: {why}"
+            ))
+        })?;
     let opened = file.metadata()?;
     if !opened.is_file() || opened.len() != metadata.len() {
         return Err(std::io::Error::other(
@@ -522,6 +532,7 @@ pub fn read(
         // in-place change after the first scan cannot escape as a valid row.
         visit(checked_row(&bytes, header_seal, ordinal)?)?;
     }
+    file.release()?;
     Ok(observed)
 }
 
@@ -681,6 +692,34 @@ mod tests {
             ))?,
             Summary::default()
         );
+        Ok(())
+    }
+
+    /// A finished writer's evidence is readable while a duplicate of its lock
+    /// descriptor is still open — the reference a child spawned by another
+    /// thread holds until its exec. While the writer released only by closing
+    /// its descriptors, that reference kept the exclusive lock and `read`
+    /// refused with "expression evidence is busy". D-0693.
+    #[test]
+    fn a_finished_evidence_writer_is_released_despite_a_duplicated_descriptor()
+    -> std::io::Result<()> {
+        let scratch = Scratch::new()?;
+        let mut writer = EvidenceWriter::begin(&scratch.0, [7; 32], &expression()?)?;
+        let child = writer.lock.try_clone()?;
+        writer.row(2, 1_000, Truth::True)?;
+        let summary = Summary {
+            evaluated: 1,
+            hits: 1,
+            misses: 0,
+            unknown: 0,
+        };
+        let published = writer.finish(summary)?;
+        assert_eq!(
+            read(&published, [7; 32], &expression()?, u64::MAX, |_| Ok(()))?,
+            summary,
+            "the finished writer unlocked despite the duplicate"
+        );
+        drop(child);
         Ok(())
     }
 

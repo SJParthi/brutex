@@ -32,6 +32,7 @@ use std::os::unix::fs::OpenOptionsExt as _;
 use std::os::windows::fs::MetadataExt as _;
 
 use brutex_core::blake3::Hasher;
+use store::flock::Flock;
 
 use crate::population::{InstrumentFamilyV1, RequestedSpanIdentityV1};
 
@@ -1246,28 +1247,32 @@ impl PopulationFinalizationV2Ledger {
         let lock_path = root.join(LOCK_FILE);
         let data_path = root.join(LEDGER_FILE);
         let lock_file = open_ledger_file(&lock_path, writable, writable)?;
-        if writable {
-            lock_file.lock().map_err(|why| {
+        // The open lock is released by name on success and by the guard's
+        // explicit unlock on every refusal, never by closing a descriptor: the
+        // ledger keeps a duplicate of this one, and a child another thread
+        // spawned may hold a third (D-0693).
+        let held = if writable {
+            Flock::lock(&lock_file, lock_path.as_path()).map_err(|why| {
                 format!(
                     "cannot take Finalization V2 writer lock {}: {why}",
                     lock_path.display()
                 )
-            })?;
+            })?
         } else {
-            lock_file.lock_shared().map_err(|why| {
+            Flock::lock_shared(&lock_file, lock_path.as_path()).map_err(|why| {
                 format!(
                     "cannot take shared Finalization V2 lock {}: {why}",
                     lock_path.display()
                 )
-            })?;
-        }
+            })?
+        };
         let held_lock = lock_file.try_clone().map_err(|why| {
             format!(
                 "cannot clone Finalization V2 lock {}: {why}",
                 lock_path.display()
             )
         })?;
-        let opened = (|| {
+        let opened: Result<Self, PopulationFinalizationV2Refusal> = (|| {
             let data_file = open_ledger_file(&data_path, writable, writable)?;
             require_regular_file(&held_lock, &lock_path)?;
             require_regular_file(&data_file, &data_path)?;
@@ -1299,16 +1304,15 @@ impl PopulationFinalizationV2Ledger {
             ledger.scan()?;
             Ok(ledger)
         })();
-        let released = lock_file.unlock().map_err(|why| {
+        let ledger = opened?;
+        held.release().map_err(|u| {
             format!(
-                "cannot release Finalization V2 open lock {}: {why}",
-                lock_path.display()
+                "cannot release Finalization V2 open lock {}: {}",
+                lock_path.display(),
+                u.why
             )
-        });
-        match (opened, released) {
-            (Ok(ledger), Ok(())) => Ok(ledger),
-            (Err(why), _) | (Ok(_), Err(why)) => Err(why),
-        }
+        })?;
+        Ok(ledger)
     }
 
     fn scan(&mut self) -> Result<(), PopulationFinalizationV2Refusal> {

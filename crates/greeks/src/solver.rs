@@ -109,7 +109,7 @@
 //! estimate and it cannot see that the computed price is not strictly
 //! monotone in volatility. Passing this check does not prove the answer is
 //! good to `MAX_RELATIVE_UNCERTAINTY`. Failing it proves the answer is
-//! worthless. See `docs/06-limits.md` §18.
+//! worthless. See `docs/06-limits.md` §29.
 
 // Every expression below is a float expression. An implied volatility is a
 // solved statistical parameter, not money; `CLAUDE.md` §7 keeps such values
@@ -203,7 +203,7 @@ pub struct ImpliedVolatility {
     /// estimate — the price's granularity divided by vega — and it cannot see
     /// that the computed price is not strictly monotone in volatility. Read it
     /// as *the answer is not obviously worthless*, never as *the answer is
-    /// good to this many digits*. `docs/06-limits.md` §18 carries the measured
+    /// good to this many digits*. `docs/06-limits.md` §29 carries the measured
     /// gap between the two readings.
     pub uncertainty: f64,
 }
@@ -746,8 +746,8 @@ mod tests {
         // runs on", and the second is false: `exp` and `ln` come from the
         // platform's libm, and against the pure-Rust libm that wasm32 links,
         // 140 of 1,344 solved volatilities differ by up to 4.22e-14 relative.
-        // Invariant G-10 is narrowed to match and `docs/06-limits.md` section
-        // 18 carries the measurement. D-0046.
+        // Invariant G-10 is narrowed to match and `docs/06-limits.md` §29
+        // carries the measurement. D-0046.
         let contract = at_the_money();
         let quoted = contract.price(0.23, OptionKind::Call).expect("priced");
         let first = contract

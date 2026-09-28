@@ -16,7 +16,7 @@ mod qualification_projection;
 pub(crate) use index_consistency_projection::policy as index_consistency_policy;
 #[cfg(test)]
 #[path = "booleanevidencejson_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 type Response = (
     StatusCode,
     [(axum::http::HeaderName, &'static str); 1],
@@ -276,21 +276,41 @@ fn render_with_budget(
             reader,
         });
     }
-    let mut body = match &cache
+    let reader = &cache
         .as_ref()
         .ok_or("Boolean evidence cache disappeared")?
-        .reader
-    {
+        .reader;
+    let mut body = match reader {
         Reader::Statistics(reader) => statistics(reader, asked),
         Reader::Admission(reader) => admission(reader, asked),
         Reader::Qualification(reader) => qualification_projection::project(reader, asked),
     }?;
+    crate::detail::put_equity_note(&mut body, equity_note(reader))?;
     put(
         &mut body,
         "observation_byte_limit",
         json!(budget.bytes().to_string()),
     )?;
     Ok(body)
+}
+/// What a page over these linked statistics sources states before any figure:
+/// `cli::research_equity_note` over their families. D-0694, AF-19.
+///
+/// A candidate's trades, wins and returns are its source family's, and the
+/// JSON said only `"cash":true` on each source. One cash source makes the page
+/// a stock's research, as it makes the text research heading carry the note;
+/// a page of index sources gains no key.
+pub(crate) fn sources_note(sources: &[StatisticsSource]) -> String {
+    cli::research_equity_note(sources.iter().map(|source| source.family))
+}
+/// [`sources_note`] over the statistics each model's page serves: its own, the
+/// admission's linked statistics, or the qualification's original ones.
+fn equity_note(reader: &Reader) -> String {
+    sources_note(match reader {
+        Reader::Statistics(reader) => reader.sources(),
+        Reader::Admission(reader) => reader.statistics().sources(),
+        Reader::Qualification(reader) => reader.original().statistics().sources(),
+    })
 }
 fn put(body: &mut Value, key: &str, value: Value) -> Result<(), String> {
     body.as_object_mut()
