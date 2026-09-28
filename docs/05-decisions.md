@@ -38677,3 +38677,41 @@ the boundary: a sentence exactly at the cap is whole, one a byte past it notes
 one byte, and a cap inside a three-byte character is cut back to the last
 whole one. `every_refusal_sentence_fits_the_finding_cap_before_its_field`
 holds the sizing. C4-PULL-05. `docs/06-limits.md` records the bounds.
+
+### D-0726 — Credit a rolling answer to the governor only after its body is accepted — 2026-09-28
+
+Review of D-0723 found that `HttpSource::post_json` still credited the
+governor on any 2xx status before its body was read: the block
+`else if status.is_success() { g.record_success(); }` ran before
+`let body = strict_discovery_body(&mut answer, MAX_RESPONSE_BYTES).await?;`.
+D-0723 added two refusals after that point, a body past the cap and one that
+is not UTF-8, so the additive increase was also credited for answers this build
+refuses. A body the socket cuts short was already refused after the credit on
+origin/main, whose read was `.text()` then
+`.map_err(|why| Refusal::transport(format!("{why}")))?`. Ledger row
+W1-pull2-11 records the credit-before-read, and it is open.
+
+**Decision: move the success credit on this path to after the body is
+accepted.** A 429 is still recorded as a throttle as soon as its status is
+seen. The success credit now runs after `strict_discovery_body` returns the
+body, so every refusal that function makes, and every failed body read,
+leaves the allowance and the successes banked toward its next step where they
+were.
+
+**What this does not close.** W1-pull2-11 stays open for the rest of it.
+`post_json` calls no `weigh_answered_body`, so a 2xx answer whose body carries
+a vendor refusal is still returned and still credited. `Discovery::get` still
+credits before it reads its body. Both are that row's.
+
+**Proof.** `a_rolling_answer_this_build_refuses_earns_the_governor_nothing`
+gives each answer a governor of its own, shared with its source, throttled
+once and banked `SUCCESSES_PER_STEP` minus one successes, so one more credit
+steps the allowance up. It sends a body cut short of its `Content-Length`, a
+`Content-Length` one past `MAX_RESPONSE_BYTES`, and a body that is not UTF-8,
+tries all three before asserting, and requires each allowance unmoved. A clean
+answer must then step its allowance up. On origin/main, on this branch before
+the change, and again with only the change reverted, it fails at "a refused
+answer earned the governor a success it did not deliver: a body the socket
+cuts short (4 to 5); a body declaring more than the cap (4 to 5); a body that
+is not UTF-8 (4 to 5)". On origin/main the last of the three was not refused
+at all, the lossy read D-0723 replaced. It passes here. C4-PULL-06.

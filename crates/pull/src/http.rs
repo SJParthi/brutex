@@ -537,8 +537,9 @@ impl HttpSource {
         // it surfaced as a 502.
         //
         // THE FEEDBACK IS NOT SKIPPED. `record_success` and `record_throttled`
-        // still run on every answer below, because a shared governor must learn
-        // from every path whether or not that path is the one that pays.
+        // still run below on every answer that earns one, because a shared
+        // governor must learn from every path whether or not that path is the
+        // one that pays.
         if self.charged_by_caller {
             return;
         }
@@ -2348,15 +2349,14 @@ impl HttpSource {
             .map_err(|why| Refusal::transport(format!("{why}")))?;
 
         let status = answer.status();
-        if let Some(lock) = self.governor.as_ref() {
-            let mut g = lock
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if status.as_u16() == 429 {
-                g.record_throttled();
-            } else if status.is_success() {
-                g.record_success();
-            }
+        // A THROTTLE IS RECORDED AS SOON AS IT IS SEEN. A SUCCESS IS NOT: it is
+        // credited below, once the body has been accepted. D-0726.
+        if status.as_u16() == 429
+            && let Some(lock) = self.governor.as_ref()
+        {
+            lock.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .record_throttled();
         }
         if !status.is_success() {
             // THE VENDOR'S OWN STATUS, for the reason `Discovery::get` gives
@@ -2382,6 +2382,17 @@ impl HttpSource {
         // undeclared one is abandoned at the cap. Both refusals carry the
         // vendor's status. D-0723.
         let body = strict_discovery_body(&mut answer, MAX_RESPONSE_BYTES).await?;
+        // ONLY NOW IS THE ANSWER CREDITED. This credit ran on any 2xx status
+        // before the body was read, so a body the socket cut short, one past
+        // the cap and one that is not UTF-8 each counted toward the next step
+        // up although this build refused them. A 2xx whose body carries a
+        // refusal is still credited here: nothing on this path reads the body
+        // for one, which is ledger row W1-pull2-11 and stays open. D-0726.
+        if let Some(lock) = self.governor.as_ref() {
+            lock.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .record_success();
+        }
         self.keep_first(crate::capture::Method::Post, url, &body);
         Ok(body)
     }
@@ -5415,6 +5426,166 @@ mod tests {
             refusal.detail.contains("UTF-8"),
             "it names what was wrong with the body: {}",
             refusal.detail
+        );
+    }
+
+    /// A shared governor, as the governor tests below hold it.
+    type SharedGovernor = std::sync::Arc<std::sync::Mutex<crate::rate::Governor>>;
+
+    /// A loopback server that answers one request with `answer`, byte for
+    /// byte, and reports how many request bytes it read.
+    ///
+    /// It is never joined. A caller that never connects fails at its own timed
+    /// wait on the report rather than hanging on `accept`.
+    fn answer_once(answer: Vec<u8>) -> (String, std::sync::mpsc::Receiver<usize>) {
+        use std::io::{Read as _, Write as _};
+        let socket = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+        let addr = socket.local_addr().expect("an address");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = socket.accept() else {
+                return;
+            };
+            let mut request = [0u8; 4096];
+            let received = stream.read(&mut request).unwrap_or(0);
+            let _written = stream.write_all(&answer);
+            let _flushed = stream.flush();
+            let _sent = tx.send(received);
+        });
+        (format!("http://{addr}"), rx)
+    }
+
+    /// Asserts the fixture behind `report` read a request within five seconds.
+    fn reached(what: &str, report: &std::sync::mpsc::Receiver<usize>) {
+        assert!(
+            report
+                .recv_timeout(core::time::Duration::from_secs(5))
+                .is_ok_and(|received| received > 0),
+            "{what}: the request has to reach the fixture, or this proves nothing"
+        );
+    }
+
+    /// The per-second allowance a shared governor stands at.
+    fn allowance(held: &SharedGovernor) -> u32 {
+        held.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .permitted(crate::rate::WindowSpan::Second)
+            .expect("a bounded span")
+    }
+
+    /// A budgeted source sharing its governor with the caller, the governor
+    /// throttled once and then banked one success short of a step, and the
+    /// allowance it stands at. One more credit steps it up.
+    fn one_credit_short() -> (HttpSource, SharedGovernor, u32) {
+        let budgeted = HttpSpec {
+            budget: Budget {
+                per_second: Some(crate::rate::DHAN_PER_SECOND),
+                per_minute: None,
+                per_day: None,
+            },
+            ..spec(PriceScale::Rupees)
+        };
+        let owned = HttpSource::new(budgeted, Credential::token("SUPERSECRET".to_owned()))
+            .expect("a client builds");
+        let governor = owned.governor();
+        let held = governor.clone().expect("a budgeted spec is governed");
+        {
+            let mut g = held
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            g.record_throttled();
+            for _ in 1..crate::rate::SUCCESSES_PER_STEP {
+                g.record_success();
+            }
+        }
+        let lowered = allowance(&held);
+        (owned.sharing(governor), held, lowered)
+    }
+
+    /// **A ROLLING ANSWER THIS BUILD REFUSES EARNS THE GOVERNOR NOTHING.**
+    /// D-0726.
+    ///
+    /// `post_json` credited the governor with a success on any 2xx status,
+    /// before its body was read. A body the socket cuts short was refused
+    /// after that credit, and D-0723 added two more refusals there: a body
+    /// declaring more than `MAX_RESPONSE_BYTES`, and one that is not UTF-8.
+    /// Each counted toward the allowance's next step up. The credit now comes
+    /// after the body is accepted.
+    ///
+    /// One success moves nothing visible until `SUCCESSES_PER_STEP` are
+    /// banked, so each answer gets a governor of its own from
+    /// `one_credit_short`. A refused answer must leave its allowance where it
+    /// was, and a clean one must step it up. Every refused answer is tried
+    /// before anything is asserted, so a failure names each one that was
+    /// credited. Each governor is shared with its source, so the source
+    /// charges no permit and the throttle's drained bucket makes no request
+    /// wait.
+    #[test]
+    fn a_rolling_answer_this_build_refuses_earns_the_governor_nothing() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let past_the_cap = MAX_RESPONSE_BYTES.saturating_add(1);
+        let mut credited = Vec::new();
+        let mut returned = Vec::new();
+        for (what, answer) in [
+            (
+                "a body the socket cuts short",
+                b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{}".to_vec(),
+            ),
+            (
+                "a body declaring more than the cap",
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {past_the_cap}\r\n\
+                     Connection: close\r\n\r\n{{}}"
+                )
+                .into_bytes(),
+            ),
+            (
+                "a body that is not UTF-8",
+                b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\n{\xff}".to_vec(),
+            ),
+        ] {
+            let (source, held, lowered) = one_credit_short();
+            let (url, report) = answer_once(answer);
+            let outcome = runtime.block_on(source.post_json(&url, "{}".to_owned()));
+            reached(what, &report);
+            let now = allowance(&held);
+            if now != lowered {
+                credited.push(format!("{what} ({lowered} to {now})"));
+            }
+            if outcome.is_ok() {
+                returned.push(what);
+            }
+        }
+        assert!(
+            credited.is_empty(),
+            "a refused answer earned the governor a success it did not deliver: {}",
+            credited.join("; ")
+        );
+        assert!(returned.is_empty(), "each is refused: {returned:?}");
+
+        // THE OTHER HALF, WHICH KEEPS THE ABOVE FROM BEING VACUOUS: a source
+        // that never credited anything would also leave the allowance alone.
+        let (source, held, lowered) = one_credit_short();
+        let body = r#"{"data":{"ce":{"close":[101.5]}}}"#;
+        let (url, report) = answer_once(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .into_bytes(),
+        );
+        let got = runtime
+            .block_on(source.post_json(&url, "{}".to_owned()))
+            .expect("a clean answer is returned");
+        reached("a clean answer", &report);
+        assert_eq!(got, body);
+        assert!(
+            allowance(&held) > lowered,
+            "a clean answer completes the step: {} !> {lowered}",
+            allowance(&held)
         );
     }
 
