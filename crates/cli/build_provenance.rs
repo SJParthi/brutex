@@ -2547,10 +2547,11 @@ mod tests {
         assert!(read_index(&scratch.0.join(".git/index")).is_none());
     }
 
-    /// The index format's own bounds: a checksummed `DIRC` of version 2 or 3,
-    /// any number of entries including none, optional (uppercase) extensions
-    /// that end exactly at the trailer, and entry names that are plain
-    /// relative paths.
+    /// The index format's own bounds: a `DIRC` of version 2 or 3, any number
+    /// of entries including none, optional (uppercase) extensions that end
+    /// exactly at the trailer, and entry names that are plain relative paths.
+    /// Every index here is sealed correctly; the trailer check is held by
+    /// [`an_index_is_read_only_whole_and_unconflicted`].
     #[test]
     fn an_index_is_read_only_within_its_formats_bounds() {
         let scratch = Scratch::store("index-format");
@@ -2830,9 +2831,10 @@ mod tests {
         }
     }
 
-    /// A pack index is read only with its own magic and version 2.
+    /// A pack index is read only with its own magic and version 2, and only
+    /// when its trailer is the SHA-1 of every byte before it.
     #[test]
-    fn a_pack_index_of_another_magic_or_version_is_not_read() {
+    fn a_pack_index_of_another_magic_version_or_checksum_is_not_read() {
         let scratch = Scratch::store("idx-header");
         let head = delta_chain(&scratch, 0, false);
         let path = scratch.0.join(".git/objects/pack/pack-chain.idx");
@@ -2855,6 +2857,138 @@ mod tests {
                 "{why}"
             );
         }
+        let mut unsealed = intact;
+        *unsealed.last_mut().expect("trailer") ^= 1;
+        fs::write(&path, unsealed).expect("unsealed pack index");
+        assert!(
+            scratch.objects().read_oid(&encode_oid(head)).is_none(),
+            "a trailer that is not the SHA-1 of the index"
+        );
+    }
+
+    /// An index is read only whole and unconflicted: a trailer that is not the
+    /// SHA-1 of what precedes it, an entry carrying a merge stage (0x1000,
+    /// 0x2000 or both) or the extended flag (0x4000), and a name listed twice
+    /// each refuse. Built the same way, two distinct names read back, so the
+    /// repeated name is refused for being repeated.
+    #[test]
+    fn an_index_is_read_only_whole_and_unconflicted() {
+        let scratch = Scratch::store("index-whole");
+        let path = scratch.0.join(".git/index");
+        let read = |bytes: Vec<u8>| {
+            fs::write(&path, bytes).expect("index");
+            read_index(&path).map(|index| index.entries)
+        };
+        let entry = Entry {
+            mode: 0o100_644,
+            oid: [9; OID_LEN],
+        };
+        let entries = BTreeMap::from([("src/lib.rs".to_owned(), entry.clone())]);
+        assert_eq!(
+            read(index_bytes(&entries, saturated, *b"DIRC", 2, &[])).as_ref(),
+            Some(&entries)
+        );
+        let mut unsealed = index_bytes(&entries, saturated, *b"DIRC", 2, &[]);
+        *unsealed.last_mut().expect("trailer") ^= 1;
+        assert_eq!(read(unsealed), None, "a trailer that is not the SHA-1");
+        for (flag, version) in [(0x1000, 2), (0x2000, 2), (0x3000, 2), (0x4000, 3)] {
+            assert_eq!(
+                read(index_bytes(
+                    &entries,
+                    |name| saturated(name) | flag,
+                    *b"DIRC",
+                    version,
+                    &[]
+                )),
+                None,
+                "flags {flag:#06x}"
+            );
+        }
+        // Two entries under one header: two names, then one name twice.
+        let listed = |names: [&str; 2]| {
+            let mut bytes = b"DIRC".to_vec();
+            bytes.extend_from_slice(&2_u32.to_be_bytes());
+            bytes.extend_from_slice(&2_u32.to_be_bytes());
+            for name in names {
+                let one = index_bytes(
+                    &BTreeMap::from([(name.to_owned(), entry.clone())]),
+                    saturated,
+                    *b"DIRC",
+                    2,
+                    &[],
+                );
+                bytes.extend_from_slice(&one[INDEX_HEADER..one.len() - OID_LEN]);
+            }
+            let trailer = Sha1::digest(&bytes);
+            bytes.extend_from_slice(&trailer);
+            bytes
+        };
+        assert_eq!(
+            read(listed(["a.rs", "b.rs"])).map(|entries| entries.len()),
+            Some(2)
+        );
+        assert_eq!(read(listed(["a.rs", "a.rs"])), None, "a name listed twice");
+    }
+
+    /// The tree a commit names must be a tree object. HEAD's commit is made to
+    /// name a BLOB holding exactly its root tree's bytes, which parse to
+    /// exactly HEAD's entries, and the tree cannot be proved.
+    #[test]
+    fn a_head_tree_that_is_not_a_tree_object_refuses() {
+        let mut fixture = Fixture::new();
+        let tree = read_loose(&loose_path(&fixture.root, fixture.tree)).1;
+        let blob = write_object(&fixture.root, "blob", &tree);
+        let commit = commit_text(blob);
+        fixture.head = encode_oid(write_object(&fixture.root, "commit", commit.as_bytes()));
+        fs::write(
+            fixture.root.join(".git/refs/heads/main"),
+            format!("{}\n", fixture.head),
+        )
+        .expect("head ref");
+        let verification = fixture.verify(None);
+        assert!(verification.commit.is_none());
+        assert_eq!(verification.reason, "the HEAD tree cannot be proved");
+    }
+
+    /// A tracked file is proved only as a regular file. A `100755` entry is
+    /// replaced on disk by a symbolic link to a file outside the repository
+    /// with the same bytes; the link's own mode carries executable bits, so
+    /// only the file-type check can refuse it, and it does.
+    #[cfg(unix)]
+    #[test]
+    fn a_tracked_file_replaced_by_a_link_to_the_same_bytes_refuses() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut fixture = Fixture::new();
+        let script = fixture.root.join("crates/cli/run.sh");
+        fs::write(&script, b"#!/bin/sh\n").expect("script");
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("chmod +x");
+        let oid = write_object(&fixture.root, "blob", b"#!/bin/sh\n");
+        fixture.entries.insert(
+            "crates/cli/run.sh".to_owned(),
+            Entry {
+                mode: 0o100_755,
+                oid,
+            },
+        );
+        fixture.recommit();
+        assert_eq!(fixture.verify(None).commit.as_deref(), Some(&*fixture.head));
+
+        let outside = Scratch::new("link-target");
+        let target = outside.0.join("run.sh");
+        fs::write(&target, b"#!/bin/sh\n").expect("target");
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).expect("chmod +x");
+        fs::remove_file(&script).expect("remove script");
+        std::os::unix::fs::symlink(&target, &script).expect("link");
+        assert!(executable(
+            &fs::symlink_metadata(&script).expect("link metadata")
+        ));
+        assert_eq!(fs::read(&script).expect("through the link"), b"#!/bin/sh\n");
+        let verification = fixture.verify(None);
+        assert!(verification.commit.is_none());
+        assert_eq!(
+            verification.reason,
+            "the working tree does not equal the index"
+        );
     }
 
     /// A tracked symbolic link is proved by its target, and retargeting it on
