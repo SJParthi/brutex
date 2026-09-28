@@ -38606,3 +38606,28 @@ test passes. Only that line separates the two runs' `load`.
 
 **Not changed.** A replay still streams every chunk once, and the checkpoint it
 rebuilds is still held whole in memory (`docs/20-sweep-resume.md`).
+
+### D-0715 — Reserve each AND checkpoint level's chunk buffer once, whole — 2026-09-28
+
+Review finding on D-0712, a cleanup: no memory figure was claimed. `Chunks::write`
+reserved `CHUNK_HEADER` when a chunk began and `now.len()` for each write, at
+most eight bytes a call from the engine's word writer, and took the buffer with
+`std::mem::take` before every publish. So each chunk's buffer grew by repeated
+reallocation from its header, and the next chunk began again from nothing.
+
+**Reproduced first, at 1648a0f8.** `a_levels_chunks_share_one_buffer_reserved_whole`
+writes a 2,400-byte level eight bytes at a time under 1,024-byte chunks.
+Against 1648a0f8's `and_checkpoint.rs` it failed at its first check, that after
+the first write the buffer holds a chunk header and a whole chunk.
+
+**The change.** When a chunk begins, the buffer is reserved
+`try_reserve_exact(full)`, `full` being the header and a whole chunk, and after
+each publish the same buffer is cleared and put back. The reservation is
+therefore made once per level, a no-op for each later chunk, and no later byte
+grows or moves the buffer: the test holds its pointer and capacity over all 300
+writes and three chunks, published as 1,024, 1,024 and 352 bytes. The per-write
+`try_reserve` is gone, since no write passes a full chunk.
+
+**The cost, stated.** A level smaller than a chunk still reserves a whole one:
+`CHUNK_HEADER + CHUNK_BYTES` bytes at production sizes, however few bytes the
+level writes. Not timed, and what the allocator commits for it is not measured.

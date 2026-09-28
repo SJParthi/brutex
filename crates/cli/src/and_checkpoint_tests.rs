@@ -1289,3 +1289,35 @@ fn a_replay_releases_each_chunk_before_reading_the_next() -> Result<(), String> 
     );
     Ok(())
 }
+
+/// A level's chunks share one buffer, reserved whole -- the chunk header and a
+/// full chunk of level bytes -- when the level's first byte arrives. Written
+/// eight bytes at a time, as the engine writes, a 2,400-byte level under
+/// 1,024-byte chunks never moves or grows that buffer, and is published as
+/// chunks of 1,024, 1,024 and 352 bytes.
+#[test]
+fn a_levels_chunks_share_one_buffer_reserved_whole() -> Result<(), String> {
+    let scratch = Scratch::new().map_err(error)?;
+    let mut journal = Journal::open(&scratch.0, NAMESPACE, ID)?;
+    let mut writer = Chunks {
+        journal: &mut journal,
+        depth: 1,
+        previous: 0,
+        limits: SMALL,
+        buffer: Vec::new(),
+        pieces: Vec::new(),
+    };
+    writer.write_all(&[7; 8]).map_err(error)?;
+    assert!(writer.buffer.capacity() >= CHUNK_HEADER + SMALL.chunk.get());
+    let reserved = (writer.buffer.as_ptr(), writer.buffer.capacity());
+    for _ in 1..300 {
+        writer.write_all(&[7; 8]).map_err(error)?;
+        assert_eq!((writer.buffer.as_ptr(), writer.buffer.capacity()), reserved);
+    }
+    let pieces = writer.finish()?;
+    assert_eq!(
+        pieces.iter().map(|piece| piece.length).collect::<Vec<_>>(),
+        [1024, 1024, 352]
+    );
+    Ok(())
+}

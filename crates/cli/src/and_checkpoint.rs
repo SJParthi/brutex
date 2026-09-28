@@ -304,15 +304,21 @@ fn publish_level(
 /// entry.
 ///
 /// A full chunk is published when the next byte for its level arrives, or by
-/// [`Chunks::finish`], and the caller takes the buffer before publishing it.
-/// So every pass of the write loop starts below a full chunk and takes at
-/// least one byte, whatever `publish` does.
+/// [`Chunks::finish`], and the caller takes the buffer to publish it and puts
+/// it back emptied. So every pass of the write loop starts below a full chunk
+/// and takes at least one byte, whatever `publish` does.
+///
+/// The buffer is reserved whole, a chunk header and a full chunk of level
+/// bytes, when the level's first byte arrives, and every chunk of the level
+/// reuses it, so no later byte grows or moves it. A level smaller than a chunk
+/// still reserves the whole chunk.
 struct Chunks<'a> {
     journal: &'a mut Journal,
     depth: u64,
     previous: u64,
     limits: Limits,
-    /// The chunk being filled, header first; empty between chunks.
+    /// The chunk being filled, header first; empty between chunks, its
+    /// capacity kept.
     buffer: Vec<u8>,
     pieces: Vec<Piece>,
 }
@@ -354,13 +360,16 @@ impl Write for Chunks<'_> {
         let mut rest = bytes;
         while !rest.is_empty() {
             if self.buffer.len() == full {
-                let chunk = std::mem::take(&mut self.buffer);
+                let mut chunk = std::mem::take(&mut self.buffer);
                 self.publish(&chunk).map_err(io::Error::other)?;
+                chunk.clear();
+                self.buffer = chunk;
             }
             if self.buffer.is_empty() {
                 let index = u64::try_from(self.pieces.len()).map_err(io::Error::other)?;
+                // Whole, once: a no-op for every chunk after the level's first.
                 self.buffer
-                    .try_reserve(CHUNK_HEADER)
+                    .try_reserve_exact(full)
                     .map_err(io::Error::other)?;
                 for word in [
                     u64::from_le_bytes(CHUNK_MAGIC),
@@ -373,9 +382,7 @@ impl Write for Chunks<'_> {
             }
             let room = full.saturating_sub(self.buffer.len());
             let (now, later) = rest.split_at(room.min(rest.len()));
-            self.buffer
-                .try_reserve(now.len())
-                .map_err(io::Error::other)?;
+            // Within the reservation: `now` never passes a full chunk.
             self.buffer.extend_from_slice(now);
             rest = later;
         }

@@ -8822,6 +8822,10 @@ more than one chunk of one level.
   history is still held in memory, as `docs/20-sweep-resume.md` states. A
   replay holds one chunk payload at a time: it releases each before it reads
   the next (C4-CLI-10).
+- **One buffer per level.** A level's chunks are written through one buffer,
+  reserved whole at the level's first byte and reused for each of its chunks
+  (C4-CLI-11): `CHUNK_HEADER + CHUNK_BYTES` bytes at production sizes, however
+  few bytes the level writes. Not timed.
 - **Orphans.** A boundary interrupted after its chunks leaves them in the
   journal unreferenced, and the next attempt rebuilds that one level
   (C4-CLI-07).
