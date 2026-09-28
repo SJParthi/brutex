@@ -38576,8 +38576,9 @@ text for `.collect(`. Review put a per-row allocation back twice. One was
 `let all: Vec<&str> = line.split(',').collect();` inside `fields_of`, whose
 text no test read. The other was
 `let _per_row = line.split(',').collect::<Vec<&str>>();` in `decode_rows`,
-which the needle did not match. Both left all 16 CSV tests green. A text search
-finds the spellings it knows, and the claim is about an allocation.
+which the needle did not match. Under each, every test in `csv::tests` passed,
+`decode_rows_collects_nothing_per_row` among them. A text search finds the
+spellings it knows, and the claim is about an allocation.
 
 The test's reason for not counting allocations was that a counting allocator
 "needs `unsafe` and every crate root forbids it". Only the first half holds.
@@ -38632,9 +38633,9 @@ walk". `descend` checked `if out.len() >= MAX_MEMBERS {`, and a census
 never onto `out`. So a census read every malformed member of a folder, past
 the cap, and kept a finding for each. `CsvError`'s `Display` quotes the bad
 field whole (`"line {line}: date {got:?} is not {format:?}"`), so a finding's
-length was bounded only by its file. The review measured a folder of
-`MAX_MEMBERS + 3` one-field members returning `Ok` with 50003 findings, and a
-member with a 1,000,000-byte date field kept as a 1000033-byte finding.
+length was bounded only by its file. The review's probe found a census past
+the cap returning `Ok` with no `TooManyMembers`, and a finding holding a
+million-byte date field whole; the proof below repeats both on origin/main.
 
 **Decision: bound both, rather than describe them as unbounded.**
 
