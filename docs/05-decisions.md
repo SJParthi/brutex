@@ -38699,7 +38699,8 @@ W1-pull2-11 records the credit-before-read, and it is open.
 
 **Decision: move the success credit on this path to after the body is
 accepted.** A 429 is still recorded as a throttle as soon as its status is
-seen. The success credit now runs after `strict_discovery_body` returns the
+seen, by the branch `if status.as_u16() == 429` that runs before the
+non-success return. The success credit now runs after `strict_discovery_body` returns the
 body, so every refusal that function makes, and every failed body read,
 leaves the allowance and the successes banked toward its next step where they
 were.
@@ -38721,3 +38722,13 @@ answer earned the governor a success it did not deliver: a body the socket
 cuts short (4 to 5); a body declaring more than the cap (4 to 5); a body that
 is not UTF-8 (4 to 5)". On origin/main the last of the three was not refused
 at all, the lossy read D-0723 replaced. It passes here. C4-PULL-06.
+
+**The throttle half is held too.** Review found that no test drove
+`post_json` with a 429 and then read the governor, so the sentence above had
+nothing behind it: with that branch matching 430 instead of 429, every test in
+`cargo test -p pull --lib` passed. `a_rolling_429_backs_the_governor_off_before_its_refusal_returns`
+answers `post_json` with a 429 from a governor one success short of a step,
+requires the allowance to fall below where it stood, and requires the refusal
+to carry status 429. With the branch matching 430 it fails at "a 429 on the
+rolling path backs the governor off: 4 !< 4", and with `record_success` in
+place of `record_throttled` at "5 !< 4". It passes here.

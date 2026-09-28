@@ -5589,6 +5589,44 @@ mod tests {
         );
     }
 
+    /// **A ROLLING 429 BACKS THE GOVERNOR OFF BEFORE ITS REFUSAL RETURNS.**
+    /// D-0726.
+    ///
+    /// D-0726 kept `post_json`'s throttle above the body read and moved only
+    /// the success credit below it. No test drove `post_json` with a 429 and
+    /// then read the governor, so matching a different status in that branch,
+    /// or dropping its `record_throttled`, passed every test in the crate.
+    ///
+    /// The governor starts one success short of a step. A throttle that is
+    /// never recorded leaves the allowance where it was, and one credited as
+    /// a success steps it up. Only a recorded throttle lowers it. The refusal
+    /// still carries the vendor's 429.
+    #[test]
+    fn a_rolling_429_backs_the_governor_off_before_its_refusal_returns() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let (source, held, lowered) = one_credit_short();
+        let (url, report) = answer_once(
+            b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_vec(),
+        );
+        let outcome = runtime.block_on(source.post_json(&url, "{}".to_owned()));
+        reached("a 429", &report);
+        let now = allowance(&held);
+        assert!(
+            now < lowered,
+            "a 429 on the rolling path backs the governor off: {now} !< {lowered}"
+        );
+        let refusal = outcome.expect_err("a 429 is refused");
+        assert_eq!(
+            refusal.status,
+            Some(429),
+            "the vendor's own status reaches the caller: {refusal:?}"
+        );
+    }
+
     /// A refusal body is read only as far as it will ever be quoted.
     ///
     /// The refusal path had **no** size check at all — `trim` cut the error
