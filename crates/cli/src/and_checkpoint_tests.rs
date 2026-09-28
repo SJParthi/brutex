@@ -410,10 +410,11 @@ fn a_first_boundary_that_never_landed_restarts_and_its_refusal_names_the_sizes()
     )
     .err()
     .ok_or("a boundary record over the admission must refuse")?;
-    assert!(
-        refused.contains("boundary record at depth 1 needs")
-            && refused.contains("over the 192 byte journal entry admission"),
-        "{refused}"
+    // 32 header bytes, 88 for the depth row and its chunk count, a 256-byte
+    // prefix and 8 chunks of 48: the record's own size, then the admission.
+    assert_eq!(
+        refused,
+        "checkpoint sink refused: AND checkpoint boundary record at depth 1 needs 760 bytes for its depth rows and 8 chunks, over the 192 byte journal entry admission"
     );
     drop(first);
     let journal = Journal::open(&scratch.0, NAMESPACE, ID)?;
@@ -452,7 +453,7 @@ fn a_first_boundary_that_never_landed_restarts_and_its_refusal_names_the_sizes()
 /// is inclusive. Level 1 is eight chunks of at most 64 bytes, published as
 /// sequences 1 to 8, and its record at sequence 9 is 760 bytes, which with the
 /// journal's 96-byte envelope is the whole admission. The depth-2 record is
-/// longer and refuses, naming its depth.
+/// longer and refuses, naming its depth, its own size and the admission.
 #[test]
 fn a_boundary_record_exactly_one_entry_long_lands() -> Result<(), String> {
     let scratch = Scratch::new().map_err(error)?;
@@ -472,9 +473,11 @@ fn a_boundary_record_exactly_one_entry_long_lands() -> Result<(), String> {
     )
     .err()
     .ok_or("the depth-2 boundary record must refuse")?;
-    assert!(
-        refused.contains("boundary record at depth 2 needs"),
-        "{refused}"
+    // Level 2's 28 survivors are 1,624 bytes, 26 chunks of at most 64, so the
+    // record lists 34 chunks: 32 + 2 × 88 + 256 + 34 × 48 bytes.
+    assert_eq!(
+        refused,
+        "checkpoint sink refused: AND checkpoint boundary record at depth 2 needs 2096 bytes for its depth rows and 34 chunks, over the 856 byte journal entry admission"
     );
     drop(attempt);
     let journal = Journal::open(&scratch.0, NAMESPACE, ID)?;
