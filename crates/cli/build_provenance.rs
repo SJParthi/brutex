@@ -1165,8 +1165,10 @@ mod tests {
                 /mutants.out*.pre-wd-black-*\n\
                 **/*.log\n";
             let serial = NEXT.fetch_add(1, Ordering::Relaxed);
-            let root = std::env::temp_dir()
-                .join(format!("brutex-provenance-{}-{serial}", std::process::id()));
+            let root = fresh_directory(
+                std::env::temp_dir()
+                    .join(format!("brutex-provenance-{}-{serial}", std::process::id())),
+            );
             fs::create_dir_all(root.join(".git/objects")).expect("objects");
             fs::create_dir_all(root.join(".git/refs/heads")).expect("refs");
 
@@ -1823,18 +1825,34 @@ mod tests {
         }
     }
 
+    /// A new, empty directory at `path`. Anything already there was left by an
+    /// earlier run killed before its `Drop` under the same process id, and is
+    /// removed first, so no test starts on another's leftovers. `create_dir`,
+    /// not `create_dir_all`, so a path that reappears in between refuses.
+    fn fresh_directory(path: PathBuf) -> PathBuf {
+        match fs::remove_dir_all(&path) {
+            Ok(()) => {}
+            Err(why) if why.kind() == std::io::ErrorKind::NotFound => {}
+            Err(why) => panic!("left-behind scratch {}: {why}", path.display()),
+        }
+        fs::create_dir(&path).expect("scratch directory");
+        path
+    }
+
     /// A throwaway directory under the OS temp directory, removed on drop.
     struct Scratch(PathBuf);
 
     impl Scratch {
         fn new(label: &str) -> Self {
             let serial = NEXT.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!(
+            Self::at(std::env::temp_dir().join(format!(
                 "brutex-provenance-{label}-{}-{serial}",
                 std::process::id()
-            ));
-            fs::create_dir_all(&path).expect("scratch directory");
-            Self(path)
+            )))
+        }
+
+        fn at(path: PathBuf) -> Self {
+            Self(fresh_directory(path))
         }
 
         /// A scratch directory holding an empty `.git/objects` store.
@@ -1853,6 +1871,25 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// A scratch path left behind by an earlier run -- one killed before its
+    /// `Drop`, under the same process id -- is emptied before a test uses it,
+    /// never reused with what it held.
+    #[test]
+    fn a_scratch_path_left_behind_is_emptied_not_reused() {
+        let path = std::env::temp_dir().join(format!(
+            "brutex-provenance-left-behind-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(path.join(".git/objects/pack")).expect("left-behind store");
+        fs::write(path.join(".git/objects/pack/pack-stale.idx"), b"stale").expect("left behind");
+        let scratch = Scratch::at(path);
+        assert_eq!(
+            fs::read_dir(&scratch.0).expect("scratch listing").count(),
+            0,
+            "nothing left behind is reused"
+        );
     }
 
     /// A pack in which `links[i]` is a delta against `links[i + 1]` for every
