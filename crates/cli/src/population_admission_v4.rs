@@ -3025,9 +3025,32 @@ fn append_raw(
     file: &mut File,
     raw: &[u8; RECORD_BYTES],
 ) -> Result<(), PopulationAdmissionV4Refusal> {
-    file.seek(SeekFrom::End(0))
-        .and_then(|_| file.write_all(raw))
-        .map_err(|why| format!("cannot append Admission V4 record: {why}"))
+    append_with_rollback(file, raw, |file, raw| file.write_all(raw))
+}
+
+/// Appends one record, and on a write error (ENOSPC, EIO) truncates the file
+/// back to the length it had before this record. Without that a partial
+/// `write_all` left a ragged tail, and every later open, read-only included,
+/// refused the file's already committed authorities as ragged.
+fn append_with_rollback(
+    file: &mut File,
+    raw: &[u8; RECORD_BYTES],
+    write: impl FnOnce(&mut File, &[u8; RECORD_BYTES]) -> std::io::Result<()>,
+) -> Result<(), PopulationAdmissionV4Refusal> {
+    let end = file
+        .seek(SeekFrom::End(0))
+        .map_err(|why| format!("cannot append Admission V4 record: {why}"))?;
+    let Err(why) = write(file, raw) else {
+        return Ok(());
+    };
+    match file.set_len(end) {
+        Ok(()) => Err(format!(
+            "cannot append Admission V4 record: {why}; truncated back to {end} bytes"
+        )),
+        Err(rollback) => Err(format!(
+            "cannot append Admission V4 record: {why}; truncation back to {end} bytes also failed: {rollback}"
+        )),
+    }
 }
 
 fn open_root(
@@ -3773,5 +3796,44 @@ mod tests {
             next.sync_all().expect("sync replacement bytes");
             assert!(authority.finalization_projection().is_err());
         }
+    }
+
+    #[test]
+    fn a_partial_append_error_truncates_back_and_committed_authority_stays_readable() {
+        let root = TestRoot::new("partial-append-error");
+        let value = prepared(
+            AdmissionV4FamilyTerminal::Evaluated,
+            AdmissionV4FamilyTerminal::NaturallyExtinct,
+            5,
+        );
+        commit_population_admission_v4(root.path(), bounds(), value.clone())
+            .expect("write committed fixture");
+        let path = root.path().join(DATA_FILE);
+        let before = std::fs::read(&path).expect("read committed bytes");
+        let raw = encoded_block(&value, 1).expect("encode next block")[0];
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("open committed file");
+        let refusal = append_with_rollback(&mut file, &raw, |file, raw| {
+            file.write_all(&raw[..RECORD_BYTES / 2])?;
+            Err(std::io::Error::other("injected short write"))
+        })
+        .expect_err("a failed write must refuse");
+        assert!(
+            refusal.contains("injected short write") && refusal.contains("truncated back"),
+            "refusal `{refusal}` must name the write error and the rollback"
+        );
+        drop(file);
+        assert_eq!(
+            std::fs::read(&path).expect("reread committed bytes"),
+            before
+        );
+        PopulationAdmissionV4Ledger::open_read(root.path(), bounds())
+            .expect("committed authority stays readable");
+        let reused = commit_population_admission_v4(root.path(), bounds(), value)
+            .expect("exact rerun reuses the committed authority");
+        assert!(matches!(&reused, PopulationAdmissionV4Commit::Reused(_)));
     }
 }
