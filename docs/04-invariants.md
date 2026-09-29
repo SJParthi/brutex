@@ -5354,3 +5354,9 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+## C4 core fixes — D-0785 onward
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| C4-CORE-01 | **A Zerodha `INDICES` row is an index only when it is typed `EQ`.** The same `NIFTY 50` row typed `FUT`, `CE` or `PE` is `InstrumentError::Malformed`, and typed `EQ` it is kept as the index `NIFTY`. D-0785 | `core::vendor::tests::an_indices_row_typed_as_a_derivative_is_refused_not_promoted_to_an_index` | ✓ |

@@ -43666,3 +43666,23 @@ job.
   survived. `an_nse_cash_stock_consults_no_peer_even_one_holding_it` gives a
   second vendor the same stock and requires that nothing votes and nothing is
   named; the same two feeds holding an index do vote, as the control.
+
+### D-0785 — Promote a Zerodha `INDICES` row to an index only when its type is `EQ` — 2026-09-29
+
+**What was wrong.** `decode_master_row` turned every Zerodha row whose
+`segment` is `INDICES` into an index by overwriting its type with `IDX`,
+without reading the type it replaced. `segment_of` stores `INDICES` and
+`type_of` maps `FUT`, `CE` and `PE` to themselves, so an `INDICES` row typed
+`FUT` was kept as the spot index its symbol names: on `origin/main` the row
+`256265, NIFTY 50, FUT, INDICES` decoded to
+`Keep(... underlying: NIFTY, kind: Index ...)`.
+
+**The change.** The promotion now requires the type word `EQ`, which is the
+type the index rows it was written for carry (`tests/zerodha_index.rs` builds
+them that way, and its module comment records that the vendor's index rows
+arrive as `EQ`). Any other type under `INDICES` is
+`InstrumentError::Malformed`, as every other unread shape in `segment_of` and
+`type_of` already is. No Groww or Dhan row is affected, because
+`index_segment_word` is `None` for both. Proven by
+`core::vendor::tests::an_indices_row_typed_as_a_derivative_is_refused_not_promoted_to_an_index`
+(C4-CORE-01).

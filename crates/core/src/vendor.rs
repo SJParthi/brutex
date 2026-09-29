@@ -1500,7 +1500,16 @@ pub fn decode_master_row(vendor: Vendor, row: MasterRow<'_>) -> Result<Decoded, 
     // `index_segment_word` is `None` for every vendor that already writes an
     // index code, so this cannot reclassify a Groww or Dhan row: the
     // comparison is against `None` and fails immediately.
+    //
+    // ONLY AN `EQ` ROW IS PROMOTED. The index rows this promotion was written
+    // for carry `EQ` in the type column; a `FUT`, `CE` or `PE` under `INDICES`
+    // is a shape this build has never read, and promoting it would file a
+    // contract as the spot index it names. It is refused instead, which is
+    // what `segment_of` and `type_of` do with every other unread shape. D-0785.
     let ty = if vendor.index_segment_word() == Some(row.segment) {
+        if ty != "EQ" {
+            return Err(InstrumentError::Malformed);
+        }
         "IDX"
     } else {
         ty
@@ -3382,5 +3391,56 @@ mod tests {
         assert_eq!(parse_expiry("2026-08-4"), Err(InstrumentError::Malformed));
         // Year two characters short.
         assert_eq!(parse_expiry("26-08-04"), Err(InstrumentError::Malformed));
+    }
+
+    // =======================================================================
+    // C4 core batch 1 — D-0785 onward
+    // =======================================================================
+
+    /// A Zerodha `INDICES` row is promoted to an index only when its type word
+    /// is `EQ`, which is how every index row in this module's fixtures and in
+    /// `tests/zerodha_index.rs` is spelled. A derivative type under `INDICES`
+    /// is a row this build has never read, and it is refused rather than
+    /// filed as an index.
+    #[test]
+    fn an_indices_row_typed_as_a_derivative_is_refused_not_promoted_to_an_index() {
+        for ty in ["FUT", "CE", "PE"] {
+            let input = MasterRow {
+                vendor_id: "256265",
+                exchange: "NSE",
+                segment: "INDICES",
+                underlying: "",
+                trading_symbol: "NIFTY 50",
+                instrument_type: ty,
+                listing_class: "",
+                isin: "",
+                expiry: "2026-08-27",
+                strike_rupees: "24000",
+                option_side: "",
+            };
+            assert_eq!(
+                decode_master_row(Vendor::Zerodha, input),
+                Err(InstrumentError::Malformed),
+                "an INDICES row typed {ty} must be refused, not kept as an index"
+            );
+        }
+        // The control: the same row typed `EQ` is the vendor's index row.
+        let index = MasterRow {
+            vendor_id: "256265",
+            exchange: "NSE",
+            segment: "INDICES",
+            underlying: "",
+            trading_symbol: "NIFTY 50",
+            instrument_type: "EQ",
+            listing_class: "",
+            isin: "",
+            expiry: "",
+            strike_rupees: "",
+            option_side: "",
+        };
+        let kept =
+            listing(decode_master_row(Vendor::Zerodha, index).expect("decodes")).expect("kept");
+        assert_eq!(kept.key.kind, Kind::Index);
+        assert_eq!(kept.key.underlying.as_str(), "NIFTY");
     }
 }
