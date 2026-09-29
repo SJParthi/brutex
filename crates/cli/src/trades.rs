@@ -738,17 +738,43 @@ impl Trades {
     /// that SHRANK is refused rather than reindexed — append-only history was
     /// replaced, and silently re-walking it would hide that.
     ///
+    /// # A damaged row is recorded, not refused
+    ///
+    /// A refresh indexes each new row exactly as the cold walk in `index_of`
+    /// does: a bad seal, an invalid schema or a non-contiguous duplicate is
+    /// recorded as this handle's first integrity failure and indexing goes on.
+    /// It used to refuse on any recorded failure before reading the file, so
+    /// one damaged row anywhere made `/trades.json` drop its cached handle,
+    /// re-walk every row on the next request, and refuse the request after.
+    /// Refreshing promotes nothing; `append_all` and `confirm_durable` still
+    /// refuse past a recorded failure. D-0919.
+    ///
     /// # Errors
     ///
-    /// The same refusals `absorb_new_rows` makes: a shrunken file, a ragged
-    /// tail, an unreadable row, or a duplicate identity whose blocks are not
-    /// contiguous.
+    /// A shrunken file, a ragged tail, or a row that cannot be read.
     pub fn refresh(&mut self) -> Result<(), Refusal> {
-        self.absorb_new_rows()
+        let len = self.grown_length()?;
+        let at = self.scanned;
+        self.file
+            .seek(SeekFrom::Start(at))
+            .map_err(|why| format!("the trade row at byte {at} could not be sought: {why}"))?;
+        let mut buffered = std::io::BufReader::new(&mut self.file);
+        let mut raw = [0_u8; STRIDE_BYTES];
+        while self.scanned.saturating_add(STRIDE) <= len {
+            let at = self.scanned;
+            buffered
+                .read_exact(&mut raw)
+                .map_err(|why| format!("the trade row at byte {at} could not be read: {why}"))?;
+            let index = at.saturating_sub(HEADER) / STRIDE;
+            index_row(&mut self.blocks, &mut self.write_refusal, index, &raw);
+            self.scanned = at.saturating_add(STRIDE);
+        }
+        Ok(())
     }
 
-    fn absorb_new_rows(&mut self) -> Result<(), Refusal> {
-        self.refuse_integrity_failure_for_write()?;
+    /// The file's length, refused when it shrank below what this handle has
+    /// indexed or is not a header plus whole rows.
+    fn grown_length(&self) -> Result<u64, Refusal> {
         let len = self
             .file
             .metadata()
@@ -767,6 +793,12 @@ impl Trades {
                 self.path.display()
             ));
         }
+        Ok(len)
+    }
+
+    fn absorb_new_rows(&mut self) -> Result<(), Refusal> {
+        self.refuse_integrity_failure_for_write()?;
+        let len = self.grown_length()?;
         let mut raw = [0_u8; STRIDE_BYTES];
         while self.scanned.saturating_add(STRIDE) <= len {
             let at = self.scanned;
@@ -1151,47 +1183,59 @@ fn index_of(file: &mut File, len: u64) -> Result<Indexed, Refusal> {
         buffered.read_exact(&mut raw).map_err(|why| {
             format!("chosen-trade row {index} could not be read while indexing: {why}")
         })?;
-        if !Row::seal_matches(&raw) {
-            write_refusal.get_or_insert_with(|| {
-                format!("whole chosen-trade row {index} whose integrity seal failed")
-            });
-            continue;
-        }
-        let mut identity = [0_u8; 32];
-        identity.copy_from_slice(raw.get(..32).unwrap_or(&[0_u8; 32]));
-        if let Err(why) = Row::from_bytes(&raw) {
-            write_refusal.get_or_insert_with(|| {
-                format!("chosen-trade row {index} is sealed but its schema is invalid: {why}")
-            });
-        }
-
-        match blocks.get_mut(&identity) {
-            Some(block) if block.first.saturating_add(block.count) == index => {
-                block.count = block.count.saturating_add(1);
-            }
-            Some(_) => {
-                write_refusal.get_or_insert_with(|| {
-                    format!(
-                        "chosen-trade row {index} starts a non-contiguous duplicate block for run {}",
-                        hex32(&identity)
-                    )
-                });
-            }
-            None => {
-                blocks.insert(
-                    identity,
-                    Block {
-                        first: index,
-                        count: 1,
-                    },
-                );
-            }
-        }
+        index_row(&mut blocks, &mut write_refusal, index, &raw);
     }
     Ok(Indexed {
         blocks,
         write_refusal,
     })
+}
+
+/// Indexes one whole row, recording its first integrity failure rather than
+/// refusing. The cold walk (`index_of`) and a warm `Trades::refresh` both call
+/// this, so a refreshed handle indexes exactly what a fresh open would.
+fn index_row(
+    blocks: &mut std::collections::HashMap<[u8; 32], Block>,
+    write_refusal: &mut Option<Refusal>,
+    index: u64,
+    raw: &[u8; STRIDE_BYTES],
+) {
+    if !Row::seal_matches(raw) {
+        write_refusal.get_or_insert_with(|| {
+            format!("whole chosen-trade row {index} whose integrity seal failed")
+        });
+        return;
+    }
+    let mut identity = [0_u8; 32];
+    identity.copy_from_slice(raw.get(..32).unwrap_or(&[0_u8; 32]));
+    if let Err(why) = Row::from_bytes(raw) {
+        write_refusal.get_or_insert_with(|| {
+            format!("chosen-trade row {index} is sealed but its schema is invalid: {why}")
+        });
+    }
+
+    match blocks.get_mut(&identity) {
+        Some(block) if block.first.saturating_add(block.count) == index => {
+            block.count = block.count.saturating_add(1);
+        }
+        Some(_) => {
+            write_refusal.get_or_insert_with(|| {
+                format!(
+                    "chosen-trade row {index} starts a non-contiguous duplicate block for run {}",
+                    hex32(&identity)
+                )
+            });
+        }
+        None => {
+            blocks.insert(
+                identity,
+                Block {
+                    first: index,
+                    count: 1,
+                },
+            );
+        }
+    }
 }
 
 /// A run identity as lowercase hex, for a message a reader can search the
@@ -1688,6 +1732,120 @@ mod tests {
             before,
             "the A,B,A history is diagnosed, never repaired or extended"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ONE DAMAGED ROW MUST NOT REFUSE EVERY LATER READ, NOR MAKE EACH ONE COLD.
+    ///
+    /// `/trades.json` holds one read handle and calls `refresh` per request. A
+    /// read handle that opened over a bad-seal row carried that fact as a writer
+    /// refusal, and `refresh` refused on it before looking at the file -- so the
+    /// cached handle was dropped, the next request re-walked every row, and the
+    /// request after that refused again. A read-side refresh records a defect
+    /// the way the cold walk does and keeps indexing; writers still refuse.
+    #[test]
+    fn a_read_refresh_over_a_damaged_row_keeps_indexing_only_the_new_rows() {
+        let dir = std::env::temp_dir().join(format!(
+            "brutex-trades-read-refresh-damaged-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = Trades::path(&dir);
+        let healthy = row([0x71; 32], 0);
+        {
+            let mut store = Trades::open(&dir).expect("a fresh file opens");
+            store.append_all(&[healthy]).expect("the healthy block");
+        }
+        let mut corrupt = row([0x72; 32], 0).to_bytes();
+        corrupt[40] ^= 0x80;
+        append_raw(&path, &[corrupt]);
+
+        let mut reader =
+            Trades::open_read_bounded(&dir, u64::MAX).expect("a read handle opens over damage");
+        for _ in 0..2 {
+            reader
+                .refresh()
+                .expect("a recorded defect does not refuse a read-side refresh");
+        }
+
+        // Rows a peer appends later: one healthy block, then each defect kind.
+        let later = row([0x73; 32], 0);
+        let mut invalid = row([0x74; 32], 0).to_bytes();
+        invalid[36] = 9;
+        reseal(&mut invalid);
+        append_raw(
+            &path,
+            &[later.to_bytes(), invalid, corrupt, healthy.to_bytes()],
+        );
+        reader
+            .refresh()
+            .expect("new rows, damaged or not, are indexed rather than refused");
+        let cold = Trades::open_read_bounded(&dir, u64::MAX).expect("a cold reader opens");
+        assert_eq!(reader.scanned, cold.scanned);
+        assert_eq!(reader.write_refusal, cold.write_refusal);
+        assert!(
+            reader
+                .write_refusal
+                .as_deref()
+                .is_some_and(|why| why.contains("row 1") && why.contains("seal failed")),
+            "{:?}",
+            reader.write_refusal
+        );
+        let mut refreshed: Vec<_> = reader
+            .blocks
+            .iter()
+            .map(|(id, block)| (*id, block.first, block.count))
+            .collect();
+        let mut walked: Vec<_> = cold
+            .blocks
+            .iter()
+            .map(|(id, block)| (*id, block.first, block.count))
+            .collect();
+        refreshed.sort_unstable();
+        walked.sort_unstable();
+        assert_eq!(refreshed, walked, "refresh and the cold walk index alike");
+        let Some(Block { first, count }) = reader.block(&later.identity) else {
+            panic!("the healthy later block is indexed");
+        };
+        assert_eq!((first, count), (2, 1));
+        let Some(Block { first, count }) = reader.block(&healthy.identity) else {
+            panic!("the first healthy block stays indexed");
+        };
+        assert_eq!(
+            (first, count),
+            (0, 1),
+            "the repeated identity at row 5 never widens the first block"
+        );
+
+        // O(new rows): damage an already-indexed row in place. A refresh that
+        // re-walked history would see it; one that resumes at `scanned` does not.
+        {
+            use std::io::{Seek as _, SeekFrom, Write as _};
+            let mut peer = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .expect("the adversarial peer opens");
+            peer.seek(SeekFrom::Start(super::HEADER))
+                .expect("seek to row 0");
+            peer.write_all(&[0xff; STRIDE_BYTES])
+                .expect("row 0 is overwritten");
+            peer.sync_all().expect("the overwrite is durable");
+        }
+        reader
+            .refresh()
+            .expect("an unchanged length refreshes nothing");
+        assert_eq!(reader.scanned, cold.scanned);
+        assert_eq!(reader.write_refusal, cold.write_refusal);
+
+        let mut writer = Trades::open(&dir).expect("a writer opens to diagnose");
+        writer
+            .refresh()
+            .expect("refresh never promotes anything, so it does not refuse");
+        let why = writer
+            .append_all(&[row([0x75; 32], 0)])
+            .expect_err("a writer still refuses past damage");
+        assert!(why.contains("integrity seal failed"), "{why}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -9922,3 +9922,18 @@ lock; a reader never initialises, and a 1-byte header still refuses unchanged.
 `a_zero_length_data_file_left_by_a_failed_header_write_is_initialised_by_the_writer`
 pins all three. The same header window in Admission V4 and Finalization V4 is
 tracked by other ledger rows and is not changed here.
+
+## `/trades.json` refreshes past a damaged row in O(new rows) — D-0919
+
+W2-cli16-0 and W2-cli16-6. `Trades::refresh` refused as soon as the handle had
+recorded any integrity failure, before reading the file, so one damaged,
+schema-invalid or non-contiguous row anywhere in `chosen-trades.bin` made the
+cached `/trades.json` handle drop on every other request and re-walk every row
+on the one between. A refresh now indexes each new row as the cold walk does,
+through the one `index_row` both call, resuming at `scanned`: a row already
+indexed is not read again, and
+`a_read_refresh_over_a_damaged_row_keeps_indexing_only_the_new_rows` shows a
+row overwritten in place behind `scanned` is not seen by a refresh. Writers
+still refuse: `append_all` and `confirm_durable` go through `absorb_new_rows`,
+which refuses on the recorded failure first. The refresh is O(rows appended
+since the last refresh) row reads; it is not timed.

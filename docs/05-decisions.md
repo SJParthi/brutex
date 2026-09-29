@@ -43693,3 +43693,20 @@ statement of its cost. `docs/06-limits.md` now states it call by call, and
 `cli::selection_v6::source::tests::a_selection_v6_read_counts_its_population_replays_and_the_limits_say_so`
 counts each call site in the source and requires the section to quote it. No
 timing is claimed.
+
+### D-0919 — A `Trades` refresh records a damaged row and keeps indexing; only writers refuse — 2026-09-29
+
+**W2-cli16-0 and W2-cli16-6.** `Trades::refresh` was `absorb_new_rows`, which
+first refused on any recorded integrity failure. A read handle opened over one
+bad-seal, schema-invalid or non-contiguous row records that failure and opens,
+so the cached `/trades.json` handle refused its next refresh, was dropped, was
+reopened by a full walk on the following request, and refused again on the
+one after. The choice: `refresh` indexes each new row through `index_row`, the
+per-row step `index_of` now also calls, so a refreshed handle holds the same
+blocks and the same first failure as a cold open, and it reads only rows at
+or past `scanned`. It never refuses on a recorded failure. `append_all` and
+`confirm_durable` still call `absorb_new_rows`, which does, so no row is
+appended and nothing is promoted past damage. Pinned by
+`cli::trades::tests::a_read_refresh_over_a_damaged_row_keeps_indexing_only_the_new_rows`
+and, through `/trades.json`, by
+`api::trades::tests::a_damaged_row_of_another_run_does_not_refuse_a_healthy_run_on_later_requests`.

@@ -985,6 +985,51 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// W2-cli16-6: ONE DAMAGED ROW OF ANOTHER RUN MUST NOT REFUSE A HEALTHY RUN
+    /// ON EVERY OTHER REQUEST.
+    ///
+    /// The first request opens the cached handle over the damage; each later
+    /// one refreshes it. A refresh that refused on the recorded damage dropped
+    /// the handle and answered that request with a refusal. D-0919.
+    #[test]
+    fn a_damaged_row_of_another_run_does_not_refuse_a_healthy_run_on_later_requests() {
+        let dir = std::env::temp_dir().join(format!(
+            "brutex-api-trades-unrelated-damage-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let healthy = [0x6a; 32];
+        cli::trades::Trades::open(&dir)
+            .expect("trade store")
+            .append_all(&[trade_row(healthy, 0)])
+            .expect("the healthy row");
+        commit_trade_fixture(&dir, healthy, 1);
+
+        let mut damaged = trade_row([0x6b; 32], 0).to_bytes();
+        if let Some(byte) = damaged.get_mut(40) {
+            *byte ^= 0x80;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(cli::trades::Trades::path(&dir))
+            .expect("trade bytes");
+        std::io::Write::write_all(&mut file, &damaged).expect("an unrelated damaged row");
+        file.sync_all().expect("durable fixture");
+
+        let query = format!("identity={}", "6a".repeat(32));
+        for request in 0..3 {
+            let (status, _, body) = respond(Ok(dir.clone()), &query);
+            assert_eq!(
+                status,
+                axum::http::StatusCode::OK,
+                "request {request}: {body}"
+            );
+            assert_body_identity(&body, &"6a".repeat(32));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A WHOLE CHILD FILE LOST AFTER COMMIT IS CORRUPTION, NOT ABSENCE.
     ///
     /// The explicit zero-count receipt is the only case in which that same
