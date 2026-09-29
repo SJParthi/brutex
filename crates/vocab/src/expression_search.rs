@@ -46,7 +46,12 @@ pub enum Step {
 }
 
 /// A fixed-memory DFS cursor. No candidate set or historical bar is retained.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// Equality is checkpoint equality: two cursors are equal exactly when
+/// [`Cursor::encode`] writes the same bytes for both. The scratch program is
+/// not part of it, because `encode` does not write it and `decode` rebuilds it
+/// only below `at`.
+#[derive(Clone, Debug)]
 pub struct Cursor {
     offered: [u16; BITS],
     count: u16,
@@ -58,6 +63,14 @@ pub struct Cursor {
     digits: [u16; MAX_INSTRUCTIONS],
     code: [Instruction; MAX_INSTRUCTIONS],
 }
+
+impl PartialEq for Cursor {
+    fn eq(&self, other: &Self) -> bool {
+        self.encode() == other.encode()
+    }
+}
+
+impl Eq for Cursor {}
 
 impl Cursor {
     /// Start the fixed V1 grammar over an explicitly identified live alphabet.

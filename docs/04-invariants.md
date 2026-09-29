@@ -5354,3 +5354,12 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### C4 vocab batch 02 (D-0982, D-0983)
+
+| Id | Invariant | Test that proves it | Status |
+|---|---|---|---|
+| C4-VOCAB-02-01 | Two expression-search cursors are equal exactly when `encode` writes the same bytes for both; a cursor equals the decode of its own bytes after every grammar node, including right after a candidate. | `vocab` `tests/expression_search.rs` `a_cursor_equals_the_decode_of_its_own_bytes_after_every_node` | ✓ |
+| C4-VOCAB-02-02 | The pivot-chain exactness proof in `vocab::implication`, and the `engine` test message that repeats it, carry no `daily.rs:<line>` pointer, and every source excerpt the proof quotes is present verbatim in `daily.rs` or `orb.rs`; `bits_with` binds the band half before its loop over the plan. | `vocab` `tests/implication_pointers.rs` `the_pivot_proof_carries_no_line_number_pointer`, `every_excerpt_the_pivot_proof_quotes_is_in_the_source_it_names`, `the_line_pointer_detector_sees_the_shape_it_refuses`, `saturating_addition_keeps_the_rung_order_at_the_top_of_the_type` | ✓ |
+| C4-VOCAB-02-03 | Every present-tense position count in `vocab`'s prose (table size, next free position, headroom, live count, live `near_*` count) and the count in `Evaluator::positions`' doc equal the table's current values. | `vocab` `tests/table.rs` `the_present_tense_position_counts_in_this_crates_prose_match_the_table`; `indicators` `tests/evaluator_position_count.rs` `the_documented_evaluator_position_count_is_the_live_table` | ✓ |
+| C4-VOCAB-02-04 | The per-node prefix scan in `Cursor::advance` is stated in `docs/06-limits.md`, and each source line that section quotes exists in `expression_search.rs`. | `vocab` `tests/expression_search.rs` `the_per_node_prefix_scan_the_limit_names_is_the_code` | ✓ |

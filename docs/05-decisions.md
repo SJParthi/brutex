@@ -43666,3 +43666,51 @@ job.
   survived. `an_nse_cash_stock_consults_no_peer_even_one_holding_it` gives a
   second vendor the same stock and requires that nothing votes and nothing is
   named; the same two feeds holding an index do vote, as the control.
+
+### D-0982 — An expression-search cursor is equal to another exactly when their checkpoint bytes are equal — 2026-09-29
+
+**What happened.** `W3-vocab1-3`: `vocab::expression_search::Cursor` derived
+`PartialEq`, so equality compared its scratch `code` array as well as its
+state. `encode` does not write that array and `decode` rebuilds it only below
+`at`, while `advance` leaves the emitted instruction in `code[at]` when it
+returns a candidate. A cursor and the decode of its own bytes therefore
+compared unequal right after a candidate, although their encodings were equal.
+Production callers compare `.encode()`, so no run was affected.
+
+**The choice.** `PartialEq` is written by hand as
+`self.encode() == other.encode()`, and `Eq` is kept. The scratch program is
+not state: every slot below `at` is a function of `digits` and the alphabet,
+and every slot from `at` up is written before it is read. Equality is now the
+same relation a checkpoint comparison already used.
+`a_cursor_equals_the_decode_of_its_own_bytes_after_every_node` checks, after
+each of 64 single-node steps over the alphabet `[0, 369]`, that the decode of
+the bytes equals the cursor and that the cursor no longer equals its start. It
+fails on the derived impl at the first candidate.
+
+### D-0983 — State the expression-grammar node's prefix scan as a limit instead of rewriting it — 2026-09-29
+
+**What happened.** `W3-vocab1-0`: `Cursor::advance` counts one unit of work per
+grammar node, and each node revalidates its whole prefix through
+`valid_prefix`, which zeroes a 1,151-entry stack and walks the prefix,
+comparing sibling operand slices at each `And` or `Or`. `docs/06-limits.md`
+named the 4,096-node replay bound and nothing about the cost of one node.
+
+**The choice.** Record the cost, do not change it in this batch. Making a node
+O(1) needs an incremental operand stack carried and restored across
+backtracking, and the sibling comparison is a slice comparison whose length is
+the operand's; neither is a small change to a wire-versioned cursor, and the
+audit's own verdict was that the cost is undocumented rather than unbounded.
+`docs/06-limits.md` now has a section quoting the five source lines, and
+`the_per_node_prefix_scan_the_limit_names_is_the_code` requires each quoted
+line in both the source and that section, so the limit fails the build if the
+code changes under it.
+
+**Also in this batch, without a locked choice.** `ET-vocabulary-conditions-bits-1`
+replaced the line-number pointers in `vocab::implication`'s exactness proof,
+and the stale `daily.rs:579` pointer in an `engine` test message, with symbol
+names and quoted source; `implication_pointers.rs` refuses a `daily.rs:<line>`
+pointer in either file and finds every quoted excerpt in the file it is
+attributed to. `ET-vocabulary-conditions-bits-2` corrected the stale present-tense
+counts in `vocab`'s prose and one in `indicators::evaluator`, and
+`the_present_tense_position_counts_in_this_crates_prose_match_the_table` and
+`the_documented_evaluator_position_count_is_the_live_table` now read them.

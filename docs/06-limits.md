@@ -9864,3 +9864,24 @@ The text above is kept as it was written.
   doc to its body, read off the source, and
   `what_a_changed_rows_line_costs_is_named_in_part_and_read_off_the_source`
   finds each part named here and in that doc in the source that pays it.
+
+### One expression-grammar node is Θ(prefix), not O(1) (D-0983)
+
+`vocab::expression_search::Cursor::advance` counts one unit of `work` per
+grammar node, and the unit is not constant. Every tried instruction revalidates
+the whole prefix it ends:
+
+* `let prefix = self.code.get(..=at).ok_or(Refusal::Cursor)?;` then
+  `if !valid_prefix(prefix, usize::from(self.length)) {`.
+* `valid_prefix` zeroes a fixed stack, `let mut starts = [0_usize; MAX_INSTRUCTIONS];`
+  (`MAX_INSTRUCTIONS` is 1,151), and walks every instruction of the prefix,
+  `for (index, op) in code.iter().enumerate() {`.
+* At each `And` or `Or` it compares the two sibling operands as slices,
+  `if code.get(left..right) > code.get(right..index) {`.
+
+So one node costs a fixed 1,151-entry zeroing plus work proportional to the
+prefix depth `at`, which the fixed language bounds below 1,151 but which is not
+independent of it. The `work` counter and every node budget count nodes, not
+this walk. Nothing here is timed; the shape is read off the source, and
+`the_per_node_prefix_scan_the_limit_names_is_the_code` fails if any quoted line
+leaves `expression_search.rs` or this section.

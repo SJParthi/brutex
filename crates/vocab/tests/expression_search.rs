@@ -152,3 +152,67 @@ fn malformed_alphabets_and_checkpoint_fields_are_refused() {
     // A valid exact checkpoint must still be bound by the caller's identity and
     // seal. Structural validation alone cannot authenticate an arbitrary file.
 }
+
+/// `W3-vocab1-3`: equality is checkpoint equality.
+///
+/// The derived `PartialEq` compared the cursor's scratch program, which `encode`
+/// does not write and `decode` rebuilds only below `at`. Right after a candidate
+/// the slot at `at` still held the emitted instruction, so a cursor and the
+/// decode of its own bytes compared unequal while their encodings were equal.
+/// Checked after every single grammar node, and in both directions: equal bytes
+/// compare equal, and different progress compares unequal.
+#[test]
+fn a_cursor_equals_the_decode_of_its_own_bytes_after_every_node() {
+    let start = Cursor::new(&[0, 369]).unwrap();
+    let mut cursor = start.clone();
+    let mut work = 0;
+    let mut candidates = 0_u32;
+    for node in 0..64 {
+        let step = cursor.advance(1, &mut work).unwrap();
+        if matches!(step, Step::Candidate(_)) {
+            candidates += 1;
+        }
+        assert_eq!(
+            Cursor::decode(&cursor.encode()),
+            Ok(cursor.clone()),
+            "node {node}: equal bytes must compare equal"
+        );
+        assert_ne!(cursor, start, "node {node}: progress must compare unequal");
+    }
+    assert!(
+        candidates > 0,
+        "no candidate was emitted, so the defect's path was not taken"
+    );
+}
+
+/// `W3-vocab1-0`: one grammar node is not O(1), and `docs/06-limits.md` says so.
+///
+/// The limit (D-0983) quotes these lines as its evidence. If the node step stops
+/// validating the whole prefix, or stops zeroing a fixed stack, this fails and the
+/// limit must be restated rather than left describing code that no longer exists.
+#[test]
+fn the_per_node_prefix_scan_the_limit_names_is_the_code() {
+    const SOURCE: &str = include_str!("../src/expression_search.rs");
+    const LIMITS: &str = include_str!("../../../docs/06-limits.md");
+    for line in [
+        "let prefix = self.code.get(..=at).ok_or(Refusal::Cursor)?;",
+        "if !valid_prefix(prefix, usize::from(self.length)) {",
+        "let mut starts = [0_usize; MAX_INSTRUCTIONS];",
+        "for (index, op) in code.iter().enumerate() {",
+        "if code.get(left..right) > code.get(right..index) {",
+    ] {
+        assert!(
+            SOURCE.contains(line),
+            "expression_search.rs no longer has `{line}`"
+        );
+        assert!(
+            LIMITS.contains(line),
+            "docs/06-limits.md no longer quotes `{line}`"
+        );
+    }
+    assert_eq!(
+        MAX_INSTRUCTIONS, 1151,
+        "the limit states a 1,151-entry stack"
+    );
+    assert!(LIMITS.contains("### One expression-grammar node is Θ(prefix), not O(1) (D-0983)"));
+}
