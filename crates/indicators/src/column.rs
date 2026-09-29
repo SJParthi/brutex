@@ -2037,6 +2037,76 @@ pub(super) mod tests {
         assert_eq!(column.census().refused(), 0);
         assert!(first > 0, "a run cannot be warm on its first bar");
     }
+
+    /// The ordinary and the anchored path admit the same bars but one: the first
+    /// warm bar (ET-indicators-6, recorded not fixed by D-0782).
+    ///
+    /// The ordinary path reads warmth before `step`, and the fifth completed
+    /// session is installed by the rollover inside `step`, so it drops the first
+    /// bar of the first warm session -- the "one lost warm bar per run" this
+    /// module's doc prices. The anchored path installs every daily reference
+    /// strictly before the bar's IST day and then reads warmth, so it admits that
+    /// bar. Given daily references aggregated from the same sessions, every row
+    /// both columns hold is identical, and the anchored column is one row longer
+    /// at its head.
+    #[test]
+    fn the_anchored_column_admits_the_first_warm_bar_the_ordinary_one_drops() {
+        use crate::anchored::{DailyEligibility, DailyReference};
+
+        let bars = warm_run();
+        let references: Vec<DailyReference> = bars
+            .chunks(BARS_PER_SESSION)
+            .map(|session| {
+                let first = session.first().expect("a session has bars");
+                let last = session.last().expect("a session has bars");
+                let daily = Candle::new(
+                    first.ts_micros,
+                    first.open,
+                    session.iter().map(|b| b.high).max().unwrap_or(first.high),
+                    session.iter().map(|b| b.low).min().unwrap_or(first.low),
+                    last.close,
+                    session.iter().map(|b| b.volume).sum(),
+                    OI_NULL,
+                );
+                DailyReference::new(daily, DailyEligibility::Eligible)
+                    .expect("an aggregated fixture session is a usable daily bar")
+            })
+            .collect();
+
+        let mut ordinary_ev = evaluator(Availability::Absent);
+        let ordinary = Column::build(&bars, &mut ordinary_ev);
+        let mut anchored_ev = AnchoredEvaluator::new(
+            widths(),
+            Availability::Absent,
+            Thresholds::CLASSICAL,
+            &references,
+        )
+        .expect("one reference per strictly increasing day");
+        let anchored = AnchoredColumn::build(&bars, &mut anchored_ev);
+        let anchored = anchored.column();
+
+        let first = ordinary
+            .first_swept()
+            .expect("eight sessions warm the ordinary run");
+        assert_eq!(
+            anchored.first_swept(),
+            Some(first - 1),
+            "the anchored path admits the bar before the ordinary path's first"
+        );
+        assert_eq!(
+            anchored.len(),
+            ordinary.len() + 1,
+            "exactly one row differs"
+        );
+        assert_eq!(
+            first % BARS_PER_SESSION,
+            1,
+            "the dropped bar is the first bar of the first warm session"
+        );
+        assert_eq!(anchored.sources().get(1..), Some(ordinary.sources()));
+        assert_eq!(anchored.bits().get(1..), Some(ordinary.bits()));
+        assert_eq!(anchored.known().get(1..), Some(ordinary.known()));
+    }
 }
 
 #[cfg(test)]

@@ -43725,3 +43725,33 @@ whose source reads "THE CURSOR ONLY MOVES FORWARD" and which pushes
 non-decreasing and inside the execution series, so the new refusal does not
 fire on it; `validate.rs` only replaces some of its targets with `None`, which
 keeps it so.
+
+### D-0782 — The ordinary and anchored columns differ by the first warm bar, recorded not fixed — 2026-09-29
+
+**What was reported (ET-indicators-6).** Given the same one-minute bars and
+daily references aggregated from the same sessions, `Column::build` and
+`AnchoredColumn::build` admit different first rows. The ordinary
+`step_with_warmth` in `column.rs` reads `warmed_up()` before `step_known`, and
+the rollover that installs the fifth completed session runs inside the step,
+so the first bar of the first warm session is not admitted. The anchored
+`step_with_warmth` in `anchored.rs` calls `advance_before(signal_day)` and only
+then reads `warmed_up()`, so it admits that bar.
+
+**Reproduced on `origin/main` (2c209309).**
+`column::tests::the_anchored_column_admits_the_first_warm_bar_the_ordinary_one_drops`
+passes there unchanged: the anchored column's `first_swept()` is one less than
+the ordinary one's, its length is one more, the ordinary first row is the
+second bar of a session (`first % BARS_PER_SESSION == 1`), and the anchored
+`sources`, `bits` and `known` from index 1 on equal the ordinary ones.
+
+**Why it is not changed.** The ordinary path's pre-step read is a priced
+choice, not an accident: this module's doc states that reading before "is
+correct for *every* shape", that "the cost of reading it before is one lost
+warm bar per run", and that "paying it knowingly is different from paying it by
+accident". Moving either path's read point changes which rows every run of that
+path sweeps, which is a change to what runs compute and is outside a low
+severity follow-up. The test above pins the present difference so that any
+later change to either read point fails it and must be decided in its own
+entry.
+
+**Identity.** Not moved; no code changes.
