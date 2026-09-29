@@ -140,7 +140,9 @@ impl Bar {
     /// A **low** below one tick, or below zero, is deliberately allowed. The
     /// predecessor is explicit that a degenerate low is absorbed by the sell
     /// floor rather than refused, so that a single malformed bar in a backtest
-    /// is a conservative fill and not a crash.
+    /// is a conservative fill and not a crash. Both anchors that sell at a low
+    /// apply that floor: [`Anchor::AdverseExtreme`] and, since D-0771,
+    /// [`Anchor::PrintedExtreme`].
     ///
     /// # Examples
     ///
@@ -422,15 +424,20 @@ pub fn fills_at(
         // `worst_case_fills` picks the identical two prices and then moves each
         // one tick further against the position. That tick is a modelled cost;
         // here the anchors ARE the fills, so the pair is exactly two numbers the
-        // bar printed. No floor is applied and none is needed: `Bar::new` has
-        // already refused a sub-tick high, and a low it accepted is a price that
-        // traded.
+        // bar printed. The buy needs no floor: `Bar::new` has already refused
+        // a sub-tick high. The sell does (W3-costs1-1, D-0771): `Bar::new`
+        // admits a low below one tick or below zero, and nothing trades there,
+        // so a sale at it is the free or negative sale the module header's sell
+        // floor exists to refuse, and a negative notional `trip::position`'s
+        // no-overflow argument does not cover. It is floored at one tick, the
+        // floor `worst_case_fills` applies to the same anchor. A low of one tick
+        // or more is left exactly where it printed.
         Anchor::PrintedExtreme => {
             let (buy, sell) = match direction {
                 Direction::Long => (entry.high, exit.low),
                 Direction::Short => (exit.high, entry.low),
             };
-            Ok(Fills::at_open(buy, sell))
+            Ok(Fills::at_open(buy, sell.max(TICK)))
         }
         Anchor::Open => {
             // Direction selects which BAR each leg is on, and nothing else:
@@ -1075,5 +1082,47 @@ mod tests {
     fn each_anchor_names_itself_for_the_audit() {
         assert_eq!(Anchor::Open.as_str(), "best");
         assert_eq!(Anchor::AdverseExtreme.as_str(), "worst");
+    }
+
+    /// W3-costs1-1 and ET-strategies-trades-ranking-costs-4: a low
+    /// [`Bar::new`] admits below one tick is not a price that traded, so the
+    /// printed reading's sell is floored at one [`TICK`], the floor the
+    /// worst case already applies to the same anchor.
+    #[test]
+    fn the_printed_extreme_sell_is_floored_at_one_tick_as_the_worst_case_is() {
+        let healthy = bar(125_00, 118_00);
+        for low in [TICK.raw() - 1, 0, -5_000, i64::MIN] {
+            let degenerate = bar(120_00, low);
+            for (direction, entry, exit) in [
+                (Direction::Long, healthy, degenerate),
+                (Direction::Short, degenerate, healthy),
+            ] {
+                let printed = fills_at(entry, exit, direction, Anchor::PrintedExtreme)
+                    .expect("a bar Bar::new admitted is priced");
+                assert_eq!(printed.sell(), TICK, "{direction:?}: low {low}");
+                let want_buy = match direction {
+                    Direction::Long => entry.high(),
+                    Direction::Short => exit.high(),
+                };
+                assert_eq!(printed.buy(), want_buy, "{direction:?}: the buy is a print");
+                assert_eq!(printed.realized_slip_per_unit(), p(0));
+                // The worst case is never better than the printed reading: its
+                // sell, where it computes at all, is at or below this one.
+                if let Ok(adverse) = fills_at(entry, exit, direction, Anchor::AdverseExtreme) {
+                    assert!(adverse.sell() <= printed.sell(), "{direction:?}: low {low}");
+                }
+            }
+        }
+        // A low of one tick or more is a print and is left exactly where it is.
+        for low in [TICK.raw(), TICK.raw() + 1, 118_00] {
+            let printed = fills_at(
+                healthy,
+                bar(120_00, low),
+                Direction::Long,
+                Anchor::PrintedExtreme,
+            )
+            .expect("legal bars");
+            assert_eq!(printed.sell(), p(low), "low {low}");
+        }
     }
 }

@@ -43696,3 +43696,37 @@ data is deferred) and which `api`'s F&O walk asks, through
 from it. The two source-answer rows in `the_next_weekly_lands_on_the_source_answers` that
 pinned the defect (NIFTY 2025-09-01 to 2025-09-04, BANKNIFTY 2023-09-03 to
 2023-09-07) now pin 2025-09-02 and 2023-09-06. Invariant C4-COSTS-01.
+
+### D-0771 — Floor the printed-extreme sell at one tick, as the worst case already is — 2026-09-29
+
+**Defects (W3-costs1-1, ET-strategies-trades-ranking-costs-4).**
+`costs::fill::fills_at` with `Anchor::PrintedExtreme` sold at the bar low with
+no floor, under a comment saying "a low it accepted is a price that traded".
+`Bar::new` deliberately admits "A **low** below one tick, or below zero", so the
+sell could be ₹0.00 or negative: the free sale the module header's sell floor
+calls "an impossible one". Reproduced with the fix reverted (the `fill.rs`
+arm is byte-identical to `origin/main` 2c209309 in that state):
+`the_printed_extreme_sell_is_floored_at_one_tick_as_the_worst_case_is` fails
+with `left: Paisa(4) right: Paisa(5)` for a long whose exit low is 4 paisa, and
+`a_printed_extreme_sell_below_zero_prices_at_the_floor_and_does_not_overflow`
+panics "attempt to subtract with overflow" at the `trip::position` subtraction
+whose comment says it "cannot overflow", because a negative sell notional is
+outside the `[0, i64::MAX]` range that comment assumes.
+
+**The change.** The printed-extreme sell is `sell.max(TICK)`: a low of one tick
+or more is the print, unchanged; a low below one tick sells at one tick. That is
+the floor `worst_case_fills` already applies to the same anchor, and it keeps
+the printed reading's sell at or above the worst case's on every bar the test
+table offers. The buy leg is unchanged: `Bar::new` refuses a sub-tick high. A
+refusal was the alternative and was not taken: `runner::trade` calls this arm
+with `.ok()?`, so a refusal there would drop the trade without a word, which is
+the hidden fallback `CLAUDE.md` §4 bans, while the floor is the module's stated
+law for a degenerate low.
+
+**What it changes.** On the runner path `indicators::evaluator` refuses first
+(`if bar.low <= 0 { return Err(Corrupt::PriceNotPositive); }`), so a zero or
+negative low never reaches this arm there; a positive low below one tick (1 to 4
+paisa) can, and its worst-reading sell moves from that low up to 5 paisa.
+Whether any stored bar has such a low is UNMEASURED. No run identity term is a
+fill-model version; the `commit` term separates runs before and after this
+change. Invariant C4-COSTS-02.
