@@ -102,8 +102,9 @@ pub mod column;
 /// [`Sweep::levels`] keeps every survivor of every level to the end of the run,
 /// and that retention -- not the search space -- is what reached 7.4 GB and an
 /// exit 137 on a full-range sweep. [`keep::Streamed`] is the same walk holding
-/// two levels instead of all of them; [`keep::Best`] is the bounded retention a
-/// caller feeds from the level boundary. Neither is a depth parameter and the
+/// two levels instead of all of them; [`keep::Best`] is a bounded retention a
+/// caller could feed from the level boundary, and no production caller does
+/// (D-0762). Neither is a depth parameter and the
 /// module header says why at length.
 pub mod keep;
 pub mod resume;
@@ -2607,6 +2608,42 @@ mod tests {
             bytes_of(&from_masks.into_ordered()),
             bytes_of(&from_column.into_ordered()),
             "and the same rows out"
+        );
+    }
+
+    /// **`keep::Best` has no production caller, and its doc says so** (ET-13,
+    /// D-0762).
+    ///
+    /// Every use of `Best` outside `keep.rs` is in this test module, and
+    /// `runner::rank` keeps its own heap. This reads the engine's shipping source
+    /// and every other crate's whole `src` (see `crate::source_scan`), requires
+    /// that none of it names the type's constructors or imports it, and requires
+    /// the type's doc to say no production path calls it.
+    #[test]
+    fn best_has_no_production_caller_and_says_so() {
+        let uses = crate::source_scan::mentions(
+            &[
+                "Best::with_capacity",
+                "Best::default",
+                "keep::Best",
+                "keep::{",
+            ],
+            "",
+        );
+        assert!(
+            uses.is_empty(),
+            "keep::Best now has a production caller: {uses:?}. Revisit its doc and \
+             D-0762 before keeping this test's claim"
+        );
+        let keep = include_str!("keep.rs");
+        let doc = keep
+            .split("/// The best `cap` itemsets offered, in memory proportional to `cap`.")
+            .nth(1)
+            .and_then(|tail| tail.split("pub struct Best {").next())
+            .unwrap_or("");
+        assert!(
+            doc.contains("/// **No production path calls this.**"),
+            "the doc must state that no production path constructs `Best`"
         );
     }
 

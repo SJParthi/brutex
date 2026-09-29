@@ -43724,3 +43724,25 @@ early-exit count for `column.rs` drops from two to one.
 `support_fingerprinted`, so no run's ranking, count, trades or report changes.
 Only the value a test or the C-E-07 bench sees for the empty mask changes, and
 C-E-07 does not time the empty mask.
+
+### D-0762 — `keep::Best` has no production caller, and says so — 2026-09-29
+
+**What was wrong.** The crate doc called `keep::Best` "the bounded retention a
+caller feeds from the level boundary", and the type's doc said nothing about
+who calls it. Every use outside `keep.rs` sits in the engine's test module;
+`runner::rank` keeps its own heap. A reader could take the type for part of the
+live path.
+
+**The change.** No code path moves. The type's doc now says "No production path
+calls this" and names `runner::rank` as keeping its own heap; the crate doc
+says a caller could feed it and no production caller does.
+`engine::tests::best_has_no_production_caller_and_says_so` uses the D-0760
+scan to require no `Best::with_capacity`, `Best::default`, `keep::Best` or
+`keep::{` in any shipping engine region or any other crate's `src`, and that
+sentence in the doc.
+
+**Why it was not deleted or gated to tests.** `keep::Streamed`, `Tally` and the
+module's tests share the file, and the retention's cost and allocation
+findings (W3-engine1-2, W3-engine1-4) are open in a later batch against this
+type. Removing it would erase what those batches fix; the guard makes the
+first production caller visible instead.
