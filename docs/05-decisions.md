@@ -43666,3 +43666,31 @@ job.
   survived. `an_nse_cash_stock_consults_no_peer_even_one_holding_it` gives a
   second vendor the same stock and requires that nothing votes and nothing is
   named; the same two feeds holding an index do vote, as the control.
+
+### D-0976 — Price a ranked row from the compiler's widths, and pin the header to them — 2026-09-29
+
+**What was wrong (W3-runner4-3).** The `crates/runner/src/rank.rs` module
+header said a `Scored` was 120 bytes, pricing `Edge` at 64 for eight fields.
+`Edge` in `crates/runner/src/outcome.rs` declares fourteen: `n`, `mean_paisa`,
+`wins`, `win_sum`, `adverse_sum`, `favourable_sum`, `losses`, `loss_sum`,
+`min_win_paisa`, `max_win_paisa`, `max_loss_paisa`, `mismatched`, `refused`,
+`t`. The peak it derived from that width (67 MB at `keep = 10_000` on fourteen
+cores) and the `top_of` comment's forty-chunk example (48 MB, against 1.2 MB)
+were understated with it.
+
+**The change.** The header and the `top_of` comment now state `Scored` 168
+bytes (`ConditionMask` 48, `hits` 8, `Edge` 112), a heap row
+`Marked<Scored>` 176 bytes, the chunk-heap peak at about 98.6 MB
+(56 x 10,000 x 176), and the forty-chunk example at 70.4 MB against 1.8 MB.
+No code path changed; this is a documentation correction, so no run identity
+moves.
+
+**Why a test and not another hand count.** This paragraph has now carried a
+stale width three times. `rank::tests::the_header_widths_and_peak_are_the_measured_type_widths`
+builds every figure above from `core::mem::size_of` and requires the source to
+contain it, so the next field added to `Edge` fails the build until the text
+moves. It also requires `Scored` to be its three fields with no padding and
+every lens wrapper (`ByPayoff`, `ByPath`, `ByAsymmetry`) to have the
+`Marked<Scored>` width. On `origin/main` (2c209309) the test fails with
+`stale width in rank.rs`, naming the phrase it expected: a `Scored` of 168
+bytes, `ConditionMask` 48, `hits` 8, `Edge` 112.

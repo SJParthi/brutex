@@ -5354,3 +5354,9 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+## C4 runner fixes, batch 06 — D-0976, D-0977
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| C4-RUNNER-06-01 | **The ranked-row widths in `rank.rs` are the compiler's.** The module header's `Scored`, `ConditionMask` and `Edge` widths, the `Marked<Scored>` heap-row width, the fourteen-core `keep = 10_000` chunk-heap peak and the `top_of` forty-chunk example are each built from `size_of` and must appear in the source; `Scored` is its three fields with no padding, and every lens wrapper has the `Marked<Scored>` width. D-0976 | `runner::rank::tests::the_header_widths_and_peak_are_the_measured_type_widths` | ✓ |
