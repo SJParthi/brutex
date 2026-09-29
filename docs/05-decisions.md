@@ -43666,3 +43666,30 @@ job.
   survived. `an_nse_cash_stock_consults_no_peer_even_one_holding_it` gives a
   second vendor the same stock and requires that nothing votes and nothing is
   named; the same two feeds holding an index do vote, as the control.
+
+### D-0760 — The hit-set fingerprint has no production caller, and says so — 2026-09-29
+
+**What was wrong.** D-0454 says `support_fingerprinted` "repacks the same row
+result into stable 64-bar hit words so support identity remains
+byte-reproducible", and `docs/06-limits.md` priced "one support or fingerprint
+pass" beside the live support count. Both read as if a run used the
+fingerprint. None does: `Column::support_fingerprinted`, and the `HitSet` it
+returns, are reached only from engine tests and from the C-E-07 row in
+`crates/engine/benches/ratio.rs`. The live sweep calls `Column::support`.
+
+**The change.** No code path moves. The method's doc now opens a paragraph with
+"No production path calls this", the limits paragraph says no production
+source calls the fingerprint pass, and
+`engine::column::tests::the_fingerprinted_path_has_no_production_caller_and_says_so`
+reads every `.rs` file under `crates/engine/src` up to its first
+`#[cfg(test)]` line and every other crate's `src` whole, with line comments
+stripped, and requires no mention outside the definition and that sentence in
+the doc. `engine::source_scan::tests::nothing_after_an_engine_files_first_test_gate_ships`
+holds the cut sound. The guard fails the day a caller appears, so the doc
+cannot go stale silently.
+
+**Why it was not deleted or wired in.** C-E-07 names the bench row that calls
+it, and invariant rows are append-only. Wiring it into the sweep would dedupe
+candidates by hit set, which changes what a run ranks and counts; that is a
+change to what a run computes and needs its own decision and identity move,
+not a follow-up fix. D-0454 stays as written; this entry corrects it.

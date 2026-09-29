@@ -2372,6 +2372,11 @@ const WORST_K3: usize = LIVE_POSITIONS * (LIVE_POSITIONS - 1) * (LIVE_POSITIONS 
 #[cfg(test)]
 const WORST_K4: usize = WORST_K3 * (LIVE_POSITIONS - 3) / 4;
 
+/// Test-only reading of the workspace's own source, for "no production caller"
+/// guards.
+#[cfg(test)]
+mod source_scan;
+
 #[cfg(test)]
 mod tests {
     use super::*;

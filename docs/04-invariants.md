@@ -5354,3 +5354,9 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### C4 engine — batch engine-01 (D-0760 to D-0762)
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| C4-ENGINE-01 | **No production source calls the hit-set fingerprint, and its doc says so.** In every `.rs` file under `crates/engine/src`, the region before its first `#[cfg(test)]` line, and every `.rs` file under any other `crates/*/src` read whole, names `support_fingerprinted` nowhere but its own definition, and the method's doc contains "No production path calls this" (D-0760). The cut is sound because every top-level engine item after that line carries its own test gate | `engine::column::tests::the_fingerprinted_path_has_no_production_caller_and_says_so`; `engine::source_scan::tests::nothing_after_an_engine_files_first_test_gate_ships`; `engine::source_scan::tests::the_scan_reads_code_not_comments_and_cuts_only_the_engine` | ✓ |
