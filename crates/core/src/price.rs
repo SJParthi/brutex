@@ -618,7 +618,11 @@ mod tests {
         // 4_503_599_627_370_497, with no fraction to round, but the biased sum
         // 4_503_599_627_370_497.5 is not representable and rounded to ...498.
         let scaled = 45_035_996_273_704.97_f64 * 100.0;
-        assert_eq!(scaled, 4_503_599_627_370_497.0, "the witness is an integer");
+        assert_eq!(
+            scaled.to_bits(),
+            4_503_599_627_370_497.0_f64.to_bits(),
+            "the witness is an integer"
+        );
         assert_eq!(
             Paisa::from_rupees_half_up(45_035_996_273_704.97)
                 .expect("in range")

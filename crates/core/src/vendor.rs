@@ -3463,7 +3463,12 @@ mod tests {
     #[test]
     fn whitespace_outside_ascii_is_not_trimmed_from_an_id_a_series_or_a_class() {
         // The id. Each end on its own, and both together.
-        for raw in ["\u{a0}1333\u{3000}", "\u{a0}1333", "1333\u{3000}", " \u{a0}1333 "] {
+        for raw in [
+            "\u{a0}1333\u{3000}",
+            "\u{a0}1333",
+            "1333\u{3000}",
+            " \u{a0}1333 ",
+        ] {
             assert_eq!(VendorId::new(raw), None, "{raw:?} must be refused");
             let mut input = row("NSE", "CASH", "RELIANCE", "EQ", "", "");
             input.vendor_id = raw;
@@ -3475,7 +3480,9 @@ mod tests {
         }
         // Inside the id it is data, and ASCII padding is still trimmed.
         assert_eq!(
-            VendorId::new(" \t13\u{a0}33\n ").expect("interior").as_str(),
+            VendorId::new(" \t13\u{a0}33\n ")
+                .expect("interior")
+                .as_str(),
             "13\u{a0}33"
         );
 
