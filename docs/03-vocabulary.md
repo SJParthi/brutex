@@ -1,11 +1,15 @@
 # 03 — Condition vocabulary
 
-74 conditions. Bit index is the identity: **never renumbered, never reused,
-never reordered.** New conditions append at the next free bit.
+370 positions, 0–369. Bit index is the identity: **never renumbered, never
+reused, never reordered.** New conditions append at the next free bit.
 
-The mask is `u128`. Bits 0–73 are live; 74–127 are free headroom — 54 more
-conditions can be added without touching the mask type, the store, or any
-existing result.
+The mask is `ConditionMask`, six `u64` words: 384 bits, so 14 free positions
+remain before the mask must widen. Positions are live, retired (a duplicate of
+a live position, named in its row) or void (definitionally constant); §8 counts
+each. This opening used to describe the table as shipped — 74 conditions in a
+`u128` with 54 free — long after it passed 128 positions, and §2 said the
+evaluator produced a `u128`. `vocab::table::the_document_opening_states_the_current_table_and_mask`
+now reads both against `COUNT` and `ConditionMask::BITS`. D-0791.
 
 ---
 
@@ -23,8 +27,8 @@ that always evaluates false. The position is never recycled.
 
 ## 2. Evaluation contract
 
-For bar *i*, the evaluator produces one `u128` where bit *b* is set iff
-condition *b* holds at that bar.
+For bar *i*, the evaluator produces one `ConditionMask` where bit *b* is set
+iff condition *b* holds at that bar.
 
 A candidate mask *M* **hits** bar *i* iff:
 
@@ -80,15 +84,15 @@ documented rather than quietly producing zeros that look like signal.
 
 ### Classic pivots — bits 6–12
 
-| Bit | Name |
-|---:|---|
-| 6 | `near_pivot_p` |
-| 7 | `near_pivot_r1` |
-| 8 | `near_pivot_r2` |
-| 9 | `near_pivot_r3` |
-| 10 | `near_pivot_s1` |
-| 11 | `near_pivot_s2` |
-| 12 | `near_pivot_s3` |
+| Bit | Name | Status |
+|---:|---|---|
+| 6 | `near_pivot_p` | **retired** — duplicates 62 |
+| 7 | `near_pivot_r1` | live |
+| 8 | `near_pivot_r2` | live |
+| 9 | `near_pivot_r3` | live |
+| 10 | `near_pivot_s1` | live |
+| 11 | `near_pivot_s2` | live |
+| 12 | `near_pivot_s3` | live |
 
 ### Previous-day high / low — bits 13–18
 
@@ -103,19 +107,19 @@ documented rather than quietly producing zeros that look like signal.
 
 ### Fibonacci — bearish anchor (PDH) — bits 19–29
 
-| Bit | Name |
-|---:|---|
-| 19 | `near_fib_0` |
-| 20 | `near_fib_236` |
-| 21 | `near_fib_382` |
-| 22 | `near_fib_50` |
-| 23 | `near_fib_618` |
-| 24 | `near_fib_786` |
-| 25 | `near_fib_100` |
-| 26 | `near_fib_1272` |
-| 27 | `near_fib_1618` |
-| 28 | `near_fib_200` |
-| 29 | `near_fib_2618` |
+| Bit | Name | Status |
+|---:|---|---|
+| 19 | `near_fib_0` | **retired** — duplicates 17 |
+| 20 | `near_fib_236` | live |
+| 21 | `near_fib_382` | live |
+| 22 | `near_fib_50` | live |
+| 23 | `near_fib_618` | live |
+| 24 | `near_fib_786` | live |
+| 25 | `near_fib_100` | **retired** — duplicates 18 |
+| 26 | `near_fib_1272` | live |
+| 27 | `near_fib_1618` | live |
+| 28 | `near_fib_200` | live |
+| 29 | `near_fib_2618` | live |
 
 ### Bar shape — bits 30–36
 
@@ -234,6 +238,9 @@ documented rather than quietly producing zeros that look like signal.
 ---
 
 ## 6. Headroom
+
+**Superseded by §8, kept for the record.** The table below is the headroom as
+shipped; §8 is the headroom now. D-0791.
 
 | | |
 |---|---|
@@ -765,7 +772,7 @@ A bar with `close == open` is **neither direction**. It sets neither 37 `prior_n
 nor 38 `prior_n_bearish`, and it **breaks** 39 `prior_alternating`, because a bar that is
 neither direction cannot be the opposite of its neighbour.
 
-This matches what 30 `bar_bullish` and 31 `bar_up`/31 `bar_bearish` already do for the
+This matches what 30 `bar_bullish` and 31 `bar_bearish` already do for the
 current bar — a flat bar sets neither, and 32 `bar_doji` is what fires instead. The
 prior-direction ring used to store a `bool` and file a flat bar as bearish, so 38 asserted
 three bearish bars over a run in which 31 never fired once. It now stores an
