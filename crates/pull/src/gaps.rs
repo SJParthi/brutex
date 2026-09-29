@@ -1037,9 +1037,10 @@ mod tests {
     /// AGAINST IT.**
     ///
     /// Written because `cargo mutants` showed that replacing the cursor's
-    /// `< day` with `== day` survived the whole suite. Under that mutant one bar
-    /// before the range, or one bar on a closed day, stalls the cursor, and
-    /// every minute of the next open session reads as a `VendorHole`. GAP14-60.
+    /// `cursor < stored.len()` with `cursor == stored.len()` survived the whole
+    /// suite. Under that mutant one bar before the range, or one bar on a closed
+    /// day, stalls the cursor, and every minute of the next open session is
+    /// lost. GAP14-60.
     #[test]
     fn a_bar_before_the_range_or_on_a_closed_day_does_not_stall_the_next_session() {
         // 2026-01-26 is Republic Day (closed, see the test above); 2026-01-27
@@ -1070,7 +1071,11 @@ mod tests {
         assert_eq!(ledger.invalid_timestamps, 0);
         assert_eq!(ledger.held, 376);
         assert_eq!(ledger.expected, 375);
-        assert_eq!(ledger.lost_minutes(), 0, "a bar outside the range is skipped");
+        assert_eq!(
+            ledger.lost_minutes(),
+            0,
+            "a bar outside the range is skipped"
+        );
         assert!(
             ledger
                 .gaps
