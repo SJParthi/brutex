@@ -269,8 +269,9 @@ impl Snapshot {
 ///
 /// One request per category, one per index, one per constituent file: 4 + 2n
 /// for n indices, which is 300 for the 148 the exchange published on 14 Aug
-/// 2026. The join inside is [`crate::universe::resolve`]'s, which indexes the
-/// master **once** for the whole pass rather than per index.
+/// 2026. The join inside is [`crate::universe::MasterIndex`], built **once**
+/// before the first category and probed once per index, so the master is
+/// indexed once for the whole pass rather than per index. D-0966.
 pub async fn crawl<S: DocumentSource>(
     source: &S,
     host: &str,
@@ -283,6 +284,9 @@ pub async fn crawl<S: DocumentSource>(
     let mut failures = Vec::new();
     // AN INDEX WITH NO BASKET, KEPT APART FROM A FAILED ONE. See `note_unlinked`.
     let mut unlinked = Vec::new();
+    // THE MASTER IS INDEXED ONCE FOR THE PASS, never inside the loops below.
+    // D-0966.
+    let joined = crate::universe::MasterIndex::new(master, key);
 
     for category in Category::ALL {
         let listing_url = format!("{host}{}", category.path());
@@ -390,9 +394,7 @@ pub async fn crawl<S: DocumentSource>(
                     let refusal = note_refused(csv_url, why.to_string());
                     failures.push(refusal);
                 }
-                Ok(published) => resolutions.push(crate::universe::resolve(
-                    &link.path, feed, key, &published, master,
-                )),
+                Ok(published) => resolutions.push(joined.resolve(&link.path, feed, &published)),
             }
         }
     }
@@ -827,6 +829,45 @@ mod tests {
 
     fn day() -> Day {
         Day::new(2026, 8, 14).expect("a real day")
+    }
+
+    /// **The master is indexed once per pass, before the first category, and
+    /// never inside the per-index loop.** D-0966.
+    ///
+    /// `crawl` called `crate::universe::resolve` once per constituent file, and
+    /// that function rebuilt its key map and symbol set from the whole master
+    /// every time — O(master) per index, so O(indices x master) per pass, while
+    /// the `# Cost` section above said the master was indexed once. A slice
+    /// cannot count its own reads, so this reads the SHAPE of `crawl`: exactly
+    /// one `MasterIndex::new(` call, placed before the category loop, and no
+    /// call to the per-index `universe::resolve` that builds its own index.
+    #[test]
+    fn the_master_is_indexed_once_per_pass_not_once_per_index() {
+        let source = include_str!("resolve.rs");
+        let start = source
+            .find("pub async fn crawl<")
+            .expect("crawl is defined in this file");
+        let body = &source[start..];
+        let end = body.find("\n}\n").expect("crawl's body ends");
+        let body = &body[..end];
+        let build = concat!("MasterIndex", "::new(");
+        assert_eq!(
+            body.matches(build).count(),
+            1,
+            "crawl must build the master's index exactly once"
+        );
+        let built_at = body.find(build).expect("counted above");
+        let loop_at = body
+            .find("for category in Category::ALL")
+            .expect("crawl walks every category");
+        assert!(
+            built_at < loop_at,
+            "the index must be built before the category loop, not inside it"
+        );
+        assert!(
+            !body.contains(concat!("universe", "::resolve(")),
+            "the per-index join rebuilds the master's index on every call"
+        );
     }
 
     #[tokio::test]
