@@ -43693,3 +43693,30 @@ walk cannot see its files.
 (`batch::census_lines`, `research::render`) do not yet print the new
 bucket. The count is on the census they already hold; printing it is a `cli`
 change.
+
+### D-0766 — The store catalog does not follow a symbolic link; it counts it — 2026-09-29
+
+**What happened (W3-store1-5).** `store::catalog::walk` decided whether to
+descend with `Path::is_dir`, which follows a link. Reproduced on origin/main
+2c209309: one real month plus `bars/groww/NSE/back -> ../..` gave
+`Census { seen: 33, spot: 1, wrong_depth: 32, .. }` on macOS, the walk
+re-entering the tree through the link until `read_dir` failed on the kernel's
+link limit and that failure was swallowed. The comment above the walk's stack
+said the explicit stack dealt with a symlink loop; it did not. A link that
+resolved to nothing answered `is_dir` false and was classified as a bar file.
+
+**The change.** The walk reads `DirEntry::file_type`, which describes the entry
+itself. A symbolic link, to a file or a directory, resolving or not, is counted
+once in the new `Census::linked` bucket and toward `seen`, and is never
+followed; `reconciles` sums it with the other buckets. An entry whose type
+cannot be read is `unreadable` (D-0765). The same fixture now gives
+`seen 2, spot 1, linked 1, wrong_depth 0`
+(`a_symlink_loop_is_counted_once_and_not_walked`).
+
+**Why not follow links with a visited set.** `docs/02-store-format.md` §9 lists
+a symlink at a path component as a hazard that defeats vendor-prefix
+isolation, so a link under `bars/` is counted as something this store does
+not produce rather than resolved.
+
+**Not changed here.** The `cli` reports that print a catalog census do not
+yet print the new bucket, as with D-0765.

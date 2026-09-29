@@ -331,8 +331,14 @@ fn a_directory_the_walk_cannot_list_is_counted_not_dropped() {
     assert_eq!(out.held[0].symbol, "NIFTY");
 
     let unlocked = catalog::walk(&root).expect("the walk runs");
-    assert_eq!(unlocked.census.unreadable, 0, "nothing is unreadable once unlocked");
-    assert_eq!(unlocked.census.spot, 2, "both months are rows once unlocked");
+    assert_eq!(
+        unlocked.census.unreadable, 0,
+        "nothing is unreadable once unlocked"
+    );
+    assert_eq!(
+        unlocked.census.spot, 2,
+        "both months are rows once unlocked"
+    );
 }
 
 /// An unreadable entry is a part of the whole like every other bucket.
@@ -350,5 +356,100 @@ fn an_unreadable_entry_is_part_of_the_reconciliation() {
         spot: 1,
         ..Census::default()
     };
-    assert!(!lost.reconciles(), "the unreadable one must be counted somewhere");
+    assert!(
+        !lost.reconciles(),
+        "the unreadable one must be counted somewhere"
+    );
+}
+
+/// **A symlink back to an ancestor is one entry, not a second walk of the
+/// tree.** D-0766.
+///
+/// `is_dir` follows links, so one real file beside `back -> ../..` was seen
+/// 33 times on macOS (32 of them filed `wrong_depth`) before `read_dir` failed
+/// on the kernel's link limit (W3-store1-5, reproduced on origin/main
+/// 2c209309). The walk no longer follows a link at all.
+#[test]
+fn a_symlink_loop_is_counted_once_and_not_walked() {
+    let root = scratch("loop");
+    put(&root, "groww/NSE/INDEX/NIFTY/1min/2026-08.bin");
+    std::os::unix::fs::symlink("../..", root.join("bars/groww/NSE/back"))
+        .expect("a symlink is creatable");
+
+    let out = catalog::walk(&root).expect("the walk runs");
+    assert_eq!(
+        out.census.linked, 1,
+        "the link back is named once: {:?}",
+        out.census
+    );
+    assert_eq!(
+        out.census.seen, 2,
+        "one file and one link: {:?}",
+        out.census
+    );
+    assert_eq!(out.census.spot, 1);
+    assert_eq!(out.census.wrong_depth, 0, "no path was walked twice");
+    assert!(out.census.reconciles(), "{:?}", out.census);
+    assert_eq!(out.held.len(), 1);
+}
+
+/// **A link that resolves to nothing is `linked`, not a bar file.** D-0766.
+///
+/// `is_dir` answers false for a link it cannot resolve, so the walk filed a
+/// dangling `2026-09.bin` as a spot month that no reader could open. A link to
+/// a real file or directory is `linked` as well and is not followed, because
+/// the store's writer never makes one (`docs/02-store-format.md` §9).
+#[test]
+fn a_symlink_is_linked_whether_it_resolves_or_not() {
+    let root = scratch("linked");
+    let elsewhere = root.join("elsewhere/dhan/NSE/INDEX/NIFTY/1min");
+    std::fs::create_dir_all(&elsewhere).expect("creatable");
+    std::fs::write(elsewhere.join("2026-07.bin"), b"").expect("writable");
+    put(&root, "groww/NSE/INDEX/NIFTY/1min/2026-08.bin");
+    std::os::unix::fs::symlink(root.join("elsewhere/dhan"), root.join("bars/dhan"))
+        .expect("a symlink is creatable");
+    std::os::unix::fs::symlink(
+        root.join("nowhere.bin"),
+        root.join("bars/groww/NSE/INDEX/NIFTY/1min/2026-09.bin"),
+    )
+    .expect("a symlink is creatable");
+    std::os::unix::fs::symlink(
+        root.join("bars/groww/NSE/INDEX/NIFTY/1min/2026-08.bin"),
+        root.join("bars/groww/NSE/INDEX/NIFTY/1min/2026-10.bin"),
+    )
+    .expect("a symlink is creatable");
+
+    let out = catalog::walk(&root).expect("the walk runs");
+    assert_eq!(out.census.linked, 3, "{:?}", out.census);
+    assert_eq!(
+        out.census.spot, 1,
+        "only the real file is a row: {:?}",
+        out.census
+    );
+    assert_eq!(out.census.seen, 4, "{:?}", out.census);
+    assert!(out.census.reconciles(), "{:?}", out.census);
+    let months: Vec<(Vendor, String)> = out
+        .held
+        .iter()
+        .map(|h| (h.vendor, h.month.to_string()))
+        .collect();
+    assert_eq!(months, vec![(Vendor::Groww, "2026-08".to_owned())]);
+}
+
+/// A link is a part of the whole like every other bucket.
+#[test]
+fn a_link_is_part_of_the_reconciliation() {
+    let counted = Census {
+        seen: 2,
+        spot: 1,
+        linked: 1,
+        ..Census::default()
+    };
+    assert!(counted.reconciles(), "1 + 1 == 2");
+    let lost = Census {
+        seen: 2,
+        spot: 1,
+        ..Census::default()
+    };
+    assert!(!lost.reconciles(), "the link must be counted somewhere");
 }

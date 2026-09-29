@@ -39,8 +39,10 @@
 //! [`reconciles`](Census::reconciles): every file seen is either a spot
 //! instrument-month, a contract path, or one of the named refusals, and a
 //! directory the walk could not list is counted as `unreadable` rather than
-//! skipped (D-0765). **Nothing is dropped silently** — a store with a malformed directory reports how many
-//! and why, which is what `CLAUDE.md` §4 asks of a degradation.
+//! skipped (D-0765), and a symbolic link is counted as `linked` rather than
+//! followed (D-0766). **Nothing is dropped silently** — a store with a
+//! malformed directory reports how many and why, which is what `CLAUDE.md`
+//! §4 asks of a degradation.
 //!
 //! **UNVERIFIED as a measurement.** The bound is argued from the
 //! shape of the code and no bench in this workspace times it.
@@ -88,7 +90,8 @@ pub struct Held {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Census {
     /// Entries encountered under `bars/`, whatever became of them: every file,
-    /// and every directory or entry the walk could not read (D-0765).
+    /// every directory or entry the walk could not read (D-0765), and every
+    /// symbolic link, which is not followed (D-0766).
     pub seen: u64,
     /// Files that became a [`Held`].
     pub spot: u64,
@@ -113,6 +116,13 @@ pub struct Census {
     /// became a row. Counted once per directory or entry, not per file inside
     /// it, because the walk cannot see those files. D-0765.
     pub unreadable: u64,
+    /// An entry below `bars/` that is a symbolic link, to a file or to a
+    /// directory. **Not followed**: `docs/02-store-format.md` §9 lists a
+    /// symlink at a path component as a hazard that defeats vendor-prefix
+    /// isolation, and following one let a link back to an ancestor walk the
+    /// tree again at every level. Counted once per link, not per file behind
+    /// it. D-0766.
+    pub linked: u64,
 }
 
 impl Census {
@@ -131,8 +141,16 @@ impl Census {
             .saturating_add(self.unknown_rung)
             .saturating_add(self.malformed_month)
             .saturating_add(self.wrong_depth)
-            .saturating_add(self.unreadable);
+            .saturating_add(self.unreadable)
+            .saturating_add(self.linked);
         parts == self.seen
+    }
+
+    /// One symbolic link the walk did not follow: seen, and filed as
+    /// [`Census::linked`].
+    const fn count_linked(&mut self) {
+        self.seen = self.seen.saturating_add(1);
+        self.linked = self.linked.saturating_add(1);
     }
 
     /// One directory or entry the walk could not read: seen, and filed as
@@ -200,8 +218,9 @@ pub fn walk(root: &Path) -> Result<Holdings, CatalogError> {
     }
     let mut out = Holdings::default();
     // An explicit stack rather than recursion: the depth is bounded by the
-    // layout, but a store is operator-supplied and a symlink loop is theirs to
-    // make, not this walk's to blow the stack on.
+    // layout, and a store is operator-supplied. The stack did NOT deal with a
+    // symlink loop, as this comment once implied; not following links does
+    // (D-0766).
     let mut stack = vec![bars.clone()];
     while let Some(dir) = stack.pop() {
         let entries = match std::fs::read_dir(&dir) {
@@ -228,8 +247,20 @@ pub fn walk(root: &Path) -> Result<Holdings, CatalogError> {
                 out.census.count_unreadable();
                 continue;
             };
+            // `file_type` and not `is_dir`: `is_dir` FOLLOWS a link, so a link
+            // back to an ancestor walked the tree again at every level until
+            // the kernel's link limit made `read_dir` fail, and a link that
+            // resolved to nothing answered false and was filed as a bar file.
+            // `file_type` describes the entry itself, so a link is one entry
+            // and never a descent (D-0766).
+            let Ok(kind) = entry.file_type() else {
+                out.census.count_unreadable();
+                continue;
+            };
             let path = entry.path();
-            if path.is_dir() {
+            if kind.is_symlink() {
+                out.census.count_linked();
+            } else if kind.is_dir() {
                 stack.push(path);
             } else {
                 out.census.seen = out.census.seen.saturating_add(1);
@@ -341,3 +372,7 @@ fn parse_month(stem: &str) -> Result<YearMonth, PathError> {
         .map_err(|_| PathError::MonthOutOfRange { month: 0 })?;
     YearMonth::new(year, month)
 }
+
+#[cfg(test)]
+#[path = "catalog_tests.rs"]
+mod catalog_tests;
