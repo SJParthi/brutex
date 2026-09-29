@@ -415,9 +415,21 @@ fn note_unreadable_records(file: &BarFile, faults: &[String], rows: usize, skip:
 /// be named on the page — `CLAUDE.md` §4, degrade loudly.
 #[must_use]
 pub fn page(file: &BarFile, skip: usize, take: usize) -> (Vec<Bar>, Vec<String>) {
+    let (read, faults) = slots(file, skip, take);
+    (read.into_iter().flatten().collect(), faults)
+}
+
+/// [`page`], with every POSITION kept: `None` where the record would not read.
+///
+/// The window needs the gap and not only its name. A row after an unreadable
+/// record has no readable predecessor, and a page that met an unreadable
+/// record has still used that position up. [`page`] drops the `None`s, and
+/// with them both facts; W1-api1-10 found the window paying for that (D-0730).
+fn slots(file: &BarFile, skip: usize, take: usize) -> (Vec<Option<Bar>>, Vec<String>) {
     let n = file.header().n_valid;
     let mut rows = Vec::with_capacity(take.min(PAGE_BARS));
     let mut faults = Vec::new();
+    let mut read = 0usize;
     for i in skip..skip.saturating_add(take) {
         let Ok(index) = u64::try_from(i) else {
             break;
@@ -426,14 +438,20 @@ pub fn page(file: &BarFile, skip: usize, take: usize) -> (Vec<Bar>, Vec<String>)
             break;
         }
         match file.read_record(index) {
-            Ok(bar) => rows.push(bar),
+            Ok(bar) => {
+                read += 1;
+                rows.push(Some(bar));
+            }
             // COUNTED IN THE `Vec`, NOT EMITTED HERE. This arm is inside the
             // per-record loop; a line placed at it would be bounded by the data
             // and not by the request. The aggregate is one call below.
-            Err(why) => faults.push(format!("record {index}: {why}")),
+            Err(why) => {
+                rows.push(None);
+                faults.push(format!("record {index}: {why}"));
+            }
         }
     }
-    note_unreadable_records(file, &faults, rows.len(), skip);
+    note_unreadable_records(file, &faults, read, skip);
     (rows, faults)
 }
 
@@ -640,18 +658,40 @@ pub struct WindowBar {
     pub oichg_why: &'static str,
 }
 
+/// What stands behind a row in time, for its change columns.
+#[derive(Debug, Clone, Copy)]
+enum Behind {
+    /// The first record of the file: there is no predecessor to measure against.
+    Nothing,
+    /// The predecessor exists and would not read. Not "first in file", and not a
+    /// zero: the row before a gap is not this row's predecessor (D-0730).
+    Unreadable,
+    /// The record written immediately before.
+    Bar(Bar),
+}
+
 /// Folds the change columns over one file's records, IN THE ORDER WRITTEN.
+///
+/// `behind` is what precedes the first slot. A `None` slot is a record that
+/// would not read: it yields no row, and the row after it says
+/// `previous_unreadable` rather than measuring across the gap against whatever
+/// read before it.
 ///
 /// `crate::server::basis_points` is called rather than re-implemented: it rounds
 /// half away from zero and returns a named refusal, and a second spelling of
 /// that arithmetic would drift the first time either was touched.
-fn with_change(rows: Vec<Bar>) -> Vec<WindowBar> {
+fn with_change(behind: Behind, rows: Vec<Option<Bar>>) -> Vec<WindowBar> {
     let mut out = Vec::with_capacity(rows.len());
-    let mut previous: Option<Bar> = None;
-    for bar in rows {
+    let mut previous = behind;
+    for slot in rows {
+        let Some(bar) = slot else {
+            previous = Behind::Unreadable;
+            continue;
+        };
         let (chg, chg_why) = match previous {
-            None => (None, "first_bar_in_file"),
-            Some(before) => match crate::server::basis_points(before.close, bar.close) {
+            Behind::Nothing => (None, "first_bar_in_file"),
+            Behind::Unreadable => (None, "previous_unreadable"),
+            Behind::Bar(before) => match crate::server::basis_points(before.close, bar.close) {
                 Ok(bps) => (Some(bps), ""),
                 Err(crate::server::Unknown::Overflow) => (None, "overflow"),
                 Err(_) => (None, "previous_close_zero"),
@@ -661,21 +701,23 @@ fn with_change(rows: Vec<Bar>) -> Vec<WindowBar> {
         // cell. `OI_NULL` is the sentinel `CLAUDE.md` §7 names; a stored zero is
         // a stored zero and must not be erased into "unknown".
         let oi_null = bar.open_interest == OI_NULL;
-        let prev_oi = previous.map(|b| b.open_interest);
         let (oichg, oichg_why) = if oi_null {
             (None, "oi_null")
         } else {
-            match prev_oi {
-                None => (None, "first_bar_in_file"),
-                Some(before) if before == OI_NULL => (None, "oi_null_before"),
-                Some(before) => match crate::server::basis_points(before, bar.open_interest) {
-                    Ok(bps) => (Some(bps), ""),
-                    Err(crate::server::Unknown::Overflow) => (None, "overflow"),
-                    Err(_) => (None, "previous_oi_zero"),
-                },
+            match previous {
+                Behind::Nothing => (None, "first_bar_in_file"),
+                Behind::Unreadable => (None, "previous_unreadable"),
+                Behind::Bar(before) if before.open_interest == OI_NULL => (None, "oi_null_before"),
+                Behind::Bar(before) => {
+                    match crate::server::basis_points(before.open_interest, bar.open_interest) {
+                        Ok(bps) => (Some(bps), ""),
+                        Err(crate::server::Unknown::Overflow) => (None, "overflow"),
+                        Err(_) => (None, "previous_oi_zero"),
+                    }
+                }
             }
         };
-        previous = Some(bar);
+        previous = Behind::Bar(bar);
         out.push(WindowBar {
             bar,
             chg,
@@ -790,8 +832,14 @@ fn seek_page(
     let mut bars: Vec<WindowBar> = Vec::with_capacity(limit.min(PAGE_BARS));
     let mut faults = Vec::new();
     let mut seen = 0usize;
+    /* POSITIONS USED, NOT ROWS RETURNED. An unreadable record still occupies
+    its place in the window: it is named in `faults` on the page that covers
+    it. Counting only the rows that read made a page that met damage fill the
+    gap from the next file, and the next offset page returned those same rows
+    a second time (W1-api1-10, D-0730). */
+    let mut filled = 0usize;
     for file in files {
-        if bars.len() >= limit {
+        if filled >= limit {
             break;
         }
         let held = usize::try_from(file.header().n_valid).unwrap_or(usize::MAX);
@@ -801,7 +849,7 @@ fn seek_page(
             continue;
         }
         let skip_in_file = offset.saturating_sub(lo);
-        let take = limit.saturating_sub(bars.len());
+        let take = limit - filled;
         /* THE BLOCK IN FILE ORDER, WHICHEVER DIRECTION THE PAGE RUNS.
         `start..end` is always ascending because the change fold needs the
         order the records were WRITTEN; the reversal for a descending page
@@ -812,21 +860,29 @@ fn seek_page(
         } else {
             (skip_in_file, skip_in_file.saturating_add(take).min(held))
         };
-        let back = start.min(LOOKBACK);
-        let (block, mut bad) = page(file, start - back, end.saturating_sub(start - back));
-        let mut folded = with_change(block);
-        /* THE LOOKBACK ROW IS DROPPED AFTER IT HAS DONE ITS WORK. It exists to
-        give the row behind it a predecessor and is not part of the page. */
-        if back > 0 && !folded.is_empty() {
-            folded.drain(..back);
-        }
+        /* THE LOOKBACK IS READ ON ITS OWN, AND ITS FAILURE IS NOT THE PAGE'S.
+        It used to be the first record of the block and was dropped by
+        POSITION after the fold; with it unreadable, `page` had already left
+        it out, and the row dropped was the page's own first row, unnamed.
+        Read apart, an unreadable lookback costs the first row its change
+        cell (`previous_unreadable`) and nothing else. It is not added to
+        `faults`: it is not a row of this page, and the page that covers it
+        names it, so a reader walking every page meets each fault once. */
+        let behind = match start.checked_sub(LOOKBACK) {
+            None => Behind::Nothing,
+            Some(before) => file
+                .read_record(u64::try_from(before).unwrap_or(u64::MAX))
+                .map_or(Behind::Unreadable, Behind::Bar),
+        };
+        let (block, mut bad) = slots(file, start, end - start);
+        filled += end - start;
+        let mut folded = with_change(behind, block);
         if desc {
             folded.reverse();
         }
         bars.append(&mut folded);
         faults.append(&mut bad);
     }
-    bars.truncate(limit);
     (bars, faults)
 }
 
@@ -953,8 +1009,8 @@ pub fn window(
     let mut all: Vec<WindowBar> = Vec::with_capacity(usize::try_from(total).unwrap_or(0));
     for file in &files {
         let held = usize::try_from(file.header().n_valid).unwrap_or(usize::MAX);
-        let (rows, mut bad) = page(file, 0, held);
-        all.append(&mut with_change(rows));
+        let (rows, mut bad) = slots(file, 0, held);
+        all.append(&mut with_change(Behind::Nothing, rows));
         faults.append(&mut bad);
     }
 
@@ -1974,5 +2030,238 @@ mod window_tests {
         assert_eq!(got.bars.len(), 100, "and it still returns what exists");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Flips one byte inside record `index` of the test month, so the block
+    /// checksum that covers it refuses every record in that 73-record block.
+    fn damage_record(root: &std::path::Path, month: YearMonth, index: u64) {
+        let file = open_classified(
+            root,
+            PathParts {
+                vendor: Vendor::Dhan,
+                exchange: "NSE",
+                segment: "INDEX",
+                symbol: SYMBOL,
+                contract: None,
+                timeframe: Timeframe::MINUTE_1,
+                month,
+                file: FileKind::Bars,
+            },
+        )
+        .map_err(|why| why.message)
+        .expect("the month opens");
+        let at = file.layout().offset_of(index).expect("a committed record");
+        let path = file.path().to_path_buf();
+        drop(file);
+        let mut bytes = std::fs::read(&path).expect("the bar file reads");
+        let at = usize::try_from(at).expect("a test file offset fits usize");
+        bytes[at + 8] ^= 0xff;
+        std::fs::write(&path, bytes).expect("the damaged file writes");
+    }
+
+    fn ts_page(
+        root: &std::path::Path,
+        to: YearMonth,
+        desc: bool,
+        offset: usize,
+        limit: usize,
+    ) -> Window {
+        window(
+            root,
+            Vendor::Dhan,
+            "NSE",
+            "INDEX",
+            SYMBOL,
+            Timeframe::MINUTE_1,
+            None,
+            YearMonth::new(2026, 1).expect("m"),
+            to,
+            SortKey::Ts,
+            desc,
+            offset,
+            limit,
+            false,
+        )
+        .expect("a legal window")
+    }
+
+    /// **AN UNREADABLE LOOKBACK RECORD MUST NOT EAT THE PAGE'S FIRST ROW.**
+    ///
+    /// The lookback used to be read as part of the page block and then dropped
+    /// by POSITION, but `page` returns only the records that read. With the
+    /// lookback unreadable, the dropped row was the page's own first row, and
+    /// no fault named it (W1-api1-10, D-0730).
+    #[test]
+    fn an_unreadable_lookback_record_does_not_eat_the_first_row_of_the_page() {
+        let root = scratch("lookback-damaged");
+        let jan = YearMonth::new(2026, 1).expect("m");
+        write_month(&root, jan, 200, 1_000);
+        // Block 1 holds records 73..146; record 145 is the lookback of offset 146.
+        damage_record(&root, jan, 100);
+
+        let got = ts_page(&root, jan, false, 146, 5);
+        let closes: Vec<i64> = got.bars.iter().map(|r| r.bar.close).collect();
+        assert_eq!(
+            closes,
+            [1_146, 1_147, 1_148, 1_149, 1_150],
+            "the page starts at the offset asked for: {:?}",
+            got.faults
+        );
+        assert_eq!(got.bars[0].chg, None, "its predecessor did not read");
+        assert_eq!(got.bars[0].chg_why, "previous_unreadable");
+        assert_eq!(
+            got.bars[0].oichg_why, "oi_null",
+            "a null OI is still named first"
+        );
+        assert!(
+            got.bars[1].chg.is_some(),
+            "the second row has a read predecessor"
+        );
+        assert!(
+            got.faults.is_empty(),
+            "no record on this page failed, so none is named: {:?}",
+            got.faults
+        );
+
+        // A readable lookback still fills the first cell.
+        let ok = ts_page(&root, jan, false, 147, 2);
+        assert_eq!(ok.bars[0].bar.close, 1_147);
+        assert!(ok.bars[0].chg.is_some());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A DAMAGED RECORD USES UP ITS PAGE POSITION.** A page that met an
+    /// unreadable record used to fill the gap from the next file, and the next
+    /// offset page returned those same rows again. Walking every page, both
+    /// directions, must return each readable row exactly once and name each
+    /// unreadable one exactly once (W1-api1-10, D-0730).
+    #[test]
+    fn paging_across_a_damaged_block_returns_every_readable_row_exactly_once() {
+        let root = scratch("paging-damaged");
+        let jan = YearMonth::new(2026, 1).expect("m");
+        let feb = YearMonth::new(2026, 2).expect("m");
+        write_month(&root, jan, 100, 1_000);
+        write_month(&root, feb, 100, 2_000);
+        // Records 73..100 of January are one checksum block.
+        damage_record(&root, jan, 80);
+
+        let first = ts_page(&root, feb, false, 70, 10);
+        let closes: Vec<i64> = first.bars.iter().map(|r| r.bar.close).collect();
+        assert_eq!(
+            closes,
+            [1_070, 1_071, 1_072],
+            "no row is borrowed from February"
+        );
+        assert_eq!(
+            first.faults.len(),
+            7,
+            "records 73..80 are named: {:?}",
+            first.faults
+        );
+
+        for desc in [false, true] {
+            let mut seen: Vec<i64> = Vec::new();
+            let mut faults = 0usize;
+            for offset in (0..200).step_by(10) {
+                let got = ts_page(&root, feb, desc, offset, 10);
+                assert!(got.bars.len() <= 10);
+                seen.extend(got.bars.iter().map(|r| r.bar.close));
+                faults += got.faults.len();
+            }
+            let mut expected: Vec<i64> = (1_000..1_073).chain(2_000..2_100).collect();
+            if desc {
+                expected.reverse();
+            }
+            assert_eq!(
+                seen, expected,
+                "desc={desc}: each readable row once, in order"
+            );
+            assert_eq!(faults, 27, "desc={desc}: each unreadable record named once");
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A SORTED PAGE DOES NOT MEASURE A ROW ACROSS AN UNREADABLE BLOCK.**
+    ///
+    /// The reading path folded the change over the records that read, so the
+    /// first row after a damaged block was measured against the last row BEFORE
+    /// it — a real-looking number against a bar that is not its predecessor
+    /// (W1-api1-10, D-0730).
+    #[test]
+    fn a_sorted_page_names_the_row_after_a_damaged_block_rather_than_measuring_across_it() {
+        let root = scratch("scan-damaged");
+        let jan = YearMonth::new(2026, 1).expect("m");
+        write_month(&root, jan, 200, 1_000);
+        // Records 73..146 are one checksum block; 0..73 and 146..200 read.
+        damage_record(&root, jan, 100);
+
+        let got = window(
+            &root,
+            Vendor::Dhan,
+            "NSE",
+            "INDEX",
+            SYMBOL,
+            Timeframe::MINUTE_1,
+            None,
+            jan,
+            jan,
+            SortKey::Close,
+            false,
+            73,
+            2,
+            false,
+        )
+        .expect("a legal window");
+        let closes: Vec<i64> = got.bars.iter().map(|r| r.bar.close).collect();
+        assert_eq!(closes, [1_146, 1_147], "the 74th smallest readable close");
+        assert_eq!(
+            got.bars[0].chg, None,
+            "its predecessor, record 145, did not read"
+        );
+        assert_eq!(got.bars[0].chg_why, "previous_unreadable");
+        assert!(
+            got.bars[1].chg.is_some(),
+            "record 146 read, so 147 is measured"
+        );
+        assert_eq!(got.faults.len(), 73, "every unreadable record is named");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The open-interest column says the same thing for the same gap, and a
+    /// predecessor that read is still measured.
+    #[test]
+    fn the_fold_names_an_unreadable_predecessor_in_both_change_columns() {
+        let bar = |close: i64, open_interest: i64| Bar {
+            ts_micros: 0,
+            open: close,
+            high: close,
+            low: close,
+            close,
+            volume: 0,
+            open_interest,
+        };
+        let rows = with_change(
+            Behind::Unreadable,
+            vec![
+                Some(bar(100, 50)),
+                Some(bar(110, 55)),
+                None,
+                Some(bar(120, 60)),
+            ],
+        );
+        assert_eq!(rows.len(), 3, "an unreadable slot yields no row");
+        for row in [&rows[0], &rows[2]] {
+            assert_eq!((row.chg, row.chg_why), (None, "previous_unreadable"));
+            assert_eq!((row.oichg, row.oichg_why), (None, "previous_unreadable"));
+        }
+        assert_eq!(rows[1].chg, Some(1_000), "110 against 100 is +10%");
+        assert_eq!(rows[1].oichg, Some(1_000), "55 against 50 is +10%");
+
+        let first = with_change(Behind::Nothing, vec![Some(bar(100, 50))]);
+        assert_eq!(first[0].chg_why, "first_bar_in_file");
+        assert_eq!(first[0].oichg_why, "first_bar_in_file");
     }
 }

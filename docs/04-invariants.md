@@ -5354,3 +5354,10 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### Window pages over damaged records — W1-api1-10 (D-0730)
+
+| Id | Invariant | Test that proves it |
+|---|---|---|
+| C4-API-01 | A time-ordered window page starts at the offset asked for even when its lookback record is unreadable; that row's change says `previous_unreadable` and the lookback is not named on that page. An unreadable record uses up its page position, so walking every offset page in either direction returns each readable row once, in order, and names each unreadable record once | `an_unreadable_lookback_record_does_not_eat_the_first_row_of_the_page` and `paging_across_a_damaged_block_returns_every_readable_row_exactly_once` in `crates/api/src/bars.rs` |
+| C4-API-02 | The change fold never measures a row against a record before an unreadable one: the row after a gap says `previous_unreadable` in both change columns, on the seek path and on the sorted reading path | `a_sorted_page_names_the_row_after_a_damaged_block_rather_than_measuring_across_it` and `the_fold_names_an_unreadable_predecessor_in_both_change_columns` in `crates/api/src/bars.rs` |

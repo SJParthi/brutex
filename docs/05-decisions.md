@@ -43666,3 +43666,43 @@ job.
   survived. `an_nse_cash_stock_consults_no_peer_even_one_holding_it` gives a
   second vendor the same stock and requires that nothing votes and nothing is
   named; the same two feeds holding an index do vote, as the control.
+
+### D-0730 — A window page counts an unreadable record as a used position, reads its lookback apart, and never measures a change across a gap — 2026-09-29
+
+**What was wrong (W1-api1-10).** `api::bars::seek_page` read the one-record
+lookback as the first record of the page's block and then dropped the first
+folded row by position. `bars::page` returns only the records that read, so
+when the lookback was unreadable the dropped row was the page's own first
+row, and nothing named it. Reproduced on origin/main (2c209309): a 200-record
+month with block 1 (records 73 to 145) damaged, asked for offset 146 limit 5,
+returned closes `[1147, 1148, 1149, 1150]` with one fault naming record 145.
+Separately, the loop stopped on rows returned rather than positions used, so a
+page that met damage filled the gap from the next month: offset 70 limit 10
+over a January whose records 73 to 99 are unreadable returned
+`[1070, 1071, 1072, 2000, …, 2006]`, and the next offset page returned
+February's first rows again. The reading path (sort other than `ts`, or
+`extremes=1`) had the third form of the same fault: its change fold ran over
+the records that read, so the row after a damaged block was measured against
+the last row before it.
+
+**The change.** `bars::slots` reads a page keeping every position, `None`
+where a record would not read; `bars::page` is that with the `None`s dropped,
+so its callers are unchanged. `seek_page` counts `end - start` positions per
+file, reads the lookback on its own with one `read_record`, and keeps the
+lookback's failure out of `faults`, because it is not a row of that page and
+the page that covers it names it. The change fold takes what stands behind the
+first slot and says `previous_unreadable`, in both change columns, for a row
+whose predecessor would not read. The cost is unchanged: one extra
+`read_record` for the lookback, as before.
+
+**The new wire code.** `previous_unreadable` is a new `chg_why` and
+`oichg_why` value on `/bars/window.json`. The grid in `web/` has no sentence
+for it yet and shows its generic "unknown" text; that is a front-end follow-up
+for the web group, not done here because this batch is backend only.
+
+**Proof.** `an_unreadable_lookback_record_does_not_eat_the_first_row_of_the_page`
+and `paging_across_a_damaged_block_returns_every_readable_row_exactly_once`
+fail on origin/main with the outputs quoted above and pass with the change;
+`a_sorted_page_names_the_row_after_a_damaged_block_rather_than_measuring_across_it`
+and `the_fold_names_an_unreadable_predecessor_in_both_change_columns` pin the
+fold.
