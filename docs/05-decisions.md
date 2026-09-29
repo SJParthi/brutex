@@ -43740,3 +43740,71 @@ receipt and pass with the change.
 `handled_zero_variance_keeps_named_procedure_compatibility` keeps its White
 assertion on a constant beside a varying row, the case this entry leaves
 measured.
+
+### D-0973 — The legacy Romano--Wolf stepdown decides on the exact finite-resample rule, in one walk, and refuses an alpha above one — 2026-09-29
+
+**The defects.** Three findings on one private function,
+`romano_wolf_aligned`, behind the public `romano_wolf` and
+`romano_wolf_receipt`:
+
+- **GAP5-52.** It rejected a strategy whose statistic exceeded a rounded
+  `1 - alpha` quantile of the bootstrap maxima, where
+  `romano_wolf_adjusted_p_values_v1` and
+  `ExactResamplingPValueV1::rejects_at_ppm` decide on the exact
+  `(1 + strict exceedances) / (B + 1) <= alpha` rule. The two disagreed. The
+  test `the_stepdown_rejects_exactly_what_the_adjusted_receipt_rejects`
+  compares 3,000 decisions (40 seeds x 5 shifts x 5 alphas x 3 strategies,
+  400 draws) and on `origin/main` (2c209309) failed with
+  `329 disagreements`: 164 at alpha 0, 164 at alpha 1 ppm and 1 at alpha
+  1,000,000 (seed 23, shift 1, strategy 2). The grid found none at 50,000 or
+  100,000 ppm; the finding's own probe did, at 1,000 draws: "tried=2000
+  legacy_only=1 [(268, 2, 51)] exact_only=2 [(178, 5, 50), (339, 2, 49)]".
+- **W3-runner1-4.** `romano_wolf` passed `alpha_ppm` unchecked, and
+  `1_000_000 - alpha` saturated to the smallest bootstrap maximum, so an
+  alpha above one rejected almost every strategy while `romano_wolf_receipt`
+  refused the same input. `an_alpha_above_one_rejects_nothing` failed on
+  `origin/main` with "alpha 1000001 is not a probability".
+- **W3-runner1-1.** Every round of the stepdown recomputed every survivor's
+  resampled mean over every draw: O(R·B·S·N) for R rounds, undocumented.
+  `each_null_statistic_is_computed_once_however_many_rounds` counts the null
+  statistics computed for eight strategies at 300 draws over a two-round
+  stepdown; on `origin/main` the count was 3,300, not 2,400.
+
+**The change.** One rewrite of `romano_wolf_aligned`:
+
+- The rejection test is the exact rule: a survivor is rejected in a round
+  when fewer than `floor((B + 1) * alpha_ppm / 1_000_000)` of the maxima
+  over the surviving set strictly exceed its statistic. The statistic,
+  canonical order, tie rule, index matrix and seed are the adjusted
+  receipt's, so the common `sqrt(n)` factor the legacy statistic carried on
+  both sides of the comparison is gone. `quantile`, its only user gone, is
+  removed.
+- The surviving set is always a suffix of the canonical order, so one walk
+  from the weakest strategy builds every suffix's maxima once and keeps each
+  suffix's bar (the `admissible`-th largest maximum, by
+  `select_nth_unstable_by`); the rounds read the bars forwards. Cost
+  O(S·B·N + S·B + S log S) time and O(B·N + B + S) space, not
+  measured by a bench.
+- An `alpha_ppm` above `1_000_000` and zero draws return empty, the legacy
+  vector's rendering of malformed input; `romano_wolf_receipt` already
+  refused both.
+- A zero-variance strategy is never rejected. Its statistic and every null
+  draw of it are `0.0`, so under the exact rule alone no draw would exceed
+  it and it would earn the strongest probability the draws can express --
+  the point mass D-0972 refuses for White. The adjusted receipt refuses such
+  a family outright; this legacy vector keeps answering it, as it always
+  has, without rejecting that row.
+
+**What a caller now sees.** A family with no zero-variance row gets the
+adjusted receipt's decisions at every alpha, and nothing at alpha 0. Rounds
+keep their meaning and, within a round, ascending caller position. The one
+non-test caller outside `runner` is `cli`'s audit, which passes
+`runner::bootstrap::romano_wolf(..).len()` to the report's Romano--Wolf row,
+so that count can change where the old boundary and the exact rule disagreed.
+
+**Tests.** `the_stepdown_rejects_exactly_what_the_adjusted_receipt_rejects`,
+`alpha_zero_rejects_nothing`, `an_alpha_above_one_rejects_nothing` and
+`each_null_statistic_is_computed_once_however_many_rounds` fail on
+`origin/main` and pass with the change.
+`a_strategy_that_never_varied_is_never_rejected` passes on both: it pins
+the zero-variance rule the exact boundary would otherwise break.

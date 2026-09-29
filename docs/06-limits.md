@@ -9864,3 +9864,24 @@ The text above is kept as it was written.
   doc to its body, read off the source, and
   `what_a_changed_rows_line_costs_is_named_in_part_and_read_off_the_source`
   finds each part named here and in that doc in the source that pays it.
+
+---
+
+## The legacy Romano--Wolf stepdown's cost is stated, and its thresholds are the adjusted receipt's — D-0973, 29 September 2026
+
+`romano_wolf` and `romano_wolf_receipt` walk the canonical order once:
+O(S·B·N + S·B + S log S) time for S strategies, B draws and N periods,
+and O(B·N + B + S) space. The `S·B` term is one `select_nth_unstable_by` per
+suffix, whose documentation in the pinned toolchain says its fallback
+"guarantees linear runtime for all inputs". The former loop was O(R·B·S·N) over R
+rounds and this file did not say so. None of these is measured by a bench;
+`each_null_statistic_is_computed_once_however_many_rounds` counts the null
+statistics (2,400 for eight strategies at 300 draws) rather than timing them.
+
+§74's statement that `romano_wolf` "does not expose its per-round critical
+thresholds" still holds. What changed is what they are: each is a bar on the
+exact `(1 + count) / (B + 1)` rule, and
+`the_stepdown_rejects_exactly_what_the_adjusted_receipt_rejects` checks the
+resulting decisions against `romano_wolf_adjusted_p_values_v1` over a
+3,000-decision grid. That is a grid, not a proof at every discrete equality
+boundary.
