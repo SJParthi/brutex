@@ -43730,3 +43730,21 @@ paisa) can, and its worst-reading sell moves from that low up to 5 paisa.
 Whether any stored bar has such a low is UNMEASURED. No run identity term is a
 fill-model version; the `commit` term separates runs before and after this
 change. Invariant C4-COSTS-02.
+
+### D-0772 — Refuse an open outside its bar under its own name — 2026-09-29
+
+**Defect (W3-costs1-2).** `costs::fill::Bar::new` refused an open outside
+`low..=high` as `CostError::InvertedBar { high, low: open }`, whose message is
+"a bar's low {low} is above its high {high}". For `Bar::new(98_00, 101_00,
+99_00)` that printed "a bar's low 9800 is above its high 10100", which is false:
+the low is 9900 and the open is below it. Reproduced with the fix reverted:
+`an_open_outside_its_bar_is_reported_as_that_and_not_as_an_inverted_bar` fails
+with `left: "a bar's low 9800 is above its high 10100; ..."`.
+
+**The change.** A new `CostError::OpenOutsideBar { open, high, low }` (the enum
+is `#[non_exhaustive]`) carries each value in its own field and prints "a bar's
+open {open} is outside its own range {low}..={high}; it is refused rather than
+filled at". A bar whose low is above its high is still `InvertedBar`, whatever
+its open. Which bars are refused is unchanged; only the error that names the
+refusal moves. `runner::trade` discards this error with `.ok()?`, so no run
+output changes. Invariant C4-COSTS-03.

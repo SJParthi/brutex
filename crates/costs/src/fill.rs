@@ -136,6 +136,8 @@ impl Bar {
     /// * [`CostError::InvertedBar`] when the low is above the high. That is not
     ///   a wide bar or a thin one, it is two numbers in the wrong order, and
     ///   swapping them silently would fill both legs off the wrong anchors.
+    /// * [`CostError::OpenOutsideBar`] when the low and the high are in order
+    ///   but the open is outside them.
     ///
     /// A **low** below one tick, or below zero, is deliberately allowed. The
     /// predecessor is explicit that a degenerate low is absorbed by the sell
@@ -177,10 +179,14 @@ impl Bar {
         // `low <= open <= high` and this module expressed it as `low <= high`,
         // on the grounds that the open never entered a computation. It does
         // now, so an open outside its own bar is refused rather than filled at.
+        // It is refused under its own name (W3-costs1-2, D-0772): the high and
+        // the low are in order here, so `InvertedBar` would put the open in
+        // the low's field and state a falsehood.
         if open.raw() < low.raw() || open.raw() > high.raw() {
-            return Err(CostError::InvertedBar {
+            return Err(CostError::OpenOutsideBar {
+                open: open.raw(),
                 high: high.raw(),
-                low: open.raw(),
+                low: low.raw(),
             });
         }
         Ok(Self { open, high, low })
@@ -1124,5 +1130,48 @@ mod tests {
             .expect("legal bars");
             assert_eq!(printed.sell(), p(low), "low {low}");
         }
+    }
+
+    /// W3-costs1-2: an open outside its own bar is refused under its own name,
+    /// with the open, the high and the low each in its own field, and not as
+    /// an inverted bar with the open in the low's place.
+    #[test]
+    fn an_open_outside_its_bar_is_reported_as_that_and_not_as_an_inverted_bar() {
+        let below = Bar::new(p(98_00), p(101_00), p(99_00)).expect_err("below the low");
+        assert_eq!(
+            below.to_string(),
+            "a bar's open 9800 is outside its own range 9900..=10100; \
+             it is refused rather than filled at"
+        );
+        let above = Bar::new(p(102_00), p(101_00), p(99_00)).expect_err("above the high");
+        assert_eq!(
+            above.to_string(),
+            "a bar's open 10200 is outside its own range 9900..=10100; \
+             it is refused rather than filled at"
+        );
+        assert_eq!(
+            below,
+            CostError::OpenOutsideBar {
+                open: 98_00,
+                high: 101_00,
+                low: 99_00
+            }
+        );
+        assert_eq!(
+            above,
+            CostError::OpenOutsideBar {
+                open: 102_00,
+                high: 101_00,
+                low: 99_00
+            }
+        );
+        // An inverted bar is still reported as one, whatever its open.
+        assert_eq!(
+            Bar::new(p(100_00), p(99_00), p(101_00)),
+            Err(CostError::InvertedBar {
+                high: 99_00,
+                low: 101_00
+            })
+        );
     }
 }
