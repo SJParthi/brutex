@@ -1136,7 +1136,7 @@ mod tests {
         let _warm = at(&large, 10_000);
 
         // THE FASTEST OF SEVERAL, INTERLEAVED. One ~1 ms sample per size failed
-        // on a shared runner at 3.09× (D-0698): a single preemption landing in
+        // on a shared runner at 3.09× (D-0730): a single preemption landing in
         // the larger sample is enough. Interference only ever ADDS time, so the
         // minimum of each size is the least-disturbed estimate of its cost, and
         // alternating the sizes spreads any slow stretch across both. A
