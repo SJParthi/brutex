@@ -43666,3 +43666,26 @@ job.
   survived. `an_nse_cash_stock_consults_no_peer_even_one_holding_it` gives a
   second vendor the same stock and requires that nothing votes and nothing is
   named; the same two feeds holding an index do vote, as the control.
+
+### D-0698 — Time the index-link dedup test as the fastest of seven interleaved samples, not one — 2026-09-29
+
+**What happened.** The scheduled CI run on `main` at 2c209309 (run
+36405358825, 2026-09-28) failed Gates 3-6 on one test,
+`pull::nse::tests::deduplicating_index_links_costs_one_probe_each_rather_than_a_scan`:
+*"doubling the links multiplied the cost by 3.09×"*, 966.607µs for 5,000
+links against 2.983758ms for 10,000. The next run on the same commit
+(36421476503) passed. No code on that path changed between them.
+
+**Why it was noise, not a regression.** The dedup is still one `HashSet`
+probe per link. The test took ONE sample of each size, each about a
+millisecond, so a single preemption or page fault on a shared runner landing
+in the larger sample was enough to cross the 3× ceiling.
+
+**The change.** Both sizes are warmed, then sampled seven times, alternating,
+and each size keeps its minimum. Interference only adds time, so the minimum
+is the least-disturbed estimate; alternating spreads a slow stretch across
+both sizes. The 3× ceiling is unchanged: a quadratic dedup quadruples its
+minimum as surely as its single sample. This is a test-only change; the
+production function is untouched. It reduces the chance of a false failure
+and does not remove it. The ratio remains a wall-clock measurement on a
+shared machine, and the bound remains UNVERIFIED as a bench (§3 rule 6).
