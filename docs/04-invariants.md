@@ -5354,3 +5354,9 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### Pull batch 05 — the gap cursor, the 2xx refusal path, the stated offset
+
+| Id | Invariant | Test that proves it | Status |
+|---|---|---|---|
+| C4-PULL-05-01 | The gap ledger steps its cursor past a stored bar dated before the day it is auditing: one bar on a closed day, or one bar the day before `first`, leaves the next open session with zero lost minutes and no `VendorHole`. | `pull::gaps::tests::a_bar_before_the_range_or_on_a_closed_day_does_not_stall_the_next_session` | ✓ |
