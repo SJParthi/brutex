@@ -43666,3 +43666,30 @@ job.
   survived. `an_nse_cash_stock_consults_no_peer_even_one_holding_it` gives a
   second vendor the same stock and requires that nothing votes and nothing is
   named; the same two feeds holding an index do vote, as the control.
+
+### D-0952 — Refuse a rolling open-interest cell that is not a count, instead of storing a zero, a truncation or the null sentinel — 2026-09-29
+
+**What was wrong (GAP16-22).** `pull::rolling::read` read every present
+open-interest cell through `number`, which answered `0` for a cell it could not
+read, truncated a fraction, and passed a literal `i64::MIN` through. That value
+is `OI_NULL`, the store's open-interest null (`CLAUDE.md` §7). So a cell of
+`"4200"` or `true` was stored as a measured zero, `1234.5` as `1234`, and
+`-9223372036854775808` as an absence the vendor never stated. Reproduced on
+origin/main code with the test added: `rolling::tests::an_open_interest_cell_that_is_not_a_count_is_refused`
+failed with `"4200" gave Ok([Row { .. open_interest: 0 }, ..])`.
+
+**The choice.** Refuse, not degrade. A present open-interest cell is now read
+by `rolling::count`: an integer is the value; a decimal is accepted only when
+`csv::paisa` reads it as a whole number; a negative is refused, because
+`store::format::Bar::counts_are_sane` would refuse it later without naming the
+cell; and `i64::MIN` is refused, as `http::one_number` already refuses it on
+the intraday path. The refusal is a new `RollingError::Uncountable` carrying
+the field name and the cell's text. `null` and an absent cell still read as
+`OI_NULL`, and `0` still reads as a real zero. The test drives each refused
+spelling, and `0`, `4200`, `4200.0` and `null` as controls.
+
+**Not changed.** Volume and timestamp cells still go through `number`, which
+still answers `0` for a cell it cannot read. The ledger row named open
+interest, and this entry changes nothing else; the doc comment on `number` says
+so.
+

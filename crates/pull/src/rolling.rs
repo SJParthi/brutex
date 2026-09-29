@@ -264,6 +264,14 @@ pub enum RollingError {
         /// Which field.
         field: &'static str,
     },
+    /// A count cell that is not a non-negative whole number, or that is the
+    /// store's own null sentinel. GAP16-22, D-0952.
+    Uncountable {
+        /// Which field.
+        field: &'static str,
+        /// The cell exactly as the vendor wrote it.
+        text: String,
+    },
 }
 
 impl core::fmt::Display for RollingError {
@@ -308,6 +316,13 @@ impl core::fmt::Display for RollingError {
             Self::Unrepresentable { field } => {
                 write!(f, "a `{field}` value does not fit paisa as an i64")
             }
+            Self::Uncountable { field, text } => write!(
+                f,
+                "a `{field}` cell holds {text}, which is not a non-negative whole \
+                 count, or is i64::MIN, the store's open-interest null sentinel \
+                 (CLAUDE.md §7). Refused rather than stored as a zero, a \
+                 truncation or an absence the vendor did not state"
+            ),
         }
     }
 }
@@ -553,10 +568,16 @@ pub fn read(
             // sentinels it; open interest was the one of the three that
             // collapsed absence into a real number. `CLAUDE.md` §7 gives it a
             // sentinel precisely so the two can be told apart.
-            open_interest: oi.map_or(OI_NULL, |a| match a.get(at) {
+            //
+            // AND A CELL THAT IS PRESENT BUT NOT A COUNT IS REFUSED. `number`
+            // also answered `0` for `"4200"` or `true`, truncated `1234.5`, and
+            // passed `i64::MIN` straight through — which IS `OI_NULL`, so a
+            // number the vendor sent was filed as the absence it did not
+            // state. GAP16-22, D-0952.
+            open_interest: match oi.and_then(|a| a.get(at)) {
                 None | Some(serde_json::Value::Null) => OI_NULL,
-                Some(_) => number(a, at),
-            }),
+                Some(cell) => count(cell, f.open_interest)?,
+            },
         };
         let overlay = Overlay {
             ts_micros: bar.ts_micros,
@@ -632,6 +653,10 @@ fn optional<'a>(
 /// Zero rather than a refusal because these are counts — a volume or an open
 /// interest — where the vendor writing nothing and writing zero mean the same
 /// thing, and the NULL case is handled one level up by the array being absent.
+///
+/// **Open interest no longer comes through here** — [`count`] reads it and
+/// refuses what this answers `0` for (D-0952). The volume and timestamp cells
+/// still do, and D-0952 records that as not yet changed.
 fn number(list: &[serde_json::Value], at: usize) -> i64 {
     let Some(cell) = list.get(at) else {
         return 0;
@@ -644,6 +669,35 @@ fn number(list: &[serde_json::Value], at: usize) -> i64 {
     // is denied workspace-wide and because the text is what the vendor sent:
     // `csv::paisa` shifts two places and the count is the whole part of that.
     crate::csv::paisa(&cell.to_string()).map_or(0, |hundredths| hundredths / 100)
+}
+
+/// One open-interest cell as a count, or a refusal naming it.
+///
+/// The same rule `http::one_number` applies on the intraday path: an integer
+/// is the value, a decimal is accepted only when it is a whole number, and
+/// `i64::MIN` is refused because it is [`OI_NULL`]. A negative is refused too,
+/// because `store::format::Bar::counts_are_sane` would refuse it one crate
+/// later with no record of which cell it came from. `null` never reaches here:
+/// the caller reads it as the sentinel. GAP16-22, D-0952.
+fn count(cell: &serde_json::Value, field: &'static str) -> Result<i64, RollingError> {
+    let refuse = || RollingError::Uncountable {
+        field,
+        text: cell.to_string(),
+    };
+    let whole = if let Some(whole) = cell.as_i64() {
+        whole
+    } else {
+        let number = cell.as_number().ok_or_else(refuse)?;
+        let hundredths = crate::csv::paisa(&number.to_string()).ok_or_else(refuse)?;
+        if hundredths % 100 != 0 {
+            return Err(refuse());
+        }
+        hundredths / 100
+    };
+    if whole < 0 {
+        return Err(refuse());
+    }
+    Ok(whole)
 }
 
 /// One price out of an array, in paisa.
@@ -1164,5 +1218,62 @@ mod tests {
             stock * s.sides.len() * s.expiry_flags.len() * s.expiry_codes.len(),
             84
         );
+    }
+
+    /// One rolling body whose single `oi` cell is `cell`, read as a CALL.
+    fn with_oi(cell: &str) -> Result<Vec<Row>, RollingError> {
+        let body = format!(
+            r#"{{"data":{{"ce":{{
+            "timestamp":[1700000000],
+            "open":[100.0],"high":[100.0],"low":[100.0],"close":[100.0],
+            "volume":[1],"oi":[{cell}]
+        }}}}}}"#
+        );
+        read(&body, &spec(), "CALL", PriceScale::Rupees)
+    }
+
+    /// **AN OPEN-INTEREST CELL THAT IS NOT A COUNT IS REFUSED, NEVER STORED.**
+    ///
+    /// GAP16-22. `number` answered `0` for a cell it could not read, truncated
+    /// `1234.5` to `1234`, and passed the literal `i64::MIN` through — which is
+    /// `OI_NULL`, so a vendor's number was filed as the store's absence. Each
+    /// of those is a fabricated reading in a column `Bar::oi()` reports as
+    /// measured. The controls pin what must NOT change: `0` is a real zero,
+    /// `null` is the sentinel, and a whole count spelled `4200.0` is 4,200.
+    #[test]
+    fn an_open_interest_cell_that_is_not_a_count_is_refused() {
+        for (cell, why) in [
+            (r#""4200""#, "a string is not a count"),
+            ("1234.5", "a fraction is not a count"),
+            ("-9223372036854775808", "the store's own null sentinel"),
+            ("18446744073709551615", "past i64"),
+            ("true", "a boolean is not a count"),
+            ("-5", "a count is never negative"),
+        ] {
+            let got = with_oi(cell);
+            assert!(
+                matches!(
+                    &got,
+                    Err(RollingError::Uncountable { field: "oi", text }) if text == cell
+                ),
+                "{why}: {cell} gave {got:?}"
+            );
+        }
+        let said = with_oi("1234.5").expect_err("refused").to_string();
+        assert!(said.contains("`oi`") && said.contains("1234.5"), "{said}");
+        let sentinel = with_oi("-9223372036854775808")
+            .expect_err("refused")
+            .to_string();
+        assert!(sentinel.contains("null sentinel"), "{sentinel}");
+
+        for (cell, want) in [
+            ("0", 0),
+            ("4200", 4200),
+            ("4200.0", 4200),
+            ("null", OI_NULL),
+        ] {
+            let rows = with_oi(cell).unwrap_or_else(|e| panic!("{cell}: {e}"));
+            assert_eq!(rows[0].bar.open_interest, want, "{cell}");
+        }
     }
 }

@@ -5354,3 +5354,9 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### C4 pull batch 03 — rolling open interest, census cap, calendar arithmetic (D-0952, D-0953)
+
+| Id | Invariant | Test that proves it | Status |
+|---|---|---|---|
+| C4-PULL-03-01 | A present rolling open-interest cell that is not a non-negative whole count, or that is `i64::MIN`, is refused as `RollingError::Uncountable` naming the field and the cell, never stored as `0`, a truncation or `OI_NULL`; `0`, `4200`, `4200.0` and `null` still read as 0, 4,200, 4,200 and `OI_NULL`. | `pull::rolling::tests::an_open_interest_cell_that_is_not_a_count_is_refused` | ✓ |
