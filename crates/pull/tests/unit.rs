@@ -328,7 +328,7 @@ fn the_only_path_is_the_one_the_configuration_assembles() {
     );
     let other_org = CredentialConfig::parse(&config_without(
         r#"org    = "orgone""#,
-        r#"org    = "orgtwo""#,
+        r#"org    = "vendortwo""#,
     ))
     .expect("a one-segment variant parses");
     assert_ne!(

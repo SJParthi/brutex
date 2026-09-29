@@ -865,7 +865,7 @@ mod tests {
             "the index must be built before the category loop, not inside it"
         );
         assert!(
-            !body.contains(concat!("universe", "::resolve(")),
+            !body.contains("universe::resolve("),
             "the per-index join rebuilds the master's index on every call"
         );
     }

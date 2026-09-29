@@ -896,7 +896,7 @@ mod tests {
             ("2", "AAA", "INE000A01002"),
             ("3", "BBB", "INE000B01002"),
             ("4", "", ""),
-            ("5", "ZZZ", "INE000Z01009"),
+            ("8", "ZZZ", "INE000Z01009"),
             ("6", "YYY", "INE000Y01008"),
         ]);
         let mut named = published();
