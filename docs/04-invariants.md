@@ -5354,3 +5354,12 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### Lake reader refuses what it used to alias — C4 lake follow-ups (D-0775)
+
+| Id | Invariant | Test that proves it | Status |
+|---|---|---|---|
+| C4-LAKE-01 | **A signed day or year in a contract expiry is refused, not aliased.** `NSE-NIFTY-+1Apr20-10000-CE`, `NSE-NIFTY-01Apr+0-10000-CE`, `NSE-NIFTY-+1Apr+0-10000-CE` and `NSE-BANKNIFTY-+4Apr24-FUT` are each `ContractError::BadExpiryShape` naming the `+`, while the digit spellings they aliased onto still parse and round-trip. D-0775 | `lake::contract::tests::a_signed_day_or_year_is_refused_rather_than_aliased_onto_another_contract` | ✓ |
+| C4-LAKE-02 | **`LakeError::NotRepresentable` hands its core error back as `source()`**, with the same rendering, and every other variant in the error test lists has no source. D-0775 | `lake::error::tests::not_representable_exposes_its_core_error_as_the_source` | ✓ |
+| C4-LAKE-03 | **A present `open_interest` equal to `i64::MIN` is refused as `OpenInterestIsNullSentinel` naming its row**, never read back as `None`; present values `0` and `7` read back as `Some(0)` and `Some(7)`. D-0775 | `lake::reader::tests::a_present_open_interest_equal_to_the_null_sentinel_is_refused` | ✓ |
+| C4-LAKE-04 | **A row group whose declared `num_rows` understates its chunks is refused as `LongColumnChunk`**, naming the first column read (`timestamp`) and the declared count, whether or not the chunks' `num_values` were edited to agree — never decoded as the declared prefix. The sound 8-row file decodes all 8. The opposite direction is L-02. D-0775 | `lake::reader::tests::a_row_count_that_understates_the_chunk_is_refused_rather_than_truncated_to` | ✓ |

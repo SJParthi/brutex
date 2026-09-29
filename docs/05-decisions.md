@@ -43666,3 +43666,54 @@ job.
   survived. `an_nse_cash_stock_consults_no_peer_even_one_holding_it` gives a
   second vendor the same stock and requires that nothing votes and nothing is
   named; the same two feeds holding an index do vote, as the control.
+
+### D-0775 — Refuse the three lake-reader aliases a present value, a long chunk and a signed expiry used to hide — 2026-09-29
+
+**What happened.** Three places in `crates/lake` accepted an input and quietly
+read it as something else. Each was reproduced by a test that failed on the
+code origin/main 2c209309 carries and passes with the fix:
+
+- **W3-lake1-3, a signed expiry.** `contract::parse_expiry` checked only the
+  seven-byte width and then called `u8::from_str` and `u16::from_str`, which
+  accept a leading `+`. `NSE-NIFTY-+1Apr20-10000-CE` parsed to the same
+  `ContractName` as `NSE-NIFTY-01Apr20-10000-CE`, and `01Apr+0` to the same as
+  `01Apr00`: two directory names, one key. The expiry's day and year must now
+  be ASCII digits, the guard `parse_strike` already applies, and a signed one
+  is `ContractError::BadExpiryShape`.
+  `contract::tests::a_signed_day_or_year_is_refused_rather_than_aliased_onto_another_contract`.
+- **W3-lake1-4, a present open interest equal to the sentinel.**
+  `read_row_group` mapped every `open_interest` value through
+  `unwrap_or(OPEN_INTEREST_NULL)`, so a value stored PRESENT and equal to
+  `i64::MIN` read back through `Bar::open_interest` as `None` — the reverted
+  run printed `a present i64::MIN read back as [Some(0), None]`. `CLAUDE.md`
+  §7 makes `i64::MIN` the null sentinel, so a present one cannot be told from
+  an absence; it is now refused by name as
+  `LakeError::OpenInterestIsNullSentinel`, naming the row.
+  `reader::tests::a_present_open_interest_equal_to_the_null_sentinel_is_refused`.
+- **W3-lake1-2, a row count that understates the chunk.** Every column read
+  asked for exactly the row group's declared `num_rows` records, so an 8-row
+  file whose footer said 4 decoded as 4 bars (the reverted run printed
+  `an 8-row chunk was read as 4 rows`) while `LakeFile::num_rows` still said 8.
+  Only the overstated direction was refused (`ShortColumnChunk`, L-02). Each
+  column read now asks for one more record after the declared count, and a
+  chunk that has one is `LakeError::LongColumnChunk`, naming the column and the
+  declared count. The test lies twice: once in `num_rows` alone, and once with
+  every chunk's `num_values` edited to agree, so the refusal rests on the rows
+  in the pages rather than on two metadata fields disagreeing.
+  `reader::tests::a_row_count_that_understates_the_chunk_is_refused_rather_than_truncated_to`.
+
+**GAP14-64, a test gap in the same crate.** Deleting the `NotRepresentable` arm
+of `LakeError::source` survived the lake suite.
+`error::tests::not_representable_exposes_its_core_error_as_the_source` builds
+the variant from a real core `PriceError`, requires `source()` to return it,
+and requires every other listed variant to have none.
+
+**Why refuse rather than tolerate.** `CLAUDE.md` §4 bans a fallback that hides
+a failure, and each of these was one: an alias that makes two names one key, a
+present value reported as absent, and rows dropped under a count that still
+claims them. None changes what a correct file reads as — the sound halves of
+each test decode unchanged — and no workspace crate depends on `lake`, so no
+run identity moves.
+
+**Cost.** The long-chunk probe is one extra `read_records(1, ..)` call per
+column chunk, with two one-element buffers; it is not a per-row operation.
