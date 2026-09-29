@@ -115,6 +115,10 @@ impl Cursor {
     /// Try at most `nodes` grammar choices. Zero pauses without advancing.
     /// `work` is incremented once per choice, including pruned invalid prefixes.
     ///
+    /// A node budget bounds choices, not progress (D-0752): every rank is
+    /// tried at every position, so nodes per emitted candidate grow with the
+    /// alphabet, and more than 4,096 nodes can pass between two candidates.
+    ///
     /// # Errors
     /// An impossible cursor invariant or exhausted cumulative counter.
     pub fn advance(&mut self, nodes: u64, work: &mut u64) -> Result<Step, Refusal> {

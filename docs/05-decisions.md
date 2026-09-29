@@ -43703,3 +43703,17 @@ and shows each survives `encode` and `decode` exactly.
 `crates/api/src/booleanjson_tests.rs` pins a row's `expression` as
 `(0 | !(1))`. Changing that text is a change of its own. The
 comment now states the limit, and `docs/06-limits.md` records it.
+
+### D-0752 — A grammar node budget bounds choices, not progress — 2026-09-29
+
+**What was wrong (ET-expressions-5).** The limits said node budgets control one
+invocation and one transition replays at most 4,096 nodes, and said nothing
+of how many nodes separate two candidates. `Cursor::advance` tries every rank
+at every position, so that number grows with the alphabet and can exceed
+4,096. `grammar_nodes_per_candidate_grow_with_the_alphabet_and_gaps_exceed_one_replay`
+counts it.
+
+**Decision.** Recorded, not changed. Pruning a refused leaf's remaining ranks
+would keep the candidate stream but move every node count and pause point a
+saved search depends on. `advance`'s comment and `docs/06-limits.md` state the
+limit.

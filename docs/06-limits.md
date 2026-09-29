@@ -9867,6 +9867,18 @@ The text above is kept as it was written.
 
 ## Grammar search: what a node budget bounds, and what display cannot re-run — D-0751 to D-0753, 29 September 2026
 
+* **A node budget bounds choices, not progress (D-0752).** `Cursor::advance`
+  tries every alphabet rank and all three operators at every position. A leaf
+  that leaves too many reductions, and a reversed sibling pair, are each
+  refused only after they are tried, so nodes per emitted candidate grow with
+  the alphabet. Counted over every program of one to three instructions: 78
+  nodes for 12 candidates with 2 live bits, 1,092 for 96 with 8, and 40,428 for
+  1,152 with 32. With 2 live bits, 6,577 nodes pass between candidate 7,115 and
+  candidate 7,116, more than the 4,096 nodes one checkpoint transition replays.
+  `grammar_nodes_per_candidate_grow_with_the_alphabet_and_gaps_exceed_one_replay`
+  counts all of these. Counted, not timed. **Not changed**: skipping a refused
+  leaf's remaining ranks would change every saved search's node accounting and
+  pause points, and is left for a decision of its own.
 * **Display is not a parser round trip (D-0751).** A program `Expression::parse`
   accepted can render past its limits: 16 NOTs over one bit render to 49 bytes
   and are refused `NestingCapacity`; a 576-leaf AND chain of bit 0 renders to

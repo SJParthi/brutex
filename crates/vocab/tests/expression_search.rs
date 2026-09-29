@@ -196,3 +196,61 @@ fn cursor_equality_is_the_encoded_state_and_ignores_unencoded_scratch() {
         Cursor::new(&[0, 63]).unwrap()
     );
 }
+
+fn first_live(n: usize) -> Vec<u32> {
+    vocab::table::TABLE
+        .iter()
+        .filter(|row| row.status == vocab::table::BitStatus::Live)
+        .take(n)
+        .map(|row| u32::from(row.index))
+        .collect()
+}
+
+fn cursor_length(cursor: &Cursor) -> u16 {
+    let bytes = cursor.encode();
+    u16::from_le_bytes([bytes[10], bytes[11]])
+}
+
+/// ET-expressions-5 (D-0752): a node budget bounds grammar choices, not
+/// progress between candidates. Every rank is tried at every position,
+/// including leaves that cannot fit and reversed siblings rejected only at
+/// their operator, so nodes per emitted candidate grow with the alphabet and a
+/// run of more than 4,096 nodes can pass with no candidate at all. Counted, not
+/// timed.
+#[test]
+fn grammar_nodes_per_candidate_grow_with_the_alphabet_and_gaps_exceed_one_replay() {
+    let mut per_alphabet = Vec::new();
+    for n in [2, 8, 32] {
+        let mut cursor = Cursor::new(&first_live(n)).unwrap();
+        let (mut work, mut candidates) = (0_u64, 0_u64);
+        while cursor_length(&cursor) < 4 {
+            if matches!(cursor.advance(1, &mut work).unwrap(), Step::Candidate(_)) {
+                candidates += 1;
+            }
+        }
+        // Programs of one to three instructions: c leaves, c single NOTs,
+        // c double NOTs and c(c+1) ordered AND/OR pairs.
+        let c = u64::try_from(n).unwrap();
+        assert_eq!(candidates, 3 * c + c * (c + 1));
+        per_alphabet.push((n, work, candidates));
+    }
+    assert_eq!(
+        per_alphabet,
+        [(2, 78, 12), (8, 1_092, 96), (32, 40_428, 1_152)]
+    );
+
+    let mut cursor = Cursor::new(&first_live(2)).unwrap();
+    let (mut work, mut candidates, mut last) = (0_u64, 0_u64, 0_u64);
+    let gap = loop {
+        if matches!(cursor.advance(1, &mut work).unwrap(), Step::Candidate(_)) {
+            candidates += 1;
+            if work - last > 4_096 {
+                break work - last;
+            }
+            last = work;
+        }
+        assert!(work < 100_000, "no gap above 4,096 nodes was reached");
+    };
+    assert_eq!((gap, candidates, work), (6_577, 7_116, 73_130));
+    assert_eq!(cursor_length(&cursor), 9);
+}
