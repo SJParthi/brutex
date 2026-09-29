@@ -184,6 +184,11 @@ fn render(root: &Path, asked: &Asked) -> Result<Value, String> {
         .get_or_init(|| Mutex::new(None))
         .try_lock()
         .map_err(|_| "cumulative result cache is busy; no request queued")?;
+    // NOT CONSTANT-TIME WHEN UNPINNED, WARM OR COLD. The pin must be known
+    // before the cache can be compared, so every unpinned request walks the
+    // search's checkpoint reservation directories and reads the newest
+    // acknowledged payload, even when the cached reader already holds that
+    // checkpoint. A pinned request skips the walk. `docs/06-limits.md`, D-0904.
     let pin = match asked.pin {
         Some(value) => value,
         None => Reader::latest_checkpoint(root, asked.identity, budget.bytes)?,
@@ -499,5 +504,109 @@ mod tests {
         assert_eq!(rows[filtered[1]].batch, 0);
         assert_eq!(rows.len(), 5);
         assert_eq!(rows[1].family_position, 1);
+    }
+
+    /// A WARM UNPINNED RANKING REQUEST STILL WALKS THE CHECKPOINTS. D-0904.
+    ///
+    /// No fixture in this crate builds a saved index-stop search, so this
+    /// reads the path off its source: the unpinned arm of `render` precedes the
+    /// cache comparison, `latest_checkpoint` opens a snapshot and reads one
+    /// payload, and opening a snapshot walks the reservation directory with a
+    /// stat per reservation. `docs/06-limits.md` must say so.
+    #[test]
+    fn an_unpinned_ranking_request_walks_the_checkpoint_directory_before_its_cache() {
+        fn after<'a>(text: &'a str, marker: &str) -> &'a str {
+            text.split_once(marker)
+                .unwrap_or_else(|| panic!("source names {marker:?}"))
+                .1
+        }
+        let render = after(
+            include_str!("indexstoprankingjson.rs"),
+            "fn render(root: &Path, asked: &Asked) -> Result<Value, String> {\n",
+        );
+        let discover = render
+            .find("None => Reader::latest_checkpoint(root, asked.identity, budget.bytes)?,")
+            .expect("the unpinned arm discovers the checkpoint");
+        let pinned = render
+            .find("Some(value) => value,")
+            .expect("a pinned request uses its pin");
+        let cache = render
+            .find("if !held.as_ref().is_some_and(|old| {")
+            .expect("the cache comparison");
+        assert!(discover < cache && pinned < cache);
+
+        let (doc, latest) = include_str!("../../cli/src/index_stop_search_reader.rs")
+            .split_once("    pub fn latest_checkpoint(")
+            .expect("source names latest_checkpoint");
+        assert!(
+            doc.ends_with(
+                "/// this one payload read are bounded cold work, not a constant-time index.\n    \
+                 /// # Errors\n    \
+                 /// Refuses missing, malformed, unacknowledged or over-budget checkpoints.\n"
+            ),
+            "the cli doc this section corrects is the one on latest_checkpoint"
+        );
+        let latest = latest.split_once("\n    }\n").expect("body ends").0;
+        for call in [
+            "Snapshot::open(root, NAMESPACE, identity)?",
+            "snapshot.read(sequence, max_bytes)?",
+        ] {
+            assert!(latest.contains(call), "latest_checkpoint calls {call}");
+        }
+
+        let checkpoint = include_str!("../../cli/src/search_checkpoint.rs");
+        let open = after(checkpoint, "    fn open_through(");
+        assert!(
+            open.split_once("\n    }\n")
+                .expect("open_through ends")
+                .0
+                .contains("discover_through(&directory, through)?")
+        );
+        let walk = after(checkpoint, "fn discover_through(");
+        let walk = walk.split_once("\n}\n").expect("discover_through ends").0;
+        for step in [
+            "fs::read_dir(directory)",
+            "if index == DIRECTORY_LIMIT {",
+            "fs::symlink_metadata(entry.path().join(\"complete\"))",
+        ] {
+            assert!(walk.contains(step), "discover_through does {step}");
+        }
+
+        let expression = include_str!("expressionsearchjson.rs");
+        assert!(
+            expression
+                .contains("Reader::open(root, asked.identity, crate::detail::MAX_SCAN_BYTES)?")
+        );
+        assert!(
+            include_str!("../../cli/src/expression_search_reader.rs")
+                .contains("Snapshot::open(root, \"expression-search-v1\", identity)?")
+        );
+        let boolean = after(
+            include_str!("booleansearchjson.rs"),
+            "fn render(root: &Path, asked: &Asked, bytes: u64, nodes: u64) -> Result<Value, String> {\n",
+        );
+        assert!(
+            boolean
+                .trim_start()
+                .starts_with("let reader=QualifiedSearch::open(root,asked.identity,bytes,nodes)")
+        );
+
+        let limits = include_str!("../../../docs/06-limits.md")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let section = after(
+            &limits,
+            "### Unpinned saved-ranking requests discover their checkpoint every time (D-0904)",
+        );
+        for claim in [
+            "calls `Reader::latest_checkpoint` before the cache comparison",
+            "every unpinned request, warm or cold",
+            "A pinned request skips it.",
+            "O(reservations) syscalls, not constant",
+            "\"bounded cold work\"",
+        ] {
+            assert!(section.contains(claim), "06-limits states {claim:?}");
+        }
     }
 }

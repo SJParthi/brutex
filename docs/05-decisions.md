@@ -43666,3 +43666,26 @@ job.
   survived. `an_nse_cash_stock_consults_no_peer_even_one_holding_it` gives a
   second vendor the same stock and requires that nothing votes and nothing is
   named; the same two feeds holding an index do vote, as the control.
+
+### D-0904 — Two api cost statements corrected: unpinned ranking checkpoint discovery, and the merge reservation's probe bound — 2026-09-29
+
+**Unpinned ranking requests.** `/index-stop-ranking.json`'s `render` calls
+`Reader::latest_checkpoint` in its unpinned arm before it compares the cached
+reader, so every unpinned request, warm or cold, opens a
+`search_checkpoint::Snapshot`, which walks the search's checkpoint directory
+(`fs::read_dir(directory)`) with one `fs::symlink_metadata` of `complete` per
+reservation, and then reads one payload. Nothing stated this cost; the cli doc
+calls it "bounded cold work". It is recorded in `docs/06-limits.md` and at the
+call site rather than removed: the newest acknowledged checkpoint is not known
+until the directory is read, and a pinned request already skips the walk.
+`an_unpinned_ranking_request_walks_the_checkpoint_directory_before_its_cache`
+reads the call order and the walk off their sources and requires the limits
+section.
+
+**The merge reservation.** The comment above `by_key` in
+`crates/api/src/merge.rs` said pre-sizing made a probe "O(1) in the WORST case
+and not merely on average", contradicting the doc on `merge` ("Probes have
+expected O(1) cost") and `CLAUDE.md` §3 rule 4. Reserving capacity prevents
+growth and rehash, not collision chains. The comment now says expected O(1).
+No code changed. `no_comment_claims_a_worst_case_constant_probe` refuses both
+worst-case phrasings in the file's production half.

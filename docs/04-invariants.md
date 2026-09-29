@@ -5354,3 +5354,10 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### api batch C4-API-04 (D-0904, D-0905)
+
+| Id | Invariant | Test that proves it | Status |
+|---|---|---|---|
+| C4-API-04-01 | An unpinned `/index-stop-ranking.json` request discovers its checkpoint before the cache comparison, and `docs/06-limits.md` names that walk as O(reservations) syscalls on every unpinned request. | `api::indexstoprankingjson::tests::an_unpinned_ranking_request_walks_the_checkpoint_directory_before_its_cache` | ✓ |
+| C4-API-04-02 | No comment in `crates/api/src/merge.rs` claims a worst-case O(1) hash probe; the expected-cost statement on `merge` stays. | `api::merge::tests::no_comment_claims_a_worst_case_constant_probe` | ✓ |
