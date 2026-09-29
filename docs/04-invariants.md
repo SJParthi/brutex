@@ -5361,3 +5361,5 @@ the guard. The existing emits test pins the warning's message and level.
 |---|---|---|---|
 | C4-API-04-01 | An unpinned `/index-stop-ranking.json` request discovers its checkpoint before the cache comparison, and `docs/06-limits.md` names that walk as O(reservations) syscalls on every unpinned request. | `api::indexstoprankingjson::tests::an_unpinned_ranking_request_walks_the_checkpoint_directory_before_its_cache` | ✓ |
 | C4-API-04-02 | No comment in `crates/api/src/merge.rs` claims a worst-case O(1) hash probe; the expected-cost statement on `merge` stays. | `api::merge::tests::no_comment_claims_a_worst_case_constant_probe` | ✓ |
+| C4-API-04-03 | `parse_day` refuses a date whose pieces carry a `+` sign, even at the right widths, as `DateNotIso`. | `api::ingest::tests::a_date_field_is_refused_by_name_whichever_way_it_is_wrong` | ✓ |
+| C4-API-04-04 | The saved-VIX reader cached for one store root never answers a request for another root. | `api::indexstopvixjson::projection_tests::a_cached_saved_vix_reader_for_one_root_never_answers_for_another` | ✓ |

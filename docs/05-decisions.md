@@ -43689,3 +43689,23 @@ expected O(1) cost") and `CLAUDE.md` §3 rule 4. Reserving capacity prevents
 growth and rehash, not collision chains. The comment now says expected O(1).
 No code changed. `no_comment_claims_a_worst_case_constant_probe` refuses both
 worst-case phrasings in the file's production half.
+
+### D-0905 — Refuse a signed date piece, and pin the store root in the saved-VIX reader cache key — 2026-09-29
+
+**Signed date pieces.** `api::ingest::parse_day` checked widths 4/2/2 and then
+called `u16`/`u8` `from_str`, which accept a leading `+`, so `2024-+8-+6` was
+accepted as 2024-08-06 although the function's doc says it is strict on
+shape. It now refuses any byte other than an ASCII digit or `-` before parsing,
+as `DateNotIso`. `a_date_field_is_refused_by_name_whichever_way_it_is_wrong`
+adds `+024-01-08`, `2024-+8-+6` and `2024-08-+6`.
+
+**Saved-VIX cache key.** `indexstopvixjson::render` keeps one reader keyed on
+root, identity, pin and bounds, and replacing `cached.root == root` with `!=`
+survived the api suite. `a_cached_saved_vix_reader_for_one_root_never_answers_for_another`
+admits a page from root A, copies A's tree to root B and damages only B's
+companion, and requires B to refuse on its own bytes, then to admit once
+restored. The two saved-VIX tests that call `render` now hold one mutex, since
+`render` answers "busy" to a concurrent caller. The same root term in
+`indexstopcandlesjson::render`'s cache key is NOT covered by this entry: its
+mirror needs a saved original-source archive, which this batch builds no
+fixture for, and it stays open.
