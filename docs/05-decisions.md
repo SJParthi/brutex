@@ -43667,7 +43667,7 @@ job.
   second vendor the same stock and requires that nothing votes and nothing is
   named; the same two feeds holding an index do vote, as the control.
 
-### D-0730 — Time the index-link dedup test as the fastest of seven interleaved samples, not one — 2026-09-29
+### D-0800 — Time the index-link dedup test as the fastest of seven interleaved samples, not one — 2026-09-29
 
 **What happened.** The scheduled CI run on `main` at 2c209309 (run
 36405358825, 2026-09-28) failed Gates 3-6 on one test,
