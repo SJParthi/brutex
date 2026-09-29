@@ -43691,3 +43691,37 @@ reaching this arm "needs prices near i64::MAX, so real data cannot reach it";
 the test reaches it only through a multiplier of 10^21. It is a second route to
 the stale-latch class of `F-87AB98`, whose own route (the cross-bar true range)
 this entry does not change.
+
+### D-0781 — `Column::reproject` refuses a map that steps back or leaves its series — 2026-09-29
+
+**What was wrong (ET-indicators-3).** The collision guard in
+`Column::reproject_with` compares each target only with the last kept one. Its
+own comment says that is exact because "the alignment is monotonically
+non-decreasing", but `reproject` and `reproject_checked` are public and their
+docs did not state that precondition, nor that a target must be below
+`onto_len`. A map that stepped back filed a second row on an earlier fill bar
+with `collided` left at zero, which is the duplicated observation the guard
+exists to prevent, and a target at or past `onto_len` was accepted.
+
+**The change.** The precondition is checked rather than assumed: a target at or
+past `onto_len`, or below the last kept target, refuses the whole projection
+(`None`), the same answer the door already gives a map of the wrong length.
+Both checks compare against values already in hand, so the pass stays one walk
+over the rows. The two public docs now state the refusal.
+`column::reproject_tests::a_map_that_steps_back_or_past_its_series_refuses`
+requires `None` for a swapped pair, for a step back across a dropped row, and
+for a last target equal to `onto_len` on both doors, and requires that a
+repeated target across a dropped row still projects with `collided() == 1`.
+The existing fixture of `two_signals_resolving_to_one_fill_bar_produce_one_row`
+started at bar 20 and then mapped rows 1 to 4 onto bars 7 and 9, a step back;
+it now maps them onto bars 22 and 24 so the map is non-decreasing, and its
+assertions are otherwise unchanged.
+
+**Identity.** Not moved. Every non-test `reproject_checked` call in `runner`
+and `cli` (`validate.rs`, `signal_candle_stop.rs`, `cli/src/lib.rs`,
+`candidate_universe.rs`) passes a map built by `runner::align::onto_execution`,
+whose source reads "THE CURSOR ONLY MOVES FORWARD" and which pushes
+`Some(cursor)` only after `execution.get(cursor)` returned a bar. Such a map is
+non-decreasing and inside the execution series, so the new refusal does not
+fire on it; `validate.rs` only replaces some of its targets with `None`, which
+keeps it so.

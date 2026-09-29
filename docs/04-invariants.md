@@ -5360,3 +5360,4 @@ the guard. The existing emits test pins the warning's message and level.
 | Id | Invariant | Test that proves it | Status |
 |---|---|---|---|
 | C4-INDICATORS-01 | A SuperTrend flip whose new stop does not fit `i64` leaves `stop()` absent rather than keeping the previous leg's stop, and an out-of-range band on the next candle keeps it absent (D-0780). | `indicators::trend::the_stop_on_both_sides::a_flip_whose_stop_will_not_fit_i64_leaves_the_stop_absent_not_stale` | ✓ |
+| C4-INDICATORS-02 | `Column::reproject` and `Column::reproject_checked` return `None` for a map whose target steps below the last kept target (adjacent or across a dropped row) or reaches `onto_len`, and still project a repeated target across a dropped row as one counted collision (D-0781). | `indicators::column::reproject_tests::a_map_that_steps_back_or_past_its_series_refuses` | ✓ |
