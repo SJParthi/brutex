@@ -123,6 +123,12 @@ pub struct Census {
     /// tree again at every level. Counted once per link, not per file behind
     /// it. D-0766.
     pub linked: u64,
+    /// A path whose components below `bars/` are not all UTF-8. The store
+    /// renders its paths from a `String` (`StorePath::to_path_buf` pushes
+    /// `self.to_string()`), so no such name is one it wrote. Counted here
+    /// rather than read with the name dropped, which shortened the path by one
+    /// level and filed it at another depth. D-0768.
+    pub non_utf8: u64,
 }
 
 impl Census {
@@ -142,7 +148,8 @@ impl Census {
             .saturating_add(self.malformed_month)
             .saturating_add(self.wrong_depth)
             .saturating_add(self.unreadable)
-            .saturating_add(self.linked);
+            .saturating_add(self.linked)
+            .saturating_add(self.non_utf8);
         parts == self.seen
     }
 
@@ -285,10 +292,17 @@ fn classify(bars: &Path, path: &Path, out: &mut Holdings) {
         out.census.wrong_depth = out.census.wrong_depth.saturating_add(1);
         return;
     };
-    let parts: Vec<&str> = rel
+    // `Option` collected, never `filter_map`: dropping a non-UTF-8 component
+    // shortened the path by one level, so a name one level too deep was filed
+    // at the spot depth under the wrong vendor (D-0768).
+    let Some(parts) = rel
         .components()
-        .filter_map(|c| c.as_os_str().to_str())
-        .collect();
+        .map(|c| c.as_os_str().to_str())
+        .collect::<Option<Vec<&str>>>()
+    else {
+        out.census.non_utf8 = out.census.non_utf8.saturating_add(1);
+        return;
+    };
     // Relative to `bars/`, a spot file is
     // `<vendor>/<exchange>/<segment>/<symbol>/<rung>/<month>.bars` -- SIX
     // components. The first draft added one for `bars` itself, which is already

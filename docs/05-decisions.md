@@ -43736,3 +43736,25 @@ hand-made name must not masquerade as one the writer produced.
 ASCII digit, or the stem is `malformed_month`. `2026-+8.bin` and `+026-08.bin`
 beside `2026-08.bin` now give `malformed_month 2, spot 1` and one row
 (`a_signed_month_field_is_malformed_not_a_second_spelling`).
+
+### D-0768 — A non-UTF-8 path component is counted, not dropped — 2026-09-29
+
+**What happened (W3-store1-7).** `store::catalog::classify` built the path's
+components with `filter_map(|c| c.as_os_str().to_str())`, which drops a
+component that is not UTF-8. The depth test then ran on a list one level
+short. Reproduced on origin/main 2c209309 by calling `classify` on
+`bars/<0xFF>/groww/NSE/INDEX/NIFTY/1min/2026-08.bin`: `spot 1` and a held
+`groww` NIFTY `2026-08` for a seven-level path under an unnamed first level.
+
+**The change.** The components are collected as `Option<Vec<&str>>`; one
+non-UTF-8 component files the whole path in the new `Census::non_utf8` bucket,
+which counts toward `reconciles`. The store renders its paths from a `String`
+(`StorePath::to_path_buf` pushes `self.to_string()`), so no such name is one it
+wrote.
+
+**Honest limit.** The proof calls `classify` directly
+(`a_non_utf8_component_is_counted_and_never_dropped`). The walk-level fixture
+could not be built on this machine: `create_dir_all` with a `0xFF 0xFE`
+component returned `Illegal byte sequence` (errno 92) on the APFS volume the
+tests run on. The ledger names ext4 as a filesystem that allows such names;
+that was not run here.

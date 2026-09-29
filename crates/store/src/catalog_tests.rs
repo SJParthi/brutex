@@ -5,7 +5,7 @@
 //! The walk-level proofs on real temporary trees are in
 //! `crates/store/tests/catalog.rs`. D-0765 to D-0768.
 
-use super::{Census, parse_month, walk};
+use super::{Census, Holdings, classify, parse_month, walk};
 use std::path::{Path, PathBuf};
 
 /// A private directory under the system temporary root, named for its test.
@@ -46,6 +46,11 @@ fn every_new_bucket_is_a_reconciliation_part() {
         Census {
             seen: 1,
             linked: 1,
+            ..Census::default()
+        },
+        Census {
+            seen: 1,
+            non_utf8: 1,
             ..Census::default()
         },
     ] {
@@ -106,4 +111,32 @@ fn a_signed_or_non_digit_month_field_does_not_parse() {
     }
     let month = parse_month("2026-08").expect("the canonical spelling parses");
     assert_eq!(month.to_string(), "2026-08");
+}
+
+#[test]
+fn a_non_utf8_component_is_counted_and_never_dropped() {
+    use std::os::unix::ffi::OsStrExt;
+    let bars = Path::new("/s/bars");
+    let path = bars
+        .join(std::ffi::OsStr::from_bytes(b"\xff"))
+        .join("groww/NSE/INDEX/NIFTY/1min/2026-08.bin");
+    let mut out = Holdings::default();
+    classify(bars, &path, &mut out);
+    let expected = Census {
+        non_utf8: 1,
+        ..Census::default()
+    };
+    assert_eq!(out.census, expected, "{:?}", out.held);
+    assert!(out.held.is_empty());
+
+    let mut control = Holdings::default();
+    classify(
+        bars,
+        &bars.join("groww/NSE/INDEX/NIFTY/1min/2026-08.bin"),
+        &mut control,
+    );
+    assert_eq!(
+        control.census.spot, 1,
+        "the same path in UTF-8 is a spot month"
+    );
 }
