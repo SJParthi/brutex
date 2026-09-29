@@ -5354,3 +5354,9 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### White's point-mass family — C4 runner batch 04 (D-0972)
+
+| ID | Invariant | Proof | ✓ |
+|---|---|---|---|
+| C4-RUNNER-04-01 | **A family in which every row is constant earns no White evidence.** At 1, 7 and 1,000,000 paisa, alone or beside zero and negative constants, `white_reality_check_receipt_v1` refuses it, legacy `reality_check` answers `p = 1` and does not clear, and `family_tests_v1` refuses it as `White`. A nonpositive point mass keeps its conservative `(B+1)/(B+1)` receipt equal to the legacy verdict, and a constant beside a varying row is still measured, bit for bit the separate receipt. | `runner::bootstrap::exact_family_test_receipt_tests::a_family_that_never_varied_mints_no_white_evidence`; `runner::bootstrap::family_pass::tests::a_family_that_never_varied_is_refused_by_white_in_the_shared_walk_too` | ✓ |

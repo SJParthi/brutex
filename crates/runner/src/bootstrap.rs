@@ -470,7 +470,15 @@ pub fn reality_check(
         // (Davison & Hinkley), and its floor is exactly the resolution the
         // draws bought: 1/1001 at 1,000 draws. It is what a resampling test can
         // honestly say, and it never returns zero.
-        p_value: if draws == 0 || periods < 2 {
+        //
+        // A FAMILY IN WHICH NO ROW EVER VARIED IS THE THIRD WAY IN (D-0972).
+        // Every recentred draw of a constant row is exactly zero, so when every
+        // row is constant the null distribution is the same point mass the
+        // one-period case produces, and a positive constant scored 1/(B+1) --
+        // for 1 paisa as readily as for 1,000,000. A family with at least one
+        // varying row is untouched: its null has spread, and a riskless mean
+        // beating that spread is the answer this test is meant to give.
+        p_value: if draws == 0 || periods < 2 || white_null_is_a_point_mass(returns) {
             1.0
         } else {
             beaten.saturating_add(1) as f64 / draws.saturating_add(1) as f64
@@ -478,6 +486,31 @@ pub fn reality_check(
         draws,
         strategies: returns.len(),
     })
+}
+
+/// Whether every row of a family is constant, so that every recentred
+/// resample of every row is exactly zero and White's bootstrap maximum is a
+/// point mass at zero on every draw (D-0972).
+///
+/// Exact rather than approximate: [`summarise`] and [`mean_at`] fold the same
+/// value the same number of times in the same order over a constant row, so
+/// `resampled - mean` is `0.0` bit for bit.
+fn white_null_is_a_point_mass(returns: &[Vec<i64>]) -> bool {
+    returns
+        .iter()
+        .all(|series| series.iter().all(|value| Some(value) == series.first()))
+}
+
+/// Whether White's exact receipt would count its strongest possible
+/// probability, `1/(B+1)`, against a point-mass null (D-0972).
+///
+/// Only a positive observed statistic can: every draw's maximum is `0.0`, so it
+/// never matches or exceeds a positive statistic and always matches a
+/// nonpositive one, which already counts the conservative `(B+1)/(B+1)`. The
+/// receipt refuses the first case rather than restating it: a changed
+/// probability under the V1 procedure domain would rename what V1 bytes mean.
+fn white_point_mass_would_mint_evidence(returns: &[Vec<i64>], observed: f64) -> bool {
+    observed > 0.0 && white_null_is_a_point_mass(returns)
 }
 
 /// Hansen's Superior Predictive Ability test.
@@ -616,7 +649,11 @@ pub fn spa(returns: &[Vec<i64>], draws: usize, seed: u64, block: usize) -> Optio
 /// Unlike [`reality_check`], this authority-producing API refuses zero draws,
 /// a zero block, fewer than two periods and an unrepresentable `draws + 1`
 /// denominator.  The legacy API keeps its conservative `p = 1` compatibility
-/// behavior for those cases.  The counted comparison remains White's existing
+/// behavior for those cases.  It also refuses a family in which every row is
+/// constant and the observed statistic is positive (D-0972): every draw's
+/// maximum is then exactly zero, and the count would be the strongest
+/// probability the draws can express, earned by no variation at all.  The
+/// legacy API answers that family `p = 1`.  The counted comparison remains White's existing
 /// `bootstrap maximum >= observed statistic`; changing it to strict `>` would
 /// be a different procedure version, not a receipt-only change.
 ///
@@ -641,7 +678,7 @@ pub fn white_reality_check_receipt_v1(
         .iter()
         .map(|summary| root_n * summary.mean)
         .fold(f64::NEG_INFINITY, f64::max);
-    if !observed.is_finite() {
+    if !observed.is_finite() || white_point_mass_would_mint_evidence(returns, observed) {
         return None;
     }
 
@@ -2301,13 +2338,17 @@ mod exact_family_test_receipt_tests {
     #[test]
     fn handled_zero_variance_keeps_named_procedure_compatibility() {
         let constant = vec![vec![7_i64; 32]];
-        let white = white_reality_check_receipt_v1(&constant, 19, 3, 4)
-            .expect("White permits a deterministic nonzero mean");
+        // White still permits a deterministic nonzero mean BESIDE A ROW THAT
+        // VARIES: its null then has spread. A family with none is refused
+        // instead (D-0972), which
+        // `a_family_that_never_varied_mints_no_white_evidence` pins.
+        let mixed = vec![vec![7_i64; 32], noise(32, 5)];
+        let white = white_reality_check_receipt_v1(&mixed, 19, 3, 4)
+            .expect("White permits a deterministic nonzero mean beside variation");
         assert_eq!(
             white.verdict(),
-            reality_check(&constant, 19, 3, 4).expect("legacy White verdict")
+            reality_check(&mixed, 19, 3, 4).expect("legacy White verdict")
         );
-        assert_eq!(white.exact_p_value().numerator(), 1);
         assert_eq!(white.exact_p_value().denominator(), 20);
 
         let spa_exact = spa_receipt_v1(&constant, 19, 3, 4)
@@ -2319,6 +2360,62 @@ mod exact_family_test_receipt_tests {
         assert_eq!(spa_exact.matched_or_exceeded(), 19);
         assert_eq!(spa_exact.exact_p_value().numerator(), 20);
         assert_eq!(spa_exact.exact_p_value().denominator(), 20);
+    }
+
+    /// A FAMILY IN WHICH NO ROW EVER VARIED EARNS NO WHITE EVIDENCE (D-0972).
+    ///
+    /// Every recentred draw of a constant row is exactly zero, so with no
+    /// varying row White's bootstrap maximum is a point mass at zero. Before
+    /// D-0972 a positive constant then counted the strongest probability the
+    /// draws can express, 1/1001 at 1,000 draws, for 1 paisa as readily as for
+    /// 1,000,000, while SPA answered 1 and Romano--Wolf refused. Several
+    /// magnitudes are asserted because the magnitude is the tell.
+    #[test]
+    fn a_family_that_never_varied_mints_no_white_evidence() {
+        for constant in [1_i64, 7, 1_000_000] {
+            for family in [
+                vec![vec![constant; 100]],
+                vec![vec![constant; 100], vec![0; 100], vec![-constant; 100]],
+            ] {
+                assert_eq!(
+                    white_reality_check_receipt_v1(&family, 1_000, 7, DEFAULT_BLOCK),
+                    None,
+                    "a point-mass null minted exact White evidence at {constant}"
+                );
+                let legacy = reality_check(&family, 1_000, 7, DEFAULT_BLOCK).expect("a verdict");
+                assert!(
+                    legacy.p_value.to_bits() == 1.0_f64.to_bits(),
+                    "a point-mass null is no evidence, got p = {}",
+                    legacy.p_value
+                );
+                assert!(!legacy.clears(), "a point-mass null cleared at {constant}");
+            }
+        }
+
+        // A nonpositive statistic against the same point mass already counts
+        // every draw, so those receipts are unchanged and conservative.
+        for family in [vec![vec![0_i64; 100]], vec![vec![-5_i64; 100], vec![0; 100]]] {
+            let white = white_reality_check_receipt_v1(&family, 1_000, 7, DEFAULT_BLOCK)
+                .expect("a nonpositive point mass keeps its conservative receipt");
+            assert_eq!(white.matched_or_exceeded(), 1_000);
+            assert_eq!(white.exact_p_value().numerator(), 1_001);
+            assert_eq!(white.exact_p_value().denominator(), 1_001);
+            assert_eq!(
+                white.verdict(),
+                reality_check(&family, 1_000, 7, DEFAULT_BLOCK).expect("legacy verdict")
+            );
+        }
+
+        // One varying row gives the null spread, and the constant keeps the
+        // measured White answer the named-procedure test above relies on.
+        let mixed = vec![vec![1_i64; 100], noise(100, 3)];
+        let white = white_reality_check_receipt_v1(&mixed, 1_000, 7, DEFAULT_BLOCK)
+            .expect("a family with variation is measured");
+        assert!(white.exact_p_value().numerator() < white.exact_p_value().denominator());
+        assert_eq!(
+            white.verdict(),
+            reality_check(&mixed, 1_000, 7, DEFAULT_BLOCK).expect("legacy verdict")
+        );
     }
 }
 
