@@ -5354,3 +5354,11 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### pull batch C4-PULL-02 (D-0950, D-0951)
+
+| Id | Invariant | Test that proves it | Status |
+|---|---|---|---|
+| C4-PULL-02-01 | On `HttpSource::post_json` and `Discovery::get`, a 2xx body naming a refusal in the vendor's `error_names` contract is returned as a `chain::Refusal` with the status sent, the body in its detail, and `credential_dead` set exactly for a dead session; a body-named throttle narrows the per-second allowance, any other named refusal leaves it unchanged, and only a clean body raises it (W1-pull2-11). | `http::tests::a_refusal_under_a_200_on_the_post_and_discovery_paths_is_never_a_success` | ✓ |
+| C4-PULL-02-02 | `resolve::HttpDocuments` refuses a document with no `Content-Length` while it is being read: offered eight times `MAX_DOCUMENT_BYTES`, close-delimited or chunked, the client stops before the server has written it all; exactly the bound is read whole and one byte past it is refused (W1-pull3-3, W1-pull3-6). | `resolve::tests::an_undeclared_length_past_the_bound_is_refused_before_it_is_all_read`; `resolve::tests::an_undeclared_length_at_the_bound_is_read_whole` | ✓ |
+| C4-PULL-02-03 | A text timestamp under `IstDateTimeText` or `IsoDateTimeText` is read only when it is exactly 19 bytes with `-`, `-`, `T` or space, `:`, `:` at bytes 4, 7, 10, 13, 16 and digits elsewhere; a trailing zone, a sign or a wrong separator is refused, and `IsoDateTimeOffset` still reads its 19-byte prefix (UC-23). | `http::tests::a_text_stamp_is_refused_unless_its_whole_shape_is_right` | ✓ |

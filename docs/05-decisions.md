@@ -43666,3 +43666,58 @@ job.
   survived. `an_nse_cash_stock_consults_no_peer_even_one_holding_it` gives a
   second vendor the same stock and requires that nothing votes and nothing is
   named; the same two feeds holding an index do vote, as the control.
+
+### D-0950 — A refusal under a 200 is a refusal on the rolling POST and on discovery, and an undeclared document length is bounded while it is read — 2026-09-29
+
+**W1-pull2-11.** `HttpSource::window_async` already weighed a 2xx body
+against the vendor's `error_names` contract before it told the governor the
+call succeeded. `HttpSource::post_json` and `Discovery::get` did not: both
+called `record_success` on any 2xx before the body was read and returned the
+body as `Ok`. So a Dhan `DH-901` under a 200 raised the allowance and reached
+the caller as a body to decode. Both paths now record only a 429 from the
+status, and weigh the body through the same `weigh_body` that `window_async`
+uses: a body-named throttle is recorded as a throttle, any other named refusal
+moves nothing, and only a body naming no refusal is recorded as a success. A
+named refusal is returned as a `chain::Refusal` carrying the status the vendor
+sent and the body, with `credential_dead` set exactly when the body names a dead
+session. `http::tests::a_refusal_under_a_200_on_the_post_and_discovery_paths_is_never_a_success`
+drives `DH-901`, `DH-904`, `DH-905` and a clean body through both paths over a
+loopback socket, and requires the refusal, its status, its `credential_dead`
+and the direction the per-second allowance moved (unchanged, down, unchanged,
+up). On origin/main it fails on the first row: `post_json` returned the
+`DH-901` body as `Ok`.
+
+**W1-pull3-3 and W1-pull3-6.** `resolve::HttpDocuments::body_of` refused a
+declared `Content-Length` past `nse::MAX_DOCUMENT_BYTES` before reading, but an
+answer that declared no length (chunked, or delimited by the close) was read to
+its end by `Response::text` and only then compared with the bound. The body is
+now read frame by frame and the read stops at the first frame that would carry
+it past the bound, so the bytes held never exceed `MAX_DOCUMENT_BYTES`. The decoded text is
+`String::from_utf8_lossy` over the bytes, which is what `text()` was in this
+build: reqwest 0.12.28 is built without its `charset` feature (no `encoding_rs`
+in `Cargo.lock`), and its `text()` under `#[cfg(not(feature = "charset"))]` is
+`String::from_utf8_lossy(&full)`.
+`resolve::tests::an_undeclared_length_past_the_bound_is_refused_before_it_is_all_read`
+offers eight times the bound with no `Content-Length`, both close-delimited and
+chunked, and requires the server to have written less than it offered; on
+origin/main the server wrote all 67108864 bytes.
+`resolve::tests::an_undeclared_length_at_the_bound_is_read_whole` requires
+exactly the bound to be read whole and one byte past it to be refused.
+
+### D-0951 — A text timestamp is read only when its whole 19-byte shape is right — 2026-09-29
+
+**UC-23.** `http::local_seconds` read six numbers at fixed offsets, checked
+nothing at bytes 4, 7, 10, 13 and 16, and ignored everything after byte 19. So
+`2026x08-04 09:15:00` was read as a stamp, and on an `IsoDateTimeText` feed
+(Groww's descriptor) `2026-08-04T09:15:00Z` was read as 09:15 local and then
+shifted by IST, a 5h30m error with nothing to refuse it. `i64::from_str` also
+takes a sign, so `-1` passed as an hour. `local_seconds` now requires exactly 19
+bytes: `-` at 4 and 7, `T` or a space at 10, `:` at 13 and 16, and an ASCII
+digit everywhere else. The `IsoDateTimeOffset` arm of `one_stamp`, which reads a
+stamp that carries its own zone, hands `local_seconds` its first 19 bytes and
+leaves the rest to `stated_offset`, as before.
+`http::tests::a_text_stamp_is_refused_unless_its_whole_shape_is_right` requires
+the `T` and space separators to read alike, refuses each listed malformed stamp
+under both `IstDateTimeText` and `IsoDateTimeText`, and requires a `+0530` stamp
+under `IsoDateTimeOffset` to read as the local time less 19800 seconds. On
+origin/main it fails on `2026x08-04 09:15:00`, read as `Some(1785834900)`.
