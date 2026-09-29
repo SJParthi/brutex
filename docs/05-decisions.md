@@ -38652,8 +38652,12 @@ million-byte date field whole; the proof below repeats both on origin/main.
   trimmed. The copy is allocated to its own length. A sentence that fits is
   kept whole.
 - The bound is chosen, not measured. No real refusal's length has been
-  measured here. Every `CsvError` variant, rendered around an empty field
-  with each date format, is shorter than it, so an ordinary field fits.
+  measured here. Every refusal the sizing test walks, rendered around an
+  empty field, is shorter than it, so an ordinary field fits. The walk goes
+  through a match on `CsvError` and on `DateFormat` with no wildcard arm, so
+  a variant added later must be named there; as with D-0721's layout walk,
+  one appended with an arm of its own returning `None`, while the last
+  variant's arm still returns `None`, is named but not walked.
 
 **Not chosen.** Stating the census as unbounded and leaving it so. The route
 behind it, `GET /folder.json`, reads a folder an operator points at, and
@@ -38682,7 +38686,12 @@ Both pass here. `a_finding_is_whole_up_to_the_cap_and_trimmed_past_it` holds
 the boundary: a sentence exactly at the cap is whole, one a byte past it notes
 one byte, and a cap inside a three-byte character is cut back to the last
 whole one. `every_refusal_sentence_fits_the_finding_cap_before_its_field`
-holds the sizing. C4-PULL-05. `docs/06-limits.md` records the bounds.
+holds the sizing. It walked a hand list at first, which review found left a
+later `CsvError` variant unchecked. With a variant appended whose sentence
+runs past the cap, that list still passed; the walk does not compile
+(E0004, the variant not covered) until the variant is named in `after`, and
+named as the last variant's successor it fails at "2027 bytes before any
+field". C4-PULL-05. `docs/06-limits.md` records the bounds.
 
 ### D-0726 — Credit a rolling answer to the governor only after its body is accepted — 2026-09-28
 

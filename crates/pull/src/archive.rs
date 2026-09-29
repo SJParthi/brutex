@@ -110,9 +110,12 @@ pub const MAX_MEMBERS: usize = 50_000;
 /// sentence that fits is kept whole.
 ///
 /// **Chosen, not measured.** No real refusal's length has been measured here.
-/// Rendered around an empty field, each [`CsvError`] variant and each date
-/// format it can name is shorter than this, so an ordinary field fits beside
-/// it. Held by
+/// Rendered around an empty field, each [`CsvError`] refusal the sizing test
+/// walks is shorter than this, so an ordinary field fits beside it. The walk
+/// goes through a match on [`CsvError`] and on the date format with no
+/// wildcard arm, so a new variant must be named there; one appended with an
+/// arm of its own returning `None`, while the last variant's arm still
+/// returns `None`, is named but not walked. Held by
 /// `pull::pipeline::a_census_finding_keeps_at_most_the_finding_cap_of_its_refusal`,
 /// `tests::a_finding_is_whole_up_to_the_cap_and_trimmed_past_it` and
 /// `tests::every_refusal_sentence_fits_the_finding_cap_before_its_field`,
@@ -1168,44 +1171,78 @@ mod tests {
     /// decoder writes, and this is the check behind it: each refusal, rendered
     /// around an empty field, is shorter than the cap, so a trimmed finding is
     /// one whose field was long.
+    ///
+    /// **WALKED, NOT LISTED.** The refusals were a hand list, and `CsvError`
+    /// is `#[non_exhaustive]`, so a variant added later was checked by nothing.
+    /// The walk now goes through `after`, whose match on `CsvError` and on
+    /// `DateFormat` has no wildcard arm, so a new variant does not compile
+    /// until it is named there. As with `csv`'s layout walk, a variant
+    /// appended with an arm of its own returning `None`, while the last
+    /// variant's arm still returns `None`, is named but not walked. Date
+    /// formats are walked in the order they are declared.
     #[test]
     fn every_refusal_sentence_fits_the_finding_cap_before_its_field() {
         use crate::vendor::DateFormat;
-        let dates = [
-            DateFormat::DashedYmd,
-            DateFormat::CompactYmd,
-            DateFormat::SlashedDmy,
-            DateFormat::CompactDmy,
-            DateFormat::DashedYmdMidnight,
-        ]
-        .map(|format| CsvError::DateMalformed {
+
+        /// `refusal`'s successor in declaration order, rendered around an
+        /// empty field and the widest numbers, or `None` after the last. Each
+        /// date format is its own step.
+        fn after(refusal: &CsvError) -> Option<CsvError> {
+            const fn next_format(format: DateFormat) -> Option<DateFormat> {
+                match format {
+                    DateFormat::DashedYmd => Some(DateFormat::CompactYmd),
+                    DateFormat::CompactYmd => Some(DateFormat::SlashedDmy),
+                    DateFormat::SlashedDmy => Some(DateFormat::CompactDmy),
+                    DateFormat::CompactDmy => Some(DateFormat::DashedYmdMidnight),
+                    DateFormat::DashedYmdMidnight => None,
+                }
+            }
+            let line = usize::MAX;
+            let got = String::new();
+            match *refusal {
+                CsvError::FieldCount { .. } => Some(CsvError::DateMalformed {
+                    line,
+                    got,
+                    format: DateFormat::DashedYmd,
+                }),
+                CsvError::DateMalformed { format, .. } => Some(match next_format(format) {
+                    Some(format) => CsvError::DateMalformed { line, got, format },
+                    None => CsvError::TimeMalformed { line, got },
+                }),
+                CsvError::TimeMalformed { .. } => Some(CsvError::PriceMalformed { line, got }),
+                CsvError::PriceMalformed { .. } => {
+                    Some(CsvError::OpenInterestSentinel { line, got })
+                }
+                CsvError::OpenInterestSentinel { .. } => Some(CsvError::TooManyRows {
+                    rows: usize::MAX,
+                    cap: usize::MAX,
+                }),
+                CsvError::TooManyRows { .. } => None,
+            }
+        }
+
+        let mut walked = Vec::new();
+        let mut next = Some(CsvError::FieldCount {
             line: usize::MAX,
-            got: String::new(),
-            format,
+            got: usize::MAX,
+            want: usize::MAX,
         });
-        for refusal in dates.into_iter().chain([
-            CsvError::FieldCount {
-                line: usize::MAX,
-                got: usize::MAX,
-                want: usize::MAX,
-            },
-            CsvError::TimeMalformed {
-                line: usize::MAX,
-                got: String::new(),
-            },
-            CsvError::PriceMalformed {
-                line: usize::MAX,
-                got: String::new(),
-            },
-            CsvError::OpenInterestSentinel {
-                line: usize::MAX,
-                got: String::new(),
-            },
-            CsvError::TooManyRows {
-                rows: usize::MAX,
-                cap: usize::MAX,
-            },
-        ]) {
+        while let Some(refusal) = next {
+            assert!(
+                walked.len() < 64,
+                "the walk ends: {} steps so far, the last {refusal:?}",
+                walked.len()
+            );
+            if let CsvError::DateMalformed { format, .. } = refusal {
+                let before = walked
+                    .iter()
+                    .filter(|seen| matches!(seen, CsvError::DateMalformed { .. }))
+                    .count();
+                assert_eq!(
+                    format as usize, before,
+                    "{format:?} is walked in the order it is declared"
+                );
+            }
             let sentence = refusal.to_string();
             assert!(
                 sentence.len() < MAX_FINDING_BYTES,
@@ -1213,6 +1250,12 @@ mod tests {
                 sentence.len()
             );
             assert_eq!(finding(&refusal), sentence, "and it is kept whole");
+            next = after(&refusal);
+            walked.push(refusal);
         }
+        assert!(
+            matches!(walked.last(), Some(CsvError::TooManyRows { .. })),
+            "the walk reaches the last variant declared: {walked:?}"
+        );
     }
 }
