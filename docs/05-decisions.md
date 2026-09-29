@@ -43666,3 +43666,28 @@ job.
   survived. `an_nse_cash_stock_consults_no_peer_even_one_holding_it` gives a
   second vendor the same stock and requires that nothing votes and nothing is
   named; the same two feeds holding an index do vote, as the control.
+
+### D-0780 — A SuperTrend flip whose new stop will not fit `i64` leaves the stop absent — 2026-09-29
+
+**What was wrong (ET-indicators-4).** `SuperTrend::fold` computes the flip
+arm's new stop in `i128`. It then set the trend unconditionally and wrote the
+stop only `if let Ok(next) = i64::try_from(stop)`. A flip whose band left `i64`
+therefore recorded the new trend and kept the previous leg's stop, a level on
+the wrong side of price. Positions 64/65 read `stop()` whenever it is `Some`,
+and the next candle compared its close with that stale level. That is a
+fallback that hides a failure, which `CLAUDE.md` §4 bans. The same function's
+seed arm already used the other policy, `self.stop = i64::try_from(stop).ok()`.
+
+**The change.** The flip and ratchet arms now use the seed's policy: an
+unrepresentable stop is `None`. The next candle reseeds, as it does after an
+unrepresentable seed. The existing test that required the stale stop was
+rewritten as
+`trend::the_stop_on_both_sides::a_flip_whose_stop_will_not_fit_i64_leaves_the_stop_absent_not_stale`,
+which requires `stop()` to be `None` after the flip and on the candle after
+it. It fails with the old two-line write restored (`left: Some(2500000)`).
+
+**Identity.** `vocab::VOCAB_VERSION` is not moved. The ledger row records that
+reaching this arm "needs prices near i64::MAX, so real data cannot reach it";
+the test reaches it only through a multiplier of 10^21. It is a second route to
+the stale-latch class of `F-87AB98`, whose own route (the cross-bar true range)
+this entry does not change.

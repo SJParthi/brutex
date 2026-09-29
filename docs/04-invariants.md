@@ -5354,3 +5354,9 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### C4 indicators follow-ups (D-0780 onward)
+
+| Id | Invariant | Test that proves it | Status |
+|---|---|---|---|
+| C4-INDICATORS-01 | A SuperTrend flip whose new stop does not fit `i64` leaves `stop()` absent rather than keeping the previous leg's stop, and an out-of-range band on the next candle keeps it absent (D-0780). | `indicators::trend::the_stop_on_both_sides::a_flip_whose_stop_will_not_fit_i64_leaves_the_stop_absent_not_stale` | ✓ |
