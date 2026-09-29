@@ -43710,8 +43710,12 @@ before sorting, when any value is NaN of either sign, infinite, below zero or
 above one. A p-value outside `[0, 1]` is a defect upstream; counting it, or
 silently dropping it, would be the fallback §4 bans. Both ends of `[0, 1]` are
 still answered. The function has no caller outside its own tests (`git grep
-benjamini_hochberg` names only `crates/runner/src/significance.rs`), so no
-report and no run identity changes.
+benjamini_hochberg -- crates/` names only `crates/runner/src/significance.rs`;
+the one other tracked mention is gate 8's sort comment in
+`.github/workflows/ci.yml`, whose "three tests, which pass at most six
+elements" was already wrong about the hundred-element Bonferroni test and is
+now one test short as well; that comment is left for the gate's own owner and
+recorded here as stale), so no report and no run identity changes.
 `significance::tests::benjamini_hochberg_refuses_a_value_that_is_not_a_probability`
 proves it.
 
