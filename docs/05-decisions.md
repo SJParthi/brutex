@@ -43705,3 +43705,24 @@ unchanged: `0.125` gives `13` and `-0.125` gives `-12`. The multiplication by
 already records. Proven by
 `core::price::tests::the_half_up_decision_reads_the_scaled_value_not_a_biased_sum`
 (C4-CORE-02).
+
+### D-0787 — Trim only ASCII whitespace from a master row's vendor id, series and suffix class — 2026-09-29
+
+**What was wrong.** `VendorId::new`, `board_of` and `unsuffixed_key` in
+`crates/core/src/vendor.rs` each called `str::trim`, which strips Unicode
+whitespace as well as ASCII. On `origin/main`, `VendorId::new("\u{a0}1333\u{3000}")`
+returned the id `1333`, so a row whose id column held U+00A0 and U+3000 around
+the digits was filed under an id the column did not hold; and `board_of("EQ\u{a0}")`
+returned `MainBoard`, so a Groww cash row with that listing class was kept as a
+main-board equity.
+
+**The change.** All three call `str::trim_ascii`. The padding the trim was for
+(Dhan's `"   ES   "`, `dhans_class_column_is_trimmed_before_it_is_read`) is
+ASCII and is still removed. A vendor id that still starts or ends with
+whitespace after the ASCII trim is refused (`None`), so the row is declined as
+`Skip::NoVendorId` rather than kept; whitespace inside an id is data and kept.
+A series with non-ASCII whitespace is a code no table holds, `Unrecognised`,
+declined as `Skip::UnrecognisedListingClass`; a suffix class with it strips
+nothing. Proven by
+`core::vendor::tests::whitespace_outside_ascii_is_not_trimmed_from_an_id_a_series_or_a_class`
+(C4-CORE-03).

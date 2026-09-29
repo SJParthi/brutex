@@ -282,10 +282,19 @@ impl VendorId {
     /// `None` for an empty id — a row with no id cannot be requested — and for
     /// one past [`VENDOR_ID_CAPACITY`], which is a grammar this build has not
     /// seen and must not silently truncate into a different instrument.
+    ///
+    /// `None` as well for an id whose first or last character is whitespace
+    /// outside ASCII, such as U+00A0 or U+3000. Only ASCII whitespace is
+    /// trimmed: `str::trim` is Unicode-aware and turned `"\u{a0}1333\u{3000}"`
+    /// into `1333`, filing a row under an id its column did not hold. D-0787.
     #[must_use]
     pub fn new(raw: &str) -> Option<Self> {
-        let raw = raw.trim();
-        if raw.is_empty() || raw.len() > VENDOR_ID_CAPACITY {
+        let raw = raw.trim_ascii();
+        if raw.is_empty()
+            || raw.len() > VENDOR_ID_CAPACITY
+            || raw.starts_with(char::is_whitespace)
+            || raw.ends_with(char::is_whitespace)
+        {
             return None;
         }
         let mut bytes = [0_u8; VENDOR_ID_CAPACITY];
@@ -1137,8 +1146,11 @@ static NON_EQUITY_INDEX: MemberIndex<512> = MemberIndex::build(&NON_EQUITY_SERIE
 /// never confused with a bond.
 fn board_of(series: &str) -> EquityVerdict {
     // Dhan pads this column, e.g. `"   ES   "`. Trimming Groww's already-tight
-    // values costs nothing and cannot change a verdict.
-    let series = series.trim();
+    // values costs nothing and cannot change a verdict. ASCII whitespace only:
+    // `str::trim` also stripped U+00A0, so `"EQ\u{a0}"` was read as the main
+    // board. It is now a series this build has not seen, `Unrecognised`, and
+    // declined by name. D-0787.
+    let series = series.trim_ascii();
     // Hash, mask, probe — three times at most, each of them constant. The
     // tables are disjoint (asserted), so the order these are asked in cannot
     // change a verdict; it is the order of decreasing frequency, which is a
@@ -1741,7 +1753,8 @@ fn unsuffixed_key(
 ) -> Result<Option<InstrumentKey>, InstrumentError> {
     // Only a cash listing has a series. An empty class would make
     // `strip_suffix` succeed on every symbol, so it is excluded explicitly.
-    let class = class.trim();
+    // ASCII whitespace only, for the reason `board_of` gives. D-0787.
+    let class = class.trim_ascii();
     if key.kind != Kind::Equity || class.is_empty() {
         return Ok(None);
     }
@@ -3442,5 +3455,63 @@ mod tests {
             listing(decode_master_row(Vendor::Zerodha, index).expect("decodes")).expect("kept");
         assert_eq!(kept.key.kind, Kind::Index);
         assert_eq!(kept.key.underlying.as_str(), "NIFTY");
+    }
+
+    /// Only ASCII whitespace is trimmed from the vendor id, the series and the
+    /// suffix class. Whitespace outside ASCII (U+00A0, U+3000) at an end of the
+    /// id refuses it, and in the series leaves a code no table holds. D-0787.
+    #[test]
+    fn whitespace_outside_ascii_is_not_trimmed_from_an_id_a_series_or_a_class() {
+        // The id. Each end on its own, and both together.
+        for raw in ["\u{a0}1333\u{3000}", "\u{a0}1333", "1333\u{3000}", " \u{a0}1333 "] {
+            assert_eq!(VendorId::new(raw), None, "{raw:?} must be refused");
+            let mut input = row("NSE", "CASH", "RELIANCE", "EQ", "", "");
+            input.vendor_id = raw;
+            assert_eq!(
+                groww(input).expect("explicit decline").skip(),
+                Some(Skip::NoVendorId),
+                "{raw:?} must be declined, not kept under 1333"
+            );
+        }
+        // Inside the id it is data, and ASCII padding is still trimmed.
+        assert_eq!(
+            VendorId::new(" \t13\u{a0}33\n ").expect("interior").as_str(),
+            "13\u{a0}33"
+        );
+
+        // The series. Groww's `EQ` with a trailing U+00A0 is not the main board.
+        assert_eq!(board_of("EQ\u{a0}"), EquityVerdict::Unrecognised);
+        assert_eq!(board_of("\u{3000}EQ"), EquityVerdict::Unrecognised);
+        assert_eq!(
+            groww(groww_cash("RELIANCE", "EQ\u{a0}", REAL_ISIN))
+                .expect("explicit decline")
+                .skip(),
+            Some(Skip::UnrecognisedListingClass)
+        );
+        assert_eq!(board_of(" \tEQ\n"), EquityVerdict::MainBoard);
+
+        // The suffix class. Only the row's own series, ASCII-trimmed, strips.
+        let l = listing(
+            groww(MasterRow {
+                vendor_id: "1333",
+                underlying: "",
+                trading_symbol: "BLUECHIP-BE",
+                listing_class: "BE",
+                isin: "INE657B01025",
+                ..row("NSE", "CASH", "BLUECHIP-BE", "EQ", "", "")
+            })
+            .expect("ok"),
+        )
+        .expect("kept");
+        assert_eq!(
+            unsuffixed_key(l.key, "BLUECHIP-BE", "BE\u{a0}").expect("no error"),
+            None
+        );
+        assert_eq!(
+            unsuffixed_key(l.key, "BLUECHIP-BE", " BE\t")
+                .expect("no error")
+                .map(|k| k.underlying.as_str().to_owned()),
+            Some("BLUECHIP".to_owned())
+        );
     }
 }
