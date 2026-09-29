@@ -1032,4 +1032,51 @@ mod tests {
         // No peer traded it either — the operator's actual case.
         assert!(provable_holes(20_028, None, &[None, None]).is_empty());
     }
+
+    /// **A STORED BAR OUTSIDE THE DAY BEING AUDITED IS STEPPED PAST, NOT HELD
+    /// AGAINST IT.**
+    ///
+    /// Written because `cargo mutants` showed that replacing the cursor's
+    /// `< day` with `== day` survived the whole suite. Under that mutant one bar
+    /// before the range, or one bar on a closed day, stalls the cursor, and
+    /// every minute of the next open session reads as a `VendorHole`. GAP14-60.
+    #[test]
+    fn a_bar_before_the_range_or_on_a_closed_day_does_not_stall_the_next_session() {
+        // 2026-01-26 is Republic Day (closed, see the test above); 2026-01-27
+        // is an ordinary session.
+        let holiday = 20_479;
+        let next = 20_480;
+        let mut stored = vec![at(holiday, 600)];
+        stored.extend(full_day(next));
+        let ledger = classify(&stored, holiday, next);
+        assert_eq!(ledger.invalid_timestamps, 0);
+        assert_eq!(ledger.held, 376, "the holiday bar is still counted as held");
+        assert_eq!(ledger.expected, 375, "the holiday owes nothing");
+        assert_eq!(ledger.lost_minutes(), 0, "the next session lost nothing");
+        assert!(
+            ledger.gaps.iter().all(|g| g.reason != Reason::VendorHole),
+            "no minute of the open session is a hole"
+        );
+        assert_eq!(
+            ledger.gaps.first().map(|g| (g.day, g.reason)),
+            Some((holiday, Reason::Closed))
+        );
+
+        // One bar the day before `first`, then the whole session of `first`.
+        let day = 20_668; // 2026-08-03, an ordinary Monday.
+        let mut early = vec![at(day - 1, 600)];
+        early.extend(full_day(day));
+        let ledger = classify(&early, day, day);
+        assert_eq!(ledger.invalid_timestamps, 0);
+        assert_eq!(ledger.held, 376);
+        assert_eq!(ledger.expected, 375);
+        assert_eq!(ledger.lost_minutes(), 0, "a bar outside the range is skipped");
+        assert!(
+            ledger
+                .gaps
+                .iter()
+                .all(|g| g.reason == Reason::OutsideWindow),
+            "the only absences are the minutes outside the session"
+        );
+    }
 }
