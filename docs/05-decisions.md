@@ -43666,3 +43666,55 @@ job.
   survived. `an_nse_cash_stock_consults_no_peer_even_one_holding_it` gives a
   second vendor the same stock and requires that nothing votes and nothing is
   named; the same two feeds holding an index do vote, as the control.
+
+### D-0960 — Check the size first on the strict constituent decode, and remember a refused symbol in `Catalogue::index` — 2026-09-29
+
+**W1-pull3-9.** `pull::nse::constituents_strict` compared the header before
+the size. A body past `MAX_DOCUMENT_BYTES` whose first line was not the header
+came back as `NseError::HeaderUnexpected`, whose `got` is
+`first_line(body).trim_end_matches('\r').to_owned()`; with no newline that is
+the whole body. `constituents` already checked the size first. The strict
+entry point now refuses with `NseError::TooLarge` before the header check.
+`the_strict_decode_refuses_a_document_past_the_bound_before_its_header` fails
+without the change with "expected TooLarge, got a refusal whose Debug form is
+8388637 bytes", and also pins that a body exactly at the bound is still
+refused by its header.
+
+**W1-pull3-8.** `pull::nseindex::Catalogue::index` skipped a symbol only when
+`mapping.resolved.contains_key(&key)`. A refused symbol that appeared again
+under the same collapsed key was resolved again and pushed into `refused`
+again. It now keeps the collapsed keys it refused in a local set and skips
+them as it skips a resolved key, so a refusal is reported once, under the
+first spelling that arrived. `a_refused_symbol_repeated_in_the_master_is_reported_once`
+fails without the change with five refused rows where two are expected.
+
+Neither function has a production caller outside `pull`'s own tests:
+`constituents_strict` is called only from `nse.rs` tests, and
+`Catalogue::index` only from `nseindex.rs` tests.
+
+### D-0961 — State the costs `nseindex` and `note_absorbed` actually pay — 2026-09-29
+
+**W1-pull3-1.** The `# Cost` section of `pull::nseindex` said the catalogue
+scan is paid once through `Catalogue::index`, "after which every lookup through
+`Mapping::get` is a hash hit". Production does not take that path. The one
+production caller, `api::indexmap::join`, calls
+`nse.matcher.resolve(&symbol)` (`crates/api/src/indexmap.rs`) for each feed
+index symbol on every `GET /indexmap.json`, and `Catalogue::index` is called
+only from `nseindex.rs` tests. `join` first resolves the name a feed renames
+the symbol from (`index_alias_source`), when there is one, and then the symbol
+itself, so each feed symbol costs up to two resolves per request, and each
+resolve of a name not published verbatim scans the catalogue. The section now
+says so. The code is
+unchanged: the route re-reads the catalogue from disk on each request and
+claims no §3 rule 4 bound in its own `# Cost` section, so there is no load at
+which to pay the scan once.
+
+**W1-pull3-5.** The `# Cost` section of `pull::rate::ABSORBED_MICROS` said
+"One `fetch_add` on the wait path". `note_absorbed` calls `fetch_update`, and
+the pinned 1.97.1 toolchain's `core::sync::atomic` implements that, through
+`try_update`, as
+`while let Some(next) = f(prev) { match self.compare_exchange_weak(prev, next, set_order, fetch_order) {`.
+It is lock-free, not wait-free: an attempt that loses a race or fails
+spuriously runs the closure again. The doc comment and the inline comment now
+say that. The code is unchanged, because `fetch_add` would wrap rather than
+saturate.

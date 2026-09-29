@@ -9864,3 +9864,18 @@ The text above is kept as it was written.
   doc to its body, read off the source, and
   `what_a_changed_rows_line_costs_is_named_in_part_and_read_off_the_source`
   finds each part named here and in that doc in the source that pays it.
+
+## Two pull costs stated as they are paid — D-0961, 29 September 2026
+
+* **`GET /indexmap.json` scans the NSE catalogue per request.**
+  `api::indexmap::join` calls `Catalogue::resolve` for each feed index symbol
+  on every request, twice when the feed renames the symbol (the renamed-from
+  name first), and each `resolve` does one hash probe and, when the name is
+  not published verbatim, one scan of the catalogue that compares the symbol
+  with each collapsed name. `Catalogue::index`, which would pay that scan once
+  per distinct symbol, has no production caller. Not timed.
+* **`pull::rate::note_absorbed` is a compare-exchange loop.** It calls
+  `AtomicU64::fetch_update`, which retries `compare_exchange_weak` while
+  another thread changes the counter in between or the weak exchange fails
+  spuriously. The number of attempts grows with that contention; it is not
+  one `fetch_add`. Not timed.

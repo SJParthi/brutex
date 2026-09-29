@@ -5354,3 +5354,10 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### Strict constituent size order and refusal memo — C4 pull batch 07 (D-0960)
+
+| Id | Invariant | Test that proves it | Status |
+|---|---|---|---|
+| C4-PULL-07-01 | `pull::nse::constituents_strict` refuses a body longer than `MAX_DOCUMENT_BYTES` with `NseError::TooLarge` before comparing its header, and a body exactly at the bound with the wrong header is still refused with `NseError::HeaderUnexpected`. | `pull::nse::tests::the_strict_decode_refuses_a_document_past_the_bound_before_its_header` | ✓ |
+| C4-PULL-07-02 | `pull::nseindex::Catalogue::index` reports a refused symbol once, under the first spelling that arrived, when the same collapsed key appears again later in the master, for both `Unresolved::Absent` and `Unresolved::Ambiguous`. | `pull::nseindex::tests::a_refused_symbol_repeated_in_the_master_is_reported_once` | ✓ |
