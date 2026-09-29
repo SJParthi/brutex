@@ -13785,8 +13785,11 @@ fn cadence_has_contracts(
 ///
 /// # Cost
 ///
-/// One dated-table lookup per call, while planning and before a request is
-/// issued. The full plan and walk remain proportional to their chunk counts.
+/// A bounded number of dated-table lookups per call, while planning and before
+/// a request is issued: `costs::expiry`'s module documentation states "at most
+/// `dated::MAX_LATER_ROWS + 1` passes on the weekly one" (D-0770) and at most
+/// three table lookups on the monthly path. No input raises that bound. The
+/// full plan and walk remain proportional to their chunk counts.
 fn cadence_has_contracts_on(
     asked: &ingest::FnoRequest,
     rolling: &pull::vendor::RollingSpec,

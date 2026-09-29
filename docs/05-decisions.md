@@ -43695,7 +43695,10 @@ data is deferred) and which `api`'s F&O walk asks, through
 `cadence_has_contracts_on`, only whether a date exists. No run identity term is computed
 from it. The two source-answer rows in `the_next_weekly_lands_on_the_source_answers` that
 pinned the defect (NIFTY 2025-09-01 to 2025-09-04, BANKNIFTY 2023-09-03 to
-2023-09-07) now pin 2025-09-02 and 2023-09-06. Invariant C4-COSTS-01.
+2023-09-07) now pin 2025-09-02 and 2023-09-06. The cost note on
+`api::server::cadence_has_contracts_on`, which said "One dated-table lookup per
+call", now names the bound stated in `costs::expiry`'s module documentation.
+Invariant C4-COSTS-01.
 
 ### D-0771 — Floor the printed-extreme sell at one tick, as the worst case already is — 2026-09-29
 
