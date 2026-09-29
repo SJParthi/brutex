@@ -43666,3 +43666,55 @@ job.
   survived. `an_nse_cash_stock_consults_no_peer_even_one_holding_it` gives a
   second vendor the same stock and requires that nothing votes and nothing is
   named; the same two feeds holding an index do vote, as the control.
+
+### D-0800 — Time the index-link dedup test as the fastest of seven interleaved samples, not one — 2026-09-29
+
+**What happened.** The scheduled CI run on `main` at 2c209309 (run
+36405358825, 2026-09-28) failed Gates 3-6 on one test,
+`pull::nse::tests::deduplicating_index_links_costs_one_probe_each_rather_than_a_scan`:
+*"doubling the links multiplied the cost by 3.09×"*, 966.607µs for 5,000
+links against 2.983758ms for 10,000. The next run on the same commit
+(36421476503) passed. No code on that path changed between them.
+
+**Why it was noise, not a regression.** The dedup is still one `HashSet`
+probe per link. The test took ONE sample of each size, each about a
+millisecond, so a single preemption or page fault on a shared runner landing
+in the larger sample was enough to cross the 3× ceiling.
+
+**The change.** Both sizes are warmed, then sampled seven times, alternating,
+and each size keeps its minimum. Interference only adds time, so the minimum
+is the least-disturbed estimate; alternating spreads a slow stretch across
+both sizes. The 3× ceiling is unchanged: a quadratic dedup quadruples its
+minimum as surely as its single sample. This is a test-only change; the
+production function is untouched. It reduces the chance of a false failure
+and does not remove it. The ratio remains a wall-clock measurement on a
+shared machine, and the bound remains UNVERIFIED as a bench (§3 rule 6).
+
+### D-0801 — Make the telemetry lock-release test's two waits cover the same lines on every run, and declare `sink.rs` 21 — 2026-09-29
+
+**What happened.** PR #20's coverage job (run 36519905990) failed gate 20:
+`sink.rs` measured 26 uncovered lines against 23 declared. PR #20 does not
+touch `crates/telemetry`. The job's `coverage-lines` artifact named the three
+extra lines: the body of the first wait in
+`sink::tests::a_failed_roll_reports_with_the_emit_lock_released`, a `while`
+that polls `rotation_failures` and runs its body only when the writer thread
+has not yet failed its roll at the first look.
+
+**Why it was timing, not a regression.** The same file measured 23 on this Mac
+three times in a row at the same code. The second wait in that test, a `for`
+that polls `try_lock`, raced the other way: its sleep line ran only when the
+first try failed. Gate 20 compares an exact count, so which thread won decided
+whether the job passed.
+
+**The change.** Test-only. Each wait is now one `(0..5_000).any(|_| { sleep;
+check })`: it sleeps before it looks, and it has no line that only some
+iterations reach. The bound (5,000 tries of 1 ms) and both assertions are
+unchanged. Three `cargo llvm-cov -p telemetry` runs then counted `sink.rs` 21
+each time while the closures ran 1 or 2 iterations, so the count no longer
+follows thread timing. The two lines that left the uncovered set were the old
+second wait's sleep and the closing brace before it. Gate 20 declares
+`sink.rs` 21 (total 33) and `docs/06-limits.md` §54 records the follow-up.
+**Not yet shown:** the workspace profile in CI reproducing 21; the next
+coverage run on this PR is that check. The 21 `sink.rs` lines that stay
+uncovered are assertion messages, test-double methods and one guarded
+`return 0`, none of them a wait.

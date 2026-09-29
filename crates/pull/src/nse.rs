@@ -1133,8 +1133,21 @@ mod tests {
         // WARM FIRST. The first call pays page faults for a freshly built
         // `String`, which is not the cost under test.
         let _warm = at(&small, 5_000);
-        let half = at(&small, 5_000);
-        let full = at(&large, 10_000);
+        let _warm = at(&large, 10_000);
+
+        // THE FASTEST OF SEVERAL, INTERLEAVED. One ~1 ms sample per size failed
+        // on a shared runner at 3.09× (D-0800): a single preemption landing in
+        // the larger sample is enough. Interference only ever ADDS time, so the
+        // minimum of each size is the least-disturbed estimate of its cost, and
+        // alternating the sizes spreads any slow stretch across both. A
+        // quadratic dedup still quadruples its minimum, so the ceiling keeps
+        // its meaning.
+        let mut half = core::time::Duration::MAX;
+        let mut full = core::time::Duration::MAX;
+        for _ in 0..7 {
+            half = half.min(at(&small, 5_000));
+            full = full.min(at(&large, 10_000));
+        }
 
         let ratio = full.as_secs_f64() / half.as_secs_f64().max(f64::MIN_POSITIVE);
         assert!(

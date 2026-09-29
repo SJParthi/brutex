@@ -3710,6 +3710,21 @@ report must still reproduce this set; a targeted report alone is not a merge
 pass. The remaining install race and test-double/diagnostic arms retain the
 limits described above.
 
+**2026-09-29 follow-up (D-0801).** The workspace profile of PR #20 (run
+36519905990) counted `sink.rs` 26 against the declared 23, with no telemetry
+change. Its per-line report named the three extra lines: the body of the wait
+in `a_failed_roll_reports_with_the_emit_lock_released` that polls
+`rotation_failures`, which runs only when the writer thread is slower than the
+first look. The test's second wait (polling `try_lock`) had the opposite race:
+its sleep line was uncovered only when the first try succeeded. Both waits now
+sleep first and then look, each as one `any` over a closure, so every line of
+both runs on every run. Three `cargo llvm-cov -p telemetry` runs on this Mac then
+counted `sink.rs` 21 each time while the closures ran different numbers of
+iterations, so the count no longer follows thread timing. Gate 20 declares
+`sink.rs` 21, totaling 33. The two lines removed were the second wait's sleep
+and the closing brace before it; no other uncovered `sink.rs` line is a wait.
+The workspace profile in CI must still reproduce 21.
+
 **What this does not do.** It does not make the `coverage` job pass. That job
 also runs `--fail-under-lines 100` over the whole workspace, and the workspace
 is not at 100%. Gate 20 makes one crate's shortfall *declared and enforced*;
