@@ -29,8 +29,9 @@
 //! pretending otherwise would be the false-claim shape this repository keeps
 //! catching itself in.
 //!
-//! What is bounded: [`MAX_MEMBERS`] caps the walk, the members a census
-//! rejects counted with the ones it decodes, and one file is open at a time.
+//! What is bounded: [`MAX_MEMBERS`] caps the `.csv` members a walk decodes or
+//! rejects, the ones a census rejects counted with the ones it decodes, and one
+//! file is open at a time.
 //!
 //! **MEMORY IS NOT BOUNDED TO ONE FILE, AND THIS PARAGRAPH USED TO SAY IT
 //! WAS.** It said each file's rows were decoded and passed along, never
@@ -512,7 +513,7 @@ enum Malformed {
 ///
 /// # Cost
 ///
-/// [`read_dir`]'s time, O(members), and more memory than [`read_dir`]'s. The
+/// [`read_dir`]'s time and more memory than [`read_dir`]'s. The
 /// returned vector holds every decoded row of the walk, and beside it the
 /// census keeps one [`Rejected`] per member that would not decode: its path
 /// and at most [`MAX_FINDING_BYTES`] of its refusal with a note of what was not
