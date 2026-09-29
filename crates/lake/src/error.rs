@@ -717,6 +717,33 @@ mod tests {
         );
     }
 
+    /// `NotRepresentable` is the one variant that wraps another error, and
+    /// `source()` must hand that core error back rather than drop the chain;
+    /// every other variant in both case lists has no cause. GAP14-64.
+    #[test]
+    fn not_representable_exposes_its_core_error_as_the_source() {
+        let core = brutex_core::price::Paisa::from_rupees_half_up(f64::NAN).unwrap_err();
+        let e = LakeError::NotRepresentable {
+            column: "close",
+            row: 9,
+            source: core,
+        };
+        let source = std::error::Error::source(&e).expect("the core error is the source");
+        assert_eq!(source.to_string(), core.to_string());
+
+        let mut without_cause = 0_usize;
+        for (other, _) in file_level_cases().into_iter().chain(content_level_cases()) {
+            if !matches!(other, LakeError::NotRepresentable { .. }) {
+                assert!(
+                    std::error::Error::source(&other).is_none(),
+                    "{other:?} has no cause"
+                );
+                without_cause += 1;
+            }
+        }
+        assert!(without_cause > 0, "the negative half checked something");
+    }
+
     /// The small reporting enum both of the above interpolate.
     #[test]
     fn every_column_type_renders_distinctly() {
