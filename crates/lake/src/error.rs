@@ -196,6 +196,22 @@ pub enum LakeError {
         arrived: usize,
     },
 
+    /// A column chunk still held a row after the row group's declared
+    /// `num_rows` had been read.
+    ///
+    /// The opposite direction of [`Self::ShortColumnChunk`]. The reader asks
+    /// the column for exactly `num_rows` records, so a footer that UNDERSTATES
+    /// the count used to be read as the declared prefix and the rest of the
+    /// chunk dropped without a word. The reader now asks for one more record
+    /// after the declared count, and any answer but none is this refusal.
+    /// W3-lake1-2.
+    LongColumnChunk {
+        /// The column that held more.
+        column: &'static str,
+        /// The row count the row group declared.
+        declared: usize,
+    },
+
     /// A column that must never be null was null.
     ///
     /// Measured across 170,547 F&O rows and 78,448 cash/index rows: timestamp,
@@ -321,6 +337,10 @@ impl fmt::Display for LakeError {
             } => write!(
                 f,
                 "column `{column}` does not cover its row group: {expected} expected, {arrived} arrived, diverging at row {row}; a chunk that runs out is damage rather than a tail of nulls, and it is refused rather than filled with nulls this reader invented"
+            ),
+            Self::LongColumnChunk { column, declared } => write!(
+                f,
+                "column `{column}` holds more than the {declared} rows its row group declares; refusing rather than reading the declared prefix and dropping the rest"
             ),
             Self::UnexpectedNull { column, row } => write!(
                 f,
@@ -574,6 +594,13 @@ mod tests {
                     arrived: 3,
                 },
                 "high",
+            ),
+            (
+                LakeError::LongColumnChunk {
+                    column: "volume",
+                    declared: 4,
+                },
+                "volume",
             ),
             (
                 LakeError::UnexpectedNull {

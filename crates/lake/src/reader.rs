@@ -23,7 +23,8 @@ use std::path::Path;
 use brutex_core::price::Paisa;
 use bytes::Bytes;
 use parquet::basic::Compression;
-use parquet::column::reader::ColumnReader;
+use parquet::column::reader::{ColumnReader, ColumnReaderImpl};
+use parquet::data_type::DataType;
 use parquet::file::metadata::{ParquetMetaData, ParquetMetaDataReader};
 
 use crate::bar::{Greeks, OPEN_INTEREST_NULL, paisa_from_lake};
@@ -175,6 +176,8 @@ impl LakeFile {
     /// [`LakeError::UnknownCodec`]
     /// for a compression this reader does not implement;
     /// [`LakeError::PageDecode`] if a page will not decode;
+    /// [`LakeError::LongColumnChunk`] if a column holds more rows than the
+    /// group declares;
     /// [`LakeError::UnexpectedNull`] if a column that must not be null is;
     /// [`LakeError::OpenInterestIsNullSentinel`] if a present open interest
     /// equals the null sentinel;
@@ -521,69 +524,89 @@ impl<'a> Columns<'a> {
         Ok(out)
     }
 
+    /// Reads exactly `rows` records from one column chunk, and refuses a chunk
+    /// that holds more.
+    ///
+    /// `read_records` answers `(records, values, levels)`, and a short read
+    /// shows up as `records < rows`. The triple is not the check for that
+    /// direction for one reason: `levels` IS `defs.len()` on an unnested leaf
+    /// at definition level 1, which is the shape `schema::detect` has already
+    /// insisted on, and `defs.len()` against `rows` is checked inside
+    /// `Self::expand` — the one function that used to pad the shortfall with
+    /// nulls. Checking the same number twice would leave a branch no file can
+    /// reach and a mutant no test can kill.
+    ///
+    /// **The long direction is checked here, because nothing else can see it.**
+    /// `rows` is the row group's declared `num_rows`, and asking for exactly
+    /// that many records stops at it. A footer that UNDERSTATES the count used
+    /// to be read as its declared prefix, and every row past it was dropped
+    /// without a word while [`LakeFile::num_rows`] still reported the whole
+    /// file. So one more record is asked for after the declared count; a chunk
+    /// that answers with any is [`LakeError::LongColumnChunk`]. That is one
+    /// extra call per column chunk, not per row. W3-lake1-2.
+    fn read_exactly<T: DataType>(
+        mut reader: ColumnReaderImpl<T>,
+        name: &'static str,
+        rows: usize,
+    ) -> Result<(Vec<T::T>, Vec<i16>), LakeError> {
+        let decode = |e: parquet::errors::ParquetError| LakeError::PageDecode {
+            column: name.to_owned(),
+            reason: e.to_string(),
+        };
+        let mut values: Vec<T::T> = Vec::with_capacity(rows);
+        let mut defs: Vec<i16> = Vec::with_capacity(rows);
+        reader
+            .read_records(rows, Some(&mut defs), None, &mut values)
+            .map_err(decode)?;
+
+        let mut past_values: Vec<T::T> = Vec::with_capacity(1);
+        let mut past_defs: Vec<i16> = Vec::with_capacity(1);
+        let (past, _, _) = reader
+            .read_records(1, Some(&mut past_defs), None, &mut past_values)
+            .map_err(decode)?;
+        if past != 0 {
+            return Err(LakeError::LongColumnChunk {
+                column: name,
+                declared: rows,
+            });
+        }
+        Ok((values, defs))
+    }
+
     fn int64(&mut self, name: &'static str) -> Result<Vec<Option<i64>>, LakeError> {
         let (pages, i) = self.pages(name)?;
         let desc = self.file.meta.file_metadata().schema_descr().column(i);
-        let mut values: Vec<i64> = Vec::with_capacity(self.rows);
-        let mut defs: Vec<i16> = Vec::with_capacity(self.rows);
         match parquet::column::reader::get_column_reader(desc, Box::new(pages)) {
-            ColumnReader::Int64ColumnReader(mut r) => {
-                // `read_records` answers `(records, values, levels)`, and a
-                // short read shows up as `records < self.rows`. The triple is
-                // not the check here for one reason: `levels` IS `defs.len()`
-                // on an unnested leaf at definition level 1, which is the shape
-                // `schema::detect` has already insisted on, and `defs.len()`
-                // against `self.rows` is checked inside `Self::expand` — the
-                // one function that used to pad the shortfall with nulls.
-                // Checking the same number twice would leave a branch no file
-                // can reach and a mutant no test can kill.
-                r.read_records(self.rows, Some(&mut defs), None, &mut values)
-                    .map_err(|e| LakeError::PageDecode {
-                        column: name.to_owned(),
-                        reason: e.to_string(),
-                    })?;
+            ColumnReader::Int64ColumnReader(r) => {
+                let (values, defs) = Self::read_exactly(r, name, self.rows)?;
+                Self::expand(name, &values, &defs, self.rows)
             }
-            _ => return Err(self.mismatch(name)),
+            _ => Err(self.mismatch(name)),
         }
-        Self::expand(name, &values, &defs, self.rows)
     }
 
     fn int32(&mut self, name: &'static str) -> Result<Vec<Option<i32>>, LakeError> {
         let (pages, i) = self.pages(name)?;
         let desc = self.file.meta.file_metadata().schema_descr().column(i);
-        let mut values: Vec<i32> = Vec::with_capacity(self.rows);
-        let mut defs: Vec<i16> = Vec::with_capacity(self.rows);
         match parquet::column::reader::get_column_reader(desc, Box::new(pages)) {
-            ColumnReader::Int32ColumnReader(mut r) => {
-                // The triple is discarded for the reason `Self::int64` states.
-                r.read_records(self.rows, Some(&mut defs), None, &mut values)
-                    .map_err(|e| LakeError::PageDecode {
-                        column: name.to_owned(),
-                        reason: e.to_string(),
-                    })?;
+            ColumnReader::Int32ColumnReader(r) => {
+                let (values, defs) = Self::read_exactly(r, name, self.rows)?;
+                Self::expand(name, &values, &defs, self.rows)
             }
-            _ => return Err(self.mismatch(name)),
+            _ => Err(self.mismatch(name)),
         }
-        Self::expand(name, &values, &defs, self.rows)
     }
 
     fn double(&mut self, name: &'static str) -> Result<Vec<Option<f64>>, LakeError> {
         let (pages, i) = self.pages(name)?;
         let desc = self.file.meta.file_metadata().schema_descr().column(i);
-        let mut values: Vec<f64> = Vec::with_capacity(self.rows);
-        let mut defs: Vec<i16> = Vec::with_capacity(self.rows);
         match parquet::column::reader::get_column_reader(desc, Box::new(pages)) {
-            ColumnReader::DoubleColumnReader(mut r) => {
-                // The triple is discarded for the reason `Self::int64` states.
-                r.read_records(self.rows, Some(&mut defs), None, &mut values)
-                    .map_err(|e| LakeError::PageDecode {
-                        column: name.to_owned(),
-                        reason: e.to_string(),
-                    })?;
+            ColumnReader::DoubleColumnReader(r) => {
+                let (values, defs) = Self::read_exactly(r, name, self.rows)?;
+                Self::expand(name, &values, &defs, self.rows)
             }
-            _ => return Err(self.mismatch(name)),
+            _ => Err(self.mismatch(name)),
         }
-        Self::expand(name, &values, &defs, self.rows)
     }
 
     /// The type this reader wanted against the type the file holds.
@@ -1187,6 +1210,58 @@ mod tests {
                 "a present i64::MIN read back as {:?}",
                 batch.iter().map(|b| b.open_interest()).collect::<Vec<_>>()
             ),
+        }
+    }
+
+    /// **A ROW COUNT THAT UNDERSTATES THE CHUNK IS REFUSED, NOT TRUNCATED TO.**
+    ///
+    /// The reader asks each column for exactly the row group's declared
+    /// `num_rows`, so an 8-row file whose footer says 4 used to decode as a
+    /// 4-bar batch: four rows dropped without a word while the file-level count
+    /// still said 8. Only the overstated direction was refused
+    /// ([`LakeError::ShortColumnChunk`]). W3-lake1-2.
+    ///
+    /// Two lies are checked. The first edits only the row group's `num_rows`,
+    /// the shape the ledger reproduced. The second also edits every chunk's
+    /// `num_values` to agree with it, so the refusal is shown to rest on the
+    /// rows actually in the pages and not on two metadata fields disagreeing.
+    #[test]
+    fn a_row_count_that_understates_the_chunk_is_refused_rather_than_truncated_to() {
+        const ROWS: usize = 8;
+        const LIE: i64 = 4;
+
+        let sound = cash_file(ROWS);
+        let decoded = LakeFile::from_bytes(sound.clone())
+            .expect("the sound fixture opens")
+            .read_row_group(0)
+            .expect("the sound fixture decodes");
+        assert_eq!(decoded.len(), ROWS, "the sound fixture decodes every row");
+
+        let only_rows = patch_footer(&sound, |meta| {
+            meta.row_groups[0].num_rows = LIE;
+        });
+        let rows_and_values = patch_footer(&sound, |meta| {
+            meta.row_groups[0].num_rows = LIE;
+            for chunk in &mut meta.row_groups[0].columns {
+                chunk
+                    .meta_data
+                    .as_mut()
+                    .expect("the writer records chunk metadata")
+                    .num_values = LIE;
+            }
+        });
+
+        for lying in [only_rows, rows_and_values] {
+            let file = LakeFile::from_bytes(lying).expect("the footer still parses");
+            assert_eq!(file.num_rows(), 8, "the file-level count is untouched");
+            match file.read_row_group(0) {
+                Err(LakeError::LongColumnChunk { column, declared }) => {
+                    assert_eq!(column, "timestamp", "the first column read refuses");
+                    assert_eq!(declared, 4, "the refusal reports the declared count");
+                }
+                Err(other) => panic!("refused for the wrong reason: {other:?}"),
+                Ok(batch) => panic!("an 8-row chunk was read as {} rows", batch.len()),
+            }
         }
     }
 
