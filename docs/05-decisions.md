@@ -43688,3 +43688,18 @@ The unit test
 `a_reopened_candidate_checkpoint_equals_its_source_and_a_step_does_not` asserts
 that the reopened scratch really differs after a one-leaf candidate while the
 two cursors compare equal, and that one further step compares unequal.
+
+### D-0751 — Display is lossless text, not a parser round trip — 2026-09-29
+
+**What was wrong (ET-expressions-2).** `Expression`'s `Display` comment said
+only that the fixed wire grammar can exceed the parser's limits. Programs the
+parser itself accepted exceed them too: every NOT renders as `!(`, two nesting
+levels, and every binary node is fully parenthesised.
+`display_can_exceed_the_parser_limits_for_programs_the_parser_accepted` pins
+three such programs, one refused `SourceCapacity` and two `NestingCapacity`,
+and shows each survives `encode` and `decode` exactly.
+
+**Decision.** Recorded, not changed. The rendered text is what `api` serves:
+`crates/api/src/booleanjson_tests.rs` pins a row's `expression` as
+`(0 | !(1))`. Changing that text is a change of its own. The
+comment now states the limit, and `docs/06-limits.md` records it.

@@ -9864,3 +9864,16 @@ The text above is kept as it was written.
   doc to its body, read off the source, and
   `what_a_changed_rows_line_costs_is_named_in_part_and_read_off_the_source`
   finds each part named here and in that doc in the source that pays it.
+
+## Grammar search: what a node budget bounds, and what display cannot re-run — D-0751 to D-0753, 29 September 2026
+
+* **Display is not a parser round trip (D-0751).** A program `Expression::parse`
+  accepted can render past its limits: 16 NOTs over one bit render to 49 bytes
+  and are refused `NestingCapacity`; a 576-leaf AND chain of bit 0 renders to
+  3,451 bytes and is refused `NestingCapacity`; the same chain of bit 369
+  renders to 4,603 bytes and is refused `SourceCapacity`. Each still survives
+  `encode` and `decode` exactly.
+  `display_can_exceed_the_parser_limits_for_programs_the_parser_accepted` pins
+  all three. `cli expression-stored` reads its EXPRESSION through
+  `Expression::parse(source)`, so a candidate's displayed text cannot always be
+  re-run there.
