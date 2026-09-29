@@ -210,6 +210,17 @@ pub enum LakeError {
         row: usize,
     },
 
+    /// A PRESENT `open_interest` value equals the null sentinel.
+    ///
+    /// `CLAUDE.md` §7 fixes `i64::MIN` as "the vendor reported none", and the
+    /// reader writes it for a Parquet null. A present value equal to it would
+    /// read back through [`crate::bar::Bar::open_interest`] as `None`, turning
+    /// a value into an absence, so it is refused instead. W3-lake1-4.
+    OpenInterestIsNullSentinel {
+        /// Which row of the row group.
+        row: usize,
+    },
+
     /// A rupee value could not become a paisa integer.
     ///
     /// The lake stores prices as IEEE doubles because Polars wrote them that
@@ -314,6 +325,10 @@ impl fmt::Display for LakeError {
             Self::UnexpectedNull { column, row } => write!(
                 f,
                 "column `{column}` is null at row {row}, and a null there has no meaning; refusing rather than substituting a value"
+            ),
+            Self::OpenInterestIsNullSentinel { row } => write!(
+                f,
+                "column `open_interest` holds a present i64::MIN at row {row}, which is the null sentinel; refusing rather than reading a present value as absent"
             ),
             Self::NotRepresentable {
                 column,
@@ -567,6 +582,7 @@ mod tests {
                 },
                 "timestamp",
             ),
+            (LakeError::OpenInterestIsNullSentinel { row: 23 }, "23"),
             (
                 LakeError::NotRepresentable {
                     column: "low",

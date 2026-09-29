@@ -176,6 +176,8 @@ impl LakeFile {
     /// for a compression this reader does not implement;
     /// [`LakeError::PageDecode`] if a page will not decode;
     /// [`LakeError::UnexpectedNull`] if a column that must not be null is;
+    /// [`LakeError::OpenInterestIsNullSentinel`] if a present open interest
+    /// equals the null sentinel;
     /// [`LakeError::NotRepresentable`] if a price will not become paisa.
     pub fn read_row_group(&self, index: usize) -> Result<Batch, LakeError> {
         let held = self.row_groups();
@@ -262,12 +264,18 @@ impl LakeFile {
 
         // Open interest is the one column whose null is meaningful, and
         // CLAUDE.md section 7 fixes its representation: i64::MIN, distinct
-        // from a real zero.
+        // from a real zero. A PRESENT value equal to the sentinel would read
+        // back as absent, so it is refused by name. W3-lake1-4.
         let open_interest = cols
             .int64("open_interest")?
             .into_iter()
-            .map(|v| v.unwrap_or(OPEN_INTEREST_NULL))
-            .collect();
+            .enumerate()
+            .map(|(row, v)| match v {
+                Some(OPEN_INTEREST_NULL) => Err(LakeError::OpenInterestIsNullSentinel { row }),
+                Some(v) => Ok(v),
+                None => Ok(OPEN_INTEREST_NULL),
+            })
+            .collect::<Result<Vec<i64>, LakeError>>()?;
 
         let (spot_at_bar, greeks, greeks_provenance_id) = if self.layout.has_greeks() {
             let spot = cols.optional_price("spot_at_bar")?;
@@ -974,6 +982,16 @@ mod tests {
     /// `page.rs`. Frames as Polars wrote them are reached only by the
     /// `#[ignore]`d `tests/real_lake.rs`, on a machine that has the lake.
     fn cash_file(rows: usize) -> Vec<u8> {
+        let ints: Vec<i64> =
+            (0..i64::try_from(rows).expect("a test row count fits an i64")).collect();
+        cash_file_with_open_interest(&ints)
+    }
+
+    /// As [`cash_file`], one row per element of `open_interest`, with those
+    /// values written PRESENT into the `open_interest` column and `0..rows`
+    /// into the other two INT64 columns.
+    fn cash_file_with_open_interest(open_interest: &[i64]) -> Vec<u8> {
+        let rows = open_interest.len();
         let fields: Vec<Arc<Type>> = CASH
             .iter()
             .map(|(name, ty)| {
@@ -1008,10 +1026,18 @@ mod tests {
         {
             let mut writer = SerializedFileWriter::new(&mut out, schema, props).expect("writer");
             let mut group = writer.next_row_group().expect("row group");
+            let mut index = 0_usize;
             while let Some(mut column) = group.next_column().expect("column") {
+                // `open_interest` is the seventh and last of `CASH`.
+                let values = if index == CASH.len() - 1 {
+                    open_interest
+                } else {
+                    &ints
+                };
+                index += 1;
                 match column.untyped() {
                     ColumnWriter::Int64ColumnWriter(typed) => {
-                        typed.write_batch(&ints, Some(&defs), None).expect("i64");
+                        typed.write_batch(values, Some(&defs), None).expect("i64");
                     }
                     ColumnWriter::DoubleColumnWriter(typed) => {
                         typed.write_batch(&doubles, Some(&defs), None).expect("f64");
@@ -1123,6 +1149,44 @@ mod tests {
                 );
             }
             other => panic!("expected ImpossibleLength, got {:?}", other.err()),
+        }
+    }
+
+    /// **A PRESENT `open_interest` OF `i64::MIN` IS REFUSED, NOT READ AS ABSENT.**
+    ///
+    /// `CLAUDE.md` §7 makes `i64::MIN` the open-interest null sentinel, and the
+    /// reader turns a Parquet null into it. A value the file stores as PRESENT
+    /// and equal to `i64::MIN` used to pass through the same `unwrap_or`
+    /// unchanged, so [`crate::bar::Bar::open_interest`] reported it as `None`:
+    /// a present value silently became "the vendor reported none". W3-lake1-4.
+    ///
+    /// The row after it is `0` and must not be refused, so the refusal is on
+    /// the sentinel value and not on the column, and the sound half proves the
+    /// fixture writes present values that decode.
+    #[test]
+    fn a_present_open_interest_equal_to_the_null_sentinel_is_refused() {
+        let sound = LakeFile::from_bytes(cash_file_with_open_interest(&[0, 7]))
+            .expect("the sound fixture opens")
+            .read_row_group(0)
+            .expect("the sound fixture decodes");
+        let oi: Vec<Option<i64>> = sound.iter().map(|b| b.open_interest()).collect();
+        assert_eq!(
+            oi,
+            [Some(0), Some(7)],
+            "present values read back as present"
+        );
+
+        let file = LakeFile::from_bytes(cash_file_with_open_interest(&[0, OPEN_INTEREST_NULL]))
+            .expect("the colliding fixture opens");
+        match file.read_row_group(0) {
+            Err(LakeError::OpenInterestIsNullSentinel { row }) => {
+                assert_eq!(row, 1, "the refusal names the row that collides");
+            }
+            Err(other) => panic!("refused for the wrong reason: {other:?}"),
+            Ok(batch) => panic!(
+                "a present i64::MIN read back as {:?}",
+                batch.iter().map(|b| b.open_interest()).collect::<Vec<_>>()
+            ),
         }
     }
 
