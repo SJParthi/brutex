@@ -2373,11 +2373,6 @@ const WORST_K3: usize = LIVE_POSITIONS * (LIVE_POSITIONS - 1) * (LIVE_POSITIONS 
 #[cfg(test)]
 const WORST_K4: usize = WORST_K3 * (LIVE_POSITIONS - 3) / 4;
 
-/// Test-only reading of the workspace's own source, for "no production caller"
-/// guards.
-#[cfg(test)]
-mod source_scan;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2608,42 +2603,6 @@ mod tests {
             bytes_of(&from_masks.into_ordered()),
             bytes_of(&from_column.into_ordered()),
             "and the same rows out"
-        );
-    }
-
-    /// **`keep::Best` has no production caller, and its doc says so** (ET-13,
-    /// D-0762).
-    ///
-    /// Every use of `Best` outside `keep.rs` is in this test module, and
-    /// `runner::rank` keeps its own heap. This reads the engine's shipping source
-    /// and every other crate's whole `src` (see `crate::source_scan`), requires
-    /// that none of it names the type's constructors or imports it, and requires
-    /// the type's doc to say no production path calls it.
-    #[test]
-    fn best_has_no_production_caller_and_says_so() {
-        let uses = crate::source_scan::mentions(
-            &[
-                "Best::with_capacity",
-                "Best::default",
-                "keep::Best",
-                "keep::{",
-            ],
-            "",
-        );
-        assert!(
-            uses.is_empty(),
-            "keep::Best now has a production caller: {uses:?}. Revisit its doc and \
-             D-0762 before keeping this test's claim"
-        );
-        let keep = include_str!("keep.rs");
-        let doc = keep
-            .split("/// The best `cap` itemsets offered, in memory proportional to `cap`.")
-            .nth(1)
-            .and_then(|tail| tail.split("pub struct Best {").next())
-            .unwrap_or("");
-        assert!(
-            doc.contains("/// **No production path calls this.**"),
-            "the doc must state that no production path constructs `Best`"
         );
     }
 

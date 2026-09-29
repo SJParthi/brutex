@@ -137,8 +137,7 @@ impl Column {
     /// **No production path calls this.** No shipping source in this crate calls
     /// it and no other crate's `src` names it, so no run's ranking, dedup or trial
     /// count uses this identity.
-    /// `the_fingerprinted_path_has_no_production_caller_and_says_so` fails the
-    /// day a caller appears (D-0760).
+    /// `engine/tests/production_callers.rs` fails the day a caller appears (D-0760).
     ///
     /// Every row still takes one fixed-width hit test. The hit booleans are packed into
     /// consecutive 64-bar words so this returns the exact identity the former vertical
@@ -882,37 +881,5 @@ mod tests {
                 "the empty mask returns a fold of its 64 bars, not a reserved pair"
             );
         }
-    }
-
-    /// **The fingerprinted path has no production caller, and its doc says so.**
-    ///
-    /// `Column::support_fingerprinted` and `HitSet` are exercised by this module's
-    /// tests and by the C-E-07 bench row only. D-0454 described the fingerprint as
-    /// if a run relied on it, which no run did. This test reads the engine's
-    /// shipping source and every other crate's whole `src` (see
-    /// `crate::source_scan`), requires that none of it names the method outside
-    /// its own definition, and requires the method's doc to say so. The day a
-    /// production caller appears, this fails and the doc sentence must be
-    /// revisited rather than left standing (D-0760).
-    #[test]
-    fn the_fingerprinted_path_has_no_production_caller_and_says_so() {
-        let calls =
-            crate::source_scan::mentions(&["support_fingerprinted"], "fn support_fingerprinted");
-        assert!(
-            calls.is_empty(),
-            "support_fingerprinted now has a production caller: {calls:?}. Revisit \
-             its doc and D-0760 before keeping this test's claim"
-        );
-
-        let source = include_str!("column.rs");
-        let doc = source
-            .split("/// The support count AND the identity of the bars it counted")
-            .nth(1)
-            .and_then(|tail| tail.split("pub fn support_fingerprinted").next())
-            .unwrap_or("");
-        assert!(
-            doc.contains("/// **No production path calls this.**"),
-            "the doc must state that no sweep, runner, cli or api path calls it"
-        );
     }
 }

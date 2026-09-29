@@ -43680,13 +43680,17 @@ returns, are reached only from engine tests and from the C-E-07 row in
 **The change.** No code path moves. The method's doc now opens a paragraph with
 "No production path calls this", the limits paragraph says no production
 source calls the fingerprint pass, and
-`engine::column::tests::the_fingerprinted_path_has_no_production_caller_and_says_so`
+`engine/tests/production_callers.rs::the_fingerprinted_path_has_no_production_caller_and_says_so`
 reads every `.rs` file under `crates/engine/src` up to its first
 `#[cfg(test)]` line and every other crate's `src` whole, with line comments
-stripped, and requires no mention outside the definition and that sentence in
-the doc. `engine::source_scan::tests::nothing_after_an_engine_files_first_test_gate_ships`
-holds the cut sound. The guard fails the day a caller appears, so the doc
-cannot go stale silently.
+stripped, and requires no whole-token mention outside the definition and that
+sentence in the doc.
+`engine/tests/production_callers.rs::nothing_after_an_engine_files_first_test_gate_ships`
+holds the cut sound. The scan lives under `crates/engine/tests` because CI Gate
+22 clause B refuses `read_dir` and `std::fs` anywhere in `crates/engine/src`,
+test-only code included, and the engine's `src` keeps no filesystem call.
+The guard fails the day a caller appears, so the
+doc cannot go stale silently.
 
 **Why it was not deleted or wired in.** C-E-07 names the bench row that calls
 it, and invariant rows are append-only. Wiring it into the sweep would dedupe
@@ -43736,10 +43740,10 @@ live path.
 **The change.** No code path moves. The type's doc now says "No production path
 calls this" and names `runner::rank` as keeping its own heap; the crate doc
 says a caller could feed it and no production caller does.
-`engine::tests::best_has_no_production_caller_and_says_so` uses the D-0760
-scan to require no `Best::with_capacity`, `Best::default`, `keep::Best` or
-`keep::{` in any shipping engine region or any other crate's `src`, and that
-sentence in the doc.
+`engine/tests/production_callers.rs::best_has_no_production_caller_and_says_so`
+uses the D-0760 scan to require the token `Best` nowhere in any shipping engine
+region or any other crate's `src` but the type's own `pub struct Best` and
+`impl Best` lines, and that sentence in the doc.
 
 **Why it was not deleted or gated to tests.** `keep::Streamed`, `Tally` and the
 module's tests share the file, and the retention's cost and allocation

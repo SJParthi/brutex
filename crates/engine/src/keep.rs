@@ -243,8 +243,7 @@ fn weaker(held: &[Itemset], lower: usize, upper: usize) -> bool {
 /// **No production path calls this.** No shipping source in this crate
 /// constructs it and no other crate's `src` names it: `runner::rank` feeds its
 /// own heap, so no run's retention, ranking or report depends on this type.
-/// `engine::tests::best_has_no_production_caller_and_says_so` fails the day a
-/// caller appears (D-0762).
+/// `engine/tests/production_callers.rs` fails the day a caller appears (D-0762).
 #[derive(Clone, Debug, Default)]
 pub struct Best {
     cap: usize,
