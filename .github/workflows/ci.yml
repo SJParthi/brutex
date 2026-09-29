@@ -7715,7 +7715,7 @@ jobs:
           level.rs 1
           lib.rs 6
           record.rs 1
-          sink.rs 23
+          sink.rs 21
           tail.rs 3
           '
           cargo llvm-cov report --locked --text > /tmp/cov.txt

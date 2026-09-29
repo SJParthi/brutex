@@ -1715,26 +1715,28 @@ mod tests {
         // The counter is bumped INSIDE the critical section, immediately before
         // the notice that now sits outside it — so once it moves, the writer is
         // either finishing its append or already parked in `report`.
-        let mut spun = 0;
-        while sink.rotation_failures.load(Ordering::Relaxed) == 0 && spun < 5_000 {
+        //
+        // SLEEP FIRST, THEN LOOK, and no line that only some iterations reach,
+        // in both waits below. Looking first let the writer's speed decide
+        // whether a loop body ran at all, so gate 20's exact uncovered-line
+        // count for this file moved with thread timing (D-0801). Each wait is
+        // one `any` over a closure whose every line runs on every run, however
+        // many tries the other thread takes.
+        let failed = (0..5_000).any(|_| {
             std::thread::sleep(std::time::Duration::from_millis(1));
-            spun += 1;
-        }
+            sink.rotation_failures.load(Ordering::Relaxed) > 0
+        });
         assert!(
-            sink.rotation_failures.load(Ordering::Relaxed) > 0,
+            failed,
             "the premise: the roll had to fail for `report` to be reached"
         );
 
         // THE ASSERTION. Another thread must be able to take the emit mutex
         // while the writer is parked in `report`.
-        let mut free = false;
-        for _ in 0..5_000 {
-            if sink.inner.try_lock().is_ok() {
-                free = true;
-                break;
-            }
+        let free = (0..5_000).any(|_| {
             std::thread::sleep(std::time::Duration::from_millis(1));
-        }
+            sink.inner.try_lock().is_ok()
+        });
 
         // Release the park and let the writer finish before asserting, so a
         // failure reports rather than leaving a thread wedged.
