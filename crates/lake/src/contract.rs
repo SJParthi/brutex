@@ -272,6 +272,13 @@ fn parse_expiry(text: &str) -> Result<Expiry, ContractError> {
     let (Some(d), Some(m), Some(y)) = (text.get(0..2), text.get(2..5), text.get(5..7)) else {
         return Err(bad());
     };
+    // `u8::from_str` and `u16::from_str` accept a leading `+`, so `+1Apr20`
+    // would parse to the expiry of `01Apr20`: two directory names, one
+    // `InstrumentKey`. The same injectivity test `parse_strike` applies:
+    // require plain digits so a novel spelling is a refusal. W3-lake1-3.
+    if !d.bytes().chain(y.bytes()).all(|b| b.is_ascii_digit()) {
+        return Err(bad());
+    }
     let day: u8 = d.parse().map_err(|_| bad())?;
     let yy: u16 = y.parse().map_err(|_| bad())?;
     let month = parse_month(m)?;
@@ -677,6 +684,34 @@ mod tests {
             let name = format!("NSE-NIFTY-01Apr20-{rupees}-CE");
             let c = ContractName::parse(&name).expect("a plain strike parses");
             assert_eq!(c.to_string(), name);
+        }
+    }
+
+    /// `u8::from_str` and `u16::from_str` accept a leading `+`, so without a
+    /// digit guard `+1Apr20` parses to the same expiry as `01Apr20` and
+    /// `01Apr+0` to the same as `01Apr00`: two directory names, one
+    /// `InstrumentKey`, and a `Display` that renders the signed one back as a
+    /// name that does not exist. W3-lake1-3.
+    #[test]
+    fn a_signed_day_or_year_is_refused_rather_than_aliased_onto_another_contract() {
+        for signed in [
+            "NSE-NIFTY-+1Apr20-10000-CE",
+            "NSE-NIFTY-01Apr+0-10000-CE",
+            "NSE-NIFTY-+1Apr+0-10000-CE",
+            "NSE-BANKNIFTY-+4Apr24-FUT",
+        ] {
+            match ContractName::parse(signed) {
+                Err(ContractError::BadExpiryShape { found }) => {
+                    assert!(found.contains('+'), "the refusal names it: {found}");
+                }
+                other => panic!("{signed} must be refused, got {other:?}"),
+            }
+        }
+
+        // The digit spellings they aliased onto still parse and round-trip.
+        for plain in ["NSE-NIFTY-01Apr20-10000-CE", "NSE-NIFTY-01Apr00-10000-CE"] {
+            let c = ContractName::parse(plain).expect("a plain expiry parses");
+            assert_eq!(c.to_string(), plain);
         }
     }
 }
