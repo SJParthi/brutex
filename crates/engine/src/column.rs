@@ -154,9 +154,13 @@ impl Column {
         let mut lo = FINGERPRINT_SEED_LO;
         let mut hi = FINGERPRINT_SEED_HI;
         for rows in self.rows.chunks(BARS_PER_WORD) {
-            let word = rows.iter().enumerate().fold(0_u64, |packed, (bit, row)| {
-                packed | (u64::from(row.hits(candidate)) << bit)
-            });
+            // Each row owns its own bit, so the shifted hits are disjoint and
+            // their sum is the packed word.
+            let word: u64 = rows
+                .iter()
+                .enumerate()
+                .map(|(bit, row)| u64::from(row.hits(candidate)) << bit)
+                .sum();
             hits = hits.saturating_add(u64::from(word.count_ones()));
             // TWO INDEPENDENT FOLDS, and the rotation is what makes them ORDERED.
             // Multiply-xorshift alone is commutative over a set of words, so two
