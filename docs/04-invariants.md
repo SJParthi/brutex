@@ -5354,3 +5354,9 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### C4 costs follow-ups (D-0770 onward)
+
+| Invariant | Statement | Test that proves it | Status |
+|---|---|---|---|
+| C4-COSTS-01 | `costs::expiry::next_weekly_expiry` answers the first day on or after the day asked whose own weekly regime names its own weekday, so a regime change between the day asked and the old weekday is read at the expiry and not at the day asked. NIFTY asked 2025-08-29 to 2025-09-01 answers 2025-09-02, and BANKNIFTY asked 2023-09-01 to 2023-09-04 answers 2023-09-06. Over the verified window on both underlyings every answer is an expiry by its own regime and the answers never go backwards; a boundary landing on the old weekday is crossed, a withdrawal met on the way answers `None`, and a refusal met on the way is returned. (D-0770) | `costs::expiry::tests::a_weekly_regime_change_is_read_at_the_expiry_and_not_at_the_day_asked`, `costs::expiry::tests::every_weekly_answer_is_an_expiry_by_its_own_regime_and_the_answers_never_go_backwards`, `costs::expiry::tests::a_boundary_on_the_old_regimes_expiry_day_is_crossed_and_one_past_it_is_not`, `costs::expiry::tests::a_boundary_into_a_refusal_before_the_expiry_is_refused_rather_than_projected` | ✓ |

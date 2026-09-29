@@ -43666,3 +43666,33 @@ job.
   survived. `an_nse_cash_stock_consults_no_peer_even_one_holding_it` gives a
   second vendor the same stock and requires that nothing votes and nothing is
   named; the same two feeds holding an index do vote, as the control.
+
+### D-0770 — Read the weekly expiry regime at the expiry, not only at the day asked — 2026-09-29
+
+**Defect (W3-costs1-0).** `costs::expiry::next_weekly_on` read the weekly
+regime once, at the day asked, and projected that regime's weekday forward.
+When a later row started between the day asked and that weekday, the answer
+was a day the table's own regime says is not an expiry. Reproduced on
+`origin/main` 2c209309: NIFTY asked 2025-08-29 answered 2025-09-04, a
+Thursday, while the NIFTY Tuesday row starts 2025-09-02; BANKNIFTY asked
+2023-09-03 answered 2023-09-07, while the Wednesday row starts 2023-09-04 and
+cites "the first Wednesday weekly expired 2023-09-06". Asked one day later the
+answers went back to 2025-09-02 and 2023-09-06, so the function was not
+monotone.
+
+**The change.** Each pass reads the regime at `from` and computes its weekday's
+offset. If a later row starts after `from` and on or before that day, `from`
+moves to that row's start and the regime is read again; otherwise the pass
+answers. A withdrawal met on the way answers `None` and an unverified row met on
+the way is refused, never projected across. `from` only moves to a strictly
+later row start, so the passes are bounded by the fixed `later` array
+(`dated::MAX_LATER_ROWS`), not by any input. The module documentation and the
+public example now state this.
+
+**What it changes.** `next_weekly_expiry` has no caller on the sweep path: its
+caller is `pull::rolling::expiry_of`, which dates options contracts (options
+data is deferred) and which `api`'s F&O walk asks, through
+`cadence_has_contracts_on`, only whether a date exists. No run identity term is computed
+from it. The two source-answer rows in `the_next_weekly_lands_on_the_source_answers` that
+pinned the defect (NIFTY 2025-09-01 to 2025-09-04, BANKNIFTY 2023-09-03 to
+2023-09-07) now pin 2025-09-02 and 2023-09-06. Invariant C4-COSTS-01.
