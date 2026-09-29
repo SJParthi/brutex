@@ -43666,3 +43666,32 @@ job.
   survived. `an_nse_cash_stock_consults_no_peer_even_one_holding_it` gives a
   second vendor the same stock and requires that nothing votes and nothing is
   named; the same two feeds holding an index do vote, as the control.
+
+### D-0910 — Record that three resumable Boolean paths re-verify all completed work on every step — 2026-09-29
+
+**What was found.** Three C4 audit rows (W2-cli2-2, W2-cli2-1, W2-cli2-0)
+name one shape in three commands: a loop whose single step repeats a check
+over everything earlier steps finished, and no limit said so.
+
+- `boolean-grammar-campaign-stored` advances one batch per invocation, and
+  `restore` calls its `complete` callback once for every nonempty completed
+  batch in the chain; the callback `execute_with` passes prepares that batch's
+  campaign again and verifies its saved campaign. Invocation n re-verifies the
+  n − 1 batches before it.
+  `cli::boolean_grammar_campaign::tests::every_invocation_reverifies_every_completed_batch_in_order`
+  requires one, two and three calls, in chain order, after one, two and three
+  completed batches.
+- `boolean-search-stored` opens the whole history and calls `verify_batch` for
+  every completed batch before it publishes a completion, and again after.
+  `verify_batch` ends by rereading every retained record.
+- The later-period OOS producer loops over every training anchor, two per
+  program, and each group ends with `training.require_current()?;`, which loops
+  over every retained row and re-verifies the saved training body.
+
+**The choice.** The repeated checks are the tamper detection each path relies
+on before it skips or builds on finished work, so they are recorded, not
+removed. `docs/06-limits.md` states each one, and quotes the source lines that
+pay for it; `c4_cli_02_limits::each_quoted_line_is_in_the_source_it_names`
+fails if a quote leaves the section or the source. The comment on `restore`,
+which named only a per-invocation bound, now also names the growth. No code
+path changed, so no run identity moves.

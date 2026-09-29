@@ -5354,3 +5354,10 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### C4 cli batch 02 — D-0910, D-0911
+
+| Id | Invariant | Test that proves it | Status |
+|---|---|---|---|
+| C4-CLI-02-01 | Grammar-campaign recovery calls `complete` once for every nonempty completed batch, in chain order, so invocation n re-verifies the n − 1 batches before it; `docs/06-limits.md` states it. | `cli::boolean_grammar_campaign::tests::every_invocation_reverifies_every_completed_batch_in_order` | ✓ |
+| C4-CLI-02-02 | Every source line the D-0910 limits section quotes for the grammar campaign, the qualified search and the later-period OOS producer is present both in that section and in the source file it names. | `c4_cli_02_limits::each_quoted_line_is_in_the_source_it_names`, `c4_cli_02_limits::the_verify_loops_the_section_describes_are_the_ones_in_the_source` | ✓ |

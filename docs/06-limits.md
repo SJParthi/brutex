@@ -9864,3 +9864,55 @@ The text above is kept as it was written.
   doc to its body, read off the source, and
   `what_a_changed_rows_line_costs_is_named_in_part_and_read_off_the_source`
   finds each part named here and in that doc in the source that pays it.
+
+## Three resumable Boolean paths re-verify all completed work on every step — D-0910, 29 September 2026
+
+Each of these is a loop whose one step repeats a check over everything the
+earlier steps finished. None is O(1) per step, none is timed, and none was
+stated here before. The checks are the tamper detection each path relies on,
+so they are recorded, not removed. Every source line quoted below is found in
+that file by `c4_cli_02_limits::each_quoted_line_is_in_the_source_it_names`.
+
+* **`boolean-grammar-campaign-stored`, one batch per invocation.** In
+  `crates/cli/src/boolean_grammar_campaign.rs`, `restore` walks the whole
+  checkpoint chain (`for (sequence, pin) in chain.into_iter().rev() {`) and,
+  for every nonempty completed batch, calls
+  `complete(id, pin, batch.programs())?;`. The `complete` that
+  `execute_with` passes prepares that batch's campaign again
+  (`let expected = prepare(&request.campaign(programs), &mut String::new())?;`)
+  and verifies its saved campaign
+  (`crate::boolean_campaign::verify_complete(request.root, id, pin, ancestry_bytes)`).
+  So invocation n re-verifies the n − 1 batches before it, and the work of a
+  whole grammar grows with the square of its batch count.
+  `cli::boolean_grammar_campaign::tests::every_invocation_reverifies_every_completed_batch_in_order`
+  counts the calls: after one, two and three completed batches, `restore`
+  calls `complete` one, two and three times, in chain order. The comment on
+  `restore` said "O(checkpoints + replayed grammar work + saved campaign
+  evidence)" and named neither the source preparation nor the growth per
+  invocation; it now names both.
+* **`boolean-search-stored`, each batch completion.** In
+  `crates/cli/src/boolean_search_command.rs`, before the completion is
+  published the command opens the whole history
+  (`let prior = Reader::open(request.input.output, identity, observe, records)?;`)
+  and verifies every completed batch (`prior.verify_batch(batch as u64)?;`),
+  and after publishing it does both again (`saved.verify_batch(batch as u64)?;`).
+  In `crates/cli/src/boolean_search_reader.rs`, `verify_batch` of a nonempty
+  batch opens its campaign (`QualifiedCampaign::open(`) and each selected rung
+  (`drop(open_rung(&self.root, &record, rung, allowance)?);`), and every `verify_batch`
+  ends by rereading every retained record (`for old in &self.history {`). So
+  one completion costs work that grows with the completed batches times the
+  retained history, as well as each batch's campaign and rung ancestry.
+  D-0549's section above says a cold reader "charges every declared replay
+  allowance"; it did not say the command repeats that for every completed
+  batch at every completion.
+* **Later-period OOS, each program and side.** In
+  `crates/cli/src/boolean_oos_v1.rs` the producer loops over every training
+  anchor (`for (group, anchor) in training.anchors.iter().enumerate() {`), and
+  each group ends with `training.require_current()?;`. In
+  `crates/cli/src/boolean_candidate_v1.rs` that check loops over every
+  retained row (`for row in &self.rows {`) and re-verifies the saved training
+  body (`persistence::verify(`). `request` refuses unless
+  `training.anchors.len()` equals the program count `.checked_mul(2)`
+  (`return Err("Boolean training anchors incomplete".into());`), two anchors
+  per program, so the whole comparison costs work
+  that grows with the programs times the retained rows and body bytes.
