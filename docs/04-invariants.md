@@ -5354,3 +5354,9 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### Index-future cost scope — C4 costs batch 02 (D-0944)
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| C4-COSTS-02-01 | **The index-future arm of `is_cost_free` stands on the operator rule, not on the spot's reason.** `Segment::IndexFuture` has an arm of its own, not shared with `Segment::IndexSpot`; the comment block over it contains `DEC-COST-SCOPE-INDEX-SIGNAL-ONLY-001` and not `Not tradeable`; and `is_cost_free(Segment::IndexFuture)` is still `true`. D-0944 | `costs::scope::tests::the_index_future_arm_cites_the_operator_rule_not_untradeability` | ✓ |
