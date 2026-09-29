@@ -43666,3 +43666,58 @@ job.
   survived. `an_nse_cash_stock_consults_no_peer_even_one_holding_it` gives a
   second vendor the same stock and requires that nothing votes and nothing is
   named; the same two feeds holding an index do vote, as the control.
+
+### D-0906 — Refuse a `/pull/run` leg whose vendor is no feed this build has — 2026-09-29
+
+**What happened.** W1-api3-3. `pullrun::legs_from` copied a leg's vendor
+unchecked (`vendor: vendor.to_owned(),`), and `pullrun::by_feed` finds a leg's
+group with `groups.iter_mut().find(|(vendor, _)| *vendor == leg.vendor)`. The
+module doc said that scan is "bounded by the number of feeds this build has
+(four), not by the number of legs", and `by_feed`'s doc said "four, not four
+thousand". Neither held: the group count, and so the scan and the number of
+chains `conduct` spawns, grew with the distinct vendor strings a form carried.
+The feed count was also not four: `pull::vendor::FEED_COUNT` is 5.
+
+**The change.** `legs_from` refuses the whole run with `Refusal::Malformed`,
+naming the leg, when its vendor is not the exact `wire()` spelling of one of
+`pull::vendor::Feed::ALL`. That is the same refusal an unknown route already
+gets. The two docs name `pull::vendor::FEED_COUNT` in place of "four", and
+`by_feed`'s doc says the bound holds for legs `legs_from` admitted.
+
+**Proof.** `pullrun::tests::a_leg_naming_no_feed_refuses_the_run_so_groups_never_outnumber_feeds`
+offers `FEED_COUNT + 1` invented vendors and requires the refusal quoting the
+first; requires `Dhan` beside `dhan` to refuse; and requires two legs on each
+feed in `Feed::ALL` to be admitted and grouped into exactly `FEED_COUNT` groups
+of two. With the check reverted the first assertion fails.
+
+### D-0907 — Record, not fix, the per-press journal replays of `/pull/recovery` — 2026-09-29
+
+**What happened.** W1-api4-0, W1-api4-1, W1-api4-2. `docs/06-limits.md` said
+only "recovery replay reads journal records". Every open of a recovery journal
+replays the whole file: `recovery_journal::replay` runs
+`for ordinal in 0..count`, and both `snapshot` and `Journal::open_at` call it.
+Nothing compacts a journal. So one press costs work proportional to history,
+not to the plan pressed, and one start replays each journal more than once.
+`preflight_plan` also snapshots `attempts.bin` only to prove it decodes; the
+result is not bound.
+
+**Why not fixed here.** Each replay is a validation that runs before a side
+effect (clearing STOP, claiming the run slot, publishing an activation
+pointer), and the preflight snapshot is what refuses a start on an unreadable
+shared ledger before any of those. Removing a replay means carrying one
+validated index across the blocking preflight and `seeded`, or compacting
+journals, and either changes the recovery refusal order this module's tests
+pin. That is a design change, not a follow-up, so the cost is stated and
+counted instead.
+
+**Stated and counted.** `docs/06-limits.md` "Per-press recovery journal
+replays (D-0907)" states the cost. A test-only thread-local in
+`recovery_journal` (`REPLAYS`) records each completed replay's file name and
+record count, and
+`recovery::tests::one_start_replays_each_journal_three_times_and_every_record_each_time`
+runs `preflight_submission` then `seeded`, as `start` does, on a plan with
+history and requires exactly three replays each of the plan journal,
+`attempts.bin` and `active.bin`, each reading every record, and nine in all.
+`drive`'s further open of `attempts.bin` runs after `seeded` and is not
+counted by that test. `reconcile_pending` (W1-api4-2) is stated from its
+source lines and is not counted by any test.

@@ -5354,3 +5354,10 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### `/pull/run` vendors and recovery replays — W1-api3-3, W1-api4-0/1 (D-0906, D-0907)
+
+| Id | Invariant | Test that proves it | Status |
+|---|---|---|---|
+| C4-API-05-01 | `pullrun::legs_from` refuses the whole run when any leg's vendor is not the exact wire name of a feed in `pull::vendor::Feed::ALL`, so the legs it admits group into at most `pull::vendor::FEED_COUNT` groups. | `api::pullrun::tests::a_leg_naming_no_feed_refuses_the_run_so_groups_never_outnumber_feeds` | ✓ |
+| C4-API-05-02 | One recovery start (`preflight_submission` then `seeded`) of a plan with history replays the plan journal, `attempts.bin` and `active.bin` three times each, every replay reading every record, and replays no other journal. This pins a stated cost, not a bound. | `api::recovery::tests::one_start_replays_each_journal_three_times_and_every_record_each_time` | ✓ |
