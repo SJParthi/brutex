@@ -118,6 +118,9 @@ impl Cursor {
     /// A node budget bounds choices, not progress (D-0752): every rank is
     /// tried at every position, so nodes per emitted candidate grow with the
     /// alphabet, and more than 4,096 nodes can pass between two candidates.
+    /// One choice is not O(1) either (D-0753): it revalidates the whole prefix
+    /// from its first instruction over a fresh `MAX_INSTRUCTIONS`-slot stack,
+    /// bounded by the fixed 1,151-instruction capacity.
     ///
     /// # Errors
     /// An impossible cursor invariant or exhausted cumulative counter.
@@ -368,6 +371,21 @@ mod invariant_tests {
             &[Instruction::Bit(63), Instruction::Bit(0), Instruction::And],
             3
         ));
+    }
+
+    /// ET-o1-proof-coverage-5 (D-0753): every grammar choice revalidates its
+    /// whole prefix from index 0 over a fresh stack of `MAX_INSTRUCTIONS`
+    /// `usize` slots. An invalid first instruction still refuses a prefix whose
+    /// last instruction alone would fit, so the scan cannot have started later.
+    #[test]
+    fn prefix_validation_rescans_from_the_first_instruction_over_a_fixed_stack() {
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(std::mem::size_of::<[usize; MAX_INSTRUCTIONS]>(), 9_208);
+        let mut code = [Instruction::Bit(0); 5];
+        assert!(valid_prefix(&code[..1], 9));
+        code[0] = Instruction::Not;
+        assert!(valid_prefix(&code[4..], 9));
+        assert!(!valid_prefix(&code, 9));
     }
 
     /// ET-expressions-3 (D-0750): after a candidate the scratch slot at `at`

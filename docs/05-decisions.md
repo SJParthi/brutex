@@ -43717,3 +43717,15 @@ counts it.
 would keep the candidate stream but move every node count and pause point a
 saved search depends on. `advance`'s comment and `docs/06-limits.md` state the
 limit.
+
+### D-0753 — One grammar node revalidates its whole prefix — 2026-09-29
+
+**What was wrong (ET-o1-proof-coverage-5).** Each grammar choice calls
+`valid_prefix` on the whole prefix over a fresh 1,151-slot stack, and nothing
+said so. `prefix_validation_rescans_from_the_first_instruction_over_a_fixed_stack`
+pins the stack width and the rescan from the first instruction.
+
+**Decision.** Recorded, not changed: incremental validation would have to keep
+per-position stack state beside the encoded cursor, which `decode` must then
+rebuild. The cost is stated in `advance`'s comment and in `docs/06-limits.md`,
+with the time per node recorded as unmeasured.

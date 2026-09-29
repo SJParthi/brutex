@@ -9879,6 +9879,15 @@ The text above is kept as it was written.
   counts all of these. Counted, not timed. **Not changed**: skipping a refused
   leaf's remaining ranks would change every saved search's node accounting and
   pause points, and is left for a decision of its own.
+* **One node is not O(1) (D-0753).** Each choice calls `valid_prefix` on the
+  whole prefix, which walks it from its first instruction
+  (`for (index, op) in code.iter().enumerate()`) over a fresh stack
+  (`let mut starts = [0_usize; MAX_INSTRUCTIONS];`, 9,208 bytes on a 64-bit
+  target) and compares sibling subtrees at every AND and OR. Its cost grows
+  with the prefix and is bounded only by the fixed 1,151-instruction capacity.
+  `prefix_validation_rescans_from_the_first_instruction_over_a_fixed_stack`
+  pins the stack width and shows an invalid first instruction refusing a
+  prefix. **UNMEASURED**: the time per node; no bench covers it.
 * **Display is not a parser round trip (D-0751).** A program `Expression::parse`
   accepted can render past its limits: 16 NOTs over one bit render to 49 bytes
   and are refused `NestingCapacity`; a 576-leaf AND chain of bit 0 renders to
