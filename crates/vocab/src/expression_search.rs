@@ -46,7 +46,13 @@ pub enum Step {
 }
 
 /// A fixed-memory DFS cursor. No candidate set or historical bar is retained.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// Equality is the encoded state (D-0750): two cursors are equal exactly when
+/// [`Self::encode`] writes the same bytes. The instruction scratch is not
+/// state: every slot is rewritten before it is read, and [`Self::decode`]
+/// rebuilds only the slots below `at`. A derived equality compared that scratch
+/// and made a reopened checkpoint unequal to the cursor it was saved from.
+#[derive(Clone, Debug)]
 pub struct Cursor {
     offered: [u16; BITS],
     count: u16,
@@ -58,6 +64,14 @@ pub struct Cursor {
     digits: [u16; MAX_INSTRUCTIONS],
     code: [Instruction; MAX_INSTRUCTIONS],
 }
+
+impl PartialEq for Cursor {
+    fn eq(&self, other: &Self) -> bool {
+        self.encode() == other.encode()
+    }
+}
+
+impl Eq for Cursor {}
 
 impl Cursor {
     /// Start the fixed V1 grammar over an explicitly identified live alphabet.
@@ -350,6 +364,32 @@ mod invariant_tests {
             &[Instruction::Bit(63), Instruction::Bit(0), Instruction::And],
             3
         ));
+    }
+
+    /// ET-expressions-3 (D-0750): after a candidate the scratch slot at `at`
+    /// still holds that candidate's last instruction, which `decode` leaves
+    /// `Pad`. Equality ignores it; one more node step is a different state.
+    #[test]
+    fn a_reopened_candidate_checkpoint_equals_its_source_and_a_step_does_not() {
+        let mut cursor = Cursor::new(&[0]).expect("live alphabet");
+        let mut work = 0;
+        assert_eq!(
+            cursor.advance(1, &mut work),
+            Ok(Step::Candidate(Expression::parse("0").expect("one leaf")))
+        );
+        let reopened = Cursor::decode(&cursor.encode()).expect("own checkpoint");
+        assert_ne!(reopened.code, cursor.code, "the scratch really differs");
+        // `eq` rather than `assert_eq!`: a failure would otherwise print two
+        // 1,151-slot scratch arrays.
+        assert!(
+            reopened.eq(&cursor),
+            "a reopened checkpoint equals its source"
+        );
+        assert!(cursor.eq(&reopened), "equality is symmetric");
+        let before = cursor.clone();
+        assert_eq!(cursor.advance(1, &mut work), Ok(Step::Paused));
+        assert!(!before.eq(&cursor), "one node step is a different state");
+        assert!(!cursor.eq(&before), "inequality is symmetric");
     }
 
     #[test]

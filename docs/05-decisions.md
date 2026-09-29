@@ -43666,3 +43666,25 @@ job.
   survived. `an_nse_cash_stock_consults_no_peer_even_one_holding_it` gives a
   second vendor the same stock and requires that nothing votes and nothing is
   named; the same two feeds holding an index do vote, as the control.
+
+### D-0750 — A grammar cursor's equality is its encoded state — 2026-09-29
+
+**What was wrong (ET-expressions-3).** `vocab::expression_search::Cursor`
+derived `PartialEq`, so `==` also compared the instruction scratch `code`,
+which `encode` does not write and `decode` rebuilds only below `at`. After a
+cursor emits a candidate, the slot at `at` still holds that candidate's last
+instruction, and `decode` leaves it `Pad`. A checkpoint reopened from a
+cursor's own bytes therefore compared unequal to that cursor. On `origin/main`
+(2c209309) the new test fails with the message
+`a reopened checkpoint equals its source`.
+
+**The change.** `Cursor` implements `PartialEq` as `encode() == encode()` and
+`Eq` on top of it. The scratch is not state: `advance` writes the slot at `at`
+before it reads the prefix. The new test drives 400 one-node steps over a
+two-bit alphabet, requires at least one candidate and one backtrack, and after
+every step requires the reopened checkpoint to equal the cursor in both
+directions, and the cursor before the step to differ from the cursor after it.
+The unit test
+`a_reopened_candidate_checkpoint_equals_its_source_and_a_step_does_not` asserts
+that the reopened scratch really differs after a one-leaf candidate while the
+two cursors compare equal, and that one further step compares unequal.

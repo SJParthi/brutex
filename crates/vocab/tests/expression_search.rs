@@ -152,3 +152,47 @@ fn malformed_alphabets_and_checkpoint_fields_are_refused() {
     // A valid exact checkpoint must still be bound by the caller's identity and
     // seal. Structural validation alone cannot authenticate an arbitrary file.
 }
+
+/// ET-expressions-3 (D-0750): a cursor's equality is exactly its encoded
+/// state. The unencoded instruction scratch that `advance` leaves behind at
+/// `at` after a candidate, and above `at` after a backtrack, is not state:
+/// every slot is rewritten before it is read. A decoded checkpoint therefore
+/// equals the cursor it was saved from, and a real change of state does not.
+#[test]
+fn cursor_equality_is_the_encoded_state_and_ignores_unencoded_scratch() {
+    let mut cursor = Cursor::new(&[0, 369]).unwrap();
+    let mut work = 0;
+    let mut saw_candidate = false;
+    let mut saw_backtrack = false;
+    for _ in 0..400 {
+        let before = cursor.clone();
+        let step = cursor.advance(1, &mut work).unwrap();
+        let bytes = cursor.encode();
+        let reopened = Cursor::decode(&bytes).unwrap();
+        assert_eq!(reopened.encode(), bytes);
+        // `assert!` rather than `assert_eq!`: a failure would otherwise print
+        // two 1,151-slot scratch arrays.
+        assert!(
+            reopened == cursor,
+            "a reopened checkpoint equals its source"
+        );
+        assert!(cursor == reopened, "equality is symmetric");
+        if matches!(step, Step::Candidate(_)) {
+            saw_candidate = true;
+        }
+        // Consecutive positions of one traversal are different states, and
+        // equality must say so.
+        assert!(before != cursor, "every node changes the encoded state");
+        assert_ne!(before.encode(), bytes);
+        let at = |b: &[u8; CURSOR_BYTES]| u16::from_le_bytes([b[12], b[13]]);
+        if at(&bytes) < at(&before.encode()) {
+            saw_backtrack = true;
+        }
+    }
+    assert!(saw_candidate && saw_backtrack);
+    // Two different alphabets at the same progress are different states.
+    assert_ne!(
+        Cursor::new(&[0, 369]).unwrap(),
+        Cursor::new(&[0, 63]).unwrap()
+    );
+}

@@ -5354,3 +5354,9 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### C4 vocab grammar follow-ups (D-0750 onward)
+
+| ID | Invariant | Named proof |
+|---|---|---|
+| C4-VOCAB-01 | **A grammar cursor equals the cursor decoded from its own checkpoint bytes.** `Cursor`'s equality is `encode()` equality, so the unencoded instruction scratch left at `at` after a candidate or above `at` after a backtrack cannot make a reopened checkpoint unequal to its source; one node step always changes the encoded state, and two alphabets differ (D-0750) | `cursor_equality_is_the_encoded_state_and_ignores_unencoded_scratch` in `crates/vocab/tests/expression_search.rs`; `expression_search::invariant_tests::a_reopened_candidate_checkpoint_equals_its_source_and_a_step_does_not` in `crates/vocab/src/expression_search.rs` |
