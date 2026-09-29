@@ -5354,3 +5354,9 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### Store catalog walk accounts for every entry — C4 store follow-ups (D-0765 to D-0768)
+
+| Id | Invariant | Test that proves it | Status |
+|---|---|---|---|
+| C4-STORE-01 | **A directory below `bars/` that `read_dir` refuses is counted, not skipped.** `Census::unreadable` counts it once and it counts toward `seen`, so a store with one locked symbol directory reports `seen 2, spot 1, unreadable 1` and still reconciles, where it reported `seen 1, spot 1` with the second month unnamed. An unreadable entry is a reconciliation part like every other bucket. D-0765 | `a_directory_the_walk_cannot_list_is_counted_not_dropped` and `an_unreadable_entry_is_part_of_the_reconciliation` in `crates/store/tests/catalog.rs` | ✓ |

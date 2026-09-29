@@ -37,8 +37,9 @@
 //!
 //! [`walk`] returns a [`Census`] as well as the rows, and the census
 //! [`reconciles`](Census::reconciles): every file seen is either a spot
-//! instrument-month, a contract path, or one of five named refusals. **Nothing
-//! is dropped silently** — a store with a malformed directory reports how many
+//! instrument-month, a contract path, or one of the named refusals, and a
+//! directory the walk could not list is counted as `unreadable` rather than
+//! skipped (D-0765). **Nothing is dropped silently** — a store with a malformed directory reports how many
 //! and why, which is what `CLAUDE.md` §4 asks of a degradation.
 //!
 //! **UNVERIFIED as a measurement.** The bound is argued from the
@@ -86,7 +87,8 @@ pub struct Held {
 /// the store is small or the walk refused something.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Census {
-    /// Files encountered under `bars/`, whatever became of them.
+    /// Entries encountered under `bars/`, whatever became of them: every file,
+    /// and every directory or entry the walk could not read (D-0765).
     pub seen: u64,
     /// Files that became a [`Held`].
     pub spot: u64,
@@ -106,6 +108,11 @@ pub struct Census {
     pub malformed_month: u64,
     /// The path had neither the spot depth nor the contract depth.
     pub wrong_depth: u64,
+    /// A directory below `bars/` that could not be listed, or a directory entry
+    /// that could not be read. **What it holds is unknown**, and none of it
+    /// became a row. Counted once per directory or entry, not per file inside
+    /// it, because the walk cannot see those files. D-0765.
+    pub unreadable: u64,
 }
 
 impl Census {
@@ -123,8 +130,17 @@ impl Census {
             .saturating_add(self.unknown_vendor)
             .saturating_add(self.unknown_rung)
             .saturating_add(self.malformed_month)
-            .saturating_add(self.wrong_depth);
+            .saturating_add(self.wrong_depth)
+            .saturating_add(self.unreadable);
         parts == self.seen
+    }
+
+    /// One directory or entry the walk could not read: seen, and filed as
+    /// [`Census::unreadable`]. One helper for both places a read can fail, so
+    /// the two cannot count differently.
+    const fn count_unreadable(&mut self) {
+        self.seen = self.seen.saturating_add(1);
+        self.unreadable = self.unreadable.saturating_add(1);
     }
 }
 
@@ -192,17 +208,26 @@ pub fn walk(root: &Path) -> Result<Holdings, CatalogError> {
             Ok(entries) => entries,
             // A directory that vanished mid-walk, or one this process may not
             // read. The ROOT failing is fatal; a branch failing is not, because
-            // one unreadable corner must not hide the rest of the store.
+            // one unreadable corner must not hide the rest of the store. It is
+            // COUNTED, though: a bare `continue` here dropped every month under
+            // a locked directory while the census still reconciled (D-0765).
             Err(because) => {
                 if dir == bars {
                     return Err(CatalogError::BarsUnreadable {
                         because: because.to_string(),
                     });
                 }
+                out.census.count_unreadable();
                 continue;
             }
         };
-        for entry in entries.flatten() {
+        // Not `flatten()`: that discarded an entry the OS could not read, and
+        // the census never learned it existed (D-0765).
+        for entry in entries {
+            let Ok(entry) = entry else {
+                out.census.count_unreadable();
+                continue;
+            };
             let path = entry.path();
             if path.is_dir() {
                 stack.push(path);

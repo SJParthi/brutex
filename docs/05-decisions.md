@@ -43666,3 +43666,30 @@ job.
   survived. `an_nse_cash_stock_consults_no_peer_even_one_holding_it` gives a
   second vendor the same stock and requires that nothing votes and nothing is
   named; the same two feeds holding an index do vote, as the control.
+
+### D-0765 — Count a directory the store catalog cannot list, rather than skip it — 2026-09-29
+
+**What happened (W3-store1-4).** `store::catalog::walk` kept the walk going
+when a directory below `bars/` failed `read_dir`, which is right: one locked
+corner must not hide the rest of the store. But it did so with a bare
+`continue` and no census bucket, and it read entries with `flatten()`, which
+throws away an entry the operating system could not read. Reproduced on
+origin/main 2c209309: two months, the `BANKNIFTY` directory at mode 000, gave
+`Census { seen: 1, spot: 1, .. }` with `reconciles()` true. The second month
+was on disk and the census did not mention it, although the module header
+says nothing is dropped silently (S-25).
+
+**The change.** `Census` gains `unreadable`: a directory below `bars/` that
+could not be listed, or an entry that could not be read, is counted there
+once and toward `seen`, and `reconciles` sums it with the other buckets. The
+walk still continues past it, and the root failing is still
+`CatalogError::BarsUnreadable`. The same fixture now gives `seen 2, spot 1,
+unreadable 1`, and the readable month is still the one row
+(`a_directory_the_walk_cannot_list_is_counted_not_dropped`). What the locked
+directory holds stays unknown: it is counted once, not per file, because the
+walk cannot see its files.
+
+**Not changed here.** The `cli` reports that print a catalog census
+(`batch::census_lines`, `research::render`) do not yet print the new
+bucket. The count is on the census they already hold; printing it is a `cli`
+change.

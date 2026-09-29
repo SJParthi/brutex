@@ -296,3 +296,59 @@ fn the_walk_descends_rather_than_guessing_the_depth() {
     );
     assert!(out.census.reconciles());
 }
+
+/// **A directory the walk cannot list is counted, not dropped.** D-0765.
+///
+/// The walk skipped a non-root directory whose `read_dir` failed with a bare
+/// `continue` and no census bucket, so a store with one locked symbol
+/// directory reported `seen 1, spot 1` and reconciled while a second month sat
+/// on disk unlisted (W3-store1-4). The locked month still cannot become a row
+/// (its contents are unknown), but the census now names it.
+#[test]
+fn a_directory_the_walk_cannot_list_is_counted_not_dropped() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = scratch("unreadable");
+    put(&root, "groww/NSE/INDEX/NIFTY/1min/2026-08.bin");
+    put(&root, "groww/NSE/INDEX/BANKNIFTY/1min/2026-08.bin");
+    let locked = root.join("bars/groww/NSE/INDEX/BANKNIFTY");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+        .expect("the fixture directory can be locked");
+    let precondition = std::fs::read_dir(&locked).is_err();
+    let out = catalog::walk(&root);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
+        .expect("the fixture directory can be unlocked");
+    assert!(
+        precondition,
+        "the locked directory must refuse `read_dir`; a process that ignores permissions cannot run this test"
+    );
+    let out = out.expect("one locked branch does not fail the walk");
+
+    assert_eq!(out.census.unreadable, 1, "the locked directory is named");
+    assert_eq!(out.census.seen, 2, "one file and one unreadable directory");
+    assert_eq!(out.census.spot, 1, "the readable month is still a row");
+    assert!(out.census.reconciles(), "{:?}", out.census);
+    assert_eq!(out.held.len(), 1);
+    assert_eq!(out.held[0].symbol, "NIFTY");
+
+    let unlocked = catalog::walk(&root).expect("the walk runs");
+    assert_eq!(unlocked.census.unreadable, 0, "nothing is unreadable once unlocked");
+    assert_eq!(unlocked.census.spot, 2, "both months are rows once unlocked");
+}
+
+/// An unreadable entry is a part of the whole like every other bucket.
+#[test]
+fn an_unreadable_entry_is_part_of_the_reconciliation() {
+    let counted = Census {
+        seen: 2,
+        spot: 1,
+        unreadable: 1,
+        ..Census::default()
+    };
+    assert!(counted.reconciles(), "1 + 1 == 2");
+    let lost = Census {
+        seen: 2,
+        spot: 1,
+        ..Census::default()
+    };
+    assert!(!lost.reconciles(), "the unreadable one must be counted somewhere");
+}
