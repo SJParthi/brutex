@@ -43693,3 +43693,37 @@ still answers `0` for a cell it cannot read. The ledger row named open
 interest, and this entry changes nothing else; the doc comment on `number` says
 so.
 
+### D-0953 — Bound the census walk by every member it opens, check the calendar's day arithmetic, and hold its session count — 2026-09-29
+
+**The census cap (W1-pull1-2).** `archive::descend` checked `MAX_MEMBERS`
+against `out.len()`, the accepted members only. Under `Malformed::Collect`, the
+walk `read_dir_reporting` and `folder::read_census` use, a member that failed to
+decode was pushed to `rejected` and the walk went on, so a folder of undecodable
+members was opened and kept in full with no bound. Reproduced on origin/main code with the test added:
+`archive::tests::a_census_of_malformed_members_is_refused_at_the_member_cap`
+failed with `(kept, rejected) = Ok((0, 50001))`. The cap now counts
+`out.len() + rejected.len()`, and the test requires
+`TooManyMembers { members: MAX_MEMBERS, cap: MAX_MEMBERS }`. Under
+`Malformed::Refuse` nothing is ever pushed to `rejected`, so the ingest walk's
+count is unchanged.
+
+**Checked day arithmetic (ET-bars-candles-store-5).** `Calendar::kind_of` and
+`Calendar::from_observed` subtracted days unchecked, and the workspace sets
+`overflow-checks = true` in `[profile.release]`, so a day near either end of
+`i64` panicked. Reproduced on origin/main code with the test added:
+`calendar::extreme_day_tests::an_extreme_day_is_unmeasured_rather_than_a_panic`
+panicked at the `epoch_day - self.first` subtraction in `kind_of` with
+"attempt to subtract with overflow". The
+four subtractions are now `checked_sub`. A day that cannot be indexed reads
+`Unmeasured`. A span that does not fit is handled the way the existing
+`try_from` fallback already handled one: the calendar holds the first day
+alone and every other day reads `Unmeasured`, never `Closed`. The test pins
+`span() == 1` and `Unmeasured` for that case.
+
+**The session count (W1-pull1-4).** `Calendar::sessions` filtered the whole
+`kinds` vector on every call. It is now counted once in `from_observed`, after
+the SEBI override is written, and held in a private field. Reproduced on
+origin/main code with the test added:
+`calendar::extreme_day_tests::sessions_is_counted_once_at_construction_not_per_call`
+empties `kinds` after construction and failed with `left: 0, right: 3`. The
+same test pins the override day as counted once, and the empty calendar as zero.

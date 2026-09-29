@@ -9864,3 +9864,21 @@ The text above is kept as it was written.
   doc to its body, read off the source, and
   `what_a_changed_rows_line_costs_is_named_in_part_and_read_off_the_source`
   finds each part named here and in that doc in the source that pays it.
+
+## The census walk is bounded by every member it opens, and a derived calendar's session count is O(1) — D-0953, 29 September 2026
+
+**The census walk.** §65 says the folder walk's own bound is
+`archive::MAX_MEMBERS`. Until D-0953 that was true of the ingest walk only: the
+census walk kept going past the cap as long as the members failed to decode.
+The cap now counts accepted and rejected members together, so both walks open
+at most `MAX_MEMBERS` members, held by
+`pull::archive::tests::a_census_of_malformed_members_is_refused_at_the_member_cap`.
+Each member is still read in full before it is decoded or rejected, so the
+walk's cost is still O(members × member bytes). Not timed.
+
+**The session count.** `pull::calendar::Calendar::sessions` is now a field read,
+held by `pull::calendar::extreme_day_tests::sessions_is_counted_once_at_construction_not_per_call`.
+The derived-calendar render that calls it is still O(span): the next statement
+in `api::calendar_of` is
+`for day in calendar.first_day()..=calendar.last_day() {`, which visits every
+day. That loop is unchanged. Not timed.
