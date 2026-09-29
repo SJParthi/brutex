@@ -3669,7 +3669,7 @@ impl AnchoredWalkForwardAuthorityV2 {
         anchored: &crate::validate::AnchoredAdmissionValidationV2,
     ) -> Result<Self, AnchoredWalkForwardRefusalV2> {
         let projection = anchored
-            .search_authority_projection()
+            .issued_authority_projection()
             .map_err(|_| AnchoredWalkForwardRefusalV2::OpaqueProvenanceMismatch)?;
         Ok(Self {
             validation_policy_digest: projection.policy_identity().digest(),
@@ -3833,7 +3833,7 @@ impl AnchoredWalkForwardAuthorityV3 {
         anchored: &crate::validate::AnchoredSearchValidationV3,
     ) -> Result<Self, AnchoredWalkForwardRefusalV3> {
         let projection = anchored
-            .search_authority_projection()
+            .issued_authority_projection()
             .map_err(|_| AnchoredWalkForwardRefusalV3::OpaqueProvenanceMismatch)?;
         Ok(Self {
             validation_policy_digest: projection.policy_identity().digest(),
@@ -3861,7 +3861,7 @@ impl AnchoredWalkForwardAuthorityV3 {
         anchored: &crate::validate::AnchoredSearchValidationV4,
     ) -> Result<Self, AnchoredWalkForwardRefusalV3> {
         let projection = anchored
-            .search_authority_projection()
+            .issued_authority_projection()
             .map_err(|_| AnchoredWalkForwardRefusalV3::OpaqueProvenanceMismatch)?;
         Ok(Self {
             validation_policy_digest: projection.policy_identity().digest(),
@@ -9114,6 +9114,57 @@ mod tests {
                 &forged_verdict,
             ),
             Err(AdmissionCanonicalRefusalV3::VerdictMismatch)
+        );
+    }
+    /// W3-runner1-0 (D-0740): one admission decision per candidate reads the
+    /// projection its opaque validation sealed when it was issued, so the
+    /// fold-wide private-seal reconciliation is not repeated per candidate.
+    #[test]
+    fn per_candidate_admission_never_re_reconciles_the_opaque_validation() {
+        let (policy, base, anchored_v2, statistics_v2) = v2_parts();
+        let anchored_v3 = anchored_v3();
+        let anchored_v4 = crate::validate::tests::anchored_search_fixture_v4();
+        let statistics_v3 = statistics_v3(1);
+        let first_v2 = policy
+            .evaluate_v2_projection(&base, &statistics_v2, &anchored_v2)
+            .expect("V2 fixture arithmetic reconciles");
+        let first_v3 = policy
+            .evaluate_v3_projection(&base, &statistics_v3, &anchored_v3)
+            .expect("V3 fixture arithmetic reconciles");
+        let first_v4 = policy
+            .evaluate_v3_exact_grid_projection(&base, &statistics_v3, &anchored_v4)
+            .expect("exact-grid fixture arithmetic reconciles");
+
+        let before = crate::validate::reconciles_on_this_thread();
+        for _ in 0..7 {
+            assert_eq!(
+                policy.evaluate_v2_projection(&base, &statistics_v2, &anchored_v2),
+                Ok(first_v2)
+            );
+            assert_eq!(
+                policy.evaluate_v3_projection(&base, &statistics_v3, &anchored_v3),
+                Ok(first_v3)
+            );
+            assert_eq!(
+                policy.evaluate_v3_exact_grid_projection(&base, &statistics_v3, &anchored_v4),
+                Ok(first_v4)
+            );
+        }
+        assert_eq!(
+            crate::validate::reconciles_on_this_thread() - before,
+            0,
+            "21 admission decisions must not re-run any fold-wide reconciliation"
+        );
+
+        // Control: the counter does see the full revalidating door, and the
+        // sealed projection is the one that door still derives.
+        let projection = anchored_v4
+            .search_authority_projection()
+            .expect("the exact-grid fixture revalidates");
+        assert_eq!(crate::validate::reconciles_on_this_thread() - before, 1);
+        assert_eq!(
+            first_v4.comparison_values().decided_folds,
+            ObservedU64V1::Measured(projection.decided_folds())
         );
     }
 }

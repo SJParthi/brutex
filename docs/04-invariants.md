@@ -5354,3 +5354,10 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### Admission reads the issued search projection — W3-runner1-0 (D-0740)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| C4-RUNNER-01: an Admission V2, V3 or exact-grid decision reads the projection its opaque validation sealed at issuance and runs no fold-wide reconciliation; 21 decisions add 0 reconciliations and the revalidating `search_authority_projection` still adds 1, with decisions equal to the first. | `admission::tests::per_candidate_admission_never_re_reconciles_the_opaque_validation` | ✓ |
+| C4-RUNNER-02: an opaque validation with no issued projection is refused with `SealMismatch` by the O(1) door, for V2, V3 and V4. | `validate::tests::an_unissued_opaque_validation_refuses_the_sealed_projection` | ✓ |

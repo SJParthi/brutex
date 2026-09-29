@@ -60,6 +60,23 @@ use crate::split::Shape;
 use crate::trade::{Trades, walk};
 use costs::fill::Direction;
 
+#[cfg(test)]
+thread_local! {
+    /// Full private-seal reconciliations run on this thread (test-only probe).
+    static RECONCILES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Full private-seal reconciliations run on the calling thread so far.
+#[cfg(test)]
+pub(crate) fn reconciles_on_this_thread() -> u64 {
+    RECONCILES.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn count_reconcile() {
+    RECONCILES.with(|count| count.set(count.get() + 1));
+}
+
 /// What one combination did over one set of bars.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Summary {
@@ -529,6 +546,10 @@ pub struct AnchoredAdmissionValidationV2 {
     validation_policy_digest: [u8; 32],
     validation_family_digest: [u8; 32],
     walk_facts_digest: [u8; 32],
+    /// The projection the full reconciliation derived when this value was
+    /// issued (D-0740). `None` only between construction and that one
+    /// reconciliation inside the issuing door.
+    issued: Option<AnchoredAdmissionProjectionV2>,
 }
 
 impl AnchoredAdmissionValidationV2 {
@@ -536,6 +557,18 @@ impl AnchoredAdmissionValidationV2 {
     #[must_use]
     pub const fn validated(&self) -> &Validated {
         &self.validated
+    }
+
+    /// The projection sealed at issuance, read in O(1) by each per-candidate
+    /// Admission decision instead of re-running the fold-wide reconciliation
+    /// (D-0740). The fields are private and only the issuing door writes
+    /// them, so the value cannot drift from what that reconciliation saw.
+    pub(crate) fn issued_authority_projection(
+        &self,
+    ) -> Result<AnchoredSearchAuthorityProjectionV2, AnchoredAdmissionValidationRefusalV2> {
+        self.issued
+            .map(AnchoredSearchAuthorityProjectionV2::from_private)
+            .ok_or(AnchoredAdmissionValidationRefusalV2::SealMismatch)
     }
 
     /// Revalidates every private policy, candidate-family, chosen-ordinal and
@@ -794,6 +827,9 @@ pub struct AnchoredSearchValidationV3 {
     validation_policy_digest: [u8; 32],
     validation_family_digest: [u8; 32],
     walk_facts_digest: [u8; 32],
+    /// The projection derived by the one reconciliation run at issuance
+    /// (D-0740).
+    issued: Option<AnchoredSearchProjectionV3>,
 }
 
 impl AnchoredSearchValidationV3 {
@@ -801,6 +837,16 @@ impl AnchoredSearchValidationV3 {
     #[must_use]
     pub const fn validated(&self) -> &Validated {
         &self.validated
+    }
+
+    /// The projection sealed at issuance, read in O(1) per Admission
+    /// decision (D-0740).
+    pub(crate) fn issued_authority_projection(
+        &self,
+    ) -> Result<AnchoredSearchAuthorityProjectionV3, AnchoredSearchValidationRefusalV3> {
+        self.issued
+            .map(AnchoredSearchAuthorityProjectionV3::from_private)
+            .ok_or(AnchoredSearchValidationRefusalV3::SealMismatch)
     }
 
     /// Revalidates all private seals and returns the minimum detached equality
@@ -1039,6 +1085,9 @@ pub struct AnchoredSearchValidationV4 {
     validation_policy_digest: [u8; 32],
     validation_family_digest: [u8; 32],
     walk_facts_digest: [u8; 32],
+    /// The projection derived by the one reconciliation run at issuance
+    /// (D-0740).
+    issued: Option<AnchoredSearchProjectionV4>,
 }
 
 impl AnchoredSearchValidationV4 {
@@ -1063,6 +1112,17 @@ impl AnchoredSearchValidationV4 {
     ) -> Result<AnchoredSearchAuthorityProjectionV4, AnchoredSearchValidationRefusalV4> {
         let private = reconcile_anchored_search_v4(self)?;
         Ok(AnchoredSearchAuthorityProjectionV4::from_private(&private))
+    }
+
+    /// The projection sealed at issuance, read in O(1) per Admission
+    /// decision (D-0740).
+    pub(crate) fn issued_authority_projection(
+        &self,
+    ) -> Result<AnchoredSearchAuthorityProjectionV4, AnchoredSearchValidationRefusalV4> {
+        self.issued
+            .as_ref()
+            .map(AnchoredSearchAuthorityProjectionV4::from_private)
+            .ok_or(AnchoredSearchValidationRefusalV4::SealMismatch)
     }
 }
 
@@ -2236,7 +2296,7 @@ pub fn walk_forward_projected_prepared_anchored_search_v4(
         validation_family_digest,
         &folds,
     );
-    let opaque = AnchoredSearchValidationV4 {
+    let mut opaque = AnchoredSearchValidationV4 {
         validated,
         policy,
         folds,
@@ -2244,8 +2304,9 @@ pub fn walk_forward_projected_prepared_anchored_search_v4(
         validation_policy_digest,
         validation_family_digest,
         walk_facts_digest,
+        issued: None,
     };
-    opaque.search_authority_projection()?;
+    opaque.issued = Some(reconcile_anchored_search_v4(&opaque)?);
     Ok(opaque)
 }
 
@@ -3247,6 +3308,8 @@ fn reconcile_anchored_search_fold_v4(
 fn reconcile_anchored_search_v4(
     value: &AnchoredSearchValidationV4,
 ) -> Result<AnchoredSearchProjectionV4, AnchoredSearchValidationRefusalV4> {
+    #[cfg(test)]
+    count_reconcile();
     if value.policy.semantic_order != CANDIDATE_SEMANTIC_ORDER_V4
         || value.policy.full_long_policy_digest == value.policy.full_short_policy_digest
         || value.policy.full_long_resolution_digest == value.policy.full_short_resolution_digest
@@ -3549,15 +3612,16 @@ impl AnchoredAdmissionCaptureV2 {
             validation_family_digest,
             &self.folds,
         );
-        let opaque = AnchoredAdmissionValidationV2 {
+        let mut opaque = AnchoredAdmissionValidationV2 {
             validated,
             policy: self.policy,
             folds: self.folds,
             validation_policy_digest,
             validation_family_digest,
             walk_facts_digest,
+            issued: None,
         };
-        opaque.search_authority_projection()?;
+        opaque.issued = Some(reconcile_anchored_admission_v2(&opaque)?);
         Ok(opaque)
     }
 }
@@ -3712,15 +3776,16 @@ impl AnchoredSearchCaptureV3 {
             validation_family_digest,
             &self.folds,
         );
-        let opaque = AnchoredSearchValidationV3 {
+        let mut opaque = AnchoredSearchValidationV3 {
             validated,
             policy: self.policy,
             folds: self.folds,
             validation_policy_digest,
             validation_family_digest,
             walk_facts_digest,
+            issued: None,
         };
-        opaque.search_authority_projection()?;
+        opaque.issued = Some(reconcile_anchored_search_v3(&opaque)?);
         Ok(opaque)
     }
 }
@@ -3728,6 +3793,8 @@ impl AnchoredSearchCaptureV3 {
 fn reconcile_anchored_admission_v2(
     value: &AnchoredAdmissionValidationV2,
 ) -> Result<AnchoredAdmissionProjectionV2, AnchoredAdmissionValidationRefusalV2> {
+    #[cfg(test)]
+    count_reconcile();
     if value.policy.resolved_rungs == 0 {
         return Err(AnchoredAdmissionValidationRefusalV2::ZeroResolvedRungs);
     }
@@ -3829,6 +3896,8 @@ fn reconcile_anchored_admission_v2(
 fn reconcile_anchored_search_v3(
     value: &AnchoredSearchValidationV3,
 ) -> Result<AnchoredSearchProjectionV3, AnchoredSearchValidationRefusalV3> {
+    #[cfg(test)]
+    count_reconcile();
     if value.policy.resolved_rungs == 0 {
         return Err(AnchoredSearchValidationRefusalV3::ZeroResolvedRungs);
     }
@@ -5005,7 +5074,7 @@ fn restricted(column: &Column, from: usize) -> Column {
     clippy::expect_used,
     reason = "the exception every test module in this workspace takes."
 )]
-mod tests {
+pub(crate) mod tests {
     use super::{
         AnchoredAdmissionValidationRefusalV2, AnchoredAdmissionValidationV2,
         AnchoredSearchValidationV3, DEFAULT_RUNGS, ExecutionSeries, MonotonicExecutionPrefix,
@@ -5271,7 +5340,7 @@ mod tests {
             .expect("the exact causal V4 fixture issues opaque authority")
     }
 
-    fn anchored_search_fixture_v4() -> super::AnchoredSearchValidationV4 {
+    pub(crate) fn anchored_search_fixture_v4() -> super::AnchoredSearchValidationV4 {
         static FIXTURE: OnceLock<super::AnchoredSearchValidationV4> = OnceLock::new();
         FIXTURE.get_or_init(anchored_search_run_v4).clone()
     }
@@ -7496,5 +7565,32 @@ mod tests {
              loop, and repeating it per candidate per side is the whole-slice term this hoist \
              removed"
         );
+    }
+
+    /// W3-runner1-0 (D-0740): a value whose issuance projection is absent is
+    /// refused by the O(1) door, never answered from nothing.
+    #[test]
+    fn an_unissued_opaque_validation_refuses_the_sealed_projection() {
+        let mut v2 = anchored_admission_fixture_v2();
+        assert!(v2.issued_authority_projection().is_ok());
+        v2.issued = None;
+        assert!(matches!(
+            v2.issued_authority_projection(),
+            Err(AnchoredAdmissionValidationRefusalV2::SealMismatch)
+        ));
+        let mut v3 = anchored_search_fixture_v3();
+        assert!(v3.issued_authority_projection().is_ok());
+        v3.issued = None;
+        assert!(matches!(
+            v3.issued_authority_projection(),
+            Err(super::AnchoredSearchValidationRefusalV3::SealMismatch)
+        ));
+        let mut v4 = anchored_search_fixture_v4();
+        assert!(v4.issued_authority_projection().is_ok());
+        v4.issued = None;
+        assert!(matches!(
+            v4.issued_authority_projection(),
+            Err(super::AnchoredSearchValidationRefusalV4::SealMismatch)
+        ));
     }
 }

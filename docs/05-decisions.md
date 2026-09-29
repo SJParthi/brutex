@@ -43666,3 +43666,32 @@ job.
   survived. `an_nse_cash_stock_consults_no_peer_even_one_holding_it` gives a
   second vendor the same stock and requires that nothing votes and nothing is
   named; the same two feeds holding an index do vote, as the control.
+
+### D-0740 — An Admission decision reads the validation's issued projection instead of re-reconciling the whole search — 2026-09-29
+
+**What was wrong (W3-runner1-0).** `AdmissionPolicyV1::evaluate_v2_projection`,
+`evaluate_v3_projection` and `evaluate_v3_exact_grid_projection` each built
+their walk-forward authority through `search_authority_projection()`, which
+runs the full private-seal reconciliation (`reconcile_anchored_admission_v2`,
+`reconcile_anchored_search_v3`, `reconcile_anchored_search_v4`) over every fold
+of the opaque validation. That work does not depend on the candidate, and the
+production caller (`cli::population_admission_v4`) makes one decision per
+candidate against one borrowed validation, so the same reconciliation ran once
+per candidate. `docs/06-limits.md` §167 had called that evaluation O(C).
+
+**The change.** The three issuing doors now keep the projection their one
+reconciliation derived in a private `issued` field, and the three
+walk-forward constructors read it through `issued_authority_projection()`,
+which copies fixed-size fields. The fields are private and written only by the
+issuing door, so the value cannot drift from what that reconciliation saw.
+`search_authority_projection()` is unchanged and still revalidates for any
+caller that asks for it. A value without an issued projection is refused
+with `SealMismatch`. No decision's bytes change: the projection read is the
+one the same reconciliation computed.
+
+**Proof.** `admission::tests::per_candidate_admission_never_re_reconciles_the_opaque_validation`
+counts reconciliations with a test-only per-thread probe: 21 decisions across
+V2, V3 and the exact grid add 0, and the revalidating door adds 1. With only
+the three call sites reverted it reports 21.
+`validate::tests::an_unissued_opaque_validation_refuses_the_sealed_projection`
+pins the refusal.

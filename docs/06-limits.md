@@ -9864,3 +9864,15 @@ The text above is kept as it was written.
   doc to its body, read off the source, and
   `what_a_changed_rows_line_costs_is_named_in_part_and_read_off_the_source`
   finds each part named here and in that doc in the source that pays it.
+
+## Admission no longer re-reconciles the search per candidate — D-0740, 29 September 2026
+
+§167 said Runner evaluation of Admission V4 is O(C). Until D-0740 it was not:
+each decision re-ran the opaque validation's full reconciliation, whose work
+grows with the folds and each fold's candidate list, so C decisions paid that
+fold-wide cost C times. Each decision now reads the projection sealed at
+issuance, a copy of fixed-size fields, so the reconciliation runs once when
+the validation is issued and not per decision
+(`per_candidate_admission_never_re_reconciles_the_opaque_validation`). The
+rest of each decision (Statistics verification, the evidence join and the
+policy) is unchanged and was not re-measured here. Not timed.
