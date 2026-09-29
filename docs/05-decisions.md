@@ -43693,3 +43693,34 @@ it, and invariant rows are append-only. Wiring it into the sweep would dedupe
 candidates by hit set, which changes what a run ranks and counts; that is a
 change to what a run computes and needs its own decision and identity move,
 not a follow-up fix. D-0454 stays as written; this entry corrects it.
+
+### D-0761 — The empty mask folds like every other candidate; no identity is reserved — 2026-09-29
+
+**What was wrong.** `support_fingerprinted` returned `HitSet::EVERY_BAR`, the
+pair `(0, 0)`, for the empty mask, and its doc called that pair "unreachable
+as a fold output". Two defects followed. First (W3-engine1-5), the identity was
+not a function of the bar set: on a column with bars, the empty mask and a bit
+every bar carries select the same bars and got different identities, and on an
+empty column the empty mask got `(0, 0)` while every other candidate got the
+unfolded seed pair, though all select nothing. Second (ET-masks-evaluation-sweep-4),
+the unreachability argument was false for each half: the high fold is zero
+when its one word equals `seed_hi.rotate_left(23)` and the low fold is zero
+when its word equals `seed_lo`, and a 64-bar column spells either word.
+
+**The change.** The early return and the `EVERY_BAR` constant are gone. The
+empty mask hits every row, since `(bits & 0) == 0`, and takes the ordinary
+fold, so it folds the same words as a bit every bar carries. With no reserved
+pair there is no value a real fold could collide with. The test-only vertical
+reference now starts each word with its real bars set and padding clear, so it
+folds the empty mask the same way.
+`engine::column::tests::the_empty_mask_folds_like_a_bit_every_bar_carries` and
+`engine::column::tests::either_half_of_a_fold_can_be_zero_so_no_pair_is_reserved`
+pin both. `the_empty_and_the_impossible_never_collide` and
+`selecting_no_bars_is_its_own_identity` now compare "every bar" with "no bar"
+on the same column instead of with the removed constant, and the engine's
+early-exit count for `column.rs` drops from two to one.
+
+**Why no run identity moves.** D-0760: no production path calls
+`support_fingerprinted`, so no run's ranking, count, trades or report changes.
+Only the value a test or the C-E-07 bench sees for the empty mask changes, and
+C-E-07 does not time the empty mask.

@@ -3932,21 +3932,20 @@ mod tests {
         let exits = count_exits(shipping);
         // The owned column is on the sweep's hot path. `support` now has no
         // early exit at all: even the empty mask takes the same fixed-width hit
-        // test on every bar. `support_fingerprinted` keeps one empty-mask return
-        // because its reserved identity cannot be produced by the ordinary fold.
+        // test on every bar, and `support_fingerprinted` folds the empty mask like
+        // any other candidate (D-0761).
         let column_src = include_str!("column.rs");
         let column_exits = count_exits(column_src.split("#[cfg(test)]").next().unwrap_or(""));
         assert_eq!(
-            column_exits, 2,
-            "crates/engine/src/column.rs may leave early in exactly two places: \
+            column_exits, 1,
+            "crates/engine/src/column.rs may leave early in exactly one place: \
              `set_positions`' iterator returning `None` when one word is exhausted, \
-             which is how an iterator ends, and `support_fingerprinted` returning \
-             the reserved EVERY_BAR identity for the empty mask. `support` itself \
+             which is how an iterator ends. `support_fingerprinted` has no early \
+             exit: the empty mask folds like any other candidate. `support` itself \
              has no early exit: every candidate, including empty, performs one \
-             fixed-six-word hit test per bar. A THIRD exit could truncate a support \
-             count or make its cost depend on the answer. The fingerprint return \
-             cannot truncate a count: it returns `self.bars()`, the maximum score, \
-             and `the_fingerprinted_count_is_the_plain_count` holds both functions \
+             fixed-six-word hit test per bar. A SECOND exit could truncate a support \
+             count or make its cost depend on the answer, and \
+             `the_fingerprinted_count_is_the_plain_count` holds both functions \
              to the same answer on over a thousand candidates."
         );
         assert_eq!(
