@@ -43,8 +43,14 @@
 //! The fourth row of that table is the one that was missing: a slot that is
 //! **whole but unsupported**, because the records it counts never reached the
 //! disk. [`Header::read_region`] falls back to the previous generation for
-//! that case too, instead of condemning the file — see
-//! `store::fault::kill_between_write_and_commit`.
+//! that case too, instead of returning an error for the region; see
+//! `store::fault::kill_between_write_and_commit`. That is this function's
+//! answer, not the file's: `BarFile::validated`, which every open door calls,
+//! refuses the file as `FormatError::CounterExceedsFile` when a slot that
+//! still decodes claims more records than the generation chosen here, and
+//! `store::write::a_truncation_back_to_the_header_is_refused_rather_than_silently_accepted`
+//! asserts it. This paragraph used to end at "instead of condemning the file".
+//! D-0790.
 //!
 //! # Why not the alternatives
 //!

@@ -234,3 +234,35 @@ fn the_c01_syscall_sentence_is_superseded_where_it_stands() {
         "row C4-DOCS-WEB-07 must record the supersession"
     );
 }
+
+/// **`header.rs` says the file-level door refuses what `read_region` walks
+/// back from.** Its module doc said `Header::read_region` falls back a
+/// generation "instead of condemning the file", and stopped there, while
+/// `BarFile::validated` refuses that file as `CounterExceedsFile` when a
+/// surviving slot claims more records than the header it chose. D-0790.
+#[test]
+fn the_header_module_doc_says_the_file_door_refuses_a_slot_ahead_of_its_data() {
+    assert!(
+        FILE_RS.contains("if claimed > header.n_valid {")
+            && FILE_RS.contains("source: FormatError::CounterExceedsFile,"),
+        "`BarFile::validated` refuses a surviving slot that claims more than the chosen header"
+    );
+    let doc = flat(
+        &HEADER_RS
+            .lines()
+            .filter_map(|line| line.strip_prefix("//!"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    assert!(
+        !doc.contains("falls back to the previous generation for that case too, instead of condemning the file —"),
+        "header.rs still ends the fallback sentence at the slot level"
+    );
+    for fact in [
+        "`BarFile::validated`",
+        "`FormatError::CounterExceedsFile`",
+        "`store::write::a_truncation_back_to_the_header_is_refused_rather_than_silently_accepted`",
+    ] {
+        assert!(doc.contains(fact), "header.rs module doc must name {fact}");
+    }
+}

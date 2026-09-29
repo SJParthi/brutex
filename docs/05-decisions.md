@@ -43714,3 +43714,21 @@ two §5 sub-tables holding a tombstone carry a status column, and each retired
 row names the live position it duplicates; the stray name is removed. Three
 tests in `crates/vocab/tests/table.rs` read these against `TABLE`, and a fourth
 proves the prose scanner they rely on takes a numbered name and nothing else.
+
+### D-0792 — Say in `header.rs` that the file refuses what `Header::read_region` walks back from — 2026-09-30
+
+**What was wrong.** The module doc of `crates/store/src/header.rs` said that
+for a slot whose records never reached the disk, `Header::read_region` "falls
+back to the previous generation for that case too, instead of condemning the
+file". That is true of `read_region` and not of the file: `BarFile::validated`
+refuses with `FormatError::CounterExceedsFile` when a slot that still decodes
+claims more records than the chosen header (`if claimed > header.n_valid` in
+`crates/store/src/file.rs`). D-0790 corrected the same claim in
+`docs/02-store-format.md` §5 and left this sentence standing.
+
+**The change.** The sentence now says the fallback is `read_region`'s answer
+and names the file-level refusal and
+`store::write::a_truncation_back_to_the_header_is_refused_rather_than_silently_accepted`.
+`store::docs::the_header_module_doc_says_the_file_door_refuses_a_slot_ahead_of_its_data`
+reads the module doc beside the refusal in `file.rs`; row C4-DOCS-WEB-09. No
+code path changes.
