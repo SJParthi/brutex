@@ -43694,3 +43694,29 @@ every lens wrapper (`ByPayoff`, `ByPath`, `ByAsymmetry`) to have the
 `Marked<Scored>` width. On `origin/main` (2c209309) the test fails with
 `stale width in rank.rs`, naming the phrase it expected: a `Scored` of 168
 bytes, `ConditionMask` 48, `hits` 8, `Edge` 112.
+
+### D-0977 — Refuse a p-value outside [0, 1] in Benjamini–Hochberg instead of counting it — 2026-09-29
+
+**What was wrong (GAP5-53).** `runner::significance::benjamini_hochberg`
+sorted with `f64::total_cmp` and counted every value at or below its rank's
+threshold. `total_cmp` puts `-NaN` first and `+NaN` last, so on `origin/main`
+`[-NaN, 0.04]` answered 2, `[NaN, 0.04]` answered 0, and `[-1, 0.9]` answered
+1: the sign bit of a NaN decided the count, and a negative value was a
+finding. Measured by a probe test on 2c209309:
+`left: (2, 0, 1)`, `right: (0, 0, 0)`.
+
+**The change.** The function returns `Option<usize>` and answers `None`,
+before sorting, when any value is NaN of either sign, infinite, below zero or
+above one. A p-value outside `[0, 1]` is a defect upstream; counting it, or
+silently dropping it, would be the fallback §4 bans. Both ends of `[0, 1]` are
+still answered. The function has no caller outside its own tests (`git grep
+benjamini_hochberg` names only `crates/runner/src/significance.rs`), so no
+report and no run identity changes.
+`significance::tests::benjamini_hochberg_refuses_a_value_that_is_not_a_probability`
+proves it.
+
+**Not done.** The ledger row also asked for a charter source row for
+Benjamini and Hochberg (1995). This change adds none: no source for it is
+recorded in `docs/00-charter.md`, and writing one without reading the source
+would be the invention §3 rule 1 forbids. The citation remains UNVERIFIED in
+the charter's sense.

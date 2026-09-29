@@ -5360,3 +5360,4 @@ the guard. The existing emits test pins the warning's message and level.
 | # | Must hold | Proven by | |
 |---|---|---|---|
 | C4-RUNNER-06-01 | **The ranked-row widths in `rank.rs` are the compiler's.** The module header's `Scored`, `ConditionMask` and `Edge` widths, the `Marked<Scored>` heap-row width, the fourteen-core `keep = 10_000` chunk-heap peak and the `top_of` forty-chunk example are each built from `size_of` and must appear in the source; `Scored` is its three fields with no padding, and every lens wrapper has the `Marked<Scored>` width. D-0976 | `runner::rank::tests::the_header_widths_and_peak_are_the_measured_type_widths` | ✓ |
+| C4-RUNNER-06-02 | **Benjamini–Hochberg refuses a value that is not a probability.** Any `-NaN`, `NaN`, negative, above-one or infinite value answers `None` and leaves the slice unsorted; `0.0` and `1.0` are answered. D-0977 | `runner::significance::tests::benjamini_hochberg_refuses_a_value_that_is_not_a_probability` | ✓ |
