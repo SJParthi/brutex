@@ -365,6 +365,26 @@ mod invariant_tests {
         ));
     }
 
+    /// `W3-vocab1-3`, held by the lib tests too: equality ignores the scratch
+    /// program and sees every encoded field.
+    #[test]
+    fn equality_is_the_encoding_and_ignores_the_scratch_program() {
+        let start = Cursor::new(&[0, 369]).expect("live alphabet");
+        let mut cursor = start.clone();
+        let mut work = 0;
+        assert!(matches!(
+            cursor.advance(1, &mut work),
+            Ok(Step::Candidate(_))
+        ));
+        let decoded = Cursor::decode(&cursor.encode()).expect("own bytes decode");
+        assert!(
+            decoded.code != cursor.code,
+            "the candidate left its instruction in the scratch program"
+        );
+        assert!(decoded == cursor, "equal bytes compare equal");
+        assert!(cursor != start, "different progress compares unequal");
+    }
+
     #[test]
     fn corrupted_internal_cursor_indices_refuse_with_bounded_work() {
         let mut cursor = Cursor::new(&[0]).expect("live alphabet");

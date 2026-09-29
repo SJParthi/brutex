@@ -185,7 +185,8 @@ fn a_cursor_equals_the_decode_of_its_own_bytes_after_every_node() {
     );
 }
 
-/// `W3-vocab1-0`: one grammar node is not O(1), and `docs/06-limits.md` says so.
+/// `W3-vocab1-0`: one grammar node revalidates its whole prefix, and
+/// `docs/06-limits.md` says so.
 ///
 /// The limit (D-0983) quotes these lines as its evidence. If the node step stops
 /// validating the whole prefix, or stops zeroing a fixed stack, this fails and the
