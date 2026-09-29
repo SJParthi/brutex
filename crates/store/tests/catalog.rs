@@ -453,3 +453,24 @@ fn a_link_is_part_of_the_reconciliation() {
     };
     assert!(!lost.reconciles(), "the link must be counted somewhere");
 }
+
+/// **A signed month field is malformed, not a second spelling of a month.**
+/// D-0767.
+///
+/// The width check passed `2026-+8` because the integer parse accepts a
+/// leading `+`, so it was listed as `2026-08` beside the real `2026-08.bin`
+/// and the census counted two spot months for one row (W3-store1-6,
+/// reproduced on origin/main 2c209309).
+#[test]
+fn a_signed_month_field_is_malformed_not_a_second_spelling() {
+    let root = scratch("signed");
+    put(&root, "groww/NSE/INDEX/NIFTY/1min/2026-+8.bin");
+    put(&root, "groww/NSE/INDEX/NIFTY/1min/+026-08.bin");
+    put(&root, "groww/NSE/INDEX/NIFTY/1min/2026-08.bin");
+    let out = catalog::walk(&root).expect("the walk runs");
+    assert_eq!(out.census.malformed_month, 2, "{:?}", out.census);
+    assert_eq!(out.census.spot, 1, "{:?}", out.census);
+    assert!(out.census.reconciles(), "{:?}", out.census);
+    assert_eq!(out.held.len(), 1);
+    assert_eq!(out.held[0].month.to_string(), "2026-08");
+}

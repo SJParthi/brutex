@@ -43720,3 +43720,19 @@ not produce rather than resolved.
 
 **Not changed here.** The `cli` reports that print a catalog census do not
 yet print the new bucket, as with D-0765.
+
+### D-0767 — A month stem must be digits only before it is parsed — 2026-09-29
+
+**What happened (W3-store1-6).** `store::catalog::parse_month` checked the
+width of `yyyy` and `mm` and then parsed them as integers. Rust's unsigned
+integer `FromStr` accepts a leading `+`, so the stem `2026-+8` passed the width
+check and was listed as the month `2026-08`. Reproduced on origin/main
+2c209309: `groww/NSE/INDEX/NIFTY/1min/2026-+8.bin` alone gave `spot 1,
+malformed_month 0` and a held `2026-08`, a path the renderer would write as
+`2026-08.bin`, which did not exist. The comment above the width check says a
+hand-made name must not masquerade as one the writer produced.
+
+**The change.** After the width check, every byte of both fields must be an
+ASCII digit, or the stem is `malformed_month`. `2026-+8.bin` and `+026-08.bin`
+beside `2026-08.bin` now give `malformed_month 2, spot 1` and one row
+(`a_signed_month_field_is_malformed_not_a_second_spelling`).

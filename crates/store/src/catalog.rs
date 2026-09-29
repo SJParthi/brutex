@@ -364,6 +364,16 @@ fn parse_month(stem: &str) -> Result<YearMonth, PathError> {
     if year.len() != 4 || month.len() != 2 {
         return Err(PathError::MonthOutOfRange { month: 0 });
     }
+    // Digits only, before `parse`: the integer `FromStr` takes a leading `+`,
+    // so `2026-+8` passed the width check and was listed as `2026-08`, a file
+    // the renderer never writes (D-0767).
+    if !year
+        .bytes()
+        .chain(month.bytes())
+        .all(|b| b.is_ascii_digit())
+    {
+        return Err(PathError::MonthOutOfRange { month: 0 });
+    }
     let year: u16 = year
         .parse()
         .map_err(|_| PathError::YearOutOfRange { year: 0 })?;

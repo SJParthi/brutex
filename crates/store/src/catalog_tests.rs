@@ -5,7 +5,7 @@
 //! The walk-level proofs on real temporary trees are in
 //! `crates/store/tests/catalog.rs`. D-0765 to D-0768.
 
-use super::{Census, walk};
+use super::{Census, parse_month, walk};
 use std::path::{Path, PathBuf};
 
 /// A private directory under the system temporary root, named for its test.
@@ -97,4 +97,13 @@ fn a_locked_directory_is_one_unreadable_entry() {
         ..Census::default()
     };
     assert_eq!(out.census, expected);
+}
+
+#[test]
+fn a_signed_or_non_digit_month_field_does_not_parse() {
+    for stem in ["2026-+8", "+026-08", "2026- 8", "2026-0x"] {
+        assert!(parse_month(stem).is_err(), "{stem} must not parse");
+    }
+    let month = parse_month("2026-08").expect("the canonical spelling parses");
+    assert_eq!(month.to_string(), "2026-08");
 }
