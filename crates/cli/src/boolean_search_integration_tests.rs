@@ -85,13 +85,10 @@ fn run_fixture_child(fixture: &Fixture, selected: bool) -> Result<(), String> {
     let mut command = std::process::Command::new(std::env::current_exe().map_err(display)?);
     command.args(["--exact", TEST, "--nocapture", "--test-threads=1"]);
     command.env_clear();
-    // Instrumented complete-calendar replay exceeded the ordinary deadline on
-    // the Linux CI runner. Keep the same assertions and finite log bound.
-    let timeout = if std::env::var_os("LLVM_PROFILE_FILE").is_some() {
-        std::time::Duration::from_mins(15)
-    } else {
-        std::time::Duration::from_mins(6)
-    };
+    // No wall-clock deadline: how long the child runs measures machine load,
+    // and a fixed one failed Gate 1e's test clause and the Tests step with
+    // nothing they check changed (D-0911). The 8MiB log bound below stays; a
+    // child that never exits is left to the CI job's own time limit.
     if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
         command.env("LLVM_PROFILE_FILE", profile);
     }
@@ -113,13 +110,12 @@ fn run_fixture_child(fixture: &Fixture, selected: bool) -> Result<(), String> {
         .stderr(file)
         .spawn()
         .map_err(display)?;
-    let started = std::time::Instant::now();
     let status = loop {
         if let Some(status) = child.try_wait().map_err(display)? {
             break status;
         }
         let log_bytes = fs::metadata(&log).map_err(display)?.len();
-        if started.elapsed() > timeout || log_bytes > 8 * 1024 * 1024 {
+        if log_bytes > 8 * 1024 * 1024 {
             child.kill().map_err(display)?;
             child.wait().map_err(display)?;
             let detail = if fs::metadata(&log).map_err(display)?.len() <= 8 * 1024 * 1024 {
@@ -128,9 +124,7 @@ fn run_fixture_child(fixture: &Fixture, selected: bool) -> Result<(), String> {
                 "child log exceeded 8MiB; refusing to load it".into()
             };
             return Err(format!(
-                "generated search child exceeded its {}s/8MiB bound after {:.1}s ({log_bytes} bytes): {detail}",
-                timeout.as_secs(),
-                started.elapsed().as_secs_f64()
+                "generated search child exceeded its 8MiB log bound ({log_bytes} bytes): {detail}"
             ));
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -923,5 +917,39 @@ fn search_settlement_retains_acknowledged_completion_and_names_late_failure() ->
     assert!(!why.contains("refusal recorded"), "{why}");
     same_record(&before, &journal.latest(bytes)?.ok_or("completion lost")?);
     assert_eq!(journal.next_sequence(), before.sequence + 1);
+    Ok(())
+}
+
+/// The child's supervision is bounded by its log, never by elapsed time: a
+/// wall-clock deadline measures how loaded the machine is, and it failed Gate
+/// 1e's test clause and the `Tests` step when nothing they check had changed.
+#[test]
+fn the_generated_search_child_is_bounded_by_its_log_and_not_by_the_clock() -> Result<(), String> {
+    let source = include_str!("boolean_search_integration_tests.rs");
+    let start = source
+        .find("\nfn run_fixture_child(")
+        .ok_or("run_fixture_child is not defined in this file")?;
+    let rest = &source[start + 1..];
+    let end = rest
+        .find("\nfn ")
+        .ok_or("no function follows run_fixture_child")?;
+    let body = &rest[..end];
+    for clock in ["Instant", "elapsed", "from_mins", "from_secs", "timeout"] {
+        assert!(
+            !body.contains(clock),
+            "run_fixture_child names `{clock}`:\n{body}"
+        );
+    }
+    assert_eq!(body.matches("Duration::").count(), 1, "{body}");
+    assert!(
+        body.contains("std::time::Duration::from_millis(50)"),
+        "{body}"
+    );
+    // The only condition that kills the child is its log passing 8MiB.
+    assert_eq!(body.matches("child.kill()").count(), 1, "{body}");
+    assert!(
+        body.contains("        if log_bytes > 8 * 1024 * 1024 {\n            child.kill()"),
+        "{body}"
+    );
     Ok(())
 }

@@ -43695,3 +43695,25 @@ pay for it; `c4_cli_02_limits::each_quoted_line_is_in_the_source_it_names`
 fails if a quote leaves the section or the source. The comment on `restore`,
 which named only a per-invocation bound, now also names the growth. No code
 path changed, so no run identity moves.
+
+### D-0911 — Bound the generated search child by its log, not by the clock — 2026-09-29
+
+**What was found (ET-rust-only-purity-11).** `run_fixture_child` in
+`crates/cli/src/boolean_search_integration_tests.rs` killed its child and
+failed once `started.elapsed()` passed six minutes (fifteen under
+`LLVM_PROFILE_FILE`). The time measures how loaded the machine is, not
+anything the test checks, so under load Gate 1e's test clause and the `Tests`
+step could fail with nothing §2-related changed.
+
+**The change.** The deadline is removed. The child is still killed, and the
+test still fails, when its log passes 8MiB, and the parent still requires the
+child's success and its `1 passed` line. A child that never exits is left to
+whatever time limit the CI job runs under rather than to a clock inside the
+test; run locally, such a child holds the test until it is interrupted, as any
+other hung test does. That is the cost of this choice, named here rather than
+hidden.
+`cli::boolean_search_command::integration_tests::the_generated_search_child_is_bounded_by_its_log_and_not_by_the_clock`
+reads the function's source and requires that it names no `Instant`,
+`elapsed`, `from_mins`, `from_secs` or `timeout`, and that its one `kill` sits
+under the 8MiB log check. Test-only; no production path and no run identity
+changes.
