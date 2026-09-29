@@ -5360,3 +5360,5 @@ the guard. The existing emits test pins the warning's message and level.
 | Id | Invariant | Test that proves it | Status |
 |---|---|---|---|
 | C4-PULL-05-01 | The gap ledger steps its cursor past a stored bar dated before the day it is auditing: one bar on a closed day, or one bar the day before `first`, leaves the next open session with zero lost minutes and no `VendorHole`. | `pull::gaps::tests::a_bar_before_the_range_or_on_a_closed_day_does_not_stall_the_next_session` | ✓ |
+| C4-PULL-05-02 | A 2xx vendor answer is parsed once for both the refusal check and the decode: one parse for a bars body, one for a body naming a refusal, one for a body that is not JSON, and the not-JSON body is still a decode fault. | `pull::http::tests::a_success_body_is_parsed_once_for_both_the_refusal_check_and_the_decode` | ✓ |
+| C4-PULL-05-03 | A refusal named in a 2xx body reaches `FetchError::VendorRefused::detail` cut to `trim`'s 500 characters, with its code still present. | `pull::http::tests::a_refusal_under_a_200_is_trimmed_before_it_reaches_the_error` | ✓ |

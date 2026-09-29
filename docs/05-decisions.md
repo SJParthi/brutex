@@ -43666,3 +43666,36 @@ job.
   survived. `an_nse_cash_stock_consults_no_peer_even_one_holding_it` gives a
   second vendor the same stock and requires that nothing votes and nothing is
   named; the same two feeds holding an index do vote, as the control.
+
+### D-0956 — Parse a 2xx vendor answer once for both the refusal check and the decode, and cut the refusal it names — 2026-09-29
+
+**What was wrong.** `HttpSource::window_async` weighed every 2xx body for a
+refusal and then decoded it. For a feed whose spec declares `error_names`, the
+refusal check called `refusal::disposition_of(text, contract)`, which runs
+`serde_json::from_str(body)`, and then `decode_body` ran its own
+`serde_json::from_str` over the same text. Every successful window was parsed
+twice, and the body is bounded only by `MAX_RESPONSE_BYTES`. `docs/06-limits.md`
+§83.1 said the linear refusal read was never called on a success path
+(W1-pull2-1). When that 2xx body did name a refusal, `weigh_answered_body`
+formatted the whole body into `FetchError::VendorRefused::detail` with no cut,
+although `trim` states that a refusal body reaching an error string is cut, and
+the non-2xx door already calls it (UC-22).
+
+**The change.** `HttpSource::settle_answer` parses the body once through
+`parse_answer` and hands the one `serde_json::Value` to both readers:
+`refusal::disposition_of_value`, which parses nothing itself, and
+`decode_value`, which is `decode_body` over a parsed value. `decode_body` keeps
+its signature and its not-JSON fault. The refusal is still read first, and a
+body that is not JSON is still a decode fault, not a success. The refusal's
+`detail` is now built from `trim(text)`: at most 500 characters of the body.
+What a window decodes to is unchanged, so no run identity moves.
+
+**Proof.**
+`pull::http::tests::a_success_body_is_parsed_once_for_both_the_refusal_check_and_the_decode`
+counts calls to `parse_answer` on its own thread: one for a bars body, one for a
+body naming `DH-901`, one for a body that is not JSON. With `settle_answer`
+restored to the weigh-then-decode pair it counts two for the bars body and
+fails.
+`pull::http::tests::a_refusal_under_a_200_is_trimmed_before_it_reaches_the_error`
+pads a `DH-901` body to over 10,000 characters and requires the detail to be
+its prefix plus exactly 500 characters; on origin/main it measured 10,177.
