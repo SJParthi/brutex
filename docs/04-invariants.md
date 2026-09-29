@@ -5360,3 +5360,4 @@ the guard. The existing emits test pins the warning's message and level.
 | # | Must hold | Proven by | |
 |---|---|---|---|
 | C4-CORE-01 | **A Zerodha `INDICES` row is an index only when it is typed `EQ`.** The same `NIFTY 50` row typed `FUT`, `CE` or `PE` is `InstrumentError::Malformed`, and typed `EQ` it is kept as the index `NIFTY`. D-0785 | `core::vendor::tests::an_indices_row_typed_as_a_derivative_is_refused_not_promoted_to_an_index` | ✓ |
+| C4-CORE-02 | **The paisa half-up snap decides on the scaled value, not on a biased sum.** `from_rupees_half_up(0.004999999999999999)` is `0` and `from_rupees_half_up(45035996273704.97)` is `4503599627370497`, where `(x * 100 + 0.5).floor()` gave `1` and `4503599627370498`; the genuine tie `0.125` is still `13`, `-0.125` is still `-12`, and the double just below `0.125` is `12`. D-0786 | `core::price::tests::the_half_up_decision_reads_the_scaled_value_not_a_biased_sum` | ✓ |

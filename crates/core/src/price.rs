@@ -114,10 +114,24 @@ impl Paisa {
             return Err(PriceError::NotFinite);
         }
 
-        // Scale, bias, floor. Adding 0.5 then flooring is half-up for every
-        // sign; `f64::round` is half-away-from-zero and would disagree with
-        // this function's own doc comment on a negative tie.
-        let floored = (rupees * SCALE + 0.5).floor();
+        // Scale, floor, then compare the fraction with one half. That is
+        // half-up for every sign; `f64::round` is half-away-from-zero and would
+        // disagree with this function's own doc comment on a negative tie.
+        //
+        // NOT `(scaled + 0.5).floor()`, which it was until D-0786: the ADDITION
+        // rounds before the floor sees it. A scaled value of
+        // 0.49999999999999994 plus 0.5 rounds to exactly 1.0, and the odd
+        // integer 4_503_599_627_370_497.0 plus 0.5 rounds to ...498.0, so both
+        // came back one paisa high although neither is a tie. The
+        // multiplication by 100 still rounds; that is the limit
+        // `a_decimal_tie_is_usually_not_a_binary_tie` records.
+        let scaled = rupees * SCALE;
+        let whole = scaled.floor();
+        let floored = if scaled - whole >= 0.5 {
+            whole + 1.0
+        } else {
+            whole
+        };
 
         // EXCLUSIVE at both ends. `(NEG_LIMIT..LIMIT)` was inclusive at the low end, so
         // `from_rupees_half_up(-92_233_720_368_547_758.08)` returned
@@ -153,8 +167,8 @@ impl Paisa {
     /// # Rounding
     ///
     /// Half-up means ties toward positive infinity, which is what
-    /// [`Self::from_rupees_half_up`] does and why it adds `0.5` and floors rather than
-    /// calling `round`. So the third fractional digit decides, and the two signs decide
+    /// [`Self::from_rupees_half_up`] does and why it floors and compares the fraction with
+    /// one half rather than calling `round`. So the third fractional digit decides, and the two signs decide
     /// differently at an exact tie:
     ///
     /// * positive: round up when the remainder is `>= 0.5`, i.e. the third digit is `>= 5`
@@ -335,8 +349,8 @@ mod tests {
 
     /// A negative tie rounds toward POSITIVE infinity, which is what half-up means here.
     ///
-    /// [`Paisa::from_rupees_half_up`]'s own comment says so: adding `0.5` then flooring is
-    /// half-up for every sign, and `round` would disagree on exactly this input. So `-0.145`
+    /// [`Paisa::from_rupees_half_up`]'s own comment says so: flooring and comparing the
+    /// fraction with one half is half-up for every sign, and `round` would disagree on exactly this input. So `-0.145`
     /// is `-14`, not `-15`. The two signs need different comparisons against the half, and
     /// getting it wrong is a one-paisa error in the direction that flatters a short.
     #[test]
@@ -583,5 +597,57 @@ mod tests {
             let got = Paisa::from_rupees_half_up(rupees).expect("finite, in range");
             assert_eq!(got.raw(), want, "{rupees} rupees");
         }
+    }
+
+    // C4 core batch 1 — D-0786.
+    #[test]
+    fn the_half_up_decision_reads_the_scaled_value_not_a_biased_sum() {
+        // Just below a tie. The scaled product is 0.49999999999999994, which
+        // is under half a paisa, so half-up gives 0. Adding 0.5 before the
+        // floor rounded that sum to exactly 1.0 and returned 1.
+        let scaled = 0.004_999_999_999_999_999_f64 * 100.0;
+        assert!(scaled < 0.5, "the witness is below a tie: {scaled}");
+        assert_eq!(
+            Paisa::from_rupees_half_up(0.004_999_999_999_999_999)
+                .expect("finite")
+                .raw(),
+            0
+        );
+
+        // An odd integer at 2^52 or above. The scaled product is exactly
+        // 4_503_599_627_370_497, with no fraction to round, but the biased sum
+        // 4_503_599_627_370_497.5 is not representable and rounded to ...498.
+        let scaled = 45_035_996_273_704.97_f64 * 100.0;
+        assert_eq!(scaled, 4_503_599_627_370_497.0, "the witness is an integer");
+        assert_eq!(
+            Paisa::from_rupees_half_up(45_035_996_273_704.97)
+                .expect("in range")
+                .raw(),
+            4_503_599_627_370_497
+        );
+
+        // The decision's own boundary: the largest double below a genuine tie
+        // rounds down, the tie itself rounds up, on both signs.
+        let under = 0.125_f64.next_down();
+        assert!(under * 100.0 < 12.5, "the witness is below a tie");
+        assert_eq!(Paisa::from_rupees_half_up(under).expect("finite").raw(), 12);
+        assert_eq!(Paisa::from_rupees_half_up(0.125).expect("finite").raw(), 13);
+        assert_eq!(
+            Paisa::from_rupees_half_up(-0.125).expect("finite").raw(),
+            -12
+        );
+        assert_eq!(Paisa::from_rupees_half_up(1.0).expect("finite").raw(), 100);
+
+        // Negative values below one paisa in size: half-up takes each toward
+        // zero, and the negative tie -0.5 paisa to zero as well.
+        assert_eq!(Paisa::from_rupees_half_up(-1e-20).expect("finite").raw(), 0);
+        assert_eq!(
+            Paisa::from_rupees_half_up(-0.004_999_999_999_999_999)
+                .expect("finite")
+                .raw(),
+            0
+        );
+        assert_eq!(Paisa::from_rupees_half_up(-0.005).expect("finite").raw(), 0);
+        assert_eq!(Paisa::from_rupees_half_up(-0.3).expect("finite").raw(), -30);
     }
 }

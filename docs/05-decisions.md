@@ -43686,3 +43686,22 @@ arrive as `EQ`). Any other type under `INDICES` is
 `index_segment_word` is `None` for both. Proven by
 `core::vendor::tests::an_indices_row_typed_as_a_derivative_is_refused_not_promoted_to_an_index`
 (C4-CORE-01).
+
+### D-0786 — Decide the paisa half-up snap on the scaled value's fraction — 2026-09-29
+
+**What was wrong.** `Paisa::from_rupees_half_up` computed
+`(rupees * 100 + 0.5).floor()`. The addition rounds before the floor runs, so
+two inputs that are not ties came back one paisa high on `origin/main`:
+`from_rupees_half_up(0.004999999999999999)` returned `1` although the scaled
+value is `0.49999999999999994`, and `from_rupees_half_up(45035996273704.97)`
+returned `4503599627370498` although the scaled value is exactly
+`4503599627370497.0`. Both break the function's own doc comment, which rounds
+up only "a value exactly halfway between two paisa".
+
+**The change.** The scaled value is floored, and one paisa is added only when
+the scaled value minus its floor is at least `0.5`. Half-up on both signs is
+unchanged: `0.125` gives `13` and `-0.125` gives `-12`. The multiplication by
+100 still rounds, which is the limit `a_decimal_tie_is_usually_not_a_binary_tie`
+already records. Proven by
+`core::price::tests::the_half_up_decision_reads_the_scaled_value_not_a_biased_sum`
+(C4-CORE-02).
