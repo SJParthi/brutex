@@ -43666,3 +43666,30 @@ job.
   survived. `an_nse_cash_stock_consults_no_peer_even_one_holding_it` gives a
   second vendor the same stock and requires that nothing votes and nothing is
   named; the same two feeds holding an index do vote, as the control.
+
+### D-0918 — Let a Population V6 writer initialise a zero-length data file, and state what a Selection V6 read replays — 2026-09-29
+
+**GAP11-2.** `PopulationV6Ledger::open` wrote the header only when `open_child`
+reported that this call created `population-v6.bin`. A writer stopped between
+the create and the header write left a 0-byte file, and every later writer and
+reader refused it with "cannot read Population V6 header: failed to fill whole
+buffer". The choice: under the exclusive writer lock, a data file whose length
+is zero is uninitialised whoever created it, and the writer writes and syncs
+the header and syncs the root, the same steps as a fresh create. The
+observation authority already initialises its own file on length alone
+(`population_observations_v1.rs`:
+`if writable && file.metadata().map_err(|why| why.to_string())?.len() == 0 {`).
+A reader still never initialises, and a non-empty file still goes through
+`verify_header`: the test shows a one-byte file refused and left unchanged. Pinned by
+`cli::population_v6::tests::a_zero_length_data_file_left_by_a_failed_header_write_is_initialised_by_the_writer`.
+The same window in Admission V4 and Finalization V4 (W2-cli10-4, W2-cli11-5)
+is not changed by this entry.
+
+**W2-cli15-0.** A Selection V6 winner read re-derives its source through
+Execution V4 and Population V6, and each layer re-reads before and after so
+that a source changing mid-read is refused. That re-reading is kept, because
+removing it would drop the mid-read change check; what was missing was any
+statement of its cost. `docs/06-limits.md` now states it call by call, and
+`cli::selection_v6::source::tests::a_selection_v6_read_counts_its_population_replays_and_the_limits_say_so`
+counts each call site in the source and requires the section to quote it. No
+timing is claimed.

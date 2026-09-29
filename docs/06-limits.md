@@ -9864,3 +9864,61 @@ The text above is kept as it was written.
   doc to its body, read off the source, and
   `what_a_changed_rows_line_costs_is_named_in_part_and_read_off_the_source`
   finds each part named here and in that doc in the source that pays it.
+
+## A Selection V6 read replays its Population source four times — D-0918
+
+W2-cli15-0. Before this section, this document stated Selection V6's record
+size ("Selection V6 uses fixed 16 KiB records and a CLI ceiling of 64 GiB per
+file") and did not say that reading its winners re-runs the Population V6
+source and its Execution V3 exit-grid replay. It does, by design: each layer re-reads its
+source before and after, so a source that changes mid-read is refused rather
+than served. That re-reading is the cost, and it is stated here rather than
+removed.
+
+The chain, each factor a call site that
+`a_selection_v6_read_counts_its_population_replays_and_the_limits_say_so`
+counts in the source:
+
+* `top_twenty_five` calls
+  `Prepared::from_execution(&mut self.source, self.policy)?` twice, once
+  before and once after `require_committed` checks the committed block.
+  `top_ten` calls `top_twenty_five` once. `snapshot` calls `top_twenty_five` once and
+  `Prepared::from_execution` once more, so three. `commit_stored_selection_v6`
+  calls it twice.
+* `Prepared::from_execution` is
+  `Self::from_source(&source.selection_v6_source()?, policy)`: one Execution V4
+  `selection_v6_source` per call.
+* `selection_v6_source` calls
+  `let source_before = self.population_execution_source()?;` and
+  `let source_after = self.population_execution_source()?;`, and each of those
+  is one Population V6 `execution_v4_source`.
+* `execution_v4_source` calls `let before = self.upstream.authenticate()?;`
+  and `let after = self.upstream.authenticate()?;`, and between them
+  `let replay = candidate_source.execution_v3_replay_authority()?;` once for
+  each retained Candidate family.
+* `authenticate` calls
+  `authenticate_candidate_authorities(&self.candidates)?` twice and reads the
+  Finalization source twice.
+
+So one `top_twenty_five` or `top_ten` read is 2 × 2 = four Population V6
+`execution_v4_source` calls: four Execution V3 exit-grid replays for each
+retained Candidate family, and eight upstream authentications, each reading
+every retained Candidate authority's population rows twice. A `snapshot` is
+six `execution_v4_source` calls, and `stored_oos_witnesses` takes two
+snapshots around its own replay.
+
+None of this is O(1). What one Execution V3 replay authority or one upstream
+authentication costs is not measured here, and no latency is claimed; the
+products above are call counts read from the source, not timings.
+
+## A zero-length Population V6 data file is initialised by the next writer — D-0918
+
+GAP11-2. `PopulationV6Ledger::open` wrote the 64-byte header only when that
+call created `population-v6.bin`. A writer killed or refused between creating
+the file and writing its header left a 0-byte file, and every later open
+refused it with "cannot read Population V6 header". A writer now initialises a
+data file whose length is zero whoever created it, under the exclusive writer
+lock; a reader never initialises, and a 1-byte header still refuses unchanged.
+`a_zero_length_data_file_left_by_a_failed_header_write_is_initialised_by_the_writer`
+pins all three. The same header window in Admission V4 and Finalization V4 is
+tracked by other ledger rows and is not changed here.

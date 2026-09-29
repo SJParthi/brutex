@@ -5354,3 +5354,10 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### Population V6 header window, Selection V6 read cost and the trades refresh — C4 cli-06 (D-0918, D-0919)
+
+| ID | Invariant | Test that proves it | Status |
+|---|---|---|---|
+| C4-CLI-06-01 | A Population V6 writer that finds a zero-length `population-v6.bin` writes the header and opens it; a reader over the same file refuses, and a one-byte file still refuses the writer and is left unchanged. | `cli::population_v6::tests::a_zero_length_data_file_left_by_a_failed_header_write_is_initialised_by_the_writer` | ✓ |
+| C4-CLI-06-02 | Every call site `docs/06-limits.md` counts for a Selection V6 read — `Prepared::from_execution` twice in `top_twenty_five`, `population_execution_source` twice in `selection_v6_source`, `upstream.authenticate` twice and `execution_v3_replay_authority` once in `execution_v4_source` — is present in the source that many times, and the D-0918 section quotes each. | `cli::selection_v6::source::tests::a_selection_v6_read_counts_its_population_replays_and_the_limits_say_so` | ✓ |

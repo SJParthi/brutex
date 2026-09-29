@@ -1917,8 +1917,20 @@ impl PopulationV6Ledger {
                 .map_err(|why| format!("cannot shared-lock Population V6 reader: {why}"))?;
         }
         let opened = (|| {
-            let (mut data_file, data_created) = open_child(&data_path, writable)?;
-            if data_created {
+            let (mut data_file, _) = open_child(&data_path, writable)?;
+            // A ZERO-LENGTH FILE IS UNINITIALISED, WHOEVER CREATED IT. The header
+            // was written only when THIS call created the file, so a writer
+            // killed or refused between `create` and the header write left a
+            // 0-byte file that every later open refused with "cannot read
+            // Population V6 header". The exclusive writer lock is held here,
+            // so no other writer is mid-header. A reader never initialises,
+            // and a non-empty file still goes through `verify_header`. D-0918.
+            let empty = data_file
+                .metadata()
+                .map_err(|why| format!("cannot stat Population V6 data: {why}"))?
+                .len()
+                == 0;
+            if writable && empty {
                 data_file
                     .write_all(&header())
                     .and_then(|()| data_file.sync_all())
@@ -3729,5 +3741,47 @@ mod tests {
                 Ok(())
             },
         )
+    }
+
+    #[test]
+    fn a_zero_length_data_file_left_by_a_failed_header_write_is_initialised_by_the_writer()
+    -> Result<(), String> {
+        let root = std::env::temp_dir().join(format!(
+            "brutex-population-v6-empty-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|why| why.to_string())?
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).map_err(|why| format!("cannot create root: {why}"))?;
+        std::fs::write(root.join(LOCK_FILE), b"").map_err(|why| why.to_string())?;
+        std::fs::write(root.join(DATA_FILE), b"").map_err(|why| why.to_string())?;
+        let reader = PopulationV6Ledger::open_read(&root, bounds());
+        assert!(
+            matches!(&reader, Err(why) if why.contains("cannot read Population V6 header")),
+            "a reader never initialises: {:?}",
+            reader.as_ref().err()
+        );
+        let writer = PopulationV6Ledger::open_write(&root, bounds())?;
+        assert_eq!(writer.record_count, 0);
+        drop(writer);
+        let bytes = std::fs::read(root.join(DATA_FILE)).map_err(|why| why.to_string())?;
+        assert_eq!(bytes, header().to_vec());
+        drop(PopulationV6Ledger::open_read(&root, bounds())?);
+
+        std::fs::write(root.join(DATA_FILE), [header()[0]]).map_err(|why| why.to_string())?;
+        let short = PopulationV6Ledger::open_write(&root, bounds());
+        assert!(
+            matches!(&short, Err(why) if why.contains("cannot read Population V6 header")),
+            "a one-byte header still refuses: {:?}",
+            short.as_ref().err()
+        );
+        assert_eq!(
+            std::fs::read(root.join(DATA_FILE)).map_err(|why| why.to_string())?,
+            vec![header()[0]]
+        );
+        std::fs::remove_dir_all(&root).map_err(|why| why.to_string())?;
+        Ok(())
     }
 }
