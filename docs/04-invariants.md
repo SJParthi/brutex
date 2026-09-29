@@ -5354,3 +5354,16 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### Store and vocabulary documents read against the code — C4 docs-web (D-0790, D-0791)
+
+| Id | Invariant | Test that proves it | Status |
+|---|---|---|---|
+| C4-DOCS-WEB-01 | `docs/02-store-format.md` §4 names the positional read the store performs (`FileExt::read_at`, one `pread`) and claims no mapping, while `file.rs` and the store manifest name none | `store::docs::section_4_names_the_positional_read_and_claims_no_mapping` · `store::docs::the_helpers_find_a_section_and_flatten_its_wrapping` | ✓ |
+| C4-DOCS-WEB-02 | §5 says a header ahead of its data is refused as `FormatError::CounterExceedsFile` and cites the two `store::write` tests that assert it, both of which exist | `store::docs::section_5_says_a_header_ahead_of_its_data_is_refused` | ✓ |
+| C4-DOCS-WEB-03 | No store document or `file.rs` says no bench times a syscall, while C-28 and C-29 time `read_record`; §6 does not cite C-07 for per-read verification | `store::docs::no_document_says_no_bench_times_a_syscall` · `store::docs::section_6_does_not_cite_c07_for_per_read_verification` | ✓ |
+| C4-DOCS-WEB-04 | The opening of `docs/03-vocabulary.md` states `COUNT` positions, the mask's bit width and the free count; §2 names `ConditionMask`; §6 says §8 supersedes it | `vocab::table::the_document_opening_states_the_current_table_and_mask` | ✓ |
+| C4-DOCS-WEB-05 | Every document row of a retired position says `retired` and the position it duplicates, every void row says `void`, and no live row says either | `vocab::table::every_row_of_a_non_live_position_carries_its_status` | ✓ |
+| C4-DOCS-WEB-06 | Every `N` `name` pair in the vocabulary document's prose is that position's name in `TABLE` | `vocab::table::every_bit_named_in_prose_is_that_bits_name` · `vocab::table::the_prose_scanner_takes_a_numbered_name_and_nothing_else` | ✓ |
+| C4-DOCS-WEB-07 | While the C-01 paragraph above still says "no bench in this repository times a syscall", D-0790 names it superseded and this row exists; C-28 and C-29 call `read_record`, whose read is `FileExt::read_at` | `store::docs::the_c01_syscall_sentence_is_superseded_where_it_stands` | ✓ |
+| C4-DOCS-WEB-08 | The module doc of `crates/store/src/header.rs` no longer heads itself "a read-only mapping plus `pwrite`" and names the positional read | `store::docs::the_header_module_doc_claims_no_mapping` | ✓ |

@@ -2871,8 +2871,11 @@ calls on an already-open handle. Against the groww census's own numbers that is
 
 **The syscall latency is not measured and is not claimed.**
 `store::file::BarFile::read_record` states the same limit for the same reason:
-the operation is constant, the read underneath it is the device's, and no bench
-in this repository times a syscall. §14 carries what *is* measured.
+the operation is constant and the read underneath it is the device's. C-28 and
+C-29 in `crates/store/benches/ratio.rs` do time `read_record`, its `pread`
+included, but on a page the host already holds, so a cold read's latency stays
+unmeasured. This sentence used to say no bench timed a syscall at all. D-0790.
+§14 carries what *is* measured.
 
 ### 40.3 The 43,422 entries already on disk have no closes, and get none for free
 

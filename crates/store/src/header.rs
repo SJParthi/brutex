@@ -89,7 +89,12 @@
 //!    a name in the path type ([`crate::path::FileKind::Lock`]), and the gap
 //!    is reported as a limit rather than implied away.
 //!
-//! # It is still a read-only mapping plus `pwrite`
+//! # Positional reads plus `pwrite`, and no mapping
+//!
+//! No crate maps a bar file: [`crate::file`] reads the header region and each
+//! record through `read_fully`, a positional read (`FileExt::read_at`). This
+//! heading used to say "a read-only mapping plus `pwrite`", which no build has
+//! done. D-0790.
 //!
 //! Nothing here writes. [`Header::commit`] returns a [`Commit`] — one offset
 //! and one 64-byte buffer — which a writer hands to a single positional write.
