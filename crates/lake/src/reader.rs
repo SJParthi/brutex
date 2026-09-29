@@ -1270,4 +1270,79 @@ mod tests {
         assert_eq!(MAGIC, *b"PAR1");
         assert_eq!(MIN_FILE, 12);
     }
+
+    /// An F&O file of two rows, every column present, whose INT32
+    /// `greeks_provenance_id` column holds `provenance`.
+    ///
+    /// Written here rather than borrowed from `tests/synthetic.rs` so that the
+    /// library's own tests drive `Columns::int32`: without it the only reader
+    /// of an INT32 column was an integration test.
+    fn fno_file_with_provenance(provenance: [i32; 2]) -> Vec<u8> {
+        let fields: Vec<Arc<Type>> = crate::schema::specs(crate::schema::Layout::Fno)
+            .map(|s| {
+                let ty = match s.ty {
+                    crate::error::ColumnType::Int32 => PhysicalType::INT32,
+                    crate::error::ColumnType::Int64 => PhysicalType::INT64,
+                    crate::error::ColumnType::Double => PhysicalType::DOUBLE,
+                    crate::error::ColumnType::Other => panic!("no lake column is Other"),
+                };
+                Arc::new(
+                    Type::primitive_type_builder(s.name, ty)
+                        .with_repetition(Repetition::OPTIONAL)
+                        .build()
+                        .expect("a primitive field builds"),
+                )
+            })
+            .collect();
+        let schema = Arc::new(
+            Type::group_type_builder("schema")
+                .with_fields(fields)
+                .build()
+                .expect("the group type builds"),
+        );
+        let props = Arc::new(
+            WriterProperties::builder()
+                .set_compression(Compression::UNCOMPRESSED)
+                .build(),
+        );
+        let defs = [1_i16; 2];
+        let mut out: Vec<u8> = Vec::new();
+        {
+            let mut writer = SerializedFileWriter::new(&mut out, schema, props).expect("writer");
+            let mut group = writer.next_row_group().expect("row group");
+            while let Some(mut column) = group.next_column().expect("column") {
+                match column.untyped() {
+                    ColumnWriter::Int32ColumnWriter(typed) => {
+                        typed
+                            .write_batch(&provenance, Some(&defs), None)
+                            .expect("i32");
+                    }
+                    ColumnWriter::Int64ColumnWriter(typed) => {
+                        typed.write_batch(&[1, 2], Some(&defs), None).expect("i64");
+                    }
+                    ColumnWriter::DoubleColumnWriter(typed) => {
+                        typed
+                            .write_batch(&[100.5, 0.25], Some(&defs), None)
+                            .expect("f64");
+                    }
+                    _ => panic!("the lake layouts are INT32, INT64 and DOUBLE only"),
+                }
+                column.close().expect("close column");
+            }
+            group.close().expect("close row group");
+            writer.close().expect("close writer");
+        }
+        out
+    }
+
+    #[test]
+    fn the_int32_provenance_column_is_read_to_its_own_rows() {
+        let file = LakeFile::from_bytes(fno_file_with_provenance([7, -3])).expect("open");
+        assert_eq!(file.layout(), crate::schema::Layout::Fno);
+        let batch = file.read_row_group(0).expect("decode");
+        let ids: Vec<Option<i32>> = (0..2)
+            .map(|i| batch.row(i).expect("a row").greeks_provenance_id)
+            .collect();
+        assert_eq!(ids, [Some(7), Some(-3)]);
+    }
 }
