@@ -3159,23 +3159,24 @@ fn stated_offset(text: &str) -> Option<i64> {
     if tail == "Z" {
         return Some(0);
     }
-    let sign = match tail.as_bytes().first()? {
+    // READ BY POSITION, AND BY LENGTH FIRST. `+0530` and `+05:30` are the only
+    // two shapes, so the tail is five or six bytes and the colon, when there
+    // is one, sits between the hours and the minutes. This used to strip every
+    // colon from the whole tail into a new `String` and count what was left,
+    // which walked a tail of any length and read `+0:530` as IST. W1-pull2-7.
+    let ([sign, h1, h2, m1, m2] | [sign, h1, h2, b':', m1, m2]) = *tail.as_bytes() else {
+        return None;
+    };
+    let sign = match sign {
         b'+' => 1,
         b'-' => -1,
         _ => return None,
     };
-    // `+0530` and `+05:30` differ only by the colon, so the digits are read by
-    // position from a form with it stripped rather than by two parsers.
-    let digits: String = tail
-        .get(1..)?
-        .chars()
-        .filter(|c| *c != ':')
-        .collect::<String>();
-    if digits.len() != 4 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+    if ![h1, h2, m1, m2].iter().all(u8::is_ascii_digit) {
         return None;
     }
-    let hours: i64 = digits.get(0..2)?.parse().ok()?;
-    let minutes: i64 = digits.get(2..4)?.parse().ok()?;
+    let hours = i64::from(h1 - b'0') * 10 + i64::from(h2 - b'0');
+    let minutes = i64::from(m1 - b'0') * 10 + i64::from(m2 - b'0');
     // BOTH FIELDS ARE BOUNDED, and the hours one was not.
     //
     // A minutes field past 59 is not a zone, it is a malformed value, and
@@ -6624,5 +6625,37 @@ mod tests {
         };
         assert!(detail.contains("not JSON"), "{detail}");
         assert_eq!(PARSES.with(std::cell::Cell::get), 1);
+    }
+
+    /// **THE OFFSET IS READ BY POSITION, SO A COLON ANYWHERE ELSE IS REFUSED.**
+    ///
+    /// The reader stripped every `:` from the whole tail and then counted the
+    /// digits left, which walked and copied a tail of any length into a new
+    /// `String` per bar, against its own doc's "no allocation", and accepted a
+    /// colon at any position: `+0:530`, `+:0530` and `+0530:` all read as
+    /// IST. ISO-8601 places it between hours and minutes only. W1-pull2-7.
+    #[test]
+    fn a_stated_offset_is_read_by_position_and_a_misplaced_colon_is_refused() {
+        let at = "2017-12-15T09:15:00";
+        assert_eq!(stated_offset(&format!("{at}+0530")), Some(19_800));
+        assert_eq!(stated_offset(&format!("{at}+05:30")), Some(19_800));
+        assert_eq!(stated_offset(&format!("{at}-0330")), Some(-12_600));
+        assert_eq!(stated_offset(&format!("{at}Z")), Some(0));
+        for bad in [
+            "+0:530", "+:0530", "+0530:", "+053:0", "+0:5:3:0", "+05::30",
+        ] {
+            assert_eq!(stated_offset(&format!("{at}{bad}")), None, "{bad}");
+        }
+        for bad in [
+            "+053", "+05300", "+05:3", "+05:300", "+0a30", "+05:3a", "0530",
+        ] {
+            assert_eq!(stated_offset(&format!("{at}{bad}")), None, "{bad}");
+        }
+        let long = format!("{at}+{}", "0".repeat(1 << 20));
+        assert_eq!(
+            stated_offset(&long),
+            None,
+            "a tail past six bytes is no zone"
+        );
     }
 }
