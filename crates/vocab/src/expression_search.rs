@@ -120,11 +120,13 @@ impl Cursor {
     /// alphabet, and more than 4,096 nodes can pass between two candidates.
     /// One choice is not O(1) either (D-0753): it revalidates the whole prefix
     /// from its first instruction over a fresh `MAX_INSTRUCTIONS`-slot stack,
-    /// bounded by the fixed 1,151-instruction capacity. Counted by
-    /// `vocab::expression_search::grammar_nodes_per_candidate_grow_with_the_alphabet_and_gaps_exceed_one_replay`
-    /// and pinned by
-    /// `vocab::invariant_tests::prefix_validation_rescans_from_the_first_instruction_over_a_fixed_stack`;
-    /// the time per node is UNVERIFIED (`docs/06-limits.md`, D-0753).
+    /// bounded by the fixed 1,151-instruction capacity. The node counts are
+    /// counted by `grammar_nodes_per_candidate_grow_with_the_alphabet_and_gaps_exceed_one_replay`
+    /// in `crates/vocab/tests/expression_search.rs`; the rescan and the stack
+    /// width are pinned by
+    /// `invariant_tests::prefix_validation_rescans_from_the_first_instruction_over_a_fixed_stack`
+    /// in this module. The time per node is unmeasured, UNVERIFIED
+    /// (`docs/06-limits.md`, D-0753).
     ///
     /// # Errors
     /// An impossible cursor invariant or exhausted cumulative counter.
