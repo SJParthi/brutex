@@ -514,6 +514,11 @@ mod tests {
     /// payload, and opening a snapshot walks the reservation directory with a
     /// stat per reservation. `docs/06-limits.md` must say so.
     #[test]
+    #[allow(
+        clippy::expect_used,
+        clippy::panic,
+        reason = "a source marker that is missing must fail the test loudly"
+    )]
     fn an_unpinned_ranking_request_walks_the_checkpoint_directory_before_its_cache() {
         fn after<'a>(text: &'a str, marker: &str) -> &'a str {
             text.split_once(marker)
@@ -608,5 +613,65 @@ mod tests {
         ] {
             assert!(section.contains(claim), "06-limits states {claim:?}");
         }
+    }
+
+    const UNPINNED_CHILD: &str = "BRUTEX_TEST_RANKING_UNPINNED_ROOT";
+
+    /// AN UNPINNED REQUEST RESOLVES ITS PIN BEFORE ANY READER IS OPENED. D-0904.
+    ///
+    /// On a root that holds no saved search, the unpinned request is refused
+    /// by `latest_checkpoint`'s own words, unwrapped, which only its discovery
+    /// call returns; the pinned request never makes that call and is refused
+    /// by `Reader::open` under the comparison's context instead. Run in a child
+    /// because `render` needs `BRUTEX_BOOLEAN_SEARCH_REPLAY_NODES` and a test
+    /// cannot set its own environment; see `crate::isolated`.
+    #[test]
+    fn an_unpinned_request_discovers_its_checkpoint_and_a_pinned_one_does_not() {
+        if let Some(root) = std::env::var_os(UNPINNED_CHILD) {
+            let root = Path::new(&root);
+            let base = format!("identity={ID}&timeframe=1min");
+            let unpinned = Asked::parse(&base).map(|asked| render(root, &asked));
+            assert_eq!(
+                unpinned,
+                Ok(Err("no saved checkpoint exists for this search".to_owned())),
+                "the unpinned arm refuses in latest_checkpoint's words"
+            );
+            let pinned = Asked::parse(&format!("{base}&sequence=1&completion={ID}"))
+                .map(|asked| render(root, &asked));
+            assert!(
+                matches!(
+                    &pinned,
+                    Ok(Err(why)) if why.starts_with("Cumulative saved comparison: no saved checkpoint exists")
+                ),
+                "the pinned arm is refused by Reader::open: {pinned:?}"
+            );
+            // The proof the child took this branch is a file, not a print:
+            // Gate 23 declares every print in the workspace.
+            assert!(
+                std::fs::write(root.join("child-ran"), b"discovered").is_ok(),
+                "the child records that it ran both arms"
+            );
+            return;
+        }
+        let root = crate::scratch::path("ranking-unpinned-empty-root");
+        let _ignored = std::fs::remove_dir_all(&root);
+        assert!(std::fs::create_dir_all(&root).is_ok(), "the child's root");
+        let _out = crate::isolated::rerun(
+            "indexstoprankingjson::tests::an_unpinned_request_discovers_its_checkpoint_and_a_pinned_one_does_not",
+            &[
+                (UNPINNED_CHILD, root.as_os_str()),
+                (
+                    "BRUTEX_BOOLEAN_SEARCH_REPLAY_NODES",
+                    std::ffi::OsStr::new("1000"),
+                ),
+            ],
+        );
+        let proof = std::fs::read(root.join("child-ran"));
+        let _ignored = std::fs::remove_dir_all(&root);
+        assert_eq!(
+            proof.ok().as_deref(),
+            Some(&b"discovered"[..]),
+            "the child ran both arms"
+        );
     }
 }

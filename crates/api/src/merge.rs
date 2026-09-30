@@ -1348,6 +1348,8 @@ mod tests {
     /// `merge` and `CLAUDE.md` §3 rule 4: reserving capacity prevents growth,
     /// not collision chains. No test can time a collision chain, so this reads
     /// this file's production half and refuses either worst-case wording.
+    /// Proven by `api::merge::no_comment_claims_a_worst_case_constant_probe`,
+    /// this test, which is what Gate 12 asks a cost sentence to name.
     #[test]
     fn no_comment_claims_a_worst_case_constant_probe() {
         let production = include_str!("merge.rs")

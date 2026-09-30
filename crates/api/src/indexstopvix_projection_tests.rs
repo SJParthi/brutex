@@ -123,6 +123,12 @@ fn saved_reference(root: &Path, catalog: &Catalog, tag: u64) -> PathBuf {
 /// here that calls `render` holds this first.
 static RENDERS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    RENDERS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn copy_tree(from: &Path, to: &Path) {
     fs::create_dir_all(to).expect("copied directory");
     for entry in fs::read_dir(from).expect("generated directory") {
@@ -146,9 +152,7 @@ fn copy_tree(from: &Path, to: &Path) {
 /// A's authenticated page. Replacing the root comparison with `!=` served A.
 #[test]
 fn a_cached_saved_vix_reader_for_one_root_never_answers_for_another() {
-    let _serial = RENDERS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _serial = serial();
     crate::indexstopjson::projection_tests::with_saved_stop_catalog(|root, id| {
         let catalog = Catalog::open(root, id, 1_048_576, 128).expect("generated native catalog");
         let pin = catalog.completion_digest();
@@ -192,9 +196,7 @@ fn a_cached_saved_vix_reader_for_one_root_never_answers_for_another() {
 
 #[test]
 fn saved_vix_pages_authenticate_exact_absent_and_unavailable_companions_and_recover_cold() {
-    let _serial = RENDERS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _serial = serial();
     for (tag, state, counter) in [
         (1, "exact", "exact_stamps"),
         (0, "absent", "absent_stamps"),

@@ -43681,6 +43681,10 @@ until the directory is read, and a pinned request already skips the walk.
 `an_unpinned_ranking_request_walks_the_checkpoint_directory_before_its_cache`
 reads the call order and the walk off their sources and requires the limits
 section.
+`an_unpinned_request_discovers_its_checkpoint_and_a_pinned_one_does_not` runs
+both arms in a child process on a root holding no saved search: the unpinned
+render is refused with `latest_checkpoint`'s own words, and the pinned one by
+`Reader::open` under the comparison's context.
 
 **The merge reservation.** The comment above `by_key` in
 `crates/api/src/merge.rs` said pre-sizing made a probe "O(1) in the WORST case
