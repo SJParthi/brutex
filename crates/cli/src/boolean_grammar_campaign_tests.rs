@@ -1046,15 +1046,17 @@ fn every_invocation_reverifies_every_completed_batch_in_order() {
     let mut batch = Batch::prepare(initial.clone(), 0, 0, chosen).unwrap();
     let mut previous = (0, [0; 32]);
     let mut done = Vec::new();
-    for invocation in 1_u8..=3 {
+    // After `completed` nonempty batches, the next invocation's recovery
+    // re-verifies exactly those `completed` batches.
+    for completed in 1_u8..=3 {
         assert!(!batch.programs().is_empty() && !batch.exhausted());
         let plan = journal
             .publish(&plan_record(previous, &batch).unwrap(), BYTES)
             .unwrap();
         previous = journal
-            .publish(&done_record(plan, ([invocation; 32], [9; 32])), BYTES)
+            .publish(&done_record(plan, ([completed; 32], [9; 32])), BYTES)
             .unwrap();
-        done.push(([invocation; 32], batch.programs().to_vec()));
+        done.push(([completed; 32], batch.programs().to_vec()));
         let mut seen = Vec::new();
         let resumed = restore(
             &journal,
@@ -1069,8 +1071,8 @@ fn every_invocation_reverifies_every_completed_batch_in_order() {
             },
         )
         .unwrap();
-        assert_eq!(seen, done, "invocation {invocation}");
-        assert_eq!(seen.len(), usize::from(invocation));
+        assert_eq!(seen, done, "after {completed} completed batches");
+        assert_eq!(seen.len(), usize::from(completed));
         batch = Batch::prepare(resumed.cursor, resumed.work, resumed.programs, chosen).unwrap();
     }
 }

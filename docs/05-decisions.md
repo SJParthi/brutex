@@ -43676,13 +43676,16 @@ over everything earlier steps finished, and no limit said so.
 - `boolean-grammar-campaign-stored` advances one batch per invocation, and
   `restore` calls its `complete` callback once for every nonempty completed
   batch in the chain; the callback `execute_with` passes prepares that batch's
-  campaign again and verifies its saved campaign. Invocation n re-verifies the
-  n − 1 batches before it.
+  campaign again and verifies its saved campaign. Invocation n re-verifies
+  every nonempty batch completed before it (at most n − 1); an empty batch
+  never reaches `complete`.
   `cli::boolean_grammar_campaign::tests::every_invocation_reverifies_every_completed_batch_in_order`
   requires one, two and three calls, in chain order, after one, two and three
   completed batches.
 - `boolean-search-stored` opens the whole history and calls `verify_batch` for
-  every completed batch before it publishes a completion, and again after.
+  every completed batch whenever it resumes a saved search, before any work,
+  and again
+  before and after it publishes each completion.
   `verify_batch` ends by rereading every retained record.
 - The later-period OOS producer loops over every training anchor, two per
   program, and each group ends with `training.require_current()?;`, which loops
@@ -43703,17 +43706,48 @@ path changed, so no run identity moves.
 failed once `started.elapsed()` passed six minutes (fifteen under
 `LLVM_PROFILE_FILE`). The time measures how loaded the machine is, not
 anything the test checks, so under load Gate 1e's test clause and the `Tests`
-step could fail with nothing §2-related changed.
+step could fail with nothing §2-related changed. The comment this change
+removes recorded one such overrun, on the instrumented run: "Instrumented
+complete-calendar replay exceeded the ordinary deadline on the Linux CI
+runner."
 
 **The change.** The deadline is removed. The child is still killed, and the
 test still fails, when its log passes 8MiB, and the parent still requires the
-child's success and its `1 passed` line. A child that never exits is left to
-whatever time limit the CI job runs under rather than to a clock inside the
-test; run locally, such a child holds the test until it is interrupted, as any
-other hung test does. That is the cost of this choice, named here rather than
-hidden.
+child's success and its `1 passed` line. Before it starts the child, the
+parent writes one line naming the test and the child's log path to its own
+stderr, which `cargo test` shows even for a test whose output it captures.
 `cli::boolean_search_command::integration_tests::the_generated_search_child_is_bounded_by_its_log_and_not_by_the_clock`
-reads the function's source and requires that it names no `Instant`,
-`elapsed`, `from_mins`, `from_secs` or `timeout`, and that its one `kill` sits
-under the 8MiB log check. Test-only; no production path and no run identity
-changes.
+reads the function's source, pins its whole wait loop and everything after
+it, requires the stderr line before `.spawn()`, and requires that the body
+names no `Instant`, `SystemTime`, `elapsed`, `now(`, `duration_since`,
+`from_mins`, `from_secs`, `timeout`, `deadline`, `thread::spawn`, `const ` or
+`static `. Test-only; no production path and no run identity changes.
+
+**What it costs, named rather than hidden.** A child that never exits is no
+longer failed by the test; it holds the test until something outside it stops
+the run. `docs/06-limits.md` states the consequences under this number, each
+checked against the file it names by
+`c4_cli_02_limits::the_d0911_costs_are_the_ones_in_ci_and_the_source`:
+
+- The `language-purity`, `build` and `coverage` jobs, which run this test,
+  declare no `timeout-minutes`, so a hang there runs until the platform's own
+  default job limit. That figure is not recorded in `docs/00-charter.md`:
+  UNVERIFIED.
+- Gate 1e captures the whole test run into one variable
+  (`tout="$(PATH="$stub:$PATH" cargo test --workspace --locked 2>&1)"`) and
+  prints from it only after `cargo test` returns, so when that job is killed
+  its log names no test, not even the stderr line above.
+- The mutation job runs with `--minimum-test-timeout 900 --timeout-multiplier 2`
+  and `.github/mutation_gate.rs` refuses a timeout
+  (`if status != "0" || !missed.is_empty() || !timeout.is_empty() {`). A mutant
+  whose only effect is to hang the generated child used to fail the test at
+  the six-minute deadline and count as caught whenever that deadline came
+  before the mutant's test timeout; it is now recorded as a timeout, and the
+  mutation job fails.
+- The same class of clock bound stays in other tests and is not changed here:
+  `if started.elapsed() > std::time::Duration::from_secs(2) {` in
+  `crates/cli/src/checksum_receipts_tests.rs` and
+  `crates/store/src/checksum_audit_tests.rs`, and
+  `if start.elapsed() > std::time::Duration::from_secs(45)` in
+  `crates/api/src/booleanlaunch_tests.rs` and
+  `crates/api/src/indexstoplaunch_tests.rs`.
