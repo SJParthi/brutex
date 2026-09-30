@@ -2280,37 +2280,37 @@ impl GlobalReplayLedgerV2 {
         )?;
         sync_file_v2(&self.files.manifest, &self.paths.manifest)?;
 
-        self.files.candidate.seek(SeekFrom::End(0)).map_err(|why| {
-            format!(
-                "{} append seek failed: {why}",
-                self.paths.candidate.display()
-            )
-        })?;
-        for stream in &prepared.streams {
-            for (ordinal, candidate) in stream.candidates.iter().copied().enumerate() {
-                let raw = DurableCandidateV2::new(stream, ordinal, candidate)?.to_bytes()?;
-                self.files.candidate.write_all(&raw).map_err(|why| {
-                    format!("{} append failed: {why}", self.paths.candidate.display())
-                })?;
-            }
-        }
+        append_encoded_v2(
+            &mut self.files.candidate,
+            &self.paths.candidate,
+            prepared.streams.iter().flat_map(|stream| {
+                stream
+                    .candidates
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .map(move |(ordinal, candidate)| {
+                        DurableCandidateV2::new(stream, ordinal, candidate)?.to_bytes()
+                    })
+            }),
+        )?;
         sync_file_v2(&self.files.candidate, &self.paths.candidate)?;
 
-        self.files
-            .stream
-            .seek(SeekFrom::End(0))
-            .map_err(|why| format!("{} append seek failed: {why}", self.paths.stream.display()))?;
         let mut candidate_first = receipt.candidate_first;
-        for stream in &prepared.streams {
-            let header = DurableStreamHeaderV2::from_stream(stream, candidate_first)?;
-            self.files
-                .stream
-                .write_all(&header.to_bytes()?)
-                .map_err(|why| format!("{} append failed: {why}", self.paths.stream.display()))?;
-            candidate_first = candidate_first
-                .checked_add(header.candidate_count)
-                .ok_or_else(|| "global replay V2 candidate append range overflowed".to_owned())?;
-        }
+        append_encoded_v2(
+            &mut self.files.stream,
+            &self.paths.stream,
+            prepared.streams.iter().map(|stream| {
+                let header = DurableStreamHeaderV2::from_stream(stream, candidate_first)?;
+                let raw = header.to_bytes()?;
+                candidate_first = candidate_first
+                    .checked_add(header.candidate_count)
+                    .ok_or_else(|| {
+                        "global replay V2 candidate append range overflowed".to_owned()
+                    })?;
+                Ok(raw)
+            }),
+        )?;
         if candidate_first
             != receipt
                 .candidate_first
@@ -2876,13 +2876,9 @@ fn append_encoded_v2<const STRIDE: usize>(
     path: &Path,
     records: impl IntoIterator<Item = Result<[u8; STRIDE], GlobalReplayRefusalV2>>,
 ) -> Result<(), GlobalReplayRefusalV2> {
-    file.seek(SeekFrom::End(0))
-        .map_err(|why| format!("{} could not be seeked for append: {why}", path.display()))?;
-    for record in records {
-        file.write_all(&record?)
-            .map_err(|why| format!("{} append failed: {why}", path.display()))?;
-    }
-    Ok(())
+    // One rollback law for V1 and V2: a refused append leaves the file
+    // exactly as long as it was (D-0926).
+    crate::global_replay::append_encoded_with(file, path, records)
 }
 
 fn sync_file_v2(file: &File, path: &Path) -> Result<(), GlobalReplayRefusalV2> {
@@ -4754,5 +4750,37 @@ mod tests {
             second_decision.disposition,
             Disposition::BlockedSimultaneous { admitted } if admitted == low.strategy_digest
         ));
+    }
+
+    /// V2's append leaves a refused call's file exactly as long as it was,
+    /// the same law as V1's (D-0926).
+    #[test]
+    fn a_refused_v2_append_leaves_the_file_exactly_as_long_as_it_was() {
+        let dir = test_root("append-encode-rollback");
+        fs::create_dir_all(&dir).expect("create append-rollback root");
+        let path = dir.join("records");
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .expect("open append-rollback file");
+        file.write_all(&[7_u8; LEDGER_HEADER_BYTES_USIZE_V2])
+            .expect("write stand-in header");
+        let why = append_encoded_v2::<8>(
+            &mut file,
+            &path,
+            [Ok([1_u8; 8]), Err("injected encode refusal".to_owned())],
+        )
+        .expect_err("the second record refuses");
+        assert_eq!(
+            file.metadata().expect("rolled-back metadata").len(),
+            LEDGER_HEADER_BYTES_V2,
+            "the first record of the refused append was removed: {why}"
+        );
+        assert!(why.contains("injected encode refusal"), "{why}");
+        assert!(why.contains("rolled back to byte 24"), "{why}");
+        fs::remove_dir_all(&dir).expect("remove append-rollback root");
     }
 }
