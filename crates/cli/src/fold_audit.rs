@@ -63,6 +63,7 @@
 
 use brutex_core::instrument::InstrumentKey;
 use brutex_core::vendor::Vendor;
+use std::cmp::Ordering;
 use std::path::Path;
 use store::file::BarFile;
 use store::format::Bar;
@@ -87,7 +88,8 @@ pub const DERIVED_RUNGS: [Timeframe; 7] = [
 /// One disagreement between a stored coarse bar and the fold of the minutes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Disagreement {
-    /// Index of the record in the coarse file.
+    /// Index of the record in the coarse file, or for a bucket the file lacks,
+    /// its index in the fold, which is the index it holds in a complete file.
     pub at: u64,
     /// The bar's opening timestamp, from whichever side has one.
     pub ts_micros: i64,
@@ -151,64 +153,101 @@ pub fn compare(rung: Timeframe, minutes: &[Bar], stored: &[Bar]) -> Result<RungV
         }
     };
 
-    for index in 0..stored.len().max(folded.len()) {
-        let at = u64::try_from(index).unwrap_or(u64::MAX);
-        match (stored.get(index), folded.get(index)) {
-            (Some(s), Some(f)) => {
-                // EVERY FIELD, IN RECORD ORDER, AND THE FIRST ONE ONLY.
-                //
-                // Naming all seven for one bar would bury the next bar's
-                // disagreement under six restatements of the same fault: a
-                // bucket folded over a hole typically disagrees on high, low,
-                // close AND volume at once.
-                for (field, sv, fv) in [
-                    ("ts_micros", s.ts_micros, f.ts_micros),
-                    ("open", s.open, f.open),
-                    ("high", s.high, f.high),
-                    ("low", s.low, f.low),
-                    ("close", s.close, f.close),
-                    ("volume", s.volume, f.volume),
-                    ("open_interest", s.open_interest, f.open_interest),
-                ] {
-                    if sv != fv {
-                        push(
-                            Disagreement {
-                                at,
-                                ts_micros: s.ts_micros,
-                                field,
-                                stored: sv,
-                                folded: fv,
-                            },
-                            &mut disagreements,
-                            &mut elided,
-                        );
-                        break;
-                    }
+    // PAIRED BY OPENING TIMESTAMP WHERE A BAR IS MISSING OR EXTRA.
+    //
+    // Pairing record i with record i turned one missing middle bucket into a
+    // `ts_micros` disagreement on every later record, because each stored bar
+    // was compared with the fold's NEXT bucket. Two cursors walk the two
+    // sequences instead. When the heads open at different times, one bar is
+    // named absent from its side if the other side's head is at or beyond the
+    // NEXT bar on this side: the fold holds a bucket the store skipped, or the
+    // store holds one the fold does not. Otherwise the two heads are one bar
+    // whose timestamp differs, and that is still named as the `ts_micros`
+    // field. Every step advances at least one cursor, so the walk ends after
+    // at most stored + folded steps even on an out-of-order stored file, and a
+    // verdict agrees only when every step paired two identical records.
+    let only_stored = |at: u64, s: &Bar| Disagreement {
+        at,
+        ts_micros: s.ts_micros,
+        field: "present in the store, absent from the fold",
+        stored: s.ts_micros,
+        folded: 0,
+    };
+    let only_folded = |fi: usize, f: &Bar| Disagreement {
+        at: u64::try_from(fi).unwrap_or(u64::MAX),
+        ts_micros: f.ts_micros,
+        field: "absent from the store, present in the fold",
+        stored: 0,
+        folded: f.ts_micros,
+    };
+    let (mut si, mut fi) = (0_usize, 0_usize);
+    loop {
+        let at = u64::try_from(si).unwrap_or(u64::MAX);
+        let found = match (stored.get(si), folded.get(fi)) {
+            (Some(s), Some(f)) => match s.ts_micros.cmp(&f.ts_micros) {
+                // The store is ahead and the fold's next bucket opens no later
+                // than the stored bar: the store skipped this bucket.
+                Ordering::Greater
+                    if folded
+                        .get(fi + 1)
+                        .is_some_and(|next| next.ts_micros <= s.ts_micros) =>
+                {
+                    let named = only_folded(fi, f);
+                    fi += 1;
+                    Some(named)
                 }
+                // The fold is ahead and the store's next bar opens no later
+                // than the folded bucket: the store holds an extra bar.
+                Ordering::Less
+                    if stored
+                        .get(si + 1)
+                        .is_some_and(|next| next.ts_micros <= f.ts_micros) =>
+                {
+                    si += 1;
+                    Some(only_stored(at, s))
+                }
+                _ => {
+                    si += 1;
+                    fi += 1;
+                    // EVERY FIELD, IN RECORD ORDER, AND THE FIRST ONE ONLY.
+                    //
+                    // Naming all seven for one bar would bury the next bar's
+                    // disagreement under six restatements of the same fault:
+                    // a bucket folded over a hole typically disagrees on high,
+                    // low, close AND volume at once.
+                    [
+                        ("ts_micros", s.ts_micros, f.ts_micros),
+                        ("open", s.open, f.open),
+                        ("high", s.high, f.high),
+                        ("low", s.low, f.low),
+                        ("close", s.close, f.close),
+                        ("volume", s.volume, f.volume),
+                        ("open_interest", s.open_interest, f.open_interest),
+                    ]
+                    .into_iter()
+                    .find(|(_, sv, fv)| sv != fv)
+                    .map(|(field, sv, fv)| Disagreement {
+                        at,
+                        ts_micros: s.ts_micros,
+                        field,
+                        stored: sv,
+                        folded: fv,
+                    })
+                }
+            },
+            (Some(s), None) => {
+                si += 1;
+                Some(only_stored(at, s))
             }
-            (Some(s), None) => push(
-                Disagreement {
-                    at,
-                    ts_micros: s.ts_micros,
-                    field: "present in the store, absent from the fold",
-                    stored: s.ts_micros,
-                    folded: 0,
-                },
-                &mut disagreements,
-                &mut elided,
-            ),
-            (None, Some(f)) => push(
-                Disagreement {
-                    at,
-                    ts_micros: f.ts_micros,
-                    field: "absent from the store, present in the fold",
-                    stored: 0,
-                    folded: f.ts_micros,
-                },
-                &mut disagreements,
-                &mut elided,
-            ),
+            (None, Some(f)) => {
+                let named = only_folded(fi, f);
+                fi += 1;
+                Some(named)
+            }
             (None, None) => break,
+        };
+        if let Some(d) = found {
+            push(d, &mut disagreements, &mut elided);
         }
     }
 
@@ -470,6 +509,195 @@ mod tests {
             other.disagreements.first().expect("one disagreement").field,
             "present in the store, absent from the fold"
         );
+    }
+
+    /// Thirty minutes and their six five-minute buckets.
+    fn thirty_minutes_and_their_fold() -> (Vec<Bar>, Vec<Bar>) {
+        let minutes: Vec<Bar> = (0..30)
+            .map(|m| minute_bar(m, 100 + m, 110 + m, 90 + m, 105 + m))
+            .collect();
+        let bucket = store_bucket(Timeframe::MINUTE_5).expect("5min has a bucket");
+        let full = pull::fold::fold(&minutes, bucket).expect("thirty minutes fold");
+        assert_eq!(full.len(), 6, "thirty minutes make six five-minute buckets");
+        (minutes, full)
+    }
+
+    /// A coarse file missing a MIDDLE bucket names that one bucket as absent,
+    /// at its index in the fold, and names nothing else; one stray middle
+    /// bucket is named present only in the store, at its own index. Pairing
+    /// records by position instead reported every later bucket as a
+    /// `ts_micros` field disagreement.
+    #[test]
+    fn a_missing_or_extra_middle_record_names_only_that_record() {
+        let (minutes, full) = thirty_minutes_and_their_fold();
+
+        let mut holed = full.clone();
+        let missing = holed.remove(2);
+        let verdict = compare(Timeframe::MINUTE_5, &minutes, &holed).expect("valid fold");
+        assert!(!verdict.agrees());
+        assert_eq!((verdict.stored_bars, verdict.folded_bars), (5, 6));
+        assert_eq!(verdict.elided, 0);
+        assert_eq!(
+            verdict.disagreements,
+            vec![Disagreement {
+                at: 2,
+                ts_micros: missing.ts_micros,
+                field: "absent from the store, present in the fold",
+                stored: 0,
+                folded: missing.ts_micros,
+            }]
+        );
+
+        // The mirror case: one stray bucket inside the file.
+        let stray = Bar {
+            ts_micros: full[3].ts_micros - 60_000_000,
+            ..full[3]
+        };
+        let mut padded = full.clone();
+        padded.insert(3, stray);
+        let other = compare(Timeframe::MINUTE_5, &minutes, &padded).expect("valid fold");
+        assert!(!other.agrees());
+        assert_eq!((other.stored_bars, other.folded_bars), (7, 6));
+        assert_eq!(other.elided, 0);
+        assert_eq!(
+            other.disagreements,
+            vec![Disagreement {
+                at: 3,
+                ts_micros: stray.ts_micros,
+                field: "present in the store, absent from the fold",
+                stored: stray.ts_micros,
+                folded: 0,
+            }]
+        );
+
+        // A paired bar still names its first differing field, and a bar with
+        // an equal timestamp is paired, never named absent.
+        let mut bent = full.clone();
+        bent[4].close += 1;
+        let changed = compare(Timeframe::MINUTE_5, &minutes, &bent).expect("valid fold");
+        assert_eq!(
+            changed.disagreements,
+            vec![Disagreement {
+                at: 4,
+                ts_micros: full[4].ts_micros,
+                field: "close",
+                stored: full[4].close + 1,
+                folded: full[4].close,
+            }]
+        );
+        assert!(
+            compare(Timeframe::MINUTE_5, &minutes, &full)
+                .expect("valid fold")
+                .agrees()
+        );
+    }
+
+    /// Two missing middle buckets in a row are each named absent at their
+    /// index in the fold, as are two missing from the end, two stray
+    /// middle bars in a row are each named present only in the store, and a
+    /// middle bar moved earlier or later is one `ts_micros` disagreement.
+    #[test]
+    fn two_missing_or_stray_middle_records_and_a_moved_bar_are_each_named_once() {
+        let (minutes, full) = thirty_minutes_and_their_fold();
+        let stray = Bar {
+            ts_micros: full[3].ts_micros - 60_000_000,
+            ..full[3]
+        };
+
+        // Two consecutive missing buckets are each named absent, and the bars
+        // after them still pair.
+        let mut gap = full.clone();
+        gap.drain(1..3);
+        let gapped = compare(Timeframe::MINUTE_5, &minutes, &gap).expect("valid fold");
+        assert_eq!(
+            gapped.disagreements,
+            vec![
+                Disagreement {
+                    at: 1,
+                    ts_micros: full[1].ts_micros,
+                    field: "absent from the store, present in the fold",
+                    stored: 0,
+                    folded: full[1].ts_micros,
+                },
+                Disagreement {
+                    at: 2,
+                    ts_micros: full[2].ts_micros,
+                    field: "absent from the store, present in the fold",
+                    stored: 0,
+                    folded: full[2].ts_micros,
+                },
+            ]
+        );
+
+        // The same two buckets missing from the END keep the index each holds
+        // in the fold, as the positional pairing reported them.
+        let cut = compare(Timeframe::MINUTE_5, &minutes, &full[..4]).expect("valid fold");
+        assert_eq!(
+            cut.disagreements,
+            vec![
+                Disagreement {
+                    at: 4,
+                    ts_micros: full[4].ts_micros,
+                    field: "absent from the store, present in the fold",
+                    stored: 0,
+                    folded: full[4].ts_micros,
+                },
+                Disagreement {
+                    at: 5,
+                    ts_micros: full[5].ts_micros,
+                    field: "absent from the store, present in the fold",
+                    stored: 0,
+                    folded: full[5].ts_micros,
+                },
+            ]
+        );
+
+        // Two consecutive stray bars are each named present only in the store.
+        let early = Bar {
+            ts_micros: full[3].ts_micros - 120_000_000,
+            ..full[3]
+        };
+        let mut strays = full.clone();
+        strays.splice(3..3, [early, stray]);
+        let doubled = compare(Timeframe::MINUTE_5, &minutes, &strays).expect("valid fold");
+        assert_eq!(
+            doubled.disagreements,
+            vec![
+                Disagreement {
+                    at: 3,
+                    ts_micros: early.ts_micros,
+                    field: "present in the store, absent from the fold",
+                    stored: early.ts_micros,
+                    folded: 0,
+                },
+                Disagreement {
+                    at: 4,
+                    ts_micros: stray.ts_micros,
+                    field: "present in the store, absent from the fold",
+                    stored: stray.ts_micros,
+                    folded: 0,
+                },
+            ]
+        );
+
+        // A middle bar REPLACED by one opening earlier, or later, is one bar
+        // whose timestamp differs, and is named as that field.
+        for shift in [-60_000_000, 60_000_000] {
+            let mut moved = full.clone();
+            moved[3].ts_micros += shift;
+            let shifted = compare(Timeframe::MINUTE_5, &minutes, &moved).expect("valid fold");
+            assert_eq!(
+                shifted.disagreements,
+                vec![Disagreement {
+                    at: 3,
+                    ts_micros: moved[3].ts_micros,
+                    field: "ts_micros",
+                    stored: moved[3].ts_micros,
+                    folded: full[3].ts_micros,
+                }],
+                "shift {shift}"
+            );
+        }
     }
 
     /// Beyond the cap, disagreements are counted rather than named, and the
