@@ -1042,15 +1042,15 @@ pub fn window(
     // asks for a bounded page and never O(universe); an audit found this route
     // breaching it.
     //
-    // The partition below is O(n) and leaves the first `want` elements as the
-    // `want` smallest under this order, unordered among themselves. Only those
-    // are then ordered. The cost goes from `O(n log n)` to
-    // `O(n) + O(want log want)`, and `want` is the caller's own page rather
-    // than the number of months asked for.
+    // The partition in `ordered_page` is O(n) and leaves the first `keep`
+    // elements as the `keep` rows nearest the page's end of this order,
+    // unordered among themselves. Only those are then ordered. The cost goes
+    // from `O(n log n)` to `O(n) + O(keep log keep)`, where `keep` is the
+    // fewer of `offset + limit` and `n - offset` (D-0733).
     //
     // THE OUTPUT IS UNCHANGED, and that is what a TOTAL comparator buys: with
     // the timestamp as tie-break no two rows ever compare equal, so the set of
-    // the `want` smallest is unique and ordering it is byte-identical to
+    // the `keep` rows is unique and ordering it is byte-identical to
     // ordering everything and slicing -- §3 rule 5. An unstable partition may
     // reorder only what it is free to reorder, and here there is nothing.
     // `selecting_the_page_then_ordering_it_equals_ordering_everything_then_slicing`
@@ -1060,21 +1060,9 @@ pub fn window(
     // THE BARS ARE STILL ALL READ, and that is not what this changes. `total`,
     // `extremes_of` and the per-file change fold each need every row; the read
     // is O(bars) because of the question being asked. What is removed is the
-    // ordering of rows nobody will see.
-    let want = offset.saturating_add(limit);
-    if want == 0 {
-        all.clear();
-    } else if want < all.len() {
-        all.select_nth_unstable_by(want - 1, order);
-        all.truncate(want);
-    }
-    all.sort_by(order);
-
-    let bars = all
-        .into_iter()
-        .skip(offset)
-        .take(limit)
-        .collect::<Vec<WindowBar>>();
+    // ordering of rows nobody will see. `ordered_page` says which rows those
+    // are, and why a deep offset is now counted from the far end (D-0733).
+    let bars = ordered_page(all, order, offset, limit);
 
     Ok(Window {
         total,
@@ -1084,6 +1072,75 @@ pub fn window(
         faults,
         extremes,
     })
+}
+
+/// Which end of a totally ordered list a page is cut from, and how many rows
+/// have to be ordered to cut it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PageSide {
+    /// The page is empty: the offset is at or past the end, or the limit is 0.
+    Empty,
+    /// Keep the `n` smallest rows under the order, order them, and slice.
+    Front(usize),
+    /// Keep the `n` LARGEST rows, order them under the reversed order, and
+    /// slice from the other end.
+    Back(usize),
+}
+
+/// Where rows `offset..offset + limit` of `n` rows are cut from.
+///
+/// From the front the rows to order are the first `offset + limit`; from the
+/// back they are the last `n - offset`. The smaller of the two is kept, the
+/// front on a tie, so no page orders more than half the rows plus its own
+/// limit: a deep offset used to order nearly all `n` (W1-api1-3, D-0733).
+fn page_side(n: usize, offset: usize, limit: usize) -> PageSide {
+    let start = offset.min(n);
+    let end = offset.saturating_add(limit).min(n);
+    if start == end {
+        PageSide::Empty
+    } else if end <= n - start {
+        PageSide::Front(end)
+    } else {
+        PageSide::Back(n - start)
+    }
+}
+
+/// Rows `offset..offset + limit` of `all` under `order`, which must be TOTAL.
+///
+/// It partitions to the rows [`page_side`] keeps in O(n), orders only those,
+/// and slices. A total order makes the kept set unique, so the page is the
+/// same rows in the same order as sorting everything and slicing:
+/// `selecting_the_page_then_ordering_it_equals_ordering_everything_then_slicing`.
+/// From the back it keeps the largest rows under the reversed order, whose
+/// ordering is the page's end first, and reverses the slice it cuts.
+fn ordered_page<T>(
+    mut all: Vec<T>,
+    order: impl Fn(&T, &T) -> core::cmp::Ordering,
+    offset: usize,
+    limit: usize,
+) -> Vec<T> {
+    let n = all.len();
+    let (keep, back) = match page_side(n, offset, limit) {
+        PageSide::Empty => return Vec::new(),
+        PageSide::Front(keep) => (keep, false),
+        PageSide::Back(keep) => (keep, true),
+    };
+    let cmp = |a: &T, b: &T| if back { order(b, a) } else { order(a, b) };
+    if keep < n {
+        all.select_nth_unstable_by(keep - 1, cmp);
+        all.truncate(keep);
+    }
+    all.sort_by(cmp);
+    let end = offset.saturating_add(limit).min(n);
+    if back {
+        // Row `i` of the kept rows is row `n - 1 - i` in the page's order, so
+        // the page is kept rows `n - end..` read backwards.
+        all.drain(..n - end);
+        all.reverse();
+    } else {
+        all.drain(..offset);
+    }
+    all
 }
 
 struct OpenedWindow {
@@ -1325,7 +1382,8 @@ mod tests {
     /// 240-month window that is roughly 1.9 million rows ordered to hand back a
     /// thousand, and `docs/07-o1-architecture.md` layer 12 asks for a bounded
     /// page and never O(universe). It now partitions with
-    /// `select_nth_unstable_by`, keeps `offset + limit`, and sorts only those.
+    /// `select_nth_unstable_by`, keeps the fewer of the first `offset + limit`
+    /// and the last `n - offset` rows, and sorts only those (D-0733).
     ///
     /// The risk in that trade is not speed, it is ORDER: an unstable partition
     /// may reorder anything it is free to reorder, so a page could come back
@@ -1354,27 +1412,98 @@ mod tests {
             .collect();
         let order = |a: &(i64, i64), b: &(i64, i64)| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1));
 
-        for (offset, limit) in [(0, 1), (0, 10), (5, 10), (57, 10), (0, 60), (59, 1), (0, 0)] {
-            let mut whole = rows.clone();
-            whole.sort_by(order);
-            let expected: Vec<(i64, i64)> = whole.into_iter().skip(offset).take(limit).collect();
-
-            let mut paged = rows.clone();
-            let want = offset.saturating_add(limit);
-            if want == 0 {
-                paged.clear();
-            } else if want < paged.len() {
-                paged.select_nth_unstable_by(want - 1, order);
-                paged.truncate(want);
+        // EVERY OFFSET, including each one past the end, so the front and the
+        // back cut (D-0733) are both compared against the unbounded page.
+        for offset in 0..=62 {
+            for limit in [0, 1, 2, 10, 29, 30, 31, 60, 61] {
+                let mut whole = rows.clone();
+                whole.sort_by(order);
+                let expected: Vec<(i64, i64)> =
+                    whole.into_iter().skip(offset).take(limit).collect();
+                let got = ordered_page(rows.clone(), order, offset, limit);
+                assert_eq!(
+                    got, expected,
+                    "offset={offset} limit={limit}: the bounded page must be the \
+                     same rows in the same order as the unbounded one"
+                );
             }
-            paged.sort_by(order);
-            let got: Vec<(i64, i64)> = paged.into_iter().skip(offset).take(limit).collect();
+        }
+    }
 
-            assert_eq!(
-                got, expected,
-                "offset={offset} limit={limit}: the bounded page must be the \
-                 same rows in the same order as the unbounded one"
+    /// **A DEEP OFFSET ORDERS THE ROWS BEHIND IT, NOT THE ROWS BEFORE IT.** Of
+    /// the `offset + limit` rows from the front and the `n - offset` rows from
+    /// the back, the fewer are kept, the front on a tie (W1-api1-3, D-0733).
+    #[test]
+    fn a_page_is_cut_from_whichever_end_orders_fewer_rows() {
+        assert_eq!(page_side(100, 0, 10), PageSide::Front(10));
+        assert_eq!(page_side(100, 40, 10), PageSide::Front(50));
+        // A tie, 60 rows either way, is cut from the front.
+        assert_eq!(page_side(100, 40, 20), PageSide::Front(60));
+        // One row past the tie: 53 from the front against 52 from the back.
+        assert_eq!(page_side(100, 48, 5), PageSide::Back(52));
+        assert_eq!(page_side(100, 50, 0), PageSide::Empty);
+        assert_eq!(
+            page_side(2_000_000, 1_999_000, 1_000),
+            PageSide::Back(1_000)
+        );
+        // Clipped at the end, and nothing past it.
+        assert_eq!(page_side(100, 95, 10), PageSide::Back(5));
+        assert_eq!(page_side(100, 100, 10), PageSide::Empty);
+        assert_eq!(page_side(100, 150, 10), PageSide::Empty);
+        assert_eq!(page_side(0, 0, 10), PageSide::Empty);
+        assert_eq!(page_side(100, usize::MAX, 10), PageSide::Empty);
+        assert_eq!(page_side(100, 0, usize::MAX), PageSide::Front(100));
+        // NO PAGE ORDERS MORE THAN HALF THE ROWS PLUS ITS LIMIT, at every row
+        // count up to 40 and every offset and limit up to 45.
+        for n in 0..=40 {
+            for offset in 0..=45 {
+                for limit in 0..=45 {
+                    let keep = match page_side(n, offset, limit) {
+                        PageSide::Empty => 0,
+                        PageSide::Front(keep) | PageSide::Back(keep) => keep,
+                    };
+                    assert!(2 * keep <= n + limit, "n={n} offset={offset} limit={limit}");
+                }
+            }
+        }
+    }
+
+    /// **THE SORTED WINDOW'S FULL READ IS STATED IN `docs/06-limits.md`, AND
+    /// EVERY LINE IT QUOTES IS THIS FILE'S OWN.** It was stated only in comments
+    /// here (W1-api1-3, D-0733). Each quoted line must appear in the limits
+    /// section and in this file's code above its tests, so a line that changes
+    /// here without the limit changing fails.
+    #[test]
+    fn the_sorted_window_read_is_stated_in_the_limits_and_quotes_this_source() {
+        let squash = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let limits = include_str!("../../../docs/06-limits.md");
+        let section = limits
+            .split_once("## A sorted or extremes window reads every bar in its range — D-0733")
+            .expect("docs/06-limits.md states the sorted window's read")
+            .1;
+        let section = squash(section.split_once("\n## ").map_or(section, |(own, _)| own));
+        let source = include_str!("bars.rs");
+        let code = squash(
+            source
+                .split_once("\n#[cfg(test)]\n")
+                .expect("the tests follow the code")
+                .0,
+        );
+        for quoted in [
+            "let mut all: Vec<WindowBar> = Vec::with_capacity(usize::try_from(total).unwrap_or(0));",
+            "let (rows, mut bad) = slots(file, 0, held);",
+            "match file.read_record(index)",
+            "let extremes = want_extremes.then(|| extremes_of(&all));",
+            "all.select_nth_unstable_by(keep - 1, cmp);",
+            "all.sort_by(cmp);",
+            "pub const MAX_WINDOW_MONTHS: usize = 240;",
+            "pub const MAX_WINDOW_LIMIT: usize = 1_000;",
+        ] {
+            assert!(
+                section.contains(&format!("`{quoted}`")),
+                "the limit quotes {quoted}"
             );
+            assert!(code.contains(quoted), "bars.rs still says {quoted}");
         }
     }
 

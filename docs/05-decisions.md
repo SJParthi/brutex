@@ -43750,3 +43750,26 @@ pins the months and totals of two feeds held side by side.
 `entries.iter()`. `docs/06-limits.md` gains a section for what is still paid,
 and `the_audit_rollup_cost_is_stated_in_the_limits_and_quotes_this_source`
 fails if that section is removed or the walk it quotes leaves `feed_rollup`.
+
+### D-0733 — A sorted window page is cut from whichever end orders fewer rows, and its full read is stated — 2026-09-29
+
+**What was wrong (W1-api1-3).** `GET /bars/window.json` sorted by a price
+column, or asked for extremes, reads every record in the asked months, keeps
+every readable one resident, and partitions them. That was stated only in
+comments in `bars.rs`, not in `docs/06-limits.md`. And the partition kept the
+first `offset + limit` rows, so a deep offset ordered nearly every row.
+
+**The change.** `ordered_page` replaces the inline partition. `page_side`
+keeps the fewer of the first `offset + limit` and the last `n - offset` rows,
+the front on a tie; a back page is ordered under the reversed comparator and
+its slice reversed. It still uses one partition and one sort, the two
+constructs gate 11 already counts in this file. The page is unchanged:
+`selecting_the_page_then_ordering_it_equals_ordering_everything_then_slicing`
+now calls `ordered_page` at every offset from 0 to past the end, against
+sorting everything and slicing. `a_page_is_cut_from_whichever_end_orders_fewer_rows`
+pins the side, the tie and the bound that no page orders more than half the
+rows plus its limit, the bound for every row count up to 40 and every offset
+and limit up to 45. The reads and resident rows are not changed and are now
+stated in `docs/06-limits.md`, quoting the lines that pay them;
+`the_sorted_window_read_is_stated_in_the_limits_and_quotes_this_source` fails
+if that section is removed or a line it quotes leaves `bars.rs`.

@@ -9892,3 +9892,44 @@ rewritten under a new modified time is counted again and answered.
 feed's walk, which grows with that feed's held keys and not with any other
 feed's. Two requests that miss together may each walk, because the lock is
 released while counting; both count the same snapshot. Not timed.
+
+## A sorted or extremes window reads every bar in its range — D-0733, 29 September 2026
+
+**This was stated only in code comments (W1-api1-3).** `GET /bars/window.json`
+ordered by anything but `ts`, or with `extremes=1`, takes the reading path in
+`bars::window`. Quoted from that function:
+
+* `let mut all: Vec<WindowBar> = Vec::with_capacity(usize::try_from(total).unwrap_or(0));`
+  and, per opened month, `let (rows, mut bad) = slots(file, 0, held);`: one
+  `read_record` per stored record in the range (`match file.read_record(index)`
+  in `slots`), and one resident `WindowBar` per readable record, for the whole
+  request.
+* `let extremes = want_extremes.then(|| extremes_of(&all));`: one pass over
+  them.
+* `ordered_page` then partitions once over them
+  (`all.select_nth_unstable_by(keep - 1, cmp);`) and orders the rows it kept
+  (`all.sort_by(cmp);`).
+
+The range is capped at `MAX_WINDOW_MONTHS` (`pub const MAX_WINDOW_MONTHS: usize
+= 240;`) and the page at `MAX_WINDOW_LIMIT` (`pub const MAX_WINDOW_LIMIT: usize
+= 1_000;`). No bar count for a 240-month range is measured here. So a
+sorted or extremes request costs record reads, resident rows and a partition
+that each grow with the bars in the asked months. The `ts` order with no
+extremes seeks and reads only its page; that is unchanged.
+
+**What changed: the ordering is bounded by the nearer end.** The partition
+kept the first `offset + limit` rows, so a deep offset ordered nearly every
+row. `page_side` now keeps the fewer of the first `offset + limit` and the last
+`n - offset`, the front on a tie, and `ordered_page` cuts a back page under the
+reversed order and reverses it. No page orders more than half the rows plus
+its limit: asserted for every row count up to 40 and every offset and limit
+up to 45, and at 2,000,000 rows for one deep page.
+`a_page_is_cut_from_whichever_end_orders_fewer_rows` pins the
+choice, and
+`selecting_the_page_then_ordering_it_equals_ordering_everything_then_slicing`
+compares every offset from 0 to past the end against sorting everything and
+slicing, over primary values each repeated three times.
+
+**Not changed, and why.** The reads, the resident rows and the partition stay
+proportional to the range: no store index answers "the largest closes", and
+`total`, `extremes_of` and the change fold each need every row. Not timed.
