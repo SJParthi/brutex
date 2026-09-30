@@ -9907,5 +9907,6 @@ than at `block`. Neither is refused or measured here.
 A max-gated probability whose floor ppm is within its ceiling while its exact
 fraction is above it is refused by the three projection doors
 (`a_floor_ppm_on_the_ceiling_never_passes_an_exact_probability_above_it`);
-the stored V2/V3 bytes cannot carry the correct failure. The cli V1 builders
+a V2/V3 verdict, re-derived from the floor ppm slots, cannot carry the
+correct failure. The cli V1 builders
 that fill the same fields with `.ppm()` are not changed by D-0743.

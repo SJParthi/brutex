@@ -43773,12 +43773,12 @@ does not fail SPA.
 `AdmissionV{2,3}ArithmeticRefusal::ProbabilityProjection(reason)` when a
 max-gated probability's floor ppm is within its ceiling while the exact
 fraction is not (`!rejects_at_ppm(ceiling)`), naming the first such gate in
-the order PBO, FWER, SPA, White, candidate Romano--Wolf. The V2 and V3
-evidence bytes carry only the floor ppm, and a decision record's verdict is
-re-derived from those bytes (`let computed = policy.evaluate_v3(&evidence);`
-in `AdmissionDecisionV3::from_canonical_parts`, which refuses a supplied
-verdict unequal to it), so a correct failure cannot be written in these
-versions; refusing is the loud alternative to a record that passes a gate its
+the order PBO, FWER, SPA, White, candidate Romano--Wolf. A decision record's
+verdict is re-derived by the V1 evaluation over the evidence's floor ppm
+slots (`values: evidence.values,` in `evaluate_v2` and `evaluate_v3`), and
+`AdmissionDecisionV3::from_canonical_parts` refuses a supplied verdict unequal
+to it (`let computed = policy.evaluate_v3(&evidence);`), so a correct failure
+cannot be written in these versions; refusing is the loud alternative to a record that passes a gate its
 exact value fails. Every value these doors decided correctly before is decided
 byte-identically: the refusal fires only where the old verdict was wrong. A
 ceiling projection in new record versions is the way to decide these values
@@ -43788,5 +43788,10 @@ instead of refusing them, and is not done here.
 (`boolean_admission_v1`, `boolean_admission_reader`,
 `index_stop_qualification_numeric`) also fill max-gated fields with
 `.ppm()`; they are outside the runner crate and outside this change.
+
+The evidence bytes themselves keep each exact fraction in their statistics
+section (`AdmissionExactProbabilityV2::new(reader.read_u64()?, reader.read_u64()?)`
+in `read_probability_v2` and `read_probability_v3`); it is the verdict, re-derived
+from the floor ppm slots, that cannot carry the correct failure.
 
 **Proof.** `admission::tests::a_floor_ppm_on_the_ceiling_never_passes_an_exact_probability_above_it`.
