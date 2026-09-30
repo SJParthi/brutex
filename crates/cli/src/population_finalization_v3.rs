@@ -1168,6 +1168,19 @@ impl PopulationFinalizationV3Authority {
 
     /// Reads one canonical row from the retained authenticated ledger.
     ///
+    /// # Cost
+    ///
+    /// Each call runs the ledger's generation check twice, before and after
+    /// its one fixed-offset read, and each check hashes the lock, row and
+    /// Completion files whole, each of them twice. One row read therefore
+    /// hashes the row file and the Completion file four times each:
+    /// O(row-file bytes + Completion-file bytes) per row, not O(1), and
+    /// O(R × those bytes) for R rows read one at a time.
+    /// `ordered_row_projections` reads a whole block between one such pair
+    /// instead. `docs/06-limits.md`, "Four ledger calls that rehash or rescan
+    /// whole files per call". `crates/cli/tests/ledger_scan_costs.rs` counts
+    /// the calls that make this cost.
+    ///
     /// # Errors
     ///
     /// Refuses an out-of-range ordinal or any stale, replaced, corrupt,

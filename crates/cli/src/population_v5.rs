@@ -12,10 +12,12 @@
 //! before a separate Completion, and a commit becomes authority only after a
 //! fresh read-only reopen reproduces every prepared byte.
 //!
-//! Sequential codec, hashing and persistence work is O(C) in Candidate count.
-//! Duplicate/index operations use `HashSet`/`HashMap`, so their stated cost is
-//! expected/amortized O(C), with a conservative O(C²) collision worst case;
-//! retained row and uniqueness state is O(C).  Fixed-record offset arithmetic
+//! Sequential codec and hashing work is O(C) in Candidate count. Persistence
+//! rescans the whole ledger and is O(R) in its total rows R; see
+//! `commit_population_v5`. Duplicate/index operations use
+//! `HashSet`/`HashMap`, so their stated cost is expected/amortized O(C), with
+//! a conservative O(C²) collision worst case; retained row and uniqueness
+//! state is O(C).  Fixed-record offset arithmetic
 //! alone is O(1). Generation validation hashes bounded files and is not O(1).
 //!
 //! **UNVERIFIED as a measured bound.** No bench in this workspace
@@ -2641,6 +2643,18 @@ impl CommittedStoredPopulationV5 {
     /// Revalidates the complete live upstream source and V5 generations before
     /// returning one exact row. No embedded or detached identity can mint this
     /// capability.
+    ///
+    /// # Cost
+    ///
+    /// Each call prepares the whole Population from the live upstream source
+    /// twice, before and after its one row read: each preparation joins every
+    /// upstream input and derives every one of the C rows, and one of them is
+    /// compared. One row read is therefore Θ(C) row derivation twice, plus
+    /// the upstream joins and the V5 generation hashing, not O(1).
+    /// `docs/06-limits.md`, "Four ledger calls that rehash or rescan whole
+    /// files per call".
+    /// `crates/cli/tests/ledger_scan_costs.rs` counts the calls that make this
+    /// cost.
     pub(crate) fn authenticated_row(
         &mut self,
         global_sequence: u64,
@@ -2752,6 +2766,18 @@ impl CommittedStoredPopulationV5 {
 /// C Candidates. Hash-backed duplicate/index work is expected/amortized O(C),
 /// with a conservative O(C²) collision worst case. The operation is
 /// intentionally not described as O(1).
+///
+/// The ledger is read whole three times per written commit: `open_write`
+/// scans it, `finish_written` scans it again after the Completion, and the
+/// fresh `open_read` scans it a third time; a reused Population skips the
+/// second. Each scan decodes every row of every Population already in the
+/// ledger, and decoding a row validates it, re-encodes it (which validates it
+/// again), and `validate_complete_block` validates it once more, so one
+/// commit is O(R) in the ledger's total rows R, not O(C).
+/// `docs/06-limits.md`, "Four ledger calls that rehash or rescan whole files
+/// per call".
+/// `crates/cli/tests/ledger_scan_costs.rs` counts the calls that make this
+/// cost.
 ///
 /// **UNVERIFIED as a measured bound.** No bench in this workspace
 /// times this, so the shape above is read from the source rather

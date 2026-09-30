@@ -9864,3 +9864,50 @@ The text above is kept as it was written.
   doc to its body, read off the source, and
   `what_a_changed_rows_line_costs_is_named_in_part_and_read_off_the_source`
   finds each part named here and in that doc in the source that pays it.
+
+## Four ledger calls that rehash or rescan whole files per call — D-0934, 30 September 2026
+
+Four crate-private ledger calls in `crates/cli` did more whole-file work per
+call than their docs said, or said nothing of it. None is changed here; each
+cost is now stated where the call is documented and here, and
+`crates/cli/tests/ledger_scan_costs.rs` reads the source to require both the
+calls that make each cost and the sentences that state it. Not timed: no bench
+in this workspace measures any of the four.
+
+* **Finalization V3, one authenticated row** (`row_projection`, W2-cli11-1).
+  Each call runs the generation check before and after its one fixed-offset
+  read, and each check hashes the lock, row and Completion files whole, twice
+  each. One row read therefore hashes the row file and the Completion file four
+  times each: O(row-file bytes + Completion-file bytes) per row, not O(1), and
+  O(R × those bytes) for R rows read one at a time. The bulk path,
+  `ordered_row_projections`, performs "one bounded bulk read between one
+  before/after generation-validation pair" in its own rustdoc's words.
+* **Finalization V4, one append** (`append_locked`, W2-cli11-0). After the
+  Completion is synced, the append hashes the whole data file and then calls
+  `scan`, which walks every block and ends by hashing the data file again. One
+  append is therefore O(F) in the ledger's file bytes F, not O(D) in its own decisions,
+  and the appends into one ledger cost quadratically in its length over its
+  life. This supersedes, for append, §168's "Encoding, ordered hashing,
+  exact-prefix comparison and append are O(D)." The rescan that follows the
+  synced Completion walks every earlier block as well as the new one.
+* **Population V5, one authenticated row**
+  (`CommittedStoredPopulationV5::authenticated_row`, W2-cli12-3). Each call
+  calls `PreparedPopulationV5::from_authority` twice, and each of those joins
+  every upstream input and derives all C rows, to compare one row. One row read
+  is therefore Θ(C) row derivation twice, plus the upstream joins and the V5
+  generation hashing, not O(1).
+* **Population V5, one commit** (`commit_population_v5`, W2-cli12-4). Each
+  scan decodes every row of every Population already in the ledger, and
+  decoding a row validates it, re-encodes it (which validates it again), and
+  `validate_complete_block` validates it once more, so one commit is O(R) in
+  the ledger's total rows R, not O(C). A written commit scans the ledger three
+  times and a reused one twice. The module doc's former "Sequential codec,
+  hashing and persistence work is O(C) in Candidate count." is replaced.
+
+The Finalization V4 and Population V5 bounds above are expected, not worst
+case: the block validation that each rescan repeats inserts every decision or
+row into hash sets built by `bounded_set`.
+
+Each rescan re-authenticates the ledger after a write or around a read.
+Making any of them incremental would change what the call proves, and is
+recorded here, not done.

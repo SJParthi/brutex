@@ -43666,3 +43666,48 @@ job.
   survived. `an_nse_cash_stock_consults_no_peer_even_one_holding_it` gives a
   second vendor the same stock and requires that nothing votes and nothing is
   named; the same two feeds holding an index do vote, as the control.
+
+### D-0934 — State four whole-file ledger costs where they are paid, and leave the rescans in place — 2026-09-30
+
+**What was found.** The C4 audit (W2-cli11-1, W2-cli11-0, W2-cli12-3,
+W2-cli12-4) found four crate-private ledger calls in `crates/cli` whose
+per-call cost was larger than their docs said, or unstated:
+
+- `PopulationFinalizationV3Authority::row_projection` runs the generation
+  check before and after its one fixed-offset read, and each check hashes the
+  lock, row and Completion files whole, twice each. Its rustdoc stated no
+  cost.
+- `PopulationFinalizationV4Ledger::append_locked` ends by hashing the data
+  file and calling `scan`, which walks every block of the ledger and ends with
+  another whole-file generation check. `docs/06-limits.md` §168 called append
+  O(D).
+- `CommittedStoredPopulationV5::authenticated_row` calls
+  `PreparedPopulationV5::from_authority` twice to compare one row. Its rustdoc
+  stated no cost.
+- `commit_population_v5` opens a writer, appends and reopens, and the open,
+  the post-Completion `finish_written` and the reopen each scan the whole
+  ledger. The module doc called persistence O(C).
+
+**The choice.** Each rescan re-authenticates the ledger after a write or
+around a read. Removing or narrowing one would change what the call proves, so
+the costs are stated, not reduced: each call's rustdoc now carries a `# Cost`
+paragraph, the Population V5 module doc no longer calls persistence O(C), and
+`docs/06-limits.md` gains the section "Four ledger calls that rehash or rescan
+whole files per call". §168 is not edited; the new section supersedes its
+append sentence and quotes it. The Finalization V4 and Population V5 bounds
+are stated as expected, not worst case, because the block validation each
+rescan repeats builds its duplicate checks with `bounded_set` hash sets.
+
+**What holds it.** `crates/cli/tests/ledger_scan_costs.rs` reads the three
+sources and the limits at compile time. For each call it first counts the
+calls that make the cost (two generation checks, three file hashes per check,
+two hashes per file; hash then rescan after the Completion sync; two
+preparations; three scans on a written commit and none in `reuse_existing`),
+then requires the stated sentences in the rustdoc and in the limits section;
+the commit test also refuses the module doc's former O(C) persistence
+sentence. On origin/main each of the four tests passed its counts and failed at
+its first documentation check: the three rustdoc sentences, and the module
+doc's O(C) sentence. All four pass with this change. No cost was timed.
+Each of the four rustdocs names `crates/cli/tests/ledger_scan_costs.rs`, and
+each test requires that sentence, so CI Gate 12, which refuses a doc block that
+says O(1) without naming a test, finds the test file beside the two that do.
