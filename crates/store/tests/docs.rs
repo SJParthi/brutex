@@ -246,7 +246,7 @@ fn the_c01_syscall_sentence_is_superseded_where_it_stands() {
 /// back from.** Its module doc said `Header::read_region` falls back a
 /// generation "instead of condemning the file", and stopped there, while
 /// `BarFile::validated` refuses that file as `CounterExceedsFile` when a
-/// surviving slot claims more records than the header it chose. D-0790.
+/// surviving slot claims more records than the header it chose. D-0792.
 #[test]
 fn the_header_module_doc_says_the_file_door_refuses_a_slot_ahead_of_its_data() {
     assert!(
@@ -272,4 +272,8 @@ fn the_header_module_doc_says_the_file_door_refuses_a_slot_ahead_of_its_data() {
     ] {
         assert!(doc.contains(fact), "header.rs module doc must name {fact}");
     }
+    assert!(
+        doc.contains("\"instead of condemning the file\". D-0792."),
+        "header.rs must cite D-0792, the decision that corrected this sentence, not D-0790"
+    );
 }

@@ -50,7 +50,7 @@
 //! still decodes claims more records than the generation chosen here, and
 //! `store::write::a_truncation_back_to_the_header_is_refused_rather_than_silently_accepted`
 //! asserts it. This paragraph used to end at "instead of condemning the file".
-//! D-0790.
+//! D-0792.
 //!
 //! # Why not the alternatives
 //!
