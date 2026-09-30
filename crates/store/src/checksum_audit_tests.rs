@@ -497,3 +497,33 @@ fn a_post_snapshot_crc_truncation_names_the_read_and_preserves_faulted_bytes() {
         assert_eq!(fs::read(path).expect("source preserved on success"), *bytes);
     }
 }
+
+/// W3-store1-8: the strict opener's `O_NOFOLLOW | O_NONBLOCK` bits per target.
+/// Source lines, libc 0.2.189 (the version pinned in `Cargo.lock`):
+/// `gnu/b64/x86_64/mod.rs:527 pub const O_NOFOLLOW: c_int = 0x20000;`,
+/// `gnu/b64/aarch64/mod.rs:453 pub const O_NOFOLLOW: c_int = 0x8000;`,
+/// `musl/b64/aarch64/mod.rs:119 pub const O_LARGEFILE: c_int = 0x20000;`,
+/// `O_NONBLOCK: c_int = 2048` on both Linux arches, and
+/// `bsd/mod.rs:245-246 O_NONBLOCK = 0x4, O_NOFOLLOW = 0x100` for macOS.
+#[test]
+fn strict_read_flags_carry_each_verified_targets_own_nofollow_bit() {
+    assert_eq!(strict_read_flags("linux", "x86_64"), Some(0x20_000 | 0x800));
+    // 0x20000 on aarch64 is O_LARGEFILE, which follows a final symlink.
+    assert_eq!(strict_read_flags("linux", "aarch64"), Some(0x8_000 | 0x800));
+    assert_eq!(strict_read_flags("macos", "aarch64"), Some(0x100 | 0x4));
+    assert_eq!(strict_read_flags("macos", "x86_64"), Some(0x100 | 0x4));
+    assert_eq!(strict_read_flags("linux", "riscv64"), None);
+    assert_eq!(strict_read_flags("freebsd", "x86_64"), None);
+}
+
+#[test]
+fn an_unverified_target_refuses_before_any_open() {
+    let missing = std::env::temp_dir().join("brutex-strict-open-never-created");
+    let refused = open_with(&missing, None).expect_err("unverified target refuses");
+    assert_eq!(refused.kind(), std::io::ErrorKind::Unsupported);
+    assert!(
+        refused
+            .to_string()
+            .contains("verified macOS or Linux x86_64/aarch64")
+    );
+}

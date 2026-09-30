@@ -5354,3 +5354,11 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### Strict opener flags and header refusal order — C4 store-02 (D-0978, D-0979)
+
+| Id | Invariant | Test that proves it | Status |
+|---|---|---|---|
+| C4-STORE-02-01 | The strict checksum opener uses `O_NOFOLLOW` plus `O_NONBLOCK` per target: `0x104` on macOS, `0x20800` on Linux x86_64, `0x8800` on Linux aarch64, and `None` (a refusal) for any other target, sampled by Linux riscv64 and FreeBSD x86_64. | `store::checksum_audit::tests::strict_read_flags_carry_each_verified_targets_own_nofollow_bit` | ✓ |
+| C4-STORE-02-02 | A target without verified flags refuses with `Unsupported` before any open. | `store::checksum_audit::tests::an_unverified_target_refuses_before_any_open` | ✓ |
+| C4-STORE-02-03 | When both header slots decode and both fail `Header::validate` with different reasons, `Header::read_region` returns the newest slot's refusal, in both generation orders. | `store::fault::when_both_slots_decode_and_fail_the_newest_slots_refusal_is_reported` | ✓ |

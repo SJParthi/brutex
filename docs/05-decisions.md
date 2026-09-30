@@ -43666,3 +43666,48 @@ job.
   survived. `an_nse_cash_stock_consults_no_peer_even_one_holding_it` gives a
   second vendor the same stock and requires that nothing votes and nothing is
   named; the same two feeds holding an index do vote, as the control.
+
+### D-0978 — Give the strict checksum opener each Linux arch's own `O_NOFOLLOW` bit — 2026-09-30
+
+**The defect (W3-store1-8).** `checksum_audit::open_regular` admitted Linux
+`x86_64` and `aarch64` but set one flag word for both,
+`#[cfg(target_os = "linux")] let flags = 0x20_000 | 0x800;`. In libc 0.2.189,
+the version `Cargo.lock` pins, `gnu/b64/x86_64/mod.rs:527` reads
+`pub const O_NOFOLLOW: c_int = 0x20000;` but `gnu/b64/aarch64/mod.rs:453` reads
+`pub const O_NOFOLLOW: c_int = 0x8000;`, and `musl/b64/aarch64/mod.rs:119`
+reads `pub const O_LARGEFILE: c_int = 0x20000;`. On aarch64 the strict opener
+therefore set the bit musl names `O_LARGEFILE` and never set `O_NOFOLLOW`, so
+its flags did not ask the kernel to refuse a final-component symlink there,
+while `docs/06-limits.md` said the flags were verified for that target.
+
+**The change.** `strict_read_flags(os, arch)` maps macOS to `0x100 | 0x4`
+(`bsd/mod.rs:245-246`), Linux `x86_64` to `0x20_000 | 0x800` and Linux
+`aarch64` to `0x8_000 | 0x800` (`O_NONBLOCK` is 2048 on both Linux arches),
+and every other target to `None`, which `open_with` refuses as `Unsupported`
+before any open. `strict_read_flags_carry_each_verified_targets_own_nofollow_bit`
+pins the table, and failed with `left: Some(133120) right: Some(34816)` when
+the aarch64 row carried the old value. `an_unverified_target_refuses_before_any_open`
+pins the refusal.
+
+**Honest limit.** This host is macOS; no aarch64 Linux open was executed. The
+aarch64 value is checked against the quoted libc source line, not measured.
+
+### D-0979 — Report the newest decoded header slot's refusal, as `read_region` documents — 2026-09-30
+
+**The defect (W3-store1-9).** `Header::read_region` documents: "When slots
+decode but none survives [`Header::validate`], the newest one's refusal is
+returned." Its search, `committed`, walks candidates newest first but assigned
+`refusal = refused` on every candidate, so when both slots decoded and both
+failed, the OLDER slot's reason came back.
+`when_both_slots_decode_and_fail_the_newest_slots_refusal_is_reported`
+reproduced it on origin/main: generation 2 over-counting a one-record file and
+generation 1 running backwards returned
+`Err(TimestampsOutOfOrder { previous: 10, next: 5 })` instead of
+`Err(CounterExceedsFile)`.
+
+**The change.** `committed` keeps the first refusal (`Option::get_or_insert`)
+and falls back to `NoValidHeader` only when no candidate was refused. The test
+walks both assignments of the two refusals to the two generations, and failed
+on `origin/main`'s `committed` with exactly the output quoted above. A header
+that validates is unaffected: `MAX_SLOTS` is 2 (`format.rs`), so at most one
+refusal precedes a success and the first refusal is also the last.

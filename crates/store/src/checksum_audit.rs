@@ -27,40 +27,43 @@ pub(crate) struct Inputs<'a> {
 
 /// Strict opt-in opener. Unsupported hosts refuse instead of using a blocking open.
 pub(crate) fn open_regular(path: &Path) -> std::io::Result<File> {
-    #[cfg(any(
-        target_os = "macos",
-        all(
-            target_os = "linux",
-            any(target_arch = "x86_64", target_arch = "aarch64")
-        )
-    ))]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        #[cfg(target_os = "macos")]
-        let flags = 0x100 | 0x4;
-        #[cfg(target_os = "linux")]
-        let flags = 0x20_000 | 0x800;
-        let file = fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(flags)
-            .open(path)?;
-        Generation::read(&file, path).map_err(std::io::Error::other)?;
-        Ok(file)
+    open_with(
+        path,
+        strict_read_flags(std::env::consts::OS, std::env::consts::ARCH),
+    )
+}
+
+/// `O_NOFOLLOW | O_NONBLOCK` for a target whose values were checked against
+/// libc 0.2.189, the version `Cargo.lock` pins; `None` for any other target.
+/// The two Linux arches carry different `O_NOFOLLOW` bits: libc's
+/// `gnu/b64/x86_64/mod.rs:527` reads `O_NOFOLLOW: c_int = 0x20000` and
+/// `gnu/b64/aarch64/mod.rs:453` reads `O_NOFOLLOW: c_int = 0x8000`, while on
+/// aarch64 `0x20000` is `O_LARGEFILE` (`musl/b64/aarch64/mod.rs:119`).
+fn strict_read_flags(os: &str, arch: &str) -> Option<i32> {
+    match (os, arch) {
+        // Each word is one literal: `O_NOFOLLOW` plus `O_NONBLOCK`, whose bits
+        // are disjoint, so `|`, `^` and `+` would all spell the same value.
+        ("macos", _) => Some(0x104),           // 0x100 + 0x4
+        ("linux", "x86_64") => Some(0x20_800), // 0x20000 + 0x800
+        ("linux", "aarch64") => Some(0x8_800), // 0x8000 + 0x800
+        _ => None,
     }
-    #[cfg(not(any(
-        target_os = "macos",
-        all(
-            target_os = "linux",
-            any(target_arch = "x86_64", target_arch = "aarch64")
-        )
-    )))]
-    {
-        let _ = path;
-        Err(std::io::Error::new(
+}
+
+fn open_with(path: &Path, flags: Option<i32>) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let Some(flags) = flags else {
+        return Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "strict checksum reads require verified macOS or Linux x86_64/aarch64 open flags",
-        ))
-    }
+        ));
+    };
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(flags)
+        .open(path)?;
+    Generation::read(&file, path).map_err(std::io::Error::other)?;
+    Ok(file)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

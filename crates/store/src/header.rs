@@ -585,8 +585,9 @@ impl Header {
 /// The committed header, the newest generation any slot claimed, and the
 /// refusal that stood between the two.
 ///
-/// This is [`Header::read_region`]'s search, moved out of it whole and
-/// unchanged. It is split off for one reason: the search can end in three
+/// This is [`Header::read_region`]'s search, moved out of it whole; D-0979
+/// later made it keep the newest refusal rather than the last one. It is split
+/// off for one reason: the search can end in three
 /// different places — no candidate at all, a region too short for the version,
 /// and every candidate refused in turn — and three `return Err` statements
 /// would need three copies of the same emit. One of them would eventually be
@@ -616,21 +617,32 @@ fn committed(region: &[u8], file_len: u64) -> Result<(Header, u64, FormatError),
     // is the one failure a test suite cannot report.
     let claimed = header.generation;
     let mut newest = Some((header, layout));
-    let mut refusal = FormatError::NoValidHeader;
+    // The FIRST refusal is kept: candidates arrive newest first, so it is the
+    // newest decoded slot's, which is what `read_region` documents. An older
+    // slot's different reason must not overwrite it (W3-store1-9, D-0979).
+    let mut refusal: Option<FormatError> = None;
     for _ in 0..MAX_SLOTS {
         let Some((candidate, geometry)) = newest else {
-            return Err(refusal);
+            return Err(refusal.unwrap_or(FormatError::NoValidHeader));
         };
         match candidate.validate(geometry, file_len) {
-            Ok(()) => return Ok((candidate, claimed, refusal)),
-            Err(refused) => refusal = refused,
+            Ok(()) => {
+                return Ok((
+                    candidate,
+                    claimed,
+                    refusal.unwrap_or(FormatError::NoValidHeader),
+                ));
+            }
+            Err(refused) => {
+                refusal.get_or_insert(refused);
+            }
         }
         // The "no older candidate" error is dropped on purpose: the
         // refusal from the newest slot that decoded says more about the
         // file than "nothing else was there".
         newest = best_candidate(region, Some(candidate.generation)).ok();
     }
-    Err(refusal)
+    Err(refusal.unwrap_or(FormatError::NoValidHeader))
 }
 
 /// A header region that yielded no usable commit, on the rolling log.

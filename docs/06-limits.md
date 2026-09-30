@@ -8494,6 +8494,9 @@ targets refuse. Final symlinks/FIFOs and observed writer locks refuse, while
 intermediate directory components remain inside the trusted-root assumption.
 Nonblocking lock/pipe handling does not bound filesystem or fsync latency.
 The current 8 TB external disk is disconnected and supplies no runtime budget.
+The Linux `O_NOFOLLOW` bit differs by architecture (0x20000 on x86_64, 0x8000
+on aarch64 in libc 0.2.189); the per-target table is unit-tested on a macOS
+host, and no aarch64 Linux open has been executed (D-0978).
 
 The finite qualification successor in D-0544 uses one predeclared eight-timeframe
 allocation. Its family-wide bootstrap hypotheses include all declared program,
