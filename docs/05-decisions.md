@@ -43726,3 +43726,27 @@ order of checks are the same. It takes the three coordinates and one
 accepts the equal case and requires the refusal for each coordinate differing
 alone. A full-page render test through a saved qualification is still absent;
 it needs `cli`'s fixture exposed to `api`, which this batch does not do.
+
+### D-0732 — `/audit.json` counts the asked feed's months from its own manifest, once per census snapshot — 2026-09-29
+
+**What was wrong (W1-api1-0).** `store_block` rolled the asked feed up by month
+by walking `census_now`'s merged entry list, every held entry of every vendor,
+and probing the asked feed's manifest for each, on every request. The cost of
+one feed's audit answer grew with every other feed's store, on a route the
+console polls, and `docs/06-limits.md` did not say so.
+
+**The change.** `feed_rollup` takes one `VendorCensus` and walks that
+manifest's `held_keys()`, so no other feed is reachable from it.
+`RollupCache`, a field on `Site`, keeps its answer per feed for the census
+`Arc` `census_now` returned, compared by pointer through a `Weak` as
+`store_wire::Cache` does, and a new snapshot replaces every feed's rollup. The
+lock is released while a miss counts. The answer's bytes are unchanged:
+`the_store_block_rolls_up_the_asked_feed_by_month_and_counts_no_other_feed`
+pins the months and totals of two feeds held side by side.
+`the_rollup_is_counted_once_per_feed_per_census_snapshot` and
+`the_audit_body_reuses_the_rollup_until_the_manifest_changes` pin the count.
+`the_store_block_walks_one_census_and_not_every_feeds_entries` reads
+`store_block`'s source and fails on origin/main, where it contains
+`entries.iter()`. `docs/06-limits.md` gains a section for what is still paid,
+and `the_audit_rollup_cost_is_stated_in_the_limits_and_quotes_this_source`
+fails if that section is removed or the walk it quotes leaves `feed_rollup`.

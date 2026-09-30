@@ -9864,3 +9864,31 @@ The text above is kept as it was written.
   doc to its body, read off the source, and
   `what_a_changed_rows_line_costs_is_named_in_part_and_read_off_the_source`
   finds each part named here and in that doc in the source that pays it.
+
+## `/audit.json`'s store block: one count per census snapshot, of the asked feed only — D-0732, 29 September 2026
+
+**What it cost (W1-api1-0).** `store_block` rolled the asked feed up by month
+on every request by walking `census_now`'s merged entry list, every held entry
+of every vendor (`for (series, month) in entries.iter()`), and probing the
+asked feed's manifest for each. So a request for one feed grew with every
+feed's store, plus one `BTreeMap` insert per held month, and the console polls
+this route. §D-0686 above listed `/audit.json` only as a `census_now` caller
+and named none of this.
+
+**What it costs now.** `feed_rollup` walks the asked feed's own manifest
+(`manifest.held_keys()`), one manifest probe and one `BTreeMap` insert per held
+key of that feed, and `RollupCache` runs it once per census snapshot per feed:
+it is keyed on the `Arc` `census_now` returns, the same key
+`store_wire::Cache` uses for `/store.json`. A request against an unchanged
+census pays the census stamps, one lock, one pointer comparison and one map
+probe, then writes one JSON object per held month, which is the answer's own
+size. `the_rollup_is_counted_once_per_feed_per_census_snapshot` counts the
+walks: one per feed per snapshot, and one more after the snapshot changes.
+`the_audit_body_reuses_the_rollup_until_the_manifest_changes` drives it
+through the body: an unchanged census does not count again, and a manifest
+rewritten under a new modified time is counted again and answered.
+
+**What still grows.** The first request after a manifest changes pays that
+feed's walk, which grows with that feed's held keys and not with any other
+feed's. Two requests that miss together may each walk, because the lock is
+released while counting; both count the same snapshot. Not timed.

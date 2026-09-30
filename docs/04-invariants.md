@@ -5367,3 +5367,10 @@ the guard. The existing emits test pins the warning's message and level.
 | Id | Invariant | Test that proves it |
 |---|---|---|
 | C4-API-03 | A `/boolean-qualification.json` row is refused unless its original identity, family and coordinate all equal the saved statistics row beside it; any one differing refuses with "qualification row differs from original coordinate" | `a_qualification_row_is_refused_unless_identity_family_and_coordinate_all_match` in `crates/api/src/booleanqualification_projection_tests.rs` |
+
+### `/audit.json` rollup and sorted window pages — W1-api1-0 (D-0732), W1-api1-3 (D-0733)
+
+| Id | Invariant | Test that proves it |
+|---|---|---|
+| C4-API-04 | `/audit.json`'s store block counts only the asked feed's held months and bars, per month and in total, and never another feed's | `the_store_block_rolls_up_the_asked_feed_by_month_and_counts_no_other_feed` and `the_store_block_walks_one_census_and_not_every_feeds_entries` in `crates/api/src/audit_json.rs` |
+| C4-API-05 | A feed's month rollup is counted once per census snapshot: a request against an unchanged census counts nothing, and a changed manifest is counted again | `the_rollup_is_counted_once_per_feed_per_census_snapshot` and `the_audit_body_reuses_the_rollup_until_the_manifest_changes` in `crates/api/src/audit_json.rs` |
