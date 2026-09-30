@@ -7,6 +7,13 @@
 //! per-read verification. None of them was read by a test, so each one drifted
 //! in silence. Each test below reads the text AND the fact it names. D-0790.
 
+#![allow(
+    clippy::expect_used,
+    clippy::panic,
+    reason = "the same exception every test module in this workspace takes: a \
+              test that cannot panic cannot fail."
+)]
+
 /// The format document.
 const FORMAT_DOC: &str = include_str!("../../../docs/02-store-format.md");
 /// The limits document, which repeated the syscall sentence.
