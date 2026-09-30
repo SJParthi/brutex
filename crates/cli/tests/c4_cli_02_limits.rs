@@ -310,8 +310,9 @@ fn the_d0911_costs_are_the_ones_in_ci_and_the_source() {
         (
             "child",
             CHILD,
-            "\"generated search child for {TEST} starting; its output goes to {}\\n\",",
+            ".stdout(file.try_clone().map_err(display)?)",
         ),
+        ("child", CHILD, ".stderr(file)"),
         (
             "receipts",
             RECEIPTS,
@@ -341,6 +342,19 @@ fn the_d0911_costs_are_the_ones_in_ci_and_the_source() {
             source.contains(quote),
             "{name} source no longer holds `{quote}`"
         );
+    }
+    // The child's two streams are the log file, inside run_fixture_child.
+    let child = &CHILD[CHILD
+        .find("\nfn run_fixture_child(")
+        .unwrap_or_else(|| panic!("run_fixture_child is gone"))..];
+    let child = &child[..child[1..]
+        .find("\nfn ")
+        .unwrap_or_else(|| panic!("nothing follows run_fixture_child"))];
+    for stream in [
+        ".stdout(file.try_clone().map_err(display)?)",
+        ".stderr(file)",
+    ] {
+        assert!(child.contains(stream), "run_fixture_child lost `{stream}`");
     }
     // Gate 1e prints its captured run only after `cargo test` has returned.
     let gate = job("language-purity");

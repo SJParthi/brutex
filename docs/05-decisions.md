@@ -43713,12 +43713,10 @@ runner."
 
 **The change.** The deadline is removed. The child is still killed, and the
 test still fails, when its log passes 8MiB, and the parent still requires the
-child's success and its `1 passed` line. Before it starts the child, the
-parent writes one line naming the test and the child's log path to its own
-stderr, which `cargo test` shows even for a test whose output it captures.
+child's success and its `1 passed` line.
 `cli::boolean_search_command::integration_tests::the_generated_search_child_is_bounded_by_its_log_and_not_by_the_clock`
 reads the function's source, pins its whole wait loop and everything after
-it, requires the stderr line before `.spawn()`, and requires that the body
+it, and requires that the body
 names no `Instant`, `SystemTime`, `elapsed`, `now(`, `duration_since`,
 `from_mins`, `from_secs`, `timeout`, `deadline`, `thread::spawn`, `const ` or
 `static `. Test-only; no production path and no run identity changes.
@@ -43736,7 +43734,11 @@ checked against the file it names by
 - Gate 1e captures the whole test run into one variable
   (`tout="$(PATH="$stub:$PATH" cargo test --workspace --locked 2>&1)"`) and
   prints from it only after `cargo test` returns, so when that job is killed
-  its log names no test, not even the stderr line above.
+  its log names no test.
+- In every job the child's own output goes only to its log file
+  (`.stdout(file.try_clone().map_err(display)?)`, `.stderr(file)`), which the
+  parent reads only once the child has exited or passed 8MiB, so a killed hang
+  shows none of it.
 - The mutation job runs with `--minimum-test-timeout 900 --timeout-multiplier 2`
   and `.github/mutation_gate.rs` refuses a timeout
   (`if status != "0" || !missed.is_empty() || !timeout.is_empty() {`). A mutant

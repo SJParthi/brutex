@@ -93,18 +93,6 @@ fn run_fixture_child(fixture: &Fixture, selected: bool) -> Result<(), String> {
     if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
         command.env("LLVM_PROFILE_FILE", profile);
     }
-    // Named before the child starts and written straight to the process's
-    // stderr, past the capture `cargo test` applies, so a kill of a hung run
-    // still shows which test's child it was and where its output is (D-0911).
-    std::io::Write::write_all(
-        &mut std::io::stderr(),
-        format!(
-            "generated search child for {TEST} starting; its output goes to {}\n",
-            log.display()
-        )
-        .as_bytes(),
-    )
-    .map_err(display)?;
     let mut child = command
         .env(CHILD, &fixture.root)
         .env(
@@ -1008,15 +996,5 @@ fn the_generated_search_child_is_bounded_by_its_log_and_not_by_the_clock() -> Re
 }
 "
     );
-    // A kill of a hung run still names this child and its log (D-0911).
-    let named = body
-        .find("std::io::Write::write_all(\n        &mut std::io::stderr(),")
-        .ok_or("run_fixture_child does not name its child on stderr")?;
-    assert!(
-        body[named..]
-            .contains("\"generated search child for {TEST} starting; its output goes to {}\\n\","),
-        "{body}"
-    );
-    assert!(named < body.find(".spawn()").ok_or("no spawn")?, "{body}");
     Ok(())
 }

@@ -9940,10 +9940,12 @@ outside it stops the run. Every file and line named below is checked by
   whose figure `docs/00-charter.md` does not record: UNVERIFIED.
 * **Gate 1e names nothing on a kill.** It captures the whole run in one
   variable (`tout="$(PATH="$stub:$PATH" cargo test --workspace --locked 2>&1)"`)
-  and prints from it only after `cargo test` returns. The parent's stderr line
-  (`"generated search child for {TEST} starting; its output goes to {}\n",`)
-  goes to the process's own stderr, which `cargo test` shows even for a
-  test it captures; in Gate 1e it is lost with the rest of that variable.
+  and prints from it only after `cargo test` returns, so a killed run there
+  names no test.
+* **A hang shows none of the child's output.** In every job the child writes
+  only to its log file (`.stdout(file.try_clone().map_err(display)?)`,
+  `.stderr(file)`), and the parent reads that file only once the child has
+  exited or passed 8MiB.
 * **A hang-only mutant is a timeout, not a catch.** The mutation job runs with
   `--minimum-test-timeout 900 --timeout-multiplier 2`, and
   `.github/mutation_gate.rs` fails on any timeout
