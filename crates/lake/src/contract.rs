@@ -276,6 +276,12 @@ fn parse_expiry(text: &str) -> Result<Expiry, ContractError> {
     // would parse to the expiry of `01Apr20`: two directory names, one
     // `InstrumentKey`. The same injectivity test `parse_strike` applies:
     // require plain digits so a novel spelling is a refusal. W3-lake1-3.
+    // This closes the signed day and year only; it does not make expiry
+    // parsing injective over directory names. The month's case tolerance,
+    // which the module header grants on purpose, still reads `01APR20` and
+    // `01Apr20` as one expiry and renders both as `01Apr20` —
+    // `the_month_case_tolerance_is_injective_and_can_never_alias_two_contracts`
+    // asserts exactly that — so those two spellings still share a key.
     if !d.bytes().chain(y.bytes()).all(|b| b.is_ascii_digit()) {
         return Err(bad());
     }
