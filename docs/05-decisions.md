@@ -43756,3 +43756,37 @@ test answers at a block of 1,000,000 over 200 periods. Recorded in
 `docs/06-limits.md`.
 
 **Proof.** `bootstrap::block_ceiling_tests::a_block_the_ppm_draw_cannot_restart_is_refused_by_every_entry_point`.
+
+### D-0743 — An Admission V2/V3 door refuses a probability whose floor ppm hides an exact value above its ceiling — 2026-09-30
+
+**What was wrong (GAP5-49).** `AdmissionEvidenceV2::new` and its V3 twin store
+each exact probability through `AdmissionExactProbabilityV2::ppm`, a floor,
+and the fixed policy gates PBO, family-wise Romano--Wolf, SPA, White and
+candidate Romano--Wolf with `check_max_u64` over that stored value
+(`value > ceiling`). A fraction just above a ceiling floors onto it and
+passes: on origin/main SPA `2_501 / 50_019` floors to 50,000 ppm, the
+fixture's 5% ceiling, `rejects_at_ppm(50_000)` is false, and the V2 verdict
+does not fail SPA.
+
+**The change.** `evaluate_v2_projection`, `evaluate_v3_projection` and
+`evaluate_v3_exact_grid_projection` refuse with
+`AdmissionV{2,3}ArithmeticRefusal::ProbabilityProjection(reason)` when a
+max-gated probability's floor ppm is within its ceiling while the exact
+fraction is not (`!rejects_at_ppm(ceiling)`), naming the first such gate in
+the order PBO, FWER, SPA, White, candidate Romano--Wolf. The V2 and V3
+evidence bytes carry only the floor ppm, and a decision record's verdict is
+re-derived from those bytes (`let computed = policy.evaluate_v3(&evidence);`
+in `AdmissionDecisionV3::from_canonical_parts`, which refuses a supplied
+verdict unequal to it), so a correct failure cannot be written in these
+versions; refusing is the loud alternative to a record that passes a gate its
+exact value fails. Every value these doors decided correctly before is decided
+byte-identically: the refusal fires only where the old verdict was wrong. A
+ceiling projection in new record versions is the way to decide these values
+instead of refusing them, and is not done here.
+
+**What it does not change.** The cli-side V1 evidence builders
+(`boolean_admission_v1`, `boolean_admission_reader`,
+`index_stop_qualification_numeric`) also fill max-gated fields with
+`.ppm()`; they are outside the runner crate and outside this change.
+
+**Proof.** `admission::tests::a_floor_ppm_on_the_ceiling_never_passes_an_exact_probability_above_it`.

@@ -9901,3 +9901,11 @@ series length — the same test answers at a block of 1,000,000 over 200
 periods — and the integer division quantizes the restart probability, so a
 large accepted block is resampled at `1_000_000 / (1_000_000 / block)` rather
 than at `block`. Neither is refused or measured here.
+
+## Admission V2/V3 refuses, rather than decides, a floor-hidden probability — D-0743, 30 September 2026
+
+A max-gated probability whose floor ppm is within its ceiling while its exact
+fraction is above it is refused by the three projection doors
+(`a_floor_ppm_on_the_ceiling_never_passes_an_exact_probability_above_it`);
+the stored V2/V3 bytes cannot carry the correct failure. The cli V1 builders
+that fill the same fields with `.ppm()` are not changed by D-0743.

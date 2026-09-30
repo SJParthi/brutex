@@ -5374,3 +5374,9 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | C4-RUNNER-05: `bootstrap::MAX_BLOCK` is 1,000,000; at a block of 1,000,001 over 200 periods each of 50 `stationary_indices` draws is one rotation, and `reality_check`, `spa`, `white_reality_check_receipt_v1`, `spa_receipt_v1`, `romano_wolf_receipt`, `romano_wolf_adjusted_p_values_v1` and `family_tests_v1` refuse that block while `romano_wolf` returns no rejection where it names one at 1,000,000; every one of them still answers at 1,000,000. | `bootstrap::block_ceiling_tests::a_block_the_ppm_draw_cannot_restart_is_refused_by_every_entry_point` | ✓ |
+
+### A floor ppm on a max ceiling never passes an exact probability above it — GAP5-49 (D-0743)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| C4-RUNNER-06: when the exact PBO, family-wise Romano--Wolf, SPA, White or candidate Romano--Wolf probability floors to a ppm within its policy ceiling while the exact fraction is above it, `evaluate_v2_projection`, `evaluate_v3_projection` and `evaluate_v3_exact_grid_projection` refuse with `ProbabilityProjection` naming that gate; values within every ceiling are decided, and an SPA floor above its ceiling is decided as a failed SPA gate. | `admission::tests::a_floor_ppm_on_the_ceiling_never_passes_an_exact_probability_above_it` | ✓ |
