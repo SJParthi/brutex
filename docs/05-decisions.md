@@ -43763,3 +43763,32 @@ could not be built on this machine: `create_dir_all` with a `0xFF 0xFE`
 component returned `Illegal byte sequence` (errno 92) on the APFS volume the
 tests run on. The ledger names ext4 as a filesystem that allows such names;
 that was not run here.
+
+### D-0769 — The store catalog refuses a `bars` it cannot stat, and names every entry it did not offer — 2026-10-01
+
+**What happened (root probe).** `store::catalog::walk` opened with
+`if !bars.is_dir() { return Ok(Holdings::default()) }`. `Path::is_dir` answers
+false on every failure to stat, so three different faults returned `Ok` with a
+zero census that reconciled, the same answer as "nothing pulled yet": a store
+root at mode 000 holding a real month, a `bars` that is a regular file, and a
+`bars` link that resolves to nothing. Found by a review of D-0765 and
+reproduced on this branch before the change:
+`a_bars_path_that_is_not_a_directory_is_refused_by_name`,
+`a_dangling_bars_link_is_refused_not_empty` and
+`a_store_root_that_cannot_be_searched_is_refused` each failed with
+`Holdings { held: [], census: Census { seen: 0, .. } }` where a refusal was
+expected. It predates the branch: the reviewer's probe gave the same `Ok` on
+origin/main 2c209309.
+
+**The change.** `bars_present` stats `root/bars` without following it
+(`symlink_metadata`); `NotFound` there, and only there, is the empty store.
+Anything else is followed with `metadata`: a directory is walked, and a
+non-directory or a failure to stat is `CatalogError::BarsUnreadable` naming
+the reason (`it is not a directory`, or the operating system's own message).
+`bars` itself may still be a link to a directory, because the root is
+operator configuration (`a_bars_link_to_a_real_directory_is_walked`); links
+below it stay counted and not followed (D-0766). The test
+`a_bars_path_that_is_not_a_directory_reports_an_empty_store`, which pinned the
+old answer, is replaced by
+`a_bars_path_that_is_not_a_directory_is_refused_by_name`: the old behaviour
+is the defect.

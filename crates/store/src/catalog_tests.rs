@@ -5,7 +5,7 @@
 //! The walk-level proofs on real temporary trees are in
 //! `crates/store/tests/catalog.rs`. D-0765 to D-0768.
 
-use super::{Census, Holdings, classify, parse_month, walk};
+use super::{CatalogError, Census, Holdings, bars_present, classify, parse_month, walk};
 use std::path::{Path, PathBuf};
 
 /// A private directory under the system temporary root, named for its test.
@@ -139,4 +139,42 @@ fn a_non_utf8_component_is_counted_and_never_dropped() {
         control.census.spot, 1,
         "the six-level path without that component is a spot month"
     );
+}
+
+#[test]
+fn only_an_absent_bars_is_the_empty_store_and_every_other_non_directory_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = scratch("probe");
+    let bars = root.join("bars");
+    assert_eq!(bars_present(&bars), Ok(false), "nothing there: empty store");
+
+    std::fs::write(&bars, b"x").expect("writable");
+    assert_eq!(
+        bars_present(&bars),
+        Err(CatalogError::BarsUnreadable {
+            because: "it is not a directory".to_owned()
+        })
+    );
+    std::fs::remove_file(&bars).expect("removable");
+
+    std::os::unix::fs::symlink(root.join("unmounted"), &bars).expect("a symlink is creatable");
+    let Err(CatalogError::BarsUnreadable { because }) = bars_present(&bars) else {
+        panic!("a dangling `bars` link is refused");
+    };
+    assert!(because.contains("os error 2"), "{because}");
+    std::fs::remove_file(&bars).expect("removable");
+
+    std::fs::create_dir(&bars).expect("creatable");
+    assert_eq!(bars_present(&bars), Ok(true));
+
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o000))
+        .expect("the fixture root can be locked");
+    let locked = bars_present(&bars);
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755))
+        .expect("the fixture root can be unlocked");
+    let Err(CatalogError::BarsUnreadable { because }) = locked else {
+        panic!("an unsearchable root is refused, not empty: {locked:?}");
+    };
+    assert!(because.contains("os error 13"), "{because}");
+    let _ = std::fs::remove_dir_all(&root);
 }

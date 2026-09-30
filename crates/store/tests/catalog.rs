@@ -256,14 +256,96 @@ fn every_known_rung_and_every_known_feed_is_recognised() {
     assert!(out.census.reconciles());
 }
 
-/// A store whose `bars` is a file, not a directory, is empty rather than fatal.
+/// **A `bars` that is not a directory is refused by name, not an empty
+/// store.** D-0769.
+///
+/// The walk opened with `bars.is_dir()`, which answers false on any failure
+/// to stat, so a `bars` that was a regular file returned `Ok` with a zero
+/// census that reconciled: the same answer as "nothing pulled yet". Only a
+/// `bars` that is absent is the empty store.
 #[test]
-fn a_bars_path_that_is_not_a_directory_reports_an_empty_store() {
+fn a_bars_path_that_is_not_a_directory_is_refused_by_name() {
     let root = scratch("notadir");
     std::fs::write(root.join("bars"), b"not a directory").expect("writable");
-    let out = catalog::walk(&root).expect("not an error");
-    assert!(out.held.is_empty());
-    assert_eq!(out.census.seen, 0);
+    let refused = catalog::walk(&root).expect_err("a file where `bars` belongs is refused");
+    assert_eq!(
+        refused,
+        catalog::CatalogError::BarsUnreadable {
+            because: "it is not a directory".to_owned()
+        }
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **A `bars` link that resolves to nothing is refused, not an empty store.**
+/// D-0769.
+///
+/// `is_dir` follows the link, fails to resolve it, and answered false, so a
+/// store whose `bars` pointed at a volume that was not mounted listed nothing
+/// and reconciled.
+#[test]
+fn a_dangling_bars_link_is_refused_not_empty() {
+    let root = scratch("danglingbars");
+    std::os::unix::fs::symlink(root.join("unmounted"), root.join("bars"))
+        .expect("a symlink is creatable");
+    let refused = catalog::walk(&root).expect_err("a dangling `bars` is refused");
+    let catalog::CatalogError::BarsUnreadable { because } = refused;
+    assert!(because.contains("os error 2"), "{because}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **A `bars` link to a real directory is still walked.** D-0769.
+///
+/// The root is operator configuration and is followed as it always was; only
+/// links BELOW `bars/` are counted and not followed (D-0766). This pins that
+/// the stricter root probe did not narrow that.
+#[test]
+fn a_bars_link_to_a_real_directory_is_walked() {
+    let root = scratch("linkedbars");
+    let real = root.join("real");
+    let file = real.join("groww/NSE/INDEX/NIFTY/1min/2026-08.bin");
+    std::fs::create_dir_all(file.parent().expect("a parent")).expect("creatable");
+    std::fs::write(&file, b"").expect("writable");
+    std::os::unix::fs::symlink(&real, root.join("bars")).expect("a symlink is creatable");
+    let out = catalog::walk(&root).expect("a linked `bars` is walked");
+    assert_eq!(
+        out.census,
+        Census {
+            seen: 1,
+            spot: 1,
+            ..Census::default()
+        }
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **A store root this process cannot search is refused, not an empty
+/// store.** D-0769.
+///
+/// With the root at mode 000 the stat of `root/bars` fails with a permission
+/// error, `is_dir` answered false, and the walk returned `Ok` with a zero
+/// census while a month sat on disk (found by a review of D-0765).
+#[test]
+fn a_store_root_that_cannot_be_searched_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = scratch("root000");
+    put(&root, "groww/NSE/INDEX/NIFTY/1min/2026-08.bin");
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o000))
+        .expect("the fixture root can be locked");
+    let precondition = std::fs::symlink_metadata(root.join("bars")).is_err();
+    let out = catalog::walk(&root);
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755))
+        .expect("the fixture root can be unlocked");
+    assert!(
+        precondition,
+        "a process that ignores permissions cannot run this test"
+    );
+    let catalog::CatalogError::BarsUnreadable { because } =
+        out.expect_err("an unsearchable root is refused");
+    assert!(because.contains("os error 13"), "{because}");
+    let unlocked = catalog::walk(&root).expect("the walk runs once unlocked");
+    assert_eq!(unlocked.census.spot, 1);
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The error type says what happened in the operator's words.

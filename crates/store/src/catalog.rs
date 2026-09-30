@@ -210,9 +210,10 @@ impl core::error::Error for CatalogError {}
 ///
 /// # Errors
 ///
-/// [`CatalogError::BarsUnreadable`] when `root/bars` cannot be listed. A store
-/// with no `bars` directory at all is **not** an error — it is an empty result
-/// with an empty census, because "nothing pulled yet" is a normal state and
+/// [`CatalogError::BarsUnreadable`] when `root/bars` cannot be listed, cannot be
+/// stat-ed (an unsearchable root, a link that resolves to nothing), or is not a
+/// directory (D-0769). A store with nothing at `root/bars` is **not** an
+/// error — it is an empty result with an empty census, because "nothing pulled yet" is a normal state and
 /// refusing it would make a fresh clone look broken.
 ///
 /// # Cost
@@ -220,7 +221,7 @@ impl core::error::Error for CatalogError {}
 /// O(entries under `root/bars`), and deliberately so — see the module header.
 pub fn walk(root: &Path) -> Result<Holdings, CatalogError> {
     let bars = root.join(BARS_ROOT);
-    if !bars.is_dir() {
+    if !bars_present(&bars)? {
         return Ok(Holdings::default());
     }
     let mut out = Holdings::default();
@@ -278,6 +279,32 @@ pub fn walk(root: &Path) -> Result<Holdings, CatalogError> {
     out.held.sort_unstable();
     out.held.dedup();
     Ok(out)
+}
+
+/// Whether `bars` is there to walk: `Ok(false)` ONLY when nothing at all is at
+/// that path, and a refusal naming the reason for anything else that is not a
+/// directory.
+///
+/// `Path::is_dir` answered false on every failure to stat, so a store root
+/// this process could not search, a `bars` that was a regular file, and a
+/// `bars` link that resolved to nothing all returned an empty census that
+/// reconciled, the same answer as "nothing pulled yet" (D-0769). The link is
+/// told apart from an absent path by `symlink_metadata`, which does not follow
+/// it. `bars` itself may be a link to a directory: the root is operator
+/// configuration, and only links BELOW it are counted and not followed
+/// (D-0766).
+fn bars_present(bars: &Path) -> Result<bool, CatalogError> {
+    let refuse = |because: String| CatalogError::BarsUnreadable { because };
+    match std::fs::symlink_metadata(bars) {
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(why) => return Err(refuse(why.to_string())),
+        Ok(_) => {}
+    }
+    match std::fs::metadata(bars) {
+        Ok(meta) if meta.is_dir() => Ok(true),
+        Ok(_) => Err(refuse("it is not a directory".to_owned())),
+        Err(why) => Err(refuse(why.to_string())),
+    }
 }
 
 /// Files a spot path has below `bars/`: exchange, segment, symbol, rung, month.
