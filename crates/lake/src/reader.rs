@@ -47,9 +47,9 @@ pub struct LakeFile {
     layout: Layout,
     /// The sum of every row group's declared `num_rows`, taken once at open
     /// so that [`LakeFile::read_row_group`] compares it with the file-level
-    /// count in O(1). `i128` because the sum of `i64`s can overflow an `i64`
-    /// and cannot overflow this: the row-group list is a thrift list, whose
-    /// length is an `i32`.
+    /// count in one comparison rather than summing again. `i128` because the
+    /// sum of `i64`s can overflow an `i64` and cannot overflow this: the
+    /// row-group list is a thrift list, whose length is an `i32`.
     group_rows: i128,
 }
 
@@ -317,7 +317,8 @@ impl LakeFile {
         // probe and the stranded-byte count have nothing to see — while
         // `Self::num_rows` still reports the rows cut away. This is checked
         // after the columns so that a lie they can see is named by the column
-        // it is in. O(1): the sum was taken once, at open. W3-lake1-2.
+        // it is in. One comparison: the sum was taken once, at open.
+        // W3-lake1-2.
         let file_rows = self.num_rows();
         if i128::from(file_rows) != self.group_rows {
             return Err(LakeError::RowCountsDisagree {
