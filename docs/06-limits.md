@@ -9864,3 +9864,26 @@ The text above is kept as it was written.
   doc to its body, read off the source, and
   `what_a_changed_rows_line_costs_is_named_in_part_and_read_off_the_source`
   finds each part named here and in that doc in the source that pays it.
+
+## `crates/lake` refuses chunk bytes a declared value count leaves unread, and that is unmeasured on the real lake — D-0776, 30 September 2026
+
+A column chunk whose page walk stops at its declared `num_values` with a page
+still unread that is not a dictionary page or a data page declaring no values
+is refused as `LakeError::UnreadChunkBytes`, once the column has otherwise
+decoded its declared rows. The format makes a conforming chunk's byte range
+exactly its pages (`parquet-format-safe` 0.2.4 documents
+`total_compressed_size` as the "total byte size of all compressed, and
+potentially encrypted, pages in this column chunk (including the headers)"), so
+every byte of a conforming chunk belongs to one of its pages. That is not a
+proof that no conforming file reaches the refusal: a writer that put a page
+declaring values past the chunk's own `num_values` would reach it.
+
+**Whether every real lake file conforms is UNMEASURED.** `~/.brutex/lake` was
+not present when D-0776 was written, and every test in `tests/real_lake.rs` is
+`#[ignore]`d with the reason "needs ~/.brutex/lake, which cannot be tracked". A
+writer that padded a chunk past its last page, or wrote a page the chunk's
+count does not cover, would make every read of that file a refusal, named by
+column and byte count rather than a silent read. `cargo test -p lake -- --ignored` on a machine with the lake
+would measure it on the files those tests decode — the two named samples and
+the month files under the first 40 NSE F&O directories `read_dir` yields, which
+`a_spread_of_real_files_decodes_with_no_failures` walks — and not on the rest.

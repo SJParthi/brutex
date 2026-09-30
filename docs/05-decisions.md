@@ -43698,8 +43698,9 @@ code origin/main 2c209309 carries and passes with the fix:
   column read now asks for one more record after the declared count, and a
   chunk that has one is `LakeError::LongColumnChunk`, naming the column and the
   declared count. The test lies twice: once in `num_rows` alone, and once with
-  every chunk's `num_values` edited to agree, so the refusal rests on the rows
-  in the pages rather than on two metadata fields disagreeing.
+  every chunk's `num_values` edited to agree. Its fixture writes each chunk as
+  ONE page, so that second lie is still the probe's refusal; on a chunk of
+  several pages it was not, and D-0776 records that gap and its close.
   `reader::tests::a_row_count_that_understates_the_chunk_is_refused_rather_than_truncated_to`.
 
 **GAP14-64, a test gap in the same crate.** Deleting the `NotRepresentable` arm
@@ -43717,3 +43718,57 @@ run identity moves.
 
 **Cost.** The long-chunk probe is one extra `read_records(1, ..)` call per
 column chunk, with two one-element buffers; it is not a per-row operation.
+
+### D-0776 — Count the chunk bytes a declared value count leaves unread, and refuse them — 2026-09-30
+
+**What happened.** D-0775's `LongColumnChunk` probe asks a column for one
+record past the row group's declared `num_rows`. Its test wrote each chunk as a
+single page, and there the probe is enough. On a chunk of several pages it is
+not: `LakePageReader::get_next_page` stops walking once the data pages it has
+returned reach the chunk's declared `num_values`, so a footer that cuts
+`num_rows` AND every chunk's `num_values` to the same page boundary hands the
+column reader exactly the declared rows, the probe finds nothing, and the pages
+after the boundary were dropped without a word — the defect W3-lake1-2 names,
+through a door D-0775 left open. The reverted run of
+`reader::tests::both_counts_understated_on_a_page_boundary_are_refused_rather_than_truncated_to`
+is the evidence: with two four-row pages a column, it printed
+`an 8-row chunk was read as 4 rows`.
+
+**The fix.** The page walk still stops at `num_values` — that stop is what makes
+a `num_values` short of `num_rows` a `ShortColumnChunk` (L-02), and removing it
+would turn that refusal into a silent read. Instead the walk records how many
+chunk bytes it left unread when the declared count stopped it
+(`LakePageReader::stranded`), and a column that otherwise decoded whole with any
+left over is `LakeError::UnreadChunkBytes`, naming the column and the byte
+count. The check runs after `Columns::expand`, so a short chunk, which also
+strands bytes, is still named as short: the L-02 tests are unchanged.
+
+**Pages that cannot hold a row are stepped over before counting.** A first
+draft of this fix counted every byte left unread, and it refused a sound file:
+in a row group of NO rows written by `parquet`'s own writer, the `timestamp`
+chunk holds one dictionary page and nothing else, and a walk whose declared
+count is zero never reads it. Run against that
+draft, `reader::tests::a_sound_row_group_of_no_rows_decodes_to_an_empty_batch`
+failed with `UnreadChunkBytes { column: "timestamp", bytes: 14 }`. The count
+now starts at the first leftover page that is not a dictionary page or a data
+page declaring no values (`page::rowless_extent`); a page holding values, a
+page of any other type, a header that will not parse and a body that runs
+past the chunk all start it. Only headers are parsed there; no body is
+decompressed. `page::tests::a_rowless_page_is_measured_and_anything_else_is_not`
+and `page::tests::a_stopped_walk_counts_from_the_first_page_that_could_hold_a_row`
+pin it.
+
+**Why a leftover row-bearing page is damage.** `parquet-format-safe` 0.2.4
+(`parquet_format.rs`) documents `ColumnMetaData.total_compressed_size` as the
+"total byte size of all compressed, and potentially encrypted, pages in this
+column chunk (including the headers)", and `Columns::pages` slices the chunk to
+exactly that length, so every byte of a conforming chunk belongs to one of its
+pages, and a page holding values past the declared count is values that count
+does not cover. Whether
+every real lake file conforms is **UNMEASURED**: `~/.brutex/lake` is not on the
+machine this was written on, and every test in `tests/real_lake.rs` is
+`#[ignore]`d with the reason "needs ~/.brutex/lake, which cannot be tracked". See `docs/06-limits.md`.
+
+**Cost.** When a walk stops: one header parse per rowless page it steps over,
+then one atomic store; one atomic load per column chunk. Nothing per row. No run identity moves: no workspace crate depends on
+`lake`.

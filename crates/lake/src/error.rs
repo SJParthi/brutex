@@ -212,6 +212,24 @@ pub enum LakeError {
         declared: usize,
     },
 
+    /// A column chunk still held bytes after the page walk stopped at its
+    /// declared value count.
+    ///
+    /// The case [`Self::LongColumnChunk`] cannot see: a footer that understates
+    /// the row group's `num_rows` and the chunk's `num_values` together, on a
+    /// page boundary. The walk stops there, the column reader is handed exactly
+    /// the declared rows, and the pages after it were dropped without a word.
+    /// The format makes a chunk's byte range exactly its pages, so bytes left
+    /// over are pages the declared counts do not cover. Leftover pages that
+    /// cannot hold a row — a dictionary page, a data page declaring no values
+    /// — are stepped over before counting. W3-lake1-2.
+    UnreadChunkBytes {
+        /// The column whose chunk held more.
+        column: &'static str,
+        /// How many bytes of the chunk were never read.
+        bytes: usize,
+    },
+
     /// A column that must never be null was null.
     ///
     /// Measured across 170,547 F&O rows and 78,448 cash/index rows: timestamp,
@@ -341,6 +359,10 @@ impl fmt::Display for LakeError {
             Self::LongColumnChunk { column, declared } => write!(
                 f,
                 "column `{column}` holds more than the {declared} rows its row group declares; refusing rather than reading the declared prefix and dropping the rest"
+            ),
+            Self::UnreadChunkBytes { column, bytes } => write!(
+                f,
+                "column `{column}` still holds {bytes} bytes of pages after its declared value count was read; refusing rather than dropping whatever rows those pages hold"
             ),
             Self::UnexpectedNull { column, row } => write!(
                 f,
@@ -601,6 +623,13 @@ mod tests {
                     declared: 4,
                 },
                 "volume",
+            ),
+            (
+                LakeError::UnreadChunkBytes {
+                    column: "close",
+                    bytes: 517,
+                },
+                "517",
             ),
             (
                 LakeError::UnexpectedNull {

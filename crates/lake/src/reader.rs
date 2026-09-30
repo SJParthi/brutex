@@ -19,6 +19,7 @@
 
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use brutex_core::price::Paisa;
 use bytes::Bytes;
@@ -178,6 +179,8 @@ impl LakeFile {
     /// [`LakeError::PageDecode`] if a page will not decode;
     /// [`LakeError::LongColumnChunk`] if a column holds more rows than the
     /// group declares;
+    /// [`LakeError::UnreadChunkBytes`] if a column chunk holds pages past
+    /// its declared value count;
     /// [`LakeError::UnexpectedNull`] if a column that must not be null is;
     /// [`LakeError::OpenInterestIsNullSentinel`] if a present open interest
     /// equals the null sentinel;
@@ -544,11 +547,28 @@ impl<'a> Columns<'a> {
     /// file. So one more record is asked for after the declared count; a chunk
     /// that answers with any is [`LakeError::LongColumnChunk`]. That is one
     /// extra call per column chunk, not per row. W3-lake1-2.
+    ///
+    /// **One lie the probe cannot see: both counts understated on a page
+    /// boundary.** The page walk stops at the chunk's declared `num_values`,
+    /// so a footer that cuts `num_rows` and `num_values` to the same page
+    /// boundary hands the column reader exactly the declared rows and no page
+    /// past them; the probe then finds nothing. The walk counts the chunk
+    /// bytes it left unread from the first page that could hold a row
+    /// (`LakePageReader::stranded`), and a column that
+    /// otherwise decoded whole with any left over is
+    /// [`LakeError::UnreadChunkBytes`]. That check runs after `Self::expand`
+    /// so that a `num_values` short of `num_rows` — which also leaves bytes
+    /// unread — is still named as the short chunk it is. One atomic load per
+    /// column chunk.
     fn read_exactly<T: DataType>(
         mut reader: ColumnReaderImpl<T>,
+        stranded: &AtomicUsize,
         name: &'static str,
         rows: usize,
-    ) -> Result<(Vec<T::T>, Vec<i16>), LakeError> {
+    ) -> Result<Vec<Option<T::T>>, LakeError>
+    where
+        T::T: Copy,
+    {
         let decode = |e: parquet::errors::ParquetError| LakeError::PageDecode {
             column: name.to_owned(),
             reason: e.to_string(),
@@ -570,40 +590,44 @@ impl<'a> Columns<'a> {
                 declared: rows,
             });
         }
-        Ok((values, defs))
+        let out = Self::expand(name, &values, &defs, rows)?;
+        let bytes = stranded.load(Ordering::Relaxed);
+        if bytes != 0 {
+            return Err(LakeError::UnreadChunkBytes {
+                column: name,
+                bytes,
+            });
+        }
+        Ok(out)
     }
 
     fn int64(&mut self, name: &'static str) -> Result<Vec<Option<i64>>, LakeError> {
         let (pages, i) = self.pages(name)?;
+        let stranded = pages.stranded();
         let desc = self.file.meta.file_metadata().schema_descr().column(i);
         match parquet::column::reader::get_column_reader(desc, Box::new(pages)) {
-            ColumnReader::Int64ColumnReader(r) => {
-                let (values, defs) = Self::read_exactly(r, name, self.rows)?;
-                Self::expand(name, &values, &defs, self.rows)
-            }
+            ColumnReader::Int64ColumnReader(r) => Self::read_exactly(r, &stranded, name, self.rows),
             _ => Err(self.mismatch(name)),
         }
     }
 
     fn int32(&mut self, name: &'static str) -> Result<Vec<Option<i32>>, LakeError> {
         let (pages, i) = self.pages(name)?;
+        let stranded = pages.stranded();
         let desc = self.file.meta.file_metadata().schema_descr().column(i);
         match parquet::column::reader::get_column_reader(desc, Box::new(pages)) {
-            ColumnReader::Int32ColumnReader(r) => {
-                let (values, defs) = Self::read_exactly(r, name, self.rows)?;
-                Self::expand(name, &values, &defs, self.rows)
-            }
+            ColumnReader::Int32ColumnReader(r) => Self::read_exactly(r, &stranded, name, self.rows),
             _ => Err(self.mismatch(name)),
         }
     }
 
     fn double(&mut self, name: &'static str) -> Result<Vec<Option<f64>>, LakeError> {
         let (pages, i) = self.pages(name)?;
+        let stranded = pages.stranded();
         let desc = self.file.meta.file_metadata().schema_descr().column(i);
         match parquet::column::reader::get_column_reader(desc, Box::new(pages)) {
             ColumnReader::DoubleColumnReader(r) => {
-                let (values, defs) = Self::read_exactly(r, name, self.rows)?;
-                Self::expand(name, &values, &defs, self.rows)
+                Self::read_exactly(r, &stranded, name, self.rows)
             }
             _ => Err(self.mismatch(name)),
         }
@@ -1014,6 +1038,13 @@ mod tests {
     /// values written PRESENT into the `open_interest` column and `0..rows`
     /// into the other two INT64 columns.
     fn cash_file_with_open_interest(open_interest: &[i64]) -> Vec<u8> {
+        cash_file_written(open_interest, None)
+    }
+
+    /// The writer behind [`cash_file`] and [`cash_file_with_open_interest`].
+    /// `Some(n)` caps every data page at `n` rows, so a chunk holds several
+    /// pages; `None` leaves the writer's defaults, one page per chunk here.
+    fn cash_file_written(open_interest: &[i64], page_rows: Option<usize>) -> Vec<u8> {
         let rows = open_interest.len();
         let fields: Vec<Arc<Type>> = CASH
             .iter()
@@ -1032,11 +1063,13 @@ mod tests {
                 .build()
                 .expect("the group type builds"),
         );
-        let props = Arc::new(
-            WriterProperties::builder()
-                .set_compression(Compression::UNCOMPRESSED)
-                .build(),
-        );
+        let mut builder = WriterProperties::builder().set_compression(Compression::UNCOMPRESSED);
+        if let Some(n) = page_rows {
+            builder = builder
+                .set_data_page_row_count_limit(n)
+                .set_write_batch_size(n);
+        }
+        let props = Arc::new(builder.build());
 
         // Every level is 1 — PRESENT — so this file exercises no null path and
         // cannot fail for a reason other than the one under test.
@@ -1223,8 +1256,11 @@ mod tests {
     ///
     /// Two lies are checked. The first edits only the row group's `num_rows`,
     /// the shape the ledger reproduced. The second also edits every chunk's
-    /// `num_values` to agree with it, so the refusal is shown to rest on the
-    /// rows actually in the pages and not on two metadata fields disagreeing.
+    /// `num_values` to agree with it. Each chunk here is ONE page, so the
+    /// second lie is still caught by the one-more-record probe; on a chunk of
+    /// several pages it is not, and
+    /// `both_counts_understated_on_a_page_boundary_are_refused_rather_than_truncated_to`
+    /// covers that case.
     #[test]
     fn a_row_count_that_understates_the_chunk_is_refused_rather_than_truncated_to() {
         const ROWS: usize = 8;
@@ -1263,6 +1299,116 @@ mod tests {
                 Ok(batch) => panic!("an 8-row chunk was read as {} rows", batch.len()),
             }
         }
+    }
+
+    /// **BOTH COUNTS UNDERSTATED ON A PAGE BOUNDARY IS REFUSED TOO.**
+    ///
+    /// The test above writes each chunk as one page, so editing `num_values`
+    /// down changes nothing the page walk does. Here each chunk is two data
+    /// pages of four rows, and the footer says 4 in `num_rows` and in every
+    /// chunk's `num_values`. The walk stops after the first page, the column
+    /// reader sees four rows and nothing past them, and the one-more-record
+    /// probe finds nothing — so before the stranded-byte count this decoded as
+    /// a sound 4-bar batch and the second page of every column was dropped
+    /// without a word. W3-lake1-2.
+    ///
+    /// The fixture is shown to hold two data pages, the sound copy to decode
+    /// all eight rows in order across them, and a lie in `num_rows` alone to
+    /// still be the probe's `LongColumnChunk`.
+    #[test]
+    fn both_counts_understated_on_a_page_boundary_are_refused_rather_than_truncated_to() {
+        const ROWS: usize = 8;
+        const LIE: i64 = 4;
+        let ints: Vec<i64> = (0..8).collect();
+        let sound = cash_file_written(&ints, Some(4));
+
+        let file = LakeFile::from_bytes(sound.clone()).expect("the paged fixture opens");
+        let (pages, _) = Columns::new(&file, 0, ROWS)
+            .pages("timestamp")
+            .expect("the timestamp chunk");
+        let data_pages = pages
+            .map(|p| p.expect("a sound page"))
+            .filter(|p| matches!(p, parquet::column::page::Page::DataPage { .. }))
+            .count();
+        assert_eq!(data_pages, 2, "the fixture really is two pages a column");
+
+        let decoded = file.read_row_group(0).expect("the paged fixture decodes");
+        let stamps: Vec<i64> = decoded.iter().map(|b| b.timestamp_micros).collect();
+        assert_eq!(stamps, ints, "all eight rows, in order, across both pages");
+
+        let rows_only = patch_footer(&sound, |meta| {
+            meta.row_groups[0].num_rows = LIE;
+        });
+        match LakeFile::from_bytes(rows_only)
+            .expect("the footer still parses")
+            .read_row_group(0)
+        {
+            Err(LakeError::LongColumnChunk { column, declared }) => {
+                assert_eq!((column, declared), ("timestamp", 4));
+            }
+            other => panic!("a num_rows lie alone is the probe's refusal, got {other:?}"),
+        }
+
+        let both = patch_footer(&sound, |meta| {
+            meta.row_groups[0].num_rows = LIE;
+            for chunk in &mut meta.row_groups[0].columns {
+                chunk
+                    .meta_data
+                    .as_mut()
+                    .expect("the writer records chunk metadata")
+                    .num_values = LIE;
+            }
+        });
+        let file = LakeFile::from_bytes(both).expect("the footer still parses");
+        assert_eq!(file.num_rows(), 8, "the file-level count is untouched");
+        match file.read_row_group(0) {
+            Err(e @ LakeError::UnreadChunkBytes { column, bytes }) => {
+                assert_eq!(column, "timestamp", "the first column read refuses");
+                assert!(bytes > 0, "the unread second page is counted");
+                assert!(
+                    e.to_string().contains(&bytes.to_string()),
+                    "the refusal names the byte count: {e}"
+                );
+            }
+            Err(other) => panic!("refused for the wrong reason: {other:?}"),
+            Ok(batch) => panic!("an 8-row chunk was read as {} rows", batch.len()),
+        }
+    }
+
+    /// **A SOUND ROW GROUP OF NO ROWS STILL DECODES, EMPTY.**
+    ///
+    /// `parquet`'s writer gives the `timestamp` chunk of an empty row group a
+    /// dictionary page. The page walk, whose declared count is zero, never reads it, so a
+    /// count of every byte left unread refused this sound file as
+    /// `UnreadChunkBytes`. A page that cannot hold a row is stepped over
+    /// instead. The fixture is shown to carry that page: read with the chunk's
+    /// declared count raised, the timestamp chunk yields one dictionary page
+    /// and nothing else. W3-lake1-2.
+    #[test]
+    fn a_sound_row_group_of_no_rows_decodes_to_an_empty_batch() {
+        let sound = cash_file(0);
+        let file = LakeFile::from_bytes(sound.clone()).expect("the empty fixture opens");
+        assert_eq!((file.row_groups(), file.num_rows()), (1, 0));
+        let batch = file.read_row_group(0).expect("an empty group decodes");
+        assert_eq!(batch.len(), 0);
+
+        let widened = patch_footer(&sound, |meta| {
+            for chunk in &mut meta.row_groups[0].columns {
+                chunk
+                    .meta_data
+                    .as_mut()
+                    .expect("the writer records chunk metadata")
+                    .num_values = 1;
+            }
+        });
+        let file = LakeFile::from_bytes(widened).expect("the widened copy opens");
+        let (pages, _) = Columns::new(&file, 0, 0)
+            .pages("timestamp")
+            .expect("the timestamp chunk");
+        let kinds: Vec<parquet::basic::PageType> = pages
+            .map(|p| p.expect("a sound page").page_type())
+            .collect();
+        assert_eq!(kinds, [parquet::basic::PageType::DICTIONARY_PAGE]);
     }
 
     #[test]
