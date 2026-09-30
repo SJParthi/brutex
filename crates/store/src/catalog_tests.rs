@@ -8,13 +8,37 @@
 use super::{CatalogError, Census, Holdings, admit, bars_present, classify, parse_month, walk};
 use std::path::{Path, PathBuf};
 
+/// A scratch tree that removes itself when the test that owns it ends, so a
+/// run leaves nothing under the system temporary root (found by a review:
+/// these trees were removed only before a test, never after).
+struct Scratch(PathBuf);
+
+impl std::ops::Deref for Scratch {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for Scratch {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// A private directory under the system temporary root, named for its test.
-fn scratch(name: &str) -> PathBuf {
+fn scratch(name: &str) -> Scratch {
     let mut root = std::env::temp_dir();
     root.push(format!("brutex-catalog-unit-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).expect("scratch root is creatable");
-    root
+    Scratch(root)
 }
 
 /// An empty file at `root/bars/<rel>`, parents created.
@@ -343,5 +367,19 @@ fn the_unoffered_report_names_every_unwalked_bucket_and_is_silent_otherwise() {
         lost.unoffered_report(),
         "CATALOG CENSUS DOES NOT RECONCILE: 5 entries seen, 3 filed. An entry has been lost, \
          which is the silent shortfall CLAUDE.md §4 bans.\n"
+    );
+}
+
+#[test]
+fn a_scratch_tree_is_removed_when_its_test_ends() {
+    let root = scratch("self-removing");
+    put(&root, "groww/NSE/INDEX/NIFTY/1min/2026-08.bin");
+    let path = root.to_path_buf();
+    assert!(path.join("bars").is_dir(), "premise: the tree was built");
+    drop(root);
+    assert!(
+        std::fs::symlink_metadata(&path).is_err(),
+        "{} was left behind",
+        path.display()
     );
 }

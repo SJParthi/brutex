@@ -27,13 +27,37 @@ use std::path::{Path, PathBuf};
 use store::catalog::{self, Census};
 use store::path::{Timeframe, YearMonth};
 
+/// A scratch tree that removes itself when the test that owns it ends, so a
+/// run leaves nothing under the system temporary root (found by a review:
+/// these trees were removed only before a test, never after).
+struct Scratch(PathBuf);
+
+impl std::ops::Deref for Scratch {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for Scratch {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// A private directory, named for the test that owns it so two can run at once.
-fn scratch(name: &str) -> PathBuf {
+fn scratch(name: &str) -> Scratch {
     let mut root = std::env::temp_dir();
     root.push(format!("brutex-catalog-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).expect("scratch root is creatable");
-    root
+    Scratch(root)
 }
 
 /// Writes an empty file at `root/bars/<rel>`, creating parents.
@@ -592,4 +616,18 @@ fn a_socket_named_like_a_month_is_not_a_held_month() {
     let months: Vec<String> = out.held.iter().map(|h| h.month.to_string()).collect();
     assert_eq!(months, vec!["2026-08".to_owned()]);
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_scratch_tree_is_removed_when_its_test_ends() {
+    let root = scratch("self-removing");
+    put(&root, "groww/NSE/INDEX/NIFTY/1min/2026-08.bin");
+    let path = root.to_path_buf();
+    assert!(path.join("bars").is_dir(), "premise: the tree was built");
+    drop(root);
+    assert!(
+        std::fs::symlink_metadata(&path).is_err(),
+        "{} was left behind",
+        path.display()
+    );
 }
