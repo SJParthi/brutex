@@ -43690,3 +43690,46 @@ rewrites the selector word to `4` and requires the named refusal.
 D-0594 named `execution_capability` as "the only one with a DECODE side";
 `boolean_candidate_grid::decode_policy` is a second, and it is the one that
 was not moved. D-0594 is left as written.
+
+### D-0923 — Join an audited span's months once, and record two per-call rescans as limits — 2026-09-30
+
+**W2-cli1-1, fixed.** `audited_range::Builder::append` reserved exactly each
+month's bars on the growing span (`span.bars.try_reserve_exact(loaded.bars.len())`)
+and then extended it, so an append could relocate every bar already held, and
+M appends could copy Theta(M^2 x bars-per-month) bars. The builder now keeps
+the first month's bars as the span and holds every later non-empty month apart;
+`finish` sums the held months, makes one exact reservation, and copies each
+held bar once. The month-boundary check reads the newest held month's last bar,
+falling back to the span's, so it stays one look rather than a walk.
+`appending_a_month_never_relocates_the_bars_already_held` appends 256 months of
+7 bars, requires the first month's buffer pointer and capacity to be unchanged
+after every append, requires the finished span's capacity to equal its length,
+and requires every bar in order; on the previous code it failed at month 1
+with the capacity grown from 7 to 14.
+`a_month_stepping_back_onto_an_appended_month_is_refused` requires the
+backward-step refusal against a held month and an empty month to add no bar.
+What each month decodes and what the finished span holds are unchanged, so no
+run identity moves.
+
+**W2-cli1-0, recorded, not fixed.** `AnchoredSearchLineageV4Ledger::append_completion`
+ends with `self.scan()`, and `scan` re-reads and re-validates every completed
+pair (`for sequence in 0..completion_records`). Removing that rescan would not
+change the class of a persist: `persist_anchored_search_lineage_v4` calls
+`AnchoredSearchLineageV4Ledger::open_write(root, bounds)` and later
+`AnchoredSearchLineageV4Ledger::open_read(root, bounds)`, and `open` hashes the
+lock, member and Completion files through `file_generation` and then calls
+`ledger.scan()`. The module rustdoc already states this path is
+"O(file bytes + pair records), not O(1)". The consequence, that N persists to
+one root cost Theta(N^2) in the records already written, is recorded in
+`docs/06-limits.md`.
+
+**W2-cli2-7, recorded, not fixed.** In `boolean_search_command::execute_observed`,
+a new batch calls `request.prepare(batch.programs(), false, ...)` and
+`request.prepare(batch.programs(), true, ...)` for its declaration, and the
+work phase calls the same pair again before comparing the plan
+(`"search batch pre-work qualification plan changed"`). Each call reaches
+`boolean_campaign::prepare`, which builds `prepared::Prepared::new` over the
+sources before `prepare_resolved(request, input, commit)` takes that
+preparation by value. Reusing one preparation across the calls would change
+that ownership, so the cost is recorded in `docs/06-limits.md` rather than
+changed here.
