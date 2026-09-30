@@ -224,9 +224,11 @@ fn walk_within(
         return Err("AND final checkpoint differs from its acknowledged publication".into());
     }
     let named = decode_boundary(&final_saved.payload, final_saved.sequence)?;
-    for piece in named.levels.iter().flatten() {
-        if journal.read(piece.sequence, limits.entry)?.seal != piece.seal {
-            return Err("AND final checkpoint chunk differs from its acknowledgment".into());
+    for (level, pieces) in named.levels.iter().enumerate() {
+        for (index, piece) in pieces.iter().enumerate() {
+            if read_named(&journal, piece, level, index, limits)?.seal != piece.seal {
+                return Err("AND final checkpoint chunk differs from its acknowledgment".into());
+            }
         }
     }
     Ok(sweep)
@@ -236,9 +238,10 @@ fn walk_within(
 ///
 /// The newest entry is either that boundary, or a chunk of the level after it
 /// that an interrupted boundary never acknowledged. Such a chunk names the
-/// boundary it followed, so recovery reads exactly one extra entry and scans
-/// nothing. A depth-1 chunk that follows no boundary means none was ever
-/// acknowledged.
+/// boundary it followed. Past the journal's own open-time discovery, in which
+/// `Journal::open` lists the identity's whole entry directory, recovery reads
+/// the newest entry and at most one more, the boundary that chunk names. A
+/// depth-1 chunk that follows no boundary means none was ever acknowledged.
 fn recover(journal: &Journal, limits: Limits) -> Result<Option<(u64, [u8; 32], Boundary)>, String> {
     let Some(latest) = journal.latest(limits.entry)? else {
         return Ok(None);
@@ -367,10 +370,16 @@ impl Write for Chunks<'_> {
             }
             if self.buffer.is_empty() {
                 let index = u64::try_from(self.pieces.len()).map_err(io::Error::other)?;
-                // Whole, once: a no-op for every chunk after the level's first.
-                self.buffer
-                    .try_reserve_exact(full)
-                    .map_err(io::Error::other)?;
+                // Whole, once: every later chunk of the level finds the
+                // buffer the last one was published from, emptied with its
+                // capacity kept.
+                if self.buffer.capacity() < full {
+                    #[cfg(test)]
+                    tests::RESERVATIONS.with(|count| count.set(count.get() + 1));
+                    self.buffer
+                        .try_reserve_exact(full)
+                        .map_err(io::Error::other)?;
+                }
                 for word in [
                     u64::from_le_bytes(CHUNK_MAGIC),
                     self.depth,
@@ -596,7 +605,7 @@ impl Replay<'_> {
             // Release the chunk just read before reading the next, so two
             // chunk payloads are never held at once.
             self.chunk = Vec::new();
-            let saved = self.journal.read(piece.sequence, self.limits.entry)?;
+            let saved = read_named(self.journal, piece, self.level, self.piece, self.limits)?;
             let [_, depth, index, _] = chunk_header(&saved.payload)?;
             if saved.seal != piece.seal
                 || u64::try_from(saved.payload.len()).map_err(error)?
@@ -633,6 +642,26 @@ impl Read for Replay<'_> {
         self.at += taken;
         Ok(taken)
     }
+}
+
+/// Reads the chunk a boundary record names as `level`'s chunk `index`
+/// (both from zero). A read that fails, an entry vanished or left without
+/// its completion marker among them, refuses naming the chunk's sequence and
+/// its one-based depth and zero-based index beside the journal's own reason.
+fn read_named(
+    journal: &Journal,
+    piece: &Piece,
+    level: usize,
+    index: usize,
+    limits: Limits,
+) -> Result<crate::search_checkpoint::Saved, String> {
+    journal.read(piece.sequence, limits.entry).map_err(|why| {
+        format!(
+            "AND checkpoint chunk {} (depth {}, index {index}) named by its boundary record cannot be read: {why}",
+            piece.sequence,
+            level.saturating_add(1)
+        )
+    })
 }
 
 fn validate_rows(checkpoint: &Checkpoint, rows: &[DepthRow]) -> Result<(), String> {

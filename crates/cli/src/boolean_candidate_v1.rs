@@ -892,7 +892,8 @@ impl<'a> Shared<'a> {
 /// `attest_training` reads the series, the column and the resolution, never a
 /// run; its own contract is to attest once and evaluate per candidate. Each
 /// program × side used to attest afresh. Attesting on first use keeps the
-/// refusal inside the first program's attempt, where it was. W2-cli2-3.
+/// refusal inside the first program's attempt, where it was. W2-cli2-3;
+/// `a_refused_attestation_is_recorded_inside_the_first_sides_attempt`.
 struct PricedSide<'a> {
     resolved: &'a ResearchResolvedExitGridV1,
     attested: Option<AttestedTrainingV1<'a>>,
@@ -912,6 +913,10 @@ impl<'a> PricedSide<'a> {
         } else {
             #[cfg(test)]
             tests::count(&tests::ATTESTATIONS);
+            #[cfg(test)]
+            if let Some(why) = tests::attest_fault() {
+                return Err(why);
+            }
             self.resolved
                 .attest_training(shared.series, shared.column, shared.horizon)
                 .map_err(display)?

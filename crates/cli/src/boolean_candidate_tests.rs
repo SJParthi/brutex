@@ -540,6 +540,10 @@ std::thread_local! {
     pub(super) static DIGESTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// TRAINING attestations [`super::PricedSide`] has made on this thread.
     pub(super) static ATTESTATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// A refusal the next TRAINING attestation on this thread returns instead
+    /// of attesting, once.
+    static ATTEST_FAULT: std::cell::RefCell<Option<Box<dyn FnOnce() -> String>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 pub(super) fn count(counter: &'static std::thread::LocalKey<std::cell::Cell<u64>>) {
@@ -579,5 +583,66 @@ fn cli_digests_a_familys_source_once_and_attests_each_side_once() -> Result<(), 
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(priced.len(), 6, "three programs, both sides, all priced");
     assert_eq!((after.0 - before.0, after.1 - before.1), (1, 2));
+    Ok(())
+}
+
+/// The injected refusal, if one is installed, taken so it fires once.
+pub(super) fn attest_fault() -> Option<String> {
+    ATTEST_FAULT
+        .with(|slot| slot.borrow_mut().take())
+        .map(|fault| fault())
+}
+
+/// **A TRAINING attestation that refuses is refused inside the first
+/// program's first-side attempt, not ahead of the program loop.** The first
+/// attestation is made to refuse. When it runs, the newest evidence attempt
+/// is that side's `Expression` attempt, still running; after the refusal that
+/// exact attempt is `Refused`, the family's own attempt is `Refused` after
+/// it, and only the one attestation was tried. An attestation hoisted ahead
+/// of the loop would run with the family's `BooleanCandidates` attempt newest
+/// and no `Expression` attempt begun. W2-cli2-3, D-0716.
+#[test]
+fn a_refused_attestation_is_recorded_inside_the_first_sides_attempt() -> Result<(), String> {
+    let fixture = Fixture::new()?;
+    let programs = programs()?;
+    let output = fixture.output.clone();
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let during = std::rc::Rc::clone(&seen);
+    ATTEST_FAULT.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || {
+            *during.borrow_mut() = Some(crate::sweep_evidence::latest(&output, 1 << 20));
+            "injected TRAINING attestation refusal".to_owned()
+        }));
+    });
+    let before = passes();
+    let refused = fixture
+        .produce("NIFTY", &programs)
+        .err()
+        .ok_or("family completed")?;
+    assert!(
+        refused.contains("injected TRAINING attestation refusal"),
+        "{refused}"
+    );
+    assert_eq!(passes().1 - before.1, 1, "one attestation tried");
+    let side = seen
+        .borrow_mut()
+        .take()
+        .ok_or("the attestation never ran")??
+        .ok_or("no attempt existed when the attestation ran")?;
+    assert_eq!(
+        (side.operation, side.completion),
+        (Operation::Expression, Completion::Running)
+    );
+    let recorded =
+        crate::sweep_evidence::read_attempt(&fixture.output, side.identity, side.attempt, 1 << 20)?
+            .ok_or("the side's attempt vanished")?;
+    assert_eq!(recorded.completion, Completion::Refused);
+    let family =
+        crate::sweep_evidence::latest(&fixture.output, 1 << 20)?.ok_or("no family attempt")?;
+    assert_eq!(
+        (family.operation, family.completion),
+        (Operation::BooleanCandidates, Completion::Refused)
+    );
+    assert!(family.attempt < side.attempt);
     Ok(())
 }

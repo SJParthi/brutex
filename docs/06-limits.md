@@ -8832,6 +8832,18 @@ more than one chunk of one level.
   (C4-CLI-07).
 - **The admission that remains.** A boundary record that cannot fit one entry
   refuses, naming its size and the admission (C4-CLI-07).
+- **The journal's open-time scan.** Every walk, fresh or resumed, first opens
+  its journal, and `Journal::open` lists the identity's whole entry directory
+  with `read_dir`, refusing past `DIRECTORY_LIMIT` entries, before recovery
+  reads anything. Version 2 publishes at least two entries per boundary, one
+  or more chunks and then the boundary record (20 chunks and a boundary record
+  per depth in C4-CLI-06's SMALL fixture), and orphaned chunks stay in the
+  directory, so that scan lists more entries than version 1's one entry per
+  boundary. The scan is linear in the entry count. Not timed.
+- **A named chunk that cannot be read.** A chunk the newest boundary names that
+  has vanished or lost its completion marker refuses the resume, or the final
+  re-read, naming its sequence, depth and index beside the journal's reason
+  (C4-CLI-14). A refused rerun runs no callback and publishes nothing.
 
 ## A resumed Boolean campaign rung prices its pinned families again — D-0713, 27 September 2026
 

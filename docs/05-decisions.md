@@ -38489,7 +38489,8 @@ hashing or attesting again, the counters kept) the two tests fail again with
 first program's first side where it did on `origin/main`: the digest before
 that side's attempt begins, the attestation inside it. Hoisting the attestation
 ahead of the program loop would refuse before any per-program attempt exists,
-changing the evidence a refused family leaves.
+changing the evidence a refused family leaves. D-0716 adds the test that holds the
+attestation half (C4-CLI-13).
 
 **Same bytes.** The fixture family's identity and completion digest, and its
 later comparison's, printed from `origin/main` and from this change, are equal:
@@ -38632,14 +38633,74 @@ writes a 2,400-byte level eight bytes at a time under 1,024-byte chunks.
 Against 1648a0f8's `and_checkpoint.rs` it failed at its first check, that after
 the first write the buffer holds a chunk header and a whole chunk.
 
-**The change.** When a chunk begins, the buffer is reserved
-`try_reserve_exact(full)`, `full` being the header and a whole chunk, and after
-each publish the same buffer is cleared and put back. The reservation is
-therefore made once per level, a no-op for each later chunk, and no later byte
-grows or moves the buffer: the test holds its pointer and capacity over all 300
-writes and three chunks, published as 1,024, 1,024 and 352 bytes. The per-write
+**The change.** When a chunk begins with a buffer below `full` capacity, `full`
+being the header and a whole chunk, the buffer is reserved
+`try_reserve_exact(full)`, and after each publish the same buffer is cleared and
+put back. The reservation is therefore made once per level and no later byte
+grows or moves the buffer: the test counts exactly one reservation, where it is
+made, across three chunks published as 1,024, 1,024 and 352 bytes, and holds the
+buffer's pointer and capacity over all 300 writes (D-0716: the pointer alone
+cannot tell reuse from a chunk freed and allocated again at the same address). The per-write
 `try_reserve` is gone, since no write passes a full chunk.
 
 **The cost, stated.** A level smaller than a chunk still reserves a whole one:
 `CHUNK_HEADER + CHUNK_BYTES` bytes at production sizes, however few bytes the
 level writes. Not timed, and what the allocator commits for it is not measured.
+
+### D-0716 — Pin the AND checkpoint's depth-row check, its one reservation and its named-chunk refusal, and the attestation's place — 2026-10-01
+
+Round-4 review findings on D-0711, D-0712 and D-0715.
+
+**The depth-row check had lost its test.** Version 2 deleted
+`wrapper_counters_lengths_and_bounded_writer_refuse_without_truncation`, the one
+test that changed a recovered record's depth-row counters and required
+`validate_rows` to refuse, and its replacement altered only the reconciliation
+byte, which `DepthRow::from_words` refuses before `validate_rows` runs. The
+round-4 review found every AND checkpoint test passing with `validate_rows`
+returning `Ok(())` at once.
+`recovered_depth_rows_must_agree_with_the_replayed_search` changes one counter
+at a time in the depth-2 record's bytes (depth 1's admissions and pair
+iterations; depth 2's generated candidates, admissions, pair iterations below
+its admissions and pair iterations of `u64::MAX`), and a row history shorter than
+the replayed levels; each refuses in `validate_rows`' own words (C4-CLI-12).
+With `validate_rows` returning `Ok(())` at once it fails.
+
+**One reservation per level, counted where it is made.** D-0715's test held the
+buffer's pointer and capacity, and a chunk freed and allocated again at the same
+size came back at the same address, so it also passed with the buffer dropped
+after each publish. `Chunks::write` now reserves only when the buffer's capacity
+is below a whole chunk, and a test-only thread-local counter at that call
+(`RESERVATIONS`) lets the test require exactly one reservation for a three-chunk
+level (C4-CLI-11). With the buffer dropped after each publish the count is
+three and the test fails.
+
+**The attestation's place is held by a test.** D-0711 and the `PricedSide` doc
+comment said a refused TRAINING attestation stays inside the first program's
+attempt, and the round-4 review found every Boolean test passing with the
+attestation hoisted ahead of the program loop. A test-only hook (`ATTEST_FAULT`) makes the first
+attestation refuse and records the newest evidence attempt as it does:
+`a_refused_attestation_is_recorded_inside_the_first_sides_attempt` requires
+that attempt to be an `Expression` attempt still running, then `Refused`, with
+the family's `BooleanCandidates` attempt `Refused` after it and one attestation
+tried (C4-CLI-13). Hoisted, the newest attempt when the attestation runs is the
+family's, and the test fails.
+
+**A named chunk that cannot be read says which.** A chunk the newest boundary
+names that had vanished, or lost its completion marker, refused a resume with
+the operating system's words alone. `read_named` now carries the chunk's
+sequence, its one-based depth and its index beside the journal's reason, for the
+replay and for the final re-read alike (C4-CLI-14).
+
+**Documented, not changed.** `recover` reads the newest entry and at most one
+more, but only after `Journal::open` has listed the identity's whole entry
+directory; version 2 writes at least two entries a boundary, and orphans stay.
+`docs/06-limits.md` states that scan. `docs/22-expression-search.md` named
+`and-checkpoint-v1` as the AND namespace; it now names `and-checkpoint-v2`.
+
+**Kept open, not fixed here.** W2-cli2-8 (D-0713): a resumed `Refused` or
+`Running` campaign rung prices its pinned families again, because
+`statistics::produce` takes `CommittedBooleanFamilyV1` by value and the saved-body
+reader rebuilds rows with `selected: None`; skipping them needs a runner
+constructor that re-mints a family's capabilities from its sealed bytes. The
+runner's per program × side digests (W3-runner2-3, W3-runner2-4, W3-runner2-5)
+stay with the runner group, as D-0711 records.

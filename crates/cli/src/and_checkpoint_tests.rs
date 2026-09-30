@@ -22,6 +22,11 @@ const SMALL: Limits = Limits {
 const fn chunk(bytes: usize) -> NonZeroUsize {
     NonZeroUsize::new(bytes).unwrap()
 }
+std::thread_local! {
+    /// Chunk buffers [`super::Chunks`] has reserved on this thread.
+    pub(super) static RESERVATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 const LENGTHS: &str = "AND checkpoint boundary has invalid exact lengths";
 const LEVEL: &str = "AND checkpoint boundary names an empty or excess level";
 const ORDER: &str = "AND checkpoint boundary chunk order or length is invalid";
@@ -1300,10 +1305,14 @@ fn a_replay_releases_each_chunk_before_reading_the_next() -> Result<(), String> 
 /// A level's chunks share one buffer, reserved whole -- the chunk header and a
 /// full chunk of level bytes -- when the level's first byte arrives. Written
 /// eight bytes at a time, as the engine writes, a 2,400-byte level under
-/// 1,024-byte chunks never moves or grows that buffer, and is published as
-/// chunks of 1,024, 1,024 and 352 bytes.
+/// 1,024-byte chunks never moves or grows that buffer, reserves exactly once
+/// across its three chunks, and is published as chunks of 1,024, 1,024 and
+/// 352 bytes. The reservation is counted where it is made, not inferred from
+/// the buffer's address: a chunk freed and allocated again at the same size
+/// can come back at the same address.
 #[test]
 fn a_levels_chunks_share_one_buffer_reserved_whole() -> Result<(), String> {
+    let before = RESERVATIONS.with(std::cell::Cell::get);
     let scratch = Scratch::new().map_err(error)?;
     let mut journal = Journal::open(&scratch.0, NAMESPACE, ID)?;
     let mut writer = Chunks {
@@ -1325,6 +1334,156 @@ fn a_levels_chunks_share_one_buffer_reserved_whole() -> Result<(), String> {
     assert_eq!(
         pieces.iter().map(|piece| piece.length).collect::<Vec<_>>(),
         [1024, 1024, 352]
+    );
+    assert_eq!(RESERVATIONS.with(std::cell::Cell::get) - before, 1);
+    Ok(())
+}
+
+/// **A recovered record's depth rows must agree with the replayed search.**
+/// Starting from the depth-2 boundary record, one depth-row counter is
+/// changed at a time in the record's bytes -- depth 1's admissions and pair
+/// iterations, depth 2's admissions, generated candidates, and pair
+/// iterations set below its admissions or to `u64::MAX` -- and each record
+/// still decodes but its replay refuses, in `validate_rows`' own words. A row
+/// history one row shorter than the replayed levels refuses as a length
+/// mismatch.
+#[test]
+fn recovered_depth_rows_must_agree_with_the_replayed_search() -> Result<(), String> {
+    const DIFFERS: &str = "AND checkpoint depth history differs from the retained search";
+    const FINAL: &str = "AND checkpoint final counters disagree";
+    let scratch = Scratch::new().map_err(error)?;
+    let (journal, saved, boundary) = paused_at_depth_two(&scratch)?;
+    let second = *boundary.rows.get(1).ok_or("depth 2 row")?;
+    assert!(second.admitted > 0 && second.pairs >= second.admitted);
+    // A row's words: k, generated, duplicates, pruned, infrequent, frequent,
+    // admitted, pairs, reconciles, excluded.
+    let word = |row: usize, index: usize| BOUNDARY_HEADER + row * DEPTH_BYTES + index * 8;
+    for (offset, value, refusal) in [
+        (word(0, 6), 1, DIFFERS),
+        (word(0, 7), 1, DIFFERS),
+        (word(1, 1), second.generated + 1, DIFFERS),
+        (word(1, 6), second.admitted + 1, DIFFERS),
+        (word(1, 7), second.admitted - 1, DIFFERS),
+        (word(1, 7), u64::MAX, FINAL),
+    ] {
+        let mut altered = saved.payload.clone();
+        altered
+            .get_mut(offset..offset + 8)
+            .ok_or("fixture field")?
+            .copy_from_slice(&value.to_le_bytes());
+        let decoded = decode_boundary(&altered, saved.sequence)?;
+        assert_eq!(
+            replay(&journal, &decoded, ID, SMALL).err().as_deref(),
+            Some(refusal),
+            "offset {offset} value {value}"
+        );
+    }
+    let shorter = Boundary {
+        rows: boundary.rows.iter().take(1).copied().collect(),
+        prefix: boundary.prefix.clone(),
+        levels: boundary.levels.clone(),
+    };
+    assert_eq!(
+        replay(&journal, &shorter, ID, SMALL).err().as_deref(),
+        Some("AND checkpoint depth history length mismatch")
+    );
+    Ok(())
+}
+
+/// Removes entry `sequence`'s completion marker, and with `vanish` its payload
+/// and its directory too, from this identity's journal under `root`.
+fn unmark(root: &Path, sequence: u64, vanish: bool) -> Result<(), String> {
+    let entry = namespace(root)?.join(format!("{sequence:016x}"));
+    fs::remove_file(entry.join("complete")).map_err(error)?;
+    if vanish {
+        fs::remove_file(entry.join("payload")).map_err(error)?;
+        fs::remove_dir(&entry).map_err(error)?;
+    }
+    Ok(())
+}
+
+/// **A chunk the newest boundary names that cannot be read refuses naming
+/// it.** After a completed SMALL walk, depth 2's second chunk loses its
+/// completion marker or vanishes whole; a rerun refuses before any callback,
+/// naming that chunk's sequence, depth and index beside the journal's own
+/// reason inside the engine decoder's I/O refusal, and publishes nothing.
+/// During a walk, level 1's chunk losing its marker after the terminal
+/// callback refuses the final re-read in the same words, naming depth 1,
+/// index 0.
+#[test]
+fn an_unreadable_named_chunk_refuses_naming_its_sequence_depth_and_index() -> Result<(), String> {
+    for vanish in [false, true] {
+        let scratch = Scratch::new().map_err(error)?;
+        let attempt = sweep_evidence::begin(&scratch.0, ID, Operation::Sweep)?;
+        walk_within(
+            &scratch.0,
+            &attempt,
+            Ladder::with_min_hits(1),
+            &column()?,
+            &POSITIONS,
+            SMALL,
+            &mut |_| Ok(()),
+        )?;
+        attempt.finish(Completion::Completed)?;
+        let (last, boundary) = newest_boundary(&scratch.0)?;
+        let target = *boundary
+            .levels
+            .get(1)
+            .and_then(|level| level.get(1))
+            .ok_or("depth 2 second chunk")?;
+        unmark(&scratch.0, target.sequence, vanish)?;
+        let attempt = sweep_evidence::begin(&scratch.0, ID, Operation::Sweep)?;
+        let mut called = false;
+        let refused = walk_within(
+            &scratch.0,
+            &attempt,
+            Ladder::with_min_hits(1),
+            &column()?,
+            &POSITIONS,
+            SMALL,
+            &mut |_| {
+                called = true;
+                Ok(())
+            },
+        )
+        .err()
+        .ok_or("a rerun completed without its named chunk")?;
+        let named = format!(
+            "AND checkpoint chunk {} (depth 2, index 1) named by its boundary record cannot be read: ",
+            target.sequence
+        );
+        // The engine's decoder carries the read's refusal as its own I/O error.
+        assert!(
+            refused.starts_with("checkpoint I/O refused: ") && refused.contains(&named),
+            "vanish {vanish}: {refused}"
+        );
+        assert!(!called, "vanish {vanish}: no callback ran");
+        assert_eq!(newest_boundary(&scratch.0)?.0, last, "nothing published");
+    }
+    let scratch = Scratch::new().map_err(error)?;
+    let attempt = sweep_evidence::begin(&scratch.0, ID, Operation::Sweep)?;
+    let root = scratch.0.clone();
+    let refused = walk_within(
+        &scratch.0,
+        &attempt,
+        Ladder::with_min_hits(1),
+        &column()?,
+        &POSITIONS,
+        SMALL,
+        &mut |view| {
+            if view.terminal() {
+                unmark(&root, 1, false)?;
+            }
+            Ok(())
+        },
+    )
+    .err()
+    .ok_or("a walk completed without its named chunk")?;
+    assert!(
+        refused.starts_with(
+            "AND checkpoint chunk 1 (depth 1, index 0) named by its boundary record cannot be read: "
+        ),
+        "{refused}"
     );
     Ok(())
 }

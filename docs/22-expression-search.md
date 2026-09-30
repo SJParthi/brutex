@@ -62,12 +62,15 @@ children are refusals, never zero rows.
 
 ## Shared checkpoint journal
 
-The only namespaces are `and-checkpoint-v1` and `expression-search-v1`, directly
-under the selected store root. Each full run ID has an exclusive `owner.lock`
-and monotonically reserved, 16-digit hexadecimal sequence directories. A new
-reservation is synchronized before its payload is created. The payload is a
-64-byte header (magic `BTXCHK01`, run ID, sequence, length, eight zero bytes),
-caller bytes and a complete 32-byte BLAKE3 seal. All integers are little-endian.
+The AND sweep writes `and-checkpoint-v2` (D-0712; `Journal::open` still admits
+`and-checkpoint-v1`, which no production path writes any more) and the
+expression search writes `expression-search-v1`, each directly under the
+selected store root; `Journal::open` refuses a namespace it does not list.
+Each full run ID has an exclusive `owner.lock` and monotonically reserved,
+16-digit hexadecimal sequence directories. A new reservation is synchronized
+before its payload is created. The payload is a 64-byte header (magic
+`BTXCHK01`, run ID, sequence, length, eight zero bytes), caller bytes and a
+complete 32-byte BLAKE3 seal. All integers are little-endian.
 A separate 32-byte `complete` marker contains that seal.
 
 The writer synchronizes and re-reads the held payload, checking its pathname
