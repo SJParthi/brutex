@@ -5354,3 +5354,9 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### Boolean grid selector round trip and audited span joins — C4 cli-08 (D-0922, D-0923)
+
+| Id | Invariant | Test that proves it | Status |
+|---|---|---|---|
+| C4-CLI-08-01 | Every exit-grid selector the Boolean grid encoder writes, `OperatorRule` included, decodes to the policy that was saved and re-encodes byte for byte; a selector word past the last appended one is refused as `Boolean selector unknown`. | `cli::candidate_universe::boolean_candidate_v1::grid_context::tests::every_saved_selector_decodes_to_the_policy_that_was_saved`, `cli::candidate_universe::boolean_candidate_v1::grid_context::tests::an_unknown_selector_word_is_refused` | ✓ |

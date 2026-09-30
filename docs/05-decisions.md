@@ -43666,3 +43666,27 @@ job.
   survived. `an_nse_cash_stock_consults_no_peer_even_one_holding_it` gives a
   second vendor the same stock and requires that nothing votes and nothing is
   named; the same two feeds holding an index do vote, as the control.
+
+### D-0922 — Read back the `OperatorRule` selector the Boolean grid encoder writes — 2026-09-30
+
+**What was wrong (W2-cli2-10).** `crates/cli/src/boolean_candidate_grid.rs`
+encodes an exit policy's selector with `ExitGridSelectorV1::OperatorRule => 3,`
+(appended by D-0594), but `decode_policy` matched only `0`, `1` and `2` and
+answered `"Boolean selector unknown"` for anything else. A saved Boolean grid
+context whose policy selected `OperatorRule` was therefore refused by the same
+crate that wrote it.
+
+**The change.** `decode_policy` gains `3 => ExitGridSelectorV1::OperatorRule`.
+No encoder byte changes, so no saved record changes and no identity moves: a
+record that was refused before now reads back, and every other record reads
+back exactly as before. A word past `3` is still refused by name.
+
+**Proof.** `every_saved_selector_decodes_to_the_policy_that_was_saved` saves a
+policy with each of the four selectors, decodes it, requires the decoded policy
+to equal the saved one, and requires it to re-encode byte for byte; it fails
+on `OperatorRule` without the new arm. `an_unknown_selector_word_is_refused`
+rewrites the selector word to `4` and requires the named refusal.
+
+D-0594 named `execution_capability` as "the only one with a DECODE side";
+`boolean_candidate_grid::decode_policy` is a second, and it is the one that
+was not moved. D-0594 is left as written.

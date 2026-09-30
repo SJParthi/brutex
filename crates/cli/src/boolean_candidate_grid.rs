@@ -275,6 +275,8 @@ fn decode_policy(input: &mut Decode<'_>) -> Result<ExitGridPolicyV1, String> {
         0 => ExitGridSelectorV1::PessimisticTotal,
         1 => ExitGridSelectorV1::EdgeThenPessimistic,
         2 => ExitGridSelectorV1::GuaranteedFloor,
+        // The encoder's APPENDED 3 (D-0594), read back. D-0922.
+        3 => ExitGridSelectorV1::OperatorRule,
         _ => return Err("Boolean selector unknown".to_owned()),
     };
     let cost = input.bytes()?;
@@ -300,4 +302,67 @@ fn decode_policy(input: &mut Decode<'_>) -> Result<ExitGridPolicyV1, String> {
         input.word()?,
     )
     .map_err(display)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn with_selector(selector: ExitGridSelectorV1) -> Result<ExitGridPolicyV1, String> {
+        let rank = RationalPercentileV1::new(1, 2).map_err(display)?;
+        ExitGridPolicyV1::new(
+            ExecutionResolutionV1::OneMinuteOhlcv,
+            RangeResolutionV1::PpmCeiling,
+            Side::Short,
+            RungPlanV1::new(vec![rank], vec![rank], vec![rank], 1).map_err(display)?,
+            RatioLimitsV1::new(1, 1_000_000, 1).map_err(display)?,
+            32,
+            selector,
+            runner::exit_grid_policy::printed_ohlcv_cost_model_id_v1(),
+            ForcedStopV1::IncludeExactObserved(7),
+            5,
+            6,
+        )
+        .map_err(display)
+    }
+
+    /// Every selector the encoder writes must be one the decoder reads back:
+    /// `OperatorRule` is encoded as 3, and a decoder that stopped at 2
+    /// refused a policy this crate had just saved. W2-cli2-10, D-0922.
+    #[test]
+    fn every_saved_selector_decodes_to_the_policy_that_was_saved() -> Result<(), String> {
+        for selector in [
+            ExitGridSelectorV1::PessimisticTotal,
+            ExitGridSelectorV1::EdgeThenPessimistic,
+            ExitGridSelectorV1::GuaranteedFloor,
+            ExitGridSelectorV1::OperatorRule,
+        ] {
+            let saved = with_selector(selector)?;
+            let mut raw = Vec::new();
+            policy(&mut raw, &saved);
+            let read = decode_policy(&mut Decode::new(&raw))?;
+            assert_eq!(read, saved, "{selector:?}");
+            assert_eq!(read.selector(), selector);
+            let mut again = Vec::new();
+            policy(&mut again, &read);
+            assert_eq!(again, raw, "{selector:?} re-encodes byte for byte");
+        }
+        Ok(())
+    }
+
+    /// A selector word past the last appended one is still refused by name.
+    #[test]
+    fn an_unknown_selector_word_is_refused() -> Result<(), String> {
+        let saved = with_selector(ExitGridSelectorV1::OperatorRule)?;
+        let mut raw = Vec::new();
+        policy(&mut raw, &saved);
+        // The selector word sits before the 32-byte cost id and the four
+        // eight-byte forced-stop kind, level, ambiguity and gap-fill words.
+        let at = raw.len() - 8 - 32 - 32;
+        assert_eq!(raw[at..at + 8], 3_u64.to_le_bytes());
+        raw[at..at + 8].copy_from_slice(&4_u64.to_le_bytes());
+        let refused = decode_policy(&mut Decode::new(&raw)).err();
+        assert_eq!(refused.as_deref(), Some("Boolean selector unknown"));
+        Ok(())
+    }
 }
