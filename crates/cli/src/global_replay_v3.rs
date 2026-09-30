@@ -44,7 +44,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use brutex_core::blake3::Hasher;
@@ -3347,6 +3347,7 @@ fn block_slice<'a, T>(
 #[cfg(test)]
 mod tests {
     use std::cell::Cell as CounterCell;
+    use std::io::Write as _;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
@@ -3915,8 +3916,9 @@ mod tests {
         let root = TempRoot::new("append-rollback")?;
         let path = root.path().join("records");
         std::fs::write(&path, [7_u8; 5]).map_err(|why| format!("cannot seed file: {why}"))?;
-        let why = append_records(&path, &[1_u8, 2], refuse_the_second)
-            .expect_err("the second record refuses");
+        let Err(why) = append_records(&path, &[1_u8, 2], refuse_the_second) else {
+            return Err("the second record did not refuse".to_owned());
+        };
         assert_eq!(
             std::fs::read(&path).map_err(|e| format!("cannot read back: {e}"))?,
             vec![7_u8; 5],
