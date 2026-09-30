@@ -112,6 +112,25 @@ const O_NOFOLLOW_FLAG: i32 = 0x100;
 
 const _: () = assert!(PAYLOAD_BYTES + 32 == RECORD_BYTES);
 
+/// Records every block holds beside its Candidates: a complete block is
+/// `candidate_count + BLOCK_MANIFEST_RECORDS` records, so no file can hold
+/// more complete blocks than `record_count / BLOCK_MANIFEST_RECORDS`.
+const BLOCK_MANIFEST_RECORDS: u64 = 4;
+
+/// Receipt-index slots one scan reserves: the most complete blocks the file's
+/// records can hold, capped by the authority bound.
+///
+/// Reserving the authority bound itself made every open and every append pay
+/// allocation and control-byte initialisation proportional to the configured
+/// ceiling rather than to the data. W2-cli13-2.
+fn receipt_index_capacity(
+    record_count: u64,
+    authorities: u64,
+) -> Result<usize, PopulationV6Refusal> {
+    usize::try_from((record_count / BLOCK_MANIFEST_RECORDS).min(authorities))
+        .map_err(|_| "Population V6 receipt index capacity does not fit usize".to_owned())
+}
+
 /// Explicit nonzero authority, Candidate-row and file ceilings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PopulationV6Bounds {
@@ -1982,10 +2001,10 @@ impl PopulationV6Ledger {
         self.record_count = body / RECORD_BYTES as u64;
         self.receipts = HashMap::new();
         self.receipts
-            .try_reserve(
-                usize::try_from(self.bounds.authorities)
-                    .map_err(|_| "Population V6 authority bound does not fit usize".to_owned())?,
-            )
+            .try_reserve(receipt_index_capacity(
+                self.record_count,
+                self.bounds.authorities,
+            )?)
             .map_err(|why| format!("cannot reserve Population V6 receipt index: {why}"))?;
         self.trailing = None;
         let mut cursor = 0_u64;
@@ -2001,7 +2020,7 @@ impl PopulationV6Ledger {
             let block_records = data
                 .source
                 .candidate_count
-                .checked_add(4)
+                .checked_add(BLOCK_MANIFEST_RECORDS)
                 .ok_or_else(|| "Population V6 block record count overflowed".to_owned())?;
             if data.source.candidate_count > self.bounds.candidates_per_authority {
                 return Err("Population V6 block exceeds Candidate bound".to_owned());
@@ -3158,6 +3177,15 @@ impl CommittedStoredPopulationV6 {
     /// Mints later stored replay evidence only for exact admitted, authorized
     /// members of this retained population. Selection determines the requested
     /// prefix; this boundary supplies the live dispositions and source facts.
+    ///
+    /// # Cost
+    ///
+    /// Not O(1) per strategy. Each requested strategy is resolved by a linear
+    /// `find` over the C rows of the exact source, so resolution is O(C) per
+    /// strategy and O(25 * C) per call at the Top-25 cap. The call already
+    /// runs `execution_v4_source` twice, before and after the replay, and each
+    /// run re-authenticates the whole retained source and projects all C rows,
+    /// so the lookup does not change the call's class. W2-cli13-3.
     pub(crate) fn selected_stored_oos_witnesses(
         &mut self,
         request: crate::stored_post_training_oos::StoredPostTrainingOosRequestV1,
@@ -3729,5 +3757,95 @@ mod tests {
                 Ok(())
             },
         )
+    }
+
+    /// W2-cli13-3: the replay lookup's cost section names the live linear
+    /// `find`, the Top-25 cap and the two whole-source reads it sits between.
+    #[test]
+    fn replay_lookup_cost_doc_names_the_live_linear_find() {
+        let source = include_str!("population_v6.rs");
+        let production = source
+            .split("\nmod tests {\n")
+            .next()
+            .expect("production source precedes the test module");
+        let (doc, body) = production
+            .split_once("    pub(crate) fn selected_stored_oos_witnesses(\n")
+            .expect("replay lookup is present");
+        let doc = doc
+            .rsplit("    /// Mints later stored replay evidence")
+            .next()
+            .expect("replay lookup doc");
+        assert!(doc.contains("Not O(1) per strategy."), "{doc}");
+        assert!(
+            doc.contains("linear\n    /// `find` over the C rows"),
+            "{doc}"
+        );
+        assert!(doc.contains("O(25 * C) per call"), "{doc}");
+        let body = body.split("\n    }\n").next().expect("replay lookup body");
+        assert!(body.contains("if strategies.len() > 25 {"), "{body}");
+        assert!(body.contains("let before = self.execution_v4_source()?;"));
+        assert!(body.contains("let after = self.execution_v4_source()?;"));
+        assert!(
+            body.contains(".find(|row| row.population().candidate_semantic_id() == *strategy)")
+        );
+        let source_read = production
+            .split("    pub(crate) fn execution_v4_source(\n")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }\n").next())
+            .expect("execution_v4_source body");
+        assert!(source_read.contains("let before = self.upstream.authenticate()?;"));
+        assert!(source_read.contains("self.population.projection()?;"));
+        assert!(source_read.contains(".try_reserve_exact(population_rows.len())"));
+    }
+
+    /// W2-cli13-2: the reservation is the most complete blocks the records
+    /// can hold, capped by the authority bound, and never the bound alone.
+    #[test]
+    fn receipt_index_capacity_is_records_over_four_capped_by_authorities() {
+        assert_eq!(receipt_index_capacity(0, 1 << 24), Ok(0));
+        assert_eq!(receipt_index_capacity(3, 1 << 24), Ok(0));
+        assert_eq!(receipt_index_capacity(4, 1 << 24), Ok(1));
+        assert_eq!(receipt_index_capacity(9, 1 << 24), Ok(2));
+        assert_eq!(receipt_index_capacity(400, 8), Ok(8));
+        assert_eq!(receipt_index_capacity(32, 8), Ok(8));
+        assert_eq!(receipt_index_capacity(31, 8), Ok(7));
+    }
+
+    /// W2-cli13-2: a wide authority bound does not size the receipt index of
+    /// an empty or one-block ledger, on open, on append, or on reopen.
+    #[test]
+    fn scan_sizes_the_receipt_index_by_records_not_by_the_authority_bound() -> Result<(), String> {
+        let wide = PopulationV6Bounds::new(1 << 16, 1_000_000, 512 * 1_024 * 1_024)?;
+        with_evaluated_prepared(|_source, prepared, root| {
+            let wide_root = root.join("wide-authority-bound");
+            std::fs::create_dir(&wide_root)
+                .map_err(|why| format!("cannot create wide-bound root: {why}"))?;
+            let empty = PopulationV6Ledger::open_write(&wide_root, wide)?;
+            assert_eq!(empty.record_count, 0);
+            assert_eq!(empty.receipts.capacity(), 0);
+            drop(empty);
+
+            let mut writer = PopulationV6Ledger::open_write(&wide_root, wide)?;
+            let (written, _) = writer.append(&prepared)?;
+            assert!(written);
+            assert_eq!(writer.receipts.len(), 1);
+            assert!(
+                writer.receipts.capacity() < 1 << 16,
+                "append rescan reserved {} slots for {} records",
+                writer.receipts.capacity(),
+                writer.record_count
+            );
+            drop(writer);
+
+            let reopened = PopulationV6Ledger::open_read(&wide_root, wide)?;
+            assert_eq!(reopened.receipts.len(), 1);
+            assert!(
+                reopened.receipts.capacity() < 1 << 16,
+                "open reserved {} slots for {} records",
+                reopened.receipts.capacity(),
+                reopened.record_count
+            );
+            Ok(())
+        })
     }
 }
