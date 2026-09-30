@@ -5438,8 +5438,11 @@ changes that.
 ### The sort, which this section used to omit
 
 The heading said `O(entries)` and the real figure is `O(entries) + O(held log
-held)` — `crates/store/src/catalog.rs:210` sorts and dedups the held rows before
-returning them. That was absent from this section, from the module header and
+held)` — `walk` sorts and dedups the held rows (`out.held.sort_unstable()`
+and `out.held.dedup()` in `crates/store/src/catalog.rs`) before returning them.
+This sentence cited `catalog.rs:210`; the sort moved as the file grew, and it
+is named by its call now rather than by a line number that drifts. The sort was
+absent from this section, from the module header and
 from the function's own `# Cost` block, so all three understated the same
 function in the same direction.
 
@@ -5450,8 +5453,10 @@ listing. The alternative orderings cost the same or more: a `BTreeSet` is
 `O(n log n)` on insert, and a hash set is O(n) but returns nothing repeatable.
 
 It is allowlisted under CI gate 11 rule 4 rather than removed, and the allowance
-carries that reason. This is a CLI path — `crates/cli/src/batch.rs` is the only
-caller — and never a request path, which is why the sort is affordable here and
+carries that reason. This is a CLI path — its production callers are in
+`crates/cli/src/batch.rs`, `crates/cli/src/research.rs` and
+`crates/cli/src/pool.rs`; this sentence once named `batch.rs` as the only one —
+and never a request path, which is why the sort is affordable here and
 would not be inside a handler.
 
 ### Why this is not a rule-4 breach
@@ -5494,6 +5499,17 @@ becomes a rule-4 breach.
 — bounded by what the store contains, not by anything the walk chooses. There is
 no unbounded intermediate: the directory stack holds at most one level's
 subdirectories at a time.
+
+### The linear bound holds for an acyclic tree only (D-0766, D-0769)
+
+The walk does not follow a symbolic link below `bars/` (D-0766), which is what
+made a link back to an ancestor cost one entry instead of a re-walk of the tree.
+**It keeps no set of visited `(device, inode)` pairs**, so a cycle made another
+way — a bind mount of an ancestor, or a directory hard link on a filesystem that
+permits one — is still descended, and the O(entries) statement does not hold
+for such a tree. Not run on this machine; no test builds such a cycle. The
+store's writer creates neither, and the `bars` root itself may be a link to a
+directory, which is followed once (D-0769).
 
 ## 88. Pricing a Groww chain re-reads what it just wrote, and that is O(bars)
 

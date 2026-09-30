@@ -43689,10 +43689,9 @@ unreadable 1`, and the readable month is still the one row
 directory holds stays unknown: it is counted once, not per file, because the
 walk cannot see its files.
 
-**Not changed here.** The `cli` reports that print a catalog census
-(`batch::census_lines`, `research::render`) do not yet print the new
-bucket. The count is on the census they already hold; printing it is a `cli`
-change.
+**Printed since D-0769.** When this entry was written, the `cli` reports that
+print a catalog census (`batch::census_lines`, `research::render`, and the
+pool surface) did not print the new bucket. D-0769 prints it in all three.
 
 ### D-0766 — The store catalog does not follow a symbolic link; it counts it — 2026-09-29
 
@@ -43723,8 +43722,17 @@ a symlink at a path component as a hazard that defeats vendor-prefix
 isolation, so a link under `bars/` is counted as something this store does
 not produce rather than resolved.
 
-**Not changed here.** The `cli` reports that print a catalog census do not
-yet print the new bucket, as with D-0765.
+**What this narrows, and where it is named.** A vendor or symbol directory
+under `bars/` that is itself a symbolic link was walked and its months offered
+to `sweep-all` before this entry, and is not offered now: its months are absent
+from `sweep-all`, `research-plan` and `pool` (the reviewer's probe: a linked
+`bars/dhan` gave `held=1` on origin/main 2c209309 and `held=0, linked: 1` here).
+`sweep-stored`, which is given the month by name and opens it through
+`BarFile::open_existing`, still reaches it by reading: that open is
+`fault(File::open(&bars_path), &bars_path, Action::Open)` in
+`crates/store/src/file.rs`, and `File::open` follows a link (not run here). D-0769 prints the `linked`
+count in all three reports, so the narrowing is named on the page rather than
+silent.
 
 ### D-0767 — A month stem must be digits only before it is parsed — 2026-09-29
 
@@ -43814,3 +43822,35 @@ is not a regular file, a directory or a link is counted in the new
 the type of `/dev/null`, and `a_socket_named_like_a_month_is_not_a_held_month`
 on a real tree, where the socket stands in for a FIFO because the standard
 library can create one).
+
+**What happened (the operator surface).** D-0765 to D-0768 counted the new
+buckets on `store::catalog::Census`, and no report printed them. The review's
+fixture held `RELIANCE` and `TCS` under `NSE/CASH` and `NIFTY` and `BANKNIFTY`
+under `NSE/INDEX`, with `TCS` and `BANKNIFTY` at mode 000: `research-plan`
+printed `TCS | 0/81 | ...`, the same row as a stock never pulled, and
+`sweep-all` printed `store holds 2 spot instrument-month(s)` and nothing about
+the two locked directories. A linked `BANKNIFTY` directory, which D-0766
+stopped offering, likewise appeared on no line.
+
+**The change.** `Census::unoffered_report` is the one spelling: a `NOT
+OFFERED` line naming the `unreadable`, `linked`, `non_utf8` and `not_regular`
+counts when any is non-zero, and a `CATALOG CENSUS DOES NOT RECONCILE` line
+when the buckets do not sum to `seen`; an empty string otherwise
+(`the_unoffered_report_names_every_unwalked_bucket_and_is_silent_otherwise`).
+`batch::census_lines` (`sweep-all`), `research::render` (`research-plan`)
+and the pool's `head_under` print it
+(`the_report_names_the_entries_the_catalog_did_not_offer`,
+`a_sweep_over_a_store_with_a_linked_symbol_directory_names_the_link`,
+`the_inventory_names_the_entries_the_catalog_did_not_offer`,
+`the_pool_page_names_the_entries_the_catalog_did_not_offer`).
+
+**Printed, not refused.** One locked or linked corner does not refuse the
+whole report, for the reason `walk` does not refuse it: it must not hide the
+rest of the store. The report degrades loudly and names the count, as
+`CLAUDE.md` §4 allows. What an unreadable directory or a link holds stays
+unknown, and the line says so.
+
+**Not changed here.** The walk keeps no set of visited `(device, inode)`
+pairs, so a cycle made by a bind mount or a directory hard link is still
+descended; `docs/06-limits.md` §86 records that the linear bound holds for an
+acyclic tree only. Not run on this machine.

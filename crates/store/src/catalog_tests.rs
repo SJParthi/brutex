@@ -276,3 +276,72 @@ fn each_entry_kind_goes_to_exactly_one_place() {
     assert!(out.census.reconciles(), "{:?}", out.census);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn the_unoffered_report_names_every_unwalked_bucket_and_is_silent_otherwise() {
+    let quiet = Census {
+        seen: 3,
+        spot: 1,
+        with_contract: 1,
+        wrong_depth: 1,
+        ..Census::default()
+    };
+    assert_eq!(
+        quiet.unoffered_report(),
+        "",
+        "a filed-in-full census prints nothing"
+    );
+
+    let all = Census {
+        seen: 10,
+        unreadable: 1,
+        linked: 2,
+        non_utf8: 3,
+        not_regular: 4,
+        ..Census::default()
+    };
+    assert_eq!(
+        all.unoffered_report(),
+        "NOT OFFERED: below bars/ the catalog could not read 1 director(ies) or entr(ies), \
+         did not follow 2 symbolic link(s), and found 3 path(s) that are not UTF-8 and 4 \
+         entr(ies) that are not a regular file. None of them was offered to any sweep; what \
+         an unreadable directory or a link holds is unknown.\n"
+    );
+    for one in [
+        Census {
+            seen: 1,
+            unreadable: 1,
+            ..Census::default()
+        },
+        Census {
+            seen: 1,
+            linked: 1,
+            ..Census::default()
+        },
+        Census {
+            seen: 1,
+            non_utf8: 1,
+            ..Census::default()
+        },
+        Census {
+            seen: 1,
+            not_regular: 1,
+            ..Census::default()
+        },
+    ] {
+        let text = one.unoffered_report();
+        assert!(text.starts_with("NOT OFFERED: "), "{one:?}: {text}");
+        assert!(!text.contains("DOES NOT RECONCILE"), "{one:?}: {text}");
+    }
+
+    let lost = Census {
+        seen: 5,
+        spot: 3,
+        ..Census::default()
+    };
+    assert_eq!(
+        lost.unoffered_report(),
+        "CATALOG CENSUS DOES NOT RECONCILE: 5 entries seen, 3 filed. An entry has been lost, \
+         which is the silent shortfall CLAUDE.md §4 bans.\n"
+    );
+}

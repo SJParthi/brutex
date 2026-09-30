@@ -40,9 +40,13 @@
 //! instrument-month, a contract path, or one of the named refusals, and a
 //! directory the walk could not list is counted as `unreadable` rather than
 //! skipped (D-0765), and a symbolic link is counted as `linked` rather than
-//! followed (D-0766). **Nothing is dropped silently** — a store with a
-//! malformed directory reports how many and why, which is what `CLAUDE.md`
-//! §4 asks of a degradation.
+//! followed (D-0766), and an entry that is not a regular file is counted as
+//! `not_regular` rather than classified (D-0769). A `bars` that exists and
+//! cannot be walked is a refusal, not an empty store (D-0769), and
+//! [`Census::unoffered_report`] is the line the `cli` reports print for every
+//! entry the walk saw and offered to nobody (D-0769). **Nothing is dropped
+//! silently** — a store with a malformed directory reports how many and why,
+//! which is what `CLAUDE.md` §4 asks of a degradation.
 //!
 //! **UNVERIFIED as a measurement.** The bound is argued from the
 //! shape of the code and no bench in this workspace times it.
@@ -51,6 +55,7 @@
 
 use crate::path::{FileKind, PathError, Timeframe, YearMonth};
 use brutex_core::vendor::Vendor;
+use core::fmt::Write as _;
 use std::fs::FileType;
 use std::path::{Path, PathBuf};
 
@@ -147,8 +152,48 @@ impl Census {
     /// `the_census_reconciles_over_a_store_holding_every_refusal`.
     #[must_use]
     pub const fn reconciles(&self) -> bool {
-        let parts = self
-            .spot
+        self.filed() == self.seen
+    }
+
+    /// The report lines a caller prints for what the walk saw and offered to
+    /// nobody: an empty string when every entry was filed and nothing was
+    /// unreadable, linked, non-UTF-8 or not a regular file.
+    ///
+    /// One spelling in the crate that owns the census, so the `cli` reports
+    /// that print a catalog census cannot drift apart. Until D-0769
+    /// none of them printed these buckets, so a locked directory's months,
+    /// and a linked symbol or vendor directory D-0766 stopped offering,
+    /// appeared on no line at all. A census that does not reconcile is
+    /// announced as well, as `CLAUDE.md` §4 asks of a lost entry.
+    #[must_use]
+    pub fn unoffered_report(&self) -> String {
+        let mut out = String::new();
+        if self.unreadable > 0 || self.linked > 0 || self.non_utf8 > 0 || self.not_regular > 0 {
+            let _ = writeln!(
+                out,
+                "NOT OFFERED: below bars/ the catalog could not read {} director(ies) or \
+                 entr(ies), did not follow {} symbolic link(s), and found {} path(s) that are \
+                 not UTF-8 and {} entr(ies) that are not a regular file. None of them was \
+                 offered to any sweep; what an unreadable directory or a link holds is unknown.",
+                self.unreadable, self.linked, self.non_utf8, self.not_regular
+            );
+        }
+        if !self.reconciles() {
+            let _ = writeln!(
+                out,
+                "CATALOG CENSUS DOES NOT RECONCILE: {} entries seen, {} filed. An entry has \
+                 been lost, which is the silent shortfall CLAUDE.md §4 bans.",
+                self.seen,
+                self.filed()
+            );
+        }
+        out
+    }
+
+    /// The sum of every bucket, saturating: what [`Census::reconciles`]
+    /// compares with `seen`.
+    const fn filed(&self) -> u64 {
+        self.spot
             .saturating_add(self.with_contract)
             .saturating_add(self.other_kind)
             .saturating_add(self.unknown_vendor)
@@ -158,8 +203,7 @@ impl Census {
             .saturating_add(self.unreadable)
             .saturating_add(self.linked)
             .saturating_add(self.non_utf8)
-            .saturating_add(self.not_regular);
-        parts == self.seen
+            .saturating_add(self.not_regular)
     }
 
     /// One symbolic link the walk did not follow: seen, and filed as
