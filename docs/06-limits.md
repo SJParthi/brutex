@@ -9864,3 +9864,14 @@ The text above is kept as it was written.
   doc to its body, read off the source, and
   `what_a_changed_rows_line_costs_is_named_in_part_and_read_off_the_source`
   finds each part named here and in that doc in the source that pays it.
+
+## `fold-audit` has no dated cash schedule — D-0912, 29 September 2026
+
+Derive passes a dated cash-session schedule for an NSE cash equity; the audit
+passes `None`. On a cash day that needs dated eligibility
+(`pull::vendor::cash_auction_eligibility_required`) the reference writes no
+bucket, so every stored bar on that day is reported as a disagreement, not as
+an agreement. It fails loud:
+`a_cash_day_needing_dated_eligibility_is_withheld_and_never_silently_agrees`.
+Records are still paired by position (`match (stored.get(index),
+folded.get(index))`), not by timestamp; that is not changed here.

@@ -623,6 +623,57 @@ struct FoldAuditReport {
     failed: bool,
 }
 
+/// Names what derive withheld in one rung-month, apart from agreement and
+/// disagreement, and answers whether there was anything to name.
+fn write_withheld(
+    out: &mut String,
+    (year, month): (u16, u8),
+    verdict: &crate::fold_audit::RungVerdict,
+) -> bool {
+    if verdict.withheld == 0 {
+        return false;
+    }
+    let _ = writeln!(
+        out,
+        "  {year}-{month:02}  {:>5}  WITHHELD by derive policy: {} diagnostic(s), \
+         neither agreement nor disagreement",
+        verdict.rung, verdict.withheld
+    );
+    for why in &verdict.withheld_named {
+        let _ = writeln!(out, "           {why}");
+    }
+    true
+}
+
+/// Names one disagreeing rung-month and each disagreement it names.
+fn write_disagreement(
+    out: &mut String,
+    (year, month): (u16, u8),
+    v: &crate::fold_audit::RungVerdict,
+) {
+    let _ = writeln!(
+        out,
+        "  {year}-{month:02}  {:>5}  DISAGREES  stored {} bars, folded {} bars, \
+         {} named disagreement(s){}",
+        v.rung,
+        v.stored_bars,
+        v.folded_bars,
+        v.disagreements.len(),
+        if v.elided == 0 {
+            String::new()
+        } else {
+            format!(", {} more not named", v.elided)
+        }
+    );
+    for d in &v.disagreements {
+        let _ = writeln!(
+            out,
+            "           record {} ts {} field {} -- stored {}, folded {}",
+            d.at, d.ts_micros, d.field, d.stored, d.folded
+        );
+    }
+}
+
 /// [`fold_audit_arm`]'s report, over a span of instrument-months.
 ///
 /// One month is the unit [`crate::fold_audit::audit_month`] offers, and a span
@@ -644,11 +695,13 @@ fn fold_audit_range(
     let months = stored::months_between(from, to)?;
 
     let mut out = String::from(
-        "FOLD AUDIT -- does each stored coarse rung equal the fold of the stored minutes?\n\n  \
+        "FOLD AUDIT -- does each stored coarse rung equal what derive writes from the stored minutes?\n\n  \
          The seven coarse rungs are NEVER pulled. `pull::ingest::derive_all` folds\n  \
-         them from the one-minute file at ingest, so a dirty minute month produces\n  \
-         coarse bars built out of gaps that are byte-indistinguishable from whole\n  \
-         ones. Nothing else in this workspace looks across rungs.\n\n",
+         them from the one-minute file at ingest with the minute-completeness\n  \
+         authority, which writes a bucket only when every scheduled minute exists\n  \
+         and withholds exceptional sessions. This audit re-derives with that same\n  \
+         authority; a bucket it withholds is counted as WITHHELD, neither agreement\n  \
+         nor disagreement. Nothing else in this workspace looks across rungs.\n\n",
     );
     let _ = writeln!(
         out,
@@ -663,6 +716,7 @@ fn fold_audit_range(
     let mut unreadable = 0_u64;
     let mut agreeing = 0_u64;
     let mut disagreeing = 0_u64;
+    let mut withheld = 0_u64;
 
     for (year, month) in months {
         // NAMED, NOT UNWRAPPED. `months_between` already refused a month
@@ -687,31 +741,16 @@ fn fold_audit_range(
             }
         };
         for verdict in verdicts {
+            if let Ok(v) = &verdict
+                && write_withheld(&mut out, (year, month), v)
+            {
+                withheld = withheld.saturating_add(1);
+            }
             match verdict {
                 Ok(v) if v.agrees() => agreeing = agreeing.saturating_add(1),
                 Ok(v) => {
                     disagreeing = disagreeing.saturating_add(1);
-                    let _ = writeln!(
-                        out,
-                        "  {year}-{month:02}  {:>5}  DISAGREES  stored {} bars, folded {} bars, \
-                         {} named disagreement(s){}",
-                        v.rung,
-                        v.stored_bars,
-                        v.folded_bars,
-                        v.disagreements.len(),
-                        if v.elided == 0 {
-                            String::new()
-                        } else {
-                            format!(", {} more not named", v.elided)
-                        }
-                    );
-                    for d in &v.disagreements {
-                        let _ = writeln!(
-                            out,
-                            "           record {} ts {} field {} -- stored {}, folded {}",
-                            d.at, d.ts_micros, d.field, d.stored, d.folded
-                        );
-                    }
+                    write_disagreement(&mut out, (year, month), &v);
                 }
                 Err(why) => {
                     unreadable = unreadable.saturating_add(1);
@@ -725,10 +764,18 @@ fn fold_audit_range(
         out,
         "\n  {agreeing} rung-month(s) agree, {disagreeing} DISAGREE, {unreadable} unreadable."
     );
+    if withheld > 0 {
+        let _ = writeln!(
+            out,
+            "  {withheld} rung-month(s) carry buckets derive WITHHELD; those buckets are \
+             not in the store and are not counted as disagreements."
+        );
+    }
     if disagreeing > 0 {
         out.push_str(
-            "  A DISAGREEING rung holds bars the minute series does not support. \
-             Re-fold that month rather than sweeping it.\n",
+            "  A DISAGREEING rung holds bars the minute series does not support, or \
+             lacks bars derive would write. Do not sweep that month; derived rungs are \
+             append-only, so its correction is a versioned store repair.\n",
         );
     }
     if unreadable > 0 {
@@ -739,7 +786,9 @@ fn fold_audit_range(
     }
     let failed = disagreeing > 0 || unreadable > 0;
     if !failed {
-        out.push_str("  Every stored coarse bar equals the fold of the stored minutes.\n");
+        out.push_str(
+            "  Every stored coarse bar equals what derive writes from the stored minutes.\n",
+        );
     }
     Ok(FoldAuditReport { text: out, failed })
 }

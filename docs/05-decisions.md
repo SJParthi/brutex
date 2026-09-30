@@ -43666,3 +43666,52 @@ job.
   survived. `an_nse_cash_stock_consults_no_peer_even_one_holding_it` gives a
   second vendor the same stock and requires that nothing votes and nothing is
   named; the same two feeds holding an index do vote, as the control.
+
+### D-0912 — `fold-audit` re-derives with derive's own authority, and counts what derive withheld apart — 2026-09-29
+
+**The defect (GAP12-4).** `pull::ingest::derive` writes a coarse rung with
+`crate::fold::complete_minutes_with_calendar(minutes, bucket, venue,
+cash_schedule, calendar)`, which writes a bucket only when every scheduled
+minute exists and withholds an exceptional session outright ("exceptional
+session {session:?} withheld"). `fold_audit::compare` built its reference with
+the plain `pull::fold::fold`, which writes every bucket that holds any minute.
+So a month derive wrote correctly, holding a disaster-recovery Saturday, was
+reported as a store defect. On `origin/main` (2c209309), a copy of the test
+below adapted to that `compare` signature, over 2024-03-01, the DR Saturday
+2024-03-02 in its two windows and 2024-03-04, stored as
+`complete_minutes_for_venue` writes it, failed with 7 of 7 rungs disagreeing;
+`2min` first differed at record 188: stored `ts_micros` 1709523900000000
+against folded 1709351100000000, a Saturday bucket derive withheld. That the
+two authorities differ on all seven rungs of this month is what
+`a_legacy_plain_fold_of_a_withheld_session_disagrees` asserts.
+
+**The change.** `compare` takes the venue and builds its reference with
+`pull::fold::complete_minutes_for_venue`, which is
+`complete_minutes_with_calendar` with no cash schedule and the default runtime
+calendar. The runtime calendar changes no bar: `Runtime::kind_of` is
+`kind_of(day)`, the static answer. `audit_month` takes the venue from the key's
+own segment with `Venue::for_segment`, as derive does, and refuses a key with
+none before it reads a file. Derive's diagnostics are carried on the verdict as
+`withheld` and the first `MAX_REPORTED` of them as `withheld_named`; they are
+neither agreement nor disagreement, and `agrees` does not read them. The
+command prints a `WITHHELD by derive policy` line per rung-month that has any,
+and its banner and remedy name the derive authority.
+
+**What it proves.** `fold_audit_agrees_with_a_correctly_derived_month_holding_a_dr_saturday`
+requires every rung of that month to agree and counts 54, 35, 21, 12, 7, 5 and
+3 withheld diagnostics for 2, 3, 5, 10, 15, 30 and 60 minutes, each naming an
+exceptional session. `a_legacy_plain_fold_of_a_withheld_session_disagrees`
+requires a file written by the plain fold over the same minutes to disagree,
+holding more bars than the reference. `fold_command_reports_withheld_buckets_apart_from_disagreements`
+runs the command over a month with one incomplete trailing bucket per rung:
+seven rung-months agree, the command passes, and seven withheld lines are
+printed.
+
+**What it does not see.** Derive passes a dated cash-session schedule for a
+cash equity and the audit has none. On a cash day that needs dated eligibility
+the reference writes nothing, so a stored bar there is a disagreement, never a
+silent agreement:
+`a_cash_day_needing_dated_eligibility_is_withheld_and_never_silently_agrees`.
+`docs/06-limits.md` records it. Records are still paired by position, not by
+timestamp.
+
