@@ -43702,7 +43702,12 @@ and shows each survives `encode` and `decode` exactly.
 **Decision.** Recorded, not changed. The rendered text is what `api` serves:
 `crates/api/src/booleanjson_tests.rs` pins a row's `expression` as
 `(0 | !(1))`. Changing that text is a change of its own. The
-comment now states the limit, and `docs/06-limits.md` records it.
+comment now states the limit, and `docs/06-limits.md` records it. The cli
+re-reads operator text through the parser, and so meets the limit, in
+`cli expression-stored` (`crates/cli/src/expression.rs`:
+`let expression = Expression::parse(source)`) and in the explicit program
+catalog (`crates/cli/src/boolean_catalog_command.rs`, `parse_catalog`:
+`let program = Expression::parse(line)`).
 
 ### D-0752 — A grammar node budget bounds choices, not progress — 2026-09-29
 
@@ -43714,18 +43719,59 @@ at every position, so that number grows with the alphabet and can exceed
 counts it.
 
 **Decision.** Recorded, not changed. Pruning a refused leaf's remaining ranks
-would keep the candidate stream but move every node count and pause point a
-saved search depends on. `advance`'s comment and `docs/06-limits.md` state the
-limit.
+would move the node counts and pause points a saved search depends on: with
+that pruning, the test above fails on its pinned counts (D-0754). `advance`'s
+comment and `docs/06-limits.md` state the limit.
 
 ### D-0753 — One grammar node revalidates its whole prefix — 2026-09-29
 
 **What was wrong (ET-o1-proof-coverage-5).** Each grammar choice calls
 `valid_prefix` on the whole prefix over a fresh 1,151-slot stack, and nothing
 said so. `prefix_validation_rescans_from_the_first_instruction_over_a_fixed_stack`
-pins the stack width and the rescan from the first instruction.
+pins it: both edges of the stack width by behaviour, the scan from the first
+instruction by behaviour, and the inline array and `advance`'s one
+whole-prefix call per choice by source shape (D-0754).
 
 **Decision.** Recorded, not changed: incremental validation would have to keep
 per-position stack state beside the encoded cursor, which `decode` must then
 rebuild. The cost is stated in `advance`'s comment and in `docs/06-limits.md`,
 with the time per node recorded as unmeasured.
+
+### D-0754 — The grammar-search proofs pin what they name, and `Cursor`'s `Debug` is its state — 2026-10-01
+
+**What was wrong.** Review round 4 on this batch found three proofs weaker than
+the sentences citing them. The D-0753 test asserted
+`size_of::<[usize; MAX_INSTRUCTIONS]>()`, a type it named itself, so widening,
+narrowing or moving `valid_prefix`'s stack to the heap still passed, and it
+never looked at `advance`, so an incremental validator there would have passed
+too. Invariant row C4-VOCAB-01 said one node step *always* changes the encoded
+state, while `advance` on an exhausted cursor returns `Exhausted` before any
+write. D-0752 said pruning would keep the candidate stream, which no test
+compared. `Cursor` also kept a derived `Debug` beside its encoded-state
+equality, so two equal cursors printed their differing scratch.
+
+**The change.**
+`prefix_validation_rescans_from_the_first_instruction_over_a_fixed_stack` now
+requires a prefix of `MAX_INSTRUCTIONS` operands to be accepted and one of
+`MAX_INSTRUCTIONS + 1` to be refused with room left to reduce it, and reads the
+source: `valid_prefix` holds `let mut starts = [0_usize; MAX_INSTRUCTIONS];`
+once before its scan, and `advance`'s node loop calls
+`valid_prefix(prefix, usize::from(self.length))` over `self.code.get(..=at)`
+and names no other validator. It fails with the stack sized by the prefix, by
+`MAX_INSTRUCTIONS + 1`, by 64, by `MAX_INSTRUCTIONS / 2 + 1`, or on the heap at
+full width, and with `advance` calling a helper instead. C4-VOCAB-01 is scoped
+to the 400 steps its test drives, and
+`cursor_equality_is_the_encoded_state_and_ignores_unencoded_scratch` now also
+requires an exhausted cursor's step to leave its bytes and the work counter
+unchanged. The unbacked D-0752 clause is replaced by what the pruning break
+shows. `Cursor` writes `Debug` by hand from the encoded fields (the alphabet up
+to `count`, `length`, `at`, `finished`, the digits up to `length`), and
+`a_reopened_candidate_checkpoint_equals_its_source_and_a_step_does_not` pins
+the text, its equality across a reopen and its refusal to panic on a corrupted
+count or length. No stored byte, encoded cursor, displayed expression or run
+identity changes.
+
+**Still open, not changed.** Per-node validation still grows with the prefix
+(D-0753), a node budget still does not bound progress between candidates
+(D-0752), and displayed text still cannot always be re-entered (D-0751).
+`docs/07-plan.md` lists all three as open.

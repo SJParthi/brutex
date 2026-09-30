@@ -9886,8 +9886,11 @@ The text above is kept as it was written.
   target) and compares sibling subtrees at every AND and OR. Its cost grows
   with the prefix and is bounded only by the fixed 1,151-instruction capacity.
   `prefix_validation_rescans_from_the_first_instruction_over_a_fixed_stack`
-  pins the stack width and shows an invalid first instruction refusing a
-  prefix. **UNMEASURED**: the time per node; no bench covers it.
+  pins both edges of the stack width (`MAX_INSTRUCTIONS` operands accepted,
+  one more refused), an invalid first instruction refusing a prefix whose tail
+  alone is valid, and by source shape the inline array and `advance`'s one
+  whole-prefix call per choice (D-0754). **UNMEASURED**: the time per node; no
+  bench covers it.
 * **Display is not a parser round trip (D-0751).** A program `Expression::parse`
   accepted can render past its limits: 16 NOTs over one bit render to 49 bytes
   and are refused `NestingCapacity`; a 576-leaf AND chain of bit 0 renders to
@@ -9896,5 +9899,7 @@ The text above is kept as it was written.
   `encode` and `decode` exactly.
   `display_can_exceed_the_parser_limits_for_programs_the_parser_accepted` pins
   all three. `cli expression-stored` reads its EXPRESSION through
-  `Expression::parse(source)`, so a candidate's displayed text cannot always be
-  re-run there.
+  `Expression::parse(source)`, and the explicit program catalog reads each line
+  through `Expression::parse(line)` (`parse_catalog` in
+  `crates/cli/src/boolean_catalog_command.rs`), so a candidate's displayed text
+  cannot always be re-run through either (D-0754).

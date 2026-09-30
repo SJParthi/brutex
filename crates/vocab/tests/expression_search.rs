@@ -170,8 +170,6 @@ fn cursor_equality_is_the_encoded_state_and_ignores_unencoded_scratch() {
         let bytes = cursor.encode();
         let reopened = Cursor::decode(&bytes).unwrap();
         assert_eq!(reopened.encode(), bytes);
-        // `assert!` rather than `assert_eq!`: a failure would otherwise print
-        // two 1,151-slot scratch arrays.
         assert!(
             reopened == cursor,
             "a reopened checkpoint equals its source"
@@ -182,7 +180,10 @@ fn cursor_equality_is_the_encoded_state_and_ignores_unencoded_scratch() {
         }
         // Consecutive positions of one traversal are different states, and
         // equality must say so.
-        assert!(before != cursor, "every node changes the encoded state");
+        assert!(
+            before != cursor,
+            "each driven node step changes the encoded state"
+        );
         assert_ne!(before.encode(), bytes);
         let at = |b: &[u8; CURSOR_BYTES]| u16::from_le_bytes([b[12], b[13]]);
         if at(&bytes) < at(&before.encode()) {
@@ -191,10 +192,21 @@ fn cursor_equality_is_the_encoded_state_and_ignores_unencoded_scratch() {
     }
     assert!(saw_candidate && saw_backtrack);
     // Two different alphabets at the same progress are different states.
-    assert_ne!(
-        Cursor::new(&[0, 369]).unwrap(),
-        Cursor::new(&[0, 63]).unwrap()
+    assert!(
+        Cursor::new(&[0, 369]).unwrap() != Cursor::new(&[0, 63]).unwrap(),
+        "two alphabets are different states"
     );
+    // The one step that changes nothing: an exhausted cursor answers
+    // `Exhausted` before it writes, so its state and the work counter stay put.
+    let mut finished = Cursor::new(&[0, 369]).unwrap().encode();
+    finished[10..12].copy_from_slice(&u16::try_from(MAX_INSTRUCTIONS).unwrap().to_le_bytes());
+    finished[14] = 1;
+    let mut cursor = Cursor::decode(&finished).unwrap();
+    let before = cursor.clone();
+    let mut work = 7;
+    assert_eq!(cursor.advance(1, &mut work), Ok(Step::Exhausted));
+    assert_eq!((cursor.encode(), work), (finished, 7));
+    assert!(before == cursor, "an exhausted step is not a new state");
 }
 
 fn first_live(n: usize) -> Vec<u32> {
