@@ -407,6 +407,26 @@ fn rowless_extent(rest: &[u8]) -> Option<usize> {
     (rowless && len <= rest.len()).then_some(len)
 }
 
+/// What is left of `rest` once every leading page `extent` measures as
+/// rowless has been stepped over. W3-lake1-2.
+///
+/// BOUNDED BY `rest`, NOT BY `extent` BEHAVING. Every real step consumes a
+/// page header of at least one byte, so at most `rest.len()` steps can happen
+/// before nothing is left and [`rowless_extent`] answers `None`. The loop is
+/// written to that bound, so an `extent` that answered `Some(0)` would end the
+/// walk with those bytes still left, to be counted as unread and refused,
+/// rather than spin. Cost: at most `rest.len()` calls to `extent`; with
+/// [`rowless_extent`], one header parse per rowless page stepped over.
+fn step_over_rowless(mut rest: &[u8], extent: impl Fn(&[u8]) -> Option<usize>) -> &[u8] {
+    for _ in 0..rest.len() {
+        match extent(rest) {
+            Some(len) => rest = rest.get(len..).unwrap_or_default(),
+            None => break,
+        }
+    }
+    rest
+}
+
 /// `usize` from a thrift `i32`, refusing a negative length.
 fn length(what: &str, v: i32) -> PqResult<usize> {
     usize::try_from(v).map_err(|_| ParquetError::General(format!("{what} is {v}, not a length")))
@@ -515,14 +535,10 @@ impl PageReader for LakePageReader {
         // The declared value count is met. Anything left in the chunk past the
         // pages that hold no row is pages that count does not cover; see
         // `Self::stranded`.
-        let mut pos = self.pos;
-        let rest = loop {
-            let rest = self.chunk.get(pos..).unwrap_or_default();
-            match rowless_extent(rest) {
-                Some(len) => pos += len,
-                None => break rest,
-            }
-        };
+        let rest = step_over_rowless(
+            self.chunk.get(self.pos..).unwrap_or_default(),
+            rowless_extent,
+        );
         self.stranded.store(rest.len(), Ordering::Relaxed);
         Ok(None)
     }
@@ -1187,6 +1203,46 @@ mod tests {
             r.stranded().load(Ordering::Relaxed),
             one_value.len() + empty_data.len()
         );
+    }
+
+    /// **THE STEP OVER ROWLESS PAGES ENDS EVEN IF A STEP DOES NOT ADVANCE.**
+    ///
+    /// Round 3 of review found `rowless_extent -> Some(0)` and `pos *= len`
+    /// reported by `cargo mutants` as TIMEOUT: the old loop relied on every
+    /// step advancing and spun when one did not. `step_over_rowless` is
+    /// bounded by the bytes it is given: an extent that never advances ends
+    /// with every byte left over, which the caller counts as unread; one that
+    /// advances a byte at a time ends with nothing left; and neither is asked
+    /// more than once per byte.
+    #[test]
+    fn the_step_over_rowless_pages_ends_even_if_a_step_does_not_advance() {
+        let bytes = [7_u8; 5];
+        let calls = std::cell::Cell::new(0_usize);
+        let stuck = step_over_rowless(&bytes, |_| {
+            calls.set(calls.get() + 1);
+            Some(0)
+        });
+        assert_eq!(
+            stuck, bytes,
+            "a step that does not advance leaves every byte"
+        );
+        assert_eq!(
+            calls.get(),
+            bytes.len(),
+            "asked once per byte, then stopped"
+        );
+
+        calls.set(0);
+        let crawl = step_over_rowless(&bytes, |r| {
+            calls.set(calls.get() + 1);
+            (!r.is_empty()).then_some(1)
+        });
+        assert!(crawl.is_empty(), "a byte at a time consumes everything");
+        assert_eq!(calls.get(), bytes.len());
+
+        let none = step_over_rowless(&bytes, |_| None);
+        assert_eq!(none, bytes, "nothing rowless, nothing stepped over");
+        assert!(step_over_rowless(&[], |_| Some(0)).is_empty());
     }
 
     #[test]

@@ -43806,3 +43806,16 @@ optional second check and is not implemented here.
 **Cost.** One `i128` sum over the row groups at open, which already reads the
 whole file; one comparison per `read_row_group`. No run identity moves: no
 workspace crate depends on `lake`.
+
+**The step over rowless pages is bounded (same review, round 3).** D-0776's
+loop that steps over leftover rowless pages advanced by whatever
+`rowless_extent` answered and had no other exit, so a step that did not advance
+would spin. `cargo mutants` reported `rowless_extent -> Some(0)` and
+`pos += len -> pos *= len` as TIMEOUT rather than caught. A lake test binary
+built with `rowless_extent` forced to `Some(0)` on the code before this change
+ran `reader::tests::a_sound_row_group_of_no_rows_decodes_to_an_empty_batch`
+until a 60-second alarm killed it (exit 142). The step is now
+`page::step_over_rowless`, a loop of at most as many steps as it has bytes;
+with the same forced `Some(0)` that test and two page tests fail at once
+instead. `page::tests::the_step_over_rowless_pages_ends_even_if_a_step_does_not_advance`
+pins the bound.
