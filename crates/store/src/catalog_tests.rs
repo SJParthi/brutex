@@ -137,6 +137,6 @@ fn a_non_utf8_component_is_counted_and_never_dropped() {
     );
     assert_eq!(
         control.census.spot, 1,
-        "the same path in UTF-8 is a spot month"
+        "the six-level path without that component is a spot month"
     );
 }

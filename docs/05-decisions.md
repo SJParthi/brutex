@@ -43701,7 +43701,12 @@ descend with `Path::is_dir`, which follows a link. Reproduced on origin/main
 2c209309: one real month plus `bars/groww/NSE/back -> ../..` gave
 `Census { seen: 33, spot: 1, wrong_depth: 32, .. }` on macOS, the walk
 re-entering the tree through the link until `read_dir` failed on the kernel's
-link limit and that failure was swallowed. The comment above the walk's stack
+link limit and that failure was swallowed. The count depends on the scratch
+root, and was re-measured on 2026-09-30 with the same test binary: `seen 34,
+wrong_depth 33` with the root under `/private/tmp/claude-501/`, and `seen 33,
+wrong_depth 32` for the same directory reached as `/tmp/claude-501/`, because
+`/tmp` is itself a link (`/tmp -> private/tmp`) and spends one of the limit's
+links. No test asserts either count. The comment above the walk's stack
 said the explicit stack dealt with a symlink loop; it did not. A link that
 resolved to nothing answered `is_dir` false and was classified as a bar file.
 

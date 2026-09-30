@@ -366,9 +366,12 @@ fn an_unreadable_entry_is_part_of_the_reconciliation() {
 /// tree.** D-0766.
 ///
 /// `is_dir` follows links, so one real file beside `back -> ../..` was seen
-/// 33 times on macOS (32 of them filed `wrong_depth`) before `read_dir` failed
-/// on the kernel's link limit (W3-store1-5, reproduced on origin/main
-/// 2c209309). The walk no longer follows a link at all.
+/// again at every level before `read_dir` failed on the kernel's link limit
+/// (W3-store1-5, reproduced on origin/main 2c209309 on macOS). How many times
+/// depends on the scratch root: `seen 34, wrong_depth 33` under
+/// `/private/tmp/...` and `seen 33, wrong_depth 32` under the same directory
+/// reached through the `/tmp` link, which spends one of the limit's links. No
+/// test asserts that count. The walk no longer follows a link at all.
 #[test]
 fn a_symlink_loop_is_counted_once_and_not_walked() {
     let root = scratch("loop");
