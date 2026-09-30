@@ -9864,3 +9864,43 @@ The text above is kept as it was written.
   doc to its body, read off the source, and
   `what_a_changed_rows_line_costs_is_named_in_part_and_read_off_the_source`
   finds each part named here and in that doc in the source that pays it.
+
+## Global Replay V1 appends and V3 commits re-read their whole ledger — D-0927, 30 September 2026
+
+§140 states what OPENING the V1 replay files costs, and §166 bounds one V3
+block in its own record count. Neither said what each later V1 append or V3
+commit costs, and both re-read every committed record.
+Nothing here was timed; every statement is read off the source named beside it.
+
+* **V1, every append.** `append_complete_locked` begins with
+  `self.require_files_unchanged()?;`, and on a new publication ends with
+  `self.refresh_file_digests()?;` (`crates/cli/src/global_replay.rs`). Each of
+  those two functions calls `digest_file` on the stream, decision, trade and
+  completion files, and `digest_file` seeks to `SeekFrom::Start(0)` and reads
+  in 16 KiB chunks until `read == 0`. One new publication therefore hashes all
+  four files twice, and an exact reuse hashes them once before it returns
+  `Reused`. The bytes hashed per append grow with every publication already
+  committed, so P appends hash O(P²) record-bytes in total when publications
+  are of similar size (an extrapolation from the loop, not a measurement).
+* **Why the whole-file hash is kept.** It is the check that refuses a writer
+  whose files were changed underneath it by an equal-length overwrite.
+  `global_replay::tests::same_length_external_mutation_makes_open_writer_stale`
+  overwrites one byte in place and requires the next append to refuse with
+  "changed after open". A replacement would have to keep that refusal, and none
+  is attempted here.
+* **V3, every open, commit and audit.** `GlobalReplayLedgerV3::open` ends with
+  `ledger.load_snapshot()?;`, `commit_locked` runs
+  `let snapshot = self.load_snapshot()?;` before its duplicate-publication
+  probe, and `audit` runs `let snapshot = self.ledger.load_snapshot()?;`
+  (`crates/cli/src/global_replay_v3.rs`). `load_snapshot` calls `read_records`
+  for the witness, candidate, decision, money and completion files, and
+  `read_records` decodes every record of its file. Each of those calls is
+  therefore proportional to every record ever committed to the five V3 files,
+  not to the one block §166 bounds, and K commits of similar size are quadratic
+  in K (an extrapolation from the loop, not a measurement).
+
+**A process killed mid-append still leaves a refused tail.** D-0926 rolls a
+failed V1, V2 or V3 append back to its starting length when an encode or a write
+returns an error. A process that dies between two writes runs no rollback, so
+its partial record remains, and the next open refuses the file for its ragged
+body, loudly, as before. No open path truncates such a tail on its own.

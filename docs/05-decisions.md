@@ -43666,3 +43666,68 @@ job.
   survived. `an_nse_cash_stock_consults_no_peer_even_one_holding_it` gives a
   second vendor the same stock and requires that nothing votes and nothing is
   named; the same two feeds holding an index do vote, as the control.
+
+### D-0926 — Name a missing or extra middle fold-audit bar as absent, and roll a failed global replay append back to its starting length — 2026-09-30
+
+**Fold audit (W2-cli5-7).** `fold_audit::compare` paired stored record i with
+folded record i. A coarse file missing one MIDDLE bucket then compared every
+later stored bar with the fold's next bucket, so each was reported as a
+`ts_micros` field disagreement and the last fold bucket was named absent,
+although the neighbouring test's doc says a file with more or fewer records "is
+named as that, rather than reported as a field disagreement". That test removed
+only the LAST bucket, where position and timestamp agree. `compare` now walks
+the two sequences with two cursors. Heads that open at the same time are
+compared field by field as before. When they differ, the head of one side is
+named absent from the other if the other side's head opens no earlier than the
+NEXT bar on this side; otherwise the two heads are one bar whose timestamp
+differs, and it is still named as the `ts_micros` field, so the existing
+`every_stored_field_disagreement_retains_its_exact_position_and_values` holds
+unchanged. A bucket the file lacks is reported at its index in the fold, which
+is the index the positional pairing gave a bucket missing from the end.
+`fold_audit::tests::a_missing_or_extra_middle_record_names_only_that_record`
+removes one middle bucket and inserts one stray bar, and
+`fold_audit::tests::two_missing_or_stray_middle_records_and_a_moved_bar_are_each_named_once`
+removes two from the middle and two from the end, inserts two, and moves one
+middle bar earlier and later; both
+require exactly the disagreements named above each time.
+
+**Append rollback (W2-cli5-6).** V1 `append_encoded`, V2 `append_encoded_v2`
+and V2's inline candidate and stream-header loops wrote records one
+`write_all` at a time and returned on the first error with no rollback. A write
+that extends the file and then fails leaves a partial record, and
+`check_record_file` refuses a body that is not a whole number of strides ("has
+a ragged {payload}-byte record body") on every later open; a record that
+refused to encode after earlier ones were written left those behind as well.
+`frontier.rs` already truncates to its measured end in the same situation. All
+four V1/V2 append sites, and V3's `append_records`, now go through one
+`global_replay::append_encoded_with`, which takes the starting length from its
+seek to the end, and on any encode or write error truncates back to it and says
+so in the refusal, or says that the truncation also failed.
+`global_replay::tests::a_partial_append_write_rolls_back_to_its_starting_length`
+fails a write after one whole record and three bytes of the next, and requires
+the file back at its starting length, and a refused truncation named;
+`global_replay::tests::a_refused_append_leaves_the_file_exactly_as_long_as_it_was`
+and
+`global_replay_v2::tests::a_refused_v2_append_leaves_the_file_exactly_as_long_as_it_was`
+refuse the second record's encoding on a real file, and
+`global_replay_v3::tests::a_refused_v3_append_leaves_the_file_exactly_as_long_as_it_was`
+does the same through V3's `append_records`. W2-cli5-6 named V1 and V2; V3
+had the same loop, so it takes the same rollback. The rollback is per file: a
+commit that appends to several files and fails on a later one leaves the earlier
+files' whole records in place, as before. A process killed between two writes
+runs no rollback; `docs/06-limits.md` records that under D-0927.
+
+### D-0927 — Record the whole-ledger re-reads on Global Replay V1 appends and V3 commits instead of removing them — 2026-09-30
+
+W2-cli5-1 and W2-cli6-2 found two per-append costs that `docs/06-limits.md`
+§140 and §166 did not state: V1 hashes all four replay files before and after
+each new publication, and V3 re-reads and decodes all five files on every open,
+commit and audit. Both are kept and recorded, not removed. V1's first hash is
+the stale-writer check that
+`global_replay::tests::same_length_external_mutation_makes_open_writer_stale`
+requires. V3's reload is taken inside `commit_locked`, which runs while the
+writer lock is held. Making either O(1) per append needs a design and a proof
+this batch does not have. The costs, the source lines they are read from, and
+the killed-process tail left by D-0926 are recorded in `docs/06-limits.md`
+under "Global Replay V1 appends and V3 commits re-read their whole ledger".
+Nothing was timed.

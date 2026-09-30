@@ -5354,3 +5354,12 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### Fold-audit pairing and global replay append rollback — C4 cli-10 (D-0926, D-0927)
+
+| Id | Invariant | Test that proves it | Status |
+|---|---|---|---|
+| C4-CLI-10-01 | `fold_audit::compare` names each bucket a coarse file lacks, one or two in the middle or two at the end, as "absent from the store, present in the fold" at its index in the fold, and a stray middle bar, one or two in a row, as "present in the store, absent from the fold" at its own index, with no other disagreement; a middle bar moved earlier or later is one `ts_micros` disagreement. | `cli::fold_audit::tests::a_missing_or_extra_middle_record_names_only_that_record`, `cli::fold_audit::tests::two_missing_or_stray_middle_records_and_a_moved_bar_are_each_named_once` | ✓ |
+| C4-CLI-10-02 | A V1 global replay append whose write fails after a partial record, or whose record refuses to encode after an earlier one was written, leaves the file exactly as long as it was before the call and names the rollback in its refusal; a rollback that itself fails is named as that. | `cli::global_replay::tests::a_partial_append_write_rolls_back_to_its_starting_length`, `cli::global_replay::tests::a_refused_append_leaves_the_file_exactly_as_long_as_it_was` | ✓ |
+| C4-CLI-10-03 | A V2 or V3 global replay append whose record refuses to encode after an earlier one was written leaves the file exactly as long as it was before the call; a V3 append that encodes leaves every record. | `cli::global_replay_v2::tests::a_refused_v2_append_leaves_the_file_exactly_as_long_as_it_was`, `cli::global_replay_v3::tests::a_refused_v3_append_leaves_the_file_exactly_as_long_as_it_was` | ✓ |
+| C4-CLI-10-04 | The V1 whole-file hash kept on every append (D-0927) refuses a writer whose file was changed by an equal-length overwrite after open. | `cli::global_replay::tests::same_length_external_mutation_makes_open_writer_stale` | ✓ |
