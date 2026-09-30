@@ -43691,6 +43691,26 @@ removes two from the middle and two from the end, inserts two, and moves one
 middle bar earlier and later; both
 require exactly the disagreements named above each time.
 
+The absent and present labels assume a stored file whose opening times
+strictly increase, which the store's writer enforces (`BatchNotOrdered`, "A
+batch whose own timestamps do not strictly increase", and
+`TimestampsOutOfOrder` for a batch that does not follow what is committed). On
+a file damaged after writing, pairing by time named one bar both files hold as
+absent from the store AND as present only in the store. `compare` therefore
+refuses such a file before pairing, naming the first record that does not
+follow; `fold_audit_range` reports that refusal on its rung's line, as it does
+any unreadable rung.
+`fold_audit::tests::a_stored_file_out_of_opening_time_order_is_refused_before_pairing`
+swaps two middle bars, repeats the last bar, and repeats a bar at `i64::MAX`,
+and requires the refusal each time.
+
+`Disagreement.at` counts in the fold for a bucket the file lacks and in the
+stored file otherwise, so one report could print "record 2" twice about two
+bars. `Disagreement::line` renders the first as "fold record N" and the rest as
+"stored record N", and the fold-audit report prints that line;
+`fold_audit::tests::a_rendered_disagreement_names_which_file_its_index_counts_in`
+requires both exact lines.
+
 **Append rollback (W2-cli5-6).** V1 `append_encoded`, V2 `append_encoded_v2`
 and V2's inline candidate and stream-header loops wrote records one
 `write_all` at a time and returned on the first error with no rollback. A write
@@ -43711,7 +43731,13 @@ and
 `global_replay_v2::tests::a_refused_v2_append_leaves_the_file_exactly_as_long_as_it_was`
 refuse the second record's encoding on a real file, and
 `global_replay_v3::tests::a_refused_v3_append_leaves_the_file_exactly_as_long_as_it_was`
-does the same through V3's `append_records`. W2-cli5-6 named V1 and V2; V3
+does the same through V3's `append_records`. The two V2 commit sites are
+pinned at commit level:
+`global_replay_v2::tests::a_refused_v2_commit_leaves_its_candidate_and_stream_files_as_long_as_they_were`
+calls `append_prepared_files` once with a second candidate that refuses to
+encode and once with a receipt whose second stream header overflows its
+candidate range, and requires the candidate file, then the stream file, back at
+its starting length. W2-cli5-6 named V1 and V2; V3
 had the same loop, so it takes the same rollback. The rollback is per file: a
 commit that appends to several files and fails on a later one leaves the earlier
 files' whole records in place, as before. A process killed between two writes
@@ -43722,12 +43748,18 @@ runs no rollback; `docs/06-limits.md` records that under D-0927.
 W2-cli5-1 and W2-cli6-2 found two per-append costs that `docs/06-limits.md`
 §140 and §166 did not state: V1 hashes all four replay files before and after
 each new publication, and V3 re-reads and decodes all five files on every open,
-commit and audit. Both are kept and recorded, not removed. V1's first hash is
-the stale-writer check that
+commit and audit, and re-validates every committed block through
+`validate_committed_block`, `validate_semantics` and `schedule_candidates`,
+which sorts each block's candidates. Both are kept and recorded, not removed.
+V1's first hash is the stale-writer check that
 `global_replay::tests::same_length_external_mutation_makes_open_writer_stale`
-requires. V3's reload is taken inside `commit_locked`, which runs while the
-writer lock is held. Making either O(1) per append needs a design and a proof
-this batch does not have. The costs, the source lines they are read from, and
-the killed-process tail left by D-0926 are recorded in `docs/06-limits.md`
-under "Global Replay V1 appends and V3 commits re-read their whole ledger".
-Nothing was timed.
+requires; that test overwrites one byte inside the first record, so it pins a
+pre-append check, not one that spans the whole file. V1's second hash, after
+the append, is kept only for simplicity: no test requires it, and the first
+pass's hasher extended with this call's bytes would give the same baseline.
+V3's reload is taken inside `commit_locked`, which runs while the writer lock
+is held. Making either O(1) per append needs a design and a proof this batch
+does not have. The costs, the source lines they are read from, the
+killed-process tail left by D-0926, and the unsynced rollback are recorded in
+`docs/06-limits.md` under "Global Replay V1 appends and V3 commits re-read
+their whole ledger". Nothing was timed.

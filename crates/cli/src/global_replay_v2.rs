@@ -4783,4 +4783,54 @@ mod tests {
         assert!(why.contains("rolled back to byte 24"), "{why}");
         fs::remove_dir_all(&dir).expect("remove append-rollback root");
     }
+
+    /// A V2 commit whose LATER candidate or stream header refuses to encode,
+    /// after an earlier one of the same file was written, leaves that file
+    /// exactly as long as it was. Without the rollback at these two commit
+    /// sites the first record's bytes stayed, and no completion named them.
+    #[test]
+    fn a_refused_v2_commit_leaves_its_candidate_and_stream_files_as_long_as_they_were() {
+        let root = test_root("commit-rollback");
+        let manifest = manifest_fixture();
+        let streams = (0..MAX_STREAMS)
+            .map(|ordinal| controlled_manifest_stream(&manifest, ordinal))
+            .collect::<Vec<_>>();
+        let prepared = schedule_streams(manifest, streams).expect("generated scheduled replay");
+        let mut writer = GlobalReplayLedgerV2::open(&root, 1).expect("new writer");
+        let receipt = writer.completion_for(&prepared).expect("receipt");
+        let length = |path: &Path| fs::metadata(path).expect("ledger file length").len();
+        let candidate_path = GlobalReplayLedgerV2::candidate_path(&root);
+        let stream_path = GlobalReplayLedgerV2::stream_path(&root);
+
+        // The second stream's only candidate now refuses to encode, after the
+        // first stream's candidate was written.
+        let mut broken = prepared.clone();
+        let second = broken
+            .streams
+            .get_mut(1)
+            .and_then(|stream| stream.candidates.first_mut())
+            .expect("second stream's candidate");
+        second.signal_micros = second.entry_micros;
+        let before = length(&candidate_path);
+        let why = writer
+            .append_prepared_files(&broken, &receipt)
+            .expect_err("the second candidate refuses");
+        assert_eq!(length(&candidate_path), before, "{why}");
+        assert!(why.contains("rolled back to byte"), "{why}");
+
+        // A receipt whose candidate range ends at u64::MAX after the first
+        // stream makes the SECOND stream header overflow, after the first
+        // header was written.
+        let mut late = receipt;
+        late.candidate_first = u64::MAX - 1;
+        let before = length(&stream_path);
+        let why = writer
+            .append_prepared_files(&prepared, &late)
+            .expect_err("the second header overflows");
+        assert_eq!(length(&stream_path), before, "{why}");
+        assert!(why.contains("candidate range overflowed"), "{why}");
+        assert!(why.contains("rolled back to byte"), "{why}");
+        drop(writer);
+        fs::remove_dir_all(root).expect("remove commit-rollback fixture");
+    }
 }
