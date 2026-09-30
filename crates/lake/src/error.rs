@@ -293,6 +293,27 @@ pub enum LakeError {
         held: usize,
     },
 
+    /// The footer's file-level row count is not the sum of its row groups'
+    /// declared row counts.
+    ///
+    /// A footer can understate a row group's `num_rows`, every chunk's
+    /// `num_values` and every chunk's byte length together, cut at a page
+    /// boundary. Each column then decodes whole as the declared prefix: the
+    /// page walk has no leftover bytes to count
+    /// ([`Self::UnreadChunkBytes`]) and the one-more-record probe finds
+    /// nothing ([`Self::LongColumnChunk`]), while
+    /// [`crate::reader::LakeFile::num_rows`]
+    /// still reports the rows that were cut. The two counts disagreeing is
+    /// what is left to see, so a row group read under them is refused.
+    /// W3-lake1-2.
+    RowCountsDisagree {
+        /// The file-level `num_rows` the footer declares.
+        file: i64,
+        /// The sum of every row group's declared `num_rows`, widened so the
+        /// sum cannot overflow.
+        groups: i128,
+    },
+
     /// A count in the file did not fit the machine's `usize`, or a length was
     /// negative where the format forbids it.
     ///
@@ -387,6 +408,10 @@ impl fmt::Display for LakeError {
             Self::NoSuchRowGroup { asked, held } => {
                 write!(f, "row group {asked} asked for, file holds {held}")
             }
+            Self::RowCountsDisagree { file, groups } => write!(
+                f,
+                "the footer declares {file} rows, its row groups {groups}; refusing rather than reading a row group under counts that disagree"
+            ),
             Self::ImpossibleLength { what, value } => {
                 write!(f, "{what} is {value}, which is not a possible length")
             }
@@ -556,6 +581,10 @@ mod tests {
                 "thrift ran out",
             ),
             (LakeError::NoSuchRowGroup { asked: 9, held: 2 }, "9"),
+            (
+                LakeError::RowCountsDisagree { file: 8, groups: 4 },
+                "declares 8 rows, its row groups 4",
+            ),
             (
                 LakeError::ImpossibleLength {
                     what: "num_rows",

@@ -45,6 +45,12 @@ pub struct LakeFile {
     bytes: Bytes,
     meta: ParquetMetaData,
     layout: Layout,
+    /// The sum of every row group's declared `num_rows`, taken once at open
+    /// so that [`LakeFile::read_row_group`] compares it with the file-level
+    /// count in O(1). `i128` because the sum of `i64`s can overflow an `i64`
+    /// and cannot overflow this: the row-group list is a thrift list, whose
+    /// length is an `i32`.
+    group_rows: i128,
 }
 
 impl core::fmt::Debug for LakeFile {
@@ -56,6 +62,7 @@ impl core::fmt::Debug for LakeFile {
             .field("bytes", &self.bytes.len())
             .field("row_groups", &self.meta.num_row_groups())
             .field("num_rows", &self.meta.file_metadata().num_rows())
+            .field("group_rows", &self.group_rows)
             .finish()
     }
 }
@@ -136,10 +143,16 @@ impl LakeFile {
                 reason: e.to_string(),
             })?;
         let layout = detect(meta.file_metadata().schema_descr())?;
+        let group_rows = meta
+            .row_groups()
+            .iter()
+            .map(|g| i128::from(g.num_rows()))
+            .sum();
         Ok(Self {
             bytes,
             meta,
             layout,
+            group_rows,
         })
     }
 
@@ -181,6 +194,8 @@ impl LakeFile {
     /// group declares;
     /// [`LakeError::UnreadChunkBytes`] if a column chunk holds pages past
     /// its declared value count;
+    /// [`LakeError::RowCountsDisagree`] if the file-level row count is not
+    /// the sum of the row groups' declared counts;
     /// [`LakeError::UnexpectedNull`] if a column that must not be null is;
     /// [`LakeError::OpenInterestIsNullSentinel`] if a present open interest
     /// equals the null sentinel;
@@ -291,6 +306,25 @@ impl LakeFile {
         } else {
             (Vec::new(), Vec::new(), Vec::new())
         };
+
+        // THE FILE-LEVEL COUNT IS THE LAST THING A FOOTER CAN BE CAUGHT BY.
+        // `parquet.thrift` (`parquet-format-safe-0.2.4`) gives `FileMetaData`
+        // field 3 `num_rows` as "Number of rows in this file" and `RowGroup`
+        // field 3 `num_rows` as "Number of rows in this row group", so the
+        // groups sum to the file. A footer that cuts a group's `num_rows`, its
+        // chunks' `num_values` and their byte lengths together, on a page
+        // boundary, decodes every column above as the declared prefix — the
+        // probe and the stranded-byte count have nothing to see — while
+        // `Self::num_rows` still reports the rows cut away. This is checked
+        // after the columns so that a lie they can see is named by the column
+        // it is in. O(1): the sum was taken once, at open. W3-lake1-2.
+        let file_rows = self.num_rows();
+        if i128::from(file_rows) != self.group_rows {
+            return Err(LakeError::RowCountsDisagree {
+                file: file_rows,
+                groups: self.group_rows,
+            });
+        }
 
         Ok(Batch::new(
             self.layout,
@@ -1373,6 +1407,86 @@ mod tests {
             Err(other) => panic!("refused for the wrong reason: {other:?}"),
             Ok(batch) => panic!("an 8-row chunk was read as {} rows", batch.len()),
         }
+    }
+
+    /// **ROW, VALUE AND BYTE COUNTS UNDERSTATED TOGETHER ARE REFUSED ON THE
+    /// FILE-LEVEL COUNT.**
+    ///
+    /// Each chunk is two data pages of four rows. The footer says 4 in the row
+    /// group's `num_rows` and in every chunk's `num_values`, and every chunk's
+    /// `total_compressed_size` is cut by exactly the bytes
+    /// `UnreadChunkBytes` reports for it, so the chunk ends where its first
+    /// page does. Neither the one-more-record probe nor the stranded-byte count
+    /// has anything left to see, and before `RowCountsDisagree` this decoded
+    /// as a 4-bar batch while `LakeFile::num_rows` still said 8. W3-lake1-2,
+    /// round 3.
+    ///
+    /// The cuts are found by reading: each read names one column and its
+    /// unread bytes, and each column is named once, so the loop is bounded by
+    /// the column count. The last read is the file-level refusal.
+    ///
+    /// The known limit is pinned too: the same lie with the file-level
+    /// `num_rows` also cut to 4 leaves nothing in the footer that disagrees,
+    /// and it decodes as four rows. `docs/06-limits.md` records it.
+    #[test]
+    fn row_value_and_byte_counts_understated_together_are_refused_on_the_file_count() {
+        const LIE: i64 = 4;
+        let ints: Vec<i64> = (0..8).collect();
+        let sound = cash_file_written(&ints, Some(4));
+
+        let lie = |cut: &[i64], file_rows: Option<i64>| {
+            patch_footer(&sound, |meta| {
+                meta.row_groups[0].num_rows = LIE;
+                for (i, chunk) in meta.row_groups[0].columns.iter_mut().enumerate() {
+                    let m = chunk
+                        .meta_data
+                        .as_mut()
+                        .expect("the writer records chunk metadata");
+                    m.num_values = LIE;
+                    m.total_compressed_size -= cut[i];
+                }
+                if let Some(n) = file_rows {
+                    meta.num_rows = n;
+                }
+            })
+        };
+
+        let mut cut = [0_i64; CASH.len()];
+        let mut named: Vec<&str> = Vec::new();
+        let refusal = loop {
+            let file = LakeFile::from_bytes(lie(&cut, None)).expect("the footer still parses");
+            assert_eq!(file.num_rows(), 8, "the file-level count is untouched");
+            match file.read_row_group(0) {
+                Err(LakeError::UnreadChunkBytes { column, bytes }) => {
+                    assert!(!named.contains(&column), "{column} named twice");
+                    named.push(column);
+                    let i = CASH
+                        .iter()
+                        .position(|(n, _)| *n == column)
+                        .expect("a cash column");
+                    cut[i] = i64::try_from(bytes).expect("a chunk length fits an i64");
+                }
+                other => break other,
+            }
+        };
+        let every: Vec<&str> = CASH.iter().map(|(n, _)| *n).collect();
+        assert_eq!(named, every, "every column's second page was cut away");
+        match refusal {
+            Err(e @ LakeError::RowCountsDisagree { file, groups }) => {
+                assert_eq!((file, groups), (8, 4));
+                assert!(e.to_string().contains("declares 8 rows"), "{e}");
+            }
+            Err(other) => panic!("refused for the wrong reason: {other:?}"),
+            Ok(batch) => panic!("an 8-row file was read as {} rows", batch.len()),
+        }
+
+        let consistent = LakeFile::from_bytes(lie(&cut, Some(LIE))).expect("the footer parses");
+        assert_eq!(consistent.num_rows(), LIE);
+        let batch = consistent
+            .read_row_group(0)
+            .expect("a footer that agrees with itself is not refused: the recorded limit");
+        let stamps: Vec<i64> = batch.iter().map(|b| b.timestamp_micros).collect();
+        assert_eq!(stamps, [0, 1, 2, 3], "only the first page of each column");
     }
 
     /// **A SOUND ROW GROUP OF NO ROWS STILL DECODES, EMPTY.**

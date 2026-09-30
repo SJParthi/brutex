@@ -43772,3 +43772,37 @@ machine this was written on, and every test in `tests/real_lake.rs` is
 **Cost.** When a walk stops: one header parse per rowless page it steps over,
 then one atomic store; one atomic load per column chunk. Nothing per row. No run identity moves: no workspace crate depends on
 `lake`.
+
+### D-0777 — Refuse a row group read under a file-level row count its row groups do not sum to — 2026-10-01
+
+**What happened.** An independent review of D-0776 (round 3) found W3-lake1-2
+still open for one footer: the row group's `num_rows`, every chunk's
+`num_values` AND every chunk's `total_compressed_size`, all cut at a page
+boundary. `Columns::pages` slices a chunk to its declared length, so the cut
+page is outside the slice, the stranded-byte count has nothing to count, and
+the one-more-record probe finds nothing. The reviewer's probe printed
+`RV7 TRIPLE LIE: file.num_rows()=8 batch.len()=4`. Before this fix,
+`reader::tests::row_value_and_byte_counts_understated_together_are_refused_on_the_file_count`
+failed with `an 8-row file was read as 4 rows`; with only the new check
+disabled it fails the same way again.
+
+**The fix.** `LakeFile::from_bytes` sums every row group's declared `num_rows`
+once, as an `i128`, and `LakeFile::read_row_group` refuses a group read under a
+file-level `num_rows` that differs from that sum as
+`LakeError::RowCountsDisagree`, naming both counts. `parquet.thrift`
+(`parquet-format-safe-0.2.4`) gives `FileMetaData` field 3 `num_rows` as
+"Number of rows in this file" and `RowGroup` field 3 `num_rows` as "Number of
+rows in this row group". The check runs after the columns decode, so a lie a
+column can see is still named by that column: the D-0775 and D-0776 tests are
+unchanged. It is a refusal at read, not at open, so a file whose counts
+disagree still opens and still reports its footer's `num_rows`.
+
+**What it does not close.** A footer that also cuts the file-level `num_rows`
+to the same prefix agrees with itself, and it decodes as that prefix; the test
+pins that as the known limit, and `docs/06-limits.md` records it. Checking that
+the chunks' byte ranges tile the row group with no gap was the reviewer's
+optional second check and is not implemented here.
+
+**Cost.** One `i128` sum over the row groups at open, which already reads the
+whole file; one comparison per `read_row_group`. No run identity moves: no
+workspace crate depends on `lake`.

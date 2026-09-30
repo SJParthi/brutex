@@ -9887,3 +9887,22 @@ column and byte count rather than a silent read. `cargo test -p lake -- --ignore
 would measure it on the files those tests decode — the two named samples and
 the month files under the first 40 NSE F&O directories `read_dir` yields, which
 `a_spread_of_real_files_decodes_with_no_failures` walks — and not on the rest.
+
+## `crates/lake` catches a cut footer only while the file-level row count still disagrees — D-0777, 1 October 2026
+
+A footer that understates a row group's `num_rows`, every chunk's `num_values`
+and every chunk's `total_compressed_size` together, on a page boundary, is
+refused only because the file-level `num_rows` no longer equals the sum of the
+row groups' counts (`LakeError::RowCountsDisagree`). The same footer with the
+file-level `num_rows` cut too agrees with itself, and it decodes as the
+declared prefix: the pages cut away lie between chunks, and nothing this reader
+checks covers bytes outside a chunk's declared range.
+`reader::tests::row_value_and_byte_counts_understated_together_are_refused_on_the_file_count`
+pins both halves. Whether every real lake file's counts agree is
+**UNMEASURED**, for the reason the D-0776 section above gives: `~/.brutex/lake`
+is not on this machine, and `tests/real_lake.rs` is `#[ignore]`d.
+
+The D-0776 section above gives the refusal and not its cost. When a page walk
+stops, stepping over the leftover rowless pages costs one header parse for each
+such page, so it is linear in those pages for that chunk, not constant, and
+bounded by the chunk's bytes. No body is decompressed there.
