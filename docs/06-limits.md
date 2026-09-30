@@ -9864,3 +9864,10 @@ The text above is kept as it was written.
   doc to its body, read off the source, and
   `what_a_changed_rows_line_costs_is_named_in_part_and_read_off_the_source`
   finds each part named here and in that doc in the source that pays it.
+
+- **Corrected 2026-09-30, D-0946.** The AF-19 correction above says "No page
+  under `web/` renders `equity_note`". The report page now renders the open
+  run's `equity_note`, trimmed of leading and trailing blanks, in its
+  breakdown pane and over its trade list, and labels every run that is not a note-free NIFTY or BANKNIFTY run gross of
+  every charge (`web/tests/charge-scope.test.js`). No other page under `web/`
+  was changed.
