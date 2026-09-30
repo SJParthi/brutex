@@ -43666,3 +43666,35 @@ job.
   survived. `an_nse_cash_stock_consults_no_peer_even_one_holding_it` gives a
   second vendor the same stock and requires that nothing votes and nothing is
   named; the same two feeds holding an index do vote, as the control.
+
+### D-0930 — Family-test ppm and the White decision come from the exact bootstrap fraction (GAP5-54, W2-cli7-6) — 2026-09-29
+
+**What was wrong.** Two projections of one exact bootstrap fraction
+`k/(draws+1)` disagreed with the exact decision at the same alpha.
+
+- `FamilyTestEvidenceV1::from_runner` and the durable path decided White
+  with `Verdict::clears` (`p < 0.05`, `runner::bootstrap`) while the stored
+  ppm beside it is compared against `<=` maxima. `p = 250/5000` stored
+  `50_000`, which passes a `<= 50_000` maximum, beside `DidNotReject`. Its
+  `ceil(p * 1e6)` also overshot exact boundaries in `f64`: `79/5000`
+  projected to `15_801`.
+- `InstitutionalStatisticsAuthorityV1::fwer_p_value_ppm` and
+  `romano_wolf_p_value_ppm` returned the row's stored `exact_ppm`, a floor.
+  `50_001/1_000_001` read `50_000` and passed a `<= 50_000` maximum that
+  `romano_wolf_rejects_at_ppm(50_000)` refuses.
+
+**The change.** `institutional_evidence` recovers `k` from the runner's
+p-value and `draws`, refuses a value that is not exactly `k/(draws+1)` (or is
+zero, or has a denominator above `2^53`), and derives both the ppm
+(`ceil(k * PPM / d)`) and the White decision (`k * PPM <= d * alpha`, the
+inclusive rule `romano_wolf_rejects_at_ppm` already uses) from the integers.
+The statistics authority's two getters now return `ceil` over the retained
+exact counts. The V1 row still stores and validates the floor: its bytes are
+a format version and are not mutated in place (`CLAUDE.md` §3 rule 8). Only
+the admission-facing projection moved, and only when the fraction is not a
+whole number of ppm.
+
+**Proof.** `family_ppm_and_white_decision_come_from_one_exact_fraction`,
+`invalid_probabilities_are_refused_instead_of_clamped` and
+`ppm_projections_never_pass_a_maximum_the_exact_count_fails`; see
+`docs/04-invariants.md` C4-CLI-12-01 and C4-CLI-12-02.

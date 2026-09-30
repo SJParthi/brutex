@@ -5354,3 +5354,10 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### Exact family-test projections, knob reads and live-run names — C4 cli-12 (D-0930, D-0931)
+
+| Id | Invariant | Test that proves it | Status |
+|---|---|---|---|
+| C4-CLI-12-01 | `FamilyTestEvidenceV1` derives the White/SPA ppm as `ceil(k * PPM / d)` and the White decision as `k * PPM <= d * alpha` from one exact `k/(draws+1)` fraction: `250/5000` stores `50_000` beside `RejectedNull`, `251/5000` stores `50_200` beside `DidNotReject`, `79/5000` stores `15_800`, and a p-value that is zero, out of `[0,1]`, not an exact fraction, or over a denominator above `2^53` is refused. | `cli::institutional_evidence::tests::family_ppm_and_white_decision_come_from_one_exact_fraction`, `cli::institutional_evidence::tests::invalid_probabilities_are_refused_instead_of_clamped` | ✓ |
+| C4-CLI-12-02 | The statistics authority's `fwer_p_value_ppm` and `romano_wolf_p_value_ppm` round up over the exact counts: a valid V1 row storing the floor `50_000` for `50_001/1_000_001` reads `50_001`, `50_000/1_000_000` reads `50_000`, and certainty reads `1_000_000`. | `cli::institutional_statistics::tests::ppm_projections_never_pass_a_maximum_the_exact_count_fails` | ✓ |
