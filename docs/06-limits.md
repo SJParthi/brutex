@@ -9879,7 +9879,9 @@ called by both `snapshot` and `Journal::open_at`), and nothing compacts one.
   `drive` then opens `attempts.bin` once more
   (`Journal::open_existing(&root(&worker_site).join("attempts.bin"))`); that
   open is not counted by the test. `preflight_plan`'s snapshot of
-  `attempts.bin` is a validation only; its result is not bound.
+  `attempts.bin` is a validation only; its result is not bound, and it is
+  what refuses a start whose shared ledger is missing
+  (`recovery::tests::preflight_refuses_a_start_whose_shared_attempt_ledger_is_missing`).
 - **Growth.** The plan journal grows with every run of that plan, and
   `attempts.bin` with every attempt of every plan: the cost of a press grows
   with the recovery history on this store, not with the plan.

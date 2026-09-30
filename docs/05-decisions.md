@@ -43701,14 +43701,15 @@ not to the plan pressed, and one start replays each journal more than once.
 `preflight_plan` also snapshots `attempts.bin` only to prove it decodes; the
 result is not bound.
 
-**Why not fixed here.** Each replay is a validation that runs before a side
-effect (clearing STOP, claiming the run slot, publishing an activation
-pointer), and the preflight snapshot is what refuses a start on an unreadable
-shared ledger before any of those. Removing a replay means carrying one
-validated index across the blocking preflight and `seeded`, or compacting
-journals, and either changes the recovery refusal order this module's tests
-pin. That is a design change, not a follow-up, so the cost is stated and
-counted instead.
+**Why not fixed here.** The replay whose result is not bound is still a
+check: `start` runs `preflight_submission(&preflight_site, &asked)?` before
+`claim(&site, Some((id, true)))`, and
+`recovery::tests::preflight_refuses_a_start_whose_shared_attempt_ledger_is_missing`
+requires that preflight to refuse with "shared recovery attempt history is
+unavailable; budgets cannot be reset" once `attempts.bin` is gone. Removing a
+replay means carrying one validated index from the blocking preflight into
+`seeded`, or compacting journals. That is a design change, not a follow-up,
+so the cost is stated and counted instead.
 
 **Stated and counted.** `docs/06-limits.md` "Per-press recovery journal
 replays (D-0907)" states the cost. A test-only thread-local in
