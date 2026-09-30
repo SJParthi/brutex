@@ -9864,3 +9864,14 @@ The text above is kept as it was written.
   doc to its body, read off the source, and
   `what_a_changed_rows_line_costs_is_named_in_part_and_read_off_the_source`
   finds each part named here and in that doc in the source that pays it.
+
+### Knob reads of an unset knob are not constant-time (D-0931)
+
+`cli::knobs::var` for a knob nothing has set reads `std::env::var_os`, a
+lookup over the process environment. Its cost depends on the size of that
+environment, which this workspace neither bounds nor measures, so it is not
+claimed O(1); `count` inherits it. A set knob is answered by the store and does
+not read the environment (`a_set_knob_never_reads_the_environment`). Knobs are
+read once per rung or once per run, never inside a loop over bars or
+candidates, as the module documentation states. UNVERIFIED as a measured bound:
+no bench times it.
