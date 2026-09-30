@@ -101,6 +101,29 @@ pub struct Disagreement {
     pub folded: i64,
 }
 
+/// The `field` of a bucket the fold holds and the coarse file lacks. Its `at`
+/// counts in the fold, not in the file.
+pub const ABSENT_FROM_STORE: &str = "absent from the store, present in the fold";
+
+impl Disagreement {
+    /// The report line for this disagreement, naming which sequence `at`
+    /// counts in: "fold record" for a bucket the file lacks, "stored record"
+    /// for everything else. Printing both as "record N" let one report name
+    /// two different bars with the same words.
+    #[must_use]
+    pub fn line(&self) -> String {
+        let counted_in = if self.field == ABSENT_FROM_STORE {
+            "fold"
+        } else {
+            "stored"
+        };
+        format!(
+            "{counted_in} record {} ts {} field {} -- stored {}, folded {}",
+            self.at, self.ts_micros, self.field, self.stored, self.folded
+        )
+    }
+}
+
 /// One rung's verdict for one instrument-month.
 #[derive(Clone, Debug)]
 pub struct RungVerdict {
@@ -138,6 +161,8 @@ pub const MAX_REPORTED: usize = 8;
 ///
 /// Refuses an invalid fold width or malformed minute sequence. A folding error
 /// cannot become an empty series that appears to agree with an empty file.
+/// Refuses a stored sequence whose opening times do not strictly increase,
+/// naming the first record that does not follow, before pairing any bar.
 pub fn compare(rung: Timeframe, minutes: &[Bar], stored: &[Bar]) -> Result<RungVerdict, String> {
     let bucket =
         store_bucket(rung).ok_or_else(|| format!("{} has no valid fold width", rung.as_str()))?;
@@ -164,8 +189,10 @@ pub fn compare(rung: Timeframe, minutes: &[Bar], stored: &[Bar]) -> Result<RungV
     // store holds one the fold does not. Otherwise the two heads are one bar
     // whose timestamp differs, and that is still named as the `ts_micros`
     // field. Every step advances at least one cursor, so the walk ends after
-    // at most stored + folded steps even on an out-of-order stored file, and a
-    // verdict agrees only when every step paired two identical records.
+    // at most stored + folded steps, and a verdict agrees only when every step
+    // paired two identical records. A stored file out of order is refused
+    // before any pairing, because those labels assume it is not.
+    require_strictly_increasing(rung, stored)?;
     let only_stored = |at: u64, s: &Bar| Disagreement {
         at,
         ts_micros: s.ts_micros,
@@ -176,7 +203,7 @@ pub fn compare(rung: Timeframe, minutes: &[Bar], stored: &[Bar]) -> Result<RungV
     let only_folded = |fi: usize, f: &Bar| Disagreement {
         at: u64::try_from(fi).unwrap_or(u64::MAX),
         ts_micros: f.ts_micros,
-        field: "absent from the store, present in the fold",
+        field: ABSENT_FROM_STORE,
         stored: 0,
         folded: f.ts_micros,
     };
@@ -258,6 +285,40 @@ pub fn compare(rung: Timeframe, minutes: &[Bar], stored: &[Bar]) -> Result<RungV
         disagreements,
         elided,
     })
+}
+
+/// Refuse a stored sequence whose opening times do not strictly increase,
+/// naming the first record that does not follow.
+///
+/// The absent and present labels hold only for a stored file whose opening
+/// times strictly increase, as the fold's do. The store's writer refuses
+/// any other batch (`BatchNotOrdered`, `TimestampsOutOfOrder`), so a file
+/// that is not is one damaged after writing, and pairing it by time named a
+/// bar both sides hold as absent from one AND present only in the other. It
+/// is refused here, in one pass, before any pairing.
+fn require_strictly_increasing(rung: Timeframe, stored: &[Bar]) -> Result<(), String> {
+    if let Some((at, before, after)) =
+        stored
+            .windows(2)
+            .enumerate()
+            .find_map(|(index, pair)| match pair {
+                [before, after] if after.ts_micros <= before.ts_micros => {
+                    Some((index + 1, before, after))
+                }
+                _ => None,
+            })
+    {
+        return Err(format!(
+            "{} stored file is not in strictly increasing opening-time order at record {} \
+             (ts {} after ts {}); the store's writer refuses such a batch, so this file \
+             changed after it was written and cannot be paired with the fold",
+            rung.as_str(),
+            at,
+            after.ts_micros,
+            before.ts_micros,
+        ));
+    }
+    Ok(())
 }
 
 /// The fold bucket for a rung, or `None` for a width of zero seconds.
@@ -698,6 +759,81 @@ mod tests {
                 "shift {shift}"
             );
         }
+    }
+
+    /// A stored file whose opening times do not strictly increase is refused
+    /// before any pairing, naming the first record that does not follow. The
+    /// store's writer refuses such a batch, so only a file damaged after
+    /// writing reaches this. Pairing it by timestamp named a bar both files
+    /// hold as "absent from the store" and again as "present in the store".
+    #[test]
+    fn a_stored_file_out_of_opening_time_order_is_refused_before_pairing() {
+        let (minutes, full) = thirty_minutes_and_their_fold();
+
+        let mut swapped = full.clone();
+        swapped.swap(1, 2);
+        let why = compare(Timeframe::MINUTE_5, &minutes, &swapped)
+            .expect_err("a swapped file cannot be paired");
+        assert_eq!(
+            why,
+            format!(
+                "5min stored file is not in strictly increasing opening-time order at \
+                 record 2 (ts {} after ts {}); the store's writer refuses such a batch, \
+                 so this file changed after it was written and cannot be paired with \
+                 the fold",
+                full[1].ts_micros, full[2].ts_micros
+            )
+        );
+
+        // A repeated bar is not strictly increasing either, even at the end.
+        let mut repeated = full.clone();
+        repeated.push(full[5]);
+        let why = compare(Timeframe::MINUTE_5, &minutes, &repeated)
+            .expect_err("a repeated bar cannot be paired");
+        assert!(why.contains("at record 6 (ts"), "{why}");
+
+        // Two repeats at i64::MAX are refused at the second, not wrapped.
+        let top = Bar {
+            ts_micros: i64::MAX,
+            ..full[0]
+        };
+        let why = compare(Timeframe::MINUTE_5, &minutes, &[full[0], top, top])
+            .expect_err("repeated i64::MAX");
+        assert!(why.contains("at record 2"), "{why}");
+
+        // Strictly increasing files, including one bar and none, still pair.
+        for stored in [&full[..], &full[..1], &[][..]] {
+            compare(Timeframe::MINUTE_5, &minutes, stored).expect("an ordered file pairs");
+        }
+    }
+
+    /// A rendered disagreement says which sequence its index counts in: the
+    /// fold for a bucket the file lacks, the stored file for everything else,
+    /// so two lines naming index 2 cannot both read "record 2".
+    #[test]
+    fn a_rendered_disagreement_names_which_file_its_index_counts_in() {
+        let absent = Disagreement {
+            at: 2,
+            ts_micros: 11,
+            field: ABSENT_FROM_STORE,
+            stored: 0,
+            folded: 11,
+        };
+        assert_eq!(
+            absent.line(),
+            "fold record 2 ts 11 field absent from the store, present in the fold -- stored 0, folded 11"
+        );
+        let changed = Disagreement {
+            at: 2,
+            ts_micros: 12,
+            field: "close",
+            stored: 131,
+            folded: 124,
+        };
+        assert_eq!(
+            changed.line(),
+            "stored record 2 ts 12 field close -- stored 131, folded 124"
+        );
     }
 
     /// Beyond the cap, disagreements are counted rather than named, and the
