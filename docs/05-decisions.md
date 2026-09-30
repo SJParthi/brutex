@@ -43695,3 +43695,37 @@ V2, V3 and the exact grid add 0, and the revalidating door adds 1. With only
 the three call sites reverted it reports 21.
 `validate::tests::an_unissued_opaque_validation_refuses_the_sealed_projection`
 pins the refusal.
+
+### D-0741 — The training attestation carries the slice facts, so a per-run price does not rebuild them — 2026-09-29
+
+**What was wrong (W3-runner2-0).** `ResolvedExitGridV1::evaluate_with_attested`
+said "no bar is re-read and no byte is re-hashed here; what remains is the
+grid", but it called `grid::evaluate_resolved_policy_v1`, which ran
+`trade::SliceFacts::of(bars, column)` on every call: a walk over every
+execution bar, a `HashMap` and two prefix vectors of the slice's length, per
+run. The expression twin (`evaluate_expression_with_attested`, through
+`grid::evaluate_resolved_expression_policy_v1`) did the same, and
+`materialize_expression_coordinate` did it once per coordinate through
+`grid::materialize_expression_cell`. The facts depend only on the bars and
+column the token already borrows.
+
+**The change.** `AttestedTrainingV1` now holds the `SliceFacts` its
+attestation derived, and the three doors pass them down; the two resolved grid
+functions take the facts as a parameter, and
+`grid::materialize_expression_cell_over` is the materializer over given facts
+(the public `materialize_expression_cell` derives them and delegates). The
+token loses `Clone`, `Copy` and `Debug`, which no caller used; it stays `Sync`.
+No price changes: the facts are the same function of the same borrowed bars
+and column, and the attested and single-shot doors still return equal grids.
+
+**Proof.** `pricing_runs_over_one_attestation_derives_the_slice_facts_once`
+and `programs_and_coordinates_over_one_attestation_derive_the_slice_facts_once`
+count derivations with a test-only per-thread probe in `SliceFacts::of`. On
+the unfixed doors they report 5 extra derivations for five runs and 33 for
+three programs and their 30 coordinates; with the fix, 0.
+
+**What it does not change.** The walk after the facts still visits every
+column row, and `evaluate_training_grid_attested` still runs
+`let attested = self.attest_training(series, column, horizon)?;` on every
+call, so a caller that prices each run through it still reads the whole slice
+per run.

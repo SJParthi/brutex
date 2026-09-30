@@ -9876,3 +9876,16 @@ the validation is issued and not per decision
 (`per_candidate_admission_never_re_reconciles_the_opaque_validation`). The
 rest of each decision (Statistics verification, the evidence join and the
 policy) is unchanged and was not re-measured here. Not timed.
+
+## Attested pricing no longer rebuilds the slice facts per run — D-0741, 29 September 2026
+
+`evaluate_with_attested`, the expression pricing door and coordinate
+materialization each derived `SliceFacts` (a pass over every execution bar,
+one `HashMap` and two prefix vectors of the slice's length) on every call. The
+attestation now derives them once and the doors read them
+(`pricing_runs_over_one_attestation_derives_the_slice_facts_once`,
+`programs_and_coordinates_over_one_attestation_derive_the_slice_facts_once`).
+A priced run still walks every column row, so its cost grows with the signal
+rows of the slice and the grid, not with a constant. The single-shot
+`evaluate_training_grid_attested` still attests per call, so a caller that
+uses it per candidate still reads the whole slice per candidate. Not timed.

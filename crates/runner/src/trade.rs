@@ -401,10 +401,24 @@ pub struct SliceFacts {
     at_timestamp: std::collections::HashMap<i64, usize>,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// [`SliceFacts::of`] derivations run on this thread (test-only probe).
+    static DERIVATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// [`SliceFacts::of`] derivations run on the calling thread so far.
+#[cfg(test)]
+pub(crate) fn slice_facts_derived_on_this_thread() -> u64 {
+    DERIVATIONS.with(std::cell::Cell::get)
+}
+
 impl SliceFacts {
     /// Derive every execution-slice fact from `bars` and its column, once.
     #[must_use]
     pub fn of(bars: &[Candle], column: &Column) -> Self {
+        #[cfg(test)]
+        DERIVATIONS.with(|count| count.set(count.get() + 1));
         let accepted = column
             .acceptance()
             .filter(|verdict| verdict.len() == bars.len())

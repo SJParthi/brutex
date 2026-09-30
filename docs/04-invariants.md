@@ -5361,3 +5361,10 @@ the guard. The existing emits test pins the warning's message and level.
 |---|---|---|
 | C4-RUNNER-01: an Admission V2, V3 or exact-grid decision reads the projection its opaque validation sealed at issuance and runs no fold-wide reconciliation; 21 decisions add 0 reconciliations and the revalidating `search_authority_projection` still adds 1, with decisions equal to the first. | `admission::tests::per_candidate_admission_never_re_reconciles_the_opaque_validation` | ✓ |
 | C4-RUNNER-02: an opaque validation with no issued projection is refused with `SealMismatch` by the O(1) door, for V2, V3 and V4. | `validate::tests::an_unissued_opaque_validation_refuses_the_sealed_projection` | ✓ |
+
+### Attested pricing reads the slice facts the attestation derived — W3-runner2-0 (D-0741)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| C4-RUNNER-03: `attest_training` derives the slice facts once, and five `evaluate_with_attested` runs over that token derive them 0 more times while pricing the same grid as the single-shot door, which derives them once. | `exit_grid_policy::tests::pricing_runs_over_one_attestation_derives_the_slice_facts_once` | ✓ |
+| C4-RUNNER-04: three expression programs priced over one attestation, and every coordinate of each materialized from it, derive the slice facts 0 more times after the attestation's one derivation. | `exit_grid_policy::expression_execution::tests::programs_and_coordinates_over_one_attestation_derive_the_slice_facts_once` | ✓ |
