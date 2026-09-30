@@ -9886,3 +9886,34 @@ every other request. The first open is still O(rows). The refresh holds the
 shared lock, so it waits for an append in progress rather than reading part of
 one: `a_read_only_refresh_waits_for_an_append_in_progress`.
 `a_read_only_handle_over_damaged_history_refreshes_by_the_delta`. Not timed.
+
+## Boolean integrity checks re-read whole bodies, and nesting doubles them — W2-cli2-4, 29 September 2026
+
+**Not O(1), and not fixed here.** The family, statistics, admission,
+out-of-sample and qualification `require_current` methods of the Boolean
+research chain each re-read and re-hash their own complete body through
+`persistence::verify`:
+`let body = read_exact(&directory.join("body.bin"), bytes)?;`
+then `hash(&body) != payload`. Each one above the family also checks its parent
+before and after, so each level calls the level below it twice:
+
+* statistics: `self.group.require_current()?; persistence::verify(..)?;
+  self.group.require_current()`, and the group calls every source family's
+  `require_current`, which runs `persistence::verify` on that family's body;
+* admission: `self.statistics.require_current()?;` then its own verify, then
+  `self.statistics.require_current()`;
+* out-of-sample: `self.training.require_current()?;` before and after its own
+  verify;
+* qualification: `current(self.training, self.later)?;` before and after its
+  own verify, and `current` checks the admission and every out-of-sample
+  source.
+
+So one check is O(total evidence bytes below it), and the reads of a family's
+body double with each level of nesting above it. The number of calls per
+campaign or qualification rung is **not measured and not counted by any test**;
+it is read off the source, and
+`the_boolean_integrity_cost_entry_is_read_off_the_source` finds every line
+quoted here in the source and counts two parent checks around one
+`persistence::verify` in each level's method. The bracketing is what proves nothing changed while
+the check ran, and removing either side would weaken that proof; a cheaper
+proof is a design change this entry does not make.
