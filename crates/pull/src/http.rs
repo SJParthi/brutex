@@ -4621,7 +4621,11 @@ mod tests {
                         crate::chain::Discovery::get(&source, &url).await
                     }
                 });
-                let path = if post { "post_json" } else { "Discovery::get" };
+                let path = if post {
+                    "HttpSource::post_json"
+                } else {
+                    "Discovery::get"
+                };
                 if refused {
                     let refusal = got.expect_err(&format!("{path}: {body} is a refusal"));
                     assert_eq!(refusal.status, Some(200), "{path}: the status sent");
@@ -4638,6 +4642,81 @@ mod tests {
                     after.cmp(&before),
                     moves,
                     "{path}: {body} moved the allowance {before} -> {after}"
+                );
+            }
+        }
+    }
+
+    /// **A 429 ON THE ROLLING POST AND ON A DISCOVERY GET STILL NARROWS THE
+    /// ALLOWANCE, AND NO OTHER REFUSING STATUS MOVES IT.** W1-pull2-11, D-0950.
+    ///
+    /// The correction moved the success half of the governor feedback behind
+    /// the body and left the throttle half on the status, in
+    /// `record_throttle_status`. This pins that half: with the governor primed
+    /// as in the 2xx test, a 429 must narrow the per-second allowance on both
+    /// paths, and a 503 and a 401 must leave it where it was.
+    #[test]
+    fn a_429_on_the_post_and_discovery_paths_narrows_the_allowance() {
+        use core::cmp::Ordering;
+        let shipped = match crate::vendor::Feed::Dhan.descriptor().transport {
+            crate::vendor::Transport::Http(spec) => spec,
+            crate::vendor::Transport::LocalArchive(_) => panic!("this feed is HTTP"),
+        };
+        let allowance = |source: &HttpSource| -> Option<u32> {
+            source.governor.as_ref().and_then(|lock| {
+                lock.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .permitted(crate::rate::WindowSpan::Second)
+            })
+        };
+        let rows: [(u16, &str, Ordering); 3] = [
+            (429, "Too Many Requests", Ordering::Less),
+            (503, "Service Unavailable", Ordering::Equal),
+            (401, "Unauthorized", Ordering::Equal),
+        ];
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        for post in [true, false] {
+            for (status, reason, moves) in rows {
+                let source = HttpSource::new(shipped, Credential::token("shhh".to_owned()))
+                    .expect("a client for the shipped Dhan row");
+                {
+                    let mut g = source
+                        .governor
+                        .as_ref()
+                        .expect("Dhan is budgeted")
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    g.record_throttled();
+                    for _ in 1..crate::rate::SUCCESSES_PER_STEP {
+                        g.record_success();
+                    }
+                }
+                let before = allowance(&source).expect("a per-second span");
+                let (url, _seen, _) = listener(Some(format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )));
+                let got = runtime.block_on(async {
+                    if post {
+                        source.post_json(&url, "{}".to_owned()).await
+                    } else {
+                        crate::chain::Discovery::get(&source, &url).await
+                    }
+                });
+                let path = if post {
+                    "HttpSource::post_json"
+                } else {
+                    "Discovery::get"
+                };
+                let refusal = got.expect_err(&format!("{path}: a {status} is a refusal"));
+                assert_eq!(refusal.status, Some(status), "{path}: the status sent");
+                let after = allowance(&source).expect("a per-second span");
+                assert_eq!(
+                    after.cmp(&before),
+                    moves,
+                    "{path}: a {status} moved the allowance {before} -> {after}"
                 );
             }
         }
@@ -4666,7 +4745,7 @@ mod tests {
             "2026-08-04x09:15:00",
             "2026-08-04 09x15:00",
             "2026-08-04 09:15x00",
-            "2026x08y04z09a15b00",
+            "2026X08Y04Z09A15B00",
             "2026-+8-04 09:15:00",
             "2026-08-04 -1:15:00",
             "2026-08-04 09:-5:00",

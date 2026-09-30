@@ -43704,6 +43704,15 @@ origin/main the server wrote all 67108864 bytes.
 `resolve::tests::an_undeclared_length_at_the_bound_is_read_whole` requires
 exactly the bound to be read whole and one byte past it to be refused.
 
+**The throttle half stays on the status.** Only the success half of the
+governor feedback moved behind the body; a 429 is still recorded from the
+status alone, by `record_throttle_status`.
+`http::tests::a_429_on_the_post_and_discovery_paths_narrows_the_allowance`
+primes the governor as above and requires a 429 to be returned as a refusal
+carrying 429 and to narrow the per-second allowance on both paths, and a 503
+and a 401 to leave it unchanged. It passes on origin/main as well: it pins
+behaviour the correction keeps, not the defect.
+
 ### D-0951 — A text timestamp is read only when its whole 19-byte shape is right — 2026-09-29
 
 **UC-23.** `http::local_seconds` read six numbers at fixed offsets, checked
