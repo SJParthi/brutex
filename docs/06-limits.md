@@ -9889,3 +9889,15 @@ A priced run still walks every column row, so its cost grows with the signal
 rows of the slice and the grid, not with a constant. The single-shot
 `evaluate_training_grid_attested` still attests per call, so a caller that
 uses it per candidate still reads the whole slice per candidate. Not timed.
+
+## The stationary bootstrap's block ceiling is arithmetic, not statistical — D-0742, 30 September 2026
+
+The continuation draw is `1_000_000_u64.saturating_sub(1_000_000 / block as u64)`
+ppm, so a block above `bootstrap::MAX_BLOCK` (1,000,000) would never restart
+and is now refused by every entry point
+(`a_block_the_ppm_draw_cannot_restart_is_refused_by_every_entry_point`). A
+block at or below the ceiling is still accepted however it compares with the
+series length — the same test answers at a block of 1,000,000 over 200
+periods — and the integer division quantizes the restart probability, so a
+large accepted block is resampled at `1_000_000 / (1_000_000 / block)` rather
+than at `block`. Neither is refused or measured here.

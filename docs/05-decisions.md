@@ -43729,3 +43729,30 @@ column row, and `evaluate_training_grid_attested` still runs
 `let attested = self.attest_training(series, column, horizon)?;` on every
 call, so a caller that prices each run through it still reads the whole slice
 per run.
+
+### D-0742 — The stationary bootstrap refuses a mean block above one million, where its ppm restart draw floors to zero — 2026-09-30
+
+**What was wrong (W3-runner1-2).** `bootstrap::stationary_indices` sets the
+continuation probability in parts per million:
+`1_000_000_u64.saturating_sub(1_000_000 / block as u64)`. For a block of
+1,000,001 or more the quotient is 0, the continuation is 1,000,000 ppm, and no
+draw ever restarts: every draw is one cyclic rotation of the series, whose
+mean equals the sample mean. Only a zero block was refused, so
+`reality_check`, `spa`, their receipts, `romano_wolf`, its receipts and
+`family_tests_v1` answered over rotations. On origin/main
+`a_block_the_ppm_draw_cannot_restart_is_refused_by_every_entry_point` fails
+with `Reality Check answered over rotations: Some(0.001)` — p = 1/(999+1) for
+noise with a 3 paisa edge.
+
+**The change.** `bootstrap::MAX_BLOCK = 1_000_000`. Every entry point named
+above, and the family pass's `Stepdown`, refuses a block above it the way it
+already refused a zero block: `None`, `Err(FamilyTestsRefusalV1::…)`, or the
+legacy empty vector of `romano_wolf`. A block at or below the ceiling computes
+exactly what it computed before, so no answered verdict changes.
+
+**What it does not change.** The refusal is the arithmetic ceiling only. A
+block at or below one million is not compared with the series length: the
+test answers at a block of 1,000,000 over 200 periods. Recorded in
+`docs/06-limits.md`.
+
+**Proof.** `bootstrap::block_ceiling_tests::a_block_the_ppm_draw_cannot_restart_is_refused_by_every_entry_point`.

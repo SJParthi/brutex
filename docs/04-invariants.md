@@ -5368,3 +5368,9 @@ the guard. The existing emits test pins the warning's message and level.
 |---|---|---|
 | C4-RUNNER-03: `attest_training` derives the slice facts once, and five `evaluate_with_attested` runs over that token derive them 0 more times while pricing the same grid as the single-shot door, which derives them once. | `exit_grid_policy::tests::pricing_runs_over_one_attestation_derives_the_slice_facts_once` | ✓ |
 | C4-RUNNER-04: three expression programs priced over one attestation, and every coordinate of each materialized from it, derive the slice facts 0 more times after the attestation's one derivation. | `exit_grid_policy::expression_execution::tests::programs_and_coordinates_over_one_attestation_derive_the_slice_facts_once` | ✓ |
+
+### The stationary bootstrap refuses a block its ppm draw cannot restart at — W3-runner1-2 (D-0742)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| C4-RUNNER-05: `bootstrap::MAX_BLOCK` is 1,000,000; at a block of 1,000,001 over 200 periods each of 50 `stationary_indices` draws is one rotation, and `reality_check`, `spa`, `white_reality_check_receipt_v1`, `spa_receipt_v1`, `romano_wolf_receipt`, `romano_wolf_adjusted_p_values_v1` and `family_tests_v1` refuse that block while `romano_wolf` returns no rejection where it names one at 1,000,000; every one of them still answers at 1,000,000. | `bootstrap::block_ceiling_tests::a_block_the_ppm_draw_cannot_restart_is_refused_by_every_entry_point` | ✓ |
