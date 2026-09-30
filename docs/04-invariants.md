@@ -5354,3 +5354,9 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### C4 cli batch 03 — W2-cli4-1, GAP12-4, W2-cli5-0, W2-cli2-4 (D-0912, D-0913)
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| C4-CLI-03-01 | Execution V3 and V4 parameter validation admits every selector tag the encoder writes, 1 to 4 with `OperatorRule` as 4 (D-0594), and each such parameter survives an encode and decode; tags 0 and 5 are refused (W2-cli4-1) | `cli::execution_v3::tests::every_exit_grid_selector_tag_the_encoder_writes_is_admitted`; `cli::execution_v4::tests::every_exit_grid_selector_tag_the_encoder_writes_is_admitted` | ✓ |
