@@ -9864,3 +9864,28 @@ The text above is kept as it was written.
   doc to its body, read off the source, and
   `what_a_changed_rows_line_costs_is_named_in_part_and_read_off_the_source`
   finds each part named here and in that doc in the source that pays it.
+
+## Selection growth rechecks its indexed records; two lookups are not O(1) — D-0936, D-0937, 29 September 2026
+
+* **Selection V1, V2 and V3 absorb after another handle appended (W2-cli14-5).**
+  When the file grew past what a handle indexed, `absorb_new` now calls
+  `require_indexed_records_unchanged`, which re-reads every indexed record and
+  compares it with the canonical bytes held in memory. That is O(indexed
+  records) of reads and encodes, paid on the growth branch only; an append
+  through the same handle keeps the length equal to `self.scanned` and does not
+  pay it. The comparison is of bytes, not of authenticity: an actor who puts
+  identical bytes back is not seen, and neither is one who forges metadata on
+  a same-length change. Not timed.
+* **Population V6 scan (W2-cli13-2).** The receipt index reservation is now
+  `min(record_count / 4, authorities)`, not the authority bound. The scan
+  still reads every record on open and after every append, so open and append
+  remain O(F); what no longer grows with the configured ceiling is the
+  allocation. Not timed.
+* **Population V6 replay lookup, `selected_stored_oos_witnesses` (W2-cli13-3).** Each of at most 25 strategies is
+  found by a linear `find` over the C source rows: O(C) per strategy and
+  O(25 * C) per call, inside a call that already runs `execution_v4_source`
+  twice. Not changed and not timed.
+* **Selection V5 exact lookup (W2-cli14-0).** `structural_receipt` rehashes
+  both the rows and the Completions file before its hash-map probe, so a lookup
+  is O(F) in those files' bytes; only the probe is average O(1). Not changed and
+  not timed.
