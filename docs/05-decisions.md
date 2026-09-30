@@ -43723,6 +43723,13 @@ whitespace after the ASCII trim is refused (`None`), so the row is declined as
 `Skip::NoVendorId` rather than kept; whitespace inside an id is data and kept.
 A series with non-ASCII whitespace is a code no table holds, `Unrecognised`,
 declined as `Skip::UnrecognisedListingClass`; a suffix class with it strips
-nothing. Proven by
+nothing.
+
+"ASCII whitespace" here means what `u8::is_ascii_whitespace` names: space,
+tab, line feed, form feed and carriage return. The vertical tab U+000B is
+ASCII but outside that set, so `str::trim` used to strip it and
+`str::trim_ascii` does not: `VendorId::new("\u{b}1333")` is now `None` and
+`board_of("\u{b}EQ")` is `Unrecognised`, a loud decline where the old trim
+kept the row. Proven by
 `core::vendor::tests::whitespace_outside_ascii_is_not_trimmed_from_an_id_a_series_or_a_class`
 (C4-CORE-03).

@@ -284,9 +284,11 @@ impl VendorId {
     /// seen and must not silently truncate into a different instrument.
     ///
     /// `None` as well for an id whose first or last character is whitespace
-    /// outside ASCII, such as U+00A0 or U+3000. Only ASCII whitespace is
-    /// trimmed: `str::trim` is Unicode-aware and turned `"\u{a0}1333\u{3000}"`
-    /// into `1333`, filing a row under an id its column did not hold. D-0787.
+    /// that `u8::is_ascii_whitespace` does not name, such as U+00A0, U+3000 or
+    /// the vertical tab U+000B. Only space, tab, line feed, form feed and
+    /// carriage return are trimmed: `str::trim` is Unicode-aware and turned
+    /// `"\u{a0}1333\u{3000}"` into `1333`, filing a row under an id its column
+    /// did not hold. D-0787.
     #[must_use]
     pub fn new(raw: &str) -> Option<Self> {
         let raw = raw.trim_ascii();
@@ -3468,6 +3470,7 @@ mod tests {
             "\u{a0}1333",
             "1333\u{3000}",
             " \u{a0}1333 ",
+            "\u{b}1333",
         ] {
             assert_eq!(VendorId::new(raw), None, "{raw:?} must be refused");
             let mut input = row("NSE", "CASH", "RELIANCE", "EQ", "", "");
@@ -3496,6 +3499,7 @@ mod tests {
             Some(Skip::UnrecognisedListingClass)
         );
         assert_eq!(board_of(" \tEQ\n"), EquityVerdict::MainBoard);
+        assert_eq!(board_of("\u{b}EQ"), EquityVerdict::Unrecognised);
 
         // The suffix class. Only the row's own series, ASCII-trimmed, strips.
         let l = listing(
