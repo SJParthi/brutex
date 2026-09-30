@@ -1489,6 +1489,28 @@ mod tests {
         assert_eq!(stamps, [0, 1, 2, 3], "only the first page of each column");
     }
 
+    /// **`LakeFile`'s hand-written `Debug` names its counts and not its bytes.**
+    ///
+    /// Both row counts `RowCountsDisagree` compares are shown, so a failure
+    /// message puts the two numbers side by side; the file's bytes are shown
+    /// as a length only.
+    #[test]
+    fn the_debug_form_names_both_row_counts_and_only_the_byte_length() {
+        let sound = cash_file(8);
+        let len = sound.len();
+        let shown = format!("{:?}", LakeFile::from_bytes(sound).expect("opens"));
+        for part in [
+            "LakeFile",
+            &format!("bytes: {len}"),
+            "row_groups: 1",
+            "num_rows: 8",
+            "group_rows: 8",
+        ] {
+            assert!(shown.contains(part), "{part:?} missing from {shown}");
+        }
+        assert!(shown.len() < 200, "the file is not dumped: {shown}");
+    }
+
     /// **A SOUND ROW GROUP OF NO ROWS STILL DECODES, EMPTY.**
     ///
     /// `parquet`'s writer gives the `timestamp` chunk of an empty row group a
