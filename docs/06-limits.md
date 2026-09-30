@@ -9875,3 +9875,14 @@ an agreement. It fails loud:
 `a_cash_day_needing_dated_eligibility_is_withheld_and_never_silently_agrees`.
 Records are still paired by position (`match (stored.get(index),
 folded.get(index))`), not by timestamp; that is not changed here.
+
+## A read-only frontier refresh is O(delta) over damaged history too — D-0913, 29 September 2026
+
+`Frontier::refresh` on a read-only handle reads only the rows past its scan,
+one `BufReader` pass, and indexes each with `index_row`, the rule `index_of`
+applies at open. It no longer refuses over damage the handle opened past, so
+`api`'s cached `/frontier.json` handle is not dropped and reopened, O(rows), on
+every other request. The first open is still O(rows). The refresh holds the
+shared lock, so it waits for an append in progress rather than reading part of
+one: `a_read_only_refresh_waits_for_an_append_in_progress`.
+`a_read_only_handle_over_damaged_history_refreshes_by_the_delta`. Not timed.

@@ -43715,3 +43715,39 @@ silent agreement:
 `docs/06-limits.md` records it. Records are still paired by position, not by
 timestamp.
 
+### D-0913 — A read-only frontier handle refreshes by the rule it opened with — 2026-09-29
+
+**The defect (W2-cli5-0).** `Frontier::refresh` called `absorb_new_rows`, whose
+first line is `self.refuse_integrity_failure_for_write()?`. A read-only handle
+opened over a file holding a bad seal, a sealed row with an invalid schema or a
+non-contiguous duplicate opens with `write_refusal` set, by design, so every
+refresh of it was refused. `api::detail::Cached::with_verified` answers a
+refused refresh with `*held = None; return Err(why);`, and the next request
+opens fresh at O(rows). A refusal and a whole-file walk alternated, while
+`refresh`'s doc said every refresh after the first open is O(delta). On
+`origin/main` the test below fails at its first `refresh`.
+
+**The change.** A read-only handle (`require_parent`) refreshes with
+`absorb_read_only`, which reads only the rows past `scanned` and indexes each
+with `index_row`, the per-row rule `index_of` now also calls at open. A writer
+handle keeps the strict `absorb_new_rows`, which still refuses. The shrunken
+and ragged-length refusals are one function, `absorbable_len`, for both.
+
+The read-only refresh holds the shared lock while it measures and reads, as
+`Frontier::read` and `results::Results::refresh` do; `append_all` writes under
+the exclusive lock. Recording damage instead of refusing is what makes the
+lock necessary: without it a refresh could read a row a writer has only
+partly laid down, index it as a bad seal, and keep that in a cached handle
+that no longer drops itself on a refusal.
+
+**What it proves.** `a_read_only_handle_over_damaged_history_refreshes_by_the_delta`
+opens read-only over a bad seal, refreshes, appends two rows of one run, a
+second bad seal, a sealed invalid row, a repeat of the first run and a new
+run, refreshes twice, and requires every run's block to equal a fresh
+read-only open's, the invalid row still diagnosed at read time, and then
+requires a writer handle's refresh over the same file to refuse. The existing
+stale-writer and reopened-writer tests keep the writer's append refusals.
+`a_read_only_refresh_waits_for_an_append_in_progress` has a peer hold the
+exclusive lock over a whole row of zeros for two seconds before writing the
+real row, and requires the refresh not to have finished while the lock is held,
+then to index the real row and record no damage.
