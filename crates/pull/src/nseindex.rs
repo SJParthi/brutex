@@ -300,6 +300,10 @@ impl Mapping {
     }
 
     /// Every symbol that did not resolve, with its reason, sorted by symbol.
+    ///
+    /// One row per collapsed key: a refused symbol that arrives again under
+    /// the same key, in any spelling, is not reported again, and the row keeps
+    /// the first spelling that arrived. D-0960.
     #[must_use]
     pub fn refused(&self) -> &[(String, Unresolved)] {
         &self.refused
@@ -471,7 +475,7 @@ mod tests {
         let mapping = nse.index([
             "INDIA VIX",
             "NIFTY BK",
-            "india-vix",
+            "India-Vix",
             "INDIA VIX",
             "nifty bk",
             "NIFTY PVT BANK",
