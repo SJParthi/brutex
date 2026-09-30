@@ -365,6 +365,18 @@ mod invariant_tests {
         ));
     }
 
+    /// `W3-vocab1-0`: `docs/06-limits.md` says a sibling comparison can read a
+    /// whole operand. Equal siblings are admitted, and siblings that differ only
+    /// in their last instruction are told apart only there.
+    #[test]
+    fn a_sibling_comparison_can_read_the_whole_operand() {
+        let (a, b) = (Instruction::Bit(0), Instruction::Bit(1));
+        let (and, or) = (Instruction::And, Instruction::Or);
+        assert!(valid_prefix(&[a, b, and, a, b, and, and], 7));
+        assert!(valid_prefix(&[a, b, and, a, b, or, and], 7));
+        assert!(!valid_prefix(&[a, b, or, a, b, and, and], 7));
+    }
+
     /// `W3-vocab1-3`, held by the lib tests too: equality ignores the scratch
     /// program and sees every encoded field.
     #[test]

@@ -215,5 +215,8 @@ fn the_per_node_prefix_scan_the_limit_names_is_the_code() {
         MAX_INSTRUCTIONS, 1151,
         "the limit states a 1,151-entry stack"
     );
-    assert!(LIMITS.contains("### One expression-grammar node is Θ(prefix), not O(1) (D-0983)"));
+    assert!(
+        LIMITS
+            .contains("### One expression-grammar node walks its whole prefix, not O(1) (D-0983)")
+    );
 }
