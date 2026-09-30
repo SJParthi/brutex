@@ -2393,4 +2393,56 @@ mod window_tests {
         assert_eq!(first[0].chg_why, "first_bar_in_file");
         assert_eq!(first[0].oichg_why, "first_bar_in_file");
     }
+
+    /// **THE `records unreadable` LINE COUNTS THE ROWS THAT READ, NOT THE
+    /// POSITIONS WALKED.** `slots` keeps a `None` for every unreadable record,
+    /// so the count it hands `note_unreadable_records` is kept apart from the
+    /// `Vec`'s length. A page over 200 records with one 73-record block damaged
+    /// must say 127 rows and 73 faults (W1-api1-10, D-0730).
+    #[test]
+    fn the_unreadable_records_line_counts_the_rows_that_read() {
+        let root = scratch("telemetry-rows");
+        let jan = YearMonth::new(2026, 1).expect("m");
+        write_month(&root, jan, 200, 1_000);
+        damage_record(&root, jan, 100);
+        let file = open_classified(
+            &root,
+            PathParts {
+                vendor: Vendor::Dhan,
+                exchange: "NSE",
+                segment: "INDEX",
+                symbol: SYMBOL,
+                contract: None,
+                timeframe: Timeframe::MINUTE_1,
+                month: jan,
+                file: FileKind::Bars,
+            },
+        )
+        .map_err(|why| why.message)
+        .expect("the month opens");
+
+        let from = crate::emitted::mark();
+        let (rows, faults) = page(&file, 0, 200);
+        assert_eq!((rows.len(), faults.len()), (127, 73));
+
+        // FILTERED ON THIS FIXTURE'S OWN DIRECTORY: a sibling test damages the
+        // same block of a month the same size, in parallel.
+        let mine: Vec<telemetry::Record> =
+            crate::emitted::landed(from, "api.bars", "records unreadable")
+                .into_iter()
+                .filter(|record| crate::emitted::says(record, "file", "-telemetry-rows"))
+                .collect();
+        assert_eq!(mine.len(), 1, "one line for the page: {mine:?}");
+        assert!(
+            crate::emitted::counts(&mine[0], "rows", 127),
+            "the rows that read: {mine:?}"
+        );
+        assert!(
+            crate::emitted::counts(&mine[0], "faults", 73),
+            "the records that did not: {mine:?}"
+        );
+
+        drop(file);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

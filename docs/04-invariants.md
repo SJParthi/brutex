@@ -5374,6 +5374,12 @@ the guard. The existing emits test pins the warning's message and level.
 |---|---|---|
 | C4-API-04 | `/audit.json`'s store block counts only the asked feed's held months and bars, per month and in total, and never another feed's | `the_store_block_rolls_up_the_asked_feed_by_month_and_counts_no_other_feed` and `the_store_block_walks_one_census_and_not_every_feeds_entries` in `crates/api/src/audit_json.rs` |
 | C4-API-05 | A feed's month rollup is counted once per census snapshot: a request against an unchanged census counts nothing, and a changed manifest is counted again | `the_rollup_is_counted_once_per_feed_per_census_snapshot` and `the_audit_body_reuses_the_rollup_until_the_manifest_changes` in `crates/api/src/audit_json.rs` |
-| C4-API-06 | A sorted window page is the same rows in the same order as sorting every row and slicing, at every offset | `selecting_the_page_then_ordering_it_equals_ordering_everything_then_slicing` in `crates/api/src/bars.rs` |
+| C4-API-06 | A sorted window page is the same rows in the same order as sorting every row and slicing (asserted over 60 rows at every offset from 0 to 62 and limits 0, 1, 2, 10, 29, 30, 31, 60 and 61) | `selecting_the_page_then_ordering_it_equals_ordering_everything_then_slicing` in `crates/api/src/bars.rs` |
 | C4-API-07 | A sorted window page orders the fewer of the first `offset + limit` and the last `n - offset` rows, the front on a tie, so never more than half the rows plus its limit (asserted for every row count up to 40 and every offset and limit up to 45) | `a_page_is_cut_from_whichever_end_orders_fewer_rows` in `crates/api/src/bars.rs` |
 | C4-API-08 | `docs/06-limits.md` states the sorted or extremes window's full read and `/audit.json`'s rollup cost, and each source line the two tests list is quoted there and present in the code of `bars.rs` or in `feed_rollup` | `the_sorted_window_read_is_stated_in_the_limits_and_quotes_this_source` in `crates/api/src/bars.rs` and `the_audit_rollup_cost_is_stated_in_the_limits_and_quotes_this_source` in `crates/api/src/audit_json.rs` |
+
+### The `records unreadable` line after W1-api1-10 (D-0730)
+
+| Id | Invariant | Test that proves it |
+|---|---|---|
+| C4-API-09 | The `api.bars` `records unreadable` line for a page counts in `rows` the records that read and in `faults` the ones that did not: a page over 200 records with one 73-record block damaged writes one line saying 127 and 73 | `the_unreadable_records_line_counts_the_rows_that_read` in `crates/api/src/bars.rs` |
