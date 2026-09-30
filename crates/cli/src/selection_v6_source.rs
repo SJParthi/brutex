@@ -823,9 +823,45 @@ mod tests {
             "{authenticate}"
         );
 
+        the_repeated_full_reads_are_counted(join, top, selection, replay);
+
         the_limits_section_quotes_each_call(
             limits,
             &[selection, production, execution, population],
+        );
+    }
+
+    /// The full reads each layer repeats besides the Population replays: one
+    /// Execution V4 disposition read per `selection_v6_source`, one Selection V6
+    /// committed-block scan per `top_twenty_five`, one Population projection
+    /// per `execution_v4_source`.
+    fn the_repeated_full_reads_are_counted(join: &str, top: &str, selection: &str, replay: &str) {
+        assert_eq!(
+            join.matches(".ordered_authenticated_dispositions()?;")
+                .count(),
+            1,
+            "{join}"
+        );
+        assert_eq!(
+            top.matches("require_committed(&self.root, self.bounds, &before.block()?)?;")
+                .count(),
+            1,
+            "{top}"
+        );
+        let committed = body(selection, "fn require_committed(");
+        assert_eq!(
+            committed
+                .matches("scan(&mut file, &path, bounds, expected)")
+                .count(),
+            1,
+            "{committed}"
+        );
+        assert_eq!(
+            replay
+                .matches("let (source, families, population_rows) = self.population.projection()?;")
+                .count(),
+            1,
+            "{replay}"
         );
     }
 
@@ -846,6 +882,10 @@ mod tests {
             "`let after = self.upstream.authenticate()?;`",
             "`let replay = candidate_source.execution_v3_replay_authority()?;`",
             "`authenticate_candidate_authorities(&self.candidates)?`",
+            "`.ordered_authenticated_dispositions()?;`",
+            "`require_committed(&self.root, self.bounds, &before.block()?)?;`",
+            "`scan(&mut file, &path, bounds, expected)`",
+            "`let (source, families, population_rows) = self.population.projection()?;`",
             "a_selection_v6_read_counts_its_population_replays_and_the_limits_say_so",
         ] {
             assert!(section.contains(quoted), "the section quotes {quoted}");

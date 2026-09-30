@@ -1917,7 +1917,7 @@ impl PopulationV6Ledger {
                 .map_err(|why| format!("cannot shared-lock Population V6 reader: {why}"))?;
         }
         let opened = (|| {
-            let (mut data_file, _) = open_child(&data_path, writable)?;
+            let (mut data_file, data_created) = open_child(&data_path, writable)?;
             // A ZERO-LENGTH FILE IS UNINITIALISED, WHOEVER CREATED IT. The header
             // was written only when THIS call created the file, so a writer
             // killed or refused between `create` and the header write left a
@@ -1925,12 +1925,22 @@ impl PopulationV6Ledger {
             // Population V6 header". The exclusive writer lock is held here,
             // so no other writer is mid-header. A reader never initialises,
             // and a non-empty file still goes through `verify_header`. D-0918.
+            //
+            // LOUDLY WHEN THIS CALL DID NOT CREATE IT. A zero-length file is
+            // also what committed history truncated to nothing looks like, and
+            // no byte left in it can tell the two apart. So initialising a file
+            // some earlier process left empty emits a named `Warn` event
+            // (`REINITIALISED_EMPTY`) before the header is written.
             let empty = data_file
                 .metadata()
                 .map_err(|why| format!("cannot stat Population V6 data: {why}"))?
                 .len()
                 == 0;
             if writable && empty {
+                if !data_created {
+                    let shown = data_path.display().to_string();
+                    crate::note(&reinitialised_empty_event(&shown));
+                }
                 data_file
                     .write_all(&header())
                     .and_then(|()| data_file.sync_all())
@@ -2439,6 +2449,26 @@ fn open_root(root: &Path) -> Result<(PathBuf, File, PlatformIdentity), Populatio
         return Err("Population V6 root changed while opening".to_owned());
     }
     Ok((canonical, file, identity))
+}
+
+/// The telemetry target Population V6 ledger events are written under.
+const TARGET: &str = "cli.population_v6";
+
+/// The message of the event a writer emits when it initialises a zero-length
+/// data file it did not create. D-0918.
+const REINITIALISED_EMPTY: &str = "Population V6 zero-length data file reinitialised";
+
+/// The `Warn` event naming a zero-length data file an earlier process left and
+/// this writer is about to give a header: either a writer stopped before its
+/// header or committed history truncated to nothing, which no byte left in the
+/// file can distinguish.
+fn reinitialised_empty_event(path: &str) -> telemetry::Event<'_> {
+    telemetry::Event::warn(TARGET, REINITIALISED_EMPTY)
+        .with("path", path)
+        .with(
+            "cause",
+            "a writer stopped before its header, or committed history truncated to zero; the file cannot tell which",
+        )
 }
 
 fn open_child(path: &Path, writable: bool) -> Result<(File, bool), PopulationV6Refusal> {
@@ -3741,6 +3771,96 @@ mod tests {
                 Ok(())
             },
         )
+    }
+
+    /// A ZERO-LENGTH FILE THIS WRITER DID NOT CREATE IS REINITIALISED LOUDLY.
+    ///
+    /// Committed history truncated to zero and a writer stopped before its
+    /// header leave the same zero bytes. The writer still initialises it, and
+    /// names the file in a `Warn` event; a file this call creates is not news.
+    #[test]
+    fn a_writer_names_an_empty_data_file_it_did_not_create_before_initialising_it()
+    -> Result<(), String> {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|why| why.to_string())?
+            .as_nanos();
+        let fresh = std::env::temp_dir().join(format!(
+            "brutex-population-v6-loud-fresh-{}-{stamp}",
+            std::process::id()
+        ));
+        let truncated = std::env::temp_dir().join(format!(
+            "brutex-population-v6-loud-truncated-{}-{stamp}",
+            std::process::id()
+        ));
+        let landed = |from: u64, root: &Path| -> Vec<telemetry::Record> {
+            let sink = crate::ledger_all::tests::sink();
+            let dir = sink
+                .path()
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default();
+            let needle = root
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_owned();
+            let query = telemetry::Query::last(telemetry::MAX_LIMIT).from_target(super::TARGET);
+            telemetry::tail(&dir, sink.keep_files(), &query)
+                .records
+                .into_iter()
+                .filter(|record| {
+                    record.seq >= from
+                        && record.message == super::REINITIALISED_EMPTY
+                        && crate::ledger_all::tests::says(record, "path", &needle)
+                })
+                .collect()
+        };
+
+        std::fs::create_dir_all(&fresh).map_err(|why| why.to_string())?;
+        let from = crate::ledger_all::tests::mark();
+        drop(PopulationV6Ledger::open_write(&fresh, bounds())?);
+        assert_eq!(
+            std::fs::read(fresh.join(DATA_FILE)).map_err(|why| why.to_string())?,
+            header().to_vec()
+        );
+        assert!(
+            landed(from, &fresh).is_empty(),
+            "a file this writer created is not reported"
+        );
+
+        std::fs::create_dir_all(&truncated).map_err(|why| why.to_string())?;
+        std::fs::write(truncated.join(LOCK_FILE), b"").map_err(|why| why.to_string())?;
+        std::fs::write(truncated.join(DATA_FILE), b"").map_err(|why| why.to_string())?;
+        let from = crate::ledger_all::tests::mark();
+        let writer = PopulationV6Ledger::open_write(&truncated, bounds())?;
+        assert_eq!(writer.record_count, 0);
+        drop(writer);
+        let events = landed(from, &truncated);
+        assert_eq!(events.len(), 1, "one named event: {events:?}");
+        assert!(
+            events
+                .iter()
+                .all(|event| event.level == telemetry::Level::Warn)
+        );
+        assert!(
+            events.iter().all(|event| crate::ledger_all::tests::says(
+                event,
+                "cause",
+                "truncated to zero"
+            )),
+            "{events:?}"
+        );
+        drop(PopulationV6Ledger::open_write(&truncated, bounds())?);
+        assert_eq!(
+            landed(from, &truncated).len(),
+            1,
+            "a header, once written, is not news"
+        );
+
+        std::fs::remove_dir_all(&fresh).map_err(|why| why.to_string())?;
+        std::fs::remove_dir_all(&truncated).map_err(|why| why.to_string())?;
+        Ok(())
     }
 
     #[test]
