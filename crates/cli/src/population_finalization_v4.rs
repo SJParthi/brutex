@@ -3514,7 +3514,10 @@ mod tests {
             .expect("open whole header")
             .set_modified(stamp)
             .expect("stamp whole header");
-        drop(PopulationFinalizationV4Ledger::open_write(root.path(), bounds()).expect("writer opens whole header"));
+        drop(
+            PopulationFinalizationV4Ledger::open_write(root.path(), bounds())
+                .expect("writer opens whole header"),
+        );
         let metadata = std::fs::metadata(&path).expect("stat whole header");
         assert_eq!(metadata.len(), HEADER_BYTES as u64);
         assert_eq!(

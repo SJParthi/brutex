@@ -25,7 +25,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::{Read as _, Seek as _, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
@@ -4567,7 +4567,7 @@ fn read_fixed_at<const N: usize>(
 }
 
 fn append_raw(file: &mut File, raw: &[u8]) -> Result<(), PopulationAdmissionV3Refusal> {
-    append_with_rollback(file, raw, |file, raw| file.write_all(raw))
+    append_with_rollback(file, raw, Write::write_all)
 }
 
 /// Appends one fixed record, and on a write error (ENOSPC, EIO) truncates the
