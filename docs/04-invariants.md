@@ -5361,3 +5361,9 @@ the guard. The existing emits test pins the warning's message and level.
 |---|---|---|
 | C4-API-01 | A time-ordered window page starts at the offset asked for even when its lookback record is unreadable; that row's change says `previous_unreadable` and the lookback is not named on that page. An unreadable record uses up its page position, so walking every offset page in either direction returns each readable row once, in order, and names each unreadable record once | `an_unreadable_lookback_record_does_not_eat_the_first_row_of_the_page` and `paging_across_a_damaged_block_returns_every_readable_row_exactly_once` in `crates/api/src/bars.rs` |
 | C4-API-02 | The change fold never measures a row against a record before an unreadable one: the row after a gap says `previous_unreadable` in both change columns, on the seek path and on the sorted reading path | `a_sorted_page_names_the_row_after_a_damaged_block_rather_than_measuring_across_it` and `the_fold_names_an_unreadable_predecessor_in_both_change_columns` in `crates/api/src/bars.rs` |
+
+### Qualification coordinate cross-check — GAP14-58 (D-0731)
+
+| Id | Invariant | Test that proves it |
+|---|---|---|
+| C4-API-03 | A `/boolean-qualification.json` row is refused unless its original identity, family and coordinate all equal the saved statistics row beside it; any one differing refuses with "qualification row differs from original coordinate" | `a_qualification_row_is_refused_unless_identity_family_and_coordinate_all_match` in `crates/api/src/booleanqualification_projection_tests.rs` |

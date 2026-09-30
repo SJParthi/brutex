@@ -43706,3 +43706,23 @@ fail on origin/main with the outputs quoted above and pass with the change;
 `a_sorted_page_names_the_row_after_a_damaged_block_rather_than_measuring_across_it`
 and `the_fold_names_an_unreadable_predecessor_in_both_change_columns` pin the
 fold.
+
+### D-0731 — Test the qualification row's coordinate cross-check on its own, since no api test can render a saved qualification — 2026-09-29
+
+**What was missing (GAP14-58).** `/boolean-qualification.json`'s projection
+refuses a qualification row whose original identity, family or coordinate
+differs from the saved statistics row beside it. The ledger's mutation run
+recorded `replace != with == in project` at
+`crates/api/src/booleanqualification_projection.rs:27:25` as MISSED: no api
+test renders a real qualification page, and the saved-qualification fixture
+lives in `cli`'s own `#[cfg(test)]` modules, which the `api` crate cannot
+reach.
+
+**The change.** The three comparisons move unchanged into
+`same_coordinate`, which `project` calls with `?`, so the refusal text and the
+order of checks are the same. It takes the three coordinates and one
+`cli::boolean_evidence::StatisticsRow`, both of which a test can build.
+`a_qualification_row_is_refused_unless_identity_family_and_coordinate_all_match`
+accepts the equal case and requires the refusal for each coordinate differing
+alone. A full-page render test through a saved qualification is still absent;
+it needs `cli`'s fixture exposed to `api`, which this batch does not do.
