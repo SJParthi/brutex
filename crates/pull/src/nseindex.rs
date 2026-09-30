@@ -232,25 +232,25 @@ impl Catalogue {
         S: AsRef<str>,
     {
         let mut mapping = Mapping::default();
-        // A refusal is remembered by its collapsed key too, so a refused
-        // symbol repeated in the master is scanned and reported once, under
-        // the first spelling that arrived -- the rule a resolved symbol
-        // already had. Without it the only memo was `resolved`. D-0960.
-        let mut refused_keys: HashSet<String> = HashSet::new();
+        let symbols = symbols.into_iter();
+        // Every collapsed key is remembered once it has been tried, refused as
+        // well as resolved, so a symbol repeated in the master is scanned and
+        // reported once, under the first spelling that arrived. The memo used
+        // to be `resolved` alone, so a refusal was rescanned and reported again
+        // per repeat. Reserved from the iterator's lower size hint, as
+        // `work::Selection::of` is. D-0960.
+        let mut tried: HashSet<String> = HashSet::with_capacity(symbols.size_hint().0);
         for symbol in symbols {
             let symbol = symbol.as_ref();
             let key = collapse(symbol);
-            if mapping.resolved.contains_key(&key) || refused_keys.contains(&key) {
+            if !tried.insert(key.clone()) {
                 continue;
             }
             match self.resolve(symbol) {
                 Ok((name, basis)) => {
                     mapping.resolved.insert(key, (name.to_owned(), basis));
                 }
-                Err(why) => {
-                    refused_keys.insert(key);
-                    mapping.refused.push((symbol.to_owned(), why));
-                }
+                Err(why) => mapping.refused.push((symbol.to_owned(), why)),
             }
         }
         mapping.refused.sort_unstable_by(|a, b| a.0.cmp(&b.0));

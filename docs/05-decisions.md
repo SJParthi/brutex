@@ -43683,9 +43683,10 @@ refused by its header.
 **W1-pull3-8.** `pull::nseindex::Catalogue::index` skipped a symbol only when
 `mapping.resolved.contains_key(&key)`. A refused symbol that appeared again
 under the same collapsed key was resolved again and pushed into `refused`
-again. It now keeps the collapsed keys it refused in a local set and skips
-them as it skips a resolved key, so a refusal is reported once, under the
-first spelling that arrived. `a_refused_symbol_repeated_in_the_master_is_reported_once`
+again. It now inserts every collapsed key it tries, resolved or refused, into
+one local `HashSet` reserved from the iterator's lower size hint, and skips a
+key whose insert finds it already there, so a refusal is reported once, under
+the first spelling that arrived. `a_refused_symbol_repeated_in_the_master_is_reported_once`
 fails without the change with five refused rows where two are expected.
 
 Neither function has a production caller outside `pull`'s own tests:
