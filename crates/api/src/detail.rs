@@ -337,11 +337,18 @@ pub(crate) async fn hold_every_slot() -> Result<HeldSlots, &'static str> {
 ///
 /// # Any refusal from `refresh` drops the handle
 ///
-/// A shrunken file, a torn tail, a duplicate identity, a file moved aside on a
-/// format-version bump -- each is a reason the handle no longer describes what
-/// is on disk. The answer is one fresh `open`, which is the single O(rows) path
-/// a cache should ever take, and the refusal that caused it is never swallowed:
-/// if the reopen also fails, that error is the response.
+/// A shrunken file, a torn tail, a file replaced or moved aside under its path
+/// -- each is a reason the handle no longer describes what is on disk. The
+/// answer is one fresh `open`, which is the single O(rows) path a cache should
+/// ever take, and the refusal that caused it is never swallowed: if the reopen
+/// also fails, that error is the response.
+///
+/// A recorded integrity failure (a bad seal, an invalid schema, a
+/// non-contiguous duplicate identity) is a refusal for `Frontier::refresh`,
+/// which still refuses on it first. It is NOT one for `Trades::refresh` since
+/// D-0919: that refresh records the damage the way a cold open does and keeps
+/// its handle, and it refuses instead when the path names a file other than the
+/// one it holds, so a reviewed repair renamed into place is reopened.
 ///
 /// A root that differs from the cached one is treated the same way. There is
 /// one store root per process, so this is a guard against a future caller

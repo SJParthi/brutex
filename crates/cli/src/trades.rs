@@ -725,10 +725,11 @@ impl Trades {
     /// *"A `BufReader` does not change the O(rows) walk — only a persisted or
     /// cached index does that, and it is the right fix."*
     ///
-    /// The incremental machinery was already here. [`Self::absorb_new_rows`]
-    /// resumes from `self.scanned` rather than rescanning, precisely so a writer
-    /// that appended since this handle opened costs O(delta) — it was simply
-    /// never available to a reader, because a reader never kept its handle.
+    /// A refresh resumes from `self.scanned` rather than rescanning, and hands
+    /// each new row to `index_row`, the per-row step the cold walk in
+    /// `index_of` also takes, so a held handle pays O(rows appended since it
+    /// last looked) rather than O(every row). Writers resume the same way
+    /// through `absorb_new_rows`, which additionally refuses on damage.
     ///
     /// # Why this is a refresh and not a reopen
     ///
@@ -749,10 +750,52 @@ impl Trades {
     /// Refreshing promotes nothing; `append_all` and `confirm_durable` still
     /// refuse past a recorded failure. D-0919.
     ///
+    /// # A replaced file is refused, so the holder reopens it
+    ///
+    /// The documented remedy for damage is a reviewed replacement installed
+    /// under the same name. The held descriptor still names the old file, and
+    /// measuring only that descriptor would index the old bytes for as long as
+    /// the process lives, refusing every run the replacement adds with a wrong
+    /// cause. So each refresh compares the held file's device and inode with
+    /// what the path names now, and refuses by name on a mismatch; a caller
+    /// such as `/trades.json`'s cache drops the handle on that refusal and the
+    /// next request opens the replacement. One `symlink_metadata`, O(1).
+    ///
+    /// # Under a shared lock, as `confirm_durable` reads
+    ///
+    /// `append_all` writes under the exclusive lock, so a refresh that takes
+    /// the shared lock never indexes a row a writer is still putting down. A
+    /// row indexed once is never read again, so without the lock a torn row
+    /// seen mid-append would stay recorded as damage on this handle.
+    ///
     /// # Errors
     ///
-    /// A shrunken file, a ragged tail, or a row that cannot be read.
+    /// A lock that cannot be taken or released, a file replaced or removed
+    /// under its path, a shrunken file, a ragged tail, or a row that cannot be
+    /// read.
     pub fn refresh(&mut self) -> Result<(), Refusal> {
+        self.file.lock_shared().map_err(|why| {
+            format!(
+                "{} could not be locked for a refresh: {why}",
+                self.path.display()
+            )
+        })?;
+        let refreshed = self.refresh_locked();
+        let released = self.file.unlock().map_err(|why| {
+            format!(
+                "{} could not be unlocked after a refresh: {why}",
+                self.path.display()
+            )
+        });
+        match (refreshed, released) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(why), _) | (Ok(()), Err(why)) => Err(why),
+        }
+    }
+
+    /// [`Self::refresh`]'s body, with the shared lock already held.
+    fn refresh_locked(&mut self) -> Result<(), Refusal> {
+        self.require_named_file()?;
         let len = self.grown_length()?;
         let at = self.scanned;
         self.file
@@ -768,6 +811,32 @@ impl Trades {
             let index = at.saturating_sub(HEADER) / STRIDE;
             index_row(&mut self.blocks, &mut self.write_refusal, index, &raw);
             self.scanned = at.saturating_add(STRIDE);
+        }
+        Ok(())
+    }
+
+    /// Refuses when the path no longer names the file this handle holds.
+    fn require_named_file(&self) -> Result<(), Refusal> {
+        use std::os::unix::fs::MetadataExt as _;
+        let held = self
+            .file
+            .metadata()
+            .map_err(|why| format!("{} could not be measured: {why}", self.path.display()))?;
+        let named = std::fs::symlink_metadata(&self.path).map_err(|why| {
+            format!(
+                "{} could not be measured by name: {why}. The file this handle holds is no longer the one its path names, so the handle no longer describes the store",
+                self.path.display()
+            )
+        })?;
+        if (held.dev(), held.ino()) != (named.dev(), named.ino()) {
+            return Err(format!(
+                "{} was replaced since this handle opened (held device {} inode {}, named device {} inode {}). The handle no longer describes the store, so it is refused rather than refreshed; a fresh open reads the replacement",
+                self.path.display(),
+                held.dev(),
+                held.ino(),
+                named.dev(),
+                named.ino()
+            ));
         }
         Ok(())
     }
@@ -1735,6 +1804,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A handle's identity index as sorted `(identity, first, count)` triples.
+    fn sorted_blocks(trades: &Trades) -> Vec<([u8; 32], u64, u64)> {
+        let mut blocks: Vec<_> = trades
+            .blocks
+            .iter()
+            .map(|(id, block)| (*id, block.first, block.count))
+            .collect();
+        blocks.sort_unstable();
+        blocks
+    }
+
+    /// An adversarial peer rewrites row 0 in place, keeping the file's length.
+    fn rewrite_row_zero(path: &std::path::Path, raw: &[u8; STRIDE_BYTES]) {
+        use std::io::{Seek as _, SeekFrom, Write as _};
+        let mut peer = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("the adversarial peer opens");
+        peer.seek(SeekFrom::Start(super::HEADER))
+            .expect("seek to row 0");
+        peer.write_all(raw).expect("row 0 is overwritten");
+        peer.sync_all().expect("the overwrite is durable");
+    }
+
     /// ONE DAMAGED ROW MUST NOT REFUSE EVERY LATER READ, NOR MAKE EACH ONE COLD.
     ///
     /// `/trades.json` holds one read handle and calls `refresh` per request. A
@@ -1792,19 +1885,12 @@ mod tests {
             "{:?}",
             reader.write_refusal
         );
-        let mut refreshed: Vec<_> = reader
-            .blocks
-            .iter()
-            .map(|(id, block)| (*id, block.first, block.count))
-            .collect();
-        let mut walked: Vec<_> = cold
-            .blocks
-            .iter()
-            .map(|(id, block)| (*id, block.first, block.count))
-            .collect();
-        refreshed.sort_unstable();
-        walked.sort_unstable();
-        assert_eq!(refreshed, walked, "refresh and the cold walk index alike");
+        let walked = sorted_blocks(&cold);
+        assert_eq!(
+            sorted_blocks(&reader),
+            walked,
+            "refresh and the cold walk index alike"
+        );
         let Some(Block { first, count }) = reader.block(&later.identity) else {
             panic!("the healthy later block is indexed");
         };
@@ -1818,23 +1904,30 @@ mod tests {
             "the repeated identity at row 5 never widens the first block"
         );
 
-        // O(new rows): damage an already-indexed row in place. A refresh that
-        // re-walked history would see it; one that resumes at `scanned` does not.
-        {
-            use std::io::{Seek as _, SeekFrom, Write as _};
-            let mut peer = std::fs::OpenOptions::new()
-                .write(true)
-                .open(&path)
-                .expect("the adversarial peer opens");
-            peer.seek(SeekFrom::Start(super::HEADER))
-                .expect("seek to row 0");
-            peer.write_all(&[0xff; STRIDE_BYTES])
-                .expect("row 0 is overwritten");
-            peer.sync_all().expect("the overwrite is durable");
-        }
+        // O(new rows): rewrite an already-indexed row in place with a VALIDLY
+        // SEALED row of an identity nothing else holds. A refresh that re-walked
+        // history -- with or without resetting its state -- would index 0x76 at
+        // row 0; one that resumes at `scanned` never reads row 0 again.
+        let rewritten = row([0x76; 32], 0);
+        rewrite_row_zero(&path, &rewritten.to_bytes());
+        assert!(
+            Trades::open_read(&dir)
+                .expect("a cold reader sees the rewrite")
+                .holds(&rewritten.identity),
+            "control: the rewritten row is whole, so any walk over row 0 indexes it"
+        );
         reader
             .refresh()
             .expect("an unchanged length refreshes nothing");
+        assert!(
+            !reader.holds(&rewritten.identity),
+            "a refresh never reads a row behind `scanned`"
+        );
+        assert_eq!(
+            sorted_blocks(&reader),
+            walked,
+            "the index is the pre-rewrite snapshot"
+        );
         assert_eq!(reader.scanned, cold.scanned);
         assert_eq!(reader.write_refusal, cold.write_refusal);
 
@@ -1846,6 +1939,123 @@ mod tests {
             .append_all(&[row([0x75; 32], 0)])
             .expect_err("a writer still refuses past damage");
         assert!(why.contains("integrity seal failed"), "{why}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A REPAIRED FILE INSTALLED UNDER THE SAME NAME MUST NOT BE HIDDEN BY A
+    /// HELD HANDLE. The remedy for damage is a reviewed replacement renamed into
+    /// place; a refresh that measured only its own descriptor kept indexing the
+    /// unlinked old file forever. D-0919.
+    #[test]
+    fn a_refresh_refuses_a_file_replaced_or_removed_under_its_path() {
+        let dir = std::env::temp_dir().join(format!(
+            "brutex-trades-refresh-replaced-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let side = dir.join("side");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = Trades::path(&dir);
+        let first = row([0x77; 32], 0);
+        let repaired = row([0x78; 32], 0);
+        Trades::open(&dir)
+            .expect("a fresh file opens")
+            .append_all(&[first])
+            .expect("the first block");
+        let mut reader = Trades::open_read(&dir).expect("a read handle opens");
+        reader
+            .refresh()
+            .expect("control: the named file is the held one");
+
+        let mut replacement = Trades::open(&side).expect("the side file opens");
+        replacement.append_all(&[first]).expect("the kept block");
+        replacement
+            .append_all(&[repaired])
+            .expect("the repaired block");
+        drop(replacement);
+        std::fs::rename(Trades::path(&side), &path).expect("the repair is installed");
+
+        let why = reader
+            .refresh()
+            .expect_err("a handle on the replaced file is refused, not refreshed");
+        assert!(
+            why.contains("was replaced since this handle opened"),
+            "{why}"
+        );
+        assert!(!reader.holds(&repaired.identity), "nothing was indexed");
+        assert!(
+            Trades::open_read(&dir)
+                .expect("a fresh open reads the replacement")
+                .holds(&repaired.identity)
+        );
+
+        let mut reader = Trades::open_read(&dir).expect("a handle on the replacement");
+        std::fs::remove_file(&path).expect("the file is removed");
+        let why = reader
+            .refresh()
+            .expect_err("a handle whose path names nothing is refused");
+        assert!(why.contains("could not be measured by name"), "{why}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A REFRESH NEVER INDEXES A ROW A WRITER IS STILL PUTTING DOWN. A row a
+    /// refresh indexes is never read again, so it waits for the writer's
+    /// exclusive lock and then sees only whole rows. D-0919.
+    #[test]
+    fn a_refresh_waits_for_a_writer_holding_the_exclusive_lock() {
+        let dir = std::env::temp_dir().join(format!(
+            "brutex-trades-refresh-locked-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = Trades::path(&dir);
+        let first = row([0x79; 32], 0);
+        let later = row([0x7a; 32], 0);
+        Trades::open(&dir)
+            .expect("a fresh file opens")
+            .append_all(&[first])
+            .expect("the first block");
+        let mut reader = Trades::open_read(&dir).expect("a read handle opens");
+        let writer = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("the peer writer opens");
+        writer
+            .lock()
+            .expect("the peer writer takes the exclusive lock");
+
+        let (done, finished) = std::sync::mpsc::channel();
+        let refreshing = std::thread::spawn(move || {
+            let refreshed = reader.refresh();
+            let _ = done.send(());
+            (reader, refreshed)
+        });
+        assert!(
+            finished
+                .recv_timeout(std::time::Duration::from_millis(500))
+                .is_err(),
+            "the refresh waits while a writer holds the exclusive lock"
+        );
+        let torn = later.to_bytes();
+        {
+            use std::io::Write as _;
+            let mut peer = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .expect("the peer appends");
+            peer.write_all(&torn[..STRIDE_BYTES / 2])
+                .expect("half a row");
+            peer.sync_all().expect("the half is durable");
+            peer.write_all(&torn[STRIDE_BYTES / 2..]).expect("the rest");
+            peer.sync_all().expect("the row is durable");
+        }
+        writer.unlock().expect("the peer writer releases");
+        let (reader, refreshed) = refreshing.join().expect("the refresh thread ends");
+        refreshed.expect("the refresh ran after the writer finished");
+        assert!(reader.holds(&later.identity), "the whole row is indexed");
+        assert_eq!(reader.write_refusal, None, "no torn row was recorded");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

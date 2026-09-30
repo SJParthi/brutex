@@ -1030,6 +1030,101 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The child half of the test below reads its store root from this.
+    const REPAIRED_CHILD: &str = "BRUTEX_API_TRADES_REPAIRED_CHILD";
+
+    /// A REVIEWED REPAIR RENAMED INTO PLACE IS SERVED, NOT HIDDEN BY THE CACHE.
+    ///
+    /// The cached handle opened over damage holds the old file's descriptor.
+    /// Its first refresh after the rename refuses by naming the replacement and
+    /// is dropped; every later request reads the repaired file. Before D-0919's
+    /// identity check, the held handle kept indexing the unlinked file and
+    /// answered every request for the repaired run "indexes 0" until restart.
+    ///
+    /// In a child process so no other test's root can take the process's one
+    /// cached handle between these requests.
+    #[test]
+    fn a_repair_renamed_into_place_is_served_after_one_named_refusal() {
+        if let Some(root) = std::env::var_os(REPAIRED_CHILD) {
+            repaired_child(std::path::Path::new(&root));
+            return;
+        }
+        let root = crate::scratch::path("trades-repaired-by-rename");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("the child's store root");
+        let out = crate::isolated::rerun(
+            "trades::tests::a_repair_renamed_into_place_is_served_after_one_named_refusal",
+            &[(REPAIRED_CHILD, root.as_os_str())],
+        );
+        assert!(
+            out.contains("TRADES-REPAIRED [400, 200, 200, 200]"),
+            "{out}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn repaired_child(dir: &std::path::Path) {
+        let healthy = [0x6c; 32];
+        let repaired = [0x6d; 32];
+        cli::trades::Trades::open(dir)
+            .expect("trade store")
+            .append_all(&[trade_row(healthy, 0)])
+            .expect("the healthy row");
+        commit_trade_fixture(dir, healthy, 1);
+        let mut damaged = trade_row([0x6e; 32], 0).to_bytes();
+        if let Some(byte) = damaged.get_mut(40) {
+            *byte ^= 0x80;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(cli::trades::Trades::path(dir))
+            .expect("trade bytes");
+        std::io::Write::write_all(&mut file, &damaged).expect("a damaged row");
+        file.sync_all().expect("durable fixture");
+        drop(file);
+        let healthy_query = format!("identity={}", "6c".repeat(32));
+        for request in 0..2 {
+            let (status, _, body) = respond(Ok(dir.to_path_buf()), &healthy_query);
+            assert_eq!(
+                status,
+                axum::http::StatusCode::OK,
+                "before the repair, request {request}: {body}"
+            );
+        }
+
+        let side = dir.join("repair");
+        let mut replacement = cli::trades::Trades::open(&side).expect("the repair store");
+        replacement
+            .append_all(&[trade_row(healthy, 0)])
+            .expect("the kept run");
+        replacement
+            .append_all(&[trade_row(repaired, 0)])
+            .expect("the repaired run");
+        drop(replacement);
+        std::fs::rename(
+            cli::trades::Trades::path(&side),
+            cli::trades::Trades::path(dir),
+        )
+        .expect("the reviewed repair is installed");
+        commit_trade_fixture(dir, repaired, 1);
+
+        let query = format!("identity={}", "6d".repeat(32));
+        let mut statuses = Vec::new();
+        for request in 0..4 {
+            let (status, _, body) = respond(Ok(dir.to_path_buf()), &query);
+            if request == 0 {
+                assert!(
+                    body.contains("was replaced since this handle opened"),
+                    "the one refusal names the replacement: {body}"
+                );
+            } else {
+                assert_body_identity(&body, &"6d".repeat(32));
+            }
+            statuses.push(status.as_u16());
+        }
+        println!("TRADES-REPAIRED {statuses:?}");
+    }
+
     /// A WHOLE CHILD FILE LOST AFTER COMMIT IS CORRUPTION, NOT ABSENCE.
     ///
     /// The explicit zero-count receipt is the only case in which that same
