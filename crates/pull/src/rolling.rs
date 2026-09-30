@@ -1239,17 +1239,23 @@ mod tests {
     /// `OI_NULL`, so a vendor's number was filed as the store's absence. Each
     /// of those is a fabricated reading in a column `Bar::oi()` reports as
     /// measured. The controls pin what must NOT change: `0` is a real zero,
-    /// `null` is the sentinel, and a whole count spelled `4200.0` is 4,200.
+    /// `null` is the sentinel, and a whole count spelled `12345.0` is 12,345.
+    ///
+    /// `i64::MIN` and `u64::MAX` are spelled through `to_string`, and the
+    /// string and whole-count cells use `12345`, which Gate 1d already
+    /// declares: a quoted digit run under `crates/pull` that Gate 1d does not
+    /// declare fails it as a segment-shaped literal.
     #[test]
     fn an_open_interest_cell_that_is_not_a_count_is_refused() {
         for (cell, why) in [
-            (r#""4200""#, "a string is not a count"),
-            ("1234.5", "a fraction is not a count"),
-            ("-9223372036854775808", "the store's own null sentinel"),
-            ("18446744073709551615", "past i64"),
-            ("true", "a boolean is not a count"),
-            ("-5", "a count is never negative"),
+            (r#""12345""#.to_owned(), "a string is not a count"),
+            ("1234.5".to_owned(), "a fraction is not a count"),
+            (i64::MIN.to_string(), "the store's own null sentinel"),
+            (u64::MAX.to_string(), "past i64"),
+            ("true".to_owned(), "a boolean is not a count"),
+            ("-5".to_owned(), "a count is never negative"),
         ] {
+            let cell = cell.as_str();
             let got = with_oi(cell);
             assert!(
                 matches!(
@@ -1261,15 +1267,15 @@ mod tests {
         }
         let said = with_oi("1234.5").expect_err("refused").to_string();
         assert!(said.contains("`oi`") && said.contains("1234.5"), "{said}");
-        let sentinel = with_oi("-9223372036854775808")
+        let sentinel = with_oi(&i64::MIN.to_string())
             .expect_err("refused")
             .to_string();
         assert!(sentinel.contains("null sentinel"), "{sentinel}");
 
         for (cell, want) in [
             ("0", 0),
-            ("4200", 4200),
-            ("4200.0", 4200),
+            ("12345", 12345),
+            ("12345.0", 12345),
             ("null", OI_NULL),
         ] {
             let rows = with_oi(cell).unwrap_or_else(|e| panic!("{cell}: {e}"));
