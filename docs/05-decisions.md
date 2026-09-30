@@ -43792,3 +43792,25 @@ below it stay counted and not followed (D-0766). The test
 old answer, is replaced by
 `a_bars_path_that_is_not_a_directory_is_refused_by_name`: the old behaviour
 is the defect.
+
+**What happened (entry dispatch).** Two further gaps in the per-entry step,
+found by the same review. First, `walk` counted an entry the operating
+system could not read, and an entry whose type could not be read, as
+`unreadable`, but no test reached either branch: deleting both
+`count_unreadable()` calls left every store test green (a surviving mutant,
+`CLAUDE.md` §4). Second, every entry that was neither a link nor a directory
+went to `classify` as a bar file, so a FIFO named `2026-09.bin` at spot depth
+became a held spot month (the reviewer's `mkfifo` probe gave
+`held=["2026-08", "2026-09"]`, and origin/main 2c209309 gives the same).
+
+**The change.** The per-entry decision is one function, `admit`, which takes
+`io::Result<(FileType, PathBuf)>`: a failure to read the entry and a failure
+to read its type arrive as one `Err` and are counted by one call, which
+`an_entry_the_os_could_not_read_is_one_unreadable_entry` reaches with an
+injected `io::Error`. Only `FileType::is_file` is classified; anything that
+is not a regular file, a directory or a link is counted in the new
+`Census::not_regular` bucket, which `reconciles` sums
+(`an_entry_that_is_not_a_regular_file_is_never_classified_as_a_month` with
+the type of `/dev/null`, and `a_socket_named_like_a_month_is_not_a_held_month`
+on a real tree, where the socket stands in for a FIFO because the standard
+library can create one).

@@ -559,3 +559,37 @@ fn a_signed_month_field_is_malformed_not_a_second_spelling() {
     assert_eq!(out.held.len(), 1);
     assert_eq!(out.held[0].month.to_string(), "2026-08");
 }
+
+/// **A socket named like a month is `not_regular`, never a held month.**
+/// D-0769.
+///
+/// Everything that was neither a link nor a directory went to `classify` as a
+/// bar file, so a FIFO named `2026-09.bin` at spot depth became a held spot
+/// month (found by a review; `mkfifo` gave `held=["2026-08", "2026-09"]`). A
+/// FIFO with no writer blocks a reader's open. A socket stands in for the FIFO
+/// here because the standard library can make one: it is bound at a short
+/// path, as a socket path has a length limit, and renamed into place.
+#[test]
+fn a_socket_named_like_a_month_is_not_a_held_month() {
+    let root = scratch("socket");
+    put(&root, "groww/NSE/INDEX/NIFTY/1min/2026-08.bin");
+    let short = std::env::temp_dir().join(format!("bcs-{}", std::process::id()));
+    let _ = std::fs::remove_file(&short);
+    let listener = std::os::unix::net::UnixListener::bind(&short).expect("a socket is bindable");
+    let at = root.join("bars/groww/NSE/INDEX/NIFTY/1min/2026-09.bin");
+    std::fs::rename(&short, &at).expect("the socket moves into the tree");
+    let out = catalog::walk(&root).expect("the walk runs");
+    drop(listener);
+    assert_eq!(
+        out.census,
+        Census {
+            seen: 2,
+            spot: 1,
+            not_regular: 1,
+            ..Census::default()
+        }
+    );
+    let months: Vec<String> = out.held.iter().map(|h| h.month.to_string()).collect();
+    assert_eq!(months, vec!["2026-08".to_owned()]);
+    let _ = std::fs::remove_dir_all(&root);
+}

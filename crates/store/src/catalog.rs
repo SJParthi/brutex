@@ -51,7 +51,8 @@
 
 use crate::path::{FileKind, PathError, Timeframe, YearMonth};
 use brutex_core::vendor::Vendor;
-use std::path::Path;
+use std::fs::FileType;
+use std::path::{Path, PathBuf};
 
 /// The directory under `root` that every bar path begins with.
 ///
@@ -82,7 +83,9 @@ pub struct Held {
     pub month: YearMonth,
 }
 
-/// Every file the walk saw, by what became of it.
+/// Every entry the walk saw below `bars/`, other than a directory it listed,
+/// by what became of it: each file, and each unreadable directory or entry,
+/// symbolic link and non-regular entry.
 ///
 /// The shape [`indicators::Column`]'s census already uses, and for the same
 /// reason: a caller that gets fewer rows than it expected needs to know whether
@@ -90,8 +93,9 @@ pub struct Held {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Census {
     /// Entries encountered under `bars/`, whatever became of them: every file,
-    /// every directory or entry the walk could not read (D-0765), and every
-    /// symbolic link, which is not followed (D-0766).
+    /// every directory or entry the walk could not read (D-0765), every
+    /// symbolic link, which is not followed (D-0766), and every entry that is
+    /// not a regular file (D-0769).
     pub seen: u64,
     /// Files that became a [`Held`].
     pub spot: u64,
@@ -129,6 +133,10 @@ pub struct Census {
     /// rather than read with the name dropped, which shortened the path by one
     /// level and filed it at another depth. D-0768.
     pub non_utf8: u64,
+    /// An entry below `bars/` that is neither a regular file, a directory nor
+    /// a symbolic link: a FIFO, a socket or a device node. The store's writer
+    /// makes none, so it is not a month whatever its name. D-0769.
+    pub not_regular: u64,
 }
 
 impl Census {
@@ -149,7 +157,8 @@ impl Census {
             .saturating_add(self.wrong_depth)
             .saturating_add(self.unreadable)
             .saturating_add(self.linked)
-            .saturating_add(self.non_utf8);
+            .saturating_add(self.non_utf8)
+            .saturating_add(self.not_regular);
         parts == self.seen
     }
 
@@ -174,7 +183,7 @@ impl Census {
 pub struct Holdings {
     /// One row per spot instrument-month, sorted and deduplicated.
     pub held: Vec<Held>,
-    /// Every file seen, by outcome.
+    /// Every entry seen other than a directory the walk listed, by outcome.
     pub census: Census,
 }
 
@@ -213,8 +222,9 @@ impl core::error::Error for CatalogError {}
 /// [`CatalogError::BarsUnreadable`] when `root/bars` cannot be listed, cannot be
 /// stat-ed (an unsearchable root, a link that resolves to nothing), or is not a
 /// directory (D-0769). A store with nothing at `root/bars` is **not** an
-/// error — it is an empty result with an empty census, because "nothing pulled yet" is a normal state and
-/// refusing it would make a fresh clone look broken.
+/// error — it is an empty result with an empty census, because "nothing
+/// pulled yet" is a normal state and refusing it would make a fresh clone look
+/// broken.
 ///
 /// # Cost
 ///
@@ -249,36 +259,56 @@ pub fn walk(root: &Path) -> Result<Holdings, CatalogError> {
             }
         };
         // Not `flatten()`: that discarded an entry the OS could not read, and
-        // the census never learned it existed (D-0765).
+        // the census never learned it existed (D-0765). A failure to read the
+        // entry and a failure to read its type reach `admit` as one `Err`, so
+        // the two cannot count differently (D-0769).
         for entry in entries {
-            let Ok(entry) = entry else {
-                out.census.count_unreadable();
-                continue;
-            };
-            // `file_type` and not `is_dir`: `is_dir` FOLLOWS a link, so a link
-            // back to an ancestor walked the tree again at every level until
-            // the kernel's link limit made `read_dir` fail, and a link that
-            // resolved to nothing answered false and was filed as a bar file.
-            // `file_type` describes the entry itself, so a link is one entry
-            // and never a descent (D-0766).
-            let Ok(kind) = entry.file_type() else {
-                out.census.count_unreadable();
-                continue;
-            };
-            let path = entry.path();
-            if kind.is_symlink() {
-                out.census.count_linked();
-            } else if kind.is_dir() {
-                stack.push(path);
-            } else {
-                out.census.seen = out.census.seen.saturating_add(1);
-                classify(&bars, &path, &mut out);
-            }
+            let entry = entry.and_then(|e| Ok((e.file_type()?, e.path())));
+            admit(entry, &bars, &mut stack, &mut out);
         }
     }
     out.held.sort_unstable();
     out.held.dedup();
     Ok(out)
+}
+
+/// Where one directory entry goes: a descent, or exactly one census bucket.
+///
+/// Split out of [`walk`] so that an entry which could not be read is testable
+/// with an injected error. A locked directory reaches `read_dir`'s own
+/// failure, but nothing on a real tree makes one entry of a readable directory
+/// fail, and the branch that counted it had no test (D-0769).
+///
+/// `file_type` and not `is_dir`: `is_dir` FOLLOWS a link, so a link back to an
+/// ancestor walked the tree again at every level until the kernel's link limit
+/// made `read_dir` fail, and a link that resolved to nothing answered false
+/// and was filed as a bar file. `file_type` describes the entry itself, so a
+/// link is one entry and never a descent (D-0766).
+///
+/// Only a REGULAR file is classified. A FIFO, a socket or a device named
+/// `2026-09.bin` at spot depth was a held month; it is `not_regular` now
+/// (D-0769).
+fn admit(
+    entry: std::io::Result<(FileType, PathBuf)>,
+    bars: &Path,
+    stack: &mut Vec<PathBuf>,
+    out: &mut Holdings,
+) {
+    let Ok((kind, path)) = entry else {
+        out.census.count_unreadable();
+        return;
+    };
+    if kind.is_symlink() {
+        out.census.count_linked();
+    } else if kind.is_dir() {
+        stack.push(path);
+    } else if kind.is_file() {
+        out.census.seen = out.census.seen.saturating_add(1);
+        classify(bars, &path, out);
+    } else {
+        out.census.seen = out.census.seen.saturating_add(1);
+        out.census.not_regular = out.census.not_regular.saturating_add(1);
+    }
 }
 
 /// Whether `bars` is there to walk: `Ok(false)` ONLY when nothing at all is at

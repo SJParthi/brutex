@@ -5,7 +5,7 @@
 //! The walk-level proofs on real temporary trees are in
 //! `crates/store/tests/catalog.rs`. D-0765 to D-0768.
 
-use super::{CatalogError, Census, Holdings, bars_present, classify, parse_month, walk};
+use super::{CatalogError, Census, Holdings, admit, bars_present, classify, parse_month, walk};
 use std::path::{Path, PathBuf};
 
 /// A private directory under the system temporary root, named for its test.
@@ -51,6 +51,11 @@ fn every_new_bucket_is_a_reconciliation_part() {
         Census {
             seen: 1,
             non_utf8: 1,
+            ..Census::default()
+        },
+        Census {
+            seen: 1,
+            not_regular: 1,
             ..Census::default()
         },
     ] {
@@ -176,5 +181,98 @@ fn only_an_absent_bars_is_the_empty_store_and_every_other_non_directory_is_refus
         panic!("an unsearchable root is refused, not empty: {locked:?}");
     };
     assert!(because.contains("os error 13"), "{because}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The type of `/dev/null`, a character device: an entry that is neither a
+/// regular file, a directory nor a symbolic link, without a FIFO or socket
+/// fixture.
+fn device_kind() -> std::fs::FileType {
+    std::fs::symlink_metadata("/dev/null")
+        .expect("/dev/null exists")
+        .file_type()
+}
+
+#[test]
+fn an_entry_the_os_could_not_read_is_one_unreadable_entry() {
+    let bars = Path::new("/s/bars");
+    let mut stack = Vec::new();
+    let mut out = Holdings::default();
+    admit(
+        Err(std::io::Error::other("injected entry failure")),
+        bars,
+        &mut stack,
+        &mut out,
+    );
+    let expected = Census {
+        seen: 1,
+        unreadable: 1,
+        ..Census::default()
+    };
+    assert_eq!(out.census, expected);
+    assert!(stack.is_empty() && out.held.is_empty());
+}
+
+#[test]
+fn an_entry_that_is_not_a_regular_file_is_never_classified_as_a_month() {
+    let kind = device_kind();
+    assert!(!kind.is_file() && !kind.is_dir() && !kind.is_symlink());
+    let bars = Path::new("/s/bars");
+    let mut stack = Vec::new();
+    let mut out = Holdings::default();
+    admit(
+        Ok((kind, bars.join("groww/NSE/INDEX/NIFTY/1min/2026-09.bin"))),
+        bars,
+        &mut stack,
+        &mut out,
+    );
+    let expected = Census {
+        seen: 1,
+        not_regular: 1,
+        ..Census::default()
+    };
+    assert_eq!(out.census, expected, "{:?}", out.held);
+    assert!(stack.is_empty() && out.held.is_empty());
+}
+
+#[test]
+fn each_entry_kind_goes_to_exactly_one_place() {
+    let root = scratch("kinds");
+    put(&root, "groww/NSE/INDEX/NIFTY/1min/2026-08.bin");
+    let link = root.join("link");
+    std::os::unix::fs::symlink(&root, &link).expect("a symlink is creatable");
+    let kind_of = |p: &Path| {
+        std::fs::symlink_metadata(p)
+            .expect("the fixture exists")
+            .file_type()
+    };
+    let bars = root.join("bars");
+    let month = bars.join("groww/NSE/INDEX/NIFTY/1min/2026-08.bin");
+    let dir = bars.join("groww");
+    let mut stack = Vec::new();
+    let mut out = Holdings::default();
+
+    admit(
+        Ok((kind_of(&dir), dir.clone())),
+        &bars,
+        &mut stack,
+        &mut out,
+    );
+    assert_eq!(stack, vec![dir], "a directory is descended, not counted");
+    assert_eq!(out.census, Census::default());
+
+    admit(
+        Ok((kind_of(&link), link.clone())),
+        &bars,
+        &mut stack,
+        &mut out,
+    );
+    assert_eq!(stack.len(), 1, "a link is never descended");
+    assert_eq!((out.census.seen, out.census.linked), (1, 1));
+
+    admit(Ok((kind_of(&month), month)), &bars, &mut stack, &mut out);
+    assert_eq!((out.census.seen, out.census.spot), (2, 1));
+    assert_eq!(out.held.len(), 1);
+    assert!(out.census.reconciles(), "{:?}", out.census);
     let _ = std::fs::remove_dir_all(&root);
 }
