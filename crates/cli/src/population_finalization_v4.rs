@@ -2278,6 +2278,9 @@ impl PopulationFinalizationV4Ledger {
     ///
     /// # Cost
     ///
+    /// The append opens with a generation check that hashes the whole data
+    /// file, and an exact reuse runs another before it returns, so a reused
+    /// append that writes nothing is O(F) as well.
     /// After the Completion is synced, the append hashes the whole data file
     /// and then rescans the whole ledger: `scan` decodes every record,
     /// validates every complete block, and ends with a generation check that

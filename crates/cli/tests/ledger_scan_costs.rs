@@ -20,6 +20,7 @@
 const FINALIZATION_V3: &str = include_str!("../src/population_finalization_v3.rs");
 const FINALIZATION_V4: &str = include_str!("../src/population_finalization_v4.rs");
 const POPULATION_V5: &str = include_str!("../src/population_v5.rs");
+const ORCHESTRATOR: &str = include_str!("../src/step3_orchestrator.rs");
 const LIMITS: &str = include_str!("../../../docs/06-limits.md");
 
 /// The heading of the limits section these four costs are stated in.
@@ -112,6 +113,12 @@ fn body<'a>(source: &'a str, anchor: &str, head: &str) -> &'a str {
     panic!("`{head}` never closes");
 }
 
+/// `text` with every whitespace character removed, so a call chain compares
+/// the same however rustfmt breaks it across lines.
+fn squeezed(text: &str) -> String {
+    text.split_whitespace().collect()
+}
+
 /// How many times `needle` occurs in `haystack`.
 fn count(haystack: &str, needle: &str) -> usize {
     haystack.matches(needle).count()
@@ -155,6 +162,27 @@ fn a_finalization_v3_row_read_hashes_both_files_four_times_and_its_docs_say_so()
         "fn file_generation_with_between_hash_action(",
     );
     assert_eq!(count(generation, "hash_held_prefix("), 2, "{generation}");
+    let single = body(FINALIZATION_V3, "", "fn file_generation(");
+    assert_eq!(
+        count(single, "file_generation_with_between_hash_action("),
+        1,
+        "`file_generation` must delegate to the twice-hashing body: {single}"
+    );
+    assert!(!single.contains("hash_held_prefix("), "{single}");
+    let delegate = body(
+        FINALIZATION_V3,
+        "impl PopulationFinalizationV3Authority",
+        "fn row_projection(",
+    );
+    assert_eq!(
+        count(
+            &squeezed(delegate),
+            "self.ledger.authenticated_row(self.receipt,global_sequence)"
+        ),
+        1,
+        "`row_projection` must read through the fixed-offset lookup: {delegate}"
+    );
+    assert!(!delegate.contains("ordered_row_projections"), "{delegate}");
 
     let sentence = "One row read therefore hashes the row file and the Completion file four \
                     times each: O(row-file bytes + Completion-file bytes) per row, not O(1), \
@@ -173,7 +201,20 @@ fn a_finalization_v3_row_read_hashes_both_files_four_times_and_its_docs_say_so()
     );
     says(&doc, "`row_projection`'s rustdoc", sentence);
     says(&doc, "`row_projection`'s rustdoc", HELD);
-    says(&limits(), "the limits section", sentence);
+    let limits = limits();
+    says(&limits, "the limits section", sentence);
+    says(
+        &limits,
+        "the limits section",
+        "`row_projection` delegates to the ledger's `authenticated_row`, and every \
+         generation goes through `file_generation`.",
+    );
+    says(
+        &limits,
+        "the limits section",
+        "`crates/cli/tests/ledger_scan_costs.rs` reads the source to require, for each \
+         cost, the calls and delegations its bullet names, and the sentences that state it.",
+    );
 }
 
 /// W2-cli11-0. `append_locked` ends by hashing the data file and rescanning
@@ -212,6 +253,29 @@ fn a_finalization_v4_append_rescans_the_whole_ledger_and_its_docs_say_so() {
     let block = body(FINALIZATION_V4, "", "fn validate_complete_block(");
     assert!(block.contains("    }\n    .validate()?;"), "{block}");
     assert!(prepared.contains("bounded_set("), "{prepared}");
+    let opening = append
+        .get(1..)
+        .expect("the body after its brace")
+        .trim_start();
+    assert!(
+        opening.starts_with("self.require_unchanged()?;"),
+        "the append does not open with a generation check: {append}"
+    );
+    assert!(
+        squeezed(append).contains("self.require_unchanged()?;returnOk((false,receipt));"),
+        "the exact reuse does not check the generation before returning: {append}"
+    );
+    let locked = body(
+        FINALIZATION_V4,
+        "impl PopulationFinalizationV4Ledger",
+        "    fn append(\n",
+    );
+    let lock = locked.find(".lock()").expect("the exclusive lock");
+    let call = locked
+        .find("self.append_locked(")
+        .expect("the locked append");
+    assert!(lock < call, "{locked}");
+    assert_eq!(count(FINALIZATION_V4, "self.append_locked("), 1);
 
     let sentence = "One append is therefore O(F) in the ledger's file bytes F, not O(D) in \
                     its own decisions, and the appends into one ledger cost quadratically \
@@ -229,11 +293,21 @@ fn a_finalization_v4_append_rescans_the_whole_ledger_and_its_docs_say_so() {
     says(
         &doc,
         "`append_locked`'s rustdoc",
+        "Appends one authority under the held exclusive lock.",
+    );
+    let reused = "The append opens with a generation check that hashes the whole data file, \
+                  and an exact reuse runs another before it returns, so a reused append that \
+                  writes nothing is O(F) as well.";
+    says(&doc, "`append_locked`'s rustdoc", reused);
+    says(
+        &doc,
+        "`append_locked`'s rustdoc",
         "Block validation inserts every decision into hash sets, so the bound is expected, \
          not worst case.",
     );
     let limits = limits();
     says(&limits, "the limits section", sentence);
+    says(&limits, "the limits section", reused);
     says(
         &limits,
         "the limits section",
@@ -262,6 +336,29 @@ fn a_population_v5_row_read_derives_the_whole_population_twice_and_its_docs_say_
         "fn authenticated_row(",
     );
     assert!(v5_read.contains("self.require_unchanged()?"), "{v5_read}");
+    assert_eq!(count(v5_read, "read_fixed_at("), 1, "{v5_read}");
+    assert_eq!(
+        count(
+            &squeezed(lookup),
+            "self.v5.authority_mut().authenticated_row(global_sequence)"
+        ),
+        1,
+        "{lookup}"
+    );
+    let hop = body(
+        POPULATION_V5,
+        "impl PopulationV5Authority {",
+        "fn authenticated_row(",
+    );
+    assert_eq!(
+        count(
+            &squeezed(hop),
+            "self.ledger.authenticated_row(&self.receipt,global_sequence)"
+        ),
+        1,
+        "the authority must read through the fixed-offset lookup: {hop}"
+    );
+    assert!(!hop.contains("authenticated_rows("), "{hop}");
     let v5_check = body(
         POPULATION_V5,
         "impl PopulationV5Ledger",
@@ -296,7 +393,13 @@ fn a_population_v5_row_read_derives_the_whole_population_twice_and_its_docs_say_
     );
     says(&doc, "`authenticated_row`'s rustdoc", sentence);
     says(&doc, "`authenticated_row`'s rustdoc", HELD);
-    says(&limits(), "the limits section", sentence);
+    let route = "The one row read goes through `PopulationV5Authority::authenticated_row` \
+                 to the ledger's fixed-offset `authenticated_row`, not through the \
+                 whole-block `authenticated_rows`.";
+    says(&doc, "`authenticated_row`'s rustdoc", route);
+    let limits = limits();
+    says(&limits, "the limits section", sentence);
+    says(&limits, "the limits section", route);
 }
 
 /// W2-cli12-4. `commit_population_v5` opens a writer, appends and reopens,
@@ -316,12 +419,73 @@ fn a_population_v5_commit_scans_the_whole_ledger_three_times_and_its_docs_say_so
     assert_eq!(count(open, "ledger.scan()?"), 1, "{open}");
     let finish = body(POPULATION_V5, "", "fn finish_written(");
     assert!(finish.contains("self.scan()?"), "{finish}");
+    for (head, caller) in [
+        ("fn append_locked(", "the fresh append"),
+        ("fn complete_trailing(", "the trailing completion"),
+    ] {
+        let written = body(POPULATION_V5, "impl PopulationV5Ledger", head);
+        assert_eq!(
+            count(written, "self.finish_written(prepared.population_id)"),
+            1,
+            "{caller} must finish with one rescan: {written}"
+        );
+    }
     assert_eq!(
-        count(POPULATION_V5, "self.finish_written(prepared.population_id)"),
-        2
+        count(POPULATION_V5, "finish_written("),
+        3,
+        "one definition and the two written paths' calls, no other"
     );
     let reuse = body(POPULATION_V5, "", "fn reuse_existing(");
-    assert!(!reuse.contains("scan()"), "{reuse}");
+    assert!(!reuse.contains("scan("), "{reuse}");
+    assert!(!reuse.contains("finish_written("), "{reuse}");
+    for head in ["fn open_read(", "fn open_write("] {
+        let door = body(POPULATION_V5, "impl PopulationV5Ledger", head);
+        assert_eq!(count(door, "Self::open("), 1, "{door}");
+    }
+    assert_eq!(
+        count(commit, "PreparedPopulationV5::from_authority("),
+        2,
+        "{commit}"
+    );
+    let join = body(ORCHESTRATOR, "", "pub(crate) fn population_v5_inputs(");
+    assert!(join.contains(".ordered_row_projections()"), "{join}");
+    assert!(join.contains(".ordered_successor_projections()"), "{join}");
+    let v3_bulk = body(
+        FINALIZATION_V3,
+        "impl PopulationFinalizationV3Authority",
+        "fn ordered_row_projections(",
+    );
+    assert!(
+        v3_bulk.contains("self.ledger.ordered_row_projections(self.receipt)"),
+        "{v3_bulk}"
+    );
+    let v3_ledger_bulk = body(
+        FINALIZATION_V3,
+        "impl PopulationFinalizationV3Ledger",
+        "fn ordered_row_projections(",
+    );
+    assert!(
+        v3_ledger_bulk.contains("self.require_unchanged()?"),
+        "{v3_ledger_bulk}"
+    );
+    let v5_check = body(
+        POPULATION_V5,
+        "impl PopulationV5Ledger",
+        "fn require_unchanged(",
+    );
+    assert_eq!(count(v5_check, "file_generation("), 3, "{v5_check}");
+    for file in ["&self.lock_file", "&self.row_file", "&self.completion_file"] {
+        assert!(
+            squeezed(v5_check).contains(&format!("file_generation({file},")),
+            "{file} is not hashed: {v5_check}"
+        );
+    }
+    let v5_generation = body(POPULATION_V5, "", "fn file_generation(");
+    assert_eq!(
+        count(v5_generation, "hash_held_file("),
+        2,
+        "{v5_generation}"
+    );
     let scan = body(POPULATION_V5, "impl PopulationV5Ledger", "fn scan(");
     assert!(scan.contains("self.read_rows("), "{scan}");
     assert_eq!(count(scan, "validate_complete_block("), 1, "{scan}");
@@ -352,34 +516,68 @@ fn a_population_v5_commit_scans_the_whole_ledger_three_times_and_its_docs_say_so
             .get(..POPULATION_V5.find("#![expect(").expect("the module doc"))
             .expect("its text"),
     );
-    assert!(
-        !module
-            .contains("Sequential codec, hashing and persistence work is O(C) in Candidate count."),
-        "the module doc still calls persistence O(C): {module}"
-    );
+    assert!(decode.contains("hash_parts(ROW_SEAL_DOMAIN,"), "{decode}");
+    assert!(encode.contains("hash_parts(ROW_SEAL_DOMAIN,"), "{encode}");
+    for former in [
+        "Sequential codec, hashing and persistence work is O(C) in Candidate count.",
+        "Sequential codec and hashing work is O(C) in Candidate count.",
+    ] {
+        assert!(
+            !module.contains(former),
+            "the module doc still calls whole-ledger work O(C): {module}"
+        );
+    }
     says(
         &module,
         "the module doc",
-        "Persistence rescans the whole ledger and is O(R) in its total rows R; see `commit_population_v5`.",
+        "Preparing, encoding and row-seal hashing the C new rows is O(C) in Candidate count. \
+         Persistence also rescans the whole ledger, decoding and seal-checking every one of \
+         its R rows, which is O(R); see `commit_population_v5`.",
     );
     let sentence = "Each scan decodes every row of every Population already in the ledger, \
                     and decoding a row validates it, re-encodes it (which validates it \
-                    again), and `validate_complete_block` validates it once more, so one \
-                    commit is O(R) in the ledger's total rows R, not O(C).";
+                    again), and `validate_complete_block` validates it once more, so the V5 \
+                    ledger work of one commit is O(R) in the ledger's total rows R, not O(C).";
+    let upstream = "On top of the ledger work, `PreparedPopulationV5::from_authority` runs \
+                    twice, before the write and after the reopen, and each run joins every \
+                    upstream input";
+    let total = "One commit is therefore O(R) plus two whole upstream joins, not O(R) alone.";
     let doc = doc_above(POPULATION_V5, "", "pub(crate) fn commit_population_v5(");
-    says(
-        &doc,
-        "`commit_population_v5`'s rustdoc",
-        "The ledger is read whole three times per written commit: `open_write` scans it, \
+    for stated in [
+        "Sequential work is O(C + bounded source/file bytes) and space is O(C) for C \
+         Candidates.",
+        "The file bytes above include the whole V5 ledger, and not once. The ledger is \
+         scanned, every row decoded, three times per written commit: `open_write` scans it, \
          `finish_written` scans it again after the Completion, and the fresh `open_read` \
-         scans it a third time; a reused Population skips the second.",
+         scans it a third time; a reused Population is scanned twice, because \
+         `reuse_existing` neither scans nor calls `finish_written`.",
+        sentence,
+        "Separately, every generation check hashes the lock, row and Completion files \
+         whole, each of them twice; this counts scans, not those hashes.",
+        upstream,
+        ": `population_v5_inputs` calls `ordered_row_projections`, which hashes the \
+         Finalization V3 files whole, and `ordered_successor_projections`.",
+        total,
+        HELD,
+    ] {
+        says(&doc, "`commit_population_v5`'s rustdoc", stated);
+    }
+    assert!(
+        !doc.contains("read whole three times"),
+        "the rustdoc counts whole reads it does not count: {doc}"
     );
-    says(&doc, "`commit_population_v5`'s rustdoc", sentence);
-    says(&doc, "`commit_population_v5`'s rustdoc", HELD);
-    says(&limits(), "the limits section", sentence);
+    let limits = limits();
+    for stated in [
+        sentence,
+        "A written commit scans the ledger three times and a reused one twice.",
+        upstream,
+        total,
+    ] {
+        says(&limits, "the limits section", stated);
+    }
     assert!(block.contains("bounded_set("), "{block}");
     says(
-        &limits(),
+        &limits,
         "the limits section",
         "The Finalization V4 and Population V5 bounds above are expected, not worst case: \
          the block validation that each rescan repeats inserts every decision or row into \

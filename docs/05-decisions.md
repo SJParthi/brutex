@@ -43705,9 +43705,33 @@ two hashes per file; hash then rescan after the Completion sync; two
 preparations; three scans on a written commit and none in `reuse_existing`),
 then requires the stated sentences in the rustdoc and in the limits section;
 the commit test also refuses the module doc's former O(C) persistence
-sentence. On origin/main each of the four tests passed its counts and failed at
-its first documentation check: the three rustdoc sentences, and the module
+sentence. On the base 2c209309 each of the four tests passed its counts and
+failed at its first documentation check: the three rustdoc sentences, and the module
 doc's O(C) sentence. All four pass with this change. No cost was timed.
 Each of the four rustdocs names `crates/cli/tests/ledger_scan_costs.rs`, and
 each test requires that sentence, so CI Gate 12, which refuses a doc block that
-says O(1) without naming a test, finds the test file beside the two that do.
+says O(1) without naming a test, finds the test file named in each of them,
+including the two new `# Cost` paragraphs that say "not O(1)":
+`row_projection`'s and `CommittedStoredPopulationV5::authenticated_row`'s.
+
+**Review round 1.** Reviewers broke the call chains the tests did not pin and
+the four tests stayed green: `file_generation` rewritten to hash once,
+`row_projection` and `PopulationV5Authority::authenticated_row` rerouted
+through the whole-block reads, and `reuse_existing` given a
+`finish_written` call. The tests now also require that `file_generation`
+delegates to the twice-hashing body, that both row reads go through the
+fixed-offset lookups, that `reuse_existing` neither scans nor finishes, that
+only `append_locked` and `complete_trailing` call `finish_written`, that
+`open_read` and `open_write` go through `open`, that `append` takes the
+exclusive lock before `append_locked`, and that `append_locked` opens with a
+generation check and runs one before an exact reuse returns. Three texts were
+corrected. The Population V5 module doc called "codec and hashing work" O(C)
+while each commit decodes and seal-checks all R rows; it now scopes O(C) to
+the C new rows. `commit_population_v5` said the ledger is "read whole three
+times"; three counts scans, and every generation check also hashes the files
+whole, so it now counts scans and says so. It also called one commit O(R)
+while `PreparedPopulationV5::from_authority` runs twice, each run a whole
+upstream join; it now states O(R) plus two whole upstream joins, as a part of
+the paragraph's older "O(C + bounded source/file bytes)" rather than a
+second bound. The Finalization V4 rustdoc and limits now state that the
+opening and pre-reuse generation checks make a reused append O(F) as well.
