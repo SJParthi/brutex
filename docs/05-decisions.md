@@ -43728,21 +43728,23 @@ verbatim and in order, typos and all, as the operator's own words.
 six messages reached this entry relayed by the session that wrote it, as sent
 on 1 October 2026 (IST). No tracked file and no command can confirm that date or
 where each message began and ended; that rests on the chat as relayed. The
-relayed task text gives each of the six as a whole quotation. **Two of the
-marks below come from a different relay**, a review round of an earlier draft
-of this entry, which reported that message 1 is the part of a longer message
-that states this design (so it is marked "excerpt") and that messages 2 and 3
-were each followed by a pasted block of the operator's standing instructions
-(O(1) bounds, a dynamic incremental scalable approach, coverage of exceptional
-cases and a comparison artifact), which is not part of this design and is not
-quoted. That review round is the only source for those two marks; neither this
-entry's author nor any reader of this repository can check it, and if it is
-wrong the quotations are whole messages. Message 3 corrects message 2;
+relayed task text gives each of the six as a whole quotation, and they are
+quoted below as that relay gives them, with no mark added. **A different relay
+said otherwise about three of them**: a review round of an earlier draft of
+this entry reported that message 1 is the part of a longer message that states
+this design, and that messages 2 and 3 were each followed by a pasted block of
+the operator's standing instructions (O(1) bounds, a dynamic incremental
+scalable approach, coverage of exceptional cases and a comparison artifact),
+which is not part of this design. That review round is the only source for
+either report; neither this entry's author nor any reader of this repository
+can check it, so it is recorded here and not carried into the quotations. If
+it is right, message 1 is an excerpt and messages 2 and 3 are quoted without
+their pasted blocks. Message 3 corrects message 2;
 message 4 answers item D of an earlier, unmerged draft of this entry, which had
 left open which prices the ranking reads. This entry does not record whether
 messages 4, 5 and 6 carried other text.
 
-> 1. (excerpt) "see dude as of now for usign condiitons espeiclal y for entry
+> 1. "see dude as of now for usign condiitons espeiclal y for entry
 > we wil lhave minute level pulled data from zerodha right dude then from there
 > we will alwyas use gdfl provided tick data for precise entires exits and exit
 > combiantion right dude sot his flow si the precise expected veiw and deeisgn
@@ -43850,9 +43852,11 @@ names the product and the source; message 6 names the price:
     reached T. That is more conservative than the order type guarantees; it is
     the worst case the operator chose, and every GDFL-priced report must say
     that targets are booked at the second's worst case, not at their limit.
-  - When a whole second lies beyond a level (it opened past it), the adverse
-    extreme is still past the level, so that fill can be better than the
-    level. No row in that second printed the level.
+  - For a **target**, when a whole second lies beyond its level (the second
+    opened past it), even that second's adverse extreme is past the level, so
+    the fill is better than the level. For a **stop**, the same kind of second
+    fills worse than the level, as the first point says. In both cases no row
+    in that second printed the level.
   - Inside one second, an exit's price no longer depends on which order fired
     first: any exit in that second sells at its low (long) or buys at its high
     (short). What intra-second order can still decide is set out in
@@ -44113,9 +44117,10 @@ files named, on the day named, and no more.
    Every GDFL file the repository read before this entry was NFO
    (`GFDLNFO_TICK_01072025`, options and futures, `docs/08-vendor-samples.md`).
    For this entry one index day was read from an extracted GDFL copy outside
-   this repository, on 1 October 2026 (IST): the directory
-   `/Volumes/WD_BLACK/NSE_Tick_2018-09-01_to_2026-09-24` on the operator's
-   machine (its name ends at 24 September 2026, though its folder names run to
+   this repository, on 1 October 2026 (IST): a directory on the operator's own
+   storage named `NSE_Tick_2018-09-01_to_2026-09-24` (where it is mounted is
+   machine layout, not a fact about the data, and is not recorded here; its
+   name ends at 24 September 2026, though its folder names run to
    30 September 2026, item 4; why is not recorded). Anyone with that copy can
    repeat every figure below with `awk`; a review of this entry reported doing
    so from that directory, with every figure matching. The day read is
@@ -44136,7 +44141,12 @@ files named, on the day named, and no more.
    - every column after `LTP` is zero in every row of both files, so the
      volume columns carry nothing (C);
    - pre-open and post-close rows are present: 1,908 and 955 rows before
-     09:15:00, and 9,418 and 4,709 rows from 15:30:00 on;
+     09:15:00, and 9,418 and 4,709 rows from 15:30:00 on. 26 May 2026 is a
+     standard 09:15–15:29 session in `pull::calendar` (its bit is set in the
+     compiled `TRADED` table and the day is in neither the irregular nor the
+     length-unmeasured list; read from the table, not by running the code), so
+     on this day "outside the session" and "outside 09:15:00 to 15:29:59" are
+     the same seconds. On a non-regular day they are not (consequence 14);
    - one session second with no row in NIFTY 50 (14:16:23) and two in NIFTY
      BANK (10:48:06 and 14:16:23);
    - **the time column steps backward 25 times in each file**, by one or two
@@ -44232,7 +44242,9 @@ engine is built.**
    UE-04).** A signal is unknowable until its signal bar closes (D-0436). The
    earliest legal entry second is the first one-second record at or after
    that close instant, in the same IST session, and never a second inside the
-   signal bar. **"First at or after" needs an upper bound.** D-0436 and UE-02
+   signal bar. What "the same session" is on a day that is not a regular
+   09:15–15:30 session, and which calendar says so, is consequence 14.
+   **"First at or after" needs an upper bound.** D-0436 and UE-02
    refuse "the next available" row as a substitute, and UE-04 accepts only the
    exact 15:09 interval; on sparse seconds an unbounded "first at or after"
    would bring that substitution back. **The bound must cover every fill, not
@@ -44267,7 +44279,9 @@ engine is built.**
    B3 a fill reads one whole second's adverse extreme over every row stamped
    in it, so no order among rows sharing a second is needed to price it. The
    forced square-off reads only seconds strictly before 15:10:00 IST (UE-04's
-   policy). Whether a row stamped `hh:mm:00` falls after the close of the
+   policy, which today holds for every session; what it does on a session
+   that does not reach 15:10 or is halted across it is consequence 14).
+   Whether a row stamped `hh:mm:00` falls after the close of the
    minute ending at `hh:mm:00` depends on UNVERIFIED item 6, and what a
    backward-stamped row (item 1) does to "after" depends on consequence 5.
 3. **A signal on a higher rung.** A rung bar is left-labelled, so its close is
@@ -44280,11 +44294,19 @@ engine is built.**
    exist only for seconds that had rows, so instant to record is not the
    store's arithmetic `base + header + i·56` (D-0002); D-0015 named the
    sparse-grid problem this raises. `pull::fold` anchors an intraday rung at
-   the open, where one second tiles the session into 22,500 slots
-   (`store::path::Timeframe::SECOND_1`). Two shapes are open: a dense
-   per-session offset table built once at write, or a fixed-slot grid with one
-   slot per session second in which an empty slot says "no row" and is never
-   read as a price (that is not a synthesised second: it carries no price).
+   the open, where one second tiles a **regular** 09:15–15:30 session into
+   22,500 slots (`store::path::Timeframe::SECOND_1`). A non-regular session
+   has other times and another count. 2021-02-24 traded again from 15:45 to
+   17:00, and a grid anchored at 09:15 with 22,500 slots has no slot for
+   those seconds. The 2025-10-21 Muhurat traded 13:45–14:44, which does lie
+   inside such a grid, but as 3,600 session seconds among 22,500 slots, so
+   the grid alone cannot tell a slot outside that session from a session
+   second with no row (consequence 14). Two shapes are open: a dense
+   per-session offset table built once at write, or a fixed-slot grid with
+   one slot per session second in which an empty slot says "no row" and is
+   never read as a price (that is not a synthesised second: it carries no
+   price). A fixed-slot grid must say where its slots come from on a
+   non-regular day.
    A third is to record the true cost in `docs/06-limits.md` before it ships.
    None is chosen here. **The number that drove D-0015's deferral goes with the
    fixed-slot shape:** D-0015 recorded ~1.26 MB per instrument per day for a
@@ -44298,8 +44320,11 @@ engine is built.**
    measured. The engine's entry weighs that disk cost against the O(1) bound
    and its limits in `docs/06-limits.md`, and states both.
 
-   Entry and horizon fills depend on the instant, not on the candidate, so
-   they can be projected once per run as D-0436's execution bars are today.
+   Entry and horizon fills depend on the instant and the direction, not on
+   the candidate: under B3 a long's entry at an instant takes that second's
+   high and a short's its low, and the exits take the other extreme. So they
+   can be projected once per run **per direction**, as D-0436's execution bars
+   are projected once today.
    Walking seconds across a hold to evaluate stops, targets and trails costs
    the number of seconds in the hold, per trade and per exit-grid cell; that
    is not O(1) and must be stated and measured, not hidden. Under D that cost
@@ -44331,13 +44356,18 @@ engine is built.**
    The high and low of a second do not depend on row order, which is what B3
    reads; its open and close do. **Rows outside the session are the other open
    rule.** The measured index files carry 1,908 and 955 rows before 09:15:00
-   and 9,418 and 4,709 from 15:30:00 on (item 1), and `pull::fold` does not
-   refuse an out-of-session row: it buckets it like any other. Whether those
-   seconds are stored as one-second records or excluded at write is the
-   engine's entry to lock. Either way no fill reads them: consequence 2 keeps
-   every fill inside the same IST session and the forced square-off before
-   15:10:00, and that must be a stated rule with its own test, not a side
-   effect of the bounds.
+   and 9,418 and 4,709 from 15:30:00 on (item 1), on a day that was a regular
+   session, and `pull::fold` does not refuse an out-of-session row: it buckets
+   it like any other. Whether those seconds are stored as one-second records
+   or excluded at write is the engine's entry to lock. Either way no fill
+   reads them: consequence 2 keeps every fill inside the same IST session and
+   the forced square-off before 15:10:00, and that must be a stated rule with
+   its own test, not a side effect of the bounds. **"Outside the session"
+   means outside that day's own session windows, not outside 09:15 to
+   15:30.** On a non-regular day the two differ: a fixed 09:15–15:30 rule
+   would class 2021-02-24's 15:45–17:00 trading as out of session and the
+   Muhurat hour's surrounding seconds as in session. Which calendar supplies
+   those windows is consequence 14.
 6. **The volume-less index (C), and the equities.** An index fill is priced
    from the index level alone, with no volume-weighted fill of any kind. What
    slippage model, if any, applies beyond B3's worst case to a spot-index fill
@@ -44463,6 +44493,63 @@ engine is built.**
 
     None of this is chosen here. Until it is locked, no GDFL-priced exit grid
     is built or ranked.
+14. **Non-regular sessions, and which calendar classifies a GDFL day and
+    second.** Every consequence above that names 09:15, 15:30, 15:10 or
+    22,500 describes a regular session, and not every trading day is one.
+    `CLAUDE.md` §5 names `pull::calendar::kind_of` as the canonical IST
+    session authority. It answers a day as `Open` with one or two windows,
+    `OpenLengthUnmeasured`, `Closed` or `Unmeasured`, and its tables hold:
+    - four sessions that are not 09:15–15:29 (its `IRREGULAR` table):
+      2021-02-24, the systems-outage day, normal trading 09:15–11:40 and
+      15:45–17:00; the disaster-recovery Saturdays 2024-03-02 and 2024-05-18,
+      09:15–09:59 and 11:30–12:29; and the 2025-10-21 Muhurat, 13:45–14:44;
+    - five earlier Muhurat days, 2020-11-14, 2021-11-04, 2022-10-24,
+      2023-11-12 and 2024-11-01, as `OpenLengthUnmeasured`: a daily bar
+      proves each traded and no minute bar measured its hours;
+    - a compiled range of 2 December 2019 to 4 September 2026 (`FIRST_DAY`,
+      `LAST_DAY`). Any other day is `Unmeasured`. The GDFL folder names
+      counted for this entry run from 3 September 2018 to 30 September 2026
+      (UNVERIFIED item 4), so every folder dated before 2 December 2019 or
+      after 4 September 2026 names a day this table does not classify.
+
+    UE-04 already holds that "Regular, extended and non-regular data all face
+    the same clock", so these days are live inputs, not curiosities. Before a
+    GDFL month is stored or a GDFL fill is read, the engine's entry must lock:
+    - **which calendar classifies a GDFL day and each of its seconds**:
+      `pull::calendar::kind_of`, as §5 names, or another authority with its
+      own entry. A GDFL file's own rows never define a session: a row is
+      evidence that GDFL printed something at that second, not that the
+      exchange was in session (the measured index files print from 09:07 to
+      16:09 on a regular day, item 1);
+    - **what happens to a GDFL day the calendar answers `Closed`,
+      `Unmeasured` or `OpenLengthUnmeasured`**: refused by name or classified
+      by a sourced extension of the calendar, and never treated as a regular
+      session by default (that default is the guess `kind_of`'s own comments
+      refuse);
+    - **which seconds a session window covers**: a window's minutes are
+      inclusive bar opens, so whether its last minute `m` covers seconds
+      `m:00` to `m:59`, as its bar does, is a rule to state, together with
+      what the store does with the seconds between two windows;
+    - **the out-of-session rule of consequence 5 on such days**, read from the
+      day's own windows, so that 2021-02-24's 15:45–17:00 trading is in
+      session and the seconds around the Muhurat hour are not;
+    - **the forced square-off on such days**: UE-04 fixes it at 15:10 for
+      every session, and "a session lacking 15:09 drops only holds that need
+      the forced boundary". So on the Muhurat hour and the two Saturdays a
+      hold that would need 15:10 is dropped today, and on 2021-02-24 15:10
+      falls inside the halt. Whether a one-second engine keeps that fixed
+      clock is to be stated; anchoring the square-off to each session's own
+      end instead would change UE-04 and needs its own entry and test;
+    - **"the same session" in consequences 2 and 3** when a signal bar's close
+      falls in the gap between two windows of one day: whether the first
+      second of the next window is the same session or the entry is dropped;
+    - **the store layout of consequences 4 and 5 on such days**, so that a
+      fixed-slot grid, if chosen, says where its slots come from when the
+      session is not 09:15–15:30.
+
+    None of this is chosen here. No measurement of a GDFL file for any
+    non-regular day has been taken: the one day read, 26 May 2026, was a
+    regular session (item 1).
 
 **Rejected.**
 
@@ -44499,7 +44586,7 @@ statement, the one day measured for this entry, and the GDFL facts still not
 recorded. `docs/07-plan.md` §3 records the licence as the question that waits
 on the operator, and what waits on it: running the ingest job over the GDFL
 files (consequence 10). §4 item 6 carries the work that needs no permission:
-consequence 12 first, as the first build step, then consequences 1 to 9, 11
-and 13 in this entry's order; consequence 10 is the §3 row.
+consequence 12 first, as the first build step, then consequences 1 to 9, 11,
+13 and 14 in this entry's order; consequence 10 is the §3 row.
 `docs/04-invariants.md`, `docs/06-limits.md`, `docs/02-store-format.md` and all
 code are untouched, because nothing has been built.

@@ -614,10 +614,11 @@ source and written here, with its lane, before any code relies on it.
 | GDFL coverage for this design | GDFL second-level snapshot data covers everything D-0802 needs. Excerpt of message 5, whose whole text D-0802 quotes: *"... for gdfl entilrey we have seconds level snapshot dude so you don't need to worry we have all the data ..."* | operator-stated 1 Oct 2026, no vendor page states it |
 
 **Measured on one day only.** Read on 1 October 2026 (IST) from an extracted
-GDFL copy outside this repository, the directory
-`/Volumes/WD_BLACK/NSE_Tick_2018-09-01_to_2026-09-24` on the operator's machine
-(its name ends at 24 September 2026, though its folder names run to
-30 September 2026; why is not recorded), by `awk` over the files named. Anyone
+GDFL copy outside this repository, a directory on the operator's own storage
+named `NSE_Tick_2018-09-01_to_2026-09-24` (where it is mounted is machine
+layout and is not recorded; its name ends at 24 September 2026, though its
+folder names run to 30 September 2026; why is not recorded), by `awk` over the
+files named. Anyone
 with that copy can repeat each figure. Each row is a
 measurement of those files on 26 May 2026 and no more; it is not a vendor
 statement and does not say what any other day holds.
@@ -629,7 +630,7 @@ statement and does not say what any other day holds.
 | Index fields beyond the level | every column after `LTP` is zero in every row, so the volume columns carry nothing | measured, one day, two files |
 | Rows per session second (09:15:00 to 15:29:59) | NIFTY 50 about 4.0 (90,360 rows over 22,499 seconds, up to 10 in one); NIFTY BANK about 2.0 (45,272 over 22,498, up to 5); no tiebreaker among rows sharing a second | measured, one day |
 | Session seconds with no row | NIFTY 50 one (14:16:23); NIFTY BANK two (10:48:06, 14:16:23) | measured, one day |
-| Rows outside the session | present: first rows 09:07:03 and 09:07:04, last 16:09:13; 1,908 and 955 rows before 09:15:00, 9,418 and 4,709 from 15:30:00 on | measured, one day |
+| Rows outside the session (26 May 2026 is a regular 09:15–15:29 session in `pull::calendar`) | present: first rows 09:07:03 and 09:07:04, last 16:09:13; 1,908 and 955 rows before 09:15:00, 9,418 and 4,709 from 15:30:00 on | measured, one day |
 | Row order | the time column steps **backward** 25 times in each index file, by one or two seconds, roughly every fifteen minutes; `pull::fold` refuses such a step rather than sorting (D-0802 consequence 5) | measured, one day; what a backward step means UNVERIFIED |
 | Range, minute against second | mean `LTP` high minus low over the session: NIFTY 50 8.68 points per minute, 1.03 per second; NIFTY BANK 29.74 per minute, 2.27 per second | measured, one day |
 | One cash-equity file | `STOCKS/2026/MAY_2026/GFDLCM_STOCK_TICK_26052026/RELIANCE.NSE.csv` (3,429 files in that folder): the same ten-name header, 17,626 rows, a nonzero `BuyPrice` or `SellPrice` on all but one row, a nonzero `LTQ` on 15,816 | measured, one day, one file |
