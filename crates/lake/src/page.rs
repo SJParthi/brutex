@@ -415,12 +415,20 @@ fn rowless_extent(rest: &[u8]) -> Option<usize> {
 /// before nothing is left and [`rowless_extent`] answers `None`. The loop is
 /// written to that bound, so an `extent` that answered `Some(0)` would end the
 /// walk with those bytes still left, to be counted as unread and refused,
-/// rather than spin. Cost: at most `rest.len()` calls to `extent`; with
+/// rather than spin. An `extent` that answered a length past the end of
+/// what is left ends the walk the same way, leaving those bytes to be
+/// counted rather than taking them as consumed. Cost: at most `rest.len()`
+/// calls to `extent`; with
 /// [`rowless_extent`], one header parse per rowless page stepped over.
 fn step_over_rowless(mut rest: &[u8], extent: impl Fn(&[u8]) -> Option<usize>) -> &[u8] {
     for _ in 0..rest.len() {
         match extent(rest) {
-            Some(len) => rest = rest.get(len..).unwrap_or_default(),
+            // A length past the end is not believed: `rest` is left as it
+            // is, to be counted as unread, never taken as consumed.
+            Some(len) => match rest.get(len..) {
+                Some(after) => rest = after,
+                None => break,
+            },
             None => break,
         }
     }
@@ -1243,6 +1251,22 @@ mod tests {
         let none = step_over_rowless(&bytes, |_| None);
         assert_eq!(none, bytes, "nothing rowless, nothing stepped over");
         assert!(step_over_rowless(&[], |_| Some(0)).is_empty());
+
+        // An extent that answers past the end is not believed: those bytes
+        // are left to be counted as unread, never taken as consumed.
+        let over = step_over_rowless(&bytes, |r| Some(r.len() + 1));
+        assert_eq!(over, bytes, "a step past the end leaves every byte");
+        let tail = step_over_rowless(&bytes, |r| {
+            Some(if r.len() == bytes.len() {
+                2
+            } else {
+                r.len() + 1
+            })
+        });
+        assert_eq!(
+            tail, [7_u8; 3],
+            "a step past the end after a real step leaves the rest"
+        );
     }
 
     #[test]
