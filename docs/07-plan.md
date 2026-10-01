@@ -154,6 +154,7 @@ reader needs to recognise if it returns.
 | 4 | ~~**Day-level mode before one-minute** (R-3)~~ — **selectable and landing under `1day/` as of D-0055.** What is left is one vendor fact, below | The operator's stated first step. The saving is smaller than this row used to claim; see the corrected arithmetic |
 | 4a | **Read Groww's daily `candle_interval` word off a live call and write it into one descriptor row** | Its request names the bar length in a parameter and the daily spelling is recorded nowhere — `1day`, `1d` and `day` are all plausible and only one is a request. A daily pull against that feed refuses by name until it is recorded. Dhan needs nothing: its request carries no interval field at all |
 | 5 | **The 2020 → yesterday backfill** | The goal |
+| 6 | **Tick-precise fills (D-0802): verify and record the GDFL facts in `docs/00-charter.md` §4g, then decide run identity, look-ahead, the tick store format and the O(1) bounds, then build the tick fill engine** | Nothing is built. Every item in §4g is UNVERIFIED, above all whether GDFL sells spot-index ticks for `NSE-NIFTY` and `NSE-BANKNIFTY`; code that relies on an unrecorded vendor fact breaks `CLAUDE.md` §3 rule 1. The sweep stays on Zerodha minutes and their rungs and is not blocked by this |
 
 ### The arithmetic behind #5, corrected
 

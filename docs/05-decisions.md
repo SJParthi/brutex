@@ -43718,3 +43718,194 @@ second wait's sleep and the closing brace before it. Gate 20 declares
 coverage run on this PR is that check. The 21 `sink.rs` lines that stay
 uncovered are assertion messages, test-double methods and one guarded
 `return 0`, none of them a wait.
+
+### D-0802 — Price every entry, exit and exit combination from GDFL tick data, keep the sweep on Zerodha minutes and their rungs, and trade the underlying spot — 2026-10-01
+
+**The operator's design, stated in chat on 1 October 2026 (IST), in three
+messages.** Quoted verbatim and in order, typos and all, as the operator's own
+words. Message 3 corrects message 2.
+
+> 1. "see dude as of now for usign condiitons espeiclal y for entry we wil lhave
+> minute level pulled data from zerodha right dude then from there we will
+> alwyas use gdfl provided tick data for precise entires exits and exit
+> combiantion right dude sot his flow si the precise expected veiw and deeisgn
+> now dude okay?"
+>
+> 2. "bro see now opur pure aim si to use ticks for precise entries and exits
+> but to do our deep drill brutoe force backettsign we will use zerodha minute
+> level dude okay?"
+>
+> 3. "see not only 1 minute we have multiple tiemframes dude for deep dirll down
+> brute force backettsign dude but for entries an exits alone precisley w ewill
+> alwyas sue the gdfl herefater dude okay? see clealry noe for undelrying we wil
+> lalwyas use its undelryign spots dude so once again we wil luse nifty and
+> banknifty wil lbe used its undelrying spot index where it wont have any volume
+> dude okay?"
+
+**What it decides, as the operator confirmed it.**
+
+**A. The sweep is unchanged.** The deep brute-force sweep (the condition and
+mask search, the level-wise ladder of `CLAUDE.md` §6, and the ranking) runs on
+Zerodha one-minute data **and on the rungs the engine folds from it** with
+`pull::fold`, not on one-minute bars alone. Message 2 said "zerodha minute
+level"; message 3 corrects it to "not only 1 minute". That is the sweep as it
+already stands (D-0139: a coarser rung is a fold of minutes already on disk).
+This entry adds no condition, no rung, no ranking term and no ingest path.
+
+**B. Every fill is priced from GDFL tick data, hereafter, always.** Every entry
+fill, every exit fill and every exit combination (the horizons, stops, targets,
+trails, grid walks and the fixed 15:10 IST forced square-off that UE-02 and
+UE-04 name) is to be priced from GDFL tick data. "Always" admits no fallback:
+once the tick fill engine exists, a trade whose tick evidence is missing,
+unreadable or ambiguous is dropped or refused by name and counted. It is never
+priced from one-minute OHLC instead (`CLAUDE.md` §4: no fallback that hides a
+failure). Until that engine exists, one-minute pricing (UE-06) is the only
+pricing in the repository, its reports keep saying so, and no minute-priced
+result may be presented as tick-priced.
+
+**C. The traded instrument is the underlying spot.** NIFTY and BANKNIFTY are
+traded as their spot index, `NSE-NIFTY` and `NSE-BANKNIFTY`, which carries
+**no volume** (the operator's words; the one index file this repository has
+read agrees: TrueData's index rows have no volume column, `docs/08-vendor-samples.md`).
+So **nothing in tick fill pricing for an index may depend on traded volume**:
+no VWAP, no volume-weighted fill, no last-traded-quantity filter, and no
+participation or liquidity cap computed from index volume. For the 213 F&O
+stock underlyings, `CLAUDE.md` §1 already names the stock's own cash price
+series; the operator did not change that. The engine surface neither widens
+nor narrows (§3 rule 2). A futures or options contract's tick never stands in
+for the spot: §1 never sweeps a contract, and pricing a spot trade from a
+contract's print would fill the trade on an instrument it never named.
+
+**What it changes in earlier decisions.**
+
+- **D-0015** deferred tick data, second-level data and the paid CSV vendors
+  "until a minute-level sweep has produced a profitable result". This entry
+  **supersedes that deferral for fill pricing only**: entries, exits and exit
+  combinations. The sweep's input stays on minutes and their rungs, so the rest
+  of D-0015 stands. D-0015 also deferred the sparse-grid dilemma, and fill
+  pricing now has to resolve it (consequence 4 below).
+- **D-0123** made GDFL a folder feed read from bought CSVs: no REST, no token,
+  reach is the files present, and a missing path halts. Unchanged. Tick fills
+  will read from that folder, so a month GDFL files do not cover refuses rather
+  than falling back.
+- **D-0118 and D-0139** recorded that the GDFL "TICK" archive this repository
+  measured is a one-second conflated snapshot, made `Granularity::Tick`
+  unrequestable, and landed the operator's word "tick" on the `1s` rung. This
+  entry uses "tick" for whatever GDFL actually delivers. It does not assert
+  that GDFL sells trade-by-trade prints and does not re-enable `Tick`. If the
+  product is one-second snapshots, fills are priced at one-second resolution
+  and every report must say that.
+- **D-0436, UE-02 and UE-06** describe the live code: a signal on any rung
+  enters only on the stored one-minute bar whose timestamp equals that signal
+  bar's close, and the round trip is bracketed by stored one-minute Open
+  (optimistic) and the direction-aware stored PrintedExtreme (pessimistic) with
+  no tick added. Those invariants stay true until the tick engine replaces that
+  code. **This entry edits neither them nor any code.** The entry that lands
+  the tick engine must supersede D-0436's pricing half and rewrite UE-02 and
+  UE-06 beside the tests that prove the new rule.
+
+**Not built.** No tick fill engine exists. No code reads GDFL data to price a
+fill, no store format holds ticks, and no run identity names a fill feed. This
+entry records a design; it measures nothing and changes no behaviour.
+
+**UNVERIFIED — each must be read from a source and recorded in
+`docs/00-charter.md` before any code relies on it (`CLAUDE.md` §3 rule 1).**
+The charter's §4 has no GDFL rows at all; D-0118 named that gap and it is still
+open. `docs/00-charter.md` §4g now lists these items.
+
+1. **UNVERIFIED: whether GDFL supplies tick or any sub-minute data for the
+   `NSE-NIFTY` and `NSE-BANKNIFTY` spot index.** This is the question the whole
+   design rests on. Every GDFL file this repository has read is NFO: `GDFL.zip`
+   is described as "Global Datafeeds historical, NFO", and its one day,
+   `GFDLNFO_TICK_01072025`, holds `Options/` and `Futures/` folders, 12,133 CSV
+   members counted as 11,490 options and 642 futures, with no spot-index member
+   recorded (`docs/08-vendor-samples.md`). The `GFDLNFO_` prefix suggests NSE
+   F&O contracts, which §1 never sweeps. If GDFL sells no spot-index series, B
+   and C cannot both be met from GDFL, and the operator must decide; a contract
+   may not stand in.
+2. **UNVERIFIED: whether GDFL supplies tick data for the cash equities** of the
+   213 F&O underlyings, the series C prices them on.
+3. **The operator's two sample files are placeholders, not evidence.**
+   `GFDLNFO_TICK_06012019.zip` and `GFDLNFO_TICK_07012019.zip`, untracked in
+   the main checkout, are 450 bytes each and each holds one 18-byte member,
+   `Options/S.NFO.csv`, whose header is `ts,ltp`. That is not GDFL's ten-column
+   layout recorded in D-0015. Read on 1 October 2026 with `unzip -l` and
+   `unzip -p`. They say nothing about GDFL's product, and their 2019 dates are
+   file names, not a date range.
+4. **UNVERIFIED: the date range GDFL can supply** for each needed instrument.
+   This repository holds one GDFL day, 2025-07-01, NFO only.
+5. **UNVERIFIED: timestamp precision for the series C needs.** The one GDFL day
+   measured has whole-second timestamps, no sub-second field, and up to four
+   rows sharing one second with no tiebreaker (`docs/08-vendor-samples.md`).
+   Whether that holds for index or equity series and for every date is not
+   known.
+6. **UNVERIFIED: the clock and alignment.** Whether a GDFL row stamped
+   `hh:mm:ss` is IST exchange time, vendor receive time or something else, and
+   whether it belongs to `[ss, ss+1)`. How GDFL timestamps align with each
+   Zerodha minute bar and each folded rung window is unmeasured: they are two
+   vendors with two clocks, and no day has been read from both.
+7. **UNVERIFIED: which field prices a fill.** GDFL's F&O rows carry `LTP`,
+   `BuyPrice` and `SellPrice`, and `LTQ` is `0` on most rows, which are quote
+   updates rather than trades (`docs/08-vendor-samples.md`). Whether an index
+   series has any field beyond a level is not known.
+8. **UNVERIFIED: costs.** No GDFL price for the needed instruments and span is
+   recorded. D-0015's two quotes name no vendor and cover F&O, not the spot.
+   Trading charges are separate and unchanged: tick pricing changes the price
+   of a fill, not its charge stack, and §1's rule that no equity result enters
+   Selection V6 or execution authority without a charter-sourced equity charge
+   stack still holds.
+9. **UNVERIFIED: GDFL's licence terms** for this use. The charter records
+   none.
+
+**Consequences that must be designed, each with its own entry, before the tick
+fill engine is built.**
+
+1. **Run identity (`CLAUDE.md` §3 rule 3, D-0225, UE-05).** The identity's
+   ninth term is one `feed`. A tick-priced result has a signal feed (Zerodha)
+   and a fill feed (GDFL). The fill feed and the digest of the tick data the
+   fills read must both enter the identity, domain-separated, so a
+   GDFL-tick-priced result can never share a `RunId` with a minute-priced one
+   even when every other term is equal, and changing one tick re-keys the run
+   as UE-05 does for a hidden one-minute row. That changes the law's list, so
+   it needs a `CLAUDE.md` edit and its own entry, as D-0225 did.
+2. **No look-ahead (§3 rule 7).** A signal is unknowable until its signal bar
+   closes (D-0436). The earliest legal entry tick is the first at or after that
+   close instant, in the same IST session, and never a tick inside the signal
+   bar. With whole-second stamps and no tiebreaker, the rows stamped in the
+   close's own second need a locked rule (first in file order, or the next
+   second); D-0123's last-wins fold decides a second's close, not which row
+   came first after an instant. Exit triggers read only ticks after the entry
+   tick, and the forced square-off reads only ticks strictly before 15:10:00
+   IST (UE-04's policy).
+3. **A signal on a higher rung.** A rung bar is left-labelled, so its close is
+   its label plus the rung length. The entry tick is chosen exactly as at one
+   minute: the first tick at or after that close, same session. It does not
+   wait for a minute bar and never reads the rung's own bar as a price. A
+   bucket whose close falls in the next session is unreachable, as UE-02
+   already holds.
+4. **O(1) per operation (§3 rule 4), or an honest limit.** Ticks are sparse
+   and several share a second, so timestamp to tick is not the arithmetic
+   `base + header + i·56` (D-0015, `docs/08-vendor-samples.md`). Locating the
+   entry tick needs a dense per-second or per-minute offset index built once at
+   write, or its true cost recorded in `docs/06-limits.md` before it ships.
+   Walking ticks across a hold to evaluate stops, targets and trails costs the
+   number of ticks in the hold per trade; that is not O(1) and must be stated
+   and measured, not hidden. No measurement of any of this has been taken.
+5. **The tick store format (`docs/02-store-format.md`).** None exists. A tick
+   file is a new file version at its own stride (§4 bans a dynamic schema;
+   D-0011 forbids widening the base record). It is append-only (§3 rule 8),
+   holds paisa `i64` prices snapped half-up once at the write boundary (§7),
+   keeps rows in file order and never sorts within a second (D-0123), and is
+   read through a read-only mapping (D-0003).
+6. **The volume-less index (C).** An index fill is priced from the index level
+   alone, with no volume-weighted fill of any kind. What slippage or charge
+   model applies to a spot-index fill is not decided here.
+7. **Idempotence (§3 rule 5).** The same tick files must give the same fills
+   byte for byte. That follows only if the row-order rule in consequence 2 is
+   fixed and no step sorts.
+
+**Companion edits.** `docs/00-charter.md` §4g lists the GDFL facts above as not
+recorded. `docs/07-plan.md` §4 item 6 carries the work in dependency order:
+verify and record those facts, then design the consequences, then build.
+`docs/04-invariants.md`, `docs/06-limits.md`, `docs/02-store-format.md` and all
+code are untouched, because nothing has been built.

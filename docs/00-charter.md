@@ -597,6 +597,27 @@ into a guarantee about this dataset.
 | White's Reality Check addresses data snooping; Hansen's SPA uses studentization and a sample-dependent null distribution | [White (2000)](https://users.ssc.wisc.edu/~behansen/718/White2000.pdf), [Hansen (2005), primary publisher abstract](https://www.tandfonline.com/doi/abs/10.1198/073500105000000063) | These methods motivate complete-population evidence. Their assumptions remain material; they do not select this repository's acceptance thresholds. |
 | P-values do not measure the probability a hypothesis is true; decisions should not rest solely on a threshold | [American Statistical Association statement](https://www.amstat.org/asa/files/pdfs/p-valuestatement.pdf) | The delegated37-field profile contains explicit research choices. No cited source prescribes its5%p-value cutoff,20%PBO limit, sample floors or loss caps. See [the explanation](22-research-policy.md). |
 
+## 4g. GDFL — the facts D-0802 depends on are not recorded
+
+D-0802 (1 October 2026) prices every entry, exit and exit combination from GDFL
+tick data, on the underlying spot. **This section holds no GDFL fact.** It lists
+what must be read from a source and written here, with its lane, before any code
+relies on it. Each item is UNVERIFIED:
+
+| Needed fact | Lane |
+|---|---|
+| Whether GDFL supplies tick or any sub-minute data for the `NSE-NIFTY` and `NSE-BANKNIFTY` spot index | UNVERIFIED — every GDFL file read so far is NFO options and futures (`docs/08-vendor-samples.md`) |
+| Whether GDFL supplies tick data for the cash equities of the F&O underlyings | UNVERIFIED |
+| The date range available for each needed instrument | UNVERIFIED — one GDFL day, 2025-07-01, NFO only, is held |
+| Timestamp precision and clock basis for those series | UNVERIFIED — the one NFO day measured is whole seconds, no sub-second field, no tiebreaker |
+| Which field prices a fill, and whether an index series has any field beyond its level | UNVERIFIED |
+| The price of the data for the needed instruments and span | UNVERIFIED |
+| Licence terms for this use | UNVERIFIED |
+
+The two `GFDLNFO_TICK_*2019.zip` files in the operator's checkout are 450-byte
+placeholders with a two-column `ts,ltp` member, and are not evidence for any row
+above. D-0118 first recorded that §4 has no GDFL rows; that gap is still open.
+
 ## 5. Run identity
 
 ```
