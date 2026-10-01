@@ -600,23 +600,25 @@ into a guarantee about this dataset.
 ## 4g. GDFL — the facts D-0802 depends on are not recorded
 
 D-0802 (1 October 2026) records the operator's design that every entry, exit
-and exit combination is to be priced from GDFL tick data, on the underlying
+and exit combination, and the ranking that reads those fills, is to be priced
+from GDFL one-second data, from each second's high and low, on the underlying
 spot. Nothing of it is built. **This section records no GDFL fact from a vendor
 source.** It lists what must be read from a source and written here, with its
 lane, before any code relies on it. Each item is UNVERIFIED. Where a cell
-mentions what this repository has measured, that is a measurement of the one
-GDFL NFO day held (`docs/08-vendor-samples.md`), not a vendor statement, and it
-settles none of these rows:
+mentions what this repository has measured, that is a recorded measurement of
+one GDFL NFO day (`docs/08-vendor-samples.md`), not a vendor statement, and it
+settles none of these rows. The archive that day was read from is not in this
+repository:
 
 | Needed fact | Lane |
 |---|---|
-| Whether GDFL supplies tick or any sub-minute data for the `NSE-NIFTY` and `NSE-BANKNIFTY` spot index | UNVERIFIED — every GDFL file read so far is NFO options and futures |
-| Whether GDFL supplies tick data for the cash equities of the F&O underlyings | UNVERIFIED |
-| The date range available for each needed instrument | UNVERIFIED — the repository holds one GDFL day, 2025-07-01, NFO only |
-| Timestamp precision and clock basis for those series | UNVERIFIED — the one NFO day the repository measured has whole seconds, no sub-second field and no tiebreaker |
+| Whether GDFL supplies one-second or finer data for the `NSE-NIFTY` and `NSE-BANKNIFTY` spot index | UNVERIFIED — every GDFL file read so far is NFO options and futures |
+| Whether GDFL supplies one-second data for the cash equities of the F&O underlyings | UNVERIFIED |
+| The date range available for each needed instrument, which must cover the whole tested history the ranking reads | UNVERIFIED — the repository has measured one GDFL day, 2025-07-01, NFO only |
+| Timestamp precision and clock basis for those series, and whether every session second has a row | UNVERIFIED — the one NFO day the repository measured has whole seconds, no sub-second field and no tiebreaker |
 | GDFL's instrument naming for the spot index and cash equities, and its mapping to `InstrumentKey` | UNVERIFIED — D-0015's two GDFL spellings are both for contracts |
 | Whether GDFL's and Zerodha's price series agree in level, including corporate-action adjustment for the cash equities | UNVERIFIED |
-| Which field prices a fill, and whether an index series has any field beyond its level | UNVERIFIED |
+| GDFL's file layout for an index and a cash-equity series, which field the one-second record is folded from, and whether an index series has any field beyond its level | UNVERIFIED — the reader knows only GDFL's ten-field F&O layout |
 | The price of the data for the needed instruments and span | UNVERIFIED |
 | Licence terms for this use | UNVERIFIED |
 
