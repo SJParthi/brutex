@@ -44015,7 +44015,11 @@ What that costs, stated rather than hidden:
   `docs/04-invariants.md` pin one-minute or bracketed execution the same way,
   and B, B3 or D contradicts each of these once the fill engine lands:
   - **XM-01** restates UE-02's alignment: a signal aligns only to the
-    one-minute bar whose open equals the signal bar's close.
+    one-minute bar whose open equals the signal bar's close. **XM-05** makes
+    every shipping audit path reproject its signal column onto exact
+    one-minute execution timestamps.
+  - **DR-02** names "the exact minute slice priced by the exit grid" as a
+    bound fact of the run identity.
   - **SB-01 and SB-02** restate UE-04: only the exact accepted 15:09 one-minute
     record prices the forced exit, and no neighbouring minute proves it.
   - **EB-05**: a time exit exists only at its exact accepted one-minute
@@ -44037,8 +44041,10 @@ What that costs, stated rather than hidden:
 
   A case-insensitive search of the id-bearing rows of `docs/04-invariants.md`
   for "one-minute", "1min", "next-minute" and "exact minute" returned 40 rows
-  on 1 October 2026; some (RG-01, for one) are about pulls, not execution, and
-  it missed OOS-01 and GR3-02, which say "exact-minute" or "minute" instead.
+  on 1 October 2026, and 44 when "exact minute" also matches "exact-minute"
+  (the four added are VX-01, SO-02, GR3-02 and OOS-01); some (RG-01, for one)
+  are about pulls, not execution, and a row that pins minute execution in
+  other words is found by neither search.
   **The list above is therefore not exhaustive**, and the entry that lands the
   fill engine must audit every invariant that pins one-minute or bracketed
   execution, not only the rows named here.
