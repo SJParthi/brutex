@@ -621,10 +621,13 @@ settles none of these rows:
 | Licence terms for this use | UNVERIFIED |
 
 Two untracked files in the main checkout, `GFDLNFO_TICK_06012019.zip` and
-`GFDLNFO_TICK_07012019.zip`, are 450 bytes each with one 18-byte two-column
-`ts,ltp` member; nothing records where they came from, and they are not
-evidence for any row above. D-0118 first recorded that §4 has no GDFL rows;
-that gap is still open.
+`GFDLNFO_TICK_07012019.zip`, were seen on 1 October 2026 at 450 bytes each with
+one 18-byte two-column `ts,ltp` member. They are outside version control, so no
+reader of this repository can re-check them, and they may no longer exist.
+Nothing records where they came from, and they are not evidence for any row
+above. D-0045 first recorded that GDFL appears nowhere in this charter, and
+D-0118 named the same gap for GDFL's granularity floor; that gap is still
+open.
 
 ## 5. Run identity
 
