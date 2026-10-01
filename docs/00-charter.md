@@ -597,29 +597,51 @@ into a guarantee about this dataset.
 | White's Reality Check addresses data snooping; Hansen's SPA uses studentization and a sample-dependent null distribution | [White (2000)](https://users.ssc.wisc.edu/~behansen/718/White2000.pdf), [Hansen (2005), primary publisher abstract](https://www.tandfonline.com/doi/abs/10.1198/073500105000000063) | These methods motivate complete-population evidence. Their assumptions remain material; they do not select this repository's acceptance thresholds. |
 | P-values do not measure the probability a hypothesis is true; decisions should not rest solely on a threshold | [American Statistical Association statement](https://www.amstat.org/asa/files/pdfs/p-valuestatement.pdf) | The delegated37-field profile contains explicit research choices. No cited source prescribes its5%p-value cutoff,20%PBO limit, sample floors or loss caps. See [the explanation](22-research-policy.md). |
 
-## 4g. GDFL — the facts D-0802 depends on are not recorded
+## 4g. GDFL — what D-0802 depends on, and how little of it is recorded
 
 D-0802 (1 October 2026) records the operator's design that every entry, exit
 and exit combination, and the ranking that reads those fills, is to be priced
-from GDFL one-second data, from each second's high and low, on the underlying
-spot. Nothing of it is built. **This section records no GDFL fact from a vendor
-source.** It lists what must be read from a source and written here, with its
-lane, before any code relies on it. Each item is UNVERIFIED. Where a cell
-mentions what this repository has measured, that is a recorded measurement of
-one GDFL NFO day (`docs/08-vendor-samples.md`), not a vendor statement, and it
-settles none of these rows. The archive that day was read from is not in this
-repository:
+from GDFL one-second data, at each second's worst-case high or low, on the
+underlying spot. Nothing of it is built. **This section records no GDFL fact
+from a vendor source.** It records one operator statement, one day measured
+from GDFL files outside this repository, and what must still be read from a
+source and written here, with its lane, before any code relies on it.
+
+**Operator statement.**
+
+| Fact | Value | Lane |
+|---|---|---|
+| GDFL coverage for this design | GDFL second-level snapshot data covers everything D-0802 needs: *"for gdfl entilrey we have seconds level snapshot dude so you don't need to worry we have all the data"* | operator-stated 1 Oct 2026, no vendor page states it |
+
+**Measured on one day only.** Read on 1 October 2026 (IST) from an extracted
+GDFL copy outside this repository, by `awk` over the files named. Each row is a
+measurement of those files on 26 May 2026 and no more; it is not a vendor
+statement and does not say what any other day holds.
+
+| Fact | Value | Lane |
+|---|---|---|
+| Index file path | `INDICES/<yyyy>/<MON_yyyy>/GFDLCM_INDICES_TICK_<ddmmyyyy>/<NAME>.NSE_IDX.csv`; 141 files on 26 May 2026, among them `NIFTY 50.NSE_IDX.csv` and `NIFTY BANK.NSE_IDX.csv` | measured, one day |
+| Index columns | `Ticker,Date,Time,LTP,BuyPrice,BuyQty,SellPrice,SellQty,LTQ,OpenInterest`, header present, date `dd/mm/yyyy`, time `hh:mm:ss` with no sub-second field, in every row | measured, one day, two files |
+| Index fields beyond the level | every column after `LTP` is zero in every row, so the volume columns carry nothing | measured, one day, two files |
+| Rows per session second (09:15:00 to 15:29:59) | NIFTY 50 about 4.0 (90,360 rows over 22,499 seconds, up to 10 in one); NIFTY BANK about 2.0 (45,272 over 22,498, up to 5); no tiebreaker among rows sharing a second | measured, one day |
+| Session seconds with no row | NIFTY 50 one (14:16:23); NIFTY BANK two (10:48:06, 14:16:23) | measured, one day |
+| Rows outside the session | present: first rows 09:07:03 and 09:07:04, last 16:09:13; 1,908 and 955 rows before 09:15:00, 9,418 and 4,709 from 15:30:00 on | measured, one day |
+| Row order | the time column steps **backward** 25 times in each index file, by one or two seconds, roughly every fifteen minutes; `pull::fold` refuses such a step rather than sorting (D-0802 consequence 5) | measured, one day; what a backward step means UNVERIFIED |
+| Range, minute against second | mean `LTP` high minus low over the session: NIFTY 50 8.68 points per minute, 1.03 per second; NIFTY BANK 29.74 per minute, 2.27 per second | measured, one day |
+| One cash-equity file | `STOCKS/2026/MAY_2026/GFDLCM_STOCK_TICK_26052026/RELIANCE.NSE.csv` (3,429 files in that folder): the same ten-name header, 17,626 rows, a nonzero `BuyPrice` or `SellPrice` on all but one row, a nonzero `LTQ` on 15,816 | measured, one day, one file |
+| Folder names present | 2,001 `GFDLCM_INDICES_TICK_<ddmmyyyy>` folders whose names run from 3 Sep 2018 to 30 Sep 2026, each with both index files, and 2,001 `GFDLCM_STOCK_TICK_<ddmmyyyy>` folders | counted by name only; contents of every other day unread |
+
+**Still UNVERIFIED.**
 
 | Needed fact | Lane |
 |---|---|
-| Whether GDFL supplies one-second or finer data for the `NSE-NIFTY` and `NSE-BANKNIFTY` spot index | UNVERIFIED — every GDFL file read so far is NFO options and futures |
-| Whether GDFL supplies one-second data for the cash equities of the F&O underlyings | UNVERIFIED |
-| The date range available for each needed instrument, which must cover the whole tested history the ranking reads | UNVERIFIED — the repository has measured one GDFL day, 2025-07-01, NFO only |
-| Timestamp precision and clock basis for those series, and whether every session second has a row | UNVERIFIED — the one NFO day the repository measured has whole seconds, no sub-second field and no tiebreaker |
-| GDFL's instrument naming for the spot index and cash equities, and its mapping to `InstrumentKey` | UNVERIFIED — D-0015's two GDFL spellings are both for contracts |
+| Whether the layout, density, gaps and backward steps above hold on every other day, for every needed series | UNVERIFIED — one day read |
+| Whether every needed day is present and non-empty across the tested history | operator-stated (above); per day UNVERIFIED, so a window with no GDFL seconds still refuses at run time |
+| Clock basis of the CSV `Time` column (exchange time, vendor receive time or other), and whether `hh:mm:ss` means `[ss, ss+1)` | UNVERIFIED — D-0015 records GDFL epoch-second fields `LastTradeTime` and `ServerTime` (documented); neither name is in the CSV |
+| Alignment of GDFL seconds with Zerodha minutes and folded rungs | UNVERIFIED — no day has been read from both |
+| GDFL's naming for every F&O underlying's cash series, and its mapping to `InstrumentKey` | UNVERIFIED — three tickers seen on one day: `NIFTY 50.NSE_IDX`, `NIFTY BANK.NSE_IDX`, `RELIANCE.NSE` |
 | Whether GDFL's and Zerodha's price series agree in level, including corporate-action adjustment for the cash equities | UNVERIFIED |
-| GDFL's file layout for an index and a cash-equity series, which field the one-second record is folded from, and whether an index series has any field beyond its level | UNVERIFIED — the reader knows only GDFL's ten-field F&O layout |
-| The price of the data for the needed instruments and span | UNVERIFIED |
+| The price of the data | not recorded; the operator states it is in hand |
 | Licence terms for this use | UNVERIFIED |
 
 Two untracked files in the main checkout, `GFDLNFO_TICK_06012019.zip` and
@@ -628,8 +650,8 @@ one 18-byte two-column `ts,ltp` member. They are outside version control, so no
 reader of this repository can re-check them, and they may no longer exist.
 Nothing records where they came from, and they are not evidence for any row
 above. D-0045 first recorded that GDFL appears nowhere in this charter, and
-D-0118 named the same gap for GDFL's granularity floor; that gap is still
-open.
+D-0118 named the same gap for GDFL's granularity floor; the operator statement
+and the one measured day above narrow that gap and do not close it.
 
 ## 5. Run identity
 
