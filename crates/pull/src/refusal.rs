@@ -616,7 +616,9 @@ pub fn named_error_of(body: &str, field: &str, envelope: Option<&str>) -> Option
 /// measurement, however sound it is.
 #[must_use]
 pub fn disposition_of(body: &str, contract: &ErrorNames) -> Option<Disposition> {
-    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    // THROUGH THE CRATE'S ONE ANSWER PARSER, so a test counting parses sees
+    // this one too. W1-pull2-1.
+    let value = crate::http::parse_answer(body).ok()?;
     disposition_of_value(&value, contract)
 }
 

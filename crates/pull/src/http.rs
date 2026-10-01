@@ -825,7 +825,10 @@ thread_local! {
 }
 
 /// The one JSON parse a vendor answer goes through, whichever reader wants it.
-fn parse_answer(body: &str) -> Result<serde_json::Value, serde_json::Error> {
+///
+/// [`crate::refusal::disposition_of`] parses through it as well, so a count of
+/// its calls sees a parse by the refusal reader and by the decode alike.
+pub(crate) fn parse_answer(body: &str) -> Result<serde_json::Value, serde_json::Error> {
     #[cfg(test)]
     PARSES.with(|c| c.set(c.get().saturating_add(1)));
     serde_json::from_str(body)
@@ -6559,7 +6562,7 @@ mod tests {
             .expect("a client for the shipped Dhan row");
         let pad = "x".repeat(10_000);
         let dead = format!(
-            r#"{{"errorCode":"DH-901","errorType":"Invalid_Authentication","errorMessage":"Client ID or access token is invalid","pad":"{pad}"}}"#
+            r#"{{"errorCode":"DH-901","errorType":"Invalid_Authentication","errorMessage":"Client ID or access token is invalid","errorDetail":"{pad}"}}"#
         );
         let Err(FetchError::VendorRefused { detail, named, .. }) =
             source.weigh_answered_body(&dead, 200)
@@ -6583,8 +6586,10 @@ mod tests {
     /// `window_async` weighed a success body for a refusal and then decoded
     /// it, and each step ran its own `serde_json::from_str` over the same
     /// text — up to `MAX_RESPONSE_BYTES` parsed twice per window, on the path
-    /// every good request takes. The count is read from `parse_answer`, the one
-    /// parser both steps go through, on this thread only. W1-pull2-1.
+    /// every good request takes. The count is read from `parse_answer`, which
+    /// both `decode_body` and `refusal::disposition_of` parse through, on this
+    /// thread only, so either reader parsing the text again is counted.
+    /// W1-pull2-1.
     #[test]
     fn a_success_body_is_parsed_once_for_both_the_refusal_check_and_the_decode() {
         let shipped = match crate::vendor::Feed::Dhan.descriptor().transport {
@@ -6595,6 +6600,20 @@ mod tests {
             .expect("a client for the shipped Dhan row");
         let body = r#"{"open":[24500.75],"high":[24500.75],"low":[24500.75],
             "close":[24500.75],"volume":[250],"timestamp":[1751337900]}"#;
+
+        // THE COUNTER SEES THE REFUSAL READER'S OWN PARSE, so a refusal check
+        // that parsed the text again would be counted, not missed.
+        let contract = source
+            .spec
+            .error_names
+            .expect("Dhan declares its error names");
+        PARSES.with(|c| c.set(0));
+        assert_eq!(crate::refusal::disposition_of(body, contract), None);
+        assert_eq!(
+            PARSES.with(std::cell::Cell::get),
+            1,
+            "disposition_of parses once"
+        );
 
         PARSES.with(|c| c.set(0));
         let window = source
@@ -6627,6 +6646,53 @@ mod tests {
         assert_eq!(PARSES.with(std::cell::Cell::get), 1);
     }
 
+    /// **AND THE LIVE PATH PARSES IT ONCE: `window_async` OVER A REAL SOCKET.**
+    ///
+    /// The test above drives `settle_answer` directly, so a `window_async`
+    /// that decoded the text again after it would pass there. This one serves a
+    /// 200 bars body on loopback to a source that declares Dhan's error names,
+    /// so the refusal check runs, and counts every `parse_answer` call the
+    /// whole fetch makes. The runtime is current-thread, so the parse runs on
+    /// this thread and the thread-local count sees it. W1-pull2-1.
+    #[test]
+    fn a_window_fetched_over_a_socket_parses_its_body_once() {
+        let crate::vendor::Transport::Http(dhan) = crate::vendor::Feed::Dhan.descriptor().transport
+        else {
+            panic!("this feed is HTTP")
+        };
+        assert!(
+            dhan.error_names.is_some(),
+            "the refusal check must run, or this counts only the decode"
+        );
+        let body = r#"{"open":[24500.75],"high":[24500.75],"low":[24500.75],
+                       "close":[24500.75],"volume":[250],"timestamp":[1751337900]}"#;
+        let (url, seen, _) = listener(Some(format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )));
+        let spec = HttpSpec {
+            base_url: Box::leak(url.into_boxed_str()),
+            error_names: dhan.error_names,
+            ..spec(PriceScale::Rupees)
+        };
+        let source = source_of(spec, "SUPERSECRET");
+        PARSES.with(|c| c.set(0));
+        let window = source.block_on_window().expect("a window comes back");
+        assert_eq!(window.rows.len(), 1);
+        assert_eq!(window.rows[0].open, 2_450_075);
+        assert!(
+            seen.recv_timeout(core::time::Duration::from_secs(5))
+                .is_ok(),
+            "the vendor was contacted"
+        );
+        assert_eq!(
+            PARSES.with(std::cell::Cell::get),
+            1,
+            "one parse for the refusal check and the decode together"
+        );
+    }
+
     /// **THE OFFSET IS READ BY POSITION, SO A COLON ANYWHERE ELSE IS REFUSED.**
     ///
     /// The reader stripped every `:` from the whole tail and then counted the
@@ -6641,21 +6707,49 @@ mod tests {
         assert_eq!(stated_offset(&format!("{at}+05:30")), Some(19_800));
         assert_eq!(stated_offset(&format!("{at}-0330")), Some(-12_600));
         assert_eq!(stated_offset(&format!("{at}Z")), Some(0));
+        // EVERY DIGIT POSITION CARRIES WEIGHT. The cases above all have a zero
+        // tens-of-hours digit and a zero minutes-units digit, so a reader that
+        // divided the tens digit or subtracted the units digit read them the
+        // same. These do not, and the edges of both bounds are read as well.
+        for (tail, seconds) in [
+            ("+1045", 38_700),
+            ("-0945", -35_100),
+            ("+1000", 36_000),
+            ("+14:00", 50_400),
+            ("-1400", -50_400),
+            ("+0559", 21_540),
+        ] {
+            assert_eq!(
+                stated_offset(&format!("{at}{tail}")),
+                Some(seconds),
+                "{tail}"
+            );
+        }
         for bad in [
             "+0:530", "+:0530", "+0530:", "+053:0", "+0:5:3:0", "+05::30",
         ] {
             assert_eq!(stated_offset(&format!("{at}{bad}")), None, "{bad}");
         }
+        // A wrong length, a non-digit, no sign, a field past its bound, and a
+        // NUL or a space where a byte of the zone belongs.
         for bad in [
-            "+053", "+05300", "+05:3", "+05:300", "+0a30", "+05:3a", "0530",
+            "+053", "+05300", "+05:3", "+05:300", "+0a30", "+05:3a", "Z0530", "005:30", "+1500",
+            "+15:00", "+0560", "+05:60", "+05-30", "", "+0530\0", "+05 30", " +0530",
         ] {
-            assert_eq!(stated_offset(&format!("{at}{bad}")), None, "{bad}");
+            assert_eq!(stated_offset(&format!("{at}{bad}")), None, "{bad:?}");
         }
+        // A STAMP SHORTER THAN ITS CLOCK, OR ONE WHOSE BYTE 19 FALLS INSIDE A
+        // CHARACTER, states no offset and does not panic.
+        assert_eq!(stated_offset(""), None);
+        assert_eq!(stated_offset("2017-12-15T09:15:0\u{e9}0530"), None);
+        // A REFUSAL CHECK, NOT A MEASUREMENT OF COST: the old reader refused
+        // this tail too. That the new one does not walk it is the slice
+        // pattern's shape in `stated_offset`, not something this asserts.
         let long = format!("{at}+{}", "0".repeat(1 << 20));
         assert_eq!(
             stated_offset(&long),
             None,
-            "a tail past six bytes is no zone"
+            "a tail past six bytes is refused, not read as a zone"
         );
     }
 }

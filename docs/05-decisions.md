@@ -43690,17 +43690,27 @@ body that is not JSON is still a decode fault, not a success. The refusal's
 `detail` is now built from `trim(text)`: at most 500 characters of the body.
 What a window decodes to is unchanged, so no run identity moves.
 
+`refusal::disposition_of` now parses through `http::parse_answer` as well, so
+every JSON parse on this path goes through the one function a test can count.
+
 **Proof.**
 `pull::http::tests::a_success_body_is_parsed_once_for_both_the_refusal_check_and_the_decode`
-counts calls to `parse_answer` on its own thread: one for a bars body, one for a
-body naming `DH-901`, one for a body that is not JSON. With `settle_answer`
-restored to the weigh-then-decode pair it counts two for the bars body and
-fails.
+counts calls to `parse_answer` on its own thread: one for `disposition_of`
+alone over a bars body, one for `settle_answer` over a bars body, one for a
+body naming `DH-901`, one for a body that is not JSON.
+`pull::http::tests::a_window_fetched_over_a_socket_parses_its_body_once` serves
+a 200 bars body on loopback to a source declaring Dhan's error names and counts
+one parse across the whole `window_async` call. With the refusal check put back
+in its origin/main shape, `crate::refusal::disposition_of(text, contract)` in
+`weigh_parsed`, both tests count two and fail. With `window_async` decoding the
+text again after `settle_answer`, the socket test counts two and fails. With
+`disposition_of` reading `serde_json::from_str` directly again, the first test's
+`disposition_of` count is zero and it fails.
 `pull::http::tests::a_refusal_under_a_200_is_trimmed_before_it_reaches_the_error`
 pads a `DH-901` body to over 10,000 characters and requires the detail to be
 its prefix plus exactly 500 characters; on origin/main it measured 10,177.
 
-### D-0957 — Read a stated UTC offset by position, so a tail of any length is not walked and a misplaced colon is refused — 2026-09-29
+### D-0957 — Read a stated UTC offset by position, with no allocation, and refuse a misplaced colon — 2026-09-29
 
 **What was wrong.** `stated_offset`'s doc says "A fixed number of byte
 comparisons on a suffix. No allocation." The body stripped every `:` from the
@@ -43717,6 +43727,14 @@ accepted in one of those two shapes reads to the same seconds.
 
 **Proof.**
 `pull::http::tests::a_stated_offset_is_read_by_position_and_a_misplaced_colon_is_refused`
-reads `+0530`, `+05:30`, `-0330` and `Z`, refuses six misplaced-colon tails,
-seven wrong-length or non-digit tails and a tail of 2^20 zeros. On origin/main
-it fails on `+0:530`, which the old reader returned as `Some(19800)`.
+reads `+0530`, `+05:30`, `-0330` and `Z`, and reads `+1045`, `-0945`,
+`+1000`, `+14:00`, `-1400` and `+0559`, whose tens-of-hours and
+minutes-units digits are not zero and which sit on both bounds. It refuses six
+misplaced-colon tails; wrong-length, non-digit, unsigned, out-of-bound, NUL and
+space tails; an empty stamp; a stamp whose byte 19 falls inside a character;
+and a tail of 2^20 zeros. On origin/main it fails on `+0:530`, which the old
+reader returned as `Some(19800)`. The 2^20-zero tail is a refusal check only:
+the old reader refused it too, so it is not evidence about cost. That the new
+reader neither walks nor copies the tail rests on the source line
+`let ([sign, h1, h2, m1, m2] | [sign, h1, h2, b':', m1, m2]) = *tail.as_bytes() else {`,
+which matches a slice of five or six bytes and allocates nothing.

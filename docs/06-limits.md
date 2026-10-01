@@ -9875,6 +9875,10 @@ parses the body once, in `HttpSource::settle_answer`, and the refusal check
 reads the parsed value through `refusal::disposition_of_value`. The one parse
 is the decode's own and is still O(body), bounded by `MAX_RESPONSE_BYTES`.
 `pull::http::tests::a_success_body_is_parsed_once_for_both_the_refusal_check_and_the_decode`
-counts it. `disposition_of` itself still parses. Its one remaining non-test caller is
+counts calls to `http::parse_answer`, which `disposition_of` and `decode_body`
+both parse through, and asserts one per `settle_answer`;
+`pull::http::tests::a_window_fetched_over_a_socket_parses_its_body_once` asserts
+one across a whole `window_async` call over loopback. `disposition_of` itself
+still parses. Its one remaining non-test caller is
 `refusal_words`, the non-2xx door, which reads at most `MAX_REFUSAL_BYTES`;
 the calls in `dhan.rs` are inside its `mod tests`.
