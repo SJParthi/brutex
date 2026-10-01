@@ -611,10 +611,14 @@ source and written here, with its lane, before any code relies on it.
 
 | Fact | Value | Lane |
 |---|---|---|
-| GDFL coverage for this design | GDFL second-level snapshot data covers everything D-0802 needs: *"for gdfl entilrey we have seconds level snapshot dude so you don't need to worry we have all the data"* | operator-stated 1 Oct 2026, no vendor page states it |
+| GDFL coverage for this design | GDFL second-level snapshot data covers everything D-0802 needs. Excerpt of message 5, whose whole text D-0802 quotes: *"... for gdfl entilrey we have seconds level snapshot dude so you don't need to worry we have all the data ..."* | operator-stated 1 Oct 2026, no vendor page states it |
 
 **Measured on one day only.** Read on 1 October 2026 (IST) from an extracted
-GDFL copy outside this repository, by `awk` over the files named. Each row is a
+GDFL copy outside this repository, the directory
+`/Volumes/WD_BLACK/NSE_Tick_2018-09-01_to_2026-09-24` on the operator's machine
+(its name ends at 24 September 2026, though its folder names run to
+30 September 2026; why is not recorded), by `awk` over the files named. Anyone
+with that copy can repeat each figure. Each row is a
 measurement of those files on 26 May 2026 and no more; it is not a vendor
 statement and does not say what any other day holds.
 

@@ -43727,16 +43727,20 @@ verbatim and in order, typos and all, as the operator's own words.
 **Where they came from, and what of that this repository cannot check.** The
 six messages reached this entry relayed by the session that wrote it, as sent
 on 1 October 2026 (IST). No tracked file and no command can confirm that date or
-where each message began and ended; that rests on the chat as relayed. As
-relayed: message 1 is the part of a longer message that states this design,
-and the text before and after it is not quoted; messages 2 and 3 are each
-quoted up to a pasted block of the operator's standing instructions (O(1)
-bounds, a dynamic incremental scalable approach, coverage of exceptional cases
-and a comparison artifact), which is not part of this design and is not
-quoted; message 3 corrects message 2; message 4 answers item D of an earlier,
-unmerged draft of this entry, which had left open which prices the ranking
-reads. This entry does not record whether messages 4, 5 and 6 carried other
-text.
+where each message began and ended; that rests on the chat as relayed. The
+relayed task text gives each of the six as a whole quotation. **Two of the
+marks below come from a different relay**, a review round of an earlier draft
+of this entry, which reported that message 1 is the part of a longer message
+that states this design (so it is marked "excerpt") and that messages 2 and 3
+were each followed by a pasted block of the operator's standing instructions
+(O(1) bounds, a dynamic incremental scalable approach, coverage of exceptional
+cases and a comparison artifact), which is not part of this design and is not
+quoted. That review round is the only source for those two marks; neither this
+entry's author nor any reader of this repository can check it, and if it is
+wrong the quotations are whole messages. Message 3 corrects message 2;
+message 4 answers item D of an earlier, unmerged draft of this entry, which had
+left open which prices the ranking reads. This entry does not record whether
+messages 4, 5 and 6 carried other text.
 
 > 1. (excerpt) "see dude as of now for usign condiitons espeiclal y for entry
 > we wil lhave minute level pulled data from zerodha right dude then from there
@@ -43792,6 +43796,21 @@ and accepts the other stored minute feeds (Groww, Dhan) today, and those runs
 stay legitimate and separately identified by `feed` (§3 rule 3). Excluding a
 feed from the search would need its own entry.
 
+**That includes GDFL rows folded to minutes, and it goes this way: such a
+search stays legal and is not this design.** The GDFL descriptor in
+`pull::vendor` serves a minute and a day folded from one-second snapshots as
+well as the second itself (its comment there cites D-0141), so a search over
+GDFL minutes, or over rungs folded from them, is a stored minute search like
+Groww's or Dhan's: this entry neither forbids it nor adopts it. The operator
+named Zerodha for the search (messages 1 and 2), so a GDFL-minute search is
+not the search this entry describes, and a report of one must not present
+itself as the operator's design. Today that descriptor reads only the
+`GFDLNFO_TICK_` contract archives, which §1 never sweeps (**Not built**), so no
+such search over the spot or the cash equities exists. If one is built, its
+signal feed and its fill feed are both GDFL, and consequence 1 still keeps the
+signal digest and the fill digest separate terms. What is rejected is a
+search on GDFL **seconds** (**Rejected**).
+
 **B. Every fill is priced from GDFL one-second data, at that second's
 worst-case high or low, hereafter, always, and from no other source.** Message
 1 says "tick data" and message 2 "ticks"; message 3 names "the gdfl"; message 4
@@ -43806,8 +43825,11 @@ names the product and the source; message 6 names the price:
   asks for that and names no storage format, so **this entry fixes none**: the
   format is the fill engine's own entry to decide (consequence 5). "Every one
   second" means every second in which GDFL printed a row. A second with no row
-  has no record: the store never synthesises, carries forward or interpolates
-  a second, and a fill never reads one (consequence 2, **Rejected**).
+  **has no price and is never a fill**: nothing synthesises, carries forward or
+  interpolates a price for it, and no fill reads one (consequence 2,
+  **Rejected**). Whether such a second is absent from the store or occupies an
+  empty slot that says "no row" is a format question, left open with the rest
+  of the format (consequence 4).
 - **B3. The worst case at the second.** Message 6: "using worst case as high
   low". Every fill takes the second's **adverse** extreme, by direction: a buy
   fills at the second's high and a sell at its low. A long enters at the high
@@ -43965,7 +43987,9 @@ What that costs, stated rather than hidden:
 
   This entry changes no other part of D-0015. That is not a claim that the
   rest of D-0015 stands as written: later entries had already changed other
-  parts of it, among them the day rung (D-0054), the intraday rungs (D-0077),
+  parts of it, among them the day rung (D-0054), the intraday rungs (D-0077,
+  the entry headed "Five intraday rungs join the table"; another entry also
+  heads D-0077),
   GDFL and TrueData as bought-CSV folder feeds (D-0123), and Zerodha among the
   minute feeds beyond D-0015's "two brokers". D-0015 also deferred the
   sparse-grid dilemma, and fill pricing now has to resolve it (consequence 4).
@@ -44014,6 +44038,13 @@ What that costs, stated rather than hidden:
   **Those are the principal rows, not the whole list.** Other live rows in
   `docs/04-invariants.md` pin one-minute or bracketed execution the same way,
   and B, B3 or D contradicts each of these once the fill engine lands:
+  - **XP-02**, the row D contradicts most directly: "Derived trade floors and
+    ranking are always measured on the actual one-minute execution slice,
+    independent of the signal rung." Under D the ranking reads GDFL one-second
+    fills; its independence from the signal rung is what consequence 3 keeps.
+  - **CO-01**: a Candidate row's entry and exit indices and timestamps "must
+    match the one-minute execution bars". A GDFL-priced trade row's entry and
+    exit are seconds.
   - **XM-01** restates UE-02's alignment: a signal aligns only to the
     one-minute bar whose open equals the signal bar's close. **XM-05** makes
     every shipping audit path reproject its signal column onto exact
@@ -44026,9 +44057,10 @@ What that costs, stated rather than hidden:
     endpoint or at the 15:10 boundary proved by the 15:09 record.
   - **EB-07**: the favourable excursion is measured from the optimistic entry
     (the open) and the adverse one from the pessimistic entry, which is the
-    bracket consequence 7 reopens.
+    bracket consequence 7 reopens and the anchor consequence 13 must lock.
   - **EG-01 and EG-02**: the exit-grid policy trains on each instrument's and
-    side's one-minute adverse and favourable distribution; opening gaps apply
+    side's one-minute adverse and favourable distribution (the ladder source
+    consequence 13 must lock); opening gaps apply
     before a same-bar retrace; and OOS replay refuses every non-one-minute
     execution shape before pricing
     (`oos_replay_refuses_every_non_one_minute_or_corrupt_shape_before_pricing`).
@@ -44039,12 +44071,17 @@ What that costs, stated rather than hidden:
     evidence, a one-minute execution subspan, or a minute-granular lock and
     VIX stamp.
 
-  A case-insensitive search of the id-bearing rows of `docs/04-invariants.md`
-  for "one-minute", "1min", "next-minute" and "exact minute" returned 40 rows
-  on 1 October 2026, and 44 when "exact minute" also matches "exact-minute"
-  (the four added are VX-01, SO-02, GR3-02 and OOS-01); some (RG-01, for one)
-  are about pulls, not execution, and a row that pins minute execution in
-  other words is found by neither search.
+  **The search behind that list, so it can be repeated.** On 1 October 2026 the
+  id-bearing rows of `docs/04-invariants.md` were selected with Gate 27's own
+  row pattern, `` ^\| *`?[A-Z][A-Z-]*-[0-9]{2,3}[a-z]?`? *\| `` (1,209 rows), and
+  searched case-insensitively for "one-minute", "1min", "next-minute" and
+  "exact minute": 40 rows, XP-02 and CO-01 among them. Letting "exact minute"
+  also match "exact-minute" (`exact[ -]minute`) gives 43, adding OOS-01, SO-02
+  and VX-01. Gate 27's pattern allows no digit in an id's prefix, so it skips
+  GR3-02; the same pattern with `[A-Z][A-Z0-9-]*-` in place of `[A-Z][A-Z-]*-`
+  (1,228 rows) gives 40 and 44, the fourth added row being GR3-02. Some
+  matches (RG-01, for one) are about pulls, not execution, and a row that pins
+  minute execution in other words is found by none of these searches.
   **The list above is therefore not exhaustive**, and the entry that lands the
   fill engine must audit every invariant that pins one-minute or bracketed
   execution, not only the rows named here.
@@ -44076,7 +44113,13 @@ files named, on the day named, and no more.
    Every GDFL file the repository read before this entry was NFO
    (`GFDLNFO_TICK_01072025`, options and futures, `docs/08-vendor-samples.md`).
    For this entry one index day was read from an extracted GDFL copy outside
-   this repository, on 1 October 2026 (IST): **26 May 2026**, folder
+   this repository, on 1 October 2026 (IST): the directory
+   `/Volumes/WD_BLACK/NSE_Tick_2018-09-01_to_2026-09-24` on the operator's
+   machine (its name ends at 24 September 2026, though its folder names run to
+   30 September 2026, item 4; why is not recorded). Anyone with that copy can
+   repeat every figure below with `awk`; a review of this entry reported doing
+   so from that directory, with every figure matching. The day read is
+   **26 May 2026**, folder
    `GFDLCM_INDICES_TICK_26052026` at
    `INDICES/<yyyy>/<MON_yyyy>/GFDLCM_INDICES_TICK_<ddmmyyyy>/<NAME>.NSE_IDX.csv`,
    141 files that day. Measured in its two files `NIFTY 50.NSE_IDX.csv` and
@@ -44355,7 +44398,7 @@ engine is built.**
     reads, never a minute price beside it; and a dropped trade carries no
     charge. The entry that lands the engine names that and tests it.
 12. **The reader and the ingest job — the first build step.** It is numbered
-    last only so the numbers above keep their meaning; nothing else in this
+    12 only so the numbers above keep their meaning; nothing else in this
     list can be exercised on GDFL data until it exists. Today the one GDFL
     descriptor reads `GFDLNFO_TICK_` archives (`pull::vendor`) and nothing
     reads GDFL's index or cash-equity files. Each of these needs designing,
@@ -44376,6 +44419,50 @@ engine is built.**
 
     Building and testing them waits on nothing; running the job over the
     GDFL files waits on the licence (consequence 10).
+13. **Where exit levels are placed: the anchor and the ladders.** B3 says what
+    price a level fills at; it does not say where the level is. Message 6's
+    stated purpose, keeping the settings and exit-grid combinations one-minute
+    fills discarded, depends on that placement as much as on the fill, and
+    today every part of it is a one-minute quantity:
+    - **The anchor.** A stop, target or trail level is a ppm distance from
+      `entry_opt`, the entry minute's Open, on every reading
+      (`runner::grid`: "THE ANCHOR IS `entry_opt` ON ALL THREE", and
+      `EntryPrices::anchor`, "the only price a level can be reconstructed
+      against"). EB-07 measures the favourable excursion from that open. Under
+      B3 the one-minute Open is no longer a fill, and the entry fill is the
+      entry second's adverse extreme. The engine's entry must lock which price
+      a level is measured from: that worst-case entry fill, another price of
+      the entry second (its open, its opposite extreme), or something else.
+      Measured from the worst-case fill, a stop of distance d is d from the
+      price the trade paid. Measured from any better price, the trade bears d
+      plus the gap between that price and its fill, so the nominal stop
+      understates the loss it allows. Whichever is chosen, the report says
+      which.
+    - **The ladders.** The rungs come from one-minute quantities today: the
+      derived step, which `runner::grid`'s `Levels` describes as "a function of
+      the instrument's median bar range", and the rung count `cli::grid_rungs`
+      derives from the same median bar range (`runner::validate`); the
+      quantile ladders, placed "at quantiles of the excursions the instrument
+      actually produced" on minute bars (`runner::excursion`,
+      `Ladder::from_excursions`); EG-01's training one-minute adverse and
+      favourable distribution; and the stop ladder's floor, which exists
+      because "on one-minute execution a level closer than a typical bar's own
+      range is hit by the entry bar itself" (`runner::grid`, `Levels`). The
+      engine's entry must lock, for each, whether it is derived from GDFL
+      one-second data, from the Zerodha minutes and rungs the signal was found
+      on, or from neither. If a ladder stays on
+      minute quantities, the one-minute range can still set how close the
+      nearest stop may be, and settings message 6 wants kept can stay
+      discarded by the ladder rather than by the fill.
+    - **Does a ladder read a second source?** D allows one fill source.
+      A level is not a fill, but exit-grid selection reads the fills those
+      levels produce, so an excursion ladder trained on minute bars makes the
+      grid's selection depend on minute prices. Whether that is a second
+      price source under message 4's "one and only" is the question the
+      engine's entry answers by name, not by default.
+
+    None of this is chosen here. Until it is locked, no GDFL-priced exit grid
+    is built or ranked.
 
 **Rejected.**
 
@@ -44386,8 +44473,11 @@ engine is built.**
   the earlier draft's reading (a), and any mixed form (for example, exit grid
   on GDFL, condition ranking on minutes). Message 4 allows one fill source,
   and a score is computed from fills.
-- **Running the condition search on GDFL seconds.** Messages 2 and 3 keep the
-  search on Zerodha minutes and the rungs folded from them.
+- **Running the condition search on GDFL seconds** (the `1s` rung or any
+  sub-minute series). Messages 1 to 3 keep the search on minutes and the
+  rungs folded from them, and messages 1 and 2 name Zerodha for it. A search
+  over GDFL rows folded to minutes is not rejected here; A says which way it
+  goes.
 - **A futures or options contract's data in place of the spot** (C): it would
   fill a trade on an instrument the trade never named, and §1 never sweeps a
   contract.
@@ -44397,7 +44487,8 @@ engine is built.**
   lies inside a second's low and high or was crossed inside a gap between
   seconds: message 6 names the second's worst case (B3).
 - **A synthesised, carried-forward or interpolated second.** A second in which
-  GDFL printed no row gets no record and prices no fill. Filling it would
+  GDFL printed no row has no price and prices no fill, whatever the format
+  stores for it (B2). Filling it would
   undo consequence 2's bound and price a fill from a row that does not exist.
 - **Sorting GDFL rows** to repair a backward step or to order a shared second.
   A sort invents an order and changes which price became the open (D-0123);
@@ -44408,7 +44499,7 @@ statement, the one day measured for this entry, and the GDFL facts still not
 recorded. `docs/07-plan.md` §3 records the licence as the question that waits
 on the operator, and what waits on it: running the ingest job over the GDFL
 files (consequence 10). §4 item 6 carries the work that needs no permission:
-consequence 12 first, as the first build step, then consequences 1 to 9 and 11
-in this entry's order; consequence 10 is the §3 row. `docs/04-invariants.md`,
-`docs/06-limits.md`, `docs/02-store-format.md` and all code are untouched,
-because nothing has been built.
+consequence 12 first, as the first build step, then consequences 1 to 9, 11
+and 13 in this entry's order; consequence 10 is the §3 row.
+`docs/04-invariants.md`, `docs/06-limits.md`, `docs/02-store-format.md` and all
+code are untouched, because nothing has been built.
