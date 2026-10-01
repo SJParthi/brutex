@@ -168,7 +168,14 @@ impl LakeFile {
         self.meta.num_row_groups()
     }
 
-    /// How many rows the file holds in total.
+    /// How many rows the file-level footer count says the file holds.
+    ///
+    /// This is the footer's claim, returned as written. It is not checked at
+    /// open: a file whose row groups do not sum to it still opens, and every
+    /// [`LakeFile::read_row_group`] of it is then refused as
+    /// [`LakeError::RowCountsDisagree`]. Nor does agreeing
+    /// make it true; `docs/06-limits.md` records footers that agree and still
+    /// misstate the rows.
     #[must_use]
     pub fn num_rows(&self) -> i64 {
         self.meta.file_metadata().num_rows()
@@ -1080,6 +1087,16 @@ mod tests {
     /// `Some(n)` caps every data page at `n` rows, so a chunk holds several
     /// pages; `None` leaves the writer's defaults, one page per chunk here.
     fn cash_file_written(open_interest: &[i64], page_rows: Option<usize>) -> Vec<u8> {
+        cash_file_grouped(open_interest, page_rows, 1)
+    }
+
+    /// As [`cash_file_written`], with `groups` identical row groups, each of
+    /// them one row per element of `open_interest`.
+    fn cash_file_grouped(
+        open_interest: &[i64],
+        page_rows: Option<usize>,
+        groups: usize,
+    ) -> Vec<u8> {
         let rows = open_interest.len();
         let fields: Vec<Arc<Type>> = CASH
             .iter()
@@ -1116,28 +1133,30 @@ mod tests {
         let mut out: Vec<u8> = Vec::new();
         {
             let mut writer = SerializedFileWriter::new(&mut out, schema, props).expect("writer");
-            let mut group = writer.next_row_group().expect("row group");
-            let mut index = 0_usize;
-            while let Some(mut column) = group.next_column().expect("column") {
-                // `open_interest` is the seventh and last of `CASH`.
-                let values = if index == CASH.len() - 1 {
-                    open_interest
-                } else {
-                    &ints
-                };
-                index += 1;
-                match column.untyped() {
-                    ColumnWriter::Int64ColumnWriter(typed) => {
-                        typed.write_batch(values, Some(&defs), None).expect("i64");
+            for _ in 0..groups {
+                let mut group = writer.next_row_group().expect("row group");
+                let mut index = 0_usize;
+                while let Some(mut column) = group.next_column().expect("column") {
+                    // `open_interest` is the seventh and last of `CASH`.
+                    let values = if index == CASH.len() - 1 {
+                        open_interest
+                    } else {
+                        &ints
+                    };
+                    index += 1;
+                    match column.untyped() {
+                        ColumnWriter::Int64ColumnWriter(typed) => {
+                            typed.write_batch(values, Some(&defs), None).expect("i64");
+                        }
+                        ColumnWriter::DoubleColumnWriter(typed) => {
+                            typed.write_batch(&doubles, Some(&defs), None).expect("f64");
+                        }
+                        _ => panic!("the cash layout is INT64 and DOUBLE only"),
                     }
-                    ColumnWriter::DoubleColumnWriter(typed) => {
-                        typed.write_batch(&doubles, Some(&defs), None).expect("f64");
-                    }
-                    _ => panic!("the cash layout is INT64 and DOUBLE only"),
+                    column.close().expect("close column");
                 }
-                column.close().expect("close column");
+                group.close().expect("close row group");
             }
-            group.close().expect("close row group");
             writer.close().expect("close writer");
         }
         out
@@ -1488,6 +1507,174 @@ mod tests {
             .expect("a footer that agrees with itself is not refused: the recorded limit");
         let stamps: Vec<i64> = batch.iter().map(|b| b.timestamp_micros).collect();
         assert_eq!(stamps, [0, 1, 2, 3], "only the first page of each column");
+    }
+
+    /// Cuts row group `group` of `sound` to the first of its two four-row
+    /// pages in every count the footer holds for it — the group's `num_rows`,
+    /// every chunk's `num_values` and every chunk's `total_compressed_size` —
+    /// then applies `more` to the footer. The byte cuts are found the way
+    /// `row_value_and_byte_counts_understated_together_are_refused_on_the_file_count`
+    /// finds them: each read of the group names one column's unread bytes, and
+    /// each column is named once. Returns the lying file and the reads' last
+    /// answer, the one that named no more unread bytes.
+    fn cut_group_to_first_page(
+        sound: &[u8],
+        group: usize,
+        more: impl Fn(&mut FileMetaData),
+    ) -> (Vec<u8>, Result<Batch, LakeError>) {
+        let lie = |cut: &[i64]| {
+            patch_footer(sound, |meta| {
+                meta.row_groups[group].num_rows = 4;
+                for (i, chunk) in meta.row_groups[group].columns.iter_mut().enumerate() {
+                    let m = chunk
+                        .meta_data
+                        .as_mut()
+                        .expect("the writer records chunk metadata");
+                    m.num_values = 4;
+                    m.total_compressed_size -= cut[i];
+                }
+                more(meta);
+            })
+        };
+        let mut cut = [0_i64; CASH.len()];
+        let mut named: Vec<&str> = Vec::new();
+        loop {
+            let bytes = lie(&cut);
+            let file = LakeFile::from_bytes(bytes.clone()).expect("the footer still parses");
+            match file.read_row_group(group) {
+                Err(LakeError::UnreadChunkBytes { column, bytes }) => {
+                    assert!(!named.contains(&column), "{column} named twice");
+                    named.push(column);
+                    let i = CASH
+                        .iter()
+                        .position(|(n, _)| *n == column)
+                        .expect("a cash column");
+                    cut[i] = i64::try_from(bytes).expect("a chunk length fits an i64");
+                }
+                last => {
+                    let every: Vec<&str> = CASH.iter().map(|(n, _)| *n).collect();
+                    assert_eq!(named, every, "every column's second page was cut away");
+                    return (bytes, last);
+                }
+            }
+        }
+    }
+
+    /// The timestamps of every batch, in order.
+    fn stamps_of(batches: &[Batch]) -> Vec<i64> {
+        batches
+            .iter()
+            .flat_map(|b| b.iter().map(|bar| bar.timestamp_micros))
+            .collect()
+    }
+
+    /// **KNOWN LIMIT: A CUT GROUP WHOSE ROWS ANOTHER GROUP MAKES UP IS READ
+    /// SHORT ON ITS OWN.** Round 4 of review, W3-lake1-2, D-0778.
+    ///
+    /// Two row groups of eight rows, each chunk two pages of four. Group 0 is
+    /// cut to its first page in every count, and group 1's `num_rows` is raised
+    /// from 8 to 12, so the groups still sum to the untouched file-level 16 and
+    /// `RowCountsDisagree` has nothing to see. Group 0 read on its own decodes
+    /// as its first four rows. Group 1 is refused when read, as a short chunk,
+    /// and so is the whole file. `docs/06-limits.md` records this; the test
+    /// pins it so that closing it is seen.
+    #[test]
+    fn a_cut_group_padded_by_another_reads_short_alone_and_the_padded_one_is_refused() {
+        let ints: Vec<i64> = (0..8).collect();
+        let sound = cash_file_grouped(&ints, Some(4), 2);
+        let (lie, group0) = cut_group_to_first_page(&sound, 0, |meta| {
+            meta.row_groups[1].num_rows = 12;
+        });
+        let group0 = group0.expect("the recorded limit: group 0 alone is not refused");
+        assert_eq!(stamps_of(&[group0]), [0, 1, 2, 3], "only its first page");
+
+        let file = LakeFile::from_bytes(lie).expect("the footer parses");
+        assert_eq!((file.num_rows(), file.row_groups()), (16, 2));
+        match file.read_row_group(1) {
+            Err(LakeError::ShortColumnChunk {
+                column,
+                row,
+                expected,
+                arrived,
+            }) => assert_eq!((column, row, expected, arrived), ("timestamp", 8, 12, 8)),
+            other => panic!("the padded group was not refused as short: {other:?}"),
+        }
+        assert!(
+            matches!(file.read_all(), Err(LakeError::ShortColumnChunk { .. })),
+            "the whole file is refused"
+        );
+    }
+
+    /// **KNOWN LIMIT: A FOOTER WHOSE ROW-GROUP COUNTS SUM TO THE FILE COUNT
+    /// IS NOT CAUGHT BY THAT SUM, WHATEVER MADE THEM SUM.** Round 4 of review,
+    /// W3-lake1-2, D-0778.
+    ///
+    /// Two footers over a sound one-group, eight-row file, neither touching a
+    /// page. In the first, group 0 is cut to its first page in every count and
+    /// a copy of that cut entry is appended: 4 + 4 is the untouched file-level
+    /// 8, and the file reads as rows `0..4` twice, rows `4..8` dropped. In the
+    /// second, the sound group's entry is listed twice and the file-level
+    /// count set to 16: every row reads twice. Nothing this reader checks
+    /// covers two entries naming the same bytes. `docs/06-limits.md` records
+    /// both; the test pins them so that closing them is seen.
+    #[test]
+    fn row_group_counts_that_sum_to_the_file_count_pass_however_they_were_made_to() {
+        let ints: Vec<i64> = (0..8).collect();
+        let sound = cash_file_written(&ints, Some(4));
+
+        let (copied, cut) = cut_group_to_first_page(&sound, 0, |meta| {
+            let copy = meta.row_groups[0].clone();
+            meta.row_groups.push(copy);
+        });
+        match cut {
+            Err(LakeError::RowCountsDisagree { .. }) => {
+                panic!("the cut and its copy sum to the file count")
+            }
+            other => assert_eq!(stamps_of(&[other.expect("group 0 decodes")]), [0, 1, 2, 3]),
+        }
+        let copied = LakeFile::from_bytes(copied).expect("the footer parses");
+        assert_eq!((copied.num_rows(), copied.row_groups()), (8, 2));
+        let read = copied.read_all().expect("the recorded limit: not refused");
+        assert_eq!(stamps_of(&read), [0, 1, 2, 3, 0, 1, 2, 3]);
+
+        let doubled = patch_footer(&sound, |meta| {
+            let copy = meta.row_groups[0].clone();
+            meta.row_groups.push(copy);
+            meta.num_rows = 16;
+        });
+        let doubled = LakeFile::from_bytes(doubled).expect("the footer parses");
+        let read = doubled.read_all().expect("the recorded limit: not refused");
+        let once: Vec<i64> = (0..8).collect();
+        assert_eq!(stamps_of(&read), [once.clone(), once].concat());
+    }
+
+    /// **`LakeFile::num_rows` IS THE FOOTER'S CLAIM, CHECKED ONLY WHEN A GROUP
+    /// IS READ.** Round 4 of review, D-0778.
+    ///
+    /// A sound two-group file of five rows each, with the file-level count
+    /// patched to every value around and away from the true 10. Each still
+    /// opens, and `num_rows` answers the patched number unqualified; every
+    /// group read is then refused, naming both counts.
+    #[test]
+    fn a_file_count_that_disagrees_opens_and_refuses_every_group_read() {
+        let ints: Vec<i64> = (0..5).collect();
+        let sound = cash_file_grouped(&ints, None, 2);
+        let file = LakeFile::from_bytes(sound.clone()).expect("the sound file opens");
+        assert_eq!(file.read_all().expect("and reads").len(), 2);
+
+        for claim in [9, 11, 0, -1, i64::MAX, i64::MIN] {
+            let lie = patch_footer(&sound, |meta| meta.num_rows = claim);
+            let file = LakeFile::from_bytes(lie).expect("a disagreeing count still opens");
+            assert_eq!(file.num_rows(), claim, "the footer's claim, unqualified");
+            for group in 0..2 {
+                match file.read_row_group(group) {
+                    Err(LakeError::RowCountsDisagree { file, groups }) => {
+                        assert_eq!((file, groups), (claim, 10));
+                    }
+                    other => panic!("group {group} under {claim}: {other:?}"),
+                }
+            }
+        }
     }
 
     /// **`LakeFile`'s hand-written `Debug` names its counts and not its bytes.**

@@ -43797,11 +43797,14 @@ column can see is still named by that column: the D-0775 and D-0776 tests are
 unchanged. It is a refusal at read, not at open, so a file whose counts
 disagree still opens and still reports its footer's `num_rows`.
 
-**What it does not close.** A footer that also cuts the file-level `num_rows`
-to the same prefix agrees with itself, and it decodes as that prefix; the test
-pins that as the known limit, and `docs/06-limits.md` records it. Checking that
-the chunks' byte ranges tile the row group with no gap was the reviewer's
-optional second check and is not implemented here.
+**What it does not close.** Any footer whose row-group counts sum to the
+file-level `num_rows` passes the check, whatever made them sum. A footer that
+also cuts the file-level `num_rows` to the same prefix decodes as that prefix,
+and the test pins it. D-0778 names two more ways to the same sum, another
+group raised to make up the cut and a row-group entry listed twice, and
+`docs/06-limits.md` records all three. Checking that the chunks' byte ranges
+tile the file with no gap was the reviewer's optional second check and is not
+implemented here.
 
 **Cost.** One `i128` sum over the row groups at open, which already reads the
 whole file; one comparison per `read_row_group`. No run identity moves: no
@@ -43819,3 +43822,55 @@ until a 60-second alarm killed it (exit 142). The step is now
 with the same forced `Some(0)` that test and two page tests fail at once
 instead. `page::tests::the_step_over_rowless_pages_ends_even_if_a_step_does_not_advance`
 pins the bound.
+
+### D-0778 — Record every footer that sums to its file count, and stop a rowless step past the end being taken as consumed — 2026-10-01
+
+**What happened.** Round 4 of independent review of D-0777 upheld one
+should-fix and three nits on W3-lake1-2.
+
+1. *The recorded limit was narrower than what is open.* D-0777 and
+   `docs/06-limits.md` named one way past `RowCountsDisagree`, cutting the
+   file-level `num_rows` too. The reviewer's probe found a second: of two
+   eight-row groups, group 0 cut to its first page in every count and group 1's
+   `num_rows` raised to 12, the file-level 16 untouched. It printed
+   `RV7 COMPENSATING: file.num_rows()=16 group0=Ok(4) group1=Err(ShortColumnChunk { column: "timestamp", row: 8, expected: 12, arrived: 8 })`.
+2. *The same gap by a copied entry.* A second probe appended a copy of a cut
+   group's footer entry, and listed a sound group twice under a file-level 16.
+   It printed `read_all=Ok([0, 1, 2, 3, 0, 1, 2, 3])` and every row twice.
+3. *A disagreeing file count is seen only at read.* `LakeFile::num_rows`
+   returned the footer's claim unqualified, with nothing saying so.
+4. *`page::step_over_rowless` failed open on a step past the end.*
+   `rest.get(len..).unwrap_or_default()` took a length past the bytes as
+   everything consumed, so those bytes were never counted as unread.
+
+**The choices.**
+
+- For 1 and 2, the limit is recorded, not closed. What would close them is a
+  check that chunk byte ranges tile the file with no gap and no overlap, and
+  whether the Polars writer that wrote the lake lays chunks out that way is
+  UNMEASURED: `~/.brutex/lake` is not on this machine and `tests/real_lake.rs`
+  is `#[ignore]`d. A check built on an unmeasured layout could refuse real
+  files with nothing here to show it. `docs/06-limits.md`'s D-0777 section is
+  rewritten to say any footer whose row-group counts sum to the file count
+  passes, and names the three ways tested;
+  `reader::tests::a_cut_group_padded_by_another_reads_short_alone_and_the_padded_one_is_refused`
+  and
+  `reader::tests::row_group_counts_that_sum_to_the_file_count_pass_however_they_were_made_to`
+  pin them, so closing one is seen.
+- For 3, the refusal stays at read. `LakeFile::num_rows`'s doc now says it is
+  the footer's claim, not checked at open, and
+  `reader::tests::a_file_count_that_disagrees_opens_and_refuses_every_group_read`
+  pins it for file-level counts of 9, 11, 0, -1, `i64::MAX` and `i64::MIN`
+  against groups summing to 10. With the comparison disabled that test fails at
+  `group 0 under 9`.
+- For 4, a length past the end now ends the walk with what is left, to be
+  counted as unread. The case added to
+  `page::tests::the_step_over_rowless_pages_ends_even_if_a_step_does_not_advance`
+  failed before the change with `a step past the end leaves every byte`,
+  `left: []`, and passes after. `rowless_extent` answers `Some(len)` only when
+  `len <= rest.len()`, so no lake file reached this; it is the helper's own
+  contract that changed.
+
+**Cost.** Unchanged: the step already called `rest.get(len..)`, and only what
+follows a `None` from it changes. No run identity moves: no workspace crate depends on
+`lake`, and no stored byte changes.
