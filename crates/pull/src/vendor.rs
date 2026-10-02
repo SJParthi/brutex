@@ -448,12 +448,13 @@ impl Granularity {
         clippy::match_same_arms,
         reason = "the two `None` arms return the same value and state DIFFERENT facts, which \
                   is the whole point of naming every arm. `Minute30 | Hour1` is 'crates/store \
-                  ships a directory and the fold would file a stub into it'; `Tick | Second1 \
-                  | Second5 | Week1` is 'crates/store ships no directory at all'. Merging them \
-                  would put a rung refused for arithmetic beside four refused for absence, and \
-                  the next reader deciding whether a rung can be enabled would have to \
-                  re-derive which kind each one is — the exact question the `_` arm this \
-                  function replaced made unanswerable. D-0132."
+                  ships a directory, and a VENDOR's bar at this rung sits on a grid nothing \
+                  here has captured' (D-0956); `Tick | Second5 | Week1` is 'crates/store \
+                  ships no directory at all'. Merging them would put a rung refused for an \
+                  unverified vendor grid beside three refused for absence, and the next \
+                  reader deciding whether a rung can be enabled would have to re-derive \
+                  which kind each one is — the exact question the `_` arm this function \
+                  replaced made unanswerable. D-0132."
     )]
     pub const fn store_timeframe(self) -> Option<Timeframe> {
         match self {
@@ -461,37 +462,45 @@ impl Granularity {
             Self::Minute3 => Some(Timeframe::MINUTE_3),
             Self::Minute5 => Some(Timeframe::MINUTE_5),
             Self::Minute15 => Some(Timeframe::MINUTE_15),
-            // THIRTY AND SIXTY ARE REFUSED, AND IT IS THE STUB, NOT THE
-            // DIRECTORY.
+            // THIRTY AND SIXTY ARE REFUSED HERE, AND IT IS NOT THE FOLD.
             //
-            // Both have a directory. What they do not have is a bar that means
-            // what its stamp says. `crate::fold`'s grid is anchored at IST
-            // MIDNIGHT (`fold.rs`, `IST_ANCHOR_MICROS`) and the NSE open is 555
-            // minutes past it. 555 is divisible by 1, 3, 5 and 15 and not by 30
-            // (18.5) or 60 (9.25) — so a 30-minute session folds to a first
-            // record stamped **09:00**, holding only 09:15–09:29: fifteen
-            // minutes of trade, filed in a file whose header says 1,800
-            // seconds, which every later reader takes as the whole
-            // [09:00, 09:30) bar. Its `open` is the 09:15 print presented as
-            // the 09:00 print. At sixty it is worse — a 45-minute first bar and
-            // a 30-minute last one.
+            // This comment used to say the refusal was the opening STUB of a
+            // fold grid anchored at IST midnight. That stopped being true when
+            // `crate::fold` moved an intraday rung's anchor to the OPEN: every
+            // intraday rung's first folded bar now begins at 09:15, and
+            // `pull::ingest::derive_all` files 30min and 60min bars folded from
+            // the minute without ever asking this function. The const block
+            // that was meant to notice the move kept passing, because it
+            // asserted the 555-minute arithmetic and not the fold. D-0956.
             //
-            // That is silent wrong data in an append-only store: the file is
-            // well formed, the checksum is right, the count is accurate, and
-            // the month cannot be prepended or rewritten. `CLAUDE.md` §4 ranks
-            // a loud refusal above exactly this.
+            // WHAT THIS FUNCTION STILL DECIDES is whether a bar a VENDOR served
+            // at this rung may be filed as it arrived (`pull::ingest::Plan`).
+            // For such a bar the stamp is the vendor's, not the fold's, and two
+            // grids are plausible: one counted from IST midnight and one counted
+            // from the 09:15 open. At 1, 3, 5 and 15 minutes the two are the
+            // SAME grid — 555 divides by each — so a vendor bar lands on a
+            // stored edge whichever convention the vendor uses. At 30 and 60
+            // they differ (555 / 30 = 18.5, 555 / 60 = 9.25): a midnight-counted
+            // vendor would stamp its first bar 09:00, and filing it under a grid
+            // whose first edge is 09:15 would present fifteen (or forty-five)
+            // minutes of trade as a whole bar, silently, in an append-only
+            // store.
             //
-            // THE PREDICATE IS THE STORE'S OWN AND THIS IS ITS FIRST CALLER.
-            // `Timeframe::aligns_with_the_open` has existed since D-0077, which
-            // says in as many words that it exposes the stub "so a caller can
-            // refuse rather than discover it" — and it had no production caller
-            // at all. Asking it here rather than listing the two rungs by hand
-            // means a rung added to the ladder is judged by the arithmetic
-            // instead of by whoever remembers this comment.
+            // Which grid any vendor uses at 30 or 60 minutes is UNVERIFIED:
+            // `docs/00-charter.md` records that Kite publishes `30minute` and
+            // `60minute` and that Groww's interval table runs `2minute`…`4hour`,
+            // and neither it nor
+            // `docs/08-vendor-samples.md` records where one of those bars is
+            // stamped. No feed declares either rung today, so this refusal is
+            // reached by no shipped request; it is the guard that makes a
+            // future declaration bring a captured sample with it.
             //
-            // Restoring them is not a table edit: it needs the fold grid
-            // anchored at the session open rather than at IST midnight, which
-            // changes what a bar IS at every rung and is a D-entry of its own.
+            // THE PREDICATE IS THE STORE'S OWN. `Timeframe::aligns_with_the_open`
+            // answers "does the midnight-counted grid land on 09:15", which is
+            // exactly "do the two plausible grids coincide". Asking it rather
+            // than listing the two rungs by hand means a rung added to the
+            // ladder is judged by the arithmetic. Pinned against the fold's real
+            // first-bar stamp by `pull::anchor::store_timeframe_follows_the_fold_anchor`.
             Self::Minute30 if Timeframe::MINUTE_30.aligns_with_the_open() => {
                 Some(Timeframe::MINUTE_30)
             }
@@ -633,14 +642,18 @@ rung_matches_store! {
     Hour1    <=> MINUTE_60,
 }
 
-// THE NAMES AGREE FOR ALL SIX ABOVE. WHETHER A RUNG IS WRITABLE IS A DIFFERENT
-// QUESTION, AND THIS PINS THE ANSWER SO IT CANNOT DRIFT EITHER WAY.
+// THE NAMES AGREE FOR ALL SIX ABOVE. WHETHER A VENDOR'S BAR AT A RUNG IS
+// FILABLE IS A DIFFERENT QUESTION, AND THIS PINS THE ARITHMETIC IT RESTS ON.
 //
-// `store_timeframe` refuses `Minute30` and `Hour1` because their opening bar is
-// a stub — see that function. The arithmetic behind the refusal is asserted here
-// rather than left implicit, so a change to the fold anchor that made them align
-// would fail this block and force the refusal to be revisited, instead of
-// leaving two rungs refused for a reason that had stopped being true.
+// `store_timeframe` refuses a vendor-served `Minute30` and `Hour1` because the
+// grid counted from IST midnight and the grid counted from the 09:15 open are
+// different grids at those two rungs, and which one a vendor stamps on is
+// UNVERIFIED — see that function. The block below asserts only the 555-minute
+// arithmetic: which rungs the two grids agree on. It says NOTHING about
+// `crate::fold`, whose intraday anchor is the open, and it did not fire when
+// that anchor moved — which is why the fold's real first-bar stamp is pinned by
+// a test that runs the fold, `pull::anchor::store_timeframe_follows_the_fold_anchor`,
+// rather than by a `const` that cannot. D-0956.
 const _: () = {
     assert!(Timeframe::MINUTE_1.aligns_with_the_open());
     assert!(Timeframe::MINUTE_3.aligns_with_the_open());
@@ -649,34 +662,22 @@ const _: () = {
     // 555 / 30 = 18.5 and 555 / 60 = 9.25.
     assert!(!Timeframe::MINUTE_30.aligns_with_the_open());
     assert!(!Timeframe::MINUTE_60.aligns_with_the_open());
-    // 555 / 2 = 277.5 and 555 / 10 = 55.5 — the two derive-only rungs answer
-    // the same way, which is why they are derive-only.
+    // 555 / 2 = 277.5 and 555 / 10 = 55.5. The two derive-only rungs have no
+    // `Granularity` at all, so no vendor bar at them can reach the store; the
+    // fold files them on the open grid.
     assert!(!Timeframe::MINUTE_2.aligns_with_the_open());
     assert!(!Timeframe::MINUTE_10.aligns_with_the_open());
 };
 
-// ══ AND THE ANCHOR MOVED, SO READ THE FOUR `false`s ABOVE CORRECTLY ══
-//
-// The block above still holds and still says what it always said: those four
-// rungs do not divide 555, so a grid anchored at IST MIDNIGHT gives each of
-// them an opening stub. That was the whole reason `store_timeframe` refused
-// thirty and sixty.
-//
-// `crate::fold` no longer anchors an intraday rung at midnight. It anchors at
-// the OPEN, so every intraday rung's first bar of the day begins at 09:15 by
-// construction and the predicate above has stopped being the question that
-// decides whether a rung is safe to file. What decides it now is whether the
-// SESSION divides evenly — 375 minutes — and the answer is ragged for the same
-// four, at the other end:
-//
-//   1min 375  3min 125  5min 75  15min 25    tile the session exactly
-//   2min 187.5  10min 37.5  30min 12.5  60min 6.25    short LAST bar
-//
-// A trailing stub is a different object from a leading one. The last bar covers
-// 15:15-15:30, is stamped correctly and holds the trades that happened in it; a
-// leading stub was stamped before the open and mislabelled. `store_timeframe`
-// is therefore free to file all of them, and this comment is here so the four
-// `false`s above are not read as a refusal they no longer imply.
+// A `false` ABOVE IS NOT A STUB IN ANYTHING THE FOLD WRITES. `crate::fold`
+// anchors every intraday rung at the open, so each one's first folded bar
+// begins at 09:15. Where a rung leaves a short bar it is the LAST one of the
+// session, and which rungs do that depends on the VENUE's session length, not
+// on the rung alone — 375 minutes for the index, 385 for equity derivatives
+// from 2026-08-03, and 360 for the continuous session of a cash security
+// eligible for the closing auction from that day. `pull::fold::complete_minutes_for_venue` derives it from the venue
+// row; `pull::anchor::derived_rung_stub_minutes_follow_the_venue_session` pins
+// it. D-0956.
 
 // THE SIX ABOVE PLUS THE DAY ARE EVERY ENTRY `Timeframe::KNOWN` HOLDS.
 //
@@ -1687,7 +1688,8 @@ pub struct Auth {
 /// Groww — correct for exactly one class each, wrong for the other. Measured
 /// consequence: every one of the 750 NIFTY-Total-Market equities was asked for
 /// inside Dhan's INDEX segment, and the broker answered no window for all of
-/// them. Groww is hardcoded the opposite way and cannot address an index.
+/// them. Groww was hardcoded the opposite way and could not address an index;
+/// its descriptor now carries a row for every class.
 ///
 /// The class is a property of the INSTRUMENT, not of the feed, so it is named
 /// once here and each descriptor maps it to its own words. `CLAUDE.md` §5:
@@ -3153,13 +3155,18 @@ impl HttpSpec {
     /// This feed's words for a listing class, or `None` when it records none.
     ///
     /// `None` is the honest answer for a class this feed has never been
-    /// verified against. Groww's documentation states `CASH` and `FNO` for
-    /// `segment` and says nothing about an index, so an index request is
-    /// refused by name rather than sent a guessed word — `CLAUDE.md` §3 rule 1.
+    /// verified against: a class with no row is refused by name rather than
+    /// sent a guessed word — `CLAUDE.md` §3 rule 1. (Groww was the example
+    /// here, and it no longer is: `docs/00-charter.md` records its live-data
+    /// page giving `CASH` for an index as well as a stock, and its descriptor
+    /// carries all three classes.)
     ///
-    /// CONSTANT WORK, not a scan. The table's length is the number of listing
-    /// classes — two — so this costs the same against a universe of 800 as
-    /// against one. Same shape as [`Self::granularity_token`] above.
+    /// CONSTANT WORK, not a scan. The table holds at most one row per
+    /// [`Listing`] variant — THREE: `Index`, `Equity`, `Derivative` (this read
+    /// "two" while Groww shipped three rows; D-0956) — so this costs the same
+    /// against a universe of 800 as against one. The bound is pinned by
+    /// `pull::vendor::every_listing_table_holds_at_most_one_row_per_class`.
+    /// Same shape as [`Self::granularity_token`] above.
     #[must_use]
     pub fn listing_words(&self, listing: Listing) -> Option<ListingWords> {
         self.listings
@@ -3953,7 +3960,9 @@ impl Descriptor {
     /// than the floor" is `<` on two bytes. The bound does not move when the
     /// ladder grows to twenty rungs or the feed table to forty rows.
     /// `pull::vendor::every_feed_answers_every_rung_with_one_of_two_verdicts`
-    /// walks the whole 4 × 11 matrix, and
+    /// walks the whole `FEED_COUNT` × `GRANULARITY_COUNT` matrix — 5 × 11
+    /// today, and that test pins both numbers so this sentence cannot go stale
+    /// again (it said 4 × 11 after Zerodha made five; D-0956) — and
     /// `pull::vendor::the_ladder_ascends_so_one_comparison_decides_which_rung_is_finer`
     /// proves the ordering the single comparison rests on.
     ///
@@ -4674,9 +4683,15 @@ const GROWW: Descriptor = Descriptor {
         auth: Auth {
             header: "Authorization",
             scheme: AuthScheme::Bearer,
-            // One secret, behind a fixed prefix. The `api-key` this vendor
-            // also issues is spent by `pull::totp` to MINT the daily token and
-            // never travels in this header — see docs/00-charter.md §4, Auth.
+            // One secret, behind a fixed prefix: the daily `access-token`.
+            // The charter records that token as TOTP-derived and lists
+            // `api-key` and `totp-secret` beside it (docs/00-charter.md, Groww,
+            // Auth and Credentials). This build reads NEITHER of those two:
+            // `key_field` is `None`, so only `access-token` is fetched, and the
+            // token is minted outside this repository — `CLAUDE.md` §8.
+            // `pull::totp` computes a code and is wired to no token exchange;
+            // `pull::totp::no_path_outside_this_module_computes_a_code`
+            // pins that. D-0956.
             key_field: None,
         },
         date_format: DateFormat::DashedYmdMidnight,
@@ -6017,14 +6032,16 @@ mod tests {
                 // would have agreed with it.
                 //
                 //   1. `Timeframe::KNOWN` holds no directory for the rung, or
-                //   2. it does, and the rung's opening bar would be a STUB —
-                //      `aligns_with_the_open` is false, so a fold anchored at
-                //      IST midnight would file 15 minutes of trade as the
-                //      [09:00, 09:30) bar.
+                //   2. it does, and the grid counted from IST midnight and the
+                //      grid counted from the 09:15 open disagree at it —
+                //      `aligns_with_the_open` is false — so a VENDOR's bar at
+                //      that rung sits on a grid nothing here has captured
+                //      (UNVERIFIED; see `store_timeframe`, D-0956). It is not a
+                //      fold stub: `crate::fold` anchors at the open.
                 //
                 // The second arm is asserted through the store's predicate, not
-                // by naming 30min and 60min, so a change to the fold anchor
-                // that made them align turns this into a failure that says so.
+                // by naming 30min and 60min, so a rung whose two grids agree
+                // can never be refused by it.
                 None => {
                     if let Some(known) = Timeframe::KNOWN
                         .iter()
@@ -6034,9 +6051,10 @@ mod tests {
                             !known.aligns_with_the_open(),
                             "a None is a refusal at the write boundary, never a \
                              substitution — and crates/store ships a directory \
-                             for {rung} whose bars DO align with the 09:15 open, \
-                             so refusing it strikes a rung off the operator's \
-                             form that the store can file correctly"
+                             for {rung} whose midnight and open grids coincide, \
+                             so a vendor's bar there lands on a stored edge \
+                             whatever its convention, and refusing it strikes a \
+                             rung off the operator's form for nothing"
                         );
                     }
                 }
@@ -6087,28 +6105,29 @@ mod tests {
                 "{name} is a store directory no rung names"
             );
         }
-        // THE STUB RUNGS ARE REFUSED, AND THE COUNT IS PINNED so this test
-        // cannot pass by refusing everything.
-        // THE MIDNIGHT-STUB RUNGS ARE PINNED so this test cannot pass by
-        // refusing everything — and there are FOUR of them now, not two.
+        // THE UNFILABLE-FROM-A-VENDOR COUNT IS PINNED so this test cannot pass
+        // by refusing everything — and it is FOUR, for two different reasons.
         //
-        // It said two, and named 30min and 60min. Two and ten minutes joined
-        // `KNOWN` for the derive ladder and answer `aligns_with_the_open` the
-        // same way — 555/2 = 277.5, 555/10 = 55.5 — so the count is four.
+        // 2min and 10min have no `Granularity` at all: nothing can ask a
+        // vendor for them, and `pull::ingest::derive_all` files them from the
+        // minute. 30min and 60min have one and `store_timeframe` refuses it,
+        // because the midnight-counted and open-counted grids disagree there
+        // and the vendor's choice is UNVERIFIED (D-0956). All four are the rungs
+        // that do not divide 555.
         //
-        // WHAT THE COUNT MEANS HAS ALSO MOVED, and the old wording said "the
-        // fold cannot align with the open" which is no longer true of any of
-        // them: `crate::fold` anchors an intraday rung AT the open, so every
-        // one begins the day at 09:15 by construction. These four are the rungs
-        // that do not divide 555, which is now a statement about the MIDNIGHT
-        // grid the daily rung still uses and about nothing else. Their
-        // raggedness moved to a short LAST bar, which is stamped correctly.
+        // NONE OF THE FOUR IS A FOLD STUB. This comment used to call them
+        // "midnight-stub rungs". `crate::fold` anchors an intraday rung AT the
+        // open, so every one begins the day at 09:15; a short bar, where a
+        // rung leaves one, is the session's LAST, and which rungs leave one is
+        // set by the venue's session length —
+        // `pull::anchor::derived_rung_stub_minutes_follow_the_venue_session`.
         assert_eq!(
             Timeframe::KNOWN.len() - expected.len(),
             4,
             "2min, 10min, 30min and 60min are the rungs that do not divide the \
-             555 minutes from IST midnight to the open; if that set changed, \
-             the fold's anchor and store_timeframe must both be revisited"
+             555 minutes from IST midnight to the open, so the midnight and \
+             open grids disagree on them; if that set changed, store_timeframe's \
+             refusal must be revisited (D-0956)"
         );
         // Coarsest last, which is the order `Granularity::ALL` walks and the
         // order a backfill lands them in.
@@ -8287,13 +8306,16 @@ mod tests {
 
     /// EVERY FEED ANSWERS EVERY RUNG, AND THE ANSWER IS ONE OF TWO VERDICTS.
     ///
-    /// The whole 4 × 11 matrix, because a capability with a hole in it is a
+    /// The whole `FEED_COUNT` × `GRANULARITY_COUNT` matrix — 5 × 11, pinned
+    /// below (it read 4 × 11 after a fifth feed landed; D-0956) — because a
+    /// capability with a hole in it is a
     /// capability a caller has to guess at. Two verdicts: the vendor refuses
     /// the rung outright, or it does not — and the second splits into the one
     /// rung that IS the floor and the rungs above it, which is where the
     /// tick-versus-conflated answer lives.
     #[test]
     fn every_feed_answers_every_rung_with_one_of_two_verdicts() {
+        let mut cells = 0_usize;
         for feed in Feed::ALL {
             let floor = feed.descriptor().granularity_floor;
             let mut refused = 0_usize;
@@ -8360,7 +8382,68 @@ mod tests {
                 floor.finest,
                 "{feed} disagrees with its own row about its finest rung"
             );
+            cells += refused + at_floor + coarser;
         }
+        // THE MATRIX THE DOCS NAME IS THE MATRIX WALKED. `granularity_verdict`'s
+        // doc, this test's doc and docs/04-invariants.md GF-03 all said 4 × 11
+        // for as long as there were five feeds. They now say 5 × 11, and this
+        // is what fails when a sixth feed or a twelfth rung makes that false.
+        // D-0956.
+        assert_eq!(
+            (Feed::ALL.len(), FEED_COUNT, GRANULARITY_COUNT),
+            (5, 5, 11),
+            "the docs name a 5 × 11 matrix; update them with the counts"
+        );
+        assert_eq!(cells, FEED_COUNT * GRANULARITY_COUNT, "every cell answered");
+    }
+
+    /// **EVERY LISTING TABLE HOLDS AT MOST ONE ROW PER CLASS — THREE.**
+    ///
+    /// `HttpSpec::listing_words`'s O(1) argument is that its table cannot
+    /// outgrow the number of [`Listing`] classes. Its doc said that number was
+    /// two while Groww shipped three rows. The class count is taken from an
+    /// exhaustive `match`, so a fourth variant fails to compile here rather
+    /// than leaving the bound's premise stale again. This test,
+    /// `pull::vendor::every_listing_table_holds_at_most_one_row_per_class`, is
+    /// the proof that doc names. D-0956.
+    #[test]
+    fn every_listing_table_holds_at_most_one_row_per_class() {
+        const fn slot(listing: Listing) -> usize {
+            match listing {
+                Listing::Index => 0,
+                Listing::Equity => 1,
+                Listing::Derivative => 2,
+            }
+        }
+        const CLASSES: usize = 3;
+        let mut widest = 0_usize;
+        for feed in Feed::ALL {
+            let Transport::Http(spec) = feed.descriptor().transport else {
+                continue;
+            };
+            let mut seen = [false; CLASSES];
+            for row in spec.listings {
+                let at = slot(row.listing);
+                assert!(!seen[at], "{feed}: two rows for {:?}", row.listing);
+                seen[at] = true;
+                assert_eq!(
+                    spec.listing_words(row.listing),
+                    Some(*row),
+                    "{feed}: the lookup finds the row it holds"
+                );
+            }
+            assert!(spec.listings.len() <= CLASSES, "{feed}");
+            widest = widest.max(spec.listings.len());
+        }
+        assert_eq!(widest, CLASSES, "Groww carries a row for every class");
+        let Transport::Http(groww) = Feed::Groww.descriptor().transport else {
+            panic!("Groww is an HTTP feed");
+        };
+        assert_eq!(
+            groww.listings.len(),
+            CLASSES,
+            "the feed the old doc's \"two\" was wrong about"
+        );
     }
 
     /// NO FEED IN THIS BUILD SERVES A PRINT STREAM, AND THAT IS PERMANENT.

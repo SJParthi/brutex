@@ -2790,11 +2790,12 @@ fn an_unlisted_length_is_refused_and_not_invented() {
     }
 }
 
-/// The alignment split the gap-leg rule depends on. The fold grid is anchored
-/// at IST midnight and the open is 555 minutes past it, so a rung aligns
-/// exactly when its length divides 555. This is arithmetic, not a convention,
-/// and a rule that reads "the first candle of the day" reads a STUB on the two
-/// rungs that fail it.
+/// The alignment split: a grid counted from IST midnight lands on the 09:15
+/// open exactly when the rung's length divides 555. This is arithmetic, not a
+/// convention. It no longer describes `pull::fold`, which counts every
+/// intraday rung from the open (D-0956): "on time" here means "a midnight-
+/// counted grid would be on time", which is what decides whether a vendor's
+/// bar at the rung is unambiguous.
 #[test]
 fn only_the_rungs_that_divide_555_start_a_session_on_time() {
     assert!(Timeframe::MINUTE_1.aligns_with_the_open());
