@@ -4833,6 +4833,10 @@ jobs:
           #     is allowed for, computed once for all three tests instead of once
           #     each. Only integer exceedance counts cross threads, so no float is
           #     ever summed in an order that depends on the thread count.
+          #   runner/bootstrap.rs 48 -> 49 (D-0932). The new line is the
+          #     Romano--Wolf null table, `Vec<Vec<f64>>` of studentized resampled
+          #     means, built once instead of per round. A t-statistic has no paisa
+          #     representation, the reason the other 48 are allowed.
           allow_float='
           crates/api/src/ingest.rs 1
           crates/api/src/server.rs 4
@@ -4847,7 +4851,7 @@ jobs:
           crates/runner/src/grid.rs 4
           crates/runner/src/significance.rs 21
           crates/runner/src/admission.rs 4
-          crates/runner/src/bootstrap.rs 48
+          crates/runner/src/bootstrap.rs 49
           crates/runner/src/bootstrap_family_pass.rs 17
           crates/runner/src/outcome.rs 26
           crates/runner/src/report.rs 3
