@@ -113,12 +113,54 @@ jobs:
           # line above would permit a build script anywhere in the tree, which
           # is the thing CLAUDE.md section 2 exists to forbid.
           web_allowed='.*'
-          # Files with no extension that are still legitimate.
-          allowed_names='LICENSE|CODEOWNERS|\.gitignore|\.gitattributes'
+          # Files with no extension that are still legitimate -- AND WHERE.
+          # The names used to pass at any depth, so `crates/x/LICENSE` could
+          # hold anything (UC-8). A licence and a code-owners file mean
+          # something at the root (and CODEOWNERS under .github/ or docs/,
+          # where GitHub reads it); the two git files mean something in any
+          # directory. D-1104.
+          root_names='LICENSE|CODEOWNERS'
+          any_depth_names='\.gitignore|\.gitattributes'
           bad=0
-          while IFS= read -r f; do
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
+          work=$(mktemp -d)
+          # THE LISTING IS A FILE, NOT A PROCESS SUBSTITUTION (AC-gates-law-10).
+          # `done < <(git ls-files)` swallowed a git that failed -- a moved
+          # worktree, a refused directory owner -- the loop read nothing and
+          # this gate printed OK. Written here, a failure stops the step under
+          # `set -e`, and an empty listing is refused below. NUL-separated with
+          # `-s`, so a name git would quote (a non-ASCII `.rs`, whose extension
+          # read as `rs"`: ET-rust-only-purity-10) is read as itself, and so
+          # the MODE is read alongside it.
+          git ls-files -s -z > "$work/staged"
+          git ls-files -z > "$work/tracked"
+          n=0
+          while IFS= read -r -d '' rec; do
+            n=$((n + 1))
+            mode="${rec%% *}"
+            f="${rec#*$'\t'}"
             base="${f##*/}"
-            if grep -Eq "^(${allowed_names})$" <<< "$base"; then continue; fi
+            # A MODE IS CONTENT TOO (D-1104). Outside web/, every tracked file
+            # is an ordinary non-executable file: a symlink can point the
+            # allowlist's `.rs` at anything, an executable bit turns a `.rs`
+            # holding a shell script into a program cargo can be told to run,
+            # and a gitlink is a whole foreign tree. None is tracked today.
+            case "$f" in
+              web/*) ;;
+              *) if [ "$mode" != 100644 ]; then
+                   printf 'FORBIDDEN MODE  %s  (%s; only 100644 outside web/)\n' "$f" "$mode"
+                   bad=1
+                 fi ;;
+            esac
+            if grep -Eq "^(${any_depth_names})$" <<< "$base"; then continue; fi
+            if grep -Eq "^(${root_names})$" <<< "$base"; then
+              case "$f" in
+                LICENSE|CODEOWNERS|.github/CODEOWNERS|docs/CODEOWNERS) continue ;;
+                web/*) continue ;;
+                *) printf 'FORBIDDEN FILE  %s  (%s is allowed only where it means something)\n' "$f" "$base"
+                   bad=1; continue ;;
+              esac
+            fi
             case "$base" in
               *.*) ext="${base##*.}" ;;
               *)   ext="" ;;
@@ -138,7 +180,39 @@ jobs:
                 "$f" "${ext:-<none>}" "$where"
               bad=1
             fi
-          done < <(git ls-files)
+          done < "$work/staged"
+          if [ "$n" -eq 0 ]; then
+            echo "GATE 1 READ NO TRACKED FILE. A gate that reads nothing is not a gate."
+            exit 1
+          fi
+          echo "read ${n} tracked file(s)"
+
+          # AN EXTENSION IS A NAME, AND THE NAME IS NOT THE CONTENT (D-1104).
+          # Everything above decides from the path. ET-rust-only-purity-3 and
+          # UC-8 put non-Rust content under `.rs`, an executable script named
+          # `.rs` behind a tracked `.cargo/config.toml`, and a NUL byte that
+          # makes every grep-based gate skip a file, and gate 1 passed them all.
+          # Two content checks close what the name cannot:
+          #
+          #   1. `source_scan content`: outside web/, no NUL byte, nothing that
+          #      is not UTF-8, no `.rs` opening with a shebang, and no browser
+          #      code in a `.html` or `.css`.
+          #   2. `source_scan orphans`: every tracked `.rs` outside web/ is
+          #      COMPILED -- reached from a crate root (lib, main, bin, test,
+          #      bench, example, build script, or a manifest `path`) or a
+          #      `.github/*.rs` tool through `mod`, `#[path]` or `include!`. A
+          #      `.rs` nothing compiles is not Rust to anything that reads this
+          #      repository, whatever is in it, and a `.rs` that IS compiled has
+          #      to be Rust or the build fails.
+          if ! "$scan" content "$work/tracked"; then
+            echo "FORBIDDEN CONTENT above. See CLAUDE.md section 2 and D-1104."
+            bad=1
+          fi
+          if ! "$scan" orphans "$work/tracked"; then
+            echo "A TRACKED .rs ABOVE IS COMPILED BY NOTHING, or a module could not"
+            echo "be resolved. Give it a crate root, or remove it. D-1104."
+            bad=1
+          fi
           if [ "$bad" -ne 0 ]; then
             echo
             echo "This repository is Rust only outside web/. See CLAUDE.md section 2"
@@ -149,7 +223,9 @@ jobs:
             echo "Under  web/:    ${web_allowed//|/ }"
             exit 1
           fi
-          echo "OK — every tracked file is in the allowlist for where it lives."
+          echo "OK — every tracked file is in the allowlist for where it lives, has"
+          echo "     an ordinary mode, carries no content its name hides, and every"
+          echo "     .rs outside web/ is compiled."
 
       - name: Gate 1e — the engine builds with no front-end toolchain
         run: |
@@ -194,7 +270,16 @@ jobs:
           # missed exactly that, verified by injecting it. A file on disk is outside
           # cargo's output capture.
           invoked="$stub/.invoked"
-          for tool in node npm npx yarn pnpm bun deno vite webpack esbuild rollup tsc; do
+          # D-1101: the interpreters other than Node are shadowed too. An audit
+          # ran a non-JS interpreter from `crates/cli/build.rs` with every gate
+          # green, and the stub list named only Node's toolchain. Gate 2 now
+          # refuses the spawn in the source; this is the second, runtime signal.
+          # A program reached by ABSOLUTE path is still not shadowed here, which
+          # is why gate 2's token check is the one that carries the rule. The
+          # py-family names are assembled because gate 15 bans the word itself.
+          snake="$(printf 'py')thon"
+          for tool in node npm npx yarn pnpm bun deno vite webpack esbuild rollup tsc \
+                      "$snake" "${snake}3" perl ruby php lua luajit; do
             printf '#!/bin/sh\nprintf "%%s\\n" "%s" >> "%s"\necho "GATE-1E-INVOKED: %s" >&2\nexit 127\n' \
               "$tool" "$invoked" "$tool" > "$stub/$tool"
             chmod +x "$stub/$tool"
@@ -299,12 +384,88 @@ jobs:
           #
           # `.claude/` is the run configuration IntelliJ and the preview tools
           # read. It is operator tooling, not source, and it is not shipped.
-          bad=$(git ls-files '*.json' '*.yml' \
+          # The listing first: `git ls-files ... | grep || true` swallowed a git
+          # that failed and printed OK over nothing (AC-gates-law-10, D-1104).
+          listing=$(git ls-files)
+          [ -n "$listing" ] || { echo "GATE 1B READ NO TRACKED FILE."; exit 1; }
+          bad=$(grep -E '\.(json|yml)$' <<< "$listing" \
                 | grep -Ev '^(\.github/|\.claude/|web/)' || true)
           if [ -n "$bad" ]; then
             printf 'CONFIG OUTSIDE ITS HOME:\n%s\n' "$bad"; exit 1
           fi
           echo "OK."
+
+      - name: Gate 1g — no tracked configuration runs a program
+        run: |
+          set -euo pipefail
+          # D-1105. `.toml` is allowed everywhere, and three tools this
+          # repository runs will EXECUTE what a tracked `.toml` tells them to:
+          #
+          #   * cargo reads `.cargo/config.toml` from the working directory and
+          #     every ancestor. Its `build.rustc-wrapper` names a program cargo
+          #     runs for every rustc invocation, on CI and on every developer
+          #     machine; `target.<t>.runner` and `.linker` are the same door.
+          #     (ET-rust-only-purity-1: a tracked config pointing the wrapper at
+          #     an executable shell script named `.rs`.)
+          #   * cargo-nextest, which the mutation job runs, reads
+          #     `.config/nextest.toml`, and a `[scripts.setup.*]` or
+          #     `[script.*]` table there runs arbitrary commands before the
+          #     tests (ET-rust-only-purity-2).
+          #   * rustup reads `rust-toolchain.toml`, whose `toolchain.path` names
+          #     a custom toolchain directory to run.
+          #
+          # So: no tracked file under any `.cargo/` directory, and the other two
+          # files may carry only the keys listed here, read by the scanner's
+          # TOML walker (D-1100) so quoting, spacing and dotted-key spellings
+          # are all one key. A new key is a reviewed edit to this list. The
+          # workflows themselves may not set the environment-variable or
+          # `--config` forms of the same settings.
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
+          bad=0
+          listing=$(git ls-files)
+          [ -n "$listing" ] || { echo "GATE 1G READ NO TRACKED FILE."; exit 1; }
+          hits=$(grep -E '(^|/)\.cargo(/|$)' <<< "$listing" || true)
+          if [ -n "$hits" ]; then
+            printf 'REFUSED  a tracked cargo configuration:\n%s\n' "$hits"
+            bad=1
+          fi
+          # Only one file may live under .config/, and only one of each tool
+          # file may exist, at the root, because each tool also reads a copy
+          # in any ancestor of the directory it runs in.
+          hits=$(grep -E '^\.config/' <<< "$listing" | grep -vx '\.config/nextest\.toml' || true)
+          hits="$hits$(grep -E '(^|/)(rust-toolchain(\.toml)?|nextest\.toml)$' <<< "$listing" \
+                       | grep -vxE 'rust-toolchain\.toml|\.config/nextest\.toml' || true)"
+          if [ -n "$hits" ]; then
+            printf 'REFUSED  a tool configuration outside its one place:\n%s\n' "$hits"
+            bad=1
+          fi
+          check_keys() {
+            file="$1"; allow="$2"
+            [ -f "$file" ] || return 0
+            keys=$("$scan" toml "$file") || { echo "REFUSED  $file is not TOML this gate can read"; bad=1; return 0; }
+            extra=$(sed -E 's/^[^:]*:[0-9]+:([^ ]*) = .*$/\1/' <<< "$keys" | grep -vxE "$allow" || true)
+            if [ -n "$extra" ]; then
+              printf 'REFUSED  %s sets a key outside its allowlist:\n' "$file"
+              sed 's/^/           /' <<< "$extra"
+              bad=1
+            else
+              printf 'ok       %s — %s key(s), all allowed\n' "$file" "$(grep -c . <<< "$keys")"
+            fi
+          }
+          check_keys rust-toolchain.toml \
+            'toolchain|toolchain\.(channel|components|targets|profile)'
+          check_keys .config/nextest.toml \
+            'profile\.[A-Za-z0-9_-]+\.overrides\[\](\.(filter|priority))?'
+          wf=$(git ls-files '.github/workflows/*.yml')
+          # shellcheck disable=SC2086
+          envs=$(grep -nE '(^|[^A-Za-z0-9_])(RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|CARGO_BUILD_RUSTC_WRAPPER|CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER|CARGO_BUILD_RUSTC|RUSTC|RUSTDOC|CARGO_TARGET_[A-Z0-9_]+_(RUNNER|LINKER))[[:space:]]*[:=]|cargo[^#|;]*[[:space:]]--config[[:space:]=]' $wf || true)
+          if [ -n "$envs" ]; then
+            printf 'REFUSED  a workflow sets a compiler wrapper, runner or linker:\n%s\n' "$envs"
+            bad=1
+          fi
+          [ "$bad" -eq 0 ] || { echo; echo "GATE 1G FAILED. See D-1105."; exit 1; }
+          echo "OK — no tracked configuration names a program for cargo, rustup or"
+          echo "     nextest to run."
 
       - name: Gate 1f — no browser code inside a Rust string literal
         run: |
@@ -386,8 +547,13 @@ jobs:
           # No untrusted input reaches this step: the inputs are `git ls-files`
           # and a static pattern. Nothing from the event payload is expanded.
           envs='prod|production|dev|development|stage|staging|uat|qa|sandbox|live'
-          hits=$(git ls-files -z \
-                 | xargs -0 -r grep -nE "/[A-Za-z0-9][A-Za-z0-9_.-]*/(${envs})/" \
+          # The listing first, to a file: piped straight into `xargs ... ||
+          # true`, a git that failed left nothing to scan and the step printed
+          # OK (AC-gates-law-10, D-1104).
+          c_work=$(mktemp -d)
+          git ls-files -z > "$c_work/tracked"
+          [ -s "$c_work/tracked" ] || { echo "GATE 1C READ NO TRACKED FILE."; exit 1; }
+          hits=$(xargs -0 -r grep -nE "/[A-Za-z0-9][A-Za-z0-9_.-]*/(${envs})/" < "$c_work/tracked" \
                  || true)
           if [ -n "$hits" ]; then
             printf 'LITERAL CREDENTIAL PATH IN A TRACKED FILE:\n%s\n' "$hits"
@@ -397,7 +563,7 @@ jobs:
             exit 1
           fi
           # The runtime configuration itself is never tracked.
-          tracked=$(git ls-files | grep -E '(^|/)credentials\.toml$' || true)
+          tracked=$(tr '\0' '\n' < "$c_work/tracked" | grep -E '(^|/)credentials\.toml$' || true)
           if [ -n "$tracked" ]; then
             printf 'CREDENTIAL CONFIG IS TRACKED:\n%s\n' "$tracked"; exit 1
           fi
@@ -1474,96 +1640,52 @@ jobs:
       - name: Gate 2 — no build script shells out
         run: |
           set -euo pipefail
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
           bad=0
-          # THE GLOB READ ONE FILE OUT OF THREE, AND THE OTHER TWO ARE THE SAME
-          # BUILD SCRIPT. `crates/cli/build.rs` is 5,200 bytes and the two lines
-          # under its doc comment are `mod build_provenance;` and
-          # `mod commit_stamp;`. Both files sit beside it, both are compiled
-          # INTO the build script cargo runs, and `git ls-files '*build.rs'`
-          # names neither — so roughly nine tenths of the bytes that execute
-          # before this workspace compiles were never read by this gate. A
-          # `Command::new("npm")` placed in `build_provenance.rs` passed it
-          # silently. Measured, not inferred.
+          # THE FILE SET IS THE COMPILER'S, READ BY THE SCANNER (D-1101). It was
+          # a shell walk of `mod NAME;` lines, which `#[path = "x.rs"] mod m;`,
+          # `pub(crate) mod m;` and `include!("x.rs")` all walked past -- so a
+          # fourth file could join the build script unseen, and gate 13 layer 3
+          # copied the same walk. `source_scan closure` follows every module
+          # declaration with any visibility, `#[path]` (at file level and inside
+          # inline modules) and `include!`, and REFUSES what it cannot resolve:
+          # a computed include path, `cfg_attr(.., path = ..)`, a module a macro
+          # declares, a module file that is not tracked. Only tracked files
+          # count: an untracked file is not what CI compiles.
           #
-          # The file set is now the CLOSURE: every tracked `build.rs`, plus
-          # every module it declares with `mod NAME;`, plus every module those
-          # declare, to a fixed point. Four resolutions are tried per name --
-          # `<dir>/NAME.rs` and `<dir>/NAME/mod.rs`, which is where rustc looks
-          # from a crate root, and the same pair under the declaring file's own
-          # stem, which is where it looks from anywhere else. Only TRACKED
-          # candidates join: an untracked file is not what CI compiles.
-          #
-          # A `build = "gen.rs"` key would rename the ROOT out of the seed list,
-          # and that is not this clause's job to catch — the manifest scan below
-          # refuses the key outright, which is the complementary half.
-          bs=""
-          queue="$( { git ls-files '*build.rs' || true; } )"
-          while [ -n "$queue" ]; do
-            next=""
-            for f in $queue; do
-              case " $bs " in *" $f "*) continue ;; esac
-              bs="$bs $f"
-              d="$(dirname "$f")"
-              stem="${f%.rs}"
-              mods=$( { grep -hoE '^[[:space:]]*(pub[[:space:]]+)?mod[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*;' "$f" || true; } \
-                      | sed -E 's/^.*mod[[:space:]]+([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*;.*$/\1/' )
-              for m in $mods; do
-                for cand in "$d/$m.rs" "$d/$m/mod.rs" "$stem/$m.rs" "$stem/$m/mod.rs"; do
-                  if [ -n "$( { git ls-files -- "$cand" || true; } )" ]; then
-                    next="$next $cand"
-                  fi
-                done
-              done
-            done
-            queue="$next"
-          done
+          # A `build = "gen.rs"` key would rename the ROOT out of the seed list;
+          # the manifest scan below refuses the key outright.
+          work=$(mktemp -d)
+          git ls-files -z > "$work/tracked"
+          [ -s "$work/tracked" ] || { echo "GATE 2 READ NO TRACKED FILE."; exit 1; }
+          roots=$(git ls-files '*build.rs')
           echo "every file compiled into a build script:"
-          if [ -z "$bs" ]; then
+          if [ -z "$roots" ]; then
             echo "  none — no tracked build.rs"
           else
-            printf '  %s\n' $bs
+            # shellcheck disable=SC2086
+            if ! "$scan" closure "$work/tracked" $roots > "$work/closure"; then
+              echo "  A BUILD SCRIPT PULLS IN CODE THIS GATE CANNOT RESOLVE:"
+              grep '^UNRESOLVED ' "$work/closure" | sed 's/^/    /'
+              bad=1
+            fi
+            grep -v '^UNRESOLVED ' "$work/closure" | sed 's/^/  /'
 
-            # WHITESPACE IS NOT SIGNIFICANT IN A RUST PATH, and the two fixed
-            # strings this used to grep for were therefore trivially evadable: a
-            # build script written `std :: process :: Command :: new("npm")`
-            # compiles, spawns, and matched NEITHER needle. Measured against a
-            # real file. These patterns allow optional whitespace at every
-            # separator. `::[[:space:]]*Command` is the third spelling and it is
-            # there for the alias: `use std::process as p;` then
-            # `p::Command::new(...)` defeats a pattern anchored on the word
-            # `process`, and nothing defeats the type's own name. The three
-            # verbs are the calls that actually start the child.
-            hits=$( { printf '%s\n' $bs | xargs grep -HnE \
-                     -e 'Command[[:space:]]*::[[:space:]]*new' \
-                     -e '::[[:space:]]*Command' \
-                     -e 'process[[:space:]]*::[[:space:]]*Command' \
-                     -e '\.[[:space:]]*(spawn|output|status)[[:space:]]*\(' || true; } )
-
-            # AND `std::process` ON ITS OWN IS NOT ONE OF THEM ANY MORE, because
-            # widening the file set turned that pattern into a false refusal.
-            # `crates/cli/build_provenance.rs` calls `std::process::id()` inside
-            # its `#[cfg(test)]` module, to put a unique number in a temp
-            # directory name. It returns THIS process's pid. It starts nothing,
-            # and the old pattern refused it.
-            #
-            # So the exemption is a NAMED LIST of `std::process` members that
-            # cannot start a child — the pid, the two ways this process ends,
-            # and the three types a `main` returns — and EVERY OTHER member of
-            # that module is still a refusal, `Command` above all. That is the
-            # opposite of loosening the rule: before this, `std::process`
-            # matched as a prefix and said nothing about which member was used.
-            #
-            # `grep -o` extracts each `std::process::<member>` occurrence on its
-            # own line, so the filter drops OCCURRENCES and not lines: a line
-            # carrying `std::process::id()` and a real spawn beside it is still
-            # refused.
-            pm=$( { printf '%s\n' $bs | xargs grep -HonE \
-                    'std[[:space:]]*::[[:space:]]*process[[:space:]]*::[[:space:]]*[A-Za-z_][A-Za-z0-9_]*' || true; } \
-                  | { grep -vE '::[[:space:]]*(id|exit|abort|ExitCode|ExitStatus|Termination)$' || true; } )
-
-            found=$( { printf '%s\n%s\n' "$hits" "$pm" | grep . || true; } )
-            if [ -n "$found" ]; then
-              printf 'BUILD SCRIPT INVOKES AN EXTERNAL PROCESS:\n%s\n' "$found"
+            # THE SPAWN CHECK READS TOKENS (D-1101). Whitespace, comments,
+            # strings and raw identifiers no longer decide it: `p::r#Command::
+            # r#new(..).r#status()` after `use std::process as p;` was invisible
+            # to all five regexes this replaced. Refused in any build-script
+            # file: the identifiers `Command` and `CommandExt`; `process` unless
+            # it is `process::{id, exit, abort, ExitCode, ExitStatus,
+            # Termination}` -- the members that start nothing, which is what
+            # `build_provenance.rs`'s test pid needs; `.spawn(`, `.output(`,
+            # `.status(`, `.exec(`; and `macro_rules`, `unsafe`, `extern`,
+            # `asm!` and `libc`, because each is a way to call something whose
+            # tokens this scan cannot read.
+            # shellcheck disable=SC2046
+            if ! "$scan" build $(grep -v '^UNRESOLVED ' "$work/closure") > "$work/found"; then
+              echo 'BUILD SCRIPT INVOKES, OR CAN REACH, AN EXTERNAL PROCESS:'
+              sed 's/^/  /' "$work/found"
               echo "A build script is Rust, so gate 1 passes it — and then it runs"
               echo "something else. That is the side door. See CLAUDE.md section 2."
               bad=1
@@ -2201,33 +2323,26 @@ jobs:
           # Gate 2's `*build.rs` glob had the identical hole and is widened the
           # same way in the same commit.
           #
-          # Four resolutions are tried per `mod NAME;` — `<dir>/NAME.rs` and
-          # `<dir>/NAME/mod.rs`, which is where rustc looks from a crate root,
-          # and the same pair under the declaring file's own stem, which is where
-          # it looks from anywhere else. Only TRACKED candidates join: an
-          # untracked file is not what CI compiles.
-          bs=""
+          # The files are the scanner's closure (D-1101), the same one gate 2
+          # reads: every module declaration with any visibility, `#[path]` and
+          # `include!`, tracked files only, and anything it cannot resolve is
+          # refused here too rather than left out of the count. The shell walk
+          # this replaced read only `mod NAME;` and `pub mod NAME;`, so a
+          # `#[path]`, `pub(crate) mod` or `include!` file joined the script
+          # with this layer still printing "1 of 1 allowed".
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
+          git ls-files -z > "$work/tracked"
           roots="$( { git ls-files | awk -F/ '$NF == "build.rs" { print $0 }'; } || true )"
-          queue="$roots"
-          while [ -n "$queue" ]; do
-            next=""
-            for f in $queue; do
-              case " $bs " in *" $f "*) continue ;; esac
-              bs="$bs $f"
-              bd="$(dirname "$f")"
-              bstem="${f%.rs}"
-              bmods=$( { grep -hoE '^[[:space:]]*(pub[[:space:]]+)?mod[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*;' "$f" || true; } \
-                       | sed -E 's/^.*mod[[:space:]]+([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*;.*$/\1/' )
-              for m in $bmods; do
-                for cand in "$bd/$m.rs" "$bd/$m/mod.rs" "$bstem/$m.rs" "$bstem/$m/mod.rs"; do
-                  if [ -n "$( { git ls-files -- "$cand" || true; } )" ]; then
-                    next="$next $cand"
-                  fi
-                done
-              done
-            done
-            queue="$next"
-          done
+          bs=""
+          if [ -n "$roots" ]; then
+            # shellcheck disable=SC2086
+            if ! "$scan" closure "$work/tracked" $roots > "$work/bclosure"; then
+              echo "  REFUSED  a build script pulls in code layer 3 cannot resolve:"
+              grep '^UNRESOLVED ' "$work/bclosure" | sed 's/^/             /'
+              bad=1
+            fi
+            bs=$(grep -v '^UNRESOLVED ' "$work/bclosure" || true)
+          fi
           rootset=" $( printf '%s ' $roots ) "
           for f in $bs; do
             case "$rootset" in
@@ -2304,68 +2419,37 @@ jobs:
             done
           fi
           # Is cargo-deny actually RUN, and at a pinned version? Gate 3's own
-          # comment argues both, and a comment cannot enforce itself. Both
-          # patterns are ANCHORED to a whole line, which is exactly what stops
-          # this check from being satisfied by the two lines you are reading:
-          # they begin `if grep` and match neither anchor.
+          # comment argues both, and a comment cannot enforce itself.
+          #
+          # A line's PRESENCE is not a line's EXECUTION, and an audit showed the
+          # first repair was half of one (D-1102). It refused only an `if:` that
+          # collapses to a literal false, and two edits switched gate 3 off with
+          # this layer still printing "present": a step-level
+          # `continue-on-error: true` (the step runs, its failure no longer fails
+          # the job, and ci-ok sees `success`) and a constant-false expression
+          # such as `if: false && true` or `if: github.run_attempt == 0`. A
+          # job-level `if:` was out of scope by its own comment.
+          #
+          # `source_scan step-runs` now finds every step whose script carries a
+          # line beginning with the needle and refuses it unless: the step and
+          # its job set no `continue-on-error` other than `false`; the step's
+          # and the job's `if:` are absent or one of `always()`, `success()`,
+          # `!cancelled()` or the build job's crate probe (true on every run
+          # that reaches that job, because gate 16 refuses a tree without a
+          # crate); and the job is in ci-ok's `needs`. An allowlist of safe
+          # conditions rather than a denylist of unsafe ones, because the
+          # denylist is what the audit walked past.
           wf=.github/workflows/ci.yml
-          # A line's PRESENCE is not a line's EXECUTION, and this is the repair.
-          # An audit confirmed by running it that a step carrying `if: false`
-          # satisfies every grep below while the command never runs -- so all four
-          # of these checks were decorative. Each pattern is now tested against the
-          # enclosing STEP: the line must be there AND its step must be REACHABLE.
-          #
-          # `[ \t]` and not `[[:space:]]`, because the latter matches a newline and
-          # would let a pattern span lines in the buffered step text.
-          #
-          # A job-level `if:` would disable this gate too, and a skipped job is
-          # visible in the checks list rather than reported as a pass, so it is out
-          # of scope here deliberately.
-          runs_unconditionally () {
-            awk -v pat="$1" '
-              function finish() {
-                if (buf ~ pat) {
-                  found = 1
-                  # Only an `if:` THAT CAN BE FALSE is refused, and getting here
-                  # took two wrong rules. "No `if:` at all" refused the real
-                  # workflow, because gate 3 legitimately carries
-                  # `if: steps.probe.outputs.has_crates ==`. "No `if:` without a
-                  # context reference" also refused it, because gate 8 carries
-                  # `if: always()` -- constant TRUE, the opposite of a bypass.
-                  #
-                  # So the rule names the always-skip forms instead. `false` in any
-                  # quoting, `0`, and `failure()`/`cancelled()` -- which run the step
-                  # only when something has already gone wrong, and so skip it on
-                  # every green run. Everything else, constant or not, is allowed.
-                  n = split(buf, L, "\n")
-                  for (i = 1; i <= n; i++) {
-                    if (L[i] !~ /^[ \t]+if:[ \t]/) continue
-                    e = L[i]
-                    sub(/^[ \t]+if:[ \t]*/, "", e)
-                    gsub(/\$\{\{|\}\}|[ \t]/, "", e)
-                    e = tolower(e)
-                    # The character class permits the quoting a YAML scalar may
-                    # carry, without needing a quote literal inside this program.
-                    if (e ~ /^[^a-z0-9]*(false|0|failure\(\)|cancelled\(\))[^a-z0-9]*$/) {
-                      dead = 1
-                    }
-                  }
-                }
-                buf = ""
-              }
-              /^      - / { finish() }
-              { buf = buf "\n" $0 }
-              END { finish(); exit (found && !dead) ? 0 : 1 }
-            ' "$wf"
-          }
-          if runs_unconditionally '(^|\n)[ \t]+cargo deny check[ \t]*(\n|$)'; then
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
+          if "$scan" step-runs "$wf" 'cargo deny check' | sed 's/^/  /'; then
             echo "  present  gate 3 invokes cargo deny check, unconditionally"
           else
-            echo "  REFUSED  nothing in this workflow RUNS cargo deny check. Either"
-            echo "           the line is gone or its step carries an \`if:\`."
+            echo "  REFUSED  nothing in this workflow RUNS cargo deny check so that"
+            echo "           its failure fails the run. Reasons above."
             bad=1
           fi
-          if runs_unconditionally '(^|\n)[ \t]+cargo install cargo-deny --version [0-9]'; then
+          if "$scan" step-runs "$wf" 'cargo install cargo-deny --version ' | sed 's/^/  /' \
+             && grep -qE '^[[:space:]]+cargo install cargo-deny --version [0-9]' "$wf"; then
             echo "  present  cargo-deny is installed at a pinned version, unconditionally"
           else
             echo "  REFUSED  cargo-deny is installed unpinned — a security verdict"
@@ -2504,17 +2588,24 @@ jobs:
           refused="$work/refused"; : > "$refused"
           walked=0; skipped=0
 
-          while IFS= read -r f; do
+          # The listing is written to a file first, so a git that FAILS fails
+          # this step under `set -e`; read from a process substitution, its
+          # failure was swallowed and the loop read nothing (AC-gates-law-10).
+          # NUL-separated, so a name git would quote is read as itself.
+          git ls-files -z > "$work/tracked"
+          while IFS= read -r -d '' f; do
             [ -n "$f" ] || continue
             walked=$((walked + 1))
-            # -I skips a file git tracks that grep reads as binary, rather than
-            # letting one turn the scan into noise. There are none today; a
-            # count is printed so that stops being an assumption.
+            # A FILE GREP READS AS BINARY IS STILL READ (D-1104). This used to
+            # be `grep -I`, which SKIPS a file holding one NUL byte -- and an
+            # audit put the banned word in a `.md` beside one NUL and watched
+            # this gate print OK. `-a` reads every byte as text. The binary
+            # count stays, as a count, so it is visible; gate 1 refuses a NUL
+            # byte in any tracked file outside web/ outright.
             if ! grep -Iq . -- "$f" 2>/dev/null; then
               skipped=$((skipped + 1))
-              continue
             fi
-            n=$( { grep -IoiF -e "$tok" -- "$f" || true; } | wc -l | tr -d ' ')
+            n=$( { grep -aoiF -e "$tok" -- "$f" || true; } | wc -l | tr -d ' ')
             [ "$n" -gt 0 ] || continue
             # COUNT FIRST, TAB-SEPARATED, PATH LAST. Written `path count` and
             # read back on spaces, a tracked file whose name contains a space
@@ -2524,10 +2615,10 @@ jobs:
             # prevent, so the separator is a tab and the unbounded field is
             # last.
             printf '%s\t%s\n' "$n" "$f" >> "$refused"
-          done < <(git ls-files)
+          done < "$work/tracked"
 
           echo "walked ${walked} tracked file(s)"
-          echo "  ${skipped} skipped as binary"
+          echo "  ${skipped} binary or empty, each read byte for byte all the same"
           echo "  $(awk 'END{print NR}' "$refused") file(s) contain the banned token"
           # A glob that matches nothing is the failure mode gate 8 shipped with
           # for the whole life of the repository, reporting success throughout.
@@ -2545,7 +2636,7 @@ jobs:
             [ -n "$a" ] || a=0
             if [ "$c" -gt "$a" ]; then
               printf '  REFUSED  %s — %s occurrence(s), %s allowed\n' "$f" "$c" "$a"
-              { grep -IniF -e "$tok" -- "$f" \
+              { grep -ainF -e "$tok" -- "$f" \
                   | sed -E "s/${tok}/[BANNED WORD]/Ig" \
                   | sed 's/^/             /' | head -8; } || true
               bad=1
@@ -2685,6 +2776,49 @@ jobs:
             echo "GATE 16 EXAMINED NO CRATE ROOT. A gate that reads no lib.rs and"
             echo "no main.rs is not a gate."
             exit 1
+          fi
+
+          # LAYER 1b — THE OTHER CRATE ROOTS (D-1103). Every `tests/*.rs`,
+          # `benches/*.rs`, `examples/*.rs`, `src/bin/*.rs` and `build.rs` is a
+          # crate root of its own, and layer 1 read only `src/lib.rs` and
+          # `src/main.rs`. The workspace `unsafe_code = "deny"` reaches those
+          # roots, but one `#[allow(unsafe_code)]` switches it off and gate 5
+          # passes up to three of those with no decision entry. In a build
+          # script, an `unsafe extern "C"` call to the C library's `system` then
+          # starts a shell with no `Command` or `std::process` token for gate 2
+          # to see. So every file those roots compile -- their scanner closure
+          # -- may not carry `unsafe`, a foreign `extern` interface or `asm!`, all
+          # read from tokens, never from comments or strings. The tree uses none.
+          echo
+          echo "layer 1b: no other crate root, nor any file it compiles, uses unsafe"
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
+          u16=$(mktemp -d)
+          git ls-files -z > "$u16/tracked"
+          other=$(git ls-files 'crates/*/build.rs' 'crates/*/tests/*.rs' 'crates/*/benches/*.rs' \
+                                'crates/*/examples/*.rs' 'crates/*/src/bin/*.rs' \
+                  | awk -F/ 'NF == 3 || (NF == 4 && $3 != "src") || (NF == 5 && $4 == "bin") || (NF == 5 && $5 == "main.rs")')
+          if [ -z "$other" ]; then
+            echo "  REFUSED  no test, bench or build root found — a gate that reads"
+            echo "           none is not a gate"
+            bad=1
+          else
+            # shellcheck disable=SC2086
+            if ! "$scan" closure "$u16/tracked" $other > "$u16/closure"; then
+              echo "  REFUSED  a root pulls in code this layer cannot resolve:"
+              grep '^UNRESOLVED ' "$u16/closure" | sed 's/^/             /'
+              bad=1
+            fi
+            files=$(grep -v '^UNRESOLVED ' "$u16/closure" || true)
+            printf '  %s root(s), %s file(s) in their closure\n' \
+              "$(printf '%s\n' "$other" | grep -c .)" "$(printf '%s\n' "$files" | grep -c .)"
+            # shellcheck disable=SC2086
+            if ! "$scan" unsafe $files > "$u16/found"; then
+              echo "  REFUSED  unsafe outside a forbidding crate root:"
+              sed 's/^/             /' "$u16/found"
+              bad=1
+            else
+              echo "  ok       none"
+            fi
           fi
 
           # The same two self-audits gates 11 through 15 carry. An entry naming

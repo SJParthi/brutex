@@ -1815,6 +1815,36 @@ fn compiled_roots(tracked: &BTreeSet<String>) -> Result<Vec<String>, String> {
     Ok(roots.into_iter().collect())
 }
 
+/// What gate 1 refuses by CONTENT in a tracked file outside `web/`: a NUL
+/// byte (no allowed extension is binary, and a NUL makes grep skip the file),
+/// bytes that are not UTF-8, a `.rs` that opens with a shebang (a script
+/// wearing a Rust name), and browser code in a `.html` or `.css`.
+fn content_findings(path: &str, bytes: &[u8]) -> Vec<String> {
+    if path.starts_with("web/") {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    if bytes.contains(&0) {
+        out.push(format!("{path}: holds a NUL byte"));
+    }
+    match std::str::from_utf8(bytes) {
+        Err(_) => out.push(format!("{path}: is not UTF-8")),
+        Ok(text) => {
+            if path.ends_with(".rs") && lex(text).is_ok_and(|l| l.shebang) {
+                out.push(format!(
+                    "{path}: a `.rs` that opens with a shebang is a script"
+                ));
+            }
+            if path.ends_with(".html") || path.ends_with(".css") {
+                for f in browser_findings(text) {
+                    out.push(format!("{path}: {f}"));
+                }
+            }
+        }
+    }
+    out
+}
+
 fn usage() -> ExitCode {
     eprintln!(
         "usage: source_scan <code|code-prod|browser|build|unsafe|paths|paths-prod|closure|orphans|toml|deps|step-runs|workflow> ARGS"
@@ -1896,6 +1926,18 @@ fn run(args: &[String]) -> Result<bool, String> {
                         println!("ORPHAN {f}");
                         clean = false;
                     }
+                }
+            }
+        }
+        "content" => {
+            let listing = rest
+                .first()
+                .ok_or("content needs a NUL-separated tracked listing")?;
+            for f in tracked_set(&read_file(listing)?) {
+                let bytes = std::fs::read(&f).map_err(|e| format!("{f}: {e}"))?;
+                for line in content_findings(&f, &bytes) {
+                    println!("{line}");
+                    clean = false;
                 }
             }
         }
@@ -2047,7 +2089,11 @@ mod tests {
 
     #[test]
     fn a_shebang_is_recognised_and_an_inner_attribute_is_not_one() {
-        assert!(lex(concat!("#!/usr/bin/env py", "thon3\nimport os\n")).unwrap().shebang);
+        assert!(
+            lex(concat!("#!/usr/bin/env py", "thon3\nimport os\n"))
+                .unwrap()
+                .shebang
+        );
         assert!(!lex("#![forbid(unsafe_code)]\n").unwrap().shebang);
         assert!(!lex("#!  [allow(x)]\n").unwrap().shebang);
     }
@@ -2398,6 +2444,10 @@ mod tests {
             ),
             (
                 "      - name: Gate 3\n",
+                "      - name: Gate 3\n        if: steps.probe.outputs.has_crates == 'false'\n",
+            ),
+            (
+                "      - name: Gate 3\n",
                 "      - continue-on-error: true\n        name: Gate 3\n",
             ),
             (
@@ -2418,7 +2468,13 @@ mod tests {
 
     #[test]
     fn always_success_and_not_cancelled_are_safe() {
-        for c in ["always()", "${{ success() }}", "!cancelled()"] {
+        for c in [
+            "always()",
+            "${{ success() }}",
+            "!cancelled()",
+            "'always()'",
+            "steps.probe.outputs.has_crates == 'true'",
+        ] {
             let wf = WF.replacen(
                 "      - name: Gate 3\n",
                 &format!("      - name: Gate 3\n        if: {c}\n"),
@@ -2448,6 +2504,28 @@ mod tests {
             "          bad=$(git ls-files | grep -Ev '^x' || true)\n",
         ] {
             assert!(workflow_findings("w", good).is_empty(), "refused: {good}");
+        }
+    }
+
+    #[test]
+    fn content_that_no_extension_check_sees_is_refused() {
+        let shebang = concat!("#!/usr/bin/env py", "thon3\nimport os\n");
+        for (path, bytes) in [
+            ("docs/x.md", &b"word\0 more"[..]),
+            ("crates/a/src/x.rs", shebang.as_bytes()),
+            ("crates/a/src/y.rs", &[0xff, 0xfe, b'a'][..]),
+            ("docs/p.html", &b"<p onclick=go()>x</p>"[..]),
+            ("docs/s.html", &b"<script>go()</script>"[..]),
+        ] {
+            assert!(!content_findings(path, bytes).is_empty(), "passed: {path}");
+        }
+        for (path, bytes) in [
+            ("web/img.png", &b"\0\x89PNG"[..]),
+            ("crates/a/src/lib.rs", &b"#![forbid(unsafe_code)]\n"[..]),
+            ("docs/x.md", &b"<script> in prose is a .md, not a page"[..]),
+            ("empty.md", &b""[..]),
+        ] {
+            assert!(content_findings(path, bytes).is_empty(), "refused: {path}");
         }
     }
 

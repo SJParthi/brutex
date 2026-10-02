@@ -43753,3 +43753,108 @@ spaces, steps at six), not YAML in general. The pipe check reads one logical
 shell line after `\` and leading-`|` continuations are joined. A grep fed by
 a process substitution or a file is not a pipe and is not refused.
 Invariants CIG-01 and CIG-02.
+
+### D-1101 — Read a build script's files and calls from tokens, and shadow every interpreter in gate 1e — 2026-10-02
+
+**What was wrong.** Findings ET-rust-only-purity-0 and UC-10. Gate 2 found a
+build script's files by grepping `^(pub )?mod NAME;` and its spawns with five
+regexes. An audit appended `use std::process as p;` and
+`p::r#Command::r#new("/usr/local/bin/node").r#status()` to the allowlisted
+`crates/cli/build_provenance.rs`, and added files through `#[path] mod`,
+`pub(crate) mod` and `include!`. A compiled build script ran seven spawns,
+Node and another interpreter among them, with gates 2, 13 and 1e green. Gate 13
+layer 3 counted the same incomplete file set against its three-file
+allowlist, so the extra files were never counted.
+
+**The choice.** Both gates call `source_scan closure` (D-1100), which follows the
+compiler's resolution and refuses what it cannot resolve. Gate 2 then calls
+`source_scan build`, a token check. A process-spawning type, any `std::process`
+member that can start a child, the spawn methods, and the four ways to call code
+the scan cannot read (`macro_rules`, `unsafe`, `extern`, `asm!`, plus `libc`) are
+refused in any build-script file. `std::process::id()`, used by
+`build_provenance.rs`'s tests, is one of six named members that start nothing
+and stays legal. Gate 1e also shadows the py-family interpreters, `perl`,
+`ruby`, `php`, `lua` and `luajit`.
+
+**Limits.** A program reached by absolute path is still not shadowed by gate 1e.
+Gate 2's source check is the control for that case, so the rule does not depend
+on PATH. Invariants CIG-03, CIG-04.
+
+### D-1102 — A guarded step must block the run, not just appear in it — 2026-10-02
+
+**What was wrong.** Findings AC-gates-law-7, AC-gates-o1-3 and AC-gates-cx-2.
+`runs_unconditionally`, copied into gate 13 layer 4 (gate 3's `cargo deny`) and
+gate 14 layer 5 (gate 8's benches), refused only an `if:` that collapses to a
+literal false. Each of these left both checks printing `present`: a step-level
+`continue-on-error: true`, `if: false && true`, `if: github.run_attempt == 0`,
+or a job-level `if:` (out of scope by the helper's own comment). Gate 14's
+comment also said gate 8 carries `if: always()`. That step has no `if:`.
+
+**The choice.** `source_scan step-runs` takes an allowlist of safe conditions,
+not a denylist of unsafe ones. A guarded step and its job may carry no
+`continue-on-error` other than `false`. Their `if:` must be absent or one of
+`always()`, `success()`, `!cancelled()` and the build job's crate probe. The
+probe is false only for a tree with no `crates/*/Cargo.toml`, and gate 16
+refuses that tree in the job `build` needs. The job must also appear in ci-ok's
+`needs`. Gate 0 (D-1100) refuses `continue-on-error` anywhere in a tracked
+workflow as well. The false comment is corrected. Invariant CIG-05.
+
+### D-1103 — Gate 16 reads every crate root, not two per crate — 2026-10-02
+
+**What was wrong.** Finding AC-gates-cx-1. Gate 16's rule is "every crate root
+forbids unsafe outright", and it read only `src/lib.rs` and `src/main.rs`. Every
+`tests/*.rs`, `benches/*.rs` and `build.rs` is a crate root of its own. The
+workspace deny reaches them, but one `#[allow(unsafe_code)]` switches it off,
+and gate 5 passes up to three with no decision entry. In `build.rs` an `unsafe
+extern "C"` call to `system` starts a shell with no token gate 2 read.
+
+**The choice.** Layer 1b computes the scanner closure (D-1100) of every other
+root: `build.rs`, `tests/*.rs`, `benches/*.rs`, `examples/*.rs`, `src/bin/*.rs`.
+It refuses `unsafe`, a foreign `extern` interface or `asm!` in any file of that
+closure, read from tokens. Adding `#![forbid(unsafe_code)]` to all 90 roots was
+the alternative. It was not taken here because several of those files belong to
+lanes this change does not own. The token refusal is at least as strict: no
+`allow` can switch it off. The tree uses none. Invariant CIG-06.
+
+### D-1104 — Gate 1 reads modes and content, and every tracked `.rs` must be compiled — 2026-10-02
+
+**What was wrong.** Findings ET-rust-only-purity-3, -8, -10, UC-8, UC-12 and
+AC-gates-law-10. Gate 1 decided from the name alone. Non-Rust content under a
+`.rs` name passed. So did `LICENSE` at any depth, an executable bit, a symlink,
+and a NUL byte, which makes gate 15's `grep -I` skip the file: the banned word
+in a `.md` beside one NUL printed OK. A non-ASCII `.rs` was refused, because
+`git ls-files` quotes it and the parsed extension became `rs"`. Gates 1, 1b and
+1c read `git ls-files` through `< <(...)` or `| ... || true`, so a git that
+failed (a moved worktree, a refused owner) gave an empty listing and a pass.
+
+**The choice.** Gate 1 reads `git ls-files -s -z` from a file. It refuses any
+mode other than 100644 outside `web/`. It places `LICENSE` and `CODEOWNERS` at
+the root (`CODEOWNERS` also under `.github/` or `docs/`). It refuses an empty
+listing. It adds two scanner checks. `content` refuses a NUL byte, non-UTF-8, a
+shebang `.rs`, and browser code in `.html`/`.css`. `orphans` refuses a tracked
+`.rs` outside `web/` that no crate root or `.github` tool compiles. A compiled
+file must be Rust or the build fails; an uncompiled one is not Rust to anything,
+whatever it holds. Gate 15 now reads with `grep -a`, so a binary file is read and
+not skipped. Gates 1b and 1c write their listings first. The tree has no
+orphan, no NUL and no mode other than 100644. Invariants CIG-07, CIG-09.
+
+**Limits.** `web/` keeps D-0053's freedom, so none of these apply there.
+
+### D-1105 — No tracked configuration names a program for cargo, rustup or nextest — 2026-10-02
+
+**What was wrong.** Findings ET-rust-only-purity-1 and -2. `.toml` is allowed
+anywhere. A tracked `.cargo/config.toml` can set `build.rustc-wrapper` to an
+executable script named `.rs`, which cargo runs for every rustc invocation. A
+`[scripts.setup.*]` table in `.config/nextest.toml` runs shell before the
+mutation job's tests. `rust-toolchain.toml`'s `toolchain.path` names a toolchain
+to run. No gate read any of them.
+
+**The choice.** New gate 1g. It refuses any tracked file under a `.cargo/`
+directory at any depth. It refuses a `rust-toolchain.toml` or `nextest.toml`
+anywhere but its one place, and any other file under `.config/`. It passes the
+two tool files' keys, read by the scanner's TOML walker, only through an
+allowlist: `toolchain.{channel,components,targets,profile}` and
+`profile.*.overrides[].{filter,priority}`. A new key is a reviewed edit. It also
+refuses a workflow that sets a rustc wrapper, `RUSTC`, a target runner or linker,
+or passes `cargo --config`. Gate 1's mode check (D-1104) separately refuses the
+executable script. Invariant CIG-08.
