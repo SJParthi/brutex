@@ -738,6 +738,8 @@ impl Column {
     /// merged with whole six-word mask operations by [`overlay_exact`]: O(1)
     /// per row, independent of how many positions the family names. It used
     /// to walk the family's positions one bit at a time on every row.
+    /// Proved by
+    /// `indicators::column::the_exact_minute_merge_is_whole_mask_and_agrees_with_the_per_bit_walk`.
     fn replace_exact_positions(
         &mut self,
         exact: &[(ConditionMask, ConditionMask)],
