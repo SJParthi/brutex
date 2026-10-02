@@ -5359,3 +5359,9 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### The audit kernel's second context read is stated — audit 2026-10-02 o1cli-4
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| AU-O1CLI-4 — **`docs/06-limits.md` states that `column_withholding_at_build` loads, digests and drops the daily and exact-minute contexts, and that `audit_range_kernel` then loads both again and recomputes the digest against the preparation digest, one extra O(minute bars + signal bars) read per stored audit, and the code still does exactly that.** The test reads the section, the build (which returns only the column and digest) and the kernel after the build. Reusing the build's contexts fails it and withdraws the limit | `the_kernels_second_context_read_is_stated_and_still_paid` in `crates/cli/tests/limits_o1cli_4.rs` | ✓ |
