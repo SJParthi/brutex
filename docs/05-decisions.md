@@ -43718,3 +43718,77 @@ second wait's sleep and the closing brace before it. Gate 20 declares
 coverage run on this PR is that check. The 21 `sink.rs` lines that stay
 uncovered are assertion messages, test-double methods and one guarded
 `return 0`, none of them a wait.
+
+### D-0915 — The store write boundary refuses a stamp outside the path's IST month or off the rung's grid — 2026-10-02
+
+**What happened.** Findings ET-bars-candles-store-2 and ET-bars-candles-store-3.
+`BarFile::append` checked OHLC, counts and order and nothing about WHEN a bar
+was. A `2024-06` one-minute file took a 2030 bar, `i64::MIN`, 09:15:30 and a
+2024-07-01 bar. Each one committed. The file is append-only and strictly
+increasing, so one stamp past the month's end refused every later real bar of
+that month. Month membership was checked only upstream, in
+`pull::ingest::months_in`, and the grid only in `pull::fetch::land` and the
+fold.
+
+**The change.** `BarFile` keeps an `Admission` built once at open from the path
+month and the header timeframe. `append` asks it of every bar after `survey`,
+and `repair::publish` asks the same of a merged revision. Two new named
+refusals, `StoreError::OutsideMonth` and `StoreError::OffGrid`, carry the batch
+index, the stamp and the month or `timeframe_secs`. Nothing is written on
+either.
+
+* **The month is the IST calendar month.** `months_in` files a bar under
+  `IstMoment::from_epoch_secs(ts).day().year_month()`, so
+  `YearMonth::ist_bounds_micros` returns `[00:00 IST on the 1st, 00:00 IST on
+  the 1st of the next month)`, computed in O(1) by Hinnant's civil-to-day
+  formula. `store` cannot name `pull::session::IST_OFFSET_SECS` because `pull`
+  depends on `store`. It keeps a copy, `store::path::IST_OFFSET_SECS`, and
+  `pull::session` asserts at compile time that the two are equal.
+* **The grid is the fold's.** Intraday rungs use `pull::fold`'s open anchor:
+  `(ts + 19,800 s − 555 min) mod width == 0`. For 1, 3, 5 and 15 minutes that
+  is the same grid a midnight anchor gives, so vendor-direct bars on those rungs
+  are unaffected. The 30- and 60-minute rungs are only ever written by the
+  fold, at 09:15. The `1day` rung admits any whole second, because
+  `Window::verdict` records that vendors stamp a daily bar at midnight, the
+  open or the close.
+* **Session membership is not checked here.** The venue hours and the trading
+  calendar live in `pull`, and `store` may not depend on it. A test pins that a
+  03:00 IST bar is admitted, and `docs/06-limits.md` states the limit.
+
+**Fixtures that changed, and why each change is legitimate.** Every fixture
+below stamped bars that its own path ruled out:
+
+* `store::checksum_audit_tests` stamped 1970 minutes into a 2025-05 file.
+* `store::write`'s overlay test used 2023-11 stamps in a 2024-06 file.
+* `api::emitted` used a stamp 40 s past a minute.
+* `store::repair`'s row-ceiling test put 100,000 consecutive minutes in one
+  month, which holds at most 44,640. It now runs on the 1s rung.
+* `store`'s `ratio` bench filled 100,000 minutes from 1970. It now uses 1s bars
+  from 2024-06-01 IST, and the record geometry, and so the cost being measured,
+  is the same at every rung.
+* `api::server::tests::committed_off_grid_minutes_do_not_certify_the_gap_page`
+  tests the reader's defence against off-grid minutes already on disk. Append
+  can no longer produce that state, so the test lays a pre-D-0915 unsealed file
+  by hand.
+
+**Three more fixtures, in `cli`, changed for the same reason.**
+`checksum_receipts_tests` stamped 1970 minutes into a 2025-05 file.
+`vix_reference`'s off-grid and wrong-month tests, and `audited_stored`'s
+off-grid screen test, need a bad stamp already on disk. They now append an
+on-grid, in-month bar and then move its stamp and reseal its block (and, for
+the screen test, its header slot) by hand, which forges a pre-D-0915 file.
+
+**What was run, and what was not.** The full `store`, `pull` and `api` test
+suites and the `store` ratio bench, whose ratios all stayed within the ceiling.
+The tests that still fail also fail on `origin/main` in this environment:
+permission-denial tests that cannot fail as root, plus
+`pull::emit_sites::every_emit_site_in_this_crate_reaches_a_file`. The `cli`
+library suite ran to completion except
+`step3_orchestrator::all_rung_tests::all_eight_stored_rungs_publish_exact_selection_chains_and_reuse_every_byte`.
+That test takes about an hour and was stopped after running for more than 60
+seconds, so its result under this change is UNVERIFIED. The `cli` failures
+were re-run after the fixture changes and passed.
+`boolean_search_command::integration_tests::generated_search_recovers_same_ordinal_and_refuses_missing_ancestry`
+failed under the 8-thread full run and passed when run by itself; its
+failure output was not captured. Files written before this decision are not
+rechecked on open.

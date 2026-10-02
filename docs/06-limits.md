@@ -9879,3 +9879,34 @@ The text above is kept as it was written.
   doc to its body, read off the source, and
   `what_a_changed_rows_line_costs_is_named_in_part_and_read_off_the_source`
   finds each part named here and in that doc in the source that pays it.
+
+## The store admits a bar by month and grid, not by session — D-0915, 2 October 2026
+
+* **What the write boundary now checks.** `BarFile::append` and
+  `repair::publish` refuse a bar stamped outside the IST month the path names
+  (`StoreError::OutsideMonth`, which also catches `i64::MIN`, `i64::MAX` and
+  zero) and a bar off the timeframe's grid (`StoreError::OffGrid`). The month
+  span is computed once per open by `YearMonth::ist_bounds_micros`, two
+  civil-to-day conversions with no table and no loop, so it is O(1). The check
+  itself is two comparisons and one remainder per bar: O(1) per bar, O(batch)
+  per append, the same order as the `survey` pass that already walked the
+  batch. Not timed.
+* **Session membership is enforced upstream only.** A bar inside the month and
+  on the grid but outside every NSE session (03:00 IST, a Sunday, a holiday) is
+  admitted. The venue hours (`pull::vendor`'s session tables) and the trading
+  calendar (`pull::calendar`) live in `pull`, and `store` cannot depend on
+  `pull`: `pull` depends on `store`, so the arrow would be a cycle (`CLAUDE.md`
+  §5). Neither `store` nor `core` holds a calendar. The filtering is
+  `pull::session::Window::verdict` and the fold's complete-minute checks, and
+  `store::admission::session_membership_is_not_the_stores_check_and_a_three_am_bar_is_admitted`
+  pins the store's acceptance so this limit cannot change silently.
+* **The daily rung's grid is weaker than the intraday one.** `Window::verdict`
+  records that vendors stamp a daily bar at midnight, at the open or at the
+  close, so the store admits any whole second in a `1day` file and refuses only
+  a fractional one. Two daily bars on one IST day are not refused here.
+* **Files written before D-0915 are not rechecked.** The admission runs on
+  append and on a repair revision, not on open or read. A month that already
+  holds an out-of-month or off-grid bar opens as it did; the readers that
+  defend against that (for example the gap page's invalid-timestamp count,
+  `api::server::tests::committed_off_grid_minutes_do_not_certify_the_gap_page`)
+  keep their own checks.

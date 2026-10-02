@@ -177,7 +177,7 @@ const _: () = assert!(MAX_ROW_LEN == 80);
 use crate::flock::Flock;
 use crate::header::Header;
 use crate::layout::Layout;
-use crate::path::{FileKind, StorePath};
+use crate::path::{FileKind, StorePath, YearMonth};
 
 /// The largest header region the format family can declare, as a length.
 ///
@@ -550,6 +550,37 @@ pub enum StoreError {
         /// Index within the batch.
         at: u64,
     },
+    /// A batch holding a bar stamped outside the IST month its file's path
+    /// names.
+    ///
+    /// The path is `…/<yyyy-mm>.bin` and the file is append-only and strictly
+    /// increasing, so one bar stamped past the month — or an `i64::MAX`
+    /// sentinel — would refuse every later legitimate bar of that month for
+    /// ever, and one stamped before it would sit in the wrong file. The span
+    /// is [`YearMonth::ist_bounds_micros`], the convention
+    /// `pull::ingest::months_in` assigns months by. D-0915.
+    OutsideMonth {
+        /// Index within the batch.
+        at: u64,
+        /// The timestamp as offered.
+        ts_micros: i64,
+        /// The month the file is named for.
+        month: YearMonth,
+    },
+    /// A batch holding a bar stamped off the grid of the timeframe its file's
+    /// path names — 09:15:30 in a one-minute file.
+    ///
+    /// Intraday rungs are anchored at the 09:15 IST open, as `pull::fold`
+    /// builds them; the daily rung admits any whole second, because vendors
+    /// stamp a daily bar at midnight, the open or the close. D-0915.
+    OffGrid {
+        /// Index within the batch.
+        at: u64,
+        /// The timestamp as offered.
+        ts_micros: i64,
+        /// The file's timeframe, from its header.
+        timeframe_secs: u32,
+    },
 }
 
 /// The [`StoreError::ImpossibleCount`] sentence.
@@ -567,6 +598,65 @@ fn write_impossible_count(
         "batch record {at} has an impossible count: volume {volume}, open \
          interest {open_interest}. A count is never negative — zero means \
          zero, and the only legal negative is the open-interest null sentinel"
+    )
+}
+
+/// The [`StoreError::Io`] sentence. See [`write_not_a_bar_path`]: lifted, word
+/// for word, when D-0915's two refusals pushed that match past the ceiling.
+fn write_io(
+    f: &mut fmt::Formatter<'_>,
+    path: &Path,
+    action: Action,
+    kind: ErrorKind,
+    code: Option<i32>,
+) -> fmt::Result {
+    write!(
+        f,
+        "{action} {} failed: {kind:?} (errno {code:?})",
+        path.display()
+    )
+}
+
+/// The [`StoreError::ShortWrite`] sentence. Lifted for [`write_io`]'s reason.
+fn write_short_write(
+    f: &mut fmt::Formatter<'_>,
+    path: &Path,
+    offset: u64,
+    asked: usize,
+    wrote: usize,
+) -> fmt::Result {
+    write!(
+        f,
+        "{} stalled at offset {offset} with {asked} bytes still owed after {wrote} accepted",
+        path.display()
+    )
+}
+
+/// The [`StoreError::OutsideMonth`] sentence. See [`write_not_a_bar_path`].
+fn write_outside_month(
+    f: &mut fmt::Formatter<'_>,
+    at: u64,
+    ts_micros: i64,
+    month: YearMonth,
+) -> fmt::Result {
+    write!(
+        f,
+        "batch record {at} is stamped {ts_micros}, outside the IST month {month} \
+         its file is named for"
+    )
+}
+
+/// The [`StoreError::OffGrid`] sentence. See [`write_not_a_bar_path`].
+fn write_off_grid(
+    f: &mut fmt::Formatter<'_>,
+    at: u64,
+    ts_micros: i64,
+    timeframe_secs: u32,
+) -> fmt::Result {
+    write!(
+        f,
+        "batch record {at} is stamped {ts_micros}, off the {timeframe_secs}-second \
+         grid its file is named for"
     )
 }
 
@@ -677,21 +767,13 @@ impl fmt::Display for StoreError {
                 action,
                 kind,
                 code,
-            } => write!(
-                f,
-                "{action} {} failed: {kind:?} (errno {code:?})",
-                path.display()
-            ),
+            } => write_io(f, path, *action, *kind, *code),
             Self::ShortWrite {
                 path,
                 offset,
                 asked,
                 wrote,
-            } => write!(
-                f,
-                "{} stalled at offset {offset} with {asked} bytes still owed after {wrote} accepted",
-                path.display()
-            ),
+            } => write_short_write(f, path, *offset, *asked, *wrote),
             Self::ShortRead {
                 path,
                 offset,
@@ -744,6 +826,16 @@ impl fmt::Display for StoreError {
             Self::ImpossibleBar { at } => {
                 write!(f, "batch record {at} has impossible OHLC")
             }
+            Self::OutsideMonth {
+                at,
+                ts_micros,
+                month,
+            } => write_outside_month(f, *at, *ts_micros, *month),
+            Self::OffGrid {
+                at,
+                ts_micros,
+                timeframe_secs,
+            } => write_off_grid(f, *at, *ts_micros, *timeframe_secs),
         }
     }
 }
@@ -879,6 +971,11 @@ pub struct BarFile {
     /// times this, so the shape above is read from the source rather
     /// than measured. `CLAUDE.md` §3 rule 6.
     verified: AtomicU64,
+    /// What the file's PATH says a bar in it may be stamped: inside its IST
+    /// month and on its timeframe's grid. Computed once at open from the path
+    /// month and the header timeframe; [`Self::append`] asks it of every bar.
+    /// D-0915.
+    admission: Admission,
     /// The advisory lock, held for its **drop** and never read again.
     ///
     /// Underscored because that is what it is: dropping this guard is what
@@ -1069,6 +1166,7 @@ impl BarFile {
             len,
             symbol_id,
             timeframe_secs,
+            path.month(),
             // THE SAME ANSWER CREATION USED, from the same function.
             table_of(path.file()),
             Access::Write,
@@ -1159,6 +1257,7 @@ impl BarFile {
             len,
             symbol_id,
             path.timeframe().secs(),
+            path.month(),
             // WHICH TABLE, DECIDED BY THE FILE KIND rather than assumed, and by
             // the same function the creating door uses.
             table_of(path.file()),
@@ -1199,6 +1298,7 @@ impl BarFile {
             len,
             symbol_id,
             path.timeframe().secs(),
+            path.month(),
             table_of(path.file()),
             Access::Audit,
         )
@@ -1253,6 +1353,7 @@ impl BarFile {
         len: u64,
         symbol_id: u32,
         timeframe_secs: u32,
+        month: YearMonth,
         // WHICH GEOMETRIES THIS FILE MAY BE. Passed rather than looked up,
         // because the answer differs by file KIND: a `.bar` may be any version
         // in `Layout::KNOWN`, and a `.ovl` may only be `Layout::OVERLAY`.
@@ -1512,6 +1613,7 @@ impl BarFile {
             // unsealed month from a sealed one that lost its `.crc`.
             crc_path: if sealed { crc_path } else { None },
             verified: AtomicU64::new(NO_BLOCK),
+            admission: Admission::new(month, timeframe_secs),
             _lock: lock,
         })
     }
@@ -1719,6 +1821,7 @@ impl BarFile {
             });
         }
         let (first_ts, last_ts) = survey(batch)?;
+        self.admission.admit(batch)?;
         let count = len_u64(batch.len());
 
         // `Header::advance` is the single authority on whether a batch follows
@@ -2300,6 +2403,106 @@ pub(crate) fn survey<R: Row>(batch: &[R]) -> Result<(i64, i64), StoreError> {
     // The batch is non-empty and strictly increasing, so the running
     // timestamp is the last one.
     Ok((first.stamp(), previous.unwrap_or(first.stamp())))
+}
+
+/// What a file's path admits: a stamp inside its IST month, on its rung's grid.
+///
+/// # The month
+///
+/// [`YearMonth::ist_bounds_micros`], `[from, until)`. Anything outside it —
+/// a neighbouring month, a year-2030 bar, `i64::MIN`, `i64::MAX`, zero — is
+/// [`StoreError::OutsideMonth`]. Before D-0915 such a bar committed, and the
+/// file being append-only and strictly increasing, one bar past the month's
+/// end refused every later real bar of that month (ET-bars-candles-store-2).
+///
+/// # The grid
+///
+/// Intraday rungs are anchored at the 09:15 IST open, exactly as `pull::fold`
+/// cuts them: a stamp is admitted when `(ts + anchor) mod width == 0`, with
+/// `anchor` `pull::fold`'s `OPEN_ANCHOR_MICROS` (IST offset less 555 minutes).
+/// Every intraday width divides 86,400 s, so the one congruence holds on every
+/// day. For 1, 3, 5 and 15 minutes it is the same grid a midnight anchor
+/// gives, which is why vendor-direct bars on those rungs pass unchanged.
+///
+/// The daily rung admits any WHOLE SECOND and nothing finer.
+/// `pull::session::Window::verdict` records that vendors stamp a daily bar
+/// "at midnight, at the open or at the close", and refusing two of the three
+/// here would refuse real data; a fractional second is none of them. That is
+/// a weaker check than the intraday one, and `docs/06-limits.md` says so in
+/// its D-0915 section.
+///
+/// # What it does not check
+///
+/// Session membership. 03:00 IST is inside the month and on the minute grid,
+/// and it is admitted: the venue hours and the holiday calendar live in
+/// `pull`, which this crate may not depend on. `docs/06-limits.md`, D-0915.
+///
+/// # Cost
+///
+/// O(1) per bar — two comparisons and one remainder — so O(batch) per append,
+/// the same order as [`survey`]'s own pass over the batch. The bounds are
+/// computed once per open, not per append. That shape is read from the
+/// source; no bench times it, so the cost is UNVERIFIED as a measurement
+/// (`docs/06-limits.md`, D-0915). What it refuses is pinned by invariant rows
+/// S-30-month, S-30-sentinel and S-30-grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Admission {
+    month: YearMonth,
+    from: i64,
+    until: i64,
+    timeframe_secs: u32,
+    width: i64,
+    anchor: i64,
+}
+
+/// `pull::fold`'s open anchor: the IST offset less the 555 minutes from IST
+/// midnight to 09:15, in microseconds. Negative, and `rem_euclid` floors.
+const OPEN_ANCHOR_MICROS: i64 = (crate::path::IST_OFFSET_SECS
+    - crate::path::Timeframe::OPEN_MINUTES_PAST_IST_MIDNIGHT as i64 * 60)
+    * 1_000_000;
+
+impl Admission {
+    pub(crate) const fn new(month: YearMonth, timeframe_secs: u32) -> Self {
+        let (from, until) = month.ist_bounds_micros();
+        let (width, anchor) = if timeframe_secs >= 86_400 {
+            (1_000_000, 0)
+        } else {
+            (timeframe_secs as i64 * 1_000_000, OPEN_ANCHOR_MICROS)
+        };
+        Self {
+            month,
+            from,
+            until,
+            timeframe_secs,
+            width,
+            anchor,
+        }
+    }
+
+    pub(crate) fn admit<R: Row>(&self, batch: &[R]) -> Result<(), StoreError> {
+        for (offset, row) in batch.iter().enumerate() {
+            let ts_micros = row.stamp();
+            if ts_micros < self.from || ts_micros >= self.until {
+                return Err(StoreError::OutsideMonth {
+                    at: len_u64(offset),
+                    ts_micros,
+                    month: self.month,
+                });
+            }
+            // Inside the month, so `ts + anchor` is nowhere near either end of
+            // `i64`. A zero width cannot reach here: `validated` refuses a
+            // header whose timeframe disagrees with the path, and every
+            // `Timeframe` is at least one second.
+            if (ts_micros + self.anchor).rem_euclid(self.width) != 0 {
+                return Err(StoreError::OffGrid {
+                    at: len_u64(offset),
+                    ts_micros,
+                    timeframe_secs: self.timeframe_secs,
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Where `batch` already sits among `n_valid` committed records, when the file
@@ -3118,6 +3321,7 @@ mod tests {
             len,
             SYMBOL,
             60,
+            crate::path::YearMonth::new(2024, 6).expect("the month T0 is in"),
             Layout::KNOWN,
             super::Access::Write,
         )
@@ -3141,6 +3345,7 @@ mod tests {
             len,
             SYMBOL,
             60,
+            crate::path::YearMonth::new(2024, 6).expect("the month T0 is in"),
             Layout::KNOWN,
             super::Access::Read,
         )
