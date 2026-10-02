@@ -44038,25 +44038,3 @@ round-trip. Proof:
 `store::unit::a_flag_bit_version_two_does_not_define_is_refused_on_read_and_on_write`,
 bits 1..31 (failed before: flags `3` decoded `Ok`, and a commit with flags
 `2` succeeded). O(1).
-
-### D-1355 — The strict checksum-audit opener gives aarch64 Linux its own `O_NOFOLLOW` — 2026-10-02
-
-**What was wrong.** `checksum_audit::open_regular` claims "verified macOS or
-Linux x86_64/aarch64 open flags" and used one `target_os = "linux"` value,
-`0x20000 | 0x800`, for both architectures. `O_NOFOLLOW` is `0x20000` on
-x86_64 and `0x8000` on aarch64, where `0x20000` is `O_LARGEFILE` (kernel
-architecture headers as `libc` 0.2.189 transcribes them:
-`unix/linux_like/linux/gnu/b64/aarch64/mod.rs` `O_NOFOLLOW = 0x8000`,
-`.../x86_64/mod.rs` `O_NOFOLLOW = 0x20000`). On an aarch64 Linux host the
-"strict" open therefore followed symlinks, leaving only the later
-`symlink_metadata` comparison between the audit and an alias.
-
-**The change.** A per-host table, `strict_open_flags(Host)`, selected by
-`cfg`. Proof:
-`store::checksum_audit::tests::the_strict_open_flags_name_o_nofollow_on_every_host`
-pins each row (with the aarch64 row set to the old value it fails: `left:
-133120, right: 34816`), and
-`the_strict_open_refuses_a_symlink_at_the_open` asserts the open itself
-returns `ELOOP` on the running host. **Honest limit:** this suite ran on
-x86_64 only; the aarch64 row is checked as data against the cited header, not
-by executing an open on aarch64. UNVERIFIED as an aarch64 run.
