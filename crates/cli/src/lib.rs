@@ -27287,9 +27287,18 @@ mod derived_floor_tests {
             "digest(&loaded.bars,&exact_minute,&daily,execution_slice)?"
         );
 
+        // The screen kernel holds its loaded inputs by reference since
+        // D-0997 (one load per descent), so it passes them without the `&`.
+        let screen_bound = concat!(
+            "data_digest:stored_executed_",
+            "digest(&span.bars,exact_minute,daily,execution_slice)?"
+        );
         assert_eq!(
-            code.matches(span_bound).count(),
-            2,
+            (
+                code.matches(span_bound).count(),
+                code.matches(screen_bound).count()
+            ),
+            (1, 1),
             "audit-range and screen-range must bind signal, exact-minute context, daily references and the actual separately loaded execution slice"
         );
         assert_eq!(
