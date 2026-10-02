@@ -484,7 +484,8 @@ fn parse_month(stem: &str) -> Result<YearMonth, PathError> {
     }
     // Digits only, before `parse`: the integer `FromStr` takes a leading `+`,
     // so `2026-+8` passed the width check and was listed as `2026-08`, a file
-    // the renderer never writes (D-0767).
+    // the renderer never writes, and opening the listed month then read that
+    // other file (D-0767; found again as probestore-4).
     if !year
         .bytes()
         .chain(month.bytes())

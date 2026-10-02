@@ -157,6 +157,44 @@ fn malformed_month_names_cannot_masquerade_as_a_canonical_held_month() {
     assert_eq!(repeated.held, found.held);
 }
 
+/// A SIGNED OR PADDED MONTH NAME IS NOT A MONTH. Audit probestore-4.
+///
+/// `str::parse` accepts a leading `+`, so a hand-made `2024-+1.bin` passed the
+/// width check and was listed as January 2024, a month whose canonical file is
+/// `2024-01.bin`: opening the listed month would read a different file from
+/// the one counted. Every four-and-two-wide spelling that is not all digits is
+/// refused and counted as malformed, beside a real month that is still held;
+/// the files are left in place and a rerun counts the same.
+#[test]
+fn a_signed_or_padded_month_name_is_not_listed_as_the_canonical_month() {
+    let root = scratch("signed-month");
+    let invalid = [
+        "2024-+1", "+024-01", "2024- 1", " 024-01", "2024-1 ", "2024--1", "-024-01", "2024-+0",
+        "+++++-01",
+    ];
+    for stem in invalid {
+        put(&root, &format!("groww/NSE/INDEX/NIFTY/1min/{stem}.bin"));
+    }
+    put(&root, "groww/NSE/INDEX/NIFTY/1min/2024-02.bin");
+    let found = catalog::walk(&root).expect("malformed names do not stop the walk");
+    assert_eq!(found.census.seen, invalid.len() as u64 + 1);
+    assert_eq!(found.census.malformed_month, invalid.len() as u64);
+    assert_eq!(found.census.spot, 1);
+    assert!(found.census.reconciles());
+    assert_eq!(found.held.len(), 1);
+    assert_eq!(found.held[0].month.to_string(), "2024-02");
+    for stem in invalid {
+        assert!(
+            root.join(format!("bars/groww/NSE/INDEX/NIFTY/1min/{stem}.bin"))
+                .exists(),
+            "{stem:?} is preserved"
+        );
+    }
+    let repeated = catalog::walk(&root).expect("repeat walk");
+    assert_eq!(repeated.census, found.census);
+    assert_eq!(repeated.held, found.held);
+}
+
 /// **Every refusal is reachable, and the census adds up over all of them.**
 ///
 /// The row `catalog`'s header points at. One store carrying every outcome at
