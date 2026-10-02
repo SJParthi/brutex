@@ -2304,6 +2304,25 @@ impl PopulationFinalizationV4Ledger {
         combine(result, unlocked)
     }
 
+    /// Appends one authority under the held exclusive lock.
+    ///
+    /// # Cost
+    ///
+    /// The append opens with a generation check that hashes the whole data
+    /// file, and an exact reuse runs another before it returns, so a reused
+    /// append that writes nothing is O(F) as well.
+    /// After the Completion is synced, the append hashes the whole data file
+    /// and then rescans the whole ledger: `scan` decodes every record,
+    /// validates every complete block, and ends with a generation check that
+    /// hashes the data file whole again. One append is therefore O(F) in the
+    /// ledger's file bytes F, not O(D) in its own decisions, and the appends
+    /// into one ledger cost quadratically in its length over its life.
+    /// Block validation inserts every decision into hash sets, so the bound
+    /// is expected, not worst case.
+    /// `docs/06-limits.md`, "Four ledger calls that rehash or rescan whole
+    /// files per call".
+    /// `crates/cli/tests/ledger_scan_costs.rs` counts the calls that make this
+    /// cost.
     #[expect(
         clippy::too_many_lines,
         reason = "one receipt-last append keeps exact-prefix retry, evidence sync, Completion sync and held-generation checks adjacent"
