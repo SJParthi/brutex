@@ -43998,3 +43998,31 @@ listing through process substitution.
 entries leave the ceiling. `pull/tests/unit.rs`'s ceiling drops from 4 to the
 3 it measures. The clause reads `source_scan code`, in which comments are blank
 and every other line is itself, from a NUL-separated listing. Invariant CIG-14.
+
+### D-1112 — Gates 21 and 22 read filesystem capability as canonical paths — 2026-10-02
+
+**What was wrong.** Findings AC-gates-cx-3, LATE-gates-and-ci tests-bite #3
+and #4, and #13 (gate 22 clauses B to D). Gate 21 counted nine substrings in
+the logger's production code. `File::create`, `fs::write` and `File::options`
+were not among them, so the logger could write any path while the gate
+printed "the declared one". Its production window was cut by an awk walk, and
+a line filter dropped `*`-led statements. Gate 22 clause B grepped text, so
+`use std::{fs as f}; f::read(p)` matched none of its patterns. Clause C
+anchored on `use store`, so `use ::store::file as sf;` passed. Clauses B to E
+skipped a swept crate whose directory was absent.
+
+**The choice.** Gate 21 reads `source_scan paths-prod` (D-1100). That command
+removes `#[cfg(test)]` items by token extent and expands `use` aliases. The
+surface is every path into `std::fs`, `std::process`, `std::net` or `std::os`
+whose last segment is a function, counted per file and compared exactly. The
+declaration is re-spelt as canonical paths and its counts are unchanged. A
+glob import of those modules is refused. Gate 22 gains clauses B2 and C2, which
+ask clauses B and C's questions of canonical paths over each swept crate's
+`src/`, `benches/` and the module closure of `src/lib.rs`. They refuse a
+swept crate whose `src/lib.rs` is not tracked. The text clauses stay.
+
+**Limits.** A method call that touches the filesystem, such as
+`path.exists()`, is not a path and is not seen. `extern crate store as s;`
+does not record its alias. Clause A pins three of the four swept crates'
+dependency sets, which closes the second case for those three. Invariant
+CIG-15.

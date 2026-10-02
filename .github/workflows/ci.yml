@@ -3743,92 +3743,56 @@ jobs:
           # the declared sites, so they cannot reach anything the sites above did
           # not already reach. `fs::metadata` takes a PATH and is the one that
           # can, which is why the list separates them.
-          declared='sink.rs:OpenOptions::new:2
-          sink.rs:create_dir_all:1
-          sink.rs:fs::metadata:1
-          sink.rs:fs::remove_file:1
-          sink.rs:fs::rename:1
-          tail.rs:File::open:2'
-          : > /tmp/io-sites.txt
-          for f in crates/telemetry/src/*.rs; do
-            base=$(basename "$f")
-            # THE TEST BOUNDARY, asserted rather than assumed. This USED to cut at
-            # the first `^#[cfg(test)]` and refuse outright on a second, on the
-            # ground that "before the first" then stops meaning "production" and an
-            # unsound window reporting PASS is worse than no gate. That ground was
-            # right and the tool was wrong: a second block is ordinary, and 823c18d
-            # added one -- a `#[cfg(test)] pub(crate) fn sweep_stale_scratch` sitting
-            # ABOVE `mod tests` -- so the gate refused a file it had no quarrel with
-            # and said so itself: "fix the gate before trusting it again, not the
-            # file." This is that fix.
-            #
-            # Every `#[cfg(test)]` block is now skipped by BRACE COUNTING, so there
-            # may be any number of them, and the attribute may cover a `fn` as well
-            # as a `mod`. Intervening attributes are stepped over -- `mod tests`
-            # carries a multi-line `#[allow(..., reason = "...")]` between the
-            # `#[cfg(test)]` and the `mod` keyword.
-            #
-            # THE SOUNDNESS PRINCIPLE IS KEPT, three ways. The walk exits 3 if it
-            # reaches EOF still inside a block, because an unbalanced brace means the
-            # window is not the one it thinks it is. The emitted body is then checked
-            # to contain NO `#[cfg(test)]` at all, which catches an over- or
-            # under-skip that happened to balance. And the surviving line count is
-            # PRINTED for every file, so a future edit that silently moves the
-            # boundary shows up in the log as a changed number rather than as nothing.
-            awk '
-              BEGIN { st = 0 }
-              st == 0 {
-                if ($0 ~ /^#\[cfg\(test\)\][ \t]*$/) { st = 1; next }
-                print; next
-              }
-              # BETWEEN THE ATTRIBUTE AND THE ITEM IT COVERS. Further attributes and
-              # their continuation lines are stepped over -- `mod tests` carries a
-              # multi-line `#[allow(..., reason = "...")]` before the `mod` keyword.
-              st == 1 {
-                t = $0; sub(/^[ \t]+/, "", t)
-                # A braceless item -- `use`, `const` -- is the whole block, and ends
-                # at its own semicolon.
-                if (index($0, "{") == 0 && t ~ /;[ \t]*$/) { st = 0; next }
-                if (index($0, "{") > 0) { st = 2 }
-                next
-              }
-              # INSIDE THE ITEM. It closes at a `}` in COLUMN ZERO and nowhere else.
-              # NOT by counting braces: that was tried and it is unsound here --
-              # `json.rs` and `tail.rs` both hold `{` and `}` inside string literals,
-              # so the count never returns to zero and the walk ran off the end of
-              # both files. A top-level item under rustfmt closes at column zero, and
-              # a brace inside a string is never a lone `}` there.
-              st == 2 {
-                if ($0 ~ /^\}/) { st = 0 }
-                next
-              }
-              END { if (st != 0) exit 3 }
-            ' "$f" > /tmp/body.txt || {
-              echo "  REFUSED  $base: a cfg(test) block does not close before EOF."
-              echo "           The production window cannot be established, so no"
-              echo "           verdict is printed for this file. CLAUDE.md section 4."
-              fail=1
-              continue
-            }
-            if grep -q '^#\[cfg(test)\]' /tmp/body.txt; then
-              echo "  REFUSED  $base: a cfg(test) attribute survived the walk."
-              echo "           The skip is wrong in one direction or the other."
-              fail=1
-              continue
-            fi
-            printf '  window   %-14s %s production line(s) of %s\n' \
-              "$base" "$(awk 'END{print NR}' /tmp/body.txt)" "$(awk 'END{print NR}' "$f")"
-            # Drop comment lines, so a construct merely NAMED in prose above is
-            # not counted as a call to it.
-            grep -vE '^[[:space:]]*(//|\*|/\*)' /tmp/body.txt > /tmp/code.txt || true
-            for probe in OpenOptions::new create_dir_all fs::metadata fs::remove_file \
-                         fs::rename File::open fs::read_dir fs::read_to_string 'fs::read('; do
-              c=$(grep -cF "$probe" /tmp/code.txt || true)
-              if [ "$c" -gt 0 ]; then
-                printf '%s:%s:%s\n' "$base" "$probe" "$c" >> /tmp/io-sites.txt
-              fi
-            done
-          done
+          #
+          # THE SURFACE IS NOW READ AS CANONICAL PATHS (D-1112). The probe list
+          # above was nine substrings, and an audit wrote to an arbitrary path
+          # past it three ways: `File::create`, `fs::write` and `File::options`
+          # were not among them (LATE tests-bite #4), so the logger could write
+          # anywhere while this clause printed "the declared one". The same
+          # substrings missed `use std::fs::{write as w}` and `std::fs::r#write`.
+          # The production window was cut by an awk walk that closed a test item
+          # at a `}` in column zero, and comment lines were dropped by a filter
+          # that also dropped a `*`-led statement.
+          #
+          # `source_scan paths-prod` removes exactly the `#[cfg(test)]` items,
+          # measured by token extent, and prints every path the remaining code
+          # uses in canonical form -- `use` aliases expanded, `r#` dropped. The
+          # surface is EVERY path into `std::fs`, `std::process`, `std::net` or
+          # `std::os` whose last segment is a function (lower-case), counted per
+          # file and compared exactly: a new capability of any name is a
+          # refusal until it is declared, with no probe list to fall behind. A
+          # glob import of one of those modules is refused outright, because
+          # the names it brings in cannot be read back.
+          #
+          # WHAT IT STILL CANNOT SEE: a METHOD that touches the filesystem on a
+          # value -- `path.exists()`, `path.metadata()` -- because a method is
+          # not a path. `.metadata()` on an open handle was already excluded on
+          # purpose (above); `Path::exists` is not used in this crate's
+          # production code today.
+          declared='sink.rs:std::fs::OpenOptions::new:2
+          sink.rs:std::fs::create_dir_all:1
+          sink.rs:std::fs::metadata:1
+          sink.rs:std::fs::remove_file:1
+          sink.rs:std::fs::rename:1
+          tail.rs:std::fs::File::open:2'
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
+          git ls-files -z -- 'crates/telemetry/src/*.rs' > /tmp/telemetry-src.z
+          [ -s /tmp/telemetry-src.z ] || { echo "  REFUSED  crates/telemetry/src holds no tracked file"; exit 1; }
+          if ! xargs -0 -r "$scan" paths-prod < /tmp/telemetry-src.z > /tmp/telemetry-paths.txt; then
+            echo "  REFUSED  a crates/telemetry source file could not be lexed"
+            fail=1
+          fi
+          globs=$(grep -E ':std::(fs|process|net|os)(::[A-Za-z0-9_]+)*::\*$' /tmp/telemetry-paths.txt || true)
+          if [ -n "$globs" ]; then
+            printf '  REFUSED  a glob import hides which capability is used:\n%s\n' "$globs"
+            fail=1
+          fi
+          awk '
+            { f = $0; sub(/:[0-9]+:.*$/, "", f); sub(/^crates\/telemetry\/src\//, "", f)
+              p = $0; sub(/^[^:]*:[0-9]+:/, "", p) }
+            p ~ /^std::(fs|process|net|os)::/ && p ~ /::[a-z_][a-z0-9_]*!?$/ { n[f ":" p]++ }
+            END { for (k in n) print k ":" n[k] }
+          ' /tmp/telemetry-paths.txt > /tmp/io-sites.txt
 
           want=$(printf '%s\n' $declared | sort)
           got=$(sort /tmp/io-sites.txt)
@@ -4011,6 +3975,71 @@ jobs:
                    "crates/$c/src" "crates/$c/benches" 2>/dev/null || true)
             if [ -n "$hits" ]; then
               echo "REFUSED  crates/$c imports a crate that reads the store:"
+              printf '%s\n' "$hits" | sed 's/^/           /'
+              fail=1
+            fi
+          done
+
+          # ── CLAUSES B2 AND C2 — the same two questions, asked of PATHS ─────────
+          #
+          # D-1112. Clauses B and C grep text, and text names a capability only
+          # the way it was spelt: `use std::{fs as f}; f::read(p)` holds none of
+          # B's patterns (LATE tests-bite #3), and `use std::fs::{self as
+          # disk};` or `std::fs::r#write` are the same hole. `source_scan paths`
+          # prints every path a file uses with `use` aliases expanded and `r#`
+          # dropped, so `f::read` IS `std::fs::read` here. B2 refuses any path
+          # into `std::fs`, `std::os`, `std::net` or `std::process` (bar the
+          # functions that start nothing: `exit`, `abort`, `id`, and the
+          # `ExitCode`/`ExitStatus`/`Termination` types the benches return),
+          # into `libc` or a `memmap` crate, and `include_bytes!`. C2 refuses a
+          # path into `store`, `pull`, `lake`, `api` or `telemetry`, under any
+          # alias. The files are each crate's tracked `src/` and `benches/` PLUS
+          # the module closure of `src/lib.rs`, so a module mounted with
+          # `#[path]` from elsewhere is read too.
+          #
+          # AN ABSENT CRATE IS A REFUSAL (LATE #13). `[ -d .. ] || continue`
+          # let clauses B to E pass over a swept crate that was not there.
+          #
+          # WHAT B2 AND C2 CANNOT SEE: a method call on a value -- a
+          # `Path::exists`-style method is not a path -- and `extern crate store
+          # as s;`, whose alias the scanner does not record. Clause A pins the
+          # dependency sets of three of the four crates, which is what makes the
+          # second unreachable there.
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
+          g22=$(mktemp -d)
+          git ls-files -z > "$g22/tracked.z"
+          [ -s "$g22/tracked.z" ] || { echo "GATE 22 READ NO TRACKED FILE."; exit 1; }
+          fs_rule='^.+:[0-9]+:((std|core|alloc)::(fs|os|net)(::.*)?|(std|core|alloc)::process(::.*)?|libc(::.*)?|memmap[0-9]*(::.*)?|include_bytes!)$'
+          ok_rule=':(std|core|alloc)::process(::(exit|abort|id|ExitCode|ExitStatus|Termination))?$'
+          store_rule='^.+:[0-9]+:(brutex_)?(store|pull|lake|api|telemetry)::.+$'
+          for c in $SWEEP; do
+            if [ -z "$(git ls-files -- "crates/$c/src/lib.rs")" ]; then
+              echo "REFUSED  crates/$c/src/lib.rs is not tracked. A swept crate cannot"
+              echo "         be held to these clauses by its absence."
+              fail=1
+              continue
+            fi
+            git ls-files -z -- "crates/$c/src/*.rs" "crates/$c/benches/*.rs" > "$g22/$c.z"
+            if ! "$scan" closure "$g22/tracked.z" "crates/$c/src/lib.rs" > "$g22/$c.closure"; then
+              echo "REFUSED  crates/$c: the module closure did not resolve:"
+              grep '^UNRESOLVED' "$g22/$c.closure" | sed 's/^/           /'
+              fail=1
+            fi
+            grep -v '^UNRESOLVED' "$g22/$c.closure" | tr '\n' '\0' >> "$g22/$c.z"
+            tr '\0' '\n' < "$g22/$c.z" | grep . | sort -u | tr '\n' '\0' > "$g22/$c.files.z"
+            if ! xargs -0 -r "$scan" paths < "$g22/$c.files.z" > "$g22/$c.paths"; then
+              echo "REFUSED  crates/$c: a source file could not be lexed"
+              fail=1
+            fi
+            hits=$( { grep -E "$fs_rule" "$g22/$c.paths" | grep -vE "$ok_rule"; } || true)
+            if [ -n "$hits" ]; then
+              echo "REFUSED  crates/$c reaches the filesystem or a process, read as a path:"
+              printf '%s\n' "$hits" | sed 's/^/           /'
+              fail=1
+            fi
+            hits=$(grep -E "$store_rule" "$g22/$c.paths" || true)
+            if [ -n "$hits" ]; then
+              echo "REFUSED  crates/$c names a crate that reads the store, read as a path:"
               printf '%s\n' "$hits" | sed 's/^/           /'
               fail=1
             fi
