@@ -119,7 +119,7 @@ pub const BAND_SIGMA: [i128; 3] = [1, 2, 3];
 /// The ceiling this module will let `sum(p² · v)` reach before refusing.
 ///
 /// `i128::MAX` is 1.7 × 10³⁸. This stops at 10³⁴ — four orders of margin, which
-/// leaves room for the `sigma² = E[p²] − E[p]²` arithmetic that follows without
+/// leaves room for the centred `p2v − q·(pv + r)` arithmetic sigma does without
 /// having to prove a second bound.
 const ACC_CEILING: i128 = 10_i128.pow(34);
 
@@ -312,8 +312,45 @@ impl Vwap {
     /// One standard deviation of the volume-weighted price, in paisa. `None` when
     /// VWAP itself is unavailable.
     ///
-    /// `sigma² = E[p²] − E[p]²`, both weighted. Computed on the ×3 scale and
-    /// divided down once, so no per-bar rounding accumulates.
+    /// # Exactly `floor(σ)`, and the formula it replaced was not (D-0940)
+    ///
+    /// With `P = high + low + close` per bar (the ×3 scale), `V = Σv`,
+    /// `pv = ΣPv` and `p2v = ΣP²v`, the weighted variance on the ×3 scale is
+    /// `σ₃² = (V·p2v − pv²) / V²`, and this returns `floor(σ₃ / 3)` — the floor of
+    /// the exact volume-weighted standard deviation in paisa, nothing coarser.
+    ///
+    /// This used to compute `isqrt(floor(p2v/V) − floor(pv/V)²)`. Flooring the
+    /// mean BEFORE squaring it adds up to `2·M·frac(M)` to the variance
+    /// (`M = pv/V`, about three times the price), so two bars at 100.00 and
+    /// 100.01 rupees — half a paisa of dispersion — reported 57 paisa, and at
+    /// 57,000 rupees 1,378. Every band position (146–152, 190–197) and the near
+    /// scale of 145 were decided on that number for every cash-equity run
+    /// (`Availability::Present`). F-9A880B, ET-indicators-0, ET-indicators-12.
+    ///
+    /// **The exact form, in O(1).** Let `q = floor(pv/V)` and `r = pv − qV`,
+    /// so `0 <= r < V`. Then
+    ///
+    /// * `C = p2v − q·(pv + r) = Σ v·(P − q)²`, since `q·(pv + r) = 2q·pv − q²V`;
+    ///   so `C >= 0` and it is an integer;
+    /// * `σ₃² = C/V − (r/V)²`, since `pv/V = q + r/V`;
+    /// * with `C = wV + s`, `0 <= s < V`: `σ₃² = w + s/V − r²/V²`, both fractions
+    ///   in `[0, 1)`, so `floor(σ₃²) = w` when `s·V >= r²` and `w − 1` otherwise;
+    /// * `floor(sqrt(x)) = isqrt(floor(x))` for real `x >= 0`, and
+    ///   `floor(floor(y)/3) = floor(y/3)`, so `isqrt(floor(σ₃²)) / 3` is
+    ///   `floor(σ₃/3)` exactly.
+    ///
+    /// **Overflow.** For any state a fold produces, `p2v <= ACC_CEILING`, every
+    /// `P >= 3`, and Cauchy–Schwarz gives `pv² <= V·p2v`; so
+    /// `q·pv <= pv²/V <= p2v` and `q·r < q·V <= pv <= p2v/3`, and `q·(pv + r)`
+    /// stays below `2 × 10³⁴`, far inside `i128`. `s·V` and `r²` do NOT: `V`
+    /// passes `2^64` after two bars at `i64::MAX` volume, so they are compared as
+    /// 256-bit products by [`wide_mul`]. Every `i128` step is still `checked_`,
+    /// so a hostile private state refuses rather than wraps.
+    ///
+    /// Proven against an independent big-integer oracle by
+    /// `sigma_is_the_exact_floor_whatever_the_remainder_of_the_mean`,
+    /// `sigma_is_exact_where_the_remainder_squared_leaves_i128` and
+    /// `maximal_volumes_at_minimal_prices_stay_exact`.
     #[must_use]
     pub fn sigma(&self) -> Option<i64> {
         if self.availability == Availability::Absent || self.v <= 0 {
@@ -330,15 +367,24 @@ impl Vwap {
         if self.contributing < MIN_FOR_SIGMA {
             return None;
         }
-        let mean = self.pv.div_euclid(self.v);
-        let mean_sq = self.p2v.div_euclid(self.v);
-        // `mean * mean` was the third unchecked multiply on this path. With the
-        // checked fold above, p2v <= ACC_CEILING bounds it — but the bound is an
-        // argument and this is a mechanism.
-        let mean_squared = mean.checked_mul(mean)?;
-        let variance = mean_sq.checked_sub(mean_squared)?;
-        // Negative variance is impossible in exact arithmetic and reachable here
-        // only through the two floor divisions above; clamp rather than sqrt a
+        // The derivation and the overflow bound are in the doc comment above.
+        // Every i128 step is checked: the ceiling bounds them for a folded state,
+        // but the bound is an argument and this is a mechanism.
+        let q = self.pv.div_euclid(self.v);
+        let r = self.pv.rem_euclid(self.v);
+        let centred = q
+            .checked_mul(self.pv.checked_add(r)?)
+            .and_then(|t| self.p2v.checked_sub(t))?;
+        let whole = centred.div_euclid(self.v);
+        let rest = centred.rem_euclid(self.v);
+        // floor(C/V − r²/V²): one less than floor(C/V) exactly when s·V < r².
+        let borrow = wide_mul(rest.unsigned_abs(), self.v.unsigned_abs())
+            < wide_mul(r.unsigned_abs(), r.unsigned_abs());
+        // `borrow` needs r > 0, so V >= 2 and |whole| <= |i128::MIN| / 2: the
+        // subtraction cannot saturate; saturating only so it cannot panic.
+        let variance = whole.saturating_sub(i128::from(borrow));
+        // Negative variance is impossible for any folded state (C >= 0); it is
+        // reachable only from a hostile private state. Clamp rather than sqrt a
         // negative, and never report a negative sigma.
         let sigma_scaled = isqrt_i128(variance.max(0));
         i64::try_from(sigma_scaled.div_euclid(3)).ok()
@@ -446,8 +492,11 @@ impl Vwap {
     ///
     /// # Cost
     ///
-    /// One division for the mean, one for the mean square, one fixed-iteration
-    /// square root, then 20 comparisons. Every count is a compile-time constant.
+    /// Two Euclidean divisions for the mean's quotient and remainder, two for the
+    /// centred sum's, two fixed-size 256-bit products for the floor correction
+    /// (D-0940), one bounded square root, then 20 comparisons. Every count is a
+    /// compile-time constant; the square root's cost is bounded, not flat
+    /// (`docs/06-limits.md`).
     #[must_use]
     pub fn bits(&self, close: i64, tolerance: Tolerance) -> ConditionMask {
         let mut mask = ConditionMask::ZERO;
@@ -531,6 +580,30 @@ impl Vwap {
         }
         known
     }
+}
+
+/// `a · b` as a 256-bit `(high, low)` pair, for operands below `2^127`.
+///
+/// [`Vwap::sigma`] has to compare `s · V` against `r²`, and with `V` past `2^64`
+/// — reachable: two bars at `i64::MAX` volume — either product can leave `i128`.
+/// Four 64-bit partial products, no loop, no branch: a fixed cost for every
+/// input. The tuple compares lexicographically, high word first, which is the
+/// order of the 256-bit values. Exact for every `a, b < 2^128`; the caller's
+/// operands are non-negative `i128`s, so below `2^127`.
+const fn wide_mul(a: u128, b: u128) -> (u128, u128) {
+    const LOW: u128 = u64::MAX as u128;
+    let (a_hi, a_lo) = (a >> 64, a & LOW);
+    let (b_hi, b_lo) = (b >> 64, b & LOW);
+    let low_low = a_lo * b_lo;
+    let high_low = a_hi * b_lo;
+    let low_high = a_lo * b_hi;
+    let high_high = a_hi * b_hi;
+    // Each term is below 2^64, so three of them cannot leave u128, and the two
+    // halves of `low` occupy disjoint bits, so their sum cannot carry.
+    let middle = (low_low >> 64) + (high_low & LOW) + (low_high & LOW);
+    let low = (low_low & LOW) + ((middle & LOW) << 64);
+    let high = high_high + (high_low >> 64) + (low_high >> 64) + (middle >> 64);
+    (high, low)
 }
 
 /// Truth and availability share exactly the same representable band bounds.
@@ -1410,6 +1483,9 @@ mod tests {
     /// explaining is the single most damaging answer this function can give. The
     /// VWAP itself is still answerable here, which is the point: the refusal is the
     /// checked multiply and not a general unavailability.
+    ///
+    /// Since D-0940 the guarded product is `q·(pv + r)` rather than `mean²`; on this
+    /// state `r = 0` and it is the same `4e44`, refused by the same kind of check.
     #[test]
     fn sigma_refuses_when_the_mean_square_leaves_i128() {
         let v = primed(0, 20_000_000_000_000_000_000, 1, 0);
@@ -1521,5 +1597,341 @@ mod tests {
             (0, 0),
             "a negative input has no root and must not be iterated on",
         );
+    }
+
+    /// An exact, independent oracle for the weighted standard deviation in paisa.
+    ///
+    /// Arbitrary-precision unsigned arithmetic on 32-bit limbs — multiply, add and
+    /// compare, nothing else — so it shares no code and no algebra with
+    /// [`Vwap::sigma`]. It answers the largest `s >= 0` with
+    /// `(3·s·V)² + pv² <= V·p2v`, i.e. `s = floor(sqrt(V·p2v − pv²) / (3·V))`:
+    /// the floor of the exact volume-weighted standard deviation of `hlc3`, in
+    /// paisa. `None` when that numerator is negative, which no fold can produce.
+    #[allow(
+        clippy::indexing_slicing,
+        reason = "a limb-array oracle in a test; every index is bounded by the \
+                  lengths it is computed from, and a panic is a failed test"
+    )]
+    mod oracle {
+        fn limbs(x: u128) -> Vec<u64> {
+            (0..4)
+                .map(|i| u64::try_from((x >> (32 * i)) & 0xffff_ffff).expect("32 bits"))
+                .collect()
+        }
+
+        fn trim(mut x: Vec<u64>) -> Vec<u64> {
+            while x.last() == Some(&0) {
+                x.pop();
+            }
+            x
+        }
+
+        fn mul(a: &[u64], b: &[u64]) -> Vec<u64> {
+            let mut out = vec![0_u64; a.len() + b.len() + 1];
+            for (i, &x) in a.iter().enumerate() {
+                let mut carry = 0_u64;
+                for (j, &y) in b.iter().enumerate() {
+                    let t = out[i + j] + x * y + carry;
+                    out[i + j] = t & 0xffff_ffff;
+                    carry = t >> 32;
+                }
+                let mut k = i + b.len();
+                while carry > 0 {
+                    let t = out[k] + carry;
+                    out[k] = t & 0xffff_ffff;
+                    carry = t >> 32;
+                    k += 1;
+                }
+            }
+            trim(out)
+        }
+
+        fn add(a: &[u64], b: &[u64]) -> Vec<u64> {
+            let n = a.len().max(b.len()) + 1;
+            let mut out = vec![0_u64; n];
+            let mut carry = 0_u64;
+            for (i, slot) in out.iter_mut().enumerate() {
+                let t = a.get(i).copied().unwrap_or(0) + b.get(i).copied().unwrap_or(0) + carry;
+                *slot = t & 0xffff_ffff;
+                carry = t >> 32;
+            }
+            trim(out)
+        }
+
+        fn le(a: &[u64], b: &[u64]) -> bool {
+            let (a, b) = (trim(a.to_vec()), trim(b.to_vec()));
+            if a.len() != b.len() {
+                return a.len() < b.len();
+            }
+            for (x, y) in a.iter().rev().zip(b.iter().rev()) {
+                if x != y {
+                    return x < y;
+                }
+            }
+            true
+        }
+
+        /// `a·b` as a `(high, low)` pair of 128-bit words, from the limbs.
+        pub(super) fn product(a: u128, b: u128) -> (u128, u128) {
+            let limbs = mul(&limbs(a), &limbs(b));
+            let word = |from: usize| {
+                (from..from + 4).rev().fold(0_u128, |acc, i| {
+                    (acc << 32) | u128::from(limbs.get(i).copied().unwrap_or(0))
+                })
+            };
+            (word(4), word(0))
+        }
+
+        /// `(a·b) <= (c·d)` exactly, for the wide-compare test.
+        pub(super) fn product_le(a: u128, b: u128, c: u128, d: u128) -> bool {
+            le(&mul(&limbs(a), &limbs(b)), &mul(&limbs(c), &limbs(d)))
+        }
+
+        pub(super) fn sigma(pv: i128, v: i128, p2v: i128) -> Option<i64> {
+            let pv = u128::try_from(pv).ok()?;
+            let v = u128::try_from(v).ok()?;
+            let p2v = u128::try_from(p2v).ok()?;
+            let rhs = mul(&limbs(v), &limbs(p2v));
+            let pv_sq = mul(&limbs(pv), &limbs(pv));
+            let fits = |s: u128| {
+                let three_s_v = mul(&limbs(3 * s), &limbs(v));
+                le(&add(&mul(&three_s_v, &three_s_v), &pv_sq), &rhs)
+            };
+            if !fits(0) {
+                return None;
+            }
+            // Largest s in [0, 2^63) that fits: plain bisection.
+            let (mut lo, mut hi) = (0_u128, 1_u128 << 63);
+            while hi - lo > 1 {
+                let mid = lo + (hi - lo) / 2;
+                if fits(mid) {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            i64::try_from(lo).ok()
+        }
+    }
+
+    /// A deterministic generator, so every fixture is reproducible byte for byte.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            self.0 >> 11
+        }
+
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+    }
+
+    /// **Sigma is the exact floor of the weighted standard deviation, whatever the
+    /// remainder of the mean** (ET-indicators-0, ET-indicators-12, F-9A880B, D-0940).
+    ///
+    /// Every earlier sigma fixture had a mean that divided exactly — 200/300 at
+    /// volume 1, 1,000,000/1,000,200 at volume 100 — so `pv mod v` was zero and the
+    /// old formula's two floors cancelled. This folds 600 generated sessions of real
+    /// bars (prices from 1 paisa to 5 × 10⁸, volumes from 1 to `i64::MAX`) and checks
+    /// `sigma()` after every bar against [`oracle::sigma`], and requires that most of
+    /// the states it checked had a non-zero remainder. On the old
+    /// `isqrt(floor(p2v/v) − floor(pv/v)²)` it fails on the first such state.
+    #[test]
+    fn sigma_is_the_exact_floor_whatever_the_remainder_of_the_mean() {
+        let mut rng = Lcg(0x9A88_0B00_0940);
+        let bases: [i64; 6] = [1, 37, 10_000, 1_000_000, 5_700_000, 500_000_000];
+        let volume_caps: [u64; 4] = [1, 20_000, 1_000_000_000, i64::MAX.unsigned_abs()];
+        let (mut checked, mut with_remainder, mut nonzero_sigma) = (0_u32, 0_u32, 0_u32);
+        for session in 0..600_u64 {
+            let mut v = Vwap::for_slice(Availability::Present);
+            let base = *bases
+                .get(usize::try_from(session % 6).expect("small"))
+                .expect("six bases");
+            let cap = *volume_caps
+                .get(usize::try_from((session / 6) % 4).expect("small"))
+                .expect("four caps");
+            let bars = 2 + rng.below(40);
+            let mut price = base;
+            for minute in 0..bars {
+                let step = i64::try_from(rng.below(2 * 50 + 1)).expect("small") - 50;
+                price = (price + step * (base / 1_000 + 1)).max(1);
+                let volume = i64::try_from(1 + rng.below(cap)).expect("below i64::MAX");
+                let minute = i64::try_from(minute).expect("small");
+                if v.fold(&at(minute, price, volume)).is_err() {
+                    break; // past the accumulator ceiling: refused, never wrapped
+                }
+                if v.contributing < MIN_FOR_SIGMA {
+                    continue;
+                }
+                let want = oracle::sigma(v.pv, v.v, v.p2v);
+                assert_eq!(
+                    v.sigma(),
+                    want,
+                    "session {session} bar {minute}: pv {} v {} p2v {}",
+                    v.pv,
+                    v.v,
+                    v.p2v,
+                );
+                checked += 1;
+                with_remainder += u32::from(v.pv.rem_euclid(v.v) != 0);
+                nonzero_sigma += u32::from(want.is_some_and(|s| s > 0));
+            }
+        }
+        assert!(checked > 5_000, "only {checked} states checked");
+        assert!(
+            with_remainder * 2 > checked,
+            "only {with_remainder} of {checked} states had pv mod v != 0, \
+             so this test no longer exercises the defect it exists for",
+        );
+        assert!(
+            nonzero_sigma > 1_000,
+            "only {nonzero_sigma} non-zero sigmas"
+        );
+    }
+
+    /// The same oracle at the far end of the range a fold can reach: total volume
+    /// past `2^64`, so `r²` and `s·V` leave `i128` and only the 256-bit comparison
+    /// can decide the floor. Each state is a sum of whole bars of two prices, so it
+    /// is one a fold could produce; it is primed because folding 10¹⁵ bars is not a
+    /// test.
+    #[test]
+    fn sigma_is_exact_where_the_remainder_squared_leaves_i128() {
+        let mut rng = Lcg(0x0940);
+        let mut wide = 0_u32;
+        for _ in 0..2_000 {
+            // Two bar classes: hlc3·3 prices p1, p2 >= 3, total volumes a, b.
+            let p1 = i128::from(3 + rng.below(30));
+            let p2 = i128::from(3 + rng.below(3_000_000_000));
+            let a = i128::from(rng.next()) * i128::from(rng.next() >> 20) + 1;
+            let b_cap = (ACC_CEILING - p1 * p1 * a) / (p2 * p2);
+            if b_cap < 1 {
+                continue;
+            }
+            let b = i128::from(rng.next()).rem_euclid(b_cap) + 1;
+            let (pv, v, p2v) = (p1 * a + p2 * b, a + b, p1 * p1 * a + p2 * p2 * b);
+            assert!(p2v <= ACC_CEILING, "fixture left the fold's own ceiling");
+            let r = pv.rem_euclid(v);
+            if r.checked_mul(r).is_none() {
+                wide += 1;
+            }
+            assert_eq!(
+                primed(0, pv, v, p2v).sigma(),
+                oracle::sigma(pv, v, p2v),
+                "pv {pv} v {v} p2v {p2v}",
+            );
+        }
+        assert!(wide > 500, "only {wide} states needed the wide comparison");
+    }
+
+    /// Real folds, every volume `i64::MAX`, prices one and two paisa: total volume
+    /// passes `2^64` within three bars and `r²` leaves `i128` — the extreme a legal
+    /// bar sequence reaches without touching [`ACC_CEILING`].
+    #[test]
+    fn maximal_volumes_at_minimal_prices_stay_exact() {
+        let mut v = Vwap::for_slice(Availability::Present);
+        let mut seen_wide = false;
+        for minute in 0..200_i64 {
+            let price = 1 + minute % 2 + i64::from(minute % 7 == 0);
+            v.fold(&at(minute, price, i64::MAX - minute))
+                .expect("far inside the ceiling");
+            if v.contributing < MIN_FOR_SIGMA {
+                continue;
+            }
+            let r = v.pv.rem_euclid(v.v);
+            seen_wide |= r.checked_mul(r).is_none();
+            assert_eq!(
+                v.sigma(),
+                oracle::sigma(v.pv, v.v, v.p2v),
+                "minute {minute}"
+            );
+        }
+        assert!(seen_wide, "no state needed the 256-bit comparison");
+    }
+
+    /// The finding's shape, reproduced from two ordinary bars (F-9A880B, D-0940).
+    ///
+    /// 100.00 and 100.01 rupees at volume 1 each: the exact dispersion is half a
+    /// paisa, so sigma floors to **0** and all three bands sit on the VWAP of
+    /// 10,000. The old formula floored the mean before squaring it and reported
+    /// **57** paisa. At 57,000.00/57,000.01 it reported **1,378** for the same half
+    /// paisa. A close of 10,020 is therefore ABOVE every band (146, 148, 193), where
+    /// the old sigma put it INSIDE every band (152, 192, 197).
+    #[test]
+    fn a_half_paisa_spread_has_no_band_width() {
+        let mut v = Vwap::for_slice(Availability::Present);
+        v.fold(&at(0, 10_000, 1)).expect("first bar");
+        v.fold(&at(1, 10_001, 1)).expect("second bar");
+        assert_eq!(v.value(), Some(10_000));
+        assert_eq!(v.sigma(), Some(0), "the old formula said 57");
+        assert_eq!(v.sigma(), oracle::sigma(v.pv, v.v, v.p2v));
+        let mask = v.bits(10_020, tol());
+        for above in [146_u32, 148, 193] {
+            assert!(mask.get(above), "10,020 is above band position {above}");
+        }
+        for inside in [152_u32, 192, 197, 147, 149, 194] {
+            assert!(!mask.get(inside), "position {inside} must not be set");
+        }
+
+        let mut big = Vwap::for_slice(Availability::Present);
+        big.fold(&at(0, 5_700_000, 1)).expect("first bar");
+        big.fold(&at(1, 5_700_001, 1)).expect("second bar");
+        assert_eq!(big.sigma(), Some(0), "the old formula said 1,378");
+
+        // A real dispersion survives untouched, and an odd total volume (r != 0)
+        // with zero spread is exactly zero.
+        let mut spread = Vwap::for_slice(Availability::Present);
+        spread.fold(&at(0, 10_000, 1)).expect("first bar");
+        spread.fold(&at(1, 10_101, 2)).expect("second bar");
+        assert_eq!(
+            spread.sigma(),
+            oracle::sigma(spread.pv, spread.v, spread.p2v)
+        );
+        assert_eq!(spread.sigma(), Some(47), "sqrt(2/9)·101 = 47.6");
+        let mut flat = Vwap::for_slice(Availability::Present);
+        flat.fold(&at(0, 12_345, 3)).expect("first bar");
+        flat.fold(&at(1, 12_345, 4)).expect("second bar");
+        assert_eq!(flat.sigma(), Some(0));
+    }
+
+    /// The first `checked_` on the new path: `pv + r` leaving `i128` refuses rather
+    /// than wraps. Unreachable from a fold, built from the private fields.
+    #[test]
+    fn sigma_refuses_when_the_remainder_sum_leaves_i128() {
+        let v = primed(0, i128::MAX, 2, 0);
+        assert_eq!(v.sigma(), None);
+    }
+
+    /// The 256-bit product comparison against the limb oracle, at the edges.
+    #[test]
+    fn the_wide_product_comparison_is_exact() {
+        let max = i128::MAX.unsigned_abs();
+        let mut rng = Lcg(7);
+        let mut cases = vec![
+            (0, 0, 0, 0),
+            (max, max, max, max),
+            (max, max - 1, max - 1, max),
+            (max, 1, 1, max),
+            (1 << 64, 1 << 64, 1, u128::MAX >> 1),
+            ((1 << 64) - 1, (1 << 64) + 1, 1 << 64, 1 << 64),
+        ];
+        for _ in 0..5_000 {
+            let mut n =
+                || (u128::from(rng.next()) << 64 | u128::from(rng.next())) >> rng.below(127);
+            cases.push((n(), n(), n(), n()));
+        }
+        for (a, b, c, d) in cases {
+            let (a, b, c, d) = (a & max, b & max, c & max, d & max);
+            assert_eq!(wide_mul(a, b), oracle::product(a, b), "{a}·{b}");
+            assert_eq!(
+                wide_mul(a, b) <= wide_mul(c, d),
+                oracle::product_le(a, b, c, d),
+                "{a}·{b} <= {c}·{d}",
+            );
+        }
     }
 }
