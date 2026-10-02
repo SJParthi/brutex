@@ -47734,3 +47734,66 @@ the overflowing term.
 changed here.
 
 Invariant RSM-03.
+### D-1420 — Lay every fixed-width terminal table out from its rows, so no two columns touch and every header stays over its figures — 2026-10-02
+
+**The defect (batch-1 audit item C3, "poolcols").** Every fixed-width table
+the `cli` renders was one `format!` string of adjacent width specifiers --
+`{:<5}{:>10}{:>9}{:>14}` -- with no literal separator. Padding was the only
+thing keeping two figures apart, so a cell that filled its width ran into its
+neighbour, and a wider one also pushed every later column off its header.
+Driven at the extremes their own types allow, each test below failed on
+`origin/main`:
+
+- `top`: `655351844674407370955161518446744073709551615-₹9,22,…` -- rank,
+  hits and n read as one number.
+- `results`: a full 16-byte feed ran into the rung
+  (`abcdefghijklmnopqrstuvwxyzabcdef`), and `months` into `depth`.
+- the screen, consistency, descent, `range-all`, window-shape and pool
+  pass-1 tables: two to six of their nine to eleven columns merged
+  (`-9223372036854775808-9223372036854775808…`).
+- `ledger-all`'s Top-10 block and `ledger-v6`'s route row already had two
+  literal spaces between columns, so their figures stayed apart. But their
+  headers were off at ordinary values: `worstLoss` is nine characters over an
+  eight-character column, and `draws/seed` is ten characters over nine.
+
+**The choice.** One helper, `cli::columns`, lays out a table's header and body
+together. The widths written at each call site stay as MINIMUMS, so a table
+whose figures fit renders byte for byte as before (pinned by
+`figures_that_fit_render_exactly_as_the_format_string_did`). A column widens,
+for every row at once, only as far as it needs to keep one space from its
+neighbour. A right-aligned column keeps the space on its left, a left-aligned
+one on its right, and a right column followed directly by a left one gets one
+literal space. A refusal row carries only its first cell, which still counts
+toward that column's width, so a `REFUSED:` sentence cannot touch it. Widths
+are counted in characters, the unit `format!` pads in.
+
+Two tables could not be measured as they were written, and were changed so
+they can be:
+
+- `descend` wrote each row into the report as its step landed. The progress
+  line on stderr still prints at that moment. The report on stdout, which is
+  read whole, now lays its table out after the last step.
+- `ledger-v6` printed its header once, above the first rung, and each rung's
+  selection report was written between the rows. Each route row now carries
+  its own header, laid out with it.
+
+`ledger-all`'s Top-10 visit now buffers one rung's (at most ten) rows before
+it renders them.
+
+**Rejected.** (1) Widening every money column to the 26 characters that
+`rupees(i64::MIN)` needs: every ordinary table would grow by about 100
+characters to handle a value no real run produces. Measuring the rows reaches
+the same guarantee without that cost. (2) Patching each format string with
+one extra space: that changes every ordinary table, and it still misaligns
+the header once a figure overflows. (3) Per-site width arithmetic: the
+fourteen copies of one rule are the drift this replaces.
+
+**Scope, stated.** `api` has no fixed-width text table; its renderers emit
+HTML and JSON. These are key/value lists whose columns already have literal
+separators and no header: `quality_block`, `verify` (its longest claim
+is 60 characters, in a 62-character column), the `ledger-all` gate census and worksheet, and
+`batch`'s month lines. They are left as they are. The pooled pass-2 table in
+`pool.rs` (`net` beside `dd>=`) is another lane's finding (GAP13-16), so it is
+not changed here.
+
+Invariants TC-01 to TC-03.
