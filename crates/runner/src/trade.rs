@@ -401,10 +401,23 @@ pub struct SliceFacts {
     at_timestamp: std::collections::HashMap<i64, usize>,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only count of [`SliceFacts::of`] calls on this thread.
+    ///
+    /// The hoisting doors ([`crate::grid::CellReplayV1`] and
+    /// [`crate::exit_grid_policy::AttestedReplayV1`]) exist so a grid's cells and a
+    /// population's masks do not rebuild these facts; the count is how a test
+    /// proves that rather than reading it off the source. D-0960.
+    pub(crate) static SLICE_FACTS_BUILT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 impl SliceFacts {
     /// Derive every execution-slice fact from `bars` and its column, once.
     #[must_use]
     pub fn of(bars: &[Candle], column: &Column) -> Self {
+        #[cfg(test)]
+        SLICE_FACTS_BUILT.with(|built| built.set(built.get().saturating_add(1)));
         let accepted = column
             .acceptance()
             .filter(|verdict| verdict.len() == bars.len())
