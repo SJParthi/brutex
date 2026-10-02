@@ -44150,3 +44150,24 @@ checks that five views (whole, first, last, interior, one bar) are accepted with
 zero searches; that a copy is accepted and a forged copy refused, with two
 searches; and that over-long and empty slices still refuse. It fails when the
 fast path is disabled.
+
+### D-0932 — The Romano–Wolf stepdown computes its null statistics once — 2026-10-02
+
+**Finding:** o1runner-7 (audit 2026-10-02). `romano_wolf_aligned` recomputed
+every surviving strategy's resampled mean on every draw in every round, though
+the resample matrix and each strategy's own mean and standard error are fixed
+before the first round. The worst case was O(S²·draws·periods), one factor of S
+above the stated bound. The callers (`cli` lib and `institutional_evidence`)
+cap S at 16, but `romano_wolf` is a `pub fn` over any family.
+
+**Decision:** an S×draws table of centred, studentized null statistics is built
+once, at O(S·draws·periods), and each round takes its maximum over the
+survivors from the table at O(alive·draws). The same expression runs in the
+same order, so every threshold and rejection is bit-identical.
+
+**Output change:** none.
+
+**Proof:** `runner::bootstrap::stepdown_partition_tests::the_stepdown_computes_each_null_statistic_once_and_answers_unchanged`
+uses a twelve-strategy family that rejects across two rounds. It counts exactly
+S·draws `mean_at` calls, and on four seeds it matches a reference copy of the
+per-round recomputation.

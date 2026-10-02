@@ -1377,20 +1377,46 @@ fn romano_wolf_aligned(
         .map(|_| stationary_indices(periods, block, &mut rng))
         .collect();
 
+    // THE NULL STATISTICS, COMPUTED ONCE (o1runner-7, D-0932).
+    //
+    // `null[s][d]` is strategy `s`'s centred, studentized resampled mean on
+    // draw `d`. None of it depends on the round: the resample matrix is fixed
+    // above and each strategy's own mean and standard error are fixed by
+    // `stats`. Every round recomputed it for every survivor, an O(periods)
+    // `mean_at` each, so the stepdown cost O(S^2 x draws x periods) in the
+    // worst case, one factor of S above the bound this module states. Now each
+    // `mean_at` runs exactly once per (strategy, draw), and a round reads the
+    // table: O(alive x draws). The same expression in the same order, so every
+    // value and every threshold is bit-identical.
+    let null: Vec<Vec<f64>> = returns
+        .iter()
+        .zip(stats.iter())
+        .map(|(series, own)| {
+            indices
+                .iter()
+                .map(|index| {
+                    let centred = mean_at(series, index) - own.mean;
+                    studentized(root_n * centred, own.standard_error)
+                })
+                .collect()
+        })
+        .collect();
+
     // Bounded by the strategy count: each round removes at least one or stops.
     while !alive.is_empty() {
         // The bootstrap maximum over the SURVIVING set only. That shrinking is
         // the stepdown -- with the winner removed the bar is lower, so a
         // strategy it was masking can now clear.
         let mut maxima: Vec<f64> = Vec::with_capacity(draws);
-        for index in &indices {
+        for draw in 0..indices.len() {
             let mut best = f64::NEG_INFINITY;
             for &s in &alive {
-                let (Some(series), Some(own)) = (returns.get(s), stats.get(s)) else {
+                let Some(row) = null.get(s) else {
                     continue;
                 };
-                let centred = mean_at(series, index) - own.mean;
-                best = best.max(studentized(root_n * centred, own.standard_error));
+                if let Some(&z) = row.get(draw) {
+                    best = best.max(z);
+                }
             }
             maxima.push(best);
         }
@@ -1554,6 +1580,8 @@ fn stationary_indices(periods: usize, block: usize, rng: &mut Rng) -> Vec<usize>
 
 /// Mean of `series` taken at `index`.
 fn mean_at(series: &[i64], index: &[usize]) -> f64 {
+    #[cfg(test)]
+    MEAN_AT_CALLS.with(|n| n.set(n.get() + 1));
     if index.is_empty() {
         return 0.0;
     }
@@ -1561,6 +1589,12 @@ fn mean_at(series: &[i64], index: &[usize]) -> f64 {
         a + series.get(i).copied().unwrap_or(0) as f64
     });
     sum / index.len() as f64
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// `mean_at` evaluations on this thread (D-0932).
+    static MEAN_AT_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// The `q_ppm` quantile of a slice, sorting it in place.
@@ -2608,7 +2642,10 @@ mod adjusted_p_value_tests {
     reason = "the exception every test module in this workspace takes."
 )]
 mod stepdown_partition_tests {
-    use super::{DEFAULT_BLOCK, romano_wolf};
+    use super::{
+        DEFAULT_BLOCK, Performance, Rejected, Rng, mean_at, quantile, romano_wolf,
+        stationary_indices, studentized, summarise,
+    };
 
     /// A LINEAR STEPDOWN, PROVED BY THE SHAPE OF WHAT IT RETURNS.
     ///
@@ -2722,5 +2759,91 @@ mod stepdown_partition_tests {
             rejected.len() <= set.len(),
             "the total rejected can never exceed the input"
         );
+    }
+
+    /// o1runner-7 / D-0932: the stepdown computes each strategy's resampled
+    /// mean once per draw, not once per draw per ROUND, and rejects exactly
+    /// what the per-round recomputation rejected.
+    #[test]
+    fn the_stepdown_computes_each_null_statistic_once_and_answers_unchanged() {
+        // Ten strong strategies clear round zero; a moderate one, masked while
+        // they are in the maximum, clears a later round; one null never does.
+        let noise = |t: i64| ((t * 7_919) % 23) - 11;
+        let mut set: Vec<Vec<i64>> = (0..10)
+            .map(|s| (0..64).map(|t| 40 + s + noise(t + s)).collect())
+            .collect();
+        set.push((0..64).map(|t| 55 + 60 * noise(t * 3)).collect());
+        set.push((0..64).map(|t| noise(t * 5)).collect());
+        let draws = 150;
+        let before = super::MEAN_AT_CALLS.with(std::cell::Cell::get);
+        let rejected = romano_wolf(&set, draws, 5, DEFAULT_BLOCK, 50_000);
+        let calls = super::MEAN_AT_CALLS.with(std::cell::Cell::get) - before;
+        let rounds = rejected.last().map_or(0, |r| r.round) + 1;
+        assert!(
+            rounds >= 2,
+            "the fixture must take several rounds: {rejected:?}"
+        );
+        assert_eq!(
+            calls,
+            (set.len() * draws) as u64,
+            "one mean per strategy per draw"
+        );
+
+        // The per-round recomputation the table replaced, as the reference.
+        for seed in [1_u64, 5, 97, 2_026] {
+            assert_eq!(
+                romano_wolf(&set, draws, seed, DEFAULT_BLOCK, 50_000),
+                reference_romano_wolf(&set, draws, seed, DEFAULT_BLOCK, 50_000),
+                "seed {seed}"
+            );
+        }
+    }
+
+    fn reference_romano_wolf(
+        returns: &[Vec<i64>],
+        draws: usize,
+        seed: u64,
+        block: usize,
+        alpha_ppm: u64,
+    ) -> Vec<Rejected> {
+        let periods = returns.first().map_or(0, Vec::len);
+        let stats: Vec<Performance> = returns.iter().map(|r| summarise(r)).collect();
+        let root_n = (periods as f64).sqrt();
+        let mut rng = Rng::new(seed);
+        let indices: Vec<Vec<usize>> = (0..draws)
+            .map(|_| stationary_indices(periods, block, &mut rng))
+            .collect();
+        let mut alive: Vec<usize> = (0..returns.len()).collect();
+        let mut out = Vec::new();
+        let mut round = 0;
+        while !alive.is_empty() {
+            let mut maxima: Vec<f64> = indices
+                .iter()
+                .map(|index| {
+                    alive.iter().fold(f64::NEG_INFINITY, |best, &s| {
+                        let (Some(series), Some(own)) = (returns.get(s), stats.get(s)) else {
+                            return best;
+                        };
+                        let centred = mean_at(series, index) - own.mean;
+                        best.max(studentized(root_n * centred, own.standard_error))
+                    })
+                })
+                .collect();
+            let Some(threshold) = quantile(&mut maxima, 1_000_000 - alpha_ppm) else {
+                break;
+            };
+            let (now, rest): (Vec<usize>, Vec<usize>) = alive.iter().partition(|&&s| {
+                stats.get(s).is_some_and(|own| {
+                    studentized(root_n * own.mean, own.standard_error) > threshold
+                })
+            });
+            if now.is_empty() {
+                break;
+            }
+            out.extend(now.into_iter().map(|strategy| Rejected { strategy, round }));
+            alive = rest;
+            round += 1;
+        }
+        out
     }
 }

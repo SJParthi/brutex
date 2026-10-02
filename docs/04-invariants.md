@@ -5437,3 +5437,9 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | An evaluated execution slice that is a view into its minute context is accepted with no linear search. An equal copy elsewhere is still accepted and a changed one refused, by the old search. | `runner::exit_grid_policy::subslice_tests::a_view_into_the_context_is_located_without_a_search` | ✓ |
+
+### Romano–Wolf null table — o1runner-7 (D-0932)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| The Romano–Wolf stepdown evaluates each strategy's resampled mean exactly once per draw, across all rounds. Its rejections equal the per-round recomputation's on every seed tested. | `runner::bootstrap::stepdown_partition_tests::the_stepdown_computes_each_null_statistic_once_and_answers_unchanged` | ✓ |
