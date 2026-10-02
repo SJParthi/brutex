@@ -781,6 +781,61 @@ mod tests {
         assert_eq!(cal.expected_bars(99), None);
     }
 
+    /// **A WITHHELD STRETCH IS UNMEASURED, NEVER CLOSED, AND NEVER LOSES A
+    /// SESSION.** D-0950: a stretch whose daily rung was not read cannot claim
+    /// the exchange was shut on it.
+    #[test]
+    fn withholding_turns_only_closed_days_inside_the_span_into_unmeasured() {
+        let build = || {
+            Calendar::from_observed(&[
+                Observed::from_runs(100, &[(555, 929)]),
+                Observed::from_runs(103, &[]),
+                Observed::from_runs(106, &[(555, 929)]),
+            ])
+        };
+        let mut cal = build();
+        assert_eq!(cal.kind_of(101), DayKind::Closed, "the premise");
+        // Ranges reaching past both ends clamp to the span; the open days in
+        // it, sized or not, are left alone.
+        assert_eq!(cal.withhold_closed(i64::MIN, i64::MAX), 4);
+        for day in [101, 102, 104, 105] {
+            assert_eq!(cal.kind_of(day), DayKind::Unmeasured, "day {day}");
+            assert_eq!(cal.expected_bars(day), None, "day {day}");
+        }
+        assert_eq!(cal.kind_of(100), DayKind::Open(Session::full()));
+        assert_eq!(cal.kind_of(103), DayKind::OpenLengthUnmeasured);
+        assert_eq!(cal.sessions(), 3);
+        assert_eq!((cal.first_day(), cal.last_day()), (100, 106), "span kept");
+        // A rerun changes nothing: idempotent.
+        assert_eq!(cal.withhold_closed(i64::MIN, i64::MAX), 0);
+
+        // One day, exactly; an inverted range; a range wholly outside.
+        let mut one = build();
+        assert_eq!(one.withhold_closed(102, 102), 1);
+        assert_eq!(one.kind_of(101), DayKind::Closed);
+        assert_eq!(one.kind_of(102), DayKind::Unmeasured);
+        assert_eq!(one.withhold_closed(105, 104), 0);
+        assert_eq!(one.withhold_closed(0, 99), 0);
+        assert_eq!(one.withhold_closed(107, i64::MAX), 0);
+        assert_eq!(one.kind_of(104), DayKind::Closed);
+
+        // An empty calendar has nothing to withhold.
+        let mut empty = Calendar::from_observed(&[]);
+        assert_eq!(empty.withhold_closed(i64::MIN, i64::MAX), 0);
+        assert_eq!(empty.span(), 0);
+
+        // The regulator-proved outage day stays open even when withheld.
+        let mut outage = Calendar::from_observed(&[
+            Observed::from_runs(SYSTEMS_OUTAGE_DAY - 1, &[(555, 929)]),
+            Observed::from_runs(SYSTEMS_OUTAGE_DAY + 1, &[(555, 929)]),
+        ]);
+        assert_eq!(outage.withhold_closed(i64::MIN, i64::MAX), 0);
+        assert!(matches!(
+            outage.kind_of(SYSTEMS_OUTAGE_DAY),
+            DayKind::Open(_)
+        ));
+    }
+
     /// **A DAY WITH A DAILY BAR AND NO MINUTE SERIES KEEPS ITS OWN ANSWER.**
     ///
     /// The five pre-2025 Muhurat sessions arrive here with NO runs at all, and
@@ -1319,6 +1374,51 @@ impl Calendar {
             DayKind::Closed => Some(0),
             DayKind::OpenLengthUnmeasured | DayKind::Unmeasured => None,
         }
+    }
+
+    /// Turn every [`DayKind::Closed`] day in `from..=to` that lies inside this
+    /// calendar's span into [`DayKind::Unmeasured`], and answer how many changed.
+    ///
+    /// **`Closed` is a claim, and only a daily rung that was read can make it.**
+    /// [`Self::from_observed`] fills every day between the first and last
+    /// observed day with `Closed`, which is right only for a stretch whose daily
+    /// rung was read whole. A caller that knows a stretch was NOT read (its daily
+    /// file is absent, or one of its records failed its checks) withholds that
+    /// stretch here, so the gap reads as "not measured" rather than as a run of
+    /// holidays that never happened. D-0950.
+    ///
+    /// Open days are left alone: a bar is proof, wherever it came from, and the
+    /// 2021-02-24 regulator override stays open. Days outside the span are
+    /// already `Unmeasured`. An empty or inverted range changes nothing.
+    ///
+    /// # Cost
+    ///
+    /// O(days in `from..=to` ∩ span): one slot visited per day, no allocation.
+    pub fn withhold_closed(&mut self, from: i64, to: i64) -> u32 {
+        let last = self.last_day();
+        let (from, to) = (from.max(self.first), to.min(last));
+        let mut changed = 0_u32;
+        if from > to {
+            return changed;
+        }
+        let (Ok(start), Ok(end)) = (
+            usize::try_from(from.saturating_sub(self.first)),
+            usize::try_from(to.saturating_sub(self.first)),
+        ) else {
+            return changed;
+        };
+        for slot in self
+            .kinds
+            .iter_mut()
+            .take(end.saturating_add(1))
+            .skip(start)
+        {
+            if *slot == DayKind::Closed {
+                *slot = DayKind::Unmeasured;
+                changed = changed.saturating_add(1);
+            }
+        }
+        changed
     }
 
     /// Days the exchange traded, counting both open kinds.

@@ -25,25 +25,39 @@ pub const MAX_QUERY_BYTES: usize = 512;
 /// Maximum JSON bytes returned by a successful or partial detail response.
 pub const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
-static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+/// Calendar derivations (`/calendar.json`, `/gaps.json`'s peer vote) that may
+/// be queued or running at once on the blocking pool.
+///
+/// A pool of its own, not [`MAX_CONCURRENT`]'s: a page polling the calendar
+/// must not be refused because sweep detail reads are busy, nor the reverse.
+/// Concurrent misses on one series share one derivation
+/// (`calendar_of::Cache`), so this bounds blocking threads, not derivations
+/// per key. W1-api2-11, D-0950.
+pub const MAX_CALENDAR_CONCURRENT: usize = 8;
 
-/// One admitted detail request.  Dropping it always returns the slot.
-pub(crate) struct Permit;
+static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+static CALENDAR_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+
+/// One admitted request in one pool.  Dropping it always returns the slot.
+pub(crate) struct Permit(&'static AtomicUsize);
 
 impl Permit {
     fn try_take() -> Option<Self> {
-        ACTIVE
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
-                (active < MAX_CONCURRENT).then_some(active.saturating_add(1))
-            })
-            .ok()
-            .map(|_| Self)
+        Self::try_take_from(&ACTIVE, MAX_CONCURRENT)
+    }
+
+    fn try_take_from(pool: &'static AtomicUsize, max: usize) -> Option<Self> {
+        pool.fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+            (active < max).then_some(active.saturating_add(1))
+        })
+        .ok()
+        .map(|_| Self(pool))
     }
 }
 
 impl Drop for Permit {
     fn drop(&mut self) {
-        let previous = ACTIVE.fetch_sub(1, Ordering::AcqRel);
+        let previous = self.0.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(previous > 0, "a detail permit is released exactly once");
     }
 }
@@ -69,6 +83,31 @@ where
     F: FnOnce() -> T + Send + 'static,
 {
     let permit = Permit::try_take().ok_or(RunError::Saturated)?;
+    admitted(permit, work).await
+}
+
+/// Runs a calendar derivation outside Tokio's worker pool, in the calendar
+/// pool of [`MAX_CALENDAR_CONCURRENT`] slots. W1-api2-11, D-0950.
+///
+/// # Errors
+///
+/// [`RunError::Saturated`] before queueing when every calendar slot is
+/// occupied, or [`RunError::Join`] when Tokio cannot join the blocking task.
+pub async fn run_calendar<T, F>(work: F) -> Result<T, RunError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let permit = Permit::try_take_from(&CALENDAR_ACTIVE, MAX_CALENDAR_CONCURRENT)
+        .ok_or(RunError::Saturated)?;
+    admitted(permit, work).await
+}
+
+async fn admitted<T, F>(permit: Permit, work: F) -> Result<T, RunError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
         work()
@@ -620,6 +659,48 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **A POOL ADMITS EXACTLY ITS BOUND, AND A DROPPED PERMIT RETURNS ITS
+    /// SLOT.** W1-api2-11, D-0950. Driven on a pool of the test's own, so no
+    /// route test sharing the real pools can see it.
+    #[test]
+    fn a_pool_admits_its_bound_and_a_dropped_permit_frees_its_slot() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static POOL: AtomicUsize = AtomicUsize::new(0);
+        let first = super::Permit::try_take_from(&POOL, 2).expect("one of two");
+        let second = super::Permit::try_take_from(&POOL, 2).expect("two of two");
+        assert!(
+            super::Permit::try_take_from(&POOL, 2).is_none(),
+            "a third is refused"
+        );
+        assert_eq!(POOL.load(Ordering::Acquire), 2);
+        drop(first);
+        assert_eq!(POOL.load(Ordering::Acquire), 1);
+        let third = super::Permit::try_take_from(&POOL, 2).expect("the freed slot");
+        drop((second, third));
+        assert_eq!(POOL.load(Ordering::Acquire), 0, "every slot returned");
+        assert!(
+            super::Permit::try_take_from(&POOL, 0).is_none(),
+            "a zero bound admits nothing"
+        );
+        assert_eq!(
+            POOL.load(Ordering::Acquire),
+            0,
+            "and a refusal takes nothing"
+        );
+    }
+
+    /// **A CALENDAR DERIVATION RUNS OFF THE ASYNC WORKER.** W1-api2-11,
+    /// D-0950. On a current-thread runtime the worker is the test's own
+    /// thread, so work that reports another thread ran on the blocking pool.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_calendar_derivation_runs_off_the_async_worker() {
+        let worker = std::thread::current().id();
+        let ran_on = super::run_calendar(|| std::thread::current().id())
+            .await
+            .expect("admitted");
+        assert_ne!(ran_on, worker, "the blocking pool, not the async worker");
     }
 
     /// ONLY AN ABSENT LEDGER IS AN ABSENCE.

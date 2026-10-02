@@ -154,3 +154,55 @@ async fn calendar_refuses_a_symbol_held_under_multiple_identities() {
     );
     assert!(body.get("sessions").is_none());
 }
+
+/// **THE CALENDAR ROUTES DERIVE OFF THE ASYNC WORKERS, BEHIND ADMISSION.**
+/// W1-api2-11, D-0950.
+///
+/// `calendar_json` held no `.await`: a cache miss derived every spot series on
+/// a Tokio worker, and `gaps_json` derived its peer vote the same way. Read off
+/// the source, because what is claimed is where the call sits.
+#[test]
+fn the_calendar_routes_derive_on_the_blocking_pool_behind_admission() {
+    let source = include_str!("server.rs");
+    let body_of = |head: &str| {
+        let at = source.find(head).expect("the handler exists");
+        let rest = &source[at..];
+        rest[..rest.find("\n}\n").expect("the handler ends")].to_owned()
+    };
+    let calendar = body_of("async fn calendar_json(");
+    assert!(
+        calendar.contains("crate::detail::run_calendar(move ||")
+            && calendar.contains("calendar_json_reading(&site, &uri, census_now_stamped)"),
+        "/calendar.json derives inside the admitted blocking pool:\n{calendar}"
+    );
+    let gaps = body_of("async fn gaps_json(");
+    let call = gaps
+        .find("peer_calendar(&peers_site, &asked)")
+        .expect("the peer vote is derived");
+    let admitted = gaps
+        .find("crate::detail::run_calendar(move ||")
+        .expect("inside the calendar pool");
+    assert!(admitted < call, "the peer vote is derived inside the pool");
+    assert!(
+        !gaps.contains("peer_calendar(&site, &asked)"),
+        "and never inline on the worker"
+    );
+}
+
+/// **A REFUSED ADMISSION IS ANSWERED, NAMED AND RETRYABLE.** Saturation is
+/// 429, a join failure 503, and both say why. W1-api2-11, D-0950.
+#[test]
+fn a_refused_calendar_admission_names_why_and_the_bound() {
+    let (status, _, body) = calendar_admission_refused(&crate::detail::RunError::Saturated);
+    assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
+    assert!(
+        body.contains("Saturated") && body.contains("at most 8"),
+        "{body}"
+    );
+    let (status, _, body) =
+        calendar_admission_refused(&crate::detail::RunError::Join("shut down".to_owned()));
+    assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    assert!(body.contains("shut down"), "{body}");
+    let parsed: Value = serde_json::from_str(&body).expect("JSON");
+    assert!(parsed["error"].is_string());
+}
