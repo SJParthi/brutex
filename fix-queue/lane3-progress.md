@@ -1,7 +1,7 @@
 # Cloud fix lane 3 progress (checkpoint; resume from here after any pause)
 
 Decision numbers: D-0940..D-0959, then D-1200..D-1299. Branch per fix: fix/cloud-<id>.
-Updated: 2026-10-02 14:40 UTC. Budget rule: max 2 agents at once; worktrees /home/claude/wt/<id>, resume notes in session scratchpad resume-*.md
+Updated: 2026-10-02 17:05 UTC. Budget rule: max 2 agents at once; worktrees /home/claude/wt/<id>, resume notes in session scratchpad resume-*.md
 
 ## Set 1 (lane3.md)
 | Fix | Findings | Branch | D | State | PR |
@@ -25,8 +25,8 @@ Updated: 2026-10-02 14:40 UTC. Budget rule: max 2 agents at once; worktrees /hom
 | B5 operation_audit | GAP14-57, W1-api3-5, W1-api3-0 | fix/cloud-gap14-57 | D-0952 | PR open, CI running | #46 |
 | B6 server.rs | W1-api5-0..-11, UC-20, R9-api-cx-2, GAP14-63 | fix/cloud-w1-api5-0 | D-0953 | PR open, CI running | #47 |
 | B7 sweeprun/audit/census | W1-api6-1, -4, -2, -5, W1-api1-9, R9-api-cx-1 | fix/cloud-w1-api6-1 | D-0954 | worker running (wt/w1-api6-5) | |
-| B8 pull ingest/fold | ET-bars-candles-store-1, -8, -4, W1-pull2-0, -3, -5, -6, R9-csr-cx-0, -1, GAP2-41, GAP12-12, W1-pull1-0 | fix/cloud-et-bars-candles-store-1 | D-0955 | worker running (wt/et-bcs-1) | |
-| B9 pull vendor docs | GAP12-8, GAP12-11, GAP2-43, W1-pull4-3, W1-pull4-2 | fix/cloud-gap12-8 | D-0956 | next | |
+| B8 pull ingest/fold | ET-bars-candles-store-1, -8, -4, W1-pull2-0, -3, -5, -6, R9-csr-cx-0, -1, GAP2-41, GAP12-12, W1-pull1-0 | fix/cloud-et-bars-candles-store-1 | D-0955 | PR open, CI running | #48 |
+| B9 pull vendor docs | GAP12-8, GAP12-11, GAP2-43, W1-pull4-3, W1-pull4-2 | fix/cloud-gap12-8 | D-0956 | PR open, CI running | #55 |
 | B10 docs-only | GAP5-50, UC-6, AC-whp-o1-1, AC-gates-o1-4, AC-whp-tb-3, -6, -7, ET-o1-proof-coverage-7, -8, -9, UC-17, ET-strategies-trades-ranking-costs-9, R9-csr-o1-0, ET-vocabulary-conditions-bits-3 | fix/cloud-gap5-50 | D-0957 | PR open, CI running | #32 |
 | GAP17-33 | process finding about Mac landing branches, not repo code | — | — | no PR; returned to queue owner | |
 
@@ -40,3 +40,5 @@ Updated: 2026-10-02 14:40 UTC. Budget rule: max 2 agents at once; worktrees /hom
 | C5 docs/tests | o1runner-9, o1runner-10, rustonly-3, audit-root | fix/cloud-o1runner-9 | D-1204 | next | |
 
 Note 14:40: #22 landed on main; merged main into all 11 open lane-3 PRs (append-only ledger conflicts, resolver scratchpad/append_resolve.py). #38 fixed gate 1c (test literals).
+
+17:05: #54 cli knob race fix (test-only, main), ported into #31. #39 and #47 fixed gate 11. #44 gate 11 under local diagnosis. B7 worker running; C1 (probeapi-1, D-1200) worker started. Local gate runners: scratchpad gate11.sh, gate12.sh.
