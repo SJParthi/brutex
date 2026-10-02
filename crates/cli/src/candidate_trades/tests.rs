@@ -821,3 +821,162 @@ fn expression_capture_replays_or_not_without_relabelling_the_same_referenced_and
 fn root_for_limit() -> PathBuf {
     root()
 }
+
+/// D-0973: one `Summary` verifies its catalog cold ONCE; every later page,
+/// tier read and reader open pins it by filesystem generation instead of
+/// re-reading and re-hashing the whole catalog. A changed catalog still refuses.
+#[test]
+fn a_summary_hashes_its_catalog_once_across_pages_and_still_refuses_a_change() {
+    let root = root();
+    let attempt = attempt(&root);
+    let (bars, column) = fixture();
+    let capture = Capture::begin(&root, &attempt, bars, column).expect("capture");
+    let tier = capture.tier(tier_input()).expect("tier");
+    record_both(&capture, &tier, &ConditionMask::default());
+    let summary = capture.finish().expect("complete");
+
+    CATALOG_VERIFICATIONS.with(|count| count.set(0));
+    for _ in 0..10 {
+        assert_eq!(
+            candidates_page(&root, &summary, 0, 0, 2, DEFAULT_MAX_BYTES)
+                .expect("page")
+                .len(),
+            2
+        );
+        assert_eq!(
+            super::tier(&root, &summary, 0, DEFAULT_MAX_BYTES).expect("tier"),
+            tier
+        );
+        assert!(TradeReader::open(&root, &summary, key_at(0, 0), DEFAULT_MAX_BYTES).is_ok());
+    }
+    assert_eq!(
+        CATALOG_VERIFICATIONS.with(std::cell::Cell::get),
+        1,
+        "thirty page-level reads of one summary hash the catalog once, not twice per read"
+    );
+
+    // A summary opened by `read` is already verified: its pages add nothing.
+    CATALOG_VERIFICATIONS.with(|count| count.set(0));
+    let reread = read(&root, [42; 32], attempt.token(), DEFAULT_MAX_BYTES)
+        .expect("read")
+        .expect("sealed");
+    assert_eq!(reread.digest, summary.digest);
+    for _ in 0..5 {
+        assert!(candidates_page(&root, &reread, 0, 0, 2, DEFAULT_MAX_BYTES).is_ok());
+    }
+    assert_eq!(CATALOG_VERIFICATIONS.with(std::cell::Cell::get), 1);
+
+    // The catalog changes between pages: same bytes, new file. Refused warm.
+    let catalog = capture.directory.join("catalog.bin");
+    let bytes = fs::read(&catalog).expect("catalog bytes");
+    fs::remove_file(&catalog).expect("remove catalog");
+    fs::write(&catalog, &bytes).expect("rewrite identical catalog");
+    for refusal in [
+        candidates_page(&root, &summary, 0, 0, 2, DEFAULT_MAX_BYTES).map(|_| ()),
+        super::tier(&root, &summary, 0, DEFAULT_MAX_BYTES).map(|_| ()),
+        TradeReader::open(&root, &summary, key_at(0, 0), DEFAULT_MAX_BYTES).map(|_| ()),
+        candidates_page(&root, &reread, 0, 0, 2, DEFAULT_MAX_BYTES).map(|_| ()),
+    ] {
+        let why = refusal.expect_err("a replaced catalog must refuse a pinned summary");
+        assert!(why.contains("changed between pages"), "{why}");
+    }
+    // A fresh cold read of the identical bytes is still valid evidence.
+    let fresh = read(&root, [42; 32], attempt.token(), DEFAULT_MAX_BYTES)
+        .expect("read")
+        .expect("sealed");
+    assert!(candidates_page(&root, &fresh, 0, 0, 2, DEFAULT_MAX_BYTES).is_ok());
+    // A removed catalog is refused warm, never treated as completed-empty.
+    fs::remove_file(&catalog).expect("remove catalog");
+    assert!(candidates_page(&root, &fresh, 0, 0, 2, DEFAULT_MAX_BYTES).is_err());
+}
+
+/// D-0973: an empty catalog (no visited tier) pins exactly like a full one.
+#[test]
+fn an_empty_catalog_is_verified_once_and_its_absent_tier_refuses() {
+    let root = root();
+    let attempt = attempt(&root);
+    let (bars, column) = fixture();
+    let capture = Capture::begin(&root, &attempt, bars, column).expect("capture");
+    let summary = capture.finish().expect("an empty capture still seals");
+    assert_eq!((summary.tiers, summary.candidates), (0, 0));
+    CATALOG_VERIFICATIONS.with(|count| count.set(0));
+    for _ in 0..3 {
+        let why =
+            super::tier(&root, &summary, 0, DEFAULT_MAX_BYTES).expect_err("no tier was visited");
+        assert!(why.contains("out of bounds"), "{why}");
+    }
+    assert_eq!(CATALOG_VERIFICATIONS.with(std::cell::Cell::get), 1);
+}
+
+/// D-0973: a capture derives the slice facts once for all of its candidates,
+/// a side with no trading cell is recorded with no rows, and one candidate side
+/// costs exactly four `fsync`s (two immutable files, each data + directory).
+#[test]
+fn a_capture_derives_slice_facts_once_and_counts_four_syncs_per_candidate_side() {
+    let root = root();
+    let attempt = attempt(&root);
+    let (bars, column) = fixture();
+    CAPTURE_FACTS_BUILT.with(|built| built.set(0));
+    let capture = Capture::begin(&root, &attempt, bars, column).expect("capture");
+    assert_eq!(
+        CAPTURE_FACTS_BUILT.with(std::cell::Cell::get),
+        0,
+        "a capture that has replayed nothing has derived nothing"
+    );
+    let tier = capture
+        .tier(Tier {
+            evaluated: 3,
+            ..tier_input()
+        })
+        .expect("tier");
+    let firing = ConditionMask::default();
+    let silent = (0..60).fold(ConditionMask::default(), ConditionMask::with_bit);
+    let mut zero_trade_sides = 0;
+    for (rank, mask) in [(1, &firing), (2, &firing), (3, &silent)] {
+        for (direction, grid) in grids(mask) {
+            let selected = crate::shown_cell(&grid, tier.rules);
+            if selected.is_none_or(|(cell, _)| cell.trades == 0) {
+                zero_trade_sides += 1;
+            }
+            DURABLE_SYNCS.with(|count| count.set(0));
+            capture
+                .record(
+                    &tier,
+                    &Evaluated {
+                        rank,
+                        mask,
+                        direction,
+                        selected,
+                        grid: &grid,
+                    },
+                )
+                .expect("exact capture");
+            assert_eq!(
+                DURABLE_SYNCS.with(std::cell::Cell::get),
+                4,
+                "one candidate side publishes two files, each with a data and a directory fsync"
+            );
+        }
+    }
+    assert_eq!(
+        zero_trade_sides, 2,
+        "the every-condition mask selects no trading cell on either side"
+    );
+    assert_eq!(
+        CAPTURE_FACTS_BUILT.with(std::cell::Cell::get),
+        1,
+        "six recorded candidate sides share one slice-fact derivation"
+    );
+    let summary = capture.finish().expect("complete");
+    let pages = candidates_page(&root, &summary, 0, 0, 6, DEFAULT_MAX_BYTES).expect("page");
+    assert_eq!(pages.len(), 6);
+    for candidate in &pages {
+        let trades = candidate.cell.map_or(0, |cell| cell.trades);
+        let mut reader =
+            TradeReader::open(&root, &summary, candidate.key, DEFAULT_MAX_BYTES).expect("reader");
+        assert_eq!(
+            reader.page(0, MAX_PAGE).expect("page").len() as u64,
+            trades.min(MAX_PAGE as u64)
+        );
+    }
+}
