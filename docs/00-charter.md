@@ -82,8 +82,10 @@ Sources are Indian exchange publications and the vendor documentation cited in
   recorded in `crates/pull/src/calendar.rs`. **A drill is not a market day**
   and its OHLC never becomes the previous-day anchor — it is in
   `CHARTER_NON_REGULAR_IST_DAYS` for exactly the reason the Muhurats are.
-  Unlike five of the six Muhurats, both land squarely inside the pull's
-  09:15–15:30 window, so nothing keeps them off disk by accident. What this
+  Both land squarely inside the pull's 09:15–15:30 window, so the pull keeps
+  them, as it keeps any in-hours bar of a Muhurat day (cloud audit GAP12-10
+  reported 43 bars dated 2021-11-04, 14:47–15:29, in one vendor's store; D-0946).
+  Only this list keeps them out of the anchor. What this
   cost while they were absent from that list, measured on the store's own
   bars: for Monday 2024-03-04 the anchor was the 105-bar Saturday rather than
   the 375-bar Friday, moving the pivot **144.5 index points** and the CPR width
