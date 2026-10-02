@@ -9879,3 +9879,23 @@ The text above is kept as it was written.
   doc to its body, read off the source, and
   `what_a_changed_rows_line_costs_is_named_in_part_and_read_off_the_source`
   finds each part named here and in that doc in the source that pays it.
+
+## The anchored daily cursor under refused signal bars — D-0942, 2 October 2026
+
+* **Before.** Each refused signal bar on the stored-daily anchored path walked
+  every daily reference between the committed cursor and its own IST day on a
+  copy that the refusal then discarded, so consecutive refusals re-walked the
+  same references: O(daily) per refused bar and O(signal x daily) per run, in
+  contradiction of the module doc's O(signal + daily). The audit measured
+  110 ns per refused bar with 10 references and 277,355 ns with 40,000.
+* **After.** A refusal is decided on the committed evaluator before the walk
+  whenever the walk would be non-empty, so a refused bar costs one fold and no
+  walk. An accepted bar pays one extra fold on the first bar of a day with an
+  unconsumed prior reference. The walk over the whole run is at most the
+  number of daily references: O(signal + daily) total, O(1) amortised per
+  signal bar.
+* **What is measured.** A deterministic walk-step count
+  (`refused_signal_bars_never_rewalk_the_daily_references`: 3,000 refusals
+  over 2,000 references walk 0, then one accepted bar walks 2,000; the pre-fix
+  code walked 6,000,000). No timing was taken; the bound is UNVERIFIED as a
+  bench until the indicators ratio bench gains an anchored row.

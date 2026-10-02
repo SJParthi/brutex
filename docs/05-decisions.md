@@ -43718,3 +43718,66 @@ second wait's sleep and the closing brace before it. Gate 20 declares
 coverage run on this PR is that check. The 21 `sink.rs` lines that stay
 uncovered are assertion messages, test-double methods and one guarded
 `return 0`, none of them a wait.
+
+### D-0942 — A refused anchored signal bar is decided before the daily cursor walks, so refusals cost no daily walk — 2026-10-02
+
+**What was found.** W3-indicators1-0, and W3-indicators1-1 is the same
+defect. `AnchoredEvaluator::step_with_warmth` copied itself, advanced the
+daily cursor on the copy with `advance_before`, then ran `step_known`. A
+refusal discarded the copy, so the next refused bar walked the same daily
+references again from the committed cursor. `Column::build_from` keeps folding
+after a refusal, so a burst of refused bars before the first accepted bar (or
+spanning many days after the last one) cost O(daily) each and O(signal x
+daily) per run. The audit measured 110 ns per refused bar with 10 references
+and 277,355 ns with 40,000. The module doc (`anchored.rs` "Join and cost")
+claimed `O(signal + daily)`.
+
+**Why the walk is not simply committed on refusal.** A refused bar may carry a
+LATER IST day than the next accepted bar: a zero-priced bar stamped three days
+ahead is refused as `PriceNotPositive`, and the next ordinary bar, still after
+the last accepted timestamp, is accepted. Committing the refused bar's walk
+would install references from days at or after the accepted bar's day, which
+is look-ahead. It would also move `census.consumed`, whose doc counts records
+made strictly earlier than an ACCEPTED signal day, and change
+`current_reference` after a trailing refusal.
+
+**The change.** When the walk would be non-empty (the reference at the cursor
+is strictly before the signal day), the bar is first stepped on a throwaway
+copy of the COMMITTED evaluator; a refusal returns from there and no reference
+is walked. This is exact because no refusal in `Evaluator::stepped` reads the
+three fields the walk writes: `prev5`, `yesterday` and `previous` are written in
+external-daily mode only by `install_external_daily_reference`
+(`close_the_books` returns early), and `SessionState::step` reads `previous`
+only for its bits after its own `check_evaluable`. So the committed evaluator
+refuses exactly the bars the advanced one refuses, with the same `Corrupt`,
+and nothing a later accepted bar sees changes.
+
+**Cost, stated.** A refused bar costs one fold and no walk. An accepted bar
+whose day has an unconsumed prior reference costs one extra fold (the probe)
+and walks those references once; that happens at most once per accepted
+signal day. Total walk is at most the number of daily references, so total
+work is `O(signal + daily)` for any order of refused and accepted bars.
+UNVERIFIED as a bench: the proof is a walk-step count, not a timing.
+
+**Proved by.**
+`indicators::anchored::tests::refused_signal_bars_never_rewalk_the_daily_references`
+offers 3,000 refused bars of six refusal kinds (zero price, negative low,
+inverted, straddling range, negative volume, overflowing VWAP accumulator)
+over 2,000 unconsumed references, then one accepted bar, and requires exactly
+2,000 walk steps in total. On the pre-fix code it fails with
+`left: 6000000, right: 0`.
+`the_pre_fix_step_walks_every_pending_reference_per_refusal` keeps the old
+step as an oracle and shows it walking 500 steps for 10 refusals over 50
+references where the new step walks 0.
+`the_refusal_probe_runs_once_per_day_with_a_pending_prior_reference` pins
+the probe's own price: three probes over four days of five bars, one per day
+with a strictly earlier unconsumed reference, none for a same-day reference
+or after the references run out.
+`mixed_refused_and_accepted_bars_match_the_pre_fix_step_exactly` drives 4,000
+pseudo-random bars per availability, including refused later-day bars
+followed by accepted earlier-day bars, duplicate and receding timestamps,
+negative volumes and accumulator overflows, and requires every result (mask,
+known set, warmth, refusal) and the cursor, installed reference, census,
+Prev5 fill, anchor and warm-up verdict after every step to equal the oracle's.
+The walk counter is a `#[cfg(test)]` thread-local, so the count is
+deterministic and absent from production builds.
