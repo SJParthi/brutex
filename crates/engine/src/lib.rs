@@ -134,7 +134,8 @@ pub mod primitives {
     ///
     /// The one call `Ladder::first_level` makes per offered position. Expected
     /// O(1) on a set pre-sized to the offered width; that is amortised hash
-    /// table evidence, not an adversarial worst-case bound.
+    /// table evidence, not an adversarial worst-case bound. Measured by C-E-10
+    /// in `crates/engine/benches/ratio.rs`.
     #[inline]
     pub fn offer<S: BuildHasher>(offered: &mut HashSet<u32, S>, position: u32) -> bool {
         offered.insert(position)

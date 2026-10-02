@@ -308,7 +308,8 @@ impl Best {
     /// sift -- `sift_up` while filling, `take_root`'s `sift_down` then
     /// `sift_up` when full -- and each sift walks at most `floor(log2(cap))`
     /// levels, so the admit cost grows with the retention's capacity, not with
-    /// the number offered. It went unstated until audit finding o1engine-20;
+    /// the number offered. UNVERIFIED as a measured figure: no bench row times
+    /// an admission. It went unstated until audit finding o1engine-20;
     /// `docs/06-limits.md` names it beside the join's costs. Memory is `cap`
     /// itemsets, fixed; the vector was reserved for `cap` when the retention
     /// was built.
