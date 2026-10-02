@@ -2160,6 +2160,32 @@ impl Addressed {
             self.contract,
         )
     }
+
+    /// Whether the store would accept this address at all, before any file is
+    /// touched.
+    ///
+    /// The same `StorePath::new` validation [`bars::open`] runs first, with the
+    /// same `"{symbol} {month}: {why}"` sentence, so `/gaps.json` and
+    /// `/bars.json` refuse one malformed query in one voice. Constant work: four
+    /// bounded segments and no I/O.
+    ///
+    /// # Errors
+    ///
+    /// The store's own refusal, ready to render.
+    fn store_path_is_valid(&self) -> Result<(), String> {
+        store::path::StorePath::new(store::path::PathParts {
+            vendor: self.vendor,
+            exchange: &self.exchange,
+            segment: &self.segment,
+            symbol: &self.symbol,
+            contract: self.contract,
+            timeframe: self.timeframe,
+            month: self.month,
+            file: store::path::FileKind::Bars,
+        })
+        .map(|_| ())
+        .map_err(|why| format!("{} {}: {why}", self.symbol, self.month))
+    }
 }
 
 /// One instrument-month of bars, as JSON, for the chart.
@@ -2397,6 +2423,15 @@ async fn gaps_json(
         Ok(asked) => asked,
         Err(why) => return refuse(why),
     };
+    // AN ADDRESS THE STORE REFUSES IS A 400, NOT AN ABSENT MONTH (probeapi-2,
+    // D-1200). `audit_one` folds every `open` refusal into `absent_file`, so an
+    // empty or `..` segment used to answer 200 with every expected minute
+    // classified `vendor-hole` — a missing-data report about a path that can
+    // never exist — while `/bars.json` refused the same query. The segments do
+    // not depend on the month, so one check covers every month in the range.
+    if let Err(why) = asked.store_path_is_valid() {
+        return refuse(why);
+    }
     // `to` IS OPTIONAL AND DEFAULTS TO `month`, so the single-month question
     // stays a single-month question and the range is opt-in. An unparseable
     // `to` REFUSES rather than collapsing to one month: a range that silently
@@ -16102,11 +16137,346 @@ fn cross_origin_sentence(method: &axum::http::Method, header: &str, value: &str)
     )
 }
 
+/// How long one client has to deliver one complete HTTP/1 request head.
+///
+/// # Why there is a deadline at all (probeapi-1, D-1200)
+///
+/// `axum::serve` builds its hyper connection with no timer, and hyper's own
+/// `header_read_timeout` is inert without one. So a client that sent half a
+/// request and went quiet held its socket for as long as it liked: the audit
+/// measured a partial `GET /health` still open after 100 s, and 19,990 such
+/// connections took the process to its 20,000-descriptor limit while a real
+/// `GET /vocab.json` got 0 bytes in 10.2 s.
+///
+/// The clock starts at accept, and again after every response written on a
+/// kept-alive connection, and stops when the head's blank line arrives. It is
+/// a deadline for the WHOLE head, not an idle timer: a client dripping one byte
+/// every second is cut at the same moment as one that sent nothing.
+///
+/// Ten seconds is a choice, not a vendor fact: this listener is loopback-only
+/// and its clients are the operator's own browser, which sends a head in one
+/// write. It is a third of hyper's documented default for the same knob.
+pub const HEAD_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How many connections this server holds open at once.
+///
+/// Above it, `accept` waits for a slot instead of taking another descriptor;
+/// the kernel's backlog holds the queue. Without it the descriptor table was
+/// the only ceiling, and reaching that ceiling refuses everything — the store
+/// files a request needs to open included. A browser holds about six.
+pub const MAX_CONNECTIONS: usize = 256;
+
+/// The two bounds [`serve_limited`] enforces per connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConnectionLimits {
+    /// See [`HEAD_READ_TIMEOUT`].
+    pub head_read_timeout: std::time::Duration,
+    /// See [`MAX_CONNECTIONS`]. Zero is read as one: a server that can never
+    /// accept is a hang, not a limit.
+    pub max_connections: usize,
+}
+
+impl ConnectionLimits {
+    /// What the operator's server runs with.
+    pub const SERVED: Self = Self {
+        head_read_timeout: HEAD_READ_TIMEOUT,
+        max_connections: MAX_CONNECTIONS,
+    };
+}
+
+/// The live-connection count and the wake-up a closing connection sends.
+#[derive(Debug)]
+struct Slots {
+    live: std::sync::atomic::AtomicUsize,
+    cap: usize,
+    freed: tokio::sync::Notify,
+}
+
+impl Slots {
+    /// Take one slot if one is free. One compare-and-swap loop, no scan.
+    fn try_take(&self) -> bool {
+        use std::sync::atomic::Ordering::{AcqRel, Acquire};
+        self.live
+            .fetch_update(AcqRel, Acquire, |n| {
+                (n < self.cap).then_some(n.saturating_add(1))
+            })
+            .is_ok()
+    }
+}
+
+/// One held slot, given back when the connection's stream is dropped.
+#[derive(Debug)]
+struct Slot(std::sync::Arc<Slots>);
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0
+            .live
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        // `notify_one` stores a permit when nobody is waiting, so a slot freed
+        // between the acceptor's check and its wait is never lost.
+        self.0.freed.notify_one();
+    }
+}
+
+/// A TCP listener that admits at most `cap` connections and hands each one out
+/// wrapped in a [`HeadDeadline`].
+#[derive(Debug)]
+struct LimitedListener {
+    inner: tokio::net::TcpListener,
+    slots: std::sync::Arc<Slots>,
+    head_read_timeout: std::time::Duration,
+}
+
+impl axum::serve::Listener for LimitedListener {
+    type Io = HeadDeadline;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        while !self.slots.try_take() {
+            self.slots.freed.notified().await;
+        }
+        // Bound BEFORE the await, so a shutdown that cancels this accept gives
+        // the slot back instead of leaking it.
+        let slot = Slot(std::sync::Arc::clone(&self.slots));
+        let (io, addr) = axum::serve::Listener::accept(&mut self.inner).await;
+        (HeadDeadline::new(io, slot, self.head_read_timeout), addr)
+    }
+
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        self.inner.local_addr()
+    }
+}
+
+/// Where one connection is in its current request head.
+#[derive(Debug, Clone, Copy)]
+enum HeadState {
+    /// Waiting for a head to finish by `deadline`. `progress` is how much of
+    /// the blank line that ends a head has been seen (`\n`, then optionally
+    /// `\r`); `partial` is whether any byte of this head has arrived.
+    Awaiting {
+        deadline: tokio::time::Instant,
+        progress: u8,
+        partial: bool,
+    },
+    /// The head is complete; the request belongs to the handler, and no
+    /// deadline runs until the response is written.
+    Delivered,
+}
+
+/// A connection whose request head must arrive by a deadline.
+///
+/// Every operation is O(1) apart from the scan for the end of the head, which
+/// is O(1) per byte read: one match on a two-state progress counter.
+/// UNVERIFIED by any bench: structural, and stated as such in
+/// `docs/06-limits.md` under D-1200.
+#[derive(Debug)]
+struct HeadDeadline {
+    io: tokio::net::TcpStream,
+    _slot: Slot,
+    timeout: std::time::Duration,
+    state: HeadState,
+    alarm: std::pin::Pin<Box<tokio::time::Sleep>>,
+    /// The waker of the last read that returned `Pending`.
+    ///
+    /// A read hyper left pending while the head was [`HeadState::Delivered`]
+    /// registered no alarm, and hyper does not poll again until something
+    /// wakes it. Without this, a response written on a kept-alive connection
+    /// re-armed a deadline nobody would ever look at: the idle socket was held
+    /// for as long as the client liked, which the keep-alive test caught.
+    parked_read: Option<std::task::Waker>,
+}
+
+/// What a client that sent part of a head is told before its socket closes.
+const HEAD_TIMEOUT_REPLY: &[u8] = b"HTTP/1.1 408 Request Timeout\r\n\
+Connection: close\r\n\
+Content-Type: text/plain; charset=utf-8\r\n\
+Content-Length: 76\r\n\
+\r\n\
+REFUSED: the request head did not arrive in time; this connection is closed.";
+
+impl HeadDeadline {
+    fn new(io: tokio::net::TcpStream, slot: Slot, timeout: std::time::Duration) -> Self {
+        let deadline = tokio::time::Instant::now() + timeout;
+        Self {
+            io,
+            _slot: slot,
+            timeout,
+            state: HeadState::Awaiting {
+                deadline,
+                progress: 0,
+                partial: false,
+            },
+            alarm: Box::pin(tokio::time::sleep_until(deadline)),
+            parked_read: None,
+        }
+    }
+
+    /// Fold freshly read bytes into the head state.
+    fn observe(&mut self, fresh: &[u8]) {
+        let HeadState::Awaiting {
+            mut progress,
+            mut partial,
+            deadline,
+        } = self.state
+        else {
+            return;
+        };
+        for &byte in fresh {
+            partial = true;
+            // A head ends at an empty line: `\n` then `\n`, or `\n` `\r` `\n`.
+            // httparse accepts the bare-LF form, so this must too, or a head
+            // the server already parsed would keep a deadline running into
+            // its handler.
+            progress = match (progress, byte) {
+                (1 | 2, b'\n') => {
+                    self.state = HeadState::Delivered;
+                    return;
+                }
+                (_, b'\n') => 1,
+                (1, b'\r') => 2,
+                _ => 0,
+            };
+        }
+        self.state = HeadState::Awaiting {
+            deadline,
+            progress,
+            partial,
+        };
+    }
+
+    /// A written response starts the next head's clock.
+    fn rearm(&mut self) {
+        match self.state {
+            HeadState::Delivered => {
+                let deadline = tokio::time::Instant::now() + self.timeout;
+                self.state = HeadState::Awaiting {
+                    deadline,
+                    progress: 0,
+                    partial: false,
+                };
+                self.alarm.as_mut().reset(deadline);
+                // Make the parked read look again, so it polls the alarm.
+                if let Some(waker) = self.parked_read.take() {
+                    waker.wake();
+                }
+            }
+            // A pipelined head already under way keeps its own clock.
+            HeadState::Awaiting { .. } => {}
+        }
+    }
+
+    /// The deadline passed: say so to a client that sent something, then
+    /// close.
+    fn expire(&self, partial: bool) -> std::io::Error {
+        if partial {
+            // BEST EFFORT AND NON-BLOCKING, on purpose: the reply is 188 bytes
+            // into an idle socket's empty send buffer, and a client that will
+            // not read it is the client this exists to drop. The connection
+            // closes either way; the error below is what hyper acts on.
+            let _best_effort = self.io.try_write(HEAD_TIMEOUT_REPLY);
+        }
+        std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "the request head did not arrive before the head-read deadline",
+        )
+    }
+}
+
+impl tokio::io::AsyncRead for HeadDeadline {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        use std::task::Poll;
+        let this = &mut *self;
+        if let HeadState::Awaiting {
+            deadline, partial, ..
+        } = this.state
+            && tokio::time::Instant::now() >= deadline
+        {
+            return Poll::Ready(Err(this.expire(partial)));
+        }
+        let before = buf.filled().len();
+        match std::pin::Pin::new(&mut this.io).poll_read(cx, buf) {
+            Poll::Ready(Ok(())) => {
+                if let Some(fresh) = buf.filled().get(before..) {
+                    this.observe(fresh);
+                }
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(why)) => Poll::Ready(Err(why)),
+            Poll::Pending => {
+                match &mut this.parked_read {
+                    Some(parked) => parked.clone_from(cx.waker()),
+                    None => this.parked_read = Some(cx.waker().clone()),
+                }
+                if let HeadState::Awaiting { partial, .. } = this.state
+                    && this.alarm.as_mut().poll(cx).is_ready()
+                {
+                    return Poll::Ready(Err(this.expire(partial)));
+                }
+                Poll::Pending
+            }
+        }
+    }
+}
+
+impl tokio::io::AsyncWrite for HeadDeadline {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let this = &mut *self;
+        let written = std::pin::Pin::new(&mut this.io).poll_write(cx, buf);
+        if matches!(written, std::task::Poll::Ready(Ok(n)) if n > 0) {
+            this.rearm();
+        }
+        written
+    }
+
+    fn poll_write_vectored(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let this = &mut *self;
+        let written = std::pin::Pin::new(&mut this.io).poll_write_vectored(cx, bufs);
+        if matches!(written, std::task::Poll::Ready(Ok(n)) if n > 0) {
+            this.rearm();
+        }
+        written
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.io.is_write_vectored()
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.io).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.io).poll_shutdown(cx)
+    }
+}
+
 /// Serves on an already-bound listener until `shutdown` resolves.
 ///
 /// The shutdown signal is a parameter rather than a `ctrl_c()` buried inside,
 /// so that a test can drive the whole serve path — accept, route, respond,
 /// stop — without a signal and without a hard kill.
+///
+/// Runs with [`ConnectionLimits::SERVED`]: a head-read deadline and a
+/// connection cap (probeapi-1, D-1200).
 ///
 /// # Errors
 ///
@@ -16117,6 +16487,32 @@ pub async fn serve(
     app: axum::Router,
     shutdown: Shutdown,
 ) -> std::io::Result<()> {
+    serve_limited(listener, app, shutdown, ConnectionLimits::SERVED).await
+}
+
+/// [`serve`], with the per-connection bounds named by the caller.
+///
+/// Split out so a test can drive the deadline in milliseconds rather than
+/// waiting out [`HEAD_READ_TIMEOUT`] for every adversarial case.
+///
+/// # Errors
+///
+/// As [`serve`].
+pub async fn serve_limited(
+    listener: tokio::net::TcpListener,
+    app: axum::Router,
+    shutdown: Shutdown,
+    limits: ConnectionLimits,
+) -> std::io::Result<()> {
+    let listener = LimitedListener {
+        inner: listener,
+        slots: std::sync::Arc::new(Slots {
+            live: std::sync::atomic::AtomicUsize::new(0),
+            cap: limits.max_connections.max(1),
+            freed: tokio::sync::Notify::new(),
+        }),
+        head_read_timeout: limits.head_read_timeout,
+    };
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             // The signal's own error is not actionable: a failed ctrl-c
@@ -16125,6 +16521,327 @@ pub async fn serve(
             let _ = shutdown.await;
         })
         .await
+}
+
+/// probeapi-1, D-1200: slow, partial, silent, oversized and crowding clients
+/// against [`serve_limited`] — the deadline and the cap, driven in
+/// milliseconds over real sockets.
+#[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic
+)]
+mod head_deadline_tests {
+    use super::{ConnectionLimits, HEAD_READ_TIMEOUT, serve, serve_limited};
+    use std::fmt::Write as _;
+    use std::net::SocketAddr;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio::net::TcpStream;
+    use tokio::time::Instant;
+
+    const T: Duration = Duration::from_millis(400);
+    /// `T` less 50 ms of scheduling slack, for the not-before checks.
+    const T_SLACK: Duration = Duration::from_millis(350);
+
+    fn app(slow: Duration) -> axum::Router {
+        axum::Router::new()
+            .route("/ok", axum::routing::get(|| async { "ok" }))
+            .route(
+                "/slow",
+                axum::routing::get(move || async move {
+                    tokio::time::sleep(slow).await;
+                    "slow"
+                }),
+            )
+    }
+
+    /// A server on an ephemeral port, and the sender that stops it.
+    async fn start(limits: ConnectionLimits) -> (SocketAddr, tokio::sync::oneshot::Sender<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let _served = tokio::spawn(serve_limited(
+            listener,
+            app(T * 3),
+            Box::pin(async move {
+                let _ = stopped.await;
+                Ok(())
+            }),
+            limits,
+        ));
+        (addr, stop)
+    }
+
+    fn limits(cap: usize) -> ConnectionLimits {
+        ConnectionLimits {
+            head_read_timeout: T,
+            max_connections: cap,
+        }
+    }
+
+    /// Everything the server sends until it closes, or until `limit` passes —
+    /// and whether it closed.
+    async fn drain(stream: &mut TcpStream, limit: Duration) -> (String, bool) {
+        let mut got = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        let until = Instant::now() + limit;
+        loop {
+            match tokio::time::timeout_at(until, stream.read(&mut chunk)).await {
+                Ok(Ok(0) | Err(_)) => return (String::from_utf8_lossy(&got).into_owned(), true),
+                Ok(Ok(n)) => got.extend_from_slice(&chunk[..n]),
+                Err(_elapsed) => return (String::from_utf8_lossy(&got).into_owned(), false),
+            }
+        }
+    }
+
+    /// Reads one response whose body ends with `tail`, leaving the socket open.
+    async fn one_response(stream: &mut TcpStream, tail: &str) -> String {
+        let mut got = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        while !String::from_utf8_lossy(&got).ends_with(tail) {
+            let n = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut chunk))
+                .await
+                .expect("a response within 5 s")
+                .expect("read");
+            assert!(
+                n > 0,
+                "closed mid-response: {}",
+                String::from_utf8_lossy(&got)
+            );
+            got.extend_from_slice(&chunk[..n]);
+        }
+        String::from_utf8_lossy(&got).into_owned()
+    }
+
+    /// THE PROBE ITSELF, against the server the operator runs: a partial
+    /// `GET /health` that goes quiet is cut within the served deadline. On the
+    /// code before D-1200 it was still open after 100 s.
+    #[tokio::test]
+    async fn the_served_default_cuts_a_partial_head_that_goes_quiet() {
+        assert!(HEAD_READ_TIMEOUT < Duration::from_secs(15));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let _served = tokio::spawn(serve(
+            listener,
+            app(T),
+            Box::pin(async move {
+                let _ = stopped.await;
+                Ok(())
+            }),
+        ));
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(format!("GET /health HTTP/1.1\r\nHost: {addr}\r\n").as_bytes())
+            .await
+            .unwrap();
+        let (said, closed) = drain(&mut client, Duration::from_secs(15)).await;
+        assert!(closed, "a partial head was still open after 15 s");
+        assert!(said.starts_with("HTTP/1.1 408"), "{said:?}");
+        let _ = stop.send(());
+    }
+
+    /// A partial head is answered `408` and closed AT the deadline: not
+    /// before it, and not long after.
+    #[tokio::test]
+    async fn a_partial_head_is_refused_with_408_at_the_deadline() {
+        let (addr, stop) = start(limits(8)).await;
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let began = Instant::now();
+        client
+            .write_all(b"GET /ok HTTP/1.1\r\nHost: x\r\n")
+            .await
+            .unwrap();
+        let (said, closed) = drain(&mut client, T * 10).await;
+        let took = began.elapsed();
+        assert!(closed, "still open after {took:?}");
+        assert!(said.starts_with("HTTP/1.1 408 Request Timeout"), "{said:?}");
+        assert!(said.ends_with("this connection is closed."), "{said:?}");
+        assert!(took >= T_SLACK, "cut early at {took:?}");
+        assert!(took < T * 4, "cut late at {took:?}");
+        let _ = stop.send(());
+    }
+
+    /// DRIPPING DOES NOT BUY TIME. One byte every quarter-deadline keeps an
+    /// idle timer happy forever; the head deadline is absolute from accept.
+    #[tokio::test]
+    async fn a_client_dripping_bytes_is_cut_at_the_same_deadline() {
+        let (addr, stop) = start(limits(8)).await;
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let began = Instant::now();
+        let drip = b"GET /ok HTTP/1.1\r\nX-Slow: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut cut = false;
+        for byte in drip {
+            if client.write_all(&[*byte]).await.is_err() {
+                cut = true;
+                break;
+            }
+            tokio::time::sleep(T / 4).await;
+            if began.elapsed() > T * 3 {
+                break;
+            }
+        }
+        let (said, closed) = drain(&mut client, T * 4).await;
+        assert!(cut || closed, "a dripping client outlived the deadline");
+        assert!(said.starts_with("HTTP/1.1 408"), "{said:?}");
+        assert!(began.elapsed() < T * 8, "cut late at {:?}", began.elapsed());
+        let _ = stop.send(());
+    }
+
+    /// A client that connects and says nothing is closed silently — it sent
+    /// no request, so no response is invented for it.
+    #[tokio::test]
+    async fn a_silent_connection_is_closed_without_a_reply() {
+        let (addr, stop) = start(limits(8)).await;
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let began = Instant::now();
+        let (said, closed) = drain(&mut client, T * 10).await;
+        assert!(closed, "a silent socket was held");
+        assert_eq!(said, "", "no request, no reply");
+        assert!(began.elapsed() >= T_SLACK);
+        let _ = stop.send(());
+    }
+
+    /// The boundary from the inside: a head finished half a deadline in, with
+    /// a bare-LF ending and then a CRLF one, is served.
+    #[tokio::test]
+    async fn a_head_completed_before_the_deadline_is_served() {
+        let (addr, stop) = start(limits(8)).await;
+        for ending in ["\r\n\r\n", "\n\n"] {
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            client
+                .write_all(b"GET /ok HTTP/1.1\r\nHost: x")
+                .await
+                .unwrap();
+            tokio::time::sleep(T / 2).await;
+            client
+                .write_all(format!("\r\nConnection: close{ending}").as_bytes())
+                .await
+                .unwrap();
+            let (said, closed) = drain(&mut client, T * 10).await;
+            assert!(closed);
+            assert!(said.starts_with("HTTP/1.1 200 OK"), "{ending:?}: {said:?}");
+            assert!(said.ends_with("ok"), "{said:?}");
+        }
+        let _ = stop.send(());
+    }
+
+    /// The deadline is for the HEAD. A handler that takes three deadlines to
+    /// answer is not cut, and the kept-alive connection then gets a fresh
+    /// clock for its next head — and is closed when that one also lapses.
+    #[tokio::test]
+    async fn a_slow_handler_is_not_cut_and_keep_alive_gets_a_fresh_clock() {
+        let (addr, stop) = start(limits(8)).await;
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(b"GET /slow HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+        let began = Instant::now();
+        let first = one_response(&mut client, "slow").await;
+        assert!(first.starts_with("HTTP/1.1 200 OK"), "{first:?}");
+        assert!(began.elapsed() >= T * 2 + T_SLACK);
+        // A second head inside the fresh window is served on the same socket.
+        tokio::time::sleep(T / 2).await;
+        client
+            .write_all(b"GET /ok HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+        let second = one_response(&mut client, "ok").await;
+        assert!(second.starts_with("HTTP/1.1 200 OK"), "{second:?}");
+        // Then idle: the kept-alive socket is closed, silently.
+        let idle = Instant::now();
+        let (said, closed) = drain(&mut client, T * 10).await;
+        assert!(closed, "an idle kept-alive socket was held forever");
+        assert_eq!(said, "");
+        assert!(idle.elapsed() >= T_SLACK);
+        let _ = stop.send(());
+    }
+
+    /// HUGE HEADS are refused, not buffered without end: too many fields, and
+    /// one field larger than the read buffer with no end in sight.
+    #[tokio::test]
+    async fn an_oversized_head_is_refused_promptly() {
+        let (addr, stop) = start(limits(8)).await;
+        let mut many = String::from("GET /ok HTTP/1.1\r\nHost: x\r\n");
+        for i in 0..500 {
+            let _ = write!(many, "X-{i}: v\r\n");
+        }
+        many.push_str("\r\n");
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let _ = client.write_all(many.as_bytes()).await;
+        let (said, closed) = drain(&mut client, T * 10).await;
+        assert!(closed);
+        assert!(said.starts_with("HTTP/1.1 431"), "{said:?}");
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let began = Instant::now();
+        let giant = format!("GET /ok HTTP/1.1\r\nX-Big: {}", "a".repeat(2 << 20));
+        let _ = tokio::time::timeout(T * 5, client.write_all(giant.as_bytes())).await;
+        let (said, closed) = drain(&mut client, T * 10).await;
+        assert!(closed, "a 2 MiB unterminated head was held");
+        assert!(
+            said.starts_with("HTTP/1.1 431") || said.starts_with("HTTP/1.1 408") || said.is_empty(),
+            "{said:?}"
+        );
+        assert!(began.elapsed() < T * 15);
+        let _ = stop.send(());
+    }
+
+    /// MANY CONCURRENT SLOW CLIENTS cannot starve a real one. Sixteen partial
+    /// heads against a cap of four: each wave is cut at the deadline, the slot
+    /// is given back, and the real request queued behind them is answered.
+    /// It waits — which is the cap working — but it is answered.
+    #[tokio::test]
+    async fn a_crowd_of_partial_clients_cannot_starve_a_real_request() {
+        let (addr, stop) = start(limits(4)).await;
+        let mut crowd = Vec::new();
+        for _ in 0..16 {
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            client
+                .write_all(b"GET /ok HTTP/1.1\r\nHost: x\r\n")
+                .await
+                .unwrap();
+            crowd.push(client);
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let began = Instant::now();
+        let mut real = TcpStream::connect(addr).await.unwrap();
+        real.write_all(b"GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let (said, closed) = drain(&mut real, T * 20).await;
+        let took = began.elapsed();
+        assert!(closed);
+        assert!(said.starts_with("HTTP/1.1 200 OK"), "{said:?}");
+        // The cap held: twelve of the crowd were queued ahead of it, so it
+        // waited out at least two whole waves.
+        assert!(took >= T * 2, "answered at {took:?}: the cap did not hold");
+        for mut client in crowd {
+            let (said, closed) = drain(&mut client, T * 10).await;
+            assert!(closed && said.starts_with("HTTP/1.1 408"), "{said:?}");
+        }
+        let _ = stop.send(());
+    }
+
+    /// A cap of zero is read as one, not as a server that never accepts.
+    #[tokio::test]
+    async fn a_zero_cap_still_serves_one_at_a_time() {
+        let (addr, stop) = start(limits(0)).await;
+        for _ in 0..3 {
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            client
+                .write_all(b"GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            let (said, closed) = drain(&mut client, T * 10).await;
+            assert!(closed && said.starts_with("HTTP/1.1 200 OK"), "{said:?}");
+        }
+        let _ = stop.send(());
+    }
 }
 
 /// The banner line naming where the front end is and what state it is in.
@@ -18701,6 +19418,60 @@ mod tests {
             assert_eq!(code, axum::http::StatusCode::BAD_REQUEST, "{body}");
             assert!(body.contains("requires timeframe=1min"), "{body}");
         }
+    }
+
+    /// probeapi-2, D-1200: an address the store refuses is a 400 on the gaps
+    /// route exactly as on the bars route — never a 200 "vendor-hole" report
+    /// about a path that cannot exist. A valid address whose month is simply
+    /// not held keeps answering 200 with the absence named.
+    #[tokio::test]
+    async fn gaps_route_refuses_an_invalid_store_address_like_the_bars_route() {
+        let site = std::sync::Arc::new(Site::serving(
+            &masters("gaps-invalid-address", None, None),
+            &store_root("gaps-invalid-address"),
+        ));
+        let rest = "timeframe=1min&month=2026-01";
+        let refused = [
+            // The probe's own query: every segment empty.
+            "month=2026-01".to_owned(),
+            format!("feed=zerodha&{rest}"),
+            format!("feed=zerodha&exchange=NSE&segment=INDEX&{rest}"),
+            format!("feed=zerodha&exchange=..&segment=INDEX&symbol=NIFTY&{rest}"),
+            format!("feed=zerodha&exchange=NSE&segment=..&symbol=NIFTY&{rest}"),
+            format!("feed=zerodha&exchange=NSE&segment=INDEX&symbol=..&{rest}"),
+            format!("feed=zerodha&exchange=NSE&segment=INDEX&symbol=.&{rest}"),
+            format!("feed=zerodha&exchange=NSE&segment=INDEX&symbol=A%2FB&{rest}"),
+            format!("feed=zerodha&exchange=nse&segment=INDEX&symbol=NIFTY&{rest}"),
+            format!(
+                "feed=zerodha&exchange=NSE&segment=INDEX&symbol={}&{rest}",
+                "N".repeat(4096)
+            ),
+            // A RANGE is checked once, before any month is walked.
+            format!("feed=zerodha&exchange=NSE&segment=INDEX&symbol=..&{rest}&to=2026-12"),
+        ];
+        for query in refused {
+            let uri: axum::http::Uri = format!("/gaps.json?{query}").parse().unwrap();
+            let (code, _, gaps) = gaps_json(axum::extract::State(site.clone()), uri.clone()).await;
+            assert_eq!(code, axum::http::StatusCode::BAD_REQUEST, "{query}: {gaps}");
+            assert!(gaps.contains("path segment"), "{query}: {gaps}");
+            assert!(!gaps.contains("vendor-hole"), "{query}: {gaps}");
+            assert!(!gaps.contains("lost_minutes"), "{query}: {gaps}");
+            // ONE VOICE: the bars route refuses the same query with the same
+            // status, so the two pages cannot disagree about one address.
+            let (bars_code, _, _) = bars_json(axum::extract::State(site.clone()), uri).await;
+            assert_eq!(bars_code, axum::http::StatusCode::BAD_REQUEST, "{query}");
+        }
+        // The control: a valid address that is not held is still a finding.
+        let uri: axum::http::Uri =
+            format!("/gaps.json?feed=zerodha&exchange=NSE&segment=INDEX&symbol=NOSUCH&{rest}")
+                .parse()
+                .unwrap();
+        let (code, _, held) = gaps_json(axum::extract::State(site.clone()), uri).await;
+        assert_eq!(code, axum::http::StatusCode::OK, "{held}");
+        assert!(
+            held.contains("does not exist") || held.contains("absent"),
+            "{held}"
+        );
     }
 
     #[test]

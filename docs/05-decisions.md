@@ -43764,3 +43764,70 @@ refuses it.
 
 Invariants AF-42 (updated) and AF-W3S13-a through AF-W3S13-e;
 `docs/06-limits.md` has the cost and the widened false refusal.
+
+### D-1200 — The api server bounds slow clients, refuses invalid gap addresses, and refuses non-text arguments — 2026-10-02
+
+**The defects (audit findings probeapi-1, probeapi-2, probeapi-3, api half).**
+
+1. *probeapi-1.* `api::server::serve` handed a bare `TcpListener` to
+   `axum::serve`, which builds its hyper connection with no timer, so hyper's
+   `header_read_timeout` never ran and nothing capped open connections. A
+   client that sent half a request and went quiet held its socket
+   indefinitely: the audit measured a partial `GET /health` still open after
+   100 s, and 19,990 partial connections took the process to its 20,000
+   descriptor limit while `GET /vocab.json` got 0 bytes in 10.2 s.
+2. *probeapi-2.* `/gaps.json` folded every `bars::open` refusal into
+   `absent_file`, including a path the store refuses before touching a file
+   (an empty, `.`, `..`, slash-bearing, wrong-case or over-long segment). It
+   answered 200 with every expected minute classified `vendor-hole`, while
+   `/bars.json` refused the same query with 400.
+3. *probeapi-3 (api half).* `crates/api/src/main.rs` read its arguments with
+   `std::env::args()`, which panics on an argument that is not valid UTF-8:
+   exit 101, a code the binary does not document, and the exit event never
+   written. The `cli` half is another lane's and is not touched here.
+
+**The choice.**
+
+1. `serve` now calls the new `serve_limited` with `ConnectionLimits::SERVED`:
+   `HEAD_READ_TIMEOUT` of 10 s and `MAX_CONNECTIONS` of 256. Both numbers are
+   choices for a loopback-only listener whose clients are the operator's
+   browser, not vendor or exchange facts. The listener is wrapped so `accept`
+   takes a slot first (an atomic compare-and-swap; a closed connection gives
+   its slot back and wakes the acceptor through `tokio::sync::Notify`), and
+   each stream carries a deadline for its request head. The deadline starts at
+   accept and again after each response written on a kept-alive connection,
+   and stops at the blank line that ends a head (`\r\n\r\n` or the bare-LF
+   form httparse also accepts). It is absolute, not an idle timer, so dripping
+   bytes does not extend it. A client that sent part of a head gets a
+   best-effort `408 Request Timeout` before the close; one that sent nothing
+   is closed with no reply. `serve`'s signature is unchanged, so every caller
+   and test keeps compiling. The workspace `tokio` entry now names the `net`
+   and `sync` features it uses rather than inheriting them through `axum`;
+   no crate is added and `Cargo.lock` is unchanged.
+2. `/gaps.json` calls `Addressed::store_path_is_valid` right after parsing.
+   It runs the same `StorePath::new` validation `bars::open` runs first, with
+   the same `"{symbol} {month}: {why}"` sentence, and refuses with 400. The
+   segments do not depend on the month, so one check covers a whole range. A
+   valid address whose month is not held still answers 200 with the absence
+   named.
+3. `main` reads `std::env::args_os()` and converts through `text_args`, which
+   refuses the first non-UTF-8 argument by position with a sentence and the
+   usage line. That is `MISUSED` (exit 2), the code any other word the binary
+   does not understand gets, and `note_exit` still runs.
+
+**Rejected.** (1) Adding `hyper` and `hyper-util` as direct dependencies to
+build connections with a timer: it replaces `axum::serve` and its graceful
+shutdown with a hand-written accept loop for one knob. The listener wrapper
+uses only the `axum::serve::Listener` trait axum already exposes. (2) An idle
+read timer: a client sending one byte just inside each interval keeps it
+satisfied forever, which is the slowloris pattern itself. (3) Refusing at the
+cap instead of waiting: the waiting connection sits in the kernel backlog and
+is served when a slot frees, which a refusal would turn into a lost request.
+(4) Reporting an invalid gap address as a per-month `absent_file` with 400
+only when every month fails: the address is wrong before any month is read.
+(5) Lossy conversion of a non-UTF-8 argument: it would run a command the
+operator did not type.
+
+Invariants AF-PROBEAPI1-a through AF-PROBEAPI1-e, AF-PROBEAPI2-a and
+AF-PROBEAPI3-a; `docs/06-limits.md` states what the deadline and the cap do
+not cover.

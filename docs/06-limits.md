@@ -9907,3 +9907,35 @@ The text above is kept as it was written.
 - **Only the old tail block is checked.** A rotted record in an earlier, full
   block is not read by an append and stays where a reader refuses it; the
   append neither verifies nor re-seals that block.
+
+## Slow clients, the connection cap and gap-address refusal — D-1200, 2 October 2026
+
+- **The head deadline covers the HEAD, not the body.** Once a request's blank
+  line has arrived, no deadline runs until the response is written. A client
+  that sends a complete head and then a body one byte at a time is bounded
+  only by `DefaultBodyLimit` (size, not time) and by the connection cap.
+- **The cap queues, it does not refuse.** With `MAX_CONNECTIONS` (256) slots
+  held, `accept` waits and the kernel backlog holds new connections. A local
+  client that opens partial connections faster than the deadline frees them
+  can still delay a real request by up to one deadline per wave of 256 queued
+  ahead of it. Measured in the test with a cap of 4, a 400 ms deadline and 16
+  partial clients: the real request was answered, after at least two waves.
+  The listener is loopback-only, so the client doing this is local.
+- **A pipelined second request can be cut.** The deadline restarts after a
+  response is written. If a client pipelined a complete second head in the
+  same read as the first, it was already buffered by hyper when the clock
+  restarted, so a handler for that second request that takes longer than the
+  deadline may see its connection closed before it answers. Browsers do not
+  pipeline. Not measured.
+- **HTTP/2 is not compiled in** (`axum`'s `http2` feature is off and `h2` is
+  not in `Cargo.lock`). If it is enabled, the head scan does not understand
+  HTTP/2 frames and this guard must be revisited.
+- **Cost.** Taking and giving back a slot is one atomic compare-and-swap and
+  one `Notify`. The head scan is O(1) per byte read, one match on a two-state
+  counter. Re-arming the deadline after a write is one timer reset. Not timed:
+  no bench row covers these paths.
+- **The `408` is best effort.** It is one non-blocking `try_write` of 188
+  bytes into the socket; a client that is not reading may never see it. The
+  connection closes either way.
+- **`/gaps.json` validates the address once.** `StorePath::new` checks four
+  bounded segments with no I/O, independent of the range's length.
