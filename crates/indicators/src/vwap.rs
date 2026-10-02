@@ -350,7 +350,10 @@ impl Vwap {
     /// Proven against an independent big-integer oracle by
     /// `sigma_is_the_exact_floor_whatever_the_remainder_of_the_mean`,
     /// `sigma_is_exact_where_the_remainder_squared_leaves_i128` and
-    /// `maximal_volumes_at_minimal_prices_stay_exact`.
+    /// `maximal_volumes_at_minimal_prices_stay_exact`. Those prove exactness,
+    /// not cost: the O(1) above is by construction (a fixed number of checked
+    /// operations and one `isqrt_i128`, no loop over bars) and is UNVERIFIED as a
+    /// bench.
     #[must_use]
     pub fn sigma(&self) -> Option<i64> {
         if self.availability == Availability::Absent || self.v <= 0 {
