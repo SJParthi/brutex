@@ -45037,3 +45037,78 @@ upstream join; it now states O(R) plus two whole upstream joins, as a part of
 the paragraph's older "O(C + bounded source/file bytes)" rather than a
 second bound. The Finalization V4 rustdoc and limits now state that the
 opening and pre-reuse generation checks make a reused append O(F) as well.
+### D-0785 — Promote a Zerodha `INDICES` row to an index only when its type is `EQ` — 2026-09-29
+
+**What was wrong.** `decode_master_row` turned every Zerodha row whose
+`segment` is `INDICES` into an index by overwriting its type with `IDX`,
+without reading the type it replaced. `segment_of` stores `INDICES` and
+`type_of` maps `FUT`, `CE` and `PE` to themselves, so an `INDICES` row typed
+`FUT` was kept as the spot index its symbol names: on `origin/main` the row
+`256265, NIFTY 50, FUT, INDICES` decoded to
+`Keep(... underlying: NIFTY, kind: Index ...)`.
+
+**The change.** The promotion now requires the type word `EQ`, which is the
+type the index rows it was written for carry (`tests/zerodha_index.rs` builds
+them that way, and its module comment records that the vendor's index rows
+arrive as `EQ`). Any other type under `INDICES` is
+`InstrumentError::Malformed`, as every other unread shape in `segment_of` and
+`type_of` already is. No Groww or Dhan row is affected, because
+`index_segment_word` is `None` for both. Proven by
+`core::vendor::tests::an_indices_row_typed_as_a_derivative_is_refused_not_promoted_to_an_index`
+(C4-CORE-01).
+
+### D-0786 — Decide the paisa half-up snap on the scaled value's fraction — 2026-09-29
+
+**What was wrong.** `Paisa::from_rupees_half_up` computed
+`(rupees * 100 + 0.5).floor()`. The addition rounds before the floor runs, so
+two inputs that are not ties came back one paisa high on `origin/main`:
+`from_rupees_half_up(0.004999999999999999)` returned `1` although the scaled
+value is `0.49999999999999994`, and `from_rupees_half_up(45035996273704.97)`
+returned `4503599627370498` although the scaled value is exactly
+`4503599627370497.0`. Both break the function's own doc comment, which rounds
+up only "a value exactly halfway between two paisa".
+
+**The change.** The scaled value is floored, and one paisa is added only when
+the scaled value minus its floor is at least `0.5`. Half-up on both signs is
+unchanged: `0.125` gives `13` and `-0.125` gives `-12`. The multiplication by
+100 still rounds, which is the limit `a_decimal_tie_is_usually_not_a_binary_tie`
+already records.
+
+**What it does not move.** Every two-decimal price from ₹0.00 to
+₹1,00,000.00, parsed from its decimal text, snaps to its own paisa, and so does the double one step above and one step below each of
+them: 30,000,003 inputs, counted by the test. The same test passes with the
+biased-sum rule put back, so on that grid no paisa this function writes
+changes. Prices above ₹1,00,000.00 and doubles further from the grid were not
+measured. Proven by
+`core::price::tests::the_half_up_decision_reads_the_scaled_value_not_a_biased_sum`
+and
+`core::price::tests::every_two_decimal_price_and_its_neighbours_snaps_to_its_own_paisa`
+(C4-CORE-02).
+
+### D-0787 — Trim only ASCII whitespace from a master row's vendor id, series and suffix class — 2026-09-29
+
+**What was wrong.** `VendorId::new`, `board_of` and `unsuffixed_key` in
+`crates/core/src/vendor.rs` each called `str::trim`, which strips Unicode
+whitespace as well as ASCII. On `origin/main`, `VendorId::new("\u{a0}1333\u{3000}")`
+returned the id `1333`, so a row whose id column held U+00A0 and U+3000 around
+the digits was filed under an id the column did not hold; and `board_of("EQ\u{a0}")`
+returned `MainBoard`, so a Groww cash row with that listing class was kept as a
+main-board equity.
+
+**The change.** All three call `str::trim_ascii`. The padding the trim was for
+(Dhan's `"   ES   "`, `dhans_class_column_is_trimmed_before_it_is_read`) is
+ASCII and is still removed. A vendor id that still starts or ends with
+whitespace after the ASCII trim is refused (`None`), so the row is declined as
+`Skip::NoVendorId` rather than kept; whitespace inside an id is data and kept.
+A series with non-ASCII whitespace is a code no table holds, `Unrecognised`,
+declined as `Skip::UnrecognisedListingClass`; a suffix class with it strips
+nothing.
+
+"ASCII whitespace" here means what `u8::is_ascii_whitespace` names: space,
+tab, line feed, form feed and carriage return. The vertical tab U+000B is
+ASCII but outside that set, so `str::trim` used to strip it and
+`str::trim_ascii` does not: `VendorId::new("\u{b}1333")` is now `None` and
+`board_of("\u{b}EQ")` is `Unrecognised`, a loud decline where the old trim
+kept the row. Proven by
+`core::vendor::tests::whitespace_outside_ascii_is_not_trimmed_from_an_id_a_series_or_a_class`
+(C4-CORE-03).
