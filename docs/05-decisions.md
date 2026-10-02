@@ -45219,3 +45219,68 @@ reads `scope.rs`, requires the future's arm not to name `IndexSpot`, requires
 the comment block over it to contain `DEC-COST-SCOPE-INDEX-SIGNAL-ONLY-001` and
 not `Not tradeable`, and requires `is_cost_free(Segment::IndexFuture)`. It fails
 on `origin/main` (2c209309) with *"the future shares the spot's arm"*.
+### D-0790 — Say the store reads by `pread`, refuses a header ahead of its data, and is timed by C-28 and C-29 — 2026-09-29
+
+**What was wrong.** Sentences in `docs/02-store-format.md`, in
+`docs/06-limits.md` and in `crates/store` comments described a store this build
+is not:
+
+- §4 said the file is mapped read-only and a read is pointer arithmetic over
+  resident pages. `crates/store/src/lib.rs` carries `#![forbid(unsafe_code)]`,
+  `crates/store/Cargo.toml` does not name `memmap2`, and the read is
+  `FileExt::read_at`, one `pread`. The module doc of
+  `crates/store/src/header.rs` carried the same claim as its heading, "It is
+  still a read-only mapping plus `pwrite`".
+- §5 said a header that outran its data "falls back to the previous
+  generation rather than refusing the whole file". `BarFile::validated`, which
+  every open door calls, refuses with `FormatError::CounterExceedsFile` when a
+  surviving slot claims more records than the chosen header.
+  `BarFile::validated`'s own comment said the same wrong thing, citing a test
+  that was renamed when its assertion was inverted.
+- §6 cited C-07 as enforcing per-read verification. C-07 times `block::seal`
+  over a block in memory; the read path verifies through `verify_block_of`.
+- `BarFile::read_record`'s doc and `docs/06-limits.md` §40 said no bench times
+  a syscall. C-28 and C-29 in `crates/store/benches/ratio.rs` time
+  `read_record`, whose read is a `pread`.
+
+**The change.** Each sentence now states what the code does, and
+`crates/store/tests/docs.rs` reads each one beside the source line it names, so
+the next drift fails the build. No code path changes. The paragraph under C-01
+in `docs/04-invariants.md` also says no bench times a syscall; it is an entry
+already on `main` and is left as written, and this entry supersedes that
+sentence. Row C4-DOCS-WEB-07 records the supersession, and
+`store::docs::the_c01_syscall_sentence_is_superseded_where_it_stands` fails if
+that sentence stands while this entry or that row stops saying so.
+
+### D-0791 — Open `docs/03-vocabulary.md` with the table as it is, mark the tombstones where they stand, and check prose bit names — 2026-09-29
+
+**What was wrong.** The opening said 74 conditions, a `u128` mask and 54 free
+positions; §2 said the evaluator produces one `u128`; §6 kept the same numbers
+with its supersession note only in §8. The §5 rows for retired positions 6, 19
+and 25 looked exactly like live rows. The D-0109 note named "31 `bar_up`", a
+condition that does not exist: position 31 is `bar_bearish`.
+
+**The change.** The opening and §2 name `ConditionMask` and the counts `COUNT`
+and `ConditionMask::BITS` give; §6 says at its head that §8 supersedes it; the
+two §5 sub-tables holding a tombstone carry a status column, and each retired
+row names the live position it duplicates; the stray name is removed. Three
+tests in `crates/vocab/tests/table.rs` read these against `TABLE`, and a fourth
+proves the prose scanner they rely on takes a numbered name and nothing else.
+
+### D-0792 — Say in `header.rs` that the file refuses what `Header::read_region` walks back from — 2026-09-30
+
+**What was wrong.** The module doc of `crates/store/src/header.rs` said that
+for a slot whose records never reached the disk, `Header::read_region` "falls
+back to the previous generation for that case too, instead of condemning the
+file". That is true of `read_region` and not of the file: `BarFile::validated`
+refuses with `FormatError::CounterExceedsFile` when a slot that still decodes
+claims more records than the chosen header (`if claimed > header.n_valid` in
+`crates/store/src/file.rs`). D-0790 corrected the same claim in
+`docs/02-store-format.md` §5 and left this sentence standing.
+
+**The change.** The sentence now says the fallback is `read_region`'s answer
+and names the file-level refusal and
+`store::write::a_truncation_back_to_the_header_is_refused_rather_than_silently_accepted`.
+`store::docs::the_header_module_doc_says_the_file_door_refuses_a_slot_ahead_of_its_data`
+reads the module doc beside the refusal in `file.rs`; row C4-DOCS-WEB-09. No
+code path changes.
