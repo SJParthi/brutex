@@ -39,6 +39,16 @@ impl Permit {
             .ok()
             .map(|_| Self)
     }
+
+    /// A slot for work an already-admitted request owes, taken past the cap.
+    ///
+    /// It is never refused, and it still counts: while it is held,
+    /// [`Permit::try_take`] sees one more active task and refuses new work
+    /// sooner. D-0952.
+    fn owed() -> Self {
+        ACTIVE.fetch_add(1, Ordering::AcqRel);
+        Self
+    }
 }
 
 impl Drop for Permit {
@@ -69,6 +79,35 @@ where
     F: FnOnce() -> T + Send + 'static,
 {
     let permit = Permit::try_take().ok_or(RunError::Saturated)?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        work()
+    })
+    .await
+    .map_err(|why| RunError::Join(why.to_string()))
+}
+
+/// Runs blocking work an already-admitted request OWES, outside Tokio's
+/// worker pool, without refusing it when every slot is taken.
+///
+/// For the invocation journal's terminal record only: the handler has already
+/// run, so refusing the write that records its outcome cannot undo it and
+/// used to leave a false `Cancelled`. The slot it takes is counted against
+/// [`run`]'s admission but bypasses its cap, so at most one owed task exists
+/// per audited request whose handler has returned; `docs/06-limits.md`
+/// (D-0952) states that this count is bounded by in-flight requests, not by
+/// [`MAX_CONCURRENT`]. UNVERIFIED: no bench times this path.
+///
+/// # Errors
+///
+/// Returns [`RunError::Join`] when Tokio cannot join the blocking task. It
+/// never returns [`RunError::Saturated`].
+pub(crate) async fn run_owed<T, F>(work: F) -> Result<T, RunError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let permit = Permit::owed();
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
         work()
@@ -289,6 +328,17 @@ static TEST_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 #[cfg(test)]
 pub(crate) async fn apart_from_slot_owners() -> tokio::sync::MutexGuard<'static, ()> {
     TEST_SERIAL.lock().await
+}
+
+/// Takes every slot that is free right now, for a test that must saturate the
+/// pool from inside a request it is already running.
+///
+/// Asks for the serial guard so it cannot race [`hold_every_slot`]. Other
+/// tests that use a slot without that guard may still hold some, which is why
+/// this takes what is free rather than exactly [`MAX_CONCURRENT`].
+#[cfg(test)]
+pub(crate) fn take_every_free_slot(_apart: &tokio::sync::MutexGuard<'static, ()>) -> Vec<Permit> {
+    std::iter::from_fn(Permit::try_take).collect()
 }
 
 #[cfg(test)]

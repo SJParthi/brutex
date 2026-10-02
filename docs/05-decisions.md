@@ -43764,3 +43764,46 @@ refuses it.
 
 Invariants AF-42 (updated) and AF-W3S13-a through AF-W3S13-e;
 `docs/06-limits.md` has the cost and the widened false refusal.
+
+### D-0952 — One audited route list, an owed terminal, and the journal's growth stated — 2026-10-02
+
+**The defects (audit findings GAP14-57, W1-api3-5, W1-api3-0).** (1)
+`operation_audit::audited_route` was a 21-arm `match` and its test named 10 of
+the routes, so deleting the `/frontier.json` arm survived the whole `api`
+suite while it silently dropped that route's invocation record and, because
+the admission layer reads the same function, its cross-site read refusal. (2)
+`request_audited` wrote the terminal record through `detail::run`, which
+answers `Saturated` before spawning when the four shared detail slots are
+taken. At that point the handler has already run. The refusal dropped the
+closure that owned the armed `Attempt`; its `Drop` wrote `Cancelled` with
+status 0, `fsync` included, synchronously on the Tokio worker, and the
+client's real answer (for `POST /backtest/run`, one that launched an engine
+task) was replaced by a 503. (3) Every audited request, polled reads
+included, adds one file to one flat directory and 256 bytes to the index, with
+no retention, and `docs/06-limits.md` said nothing about it.
+
+**The choice.** (1) The routes are one `pub(crate) const AUDITED: [&str; 21]`;
+`audited_route` returns the matching entry by a scan bounded by the type.
+A test parses the production router's registrations and requires every
+registered path to be in `AUDITED` or in an explicit exemption list with a
+reason, and every entry of either to be registered; a live-router test sends
+another site's `GET`, `HEAD` and `POST` to every audited route and requires a
+`403` before the journal exists, then one same-origin `GET` each and exactly
+one record each. The index-stop routes are in the exemption list as not
+journaled and not decided: whether they should be is left open, not chosen
+here. (2) The terminal is written through a new `detail::run_owed`, which
+takes a slot past `MAX_CONCURRENT` and is never refused. The slot still
+counts against new detail work while it runs. (3) `docs/06-limits.md` states
+the per-request growth and the owed terminal's bound, and a test pins the
+byte and file counts and checks the section is there.
+
+**Rejected.** (a) Holding a detail slot across the handler so the terminal
+always has one: four slow audited requests would then starve every detail
+read and every handler that needs a slot itself. (b) Retrying `detail::run`
+until a slot frees: an unbounded wait with no refusal to show for it, while
+the handler's work is already done. (c) A `match` plus a parallel array: two
+lists for one fact is the drift this fixes. (d) Rotation or sharding of the
+journal directory: a store format change that needs its own decision; this
+one states the cost instead.
+
+Invariants OAU-01, OAU-02 and OAU-03; `docs/06-limits.md` has the bounds.
