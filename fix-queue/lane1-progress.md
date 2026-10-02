@@ -8,8 +8,8 @@ Checkpoint for pause/resume. Updated after each item. Branch per item: `fix/clou
 |---|---|---|---|
 | W3-store1-3 | W3-store1-3 | pushed, in review | https://github.com/SJParthi/brutex/pull/22 |
 | AC-whp-cx-0 | AC-whp-cx-0 | pushed, in review | https://github.com/SJParthi/brutex/pull/24 |
-| ET-bars-candles-store-0 | ET-bars-candles-store-0 | in progress | - |
-| W3-store1-0 | W3-store1-0, W3-store1-1, ET-bars-candles-store-12 | in progress | - |
+| ET-bars-candles-store-0 | ET-bars-candles-store-0 | pushed, in review | https://github.com/SJParthi/brutex/pull/25 |
+| W3-store1-0 | W3-store1-0, W3-store1-1, ET-bars-candles-store-12 | pushed, in review | https://github.com/SJParthi/brutex/pull/27 |
 | ET-o1-proof-coverage-4 | ET-o1-proof-coverage-4, ET-bars-candles-store-9 | in progress | - |
 | ET-bars-candles-store-2 | ET-bars-candles-store-2, ET-bars-candles-store-3 | in progress | - |
 | UC-7 | UC-7, UC-13, ET-rust-only-purity-5 | in progress | - |
@@ -22,3 +22,7 @@ State: 41 units planned in fix-queue/lane1-b-plan.md (U3 folded into U9's branch
 ## Resume
 
 After any pause: read this file, `git ls-remote origin 'refs/heads/fix/cloud-*'`, and open PRs; re-run any unit whose branch is missing or whose PR CI is red.
+
+| lane1-b unit | Branch | State | PR |
+|---|---|---|---|
+| U21 | fix/cloud-W2-cli4-2 | pushed, in review | https://github.com/SJParthi/brutex/pull/26 |
