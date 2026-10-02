@@ -118,8 +118,85 @@ fn saved_reference(root: &Path, catalog: &Catalog, tag: u64) -> PathBuf {
     path
 }
 
+/// `render` holds ONE process-wide reader behind `try_lock`, so two tests that
+/// render at once would see "busy" rather than what each asserts. Every test
+/// here that calls `render` holds this first.
+static RENDERS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    RENDERS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    fs::create_dir_all(to).expect("copied directory");
+    for entry in fs::read_dir(from).expect("generated directory") {
+        let entry = entry.expect("generated entry");
+        let kind = entry.file_type().expect("generated entry type");
+        let target = to.join(entry.file_name());
+        if kind.is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            assert!(kind.is_file(), "the generated store holds only files");
+            fs::copy(entry.path(), target).expect("copied file");
+        }
+    }
+}
+
+/// THE STORE ROOT IS PART OF THE CACHED READER'S KEY. D-0905.
+///
+/// A reader admitted under root A is kept for the next request. Root B holds
+/// a byte-identical catalog, so identity, pin and bounds all match, but B's
+/// companion is damaged: B must refuse on its own bytes rather than be served
+/// A's authenticated page. Replacing the root comparison with `!=` served A.
+#[test]
+fn a_cached_saved_vix_reader_for_one_root_never_answers_for_another() {
+    let _serial = serial();
+    crate::indexstopjson::projection_tests::with_saved_stop_catalog(|root, id| {
+        let catalog = Catalog::open(root, id, 1_048_576, 128).expect("generated native catalog");
+        let pin = catalog.completion_digest();
+        let body = saved_reference(root, &catalog, 1);
+        let query = format!("identity={}&pin={}&setting=0", hex(id), hex(pin));
+        let asked = Asked::parse(&query).expect("exact request");
+        let first = render(root, &asked).expect("root A admits its companion");
+        assert_eq!(first["status"], "saved");
+
+        let other = crate::scratch::path(&format!(
+            "vix-second-root-{}",
+            root.file_name()
+                .expect("generated root name")
+                .to_string_lossy()
+        ));
+        let _ignored = fs::remove_dir_all(&other);
+        copy_tree(root, &other);
+        let copied = other.join(body.strip_prefix(root).expect("companion under root A"));
+        let saved = fs::read(&copied).expect("copied companion");
+        let mut corrupt = saved.clone();
+        corrupt[0] ^= 1;
+        fs::write(&copied, corrupt).expect("damage only root B's companion");
+
+        let refused = render(&other, &asked);
+        let restored = fs::write(&copied, &saved);
+        let second = render(&other, &asked);
+        let again = render(root, &asked);
+        let _ignored = fs::remove_dir_all(&other);
+
+        let why = refused.expect_err("root B refuses on its own damaged companion");
+        assert!(!why.contains("busy"), "refused for contention: {why}");
+        restored.expect("restore root B's companion");
+        assert_eq!(
+            second.expect("restored root B admits its own companion"),
+            first,
+            "root B is a faithful copy, so its refusal came from the damage"
+        );
+        assert_eq!(again.expect("root A still admits"), first);
+    });
+}
+
 #[test]
 fn saved_vix_pages_authenticate_exact_absent_and_unavailable_companions_and_recover_cold() {
+    let _serial = serial();
     for (tag, state, counter) in [
         (1, "exact", "exact_stamps"),
         (0, "absent", "absent_stamps"),

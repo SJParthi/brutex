@@ -9961,3 +9961,32 @@ slicing, over primary values each repeated three times.
 **Not changed, and why.** The reads, the resident rows and the partition stay
 proportional to the range: no store index answers "the largest closes", and
 `total`, `extremes_of` and the change fold each need every row. Not timed.
+### Unpinned saved-ranking requests discover their checkpoint every time (D-0904)
+
+An `/index-stop-ranking.json` request without a pinned checkpoint cannot
+compare its one cached reader until it knows the newest acknowledged
+checkpoint, so `render` calls `Reader::latest_checkpoint` before the cache
+comparison. That runs on every unpinned request, warm or cold, including one
+the cached reader already answers. A pinned request skips it.
+
+* **What the call costs.** `latest_checkpoint` opens a
+  `search_checkpoint::Snapshot` and then reads one payload
+  (`snapshot.read(sequence, max_bytes)`). Opening the snapshot walks the
+  search's checkpoint directory (`fs::read_dir(directory)`) and, for each
+  reservation it keeps, stats that reservation's completion marker
+  (`fs::symlink_metadata(entry.path().join("complete"))`). The walk is
+  O(reservations) syscalls, not constant; the directory walk refuses at
+  `DIRECTORY_LIMIT` entries. Not timed.
+* **The wording it corrects.** The cli doc on `latest_checkpoint` calls this
+  "bounded cold work". It is bounded, but it is not confined to a cold
+  admission. The call site in `crates/api/src/indexstoprankingjson.rs` now
+  says so.
+* **Two neighbours that open their reader per request.** An expression-search
+  first page with no snapshot opens `expression_search_reader::Reader`, which
+  calls `Snapshot::open`; every Boolean search page calls
+  `QualifiedSearch::open` at the top of its `render`. Both are cold opens on
+  every such request, not a cached path that also scans; this section does
+  not cost them further.
+
+`an_unpinned_ranking_request_walks_the_checkpoint_directory_before_its_cache`
+reads each quoted line above off its source and requires this section.

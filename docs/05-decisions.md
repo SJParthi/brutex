@@ -44105,3 +44105,49 @@ no page. With the guard, `replace < with <=` in it was a mutant no test could
 kill, because both spellings return the same page;
 `selecting_the_page_then_ordering_it_equals_ordering_everything_then_slicing`
 covers `limit` 60 and 61 over 60 rows at offset 0, where `keep` equals `n`.
+### D-0904 — Two api cost statements corrected: unpinned ranking checkpoint discovery, and the merge reservation's probe bound — 2026-09-29
+
+**Unpinned ranking requests.** `/index-stop-ranking.json`'s `render` calls
+`Reader::latest_checkpoint` in its unpinned arm before it compares the cached
+reader, so every unpinned request, warm or cold, opens a
+`search_checkpoint::Snapshot`, which walks the search's checkpoint directory
+(`fs::read_dir(directory)`) with one `fs::symlink_metadata` of `complete` per
+reservation, and then reads one payload. Nothing stated this cost; the cli doc
+calls it "bounded cold work". It is recorded in `docs/06-limits.md` and at the
+call site rather than removed: the newest acknowledged checkpoint is not known
+until the directory is read, and a pinned request already skips the walk.
+`an_unpinned_ranking_request_walks_the_checkpoint_directory_before_its_cache`
+reads the call order and the walk off their sources and requires the limits
+section.
+`an_unpinned_request_discovers_its_checkpoint_and_a_pinned_one_does_not` runs
+both arms in a child process on a root holding no saved search: the unpinned
+render is refused with `latest_checkpoint`'s own words, and the pinned one by
+`Reader::open` under the comparison's context.
+
+**The merge reservation.** The comment above `by_key` in
+`crates/api/src/merge.rs` said pre-sizing made a probe "O(1) in the WORST case
+and not merely on average", contradicting the doc on `merge` ("Probes have
+expected O(1) cost") and `CLAUDE.md` §3 rule 4. Reserving capacity prevents
+growth and rehash, not collision chains. The comment now says expected O(1).
+No code changed. `no_comment_claims_a_worst_case_constant_probe` refuses both
+worst-case phrasings in the file's production half.
+
+### D-0905 — Refuse a signed date piece, and pin the store root in the saved-VIX reader cache key — 2026-09-29
+
+**Signed date pieces.** `api::ingest::parse_day` checked widths 4/2/2 and then
+called `u16`/`u8` `from_str`, which accept a leading `+`, so `2024-+8-+6` was
+accepted as 2024-08-06 although the function's doc says it is strict on
+shape. It now refuses any byte other than an ASCII digit or `-` before parsing,
+as `DateNotIso`. `a_date_field_is_refused_by_name_whichever_way_it_is_wrong`
+adds `+024-01-08`, `2024-+8-+6` and `2024-08-+6`.
+
+**Saved-VIX cache key.** `indexstopvixjson::render` keeps one reader keyed on
+root, identity, pin and bounds, and replacing `cached.root == root` with `!=`
+survived the api suite. `a_cached_saved_vix_reader_for_one_root_never_answers_for_another`
+admits a page from root A, copies A's tree to root B and damages only B's
+companion, and requires B to refuse on its own bytes, then to admit once
+restored. The two saved-VIX tests that call `render` now hold one mutex, since
+`render` answers "busy" to a concurrent caller. The same root term in
+`indexstopcandlesjson::render`'s cache key is NOT covered by this entry: its
+mirror needs a saved original-source archive, which this batch builds no
+fixture for, and it stays open.
