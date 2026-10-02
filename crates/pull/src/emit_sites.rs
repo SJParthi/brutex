@@ -773,18 +773,25 @@ static SITES: &[Site] = &[
         drive: drive_rate,
     },
     Site {
-        at: "crates/pull/src/config.rs:271 (Ok arm)",
+        at: "crates/pull/src/config.rs:274 (Ok arm)",
         target: "pull.config",
         message: "loaded",
         says: ("file", Says::Holds("CREDENTIALS")),
         drive: drive_config_loaded,
     },
     Site {
-        at: "crates/pull/src/config.rs:271 (Err arm)",
+        at: "crates/pull/src/config.rs:274 (Err arm)",
         target: "pull.config",
         message: "refused",
         says: ("vendors", Says::Signs(0)),
         drive: drive_config_refused,
+    },
+    Site {
+        at: "crates/pull/src/config.rs:274 (Err arm, file never read)",
+        target: "pull.config",
+        message: "refused",
+        says: ("file", Says::Holds("ABSENT-CONFIGURATION")),
+        drive: drive_config_absent,
     },
     Site {
         at: "crates/pull/src/session.rs:1136",
@@ -1107,18 +1114,32 @@ fn drive_config_loaded(scratch: &Scratch) {
 
 /// A configuration file that is there and does not parse.
 ///
-/// **Not a missing file, deliberately.** `CredentialConfig::load` returns on
-/// the read before `note_load` is ever called, so an absent file leaves no line
-/// here — the refusal an operator sees for that one is the `Unreadable` error
-/// itself. What this row proves is the other half: a file that was read and
-/// whose contents were refused, which is the case that used to reach an HTML
-/// page and nothing else.
+/// The half of the refusal that reads the file. [`drive_config_absent`] is the
+/// other half, a file that was never read.
 fn drive_config_refused(scratch: &Scratch) {
     let path = scratch.root.join("HALF-A-CONFIGURATION");
     fs::write(&path, "org    = \"orgone\"\n").expect("a scratch configuration");
     assert!(
         CredentialConfig::load(&path).is_err(),
         "a configuration naming no vendor halts, and never defaults"
+    );
+}
+
+/// A configuration file that is not there — P-07's headline case.
+///
+/// `CredentialConfig::load` used to return on the read before `note_load` ran,
+/// so the absent file, the unreadable one, the FIFO, the oversized one and the
+/// non-UTF-8 one each left NO line, while `note_load`'s own doc promised the
+/// log could tell "the file is missing" from "the file names no vendor".
+/// D-1393.
+fn drive_config_absent(scratch: &Scratch) {
+    let path = scratch.root.join("ABSENT-CONFIGURATION");
+    assert!(
+        matches!(
+            CredentialConfig::load(&path),
+            Err(crate::config::ConfigError::Unreadable { .. })
+        ),
+        "a configuration that is not there halts, and never defaults"
     );
 }
 

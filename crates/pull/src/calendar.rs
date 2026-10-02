@@ -1020,6 +1020,77 @@ mod runtime_tests {
         );
     }
 
+    /// **A CALENDAR ENDING ON `i64::MAX` NAMES `i64::MAX` AS ITS LAST DAY.**
+    ///
+    /// `last_day` computed `first.saturating_add(len).saturating_sub(1)`. The
+    /// add saturated first and the subtraction then stepped back one, so a
+    /// one-day calendar on `i64::MAX` reported `i64::MAX - 1`: a last day
+    /// BEFORE the only day it holds, contradicting its own `kind_of`. D-1390.
+    #[test]
+    fn a_calendar_ending_on_the_last_i64_names_it_as_its_last_day() {
+        let high = Calendar::from_observed(&[Observed::from_runs(i64::MAX, &[(555, 929)])]);
+        assert_eq!(high.kind_of(i64::MAX), DayKind::Open(Session::full()));
+        assert_eq!(high.first_day(), i64::MAX);
+        assert_eq!(
+            high.last_day(),
+            i64::MAX,
+            "the day it holds, not one before"
+        );
+
+        let two = Calendar::from_observed(&[
+            Observed::from_runs(i64::MAX - 1, &[(555, 929)]),
+            Observed::from_runs(i64::MAX, &[(555, 929)]),
+        ]);
+        assert_eq!(two.last_day(), i64::MAX);
+        assert_eq!(two.span(), 2);
+
+        // Unchanged away from the edge, and for the empty calendar.
+        assert_eq!(
+            Calendar::from_observed(&[Observed::from_runs(100, &[(555, 929)])]).last_day(),
+            100
+        );
+        let empty = Calendar::from_observed(&[]);
+        assert_eq!(empty.last_day(), empty.first_day() - 1);
+    }
+
+    /// **ANY RUN PAST [`MAX_WINDOWS`] IS DROPPED, NOT MERGED.**
+    ///
+    /// `Observed::from_runs` named this test as the pin on its behaviour, and
+    /// no test of this name existed. Merging would reinstate the 180-bar
+    /// midday-break over-count; dropping under-counts. The returned session
+    /// carries no marker that a run was dropped — `count` is simply
+    /// [`MAX_WINDOWS`] — so the caller that walked the day is the only place
+    /// a third run is visible. D-1391.
+    #[test]
+    fn a_third_window_is_dropped_rather_than_merged() {
+        let three = Observed::from_runs(19_784, &[(555, 599), (690, 749), (800, 809)]).session;
+        assert_eq!(
+            three.map(|s| usize::from(s.count)),
+            Some(MAX_WINDOWS),
+            "three runs are a session of MAX_WINDOWS windows"
+        );
+        assert_eq!(
+            three.map(Session::bars),
+            Some(45 + 60),
+            "the third run's 10 bars are dropped"
+        );
+        assert_eq!(
+            three.map(|s| s.expects(805)),
+            Some(false),
+            "the dropped run is not owed"
+        );
+        assert_eq!(
+            three.map(|s| s.expects(650)),
+            Some(false),
+            "and the gap between runs is not merged in"
+        );
+        assert_eq!(
+            Observed::from_runs(19_784, &[(555, 599), (690, 749)]).session,
+            three,
+            "identical to the two-run session: nothing marks the drop"
+        );
+    }
+
     #[test]
     fn unknown_observed_lengths_and_empty_calendars_carry_no_authority() {
         let observed = Calendar::from_observed(&[Observed::from_runs(LAST_DAY + 1, &[])]);
@@ -1061,13 +1132,18 @@ impl Observed {
     /// Build a session from contiguous runs, as a caller walking a day finds
     /// them.
     ///
-    /// **Runs past [`MAX_WINDOWS`] are dropped and the count says so** rather
-    /// than being merged into the span. Merging would silently reinstate the
-    /// 180-bar over-count this signature exists to remove; dropping under-counts
-    /// instead, which reports fewer owed bars and therefore never invents a
-    /// hole. Nothing in the operator's store needs a third window, and
-    /// `a_third_window_is_dropped_rather_than_merged` pins the behaviour so a
-    /// venue that does is a visible surprise rather than a wrong number.
+    /// **Runs past [`MAX_WINDOWS`] are dropped** rather than merged into the
+    /// span. Merging would silently reinstate the 180-bar over-count this
+    /// signature exists to remove; dropping under-counts instead, which reports
+    /// fewer owed bars and therefore never invents a hole.
+    ///
+    /// **Nothing in the returned value marks the drop.** `count` is
+    /// [`MAX_WINDOWS`] whether two runs or ten were given, and the session is
+    /// identical to the two-run one, so a caller that must notice a third
+    /// window has to compare `runs.len()` with [`MAX_WINDOWS`] itself — the
+    /// count does not "say so". Nothing in the operator's store needs a third
+    /// window, and `a_third_window_is_dropped_rather_than_merged` pins the
+    /// behaviour. D-1391.
     #[must_use]
     pub fn from_runs(day: i64, runs: &[(u16, u16)]) -> Self {
         if runs.is_empty() {
@@ -1197,8 +1273,16 @@ impl Calendar {
         // nine quintillion days, and saturating there is the safe direction
         // because it can only ever make the range look SMALLER, never claim a
         // day nobody measured.
+        //
+        // ADD `span - 1`, NOT `span` THEN SUBTRACT ONE. The second order
+        // saturated at `i64::MAX` first and then stepped back, so a one-day
+        // calendar on `i64::MAX` reported its last day as `i64::MAX - 1` —
+        // a day before the only day it holds. D-1390.
         let span = i64::try_from(self.kinds.len()).unwrap_or(i64::MAX);
-        self.first.saturating_add(span).saturating_sub(1)
+        match span.checked_sub(1) {
+            Some(tail) if tail >= 0 => self.first.saturating_add(tail),
+            _ => self.first.saturating_sub(1),
+        }
     }
 
     /// How many days it covers.

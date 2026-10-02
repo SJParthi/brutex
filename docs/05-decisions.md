@@ -47232,3 +47232,81 @@ attributed to. `ET-vocabulary-conditions-bits-2` corrected the stale present-ten
 counts in `vocab`'s prose and one in `indicators::evaluator`, and
 `the_present_tense_position_counts_in_this_crates_prose_match_the_table` and
 `the_documented_evaluator_position_count_is_the_live_table` now read them.
+### D-1390 — A derived calendar ending on `i64::MAX` names `i64::MAX` as its last day — 2026-10-02
+
+**What happened.** `pull::calendar::Calendar::last_day` computed
+`first.saturating_add(len).saturating_sub(1)`. The add saturated first and the
+subtraction then stepped back one, so a one-day calendar on `i64::MAX`
+reported `i64::MAX - 1` as its last day. That is a day before the only day it
+holds, and its own `kind_of(i64::MAX)` answers `Open` for it.
+
+**The change.** `last_day` adds `len - 1`, and an empty calendar still answers
+`first - 1`. Pinned by
+`calendar::runtime_tests::a_calendar_ending_on_the_last_i64_names_it_as_its_last_day`.
+Before the change the same assertion failed with
+`left: 9223372036854775806, right: 9223372036854775807`. The call is O(1).
+The unchecked subtractions in `kind_of` and `from_observed` are a separate
+defect. `origin/fix/c4-pull` (D-0953) already fixes them, so they are not
+repeated here.
+
+### D-1391 — `Observed::from_runs` says that nothing marks a dropped run, and the test its doc named now exists — 2026-10-02
+
+**What happened.** The doc said runs past `MAX_WINDOWS` "are dropped and the
+count says so", and that `a_third_window_is_dropped_rather_than_merged` pins
+this. No test had that name anywhere in the workspace. The count does not say
+so either: it is `MAX_WINDOWS` for two runs or ten, and the session is
+identical to the two-run one.
+
+**The change.** The doc now states that the drop is unmarked and that a
+caller must compare `runs.len()` with `MAX_WINDOWS` itself. The named test
+exists and asserts the drop: 105 bars, the third run not expected, the gap not
+merged, and equality with the two-run session. Behaviour is unchanged.
+
+### D-1392 — `chain::month` asks a repeated expiry once and files a repeated contract name once per expiry — 2026-10-02
+
+**What happened.** The walk trusted the vendor's lists to name each date and
+each contract once. An expiries answer naming one date twice issued two
+contracts calls and filed every contract of that date twice. A contracts answer
+naming one contract twice filed it twice. The "Contracts discovered" count was
+inflated and the bars request was built twice for one contract.
+
+**The change.** Expiries are deduplicated in vendor order before the walk.
+Names are deduplicated within one expiry's answer, and only there: the same
+name under a second expiry still reaches `fno::read_contract`, whose token check
+refuses it by name, so a dedup cannot hide that disagreement. No name or date
+is dropped from the set. Each dedup is one `HashSet` insert per item, which is
+amortised O(1). Pinned by
+`chain::tests::a_repeated_expiry_or_name_is_asked_and_filed_once`. It failed
+before with three calls where two were expected.
+
+### D-1393 — Every credential-config load is noted, including the reads that never reached `parse` — 2026-10-02
+
+**What happened.** `CredentialConfig::load` returned through `?` on an absent,
+unreadable, non-regular, oversized or non-UTF-8 file, before `note_load` ran.
+So P-07's headline case, the missing file, left no `pull.config` line. Yet
+`note_load`'s doc said the log could tell "the file is missing" from "the file
+names no vendor". `emit_sites` recorded the gap as deliberate in a comment,
+which made the doc and the test disagree.
+
+**The change.** `load` calls one private `read_and_parse` and notes whatever it
+returns. The log record carries the file path, the vendor count and the level;
+it never carries a segment, so P-18 is unchanged. A new `emit_sites` row,
+`drive_config_absent`, requires a `refused` record naming the absent file. The
+row failed before and passes after; the test was run as an unprivileged user
+because, as root, unrelated rows of that test fail.
+
+### D-1394 — `path_for`'s comment and the config module header stop claiming `parse` refuses an absent vendor — 2026-10-02
+
+**What happened.** The comment in `CredentialConfig::path_for` said `parse`
+refuses a configuration missing any vendor, so the `MissingVendor` arm was
+"unreachable by any input". `parse` stopped refusing that case when absent
+brokers were allowed. The arm is reached by any config naming fewer vendors
+than `Vendor::ALL`. The module header also listed "a missing vendor table"
+among the refusals made at load. `read_bounded`'s doc cited `path_for`'s
+reasoning, which no longer holds.
+
+**The change.** Doc and comment only. The header says a missing table is
+refused at use, by `fields` and `path_for`. `pull::unit` now asserts
+`path_for(Vendor::Dhan, ..)` on a Groww-only config is `MissingVendor`. That
+assertion passes before and after, which is the evidence that the old comment
+was false.

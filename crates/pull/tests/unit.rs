@@ -639,6 +639,16 @@ fn a_missing_table_or_key_is_a_halt() {
         }),
         "and the one it does not is refused BY NAME where it is used"
     );
+    // AND `path_for` REACHES THE SAME REFUSAL. Its own comment said `parse`
+    // refuses a config missing any vendor, so this arm was "unreachable by any
+    // input". It is reachable by exactly this input. D-1394.
+    assert_eq!(
+        one_broker.path_for(Vendor::Dhan, "fieldthree"),
+        Err(ConfigError::MissingVendor {
+            vendor: Vendor::Dhan.as_str()
+        }),
+        "an unconfigured vendor's path is refused by name, never assembled"
+    );
     assert_eq!(
         CredentialConfig::parse(&config_without(
             "[vendor.dhan]",
