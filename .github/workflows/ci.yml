@@ -6853,6 +6853,14 @@ jobs:
           # is `[a, b, c, d, e].contains(&0)` in population_statistics_v2.rs,
           # which is a five-element array literal checking that five declared
           # bounds are all nonzero.
+          #
+          #   cli/src/candidate_trades.rs 1 -> REMOVED (D-0991). Its one site
+          #     was the linear `evaluated.grid.cells.contains(&cell)` in
+          #     `Capture::record_inner`, rescanning the grid a second time after
+          #     `shown_cell` had already returned a copy of one of its own cells.
+          #     D-0991 deleted it -- the existing equality check proves
+          #     membership -- so the file no longer matches this rule and its
+          #     row would only make the allowlist read looser than the tree.
           allow_member='
           crates/api/src/assets.rs 1
           crates/api/src/calendar_of.rs 2
@@ -6911,7 +6919,6 @@ jobs:
           crates/cli/src/boolean_catalog_prepared.rs 1
           crates/cli/src/index_stop_qualification_codec.rs 2
           crates/api/src/booleansearchjson.rs 1
-          crates/cli/src/candidate_trades.rs 1
           crates/cli/src/boolean_candidate_v1.rs 1
           crates/api/src/indexstopjson.rs 1
           crates/cli/src/operation_audit.rs 2
