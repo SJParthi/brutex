@@ -374,7 +374,7 @@ impl ExecutionV4ParameterRecord {
         }
         let [min_hits, ceiling, pair_budget, _policy] = self.run_params;
         if !matches!(self.range_policy_tag, 1 | 2)
-            || !matches!(self.selector_policy_tag, 1..=3)
+            || !matches!(self.selector_policy_tag, 1..=4)
             || self.rung == 0
             || self.horizon_bars == 0
             || min_hits == 0
@@ -1867,6 +1867,20 @@ impl PreparedExecutionV4 {
     }
 }
 
+/// The one-based selector tag this codec stores. The validator admits exactly
+/// the tags this function returns, and the test
+/// `every_exit_grid_selector_tag_the_encoder_writes_is_admitted` walks every
+/// selector through both. W2-cli4-1, `docs/04-invariants.md` C4-CLI-03-01.
+const fn selector_policy_tag(selector: ExitGridSelectorV1) -> u8 {
+    match selector {
+        ExitGridSelectorV1::PessimisticTotal => 1,
+        ExitGridSelectorV1::EdgeThenPessimistic => 2,
+        ExitGridSelectorV1::GuaranteedFloor => 3,
+        // APPENDED AS 4; the three above keep their numbers. D-0594.
+        ExitGridSelectorV1::OperatorRule => 4,
+    }
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "ONE struct literal, 48 fields named once each in declaration \
@@ -1886,13 +1900,7 @@ fn parameter_from_population_source(
         RangeResolutionV1::PpmFloor => 1,
         RangeResolutionV1::PpmCeiling => 2,
     };
-    let selector_policy_tag = match facts.selector {
-        ExitGridSelectorV1::PessimisticTotal => 1,
-        ExitGridSelectorV1::EdgeThenPessimistic => 2,
-        ExitGridSelectorV1::GuaranteedFloor => 3,
-        // APPENDED AS 4; the three above keep their numbers. D-0594.
-        ExitGridSelectorV1::OperatorRule => 4,
-    };
+    let selector_policy_tag = selector_policy_tag(facts.selector);
     let forced_stop_policy_tag = match facts.forced_stop {
         ForcedStopV1::Disabled => FORCED_STOP_DISABLED_TAG,
         ForcedStopV1::IncludeExactObserved(_) => FORCED_STOP_INCLUDE_TAG,
@@ -5643,6 +5651,50 @@ mod tests {
         parameter.parameter_core_id = parameter.derive_core_id();
         parameter.parameter_id = parameter.derive_parameter_id();
         parameter
+    }
+
+    /// W2-cli4-1, C4-CLI-03-01: the encoder writes tag 4 for `OperatorRule` (D-0594),
+    /// and the validator used to admit only 1..=3, so every `OperatorRule`
+    /// parameter was refused as "a zero required bound/policy". Every selector
+    /// the encoder can name must validate and survive a decode; the tags on
+    /// either side of the table must not.
+    #[test]
+    fn every_exit_grid_selector_tag_the_encoder_writes_is_admitted() {
+        let base = prepared(91)
+            .parameters
+            .first()
+            .expect("fixture has a parameter")
+            .clone();
+        for selector in [
+            ExitGridSelectorV1::PessimisticTotal,
+            ExitGridSelectorV1::EdgeThenPessimistic,
+            ExitGridSelectorV1::GuaranteedFloor,
+            ExitGridSelectorV1::OperatorRule,
+        ] {
+            let mut parameter = base.clone();
+            parameter.selector_policy_tag = selector_policy_tag(selector);
+            let parameter = reidentify_parameter(parameter);
+            let validated = parameter.validate();
+            assert!(
+                validated.is_ok(),
+                "{selector:?} must validate: {validated:?}"
+            );
+            let raw = parameter.encode().expect("parameter encode");
+            assert_eq!(
+                ExecutionV4ParameterRecord::decode(&raw).expect("parameter decode"),
+                parameter,
+                "{selector:?} must survive a decode"
+            );
+        }
+        assert_eq!(selector_policy_tag(ExitGridSelectorV1::OperatorRule), 4);
+        for outside in [0, 5] {
+            let mut parameter = base.clone();
+            parameter.selector_policy_tag = outside;
+            assert!(
+                reidentify_parameter(parameter).validate().is_err(),
+                "selector tag {outside} names no selector and must be refused"
+            );
+        }
     }
 
     fn rebind_disposition(

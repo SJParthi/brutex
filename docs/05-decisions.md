@@ -44624,3 +44624,87 @@ checked against the file it names by
   `if start.elapsed() > std::time::Duration::from_secs(45)` in
   `crates/api/src/booleanlaunch_tests.rs` and
   `crates/api/src/indexstoplaunch_tests.rs`.
+### D-0912 — `fold-audit` re-derives with derive's own authority, and counts what derive withheld apart — 2026-09-29
+
+**The defect (GAP12-4).** `pull::ingest::derive` writes a coarse rung with
+`crate::fold::complete_minutes_with_calendar(minutes, bucket, venue,
+cash_schedule, calendar)`, which writes a bucket only when every scheduled
+minute exists and withholds an exceptional session outright ("exceptional
+session {session:?} withheld"). `fold_audit::compare` built its reference with
+the plain `pull::fold::fold`, which writes every bucket that holds any minute.
+So a month derive wrote correctly, holding a disaster-recovery Saturday, was
+reported as a store defect. On `origin/main` (2c209309), a copy of the test
+below adapted to that `compare` signature, over 2024-03-01, the DR Saturday
+2024-03-02 in its two windows and 2024-03-04, stored as
+`complete_minutes_for_venue` writes it, failed with 7 of 7 rungs disagreeing;
+`2min` first differed at record 188: stored `ts_micros` 1709523900000000
+against folded 1709351100000000, a Saturday bucket derive withheld. That the
+two authorities differ on all seven rungs of this month is what
+`a_legacy_plain_fold_of_a_withheld_session_disagrees` asserts.
+
+**The change.** `compare` takes the venue and builds its reference with
+`pull::fold::complete_minutes_for_venue`, which is
+`complete_minutes_with_calendar` with no cash schedule and the default runtime
+calendar. The runtime calendar changes no bar: `Runtime::kind_of` is
+`kind_of(day)`, the static answer. `audit_month` takes the venue from the key's
+own segment with `Venue::for_segment`, as derive does, and refuses a key with
+none before it reads a file. Derive's diagnostics are carried on the verdict as
+`withheld` and the first `MAX_REPORTED` of them as `withheld_named`; they are
+neither agreement nor disagreement, and `agrees` does not read them. The
+command prints a `WITHHELD by derive policy` line per rung-month that has any,
+and its banner and remedy name the derive authority.
+
+**What it proves.** `fold_audit_agrees_with_a_correctly_derived_month_holding_a_dr_saturday`
+requires every rung of that month to agree and counts 54, 35, 21, 12, 7, 5 and
+3 withheld diagnostics for 2, 3, 5, 10, 15, 30 and 60 minutes, each naming an
+exceptional session. `a_legacy_plain_fold_of_a_withheld_session_disagrees`
+requires a file written by the plain fold over the same minutes to disagree,
+holding more bars than the reference. `fold_command_reports_withheld_buckets_apart_from_disagreements`
+runs the command over a month with one incomplete trailing bucket per rung:
+seven rung-months agree, the command passes, and seven withheld lines are
+printed.
+
+**What it does not see.** Derive passes a dated cash-session schedule for a
+cash equity and the audit has none. On a cash day that needs dated eligibility
+the reference writes nothing, so a stored bar there is a disagreement, never a
+silent agreement:
+`a_cash_day_needing_dated_eligibility_is_withheld_and_never_silently_agrees`.
+`docs/06-limits.md` records it. Records are still paired by position, not by
+timestamp.
+
+### D-0913 — A read-only frontier handle refreshes by the rule it opened with — 2026-09-29
+
+**The defect (W2-cli5-0).** `Frontier::refresh` called `absorb_new_rows`, whose
+first line is `self.refuse_integrity_failure_for_write()?`. A read-only handle
+opened over a file holding a bad seal, a sealed row with an invalid schema or a
+non-contiguous duplicate opens with `write_refusal` set, by design, so every
+refresh of it was refused. `api::detail::Cached::with_verified` answers a
+refused refresh with `*held = None; return Err(why);`, and the next request
+opens fresh at O(rows). A refusal and a whole-file walk alternated, while
+`refresh`'s doc said every refresh after the first open is O(delta). On
+`origin/main` the test below fails at its first `refresh`.
+
+**The change.** A read-only handle (`require_parent`) refreshes with
+`absorb_read_only`, which reads only the rows past `scanned` and indexes each
+with `index_row`, the per-row rule `index_of` now also calls at open. A writer
+handle keeps the strict `absorb_new_rows`, which still refuses. The shrunken
+and ragged-length refusals are one function, `absorbable_len`, for both.
+
+The read-only refresh holds the shared lock while it measures and reads, as
+`Frontier::read` and `results::Results::refresh` do; `append_all` writes under
+the exclusive lock. Recording damage instead of refusing is what makes the
+lock necessary: without it a refresh could read a row a writer has only
+partly laid down, index it as a bad seal, and keep that in a cached handle
+that no longer drops itself on a refusal.
+
+**What it proves.** `a_read_only_handle_over_damaged_history_refreshes_by_the_delta`
+opens read-only over a bad seal, refreshes, appends two rows of one run, a
+second bad seal, a sealed invalid row, a repeat of the first run and a new
+run, refreshes twice, and requires every run's block to equal a fresh
+read-only open's, the invalid row still diagnosed at read time, and then
+requires a writer handle's refresh over the same file to refuse. The existing
+stale-writer and reopened-writer tests keep the writer's append refusals.
+`a_read_only_refresh_waits_for_an_append_in_progress` has a peer hold the
+exclusive lock over a whole row of zeros for two seconds before writing the
+real row, and requires the refresh not to have finished while the lock is held,
+then to index the real row and record no damage.

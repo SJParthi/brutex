@@ -10214,3 +10214,55 @@ outside it stops the run. Every file and line named below is checked by
   `if start.elapsed() > std::time::Duration::from_secs(45)` in
   `crates/api/src/booleanlaunch_tests.rs` and
   `crates/api/src/indexstoplaunch_tests.rs`.
+## `fold-audit` has no dated cash schedule — D-0912, 29 September 2026
+
+Derive passes a dated cash-session schedule for an NSE cash equity; the audit
+passes `None`. On a cash day that needs dated eligibility
+(`pull::vendor::cash_auction_eligibility_required`) the reference writes no
+bucket, so every stored bar on that day is reported as a disagreement, not as
+an agreement. It fails loud:
+`a_cash_day_needing_dated_eligibility_is_withheld_and_never_silently_agrees`.
+Records are still paired by position (`match (stored.get(index),
+folded.get(index))`), not by timestamp; that is not changed here.
+
+## A read-only frontier refresh is O(delta) over damaged history too — D-0913, 29 September 2026
+
+`Frontier::refresh` on a read-only handle reads only the rows past its scan,
+one `BufReader` pass, and indexes each with `index_row`, the rule `index_of`
+applies at open. It no longer refuses over damage the handle opened past, so
+`api`'s cached `/frontier.json` handle is not dropped and reopened, O(rows), on
+every other request. The first open is still O(rows). The refresh holds the
+shared lock, so it waits for an append in progress rather than reading part of
+one: `a_read_only_refresh_waits_for_an_append_in_progress`.
+`a_read_only_handle_over_damaged_history_refreshes_by_the_delta`. Not timed.
+
+## Boolean integrity checks re-read whole bodies, and nesting doubles them — W2-cli2-4, 29 September 2026
+
+**Not O(1), and not fixed here.** The family, statistics, admission,
+out-of-sample and qualification `require_current` methods of the Boolean
+research chain each re-read and re-hash their own complete body through
+`persistence::verify`:
+`let body = read_exact(&directory.join("body.bin"), bytes)?;`
+then `hash(&body) != payload`. Each one above the family also checks its parent
+before and after, so each level calls the level below it twice:
+
+* statistics: `self.group.require_current()?; persistence::verify(..)?;
+  self.group.require_current()`, and the group calls every source family's
+  `require_current`, which runs `persistence::verify` on that family's body;
+* admission: `self.statistics.require_current()?;` then its own verify, then
+  `self.statistics.require_current()`;
+* out-of-sample: `self.training.require_current()?;` before and after its own
+  verify;
+* qualification: `current(self.training, self.later)?;` before and after its
+  own verify, and `current` checks the admission and every out-of-sample
+  source.
+
+So one check is O(total evidence bytes below it), and the reads of a family's
+body double with each level of nesting above it. The number of calls per
+campaign or qualification rung is **not measured and not counted by any test**;
+it is read off the source, and
+`the_boolean_integrity_cost_entry_is_read_off_the_source` finds every line
+quoted here in the source and counts two parent checks around one
+`persistence::verify` in each level's method. The bracketing is what proves nothing changed while
+the check ran, and removing either side would weaken that proof; a cheaper
+proof is a design change this entry does not make.

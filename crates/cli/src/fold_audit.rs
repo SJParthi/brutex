@@ -4,9 +4,17 @@
 //!
 //! `2min`, `3min`, `5min`, `10min`, `15min`, `30min` and `60min` are **never
 //! asked of a vendor**. `pull::ingest::derive_all` folds them from the
-//! one-minute file at ingest time — `crates/pull/src/ingest.rs:2206` calls
-//! `pull::fold::fold` and writes the result straight to the rung's own
-//! directory. `pull::fold`'s own doc names the failure that follows:
+//! one-minute file at ingest time. When this audit was written derive called
+//! the plain `pull::fold::fold`; it now calls
+//! `pull::fold::complete_minutes_with_calendar`, which writes only buckets
+//! whose every scheduled minute exists and withholds exceptional sessions
+//! outright. **The audit's reference is that same authority** (GAP12-4,
+//! D-0912): against the plain fold, a correctly derived month holding a
+//! disaster-recovery Saturday disagreed on every rung, and
+//! `fold_audit_agrees_with_a_correctly_derived_month_holding_a_dr_saturday`
+//! pins the correction. What derive withheld is counted as withheld, neither
+//! agreement nor disagreement. `pull::fold`'s own doc names the failure that
+//! follows:
 //!
 //! > *"Folding a month whose one-minute pull was dirty produces coarse bars
 //! > built out of gaps, and nothing downstream can tell them from complete
@@ -52,6 +60,16 @@
 //! calendar's question and `CalendarReceiptV2` answers it. The two together are
 //! the whole check: the calendar proves the minutes are all there, and this
 //! proves the coarse rungs were folded from them.
+//!
+//! # What the reference cannot see: dated cash eligibility
+//!
+//! Derive passes a dated cash-session schedule for an NSE cash equity; this
+//! audit has none and passes `None`. On a cash day that requires dated
+//! eligibility (`pull::vendor::cash_auction_eligibility_required`) the
+//! reference therefore withholds every bucket, and a stored bar there is
+//! reported as a disagreement rather than silently agreed with.
+//! `a_cash_day_needing_dated_eligibility_is_withheld_and_never_silently_agrees`
+//! pins that. It fails loud, not quiet; `docs/06-limits.md` records it.
 //!
 //! # Cost
 //!
@@ -112,6 +130,12 @@ pub struct RungVerdict {
     pub disagreements: Vec<Disagreement>,
     /// Disagreements beyond the cap, counted but not named.
     pub elided: u64,
+    /// Diagnostics the derive authority gave for what it did not write — an
+    /// exceptional session, an incomplete bucket, an unverified day. Neither
+    /// agreement nor disagreement: [`RungVerdict::agrees`] does not read it.
+    pub withheld: u64,
+    /// The first [`MAX_REPORTED`] of those diagnostics, in derive's words.
+    pub withheld_named: Vec<String>,
 }
 
 impl RungVerdict {
@@ -128,18 +152,30 @@ impl RungVerdict {
 /// disagreement per bar, and a report nobody can read is a report nobody reads.
 pub const MAX_REPORTED: usize = 8;
 
-/// Compare one coarse rung against the fold of the supplied minutes.
+/// Compare one coarse rung against what derive writes from the supplied
+/// minutes for `venue`.
 ///
-/// Pure, so the comparison itself is testable without a store on disk.
+/// The reference is `pull::fold::complete_minutes_for_venue`, which is
+/// `complete_minutes_with_calendar` with no cash schedule and the default
+/// runtime calendar — the authority `pull::ingest::derive` calls. The runtime
+/// calendar's observations change only diagnostic wording, never which bars
+/// are written (`pull::calendar::Runtime::kind_of` returns the static
+/// `kind_of`). Pure, so the comparison itself is testable without a store on
+/// disk.
 ///
 /// # Errors
 ///
 /// Refuses an invalid fold width or malformed minute sequence. A folding error
 /// cannot become an empty series that appears to agree with an empty file.
-pub fn compare(rung: Timeframe, minutes: &[Bar], stored: &[Bar]) -> Result<RungVerdict, String> {
+pub fn compare(
+    rung: Timeframe,
+    venue: pull::vendor::Venue,
+    minutes: &[Bar],
+    stored: &[Bar],
+) -> Result<RungVerdict, String> {
     let bucket =
         store_bucket(rung).ok_or_else(|| format!("{} has no valid fold width", rung.as_str()))?;
-    let folded = pull::fold::fold(minutes, bucket)
+    let (folded, diagnostics) = pull::fold::complete_minutes_for_venue(minutes, bucket, venue)
         .map_err(|why| format!("{} minute fold refused: {why}", rung.as_str()))?;
     let mut disagreements = Vec::new();
     let mut elided = 0_u64;
@@ -218,6 +254,8 @@ pub fn compare(rung: Timeframe, minutes: &[Bar], stored: &[Bar]) -> Result<RungV
         folded_bars: u64::try_from(folded.len()).unwrap_or(u64::MAX),
         disagreements,
         elided,
+        withheld: u64::try_from(diagnostics.len()).unwrap_or(u64::MAX),
+        withheld_named: diagnostics.into_iter().take(MAX_REPORTED).collect(),
     })
 }
 
@@ -291,13 +329,22 @@ pub fn audit_month(
     key: &InstrumentKey,
     ym: YearMonth,
 ) -> Result<Vec<Result<RungVerdict, String>>, String> {
+    // The venue derive used, from the key's own segment, exactly as
+    // `pull::ingest::derive` takes it; a key with none was never derived.
+    let venue = pull::vendor::Venue::for_segment(key.exchange, key.segment).ok_or_else(|| {
+        format!(
+            "no verified minute-completeness venue for {} {}; derive writes no coarse rung for it",
+            key.exchange.as_str(),
+            key.segment.as_str()
+        )
+    })?;
     let minutes = read_month(root, vendor, key, Timeframe::MINUTE_1, ym)
         .map_err(|why| format!("the one-minute file is the authority here and {why}"))?;
     Ok(DERIVED_RUNGS
         .iter()
         .map(|rung| {
             read_month(root, vendor, key, *rung, ym)
-                .and_then(|stored| compare(*rung, &minutes, &stored))
+                .and_then(|stored| compare(*rung, venue, &minutes, &stored))
         })
         .collect())
 }
@@ -319,6 +366,9 @@ mod io_tests;
 mod tests {
     use super::*;
 
+    /// The venue every NIFTY/BANKNIFTY fixture here is derived for.
+    const INDEX: pull::vendor::Venue = pull::vendor::Venue::NseIndex;
+
     #[test]
     fn malformed_minutes_cannot_agree_with_an_empty_derived_file() {
         let minutes = [
@@ -327,7 +377,7 @@ mod tests {
         ];
         for rung in DERIVED_RUNGS {
             for stored in [&[][..], &minutes[..1]] {
-                let why = compare(rung, &minutes, stored).expect_err("malformed source");
+                let why = compare(rung, INDEX, &minutes, stored).expect_err("malformed source");
                 assert!(why.contains(rung.as_str()), "{why}");
                 assert!(why.contains("minute fold refused"), "{why}");
                 assert!(why.contains("snapshot 1"), "{why}");
@@ -336,17 +386,18 @@ mod tests {
                 ts_micros: i64::MIN,
                 ..minutes[0]
             }];
-            let why = compare(rung, &extremes, &[]).expect_err("unrepresentable intraday grid");
+            let why =
+                compare(rung, INDEX, &extremes, &[]).expect_err("unrepresentable intraday grid");
             assert!(why.contains("minute fold refused"), "{why}");
         }
         let extremes = [Bar {
             ts_micros: i64::MAX,
             ..minutes[0]
         }];
-        let why =
-            compare(Timeframe::DAY_1, &extremes, &[]).expect_err("unrepresentable daily grid");
+        let why = compare(Timeframe::DAY_1, INDEX, &extremes, &[])
+            .expect_err("unrepresentable daily grid");
         assert!(why.contains("minute fold refused"), "{why}");
-        let empty = compare(Timeframe::MINUTE_5, &[], &[]).expect("empty valid input");
+        let empty = compare(Timeframe::MINUTE_5, INDEX, &[], &[]).expect("empty valid input");
         assert!(empty.agrees());
         assert_eq!(
             (empty.stored_bars, empty.folded_bars, empty.elided),
@@ -370,16 +421,185 @@ mod tests {
         }
     }
 
+    /// IST midnight of 2024-03-01 in micros.
+    const MIDNIGHT_2024_03_01: i64 = 1_709_231_400_000_000;
+
+    /// One flat minute bar `minute` minutes past IST midnight of `day` days
+    /// after 2024-03-01.
+    fn dated_minute(day: i64, minute: i64) -> Bar {
+        Bar {
+            ts_micros: MIDNIGHT_2024_03_01 + day * 86_400_000_000 + minute * 60_000_000,
+            open: 100 + minute,
+            high: 110 + minute,
+            low: 90 + minute,
+            close: 105 + minute,
+            volume: 10,
+            open_interest: i64::MIN,
+        }
+    }
+
+    /// Friday 2024-03-01 and Monday 2024-03-04 in full (09:15..15:30), and
+    /// the disaster-recovery Saturday 2024-03-02 between them in its two
+    /// windows, 09:15..10:00 and 11:30..12:30.
+    fn month_with_a_dr_saturday() -> Vec<Bar> {
+        let regular = 555..930;
+        let saturday = (555..600).chain(690..750);
+        regular
+            .clone()
+            .map(|m| dated_minute(0, m))
+            .chain(saturday.map(|m| dated_minute(1, m)))
+            .chain(regular.map(|m| dated_minute(3, m)))
+            .collect()
+    }
+
+    /// GAP12-4, D-0912: the reference is the derive authority, so a month that
+    /// `pull` derived correctly agrees, and the buckets derive withheld are
+    /// counted as withheld rather than as store defects.
+    #[test]
+    fn fold_audit_agrees_with_a_correctly_derived_month_holding_a_dr_saturday() {
+        let minutes = month_with_a_dr_saturday();
+        for (rung, withheld) in DERIVED_RUNGS.into_iter().zip([54, 35, 21, 12, 7, 5, 3]) {
+            let bucket = store_bucket(rung).expect("derived width");
+            let (stored, _) = pull::fold::complete_minutes_for_venue(
+                &minutes,
+                bucket,
+                pull::vendor::Venue::NseIndex,
+            )
+            .expect("derive policy folds the fixture");
+            let verdict = compare(rung, INDEX, &minutes, &stored).expect("valid fold");
+            assert!(
+                verdict.agrees(),
+                "{} disagreed with what derive writes: {:?}",
+                rung.as_str(),
+                verdict.disagreements
+            );
+            assert_eq!(verdict.withheld, withheld, "{}", rung.as_str());
+            assert_eq!(
+                verdict.withheld_named.len(),
+                MAX_REPORTED.min(usize::try_from(withheld).expect("small")),
+                "{}",
+                rung.as_str()
+            );
+            assert!(
+                verdict
+                    .withheld_named
+                    .iter()
+                    .all(|why| why.contains("exceptional session")),
+                "{}: {:?}",
+                rung.as_str(),
+                verdict.withheld_named
+            );
+        }
+    }
+
+    /// The reference names no withheld diagnostic for a complete regular day.
+    #[test]
+    fn a_complete_regular_day_withholds_nothing() {
+        let minutes: Vec<Bar> = (555..930).map(|m| dated_minute(0, m)).collect();
+        for rung in DERIVED_RUNGS {
+            let bucket = store_bucket(rung).expect("derived width");
+            let plain = pull::fold::fold(&minutes, bucket).expect("plain fold");
+            let verdict = compare(rung, INDEX, &minutes, &plain).expect("valid fold");
+            assert!(verdict.agrees(), "{}", rung.as_str());
+            assert_eq!(
+                (verdict.withheld, verdict.withheld_named.len()),
+                (0, 0),
+                "{}",
+                rung.as_str()
+            );
+        }
+    }
+
+    /// The audit has no dated cash schedule, so on a cash day that needs one
+    /// the reference writes nothing and a stored bar is a disagreement, never
+    /// a silent agreement. `docs/06-limits.md` records this limit.
+    #[test]
+    fn a_cash_day_needing_dated_eligibility_is_withheld_and_never_silently_agrees() {
+        const MIDNIGHT_2026_08_03: i64 = 1_785_695_400_000_000;
+        let minutes: Vec<Bar> = (555..930)
+            .map(|m| Bar {
+                ts_micros: MIDNIGHT_2026_08_03 + m * 60_000_000,
+                ..dated_minute(0, m)
+            })
+            .collect();
+        let bucket = store_bucket(Timeframe::MINUTE_5).expect("derived width");
+        let stored = pull::fold::fold(&minutes, bucket).expect("plain fold");
+        let verdict = compare(
+            Timeframe::MINUTE_5,
+            pull::vendor::Venue::NseCash,
+            &minutes,
+            &stored,
+        )
+        .expect("valid fold");
+        assert!(!verdict.agrees());
+        assert_eq!(verdict.folded_bars, 0);
+        assert!(verdict.withheld > 0);
+        assert!(
+            verdict
+                .withheld_named
+                .iter()
+                .any(|why| why.contains("dated eligibility required")),
+            "{:?}",
+            verdict.withheld_named
+        );
+        let index = compare(Timeframe::MINUTE_5, INDEX, &minutes, &stored).expect("valid fold");
+        assert!(index.agrees(), "the same day on the index venue is regular");
+    }
+
+    /// A key whose segment has no minute-completeness venue was never derived,
+    /// and the month is refused before any file is read.
+    #[test]
+    fn a_key_with_no_derive_venue_is_refused_before_any_read() {
+        let key = InstrumentKey::index(brutex_core::instrument::Exchange::Bse, "SENSEX")
+            .expect("a BSE index key");
+        let root =
+            std::env::temp_dir().join(format!("brutex-fold-no-venue-{}", std::process::id()));
+        let why = audit_month(
+            &root,
+            Vendor::Zerodha,
+            &key,
+            YearMonth::new(2024, 3).expect("a month"),
+        )
+        .expect_err("BSE has no derive venue");
+        assert!(
+            why.contains("no verified minute-completeness venue"),
+            "{why}"
+        );
+        assert!(!root.exists(), "nothing was created or read");
+    }
+
+    /// A month derived by the plain fold before derive withheld exceptional
+    /// sessions holds bars the derive authority does not write, and the audit
+    /// names that as a disagreement.
+    #[test]
+    fn a_legacy_plain_fold_of_a_withheld_session_disagrees() {
+        let minutes = month_with_a_dr_saturday();
+        for rung in DERIVED_RUNGS {
+            let bucket = store_bucket(rung).expect("derived width");
+            let legacy = pull::fold::fold(&minutes, bucket).expect("plain fold");
+            let verdict = compare(rung, INDEX, &minutes, &legacy).expect("valid fold");
+            assert!(!verdict.agrees(), "{}", rung.as_str());
+            assert!(
+                verdict.stored_bars > verdict.folded_bars,
+                "{}",
+                rung.as_str()
+            );
+        }
+    }
     /// A complete minute series folds to a coarse file that agrees exactly.
+    ///
+    /// Sixty minutes from 09:15, so every rung's buckets are whole: the derive
+    /// authority withholds a partial bucket, and thirty minutes left the
+    /// `60min` bucket partial.
     #[test]
     fn a_complete_minute_series_agrees_with_its_own_fold() {
-        let minutes: Vec<Bar> = (0..30)
+        let minutes: Vec<Bar> = (0..60)
             .map(|m| minute_bar(m, 100 + m, 110 + m, 90 + m, 105 + m))
             .collect();
         for rung in DERIVED_RUNGS {
             let bucket = store_bucket(rung).expect("every derived rung has a bucket");
             let folded = pull::fold::fold(&minutes, bucket).expect("a clean series folds");
-            let verdict = compare(rung, &minutes, &folded).expect("valid fold");
+            let verdict = compare(rung, INDEX, &minutes, &folded).expect("valid fold");
             assert!(
                 verdict.agrees(),
                 "{} disagreed with its own fold: {:?}",
@@ -415,7 +635,7 @@ mod tests {
         assert_eq!(stored.len(), 1, "the bucket still exists");
         assert_eq!(truth.len(), 1, "and so does the correct one");
 
-        let verdict = compare(Timeframe::MINUTE_5, &complete, &stored).expect("valid fold");
+        let verdict = compare(Timeframe::MINUTE_5, INDEX, &complete, &stored).expect("valid fold");
         assert_eq!(
             verdict.stored_bars, verdict.folded_bars,
             "THE COUNT AGREES, which is the whole reason a count check cannot \
@@ -449,7 +669,7 @@ mod tests {
         assert_eq!(full.len(), 2, "ten minutes make two five-minute buckets");
 
         let short = vec![full[0]];
-        let verdict = compare(Timeframe::MINUTE_5, &minutes, &short).expect("valid fold");
+        let verdict = compare(Timeframe::MINUTE_5, INDEX, &minutes, &short).expect("valid fold");
         assert!(!verdict.agrees());
         assert_eq!(verdict.stored_bars, 1);
         assert_eq!(verdict.folded_bars, 2);
@@ -464,7 +684,7 @@ mod tests {
 
         let mut long = full.clone();
         long.push(minute_bar(99, 1, 1, 1, 1));
-        let other = compare(Timeframe::MINUTE_5, &minutes, &long).expect("valid fold");
+        let other = compare(Timeframe::MINUTE_5, INDEX, &minutes, &long).expect("valid fold");
         assert!(!other.agrees());
         assert_eq!(
             other.disagreements.first().expect("one disagreement").field,
@@ -489,7 +709,7 @@ mod tests {
                 ..*bar
             })
             .collect();
-        let verdict = compare(Timeframe::MINUTE_2, &minutes, &wrong).expect("valid fold");
+        let verdict = compare(Timeframe::MINUTE_2, INDEX, &minutes, &wrong).expect("valid fold");
         assert!(!verdict.agrees());
         assert_eq!(verdict.disagreements.len(), MAX_REPORTED);
         assert_eq!(
@@ -500,8 +720,11 @@ mod tests {
 
     #[test]
     fn every_stored_field_disagreement_retains_its_exact_position_and_values() {
-        let minutes = [minute_bar(0, 100, 110, 90, 105)];
-        let truth = minutes[0];
+        // One whole five-minute bucket: the derive authority withholds a
+        // bucket with fewer than its five scheduled minutes.
+        let minutes: Vec<Bar> = (0..5).map(|m| minute_bar(m, 100, 110, 90, 105)).collect();
+        let bucket = store_bucket(Timeframe::MINUTE_5).expect("5min has a bucket");
+        let truth = pull::fold::fold(&minutes, bucket).expect("five minutes fold")[0];
         for field in [
             "ts_micros",
             "open",
@@ -542,7 +765,8 @@ mod tests {
                     (changed.open_interest, truth.open_interest)
                 }
             };
-            let verdict = compare(Timeframe::MINUTE_5, &minutes, &[changed]).expect("valid fold");
+            let verdict =
+                compare(Timeframe::MINUTE_5, INDEX, &minutes, &[changed]).expect("valid fold");
             assert!(!verdict.agrees());
             assert_eq!(
                 (verdict.stored_bars, verdict.folded_bars, verdict.elided),
