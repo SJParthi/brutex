@@ -44637,6 +44637,63 @@ refuses it.
 Invariants AF-42 (updated) and AF-W3S13-a through AF-W3S13-e;
 `docs/06-limits.md` has the cost and the widened false refusal.
 
+### D-0940 — Compute VWAP sigma as the exact floor of the weighted standard deviation, not from a floored mean — 2026-10-02
+
+**What was wrong.** `indicators::vwap::Vwap::sigma` computed
+`isqrt(floor(p2v/V) − floor(pv/V)²) / 3`. Flooring the mean before squaring
+it adds up to `2·M·frac(M)` to the ×3-scale variance, where `M = pv/V` is
+about three times the price. Two bars at 100.00 and 100.01 rupees, volume 1
+each, have half a paisa of dispersion and reported a sigma of **57** paisa;
+at 57,000.00/57,000.01 rupees it reported **1,378**. The sweep findings
+ET-indicators-0 and ET-indicators-12 (the same defect from two lenses)
+reproduced exact sigmas of 0/3/38 paisa reported as 912/47/324. Sigma is the
+near scale of position 145 and sets every band level for 146–152 and
+190–197, so a close of 10,020 against a VWAP of 10,000 was reported INSIDE
+all three bands (152, 192, 197) when exact arithmetic puts it ABOVE all three
+(146, 148, 193).
+
+**F-9A880B's "cannot bite any run this engine sweeps" is false, and is
+corrected.** `cli::stored::vwap_availability` maps `Kind::Equity` to
+`Availability::Present` (D-0506, D-0507), so every cash-equity sweep has
+evaluated these positions on the inflated sigma. Spot indices are `Absent`
+and were never affected. Existing equity results that used any of these
+twenty positions were computed on the old sigma; they are not rewritten
+(append-only history), and a rerun is a new run under a new `commit` term of
+the run identity.
+
+**The change.** With `q = floor(pv/V)`, `r = pv − qV` and
+`C = p2v − q·(pv + r)` (which equals `Σ v·(P − q)²`, so is an exact
+non-negative integer), the ×3 variance is `C/V − (r/V)²`. Writing
+`C = wV + s`, its floor is `w`, less one exactly when `s·V < r²`. Sigma is then
+`isqrt(that floor) / 3`, which equals `floor(σ)` of the exact
+volume-weighted standard deviation in paisa. The derivation and the overflow
+argument are on the method's doc comment. `q·(pv + r)` is bounded by
+`p2v + pv` for any folded state (Cauchy–Schwarz and `P >= 3`), far inside
+`i128` under `ACC_CEILING`; `s·V` and `r²` are not (total volume passes `2^64`
+after two `i64::MAX`-volume bars), so they are compared as 256-bit products
+by a new branch-free `wide_mul`. Every `i128` step stays `checked_`.
+
+**Cost.** Still O(1) per call: two more Euclidean divisions and two
+fixed-size 256-bit products, no loop. The bounded-not-flat square root is
+unchanged and remains recorded in `docs/06-limits.md`.
+
+**Proof.** `vwap::tests::sigma_is_the_exact_floor_whatever_the_remainder_of_the_mean`
+folds 600 generated sessions (prices 1 paisa to 5 × 10⁸, volumes 1 to
+`i64::MAX`) and checks every state against an independent big-integer oracle
+(`floor(sqrt(V·p2v − pv²) / 3V)` by bisection on limb arithmetic), requiring
+most states to have `pv mod V != 0`.
+`sigma_is_exact_where_the_remainder_squared_leaves_i128` and
+`maximal_volumes_at_minimal_prices_stay_exact` cover the range where `r²`
+leaves `i128`; `a_half_paisa_spread_has_no_band_width` pins the bit
+positions; `sigma_refuses_when_the_remainder_sum_leaves_i128` covers the new
+`checked_` guard; `the_wide_product_comparison_is_exact` checks `wide_mul`.
+Three of these fail on the pre-fix code, e.g. *"the old formula said 57 —
+left: Some(57), right: Some(0)"*. Every pre-existing sigma test passes
+unchanged: their fixtures have `r = 0`, which is why none saw this.
+
+**Not shown.** No stored equity month was re-swept to measure how many
+recorded candidates change; that is a rerun, not part of this fix.
+
 ### D-0913 — State the timestamp lookup's bisection cost in the limits register, and stop saying no bench times a syscall — 2026-10-02
 
 **What happened.** An audit (W3-store1-0, W3-store1-1) found
