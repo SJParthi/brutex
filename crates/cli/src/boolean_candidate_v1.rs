@@ -13,7 +13,10 @@ use runner::exit_grid_policy::expression_execution::{
     ExpressionExecutionRunV1, SelectedExpressionExitV1,
 };
 use runner::exit_grid_policy::research_resolution::ResearchResolvedExitGridV1;
-use runner::exit_grid_policy::{ExecutionRefusalBitsV1, ExecutionSeriesV1, ExitGridPolicyV1};
+use runner::exit_grid_policy::{
+    ExecutionDigestsV1, ExecutionRefusalBitsV1, ExecutionSeriesV1, ExitGridErrorV1,
+    ExitGridPolicyV1,
+};
 use runner::expression::Expression;
 use runner::grid::{Cell, Chosen, TradeRow};
 use runner::identity::{DailyReferenceBinding, Direction, Params, ReferenceIntegrity, Run};
@@ -670,8 +673,10 @@ fn compute(
                 .ok_or("Boolean anchor count overflow")?,
         )
         .map_err(display)?;
+    let mut hoisted: Option<ExecutionDigestsV1> = None;
     for (program_index, program) in request.programs.iter().enumerate() {
         for resolved in &resolutions {
+            let digests = slice_digests(&mut hoisted, source, series)?;
             let (mut produced, anchor) = produce_side(
                 request,
                 source,
@@ -684,6 +689,7 @@ fn compute(
                 series,
                 &session_index,
                 &mut remaining,
+                &digests,
             )?;
             rows.append(&mut produced);
             anchors.push(anchor);
@@ -717,13 +723,9 @@ fn produce_side(
     series: ExecutionSeriesV1<'_>,
     sessions: &Sessions,
     remaining: &mut Remaining,
+    digests: &ExecutionDigestsV1,
 ) -> Result<(Vec<BooleanCoordinateV1>, ExpressionTrainingAnchorV1), String> {
-    let data_digest = runner::identity::data_digest_with_daily_reference(
-        &source.data.signal.bars,
-        &source.data.exact_minute.bars,
-        reference(source),
-    )
-    .map_err(|why| format!("Boolean daily identity refused: {why:?}"))?;
+    let data_digest = digests.data_digest();
     let run = Run {
         mask: program.referenced(),
         direction: match resolved.side() {
@@ -743,14 +745,7 @@ fn produce_side(
         commit,
         feed: request.vendor.as_str(),
     };
-    let run = ExpressionExecutionRunV1::new_with_daily_reference(
-        &run,
-        program,
-        &source.data.signal.bars,
-        &source.data.exact_minute.bars,
-        series.bars(),
-        reference(source),
-    )?;
+    let run = ExpressionExecutionRunV1::with_digests(&run, program, digests)?;
     let attempt =
         crate::sweep_evidence::begin(request.output, run.run_id().bytes(), Operation::Expression)?;
     let produced = (|| {
@@ -956,6 +951,38 @@ impl Sessions {
         }
         Ok(periods)
     }
+}
+
+/// The source's slice digests, hashed once per catalogue (D-1143).
+///
+/// The three-stream data digest and the execution digest are facts about the
+/// source slices, not about a program or side, and `produce_side` hashed them
+/// once per program x side, three BLAKE3 passes each. Built on first use, so an
+/// empty catalogue still hashes nothing and refuses nothing. A malformed daily
+/// binding keeps the message `produce_side` gave it; every other refusal is the
+/// one `ExpressionExecutionRunV1::new_with_daily_reference` rendered.
+fn slice_digests(
+    hoisted: &mut Option<ExecutionDigestsV1>,
+    source: &Source,
+    series: ExecutionSeriesV1<'_>,
+) -> Result<ExecutionDigestsV1, String> {
+    if let Some(digests) = *hoisted {
+        return Ok(digests);
+    }
+    let digests = ExecutionDigestsV1::of_daily_reference(
+        &source.data.signal.bars,
+        &source.data.exact_minute.bars,
+        series.bars(),
+        reference(source),
+    )
+    .map_err(|why| match why {
+        ExitGridErrorV1::DailyReferenceIdentityRefused(why) => {
+            format!("Boolean daily identity refused: {why:?}")
+        }
+        other => display(other),
+    })?;
+    *hoisted = Some(digests);
+    Ok(digests)
 }
 
 fn display(why: impl std::fmt::Display) -> String {

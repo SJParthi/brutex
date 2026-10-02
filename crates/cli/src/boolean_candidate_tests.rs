@@ -543,3 +543,29 @@ fn complete_generated_months_measure_actual_accepted_periods_before_stats_fixtur
     assert!(sessions.days.len().is_multiple_of(2));
     Ok(())
 }
+
+/// D-1143, source shape: `produce_side` runs once per program and side and
+/// must seal its run against the catalogue's hoisted digests rather than hash
+/// the signal, minute and daily bars again. The answers are byte-identical, so
+/// only the source tells the two apart.
+#[test]
+fn produce_side_hashes_no_slice() {
+    let source = include_str!("boolean_candidate_v1.rs");
+    let at = source.find("fn produce_side(");
+    assert!(at.is_some(), "produce_side must exist");
+    let rest = source.get(at.unwrap_or_default()..).unwrap_or_default();
+    let body = rest
+        .get(..rest.find("\n}\n").unwrap_or(rest.len()))
+        .unwrap_or_default();
+    assert!(body.contains("ExpressionExecutionRunV1::with_digests(&run, program, digests)"));
+    for hashing in [
+        "data_digest_with_daily_reference(",
+        "new_with_daily_reference(",
+        "ExecutionDigestsV1::of",
+    ] {
+        assert!(
+            !body.contains(hashing),
+            "produce_side must not call {hashing}"
+        );
+    }
+}

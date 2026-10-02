@@ -9911,3 +9911,32 @@ not:
   attested path.
 - Not measured. No bench times any of these; the bounds are read from the
   source (`CLAUDE.md` §3 rule 6).
+
+## Run sealing is O(1) per run; OOS replay is still O(prefix) per pending candidate — D-1143, 2 October 2026
+
+- **Sealing.** `ExecutionDigestsV1` is O(S + E) BLAKE3 once per slice set, and
+  `ExecutionRunV1::with_digests` is O(1) per run: a few term compares, one
+  identity hash over fixed-size terms, and two short feed/commit hashes. The
+  V4 training population, the V4 OOS loop and `cli`'s Boolean catalogue use
+  it. `cli::candidate_universe` still seals per member-side with
+  `new_with_daily_reference`, which is O(S + E) per member-side. It also
+  re-attests per member-side (D-1141's limits), so the order there is
+  unchanged.
+- **V4 OOS replay (W3-runner5-0, open).** Each pending candidate's
+  `replay_selected` still costs O(E_prefix) attestation work: BLAKE3 over
+  `trade_test` twice, one over the column, bar/acceptance/source/envelope
+  validation, and a `SliceFacts` build. Its walk is O(prefix rows), not
+  O(test rows). The loop is serial, and pending is up to 2 × closed masks.
+  Closing the attestation term needs an attested-OOS token. That token would
+  change which refusal is reported when an input has more than one fault, and
+  that needs its own decision. Closing the walk term needs `trade::walk_over`
+  to start at a row offset (see the W3-runner5-3 entry below).
+- **`walk_forward_core` OOS pass (W3-runner5-3, open).** Every scored candidate
+  is re-priced with `with_levels_over` on a column that runs from bar 0 to
+  `fold.test.end`, with rows before `fold.test.start` blanked by `restricted`.
+  The walk visits every row, so it costs O(prefix rows) per candidate where
+  O(test rows) is needed. Cutting the column instead would renumber nothing,
+  because sources are explicit. It would still change two things: the
+  empty-mask answer (a blanked row fires for the empty mask) and the slice
+  facts derived from the column. The fix that changes no answer is a row-offset
+  start in `trade::walk_over`, which is owned by another lane. Not measured.

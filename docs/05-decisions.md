@@ -43839,3 +43839,61 @@ fixed `Run`'s identity to
 refuses the false sentence in the module source, and that half fails on the
 previous tree. A `vocab::VOCAB_VERSION` bump re-keys on purpose and is the one
 legitimate reason to re-take the constant. No identity changes.
+
+### D-1143 — Hash an execution run's slices once per slice, and seal each run against the digests at O(1) — 2026-10-02
+
+**Findings.** W3-runner3-3, W3-runner5-1, and the identity half of
+W3-runner5-0.
+
+* `ExecutionRunV1::new` hashed every signal and execution bar to check a run's
+  data term, then hashed the execution slice again for its execution digest.
+  `new_with_daily_reference` did the same over three streams. Both digests are
+  facts about the slices, but the callers seal one run per candidate:
+  * The V4 walk-forward population (`validate.rs` `evaluate_one`, inside
+    `par_iter`, twice per closed mask) paid O(S_train + 2·E_train) BLAKE3 per
+    candidate × side. Its comment called the recomputation "deliberate -- it is
+    the attestation". The check is the attestation; the hashing is not.
+  * Its OOS loop over `pending` hashed `signal_upto` twice and `trade_test`
+    three times per candidate: once in `data_digest_with_execution` for the
+    `Run`, once in `new` for the check, and once for the execution digest.
+  * `cli`'s Boolean candidate catalogue (`produce_side`, once per program ×
+    side) hashed signal, minute and daily bars twice per call.
+
+**The change.** New `runner::exit_grid_policy::ExecutionDigestsV1` holds the
+expected data digest and the execution digest. Its fields are private and its
+only constructors (`of`, `of_daily_reference`) hash real bars in this process,
+so a digest cannot be forged. `ExecutionRunV1::with_digests` and
+`ExpressionExecutionRunV1::with_digests` seal a run against it at O(1). They
+make the same checks in the same order, and `of_daily_reference` refuses a
+malformed binding or a detached slice exactly as `new_with_daily_reference`
+does. The two hashing constructors now build the digests and call
+`with_digests`, so there is one sealing path. `validate.rs` hoists the digests
+once per fold for training and once per fold for OOS. `cli`'s Boolean
+catalogue builds them on first use, keeping both refusal messages, so an empty
+catalogue still hashes nothing.
+
+**No output changes.** Every `RunId`, data digest and execution digest is
+byte-identical.
+
+**What is not done (W3-runner5-0, remainder).** Each pending OOS candidate
+still goes through `replay_selected`. That re-attests the OOS series (one
+BLAKE3 over `trade_test` in `require_matches`, one for `oos_data_digest`, one
+over the column), re-validates bars, acceptance, sources and the arithmetic
+envelope, builds `SliceFacts`, and walks the whole prefix column. The loop is
+still serial. Hoisting that needs an attested-OOS token like
+`AttestedTrainingV1`. That token would reorder refusal precedence for inputs
+with more than one fault, which is a change to outputs that needs its own
+decision. The prefix walk needs a row-offset walk in `trade.rs`, which this
+lane does not own. Both are recorded in `docs/06-limits.md`.
+
+**Tests.**
+`exit_grid_policy::tests::sealing_against_hoisted_digests_equals_hashing_per_run`
+compares `with_digests` against the hashing constructors. It covers one-stream,
+two-stream, empty-signal, three-stream and refused inputs, every direction
+including `Undirected`, a forged data term, and reuse.
+`validate::tests::the_population_loop_hoists_its_data_digest_out_of_the_candidate_loop`
+gains a clause refusing `ExecutionRunV1::new(` in the loop, and
+`validate::tests::the_oos_replay_loop_hashes_its_slices_once_per_fold` is new.
+`cli::candidate_universe::boolean_candidate_v1::tests::produce_side_hashes_no_slice` covers the `cli`
+catalogue. The three source-shape tests fail on the previous tree; the
+behavioural test does not compile there.

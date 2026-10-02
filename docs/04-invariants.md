@@ -5373,3 +5373,10 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The `RunId` encoding is a stored format: one fixed `Run` hashes to a pinned 64-hex identity, and `runner::identity`'s source does not claim that `RunId`s are unpersisted. | `runner::identity::tests::a_persisted_run_identity_does_not_drift` | ✓ |
+
+### A run is sealed against its slices' digests, hashed once — W3-runner3-3, W3-runner5-1 (D-1143)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| `ExecutionRunV1::with_digests` over `ExecutionDigestsV1` returns exactly what `ExecutionRunV1::new` / `new_with_daily_reference` returns, or exactly the same refusal, for every input those constructors accept or refuse. Reusing one digest set is idempotent. | `runner::exit_grid_policy::tests::sealing_against_hoisted_digests_equals_hashing_per_run` | ✓ |
+| No per-candidate loop in the V4 walk-forward (training population or OOS replay) or in `cli`'s Boolean catalogue hashes the fold's or source's slices to seal a run. | `runner::validate::tests::the_population_loop_hoists_its_data_digest_out_of_the_candidate_loop` · `runner::validate::tests::the_oos_replay_loop_hashes_its_slices_once_per_fold` · `cli::candidate_universe::boolean_candidate_v1::tests::produce_side_hashes_no_slice` | ✓ |

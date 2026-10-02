@@ -51,10 +51,10 @@ use rayon::prelude::*;
 use vocab::ConditionMask;
 
 use crate::exit_grid_policy::{
-    AttestedTrainingV1, ExecutionRunV1, ExecutionSeriesV1, ExitGridErrorV1, OosExecutionSeriesV1,
-    ResolvedExitGridV1, SelectedExitV1, column_digest_v1,
+    AttestedTrainingV1, ExecutionDigestsV1, ExecutionRunV1, ExecutionSeriesV1, ExitGridErrorV1,
+    OosExecutionSeriesV1, ResolvedExitGridV1, SelectedExitV1, column_digest_v1,
 };
-use crate::identity::{Params, Run, data_digest, data_digest_with_execution};
+use crate::identity::{Params, Run, data_digest};
 use crate::outcome::Horizon;
 use crate::split::Shape;
 use crate::trade::{Trades, walk};
@@ -2505,10 +2505,15 @@ fn walk_forward_exact_grid_v4(
         // see this one. The hoist is made here; widening that gate to reach V4
         // is a separate change and is noted rather than smuggled in.
         //
-        // `ExecutionRunV1::new` below recomputes the identical digest to check
-        // it, which is deliberate -- it is the attestation, not a duplicate --
-        // and is left alone.
-        let train_data_digest = data_digest_with_execution(train, Some(trade_train));
+        // `ExecutionRunV1::new` used to recompute the identical digest per
+        // candidate per side to check it -- and hash `trade_train` a third
+        // time for the execution digest. That check is the attestation and it
+        // stays; what moved (D-1143) is the HASHING. `ExecutionDigestsV1` is
+        // built here from the real bars once, its fields cannot be forged, and
+        // `ExecutionRunV1::with_digests` makes the same comparison per run at
+        // O(1).
+        let train_digests = ExecutionDigestsV1::of(train, Some(trade_train));
+        let train_data_digest = train_digests.data_digest();
         // THE TRAINING SLICE IS ATTESTED ONCE PER SIDE, NOT ONCE PER CANDIDATE.
         //
         // `evaluate_training_grid_attested` re-attested `train_series` and
@@ -2569,7 +2574,7 @@ fn walk_forward_exact_grid_v4(
                 commit: execution.commit(),
                 feed: execution.feed(),
             };
-            let execution_run = ExecutionRunV1::new(&run, train, Some(trade_train))?;
+            let execution_run = ExecutionRunV1::with_digests(&run, &train_digests)?;
             let evaluated = resolved.evaluate_with_attested(attested, execution_run)?;
             let evaluated_cells = stable_u64_v4(evaluated.grid().cells.len())?;
             if evaluated_cells != resolved.cell_count() {
@@ -2702,6 +2707,9 @@ fn walk_forward_exact_grid_v4(
             )
             .map_err(AnchoredSearchValidationRefusalV4::BuilderRefused)?;
 
+            // The OOS slices are the fold's, not the candidate's: hashed once
+            // here (D-1143) rather than three times per pending candidate.
+            let oos_digests = ExecutionDigestsV1::of(signal_upto, Some(trade_test));
             for (ordinal, candidate) in pending.iter().enumerate() {
                 let resolved = match candidate.side {
                     Direction::Long => &long,
@@ -2713,11 +2721,11 @@ fn walk_forward_exact_grid_v4(
                     instrument: execution.instrument(),
                     timeframe,
                     params,
-                    data_digest: data_digest_with_execution(signal_upto, Some(trade_test)),
+                    data_digest: oos_digests.data_digest(),
                     commit: execution.commit(),
                     feed: execution.feed(),
                 };
-                let execution_run = ExecutionRunV1::new(&run, signal_upto, Some(trade_test))?;
+                let execution_run = ExecutionRunV1::with_digests(&run, &oos_digests)?;
                 let replay = resolved.replay_selected(
                     oos,
                     &projected_oos,
@@ -7405,8 +7413,7 @@ mod tests {
     #[test]
     fn the_population_loop_hoists_its_data_digest_out_of_the_candidate_loop() {
         let source = include_str!("validate.rs");
-        let anchor =
-            "let train_data_digest = data_digest_with_execution(train, Some(trade_train));";
+        let anchor = "let train_digests = ExecutionDigestsV1::of(train, Some(trade_train));";
         let at = source.find(anchor).expect(
             "the V4 population pass must build its data digest ONCE, before the \
              candidate loop",
@@ -7448,6 +7455,42 @@ mod tests {
              whole loop, and recomputing it per candidate per side is the \
              O(C x 2 x B) term this hoist removed"
         );
+        // D-1143: nor may it seal a run by re-hashing them. `ExecutionRunV1::new`
+        // hashes signal and execution bars; the per-run door is
+        // `with_digests` over the hoisted `ExecutionDigestsV1`.
+        assert!(
+            !inner.contains("ExecutionRunV1::new(")
+                && !inner.contains("ExecutionDigestsV1::of(")
+                && inner.contains("ExecutionRunV1::with_digests(&run, &train_digests)"),
+            "the candidate loop must seal each run against the hoisted digests"
+        );
+    }
+
+    /// D-1143: the V4 OOS replay loop seals each pending candidate's run
+    /// against digests built once per fold, not by hashing both slices three
+    /// times per candidate.
+    #[test]
+    fn the_oos_replay_loop_hashes_its_slices_once_per_fold() {
+        let source = include_str!("validate.rs");
+        let anchor = "let oos_digests = ExecutionDigestsV1::of(signal_upto, Some(trade_test));";
+        let at = source.find(anchor);
+        assert!(at.is_some(), "the OOS pass must hoist its digests");
+        let rest = source.get(at.unwrap_or_default()..).unwrap_or_default();
+        let end = rest.find("final_candidates.push(proof);");
+        assert!(
+            end.is_some(),
+            "the scanned region must end at the loop's push"
+        );
+        let inner = rest
+            .get(anchor.len()..end.unwrap_or_default())
+            .unwrap_or_default();
+        assert!(inner.contains("for (ordinal, candidate) in pending.iter().enumerate()"));
+        assert!(inner.contains("ExecutionRunV1::with_digests(&run, &oos_digests)"));
+        assert!(
+            !inner.contains("data_digest_with_execution(")
+                && !inner.contains("ExecutionRunV1::new("),
+            "nothing inside the pending loop may hash the fold's slices"
+        );
     }
 
     /// The V4 population loop attests its training slice once per side, not
@@ -7464,8 +7507,7 @@ mod tests {
     #[test]
     fn the_population_loop_attests_its_training_slice_once_per_side() {
         let source = include_str!("validate.rs");
-        let anchor =
-            "let train_data_digest = data_digest_with_execution(train, Some(trade_train));";
+        let anchor = "let train_digests = ExecutionDigestsV1::of(train, Some(trade_train));";
         let at = source
             .find(anchor)
             .expect("the V4 population pass must still hoist its data digest");
