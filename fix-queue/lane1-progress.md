@@ -30,3 +30,7 @@ After any pause: read this file, `git ls-remote origin 'refs/heads/fix/cloud-*'`
 ## Batch 3 (audit-20261002 new-findings.md, queued after lane1-b)
 
 Medium first: o1cli-1, probestore-3, probeapi-3 (cli half). Then: o1store-1, o1store-2, o1engine-22, o1engine-23, o1engine-24, o1engine-40, o1cli-2..6, probestore-4..7, probeapi-6. State: queued. Source: /mnt/project-files/audit-20261002/new-findings.md (copied to fix-queue/lane1-c-findings.md).
+
+## Usage mode (08:15 UTC)
+
+Weekly usage at 45%: lane 1 now runs at most 2 agents (the step3 test-speed agent + one sequential workflow). Order: review pushed PRs, batch-1 rest, then lane1-b units U1, U2, U9(+U3), U4... Root-permission test fix paused with partial work in its worktree (resume later). Stop and checkpoint at 85%.
