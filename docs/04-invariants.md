@@ -6013,3 +6013,9 @@ old line regex the same input and watched it pass.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | AU-PROBESTORE-4 — **`catalog::walk` lists a month only when its file stem is four ASCII digits, `-`, two ASCII digits, and that month exists.** `2024-+1`, `+024-01`, `2024- 1`, ` 024-01`, `2024-1 `, `2024--1`, `-024-01`, `2024-+0` and `+++++-01` are each counted `malformed_month` and preserved on disk, beside a real `2024-02` that is still the one held month; the census reconciles and a rerun counts the same. Before the fix `2024-+1` was listed as January 2024, whose canonical file is a different file, because `str::parse` accepts a leading `+` | `a_signed_or_padded_month_name_is_not_listed_as_the_canonical_month` in `crates/store/tests/catalog.rs` | ✓ |
+
+### A non-UTF-8 store path component is counted — audit 2026-10-02 probestore-5
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| AU-PROBESTORE-5 — **`catalog::walk` counts a file whose path below `bars/` has any non-UTF-8 component in the `Census::non_utf8` bucket (D-0768; found again as probestore-5), before measuring depth, and never lists it.** A non-UTF-8 contract level (`FNO/NIFTY/<0xFF>CE/1min/2024-01.bin`), symbol, rung, file stem and vendor are each counted `non_utf8` and in no other bucket; the real `2024-02` NIFTY month beside them is the one row; `reconciles` includes the bucket; a rerun counts the same. Before the fix the components were dropped, the contract file measured at spot depth and was listed as the NIFTY index | `a_non_utf8_component_is_counted_and_never_shortens_the_path` in `crates/store/tests/catalog.rs` | ✓ |
