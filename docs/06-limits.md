@@ -11177,6 +11177,26 @@ a measured bound**: no bench row times it (`CLAUDE.md` §3 rule 6).
   block is not read by an append and stays where a reader refuses it; the
   append neither verifies nor re-seals that block.
 
+## The audit kernel reads its daily and minute contexts twice (audit o1cli-4)
+
+- **`column_withholding_at_build` loads the daily context and the
+  exact-minute context, digests them with `stored_anchored_digest`, and drops
+  them, handing back only the column and the digest.**
+  `exact_minute_withholding_unsourceable_days` and `stored::load_daily_context`
+  then load both again in `audit_range_kernel`, which recomputes the digest
+  and compares it with the preparation digest before any identity is
+  published. Every stored audit therefore pays one extra read of the rung's
+  one-minute span (from the month before the span) and of its daily context,
+  plus one more digest, O(minute bars + signal bars). The second read is
+  what the kernel goes on to use, and the comparison is the check that the
+  inputs did not change between preparation and publication. Handing the
+  build's contexts back and replacing the re-read with a cheaper
+  file-generation check would remove the cost, and is a change to that
+  check's guarantee, so it is not made here. Stated from the code's shape;
+  not timed. Held to the code by
+  `the_kernels_second_context_read_is_stated_and_still_paid` in
+  `crates/cli/tests/limits_o1cli_4.rs`.
+
 ## Parallel rungs each re-read the same one-minute span (audit o1cli-3)
 
 - **`sweep_rungs` runs every rung through `one_rung` in parallel, and each
