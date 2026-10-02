@@ -33,7 +33,7 @@ Medium done: o1cli-1 PR #49 (D-0997), probeapi-3 cli half PR #50 (D-0998), probe
 
 ## Usage mode (08:15 UTC)
 
-Weekly usage at 45%: lane 1 now runs at most 2 agents (the step3 test-speed agent + one sequential workflow). Order: review pushed PRs, batch-1 rest, then lane1-b units U1, U2, U9(+U3), U4... Root-permission test fix paused with partial work in its worktree (resume later). Stop and checkpoint at 85%.
+Weekly usage at 45%: lane 1 now runs at most 2 agents (the step3 test-speed agent + one sequential workflow). Order: review pushed PRs, batch-1 rest, then lane1-b units U1, U2, U9(+U3), U4... Root-permission test fix paused with partial work in its worktree (resume later). Stop rule now: 98% weekly usage (see resume/RESUME-20261003.md).
 
 | extra | fix/cloud-step3-test-speed | pushed (55m -> 8m15s) | https://github.com/SJParthi/brutex/pull/40 |
 | extra | fix/cloud-root-permission-tests | pushed (16 root-only failures fixed) | https://github.com/SJParthi/brutex/pull/43 |
