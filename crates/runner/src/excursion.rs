@@ -1034,6 +1034,25 @@ impl ActualClock {
 #[path = "excursion_clock_tests.rs"]
 mod clock_contract_tests;
 
+/// [`admit`], plus the location of the FIRST bar it refuses: `refused` alone is
+/// a count, and a count cannot say whether the hole sits before or after an
+/// exit. `(accepted, index, offset)` — `offset` is the bar's position in the
+/// path, which is what `Crossings::first_refused` reports. D-1179.
+fn admit_located(
+    out: &mut Crossings,
+    admission: &mut PathAdmission,
+    bar: &Candle,
+    (accepted, index, offset): (Option<&[bool]>, usize, usize),
+    priced: bool,
+) -> bool {
+    let refused_before = out.refused;
+    let admitted = admit(out, admission, bar, (accepted, index), priced);
+    if out.refused > refused_before && out.first_refused.is_none() {
+        out.first_refused = Some(offset);
+    }
+    admitted
+}
+
 fn crossings_with(
     bars: &[Candle],
     from: usize,
@@ -1110,11 +1129,8 @@ fn crossings_with(
         };
         // A BAR THE ENGINE REFUSED MAY NOT MOVE A RUNNING MAXIMUM, and a
         // non-positive entry may move nothing but the extremes. See [`admit`].
-        let refused_before = out.refused;
-        if !admit(&mut out, &mut admission, bar, (accepted, index), priced) {
-            if out.refused > refused_before && out.first_refused.is_none() {
-                out.first_refused = Some(offset);
-            }
+        let at = (accepted, index, offset);
+        if !admit_located(&mut out, &mut admission, bar, at, priced) {
             continue;
         }
         out.last = offset;
