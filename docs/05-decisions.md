@@ -45504,3 +45504,210 @@ later change to either read point fails it and must be decided in its own
 entry.
 
 **Identity.** Not moved; no code changes.
+### D-0775 — Refuse the three lake-reader aliases a present value, a long chunk and a signed expiry used to hide — 2026-09-29
+
+**What happened.** Three places in `crates/lake` accepted an input and quietly
+read it as something else. Each was reproduced by a test that failed on the
+code origin/main 2c209309 carries and passes with the fix:
+
+- **W3-lake1-3, a signed expiry.** `contract::parse_expiry` checked only the
+  seven-byte width and then called `u8::from_str` and `u16::from_str`, which
+  accept a leading `+`. `NSE-NIFTY-+1Apr20-10000-CE` parsed to the same
+  `ContractName` as `NSE-NIFTY-01Apr20-10000-CE`, and `01Apr+0` to the same as
+  `01Apr00`: two directory names, one key. The expiry's day and year must now
+  be ASCII digits, the guard `parse_strike` already applies, and a signed one
+  is `ContractError::BadExpiryShape`.
+  `contract::tests::a_signed_day_or_year_is_refused_rather_than_aliased_onto_another_contract`.
+- **W3-lake1-4, a present open interest equal to the sentinel.**
+  `read_row_group` mapped every `open_interest` value through
+  `unwrap_or(OPEN_INTEREST_NULL)`, so a value stored PRESENT and equal to
+  `i64::MIN` read back through `Bar::open_interest` as `None` — the reverted
+  run printed `a present i64::MIN read back as [Some(0), None]`. `CLAUDE.md`
+  §7 makes `i64::MIN` the null sentinel, so a present one cannot be told from
+  an absence; it is now refused by name as
+  `LakeError::OpenInterestIsNullSentinel`, naming the row.
+  `reader::tests::a_present_open_interest_equal_to_the_null_sentinel_is_refused`.
+- **W3-lake1-2, a row count that understates the chunk.** Every column read
+  asked for exactly the row group's declared `num_rows` records, so an 8-row
+  file whose footer said 4 decoded as 4 bars (the reverted run printed
+  `an 8-row chunk was read as 4 rows`) while `LakeFile::num_rows` still said 8.
+  Only the overstated direction was refused (`ShortColumnChunk`, L-02). Each
+  column read now asks for one more record after the declared count, and a
+  chunk that has one is `LakeError::LongColumnChunk`, naming the column and the
+  declared count. The test lies twice: once in `num_rows` alone, and once with
+  every chunk's `num_values` edited to agree. Its fixture writes each chunk as
+  ONE page, so that second lie is still the probe's refusal; on a chunk of
+  several pages it was not, and D-0776 records that gap and its close.
+  `reader::tests::a_row_count_that_understates_the_chunk_is_refused_rather_than_truncated_to`.
+
+**GAP14-64, a test gap in the same crate.** Deleting the `NotRepresentable` arm
+of `LakeError::source` survived the lake suite.
+`error::tests::not_representable_exposes_its_core_error_as_the_source` builds
+the variant from a real core `PriceError`, requires `source()` to return it,
+and requires every other listed variant to have none.
+
+**Why refuse rather than tolerate.** `CLAUDE.md` §4 bans a fallback that hides
+a failure, and each of these was one: an alias that makes two names one key, a
+present value reported as absent, and rows dropped under a count that still
+claims them. None changes what a correct file reads as — the sound halves of
+each test decode unchanged — and no workspace crate depends on `lake`, so no
+run identity moves.
+
+**Cost.** The long-chunk probe is one extra `read_records(1, ..)` call per
+column chunk, with two one-element buffers; it is not a per-row operation.
+
+### D-0776 — Count the chunk bytes a declared value count leaves unread, and refuse them — 2026-09-30
+
+**What happened.** D-0775's `LongColumnChunk` probe asks a column for one
+record past the row group's declared `num_rows`. Its test wrote each chunk as a
+single page, and there the probe is enough. On a chunk of several pages it is
+not: `LakePageReader::get_next_page` stops walking once the data pages it has
+returned reach the chunk's declared `num_values`, so a footer that cuts
+`num_rows` AND every chunk's `num_values` to the same page boundary hands the
+column reader exactly the declared rows, the probe finds nothing, and the pages
+after the boundary were dropped without a word — the defect W3-lake1-2 names,
+through a door D-0775 left open. The reverted run of
+`reader::tests::both_counts_understated_on_a_page_boundary_are_refused_rather_than_truncated_to`
+is the evidence: with two four-row pages a column, it printed
+`an 8-row chunk was read as 4 rows`.
+
+**The fix.** The page walk still stops at `num_values` — that stop is what makes
+a `num_values` short of `num_rows` a `ShortColumnChunk` (L-02), and removing it
+would turn that refusal into a silent read. Instead the walk records how many
+chunk bytes it left unread when the declared count stopped it
+(`LakePageReader::stranded`), and a column that otherwise decoded whole with any
+left over is `LakeError::UnreadChunkBytes`, naming the column and the byte
+count. The check runs after `Columns::expand`, so a short chunk, which also
+strands bytes, is still named as short: the L-02 tests are unchanged.
+
+**Pages that cannot hold a row are stepped over before counting.** A first
+draft of this fix counted every byte left unread, and it refused a sound file:
+in a row group of NO rows written by `parquet`'s own writer, the `timestamp`
+chunk holds one dictionary page and nothing else, and a walk whose declared
+count is zero never reads it. Run against that
+draft, `reader::tests::a_sound_row_group_of_no_rows_decodes_to_an_empty_batch`
+failed with `UnreadChunkBytes { column: "timestamp", bytes: 14 }`. The count
+now starts at the first leftover page that is not a dictionary page or a data
+page declaring no values (`page::rowless_extent`); a page holding values, a
+page of any other type, a header that will not parse and a body that runs
+past the chunk all start it. Only headers are parsed there; no body is
+decompressed. `page::tests::a_rowless_page_is_measured_and_anything_else_is_not`
+and `page::tests::a_stopped_walk_counts_from_the_first_page_that_could_hold_a_row`
+pin it.
+
+**Why a leftover row-bearing page is damage.** `parquet-format-safe` 0.2.4
+(`parquet_format.rs`) documents `ColumnMetaData.total_compressed_size` as the
+"total byte size of all compressed, and potentially encrypted, pages in this
+column chunk (including the headers)", and `Columns::pages` slices the chunk to
+exactly that length, so every byte of a conforming chunk belongs to one of its
+pages, and a page holding values past the declared count is values that count
+does not cover. Whether
+every real lake file conforms is **UNMEASURED**: `~/.brutex/lake` is not on the
+machine this was written on, and every test in `tests/real_lake.rs` is
+`#[ignore]`d with the reason "needs ~/.brutex/lake, which cannot be tracked". See `docs/06-limits.md`.
+
+**Cost.** When a walk stops: one header parse per rowless page it steps over,
+then one atomic store; one atomic load per column chunk. Nothing per row. No run identity moves: no workspace crate depends on
+`lake`.
+
+### D-0777 — Refuse a row group read under a file-level row count its row groups do not sum to — 2026-10-01
+
+**What happened.** An independent review of D-0776 (round 3) found W3-lake1-2
+still open for one footer: the row group's `num_rows`, every chunk's
+`num_values` AND every chunk's `total_compressed_size`, all cut at a page
+boundary. `Columns::pages` slices a chunk to its declared length, so the cut
+page is outside the slice, the stranded-byte count has nothing to count, and
+the one-more-record probe finds nothing. The reviewer's probe printed
+`RV7 TRIPLE LIE: file.num_rows()=8 batch.len()=4`. Before this fix,
+`reader::tests::row_value_and_byte_counts_understated_together_are_refused_on_the_file_count`
+failed with `an 8-row file was read as 4 rows`; with only the new check
+disabled it fails the same way again.
+
+**The fix.** `LakeFile::from_bytes` sums every row group's declared `num_rows`
+once, as an `i128`, and `LakeFile::read_row_group` refuses a group read under a
+file-level `num_rows` that differs from that sum as
+`LakeError::RowCountsDisagree`, naming both counts. `parquet.thrift`
+(`parquet-format-safe-0.2.4`) gives `FileMetaData` field 3 `num_rows` as
+"Number of rows in this file" and `RowGroup` field 3 `num_rows` as "Number of
+rows in this row group". The check runs after the columns decode, so a lie a
+column can see is still named by that column: the D-0775 and D-0776 tests are
+unchanged. It is a refusal at read, not at open, so a file whose counts
+disagree still opens and still reports its footer's `num_rows`.
+
+**What it does not close.** Any footer whose row-group counts sum to the
+file-level `num_rows` passes the check, whatever made them sum. A footer that
+also cuts the file-level `num_rows` to the same prefix decodes as that prefix,
+and the test pins it. D-0778 names two more ways to the same sum, another
+group raised to make up the cut and a row-group entry listed twice, and
+`docs/06-limits.md` records all three. Checking that the chunks' byte ranges
+tile the file with no gap was the reviewer's optional second check and is not
+implemented here.
+
+**Cost.** One `i128` sum over the row groups at open, which already reads the
+whole file; one comparison per `read_row_group`. No run identity moves: no
+workspace crate depends on `lake`.
+
+**The step over rowless pages is bounded (same review, round 3).** D-0776's
+loop that steps over leftover rowless pages advanced by whatever
+`rowless_extent` answered and had no other exit, so a step that did not advance
+would spin. `cargo mutants` reported `rowless_extent -> Some(0)` and
+`pos += len -> pos *= len` as TIMEOUT rather than caught. A lake test binary
+built with `rowless_extent` forced to `Some(0)` on the code before this change
+ran `reader::tests::a_sound_row_group_of_no_rows_decodes_to_an_empty_batch`
+until a 60-second alarm killed it (exit 142). The step is now
+`page::step_over_rowless`, a loop of at most as many steps as it has bytes;
+with the same forced `Some(0)` that test and two page tests fail at once
+instead. `page::tests::the_step_over_rowless_pages_ends_even_if_a_step_does_not_advance`
+pins the bound.
+
+### D-0778 — Record every footer that sums to its file count, and stop a rowless step past the end being taken as consumed — 2026-10-01
+
+**What happened.** Round 4 of independent review of D-0777 upheld one
+should-fix and three nits on W3-lake1-2.
+
+1. *The recorded limit was narrower than what is open.* D-0777 and
+   `docs/06-limits.md` named one way past `RowCountsDisagree`, cutting the
+   file-level `num_rows` too. The reviewer's probe found a second: of two
+   eight-row groups, group 0 cut to its first page in every count and group 1's
+   `num_rows` raised to 12, the file-level 16 untouched. It printed
+   `RV7 COMPENSATING: file.num_rows()=16 group0=Ok(4) group1=Err(ShortColumnChunk { column: "timestamp", row: 8, expected: 12, arrived: 8 })`.
+2. *The same gap by a copied entry.* A second probe appended a copy of a cut
+   group's footer entry, and listed a sound group twice under a file-level 16.
+   It printed `read_all=Ok([0, 1, 2, 3, 0, 1, 2, 3])` and every row twice.
+3. *A disagreeing file count is seen only at read.* `LakeFile::num_rows`
+   returned the footer's claim unqualified, with nothing saying so.
+4. *`page::step_over_rowless` failed open on a step past the end.*
+   `rest.get(len..).unwrap_or_default()` took a length past the bytes as
+   everything consumed, so those bytes were never counted as unread.
+
+**The choices.**
+
+- For 1 and 2, the limit is recorded, not closed. What would close them is a
+  check that chunk byte ranges tile the file with no gap and no overlap, and
+  whether the Polars writer that wrote the lake lays chunks out that way is
+  UNMEASURED: `~/.brutex/lake` is not on this machine and `tests/real_lake.rs`
+  is `#[ignore]`d. A check built on an unmeasured layout could refuse real
+  files with nothing here to show it. `docs/06-limits.md`'s D-0777 section is
+  rewritten to say any footer whose row-group counts sum to the file count
+  passes, and names the three ways tested;
+  `reader::tests::a_cut_group_padded_by_another_reads_short_alone_and_the_padded_one_is_refused`
+  and
+  `reader::tests::row_group_counts_that_sum_to_the_file_count_pass_however_they_were_made_to`
+  pin them, so closing one is seen.
+- For 3, the refusal stays at read. `LakeFile::num_rows`'s doc now says it is
+  the footer's claim, not checked at open, and
+  `reader::tests::a_file_count_that_disagrees_opens_and_refuses_every_group_read`
+  pins it for file-level counts of 9, 11, 0, -1, `i64::MAX` and `i64::MIN`
+  against groups summing to 10. With the comparison disabled that test fails at
+  `group 0 under 9`.
+- For 4, a length past the end now ends the walk with what is left, to be
+  counted as unread. The case added to
+  `page::tests::the_step_over_rowless_pages_ends_even_if_a_step_does_not_advance`
+  failed before the change with `a step past the end leaves every byte`,
+  `left: []`, and passes after. `rowless_extent` answers `Some(len)` only when
+  `len <= rest.len()`, so no lake file reached this; it is the helper's own
+  contract that changed.
+
+**Cost.** Unchanged: the step already called `rest.get(len..)`, and only what
+follows a `None` from it changes. No run identity moves: no workspace crate depends on
+`lake`, and no stored byte changes.

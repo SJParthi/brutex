@@ -10538,3 +10538,70 @@ relative to a single pass is UNMEASURED.
   breakdown pane and over its trade list, and labels every run that is not a note-free NIFTY or BANKNIFTY run gross of
   every charge (`web/tests/charge-scope.test.js`). No other page under `web/`
   was changed.
+## `crates/lake` refuses chunk bytes a declared value count leaves unread, and that is unmeasured on the real lake — D-0776, 30 September 2026
+
+A column chunk whose page walk stops at its declared `num_values` with a page
+still unread that is not a dictionary page or a data page declaring no values
+is refused as `LakeError::UnreadChunkBytes`, once the column has otherwise
+decoded its declared rows. The format makes a conforming chunk's byte range
+exactly its pages (`parquet-format-safe` 0.2.4 documents
+`total_compressed_size` as the "total byte size of all compressed, and
+potentially encrypted, pages in this column chunk (including the headers)"), so
+every byte of a conforming chunk belongs to one of its pages. That is not a
+proof that no conforming file reaches the refusal: a writer that put a page
+declaring values past the chunk's own `num_values` would reach it.
+
+**Whether every real lake file conforms is UNMEASURED.** `~/.brutex/lake` was
+not present when D-0776 was written, and every test in `tests/real_lake.rs` is
+`#[ignore]`d with the reason "needs ~/.brutex/lake, which cannot be tracked". A
+writer that padded a chunk past its last page, or wrote a page the chunk's
+count does not cover, would make every read of that file a refusal, named by
+column and byte count rather than a silent read. `cargo test -p lake -- --ignored` on a machine with the lake
+would measure it on the files those tests decode — the two named samples and
+the month files under the first 40 NSE F&O directories `read_dir` yields, which
+`a_spread_of_real_files_decodes_with_no_failures` walks — and not on the rest.
+
+## `crates/lake` does not catch a footer whose row-group counts sum to its file-level count — D-0777, D-0778, 1 October 2026
+
+A footer that understates a row group's `num_rows`, every chunk's `num_values`
+and every chunk's `total_compressed_size` together, on a page boundary, is
+refused only when the row groups' declared counts no longer sum to the
+file-level `num_rows` (`LakeError::RowCountsDisagree`). Any footer whose
+row-group counts do sum to it passes that check, whatever made them sum, and
+nothing else this reader checks covers bytes outside a chunk's declared range
+or two entries naming the same bytes. Three such footers are pinned:
+
+- **The file-level count cut too.** The cut group decodes as the declared
+  prefix: the timestamps `0, 1, 2, 3` of eight.
+  `reader::tests::row_value_and_byte_counts_understated_together_are_refused_on_the_file_count`.
+- **Another group raised to make up the cut.** Of two eight-row groups, group 0
+  cut to four and group 1 raised to twelve, with the file-level 16 untouched:
+  group 0 read on its own decodes as its first four rows. Group 1 is refused
+  when read (`ShortColumnChunk`, 8 of 12 rows arrived), and so is `read_all`,
+  but a caller reading group 0 alone is not told.
+  `reader::tests::a_cut_group_padded_by_another_reads_short_alone_and_the_padded_one_is_refused`.
+- **A row-group entry listed twice.** A cut group plus a copy of its entry sums
+  to the untouched file-level 8 and `read_all` returns rows `0..4` twice and
+  drops rows `4..8`; a sound group listed twice under a file-level 16 returns
+  every row twice. Neither touches a page.
+  `reader::tests::row_group_counts_that_sum_to_the_file_count_pass_however_they_were_made_to`.
+
+What would close all three is a check that the chunks' byte ranges tile the
+file, each starting where the previous one ends, with no gap and no overlap.
+It is **not implemented**, because whether the Polars writer that wrote the
+lake lays every chunk out that way is **UNMEASURED**: `~/.brutex/lake` is not on
+this machine and `tests/real_lake.rs` is `#[ignore]`d, so such a check could
+refuse real files and nothing here would show it. Whether every real lake
+file's counts agree is UNMEASURED for the same reason.
+
+A file whose counts disagree still opens: the comparison is made in
+`read_row_group`, not at open, so `LakeFile::num_rows` answers the footer's
+claim unqualified and only a group read is refused.
+`reader::tests::a_file_count_that_disagrees_opens_and_refuses_every_group_read`
+pins that for file-level counts of 9, 11, 0, -1, `i64::MAX` and `i64::MIN`
+against groups summing to 10.
+
+The D-0776 section above gives the refusal and not its cost. When a page walk
+stops, stepping over the leftover rowless pages costs one header parse for each
+such page, so it is linear in those pages for that chunk, not constant, and
+bounded by the chunk's bytes. No body is decompressed there.
