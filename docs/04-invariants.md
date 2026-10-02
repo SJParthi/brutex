@@ -5437,6 +5437,12 @@ the guard. The existing emits test pins the warning's message and level.
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
 
+### Rupee text is bounded before it is read — audit 2026-10-02 o1store-2 (D-0918)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| AU-O1STORE-2 — **`Paisa::from_rupee_text_half_up` refuses text longer than `MAX_PRICE_TEXT` (64) bytes, padding included, with `PriceError::TooLong` before reading it, and reads text at the bound.** `"1."` plus 62 zeros (64 bytes) reads as 100 paisa and one more zero is refused; a 64-byte right-aligned `"7"` reads as 700 and one more space is refused; a mebibyte of digits and 65 bytes of `x` are refused for their length; the widest `i64` paisa price `-92233720368547758.07` still reads. Before D-0918 the 65-byte input read as 100 and the reader's cost was its input's length | `core::price::tests::text_longer_than_the_bound_is_refused_before_it_is_read` | ✓ |
+
 ### Filtered per-member append line builds nothing — audit 2026-10-02 o1store-1
 
 | Invariant | Test that proves it | Status |

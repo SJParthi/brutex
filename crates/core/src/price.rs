@@ -19,6 +19,16 @@ use crate::error::PriceError;
 /// it would be a magic constant that a reader has to infer.
 pub const PAISA_PER_RUPEE: i64 = 100;
 
+/// The longest rupee text [`Paisa::from_rupee_text_half_up`] reads, in bytes,
+/// ASCII padding included.
+///
+/// The widest price that fits `i64` paisa, `-92233720368547758.07`, is 21 bytes,
+/// and the shortest round-tripping text of any `f64` (what `pull` renders a JSON
+/// number back to) is at most 24. Sixty-four leaves room for padding and trailing
+/// zeros and still bounds the reader's cost by a constant. Longer text is refused
+/// with [`PriceError::TooLong`], never truncated.
+pub const MAX_PRICE_TEXT: usize = 64;
+
 /// A price, as a count of paisa.
 ///
 /// Ordering is numeric ordering, so a `Paisa` can be compared, sorted and used
@@ -180,8 +190,15 @@ impl Paisa {
     ///
     /// # Errors
     ///
-    /// [`PriceError::NotDecimal`] for text that is not an optionally-signed decimal, and
-    /// [`PriceError::OutOfRange`] when the value does not fit `i64` paisa.
+    /// [`PriceError::TooLong`] for text longer than [`MAX_PRICE_TEXT`] bytes, padding
+    /// included, [`PriceError::NotDecimal`] for text that is not an optionally-signed
+    /// decimal, and [`PriceError::OutOfRange`] when the value does not fit `i64` paisa.
+    ///
+    /// # Cost
+    ///
+    /// At most [`MAX_PRICE_TEXT`] bytes are read, a few passes over them, so the cost
+    /// is bounded by that constant whatever the caller hands in. The length is refused
+    /// before the first byte is looked at.
     ///
     /// # Examples
     ///
@@ -193,6 +210,13 @@ impl Paisa {
     /// ```
     pub fn from_rupee_text_half_up(text: &str) -> Result<Self, PriceError> {
         const _: () = assert!(PAISA_PER_RUPEE == 100);
+
+        // THE LENGTH IS REFUSED FIRST, so every pass below walks a bounded slice.
+        // Without it the reader's cost was whatever its caller handed it: `pull`
+        // passes the `to_string()` of a decoded cell, and nothing upstream bounds that.
+        if text.len() > MAX_PRICE_TEXT {
+            return Err(PriceError::TooLong);
+        }
 
         // ASCII whitespace only. `str::trim` is Unicode-aware and strips U+00A0, so a
         // non-breaking space smuggled into a master-file column would read as padding and
@@ -403,6 +427,56 @@ mod tests {
         );
         assert_eq!(Paisa::from_rupee_text_half_up(".5").map(Paisa::raw), Ok(50));
         assert_eq!(Paisa::from_rupee_text_half_up("7").map(Paisa::raw), Ok(700));
+    }
+
+    /// Text past [`MAX_PRICE_TEXT`] is refused before it is read, and text at it is read.
+    ///
+    /// The reader walks its input several times, so without the bound its cost is the
+    /// caller's input length. The boundary is exact: 64 bytes reads and 65 does not,
+    /// for digits and for padding alike, and a mebibyte of digits is refused with the
+    /// same error rather than walked. The widest `i64` paisa price fits well inside.
+    #[test]
+    fn text_longer_than_the_bound_is_refused_before_it_is_read() {
+        let at = format!("1.{}", "0".repeat(MAX_PRICE_TEXT - 2));
+        assert_eq!(at.len(), MAX_PRICE_TEXT);
+        assert_eq!(Paisa::from_rupee_text_half_up(&at).map(Paisa::raw), Ok(100));
+        let past = format!("{at}0");
+        assert_eq!(
+            Paisa::from_rupee_text_half_up(&past),
+            Err(PriceError::TooLong)
+        );
+
+        let padded = format!("{:>width$}", "7", width = MAX_PRICE_TEXT);
+        assert_eq!(
+            Paisa::from_rupee_text_half_up(&padded).map(Paisa::raw),
+            Ok(700)
+        );
+        assert_eq!(
+            Paisa::from_rupee_text_half_up(&format!(" {padded}")),
+            Err(PriceError::TooLong)
+        );
+
+        let huge = format!("0.{}1", "0".repeat(1 << 20));
+        assert_eq!(
+            Paisa::from_rupee_text_half_up(&huge),
+            Err(PriceError::TooLong)
+        );
+        // Malformed AND long is refused for its length: nothing is read.
+        assert_eq!(
+            Paisa::from_rupee_text_half_up(&"x".repeat(MAX_PRICE_TEXT + 1)),
+            Err(PriceError::TooLong)
+        );
+        assert_eq!(
+            Paisa::from_rupee_text_half_up(""),
+            Err(PriceError::NotDecimal)
+        );
+
+        let widest = "-92233720368547758.07";
+        assert!(widest.len() < MAX_PRICE_TEXT);
+        assert_eq!(
+            Paisa::from_rupee_text_half_up(widest).map(Paisa::raw),
+            Ok(-9_223_372_036_854_775_807)
+        );
     }
 
     /// `i64::MIN` is not a price, because it is the open-interest null sentinel.

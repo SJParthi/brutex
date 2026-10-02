@@ -11176,6 +11176,17 @@ a measured bound**: no bench row times it (`CLAUDE.md` §3 rule 6).
   block is not read by an append and stays where a reader refuses it; the
   append neither verifies nor re-seals that block.
 
+## Rupee text is read at most 64 bytes at a time (D-0918)
+
+- **`Paisa::from_rupee_text_half_up` costs at most a few passes over
+  `MAX_PRICE_TEXT` (64) bytes.** Text longer than that, padding included, is
+  refused with `PriceError::TooLong` before a byte is read. Until D-0918 the
+  cost was the caller's input length, and two `pull` callers pass text nothing
+  upstream bounds. Proved by
+  `core::price::tests::text_longer_than_the_bound_is_refused_before_it_is_read`
+  (64 bytes read, 65 and a mebibyte refused); the cost is stated from the
+  shape of the code, not timed.
+
 ## Forty-one chained searches rule 6 now sees and nobody has classified — D-1115, 2 October 2026
 
 CI gate 11 rule 6 reads method chains as of D-1115. It found 41
