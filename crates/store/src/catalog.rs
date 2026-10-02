@@ -114,6 +114,15 @@ pub struct Census {
     /// first reader to open it blocked forever. Counted here so the census
     /// still reconciles and the operator can see it. D-0911, AC-whp-cx-0.
     pub not_regular: u64,
+    /// The entry is a symlink to a directory, and the walk does not enter it.
+    ///
+    /// The walk once followed every symlinked directory with no visited set,
+    /// so a link back to its own directory (`x/a -> .`) made a sweep-all run
+    /// for as long as the operator waited, with no error. A link to a
+    /// directory is counted here instead and its contents are not listed; a
+    /// link to a regular file is still followed and classified. D-0996,
+    /// probestore-3.
+    pub symlinked_dir: u64,
 }
 
 impl Census {
@@ -132,7 +141,8 @@ impl Census {
             .saturating_add(self.unknown_rung)
             .saturating_add(self.malformed_month)
             .saturating_add(self.wrong_depth)
-            .saturating_add(self.not_regular);
+            .saturating_add(self.not_regular)
+            .saturating_add(self.symlinked_dir);
         parts == self.seen
     }
 }
@@ -193,8 +203,8 @@ pub fn walk(root: &Path) -> Result<Holdings, CatalogError> {
     }
     let mut out = Holdings::default();
     // An explicit stack rather than recursion: the depth is bounded by the
-    // layout, but a store is operator-supplied and a symlink loop is theirs to
-    // make, not this walk's to blow the stack on.
+    // layout, but a store is operator-supplied. A symlink loop cannot grow it:
+    // a link to a directory is counted, never pushed (D-0996).
     let mut stack = vec![bars.clone()];
     while let Some(dir) = stack.pop() {
         let entries = match std::fs::read_dir(&dir) {
@@ -213,9 +223,17 @@ pub fn walk(root: &Path) -> Result<Holdings, CatalogError> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
+            // The entry's own type first, without following a symlink: a link
+            // to a directory is counted and never entered, because entering
+            // one with no visited set let `x/a -> .` loop for ever. D-0996.
+            let linked = entry.file_type().is_ok_and(|kind| kind.is_symlink());
             // `stat`, never `open`: asking the type cannot block on a FIFO the
-            // way opening it does. Symlinks are followed, as `is_dir` did.
+            // way opening it does. A link to a file is followed, as before.
             match std::fs::metadata(&path) {
+                Ok(meta) if meta.is_dir() && linked => {
+                    out.census.seen = out.census.seen.saturating_add(1);
+                    out.census.symlinked_dir = out.census.symlinked_dir.saturating_add(1);
+                }
                 Ok(meta) if meta.is_dir() => stack.push(path),
                 Ok(meta) if meta.is_file() => {
                     out.census.seen = out.census.seen.saturating_add(1);

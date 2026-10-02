@@ -43762,3 +43762,43 @@ be listed and then refused as `Missing` on open. It is now counted as
 **Proof.** `crates/store/tests/fifo.rs` has eight tests, recorded as
 `docs/04-invariants.md` S-WHPCX-01 and S-WHPCX-02. The S-25 bucket count is
 updated from seven to eight.
+
+### D-0996 — The catalog walk counts a symlink to a directory and does not enter it — 2026-10-02
+
+**What was wrong (probestore-3).** `catalog::walk` decided whether to descend
+by following each entry's symlink (`is_dir`, then `metadata` after D-0911) and
+kept no record of the directories it had entered. A link back to its own
+directory was entered again on every visit, so `bars/x/{a,b,c} -> .` made the
+walk re-list the same directory through every path of links: the audit probe
+was still running after 60 s, and `cli sweep-all` waits on this walk with no
+error and no log line. Reproduced on this branch before the fix:
+`a_symlink_loop_finishes_promptly_and_is_counted` failed at its 10 s bound.
+
+**The change.** For each entry the walk first reads the entry's own type with
+`DirEntry::file_type`, which does not follow a symlink, and then `stat`s it as
+D-0911 does. A symlink whose target is a directory is counted in the new
+`Census::symlinked_dir` bucket and never pushed onto the stack, and
+`Census::reconciles` adds that bucket. A plain directory is entered as before,
+and a symlink to a regular file is still followed and classified, so a linked
+month stays a held month. The alternative, a visited set of `(dev, ino)` pairs,
+would keep linked trees listed but adds a hash insert per directory and a
+platform-specific key; nothing in the store writes symlinks, so not entering
+them is the smaller rule. Each entry still costs one `file_type` and one
+`stat`, so the walk stays O(entries) with no per-entry scan.
+
+**Composition.** This branch is built on `fix/cloud-AC-whp-cx-0` (PR #24,
+D-0911), which first moved the walk to `stat` and added `Census::not_regular`.
+The two changes touch adjacent lines, so this one was written on top of that
+branch to merge without conflict; it should land after #24.
+
+**Honest limits.** A store that someone built out of directory symlinks (for
+example a feed directory linked in from another disk) is no longer listed
+below the link; its links are counted in `symlinked_dir` instead, which is
+visible in the census but not refused. On platforms where `file_type` must
+fall back to `lstat`, that is one more syscall per entry, still constant.
+Only Linux x86_64 has run the test, and it is `#[cfg(unix)]`.
+
+**Proof.** `store::catalog::a_symlink_loop_finishes_promptly_and_is_counted`,
+recorded as `docs/04-invariants.md` S-PROBESTORE3-01. The S-25 bucket count is
+updated from eight to nine, and the every-refusal fixture now asserts
+`symlinked_dir == 0`.

@@ -174,6 +174,7 @@ fn the_census_reconciles_over_a_store_holding_every_refusal() {
     );
     assert_eq!(c.wrong_depth, 1, "one path too shallow");
     assert_eq!(c.not_regular, 0, "every entry here is a regular file");
+    assert_eq!(c.symlinked_dir, 0, "no entry here is a link");
     assert!(c.reconciles(), "the parts must sum to the whole: {c:?}");
     assert_eq!(out.held.len(), 2, "only the spot months are rows");
 }
@@ -296,4 +297,49 @@ fn the_walk_descends_rather_than_guessing_the_depth() {
         "the deeper one reads as a contract level"
     );
     assert!(out.census.reconciles());
+}
+
+/// **A symlink loop cannot make the walk run forever.** probestore-3, D-0996.
+///
+/// The walk once followed every symlinked directory with no visited set, so
+/// `x/{a,b,c} -> .` made it re-enter the same directory through every
+/// permutation of the three links: measured still running after 60 s. A link
+/// to a directory is now counted in `Census::symlinked_dir` and never entered,
+/// while a link to a regular file is still followed and classified as it was.
+/// The walk runs on its own thread against a 10 s bound, so the old behaviour
+/// fails here instead of hanging the suite.
+#[cfg(unix)]
+#[test]
+fn a_symlink_loop_finishes_promptly_and_is_counted() {
+    use std::os::unix::fs::symlink;
+    let root = scratch("symloop");
+    put(&root, "groww/NSE/INDEX/NIFTY/1min/2026-08.bin");
+    let rung = root.join("bars/groww/NSE/INDEX/NIFTY/1min");
+    // A link to a real month is a file, and stays a month.
+    symlink(rung.join("2026-08.bin"), rung.join("2026-09.bin")).expect("file link");
+    // The probe's shape: three self-links in one directory ...
+    let x = root.join("bars/x");
+    std::fs::create_dir_all(&x).expect("x");
+    for name in ["a", "b", "c"] {
+        symlink(".", x.join(name)).expect("self link");
+    }
+    // ... and a link from deep in the tree back up to `bars` itself.
+    symlink(root.join("bars"), rung.join("up")).expect("ancestor link");
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let walked = root.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(catalog::walk(&walked));
+    });
+    let out = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the walk finishes within 10 s")
+        .expect("the walk runs");
+    let months: Vec<String> = out.held.iter().map(|h| h.month.to_string()).collect();
+    assert_eq!(months, vec!["2026-08".to_owned(), "2026-09".to_owned()]);
+    assert_eq!(out.census.spot, 2, "the month and the link to it");
+    assert_eq!(out.census.symlinked_dir, 4, "a, b, c and up, none entered");
+    assert_eq!(out.census.not_regular, 0);
+    assert_eq!(out.census.seen, 6);
+    assert!(out.census.reconciles(), "{:?}", out.census);
 }
