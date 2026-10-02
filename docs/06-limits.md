@@ -10411,3 +10411,35 @@ and a removed path, and
 `/trades.json` answers 400 naming the replacement once, then 200 for the
 repaired run. A row rewritten IN PLACE behind `scanned` keeps the same file and
 is still not seen by a held handle until it is reopened.
+## Audited span joins, and two per-call rescans that stay — D-0923, 30 September 2026
+
+* **An audited span's months are joined once, in `finish`.**
+  `audited_range::Builder::append` holds each later non-empty month apart and
+  copies no bar; `finish` makes one exact reservation and copies each held bar
+  once; the reservation may relocate the first month's bars, once. A bar is
+  therefore copied at most once after it is appended, where before each later
+  month's reservation could relocate it again. Each
+  append pushes one vector header onto the held months, which is amortised
+  O(1), not worst-case O(1). While the span is joined, the held months and the
+  joined span are both alive, so the transient peak is about twice the span's
+  bars. The join reserves exactly the held months' bars on top of the first
+  month's buffer.
+  `appending_a_month_never_relocates_the_bars_already_held` pins that no append
+  relocates the held bars and, for a first month decoded without spare
+  capacity, that the finished capacity equals the length.
+  The peak memory is read from the source, not measured. (W2-cli1-1.)
+* **Each Anchored Search V4 lineage persist rescans the whole ledger.**
+  `append_completion` ends with `self.scan()`, and `scan` reads and validates
+  every completed pair (`for sequence in 0..completion_records`); `open`, which
+  both `open_write` and `open_read` call, hashes each ledger file through
+  `file_generation` and scans too. One persist therefore costs
+  O(file bytes + pair records), as the module rustdoc says, and N persists to
+  one root cost Theta(N^2) in the records already written, bounded by the
+  ledger's explicit `pair_records` bound. Not timed. (W2-cli1-0.)
+* **Each Boolean search batch prepares its sources twice over.**
+  `boolean_search_command::execute_observed` calls `request.prepare` for the
+  training and later windows when it declares a new batch, and again in the
+  work phase before it compares the plan; the invocation start makes one more
+  pair. Each call reaches `boolean_campaign::prepare`, which builds
+  `prepared::Prepared::new` over the sources, so a batch costs a multiple of
+  its source bytes rather than O(1) in them. Not timed. (W2-cli2-7.)
