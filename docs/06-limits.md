@@ -12972,8 +12972,10 @@ yet -- another session had them staged -- so an entry naming them would have
 been a STALE ALLOWLIST ENTRY, which this gate treats as a failure rather than a
 note, correctly, because such an entry makes the gate read stronger than it is.
 It closed: "when those files land, rule 4 will refuse them and their owner adds
-the entries." They landed in 6a58d7c and 6a58d7c's successors, both are tracked
-and clean, and rule 4 refuses them. So the entries go in -- but re-derived from
+the entries." They landed in 6a58d7c and 6a58d7c's successors (6a58d7c is in
+neither `main`'s history nor this section's branch, because `main` took that
+work as a squash; a note added when this text moved here, D-1451), both are
+tracked and clean, and rule 4 refuses them. So the entries go in -- but re-derived from
 the code rather than trusted from that prediction, because a forecast is not a
 trace:
 

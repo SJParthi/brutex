@@ -126,7 +126,8 @@ impl Off {
 }
 
 /// Every commit the texts cite that `main` does not hold, and why.
-const NOT_ON_MAIN: [(&str, Off); 26] = [
+const NOT_ON_MAIN: [(&str, Off); 27] = [
+    ("6a58d7c", Off::Neither),
     ("79b9a1d5", Off::Neither),
     ("224b6760", Off::Neither),
     ("28c362c1", Off::Neither),

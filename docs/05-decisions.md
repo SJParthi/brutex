@@ -53384,7 +53384,12 @@ reasons and history for every `allow_*` count (rules 2, 3, 4, 5, 5d, 6-and-7
 and 7, about 110 KB), move verbatim to `docs/06-limits.md` under
 "Gate 11 allowlist reasons". Each block's rule header stays in `ci.yml`
 with a pointer to its section. Nothing the gate executes changed, and no
-count, path or allowlist line moved. The file drops to 460,322 bytes.
+count, path or allowlist line moved. The file drops to 460,322 bytes. One
+moved sentence cites 6a58d7c, which `main` holds only as a squash; in
+`ci.yml` the store's citation check never read it, in `docs/06-limits.md` it
+does, so `crates/store/tests/cited_commits.rs` lists it as `Off::Neither` and
+the sentence gains the words that reason requires. That is the one edit to
+the moved text.
 
 **The rule that follows.** A new or changed Gate 11 count gets its reason in
 that `docs/06-limits.md` section in the same change, not as a comment
