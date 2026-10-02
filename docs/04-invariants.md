@@ -5359,3 +5359,9 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### A non-UTF-8 store path component is counted — audit 2026-10-02 probestore-5
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| AU-PROBESTORE-5 — **`catalog::walk` counts a file whose path below `bars/` has any non-UTF-8 component in the new `Census::not_utf8` bucket, before measuring depth, and never lists it.** A non-UTF-8 contract level (`FNO/NIFTY/<0xFF>CE/1min/2024-01.bin`), symbol, rung, file stem and vendor are each counted `not_utf8` and in no other bucket; the real `2024-02` NIFTY month beside them is the one row; `reconciles` includes the bucket; a rerun counts the same. Before the fix the components were dropped, the contract file measured at spot depth and was listed as the NIFTY index | `a_non_utf8_component_is_counted_and_never_shortens_the_path` in `crates/store/tests/catalog.rs` | ✓ |

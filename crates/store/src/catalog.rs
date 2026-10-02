@@ -106,6 +106,12 @@ pub struct Census {
     pub malformed_month: u64,
     /// The path had neither the spot depth nor the contract depth.
     pub wrong_depth: u64,
+    /// A component of the path below `bars/` was not valid UTF-8.
+    ///
+    /// Counted before the depth is measured. Dropping such a component instead
+    /// shortened the path: an options file under a contract directory with a
+    /// non-UTF-8 name measured at the spot depth and was listed as the index.
+    pub not_utf8: u64,
 }
 
 impl Census {
@@ -123,7 +129,8 @@ impl Census {
             .saturating_add(self.unknown_vendor)
             .saturating_add(self.unknown_rung)
             .saturating_add(self.malformed_month)
-            .saturating_add(self.wrong_depth);
+            .saturating_add(self.wrong_depth)
+            .saturating_add(self.not_utf8);
         parts == self.seen
     }
 }
@@ -229,10 +236,18 @@ fn classify(bars: &Path, path: &Path, out: &mut Holdings) {
         out.census.wrong_depth = out.census.wrong_depth.saturating_add(1);
         return;
     };
-    let parts: Vec<&str> = rel
+    // EVERY component, or the file is counted and not classified. A
+    // `filter_map` here dropped a non-UTF-8 component and so changed the depth
+    // the next lines measure: `FNO/NIFTY/<0xFF>CE/1min/2024-01.bin` lost its
+    // contract level and was listed as the NIFTY index.
+    let Some(parts) = rel
         .components()
-        .filter_map(|c| c.as_os_str().to_str())
-        .collect();
+        .map(|c| c.as_os_str().to_str())
+        .collect::<Option<Vec<&str>>>()
+    else {
+        out.census.not_utf8 = out.census.not_utf8.saturating_add(1);
+        return;
+    };
     // Relative to `bars/`, a spot file is
     // `<vendor>/<exchange>/<segment>/<symbol>/<rung>/<month>.bars` -- SIX
     // components. The first draft added one for `bars` itself, which is already

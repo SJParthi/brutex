@@ -177,6 +177,95 @@ fn the_census_reconciles_over_a_store_holding_every_refusal() {
     assert_eq!(out.held.len(), 2, "only the spot months are rows");
 }
 
+/// A NON-UTF-8 PATH COMPONENT IS COUNTED, NEVER DROPPED. Audit probestore-5.
+///
+/// The walk used to `filter_map` the components through `to_str`, so a
+/// component that was not UTF-8 vanished and the path measured one level
+/// shorter. An options file under `FNO/NIFTY/<0xFF>CE/` then had the spot
+/// depth and was listed as the NIFTY index. Now a non-UTF-8 contract level, a
+/// non-UTF-8 symbol, rung or exchange at spot depth, a non-UTF-8 stem and a
+/// non-UTF-8 vendor are each counted `not_utf8` and nothing else; the real
+/// month beside them is still the one row; the census reconciles; a rerun
+/// counts the same.
+#[cfg(unix)]
+#[test]
+fn a_non_utf8_component_is_counted_and_never_shortens_the_path() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let root = scratch("not-utf8");
+    let bad = OsStr::from_bytes(b"\xFFCE");
+    let paths = [
+        ["groww", "NSE", "FNO", "NIFTY"]
+            .iter()
+            .map(OsStr::new)
+            .chain([bad])
+            .chain(["1min", "2024-01.bin"].iter().map(OsStr::new))
+            .collect::<std::path::PathBuf>(),
+        ["groww", "NSE", "INDEX"]
+            .iter()
+            .map(OsStr::new)
+            .chain([bad])
+            .chain(["1min", "2024-01.bin"].iter().map(OsStr::new))
+            .collect(),
+        ["groww", "NSE", "INDEX", "NIFTY"]
+            .iter()
+            .map(OsStr::new)
+            .chain([bad])
+            .chain(["2024-01.bin"].iter().map(OsStr::new))
+            .collect(),
+        ["groww", "NSE", "INDEX", "NIFTY", "1min"]
+            .iter()
+            .map(OsStr::new)
+            .chain([OsStr::from_bytes(b"2024-01\xFF.bin")])
+            .collect(),
+        [bad]
+            .into_iter()
+            .chain(
+                ["NSE", "INDEX", "NIFTY", "1min", "2024-01.bin"]
+                    .iter()
+                    .map(OsStr::new),
+            )
+            .collect(),
+    ];
+    for rel in &paths {
+        let full = root.join("bars").join(rel);
+        std::fs::create_dir_all(full.parent().expect("a parent")).expect("parents are creatable");
+        std::fs::write(&full, b"").expect("file is writable");
+    }
+    put(&root, "groww/NSE/INDEX/NIFTY/1min/2024-02.bin");
+    let found = catalog::walk(&root).expect("the walk runs");
+    let c = found.census;
+    assert_eq!(c.seen, paths.len() as u64 + 1);
+    assert_eq!(c.not_utf8, paths.len() as u64, "{c:?}");
+    assert_eq!(c.spot, 1, "only the real month is spot: {c:?}");
+    assert_eq!(
+        c.with_contract + c.wrong_depth + c.malformed_month + c.unknown_vendor,
+        0
+    );
+    assert!(c.reconciles(), "{c:?}");
+    assert_eq!(found.held.len(), 1);
+    assert_eq!(found.held[0].symbol, "NIFTY");
+    assert_eq!(found.held[0].month.to_string(), "2024-02");
+    let repeated = catalog::walk(&root).expect("repeat walk");
+    assert_eq!(repeated.census, c);
+    assert_eq!(repeated.held, found.held);
+    assert!(
+        !Census {
+            seen: 1,
+            ..Census::default()
+        }
+        .reconciles()
+    );
+    assert!(
+        Census {
+            seen: 1,
+            not_utf8: 1,
+            ..Census::default()
+        }
+        .reconciles()
+    );
+}
+
 /// A census that has lost a file is caught.
 #[test]
 fn a_census_that_does_not_add_up_is_refused() {
