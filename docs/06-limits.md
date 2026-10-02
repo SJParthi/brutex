@@ -11181,6 +11181,90 @@ a measured bound**: no bench row times it (`CLAUDE.md` §3 rule 6).
   block is not read by an append and stays where a reader refuses it; the
   append neither verifies nor re-seals that block.
 
+## Pull ingest, fold and cache costs that grow with the month or the census — D-0955, 2 October 2026
+
+An audit (cluster B8) found seven paths in `crates/pull` whose cost grows with
+what a month or a vendor's census already holds and which this register did not
+name, plus five defects that were not costs. The five defects were changed
+(see D-0955). The costs are written here, each with the function that pays it.
+Three tests in `crates/pull/tests/derive.rs`
+(`d_0955_derivation_rereads_the_whole_month_and_the_register_says_so`,
+`d_0955_each_census_write_reads_the_whole_census_and_the_register_says_so`,
+`d_0955_cash_days_and_masters_are_read_per_request_and_the_register_says_so`)
+read every bullet below and check that the code still has the shape the
+bullet describes, so a bullet goes stale only with a failing build. Notation:
+`n_m` is the committed one-minute rows of one instrument-month, `h_r` the
+stored rows of derived rung `r` in that month, `E_v` one vendor's census
+entries, `D` the days a cash body's months touch, `B` one security master's
+bytes. **No latency below is measured** (`CLAUDE.md` §3 rule 6); every bound is
+read from the source.
+
+### Documented, not changed
+
+* **ET-bars-candles-store-1 — `derive_all`, once per member-month per ingest.**
+  Derivation is not incremental. `derive_all` reads every committed one-minute
+  record of the month (`(0..file.header().n_valid)`, one positional read per
+  record and one block check per 73), then `derive` folds that whole month once
+  for each of the 7 derived rungs through `complete_minutes_with_calendar`, and
+  `reconcile_derived` reads every stored record of each rung. Per ingest:
+  O(n_m + Σ h_r) reads, 7 × O(n_m) fold work and O(n_m) memory. It does not
+  grow with history or with the store: the month partition caps it (a month of
+  regular index sessions is about 23 × 375 = 8,625 minute rows). **What it
+  costs over a month:** a month filled one session at a time reads
+  375 × (1 + 2 + … + s) minute rows over `s` sessions, quadratic in `s`
+  (about 103,500 minute reads for 23 sessions, against 8,625 for one pass).
+  Kept because `reconcile_derived` re-proves every stored derived bar against
+  complete source on every batch, which is the only check that finds a derived
+  conflict, and because a rerun is how derivation is retried once missing
+  schedule evidence is restored. An incremental fold needs a per-rung resume
+  point the store does not record.
+* **ET-bars-candles-store-8 — the same path, named against §3 rule 4.** Result
+  append stays amortised O(1); the read and the fold above are the part that is
+  O(month rows), and the code comment in `derive_all` that says so ("This is
+  O(month rows) once per batch") is now in this register.
+* **W1-pull2-3 — `derive_all` on a rerun.** `one` calls `derive_all` whether or
+  not `write_and_count` wrote anything, so a window the store already holds
+  (`AlreadyPresent`) pays the full O(n_m + Σ h_r) reads and 7 × O(n_m) folds of
+  the bullet above. Kept for the retry reason above.
+* **W1-pull2-0 — `from_members_inner`, once per broker window.** Each call takes
+  the census lock and calls `read_census`, which is one `fs::read(path)` of the
+  whole manifest and a decode and CRC-32C check of every committed entry:
+  O(manifest bytes + E_v) per call, up to `MAX_ENTRIES` (2,097,152 entries,
+  268,468,224 bytes). `from_window` hands `from_members` one member, so the
+  read is paid per window. This is the read half D-0953 (W1-api5-1) left to
+  this crate. **It is left here too, and on purpose:** a decoded census kept
+  across calls would stop re-verifying every committed entry on each read, and
+  a census that rotted under a long-running process would then be appended to
+  as if it were sound, which is the D-0036 class. The write half is incremental
+  (`append_locked`).
+* **W1-pull2-6 — `record_all`, through `record_held`, once per rolling answer.**
+  The same `read_census` per call, O(manifest bytes + E_v), plus O(offered) to
+  fold the rows in. Its own doc says "Per call: Θ(entries) for the read"; it is
+  now in this register. Kept for the reason above.
+* **W1-pull2-5 — `committed_cash_days`, once per minute equity request.**
+  `api::server::prepare_cash_schedule` calls it for every month the request
+  touches, and it reads every committed record of each month
+  (`for index in 0..file.header().n_valid`) to collect the days that need dated
+  eligibility: O(n_m) reads per month plus O(days log days) for the set. The
+  D-0519 section says full-month source reads are kept off the per-bar path;
+  this one is per request, which is not per bar, and is now named.
+* **W1-pull1-0 — `prepare_observed_with`, once per landed cash body.** For each
+  eligibility day in the body's months it takes the day's lock, `read_entry`
+  reads the receipted master (at most `MAX_COMPRESSED`, 4 MiB) and checks its
+  SHA-256 receipt, and `decode` gunzips it (at most `MAX_EXPANDED`, 32 MiB) and
+  parses it (at most `cash_auction::MAX_ROWS`, 250,000 rows): O(D × B) per body,
+  including days the in-memory map already holds. Kept because the D-0519
+  section's revalidation is what proves a cached day still has receipted
+  evidence on disk; doing it once per instrument rather than once per body is
+  a change in `api`, not here.
+
+### Corrections to earlier sections
+
+* §17 says of the census load "It is paid once per process." On the write path
+  it is not: `read_census` is paid once per `from_members` call and once per
+  `record_held` call (W1-pull2-0, W1-pull2-6 above). The api's read path pays
+  it once per manifest change (D-0686).
+
 ## API request and pull costs that still grow with the store — D-0953, 2 October 2026
 
 An audit (cluster B6) found eleven paths in `crates/api` whose cost grows with

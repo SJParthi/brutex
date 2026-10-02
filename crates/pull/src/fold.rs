@@ -330,7 +330,17 @@ pub fn fold(snapshots: &[Bar], bucket: Bucket) -> Result<Vec<Bar>, FoldError> {
             // sharing a second have no tiebreaker, so file order is the only
             // order there is and sorting would invent one.
             bar.close = snap.close;
-            bar.volume = bar.volume.saturating_add(snap.volume);
+            // CHECKED, for the reason the stamp above is: a saturated sum is a
+            // bar whose volume is i64::MAX however much more traded, filed as if
+            // it were measured. Refused instead (ET-bars-candles-store-4,
+            // D-0955).
+            bar.volume = bar
+                .volume
+                .checked_add(snap.volume)
+                .ok_or(FoldError::VolumeOverflow {
+                    at: i,
+                    bucket: start,
+                })?;
             if snap.open_interest != i64::MIN {
                 bar.open_interest = snap.open_interest;
             }
@@ -401,6 +411,18 @@ pub enum FoldError {
         /// The snapshot's own stamp, before the shift.
         ts_micros: i64,
     },
+    /// A bucket's summed volume leaves the range an `i64` can hold.
+    ///
+    /// Refused rather than saturated, for the reason [`Self::AnchorOverflow`]
+    /// is: a capped sum is a wrong volume filed as a measured one. Unreachable
+    /// from any real exchange print and stated anyway (ET-bars-candles-store-4,
+    /// D-0955).
+    VolumeOverflow {
+        /// Zero-based position of the snapshot whose volume overflowed.
+        at: usize,
+        /// The start of the bucket it was being added to.
+        bucket: i64,
+    },
     /// A snapshot's timestamp precedes the one before it.
     ///
     /// Refused rather than sorted. Rows sharing a second carry no tiebreaker,
@@ -443,6 +465,12 @@ impl core::fmt::Display for FoldError {
                  Refused rather than saturated: a saturated instant lands in a \
                  bucket that is not its own, which files the bar under the \
                  wrong month."
+            ),
+            Self::VolumeOverflow { at, bucket } => write!(
+                f,
+                "snapshot {at} takes the volume of the bucket at {bucket} past \
+                 what an i64 can hold. Refused rather than saturated: a capped \
+                 sum is a wrong volume filed as a measured one."
             ),
             Self::OutOfOrder {
                 at,
@@ -831,11 +859,8 @@ pub fn complete_minutes_with_calendar(
             let expected = (i128::from(close) - i128::from(missing)) / i128::from(MINUTE);
             diagnostics.push(format!("bucket range [{missing}, {close}): absent: observed 0, scheduled {expected}; observed-day tail withheld; historical gap refill requires a versioned store repair"));
         }
-        if calendar == crate::calendar::DayKind::Unmeasured && previous_day != Some(day) {
-            diagnostics.push(format!(
-                "day {day}: UNVERIFIED: {}; derived buckets withheld",
-                runtime.unverified_reason(day)
-            ));
+        if previous_day != Some(day) {
+            diagnostics.extend(day_note(day, calendar, session, runtime));
         }
         // Entirely absent buckets never become fold candidates. Name those
         // between observed buckets too; do not treat session breaks as gaps.
@@ -889,11 +914,53 @@ pub fn complete_minutes_with_calendar(
             diagnostics.push(format!("bucket {start}: exceptional session {session:?} withheld; fixed stored grid cannot attest session alignment; versioned store architecture required"));
         } else if valid && expected > 0 && i128::from(count) == expected {
             complete.push(bar);
-        } else {
+        } else if !day_is_withheld(session) {
             diagnostics.push(format!("bucket {start}: incomplete or invalid minute coverage: observed {count}, scheduled {expected}, calendar {session:?}; withheld; historical gap refill requires a versioned store repair"));
         }
     }
     Ok((complete, diagnostics))
+}
+
+/// The one sentence a day gets before its buckets, if it gets one.
+///
+/// A day outside the measured calendar says so, as it always did. The two new
+/// arms are ONCE PER DAY, AND NOT A COVERAGE FAULT (GAP12-12, D-0955). An
+/// `OpenLengthUnmeasured` day traded for a length the calendar does not state,
+/// so no minute count could ever complete a bucket; each bucket used to be
+/// reported as incomplete coverage, which `ingest::derive` rewrote into
+/// "restore complete minute source", a repair that does not exist, once per
+/// bucket. Bars on a measured `Closed` day are a defect in what was stored, not
+/// a hole in it. Neither sentence ends in the suffix `derive` rewrites.
+fn day_note(
+    day: i64,
+    calendar: crate::calendar::DayKind,
+    session: crate::calendar::DayKind,
+    runtime: crate::calendar::Runtime<'_>,
+) -> Option<String> {
+    use crate::calendar::DayKind;
+    if calendar == DayKind::Unmeasured {
+        return Some(format!(
+            "day {day}: UNVERIFIED: {}; derived buckets withheld",
+            runtime.unverified_reason(day)
+        ));
+    }
+    match session {
+        DayKind::OpenLengthUnmeasured => Some(format!(
+            "day {day}: session length unmeasured (a traded non-regular session whose minute length the calendar does not state); derived buckets withheld; nothing to repair in the minute source"
+        )),
+        DayKind::Closed => Some(format!(
+            "day {day}: minute bars on a day the calendar measures as closed; store defect; derived buckets withheld"
+        )),
+        DayKind::Open(_) | DayKind::Unmeasured => None,
+    }
+}
+
+/// Whether [`day_note`] already named every bucket of this day.
+const fn day_is_withheld(session: crate::calendar::DayKind) -> bool {
+    matches!(
+        session,
+        crate::calendar::DayKind::OpenLengthUnmeasured | crate::calendar::DayKind::Closed
+    )
 }
 
 fn session_minutes(session: crate::calendar::DayKind) -> i64 {

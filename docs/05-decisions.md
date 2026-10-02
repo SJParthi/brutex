@@ -48538,6 +48538,71 @@ refuses it.
 Invariants AF-42 (updated) and AF-W3S13-a through AF-W3S13-e;
 `docs/06-limits.md` has the cost and the widened false refusal.
 
+### D-0955 — Pull ingest, fold and census lock: refuse what was capped, hung or mislabelled; name the costs that grow — 2026-10-02
+
+**The defects (audit cluster B8).** Five were behaviour, and each is changed.
+
+* **ET-bars-candles-store-4.** `pull::fold::fold` summed a bucket's volume with
+  `saturating_add`, so a sum past `i64::MAX` was filed as `i64::MAX`. The same
+  function refuses a timestamp it cannot shift, on the stated ground that
+  saturating files a wrong bar (`CLAUDE.md` §4). The sum is now `checked_add`
+  and an overflow is the new `FoldError::VolumeOverflow { at, bucket }`.
+  `FoldError` is `#[non_exhaustive]`, so no caller's match breaks.
+* **GAP12-12.** `complete_minutes_with_calendar` had no arm for a day the
+  calendar answers `OpenLengthUnmeasured` (the pre-2025 Muhurat sessions) or
+  `Closed`. Every bucket of such a day was reported as "incomplete or invalid
+  minute coverage", which `ingest::derive` rewrote into "restore complete minute
+  source ... before retrying derivation": a repair that does not exist, once per
+  bucket. Each is now one sentence per day: an unmeasured length says "nothing
+  to repair in the minute source", and bars on a measured closed day say "store
+  defect". Neither ends in the suffix `derive` rewrites.
+* **R9-csr-cx-0.** `CensusLock::take` opened `<vendor>.man.lock` write-only.
+  A write-only open of a FIFO blocks in open(2) until a reader appears, so a
+  FIFO at that name hung the ingest, which neither refused nor ran. The open is
+  now read-write, as every other lock opener in the store and the pull crate
+  is, and a lock path that is not a regular file is refused by name.
+* **R9-csr-cx-1.** The `try_lock` refusal was one `Err(_)` arm saying "another
+  ingest holds the census lock ... wait for the other run". A host that refuses
+  `flock` itself (`ENOLCK`, `ENOTSUP`) implies no other run. `lock_refusal` now
+  says that only for `TryLockError::WouldBlock` and gives the host's own words
+  for `TryLockError::Error`.
+* **GAP2-41.** `ingest::identify` parsed any exchange the core enum knows, so a
+  plan naming BSE wrote BSE bars and a census row, against `CLAUDE.md` §1 and
+  D-0017. `identify` is reached only from the write path and from
+  `committed_cash_days`, which names NSE; it now refuses every exchange but
+  NSE, naming the venue and D-0017. BSE files already on disk are not touched
+  and are still read: no reader goes through `identify`.
+
+**The costs (documented, not changed).** ET-bars-candles-store-1 and -8 and
+W1-pull2-3 (derivation re-reads and re-folds the whole month per ingest, and on
+a rerun), W1-pull2-0 and W1-pull2-6 (`read_census` per broker window and per
+rolling answer), W1-pull2-5 (`committed_cash_days` per request) and W1-pull1-0
+(`prepare_observed_with` per cash body) are each written in the D-0955 section
+of `docs/06-limits.md` with the function and the bound, and three
+`pull::derive::d_0955_*` tests hold each bullet to the source. That section also corrects §17's "paid once
+per process" for the write path.
+
+**Why the census read is not cached.** D-0953 (W1-api5-1) left the per-window
+read to this crate. A decoded census kept across calls would stop re-verifying
+every committed entry's checksum on each read, so a census that rotted under a
+long-running process would be appended to as if it were sound, which is the
+D-0036 class. That trade is not made here; it stays named.
+
+**Why derivation is not made incremental.** `reconcile_derived` re-proves every
+stored derived bar against complete source on every batch, and a rerun is how
+derivation is retried once missing schedule evidence is restored. A suffix-only
+fold would drop the first and needs a per-rung resume point the store does not
+record. The month partition bounds the cost; the quadratic fill is stated.
+
+**Rejected.** (1) Saturating with a warning: the bar would still be filed
+wrong. (2) Skipping `derive_all` when the minute write was `AlreadyPresent`:
+that is the retry path. (3) Making `Plan::exchange` an NSE-only type: a wider
+API change for the same refusal, and the archive and broker paths both already
+pass through `identify`. (4) A FIFO test through a libc binding: `CLAUDE.md` §2;
+the test runs `/usr/bin/mkfifo`, as `cli`'s checksum-receipt test runs `mkfifo`.
+
+Invariants PIF-01 through PIF-07; `docs/06-limits.md` has the costs.
+
 ### D-0953 — API request costs named per route; one index observation per instrument; a page orders only itself; `/store` fresh in every view; the serve lock names one holder — 2026-10-02
 
 **What happened.** An audit (cluster B6: W1-api5-0 to W1-api5-11, UC-20,

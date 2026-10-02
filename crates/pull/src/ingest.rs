@@ -2074,6 +2074,18 @@ fn identify(instrument: &str, exchange: &str, segment: &str) -> Result<Identity,
         .map_err(|why| format!("{instrument}: {why}"))?;
     let exchange = Exchange::parse(exchange)
         .map_err(|why| format!("{instrument}: exchange {exchange:?}: {why}"))?;
+    // NSE ONLY ON THE WRITE PATH (GAP2-41, D-0955). `CLAUDE.md` §1: BSE is
+    // not swept and not pulled (D-0017). Every caller of this function is about
+    // to write bars or read the NSE cash rung, so a plan naming BSE stores
+    // nothing. BSE files already on disk are untouched: reading them does not
+    // come through here.
+    if exchange != Exchange::Nse {
+        return Err(format!(
+            "{instrument}: exchange {}: not pulled; D-0017 narrows ingest to \
+             NSE, so nothing is written for this member",
+            exchange.as_str()
+        ));
+    }
     let segment = Segment::parse(segment)
         .map_err(|why| format!("{instrument}: segment {segment:?}: {why}"))?;
     // The symbol id is a CROSS-CHECK the store stamps into the header and
@@ -3024,9 +3036,14 @@ impl CensusLock {
         // is no third option, and a silent un-locked run is the fallback that
         // hides a failure — the loser's receipt still reads "every row
         // accounted for", because its own books balanced.
+        // READ AND WRITE, never write alone (R9-csr-cx-0, D-0955). A write-only
+        // open of a FIFO blocks in open(2) until a reader appears, so a FIFO
+        // misfiled at this name hung the ingest: it neither refused nor ran.
+        // Read-write does not wait on a FIFO, and the type is refused below.
         let lock = match fs::OpenOptions::new()
             .create(true)
             .truncate(false)
+            .read(true)
             .write(true)
             .open(&lock_path)
         {
@@ -3088,17 +3105,59 @@ impl CensusLock {
             // Every other cause is the path's, and the install reports it.
             Err(_) => return Ok(Self { _held: None }),
         };
-        match Flock::try_lock(lock, lock_path.clone()) {
-            Ok(held) => Ok(Self { _held: Some(held) }),
-            Err(_) => Err(format!(
-                "another ingest holds the census lock at {}. Refused rather \
-                 than queued: two runs installing at once silently discard one, and \
-                 the loser's receipt still reads 'every row accounted for' \
-                 because its own books balanced. Wait for the other run and try \
-                 again.",
-                lock_path.display()
-            )),
+        // A LOCK THAT IS NOT A REGULAR FILE IS REFUSED BY NAME. A FIFO, a
+        // socket or a device at this name is a misfiled path, the same class
+        // as the directory refused above, and nothing downstream reports it.
+        match lock.metadata() {
+            Ok(found) if found.is_file() => {}
+            Ok(found) => {
+                return Err(format!(
+                    "the census lock at {} is not a regular file ({:?}). \
+                     Refused rather than run without it: the census beside it \
+                     is still writable. Remove what occupies that name and try \
+                     again.",
+                    lock_path.display(),
+                    found.file_type()
+                ));
+            }
+            Err(why) => {
+                return Err(format!(
+                    "the census lock at {} opened but cannot be measured: {why}. \
+                     Refused rather than run without it.",
+                    lock_path.display()
+                ));
+            }
         }
+        Flock::try_lock(lock, lock_path.clone())
+            .map(|held| Self { _held: Some(held) })
+            .map_err(|refusal| lock_refusal(&lock_path, refusal))
+    }
+}
+
+/// The sentence for a census lock that could not be taken.
+///
+/// Only [`TryLockError::WouldBlock`] means another run holds it. Every other
+/// refusal is the host declining `flock` itself (`ENOLCK` on an NFS mount
+/// without a lock daemon, `ENOTSUP` for a lock file the host cannot lock), and
+/// waiting for "the other run" never helps when there is none. Both arms used
+/// to say there was one (R9-csr-cx-1, D-0955).
+fn lock_refusal(lock_path: &Path, refusal: std::fs::TryLockError) -> String {
+    match refusal {
+        std::fs::TryLockError::WouldBlock => format!(
+            "another ingest holds the census lock at {}. Refused rather \
+             than queued: two runs installing at once silently discard one, and \
+             the loser's receipt still reads 'every row accounted for' \
+             because its own books balanced. Wait for the other run and try \
+             again.",
+            lock_path.display()
+        ),
+        std::fs::TryLockError::Error(host) => format!(
+            "the host refused to lock the census lock at {}: {host}. No other \
+             run is implied, so waiting will not help; refused rather than run \
+             without the lock. Put the store on a filesystem that supports \
+             advisory locks.",
+            lock_path.display()
+        ),
     }
 }
 
@@ -3275,7 +3334,7 @@ mod tests {
 
     use super::{
         CensusLock, EntryKey, MAX_CENSUS_BYTES, beyond_ceiling, closes_in_hand, install_locked,
-        write_and_count,
+        lock_refusal, write_and_count,
     };
 
     /// A scratch directory of this test's own, named after the line that asked
@@ -3505,6 +3564,80 @@ mod tests {
         drop(second);
         drop(child);
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// **A FIFO AT THE LOCK'S NAME IS REFUSED, NOT WAITED ON.** R9-csr-cx-0,
+    /// D-0955.
+    ///
+    /// The lock was opened write-only, and a write-only open of a FIFO blocks
+    /// in open(2) until some process opens it for reading. The ingest neither
+    /// refused nor ran. `take` runs on a thread here so a regression is a
+    /// failed assertion after five seconds rather than a hung suite; the FIFO
+    /// is then opened for reading, which is what releases a blocked writer.
+    ///
+    /// `mkfifo` is the external program, run from a test only: `CLAUDE.md` §2
+    /// forbids a binding, and `std` has no FIFO constructor.
+    #[test]
+    fn a_fifo_at_the_lock_path_is_refused_rather_than_waited_on() {
+        let root = scratch("LOCK-FIFO");
+        let census = root.join("manifest").join("dhan.man");
+        let lock_path = census.with_extension("man.lock");
+        let made = std::process::Command::new("/usr/bin/mkfifo")
+            .arg(&lock_path)
+            .status()
+            .expect("the FIFO this test is about can be made");
+        assert!(made.success(), "the premise: a FIFO at the lock's name");
+
+        let (tell, heard) = std::sync::mpsc::channel();
+        let asked = census.clone();
+        std::thread::spawn(move || {
+            let answer = CensusLock::take(&asked).map(drop);
+            let _gone = tell.send(answer);
+        });
+        let answer = heard.recv_timeout(std::time::Duration::from_secs(5));
+        if answer.is_err() {
+            // Release the writer blocked in open(2) before failing.
+            let _reader = std::fs::File::open(&lock_path);
+        }
+        let Ok(Err(why)) = answer else {
+            panic!("a FIFO at the lock path must refuse promptly, got {answer:?}")
+        };
+        assert!(why.contains("man.lock"), "the path is named: {why}");
+        assert!(why.contains("not a regular file"), "and so is why: {why}");
+
+        // A regular lock file at the same name is taken as before.
+        std::fs::remove_file(&lock_path).expect("the FIFO is removable");
+        let held = CensusLock::take(&census).map_err(|why| why.clone());
+        assert!(held.is_ok(), "{:?}", held.map(drop));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// **ONLY A HELD LOCK IS REPORTED AS ANOTHER RUN.** R9-csr-cx-1, D-0955.
+    ///
+    /// Both refusals of `try_lock` became "another ingest holds the census
+    /// lock". When the host refuses `flock` itself (`ENOLCK` on NFS without a
+    /// lock daemon, `ENOTSUP` for a lock file it cannot lock) no other run
+    /// exists and waiting never helps. Linux gives no regular file that refuses
+    /// `flock`, so the mapping is driven directly, with each host error.
+    #[test]
+    fn a_host_refusal_to_lock_is_not_reported_as_another_run() {
+        let path = std::path::Path::new("/store/manifest/dhan.man.lock");
+        let busy = lock_refusal(path, std::fs::TryLockError::WouldBlock);
+        assert!(busy.contains("another ingest holds"), "{busy}");
+        for host in [
+            std::io::Error::from(std::io::ErrorKind::Unsupported),
+            std::io::Error::other("No locks available"),
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        ] {
+            let words = host.to_string();
+            let why = lock_refusal(path, std::fs::TryLockError::Error(host));
+            assert!(
+                !why.contains("another ingest") && !why.contains("Wait for the other run"),
+                "a host refusal names no other run: {why}"
+            );
+            assert!(why.contains(&words), "the host's own words: {why}");
+            assert!(why.contains("man.lock"), "and the path: {why}");
+        }
     }
 
     /// A bar at one instant with one close. Every other field is zero, which
