@@ -43979,3 +43979,22 @@ NUL-separated listing file.
 letter. There are 356 such distinct values in `crates/pull` today, and gate 1c
 covers a mixed-case joined path. Gate 23 counts the `use` that imports a
 stream handle together with its calls. Invariant CIG-13.
+
+### D-1110 — The cli test fixtures name their process, and gate 23 clause C reads tokens — 2026-10-02
+
+**What was wrong.** Finding LATE-gates-and-ci #10. Gate 23 clause C allowed
+four fixed temporary paths in `cli/src/results.rs` and one in `cli/src/lib.rs`
+(`brutex-v2-read-test`, `brutex-v2-append-test`, `brutex-v9-test`,
+`brutex-wire-test`). The stated reason was that "under `cargo test` they run in
+one process on separate names, so nothing collides". `cargo nextest` runs each
+test in its own process, and two checkouts running the suite at once share one
+temp directory. Each fixture calls `remove_dir_all` on its root, so a second
+run could delete the first run's ledger mid-test. The ceiling for `results.rs`
+read 4 where 3 sites existed. The clause also skipped `*`-led lines and read its
+listing through process substitution.
+
+**The choice.** Each of the four fixtures now names `process::id()`, as
+`results.rs`'s own `brutex-results-*` fixtures already did, and the `cli`
+entries leave the ceiling. `pull/tests/unit.rs`'s ceiling drops from 4 to the
+3 it measures. The clause reads `source_scan code`, in which comments are blank
+and every other line is itself, from a NUL-separated listing. Invariant CIG-14.

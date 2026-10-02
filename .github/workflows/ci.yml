@@ -3515,8 +3515,12 @@ jobs:
           #                           than fixed because the file belongs to
           #                           another line of work; the entry is the
           #                           report, and it is meant to be removed.
-          #   pull/tests/unit.rs   4  Two are `brutex-pull`, a fixed directory,
-          #                           and the same hazard. The other two --
+          #   pull/tests/unit.rs   3  One is `brutex-pull`, a fixed directory,
+          #                           and the same hazard. (The ceiling read 4
+          #                           while the clause measured 3 before
+          #                           D-1110 too: the other `brutex-pull` site
+          #                           names the pid in the file it writes.)
+          #                           The other two --
           #                           `brutex-pull-there-is-no-such-file.toml`
           #                           and `brutex-no-such-dir-ever` -- are paths
           #                           asserted ABSENT, which cannot collide
@@ -3549,17 +3553,22 @@ jobs:
           # a clock because two processes can start in the same microsecond and
           # cannot share a pid.
           #
-          # The five that remain are all inside `#[cfg(test)]`, same class as
-          # `pull/tests/unit.rs` above: a scratch root per case, named for the
-          # case. Under `cargo test` they run in one process on separate names,
-          # so nothing collides.
+          # AND THE `cli` TEST FIXTURES THAT USED TO REMAIN ARE FIXED TOO
+          # (D-1110). They were `brutex-v2-read-test`, `brutex-v2-append-test`
+          # and `brutex-v9-test` in `results.rs` and `brutex-wire-test` in
+          # `lib.rs`, allowed here on the claim that "under `cargo test` they
+          # run in one process on separate names, so nothing collides". That
+          # was false twice over: `cargo nextest` -- which `.config/nextest.toml`
+          # configures -- runs each test in its OWN process, and two checkouts
+          # running the suite at once (two worktrees on one machine) share one
+          # temp directory and run the same case. Each fixture now names
+          # `process::id()`, as `results.rs`'s own `brutex-results-*` fixtures
+          # already did, and the `cli` entries are gone.
           allow_fixed='
           api/src/scratch.rs 1
           api/tests/binary.rs 1
-          cli/src/lib.rs 1
-          cli/src/results.rs 4
           pull/src/ssm.rs 1
-          pull/tests/unit.rs 4
+          pull/tests/unit.rs 3
           telemetry/src/lib.rs 1
           '
           #
@@ -3573,14 +3582,27 @@ jobs:
           # without saying so is the shape gate 12 exists to refuse.
           tmp_window=3
           : > /tmp/fixed-temp.txt
-          while IFS= read -r f; do
-            [ -n "$f" ] || continue
-            awk -v W="$tmp_window" -v name="$(printf '%s' "$f" | sed 's|crates/||')" '
+          # READ THROUGH THE LEXER, FROM A NUL-SEPARATED LISTING (D-1110). The
+          # awk below skipped a line whose first non-blank character was `//`
+          # or `*`, which also skipped a `*`-led statement; it now reads
+          # `source_scan code`, in which comments are already blank and every
+          # other line is itself, so no line is skipped. The listing was read
+          # through process substitution, so a failing git meant a pass.
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
+          git ls-files -z -- 'crates/**/*.rs' > /tmp/fixed-temp-files.z
+          [ -s /tmp/fixed-temp-files.z ] || { echo "GATE 23 CLAUSE C READ NO FILE."; exit 1; }
+          nfixed=0
+          while IFS= read -r -d '' f; do
+            nfixed=$((nfixed + 1))
+            if ! "$scan" code "$f" > /tmp/fixed-temp-code.rs; then
+              printf '  REFUSED  %s could not be lexed\n' "$f"
+              fail=1
+              continue
+            fi
+            awk -v W="$tmp_window" -v name="${f#crates/}" '
               { line[NR] = $0 }
               END {
                 for (i = 1; i <= NR; i++) {
-                  t = line[i]; sub(/^[ \t]+/, "", t)
-                  if (t ~ /^(\/\/|\*)/) continue
                   if (line[i] !~ /env::temp_dir\(\)/) continue
                   ok = 0
                   for (j = i; j <= NR && j <= i + W; j++) {
@@ -3588,12 +3610,12 @@ jobs:
                   }
                   if (!ok) print name ":" i
                 }
-              }' "$f" >> /tmp/fixed-temp.txt
-          done < <(git ls-files 'crates/**/*.rs')
+              }' /tmp/fixed-temp-code.rs >> /tmp/fixed-temp.txt
+          done < /tmp/fixed-temp-files.z
 
           echo "  clause C: $(wc -l < /tmp/fixed-temp.txt | tr -d ' ') temporary path(s)"
           echo "            that do not name their process, over"
-          echo "            $(git ls-files 'crates/**/*.rs' | wc -l | tr -d ' ') tracked source file(s)"
+          echo "            ${nfixed} tracked source file(s)"
           for p in $( { cut -d: -f1 /tmp/fixed-temp.txt | sort -u; } || true ); do
             c=$( { grep -c "^${p}:" /tmp/fixed-temp.txt || true; } | tr -d ' ')
             a=$( { printf '%s\n' "$allow_fixed" | awk -v F="$p" '$1==F{print $2; exit}'; } || true)

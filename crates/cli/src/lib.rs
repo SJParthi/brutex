@@ -22908,7 +22908,7 @@ mod tests {
     /// recorded in `docs/05-decisions.md`.
     #[test]
     fn a_recorded_run_is_addressable_and_a_rerun_adds_nothing() {
-        let root = std::env::temp_dir().join("brutex-wire-test");
+        let root = std::env::temp_dir().join(format!("brutex-wire-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("a temp root");
 

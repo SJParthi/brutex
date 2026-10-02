@@ -2409,7 +2409,7 @@ mod tests {
     /// READ that history is not what it asks for.
     #[test]
     fn a_version_two_ledger_is_read_and_its_records_come_back_whole() {
-        let root = std::env::temp_dir().join("brutex-v2-read-test");
+        let root = std::env::temp_dir().join(format!("brutex-v2-read-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("results")).expect("a temp root");
         let path = Results::path(&root);
@@ -2447,7 +2447,8 @@ mod tests {
     /// pattern here is a legal record.
     #[test]
     fn a_version_two_ledger_is_never_appended_to() {
-        let root = std::env::temp_dir().join("brutex-v2-append-test");
+        let root =
+            std::env::temp_dir().join(format!("brutex-v2-append-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("results")).expect("a temp root");
         std::fs::write(Results::path(&root), v2_file_holding(&record(4)))
@@ -2480,7 +2481,7 @@ mod tests {
     /// A version this build has never written is refused rather than guessed at.
     #[test]
     fn a_version_from_the_future_is_refused_rather_than_guessed_at() {
-        let root = std::env::temp_dir().join("brutex-v9-test");
+        let root = std::env::temp_dir().join(format!("brutex-v9-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("results")).expect("a temp root");
         let mut bytes = v2_file_holding(&record(1));
