@@ -6598,7 +6598,7 @@ mod tests {
         let stale = Credential::token("stale".to_owned()).print();
         assert_eq!(stale, Credential::token("stale".to_owned()).print());
         assert_ne!(stale, Credential::token("fresh".to_owned()).print());
-        assert_ne!(stale, Credential::token("stalf".to_owned()).print());
+        assert_ne!(stale, Credential::token("Stale".to_owned()).print());
         assert_ne!(
             stale,
             Credential::pair(String::new(), "stale".to_owned()).print(),
@@ -6607,8 +6607,8 @@ mod tests {
         // THE LENGTH PREFIX: the same eight bytes split differently between
         // key and token must not collide.
         assert_ne!(
-            Credential::pair("the".to_owned(), "-token".to_owned()).print(),
-            Credential::pair("the-".to_owned(), "token".to_owned()).print()
+            Credential::pair("The".to_owned(), "-token".to_owned()).print(),
+            Credential::pair("The-".to_owned(), "token".to_owned()).print()
         );
         // And a key/token transposition is a different credential.
         assert_ne!(
