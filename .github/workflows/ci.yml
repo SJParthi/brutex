@@ -5418,6 +5418,15 @@ jobs:
           #     unchanged because the comparator is total, and
           #     `selecting_the_page_then_ordering_it_equals_ordering_everything_then_slicing`
           #     runs both strategies and requires them to agree.
+          #   api/bars.rs 2 -> 3 -- D-0953, W1-api5-4. The single partition at
+          #     `offset + limit` still ordered every row BEFORE the page, and
+          #     `offset` is uncapped, so a page past the end ordered the whole
+          #     window to answer nothing. `page_of` now partitions at `offset`,
+          #     then at `limit` inside the rest, then orders only the page: three
+          #     constructs, each bounded by the window or by the PAGE, never by
+          #     the rows outside it. An offset at or past the end returns before
+          #     any of them. Measured by
+          #     `api::bars::tests::the_page_orders_only_itself_wherever_the_offset_lands`.
           #   api/server.rs 2 -> 4 -- one is the target list, ALSO FIXED here: it
           #     ordered by `underlying` alone, a PARTIAL key over
           #     `{exchange, segment, underlying, kind}`, so equal-comparing
@@ -5541,7 +5550,7 @@ jobs:
           crates/runner/src/pbo.rs 2
           crates/runner/src/excursion.rs 1
           crates/pull/src/folder.rs 1
-          crates/api/src/bars.rs 2
+          crates/api/src/bars.rs 3
           crates/api/src/calendar_of.rs 3
           crates/api/src/constituents.rs 3
           crates/api/src/logs.rs 1
