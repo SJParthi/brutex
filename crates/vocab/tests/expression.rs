@@ -472,3 +472,41 @@ fn canonical_display_round_trips_normal_programs_and_renders_maximum_wire_withou
     assert!(write!(&mut Refusing, "{expression}").is_err());
     Ok(())
 }
+
+/// ET-expressions-2 (D-0751): the canonical display is not a round trip for
+/// every program the parser itself accepted. Every NOT renders as `!(`, two
+/// parser nesting levels for the one the source spent, and every binary node
+/// renders fully parenthesised, one level and five bytes. The exact round trip
+/// is the fixed wire encoding, which these programs survive unchanged.
+#[test]
+fn display_can_exceed_the_parser_limits_for_programs_the_parser_accepted() -> Result<(), String> {
+    let chain = |leaf: &str| [leaf; 576].join("&");
+    for (source, rendered_len, refusal) in [
+        ("!".repeat(16) + "0", 49, Refusal::NestingCapacity),
+        (chain("0"), 3451, Refusal::NestingCapacity),
+        (chain("369"), 4603, Refusal::SourceCapacity),
+    ] {
+        let expression = Expression::parse(&source).map_err(|e| format!("{e:?}"))?;
+        let rendered = expression.to_string();
+        assert_eq!(rendered.len(), rendered_len, "{source:.20}");
+        assert_eq!(Expression::parse(&rendered), Err(refusal), "{source:.20}");
+        assert_eq!(
+            Expression::decode(&expression.encode()).map_err(|e| format!("{e:?}"))?,
+            expression
+        );
+    }
+    // The two chains are the full fixed wire capacity: 576 leaves, 575 joins.
+    let full = Expression::parse(&chain("0")).map_err(|e| format!("{e:?}"))?;
+    let bytes = full.encode();
+    assert_eq!(
+        bytes
+            .get(2..4)
+            .and_then(|b| <[u8; 2]>::try_from(b).ok())
+            .map(|b| usize::from(u16::from_le_bytes(b))),
+        Some(MAX_INSTRUCTIONS)
+    );
+    // One NOT fewer renders to 30 nesting levels and parses back exactly.
+    let fifteen = parse(&("!".repeat(15) + "0"));
+    assert_eq!(Expression::parse(&fifteen.to_string()), Ok(fifteen));
+    Ok(())
+}

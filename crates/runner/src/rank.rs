@@ -22,18 +22,23 @@
 //! Keeps `k` and throws the rest away as it goes. Memory becomes a function of
 //! how many results you want to LOOK at, not of how many exist.
 //!
-//! **A `Scored` is 120 bytes** -- `ConditionMask` 48, `hits` 8, `Edge` 64. This
-//! header said 80, pricing `Edge` at 24 for three fields when it has EIGHT:
-//! `n`, `mean_paisa`, `wins`, `win_sum`, `loss_sum`, `mismatched`, `refused`,
-//! `t`. It drifted when the payoff fields landed and nothing re-measured it --
-//! the second time this one paragraph has carried a stale width, the first being
-//! the 212 an earlier audit caught.
+//! **A `Scored` is 168 bytes** -- `ConditionMask` 48, `hits` 8, `Edge` 112.
+//! `Edge` is fourteen eight-byte fields: `n`, `mean_paisa`, `wins`, `win_sum`,
+//! `adverse_sum`, `favourable_sum`, `losses`, `loss_sum`, `min_win_paisa`,
+//! `max_win_paisa`, `max_loss_paisa`, `mismatched`, `refused`, `t`. A heap row,
+//! `Marked<Scored>`, is 176 bytes with its closure flag and padding, and every
+//! lens wrapper has the same width. This header said 80, then 120 with `Edge` at
+//! 64 for eight fields; each time a field landed and nothing re-measured it.
+//! These figures are no longer counted by hand:
+//! `the_header_widths_and_peak_are_the_measured_type_widths` builds them from
+//! `size_of` and fails when this paragraph drifts from the types (D-0976).
 //!
 //! **The peak is `chunks x keep`, not `keep`.** The walk is chunked across the
 //! cores, each chunk holding its own bounded heap, so the bound moved when the
-//! parallel form landed and this paragraph did not move with it. Chunks are
-//! `4 x threads` per level, so on fourteen cores at `keep = 10_000` the peak is
-//! about **67 MB**, not the 0.80 MB written here before. Each chunk's heap is
+//! parallel form landed and this paragraph did not move with it. Chunks are at
+//! most `4 x threads` per level, so on fourteen cores at `keep = 10_000` the
+//! chunk heaps peak at about **98.6 MB** (56 x 10,000 x 176 bytes), not the 67 MB
+//! or the 0.80 MB written here before. Each chunk's heap is
 //! now reserved at `keep.min(part.len())`, so a SHORT chunk costs what it can
 //! hold rather than what the caller might have wanted.
 //!
@@ -638,9 +643,10 @@ fn top_of<K: Ranked1>(
     //
     // Measured against the defaults: `chunk_size` collapses to a width of 1 when
     // the frequent set is smaller than four per thread, so a 40-survivor sweep on
-    // fourteen cores is FORTY chunks. At `keep = 10_000` and 120 bytes a
-    // `Scored`, reserving `keep` each was 48 MB to rank forty rows, against the
-    // 1.2 MB the single heap this replaced would have used.
+    // fourteen cores is FORTY chunks. At `keep = 10_000` and
+    // 176 bytes a heap row, reserving `keep` each was 70.4 MB to rank forty
+    // rows, against the 1.8 MB the single heap this replaced would have used
+    // (widths pinned by `the_header_widths_and_peak_are_the_measured_type_widths`).
     let mut heap: Heap<Marked<K>> = Heap::with_capacity(keep.min(part.len()));
     for itemset in part {
         admit(
@@ -746,7 +752,7 @@ fn ordered<K: Ranked1>(heap: Heap<Marked<K>>) -> (Vec<Scored>, Vec<Scored>) {
     reason = "the exception every test module in this workspace takes."
 )]
 mod tests {
-    use super::{Accumulator, ByAsymmetry, Lens, Scored, rank, rank_by};
+    use super::{Accumulator, ByAsymmetry, ByPath, ByPayoff, Lens, Marked, Scored, rank, rank_by};
     use crate::outcome::{Edge, Horizon, forward};
     use crate::{Sweeper, synthetic};
     use engine::Ladder;
@@ -1293,5 +1299,59 @@ mod tests {
             0,
             "nothing won is the floor -- it is not asymmetric, it is absent"
         );
+    }
+
+    /// Bytes as megabytes (10^6) to one decimal place, rounded half up.
+    fn megabytes(bytes: usize) -> String {
+        let tenths = bytes.saturating_add(50_000) / 100_000;
+        format!("{}.{} MB", tenths / 10, tenths % 10)
+    }
+
+    /// The module header and the `top_of` comment price a row and the peak from
+    /// the widths the compiler lays out (W3-runner4-3).
+    ///
+    /// They said a `Scored` was 120 bytes with `Edge` at 64 when `Edge` holds
+    /// fourteen eight-byte fields. Every expected phrase below is BUILT from
+    /// `size_of`, so this test's own text cannot satisfy the search: a header
+    /// that drifts from the types fails here.
+    #[test]
+    fn the_header_widths_and_peak_are_the_measured_type_widths() {
+        let scored = core::mem::size_of::<Scored>();
+        let mask = core::mem::size_of::<ConditionMask>();
+        let edge = core::mem::size_of::<Edge>();
+        let row = core::mem::size_of::<Marked<Scored>>();
+        assert_eq!(
+            scored,
+            mask + core::mem::size_of::<u64>() + edge,
+            "`Scored` is its three fields and no padding"
+        );
+        for lens_row in [
+            core::mem::size_of::<Marked<ByPayoff>>(),
+            core::mem::size_of::<Marked<ByPath>>(),
+            core::mem::size_of::<Marked<ByAsymmetry>>(),
+        ] {
+            assert_eq!(lens_row, row, "every lens holds the same row width");
+        }
+        let source = include_str!("rank.rs");
+        let expected = [
+            format!(
+                "**A `Scored` is {scored} bytes** -- `ConditionMask` {mask}, `hits` 8, `Edge` {edge}."
+            ),
+            format!("`Marked<Scored>`, is {row} bytes"),
+            // Fourteen cores, four chunks a thread, `keep = 10_000`.
+            format!("about **{}**", megabytes(4 * 14 * 10_000 * row)),
+            // The `top_of` comment's forty-chunk example and the one heap it replaced.
+            format!(
+                "{row} bytes a heap row, reserving `keep` each was {}",
+                megabytes(40 * 10_000 * row)
+            ),
+            format!("against the {} the single heap", megabytes(10_000 * row)),
+        ];
+        for phrase in expected {
+            assert!(
+                source.contains(&phrase),
+                "stale width in rank.rs: expected {phrase:?}"
+            );
+        }
     }
 }

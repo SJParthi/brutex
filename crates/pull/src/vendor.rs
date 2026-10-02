@@ -5062,7 +5062,8 @@ const GDFL_FNO: ColumnLayout = ColumnLayout {
     shape: Columns::Gdfl,
 };
 
-const GDFL_HEADER: &str = "Ticker,Date,Time,LTP,BuyPrice,BuyQty,SellPrice,SellQty,LTQ,OpenInterest";
+// The one spelling lives beside the decoder that checks it. D-1360.
+const GDFL_HEADER: &str = crate::csv::GDFL_HEADER;
 
 const GDFL: Descriptor = Descriptor {
     // As TRUE_DATA: a local archive of vendor files, so the bar is whatever

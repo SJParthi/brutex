@@ -37,9 +37,16 @@
 //!
 //! [`walk`] returns a [`Census`] as well as the rows, and the census
 //! [`reconciles`](Census::reconciles): every file seen is either a spot
-//! instrument-month, a contract path, or one of five named refusals. **Nothing
-//! is dropped silently** — a store with a malformed directory reports how many
-//! and why, which is what `CLAUDE.md` §4 asks of a degradation.
+//! instrument-month, a contract path, or one of the named refusals, and a
+//! directory the walk could not list is counted as `unreadable` rather than
+//! skipped (D-0765), and a symbolic link is counted as `linked` rather than
+//! followed (D-0766), and an entry that is not a regular file is counted as
+//! `not_regular` rather than classified (D-0769). A `bars` that exists and
+//! cannot be walked is a refusal, not an empty store (D-0769), and
+//! [`Census::unoffered_report`] is the line the `cli` reports print for every
+//! entry the walk saw and offered to nobody (D-0769). **Nothing is dropped
+//! silently** — a store with a malformed directory reports how many and why,
+//! which is what `CLAUDE.md` §4 asks of a degradation.
 //!
 //! **UNVERIFIED as a measurement.** The bound is argued from the
 //! shape of the code and no bench in this workspace times it.
@@ -48,7 +55,9 @@
 
 use crate::path::{FileKind, PathError, Timeframe, YearMonth};
 use brutex_core::vendor::Vendor;
-use std::path::Path;
+use core::fmt::Write as _;
+use std::fs::FileType;
+use std::path::{Path, PathBuf};
 
 /// The directory under `root` that every bar path begins with.
 ///
@@ -79,14 +88,19 @@ pub struct Held {
     pub month: YearMonth,
 }
 
-/// Every file the walk saw, by what became of it.
+/// Every entry the walk saw below `bars/`, other than a directory it listed,
+/// by what became of it: each file, and each unreadable directory or entry,
+/// symbolic link and non-regular entry.
 ///
 /// The shape [`indicators::Column`]'s census already uses, and for the same
 /// reason: a caller that gets fewer rows than it expected needs to know whether
 /// the store is small or the walk refused something.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Census {
-    /// Files encountered under `bars/`, whatever became of them.
+    /// Entries encountered under `bars/`, whatever became of them: every file,
+    /// every directory or entry the walk could not read (D-0765), every
+    /// symbolic link, which is not followed (D-0766), and every entry that is
+    /// not a regular file (D-0769).
     pub seen: u64,
     /// Files that became a [`Held`].
     pub spot: u64,
@@ -106,6 +120,31 @@ pub struct Census {
     pub malformed_month: u64,
     /// The path had neither the spot depth nor the contract depth.
     pub wrong_depth: u64,
+    /// A directory below `bars/` that could not be listed, or a directory entry
+    /// that could not be read. **What it holds is unknown**, and none of it
+    /// became a row. Counted once per directory or entry, not per file inside
+    /// it, because the walk cannot see those files. D-0765.
+    pub unreadable: u64,
+    /// An entry below `bars/` that is a symbolic link, to a file or to a
+    /// directory. **Not followed**: `docs/02-store-format.md` §9 lists a
+    /// symlink at a path component as a hazard that defeats vendor-prefix
+    /// isolation, and following one let a link back to an ancestor walk the
+    /// tree again at every level. Counted once per link, not per file behind
+    /// it. D-0766.
+    pub linked: u64,
+    /// A path whose components below `bars/` are not all UTF-8. The store
+    /// renders its paths from a `String` (`StorePath::to_path_buf` pushes
+    /// `self.to_string()`), so no such name is one it wrote. Counted here
+    /// rather than read with the name dropped, which shortened the path by one
+    /// level and filed it at another depth. D-0768.
+    pub non_utf8: u64,
+    /// An entry below `bars/` that is neither a regular file, a directory nor
+    /// a symbolic link: a FIFO, a socket or a device node. The store's writer
+    /// makes none, so it is not a month whatever its name. D-0769.
+    ///
+    /// A FIFO spelled `2026-08.bin` used to be listed as a held month, and the
+    /// first reader to open it blocked forever. D-0911, AC-whp-cx-0.
+    pub not_regular: u64,
 }
 
 impl Census {
@@ -116,15 +155,73 @@ impl Census {
     /// `the_census_reconciles_over_a_store_holding_every_refusal`.
     #[must_use]
     pub const fn reconciles(&self) -> bool {
-        let parts = self
-            .spot
+        self.filed() == self.seen
+    }
+
+    /// The report lines a caller prints for what the walk saw and offered to
+    /// nobody: an empty string when every entry was filed and nothing was
+    /// unreadable, linked, non-UTF-8 or not a regular file.
+    ///
+    /// One spelling in the crate that owns the census, so the `cli` reports
+    /// that print a catalog census cannot drift apart. Until D-0769
+    /// none of them printed these buckets, so a locked directory's months,
+    /// and a linked symbol or vendor directory D-0766 stopped offering,
+    /// appeared on no line at all. A census that does not reconcile is
+    /// announced as well, as `CLAUDE.md` §4 asks of a lost entry.
+    #[must_use]
+    pub fn unoffered_report(&self) -> String {
+        let mut out = String::new();
+        if self.unreadable > 0 || self.linked > 0 || self.non_utf8 > 0 || self.not_regular > 0 {
+            let _ = writeln!(
+                out,
+                "NOT OFFERED: below bars/ the catalog could not read {} director(ies) or \
+                 entr(ies), did not follow {} symbolic link(s), and found {} path(s) that are \
+                 not UTF-8 and {} entr(ies) that are not a regular file. None of them was \
+                 offered to any sweep; what an unreadable directory or a link holds is unknown.",
+                self.unreadable, self.linked, self.non_utf8, self.not_regular
+            );
+        }
+        if !self.reconciles() {
+            let _ = writeln!(
+                out,
+                "CATALOG CENSUS DOES NOT RECONCILE: {} entries seen, {} filed. An entry has \
+                 been lost, which is the silent shortfall CLAUDE.md §4 bans.",
+                self.seen,
+                self.filed()
+            );
+        }
+        out
+    }
+
+    /// The sum of every bucket, saturating: what [`Census::reconciles`]
+    /// compares with `seen`.
+    const fn filed(&self) -> u64 {
+        self.spot
             .saturating_add(self.with_contract)
             .saturating_add(self.other_kind)
             .saturating_add(self.unknown_vendor)
             .saturating_add(self.unknown_rung)
             .saturating_add(self.malformed_month)
-            .saturating_add(self.wrong_depth);
-        parts == self.seen
+            .saturating_add(self.wrong_depth)
+            .saturating_add(self.unreadable)
+            .saturating_add(self.linked)
+            .saturating_add(self.non_utf8)
+            .saturating_add(self.not_regular)
+    }
+
+    /// One symbolic link the walk did not follow: seen, and filed as
+    /// [`Census::linked`].
+    const fn count_linked(&mut self) {
+        self.seen = self.seen.saturating_add(1);
+        self.linked = self.linked.saturating_add(1);
+    }
+
+    /// One directory or entry the walk could not read: seen, and filed as
+    /// [`Census::unreadable`]. One helper for both places a read can fail, so
+    /// the two cannot count differently.
+    const fn count_unreadable(&mut self) {
+        self.seen = self.seen.saturating_add(1);
+        self.unreadable = self.unreadable.saturating_add(1);
     }
 }
 
@@ -133,7 +230,7 @@ impl Census {
 pub struct Holdings {
     /// One row per spot instrument-month, sorted and deduplicated.
     pub held: Vec<Held>,
-    /// Every file seen, by outcome.
+    /// Every entry seen other than a directory the walk listed, by outcome.
     pub census: Census,
 }
 
@@ -169,52 +266,122 @@ impl core::error::Error for CatalogError {}
 ///
 /// # Errors
 ///
-/// [`CatalogError::BarsUnreadable`] when `root/bars` cannot be listed. A store
-/// with no `bars` directory at all is **not** an error — it is an empty result
-/// with an empty census, because "nothing pulled yet" is a normal state and
-/// refusing it would make a fresh clone look broken.
+/// [`CatalogError::BarsUnreadable`] when `root/bars` cannot be listed, cannot be
+/// stat-ed (an unsearchable root, a link that resolves to nothing), or is not a
+/// directory (D-0769). A store with nothing at `root/bars` is **not** an
+/// error — it is an empty result with an empty census, because "nothing
+/// pulled yet" is a normal state and refusing it would make a fresh clone look
+/// broken.
 ///
 /// # Cost
 ///
 /// O(entries under `root/bars`), and deliberately so — see the module header.
 pub fn walk(root: &Path) -> Result<Holdings, CatalogError> {
     let bars = root.join(BARS_ROOT);
-    if !bars.is_dir() {
+    if !bars_present(&bars)? {
         return Ok(Holdings::default());
     }
     let mut out = Holdings::default();
     // An explicit stack rather than recursion: the depth is bounded by the
-    // layout, but a store is operator-supplied and a symlink loop is theirs to
-    // make, not this walk's to blow the stack on.
+    // layout, and a store is operator-supplied. The stack did NOT deal with a
+    // symlink loop, as this comment once implied; not following links does
+    // (D-0766).
     let mut stack = vec![bars.clone()];
     while let Some(dir) = stack.pop() {
         let entries = match std::fs::read_dir(&dir) {
             Ok(entries) => entries,
             // A directory that vanished mid-walk, or one this process may not
             // read. The ROOT failing is fatal; a branch failing is not, because
-            // one unreadable corner must not hide the rest of the store.
+            // one unreadable corner must not hide the rest of the store. It is
+            // COUNTED, though: a bare `continue` here dropped every month under
+            // a locked directory while the census still reconciled (D-0765).
             Err(because) => {
                 if dir == bars {
                     return Err(CatalogError::BarsUnreadable {
                         because: because.to_string(),
                     });
                 }
+                out.census.count_unreadable();
                 continue;
             }
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else {
-                out.census.seen = out.census.seen.saturating_add(1);
-                classify(&bars, &path, &mut out);
-            }
+        // Not `flatten()`: that discarded an entry the OS could not read, and
+        // the census never learned it existed (D-0765). A failure to read the
+        // entry and a failure to read its type reach `admit` as one `Err`, so
+        // the two cannot count differently (D-0769).
+        for entry in entries {
+            let entry = entry.and_then(|e| Ok((e.file_type()?, e.path())));
+            admit(entry, &bars, &mut stack, &mut out);
         }
     }
     out.held.sort_unstable();
     out.held.dedup();
     Ok(out)
+}
+
+/// Where one directory entry goes: a descent, or exactly one census bucket.
+///
+/// Split out of [`walk`] so that an entry which could not be read is testable
+/// with an injected error. A locked directory reaches `read_dir`'s own
+/// failure, but nothing on a real tree makes one entry of a readable directory
+/// fail, and the branch that counted it had no test (D-0769).
+///
+/// `file_type` and not `is_dir`: `is_dir` FOLLOWS a link, so a link back to an
+/// ancestor walked the tree again at every level until the kernel's link limit
+/// made `read_dir` fail, and a link that resolved to nothing answered false
+/// and was filed as a bar file. `file_type` describes the entry itself, so a
+/// link is one entry and never a descent (D-0766).
+///
+/// Only a REGULAR file is classified. A FIFO, a socket or a device named
+/// `2026-09.bin` at spot depth was a held month; it is `not_regular` now
+/// (D-0769).
+fn admit(
+    entry: std::io::Result<(FileType, PathBuf)>,
+    bars: &Path,
+    stack: &mut Vec<PathBuf>,
+    out: &mut Holdings,
+) {
+    let Ok((kind, path)) = entry else {
+        out.census.count_unreadable();
+        return;
+    };
+    if kind.is_symlink() {
+        out.census.count_linked();
+    } else if kind.is_dir() {
+        stack.push(path);
+    } else if kind.is_file() {
+        out.census.seen = out.census.seen.saturating_add(1);
+        classify(bars, &path, out);
+    } else {
+        out.census.seen = out.census.seen.saturating_add(1);
+        out.census.not_regular = out.census.not_regular.saturating_add(1);
+    }
+}
+
+/// Whether `bars` is there to walk: `Ok(false)` ONLY when nothing at all is at
+/// that path, and a refusal naming the reason for anything else that is not a
+/// directory.
+///
+/// `Path::is_dir` answered false on every failure to stat, so a store root
+/// this process could not search, a `bars` that was a regular file, and a
+/// `bars` link that resolved to nothing all returned an empty census that
+/// reconciled, the same answer as "nothing pulled yet" (D-0769). The link is
+/// told apart from an absent path by `symlink_metadata`, which does not follow
+/// it. `bars` itself may be a link to a directory: the root is operator
+/// configuration, and only links BELOW it are counted and not followed
+/// (D-0766).
+fn bars_present(bars: &Path) -> Result<bool, CatalogError> {
+    let refuse = |because: String| CatalogError::BarsUnreadable { because };
+    match std::fs::symlink_metadata(bars) {
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(why) => return Err(refuse(why.to_string())),
+        Ok(_) => {}
+    }
+    match std::fs::metadata(bars) {
+        Ok(meta) if meta.is_dir() => Ok(true),
+        Ok(_) => Err(refuse("it is not a directory".to_owned())),
+        Err(why) => Err(refuse(why.to_string())),
+    }
 }
 
 /// Files a spot path has below `bars/`: exchange, segment, symbol, rung, month.
@@ -229,10 +396,17 @@ fn classify(bars: &Path, path: &Path, out: &mut Holdings) {
         out.census.wrong_depth = out.census.wrong_depth.saturating_add(1);
         return;
     };
-    let parts: Vec<&str> = rel
+    // `Option` collected, never `filter_map`: dropping a non-UTF-8 component
+    // shortened the path by one level, so a name one level too deep was filed
+    // at the spot depth under the wrong vendor (D-0768).
+    let Some(parts) = rel
         .components()
-        .filter_map(|c| c.as_os_str().to_str())
-        .collect();
+        .map(|c| c.as_os_str().to_str())
+        .collect::<Option<Vec<&str>>>()
+    else {
+        out.census.non_utf8 = out.census.non_utf8.saturating_add(1);
+        return;
+    };
     // Relative to `bars/`, a spot file is
     // `<vendor>/<exchange>/<segment>/<symbol>/<rung>/<month>.bars` -- SIX
     // components. The first draft added one for `bars` itself, which is already
@@ -308,6 +482,16 @@ fn parse_month(stem: &str) -> Result<YearMonth, PathError> {
     if year.len() != 4 || month.len() != 2 {
         return Err(PathError::MonthOutOfRange { month: 0 });
     }
+    // Digits only, before `parse`: the integer `FromStr` takes a leading `+`,
+    // so `2026-+8` passed the width check and was listed as `2026-08`, a file
+    // the renderer never writes (D-0767).
+    if !year
+        .bytes()
+        .chain(month.bytes())
+        .all(|b| b.is_ascii_digit())
+    {
+        return Err(PathError::MonthOutOfRange { month: 0 });
+    }
     let year: u16 = year
         .parse()
         .map_err(|_| PathError::YearOutOfRange { year: 0 })?;
@@ -316,3 +500,7 @@ fn parse_month(stem: &str) -> Result<YearMonth, PathError> {
         .map_err(|_| PathError::MonthOutOfRange { month: 0 })?;
     YearMonth::new(year, month)
 }
+
+#[cfg(test)]
+#[path = "catalog_tests.rs"]
+mod catalog_tests;

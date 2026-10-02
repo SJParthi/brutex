@@ -88,14 +88,16 @@ pub fn seal(layout: Layout, n_valid: u64, block: u64, bytes: &[u8]) -> Result<u3
 /// A verification asked of a file that carries no checksums, on the rolling
 /// log.
 ///
-/// # This path cannot be reached in production today, and that is the point
+/// # Who reaches this path
 ///
-/// No writer in this workspace sets [`crate::format::FLAG_CHECKSUMS`] —
-/// `docs/04-invariants.md` S-06 and S-06b record exactly that, and [`seal`] and
-/// [`verify`] have no production caller because of it. So the operator who
-/// first trips this arm is the operator running the *first* build that turns
-/// checksums on, against files written by every build before it. Their file is
-/// not corrupt; it simply predates the flag. Without this line the only record
+/// `store::file::initialise` sets [`crate::format::FLAG_CHECKSUMS`] on every
+/// month it creates, so a file this build wrote never lands here. Nor does a
+/// month born flag-clear by an earlier build when it is read through a
+/// production door: `BarFile` serves it unverified without calling [`verify`],
+/// and `checksum_audit` refuses its header before calling [`verify`]. This arm
+/// answers a direct caller holding a flag-clear header — `docs/04-invariants.md`
+/// S-06b, corrected by D-0957, which also corrected S-06's "no writer sets the
+/// flag". Such a file is not corrupt; it simply predates the flag. Without this line the only record
 /// of that is a `ChecksumsAbsent` returned to a caller that may well treat it
 /// as a verification failure, which is the conflation S-06b exists to forbid:
 /// "verified" and "there was nothing to verify against" are different answers.
@@ -128,13 +130,11 @@ fn note_unverifiable(header: &Header, block: u64) {
 /// its immediate caller, in a return value that a batch verifier would fold
 /// into a count.
 ///
-/// # Unreachable in production today, said plainly rather than left to be found
+/// # Reachable on every month this build writes
 ///
-/// Same reason as [`note_unverifiable`]: nothing sets
-/// [`crate::format::FLAG_CHECKSUMS`], so `verify` has no production caller
-/// (S-06/S-06b). `CLAUDE.md` §3 rule 6 — this is stated here rather than
-/// implied, so nobody reads the emit as evidence the store is checksumming
-/// anything yet.
+/// This said nothing set [`crate::format::FLAG_CHECKSUMS`]. `store::file::initialise`
+/// now sets it at birth, and `BarFile`'s reads reach this through
+/// [`verify_through`] — `docs/04-invariants.md` S-06, corrected by D-0957.
 ///
 /// # Why `Error`, and why it is bounded by structure
 ///

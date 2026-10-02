@@ -2653,10 +2653,12 @@ fn every_format_error_renders_a_distinct_reason() {
             found: 0,
         },
         FormatError::DegenerateLayout { field: "magic" },
+        FormatError::ReservedNotZero(0x5A),
+        FormatError::UnknownFlags(2),
         FormatError::NoValidHeader,
     ];
     assert_distinct(&all);
-    assert_eq!(all.len(), 22, "every variant the enum has, rendered");
+    assert_eq!(all.len(), 24, "every variant the enum has, rendered");
     assert!(all[1].to_string().contains("63"), "the length is visible");
     assert!(all[2].to_string().contains("55"), "the length is visible");
     assert_ne!(
@@ -2875,4 +2877,85 @@ fn every_rung_length_and_name_is_pinned_exactly() {
             "{name} is a const with no place in KNOWN"
         );
     }
+}
+
+/// **A slot whose reserved tail is not zero is refused.** D-1353.
+///
+/// `docs/02-store-format.md` §2: bytes `60..64` are *"reserved | zero"*, and
+/// *"a future field takes reserved space in a new version, never by
+/// reinterpreting version 2"*. `Header::decode` never read them, so a version-2
+/// slot carrying a value there decoded as a healthy header — exactly the
+/// in-place reinterpretation `CLAUDE.md` §3 rule 8 forbids, accepted silently.
+/// The checksum covers those bytes, so the slot is re-sealed: this is a
+/// well-formed slot from a writer that broke the format, not a flipped bit.
+#[test]
+fn a_slot_whose_reserved_tail_is_not_zero_is_refused() {
+    for at in 60..64 {
+        let mut slot = genesis_slot();
+        slot[at] = 0x5A;
+        reseal(&mut slot);
+        let reserved = u32::from_le_bytes(slot[60..64].try_into().unwrap());
+        assert_eq!(
+            Header::decode(&slot),
+            Err(FormatError::ReservedNotZero(reserved)),
+            "byte {at}"
+        );
+
+        // Through the region read too: the only commit is refused, by name.
+        let mut region = vec![0u8; 32_768];
+        region[..SLOT_LEN].copy_from_slice(&slot);
+        assert_eq!(
+            Header::read_region(&region, 32_768),
+            Err(FormatError::ReservedNotZero(reserved)),
+            "byte {at}, read as a region"
+        );
+    }
+    // The control: the genesis slot's zero tail decodes.
+    assert!(Header::decode(&genesis_slot()).is_ok());
+    assert!(
+        FormatError::ReservedNotZero(0x5A)
+            .to_string()
+            .contains("reserved")
+    );
+}
+
+/// **A flag bit version 2 does not define is refused, on read and on write.**
+/// D-1354.
+///
+/// `flags` defines bit 0 and nothing else. Every other bit was accepted and
+/// ignored, so a file declaring a property this build has never heard of —
+/// whatever a later writer meant by it — was read as if it declared none.
+/// `Header::commit` likewise wrote any value it was handed, producing a slot
+/// whose meaning no reader could know.
+#[test]
+fn a_flag_bit_version_two_does_not_define_is_refused_on_read_and_on_write() {
+    for bit in 1..32 {
+        let flags = FLAG_CHECKSUMS | (1u32 << bit);
+        let mut slot = genesis_slot();
+        slot[12..16].copy_from_slice(&flags.to_le_bytes());
+        reseal(&mut slot);
+        assert_eq!(
+            Header::decode(&slot),
+            Err(FormatError::UnknownFlags(flags)),
+            "bit {bit} on read"
+        );
+        let header = Header::genesis(7, 60, flags);
+        assert_eq!(
+            header.commit(),
+            Err(FormatError::UnknownFlags(flags)),
+            "bit {bit} on write"
+        );
+    }
+    // Both defined values still round-trip.
+    for flags in [0, FLAG_CHECKSUMS] {
+        let commit = Header::genesis(7, 60, flags)
+            .commit()
+            .expect("defined flags commit");
+        assert_eq!(Header::decode(&commit.bytes).map(|h| h.flags), Ok(flags));
+    }
+    assert!(
+        FormatError::UnknownFlags(u32::MAX)
+            .to_string()
+            .contains("0xffffffff")
+    );
 }

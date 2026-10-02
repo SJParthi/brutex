@@ -33,6 +33,12 @@ fn day_of(bar: &Candle) -> i64 {
     (bar.ts_micros + 330 * MINUTE).div_euclid(DAY)
 }
 
+/// The bar's span on the 3-minute grid anchored at IST midnight (D-0944): the
+/// source's candle is a clock span, so membership is read off the stamp.
+fn span_of(bar: &Candle) -> i64 {
+    (bar.ts_micros + 330 * MINUTE).div_euclid(3 * MINUTE)
+}
+
 fn evaluator(tolerance: Tolerance, calendar: Calendar) -> Evaluator {
     Evaluator::with_calendar(
         Widths {
@@ -54,12 +60,17 @@ fn expected(
     calendar: Calendar,
 ) -> [Truth; 11] {
     let today = day_of(current);
+    // Today's first candle: every prior bar of today stamped in the span of today's
+    // first bar. It is closed -- usable -- only once the current bar lies in a later
+    // span; a bar inside the opening span is still measured against nothing.
+    let Some(opening) = prior.iter().find(|bar| day_of(bar) == today).map(span_of) else {
+        return [Truth::Unknown; 11];
+    };
     let first: Vec<_> = prior
         .iter()
-        .filter(|bar| day_of(bar) == today)
-        .take(3)
+        .filter(|bar| day_of(bar) == today && span_of(bar) == opening)
         .collect();
-    if first.len() < 3 || tolerance.base() != Some(Base::SessionRange) {
+    if span_of(current) == opening || tolerance.base() != Some(Base::SessionRange) {
         return [Truth::Unknown; 11];
     }
     let Some(yesterday) = prior
@@ -70,22 +81,26 @@ fn expected(
     else {
         return [Truth::Unknown; 11];
     };
-    let last: Vec<_> = prior
+    let closing = prior
         .iter()
         .rev()
-        .filter(|bar| day_of(bar) == yesterday)
-        .take(3)
+        .find(|bar| day_of(bar) == yesterday)
+        .map(span_of)
+        .expect("previous observed session");
+    let last: Vec<_> = prior
+        .iter()
+        .filter(|bar| day_of(bar) == yesterday && span_of(bar) == closing)
         .collect();
     let high = first
         .iter()
         .map(|bar| bar.high)
         .max()
-        .expect("three opening bars");
+        .expect("an opening bar");
     let low = first
         .iter()
         .map(|bar| bar.low)
         .min()
-        .expect("three opening bars");
+        .expect("an opening bar");
     let y_high = last
         .iter()
         .map(|bar| bar.high)
@@ -209,6 +224,46 @@ fn all_eleven_gap_predicates_and_negations_match_independent_pre_fold_levels() {
     }
 }
 
+/// D-0944 through the whole evaluator: minutes missing on both sides of the night.
+/// Yesterday lacks 15:29 and spikes at 15:26; today lacks 09:16 and spikes at 09:18.
+/// The independent oracle reads clock spans, so a three-bar count would take 15:26
+/// into `X1` and 09:18 into `X2` and disagree with it on truth AND availability.
+#[test]
+fn missing_minutes_keep_each_candle_inside_its_clock_span() {
+    let tolerance = vocab::tolerance::pinned_fib().expect("fib");
+    let mut bars = vec![
+        bar(30_000, 370, 100_000, 100_000, 100_000),
+        bar(30_000, 371, 150_000, 100_000, 100_000),
+        bar(30_000, 372, 101_000, 99_000, 100_000),
+        bar(30_000, 373, 100_000, 100_000, 100_000),
+        bar(30_001, 0, 120_000, 119_000, 119_500),
+        bar(30_001, 2, 119_000, 118_000, 118_500),
+        bar(30_001, 3, 200_000, 118_000, 119_000),
+    ];
+    let (old, opening) = (101_000_i128, 120_000_i128);
+    for (offset, rung) in RUNGS.into_iter().enumerate() {
+        let price = i64::try_from(opening + (rung * (old - opening)).div_euclid(1000))
+            .expect("ordinary positive levels");
+        bars.push(bar(
+            30_001,
+            4 + i64::try_from(offset).expect("eleven"),
+            price,
+            price,
+            price,
+        ));
+    }
+    for [false_count, true_count, unknown_count] in
+        verify(&bars, tolerance, Calendar::all_regular())
+    {
+        assert!(false_count > 0 && true_count > 0);
+        assert_eq!(
+            unknown_count, 6,
+            "yesterday's four bars and today's 09:15 and 09:17 stay unavailable; \
+             09:18 opens the next span and is measured"
+        );
+    }
+}
+
 #[test]
 fn absent_ambiguous_and_unrepresentable_gap_references_never_satisfy_not() {
     let mut ordinary = Vec::new();
@@ -281,6 +336,27 @@ fn non_regular_session_cannot_replace_the_prior_regular_gap_anchor() {
     assert!(counts.iter().all(|[f, t, _]| f + t == 4));
 }
 
+/// The five-minute exact-minute `GapFib` overlay over regular 09:15-15:29 sessions; the
+/// caller's session close is 15:29 on every fixture day (D-0943).
+fn overlay_five_minute(
+    signal: &[Candle],
+    minutes: &[Candle],
+    widths: Widths,
+    calendar: Calendar,
+    column: &mut Column,
+) -> Result<indicators::anchored::ExactMinuteGapCensus, indicators::anchored::ExactMinuteGapRefusal>
+{
+    indicators::anchored::overlay_exact_minute_gapfib(
+        signal,
+        minutes,
+        5 * MINUTE,
+        widths,
+        calendar,
+        |_| Some(15 * 60 + 29),
+        column,
+    )
+}
+
 #[test]
 fn exact_minute_overlay_preserves_known_false_and_is_transactional_on_missing_evidence() {
     let widths = Widths::pinned().expect("widths");
@@ -311,15 +387,8 @@ fn exact_minute_overlay_preserves_known_false_and_is_transactional_on_missing_ev
     let mut column = Column::build(&signal, &mut evaluator(widths.fib, calendar));
     assert!(!column.is_empty(), "fixture must warm the actual column");
     let before = column.clone();
-    indicators::anchored::overlay_exact_minute_gapfib(
-        &signal,
-        &minutes,
-        5 * MINUTE,
-        widths,
-        calendar,
-        &mut column,
-    )
-    .expect("exact close alignment");
+    overlay_five_minute(&signal, &minutes, widths, calendar, &mut column)
+        .expect("exact close alignment");
     let mut known_false = 0;
     for ((source, truth), known) in column
         .sources()
@@ -368,17 +437,7 @@ fn exact_minute_overlay_preserves_known_false_and_is_transactional_on_missing_ev
     let missing_ts = signal.get(first_source).expect("source").ts_micros + 4 * MINUTE;
     minutes.retain(|bar| bar.ts_micros != missing_ts);
     let intact = column.clone();
-    assert!(
-        indicators::anchored::overlay_exact_minute_gapfib(
-            &signal,
-            &minutes,
-            5 * MINUTE,
-            widths,
-            calendar,
-            &mut column
-        )
-        .is_err()
-    );
+    assert!(overlay_five_minute(&signal, &minutes, widths, calendar, &mut column).is_err());
     assert_eq!(
         column, intact,
         "no partial truth or availability overlay on failure"

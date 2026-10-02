@@ -19,11 +19,13 @@
 
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use brutex_core::price::Paisa;
 use bytes::Bytes;
 use parquet::basic::Compression;
-use parquet::column::reader::ColumnReader;
+use parquet::column::reader::{ColumnReader, ColumnReaderImpl};
+use parquet::data_type::DataType;
 use parquet::file::metadata::{ParquetMetaData, ParquetMetaDataReader};
 
 use crate::bar::{Greeks, OPEN_INTEREST_NULL, paisa_from_lake};
@@ -43,6 +45,12 @@ pub struct LakeFile {
     bytes: Bytes,
     meta: ParquetMetaData,
     layout: Layout,
+    /// The sum of every row group's declared `num_rows`, taken once at open
+    /// so that [`LakeFile::read_row_group`] compares it with the file-level
+    /// count in one comparison rather than summing again. `i128` because the
+    /// sum of `i64`s can overflow an `i64` and cannot overflow this: the
+    /// row-group list is a thrift list, whose length is an `i32`.
+    group_rows: i128,
 }
 
 impl core::fmt::Debug for LakeFile {
@@ -54,6 +62,7 @@ impl core::fmt::Debug for LakeFile {
             .field("bytes", &self.bytes.len())
             .field("row_groups", &self.meta.num_row_groups())
             .field("num_rows", &self.meta.file_metadata().num_rows())
+            .field("group_rows", &self.group_rows)
             .finish()
     }
 }
@@ -134,10 +143,16 @@ impl LakeFile {
                 reason: e.to_string(),
             })?;
         let layout = detect(meta.file_metadata().schema_descr())?;
+        let group_rows = meta
+            .row_groups()
+            .iter()
+            .map(|g| i128::from(g.num_rows()))
+            .sum();
         Ok(Self {
             bytes,
             meta,
             layout,
+            group_rows,
         })
     }
 
@@ -153,7 +168,14 @@ impl LakeFile {
         self.meta.num_row_groups()
     }
 
-    /// How many rows the file holds in total.
+    /// How many rows the file-level footer count says the file holds.
+    ///
+    /// This is the footer's claim, returned as written. It is not checked at
+    /// open: a file whose row groups do not sum to it still opens, and every
+    /// [`LakeFile::read_row_group`] of it is then refused as
+    /// [`LakeError::RowCountsDisagree`]. Nor does agreeing
+    /// make it true; `docs/06-limits.md` records footers that agree and still
+    /// misstate the rows.
     #[must_use]
     pub fn num_rows(&self) -> i64 {
         self.meta.file_metadata().num_rows()
@@ -175,7 +197,15 @@ impl LakeFile {
     /// [`LakeError::UnknownCodec`]
     /// for a compression this reader does not implement;
     /// [`LakeError::PageDecode`] if a page will not decode;
+    /// [`LakeError::LongColumnChunk`] if a column holds more rows than the
+    /// group declares;
+    /// [`LakeError::UnreadChunkBytes`] if a column chunk holds pages past
+    /// its declared value count;
+    /// [`LakeError::RowCountsDisagree`] if the file-level row count is not
+    /// the sum of the row groups' declared counts;
     /// [`LakeError::UnexpectedNull`] if a column that must not be null is;
+    /// [`LakeError::OpenInterestIsNullSentinel`] if a present open interest
+    /// equals the null sentinel;
     /// [`LakeError::NotRepresentable`] if a price will not become paisa.
     pub fn read_row_group(&self, index: usize) -> Result<Batch, LakeError> {
         let held = self.row_groups();
@@ -262,12 +292,18 @@ impl LakeFile {
 
         // Open interest is the one column whose null is meaningful, and
         // CLAUDE.md section 7 fixes its representation: i64::MIN, distinct
-        // from a real zero.
+        // from a real zero. A PRESENT value equal to the sentinel would read
+        // back as absent, so it is refused by name. W3-lake1-4.
         let open_interest = cols
             .int64("open_interest")?
             .into_iter()
-            .map(|v| v.unwrap_or(OPEN_INTEREST_NULL))
-            .collect();
+            .enumerate()
+            .map(|(row, v)| match v {
+                Some(OPEN_INTEREST_NULL) => Err(LakeError::OpenInterestIsNullSentinel { row }),
+                Some(v) => Ok(v),
+                None => Ok(OPEN_INTEREST_NULL),
+            })
+            .collect::<Result<Vec<i64>, LakeError>>()?;
 
         let (spot_at_bar, greeks, greeks_provenance_id) = if self.layout.has_greeks() {
             let spot = cols.optional_price("spot_at_bar")?;
@@ -277,6 +313,26 @@ impl LakeFile {
         } else {
             (Vec::new(), Vec::new(), Vec::new())
         };
+
+        // THE FILE-LEVEL COUNT IS THE LAST THING A FOOTER CAN BE CAUGHT BY.
+        // `parquet.thrift` (`parquet-format-safe-0.2.4`) gives `FileMetaData`
+        // field 3 `num_rows` as "Number of rows in this file" and `RowGroup`
+        // field 3 `num_rows` as "Number of rows in this row group", so the
+        // groups sum to the file. A footer that cuts a group's `num_rows`, its
+        // chunks' `num_values` and their byte lengths together, on a page
+        // boundary, decodes every column above as the declared prefix — the
+        // probe and the stranded-byte count have nothing to see — while
+        // `Self::num_rows` still reports the rows cut away. This is checked
+        // after the columns so that a lie they can see is named by the column
+        // it is in. One comparison: the sum was taken once, at open.
+        // W3-lake1-2.
+        let file_rows = self.num_rows();
+        if i128::from(file_rows) != self.group_rows {
+            return Err(LakeError::RowCountsDisagree {
+                file: file_rows,
+                groups: self.group_rows,
+            });
+        }
 
         Ok(Batch::new(
             self.layout,
@@ -513,69 +569,110 @@ impl<'a> Columns<'a> {
         Ok(out)
     }
 
+    /// Reads exactly `rows` records from one column chunk, and refuses a chunk
+    /// that holds more.
+    ///
+    /// `read_records` answers `(records, values, levels)`, and a short read
+    /// shows up as `records < rows`. The triple is not the check for that
+    /// direction for one reason: `levels` IS `defs.len()` on an unnested leaf
+    /// at definition level 1, which is the shape `schema::detect` has already
+    /// insisted on, and `defs.len()` against `rows` is checked inside
+    /// `Self::expand` — the one function that used to pad the shortfall with
+    /// nulls. Checking the same number twice would leave a branch no file can
+    /// reach and a mutant no test can kill.
+    ///
+    /// **The long direction is checked here, because nothing else can see it.**
+    /// `rows` is the row group's declared `num_rows`, and asking for exactly
+    /// that many records stops at it. A footer that UNDERSTATES the count used
+    /// to be read as its declared prefix, and every row past it was dropped
+    /// without a word while [`LakeFile::num_rows`] still reported the whole
+    /// file. So one more record is asked for after the declared count; a chunk
+    /// that answers with any is [`LakeError::LongColumnChunk`]. That is one
+    /// extra call per column chunk, not per row. W3-lake1-2.
+    ///
+    /// **One lie the probe cannot see: both counts understated on a page
+    /// boundary.** The page walk stops at the chunk's declared `num_values`,
+    /// so a footer that cuts `num_rows` and `num_values` to the same page
+    /// boundary hands the column reader exactly the declared rows and no page
+    /// past them; the probe then finds nothing. The walk counts the chunk
+    /// bytes it left unread from the first page that could hold a row
+    /// (`LakePageReader::stranded`), and a column that
+    /// otherwise decoded whole with any left over is
+    /// [`LakeError::UnreadChunkBytes`]. That check runs after `Self::expand`
+    /// so that a `num_values` short of `num_rows` — which also leaves bytes
+    /// unread — is still named as the short chunk it is. One atomic load per
+    /// column chunk.
+    fn read_exactly<T: DataType>(
+        mut reader: ColumnReaderImpl<T>,
+        stranded: &AtomicUsize,
+        name: &'static str,
+        rows: usize,
+    ) -> Result<Vec<Option<T::T>>, LakeError>
+    where
+        T::T: Copy,
+    {
+        let decode = |e: parquet::errors::ParquetError| LakeError::PageDecode {
+            column: name.to_owned(),
+            reason: e.to_string(),
+        };
+        let mut values: Vec<T::T> = Vec::with_capacity(rows);
+        let mut defs: Vec<i16> = Vec::with_capacity(rows);
+        reader
+            .read_records(rows, Some(&mut defs), None, &mut values)
+            .map_err(decode)?;
+
+        let mut past_values: Vec<T::T> = Vec::with_capacity(1);
+        let mut past_defs: Vec<i16> = Vec::with_capacity(1);
+        let (past, _, _) = reader
+            .read_records(1, Some(&mut past_defs), None, &mut past_values)
+            .map_err(decode)?;
+        if past != 0 {
+            return Err(LakeError::LongColumnChunk {
+                column: name,
+                declared: rows,
+            });
+        }
+        let out = Self::expand(name, &values, &defs, rows)?;
+        let bytes = stranded.load(Ordering::Relaxed);
+        if bytes != 0 {
+            return Err(LakeError::UnreadChunkBytes {
+                column: name,
+                bytes,
+            });
+        }
+        Ok(out)
+    }
+
     fn int64(&mut self, name: &'static str) -> Result<Vec<Option<i64>>, LakeError> {
         let (pages, i) = self.pages(name)?;
+        let stranded = pages.stranded();
         let desc = self.file.meta.file_metadata().schema_descr().column(i);
-        let mut values: Vec<i64> = Vec::with_capacity(self.rows);
-        let mut defs: Vec<i16> = Vec::with_capacity(self.rows);
         match parquet::column::reader::get_column_reader(desc, Box::new(pages)) {
-            ColumnReader::Int64ColumnReader(mut r) => {
-                // `read_records` answers `(records, values, levels)`, and a
-                // short read shows up as `records < self.rows`. The triple is
-                // not the check here for one reason: `levels` IS `defs.len()`
-                // on an unnested leaf at definition level 1, which is the shape
-                // `schema::detect` has already insisted on, and `defs.len()`
-                // against `self.rows` is checked inside `Self::expand` — the
-                // one function that used to pad the shortfall with nulls.
-                // Checking the same number twice would leave a branch no file
-                // can reach and a mutant no test can kill.
-                r.read_records(self.rows, Some(&mut defs), None, &mut values)
-                    .map_err(|e| LakeError::PageDecode {
-                        column: name.to_owned(),
-                        reason: e.to_string(),
-                    })?;
-            }
-            _ => return Err(self.mismatch(name)),
+            ColumnReader::Int64ColumnReader(r) => Self::read_exactly(r, &stranded, name, self.rows),
+            _ => Err(self.mismatch(name)),
         }
-        Self::expand(name, &values, &defs, self.rows)
     }
 
     fn int32(&mut self, name: &'static str) -> Result<Vec<Option<i32>>, LakeError> {
         let (pages, i) = self.pages(name)?;
+        let stranded = pages.stranded();
         let desc = self.file.meta.file_metadata().schema_descr().column(i);
-        let mut values: Vec<i32> = Vec::with_capacity(self.rows);
-        let mut defs: Vec<i16> = Vec::with_capacity(self.rows);
         match parquet::column::reader::get_column_reader(desc, Box::new(pages)) {
-            ColumnReader::Int32ColumnReader(mut r) => {
-                // The triple is discarded for the reason `Self::int64` states.
-                r.read_records(self.rows, Some(&mut defs), None, &mut values)
-                    .map_err(|e| LakeError::PageDecode {
-                        column: name.to_owned(),
-                        reason: e.to_string(),
-                    })?;
-            }
-            _ => return Err(self.mismatch(name)),
+            ColumnReader::Int32ColumnReader(r) => Self::read_exactly(r, &stranded, name, self.rows),
+            _ => Err(self.mismatch(name)),
         }
-        Self::expand(name, &values, &defs, self.rows)
     }
 
     fn double(&mut self, name: &'static str) -> Result<Vec<Option<f64>>, LakeError> {
         let (pages, i) = self.pages(name)?;
+        let stranded = pages.stranded();
         let desc = self.file.meta.file_metadata().schema_descr().column(i);
-        let mut values: Vec<f64> = Vec::with_capacity(self.rows);
-        let mut defs: Vec<i16> = Vec::with_capacity(self.rows);
         match parquet::column::reader::get_column_reader(desc, Box::new(pages)) {
-            ColumnReader::DoubleColumnReader(mut r) => {
-                // The triple is discarded for the reason `Self::int64` states.
-                r.read_records(self.rows, Some(&mut defs), None, &mut values)
-                    .map_err(|e| LakeError::PageDecode {
-                        column: name.to_owned(),
-                        reason: e.to_string(),
-                    })?;
+            ColumnReader::DoubleColumnReader(r) => {
+                Self::read_exactly(r, &stranded, name, self.rows)
             }
-            _ => return Err(self.mismatch(name)),
+            _ => Err(self.mismatch(name)),
         }
-        Self::expand(name, &values, &defs, self.rows)
     }
 
     /// The type this reader wanted against the type the file holds.
@@ -974,6 +1071,33 @@ mod tests {
     /// `page.rs`. Frames as Polars wrote them are reached only by the
     /// `#[ignore]`d `tests/real_lake.rs`, on a machine that has the lake.
     fn cash_file(rows: usize) -> Vec<u8> {
+        let ints: Vec<i64> =
+            (0..i64::try_from(rows).expect("a test row count fits an i64")).collect();
+        cash_file_with_open_interest(&ints)
+    }
+
+    /// As [`cash_file`], one row per element of `open_interest`, with those
+    /// values written PRESENT into the `open_interest` column and `0..rows`
+    /// into the other two INT64 columns.
+    fn cash_file_with_open_interest(open_interest: &[i64]) -> Vec<u8> {
+        cash_file_written(open_interest, None)
+    }
+
+    /// The writer behind [`cash_file`] and [`cash_file_with_open_interest`].
+    /// `Some(n)` caps every data page at `n` rows, so a chunk holds several
+    /// pages; `None` leaves the writer's defaults, one page per chunk here.
+    fn cash_file_written(open_interest: &[i64], page_rows: Option<usize>) -> Vec<u8> {
+        cash_file_grouped(open_interest, page_rows, 1)
+    }
+
+    /// As [`cash_file_written`], with `groups` identical row groups, each of
+    /// them one row per element of `open_interest`.
+    fn cash_file_grouped(
+        open_interest: &[i64],
+        page_rows: Option<usize>,
+        groups: usize,
+    ) -> Vec<u8> {
+        let rows = open_interest.len();
         let fields: Vec<Arc<Type>> = CASH
             .iter()
             .map(|(name, ty)| {
@@ -991,11 +1115,13 @@ mod tests {
                 .build()
                 .expect("the group type builds"),
         );
-        let props = Arc::new(
-            WriterProperties::builder()
-                .set_compression(Compression::UNCOMPRESSED)
-                .build(),
-        );
+        let mut builder = WriterProperties::builder().set_compression(Compression::UNCOMPRESSED);
+        if let Some(n) = page_rows {
+            builder = builder
+                .set_data_page_row_count_limit(n)
+                .set_write_batch_size(n);
+        }
+        let props = Arc::new(builder.build());
 
         // Every level is 1 — PRESENT — so this file exercises no null path and
         // cannot fail for a reason other than the one under test.
@@ -1007,20 +1133,30 @@ mod tests {
         let mut out: Vec<u8> = Vec::new();
         {
             let mut writer = SerializedFileWriter::new(&mut out, schema, props).expect("writer");
-            let mut group = writer.next_row_group().expect("row group");
-            while let Some(mut column) = group.next_column().expect("column") {
-                match column.untyped() {
-                    ColumnWriter::Int64ColumnWriter(typed) => {
-                        typed.write_batch(&ints, Some(&defs), None).expect("i64");
+            for _ in 0..groups {
+                let mut group = writer.next_row_group().expect("row group");
+                let mut index = 0_usize;
+                while let Some(mut column) = group.next_column().expect("column") {
+                    // `open_interest` is the seventh and last of `CASH`.
+                    let values = if index == CASH.len() - 1 {
+                        open_interest
+                    } else {
+                        &ints
+                    };
+                    index += 1;
+                    match column.untyped() {
+                        ColumnWriter::Int64ColumnWriter(typed) => {
+                            typed.write_batch(values, Some(&defs), None).expect("i64");
+                        }
+                        ColumnWriter::DoubleColumnWriter(typed) => {
+                            typed.write_batch(&doubles, Some(&defs), None).expect("f64");
+                        }
+                        _ => panic!("the cash layout is INT64 and DOUBLE only"),
                     }
-                    ColumnWriter::DoubleColumnWriter(typed) => {
-                        typed.write_batch(&doubles, Some(&defs), None).expect("f64");
-                    }
-                    _ => panic!("the cash layout is INT64 and DOUBLE only"),
+                    column.close().expect("close column");
                 }
-                column.close().expect("close column");
+                group.close().expect("close row group");
             }
-            group.close().expect("close row group");
             writer.close().expect("close writer");
         }
         out
@@ -1126,9 +1262,557 @@ mod tests {
         }
     }
 
+    /// **A PRESENT `open_interest` OF `i64::MIN` IS REFUSED, NOT READ AS ABSENT.**
+    ///
+    /// `CLAUDE.md` §7 makes `i64::MIN` the open-interest null sentinel, and the
+    /// reader turns a Parquet null into it. A value the file stores as PRESENT
+    /// and equal to `i64::MIN` used to pass through the same `unwrap_or`
+    /// unchanged, so [`crate::bar::Bar::open_interest`] reported it as `None`:
+    /// a present value silently became "the vendor reported none". W3-lake1-4.
+    ///
+    /// The row after it is `0` and must not be refused, so the refusal is on
+    /// the sentinel value and not on the column, and the sound half proves the
+    /// fixture writes present values that decode.
+    #[test]
+    fn a_present_open_interest_equal_to_the_null_sentinel_is_refused() {
+        let sound = LakeFile::from_bytes(cash_file_with_open_interest(&[0, 7]))
+            .expect("the sound fixture opens")
+            .read_row_group(0)
+            .expect("the sound fixture decodes");
+        let oi: Vec<Option<i64>> = sound.iter().map(|b| b.open_interest()).collect();
+        assert_eq!(
+            oi,
+            [Some(0), Some(7)],
+            "present values read back as present"
+        );
+
+        let file = LakeFile::from_bytes(cash_file_with_open_interest(&[0, OPEN_INTEREST_NULL]))
+            .expect("the colliding fixture opens");
+        match file.read_row_group(0) {
+            Err(LakeError::OpenInterestIsNullSentinel { row }) => {
+                assert_eq!(row, 1, "the refusal names the row that collides");
+            }
+            Err(other) => panic!("refused for the wrong reason: {other:?}"),
+            Ok(batch) => panic!(
+                "a present i64::MIN read back as {:?}",
+                batch.iter().map(|b| b.open_interest()).collect::<Vec<_>>()
+            ),
+        }
+    }
+
+    /// **A ROW COUNT THAT UNDERSTATES THE CHUNK IS REFUSED, NOT TRUNCATED TO.**
+    ///
+    /// The reader asks each column for exactly the row group's declared
+    /// `num_rows`, so an 8-row file whose footer says 4 used to decode as a
+    /// 4-bar batch: four rows dropped without a word while the file-level count
+    /// still said 8. Only the overstated direction was refused
+    /// ([`LakeError::ShortColumnChunk`]). W3-lake1-2.
+    ///
+    /// Two lies are checked. The first edits only the row group's `num_rows`,
+    /// the shape the ledger reproduced. The second also edits every chunk's
+    /// `num_values` to agree with it. Each chunk here is ONE page, so the
+    /// second lie is still caught by the one-more-record probe; on a chunk of
+    /// several pages it is not, and
+    /// `both_counts_understated_on_a_page_boundary_are_refused_rather_than_truncated_to`
+    /// covers that case.
+    #[test]
+    fn a_row_count_that_understates_the_chunk_is_refused_rather_than_truncated_to() {
+        const ROWS: usize = 8;
+        const LIE: i64 = 4;
+
+        let sound = cash_file(ROWS);
+        let decoded = LakeFile::from_bytes(sound.clone())
+            .expect("the sound fixture opens")
+            .read_row_group(0)
+            .expect("the sound fixture decodes");
+        assert_eq!(decoded.len(), ROWS, "the sound fixture decodes every row");
+
+        let only_rows = patch_footer(&sound, |meta| {
+            meta.row_groups[0].num_rows = LIE;
+        });
+        let rows_and_values = patch_footer(&sound, |meta| {
+            meta.row_groups[0].num_rows = LIE;
+            for chunk in &mut meta.row_groups[0].columns {
+                chunk
+                    .meta_data
+                    .as_mut()
+                    .expect("the writer records chunk metadata")
+                    .num_values = LIE;
+            }
+        });
+
+        for lying in [only_rows, rows_and_values] {
+            let file = LakeFile::from_bytes(lying).expect("the footer still parses");
+            assert_eq!(file.num_rows(), 8, "the file-level count is untouched");
+            match file.read_row_group(0) {
+                Err(LakeError::LongColumnChunk { column, declared }) => {
+                    assert_eq!(column, "timestamp", "the first column read refuses");
+                    assert_eq!(declared, 4, "the refusal reports the declared count");
+                }
+                Err(other) => panic!("refused for the wrong reason: {other:?}"),
+                Ok(batch) => panic!("an 8-row chunk was read as {} rows", batch.len()),
+            }
+        }
+    }
+
+    /// **BOTH COUNTS UNDERSTATED ON A PAGE BOUNDARY IS REFUSED TOO.**
+    ///
+    /// The test above writes each chunk as one page, so editing `num_values`
+    /// down changes nothing the page walk does. Here each chunk is two data
+    /// pages of four rows, and the footer says 4 in `num_rows` and in every
+    /// chunk's `num_values`. The walk stops after the first page, the column
+    /// reader sees four rows and nothing past them, and the one-more-record
+    /// probe finds nothing — so before the stranded-byte count this decoded as
+    /// a sound 4-bar batch and the second page of every column was dropped
+    /// without a word. W3-lake1-2.
+    ///
+    /// The fixture is shown to hold two data pages, the sound copy to decode
+    /// all eight rows in order across them, and a lie in `num_rows` alone to
+    /// still be the probe's `LongColumnChunk`.
+    #[test]
+    fn both_counts_understated_on_a_page_boundary_are_refused_rather_than_truncated_to() {
+        const ROWS: usize = 8;
+        const LIE: i64 = 4;
+        let ints: Vec<i64> = (0..8).collect();
+        let sound = cash_file_written(&ints, Some(4));
+
+        let file = LakeFile::from_bytes(sound.clone()).expect("the paged fixture opens");
+        let (pages, _) = Columns::new(&file, 0, ROWS)
+            .pages("timestamp")
+            .expect("the timestamp chunk");
+        let data_pages = pages
+            .map(|p| p.expect("a sound page"))
+            .filter(|p| matches!(p, parquet::column::page::Page::DataPage { .. }))
+            .count();
+        assert_eq!(data_pages, 2, "the fixture really is two pages a column");
+
+        let decoded = file.read_row_group(0).expect("the paged fixture decodes");
+        let stamps: Vec<i64> = decoded.iter().map(|b| b.timestamp_micros).collect();
+        assert_eq!(stamps, ints, "all eight rows, in order, across both pages");
+
+        let rows_only = patch_footer(&sound, |meta| {
+            meta.row_groups[0].num_rows = LIE;
+        });
+        match LakeFile::from_bytes(rows_only)
+            .expect("the footer still parses")
+            .read_row_group(0)
+        {
+            Err(LakeError::LongColumnChunk { column, declared }) => {
+                assert_eq!((column, declared), ("timestamp", 4));
+            }
+            other => panic!("a num_rows lie alone is the probe's refusal, got {other:?}"),
+        }
+
+        let both = patch_footer(&sound, |meta| {
+            meta.row_groups[0].num_rows = LIE;
+            for chunk in &mut meta.row_groups[0].columns {
+                chunk
+                    .meta_data
+                    .as_mut()
+                    .expect("the writer records chunk metadata")
+                    .num_values = LIE;
+            }
+        });
+        let file = LakeFile::from_bytes(both).expect("the footer still parses");
+        assert_eq!(file.num_rows(), 8, "the file-level count is untouched");
+        match file.read_row_group(0) {
+            Err(e @ LakeError::UnreadChunkBytes { column, bytes }) => {
+                assert_eq!(column, "timestamp", "the first column read refuses");
+                assert!(bytes > 0, "the unread second page is counted");
+                assert!(
+                    e.to_string().contains(&bytes.to_string()),
+                    "the refusal names the byte count: {e}"
+                );
+            }
+            Err(other) => panic!("refused for the wrong reason: {other:?}"),
+            Ok(batch) => panic!("an 8-row chunk was read as {} rows", batch.len()),
+        }
+    }
+
+    /// **ROW, VALUE AND BYTE COUNTS UNDERSTATED TOGETHER ARE REFUSED ON THE
+    /// FILE-LEVEL COUNT.**
+    ///
+    /// Each chunk is two data pages of four rows. The footer says 4 in the row
+    /// group's `num_rows` and in every chunk's `num_values`, and every chunk's
+    /// `total_compressed_size` is cut by exactly the bytes
+    /// `UnreadChunkBytes` reports for it, so the chunk ends where its first
+    /// page does. Neither the one-more-record probe nor the stranded-byte count
+    /// has anything left to see, and before `RowCountsDisagree` this decoded
+    /// as a 4-bar batch while `LakeFile::num_rows` still said 8. W3-lake1-2,
+    /// round 3.
+    ///
+    /// The cuts are found by reading: each read names one column and its
+    /// unread bytes, and each column is named once, so the loop is bounded by
+    /// the column count. The last read is the file-level refusal.
+    ///
+    /// The known limit is pinned too: the same lie with the file-level
+    /// `num_rows` also cut to 4 leaves nothing in the footer that disagrees,
+    /// and it decodes as four rows. `docs/06-limits.md` records it.
+    #[test]
+    fn row_value_and_byte_counts_understated_together_are_refused_on_the_file_count() {
+        const LIE: i64 = 4;
+        let ints: Vec<i64> = (0..8).collect();
+        let sound = cash_file_written(&ints, Some(4));
+
+        let lie = |cut: &[i64], file_rows: Option<i64>| {
+            patch_footer(&sound, |meta| {
+                meta.row_groups[0].num_rows = LIE;
+                for (i, chunk) in meta.row_groups[0].columns.iter_mut().enumerate() {
+                    let m = chunk
+                        .meta_data
+                        .as_mut()
+                        .expect("the writer records chunk metadata");
+                    m.num_values = LIE;
+                    m.total_compressed_size -= cut[i];
+                }
+                if let Some(n) = file_rows {
+                    meta.num_rows = n;
+                }
+            })
+        };
+
+        let mut cut = [0_i64; CASH.len()];
+        let mut named: Vec<&str> = Vec::new();
+        let refusal = loop {
+            let file = LakeFile::from_bytes(lie(&cut, None)).expect("the footer still parses");
+            assert_eq!(file.num_rows(), 8, "the file-level count is untouched");
+            match file.read_row_group(0) {
+                Err(LakeError::UnreadChunkBytes { column, bytes }) => {
+                    assert!(!named.contains(&column), "{column} named twice");
+                    named.push(column);
+                    let i = CASH
+                        .iter()
+                        .position(|(n, _)| *n == column)
+                        .expect("a cash column");
+                    cut[i] = i64::try_from(bytes).expect("a chunk length fits an i64");
+                }
+                other => break other,
+            }
+        };
+        let every: Vec<&str> = CASH.iter().map(|(n, _)| *n).collect();
+        assert_eq!(named, every, "every column's second page was cut away");
+        match refusal {
+            Err(e @ LakeError::RowCountsDisagree { file, groups }) => {
+                assert_eq!((file, groups), (8, 4));
+                assert!(e.to_string().contains("declares 8 rows"), "{e}");
+            }
+            Err(other) => panic!("refused for the wrong reason: {other:?}"),
+            Ok(batch) => panic!("an 8-row file was read as {} rows", batch.len()),
+        }
+
+        let consistent = LakeFile::from_bytes(lie(&cut, Some(LIE))).expect("the footer parses");
+        assert_eq!(consistent.num_rows(), LIE);
+        let batch = consistent
+            .read_row_group(0)
+            .expect("a footer that agrees with itself is not refused: the recorded limit");
+        let stamps: Vec<i64> = batch.iter().map(|b| b.timestamp_micros).collect();
+        assert_eq!(stamps, [0, 1, 2, 3], "only the first page of each column");
+    }
+
+    /// Cuts row group `group` of `sound` to the first of its two four-row
+    /// pages in every count the footer holds for it — the group's `num_rows`,
+    /// every chunk's `num_values` and every chunk's `total_compressed_size` —
+    /// then applies `more` to the footer. The byte cuts are found the way
+    /// `row_value_and_byte_counts_understated_together_are_refused_on_the_file_count`
+    /// finds them: each read of the group names one column's unread bytes, and
+    /// each column is named once. Returns the lying file and the reads' last
+    /// answer, the one that named no more unread bytes.
+    fn cut_group_to_first_page(
+        sound: &[u8],
+        group: usize,
+        more: impl Fn(&mut FileMetaData),
+    ) -> (Vec<u8>, Result<Batch, LakeError>) {
+        let lie = |cut: &[i64]| {
+            patch_footer(sound, |meta| {
+                meta.row_groups[group].num_rows = 4;
+                for (i, chunk) in meta.row_groups[group].columns.iter_mut().enumerate() {
+                    let m = chunk
+                        .meta_data
+                        .as_mut()
+                        .expect("the writer records chunk metadata");
+                    m.num_values = 4;
+                    m.total_compressed_size -= cut[i];
+                }
+                more(meta);
+            })
+        };
+        let mut cut = [0_i64; CASH.len()];
+        let mut named: Vec<&str> = Vec::new();
+        loop {
+            let bytes = lie(&cut);
+            let file = LakeFile::from_bytes(bytes.clone()).expect("the footer still parses");
+            match file.read_row_group(group) {
+                Err(LakeError::UnreadChunkBytes { column, bytes }) => {
+                    assert!(!named.contains(&column), "{column} named twice");
+                    named.push(column);
+                    let i = CASH
+                        .iter()
+                        .position(|(n, _)| *n == column)
+                        .expect("a cash column");
+                    cut[i] = i64::try_from(bytes).expect("a chunk length fits an i64");
+                }
+                last => {
+                    let every: Vec<&str> = CASH.iter().map(|(n, _)| *n).collect();
+                    assert_eq!(named, every, "every column's second page was cut away");
+                    return (bytes, last);
+                }
+            }
+        }
+    }
+
+    /// The timestamps of every batch, in order.
+    fn stamps_of(batches: &[Batch]) -> Vec<i64> {
+        batches
+            .iter()
+            .flat_map(|b| b.iter().map(|bar| bar.timestamp_micros))
+            .collect()
+    }
+
+    /// **KNOWN LIMIT: A CUT GROUP WHOSE ROWS ANOTHER GROUP MAKES UP IS READ
+    /// SHORT ON ITS OWN.** Round 4 of review, W3-lake1-2, D-0778.
+    ///
+    /// Two row groups of eight rows, each chunk two pages of four. Group 0 is
+    /// cut to its first page in every count, and group 1's `num_rows` is raised
+    /// from 8 to 12, so the groups still sum to the untouched file-level 16 and
+    /// `RowCountsDisagree` has nothing to see. Group 0 read on its own decodes
+    /// as its first four rows. Group 1 is refused when read, as a short chunk,
+    /// and so is the whole file. `docs/06-limits.md` records this; the test
+    /// pins it so that closing it is seen.
+    #[test]
+    fn a_cut_group_padded_by_another_reads_short_alone_and_the_padded_one_is_refused() {
+        let ints: Vec<i64> = (0..8).collect();
+        let sound = cash_file_grouped(&ints, Some(4), 2);
+        let (lie, group0) = cut_group_to_first_page(&sound, 0, |meta| {
+            meta.row_groups[1].num_rows = 12;
+        });
+        let group0 = group0.expect("the recorded limit: group 0 alone is not refused");
+        assert_eq!(stamps_of(&[group0]), [0, 1, 2, 3], "only its first page");
+
+        let file = LakeFile::from_bytes(lie).expect("the footer parses");
+        assert_eq!((file.num_rows(), file.row_groups()), (16, 2));
+        match file.read_row_group(1) {
+            Err(LakeError::ShortColumnChunk {
+                column,
+                row,
+                expected,
+                arrived,
+            }) => assert_eq!((column, row, expected, arrived), ("timestamp", 8, 12, 8)),
+            other => panic!("the padded group was not refused as short: {other:?}"),
+        }
+        assert!(
+            matches!(file.read_all(), Err(LakeError::ShortColumnChunk { .. })),
+            "the whole file is refused"
+        );
+    }
+
+    /// **KNOWN LIMIT: A FOOTER WHOSE ROW-GROUP COUNTS SUM TO THE FILE COUNT
+    /// IS NOT CAUGHT BY THAT SUM, WHATEVER MADE THEM SUM.** Round 4 of review,
+    /// W3-lake1-2, D-0778.
+    ///
+    /// Two footers over a sound one-group, eight-row file, neither touching a
+    /// page. In the first, group 0 is cut to its first page in every count and
+    /// a copy of that cut entry is appended: 4 + 4 is the untouched file-level
+    /// 8, and the file reads as rows `0..4` twice, rows `4..8` dropped. In the
+    /// second, the sound group's entry is listed twice and the file-level
+    /// count set to 16: every row reads twice. Nothing this reader checks
+    /// covers two entries naming the same bytes. `docs/06-limits.md` records
+    /// both; the test pins them so that closing them is seen.
+    #[test]
+    fn row_group_counts_that_sum_to_the_file_count_pass_however_they_were_made_to() {
+        let ints: Vec<i64> = (0..8).collect();
+        let sound = cash_file_written(&ints, Some(4));
+
+        let (copied, cut) = cut_group_to_first_page(&sound, 0, |meta| {
+            let copy = meta.row_groups[0].clone();
+            meta.row_groups.push(copy);
+        });
+        match cut {
+            Err(LakeError::RowCountsDisagree { .. }) => {
+                panic!("the cut and its copy sum to the file count")
+            }
+            other => assert_eq!(stamps_of(&[other.expect("group 0 decodes")]), [0, 1, 2, 3]),
+        }
+        let copied = LakeFile::from_bytes(copied).expect("the footer parses");
+        assert_eq!((copied.num_rows(), copied.row_groups()), (8, 2));
+        let read = copied.read_all().expect("the recorded limit: not refused");
+        assert_eq!(stamps_of(&read), [0, 1, 2, 3, 0, 1, 2, 3]);
+
+        let doubled = patch_footer(&sound, |meta| {
+            let copy = meta.row_groups[0].clone();
+            meta.row_groups.push(copy);
+            meta.num_rows = 16;
+        });
+        let doubled = LakeFile::from_bytes(doubled).expect("the footer parses");
+        let read = doubled.read_all().expect("the recorded limit: not refused");
+        let once: Vec<i64> = (0..8).collect();
+        assert_eq!(stamps_of(&read), [once.clone(), once].concat());
+    }
+
+    /// **`LakeFile::num_rows` IS THE FOOTER'S CLAIM, CHECKED ONLY WHEN A GROUP
+    /// IS READ.** Round 4 of review, D-0778.
+    ///
+    /// A sound two-group file of five rows each, with the file-level count
+    /// patched to every value around and away from the true 10. Each still
+    /// opens, and `num_rows` answers the patched number unqualified; every
+    /// group read is then refused, naming both counts.
+    #[test]
+    fn a_file_count_that_disagrees_opens_and_refuses_every_group_read() {
+        let ints: Vec<i64> = (0..5).collect();
+        let sound = cash_file_grouped(&ints, None, 2);
+        let file = LakeFile::from_bytes(sound.clone()).expect("the sound file opens");
+        assert_eq!(file.read_all().expect("and reads").len(), 2);
+
+        for claim in [9, 11, 0, -1, i64::MAX, i64::MIN] {
+            let lie = patch_footer(&sound, |meta| meta.num_rows = claim);
+            let file = LakeFile::from_bytes(lie).expect("a disagreeing count still opens");
+            assert_eq!(file.num_rows(), claim, "the footer's claim, unqualified");
+            for group in 0..2 {
+                match file.read_row_group(group) {
+                    Err(LakeError::RowCountsDisagree { file, groups }) => {
+                        assert_eq!((file, groups), (claim, 10));
+                    }
+                    other => panic!("group {group} under {claim}: {other:?}"),
+                }
+            }
+        }
+    }
+
+    /// **`LakeFile`'s hand-written `Debug` names its counts and not its bytes.**
+    ///
+    /// Both row counts `RowCountsDisagree` compares are shown, so a failure
+    /// message puts the two numbers side by side; the file's bytes are shown
+    /// as a length only.
+    #[test]
+    fn the_debug_form_names_both_row_counts_and_only_the_byte_length() {
+        let sound = cash_file(8);
+        let len = sound.len();
+        let shown = format!("{:?}", LakeFile::from_bytes(sound).expect("opens"));
+        for part in [
+            "LakeFile",
+            &format!("bytes: {len}"),
+            "row_groups: 1",
+            "num_rows: 8",
+            "group_rows: 8",
+        ] {
+            assert!(shown.contains(part), "{part:?} missing from {shown}");
+        }
+        assert!(shown.len() < 200, "the file is not dumped: {shown}");
+    }
+
+    /// **A SOUND ROW GROUP OF NO ROWS STILL DECODES, EMPTY.**
+    ///
+    /// `parquet`'s writer gives the `timestamp` chunk of an empty row group a
+    /// dictionary page. The page walk, whose declared count is zero, never reads it, so a
+    /// count of every byte left unread refused this sound file as
+    /// `UnreadChunkBytes`. A page that cannot hold a row is stepped over
+    /// instead. The fixture is shown to carry that page: read with the chunk's
+    /// declared count raised, the timestamp chunk yields one dictionary page
+    /// and nothing else. W3-lake1-2.
+    #[test]
+    fn a_sound_row_group_of_no_rows_decodes_to_an_empty_batch() {
+        let sound = cash_file(0);
+        let file = LakeFile::from_bytes(sound.clone()).expect("the empty fixture opens");
+        assert_eq!((file.row_groups(), file.num_rows()), (1, 0));
+        let batch = file.read_row_group(0).expect("an empty group decodes");
+        assert_eq!(batch.len(), 0);
+
+        let widened = patch_footer(&sound, |meta| {
+            for chunk in &mut meta.row_groups[0].columns {
+                chunk
+                    .meta_data
+                    .as_mut()
+                    .expect("the writer records chunk metadata")
+                    .num_values = 1;
+            }
+        });
+        let file = LakeFile::from_bytes(widened).expect("the widened copy opens");
+        let (pages, _) = Columns::new(&file, 0, 0)
+            .pages("timestamp")
+            .expect("the timestamp chunk");
+        let kinds: Vec<parquet::basic::PageType> = pages
+            .map(|p| p.expect("a sound page").page_type())
+            .collect();
+        assert_eq!(kinds, [parquet::basic::PageType::DICTIONARY_PAGE]);
+    }
+
     #[test]
     fn the_magic_and_minimum_are_what_the_format_says() {
         assert_eq!(MAGIC, *b"PAR1");
         assert_eq!(MIN_FILE, 12);
+    }
+
+    /// An F&O file of two rows, every column present, whose INT32
+    /// `greeks_provenance_id` column holds `provenance`.
+    ///
+    /// Written here rather than borrowed from `tests/synthetic.rs` so that the
+    /// library's own tests drive `Columns::int32`: without it the only reader
+    /// of an INT32 column was an integration test.
+    fn fno_file_with_provenance(provenance: [i32; 2]) -> Vec<u8> {
+        let fields: Vec<Arc<Type>> = crate::schema::specs(crate::schema::Layout::Fno)
+            .map(|s| {
+                let ty = match s.ty {
+                    crate::error::ColumnType::Int32 => PhysicalType::INT32,
+                    crate::error::ColumnType::Int64 => PhysicalType::INT64,
+                    crate::error::ColumnType::Double => PhysicalType::DOUBLE,
+                    crate::error::ColumnType::Other => panic!("no lake column is Other"),
+                };
+                Arc::new(
+                    Type::primitive_type_builder(s.name, ty)
+                        .with_repetition(Repetition::OPTIONAL)
+                        .build()
+                        .expect("a primitive field builds"),
+                )
+            })
+            .collect();
+        let schema = Arc::new(
+            Type::group_type_builder("schema")
+                .with_fields(fields)
+                .build()
+                .expect("the group type builds"),
+        );
+        let props = Arc::new(
+            WriterProperties::builder()
+                .set_compression(Compression::UNCOMPRESSED)
+                .build(),
+        );
+        let defs = [1_i16; 2];
+        let mut out: Vec<u8> = Vec::new();
+        {
+            let mut writer = SerializedFileWriter::new(&mut out, schema, props).expect("writer");
+            let mut group = writer.next_row_group().expect("row group");
+            while let Some(mut column) = group.next_column().expect("column") {
+                match column.untyped() {
+                    ColumnWriter::Int32ColumnWriter(typed) => {
+                        typed
+                            .write_batch(&provenance, Some(&defs), None)
+                            .expect("i32");
+                    }
+                    ColumnWriter::Int64ColumnWriter(typed) => {
+                        typed.write_batch(&[1, 2], Some(&defs), None).expect("i64");
+                    }
+                    ColumnWriter::DoubleColumnWriter(typed) => {
+                        typed
+                            .write_batch(&[100.5, 0.25], Some(&defs), None)
+                            .expect("f64");
+                    }
+                    _ => panic!("the lake layouts are INT32, INT64 and DOUBLE only"),
+                }
+                column.close().expect("close column");
+            }
+            group.close().expect("close row group");
+            writer.close().expect("close writer");
+        }
+        out
+    }
+
+    #[test]
+    fn the_int32_provenance_column_is_read_to_its_own_rows() {
+        let file = LakeFile::from_bytes(fno_file_with_provenance([7, -3])).expect("open");
+        assert_eq!(file.layout(), crate::schema::Layout::Fno);
+        let batch = file.read_row_group(0).expect("decode");
+        let ids: Vec<Option<i32>> = (0..2)
+            .map(|i| batch.row(i).expect("a row").greeks_provenance_id)
+            .collect();
+        assert_eq!(ids, [Some(7), Some(-3)]);
     }
 }

@@ -346,10 +346,23 @@ pub fn p_value(t: f64) -> f64 {
 ///
 /// Returns how many are rejected; the caller holds the ordering and can take
 /// that many from the front of its own sorted list.
+///
+/// # Refuses a value that is not a probability
+///
+/// Answers `None`, and leaves the slice unsorted, when any value is NaN of
+/// either sign, infinite, below zero or above one. Counting such a value
+/// broke the answer two ways (GAP5-53, D-0977): `f64::total_cmp` sorts `-NaN`
+/// first and `+NaN` last, so `[-NaN, 0.04]` rejected two while `[NaN, 0.04]`
+/// rejected none; and `-1` cleared every threshold, so `[-1, 0.9]` reported
+/// one finding. A p-value outside `[0, 1]` is a defect upstream, and a count
+/// that included it would be a fallback hiding that failure.
 #[must_use]
-pub fn benjamini_hochberg(p_values: &mut [f64]) -> usize {
+pub fn benjamini_hochberg(p_values: &mut [f64]) -> Option<usize> {
+    if p_values.iter().any(|p| !(0.0..=1.0).contains(p)) {
+        return None;
+    }
     if p_values.is_empty() {
-        return 0;
+        return Some(0);
     }
     p_values.sort_unstable_by(f64::total_cmp);
     #[allow(
@@ -373,7 +386,7 @@ pub fn benjamini_hochberg(p_values: &mut [f64]) -> usize {
             largest = rank;
         }
     }
-    largest
+    Some(largest)
 }
 
 /// Standard normal CDF, from the error function's rational approximation.
@@ -836,7 +849,7 @@ mod tests {
         let mut p = [0.001, 0.015, 0.035, 0.039, 0.9];
         assert_eq!(
             benjamini_hochberg(&mut p),
-            4,
+            Some(4),
             "0.035 exceeds its own threshold of 0.03, but 0.039 clears 0.04 -- \
              so everything up to rank four is rejected"
         );
@@ -847,7 +860,7 @@ mod tests {
         // The same p-values under both. BH must reject at least as many, or it
         // is not doing the job it exists for.
         let mut p: Vec<f64> = (1..=100).map(|i| f64::from(i) * 0.0004).collect();
-        let bh = benjamini_hochberg(&mut p);
+        let bh = benjamini_hochberg(&mut p).expect("every p is in [0, 1]");
         let bonferroni = p.iter().filter(|x| **x <= 0.05 / 100.0).count();
         assert!(
             bh > bonferroni,
@@ -859,12 +872,50 @@ mod tests {
 
     #[test]
     fn benjamini_hochberg_rejects_nothing_when_nothing_deserves_it() {
-        assert_eq!(benjamini_hochberg(&mut []), 0, "no hypotheses, no findings");
+        assert_eq!(
+            benjamini_hochberg(&mut []),
+            Some(0),
+            "no hypotheses, no findings"
+        );
         let mut noise = [0.6_f64, 0.7, 0.8, 0.99];
-        assert_eq!(benjamini_hochberg(&mut noise), 0, "pure noise yields none");
+        assert_eq!(
+            benjamini_hochberg(&mut noise),
+            Some(0),
+            "pure noise yields none"
+        );
         // And everything, when everything deserves it.
         let mut strong = [1e-12_f64; 20];
-        assert_eq!(benjamini_hochberg(&mut strong), 20);
+        assert_eq!(benjamini_hochberg(&mut strong), Some(20));
+    }
+
+    /// GAP5-53: a value that is not a probability is refused, whatever its
+    /// sign, rather than counted or silently dropped (D-0977).
+    #[test]
+    fn benjamini_hochberg_refuses_a_value_that_is_not_a_probability() {
+        // Before the fix these answered 2, 0 and 1: the sign of a NaN decided
+        // whether it was counted, and a negative p cleared every threshold.
+        for bad in [
+            -f64::NAN,
+            f64::NAN,
+            -1.0,
+            -f64::MIN_POSITIVE,
+            1.000_000_1,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            let mut p = [0.9, bad, 0.04];
+            assert_eq!(
+                benjamini_hochberg(&mut p),
+                None,
+                "{bad} is not a probability and must be refused"
+            );
+            assert_eq!(p[0].to_bits(), 0.9_f64.to_bits(), "a refusal sorts nothing");
+            assert_eq!(p[1].to_bits(), bad.to_bits(), "a refusal sorts nothing");
+        }
+        // Both ends of [0, 1] are probabilities, and are answered.
+        assert_eq!(benjamini_hochberg(&mut [0.0, 0.04]), Some(2));
+        assert_eq!(benjamini_hochberg(&mut [1.0]), Some(0));
+        assert_eq!(benjamini_hochberg(&mut [0.05]), Some(1));
     }
 
     #[test]

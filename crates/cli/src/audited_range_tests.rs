@@ -796,3 +796,101 @@ fn a_contract_reaching_the_strict_range_kernel_is_refused_before_it_is_recorded(
     assert!(!crate::carries_refusal(&whole), "{whole}");
     assert!(!whole.contains(&named), "{whole}");
 }
+
+/// One generated month of `bars` one-minute candles starting at `first`.
+fn generated_month(first: i64, bars: i64) -> Loaded {
+    Loaded {
+        bars: (0..bars)
+            .map(|at| indicators::Candle {
+                ts_micros: first + at * 60_000_000,
+                open: 100,
+                high: 101,
+                low: 99,
+                close: 100,
+                volume: 1,
+                open_interest: i64::MIN,
+            })
+            .collect(),
+        vendor: Vendor::Zerodha,
+        key: stored::swept_index("NIFTY").expect("NIFTY is swept"),
+        timeframe: "1min",
+        excluded: stored::CalendarExclusion::none(),
+    }
+}
+
+/// Appending a month must not copy the bars already held: an exact
+/// per-month reservation on the growing span relocated every bar held on
+/// each append, so M appends copied Theta(M^2 x bars-per-month) bars. Months
+/// are now held apart and joined once, by one exact reservation, in
+/// `finish`. The first month's buffer is never reallocated while months are
+/// appended, and the finished span holds exactly its bars, in order.
+/// W2-cli1-1, D-0923.
+#[test]
+fn appending_a_month_never_relocates_the_bars_already_held() {
+    const MONTHS: i64 = 256;
+    const PER_MONTH: i64 = 7;
+    let mut builder = Builder::default();
+    builder
+        .append(generated_month(0, PER_MONTH))
+        .expect("the first month starts the span");
+    let head = builder.0.as_ref().expect("span exists after an append");
+    let (pointer, capacity) = (head.bars.as_ptr(), head.bars.capacity());
+    for month in 1..MONTHS {
+        builder
+            .append(generated_month(month * PER_MONTH * 60_000_000, PER_MONTH))
+            .expect("strictly later month joins");
+        let head = builder.0.as_ref().expect("span exists after an append");
+        assert_eq!(
+            (head.bars.as_ptr(), head.bars.capacity()),
+            (pointer, capacity),
+            "month {month}: the bars already held were relocated"
+        );
+    }
+    let span = builder.finish().expect("span");
+    assert_eq!(
+        span.bars.len(),
+        usize::try_from(MONTHS * PER_MONTH).expect("a test-sized bar count fits usize")
+    );
+    assert_eq!(span.bars.capacity(), span.bars.len(), "one exact join");
+    assert_eq!(i64::from(span.asked), MONTHS);
+    assert_eq!(span.found, span.asked);
+    for (at, bar) in span.bars.iter().enumerate() {
+        assert_eq!(
+            bar.ts_micros,
+            i64::try_from(at).expect("a test-sized index fits i64") * 60_000_000,
+            "bar {at} out of order"
+        );
+    }
+}
+
+/// The month boundary is checked against the last bar held, wherever it is
+/// held: a month stepping back onto the newest appended month is refused,
+/// and an empty month neither moves that boundary nor adds a bar.
+#[test]
+fn a_month_stepping_back_onto_an_appended_month_is_refused() {
+    let mut builder = Builder::default();
+    builder.append(generated_month(0, 2)).expect("first month");
+    builder
+        .append(generated_month(10 * 60_000_000, 2))
+        .expect("later month");
+    builder
+        .append(generated_month(0, 0))
+        .expect("an empty month joins without bars");
+    assert_eq!(
+        builder
+            .append(generated_month(11 * 60_000_000, 1))
+            .expect_err("steps back onto the appended month"),
+        "audited range steps backward at its month boundary"
+    );
+    builder
+        .append(generated_month(12 * 60_000_000, 1))
+        .expect("strictly later than the appended month");
+    let span = builder.finish().expect("span");
+    let at: Vec<i64> = span
+        .bars
+        .iter()
+        .map(|bar| bar.ts_micros / 60_000_000)
+        .collect();
+    assert_eq!(at, [0, 1, 10, 11, 12]);
+    assert_eq!(span.asked, 4);
+}
