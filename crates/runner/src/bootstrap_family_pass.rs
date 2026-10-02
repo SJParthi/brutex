@@ -60,6 +60,7 @@ use super::{
     RomanoWolfAdjustedReceiptV1, SpaReceiptV1, WhiteRealityCheckReceiptV1,
     exact_family_test_fields_v1, exact_family_test_inputs_v1, mean_at,
     romano_wolf_family_digest_v1, stationary_indices, studentized, summarise,
+    white_point_mass_would_mint_evidence,
 };
 use rayon::prelude::*;
 
@@ -170,6 +171,11 @@ pub fn family_tests_v1(
     let (periods, stats) =
         exact_family_test_inputs_v1(returns, draws, block).ok_or(FamilyTestsRefusalV1::White)?;
     let family = Family::new(returns, &stats, periods, stepdown.as_ref());
+    // The separate White receipt's point-mass refusal (D-0972), at the same
+    // place in the refusal order: after Romano--Wolf's, before any draw.
+    if white_point_mass_would_mint_evidence(returns, family.white_observed) {
+        return Err(FamilyTestsRefusalV1::White);
+    }
     let tally = count(&family, periods, draws, seed, block, chunk_draws(periods))
         .ok_or(FamilyTestsRefusalV1::Pass)?;
     let romano_wolf = stepdown

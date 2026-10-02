@@ -47044,3 +47044,144 @@ origin/main code with the test added:
 `calendar::extreme_day_tests::sessions_is_counted_once_at_construction_not_per_call`
 empties `kinds` after construction and failed with `left: 0, right: 3`. The
 same test pins the override day as counted once, and the empty calendar as zero.
+### D-0972 — White's Reality Check earns nothing from a family in which no row ever varied — 2026-09-29
+
+**The defect (GAP5-51).** When every row of a family is constant, every
+recentred resample of every row is exactly `0.0`, so White's bootstrap maximum
+is a point mass at zero on every draw. A positive constant then never met or
+exceeded the observed statistic, and
+`white_reality_check_receipt_v1(&[vec![1; 100]], 1000, 7, DEFAULT_BLOCK)`
+returned the strongest probability 1,000 draws can express, 1/1001, and
+`family_tests_v1` carried it into the shared walk while its SPA receipt beside
+it counted 1001/1001. Measured on `origin/main` (2c209309) by this entry's
+tests before the change: the receipt was `matched_or_exceeded: 0,
+exact_p_value: ExactFamilyTestPValueV1 { matched_or_exceeded_plus_one: 1,
+draws_plus_one: 1001 }`, and `family_tests_v1` returned `Ok` with the same
+White fields and `SpaReceiptV1 { .. matched_or_exceeded: 1000 .. }`. The
+finding's own probe recorded the legacy half: "constant +1 legacy
+reality_check p=0.000999000999000999 clears=true", and Romano--Wolf's
+adjusted receipt refusing the same row (`rw_adjusted=false`).
+
+**Why it is the point mass, and only the point mass.** `reality_check` already
+answers `p = 1` for fewer than two periods on exactly this reasoning: the
+stationary bootstrap can only reproduce the sample, so "a p-value computed
+against a point mass is not a weak result, it is an absent one". A family in
+which no row varied reaches the same point mass from the other side. A family
+with at least one varying row does not: its null has spread, and the comment
+on `a_zero_variance_strategy_does_not_clear_the_studentized_tests` records
+that a riskless positive mean beating that spread is White's intended answer.
+So the rule is narrower than the finding's first suggestion (refuse any
+nonzero constant row, the `bootstrap_zero_v2` rule): that would have reversed
+a documented choice for mixed families, which this entry does not make.
+
+**The change.**
+
+- `reality_check` answers `p = 1` when every row is constant, beside its
+  existing zero-draw and one-period cases.
+- `white_reality_check_receipt_v1` refuses (`None`) a family in which every
+  row is constant and the observed statistic is positive. That is the only
+  point-mass case that counted anything but every draw; a nonpositive
+  statistic against the same point mass already counts `(B+1)/(B+1)`, and
+  those receipts are unchanged. Refusal rather than a restated `p = 1`,
+  because a different probability under the unchanged V1 procedure domain
+  would change what existing V1 bytes mean.
+- `family_tests_v1` refuses the same family with
+  `FamilyTestsRefusalV1::White`, after Romano--Wolf's refusal and before any
+  draw, so the shared walk still equals the separate procedures.
+
+**Who sees it.** `bootstrap_zero_v2` already refuses every nonzero constant
+row before the shared walk (`if first != 0 { return
+Err(FamilyRefusal::RomanoWolf(Refusal::NonzeroConstant { strategy })) }`), so
+it cannot reach the new refusal, and `boolean_qualification_v1` runs that
+zero-conservative evaluation with `?` on the line before its White receipt. A
+family reaching the new refusal holds a positive constant row, so neither
+path reaches it. The three
+`population_statistics_v2` call sites require the Romano--Wolf adjusted
+receipt beside White (each `romano_wolf_adjusted_p_values_v1(..)` ends in
+`?`), and that receipt refuses every zero-variance row, so a family reaching
+the new refusal there was already refused; it is now refused one call
+earlier, by the White message on the line before. The Boolean statistics
+measurement calls the White receipt without that requirement and now refuses
+such a family with its existing `"Boolean statistics White procedure
+refused"`. Its reader, `boolean_statistics_reader.rs`, decodes the stored
+White words (`pub white: [u64; 8]`) and names neither
+`white_reality_check_receipt_v1` nor `family_tests_v1`, so records already
+written are read as written. The legacy `reality_check` feeds the audit
+report's White row in `cli`, which now reads `p = 1` for such a family.
+
+**Tests.** `a_family_that_never_varied_mints_no_white_evidence` (runner
+`bootstrap`) and
+`a_family_that_never_varied_is_refused_by_white_in_the_shared_walk_too`
+(runner `bootstrap::family_pass`) fail on the unchanged code with the 1/1001
+receipt and pass with the change.
+`handled_zero_variance_keeps_named_procedure_compatibility` keeps its White
+assertion on a constant beside a varying row, the case this entry leaves
+measured.
+
+### D-0973 — The legacy Romano--Wolf stepdown decides on the exact finite-resample rule, in one walk, and refuses an alpha above one — 2026-09-29
+
+**The defects.** Three findings on one private function,
+`romano_wolf_aligned`, behind the public `romano_wolf` and
+`romano_wolf_receipt`:
+
+- **GAP5-52.** It rejected a strategy whose statistic exceeded a rounded
+  `1 - alpha` quantile of the bootstrap maxima, where
+  `romano_wolf_adjusted_p_values_v1` and
+  `ExactResamplingPValueV1::rejects_at_ppm` decide on the exact
+  `(1 + strict exceedances) / (B + 1) <= alpha` rule. The two disagreed. The
+  test `the_stepdown_rejects_exactly_what_the_adjusted_receipt_rejects`
+  compares 3,000 decisions (40 seeds x 5 shifts x 5 alphas x 3 strategies,
+  400 draws) and on `origin/main` (2c209309) failed with
+  `329 disagreements`: 164 at alpha 0, 164 at alpha 1 ppm and 1 at alpha
+  1,000,000 (seed 23, shift 1, strategy 2). The grid found none at 50,000 or
+  100,000 ppm; the finding's own probe did, at 1,000 draws: "tried=2000
+  legacy_only=1 [(268, 2, 51)] exact_only=2 [(178, 5, 50), (339, 2, 49)]".
+- **W3-runner1-4.** `romano_wolf` passed `alpha_ppm` unchecked, and
+  `1_000_000 - alpha` saturated to the smallest bootstrap maximum, so an
+  alpha above one rejected almost every strategy while `romano_wolf_receipt`
+  refused the same input. `an_alpha_above_one_rejects_nothing` failed on
+  `origin/main` with "alpha 1000001 is not a probability".
+- **W3-runner1-1.** Every round of the stepdown recomputed every survivor's
+  resampled mean over every draw: O(R·B·S·N) for R rounds, undocumented.
+  `each_null_statistic_is_computed_once_however_many_rounds` counts the null
+  statistics computed for eight strategies at 300 draws over a two-round
+  stepdown; on `origin/main` the count was 3,300, not 2,400.
+
+**The change.** One rewrite of `romano_wolf_aligned`:
+
+- The rejection test is the exact rule: a survivor is rejected in a round
+  when fewer than `floor((B + 1) * alpha_ppm / 1_000_000)` of the maxima
+  over the surviving set strictly exceed its statistic. The statistic,
+  canonical order, tie rule, index matrix and seed are the adjusted
+  receipt's, so the common `sqrt(n)` factor the legacy statistic carried on
+  both sides of the comparison is gone. `quantile`, its only user gone, is
+  removed.
+- The surviving set is always a suffix of the canonical order, so one walk
+  from the weakest strategy builds every suffix's maxima once and keeps each
+  suffix's bar (the `admissible`-th largest maximum, by
+  `select_nth_unstable_by`); the rounds read the bars forwards. Cost
+  O(S·B·N + S·B + S log S) time and O(B·N + B + S) space, not
+  measured by a bench.
+- An `alpha_ppm` above `1_000_000` and zero draws return empty, the legacy
+  vector's rendering of malformed input; `romano_wolf_receipt` already
+  refused both.
+- A zero-variance strategy is never rejected. Its statistic and every null
+  draw of it are `0.0`, so under the exact rule alone no draw would exceed
+  it and it would earn the strongest probability the draws can express --
+  the point mass D-0972 refuses for White. The adjusted receipt refuses such
+  a family outright; this legacy vector keeps answering it, as it always
+  has, without rejecting that row.
+
+**What a caller now sees.** A family with no zero-variance row gets the
+adjusted receipt's decisions at every alpha, and nothing at alpha 0. Rounds
+keep their meaning and, within a round, ascending caller position. The one
+non-test caller outside `runner` is `cli`'s audit, which passes
+`runner::bootstrap::romano_wolf(..).len()` to the report's Romano--Wolf row,
+so that count can change where the old boundary and the exact rule disagreed.
+
+**Tests.** `the_stepdown_rejects_exactly_what_the_adjusted_receipt_rejects`,
+`alpha_zero_rejects_nothing`, `an_alpha_above_one_rejects_nothing` and
+`each_null_statistic_is_computed_once_however_many_rounds` fail on
+`origin/main` and pass with the change.
+`a_strategy_that_never_varied_is_never_rejected` passes on both: it pins
+the zero-variance rule the exact boundary would otherwise break.

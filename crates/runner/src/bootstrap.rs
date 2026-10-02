@@ -483,7 +483,15 @@ pub fn reality_check(
         // (Davison & Hinkley), and its floor is exactly the resolution the
         // draws bought: 1/1001 at 1,000 draws. It is what a resampling test can
         // honestly say, and it never returns zero.
-        p_value: if draws == 0 || periods < 2 {
+        //
+        // A FAMILY IN WHICH NO ROW EVER VARIED IS THE THIRD WAY IN (D-0972).
+        // Every recentred draw of a constant row is exactly zero, so when every
+        // row is constant the null distribution is the same point mass the
+        // one-period case produces, and a positive constant scored 1/(B+1) --
+        // for 1 paisa as readily as for 1,000,000. A family with at least one
+        // varying row is untouched: its null has spread, and a riskless mean
+        // beating that spread is the answer this test is meant to give.
+        p_value: if draws == 0 || periods < 2 || white_null_is_a_point_mass(returns) {
             1.0
         } else {
             beaten.saturating_add(1) as f64 / draws.saturating_add(1) as f64
@@ -491,6 +499,31 @@ pub fn reality_check(
         draws,
         strategies: returns.len(),
     })
+}
+
+/// Whether every row of a family is constant, so that every recentred
+/// resample of every row is exactly zero and White's bootstrap maximum is a
+/// point mass at zero on every draw (D-0972).
+///
+/// Exact rather than approximate: [`summarise`] and [`mean_at`] fold the same
+/// value the same number of times in the same order over a constant row, so
+/// `resampled - mean` is `0.0` bit for bit.
+fn white_null_is_a_point_mass(returns: &[Vec<i64>]) -> bool {
+    returns
+        .iter()
+        .all(|series| series.iter().all(|value| Some(value) == series.first()))
+}
+
+/// Whether White's exact receipt would count its strongest possible
+/// probability, `1/(B+1)`, against a point-mass null (D-0972).
+///
+/// Only a positive observed statistic can: every draw's maximum is `0.0`, so it
+/// never matches or exceeds a positive statistic and always matches a
+/// nonpositive one, which already counts the conservative `(B+1)/(B+1)`. The
+/// receipt refuses the first case rather than restating it: a changed
+/// probability under the V1 procedure domain would rename what V1 bytes mean.
+fn white_point_mass_would_mint_evidence(returns: &[Vec<i64>], observed: f64) -> bool {
+    observed > 0.0 && white_null_is_a_point_mass(returns)
 }
 
 /// Hansen's Superior Predictive Ability test.
@@ -632,8 +665,12 @@ pub fn spa(returns: &[Vec<i64>], draws: usize, seed: u64, block: usize) -> Optio
 /// Unlike [`reality_check`], this authority-producing API refuses zero draws,
 /// a zero block, fewer than two periods and an unrepresentable `draws + 1`
 /// denominator.  The legacy API keeps its conservative `p = 1` compatibility
-/// behavior for those cases.  Both refuse a block above [`MAX_BLOCK`].  The
-/// counted comparison remains White's existing
+/// behavior for those cases.  Both refuse a block above [`MAX_BLOCK`].  It also
+/// refuses a family in which every row is constant and the observed statistic is positive (D-0972): every draw's
+/// maximum is then exactly zero, and the count would be the strongest
+/// probability the draws can express, earned by no variation at all.  The
+/// legacy API answers that family `p = 1`.  The counted comparison remains
+/// White's existing
 /// `bootstrap maximum >= observed statistic`; changing it to strict `>` would
 /// be a different procedure version, not a receipt-only change.
 ///
@@ -658,7 +695,7 @@ pub fn white_reality_check_receipt_v1(
         .iter()
         .map(|summary| root_n * summary.mean)
         .fold(f64::NEG_INFINITY, f64::max);
-    if !observed.is_finite() {
+    if !observed.is_finite() || white_point_mass_would_mint_evidence(returns, observed) {
         return None;
     }
 
@@ -1124,7 +1161,15 @@ impl RomanoWolfAdjustedReceiptV1 {
 /// legacy vector shape renders malformed input, a `block` above
 /// [`MAX_BLOCK`] and a complete non-rejection as empty; callers that must
 /// distinguish them use
-/// [`romano_wolf_receipt`].
+/// [`romano_wolf_receipt`]. An `alpha_ppm` above `1_000_000` and zero draws
+/// are malformed input here (D-0973).
+///
+/// A strategy is rejected on the exact `(1 + strict exceedances) / (B + 1) <=
+/// alpha` rule, so on a family with no zero-variance row the rejected set is
+/// the set whose [`romano_wolf_adjusted_p_values_v1`] probability rejects at the
+/// same alpha; a zero-variance strategy is never rejected. Each strategy's
+/// null statistics are computed once however many rounds the stepdown takes
+/// (D-0973).
 ///
 /// UNVERIFIED as a measured figure: no bench row covers this yet.
 #[must_use]
@@ -1149,7 +1194,9 @@ pub fn romano_wolf(
 /// Unlike [`romano_wolf`], this distinguishes a valid family that rejected
 /// nothing from malformed input.  Zero draws, a zero block length or one above
 /// [`MAX_BLOCK`], and an alpha outside the ppm probability domain have no
-/// complete procedure receipt and return `None`.
+/// complete procedure receipt and return `None`.  The decisions are
+/// [`romano_wolf`]'s, on the exact rule (D-0973): at alpha zero nothing is
+/// rejected.
 #[must_use]
 pub fn romano_wolf_receipt(
     returns: &[Vec<i64>],
@@ -1363,6 +1410,47 @@ pub(crate) fn romano_wolf_family_digest_v1<R: AsRef<[i64]>>(
     Some(hasher.finalize())
 }
 
+/// The legacy stepdown, on the exact finite-resample rule and in one walk
+/// (D-0973).
+///
+/// # One boundary, the adjusted receipt's
+///
+/// A surviving strategy is rejected in a round when one plus the number of
+/// bootstrap maxima over the surviving set that STRICTLY exceed its statistic is
+/// at most `floor((B + 1) * alpha_ppm / 1_000_000)`: the exact `(1 + count) /
+/// (B + 1) <= alpha` test [`ExactResamplingPValueV1::rejects_at_ppm`] applies to
+/// [`romano_wolf_adjusted_p_values_v1`]. The statistic, the tie order, the index
+/// matrix and the seed are that receipt's too, so on a family with no
+/// zero-variance row the rejected set is exactly the set whose adjusted
+/// probability rejects at the same alpha. This replaced a rounded `1 - alpha`
+/// quantile of the maxima, which rejected at alpha 0 and near 5% disagreed with
+/// the exact rule in both directions.
+///
+/// # One walk
+///
+/// A round rejects every survivor at or above one bar, so the surviving set is
+/// always a suffix of the canonical order (descending statistic, caller position
+/// breaking ties). Walking that order from the weakest strategy grows the
+/// maxima of every suffix in turn, and each suffix's bar -- the smallest
+/// statistic its maxima would reject -- is kept. The rounds then read those
+/// bars forwards. Each strategy's null series is computed once, where the
+/// former loop recomputed every survivor's on every round.
+///
+/// # A zero-variance strategy is never rejected
+///
+/// Its studentized statistic and every null draw of it are `0.0` (see
+/// [`studentized`]), so no draw can strictly exceed it; the exact rule would
+/// count that as the strongest evidence the draws can express, earned by no
+/// variation. It still enters the maxima as it always did, and the stepdown
+/// stops at it.
+///
+/// # Cost
+///
+/// O(S·B·N + S·B + S log S) time for S strategies, B draws and N periods
+/// (the per-suffix selection is `select_nth_unstable_by`, whose documentation
+/// says its fallback "guarantees linear runtime for all inputs"), and
+/// O(B·N + B + S) space. The former loop was O(R·B·S·N) over R rounds. Not
+/// measured by a bench; `CLAUDE.md` §3 rule 6.
 fn romano_wolf_aligned(
     returns: &[Vec<i64>],
     periods: usize,
@@ -1371,105 +1459,129 @@ fn romano_wolf_aligned(
     block: usize,
     alpha_ppm: u64,
 ) -> Vec<Rejected> {
+    // Outside the probability domain there is no procedure to run, and zero
+    // draws is no resample: both are refused as empty, which is what this
+    // legacy vector renders malformed input as.
+    if alpha_ppm > 1_000_000 || draws == 0 {
+        return Vec::new();
+    }
+    // The largest numerator `1 + count` that still rejects.
+    let admissible = usize::try_from(
+        (draws as u128)
+            .saturating_add(1)
+            .saturating_mul(u128::from(alpha_ppm))
+            / 1_000_000,
+    )
+    .unwrap_or(usize::MAX);
+    if admissible == 0 {
+        return Vec::new();
+    }
+
     let stats: Vec<Performance> = returns.iter().map(|r| summarise(r)).collect();
-    let root_n = (periods as f64).sqrt();
+    let observed: Vec<f64> = stats
+        .iter()
+        .map(|stat| studentized(stat.mean, stat.standard_error))
+        .collect();
+    let mut order: Vec<usize> = (0..returns.len()).collect();
+    order.sort_unstable_by(
+        |left, right| match (observed.get(*left), observed.get(*right)) {
+            (Some(left_value), Some(right_value)) => right_value
+                .total_cmp(left_value)
+                .then_with(|| left.cmp(right)),
+            _ => left.cmp(right),
+        },
+    );
 
-    let mut alive: Vec<usize> = (0..returns.len()).collect();
-    let mut out: Vec<Rejected> = Vec::new();
-    let mut round = 0_usize;
-
-    // ONE RESAMPLE SET, DRAWN ONCE AND REUSED BY EVERY ROUND.
+    // ONE RESAMPLE SET, DRAWN ONCE AND HELD ACROSS THE STEPDOWN.
     //
-    // This drew fresh indices per round, from `Rng::new(seed + round)`. That
-    // breaks the property the stepdown rests on: with a SHRINKING alive set the
-    // maximum is taken over fewer strategies, so the threshold must be
-    // non-increasing. On independent draws it is not, because the round's
-    // threshold is a different sample as well as a smaller set.
-    //
-    // Measured: 32.536 -> 33.906 on a shrinking set at seed 97 -- the bar ROSE
-    // after a strategy was removed. It rose in 19 of 400 configurations, and 0
-    // of 400 after this change. It altered the rejection set in 4 of 400, one
-    // of them permissively.
-    //
-    // Romano & Wolf's construction is one B x n resample matrix held across the
-    // stepdown, which is what this now is. `Rng::new(seed)` once, so the draws
-    // are still fully determined by the caller's seed and §3 rule 5 holds.
+    // Fresh indices per round, from `Rng::new(seed + round)`, once let the
+    // threshold RISE after a strategy was removed: measured 32.536 -> 33.906 at
+    // seed 97, in 19 of 400 configurations. Romano & Wolf's construction is one
+    // B x n resample matrix, and `Rng::new(seed)` once keeps §3 rule 5.
     let mut rng = Rng::new(seed);
     let indices: Vec<Vec<usize>> = (0..draws)
         .map(|_| stationary_indices(periods, block, &mut rng))
         .collect();
 
-    // Bounded by the strategy count: each round removes at least one or stops.
-    while !alive.is_empty() {
-        // The bootstrap maximum over the SURVIVING set only. That shrinking is
-        // the stepdown -- with the winner removed the bar is lower, so a
-        // strategy it was masking can now clear.
-        let mut maxima: Vec<f64> = Vec::with_capacity(draws);
-        for index in &indices {
-            let mut best = f64::NEG_INFINITY;
-            for &s in &alive {
-                let (Some(series), Some(own)) = (returns.get(s), stats.get(s)) else {
-                    continue;
-                };
-                let centred = mean_at(series, index) - own.mean;
-                best = best.max(studentized(root_n * centred, own.standard_error));
-            }
-            maxima.push(best);
+    let mut maxima = vec![f64::NEG_INFINITY; draws];
+    let mut scratch: Vec<f64> = Vec::with_capacity(draws);
+    let mut bars = vec![f64::INFINITY; order.len()];
+    for rank in (0..order.len()).rev() {
+        let Some(&strategy) = order.get(rank) else {
+            continue;
+        };
+        let (Some(series), Some(own)) = (returns.get(strategy), stats.get(strategy)) else {
+            continue;
+        };
+        for (maximum, index) in maxima.iter_mut().zip(&indices) {
+            *maximum = maximum.max(null_statistic(series, index, own));
         }
-        let Some(threshold) = quantile(&mut maxima, 1_000_000_u64.saturating_sub(alpha_ppm)) else {
+        // A statistic `x` rejects against these maxima iff fewer than
+        // `admissible` of them strictly exceed it, i.e. iff `x` is at least
+        // the `admissible`-th largest. More admissible than draws rejects
+        // anything.
+        let bar = match draws.checked_sub(admissible) {
+            None => f64::NEG_INFINITY,
+            Some(position) => {
+                scratch.clear();
+                scratch.extend_from_slice(&maxima);
+                let (_, kth, _) = scratch.select_nth_unstable_by(position, f64::total_cmp);
+                *kth
+            }
+        };
+        if let Some(slot) = bars.get_mut(rank) {
+            *slot = bar;
+        }
+    }
+
+    let mut out: Vec<Rejected> = Vec::new();
+    let mut start = 0_usize;
+    let mut round = 0_usize;
+    while let Some(&bar) = bars.get(start) {
+        let mut end = start;
+        while let Some(&strategy) = order.get(end) {
+            let (Some(&statistic), Some(own)) = (observed.get(strategy), stats.get(strategy))
+            else {
+                break;
+            };
+            if own.standard_error > 0.0 && statistic >= bar {
+                end = end.saturating_add(1);
+            } else {
+                break;
+            }
+        }
+        let Some(rejected_now) = order.get(start..end).filter(|now| !now.is_empty()) else {
             break;
         };
-
-        // Every surviving strategy above the threshold is rejected together:
-        // they all cleared the same bar in the same round.
-        //
-        // THE PARTITION IS BUILT ONCE, NOT DERIVED TWICE.
-        //
-        // This collected `rejected_now` and then ran
-        // `alive.retain(|s| !rejected_now.contains(s))`, which is a LINEAR SCAN
-        // of the rejected set for every survivor -- O(alive x rejected) per
-        // round, and nothing structural bounds either: `romano_wolf` is a
-        // `pub fn` over `&[Vec<i64>]` and the caller decides how many strategies
-        // it holds. A round that rejects half of 10,000 candidates is 25 million
-        // comparisons to compute a set the loop above already knew.
-        //
-        // Gate 11 rule 7 could not see it. Its pattern is `\.contains\(&` and
-        // this was `.contains(s)`, `s` already being a reference -- so the one
-        // genuine `Vec` scan of that shape in the crate was invisible to the
-        // gate written to refuse exactly it.
-        //
-        // Both halves fall out of the single pass that decides them, so the
-        // cost is O(alive) and the two vectors cannot disagree about which
-        // strategy went where.
-        let mut rejected_now: Vec<usize> = Vec::new();
-        let mut survivors: Vec<usize> = Vec::with_capacity(alive.len());
-        for &s in &alive {
-            // A strategy with no `stats` row SURVIVES, which is what `retain`
-            // did: it was never pushed to `rejected_now`, so the predicate kept
-            // it. Spelled out here because the old shape said it by omission.
-            let Some(own) = stats.get(s) else {
-                survivors.push(s);
-                continue;
-            };
-            if studentized(root_n * own.mean, own.standard_error) > threshold {
-                rejected_now.push(s);
-            } else {
-                survivors.push(s);
-            }
+        // Within a round, caller position: every one of them cleared the same
+        // bar, which is the order this vector has always reported them in.
+        let first = out.len();
+        out.extend(
+            rejected_now
+                .iter()
+                .map(|&strategy| Rejected { strategy, round }),
+        );
+        if let Some(this_round) = out.get_mut(first..) {
+            this_round.sort_unstable_by_key(|rejected| rejected.strategy);
         }
-        if rejected_now.is_empty() {
-            break;
-        }
-        for s in &rejected_now {
-            out.push(Rejected {
-                strategy: *s,
-                round,
-            });
-        }
-        alive = survivors;
+        start = end;
         round = round.saturating_add(1);
     }
     out
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Null statistics [`romano_wolf_aligned`] has computed on this thread,
+    /// so a test can count the stepdown's work rather than time it.
+    static NULL_STATISTICS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+/// One strategy's recentred, studentized statistic on one resample.
+fn null_statistic(series: &[i64], index: &[usize], own: &Performance) -> f64 {
+    #[cfg(test)]
+    NULL_STATISTICS.with(|count| count.set(count.get().saturating_add(1)));
+    studentized(mean_at(series, index) - own.mean, own.standard_error)
 }
 
 /// Every series is the same non-zero length, and that length.
@@ -1583,46 +1695,6 @@ fn mean_at(series: &[i64], index: &[usize]) -> f64 {
         a + series.get(i).copied().unwrap_or(0) as f64
     });
     sum / index.len() as f64
-}
-
-/// The `q_ppm` quantile of a slice, sorting it in place.
-///
-/// Parts per million rather than a fraction, so no float ever becomes an index.
-/// A truncating cast on a quantile silently returns the wrong threshold, and a
-/// wrong threshold here admits or rejects strategies with no sign anything went
-/// wrong -- the lint table denies that cast for exactly this reason.
-///
-/// `None` for an empty slice — refused rather than answered zero, because a
-/// threshold of zero would reject every strategy with a positive statistic and
-/// report it as a finding.
-fn quantile(values: &mut [f64], q_ppm: u64) -> Option<f64> {
-    if values.is_empty() {
-        return None;
-    }
-    // `total_cmp` and not `partial_cmp`: a NaN under a partial comparator makes
-    // the sort's behaviour unspecified, and a NaN can arrive here from a
-    // degenerate series. The same choice `crate::rank` makes and for the same
-    // reason.
-    values.sort_unstable_by(f64::total_cmp);
-    // WALKED, NOT CAST. The index is a fraction of the length, and turning a
-    // rounded `f64` back into an index needs a cast the lint table denies for
-    // good reason: a truncating cast on a quantile silently returns the wrong
-    // threshold, and a wrong threshold here rejects or admits strategies with
-    // no sign that anything went wrong.
-    //
-    // Integer arithmetic instead. `q` is clamped to `0..=1` and scaled to parts
-    // per million, so the whole computation stays in `usize` and cannot land
-    // outside the slice.
-    let last = values.len().saturating_sub(1);
-    let idx = usize::try_from(
-        (last as u64)
-            .saturating_mul(q_ppm.min(1_000_000))
-            .saturating_add(500_000)
-            / 1_000_000,
-    )
-    .unwrap_or(0)
-    .min(last);
-    values.get(idx).copied()
 }
 
 #[cfg(test)]
@@ -2323,13 +2395,17 @@ mod exact_family_test_receipt_tests {
     #[test]
     fn handled_zero_variance_keeps_named_procedure_compatibility() {
         let constant = vec![vec![7_i64; 32]];
-        let white = white_reality_check_receipt_v1(&constant, 19, 3, 4)
-            .expect("White permits a deterministic nonzero mean");
+        // White still permits a deterministic nonzero mean BESIDE A ROW THAT
+        // VARIES: its null then has spread. A family with none is refused
+        // instead (D-0972), which
+        // `a_family_that_never_varied_mints_no_white_evidence` pins.
+        let mixed = vec![vec![7_i64; 32], noise(32, 5)];
+        let white = white_reality_check_receipt_v1(&mixed, 19, 3, 4)
+            .expect("White permits a deterministic nonzero mean beside variation");
         assert_eq!(
             white.verdict(),
-            reality_check(&constant, 19, 3, 4).expect("legacy White verdict")
+            reality_check(&mixed, 19, 3, 4).expect("legacy White verdict")
         );
-        assert_eq!(white.exact_p_value().numerator(), 1);
         assert_eq!(white.exact_p_value().denominator(), 20);
 
         let spa_exact = spa_receipt_v1(&constant, 19, 3, 4)
@@ -2341,6 +2417,65 @@ mod exact_family_test_receipt_tests {
         assert_eq!(spa_exact.matched_or_exceeded(), 19);
         assert_eq!(spa_exact.exact_p_value().numerator(), 20);
         assert_eq!(spa_exact.exact_p_value().denominator(), 20);
+    }
+
+    /// A FAMILY IN WHICH NO ROW EVER VARIED EARNS NO WHITE EVIDENCE (D-0972).
+    ///
+    /// Every recentred draw of a constant row is exactly zero, so with no
+    /// varying row White's bootstrap maximum is a point mass at zero. Before
+    /// D-0972 a positive constant then counted the strongest probability the
+    /// draws can express, 1/1001 at 1,000 draws, for 1 paisa as readily as for
+    /// 1,000,000, while SPA answered 1 and Romano--Wolf refused. Several
+    /// magnitudes are asserted because the magnitude is the tell.
+    #[test]
+    fn a_family_that_never_varied_mints_no_white_evidence() {
+        for constant in [1_i64, 7, 1_000_000] {
+            for family in [
+                vec![vec![constant; 100]],
+                vec![vec![constant; 100], vec![0; 100], vec![-constant; 100]],
+            ] {
+                assert_eq!(
+                    white_reality_check_receipt_v1(&family, 1_000, 7, DEFAULT_BLOCK),
+                    None,
+                    "a point-mass null minted exact White evidence at {constant}"
+                );
+                let legacy = reality_check(&family, 1_000, 7, DEFAULT_BLOCK).expect("a verdict");
+                assert!(
+                    legacy.p_value.to_bits() == 1.0_f64.to_bits(),
+                    "a point-mass null is no evidence, got p = {}",
+                    legacy.p_value
+                );
+                assert!(!legacy.clears(), "a point-mass null cleared at {constant}");
+            }
+        }
+
+        // A nonpositive statistic against the same point mass already counts
+        // every draw, so those receipts are unchanged and conservative.
+        for family in [
+            vec![vec![0_i64; 100]],
+            vec![vec![-5_i64; 100], vec![0; 100]],
+        ] {
+            let white = white_reality_check_receipt_v1(&family, 1_000, 7, DEFAULT_BLOCK)
+                .expect("a nonpositive point mass keeps its conservative receipt");
+            assert_eq!(white.matched_or_exceeded(), 1_000);
+            assert_eq!(white.exact_p_value().numerator(), 1_001);
+            assert_eq!(white.exact_p_value().denominator(), 1_001);
+            assert_eq!(
+                white.verdict(),
+                reality_check(&family, 1_000, 7, DEFAULT_BLOCK).expect("legacy verdict")
+            );
+        }
+
+        // One varying row gives the null spread, and the constant keeps the
+        // measured White answer the named-procedure test above relies on.
+        let mixed = vec![vec![1_i64; 100], noise(100, 3)];
+        let white = white_reality_check_receipt_v1(&mixed, 1_000, 7, DEFAULT_BLOCK)
+            .expect("a family with variation is measured");
+        assert!(white.exact_p_value().numerator() < white.exact_p_value().denominator());
+        assert_eq!(
+            white.verdict(),
+            reality_check(&mixed, 1_000, 7, DEFAULT_BLOCK).expect("legacy verdict")
+        );
     }
 }
 
@@ -2835,5 +2970,154 @@ mod block_ceiling_tests {
         assert!(romano_wolf_receipt(&set, 999, 3, ceiling, 50_000).is_some());
         assert!(romano_wolf_adjusted_p_values_v1(&set, 999, 3, ceiling).is_some());
         assert!(family_tests_v1(&set, &[0], 999, 3, ceiling).is_ok());
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes."
+)]
+mod exact_stepdown_tests {
+    use super::{
+        DEFAULT_BLOCK, NULL_STATISTICS, Rng, romano_wolf, romano_wolf_adjusted_p_values_v1,
+        romano_wolf_receipt,
+    };
+
+    fn noise(periods: usize, seed: u64, shift: i64) -> Vec<i64> {
+        let mut rng = Rng::new(seed);
+        (0..periods)
+            .map(|_| i64::try_from(rng.next_u64() % 21).unwrap_or(0) - 10 + shift)
+            .collect()
+    }
+
+    fn family(seed: u64, shift: i64) -> Vec<Vec<i64>> {
+        vec![
+            noise(60, seed, shift),
+            noise(60, seed.wrapping_add(10_000), 0),
+            noise(60, seed.wrapping_add(20_000), shift / 2),
+        ]
+    }
+
+    /// ONE PROCEDURE AND ONE BOUNDARY (D-0973).
+    ///
+    /// On a family with no zero-variance row, the legacy stepdown rejects a
+    /// strategy exactly when its Romano--Wolf adjusted probability rejects at
+    /// the same alpha under the exact `(1 + count) / (B + 1)` rule, and the
+    /// receipt carries the same set. Before D-0973 it read a rounded `1 - alpha`
+    /// quantile: at alpha 0 it rejected the strongest strategy, and near 5% it
+    /// disagreed with the exact rule in both directions.
+    #[test]
+    fn the_stepdown_rejects_exactly_what_the_adjusted_receipt_rejects() {
+        let mut compared = 0_usize;
+        let mut disagreements: Vec<(u64, i64, u64, usize)> = Vec::new();
+        for seed in 0..40_u64 {
+            for shift in 1..=5_i64 {
+                let returns = family(seed, shift);
+                let adjusted = romano_wolf_adjusted_p_values_v1(&returns, 400, seed, DEFAULT_BLOCK)
+                    .expect("a varying family has adjusted probabilities");
+                for alpha in [0_u64, 1, 50_000, 100_000, 1_000_000] {
+                    let legacy = romano_wolf(&returns, 400, seed, DEFAULT_BLOCK, alpha);
+                    let receipt = romano_wolf_receipt(&returns, 400, seed, DEFAULT_BLOCK, alpha)
+                        .expect("a valid family has a receipt");
+                    assert_eq!(receipt.rejected(), legacy.as_slice());
+                    for strategy in 0..returns.len() {
+                        let exact = adjusted
+                            .candidate(strategy)
+                            .and_then(|row| row.adjusted_p_value().rejects_at_ppm(alpha))
+                            .expect("every candidate has a probability");
+                        if legacy.iter().any(|row| row.strategy == strategy) != exact
+                            || receipt.is_rejected(strategy) != Some(exact)
+                        {
+                            disagreements.push((seed, shift, alpha, strategy));
+                        }
+                        compared = compared.saturating_add(1);
+                    }
+                }
+            }
+        }
+        assert_eq!(compared, 40 * 5 * 5 * 3);
+        assert!(
+            disagreements.is_empty(),
+            "{} disagreements (seed, shift, alpha, strategy): {disagreements:?}",
+            disagreements.len()
+        );
+    }
+
+    /// At alpha zero nothing is rejected: `(1 + count) / (B + 1)` is never 0.
+    #[test]
+    fn alpha_zero_rejects_nothing() {
+        let returns = family(3, 8);
+        assert!(
+            !romano_wolf(&returns, 400, 3, DEFAULT_BLOCK, 1_000_000).is_empty(),
+            "the control: the same family does reject at alpha 1"
+        );
+        assert!(romano_wolf(&returns, 400, 3, DEFAULT_BLOCK, 0).is_empty());
+        let receipt =
+            romano_wolf_receipt(&returns, 400, 3, DEFAULT_BLOCK, 0).expect("a valid receipt");
+        assert!(receipt.rejected().is_empty());
+    }
+
+    /// AN ALPHA OUTSIDE THE PROBABILITY DOMAIN RUNS NO PROCEDURE (D-0973).
+    ///
+    /// `romano_wolf_receipt` already refused it; the legacy vector saturated
+    /// `1_000_000 - alpha` to the minimum bootstrap maximum and rejected almost
+    /// every strategy. It now renders it as it renders every malformed input:
+    /// empty.
+    #[test]
+    fn an_alpha_above_one_rejects_nothing() {
+        let returns = family(3, 8);
+        let at_one = romano_wolf(&returns, 400, 3, DEFAULT_BLOCK, 1_000_000);
+        assert_eq!(at_one.len(), returns.len(), "alpha 1 rejects every row");
+        for alpha in [1_000_001_u64, 2_000_000, u64::MAX] {
+            assert!(
+                romano_wolf(&returns, 400, 3, DEFAULT_BLOCK, alpha).is_empty(),
+                "alpha {alpha} is not a probability"
+            );
+            assert!(romano_wolf_receipt(&returns, 400, 3, DEFAULT_BLOCK, alpha).is_none());
+        }
+    }
+
+    /// EACH NULL STATISTIC IS COMPUTED ONCE, HOWEVER MANY ROUNDS (D-0973).
+    ///
+    /// The former loop recomputed every survivor's resampled mean on every
+    /// round, B·Σ|alive| statistics over the stepdown. The walk computes each
+    /// strategy's B statistics once, whatever the round count.
+    #[test]
+    fn each_null_statistic_is_computed_once_however_many_rounds() {
+        let returns: Vec<Vec<i64>> = (0..8_u64)
+            .map(|strategy| {
+                let edge = 8_i64.saturating_sub(i64::try_from(strategy).unwrap_or(8));
+                noise(120, strategy.wrapping_add(500), edge)
+            })
+            .collect();
+        NULL_STATISTICS.with(|count| count.set(0));
+        let rejected = romano_wolf(&returns, 300, 11, DEFAULT_BLOCK, 50_000);
+        let computed = NULL_STATISTICS.with(std::cell::Cell::get);
+        let rounds = rejected.last().map_or(0, |row| row.round.saturating_add(1));
+        assert!(rounds >= 2, "the family must step down; rounds {rounds}");
+        assert_eq!(computed, 300 * returns.len(), "rounds {rounds}");
+    }
+
+    /// A ZERO-VARIANCE STRATEGY IS NEVER REJECTED (D-0973).
+    ///
+    /// Its statistic and every null draw of it are `0.0`, so no draw strictly
+    /// exceeds it and the exact rule alone would call it the strongest result
+    /// the draws can express.
+    #[test]
+    fn a_strategy_that_never_varied_is_never_rejected() {
+        for alpha in [50_000_u64, 1_000_000] {
+            assert!(
+                romano_wolf(&[vec![0; 60], vec![0; 60]], 400, 5, DEFAULT_BLOCK, alpha).is_empty()
+            );
+            assert!(romano_wolf(&[vec![9; 60]], 400, 5, DEFAULT_BLOCK, alpha).is_empty());
+        }
+        let beside = vec![noise(60, 7, 8), vec![3; 60], noise(60, 8, 0)];
+        let rejected = romano_wolf(&beside, 400, 5, DEFAULT_BLOCK, 50_000);
+        assert!(
+            rejected.iter().any(|row| row.strategy == 0),
+            "the control: the edged row beside it is still rejected"
+        );
+        assert!(rejected.iter().all(|row| row.strategy != 1));
     }
 }
