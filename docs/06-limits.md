@@ -10911,17 +10911,16 @@ that fill the same fields with `.ppm()` are not changed by D-0743.
   counts all of these. Counted, not timed. **Not changed**: skipping a refused
   leaf's remaining ranks would change every saved search's node accounting and
   pause points, and is left for a decision of its own.
-* **One node is not O(1) (D-0753).** Each choice calls `valid_prefix` on the
-  whole prefix, which walks it from its first instruction
-  (`for (index, op) in code.iter().enumerate()`) over a fresh stack
-  (`let mut starts = [0_usize; MAX_INSTRUCTIONS];`, 9,208 bytes on a 64-bit
-  target) and compares sibling subtrees at every AND and OR. Its cost grows
-  with the prefix and is bounded only by the fixed 1,151-instruction capacity.
+* **One node was not O(1) (D-0753); since o1engine-23 it is, but for the sibling
+  comparison.** Each choice used to call `valid_prefix` on the whole prefix,
+  walking it from its first instruction over a fresh 9,208-byte stack. It now
+  asks `Cursor::place` about the one new instruction, reading the start and
+  depth recorded for `..at`: O(1) except the canonical-order comparison at an
+  AND or OR, which reads the two subtrees it joins and is bounded by `length`.
+  `the_incremental_prefix_check_admits_exactly_what_the_full_rewalk_did` checks
+  it against the old validator, kept as the test-only reference, and
   `prefix_validation_rescans_from_the_first_instruction_over_a_fixed_stack`
-  pins both edges of the stack width (`MAX_INSTRUCTIONS` operands accepted,
-  one more refused), an invalid first instruction refusing a prefix whose tail
-  alone is valid, and by source shape the inline array and `advance`'s one
-  whole-prefix call per choice (D-0754). **UNMEASURED**: the time per node; no
+  pins that `advance` no longer calls it. **UNMEASURED**: the time per node; no
   bench covers it.
 * **Display is not a parser round trip (D-0751).** A program `Expression::parse`
   accepted can render past its limits: 16 NOTs over one bit render to 49 bytes
@@ -11064,31 +11063,33 @@ exact `(1 + count) / (B + 1)` rule, and
 resulting decisions against `romano_wolf_adjusted_p_values_v1` over a
 3,000-decision grid. That is a grid, not a proof at every discrete equality
 boundary.
-### One expression-grammar node walks its whole prefix, not O(1) (D-0983)
+### One expression-grammar node checks only its new instruction (D-0983, o1engine-23)
 
 `vocab::expression_search::Cursor::advance` counts one unit of `work` per
-grammar node, and the unit is not constant. Every tried instruction revalidates
-the whole prefix it ends:
+grammar node. D-0983 recorded that the unit was not constant, because every
+tried instruction revalidated the whole prefix it ended through `valid_prefix`,
+which zeroed a fixed 1,151-entry stack and walked every instruction up to `at`.
+Since o1engine-23 the step is incremental:
 
-* `let prefix = self.code.get(..=at).ok_or(Refusal::Cursor)?;` then
-  `if !valid_prefix(prefix, usize::from(self.length)) {`.
-* `valid_prefix` zeroes a fixed stack, `let mut starts = [0_usize; MAX_INSTRUCTIONS];`
-  (`MAX_INSTRUCTIONS` is 1,151), and walks every instruction of the prefix,
-  `for (index, op) in code.iter().enumerate() {`.
-* At each `And` or `Or` it compares the two sibling operands as slices,
-  `if code.get(left..right) > code.get(right..index) {`.
+* `let Some((start, depth)) = self.place(at) else {` asks about the one new
+  instruction, reading the subtree start and stack depth already recorded for
+  `..at`.
+* At an `And` or `Or` it still compares the two sibling operands as slices,
+  `if self.code.get(left..right)? > self.code.get(right..at)? {`.
 
-So one node costs a fixed 1,151-entry zeroing, a walk of every instruction up
-to `at`, which the fixed language bounds below 1,151 but which is not
-independent of it, and the sibling comparisons. Those are not claimed linear in
-`at`: the refusal is only `>`, so equal siblings are admitted, and siblings that
+So one node is O(1) except that comparison. It is not claimed linear in `at`:
+the refusal is only `>`, so equal siblings are admitted, and siblings that
 differ only in their last instruction are told apart only there, so one
 comparison can read a whole operand
-(`a_sibling_comparison_can_read_the_whole_operand`). Their total per node is
-not measured or bounded here. The `work` counter and every node budget count
-nodes, not this walk. Nothing here is timed; the shape is read off the source, and
-`the_per_node_prefix_scan_the_limit_names_is_the_code` fails if any quoted line
-leaves `expression_search.rs` or this section.
+(`a_sibling_comparison_can_read_the_whole_operand`). Its total per node is not
+measured or bounded here. The old whole-prefix validator is kept as the
+test-only reference (`let mut starts = [0_usize; MAX_INSTRUCTIONS];`,
+`for (index, op) in code.iter().enumerate() {`,
+`if code.get(left..right) > code.get(right..index) {`), and
+`the_incremental_prefix_check_admits_exactly_what_the_full_rewalk_did` holds the
+two to the same answers. Nothing here is timed; the shape is read off the
+source, and `the_per_node_prefix_scan_the_limit_names_is_the_code` fails if any
+quoted line leaves `expression_search.rs` or this section.
 
 ## One archive member's text is capped before it is read — D-1362, 2 October 2026
 
@@ -11175,6 +11176,22 @@ a measured bound**: no bench row times it (`CLAUDE.md` §3 rule 6).
 - **Only the old tail block is checked.** A rotted record in an earlier, full
   block is not read by an append and stays where a reader refuses it; the
   append neither verifies nor re-seals that block.
+
+## Expression search checks one grammar choice incrementally (audit o1engine-23)
+
+- **Each `vocab::expression_search::Cursor::advance` node costs O(1) plus one
+  canonical-order comparison of the two subtrees a join combines, which is
+  bounded by the program length (at most 1,151 instructions), not O(1).**
+  Until this audit every node re-walked the whole partial program from the
+  start and cleared a 9.2 KB full-capacity array, so a node got slower as the
+  rule grew. The cursor now records, for each placed position, the start of
+  the subtree ending there and the stack depth after it, and checks a new
+  choice from those. The record is derived, never encoded: `CURSOR_BYTES`
+  stays 3,086 and `decode` rebuilds it in O(at). The sibling comparison is
+  kept because canonical order is defined by it. Stated from the code's
+  shape; not timed. Proved by
+  `vocab::expression_search::invariant_tests::the_incremental_prefix_check_admits_exactly_what_the_full_rewalk_did`
+  and `a_resumed_search_records_exactly_what_the_live_one_does`.
 
 ## Boolean expression evaluation is Θ(program length) per bar (audit o1engine-22)
 

@@ -299,19 +299,19 @@ fn a_cursor_equals_the_decode_of_its_own_bytes_after_every_node() {
     );
 }
 
-/// `W3-vocab1-0`: one grammar node revalidates its whole prefix, and
-/// `docs/06-limits.md` says so.
+/// `W3-vocab1-0`: what one grammar node costs, and `docs/06-limits.md` says so.
 ///
-/// The limit (D-0983) quotes these lines as its evidence. If the node step stops
-/// validating the whole prefix, or stops zeroing a fixed stack, this fails and the
-/// limit must be restated rather than left describing code that no longer exists.
+/// The limit (D-0983, restated when o1engine-23 made the step incremental)
+/// quotes these lines as its evidence. If the node step or the test-only
+/// reference validator changes, this fails and the limit must be restated
+/// rather than left describing code that no longer exists.
 #[test]
 fn the_per_node_prefix_scan_the_limit_names_is_the_code() {
     const SOURCE: &str = include_str!("../src/expression_search.rs");
     const LIMITS: &str = include_str!("../../../docs/06-limits.md");
     for line in [
-        "let prefix = self.code.get(..=at).ok_or(Refusal::Cursor)?;",
-        "if !valid_prefix(prefix, usize::from(self.length)) {",
+        "let Some((start, depth)) = self.place(at) else {",
+        "if self.code.get(left..right)? > self.code.get(right..at)? {",
         "let mut starts = [0_usize; MAX_INSTRUCTIONS];",
         "for (index, op) in code.iter().enumerate() {",
         "if code.get(left..right) > code.get(right..index) {",
@@ -329,8 +329,7 @@ fn the_per_node_prefix_scan_the_limit_names_is_the_code() {
         MAX_INSTRUCTIONS, 1151,
         "the limit states a 1,151-entry stack"
     );
-    assert!(
-        LIMITS
-            .contains("### One expression-grammar node walks its whole prefix, not O(1) (D-0983)")
-    );
+    assert!(LIMITS.contains(
+        "### One expression-grammar node checks only its new instruction (D-0983, o1engine-23)"
+    ));
 }
