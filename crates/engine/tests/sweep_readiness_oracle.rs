@@ -151,7 +151,12 @@ fn assert_offer_accounting(
             .levels
             .iter()
             .skip(1)
-            .all(|level| level.duplicates == 0 && level.excluded == 0)
+            // `duplicates` and `excluded` are literal zeros at k>=2 and could
+            // not fail here; distinct canonical survivors can (D-0926).
+            .all(|level| level
+                .frequent
+                .windows(2)
+                .all(|w| matches!(w, [x, y] if x.mask.words() < y.mask.words())))
     );
 }
 

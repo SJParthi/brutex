@@ -2925,4 +2925,29 @@ mod tests {
         assert_eq!(charge_set.len(), 1);
         assert!(format!("{charges:?}").starts_with("Charges {"));
     }
+
+    /// W3-costs1-1: a printed-extreme sell anchored on a low far below zero
+    /// used to reach [`position`] as a negative notional, and the gross
+    /// subtraction its comment calls unable to overflow left `i64`. The sell is
+    /// floored at one tick, so it prices as a one-tick sale.
+    #[test]
+    fn a_printed_extreme_sell_below_zero_prices_at_the_floor_and_does_not_overflow() {
+        let fills = crate::fill::fills_at(
+            Bar::flat(Paisa::from_raw(100_00)).expect("legal"),
+            Bar::new(
+                Paisa::from_raw(-i64::MAX),
+                Paisa::from_raw(100_00),
+                Paisa::from_raw(-i64::MAX),
+            )
+            .expect("Bar::new admits a low below zero"),
+            Direction::Long,
+            crate::fill::Anchor::PrintedExtreme,
+        )
+        .expect("priced");
+        let charges =
+            charge_stack(fills, 1, &rates_on(Exchange::Nse, example_day())).expect("in range");
+        assert_eq!(charges.sell_notional(), TICK_HELPER);
+        assert_eq!(charges.buy_notional(), Paisa::from_raw(100_00));
+        assert_eq!(charges.gross_pnl().raw(), TICK_HELPER.raw() - 100_00);
+    }
 }

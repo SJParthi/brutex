@@ -1023,7 +1023,12 @@ fn identity_from_name(path: &Path) -> Option<[u8; 32]> {
     // than normalising it: this directory's filenames are written by
     // `Live::path` and nothing else, so a name that is not lowercase hex was not
     // written by this program.
-    if !stem.bytes().all(|b| b.is_ascii_hexdigit()) {
+    //
+    // LOWERCASE, and `is_ascii_hexdigit` is not that check either: it admits
+    // `b'A'..=b'F'`, and `from_str_radix` parses `"AA"` to the byte `"aa"` does,
+    // so a foreign `AA..AA.bin` reported the identity `aa..aa.bin` names.
+    // W2-cli9-6, D-0931.
+    if !stem.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
         return None;
     }
     let mut out = [0_u8; 32];
@@ -1103,6 +1108,45 @@ mod tests {
     };
     use crate::frontier::Row;
     use crate::frontier::STRIDE_BYTES;
+
+    /// An upper-case hex name is not an identity, because `Live::path` writes
+    /// `{byte:02x}` and nothing else writes this directory.
+    ///
+    /// `u8::is_ascii_hexdigit` admits `b'A'..=b'F'` and `from_str_radix` parses
+    /// `"AA"` to the same byte as `"aa"`, so before this row a foreign
+    /// `AA..AA.bin` parsed to `[0xAA; 32]`, the identity `aa..aa.bin` already
+    /// names. W2-cli9-6, D-0931.
+    #[test]
+    fn an_upper_case_hex_name_is_not_an_identity() {
+        let root = std::path::Path::new("/nonexistent-brutex-root");
+        let written = Live::path(root, &[0xAA; 32]);
+        assert_eq!(
+            super::identity_from_name(&written),
+            Some([0xAA; 32]),
+            "the name the only writer produces parses to its identity"
+        );
+        let mut every_digit = [0_u8; 32];
+        for (slot, byte) in every_digit.iter_mut().zip((0_u8..=0xff).step_by(9)) {
+            *slot = byte;
+        }
+        assert_eq!(
+            super::identity_from_name(&Live::path(root, &every_digit)),
+            Some(every_digit),
+            "every lowercase digit the writer can emit, 0-9 and a-f, is admitted"
+        );
+        let upper = Live::dir(root).join(format!("{}.bin", "AA".repeat(32)));
+        assert_eq!(
+            super::identity_from_name(&upper),
+            None,
+            "a name that is not lowercase hex was not written by this program"
+        );
+        let mixed = Live::dir(root).join(format!("{}Aa.bin", "aa".repeat(31)));
+        assert_eq!(
+            super::identity_from_name(&mixed),
+            None,
+            "one upper-case digit is enough to refuse the name"
+        );
+    }
 
     /// One file name of the only shape the reader admits: sixty-four hex
     /// characters and `.bin`, the byte repeated thirty-two times.

@@ -196,6 +196,40 @@ pub enum LakeError {
         arrived: usize,
     },
 
+    /// A column chunk still held a row after the row group's declared
+    /// `num_rows` had been read.
+    ///
+    /// The opposite direction of [`Self::ShortColumnChunk`]. The reader asks
+    /// the column for exactly `num_rows` records, so a footer that UNDERSTATES
+    /// the count used to be read as the declared prefix and the rest of the
+    /// chunk dropped without a word. The reader now asks for one more record
+    /// after the declared count, and any answer but none is this refusal.
+    /// W3-lake1-2.
+    LongColumnChunk {
+        /// The column that held more.
+        column: &'static str,
+        /// The row count the row group declared.
+        declared: usize,
+    },
+
+    /// A column chunk still held bytes after the page walk stopped at its
+    /// declared value count.
+    ///
+    /// The case [`Self::LongColumnChunk`] cannot see: a footer that understates
+    /// the row group's `num_rows` and the chunk's `num_values` together, on a
+    /// page boundary. The walk stops there, the column reader is handed exactly
+    /// the declared rows, and the pages after it were dropped without a word.
+    /// The format makes a chunk's byte range exactly its pages, so bytes left
+    /// over are pages the declared counts do not cover. Leftover pages that
+    /// cannot hold a row — a dictionary page, a data page declaring no values
+    /// — are stepped over before counting. W3-lake1-2.
+    UnreadChunkBytes {
+        /// The column whose chunk held more.
+        column: &'static str,
+        /// How many bytes of the chunk were never read.
+        bytes: usize,
+    },
+
     /// A column that must never be null was null.
     ///
     /// Measured across 170,547 F&O rows and 78,448 cash/index rows: timestamp,
@@ -206,6 +240,17 @@ pub enum LakeError {
     UnexpectedNull {
         /// The column.
         column: &'static str,
+        /// Which row of the row group.
+        row: usize,
+    },
+
+    /// A PRESENT `open_interest` value equals the null sentinel.
+    ///
+    /// `CLAUDE.md` §7 fixes `i64::MIN` as "the vendor reported none", and the
+    /// reader writes it for a Parquet null. A present value equal to it would
+    /// read back through [`crate::bar::Bar::open_interest`] as `None`, turning
+    /// a value into an absence, so it is refused instead. W3-lake1-4.
+    OpenInterestIsNullSentinel {
         /// Which row of the row group.
         row: usize,
     },
@@ -246,6 +291,27 @@ pub enum LakeError {
         asked: usize,
         /// How many the file holds.
         held: usize,
+    },
+
+    /// The footer's file-level row count is not the sum of its row groups'
+    /// declared row counts.
+    ///
+    /// A footer can understate a row group's `num_rows`, every chunk's
+    /// `num_values` and every chunk's byte length together, cut at a page
+    /// boundary. Each column then decodes whole as the declared prefix: the
+    /// page walk has no leftover bytes to count
+    /// ([`Self::UnreadChunkBytes`]) and the one-more-record probe finds
+    /// nothing ([`Self::LongColumnChunk`]), while
+    /// [`crate::reader::LakeFile::num_rows`]
+    /// still reports the rows that were cut. The two counts disagreeing is
+    /// what is left to see, so a row group read under them is refused.
+    /// W3-lake1-2.
+    RowCountsDisagree {
+        /// The file-level `num_rows` the footer declares.
+        file: i64,
+        /// The sum of every row group's declared `num_rows`, widened so the
+        /// sum cannot overflow.
+        groups: i128,
     },
 
     /// A count in the file did not fit the machine's `usize`, or a length was
@@ -311,9 +377,21 @@ impl fmt::Display for LakeError {
                 f,
                 "column `{column}` does not cover its row group: {expected} expected, {arrived} arrived, diverging at row {row}; a chunk that runs out is damage rather than a tail of nulls, and it is refused rather than filled with nulls this reader invented"
             ),
+            Self::LongColumnChunk { column, declared } => write!(
+                f,
+                "column `{column}` holds more than the {declared} rows its row group declares; refusing rather than reading the declared prefix and dropping the rest"
+            ),
+            Self::UnreadChunkBytes { column, bytes } => write!(
+                f,
+                "column `{column}` still holds {bytes} bytes of pages after its declared value count was read; refusing rather than dropping whatever rows those pages hold"
+            ),
             Self::UnexpectedNull { column, row } => write!(
                 f,
                 "column `{column}` is null at row {row}, and a null there has no meaning; refusing rather than substituting a value"
+            ),
+            Self::OpenInterestIsNullSentinel { row } => write!(
+                f,
+                "column `open_interest` holds a present i64::MIN at row {row}, which is the null sentinel; refusing rather than reading a present value as absent"
             ),
             Self::NotRepresentable {
                 column,
@@ -330,6 +408,10 @@ impl fmt::Display for LakeError {
             Self::NoSuchRowGroup { asked, held } => {
                 write!(f, "row group {asked} asked for, file holds {held}")
             }
+            Self::RowCountsDisagree { file, groups } => write!(
+                f,
+                "the footer declares {file} rows, its row groups {groups}; refusing rather than reading a row group under counts that disagree"
+            ),
             Self::ImpossibleLength { what, value } => {
                 write!(f, "{what} is {value}, which is not a possible length")
             }
@@ -500,6 +582,10 @@ mod tests {
             ),
             (LakeError::NoSuchRowGroup { asked: 9, held: 2 }, "9"),
             (
+                LakeError::RowCountsDisagree { file: 8, groups: 4 },
+                "declares 8 rows, its row groups 4",
+            ),
+            (
                 LakeError::ImpossibleLength {
                     what: "num_rows",
                     value: -3,
@@ -561,12 +647,27 @@ mod tests {
                 "high",
             ),
             (
+                LakeError::LongColumnChunk {
+                    column: "volume",
+                    declared: 4,
+                },
+                "volume",
+            ),
+            (
+                LakeError::UnreadChunkBytes {
+                    column: "close",
+                    bytes: 517,
+                },
+                "517",
+            ),
+            (
                 LakeError::UnexpectedNull {
                     column: "timestamp",
                     row: 17,
                 },
                 "timestamp",
             ),
+            (LakeError::OpenInterestIsNullSentinel { row: 23 }, "23"),
             (
                 LakeError::NotRepresentable {
                     column: "low",
@@ -717,6 +818,33 @@ mod tests {
         );
     }
 
+    /// `NotRepresentable` is the one variant that wraps another error, and
+    /// `source()` must hand that core error back rather than drop the chain;
+    /// every other variant in both case lists has no cause. GAP14-64.
+    #[test]
+    fn not_representable_exposes_its_core_error_as_the_source() {
+        let core = brutex_core::price::Paisa::from_rupees_half_up(f64::NAN).unwrap_err();
+        let e = LakeError::NotRepresentable {
+            column: "close",
+            row: 9,
+            source: core,
+        };
+        let source = std::error::Error::source(&e).expect("the core error is the source");
+        assert_eq!(source.to_string(), core.to_string());
+
+        let mut without_cause = 0_usize;
+        for (other, _) in file_level_cases().into_iter().chain(content_level_cases()) {
+            if !matches!(other, LakeError::NotRepresentable { .. }) {
+                assert!(
+                    std::error::Error::source(&other).is_none(),
+                    "{other:?} has no cause"
+                );
+                without_cause += 1;
+            }
+        }
+        assert!(without_cause > 0, "the negative half checked something");
+    }
+
     /// The small reporting enum both of the above interpolate.
     #[test]
     fn every_column_type_renders_distinctly() {
@@ -731,5 +859,58 @@ mod tests {
         seen.sort_unstable();
         seen.dedup();
         assert_eq!(seen.len(), all.len(), "two column types render the same");
+    }
+
+    /// **A variant with two fields of one type names each in its own place.**
+    ///
+    /// The substring check above cannot see a swapped pair: it looks for one
+    /// value, and `NoSuchRowGroup { asked: 9, held: 2 }` rendered as "row
+    /// group 2 asked for, file holds 9" still contains "9". Swapping `asked`
+    /// and `held`, or `day` and `month` in `ImpossibleDate`, survived the
+    /// whole crate's tests while sending an operator to the wrong row group or
+    /// a non-existent month (D-1333). The whole sentence is pinned instead.
+    #[test]
+    fn two_same_typed_fields_are_rendered_in_their_own_places() {
+        assert_eq!(
+            LakeError::NoSuchRowGroup { asked: 9, held: 2 }.to_string(),
+            "row group 9 asked for, file holds 2"
+        );
+        assert_eq!(
+            LakeError::Truncated {
+                len: 7,
+                minimum: 12
+            }
+            .to_string(),
+            "truncated parquet file: 7 bytes, the minimum is 12"
+        );
+        assert_eq!(
+            ContractError::ImpossibleDate {
+                day: 31,
+                month: 2,
+                year: 2025
+            }
+            .to_string(),
+            "2025-02-31 is not a real date"
+        );
+        let short = LakeError::ShortColumnChunk {
+            column: "high",
+            row: 41,
+            expected: 100,
+            arrived: 3,
+        }
+        .to_string();
+        assert!(
+            short.contains("100 expected, 3 arrived, diverging at row 41"),
+            "got: {short}"
+        );
+        let partial = LakeError::PartialGreeks {
+            row: 88,
+            present: 4,
+        }
+        .to_string();
+        assert!(
+            partial.starts_with("row 88 carries 4 of the 8"),
+            "got: {partial}"
+        );
     }
 }

@@ -1,6 +1,10 @@
 //! Exact, pinned observation pages for the finite supplied Boolean catalog.
 //! Cold admission hashes and decodes the bounded body; warm reads retain its
 //! owner/receipt/body guards. No decoded page mints a successor authority.
+//! An unpinned first page reuses a held catalog that is still current
+//! (`detail::must_admit`); a new key or a changed generation is cold, and the
+//! one slot makes alternating keys cold every time. `docs/06-limits.md`,
+//! D-0951, states that cost, which is UNVERIFIED as a measurement.
 use axum::http::{StatusCode, Uri};
 use cli::boolean_observation::{
     Cell, Coordinate, ExecutionRefusalBitsV1 as Refusal, ExitGridSelectorV1, ForcedStopV1,
@@ -153,6 +157,14 @@ pub async fn boolean_json(uri: Uri) -> Response {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Cold authentications run on this thread, so a test can tell a warm
+    /// page from a fresh hash and decode of the whole body. Per thread, so a
+    /// test running beside another cannot count the other's. Test builds only.
+    pub(crate) static COLD_ADMISSIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 struct Cached {
     root: PathBuf,
     identity: [u8; 32],
@@ -178,12 +190,15 @@ fn render_with_budget(
         .get_or_init(|| Mutex::new(None))
         .lock()
         .map_err(|_| "Boolean catalog cache poisoned")?;
-    if asked.completion.is_none()
-        || !cache.as_ref().is_some_and(|held| {
-            held.root == root && held.identity == asked.identity && held.budget == budget
-        })
-    {
+    let held = cache.as_ref().filter(|held| {
+        held.root == root && held.identity == asked.identity && held.budget == budget
+    });
+    if crate::detail::must_admit(held.is_some(), asked.completion.is_some(), || {
+        held.is_some_and(|held| held.reader.require_current().is_ok())
+    }) {
         *cache = None;
+        #[cfg(test)]
+        COLD_ADMISSIONS.with(|count| count.set(count.get() + 1));
         let reader = Reader::open(root, asked.identity, budget.bytes()).map_err(|why| budget.context(&format!(
             "Catalog {} unavailable under configured evidence root {}: {why}. The dashboard BRUTEX_STORE must match the catalog command OUTPUT_ROOT; no other folder was searched.",
             crate::server::hex32(asked.identity), root.display()

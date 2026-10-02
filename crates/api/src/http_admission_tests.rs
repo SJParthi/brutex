@@ -114,6 +114,11 @@ fn head_of(answer: &str) -> String {
         .to_ascii_lowercase()
 }
 
+/// The response body, after the head.
+fn body_of(answer: &str) -> &str {
+    answer.split_once("\r\n\r\n").map_or("", |(_, body)| body)
+}
+
 /// The three headers, each present exactly once with its exact value.
 fn assert_never_framed(what: &str, answer: &str) {
     let head = head_of(answer);
@@ -526,4 +531,91 @@ fn a_journaled_read_is_refused_only_when_it_names_another_site() {
             "{path}"
         );
     }
+}
+
+/// **EVERY AUDITED ROUTE, NOT THREE OF THEM: ANOTHER SITE'S REQUEST IS REFUSED
+/// BEFORE THE JOURNAL, AND THE OPERATOR'S OWN IS JOURNALED UNDER ITS NAME.**
+///
+/// [`a_refused_or_cross_site_journaled_request_never_opens_the_journal`] names
+/// three paths, so deleting `/frontier.json` from the audited list removed its
+/// record and its cross-site refusal and every `api` test still passed
+/// (GAP14-57). This walks [`crate::operation_audit::AUDITED`] whole. Each route
+/// is asked by `GET`, `HEAD` and a same-`Origin` `POST`, under three foreign
+/// fetch-site values, a repeated one and one that is not text; every answer is
+/// a `403` with no audit id, and the journal directory does not exist after
+/// all of them. Then one same-origin `GET` per route adds exactly one record
+/// labelled `GET <route>`, a `POST`-only route's `405` included. D-0952.
+#[tokio::test]
+async fn every_audited_route_refuses_another_sites_request_before_the_journal() {
+    let _apart = crate::detail::apart_from_slot_owners().await;
+    let root = owned_root("d0952-every-audited-route");
+    let journal_dir = root.join("audit");
+    let (store, journal_dir) = (&root, &journal_dir);
+    live(
+        |addr| audited(store, store, addr),
+        |addr| async move {
+            let local = addr.to_string();
+            let origin = format!("Origin: http://{local}\r\n");
+            // READ OFF THE ROUTER, NOT OFF THE LIST UNDER TEST: a route dropped
+            // from `AUDITED` is still registered, so it is still asked here.
+            let routes = crate::operation_audit::tests::journaled_by_registration();
+            assert_eq!(routes.len(), crate::operation_audit::AUDITED.len());
+            for route in &routes {
+                for method in ["GET", "HEAD", "POST"] {
+                    for value in [
+                        "Sec-Fetch-Site: cross-site\r\n",
+                        "Sec-Fetch-Site: same-site\r\n",
+                        "Sec-Fetch-Site: nonsense\r\n",
+                        "Sec-Fetch-Site: same-origin\r\nSec-Fetch-Site: same-origin\r\n",
+                        "Sec-Fetch-Site: cross-site\r\nSec-Fetch-Site: same-origin\r\n",
+                    ] {
+                        let extra = format!("{value}{origin}");
+                        let answer = ask(addr, method, route, &local, &extra).await;
+                        refused(&format!("{method} {route} [{value}]"), &answer);
+                    }
+                }
+                assert!(
+                    !journal_dir.exists(),
+                    "a cross-site request to {route} opened the invocation journal"
+                );
+            }
+            let fallback = ask(
+                addr,
+                "GET",
+                "/d0952-no-such-route.json",
+                &local,
+                "Sec-Fetch-Site: same-origin\r\n",
+            )
+            .await;
+            assert!(!journal_dir.exists(), "the fallback is not journaled");
+            for (count, route) in (1..).zip(&routes) {
+                let answer = ask_journaled(
+                    addr,
+                    "GET",
+                    route,
+                    &local,
+                    "Sec-Fetch-Site: same-origin\r\n",
+                )
+                .await;
+                assert!(!status_line(&answer).contains("403"), "{route}: {answer}");
+                // A registered route answers itself; a name in the list that
+                // no longer names a route falls through to the front end.
+                assert_ne!(
+                    body_of(&answer),
+                    body_of(&fallback),
+                    "{route} is audited and not served: {answer}"
+                );
+                assert!(
+                    head_of(&answer).contains("x-brutex-request-audit:"),
+                    "{route} was not journaled: {answer}"
+                );
+                let rows = journal::page(store, None, 32).expect("a readable journal");
+                assert_eq!(rows.len(), count.min(32), "{route}: one record per read");
+                let newest = rows.first().expect("the record just written");
+                assert_eq!(newest.label, format!("GET {route}"));
+            }
+        },
+    )
+    .await;
+    let _ = std::fs::remove_dir_all(&root);
 }

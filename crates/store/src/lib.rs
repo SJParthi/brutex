@@ -64,6 +64,8 @@ pub mod flock;
 pub mod format;
 pub mod header;
 pub mod layout;
+/// Per-architecture `O_NOFOLLOW` / `O_NONBLOCK`, written once (D-0980).
+pub mod open_flags;
 pub mod path;
 pub mod repair;
 

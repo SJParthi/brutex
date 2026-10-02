@@ -1360,6 +1360,22 @@ jobs:
           # field.
           pull_asserted_number='2025-07 2025-08 401 42'
 
+          # ---- group 31: ONE WRONG REGION AND THREE CASE LABELS, all four
+          # offered by `ssm.rs` tests rather than emitted. D-1371, D-1372.
+          #
+          # `ap-south-2` is a real AWS region that is NOT the one CLAUDE.md §8
+          # names. `ssm.rs:1212` offers it beside `us-east-1` and two malformed
+          # spellings of `ap-south-1` to prove the client refuses to sign for
+          # any region but `ap-south-1`: the near miss is the point of the test,
+          # and it names no account, environment, vendor or field.
+          #
+          # `empty-id`, `empty-secret` and `empty-token` are the `assert!`
+          # labels of the three cases proving an empty AWS access key id,
+          # secret key or session token is refused before a request is signed.
+          # Hyphenated test-case names, never a segment of a parameter path.
+          # Declared on the owner's decision (PR #35), not widened by a gate.
+          ssm_region_fixture='ap-south-2 empty-id empty-secret empty-token'
+
           allowed="${seg_shape} ${vendor_wire} ${claim_standing} ${config_fixture}
           ${secret_fixture} ${scaffold} ${timeframe} ${governor}
           ${record_field} ${header_name} ${bound_number}
@@ -1370,7 +1386,8 @@ jobs:
           ${rolling_word} ${rolling_scaffold} ${pull_fixture}
           ${ssm_leak_fixture}
           ${vendor_error} ${event_field} ${pull_scratch} ${bare_number}
-          ${capture_field} ${pull_scratch_2} ${pull_assert} ${pull_asserted_number}"
+          ${capture_field} ${pull_scratch_2} ${pull_assert} ${pull_asserted_number}
+          ${ssm_region_fixture}"
           # MATERIALISED ONCE, AND NOT PIPED. `printf '%s\n' $allowed |
           # grep -qxF` was the shape here, and under `set -euo pipefail` it is
           # unsound in the direction that fails a green build:
@@ -3070,6 +3087,10 @@ jobs:
           #     `/logs` does not read looked exactly like a run that was fully
           #     observable". Both are CLI contract to the operator, the same
           #     category as `server.rs`'s usage text already declared here.
+          #
+          #   greeks/src/solver.rs println! 5 -> 7 (D-0921). Both new prints are
+          #     inside `#[cfg(test)]` and report the measured bracket width and
+          #     the bisected-solve census, the same kind as the five beside them.
           declared='api/src/calendar_of.rs:println!:2
           api/src/constituents.rs:println!:2
           api/src/server.rs:println!:16
@@ -3083,7 +3104,7 @@ jobs:
           cli/src/main.rs:println!:2
           greeks/src/bsm.rs:println!:4
           greeks/src/normal.rs:println!:3
-          greeks/src/solver.rs:println!:5
+          greeks/src/solver.rs:println!:7
           pull/src/http.rs:eprintln!:6
           telemetry/src/record.rs:eprintln!:1
           telemetry/src/sink.rs:eprintln!:1'
@@ -3093,14 +3114,15 @@ jobs:
           # child process. `crate::isolated::rerun` re-runs one test of the api
           # test binary with a chosen environment, and each child prints one
           # line its parent asserts on -- `FRONTIER-ADMITTED`, `SERVER-BUDGET`
-          # and `TRADES-ADMITTED` -- as proof the child took its own branch and
+          # and `TRADES-ADMITTED` (plus `TRADES-REPAIRED`, D-0919's
+          # repaired-by-rename child, fix/c4-cli-06) -- as proof the child took its own branch and
           # did not pass by testing nothing. Each sits inside
           # `#[cfg(test)] mod tests`, so no production path reaches it, and it
           # is not a diagnostic: nothing is wrong when it prints.
           declared="$declared api/src/booleanlaunch_tests.rs:println!:2
           api/src/frontierjson.rs:println!:1
           api/src/sweeprun.rs:println!:1
-          api/src/trades.rs:println!:1
+          api/src/trades.rs:println!:2
           api/src/recovery.rs:println!:1
           cli/src/boolean_candidate_tests.rs:eprintln!:2
           cli/src/index_stop_qualification_tests.rs:eprintln!:2
@@ -4832,6 +4854,11 @@ jobs:
           #     is allowed for, computed once for all three tests instead of once
           #     each. Only integer exceedance counts cross threads, so no float is
           #     ever summed in an order that depends on the thread count.
+          #   greeks/solver.rs 13 -> 14 (D-0921). The new line is
+          #     `Checked::bracket(&self, price: f64, kind) -> (f64, f64)`, the
+          #     no-arbitrage volatility bracket the fixed-step bisection starts
+          #     from. A volatility is a statistic with no paisa representation,
+          #     the same reason the other 13 in this file are allowed.
           allow_float='
           crates/api/src/ingest.rs 1
           crates/api/src/server.rs 4
@@ -4839,7 +4866,7 @@ jobs:
           crates/greeks/src/bsm.rs 36
           crates/greeks/src/normal.rs 21
           crates/greeks/src/error.rs 17
-          crates/greeks/src/solver.rs 13
+          crates/greeks/src/solver.rs 14
           crates/greeks/src/moneyness.rs 6
           crates/pull/src/pricing.rs 22
           crates/pull/src/tenor.rs 5
@@ -5422,6 +5449,15 @@ jobs:
           #     unchanged because the comparator is total, and
           #     `selecting_the_page_then_ordering_it_equals_ordering_everything_then_slicing`
           #     runs both strategies and requires them to agree.
+          #   api/bars.rs 2 -> 3 -- D-0953, W1-api5-4. The single partition at
+          #     `offset + limit` still ordered every row BEFORE the page, and
+          #     `offset` is uncapped, so a page past the end ordered the whole
+          #     window to answer nothing. `page_of` now partitions at `offset`,
+          #     then at `limit` inside the rest, then orders only the page: three
+          #     constructs, each bounded by the window or by the PAGE, never by
+          #     the rows outside it. An offset at or past the end returns before
+          #     any of them. Measured by
+          #     `api::bars::tests::the_page_orders_only_itself_wherever_the_offset_lands`.
           #   api/server.rs 2 -> 4 -- one is the target list, ALSO FIXED here: it
           #     ordered by `underlying` alone, a PARTIAL key over
           #     `{exchange, segment, underlying, kind}`, so equal-comparing
@@ -5545,7 +5581,7 @@ jobs:
           crates/runner/src/pbo.rs 2
           crates/runner/src/excursion.rs 1
           crates/pull/src/folder.rs 1
-          crates/api/src/bars.rs 2
+          crates/api/src/bars.rs 3
           crates/api/src/calendar_of.rs 3
           crates/api/src/constituents.rs 3
           crates/api/src/logs.rs 1
@@ -7135,7 +7171,7 @@ jobs:
           cover='
           core   crates/core/benches/ratio.rs   3  C-09 C-09b C-10
           pull   crates/pull/benches/ratio.rs   4  C-11 C-12 C-13 C-26
-          store  crates/store/benches/ratio.rs  4  C-01 C-07 C-08 C-28 C-29
+          store  crates/store/benches/ratio.rs  4  C-01 C-07 C-08 C-28 C-29 C-BC-01 C-BC-02
           api    crates/api/benches/ratio.rs    4  C-14 C-15 C-16 C-17 C-27
           costs  crates/costs/benches/ratio.rs  27 C-K-01 C-K-02 C-K-03 C-K-04 C-K-05 C-K-06 C-K-07 C-K-08 C-K-09 C-K-10 C-K-11 C-K-12 C-K-13
           lake      crates/lake/benches/ratio.rs      6  C-L-01 C-L-02 C-L-03 C-L-04
@@ -7143,7 +7179,7 @@ jobs:
           greeks    crates/greeks/benches/ratio.rs    6  C-G-01 C-G-02 C-G-03 C-G-05
           vocab     crates/vocab/benches/ratio.rs     7  C-V-01 C-V-02 C-V-03 C-V-04 C-V-05 C-V-06
           indicators crates/indicators/benches/ratio.rs 5  C-I-01 C-I-02 C-I-03 C-I-04 C-I-05 C-I-06 C-I-07
-          engine    crates/engine/benches/ratio.rs    4  C-E-01 C-E-02 C-E-03 C-E-04 C-E-05 C-E-06 C-E-07 C-E-08 C-E-09 C-E-10 C-E-11
+          engine    crates/engine/benches/ratio.rs    4  C-E-01 C-E-02 C-E-03 C-E-04 C-E-05 C-E-06 C-E-07 C-E-08 C-E-09 C-E-10 C-E-11 C-E-12
           runner    crates/runner/benches/ratio.rs    3  C-R-01 C-R-02 C-R-03 C-R-04 C-R-05
           cli       crates/cli/benches/ratio.rs       4  C-CLI-01 C-CLI-02 C-CLI-03 C-CLI-04 C-CLI-05 C-CLI-06
           '
@@ -7706,7 +7742,8 @@ jobs:
           # `assert!` evaluates only when it FAILS, and methods on `Target`
           # doubles that a given test never calls. Line 1309 is the only one on
           # a production path, and it is `resume_seq`'s `return 0` that
-          # docs/06-limits.md §54 already accounts for.
+          # docs/06-limits.md §54 already accounts for. D-1327: that line is
+          # gone (`resume_point` has none), so `sink.rs` is declared 20.
           #
           # docs/06-limits.md §54 measured the earlier set with
           # `cargo llvm-cov -p telemetry`; this gate runs after the workspace
@@ -7719,7 +7756,7 @@ jobs:
           level.rs 1
           lib.rs 6
           record.rs 1
-          sink.rs 21
+          sink.rs 20
           tail.rs 3
           '
           cargo llvm-cov report --locked --text > /tmp/cov.txt

@@ -13,10 +13,14 @@ use runner::exit_grid_policy::expression_execution::{
     ExpressionExecutionRunV1, SelectedExpressionExitV1,
 };
 use runner::exit_grid_policy::research_resolution::ResearchResolvedExitGridV1;
-use runner::exit_grid_policy::{ExecutionRefusalBitsV1, ExecutionSeriesV1, ExitGridPolicyV1};
+use runner::exit_grid_policy::{
+    AttestedTrainingV1, ExecutionRefusalBitsV1, ExecutionSeriesV1, ExitGridPolicyV1,
+};
 use runner::expression::Expression;
 use runner::grid::{Cell, Chosen, TradeRow};
-use runner::identity::{DailyReferenceBinding, Direction, Params, ReferenceIntegrity, Run};
+use runner::identity::{
+    DailyBindingRefusal, DailyReferenceBinding, Direction, Params, ReferenceIntegrity, Run,
+};
 use runner::outcome::Horizon;
 use runner::research_family::ResearchFamilyV1;
 
@@ -670,8 +674,10 @@ fn compute(
                 .ok_or("Boolean anchor count overflow")?,
         )
         .map_err(display)?;
+    let mut shared = Shared::new(source, series, &column, request.horizon);
+    let mut sides = resolutions.each_ref().map(PricedSide::new);
     for (program_index, program) in request.programs.iter().enumerate() {
-        for resolved in &resolutions {
+        for side in &mut sides {
             let (mut produced, anchor) = produce_side(
                 request,
                 source,
@@ -679,9 +685,8 @@ fn compute(
                 commit,
                 program_index,
                 program,
-                resolved,
-                &column,
-                series,
+                side,
+                &mut shared,
                 &session_index,
                 &mut remaining,
             )?;
@@ -705,25 +710,23 @@ fn compute(
     clippy::too_many_arguments,
     reason = "one exact program/side transaction retains all source and physical authorities"
 )]
-fn produce_side(
+fn produce_side<'a>(
     request: &Request<'_>,
     source: &Source,
     catalog: [u8; 32],
     commit: &str,
     program_index: usize,
     program: &Expression,
-    resolved: &ResearchResolvedExitGridV1,
-    column: &Column,
-    series: ExecutionSeriesV1<'_>,
+    side: &mut PricedSide<'a>,
+    shared: &mut Shared<'a>,
     sessions: &Sessions,
     remaining: &mut Remaining,
 ) -> Result<(Vec<BooleanCoordinateV1>, ExpressionTrainingAnchorV1), String> {
-    let data_digest = runner::identity::data_digest_with_daily_reference(
-        &source.data.signal.bars,
-        &source.data.exact_minute.bars,
-        reference(source),
-    )
-    .map_err(|why| format!("Boolean daily identity refused: {why:?}"))?;
+    let (resolved, series) = (side.resolved, shared.series);
+    let data_digest = shared
+        .digest
+        .get()
+        .map_err(|why| format!("Boolean daily identity refused: {why:?}"))?;
     let run = Run {
         mask: program.referenced(),
         direction: match resolved.side() {
@@ -754,10 +757,8 @@ fn produce_side(
     let attempt =
         crate::sweep_evidence::begin(request.output, run.run_id().bytes(), Operation::Expression)?;
     let produced = (|| {
-        let attested = resolved
-            .attest_training(series, column, request.horizon)
-            .map_err(display)?;
-        let evaluated = resolved.evaluate_expression_with_attested(&attested, &run)?;
+        let attested = side.attested(shared)?;
+        let evaluated = resolved.evaluate_expression_with_attested(attested, &run)?;
         let valid = resolved.validate_expression_evaluation(&evaluated)?;
         let mut rows = Vec::new();
         rows.try_reserve_exact(evaluated.grid().cells.len())
@@ -775,7 +776,7 @@ fn produce_side(
             }
             let disposition =
                 resolved.classify_expression_coordinate(&valid, Chosen::from_cell(cell))?;
-            let trades = resolved.materialize_expression_coordinate(&attested, &valid, ordinal)?;
+            let trades = resolved.materialize_expression_coordinate(attested, &valid, ordinal)?;
             if trades.len() as u64 != cell.trades {
                 return Err("Boolean materialized trade count changed".to_owned());
             }
@@ -817,6 +818,111 @@ fn produce_side(
 struct Remaining {
     trades: u64,
     bytes: u64,
+}
+
+/// One family's three-stream source digest: hashed the first time a program
+/// asks for it and reused by every later one.
+///
+/// It reads no program: its inputs are the signal, exact-minute and daily
+/// streams and their binding, all fixed for the family. cli used to hash them
+/// afresh for each program × side, in TRAINING and again in the later
+/// comparison. Hashing on first use rather than ahead of the loop leaves a
+/// refusal where it was, at the first program. W2-cli2-3.
+///
+/// This is cli's digest only. Minting each program × side's run through
+/// `ExpressionExecutionRunV1::new_with_daily_reference` still hashes the same
+/// streams in the runner (W3-runner2-3, D-0711).
+struct SourceDigest<'a> {
+    source: &'a Source,
+    digest: Option<[u8; 32]>,
+}
+
+impl<'a> SourceDigest<'a> {
+    const fn new(source: &'a Source) -> Self {
+        Self {
+            source,
+            digest: None,
+        }
+    }
+
+    fn get(&mut self) -> Result<[u8; 32], DailyBindingRefusal> {
+        if let Some(digest) = self.digest {
+            return Ok(digest);
+        }
+        #[cfg(test)]
+        tests::count(&tests::DIGESTS);
+        let digest = runner::identity::data_digest_with_daily_reference(
+            &self.source.data.signal.bars,
+            &self.source.data.exact_minute.bars,
+            reference(self.source),
+        )?;
+        self.digest = Some(digest);
+        Ok(digest)
+    }
+}
+
+/// What every program × side of one TRAINING family shares: the source digest
+/// and the series, column and horizon each side is attested over.
+struct Shared<'a> {
+    digest: SourceDigest<'a>,
+    series: ExecutionSeriesV1<'a>,
+    column: &'a Column,
+    horizon: Horizon,
+}
+
+impl<'a> Shared<'a> {
+    const fn new(
+        source: &'a Source,
+        series: ExecutionSeriesV1<'a>,
+        column: &'a Column,
+        horizon: Horizon,
+    ) -> Self {
+        Self {
+            digest: SourceDigest::new(source),
+            series,
+            column,
+            horizon,
+        }
+    }
+}
+
+/// One side's resolution and its TRAINING attestation, made the first time a
+/// program prices that side and reused by every later program.
+///
+/// `attest_training` reads the series, the column and the resolution, never a
+/// run; its own contract is to attest once and evaluate per candidate. Each
+/// program × side used to attest afresh. Attesting on first use keeps the
+/// refusal inside the first program's attempt, where it was. W2-cli2-3;
+/// `a_refused_attestation_is_recorded_inside_the_first_sides_attempt`.
+struct PricedSide<'a> {
+    resolved: &'a ResearchResolvedExitGridV1,
+    attested: Option<AttestedTrainingV1<'a>>,
+}
+
+impl<'a> PricedSide<'a> {
+    const fn new(resolved: &'a ResearchResolvedExitGridV1) -> Self {
+        Self {
+            resolved,
+            attested: None,
+        }
+    }
+
+    fn attested(&mut self, shared: &Shared<'a>) -> Result<&AttestedTrainingV1<'a>, String> {
+        let attested = if let Some(attested) = self.attested.take() {
+            attested
+        } else {
+            #[cfg(test)]
+            tests::count(&tests::ATTESTATIONS);
+            #[cfg(test)]
+            if let Some(why) = tests::attest_fault() {
+                return Err(why);
+            }
+            self.resolved
+                .attest_training(shared.series, shared.column, shared.horizon)
+                .map_err(display)?
+        };
+        Ok(self.attested.insert(attested))
+    }
 }
 
 fn catalog_words(digest: [u8; 32]) -> [u64; 4] {

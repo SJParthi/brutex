@@ -70,8 +70,9 @@ use store::catalog::{self, Held};
 ///
 /// # Why the whole-store sweep needs its own ceiling
 ///
-/// `engine::DEFAULT_CEILING` is `1 << 26` and its own doc prices that at
-/// **8 GiB** — more than an ordinary machine has. So on a single sweep the
+/// `engine::DEFAULT_CEILING` is `1 << 27` (this said `1 << 26`, the value
+/// before D-0304; corrected by D-0926) and its own doc's table prices `2^26`
+/// at **8 GiB**, so `2^27` is more still — more than an ordinary machine has. So on a single sweep the
 /// constant never binds and the real bound is `Ladder::cannot_grow`, a genuine
 /// `try_reserve` probe. `engine::Breach::Memory`'s doc states that as the
 /// design: the sweep *"uses what a 4 GB machine has and what a 48 GB machine
@@ -571,8 +572,9 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
     // A STATED CEILING, BECAUSE THE DEFAULT ONE IS THE MACHINE'S FREE MEMORY.
     //
     // This was `Ladder::with_min_hits(min_hits)` alone, which leaves
-    // `engine::DEFAULT_CEILING` in force — and that constant is `1 << 26`,
-    // priced by its own doc at 8 GiB, more than an ordinary machine has. So the
+    // `engine::DEFAULT_CEILING` in force — and that constant is `1 << 27`
+    // (written here as `1 << 26` until D-0926), more than the 8 GiB its own doc
+    // prices `2^26` at, so more than an ordinary machine has. So the
     // bound that actually binds is not the constant: it is `cannot_grow`, a real
     // `try_reserve` probe. `Breach::Memory`'s doc says that is deliberate — the
     // sweep "uses what a 4 GB machine has and what a 48 GB machine has,
@@ -839,6 +841,12 @@ fn census_lines(out: &mut String, walk: &catalog::Census, offered: u64) {
             walk.unknown_vendor, walk.unknown_rung
         );
     }
+    // THE ENTRIES THE CATALOG SAW AND OFFERED TO NOBODY: a locked directory, a
+    // symbolic link it does not follow, a non-UTF-8 name, a FIFO or socket.
+    // Counted since D-0765 to D-0769 and printed nowhere until D-0769, so a
+    // locked symbol directory's months were absent from this report without a
+    // line naming them.
+    out.push_str(&walk.unoffered_report());
 }
 
 /// One line per instrument-month, and its identity under each month that
@@ -1488,6 +1496,63 @@ mod tests {
             &[],
         );
         assert!(!quiet.contains("were not offered"), "{quiet}");
+    }
+
+    /// **The report names what the catalog saw and offered to nobody.** D-0769.
+    ///
+    /// `census_lines` printed `spot`, `unknown_vendor` and `unknown_rung` only,
+    /// so a locked symbol directory and a linked one were absent from a
+    /// sweep-all report without a line naming them (found by a review). The
+    /// line is the catalog's own `unoffered_report`, and a census with none
+    /// of those buckets prints no such line.
+    #[test]
+    fn the_report_names_the_entries_the_catalog_did_not_offer() {
+        let tally = Tally::default();
+        let census = store::catalog::Census {
+            seen: 2,
+            unreadable: 1,
+            linked: 1,
+            ..store::catalog::Census::default()
+        };
+        let text = render("groww", "1min", 100, "deadbeef", "", &census, &tally, &[]);
+        assert!(text.contains(&census.unoffered_report()), "{text}");
+        assert!(
+            text.contains("could not read 1 director(ies) or entr(ies), did not follow 1"),
+            "{text}"
+        );
+        let quiet = render(
+            "groww",
+            "1min",
+            100,
+            "deadbeef",
+            "",
+            &store::catalog::Census::default(),
+            &tally,
+            &[],
+        );
+        assert!(!quiet.contains("NOT OFFERED"), "{quiet}");
+    }
+
+    /// **A linked symbol directory is named on a real sweep-all run.** D-0769.
+    ///
+    /// D-0766 stopped the catalog following a link, so a symbol directory that
+    /// is a link is no longer offered. This pins that the run says so rather
+    /// than printing one fewer month and nothing else.
+    #[test]
+    fn a_sweep_over_a_store_with_a_linked_symbol_directory_names_the_link() {
+        let _knobs = crate::knobs::serially();
+        crate::knobs::clear_all();
+        let text = crate::audited_stored::with_warmed_store(|root| {
+            let index = root.join("bars/zerodha/NSE/INDEX");
+            std::os::unix::fs::symlink(index.join("NIFTY"), index.join("BANKNIFTY"))
+                .expect("a symlink is creatable");
+            sweep_under(root, "zerodha", "1min", u64::MAX, "deadbeef").expect("the run completes")
+        });
+        crate::knobs::clear_all();
+        assert!(
+            text.contains("did not follow 1 symbolic link(s)"),
+            "the linked directory is named: {text}"
+        );
     }
 
     /// A ceiling breach is reported as a floor on depth, not as an answer.

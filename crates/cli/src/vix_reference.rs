@@ -505,7 +505,11 @@ mod tests {
     #[test]
     fn an_off_grid_stored_bar_and_an_off_grid_lookup_both_refuse() {
         let first = ist_minute(2026, 8, 3, 9 * 60 + 15);
-        let (root, _) = seed("off-grid", Vendor::Dhan, &[bar(first + 1, 0)]);
+        // The store now refuses an off-grid append (D-0915), so the stored
+        // state is a pre-D-0915 file: an on-grid bar, then its stamp moved and
+        // its block resealed.
+        let (root, file_path) = seed("off-grid", Vendor::Dhan, &[bar(first, 0)]);
+        overwrite_i64(&file_path, 0, 0, first + 1, 1);
         let why = VixReferenceMonth::open(&root, Vendor::Dhan, month())
             .expect_err("an off-grid stored timestamp is corrupt");
         assert!(why.contains("off the exact one-minute grid"), "{why}");
@@ -522,7 +526,10 @@ mod tests {
     fn a_wrong_month_stored_bar_and_a_wrong_month_lookup_both_refuse() {
         let august = ist_minute(2026, 8, 3, 9 * 60 + 15);
         let september = ist_minute(2026, 9, 1, 9 * 60 + 15);
-        let (root, _) = seed("wrong-month", Vendor::Dhan, &[bar(september, 0)]);
+        // The store now refuses an out-of-month append (D-0915); a
+        // pre-D-0915 file is forged the same way as the off-grid case.
+        let (root, file_path) = seed("wrong-month", Vendor::Dhan, &[bar(august, 0)]);
+        overwrite_i64(&file_path, 0, 0, september, 1);
         let why = VixReferenceMonth::open(&root, Vendor::Dhan, month())
             .expect_err("a foreign-month row cannot enter the index");
         assert!(why.contains("IST month 2026-09"), "{why}");

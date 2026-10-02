@@ -60,8 +60,13 @@
 use hmac::{Hmac, Mac};
 use sha1::Sha1;
 
-/// Seconds per step. RFC 6238 §4 default, and what every broker documented in
-/// `docs/00-charter.md` uses.
+/// Seconds per step. RFC 6238 §4's default (`X = 30`).
+///
+/// It used to add *"and what every broker documented in `docs/00-charter.md`
+/// uses"*. The charter records no step length for any broker — its only TOTP
+/// row is Groww's *"TOTP-derived daily token, reset 06:00 IST"* — so that half
+/// was a vendor claim with no source, which `CLAUDE.md` §3 rule 1 forbids.
+/// Whether a given broker uses 30 s is **UNVERIFIED** here. D-1374.
 pub const STEP_SECONDS: u64 = 30;
 
 /// Digits in the code. RFC 6238 §5.3 default.
@@ -139,8 +144,9 @@ impl core::error::Error for TotpError {}
 ///
 /// # Why hand-written
 ///
-/// One alphabet, one bit-packing loop, and no padding to handle — a shared
-/// secret is written without `=`. A dependency for twenty lines is the trade
+/// One alphabet and one bit-packing loop. A shared secret is usually written
+/// without `=`; trailing RFC 4648 padding is accepted and skipped, and a `=`
+/// anywhere but the tail is refused (D-1373). A dependency for twenty lines is the trade
 /// `CLAUDE.md` §2's spirit refuses, and `crates/pull` already hand-rolls `SigV4`
 /// for the same reason.
 ///
@@ -224,11 +230,27 @@ fn decode_alphabet(secret: &str) -> Result<Vec<u8>, TotpError> {
     let mut out = Vec::with_capacity(secret.len() * 5 / 8 + 1);
     let mut acc: u32 = 0;
     let mut bits: u32 = 0;
+    // Whether padding has begun. RFC 4648 §6 padding is a TAIL: once a `=` has
+    // been read, only more `=` (or a display separator) may follow.
+    let mut padded = false;
 
     for byte in secret.bytes() {
-        // Separators as displayed. `=` is padding and carries no bits.
-        if matches!(byte, b' ' | b'-' | b'=') {
+        // Separators as displayed.
+        if matches!(byte, b' ' | b'-') {
             continue;
+        }
+        // `=` is padding and carries no bits — at the END. It used to be
+        // skipped wherever it stood, so `GEZD=GNBV` decoded to the same key as
+        // `GEZDGNBV` and produced a valid-looking code from a secret that was
+        // mis-transcribed: the exact failure `a_bad_character_is_refused_and_
+        // not_skipped` names. A data character after padding is refused, and
+        // the byte reported is the `=` that broke the tail. D-1373.
+        if byte == b'=' {
+            padded = true;
+            continue;
+        }
+        if padded {
+            return Err(TotpError::NotBase32 { byte: b'=' });
         }
         let value = match byte {
             b'A'..=b'Z' => byte - b'A',
@@ -522,6 +544,42 @@ mod tests {
     fn a_bad_character_is_refused_and_not_skipped() {
         assert!(code_at("GEZD0GNBV", 59).is_err());
         assert!(base32_decode("GEZD0GNBV").is_err());
+    }
+
+    /// Padding is a tail, never a separator.
+    ///
+    /// Before D-1373 a `=` was skipped wherever it stood, so a secret with one
+    /// mis-keyed into its middle decoded to a shorter, DIFFERENT key and
+    /// produced a valid-looking code — refused at the vendor with nothing
+    /// here to say why.
+    #[test]
+    fn padding_inside_the_secret_is_refused_and_only_a_tail_is_skipped() {
+        for inside in [
+            "GEZD=GNBV",
+            "=GEZDGNBV",
+            "GEZDGNBV=A",
+            "GEZDGNBV==A==",
+            "GE=-ZD",
+        ] {
+            assert_eq!(
+                base32_decode(inside),
+                Err(TotpError::NotBase32 { byte: b'=' }),
+                "{inside:?} has data after padding"
+            );
+            assert!(code_at(inside, 59).is_err(), "{inside:?} mints no code");
+        }
+        // A tail of padding, with or without display separators after it, is
+        // still the canonical secret.
+        let canonical = base32_decode("GEZDGNBV").expect("legal");
+        for tail in ["GEZDGNBV=", "GEZDGNBV======", "GEZDGNBV== ", "GEZDGNBV=-="] {
+            assert_eq!(
+                base32_decode(tail).expect("legal tail"),
+                canonical,
+                "{tail:?}"
+            );
+        }
+        // And a secret that is ALL padding carries no key.
+        assert_eq!(base32_decode("===="), Err(TotpError::Empty));
     }
 
     /// The length bound is checked BEFORE a character is decoded, which is what
