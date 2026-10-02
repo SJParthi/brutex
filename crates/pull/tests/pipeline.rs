@@ -1113,6 +1113,63 @@ fn a_price_that_leaves_the_paisa_grid_refuses_the_window_and_names_its_field() {
     assert_eq!(landed.bars[0].open, too_big);
 }
 
+/// **BORROWED ROWS LAND EXACTLY AS A WINDOW DOES.** o1api-36, D-1203.
+///
+/// `ingest` used to clone every member's rows into a `RawWindow` to call
+/// `land_with_cash_schedule`; it now hands the rows to `fetch::land_rows`
+/// borrowed. The three entry points must agree byte for byte on every outcome
+/// — bars kept, rows dropped and why, and a refusal — or the copy that was
+/// removed was carrying a behaviour.
+#[test]
+fn borrowed_rows_land_exactly_as_a_window_does() {
+    let at = |timestamp: i64, open: i64| RawRow {
+        timestamp,
+        open,
+        high: open,
+        low: open,
+        close: open,
+        volume: 3,
+        open_interest: Some(7),
+    };
+    // 2022-10-03 09:16 IST, as the encoding test above derives it.
+    let first = 1_664_768_760_i64;
+    let cases: [(Vec<RawRow>, PriceScale); 6] = [
+        (Vec::new(), PriceScale::Paisa),
+        (vec![at(first, 1)], PriceScale::Paisa),
+        // Three kept, one the same minute again, one before the open.
+        (
+            vec![
+                at(first, 10),
+                at(first + 60, 11),
+                at(first + 120, 12),
+                at(first + 120, 13),
+                at(first - 6 * 3_600, 14),
+            ],
+            PriceScale::Paisa,
+        ),
+        // Off the paisa grid once scaled: a refusal, through every entry.
+        (vec![at(first, i64::MAX / 50)], PriceScale::Rupees),
+        (vec![at(first, i64::MAX)], PriceScale::Paisa),
+        (vec![at(i64::MIN, 1), at(i64::MAX, 1)], PriceScale::Paisa),
+    ];
+    let request = request();
+    for (rows, scale) in cases {
+        let encoding = TimestampEncoding::EpochSecondsUtc;
+        let window = RawWindow { rows: rows.clone() };
+        let owned = format!("{:?}", fetch::land(&window, &request, encoding, scale));
+        let scheduled = format!(
+            "{:?}",
+            fetch::land_with_cash_schedule(&window, &request, encoding, scale, None)
+        );
+        let borrowed = format!(
+            "{:?}",
+            fetch::land_rows(&rows, &request, encoding, scale, None)
+        );
+        assert_eq!(owned, scheduled, "{rows:?}");
+        assert_eq!(owned, borrowed, "{rows:?}");
+    }
+}
+
 // ===========================================================================
 // crate::ingest — the member-level failures the run is supposed to survive
 // ===========================================================================

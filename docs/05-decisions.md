@@ -43764,3 +43764,54 @@ refuses it.
 
 Invariants AF-42 (updated) and AF-W3S13-a through AF-W3S13-e;
 `docs/06-limits.md` has the cost and the widened false refusal.
+
+### D-1203 — Pull: reserve rate permits in one call, borrow ingest rows, reserve CSV rows once, and state the decode's memory — 2026-10-02
+
+**The findings (audit 2026-10-02, all low).** o1api-54: waiting for a rate
+permit looped `admit`-and-sleep in both `pull::http::HttpSource::wait_for_permit`
+and `api::server::await_budget`. Waiters that slept the same named wait woke
+together and raced for one permit, so service was not first-come-first-served;
+the transport's loop had no bound; the server's refused after 64 losses with a
+sentence blaming a ceiling below one request per span for what was contention.
+o1api-36: `ingest::one` cloned every member's rows into a `RawWindow` only to
+pass a reference to it. o1api-34: `pull::csv`'s header said no row allocates
+and the row vector is reserved from a bound; each row collected a `Vec<&str>`
+and the row vector started empty. o1api-39: `calendar::kind_of`'s cost note
+named one table walk and the body made two. o1api-33: `http::decode_body`
+builds a whole `serde_json::Value` tree and its peak memory was never stated.
+probestore-2 (`2024+1+3` read as a date) is fixed on `fix/cloud-o1api-44` by
+D-1201's digits-only field check and is not repeated here.
+
+**The choices.** (1) `pull::rate::Governor::reserve(now)` charges the permit
+against the instant the bucket will afford it, moves the forward-only cursor
+there and returns that instant; both callers call it once and sleep once. The
+schedule is the one `admit` would allow at those instants, which a test proves
+by replaying it. A wait past `u64::MAX` charges nothing and returns
+`u64::MAX`. The server's refusal is removed rather than reworded: a reservation
+cannot lose a race, and a zero ceiling is already refused at construction. (2)
+Both callers read one clock, `pull::rate::monotonic_micros`: the transport read
+the wall clock, which `admit`'s forward-only cursor tolerated but a reservation
+would turn into a sleep the length of any backward step. The server's private
+copy of that function is gone. (3) `fetch::land_rows(&[RawRow], ..)` is the one
+landing body; `land_with_cash_schedule` delegates to it and `ingest::one` calls
+it with the member's own rows. (4) `csv::decode_rows` splits into a fixed
+`MAX_FIELDS` (10) array, still counting fields past it so `FieldCount` reports
+the true width, and reserves `min(newlines + 1, MAX_ROWS)` rows once. (5)
+`kind_of`'s note names both walks, and a compile-time assertion pins 5 and 4.
+(6) o1api-33 is stated, not fixed: `decode_body`'s doc and `docs/06-limits.md`
+give the argued ~16× bound from a 32-byte node, pinned by a test, and say no
+peak was measured.
+
+**Rejected.** A ticket counter beside `admit` with waiters polling for their
+turn: still a loop per acquire. A typed or streaming JSON decode for o1api-33
+in this change: the three response shapes take their field names from the
+vendor descriptor at run time, so it is a rewrite of the decoder and its
+refusals, not a low-severity fix. A counting global allocator to measure the
+CSV and decode allocations: it needs `unsafe impl GlobalAlloc`, which the
+workspace `unsafe_code = "deny"` refuses and gate 5 counts as an exception
+needing its own entry; the CSV reservation is proven
+through `Vec::with_capacity`'s documented exact capacity instead, and the field
+vector's absence through the source.
+
+Invariants AF-1203-a through AF-1203-f; `docs/06-limits.md` has the costs, the
+unrevoked-reservation exposure and the unmeasured decode peak.

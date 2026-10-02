@@ -9907,3 +9907,31 @@ The text above is kept as it was written.
 - **Only the old tail block is checked.** A rotted record in an earlier, full
   block is not read by an append and stays where a reader refuses it; the
   append neither verifies nor re-seals that block.
+
+## Pull decode memory, CSV reservation and rate reservations — D-1203, 2 October 2026
+
+- **`http::decode_body` builds a whole `serde_json::Value` tree, and its peak
+  memory is UNMEASURED.** o1api-33. The tree, the body and the decoded columns
+  are alive together. A `Value` node is 32 bytes on this build
+  (`the_json_tree_is_thirty_two_bytes_a_node` pins it) against as few as two
+  bytes of text per array element, so the tree can reach about 16× the body,
+  more while an array's vector doubles, under the 64 MiB `MAX_RESPONSE_BYTES`
+  cap. That is an argued bound and a labelled one: no allocator was counted and
+  no peak was taken. The typed or streaming decode that would remove the tree
+  is not built; the finding stays open on that.
+- **`csv::decode` counts the body's newlines once before decoding.** o1api-34.
+  One extra linear pass over bytes already in memory, the same order as the
+  decode pass, buys one reservation of `min(newlines + 1, MAX_ROWS)` rows and
+  no reallocation. The reservation is sized by LINES, not rows: a body of
+  blank or header lines reserves for rows it never yields, up to `MAX_ROWS`
+  rows of 64 bytes each. Not timed.
+- **A rate reservation is O(1) per acquire, with no retry.** o1api-54.
+  `Governor::reserve` is two cursor advances and two walks of the three
+  windows. What it gives up: a reservation is not revoked by a later
+  `record_throttled`, so at most one request per waiter that held a
+  reservation at the instant of a refusal still goes out on the old schedule.
+  The retry loop it replaced had the same exposure for a waiter already past
+  its `admit`. Real contention between concurrent callers was never measured,
+  before or after; the fairness claim is that grants follow lock order, which
+  is the order `std::sync::Mutex` hands the lock out, and that order is not
+  itself FIFO-guaranteed by the standard library.

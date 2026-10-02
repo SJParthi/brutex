@@ -366,14 +366,23 @@ static TRADED: [u8; 309] = [
 
 const _: () = assert!(TRADED.len() == DAYS.div_ceil(8));
 
+// THE TWO WALK LENGTHS `kind_of`'s cost note states. o1api-39, D-1203.
+const _: () = assert!(LENGTH_UNMEASURED.len() == 5 && IRREGULAR.len() == 4);
+
 /// What `epoch_day` was: an open session with its windows, a closed day, or
 /// outside what has been measured.
 ///
 /// # Cost
 ///
 /// One compare, one subtract, one index, one shift — and, only for a day that
-/// traded, a walk of the four-element [`IRREGULAR`] table whose length is a
-/// compile-time constant. O(1), no hash, no allocation.
+/// traded, TWO bounded walks: the five-element [`LENGTH_UNMEASURED`] table and
+/// then the four-element [`IRREGULAR`] table, at most nine comparisons in all.
+/// Both lengths are compile-time constants, pinned by the assertion above so a
+/// table that grows cannot leave this sentence behind. O(1), no hash, no
+/// allocation.
+///
+/// This note named only the [`IRREGULAR`] walk until o1api-39 (D-1203); the
+/// [`LENGTH_UNMEASURED`] walk ran first and was not mentioned.
 ///
 /// **UNVERIFIED as a measurement.** The bound is argued from the
 /// shape of the code and no bench in this workspace times it.
@@ -458,6 +467,38 @@ pub fn sessions_between(first: i64, last: i64) -> Option<u32> {
 #[allow(clippy::expect_used, clippy::panic, reason = "test-only assertions")]
 mod tests {
     use super::*;
+
+    /// **THE COST NOTE ON `kind_of` NAMES BOTH WALKS.** o1api-39, D-1203.
+    ///
+    /// The note described one walk, of [`IRREGULAR`], while the body walked
+    /// [`LENGTH_UNMEASURED`] first. The lengths are pinned by a compile-time
+    /// assertion; this pins the prose that states them. Every day each table
+    /// names is also answered by its own walk, so neither walk is dead.
+    #[test]
+    fn the_cost_note_names_both_table_walks() {
+        let source = include_str!("calendar.rs");
+        let signature = format!("{}{}", "pub fn kind_", "of(epoch_day: i64)");
+        let at = source.find(&signature).expect("kind_of exists");
+        let before = source.get(..at).expect("a char boundary");
+        let doc_start = before
+            .rfind("/// What `epoch_day` was")
+            .expect("kind_of's doc");
+        let doc = before.get(doc_start..).expect("a char boundary");
+        for needle in [
+            "five-element [`LENGTH_UNMEASURED`]",
+            "four-element [`IRREGULAR`]",
+            "at most nine comparisons",
+        ] {
+            assert!(doc.contains(needle), "kind_of's cost note lacks {needle:?}");
+        }
+        assert_eq!(LENGTH_UNMEASURED.len() + IRREGULAR.len(), 9);
+        for day in LENGTH_UNMEASURED {
+            assert_eq!(kind_of(day), DayKind::OpenLengthUnmeasured, "day {day}");
+        }
+        for (day, session) in IRREGULAR {
+            assert_eq!(kind_of(day), DayKind::Open(session), "day {day}");
+        }
+    }
 
     /// **THE ARITHMETIC THAT MAKES THIS A MEASUREMENT AND NOT A LIST.**
     ///

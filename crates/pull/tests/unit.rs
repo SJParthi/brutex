@@ -7841,3 +7841,144 @@ fn absorbed_throttle_is_counted_rather_than_discarded() {
          report a run throttled a thousand times as one throttled once"
     );
 }
+
+// ===========================================================================
+// pull::rate::Governor::reserve — one call per acquire, granted in order.
+// o1api-54, D-1203.
+// ===========================================================================
+
+/// **A RESERVATION IS ONE CALL, AND THE SCHEDULE IS EXACTLY WHAT `admit`
+/// WOULD HAVE ALLOWED.**
+///
+/// The transport and the server used to loop `admit`-and-sleep: waiters that
+/// slept the same named wait woke together and raced for one permit. A
+/// reservation is granted in the order callers take the lock and is never
+/// asked twice. Twelve callers arriving at the same instant against Dhan's
+/// 5/s get the first five permits now and the rest one per 200 ms, in order;
+/// replaying those instants through `admit` on a fresh governor admits every
+/// one, so the reservation never spends a permit the bucket had not earned.
+#[test]
+fn a_reservation_is_one_call_and_never_outruns_admit() {
+    let fresh = || Governor::new(Some(DHAN_PER_SECOND), None, Some(DHAN_PER_DAY)).expect("dhan");
+    let mut governor = fresh();
+    let at: Vec<u64> = (0..12).map(|_| governor.reserve(0)).collect();
+    let step = MICROS_PER_SECOND / u64::from(DHAN_PER_SECOND);
+    let want: Vec<u64> = (0..12_u64).map(|k| k.saturating_sub(4) * step).collect();
+    assert_eq!(
+        at, want,
+        "five now, then one per {step} µs, in arrival order"
+    );
+    assert_eq!(governor.cursor_micros(), 7 * step);
+    assert!(
+        at.windows(2).all(|pair| pair[0] <= pair[1]),
+        "first come, first served"
+    );
+
+    let mut replay = fresh();
+    for (k, instant) in at.iter().enumerate() {
+        assert_eq!(
+            replay.admit(*instant),
+            Verdict::Admit,
+            "reservation {k} at {instant}"
+        );
+    }
+    assert_eq!(
+        replay.credit_micro_permits(WindowSpan::Second),
+        governor.credit_micro_permits(WindowSpan::Second),
+        "the same permits spent by either path"
+    );
+    assert_eq!(
+        replay.credit_micro_permits(WindowSpan::Day),
+        governor.credit_micro_permits(WindowSpan::Day)
+    );
+
+    // A CALLER WHOSE READING IS BEHIND THE CURSOR QUEUES BEHIND IT. Its own
+    // clock is older than the reservations already granted, so it is served
+    // after them rather than handed a permit they hold.
+    assert_eq!(governor.reserve(1), 8 * step);
+    // AN IDLE BUCKET REFILLS. Ten seconds later the bucket is full again and
+    // the permit is good at the caller's own instant.
+    let later = 10 * MICROS_PER_SECOND;
+    assert_eq!(governor.reserve(later), later);
+    assert_eq!(
+        governor.credit_micro_permits(WindowSpan::Second),
+        Some(u64::from(DHAN_PER_SECOND - 1) * MICROS_PER_SECOND)
+    );
+}
+
+/// **THE LONGEST WAIT BINDS, AND A SPAN WITH NO BOUND NEVER WAITS.**
+#[test]
+fn a_reservation_waits_for_the_binding_span_and_an_unbounded_governor_never_waits() {
+    let mut both = Governor::new(Some(5), None, Some(2)).expect("five a second, two a day");
+    let half_day = MICROS_PER_DAY / 2;
+    let at: Vec<u64> = (0..4).map(|_| both.reserve(0)).collect();
+    assert_eq!(at, vec![0, 0, half_day, 2 * half_day], "the day span binds");
+
+    let mut open = Governor::new(None, None, None).expect("no bound at all");
+    for now in [0, 1, 1, 7, u64::MAX - 1, u64::MAX] {
+        assert_eq!(open.reserve(now), now, "nothing to wait for at {now}");
+    }
+    // FORWARD ONLY: a reading below the cursor is served at the cursor.
+    assert_eq!(open.reserve(3), u64::MAX);
+}
+
+/// **A REFUSAL DRAINS THE BUCKET FOR EVERY LATER RESERVATION.**
+///
+/// One step down on the second span (5 → 4) and an empty bucket: the next
+/// reservation waits a full quarter-second, not the fifth it waited before.
+/// Per-second only, because a refusal drains the day span too and its wait
+/// would bind instead.
+#[test]
+fn a_reservation_after_a_refusal_waits_for_the_reduced_allowance() {
+    let mut governor = Governor::new(Some(DHAN_PER_SECOND), None, None).expect("dhan");
+    assert_eq!(governor.reserve(0), 0);
+    governor.record_throttled();
+    assert_eq!(
+        governor.permitted(WindowSpan::Second),
+        Some(DHAN_PER_SECOND - 1)
+    );
+    assert_eq!(governor.reserve(0), MICROS_PER_SECOND / 4);
+    assert_eq!(governor.reserve(0), 2 * (MICROS_PER_SECOND / 4));
+}
+
+/// **AT THE FAR END OF THE CLOCK NOTHING IS CHARGED.**
+///
+/// An instant past `u64::MAX` does not exist, so the bucket could never earn
+/// the permit; charging it anyway would subtract a cost never earned. The
+/// answer is `u64::MAX`, an instant no caller reaches, and every credit is
+/// left as it was.
+#[test]
+fn a_reservation_past_the_end_of_the_clock_charges_nothing() {
+    let mut governor =
+        Governor::new(Some(DHAN_PER_SECOND), None, Some(DHAN_PER_DAY)).expect("dhan");
+    for _ in 0..DHAN_PER_SECOND {
+        assert_eq!(governor.reserve(u64::MAX), u64::MAX, "affordable now");
+    }
+    let second = governor.credit_micro_permits(WindowSpan::Second);
+    let day = governor.credit_micro_permits(WindowSpan::Day);
+    assert_eq!(second, Some(0));
+    for _ in 0..3 {
+        assert_eq!(governor.reserve(u64::MAX), u64::MAX);
+        assert_eq!(governor.credit_micro_permits(WindowSpan::Second), second);
+        assert_eq!(governor.credit_micro_permits(WindowSpan::Day), day);
+    }
+    // One step short of the end, the wait still fits and is charged.
+    let mut near = Governor::new(Some(1), None, None).expect("one a second");
+    let edge = u64::MAX - MICROS_PER_SECOND;
+    assert_eq!(near.reserve(edge), edge);
+    assert_eq!(near.reserve(edge), u64::MAX, "exactly a second later fits");
+    assert_eq!(near.credit_micro_permits(WindowSpan::Second), Some(0));
+    assert_eq!(near.reserve(edge), u64::MAX, "and the next does not");
+    assert_eq!(near.credit_micro_permits(WindowSpan::Second), Some(0));
+}
+
+/// **THE CLOCK BOTH CALLERS READ NEVER STEPS BACK.**
+#[test]
+fn the_governor_clock_is_monotonic() {
+    let mut last = pull::rate::monotonic_micros();
+    for _ in 0..1_000 {
+        let now = pull::rate::monotonic_micros();
+        assert!(now >= last, "{now} after {last}");
+        last = now;
+    }
+}
