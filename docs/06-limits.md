@@ -5244,7 +5244,7 @@ is a gap. **They are not to be chased.**
 | `lib.rs` | `CurDayFib::bits` `\|\| → &&` | `!live` with `r > 0` is unreachable — `range()` returns 0 whenever the state is not live — and live with `r <= 0` falls through to a loop where `covers` refuses every rung outright |
 | `evaluator.rs` | `stepped` ×2 | assignment at equality writes the value already held |
 | `fib.rs` | `Prev5::extremes` ×2 | the same, in a fold-max and a fold-min |
-| `gap.rs` | `close_the_session` ×2, `fold` ×2 | the same, in a reduce and in the opening candle |
+| `gap.rs` | `fold` ×2 | the same, in the running 3-minute candle (D-0944; this row read `close_the_session` ×2 and `fold` ×2 while the candle was a three-slot ring reduced at the bell and a three-bar opening count) |
 | `orb.rs` | `Orb::fold` ×2 | the same, in the window fold |
 
 **One is equivalent for a reason worth stating separately.** `gap.rs:328:28`
@@ -5253,6 +5253,9 @@ block, which is a real behaviour change — but `today_high`/`today_low` are rea
 only by `establish`, which runs on the bar where the count REACHES
 `CANDLE_MINUTES` and never again before the session resets. The extra bar writes
 fields nothing goes on to read. Equivalent by reachability, not by symmetry.
+**Superseded by D-0944:** the count, `today_bars` and that site are gone; the
+opening candle is now the running candle of the session's first 3-minute span,
+closed by the first bar of a later span, so there is no count to mutate.
 
 ### Still open
 
@@ -9879,3 +9882,39 @@ The text above is kept as it was written.
   doc to its body, read off the source, and
   `what_a_changed_rows_line_costs_is_named_in_part_and_read_off_the_source`
   finds each part named here and in that doc in the source that pays it.
+
+## The gap candle is a clock span, and a wholly missing one reads as a late open — D-0944, 2 October 2026
+
+`indicators::gap::GapFib` keys the source's 3-minute candle by the bar's span on
+the 3-minute grid anchored at IST midnight, not by counting three bars. Cost per
+bar: one `saturating_add` and two `div_euclid` for the span key, one comparison
+against the running span, at most one establish, and a two-field fold. No ring,
+no scan, no allocation: O(1) per bar, and the struct shrank from 160 bytes to
+96, measured by the `size_of::<GapFib>() <= 96` assertion. Not timed beyond
+`C-I-01`.
+
+What it still cannot know, stated rather than implied (§3 rule 6):
+
+* **A wholly missing opening span is indistinguishable from a late open.** The
+  module sees no session timetable, so if every minute of 09:15-09:17 is missing
+  the first span that DID trade (09:18-09:20, say) becomes `X2`. A late open is
+  real (this file records sessions partly outside 09:15-15:29), and
+  fixing the opening span at 09:15 would refuse the leg on every one of those
+  days and on the Muhurat session. Telling the two apart needs the calendar's
+  per-day open, which `GapFib` is not given. UNVERIFIED how often the store
+  holds a session whose whole first span is missing; not measured.
+* **A partly missing candle is what traded inside its span.** With 09:16
+  missing, `X2` is the extremes of 09:15 and 09:17. Nothing is filled and no
+  neighbouring bar is borrowed. The candle may be narrower than the vendor's
+  own 3-minute candle would have been if the hole is a vendor gap rather than
+  no trade; the module cannot tell which.
+* **On a rung coarser than three minutes the candle is one rung bar**, so `X1`
+  and `X2` span 5 to 60 minutes (and the 30- and 60-minute rungs' open-anchored
+  bars). The source names a 3-minute candle; the rung does not hold one, and
+  the module does not know the rung. Abstaining per rung belongs to the caller,
+  as it does for `orb`.
+* **The leg becomes visible one bar later on a hole at the span's end.** With
+  09:17 missing the opening candle closes when 09:18 arrives, which is the
+  same bar the complete session first measures; with 09:18 also missing it
+  closes on the next bar that trades. A bar never reads a leg built from
+  itself.

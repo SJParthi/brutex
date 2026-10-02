@@ -43718,3 +43718,98 @@ second wait's sleep and the closing brace before it. Gate 20 declares
 coverage run on this PR is that check. The 21 `sink.rs` lines that stay
 uncovered are assertion messages, test-double methods and one guarded
 `return 0`, none of them a wait.
+
+### D-0944 — Key the gap family's 3-minute candle by clock span, not by counting three bars — 2026-10-02
+
+**What was wrong.** `docs/09-design-sources.md` §4 defines `X1` as the
+previous day's **last 3-minute candle** and `X2` as today's **first 3-minute
+candle**, and ties candles to the fold grid anchored at IST midnight.
+`indicators::gap::GapFib` counted three BARS (`CANDLE_MINUTES = 3` as a bar
+count, a three-slot ring for the tail, a `today_bars` counter for the opening
+candle) and never read `ts_micros`. Two consequences, both reachable on real
+data (findings ET-indicators-2 and ET-indicators-11, one defect):
+
+* **A missing minute let a bar of the next candle in.** The store is about
+  1.32% missing minutes. With 09:16 missing, the count took 09:15, 09:17 and
+  09:18, so 09:18's high became `X2` (the audit's attack07: `x2 = 1,090,000`
+  where the 09:15-09:17 candle printed 1,051,000). The same happened at the
+  other end: with 15:29 missing, 15:26 entered `X1`. The exact-minute overlay
+  (`anchored::overlay_exact_minute_gapfib`) uses the same `GapFib`, and its
+  cadence check admits holes, so it inherited the defect.
+* **On a rung of three minutes or more the candle was three rung bars**: 9
+  minutes at 3, 15 at 5, 45 at 15, 180 at 60. The module doc claimed the
+  opposite ("a single bar *is* the candle").
+
+**The change.** A bar's candle is its span on the 3-minute grid anchored at
+IST midnight, `(ts + IST offset) div 1 minute div 3`, computed by
+`gap::candle_bucket`. The 09:15 open is minute 555, a multiple of three, so
+09:15-09:17 and 15:27-15:29 are each one span, and the grid is the same one
+the open-anchored fold produces for every rung that divides 555.
+
+* `X1` is the running candle at the session's end: every bar of the session
+  stamped in the span of its last bar. A bar of a new span restarts the
+  candle; it never widens the old one.
+* `X2` is the running candle of the session's first span. It is final when a
+  bar stamped in a later span arrives, and it is closed **before** that bar is
+  emitted, the order `orb::Orb::step` uses for `mark_closed`. The leg is built
+  from earlier bars only, so no bar is measured against a leg containing
+  itself.
+* `Evaluator::known_after` now reads the gap family's availability from the
+  POST-step `GapFib`. The leg is settled before the emit and the fold never
+  moves it, so the post-step leg is exactly the one the bar's truth read; the
+  pre-step read would be one bar stale on the bar that closes the candle.
+  `GapFib::step_known` pairs truth with availability the same way.
+
+O(1) per bar: one span key, one comparison, at most one establish, a
+two-field fold. The struct went from 160 bytes to 96, so
+`size_of::<Evaluator>()` went from 1792 to 1728. The ceiling came down from
+1824 to 1760, keeping the 32 bytes of slack `docs/10-shared-core.md` states.
+
+**Choices made where the spec is silent, and why.**
+
+* **Partly missing candle: what traded inside its span.** This is the rule the
+  module already applied to a short session's last candle ("refusing a
+  half-day outright would drop a real gap"). Nothing is filled and no bar of a
+  neighbouring span is borrowed to make up a count. A session with fewer than
+  three minutes, or one minute in its opening span, still gets a leg once a
+  later span trades.
+* **Wholly missing opening span: the first span that traded.** The module sees
+  no session timetable and cannot tell a data hole from a late open. Fixing the
+  opening span at 09:15, as `orb` fixes its windows, would refuse the leg on
+  every late-open day and on the Muhurat session, which this module has
+  answered on until now. Recorded in `docs/06-limits.md` as a limit, not a
+  verified property.
+* **Coarser rungs: one rung bar is the candle.** Every rung of three minutes or
+  more stamps bars at least three minutes apart, so each bar starts in its own
+  span and `X1`/`X2` are the session's last and first rung bar. That is the
+  closest object the rung holds. The module does not know the rung, exactly
+  as `orb` does not, and abstaining for a rung belongs to the caller. A rung
+  below three minutes that does not divide it (two) places bars by their start
+  minute.
+
+**What did not change.** On a complete one-minute session the span and the
+count take the same three bars at both ends, and the bar that closes the
+opening candle (09:18) is the bar the count first measured against the leg.
+Two tests pin that byte for byte against digests taken on `origin/main` at
+`bc531631` before the change: twelve complete sessions through `GapFib`
+(truth and availability of positions 132-142), and the same sessions through
+the whole `Evaluator` (all 384 positions, truth and availability). The only
+observable difference on a complete session is when `GapFib::leg()` reports
+the leg: on 09:18's arrival rather than after 09:17's fold. No production
+caller reads it between those two points.
+
+**Tests, each run against the pre-fix code and seen to fail there:**
+`gap::tests::a_missing_0916_does_not_let_0918_into_x2`,
+`a_missing_last_minute_of_yesterday_does_not_pull_in_the_candle_before`,
+`a_session_shorter_than_three_minutes_is_keyed_by_clock_not_count`,
+`gaps_on_both_sides_of_the_night_keep_each_candle_inside_its_span`,
+`on_a_coarser_rung_one_bar_is_the_candle` (rungs 3, 5, 15 and 60), and
+`gap_known_readiness::missing_minutes_keep_each_candle_inside_its_clock_span`,
+whose independent oracle now reads clock spans. `docs/04-invariants.md` IF-25.
+
+**Not recorded in `docs/11-findings.md`.** That ledger holds the 2026-08-11
+sweep and the audits appended to it; ET-indicators-2 and ET-indicators-11 come
+from the batch-2 queue, which has no row there to dispose of. Adding one would
+change the ledger's digest and stated counts in a branch that other lane
+branches also touch; if the operator wants batch-2 findings in that ledger,
+that is its own change.

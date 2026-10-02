@@ -537,8 +537,10 @@ enum Side {
 // a per-bar collection. The bound is still a CONSTANT and the assertion is still
 // what catches a module that starts accumulating; it moved because one more
 // fixed-size field was added, which is the only reason it is ever allowed to
-// move.
-const _: () = assert!(core::mem::size_of::<Evaluator>() <= 1824);
+// move. D-0944 then took 64 bytes OUT: `GapFib`'s three-slot ring and bar count
+// became one running 3-minute candle, 160 bytes to 96, so the evaluator measures
+// 1728 and the ceiling came down from 1824 to keep the same 32 bytes of slack.
+const _: () = assert!(core::mem::size_of::<Evaluator>() <= 1760);
 
 impl Evaluator {
     /// Snapshot the four caller choices, without any running indicator state.
@@ -713,8 +715,8 @@ impl Evaluator {
         // after them. The entry was right about the fix it described and wrong that the
         // fix was complete.
         //
-        // Free, because `Evaluator` is `Copy` and `size_of` is held at or below 1792
-        // bytes by the const assertion above -- a 1,664-byte memcpy per bar against a
+        // Free, because `Evaluator` is `Copy` and `size_of` is held at or below 1760
+        // bytes by the const assertion above -- a 1,728-byte memcpy per bar against a
         // fold that already costs ~320 ns.
         let (next, mask) = self.stepped(bar)?;
         let known = self.known_after(&next, mask, bar);
@@ -752,7 +754,12 @@ impl Evaluator {
         ));
         if self.day == next.day {
             known = known.union(&self.curday.known(self.widths.fib));
-            known = known.union(&self.gap.known(self.widths.fib));
+            // `next`, not `self`: the gap leg is settled BEFORE its emit, when a bar
+            // of a later 3-minute span closes the opening candle, and its fold never
+            // moves it (D-0944). So the post-step leg is exactly the one this bar's
+            // truth read, and the pre-step one is a bar stale on the bar that closes
+            // the candle.
+            known = known.union(&next.gap.known(self.widths.fib));
         }
         known = self.crossings_known(next, known);
         // A cold, absent or overflowing reference still cannot satisfy NOT.
