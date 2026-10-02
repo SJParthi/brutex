@@ -43981,3 +43981,127 @@ RFC 6238 Appendix B vectors that `the_rfc_6238_sha1_vectors_reproduce_exactly`
 checks are unchanged and still pass. No code path in `totp.rs` exchanges a
 code for a token. It computes the code and nothing else, so §8's ban on
 minting holds in this file.
+### D-0730 — A window page counts an unreadable record as a used position, reads its lookback apart, and never measures a change across a gap — 2026-09-29
+
+**What was wrong (W1-api1-10).** `api::bars::seek_page` read the one-record
+lookback as the first record of the page's block and then dropped the first
+folded row by position. `bars::page` returns only the records that read, so
+when the lookback was unreadable the dropped row was the page's own first
+row, and nothing named it. Reproduced on origin/main (2c209309): a 200-record
+month with block 1 (records 73 to 145) damaged, asked for offset 146 limit 5,
+returned closes `[1147, 1148, 1149, 1150]` with one fault naming record 145.
+Separately, the loop stopped on rows returned rather than positions used, so a
+page that met damage filled the gap from the next month: offset 70 limit 10
+over a January whose records 73 to 99 are unreadable returned
+`[1070, 1071, 1072, 2000, …, 2006]`, and the next offset page returned
+February's first rows again. The reading path (sort other than `ts`, or
+`extremes=1`) had the third form of the same fault: its change fold ran over
+the records that read, so the row after a damaged block was measured against
+the last row before it.
+
+**The change.** `bars::slots` reads a page keeping every position, `None`
+where a record would not read; `bars::page` is that with the `None`s dropped,
+so its callers are unchanged. `seek_page` counts `end - start` positions per
+file, reads the lookback on its own with one `read_record`, and keeps the
+lookback's failure out of `faults`, because it is not a row of that page and
+the page that covers it names it. The change fold takes what stands behind the
+first slot and says `previous_unreadable`, in both change columns, for a row
+whose predecessor would not read. The cost is unchanged: one extra
+`read_record` for the lookback, as before.
+
+**The new wire code.** `previous_unreadable` is a new `chg_why` and
+`oichg_why` value on `/bars/window.json`. The grid in `web/` has no sentence
+for it yet and shows its generic "unknown" text; that is a front-end follow-up
+for the web group, not done here because this batch is backend only.
+
+**Proof.** `an_unreadable_lookback_record_does_not_eat_the_first_row_of_the_page`
+and `paging_across_a_damaged_block_returns_every_readable_row_exactly_once`
+fail on origin/main with the outputs quoted above and pass with the change;
+`a_sorted_page_names_the_row_after_a_damaged_block_rather_than_measuring_across_it`
+and `the_fold_names_an_unreadable_predecessor_in_both_change_columns` pin the
+fold.
+
+### D-0731 — Test the qualification row's coordinate cross-check on its own, since no api test can render a saved qualification — 2026-09-29
+
+**What was missing (GAP14-58).** `/boolean-qualification.json`'s projection
+refuses a qualification row whose original identity, family or coordinate
+differs from the saved statistics row beside it. The ledger's mutation run
+recorded `replace != with == in project` at
+`crates/api/src/booleanqualification_projection.rs:27:25` as MISSED: no api
+test renders a real qualification page, and the saved-qualification fixture
+lives in `cli`'s own `#[cfg(test)]` modules, which the `api` crate cannot
+reach.
+
+**The change.** The three comparisons move unchanged into
+`same_coordinate`, which `project` calls with `?`, so the refusal text and the
+order of checks are the same. It takes the three coordinates and one
+`cli::boolean_evidence::StatisticsRow`, both of which a test can build.
+`a_qualification_row_is_refused_unless_identity_family_and_coordinate_all_match`
+accepts the equal case and requires the refusal for each coordinate differing
+alone. A full-page render test through a saved qualification is still absent;
+it needs `cli`'s fixture exposed to `api`, which this batch does not do.
+Until then the call itself is pinned in the source:
+`project_cross_checks_each_row_before_rendering_it` finds
+`same_coordinate(row.original, row.family, row.coordinate, original)?;` inside
+`project`'s row loop ahead of `admission_projection::row(`, and fails on
+origin/main, where that call does not exist. It reads source text and does not
+run `project`. So `cargo mutants --in-diff` over this batch still reports two
+MISSED mutants, `replace + with -` and `replace + with *` at
+`crates/api/src/booleanqualification_projection.rs:26:34`, the unchanged line
+`let index = asked.offset + n;` beside the changed call: no api test runs
+`project`, and only a rendered page would see a wrong index.
+
+### D-0732 — `/audit.json` counts the asked feed's months from its own manifest, once per census snapshot — 2026-09-29
+
+**What was wrong (W1-api1-0).** `store_block` rolled the asked feed up by month
+by walking `census_now`'s merged entry list, every held entry of every vendor,
+and probing the asked feed's manifest for each, on every request. The cost of
+one feed's audit answer grew with every other feed's store, on a route the
+console polls, and `docs/06-limits.md` did not say so.
+
+**The change.** `feed_rollup` takes one `VendorCensus` and walks that
+manifest's `held_keys()`, so no other feed is reachable from it.
+`RollupCache`, a field on `Site`, keeps its answer per feed for the census
+`Arc` `census_now` returned, compared by pointer through a `Weak` as
+`store_wire::Cache` does, and a new snapshot replaces every feed's rollup. The
+lock is released while a miss counts. The answer's bytes are unchanged:
+`the_store_block_rolls_up_the_asked_feed_by_month_and_counts_no_other_feed`
+pins the months and totals of two feeds held side by side.
+`the_rollup_is_counted_once_per_feed_per_census_snapshot` and
+`the_audit_body_reuses_the_rollup_until_the_manifest_changes` pin the count.
+`the_store_block_walks_one_census_and_not_every_feeds_entries` reads
+`store_block`'s source and fails on origin/main, where it contains
+`entries.iter()`. `docs/06-limits.md` gains a section for what is still paid,
+and `the_audit_rollup_cost_is_stated_in_the_limits_and_quotes_this_source`
+fails if that section is removed or the walk it quotes leaves `feed_rollup`.
+
+### D-0733 — A sorted window page is cut from whichever end orders fewer rows, and its full read is stated — 2026-09-29
+
+**What was wrong (W1-api1-3).** `GET /bars/window.json` sorted by a price
+column, or asked for extremes, reads every record in the asked months, keeps
+every readable one resident, and partitions them. That was stated only in
+comments in `bars.rs`, not in `docs/06-limits.md`. And the partition kept the
+first `offset + limit` rows, so a deep offset ordered nearly every row.
+
+**The change.** `ordered_page` replaces the inline partition. `page_side`
+keeps the fewer of the first `offset + limit` and the last `n - offset` rows,
+the front on a tie; a back page is ordered under the reversed comparator and
+its slice reversed. It still uses one partition and one sort, the two
+constructs gate 11 already counts in this file. The page is unchanged:
+`selecting_the_page_then_ordering_it_equals_ordering_everything_then_slicing`
+now calls `ordered_page` at every offset from 0 to past the end, against
+sorting everything and slicing. `a_page_is_cut_from_whichever_end_orders_fewer_rows`
+pins the side, the tie and the bound that no page orders more than half the
+rows plus its limit, the bound for every row count up to 40 and every offset
+and limit up to 45. The reads and resident rows are not changed and are now
+stated in `docs/06-limits.md`, quoting the lines that pay them;
+`the_sorted_window_read_is_stated_in_the_limits_and_quotes_this_source` fails
+if that section is removed or a line it quotes leaves `bars.rs`.
+
+**No `keep < n` guard around the partition.** `ordered_page` partitions and
+truncates even when `page_side` keeps every row, because that is legal
+(`keep` is at least 1 and at most `n`, so `keep - 1` is an index) and changes
+no page. With the guard, `replace < with <=` in it was a mutant no test could
+kill, because both spellings return the same page;
+`selecting_the_page_then_ordering_it_equals_ordering_everything_then_slicing`
+covers `limit` 60 and 61 over 60 rows at offset 0, where `keep` equals `n`.

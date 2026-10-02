@@ -5370,3 +5370,38 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### Window pages over damaged records — W1-api1-10 (D-0730)
+
+| Id | Invariant | Test that proves it |
+|---|---|---|
+| C4-API-01 | A time-ordered window page starts at the offset asked for even when its lookback record is unreadable; that row's change says `previous_unreadable` and the lookback is not named on that page. An unreadable record uses up its page position, so walking every offset page in either direction returns each readable row once, in order, and names each unreadable record once | `an_unreadable_lookback_record_does_not_eat_the_first_row_of_the_page` and `paging_across_a_damaged_block_returns_every_readable_row_exactly_once` in `crates/api/src/bars.rs` |
+| C4-API-02 | The change fold never measures a row against a record before an unreadable one: the row after a gap says `previous_unreadable` in both change columns, on the seek path and on the sorted reading path | `a_sorted_page_names_the_row_after_a_damaged_block_rather_than_measuring_across_it` and `the_fold_names_an_unreadable_predecessor_in_both_change_columns` in `crates/api/src/bars.rs` |
+
+### Qualification coordinate cross-check — GAP14-58 (D-0731)
+
+| Id | Invariant | Test that proves it |
+|---|---|---|
+| C4-API-03 | A `/boolean-qualification.json` row is refused unless its original identity, family and coordinate all equal the saved statistics row beside it; any one differing refuses with "qualification row differs from original coordinate" | `a_qualification_row_is_refused_unless_identity_family_and_coordinate_all_match` in `crates/api/src/booleanqualification_projection_tests.rs` |
+
+### `/audit.json` rollup and sorted window pages — W1-api1-0 (D-0732), W1-api1-3 (D-0733)
+
+| Id | Invariant | Test that proves it |
+|---|---|---|
+| C4-API-04 | `/audit.json`'s store block counts only the asked feed's held months and bars, per month and in total, and never another feed's | `the_store_block_rolls_up_the_asked_feed_by_month_and_counts_no_other_feed` and `the_store_block_walks_one_census_and_not_every_feeds_entries` in `crates/api/src/audit_json.rs` |
+| C4-API-05 | A feed's month rollup is counted once per census snapshot: a request against an unchanged census counts nothing, and a changed manifest is counted again | `the_rollup_is_counted_once_per_feed_per_census_snapshot` and `the_audit_body_reuses_the_rollup_until_the_manifest_changes` in `crates/api/src/audit_json.rs` |
+| C4-API-06 | A sorted window page is the same rows in the same order as sorting every row and slicing (asserted over 60 rows at every offset from 0 to 62 and limits 0, 1, 2, 10, 29, 30, 31, 60 and 61) | `selecting_the_page_then_ordering_it_equals_ordering_everything_then_slicing` in `crates/api/src/bars.rs` |
+| C4-API-07 | A sorted window page orders the fewer of the first `offset + limit` and the last `n - offset` rows, the front on a tie, so never more than half the rows plus its limit (asserted for every row count up to 40 and every offset and limit up to 45) | `a_page_is_cut_from_whichever_end_orders_fewer_rows` in `crates/api/src/bars.rs` |
+| C4-API-08 | `docs/06-limits.md` states the sorted or extremes window's full read and `/audit.json`'s rollup cost, and each source line the two tests list is quoted there and present in the code of `bars.rs` or in `feed_rollup` | `the_sorted_window_read_is_stated_in_the_limits_and_quotes_this_source` in `crates/api/src/bars.rs` and `the_audit_rollup_cost_is_stated_in_the_limits_and_quotes_this_source` in `crates/api/src/audit_json.rs` |
+
+### The `records unreadable` line after W1-api1-10 (D-0730)
+
+| Id | Invariant | Test that proves it |
+|---|---|---|
+| C4-API-09 | The `api.bars` `records unreadable` line for a page counts in `rows` the records that read and in `faults` the ones that did not: a page over 200 records with one 73-record block damaged writes one line saying 127 and 73 | `the_unreadable_records_line_counts_the_rows_that_read` in `crates/api/src/bars.rs` |
+
+### `project` runs the qualification cross-check — GAP14-58 (D-0731)
+
+| Id | Invariant | Test that proves it |
+|---|---|---|
+| C4-API-10 | Inside `project`'s row loop, `same_coordinate(row.original, row.family, row.coordinate, original)?;` appears before the row is rendered with `admission_projection::row(`. This is a check of the source text: no api test renders a saved qualification | `project_cross_checks_each_row_before_rendering_it` in `crates/api/src/booleanqualification_projection_tests.rs` |
