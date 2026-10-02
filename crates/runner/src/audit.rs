@@ -944,7 +944,7 @@ pub fn grid(out: &mut String, g: &Grid, keep: usize) {
     // comparing "with levels" against "without" must not have to hunt for the
     // row that is the comparison.
     let mut ordered: Vec<(usize, &Cell)> = g.cells.iter().enumerate().collect();
-    ordered.sort_by_key(|&(i, c)| {
+    let key = |&(i, c): &(usize, &Cell)| {
         // `arm` is not tested: it cannot be set without a trail, so a cell with
         // no trail has none, and adding the clause would be a guard against a
         // state `crate::grid::evaluate` does not emit.
@@ -977,7 +977,17 @@ pub fn grid(out: &mut String, g: &Grid, keep: usize) {
             !base,
             core::cmp::Reverse((c.pessimistic, crate::grid::merit(c), i)),
         )
-    });
+    };
+    // ONLY THE SHOWN ROWS ARE SORTED (o1runner-11, D-0930). The key is total --
+    // the index breaks every tie -- so selecting the `keep` smallest first and
+    // sorting just those prints exactly the rows, in exactly the order, a full
+    // sort did: O(n + keep log keep) rather than O(n log n) over every cell.
+    let shown = ordered.len().min(keep);
+    if shown > 0 && shown < ordered.len() {
+        ordered.select_nth_unstable_by_key(shown - 1, key);
+    }
+    let (head, tail) = ordered.split_at_mut(shown);
+    head.sort_by_key(key);
 
     // Marks are resolved by IDENTITY, not by re-running the comparator: the
     // selectors return a `&Cell` into `g.cells`, so pointer equality answers
@@ -995,16 +1005,15 @@ pub fn grid(out: &mut String, g: &Grid, keep: usize) {
         }
     };
 
-    let shown = ordered.len().min(keep);
-    for &(_, c) in ordered.iter().take(keep) {
+    for &(_, c) in head.iter() {
         grid_row(out, c, mark_for(c));
     }
-    if ordered.len() > shown {
+    if !tail.is_empty() {
         let _ = writeln!(
             out,
             "  ... {} further variant(s) NOT SHOWN. The grid is complete; this \
              table is not.",
-            ordered.len().saturating_sub(shown)
+            tail.len()
         );
         // A SELECTOR'S OWN ROW IS NEVER DROPPED BY THE CUT.
         //
@@ -1014,11 +1023,18 @@ pub fn grid(out: &mut String, g: &Grid, keep: usize) {
         // variant no row described. Printing it below the cut costs two lines
         // and removes the one way this table could contradict the report around
         // it.
-        for &(_, c) in ordered.iter().skip(shown) {
-            let mark = mark_for(c);
-            if !mark.is_empty() {
-                grid_row(out, c, mark);
-            }
+        //
+        // The tail is unsorted now, and at most two of its cells carry a mark
+        // (one per selector), so those are put in key order by one comparison
+        // instead of by sorting the tail.
+        let mut marked = tail.iter().filter(|&&(_, c)| !mark_for(c).is_empty());
+        let (first, second) = (marked.next(), marked.next());
+        let (first, second) = match (first, second) {
+            (Some(a), Some(b)) if key(b) < key(a) => (Some(b), Some(a)),
+            pair => pair,
+        };
+        for &(_, c) in first.into_iter().chain(second) {
+            grid_row(out, c, mark_for(c));
         }
     }
     let _ = writeln!(out);
@@ -2664,6 +2680,63 @@ mod tests {
             !out.contains("yes"),
             "a test that was refused must never render as clearing"
         );
+    }
+
+    /// o1runner-11 / D-0930: the cut table sorts only its shown rows, and
+    /// must print exactly the rows, in exactly the order, a full sort printed.
+    /// The full render (`keep` past the grid) sorts everything, so it is the
+    /// reference for every shorter `keep`, ties included.
+    #[test]
+    fn a_cut_grid_table_shows_exactly_the_full_tables_leading_rows() {
+        let mut g = populated_grid();
+        let template = g.cells.clone();
+        for (n, pessimistic) in [5, -3, 5, 0, 5, -3, 9, 0, 1, 5, -7, 9]
+            .into_iter()
+            .enumerate()
+        {
+            let mut cell = template
+                .get(n % template.len())
+                .copied()
+                .unwrap_or_default();
+            cell.pessimistic = pessimistic;
+            g.cells.push(cell);
+        }
+        // A winless top earner: `best()` and not `sharpest()`, so the two
+        // selectors mark DIFFERENT rows and their order below the cut is tested.
+        let mut rich = template.first().copied().unwrap_or_default();
+        rich.pessimistic = 9_000_000;
+        rich.wins = 0;
+        g.cells.push(rich);
+        let (best, sharp) = (g.best().copied(), g.sharpest().copied());
+        assert!(best.is_some() && sharp.is_some() && best != sharp);
+        let rows = |out: &str| -> Vec<String> {
+            out.lines()
+                .filter(|l| is_grid_row(l) && !l.contains("NOT SHOWN"))
+                .map(str::to_owned)
+                .collect()
+        };
+        let mut full = String::new();
+        grid(&mut full, &g, g.cells.len() + 1);
+        let full = rows(&full);
+        assert_eq!(full.len(), g.cells.len());
+        for keep in 0..=g.cells.len() {
+            let mut out = String::new();
+            grid(&mut out, &g, keep);
+            let cut = rows(&out);
+            assert_eq!(
+                cut.get(..keep),
+                full.get(..keep),
+                "keep={keep}: the shown rows differ from the full table's"
+            );
+            // Below the cut only the selectors' rows, in full-table order.
+            let below: Vec<&String> = full
+                .iter()
+                .skip(keep)
+                .filter(|l| l.contains("<-"))
+                .collect();
+            let printed: Vec<&String> = cut.iter().skip(keep).collect();
+            assert_eq!(printed, below, "keep={keep}: rows below the cut");
+        }
     }
 
     #[test]

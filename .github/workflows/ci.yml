@@ -5336,6 +5336,10 @@ jobs:
           # count. It is neither the candidate count nor the frequent-itemset count,
           # so it does not grow with the sweep. Called once per rendered report at
           # the coarsest boundary this crate has, and the render touches no bar.
+          # TWO matches since D-0930 (o1runner-11), and still one ordering: a
+          # `select_nth_unstable_by_key` picks the `keep` rows the table shows and
+          # `sort_by_key` orders only those, O(n + keep log keep) instead of a
+          # full sort of every cell. Same rows, same order, by test.
           # `crates/api/src/census.rs` — THE SECOND OF ITS TWO SORTS IS PER REQUEST,
           # AND THIS ENTRY SAID THE OPPOSITE. The startup group above used to name
           # `held_series` AND `held_entries` together under a heading that reads
@@ -5534,7 +5538,7 @@ jobs:
           #     position, over the same slice of strategies and in the same
           #     decreasing order as the first `runner/bootstrap.rs` entry.
           allow_sort='
-          crates/runner/src/audit.rs 1
+          crates/runner/src/audit.rs 2
           crates/runner/src/bootstrap.rs 2
           crates/runner/src/bootstrap_family_pass.rs 1
           crates/runner/src/outcome.rs 1

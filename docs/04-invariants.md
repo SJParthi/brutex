@@ -5425,3 +5425,9 @@ the guard. The existing emits test pins the warning's message and level.
 |---|---|---|
 | For every intraday period that divides the day, every session's first resampled bar is stamped 09:15 IST and holds a whole period, on consecutive days; the hourly bucket holding 09:15 begins at 09:15. | `runner::resample::tests::every_session_opens_with_a_bar_stamped_at_the_open` · `runner::resample::tests::the_hourly_grid_starts_at_the_open_like_pull_fold` | ✓ |
 | `Period::minutes` admits an intraday period iff it divides 1,440 and a longer period iff it is whole days; 7, 1,441 and `u32::MAX` are refused. | `runner::resample::tests::a_period_whose_grid_would_drift_between_days_is_refused` | ✓ |
+
+### Exit-grid table cut — o1runner-11 (D-0930)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| For every `keep`, the exit-grid table prints exactly the full table's leading `keep` rows in its order. Below the cut it prints only the selectors' rows, in full-table order. Only the shown rows are sorted. | `runner::audit::tests::a_cut_grid_table_shows_exactly_the_full_tables_leading_rows` | ✓ |

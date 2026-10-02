@@ -44108,3 +44108,23 @@ and now use the open grid that stored rungs are on.
 `every_session_opens_with_a_bar_stamped_at_the_open`,
 `a_period_whose_grid_would_drift_between_days_is_refused`. All three fail on
 the old anchor and admission rule.
+
+### D-0930 — The exit-grid table sorts only the rows it shows — 2026-10-02
+
+**Finding:** o1runner-11 (audit 2026-10-02). `runner::audit::grid` sorted every
+grid cell to print the top `keep` rows. It runs once per report, not on a sweep
+path, but it still cost O(n log n) over every cell.
+
+**Decision:** `select_nth_unstable_by_key` moves the `keep` leading rows to the
+front and `sort_by_key` orders only those. The key is total, because the index
+breaks every tie, so the printed rows and their order are exactly the full
+sort's. At most two rows below the cut carry a selector mark, and they are put
+in key order by one comparison. Cost: O(n + keep·log keep). Gate 11 rule 4 now
+counts two matches in `audit.rs`, one ordering.
+
+**Output change:** none.
+
+**Proof:** `runner::audit::tests::a_cut_grid_table_shows_exactly_the_full_tables_leading_rows`
+checks every `keep` from 0 to n+1 against the full table, ties included, with
+`best()` and `sharpest()` on different rows. It fails without the head sort,
+and it fails with the two marked rows swapped.
