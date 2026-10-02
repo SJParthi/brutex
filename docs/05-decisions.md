@@ -43946,3 +43946,40 @@ Only rounding in the `f64` assembly can push it to zero or below, which is why
 the guard stays.
 
 **Outputs.** None change.
+
+### D-1176 — A missing minute is named apart from a refused record — 2026-10-02
+
+**What was wrong (audit W3-runner3-8).** `forward` set its one `refused` flag
+for every absence that was not the tail. That included a deadline minute with no
+record (`at_timestamp(deadline)` is `None`) and a timestamp gap inside the held
+path (`path_accepts` is false on any `broken_prefix` change). `Edge::refused`
+was documented as *"Non-zero means the store handed this run a record the engine
+refuses"*. A session with a hole therefore read as a corrupt store, although no
+record existed to refuse. The tests covered duplicate, overflowing and corrupt
+records only.
+
+**The change.** `Forward`'s reason lane is an enum, `Unpriced::{No, Refused,
+Missing}`, one byte per bar as before. When the deadline lookup fails, or
+`path_accepts` says no, `Unpriced::of` asks the new O(1)
+`SliceFacts::refused_within(from, to)`. A refused record anywhere on the
+path charges the absence to the store's refusal. Otherwise the cadence broke with
+nothing refused, and the absence is `Missing`. For the deadline case the range
+checked is the `H` records after the entry. `Forward::was_missing` and the new
+`Edge::missing` name the second kind.
+
+**What did not change, and why.** `Edge::refused` keeps its total, refused
+records plus missing minutes. `cli` persists it in the sweep-evidence row as the
+"unpriceable/refused outcome count", and changing what that stored number means
+is what §3 rule 8 forbids. Its doc now says what it counts, and that
+`refused - missing` is the refused records. `missing` is not persisted. It is
+derived again on every run. No existing output changes.
+
+**Tests.** `a_missing_minute_is_named_missing_and_never_a_refused_record`
+removes one bar mid-session and requires every entry whose window needed it to
+be absent, unpriceable and missing, with `Edge::missing == Edge::refused`.
+`a_refused_record_is_never_named_missing` covers a `Candle::check` refusal
+(`missing == 0`) and a path holding both kinds, where the refusal is named.
+`the_tail_and_an_index_past_the_slice_are_neither` covers the tail and
+out-of-range indices. These tests did not compile on the previous tree: neither
+`was_missing` nor `Edge::missing` existed, and nothing could tell the two
+absences apart.

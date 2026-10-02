@@ -510,6 +510,28 @@ impl SliceFacts {
         self.at_timestamp.get(&timestamp).copied()
     }
 
+    /// Does the inclusive range `from..=to` hold a record the evaluator refused?
+    ///
+    /// `to` past the slice is clamped to its last bar, and a reversed range
+    /// holds nothing. Two prefix reads and one subtraction. This is what
+    /// separates a REFUSED record from a MISSING minute when
+    /// [`Self::path_accepts`] says no -- D-1176.
+    #[must_use]
+    pub fn refused_within(&self, from: usize, to: usize) -> bool {
+        let last = self.refused_prefix.len().saturating_sub(2);
+        let to = to.min(last);
+        if from > to {
+            return false;
+        }
+        let before = self.refused_prefix.get(from).copied().unwrap_or(0);
+        let after = self
+            .refused_prefix
+            .get(to.saturating_add(1))
+            .copied()
+            .unwrap_or(before);
+        after > before
+    }
+
     /// Did every bar in the inclusive path `from..=to` pass the evaluator, and
     /// did every adjacent timestamp advance by exactly this slice's cadence?
     ///

@@ -395,23 +395,66 @@ pub struct Forward {
     /// landed there: `n` fell from 234 to 230 with `mismatched == 0` in both
     /// runs, and nothing anywhere said why.
     ///
-    /// One `bool` per bar. At the store's largest instrument-month that is under
+    /// # And a refused RECORD is not a MISSING MINUTE -- D-1176
+    ///
+    /// This was one `bool`, and every absence that was not the tail set it,
+    /// including a deadline minute that simply has no record and a timestamp gap
+    /// inside the held path. `Edge::refused` then told the operator that the
+    /// store handed this run a record the engine refuses, when no record existed
+    /// to refuse. The lane now names which of the two it was.
+    ///
+    /// One byte per bar. At the store's largest instrument-month that is under
     /// 1.3 MB, once per `Forward` and never per candidate.
-    refused: Vec<bool>,
+    refused: Vec<Unpriced>,
+}
+
+/// Why an outcome inside the slice could not be priced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Unpriced {
+    /// Measured, or absent for a reason that is not the data's fault: the
+    /// tail, a forced-exit bar, an unproved session end.
+    No,
+    /// The path held a record the engine REFUSED.
+    Refused,
+    /// The path held no refused record, but a minute it needed has NO record:
+    /// the exact deadline minute, or a step off the cadence inside the path.
+    Missing,
+}
+
+impl Unpriced {
+    /// A refused record anywhere in `from..=to` makes the absence the store's
+    /// refusal. Otherwise the cadence broke with nothing refused, so a minute
+    /// has no record. Two prefix reads.
+    fn of(facts: &crate::trade::SliceFacts, from: usize, to: usize) -> Self {
+        if facts.refused_within(from, to) {
+            Self::Refused
+        } else {
+            Self::Missing
+        }
+    }
 }
 
 impl Forward {
-    /// Was the outcome at `i` dropped because a bar was REFUSED?
+    /// Was the outcome at `i` dropped because its path could not be priced --
+    /// a REFUSED record or a MISSING minute?
     ///
     /// `false` for the tail, for an out-of-range index, and for a bar that has a
-    /// real outcome. Only a record `Candle::check` rejected answers `true`.
+    /// real outcome. [`Self::was_missing`] says which of the two it was.
     ///
     /// Exists because [`Self::at`] returns `None` for two facts that mean
     /// opposite things — see the `refused` field — and every caller that treats
     /// them alike reports a smaller sample with no reason attached.
     #[must_use]
     pub fn was_refused(&self, i: usize) -> bool {
-        self.refused.get(i).copied().unwrap_or(false)
+        self.refused.get(i).is_some_and(|why| *why != Unpriced::No)
+    }
+
+    /// Was the outcome at `i` dropped because a minute its path needed has no
+    /// record at all, with no refused record on that path? A subset of
+    /// [`Self::was_refused`] -- D-1176.
+    #[must_use]
+    pub fn was_missing(&self, i: usize) -> bool {
+        self.refused.get(i) == Some(&Unpriced::Missing)
     }
 
     /// The forward move at caller-slice index `i`, or `None` for the tail.
@@ -605,7 +648,7 @@ impl WindowExtremes {
 struct Lanes {
     ret: Vec<Option<i64>>,
     /// WHY an outcome is absent -- see `Forward::refused`.
-    refused: Vec<bool>,
+    refused: Vec<Unpriced>,
     /// `None` exactly where `ret` is `None`, so a caller cannot read an
     /// excursion for an outcome that does not exist.
     adverse: Vec<Option<i64>>,
@@ -625,10 +668,10 @@ impl Lanes {
         }
     }
 
-    /// No outcome at this bar; `refused` says whether a bar was refused.
-    fn absent(&mut self, refused: bool) {
+    /// No outcome at this bar; `why` says whether the data was at fault.
+    fn absent(&mut self, why: Unpriced) {
         self.ret.push(None);
-        self.refused.push(refused);
+        self.refused.push(why);
         self.adverse.push(None);
         self.favourable.push(None);
         self.exits.push(None);
@@ -637,7 +680,7 @@ impl Lanes {
     /// A measured outcome, its two excursions and the bar it exited on.
     fn measured(&mut self, moved: i64, up: Option<i64>, down: Option<i64>, exit: usize) {
         self.ret.push(Some(moved));
-        self.refused.push(false);
+        self.refused.push(Unpriced::No);
         self.adverse.push(down);
         self.favourable.push(up);
         self.exits.push(Some(exit));
@@ -684,7 +727,7 @@ pub fn forward(bars: &[Candle], column: &Column, horizon: Horizon) -> Forward {
     let mut lanes = Lanes::with_capacity(bars.len());
     for i in 0..bars.len() {
         if !facts.accepts(i) {
-            lanes.absent(true);
+            lanes.absent(Unpriced::Refused);
             continue;
         }
         // NO ENTRY ON A FORCED-EXIT BAR. At the square-off the position is being
@@ -693,11 +736,11 @@ pub fn forward(bars: &[Candle], column: &Column, horizon: Horizon) -> Forward {
         // `bar_open + tf > forced_minute`, which [`SessionBounds::fillable`]
         // answers per day rather than against a fixed minute.
         let Some(square_off) = facts.exits().get(i).copied().flatten() else {
-            lanes.absent(false);
+            lanes.absent(Unpriced::No);
             continue;
         };
         let Some(start) = bars.get(i).map(|bar| bar.ts_micros) else {
-            lanes.absent(true);
+            lanes.absent(Unpriced::Refused);
             continue;
         };
         let span = i64::try_from(h).unwrap_or(i64::MAX);
@@ -726,16 +769,19 @@ pub fn forward(bars: &[Candle], column: &Column, horizon: Horizon) -> Forward {
             square_off.bar
         } else if deadline <= forced_stamp {
             let Some(want) = facts.at_timestamp(deadline) else {
-                lanes.absent(true);
+                // No accepted record at the deadline. A refused record within
+                // the `h` records after the entry is the store's fault; with
+                // none there, the minute has no record at all -- D-1176.
+                lanes.absent(Unpriced::of(&facts, i, i.saturating_add(h)));
                 continue;
             };
             want
         } else {
-            lanes.absent(false);
+            lanes.absent(Unpriced::No);
             continue;
         };
         if exit <= i {
-            lanes.absent(false);
+            lanes.absent(Unpriced::No);
             continue;
         }
         // A BAR THIS RUN ALREADY REFUSED MAY NOT PRICE AN EXIT.
@@ -778,7 +824,7 @@ pub fn forward(bars: &[Candle], column: &Column, horizon: Horizon) -> Forward {
         // runs and nothing said why. A silent smaller sample is a quieter version
         // of the same §4 failure.
         if !facts.path_accepts(i, exit) {
-            lanes.absent(true);
+            lanes.absent(Unpriced::of(&facts, i, exit));
             continue;
         }
         let Some((later, now)) = bars
@@ -786,7 +832,7 @@ pub fn forward(bars: &[Candle], column: &Column, horizon: Horizon) -> Forward {
             .zip(bars.get(i))
             .map(|(later, now)| (later.close, now.close))
         else {
-            lanes.absent(true);
+            lanes.absent(Unpriced::Refused);
             continue;
         };
         let moved = later.saturating_sub(now);
@@ -990,8 +1036,9 @@ pub struct Edge {
     /// about one mask and has nowhere to put an error; `CLAUDE.md` §4 asks for
     /// the reason to be named beside the answer, and this names it.
     pub mismatched: u64,
-    /// Bars where the mask fired and the outcome was dropped because a BAR WAS
-    /// REFUSED.
+    /// Bars where the mask fired and the outcome was dropped because its path
+    /// could not be priced: a REFUSED record, or a MISSING minute. [`Self::missing`]
+    /// counts the second kind, so `refused - missing` is the refused records.
     ///
     /// # Not the tail, and it used to be indistinguishable from it
     ///
@@ -1006,11 +1053,22 @@ pub struct Edge {
     /// `Edge::mismatched`"*. It was not, and this field is what makes the claim
     /// true.
     ///
-    /// **Zero on every sound slice.** Non-zero means the store handed this run a
-    /// record the engine refuses, and every figure beside it is over a smaller
-    /// sample rather than a corrected one — `CLAUDE.md` §4, degrade loudly and
-    /// name the reason.
+    /// **Zero on every sound, complete slice.** Non-zero means the store handed
+    /// this run a record the engine refuses or left a minute out, and every
+    /// figure beside it is over a smaller sample rather than a corrected one —
+    /// `CLAUDE.md` §4, degrade loudly and name the reason.
+    ///
+    /// Kept as the total, not split, because `cli` persists it in the
+    /// sweep-evidence row as the "unpriceable/refused outcome count", and
+    /// changing what that stored number means is what §3 rule 8 forbids.
     pub refused: u64,
+    /// The part of [`Self::refused`] where no record was refused: a minute the
+    /// path needed has no record at all -- D-1176.
+    ///
+    /// It was counted, unnamed, as a refused record, so a holed session read as a
+    /// corrupt store. Not persisted. It is an in-memory reason, derived again on
+    /// every run.
+    pub missing: u64,
     /// The t-statistic of that mean against zero.
     ///
     /// `mean / (sd / √n)`. Zero when fewer than two observations exist, where a
@@ -1652,6 +1710,7 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
     // Outcomes dropped because a bar was REFUSED, kept apart from the tail. See
     // `Forward::refused`: both are absent, and they mean opposite things.
     let mut refused: u64 = 0;
+    let mut missing: u64 = 0;
     let mut mean = 0.0_f64;
     let mut m2 = 0.0_f64;
     // The two sides of the distribution, kept apart -- see `Edge::payoff_bp`
@@ -1774,6 +1833,9 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
             if forward.was_refused(source) {
                 refused = refused.saturating_add(1);
             }
+            if forward.was_missing(source) {
+                missing = missing.saturating_add(1);
+            }
             continue;
         };
         n = n.saturating_add(1);
@@ -1855,6 +1917,7 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
         n,
         mismatched,
         refused,
+        missing,
         mean_paisa: mean,
         // CARRIED, not zeroed, on the `t = 0.0` path. A single observation has
         // no `t` -- there is no spread to divide by -- but it did move one way
@@ -4246,5 +4309,117 @@ mod overlap_window_tests {
             live.contains("recent.observe(source, r,"),
             "edge must fold O(1)"
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes."
+)]
+mod missing_minute_tests {
+    use super::{Horizon, edge, forward};
+    use indicators::column::Column;
+    use indicators::evaluator::{Evaluator, Widths};
+    use indicators::pattern::Thresholds;
+    use indicators::vwap::Availability;
+    use indicators::{Candle, OI_NULL};
+    use vocab::ConditionMask;
+
+    fn evaluator() -> Evaluator {
+        Evaluator::new(
+            Widths::pinned().expect("pinned widths are valid"),
+            Availability::Absent,
+            Thresholds::CLASSICAL,
+        )
+    }
+
+    /// W3-runner3-8: a minute with NO record is not a refused record. Remove
+    /// one mid-session bar; every outcome whose deadline or path needed it is
+    /// absent, and each is named missing, not refused.
+    #[test]
+    fn a_missing_minute_is_named_missing_and_never_a_refused_record() {
+        let mut bars = crate::synthetic::sessions(8);
+        let hole = bars.len() - 200;
+        bars.remove(hole);
+        let column = Column::build(&bars, &mut evaluator());
+        assert_eq!(
+            column.acceptance_census().offered,
+            column.acceptance_census().swept + column.acceptance_census().warming,
+            "nothing in this fixture is refused"
+        );
+        let f = forward(&bars, &column, Horizon::DEFAULT);
+        // The entries whose fifteen-minute window spans the hole.
+        let mut dropped = 0_u32;
+        for i in hole - 15..hole {
+            assert!(
+                f.at(i).is_none(),
+                "entry {i} priced across a missing minute"
+            );
+            assert!(f.was_refused(i), "entry {i}: the path was unpriceable");
+            assert!(
+                f.was_missing(i),
+                "entry {i}: and the reason is a missing minute"
+            );
+            dropped += 1;
+        }
+        assert!(dropped > 0);
+        let e = edge(&column, &f, &ConditionMask::default());
+        assert!(e.refused > 0, "the hole is still counted as unpriceable");
+        assert_eq!(
+            e.missing, e.refused,
+            "and every one of them is a missing minute"
+        );
+    }
+
+    /// A refused record stays refused, and when a path holds both a refused
+    /// record and a missing minute, the refusal is what it is charged to.
+    #[test]
+    fn a_refused_record_is_never_named_missing() {
+        let clean = crate::synthetic::sessions(8);
+        let mut dirty = clean.clone();
+        let victim = dirty.len() - 100;
+        let stamp = dirty.get(victim).map_or(0, |bar| bar.ts_micros);
+        if let Some(bar) = dirty.get_mut(victim) {
+            // `high` below `open`: `Candle::check` refuses it.
+            *bar = Candle::new(
+                stamp, 2_500_000, 2_499_000, 2_498_000, 2_498_500, 1, OI_NULL,
+            );
+        }
+        let column = Column::build(&dirty, &mut evaluator());
+        assert!(!column.accepts(victim));
+        let f = forward(&dirty, &column, Horizon::DEFAULT);
+        assert!(f.was_refused(victim - 2) && !f.was_missing(victim - 2));
+        let e = edge(&column, &f, &ConditionMask::default());
+        assert!(e.refused > 0);
+        assert_eq!(e.missing, 0, "a refused record is not a missing minute");
+
+        // BOTH ON ONE PATH: a hole five minutes after the refused record.
+        let mut both = dirty.clone();
+        both.remove(victim + 5);
+        let column = Column::build(&both, &mut evaluator());
+        let f = forward(&both, &column, Horizon::DEFAULT);
+        assert!(f.was_refused(victim - 2), "the path is unpriceable");
+        assert!(
+            !f.was_missing(victim - 2),
+            "and the refused record is named"
+        );
+        assert!(f.was_missing(victim + 1), "past the refusal, only the hole");
+    }
+
+    /// The lane's edges: out of range and the tail are neither.
+    #[test]
+    fn the_tail_and_an_index_past_the_slice_are_neither() {
+        let bars = crate::synthetic::sessions(6);
+        let column = Column::build(&bars, &mut evaluator());
+        let f = forward(&bars, &column, Horizon::DEFAULT);
+        let last = bars.len() - 1;
+        assert!(f.at(last).is_none());
+        assert!(
+            !f.was_refused(last) && !f.was_missing(last),
+            "the tail is the design"
+        );
+        assert!(!f.was_refused(bars.len()) && !f.was_missing(bars.len()));
+        assert!(!f.was_missing(usize::MAX));
     }
 }
