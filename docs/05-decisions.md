@@ -44416,3 +44416,41 @@ measured reasons:
   lines that call `verify`.
 
 Invariant CIG-23.
+
+### D-1120 — V-06's dependency pin reads the engine manifest as TOML and reports the linked package — 2026-10-02
+
+**What was wrong.** D-1107 deferred it. `engine::tests::declared_dependencies`
+backs V-06 (`the_sweep_cannot_compute_a_condition_bit`), which pins
+`crates/engine`'s dependency set to exactly `["vocab"]`. It split each line at
+`#` and `=` and took the table from any line that began with `[`. Run against
+the shapes D-1107 listed, it returned `["vocab"]` for
+`vocab = { package = "store", .. }`, for a `[dependencies.vocab]` table with
+`package = "store"` and for `vocab.package = "store"`, so the exact pin passed
+while `store` linked. It returned `[]` for `[ dependencies . store ]`,
+`["dependencies"]`, `[dev_dependencies]` and a root-level
+`dependencies.store = { .. }`. It returned the escaped text for
+`"store" = ..`, and phantom names for the continuation lines of a
+multi-line array and for a header written inside a multi-line string. All ten
+results were taken by compiling the old function on its own and running it on
+each shape.
+
+**The choice.** `crates/engine/src/manifest.rs`, compiled only under
+`#[cfg(test)]`, reads the manifest as TOML: dotted and quoted keys split into
+segments, basic and literal strings with their escapes decoded, multi-line
+strings, inline tables and arrays across lines. Every key is joined to its
+table's path before it is classified. A dependency is a key under
+`dependencies`, `dev-dependencies` or `build-dependencies` (hyphen or underscore
+spelling), directly or under `target.CFG`. The result is the PACKAGE each one
+links: an explicit `package` wins, and a `NAME.workspace = true` declaration
+resolves through the root manifest's `[workspace.dependencies]`, which the
+reader also parses. Text it cannot parse is an `Err` that fails the test,
+never a partial list, so a nameless key now refuses where the line scan
+dropped it. No TOML crate is in `Cargo.lock` and none was added.
+
+**Not changed.** The reader is permissive where cargo is strict (a multi-line
+key, a trailing comma, a newline inside an inline table), which cannot hide a
+dependency because cargo refuses those manifests itself. It does not read
+`[patch]` or `[replace]`: they redirect a dependency already declared and do
+not add one, and gate 22 clause A, which reads them through
+`.github/source_scan.rs deps`, is unchanged. `crates/core/tests/graph.rs` keeps
+its own line reader and its stated multi-line limit. Invariant V-06b.
