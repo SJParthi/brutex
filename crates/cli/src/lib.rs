@@ -666,11 +666,7 @@ fn write_disagreement(
         }
     );
     for d in &v.disagreements {
-        let _ = writeln!(
-            out,
-            "           record {} ts {} field {} -- stored {}, folded {}",
-            d.at, d.ts_micros, d.field, d.stored, d.folded
-        );
+        let _ = writeln!(out, "           {}", d.line());
     }
 }
 

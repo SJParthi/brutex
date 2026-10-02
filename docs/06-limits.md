@@ -10832,3 +10832,71 @@ that fill the same fields with `.ppm()` are not changed by D-0743.
   through `Expression::parse(line)` (`parse_catalog` in
   `crates/cli/src/boolean_catalog_command.rs`), so a candidate's displayed text
   cannot always be re-run through either (D-0754).
+## Global Replay V1 appends and V3 commits re-read their whole ledger — D-0927, 30 September 2026
+
+§140 states what OPENING the V1 replay files costs, and §166 bounds one V3
+block in its own record count. Neither said what each later V1 append or V3
+commit costs, and both re-read every committed record.
+Nothing here was timed; every statement is read off the source named beside it.
+
+* **V1, every append.** `append_complete_locked` begins with
+  `self.require_files_unchanged()?;`, and on a new publication ends with
+  `self.refresh_file_digests()?;` (`crates/cli/src/global_replay.rs`). Each of
+  those two functions calls `digest_file` on the stream, decision, trade and
+  completion files, and `digest_file` seeks to `SeekFrom::Start(0)` and reads
+  in 16 KiB chunks until `read == 0`. One new publication therefore hashes all
+  four files twice, and an exact reuse hashes them once before it returns
+  `Reused`. The bytes hashed per append grow with every publication already
+  committed, so P appends hash O(P²) record-bytes in total when publications
+  are of similar size (an extrapolation from the loop, not a measurement).
+* **Why the first hash is kept.** `require_files_unchanged` is the check
+  that refuses a writer whose files were changed underneath it by an
+  equal-length overwrite.
+  `global_replay::tests::same_length_external_mutation_makes_open_writer_stale`
+  overwrites one byte at `HEADER_BYTES + 10` of the stream file, inside its
+  first record, and requires the next append to refuse with "changed after
+  open". That pins that a pre-append check exists and covers that byte; it does
+  not prove the check must span the whole file, and a check over a prefix
+  would pass it too. A replacement would have to keep that refusal, and none is
+  attempted here.
+* **The second hash is kept only for simplicity.** `refresh_file_digests`
+  rehashes all four files after the append to set the next baseline, and no
+  test requires that it read them again: the hasher from the first pass,
+  extended with only the bytes this call appended, would give the same
+  baseline. Removing it would halve the hashing per new publication and leave
+  it O(P) per append, so the class above is unchanged either way. It is a
+  separate, removable cost, recorded here rather than removed.
+* **V3, every open, commit and audit.** `GlobalReplayLedgerV3::open` ends with
+  `ledger.load_snapshot()?;`, `commit_locked` runs
+  `let snapshot = self.load_snapshot()?;` before its duplicate-publication
+  probe, and `audit` runs `let snapshot = self.ledger.load_snapshot()?;`
+  (`crates/cli/src/global_replay_v3.rs`). `load_snapshot` calls `read_records`
+  for the witness, candidate, decision, money and completion files, and
+  `read_records` decodes every record of its file. It then walks
+  `for (ordinal, completion) in snapshot.completions.iter().enumerate()` and
+  calls `validate_committed_block(completion, &snapshot)?;` for every prior
+  completion. That runs `let summary = validate_semantics(`, which runs
+  `let scheduled = schedule_candidates(witnesses, candidates, Some(&persisted_vix))?;`,
+  and `schedule_candidates` begins with `order.sort_unstable_by_key(` over the
+  block's candidates. So each call decodes every record ever committed to the
+  five V3 files AND re-schedules every committed block, a sort of C_i
+  candidates for block i: about Θ(R + Σ C_i log C_i) per call, where R is the
+  record count of the five files, not the one block §166 bounds. K commits of
+  similar size are therefore at least quadratic in K (an extrapolation from the
+  loops, not a measurement).
+
+**A process killed mid-append still leaves a refused tail.** D-0926 rolls a
+failed V1, V2 or V3 append back to its starting length when an encode or a write
+returns an error. A process that dies between two writes runs no rollback, so
+its partial record remains, and the next open refuses the file for its ragged
+body, loudly, as before. No open path truncates such a tail on its own.
+
+**A rollback is not synced before the refusal returns.** `append_encoded_with`
+calls `file.cut_to(start)` (`set_len` on a `File`) and returns its refusal with
+no `sync_all` after it, so the truncation may not have reached the disk. A
+power loss then can bring back the bytes the rollback cut: a partial record,
+which the next open refuses for its ragged body as for the killed process
+above, or whole records of the refused call, which are then in the same state
+as the whole records D-0926 says a commit failing on a later file leaves in its
+earlier files. This is not synced here and not tested; it is read off the
+source.
