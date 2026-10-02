@@ -9888,3 +9888,10 @@ The text above is kept as it was written.
   widest window, not `n·log n`. A query that moved backwards would cost
   Θ(window) for that query. `forward` issues none, and the test that walks
   every exit checks that. Not timed. No bench row covers `forward`.
+* **A derived exit ladder: expected O(n) per candidate, O(1) per trade
+  (D-1172).** `Ladder::from_excursions` selects at most 65 halving positions
+  with `select_nth_unstable` and never sorts. Each caller still copies the
+  sample once per axis (`to_vec()`), which is O(n) per candidate. That copy is
+  linear in the candidate's own trades, not in the bars. Expected rather than
+  worst-case: `select_nth_unstable`'s documented bound is expected linear.
+  Not timed.

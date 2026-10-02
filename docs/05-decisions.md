@@ -43798,3 +43798,38 @@ mean, the counts and every sum are unchanged.
 `one_window_holding_the_whole_sample_is_no_evidence` (14,175.6 on 353 hits of
 one day). They compare `edge` against the estimator written out pair by pair
 from its definition, not against `edge`'s own accumulators.
+
+### D-1172 — `Ladder::from_excursions` selects its rung positions instead of sorting the sample — 2026-10-02
+
+**What was wrong (audit W3-runner2-6).** `Ladder::from_excursions` is called
+once per candidate on the legacy and expression grid paths (`grid.rs`
+`merged_stops` and `ladder_of`). It ran `observed.sort_unstable()` over every
+trade's excursion and then read only `count` positions. That is Θ(n log n) per
+candidate, or Θ(log n) per trade, and no limits entry stated it. The loop also
+ran `count` times and reserved `count` rungs, so an absurd `count` was an
+allocation failure, which aborts the process.
+
+**The change.** Rung `i` reads position `(len - 1) / 2^(count - i + 1)`, and
+these positions halve. The deepest one is selected with `select_nth_unstable`
+over the whole slice. Each shallower one is selected inside the prefix the
+previous selection left below it, which is at most half as long. The total is
+expected O(n) per ladder, which is O(1) per trade. Positions past the 64th
+halving are all zero, so the loop visits at most 65 positions whatever `count`
+is. The position arithmetic moved, unchanged, into `rung_position`.
+
+**Outputs.** Unchanged. The same order statistics are read, so every ladder is
+rung-for-rung identical to the sorted reading.
+`the_selected_ladder_is_the_sorted_ladder_rung_for_rung` checks this over
+twelve samples (empty, one element, duplicates, zeros, negatives, `i64`
+extremes) and eleven counts. One difference is visible to a caller: the slice
+it passes in is now left permuted, not sorted. Every production caller passes a
+fresh `to_vec()` copy and never reads it afterwards.
+
+**Tests that fail on the previous tree:** `from_excursions_does_not_sort_the_sample`
+(the old body sorts), and `an_absurd_rung_count_is_the_sixty_five_rung_ladder`
+(the old loop reserves `usize::MAX` rungs). **Not measured:** no bench row times
+the ladder. The expected-linear bound is the documented bound of
+`select_nth_unstable`. The gate 11 sort allowlist for `excursion.rs` stays at
+one occurrence. Its comment in `ci.yml` still says "ONE sort", and it should say
+"one selection". That file belongs to another lane, so the stale comment is
+reported here and not edited.
