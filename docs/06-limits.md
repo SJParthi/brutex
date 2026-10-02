@@ -8972,7 +8972,9 @@ it was written.
   damaged record past the commit, leave an entry no extent matches. The
   committed bars are refused until a strictly following append re-seals the
   block. The strict audit door (D-0525) refuses any bytes past the commit and
-  is unchanged.
+  is unchanged. **Widened by D-0910:** a strictly following append now
+  verifies the old tail block before re-sealing it, so this state refuses
+  every append as well as every read; see the D-0910 section below.
 - **The directory `fsync` after creating a `.crc` is not observable by any
   test.** It runs on each writer open of a month with no committed records, so
   a month reopened while still empty pays one directory flush each time. What
@@ -9879,6 +9881,32 @@ The text above is kept as it was written.
   doc to its body, read off the source, and
   `what_a_changed_rows_line_costs_is_named_in_part_and_read_off_the_source`
   finds each part named here and in that doc in the source that pays it.
+
+## A following append verifies the old tail block before re-sealing it — D-0910, 2 October 2026
+
+- **One block verification per append that lands inside a partially covered
+  tail block.** `BarFile::append`'s forward path now calls `verify_block_of`
+  on the old tail block before it writes: at most one 4,088-byte read, one
+  4-byte sidecar read and the tail block's one `fstat`, plus the D-0688 past
+  read when records lie past the commit. Independent of the file's length
+  (`CLAUDE.md` §3 rule 4). An append whose old `n_valid` is a whole number of
+  blocks (or zero) verifies nothing. Not timed: no bench row covers this path.
+- **The handle's one-block cache is cleared before the check**, so a block a
+  read verified earlier on the same handle is read again. That is the price of
+  not trusting the cache about bytes that can change between a read and an
+  append.
+- **A false refusal widened, stated.** A tail block D-0688 cannot prove
+  (a second interrupted append that rewrote records past the commit before
+  re-sealing, or a damaged record past the commit) used to be healed by the
+  next strictly following append. It now refuses that append too, with the
+  same `BlockChecksum` the reads give, and both files are left as found. The
+  bytes cannot tell this state from a rotted committed record, and healing
+  one launders the other. No path in this repository repairs such a month:
+  `store::repair` refuses a source whose checksums fail. Recovering it is an
+  operator action outside the store.
+- **Only the old tail block is checked.** A rotted record in an earlier, full
+  block is not read by an append and stays where a reader refuses it; the
+  append neither verifies nor re-seals that block.
 
 ## The cold bar lookup is measured, and it has its own budget — D-0914, 2 October 2026
 
