@@ -43918,3 +43918,31 @@ drives moves near `i64::MAX` with a spread of a few paisa, and alternating
 `i64::MIN` and `i64::MAX`. `empty_single_and_reopened_windows` covers no hit,
 one hit, and a drain to empty that re-anchors. **Not measured:** no bench row
 covers `edge`. The O(1) per hit is argued from the code (§3 rule 6).
+
+### D-1175 — The long-run-variance refusal is tested where it lives, and its stated cause is corrected — 2026-10-02
+
+**What was wrong (audit LATE-whole-hot-path:tests-bite#8).**
+`a_non_positive_long_run_variance_is_refused_rather_than_reported_as_nan`
+never called `edge` or anything `edge` calls after the sum. It built a negative
+sum and asserted that `f64::sqrt` of it divided by two constants is `NaN`. That
+is a fact about IEEE 754, and the test passed with `edge`'s guard deleted.
+
+**The change.** `edge`'s last step, from the long-run sum to `t`, is now the
+function `newey_west_t`. It has the same arithmetic, in the same order, so its
+bits are unchanged. `a_long_run_sum_that_cannot_give_a_t_reports_none` drives
+it with a negative sum, `-0.0`, `0.0`, `NaN` and both infinities, and requires
+exactly `0.0` each time. It also requires the ordinary `t` (3/2) for a positive
+sum and the mean's sign. With the guard removed the test fails (`sum -99 gave
+t=NaN`).
+
+**The cause the old comment gave was wrong, and is corrected.** It said the
+Bartlett kernel is positive semi-definite only on evenly spaced lags, so
+irregular hits could drive the sum below zero through negative
+autocovariance. The triangle `max(0, 1 - |d|/H)` is a positive-definite
+function on the real line, since its Fourier transform is a squared sinc. Its
+matrix is therefore positive semi-definite at any set of hit positions, and
+under D-1171 it is one such block per day. The exact sum is never negative.
+Only rounding in the `f64` assembly can push it to zero or below, which is why
+the guard stays.
+
+**Outputs.** None change.

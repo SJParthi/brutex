@@ -1969,31 +1969,43 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
         reason = "the observation count is bounded by the column length."
     )]
     let count = n as f64;
-    let sum_squares = recent.sum_squares(m2, mean);
-    let variance = sum_squares / (count - 1.0);
-    let standard_error = (variance / count).sqrt();
-    let t = if standard_error > 0.0 && standard_error.is_finite() {
+    assemble(newey_west_t(count, mean, recent.sum_squares(m2, mean)))
+}
+
+/// The t-statistic of `mean` over `count` observations whose long-run sum of
+/// squares is `sum_squares`, or `0.0` when that sum cannot give one.
+///
+/// # Split out so the refusal is tested where it lives -- D-1175
+///
+/// The test named for this refusal never called `edge`. It asserted that
+/// `f64::sqrt` of a negative number is `NaN`, which is a fact about IEEE 754 and
+/// holds with the guard deleted. This is the last step of `edge`, unchanged, and
+/// `a_long_run_sum_that_cannot_give_a_t_reports_none` drives it directly.
+///
+/// # When the sum is not positive
+///
+/// The comment here used to say the Bartlett kernel is positive semi-definite
+/// only on evenly spaced lags, so irregular hits could drive the sum negative
+/// by negative autocovariance. That was wrong. The triangle `max(0, 1 - |d|/H)`
+/// is a positive-definite function on the real line (its Fourier transform is
+/// a squared sinc), so its matrix is positive semi-definite at ANY set of hit
+/// positions. Under D-1171 the matrix is one such block per day, which is still
+/// positive semi-definite. The exact sum is never negative.
+///
+/// What CAN reach here is rounding: the sum is assembled from uncentred terms
+/// in `f64` (`long_run_sum_squares`), and a near-degenerate sample can round to
+/// zero or just below it. `sqrt` of a negative is `NaN`, which compares false
+/// against every threshold and would read as a silently weak result. So a
+/// non-positive or non-finite standard error is reported as `0.0`, the same
+/// "no evidence" answer a degenerate sample gets. Reporting the uncorrected t
+/// instead would report the inflated number the correction exists to remove.
+fn newey_west_t(count: f64, mean: f64, sum_squares: f64) -> f64 {
+    let standard_error = (sum_squares / (count - 1.0) / count).sqrt();
+    if standard_error > 0.0 && standard_error.is_finite() {
         mean / standard_error
     } else {
-        // TWO WAYS TO GET HERE, AND BOTH ARE REPORTED AS NO EVIDENCE.
-        //
-        // Every observation identical: the mean is exact and its spread is
-        // zero, which is not an infinitely strong result -- it is a degenerate
-        // sample, and reporting it as zero refuses to dress one up as the other.
-        //
-        // Or the long-run variance came out NON-POSITIVE. The Bartlett kernel
-        // is positive semi-definite on evenly spaced lags, and these lags are
-        // bar gaps between irregular hits, so that guarantee does not carry
-        // over: strong negative autocovariance can drive `sum_squares` to or
-        // below zero. `sqrt` of a negative is `NaN`, which would compare false
-        // against every threshold and read as a silently weak result rather
-        // than an unusable one. `is_finite` catches it and it lands here, with
-        // the same answer the degenerate sample gets -- this run measured
-        // nothing usable. Reporting the uncorrected t instead would be reporting
-        // the inflated number this whole block exists to remove.
         0.0
-    };
-    assemble(t)
+    }
 }
 
 #[cfg(test)]
@@ -2438,23 +2450,35 @@ mod tests {
         );
     }
 
-    /// A long-run variance can come out non-positive, and that is reported as no
-    /// evidence rather than as a `NaN` that reads like weak evidence.
+    /// A long-run sum that cannot give a `t` is reported as no evidence, never as
+    /// a `NaN` that reads like weak evidence -- D-1175.
     ///
-    /// The Bartlett kernel is positive semi-definite on evenly spaced lags. These
-    /// lags are bar gaps between irregular hits, so the guarantee does not carry
-    /// over and strong negative autocovariance can drive the sum of squares
-    /// below zero. `sqrt` of that is `NaN`, and `NaN` compares false against
-    /// every threshold -- it would pass a `t > bar` test by failing it, and read
-    /// as a merely-weak result instead of an unusable one.
+    /// This drives `newey_west_t`, the last step of `edge`, with every sum that
+    /// cannot give a standard error: negative (rounding), zero, `NaN` and
+    /// infinite. Each must come back exactly `0.0`. Delete the guard and the
+    /// negative case returns `NaN`, the zero case an infinite `t`, and this
+    /// fails. The test it replaces asserted only that `sqrt(-1)` is `NaN`.
     #[test]
-    fn a_non_positive_long_run_variance_is_refused_rather_than_reported_as_nan() {
-        // Cross term far more negative than m2 is positive.
-        let s = long_run_sum_squares(1.0, 0.0, -50.0, 0.0, 0.0);
-        assert!(s < 0.0, "the fixture must actually go negative, got {s}");
+    fn a_long_run_sum_that_cannot_give_a_t_reports_none() {
+        let negative = long_run_sum_squares(1.0, 0.0, -50.0, 0.0, 0.0);
+        assert!(negative < 0.0, "the fixture must actually go negative");
+        for sum in [
+            negative,
+            -0.0,
+            0.0,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            let t = super::newey_west_t(5.0, 3.0, sum);
+            assert!(t.to_bits() == 0.0_f64.to_bits(), "sum {sum} gave t={t}");
+        }
+        // And a positive sum gives the ordinary t: mean / sqrt(sum / (n-1) / n).
+        let t = super::newey_west_t(5.0, 3.0, 80.0);
+        assert!((t - 3.0 / 2.0).abs() < 1e-12, "t={t}");
         assert!(
-            (s / 4.0 / 5.0).sqrt().is_nan(),
-            "and a negative variance is where the NaN would come from"
+            super::newey_west_t(5.0, -3.0, 80.0) < 0.0,
+            "the sign is the mean's"
         );
     }
 
