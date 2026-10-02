@@ -3,9 +3,9 @@
 use super::{
     BooleanCoordinateV1, Bounds, Chosen, CommittedBooleanFamilyV1, Completion, Direction,
     ExecutionSeriesV1, Expression, ExpressionExecutionRunV1, Hasher, Horizon, Operation, Params,
-    Path, PathBuf, Remaining, Request, RetainedSource, Run, Sessions, Side, Source, StrictConfig,
-    catalog_words, cohort_digest, display, grid_context, hash, load_source, persistence,
-    prepare_column, reference, refuse, validate_request,
+    Path, PathBuf, Remaining, Request, RetainedSource, Run, Sessions, Side, Source, SourceDigest,
+    StrictConfig, catalog_words, cohort_digest, display, grid_context, hash, load_source,
+    persistence, prepare_column, reference, refuse, validate_request,
 };
 use runner::exit_grid_policy::expression_execution::later_period::validation::{
     BoundFixedTrainingFoldsV1, FixedTrainingFoldPlanV1, FixedTrainingFoldProjectionV1,
@@ -431,15 +431,9 @@ fn compute(
     // each verdict is still reported where the per-call path reported it.
     let later = LaterExpressionSliceV1::new(series, &column);
     let fold_map = validation
-        .map(|validation| {
-            LaterFoldMapV1::new(
-                validation.windows,
-                execution,
-                &column,
-                validation.mapping_bytes,
-            )
-        })
+        .map(|asked| LaterFoldMapV1::new(asked.windows, execution, &column, asked.mapping_bytes))
         .transpose()?;
+    let mut digest = SourceDigest::new(source);
     for (group, anchor) in training.anchors.iter().enumerate() {
         let program = training
             .programs
@@ -457,7 +451,18 @@ fn compute(
         {
             return Err("Boolean later anchor differs from original directional run".into());
         }
-        let run = execution_run(request, source, identity, commit, program, resolved.side())?;
+        let data_digest = digest
+            .get()
+            .map_err(|why| format!("Boolean later daily identity: {why:?}"))?;
+        let run = execution_run(
+            request,
+            source,
+            identity,
+            commit,
+            program,
+            resolved.side(),
+            data_digest,
+        )?;
         let attempt = crate::sweep_evidence::begin(
             request.output,
             run.run_id().bytes(),
@@ -527,13 +532,8 @@ fn execution_run(
     commit: &str,
     program: &Expression,
     side: Side,
+    data_digest: [u8; 32],
 ) -> Result<ExpressionExecutionRunV1, String> {
-    let data_digest = runner::identity::data_digest_with_daily_reference(
-        &source.data.signal.bars,
-        &source.data.exact_minute.bars,
-        reference(source),
-    )
-    .map_err(|why| format!("Boolean later daily identity: {why:?}"))?;
     ExpressionExecutionRunV1::new_with_daily_reference(
         &Run {
             mask: program.referenced(),

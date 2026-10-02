@@ -498,7 +498,7 @@ impl ExecutionRunV1 {
 /// Is `evaluated_execution_1m` an exact contiguous run of
 /// `reference_minute_context`?
 ///
-/// # Cost (o1runner-3, D-0931)
+/// # Cost (o1runner-3, D-1196)
 ///
 /// Every production caller passes the evaluated slice as a VIEW into the
 /// context it was cut from, so its position is pointer arithmetic: the address
@@ -544,7 +544,7 @@ fn require_exact_execution_subslice(
 
 #[cfg(test)]
 std::thread_local! {
-    /// Linear subslice searches taken on this thread (D-0931).
+    /// Linear subslice searches taken on this thread (D-1196).
     static SUBSLICE_SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
@@ -573,7 +573,7 @@ mod subslice_tests {
         SUBSLICE_SCANS.with(std::cell::Cell::get)
     }
 
-    /// o1runner-3 / D-0931: a view into the context is located by address, with
+    /// o1runner-3 / D-1196: a view into the context is located by address, with
     /// no search; a copy is still judged exactly as before.
     #[test]
     fn a_view_into_the_context_is_located_without_a_search() {
@@ -1302,7 +1302,10 @@ impl ResolvedLaddersV1 {
 /// pass -- so the "per-candidate half" re-read every bar per candidate. The
 /// facts are a function of the bars and the column alone, the two things this
 /// token already binds, so they are built here and shared behind an `Arc`.
-/// That is also why the token is `Clone` and no longer `Copy`.
+/// That is also why the token is `Clone` and no longer `Copy`. D-0741
+/// (W3-runner2-0) hoisted the same facts into this token on a parallel
+/// branch; the merged tree keeps this one field and every door, the expression
+/// pricing and coordinate materialization among them, reads it.
 ///
 /// **UNVERIFIED as a measured bound.** No bench in this workspace times the
 /// attestation it hoists, so the saving is read from the source rather than
@@ -2218,6 +2221,8 @@ impl ResolvedExitGridV1 {
     /// run's five identity terms are checked against this resolution's own
     /// copies -- which the attestation proved equal to the series' -- so no
     /// bar is re-read and no byte is re-hashed here; what remains is the grid.
+    /// The slice facts come from the token too (D-0741), so no per-slice table
+    /// is rebuilt here either; the walk still visits every column row.
     ///
     /// # Errors
     ///
@@ -6390,6 +6395,51 @@ mod tests {
         assert_eq!(
             other.evaluate_with_attested(&attested, run),
             Err(ExitGridErrorV1::EvaluationResolutionMismatch)
+        );
+    }
+
+    /// W3-runner2-0 (D-0741): the per-slice facts are derived once, by the
+    /// attestation, and pricing a run over the token derives none.
+    #[test]
+    fn pricing_runs_over_one_attestation_derives_the_slice_facts_once() {
+        let input = bars(100);
+        let instrument = nifty();
+        let resolved = policy()
+            .resolve(&instrument, &input)
+            .unwrap_or_else(|_| unreachable_resolved());
+        let column = test_column(&input);
+        let series =
+            ExecutionSeriesV1::new(&instrument, "test-feed", "test-commit", [0xA5; 32], &input)
+                .expect("the synthetic series is well formed");
+        let run = test_execution_run(&instrument, &ConditionMask::ZERO, resolved.side(), &input)
+            .expect("the synthetic run seals");
+
+        let before_attest = crate::trade::slice_facts_derived_on_this_thread();
+        let attested = resolved
+            .attest_training(series, &column, Horizon::DEFAULT)
+            .expect("the exact training slice attests");
+        let after_attest = crate::trade::slice_facts_derived_on_this_thread();
+
+        let first = resolved.evaluate_with_attested(&attested, run);
+        assert!(first.is_ok());
+        for _ in 0..4 {
+            assert_eq!(resolved.evaluate_with_attested(&attested, run), first);
+        }
+        assert_eq!(
+            crate::trade::slice_facts_derived_on_this_thread() - after_attest,
+            0,
+            "five runs priced over one token must not re-derive the slice facts"
+        );
+        assert_eq!(after_attest - before_attest, 1, "attestation derives once");
+        // The single-shot door attests afresh, so it derives exactly once and
+        // prices the same bytes.
+        assert_eq!(
+            resolved.evaluate_training_grid_attested(series, &column, Horizon::DEFAULT, run),
+            first
+        );
+        assert_eq!(
+            crate::trade::slice_facts_derived_on_this_thread() - after_attest,
+            1
         );
     }
 

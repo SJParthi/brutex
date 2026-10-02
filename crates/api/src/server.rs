@@ -5077,6 +5077,9 @@ pub struct Site {
     pub census: CensusCache,
     /// Encoded responses for one exact immutable census snapshot.
     census_wire: store_wire::Cache,
+    /// `/audit.json`'s per-feed month rollups for one exact census snapshot.
+    /// See [`crate::audit_json::RollupCache`]. D-0732.
+    pub(crate) audit_rollup: crate::audit_json::RollupCache,
     /// The run the operator started, if one is in flight or has just ended.
     ///
     /// # Why it is state on the site and not a global
@@ -5340,6 +5343,7 @@ impl Site {
             calendars: std::sync::Mutex::new(std::collections::HashMap::new()),
             census: std::sync::Mutex::new(None),
             census_wire: store_wire::Cache::default(),
+            audit_rollup: crate::audit_json::RollupCache::default(),
             budgets: std::sync::Mutex::new(feed_budgets()),
             // NO RUN UNTIL SOMEBODY PRESSES PULL. A site that started life
             // holding one would answer `/pull/run.json` for a run nobody asked
@@ -13785,8 +13789,11 @@ fn cadence_has_contracts(
 ///
 /// # Cost
 ///
-/// One dated-table lookup per call, while planning and before a request is
-/// issued. The full plan and walk remain proportional to their chunk counts.
+/// A bounded number of dated-table lookups per call, while planning and before
+/// a request is issued: `costs::expiry`'s module documentation states "at most
+/// `dated::MAX_LATER_ROWS + 1` passes on the weekly one" (D-0770) and at most
+/// three table lookups on the monthly path. No input raises that bound. The
+/// full plan and walk remain proportional to their chunk counts.
 fn cadence_has_contracts_on(
     asked: &ingest::FnoRequest,
     rolling: &pull::vendor::RollingSpec,

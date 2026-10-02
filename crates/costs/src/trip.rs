@@ -918,7 +918,7 @@ fn position(fills: Fills, quantity: i64) -> Result<Position, CostError> {
     // Both notionals are in `[0, i64::MAX]`: a `Fills` has no public
     // constructor, so its buy leg is at least one tick (two on the worst case)
     // and its sell leg at least one on every anchor -- the printed-extreme
-    // anchor only since D-0927, before which a negative low reached here and
+    // anchor only since D-1192, before which a negative low reached here and
     // `i64::MIN` overflowed this subtraction -- the quantity is strictly
     // positive, and the multiplications
     // above already refused anything that left `i64`. The difference of two
@@ -2239,9 +2239,9 @@ mod tests {
         )
     }
 
-    /// D-0927. Every anchor, every constructible degenerate low, both
+    /// D-1192. Every anchor, every constructible degenerate low, both
     /// directions, a range of quantities: `charge_stack` answers `Ok` or a
-    /// named `Err` and never panics. Before D-0927 a printed-extreme sell at
+    /// named `Err` and never panics. Before D-1192 a printed-extreme sell at
     /// `i64::MIN` panicked in `position` with "attempt to subtract with
     /// overflow", and a low of -100 priced a sell fill at -₹1.00.
     #[test]
@@ -2967,5 +2967,51 @@ mod tests {
         assert!(!charge_set.insert(charges));
         assert_eq!(charge_set.len(), 1);
         assert!(format!("{charges:?}").starts_with("Charges {"));
+    }
+
+    /// W3-costs1-1: a printed-extreme sell anchored on a low far below zero
+    /// used to reach [`position`] as a negative notional, and the gross
+    /// subtraction its comment calls unable to overflow left `i64`. D-0771
+    /// floored the sell at one tick; the merged tree refuses it by name instead
+    /// (D-1192), so it never reaches [`position`], and the worst case on the
+    /// same bars still absorbs it with its floor and prices without overflow.
+    #[test]
+    fn a_printed_extreme_sell_below_zero_is_refused_and_does_not_overflow() {
+        let entry = Bar::flat(Paisa::from_raw(100_00)).expect("legal");
+        let exit = Bar::new(
+            Paisa::from_raw(-i64::MAX),
+            Paisa::from_raw(100_00),
+            Paisa::from_raw(-i64::MAX),
+        )
+        .expect("Bar::new admits a low below zero");
+        assert_eq!(
+            crate::fill::fills_at(
+                entry,
+                exit,
+                Direction::Long,
+                crate::fill::Anchor::PrintedExtreme
+            ),
+            Err(CostError::BelowTick {
+                quantity: "sell printed-extreme fill",
+                value: -i64::MAX,
+            })
+        );
+        // The worst case on the same bars answers `Ok` or a named refusal, and
+        // where it prices, its sell is the one-tick floor and the charge stack
+        // computes without leaving `i64`.
+        match crate::fill::fills_at(
+            entry,
+            exit,
+            Direction::Long,
+            crate::fill::Anchor::AdverseExtreme,
+        ) {
+            Ok(fills) => {
+                assert_eq!(fills.sell(), TICK_HELPER);
+                let charges = charge_stack(fills, 1, &rates_on(Exchange::Nse, example_day()))
+                    .expect("in range");
+                assert_eq!(charges.sell_notional(), TICK_HELPER);
+            }
+            Err(refused) => assert!(matches!(refused, CostError::Overflow { .. })),
+        }
     }
 }

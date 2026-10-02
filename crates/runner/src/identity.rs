@@ -996,8 +996,8 @@ mod tests {
             })
             .collect();
         let period = crate::resample::Period::minutes(15).expect("a coarse period");
-        let coarse_a = crate::resample::resample(&path_a, period);
-        let coarse_b = crate::resample::resample(&path_b, period);
+        let coarse_a = crate::resample::resample(&path_a, period).expect("market values resample");
+        let coarse_b = crate::resample::resample(&path_b, period).expect("market values resample");
         assert_eq!(
             coarse_a, coarse_b,
             "the signal bars must be byte-identical or this test does not isolate the hidden one-minute path"

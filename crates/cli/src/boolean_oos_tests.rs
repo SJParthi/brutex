@@ -467,3 +467,34 @@ fn the_later_loop_attests_its_slice_and_fold_index_once() {
     assert!(inside.contains("plan.bind_with(&evaluated, map,"));
     assert!(!inside.contains("evaluate_expression_oos(") && !inside.contains("plan.bind(&"));
 }
+
+/// cli's own pass over a later comparison's source: one
+/// [`super::super::SourceDigest`] digest across these three programs' six
+/// groups, where cli used to hash the three streams afresh for each group. It
+/// attests nothing through [`super::super::PricedSide`]. W2-cli2-3.
+///
+/// **This counts cli's pass, not the comparison's.** Each group's run is still
+/// minted through `ExpressionExecutionRunV1::new_with_daily_reference`, whose
+/// runner constructor hashes the same three streams again (`let
+/// expected_data_digest = crate::identity::data_digest_with_daily_reference(`),
+/// and `evaluate_expression_oos` hashes the later bars for each group (`let
+/// execution = crate::identity::data_digest(bars);`). Both are runner passes,
+/// W3-runner2-3 and W3-runner2-4, recorded in D-0711.
+#[test]
+fn cli_digests_a_later_comparisons_source_once() -> Result<(), String> {
+    use super::super::tests::{passes, programs};
+    let fixture = Fixture::new()?;
+    let training = fixture.produce("NIFTY", &programs()?)?;
+    let inputs = config(&fixture)?;
+    let before = passes();
+    let observed = produce_identified(
+        &training,
+        later(&fixture, &inputs),
+        "generated-boolean-candidate-fixture",
+    )?;
+    let after = passes();
+    assert_eq!(training.anchors.len(), 6, "three programs, both sides");
+    assert_eq!(observed.rows().len(), training.rows().len());
+    assert_eq!((after.0 - before.0, after.1 - before.1), (1, 0));
+    Ok(())
+}

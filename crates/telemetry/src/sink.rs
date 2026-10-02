@@ -143,8 +143,11 @@ pub const DEFAULT_MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 /// How many files are kept, the one being written included.
 ///
 /// Eight. With the bound above that is a **64 MiB ceiling on this crate's
-/// entire footprint**, forever: negligible beside the 40 GB lake, and small
-/// enough that no operator has to think about it. It is also ~260,000 events
+/// footprint while rotation works**: negligible beside the 40 GB lake, and
+/// small enough that no operator has to think about it. It used to say
+/// "forever", and it is not: after the first failed roll `rotation_broken`
+/// stops rotating for the life of the sink and the current file grows past
+/// its bound, loudly, in [`Health`]. D-1324. It is also ~260,000 events
 /// of history, which is several backfills.
 pub const DEFAULT_KEEP_FILES: u8 = 8;
 
@@ -707,8 +710,9 @@ impl Sink {
     ///
     /// The sequence number resumes from the last readable line of the current
     /// file, so a restart continues the stream rather than starting a second
-    /// one at zero. That read is one block from the end and nothing more; see
-    /// `resume_seq`.
+    /// one at zero. That read is one block from the end of the newest
+    /// non-empty file and nothing more, and it resumes the `ms` floor too; see
+    /// `resume_point`.
     ///
     /// A file that does not end in a newline is **terminated before the first
     /// append**, so the record the previous process was killed in the middle
@@ -739,12 +743,12 @@ impl Sink {
         let mut target = FileTarget::open(&path)
             .map_err(|e| format!("{}: cannot open the event stream — {e}", path.display()))?;
         let found = target.len();
-        let seq = resume_seq(&path);
+        let (seq, last_at) = resume_point(&config.dir, config.keep_files);
         // THE TORN TAIL IS CLOSED BEFORE THE FIRST APPEND. See
         // `terminate_torn_tail`: without this the first event of the new
         // process fuses onto whatever the old one was killed in the middle of.
         let (bytes, torn) = terminate_torn_tail(&mut target, &path, found);
-        let sink = Self::around(config, Box::new(target), bytes, seq);
+        let sink = Self::around(config, Box::new(target), bytes, seq, last_at);
         if let Some(why) = torn {
             sink.report(&why);
         }
@@ -764,11 +768,17 @@ impl Sink {
         if let Some(why) = config.refusal() {
             return Err(why);
         }
-        Ok(Self::around(config, target, 0, 0))
+        Ok(Self::around(config, target, 0, 0, 0))
     }
 
     /// The common construction.
-    fn around(config: &Config, target: Box<dyn Target>, bytes: u64, seq: u64) -> Self {
+    fn around(
+        config: &Config,
+        target: Box<dyn Target>,
+        bytes: u64,
+        seq: u64,
+        last_at: i64,
+    ) -> Self {
         Self {
             dir: config.dir.clone(),
             max_file_bytes: config.max_file_bytes,
@@ -782,11 +792,14 @@ impl Sink {
                 target,
                 bytes,
                 seq,
-                // ZERO, NOT `now_millis()`. A resumed sink must not claim the
-                // events already in the file happened at the moment it opened;
-                // the first event written clamps against a floor of zero, which
-                // any real clock clears.
-                last_at: 0,
+                // THE LAST STAMP ON DISK, NOT `now_millis()` AND NOT ZERO.
+                // Not the clock: a resumed sink must not claim the events
+                // already in the file happened at the moment it opened. Not
+                // zero either: a restart whose clock is behind the last line
+                // would write an older line after a newer one, which ends
+                // `tail`'s `since` walk early. See `resume_point`; zero only
+                // when nothing on disk could be read. D-1325.
+                last_at,
                 buf: Vec::with_capacity(512),
             }),
             written: AtomicU64::new(0),
@@ -1327,35 +1340,68 @@ fn rename_if_present(from: &Path, to: &Path) -> std::io::Result<()> {
     }
 }
 
-/// The sequence number to carry on from, read from one block at the end.
+/// Where a reopened sink carries on from: the sequence number AND the `ms`
+/// stamp of the newest readable record in the set.
 ///
-/// Never fails: an absent file, an unreadable one, and a file whose last line
-/// will not decode all mean the same thing here — this build cannot tell what
-/// came before, so it starts at zero. That is a **stated limit and not a
-/// silent one**: a wiped or corrupted tail restarts the numbering, and the
-/// `ms` field, which is never reused, is what orders events across such a
-/// restart.
-fn resume_seq(path: &Path) -> u64 {
+/// # Why the set and not only the current file
+///
+/// It read the current file alone, and an EMPTY current file is exactly what a
+/// set holds straight after a roll that renamed the old file aside and then
+/// failed to append (a full disk), or after the current file was removed: the
+/// newest history is then in `.1`. The numbering restarted at zero on top of
+/// it — so `Sink::reserve_run_id`, which resumes from this number, handed a
+/// restarted process run ids still carried by events in the rolled files, and
+/// `Tail::missing` stopped being able to see a gap across the restart. The
+/// first NON-EMPTY file, newest first, is the evidence of where the stream
+/// stands. D-1326.
+///
+/// # Why the stamp too
+///
+/// `Inner::last_at` is the floor `ms` is clamped to so that `ms` order IS file
+/// order, which `tail`'s `since` filter ends its walk on. It started a resumed
+/// sink at zero, so a process restarted with its clock behind the last line on
+/// disk — NTP stepping a rebooted host back, a restored VM — wrote a line older
+/// than the line before it, and a `since` query landing between the two
+/// returned nothing at all: the walk met the new, older line first and stopped.
+/// Resuming the floor from the same record the sequence comes from carries the
+/// clamp across the restart. D-1325.
+///
+/// # Limits, stated
+///
+/// Never fails: a set with no non-empty file, an unreadable newest file, and a
+/// newest file whose last block holds no line that decodes all mean the same
+/// thing — this build cannot tell what came before, so it starts at zero with
+/// no floor. That is a **stated limit and not a silent one**: a corrupted tail
+/// restarts the numbering. The newest non-empty file is the only one asked;
+/// a corrupt one is not skipped in favour of an older file, whose number could
+/// be lower than lines this one still holds.
+///
+/// The cost is one `stat` per empty or absent file passed over (at most
+/// `keep_files`) and one 64 KiB read, once, at open — never on the write path.
+fn resume_point(dir: &Path, keep_files: u8) -> (u64, i64) {
+    paths_newest_first(dir, keep_files)
+        .iter()
+        .find_map(|path| {
+            let len = std::fs::metadata(path).map_or(0, |meta| meta.len());
+            (len > 0).then_some((path, len))
+        })
+        .and_then(|(path, len)| last_record(path, len))
+        .map_or((0, 0), |record| (record.seq, record.at_unix_millis))
+}
+
+/// The last line of one file that decodes, read from one block at its end.
+fn last_record(path: &Path, len: u64) -> Option<Record> {
     /// One block at the end. 64 KiB holds ~250 lines at the typical width, so
     /// the last complete line is inside it unless one line is larger than the
-    /// block, which the ceilings in `crate::event` make impossible.
+    /// block, which the ceilings in `crate::event` make impossible: the widest
+    /// legal line is just over 41 KB (`tail::MAX_LINE_BYTES`).
     const BLOCK: u64 = 64 * 1024;
-    let Ok(meta) = std::fs::metadata(path) else {
-        return 0;
-    };
-    let len = meta.len();
-    if len == 0 {
-        return 0;
-    }
     let from = len.saturating_sub(BLOCK);
-    let Ok(bytes) = crate::tail::read_at(path, from, len.saturating_sub(from)) else {
-        return 0;
-    };
+    let bytes = crate::tail::read_at(path, from, len.saturating_sub(from)).ok()?;
     bytes
         .split(|&b| b == b'\n')
         .rev()
         .find_map(|line| Record::decode(line).ok())
-        .map_or(0, |record| record.seq)
 }
 
 /// Whether the file's last byte is anything but a newline.
@@ -1402,7 +1448,7 @@ fn ends_mid_line(path: &Path, len: u64) -> bool {
 /// gone: a `SIGKILL` between the iterations of a `write_all` that the kernel
 /// split, or a power cut with the last page still in the cache.
 ///
-/// `resume_seq` does not close it either, and reading it is what makes the gap
+/// `resume_point` does not close it either, and reading it is what makes the gap
 /// look shut: it finds the last COMPLETE line and carries on from there, so a
 /// restart knows the fragment is there and appends past it anyway.
 ///
@@ -1423,7 +1469,7 @@ fn ends_mid_line(path: &Path, len: u64) -> bool {
 ///
 /// * **The torn event's own bytes.** They were never written. What is
 ///   recovered is the *next* event and the count.
-/// * **Its sequence number.** `resume_seq` resumes from the last DECODABLE
+/// * **Its sequence number.** `resume_point` resumes from the last DECODABLE
 ///   line, so the number the torn event carried is handed to the next one and
 ///   `Tail::missing` reports no hole. That was true before this change and is
 ///   neither caused nor fixed by it; the honest reading of the file is "one
@@ -3068,7 +3114,7 @@ mod tests {
         );
     }
 
-    /// **`resume_seq` READS FAR ENOUGH BACK FOR A LINE OF ANY LEGAL WIDTH.**
+    /// **`resume_point` READS FAR ENOUGH BACK FOR A LINE OF ANY LEGAL WIDTH.**
     ///
     /// Its block is `64 * 1024`, and its doc says the last complete line is
     /// always inside it "unless one line is larger than the block, which the
@@ -3642,7 +3688,7 @@ mod tests {
     /// iterations of a split `write_all`, or a power cut with the last page
     /// still in the cache.
     ///
-    /// `resume_seq` reads the last COMPLETE line, so the restart knew the
+    /// `resume_point` reads the last COMPLETE line, so the restart knew the
     /// fragment was there and appended past it anyway. Run against this exact
     /// fixture with the fix disabled, the reader said
     /// `records=3 malformed=1 partial_tail=false` while the sink said
@@ -3822,7 +3868,7 @@ mod tests {
         );
         assert_eq!(
             health.next_seq, 1,
-            "`resume_seq` could not read it either, which is its own stated limit"
+            "`resume_point` could not read it either, which is its own stated limit"
         );
         let _ignored = std::fs::remove_dir_all(&dir);
     }
@@ -3965,5 +4011,115 @@ mod tests {
         assert_eq!(found.records.len(), 3, "{found:?}");
         assert_eq!(found.malformed, 0);
         let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A RESTART WHOSE CLOCK IS BEHIND THE LAST LINE KEEPS `ms` IN FILE ORDER.**
+    ///
+    /// The line on disk is stamped a day ahead of this host — the state a
+    /// reboot leaves when NTP steps the clock back after the previous process
+    /// wrote. A resumed sink used to clamp against a floor of zero, so its
+    /// first line was a day OLDER than the line before it; `tail`'s `since`
+    /// filter, which ends the walk at the first record older than its floor,
+    /// then met that line first and returned nothing — although the older
+    /// line on disk matched. D-1325.
+    #[test]
+    fn a_restart_behind_the_last_stamp_keeps_ms_in_file_order() {
+        let dir = scratch("resume-floor");
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let ahead = crate::clock::now_millis() + 86_400_000;
+        let mut line = Vec::new();
+        crate::encode::line(
+            &mut line,
+            5,
+            ahead,
+            0,
+            &Event::info("t", "before the restart"),
+        );
+        std::fs::write(current_path(&dir), &line).expect("write");
+
+        let sink = Sink::open(&Config::new(&dir)).expect("reopens");
+        assert!(
+            sink.emit(&Event::info("t", "after the restart"))
+                .is_written()
+        );
+        let written = lines_of(&current_path(&dir));
+        assert_eq!(written.len(), 2);
+        assert_eq!(written[1].seq, 6, "the sequence resumes as before");
+        assert_eq!(
+            written[1].at_unix_millis, ahead,
+            "the floor resumed from the line on disk, so the clock behind it is clamped"
+        );
+
+        let found = crate::tail(
+            &dir,
+            sink.keep_files(),
+            &crate::Query::last(10).since(ahead - 3_600_000),
+        );
+        let messages: Vec<&str> = found.records.iter().map(|r| r.message.as_str()).collect();
+        assert_eq!(
+            messages,
+            vec!["after the restart", "before the restart"],
+            "a `since` an hour before the line on disk finds both"
+        );
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **AN EMPTY CURRENT FILE DOES NOT RESTART THE NUMBERING UNDER A ROLLED ONE.**
+    ///
+    /// A roll renames the current file to `.1` and opens a fresh one; if the
+    /// append that follows fails, or the process dies first, the set is left
+    /// with an empty current file and all of its history in `.1`. The resume
+    /// read the current file alone, found nothing, and started at zero — so
+    /// the restarted process re-issued sequence numbers AND run ids that events
+    /// in `.1` still carry. `reserve_run_id` says a restart starts "strictly
+    /// above every id still present in the log"; this is the case where it did
+    /// not. D-1326.
+    #[test]
+    fn an_empty_current_file_resumes_from_the_rolled_one_beneath_it() {
+        let dir = scratch("resume-rolled");
+        let config = Config::new(&dir).with_keep_files(4);
+        let (last_seq, run) = {
+            let sink = Sink::open(&config).expect("opens");
+            let run = sink.reserve_run_id().expect("an id");
+            for i in 0..5u32 {
+                assert!(
+                    sink.emit_for_run(run, &Event::info("t", "m").with("i", i))
+                        .is_written()
+                );
+            }
+            (sink.health().next_seq - 1, run)
+        };
+        // THE ROLL, by hand, exactly as `roll` leaves it before its append.
+        std::fs::rename(current_path(&dir), rotated_path(&dir, 1)).expect("roll");
+        std::fs::write(current_path(&dir), b"").expect("an empty current file");
+
+        let sink = Sink::open(&config).expect("reopens");
+        assert_eq!(
+            sink.health().next_seq,
+            last_seq + 1,
+            "the numbering carries on from the rolled file"
+        );
+        let next = sink.reserve_run_id().expect("an id");
+        assert!(
+            next > run,
+            "a restart never re-issues a run id still on disk"
+        );
+        assert!(next > last_seq);
+
+        // And an ABSENT current file is the same state: nothing to read.
+        drop(sink);
+        std::fs::remove_file(current_path(&dir)).expect("remove");
+        let sink = Sink::open(&config).expect("reopens over an absent file");
+        assert_eq!(sink.health().next_seq, last_seq + 1);
+
+        // A set with nothing in it at all still starts at one.
+        let empty = scratch("resume-rolled-empty");
+        std::fs::create_dir_all(&empty).expect("a scratch directory");
+        std::fs::write(rotated_path(&empty, 1), b"").expect("an empty rolled file");
+        let fresh = Sink::open(&Config::new(&empty)).expect("opens");
+        assert_eq!(fresh.health().next_seq, 1);
+        assert_eq!(fresh.reserve_run_id(), Some(1));
+        let _ignored = std::fs::remove_dir_all(&dir);
+        let _ignored = std::fs::remove_dir_all(&empty);
     }
 }

@@ -1339,16 +1339,13 @@ impl BarFile {
         // three records are just as lost — the length-shaped refusal cannot
         // even state this condition, which is half of why it was the wrong one.
         //
-        // WHAT THIS DOES NOT FIX, stated rather than implied: a truncation that
-        // lands exactly on an older commit's extent. Cut the file to
-        // `offset_of` of the generation the fallback returns and there is
-        // nothing left over to notice — `discarded` is zero and the bytes are
-        // byte-for-byte what a header published before its records became
-        // durable looks like. Those two files are the same file, so no rule
-        // over these bytes can separate them, and the recovery is the half
-        // worth keeping: `store::write::a_header_that_outran_its_file_falls_back_one_generation`
-        // is that file and it still opens. Catching it needs the block
-        // checksums this build does not write, which the module doc names.
+        // A truncation that lands exactly on an older commit's extent leaves
+        // `discarded` at zero, so nothing in THIS arm notices it. The guard
+        // below does: `claimed > header.n_valid` refuses that file as
+        // `CounterExceedsFile`, and
+        // `store::write::a_truncation_back_to_the_header_is_refused_rather_than_silently_accepted`
+        // asserts it. This paragraph used to say that file "still opens",
+        // through a test renamed when its assertion was inverted. D-0790.
         //
         // The subtraction is written through `capacity_for` and
         // `ragged_tail_bytes` rather than `offset_of`, because those two are
@@ -1927,9 +1924,10 @@ impl BarFile {
     ///
     /// **Read that bound precisely.** The *operation* is constant; the read
     /// syscall underneath it is not free and its latency is the device's, not
-    /// this crate's. Nothing here measures the device, and no bench in this
-    /// repository times a syscall — `crates/store/benches/ratio.rs` measures
-    /// the arithmetic and the checksum. The syscall cost is UNVERIFIED.
+    /// this crate's. `crates/store/benches/ratio.rs` rows C-28 and C-29 time
+    /// this method end to end, the `pread` included, on whatever device the
+    /// bench runs on; that measures a page the host already holds, not a cold
+    /// read from a disk, so the device's own latency is UNVERIFIED. D-0790.
     ///
     /// # Errors
     ///

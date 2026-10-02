@@ -49,6 +49,7 @@ impl Fixture {
             bars.clone()
         } else {
             crate::resample::resample(&bars, crate::resample::Period::minutes(minutes).unwrap())
+                .unwrap()
         };
         let position = signals
             .iter()
@@ -209,9 +210,8 @@ fn roundtrip(result: &Evaluation) {
 #[test]
 fn all_eight_rungs_keep_original_signal_low_high_and_exact_next_minute_entry() {
     for minutes in [1, 2, 3, 5, 10, 15, 30, 60] {
-        // 10:15 IST, sixty minutes past the open, is a complete edge on every
-        // canonical grid now that the resampler anchors at the open (D-0929);
-        // 10:00 was an edge only on the old IST-midnight grid.
+        // 10:15 IST is a complete edge on every open-anchored resampling grid
+        // (D-1430): sixty minutes past the open is a multiple of each rung.
         let fixture = Fixture::new(minutes, 60);
         for side in [Direction::Long, Direction::Short] {
             let prepared = fixture.prepared();
@@ -470,7 +470,7 @@ fn a_signal_closing_after_the_last_entry_minute_is_too_late_even_with_no_minute_
     // exists, so alignment gives it none. That is "too late to trade today" --
     // the verdict a present 15:10 entry gets -- never a missing observation,
     // which refuses the whole setting's execution completeness. Buckets sit on
-    // the open-anchored grid (D-0929), so the last one starts at 15:29, 15:29,
+    // the open-anchored grid (D-1430), so the last one starts at 15:29, 15:29,
     // 15:27, 15:25, 15:25, 15:15, 15:15 and 15:15 respectively.
     let last_buckets = [
         (1, 374),

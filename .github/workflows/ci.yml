@@ -1356,6 +1356,22 @@ jobs:
           # field.
           pull_asserted_number='2025-07 2025-08 401 42'
 
+          # ---- group 31: ONE WRONG REGION AND THREE CASE LABELS, all four
+          # offered by `ssm.rs` tests rather than emitted. D-1371, D-1372.
+          #
+          # `ap-south-2` is a real AWS region that is NOT the one CLAUDE.md §8
+          # names. `ssm.rs:1212` offers it beside `us-east-1` and two malformed
+          # spellings of `ap-south-1` to prove the client refuses to sign for
+          # any region but `ap-south-1`: the near miss is the point of the test,
+          # and it names no account, environment, vendor or field.
+          #
+          # `empty-id`, `empty-secret` and `empty-token` are the `assert!`
+          # labels of the three cases proving an empty AWS access key id,
+          # secret key or session token is refused before a request is signed.
+          # Hyphenated test-case names, never a segment of a parameter path.
+          # Declared on the owner's decision (PR #35), not widened by a gate.
+          ssm_region_fixture='ap-south-2 empty-id empty-secret empty-token'
+
           allowed="${seg_shape} ${vendor_wire} ${claim_standing} ${config_fixture}
           ${secret_fixture} ${scaffold} ${timeframe} ${governor}
           ${record_field} ${header_name} ${bound_number}
@@ -1366,7 +1382,8 @@ jobs:
           ${rolling_word} ${rolling_scaffold} ${pull_fixture}
           ${ssm_leak_fixture}
           ${vendor_error} ${event_field} ${pull_scratch} ${bare_number}
-          ${capture_field} ${pull_scratch_2} ${pull_assert} ${pull_asserted_number}"
+          ${capture_field} ${pull_scratch_2} ${pull_assert} ${pull_asserted_number}
+          ${ssm_region_fixture}"
           # MATERIALISED ONCE, AND NOT PIPED. `printf '%s\n' $allowed |
           # grep -qxF` was the shape here, and under `set -euo pipefail` it is
           # unsound in the direction that fails a green build:
@@ -3089,14 +3106,15 @@ jobs:
           # child process. `crate::isolated::rerun` re-runs one test of the api
           # test binary with a chosen environment, and each child prints one
           # line its parent asserts on -- `FRONTIER-ADMITTED`, `SERVER-BUDGET`
-          # and `TRADES-ADMITTED` -- as proof the child took its own branch and
+          # and `TRADES-ADMITTED` (plus `TRADES-REPAIRED`, D-0919's
+          # repaired-by-rename child, fix/c4-cli-06) -- as proof the child took its own branch and
           # did not pass by testing nothing. Each sits inside
           # `#[cfg(test)] mod tests`, so no production path reaches it, and it
           # is not a diagnostic: nothing is wrong when it prints.
           declared="$declared api/src/booleanlaunch_tests.rs:println!:2
           api/src/frontierjson.rs:println!:1
           api/src/sweeprun.rs:println!:1
-          api/src/trades.rs:println!:1
+          api/src/trades.rs:println!:2
           api/src/recovery.rs:println!:1
           cli/src/boolean_candidate_tests.rs:eprintln!:2
           cli/src/index_stop_qualification_tests.rs:eprintln!:2
@@ -4833,10 +4851,15 @@ jobs:
           #     is allowed for, computed once for all three tests instead of once
           #     each. Only integer exceedance counts cross threads, so no float is
           #     ever summed in an order that depends on the thread count.
-          #   runner/bootstrap.rs 48 -> 49 (D-0932). The new line is the
+          #   runner/bootstrap.rs 48 -> 49 (D-1197). The new line is the
           #     Romano--Wolf null table, `Vec<Vec<f64>>` of studentized resampled
           #     means, built once instead of per round. A t-statistic has no paisa
           #     representation, the reason the other 48 are allowed.
+          #   runner/bootstrap.rs 49 -> 51 (D-0973, D-1198). The merge with
+          #     lane 4 replaced that null table with D-0973's one-walk stepdown,
+          #     whose running maxima, selection scratch and per-rank bars are
+          #     the same studentized statistics; lane 4's own tree measured 51
+          #     against its allowance of 48. No price is among them.
           allow_float='
           crates/api/src/ingest.rs 1
           crates/api/src/server.rs 4
@@ -4851,7 +4874,7 @@ jobs:
           crates/runner/src/grid.rs 4
           crates/runner/src/significance.rs 21
           crates/runner/src/admission.rs 4
-          crates/runner/src/bootstrap.rs 49
+          crates/runner/src/bootstrap.rs 51
           crates/runner/src/bootstrap_family_pass.rs 17
           crates/runner/src/outcome.rs 26
           crates/runner/src/report.rs 3
@@ -5357,7 +5380,7 @@ jobs:
           # count. It is neither the candidate count nor the frequent-itemset count,
           # so it does not grow with the sweep. Called once per rendered report at
           # the coarsest boundary this crate has, and the render touches no bar.
-          # TWO matches since D-0930 (o1runner-11), and still one ordering: a
+          # TWO matches since D-1195 (o1runner-11), and still one ordering: a
           # `select_nth_unstable_by_key` picks the `keep` rows the table shows and
           # `sort_by_key` orders only those, O(n + keep log keep) instead of a
           # full sort of every cell. Same rows, same order, by test.
@@ -7727,7 +7750,8 @@ jobs:
           # `assert!` evaluates only when it FAILS, and methods on `Target`
           # doubles that a given test never calls. Line 1309 is the only one on
           # a production path, and it is `resume_seq`'s `return 0` that
-          # docs/06-limits.md §54 already accounts for.
+          # docs/06-limits.md §54 already accounts for. D-1327: that line is
+          # gone (`resume_point` has none), so `sink.rs` is declared 20.
           #
           # docs/06-limits.md §54 measured the earlier set with
           # `cargo llvm-cov -p telemetry`; this gate runs after the workspace
@@ -7740,7 +7764,7 @@ jobs:
           level.rs 1
           lib.rs 6
           record.rs 1
-          sink.rs 21
+          sink.rs 20
           tail.rs 3
           '
           cargo llvm-cov report --locked --text > /tmp/cov.txt

@@ -978,7 +978,7 @@ pub fn grid(out: &mut String, g: &Grid, keep: usize) {
             core::cmp::Reverse((c.pessimistic, crate::grid::merit(c), i)),
         )
     };
-    // ONLY THE SHOWN ROWS ARE SORTED (o1runner-11, D-0930). The key is total --
+    // ONLY THE SHOWN ROWS ARE SORTED (o1runner-11, D-1195). The key is total --
     // the index breaks every tie -- so selecting the `keep` smallest first and
     // sorting just those prints exactly the rows, in exactly the order, a full
     // sort did: O(n + keep log keep) rather than O(n log n) over every cell.
@@ -2682,7 +2682,7 @@ mod tests {
         );
     }
 
-    /// o1runner-11 / D-0930: the cut table sorts only its shown rows, and
+    /// o1runner-11 / D-1195: the cut table sorts only its shown rows, and
     /// must print exactly the rows, in exactly the order, a full sort printed.
     /// The full render (`keep` past the grid) sorts everything, so it is the
     /// reference for every shorter `keep`, ties included.

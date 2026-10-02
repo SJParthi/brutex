@@ -2871,8 +2871,11 @@ calls on an already-open handle. Against the groww census's own numbers that is
 
 **The syscall latency is not measured and is not claimed.**
 `store::file::BarFile::read_record` states the same limit for the same reason:
-the operation is constant, the read underneath it is the device's, and no bench
-in this repository times a syscall. §14 carries what *is* measured.
+the operation is constant and the read underneath it is the device's. C-28 and
+C-29 in `crates/store/benches/ratio.rs` do time `read_record`, its `pread`
+included, but on a page the host already holds, so a cold read's latency stays
+unmeasured. This sentence used to say no bench timed a syscall at all. D-0790.
+§14 carries what *is* measured.
 
 ### 40.3 The 43,422 entries already on disk have no closes, and get none for free
 
@@ -3647,7 +3650,7 @@ in their own rows.
 | Where | What | Why it cannot execute |
 |---|---|---|
 | `lib.rs` 178, 187–191 | the concurrent-`install` arm | Needs two `install` calls to interleave inside a few instructions. `OnceLock` is per **process**, so a test cannot retry — it gets one attempt per binary. Already named in the source. |
-| `sink.rs` 1309 | `resume_seq`'s `return 0` | `FileTarget::open` creates the file *before* `resume_seq` runs, so the `metadata` it guards cannot fail on that path. **Was 1099, 1107 on 2026-08-11 and is one line now** — the file grew above it and one of the two returns is reached by the workspace profile's wider set of callers. |
+| `sink.rs` 1309 | `resume_seq`'s `return 0` | `FileTarget::open` creates the file *before* `resume_seq` runs, so the `metadata` it guards cannot fail on that path. **Was 1099, 1107 on 2026-08-11 and is one line now** — the file grew above it and one of the two returns is reached by the workspace profile's wider set of callers. **Retired 2026-10-02 (D-1327):** `resume_seq` became `resume_point`, which has no such line. |
 | `tail.rs` 401–403 | `file.metadata()` failing | The file is already **open**. `fstat` on a live descriptor does not fail; the reachable error is on the path that opened it, which IS tested. **Was 378–380** — the same three lines, moved down by growth above them. |
 | `clock.rs` 41 | `now_millis`'s pre-epoch arm | Needs a host clock set before 1970. `millis_of` is tested directly with `before_epoch = true`; what is dark is the routing. |
 
@@ -3724,6 +3727,19 @@ iterations, so the count no longer follows thread timing. Gate 20 declares
 `sink.rs` 21, totaling 33. The two lines removed were the second wait's sleep
 and the closing brace before it; no other uncovered `sink.rs` line is a wait.
 The workspace profile in CI must still reproduce 21.
+
+**2026-10-02 follow-up (D-1327).** D-1326 replaced `resume_seq` with
+`resume_point` and `last_record`, which use `?` and `map_or` and have no
+early-return lines. The `return 0` in the `sink.rs` 1309 row above no longer
+exists, so that row is retired. Gate 20 declares `sink.rs` 20, totaling 32.
+Measured with `cargo llvm-cov -p telemetry` on a root container, origin then
+this change, the uncovered `sink.rs` count went 53 → 51. The two lines that
+left were both `resume_seq` `return 0` arms. The other 30 lines in that 51
+come from four permission-based tests that fail as root (the audit-root item,
+claimed elsewhere), and they are the same 30 in both runs. `tail.rs` stays 3:
+the new tail tests add no uncovered line, and the three are still the
+`fstat`-failure arm. **Not yet shown:** that the workspace profile in CI
+counts exactly 20.
 
 **What this does not do.** It does not make the `coverage` job pass. That job
 also runs `--fail-under-lines 100` over the whole workspace, and the workspace
@@ -5453,8 +5469,11 @@ changes that.
 ### The sort, which this section used to omit
 
 The heading said `O(entries)` and the real figure is `O(entries) + O(held log
-held)` — `crates/store/src/catalog.rs:210` sorts and dedups the held rows before
-returning them. That was absent from this section, from the module header and
+held)` — `walk` sorts and dedups the held rows (`out.held.sort_unstable()`
+and `out.held.dedup()` in `crates/store/src/catalog.rs`) before returning them.
+This sentence cited `catalog.rs:210`; the sort moved as the file grew, and it
+is named by its call now rather than by a line number that drifts. The sort was
+absent from this section, from the module header and
 from the function's own `# Cost` block, so all three understated the same
 function in the same direction.
 
@@ -5465,8 +5484,10 @@ listing. The alternative orderings cost the same or more: a `BTreeSet` is
 `O(n log n)` on insert, and a hash set is O(n) but returns nothing repeatable.
 
 It is allowlisted under CI gate 11 rule 4 rather than removed, and the allowance
-carries that reason. This is a CLI path — `crates/cli/src/batch.rs` is the only
-caller — and never a request path, which is why the sort is affordable here and
+carries that reason. This is a CLI path — its production callers are in
+`crates/cli/src/batch.rs`, `crates/cli/src/research.rs` and
+`crates/cli/src/pool.rs`; this sentence once named `batch.rs` as the only one —
+and never a request path, which is why the sort is affordable here and
 would not be inside a handler.
 
 ### Why this is not a rule-4 breach
@@ -5509,6 +5530,17 @@ becomes a rule-4 breach.
 — bounded by what the store contains, not by anything the walk chooses. There is
 no unbounded intermediate: the directory stack holds at most one level's
 subdirectories at a time.
+
+### The linear bound holds for an acyclic tree only (D-0766, D-0769)
+
+The walk does not follow a symbolic link below `bars/` (D-0766), which is what
+made a link back to an ancestor cost one entry instead of a re-walk of the tree.
+**It keeps no set of visited `(device, inode)` pairs**, so a cycle made another
+way — a bind mount of an ancestor, or a directory hard link on a filesystem that
+permits one — is still descended, and the O(entries) statement does not hold
+for such a tree. Not run on this machine; no test builds such a cycle. The
+store's writer creates neither, and the `bars` root itself may be a link to a
+directory, which is followed once (D-0769).
 
 ## 88. Pricing a Groww chain re-reads what it just wrote, and that is O(bars)
 
@@ -7362,7 +7394,9 @@ alter the O(sum C_i + F log F) time and O(F) temporary-space bounds above.
 The live support column similarly makes candidate depth constant per bar, not
 the sweep constant in total. Building the owned column is O(B) time and space
 for B fixed-six-word masks; one support or fingerprint pass is O(B) total with
-O(1) work per bar independent of k. Measured `C-E-02` ratios were 0.971x at
+O(1) work per bar independent of k. No production source calls the fingerprint
+pass, so no run pays for it or ranks by it (D-0760). Measured `C-E-02` ratios
+were 0.971x at
 k=4 and 0.996x at k=8 relative to k=1, and `C-E-09` was 0.942x from k=1 to
 k=384. Those release measurements close the former live O(k)-per-bar defect;
 they do not bound Apriori frontier growth, number of candidates, persistence,
@@ -9885,6 +9919,1139 @@ The text above is kept as it was written.
   `what_a_changed_rows_line_costs_is_named_in_part_and_read_off_the_source`
   finds each part named here and in that doc in the source that pays it.
 
+## `/audit.json`'s store block: one count per census snapshot, of the asked feed only — D-0732, 29 September 2026
+
+**What it cost (W1-api1-0).** `store_block` rolled the asked feed up by month
+on every request by walking `census_now`'s merged entry list, every held entry
+of every vendor (`for (series, month) in entries.iter()`), and probing the
+asked feed's manifest for each. So a request for one feed grew with every
+feed's store, plus one `BTreeMap` insert per held month, and the console polls
+this route. §D-0686 above listed `/audit.json` only as a `census_now` caller
+and named none of this.
+
+**What it costs now.** `feed_rollup` walks the asked feed's own manifest
+(`manifest.held_keys()`), one manifest probe and one `BTreeMap` insert per held
+key of that feed, and `RollupCache` runs it once per census snapshot per feed:
+it is keyed on the `Arc` `census_now` returns, the same key
+`store_wire::Cache` uses for `/store.json`. A request against an unchanged
+census pays the census stamps, one lock, one pointer comparison and one map
+probe, then writes one JSON object per held month, which is the answer's own
+size. `the_rollup_is_counted_once_per_feed_per_census_snapshot` counts the
+walks: one per feed per snapshot, and one more after the snapshot changes.
+`the_audit_body_reuses_the_rollup_until_the_manifest_changes` drives it
+through the body: an unchanged census does not count again, and a manifest
+rewritten under a new modified time is counted again and answered.
+
+**What still grows.** The first request after a manifest changes pays that
+feed's walk, which grows with that feed's held keys and not with any other
+feed's. Two requests that miss together may each walk, because the lock is
+released while counting; both count the same snapshot. Not timed.
+
+## A sorted or extremes window reads every bar in its range — D-0733, 29 September 2026
+
+**This was stated only in code comments (W1-api1-3).** `GET /bars/window.json`
+ordered by anything but `ts`, or with `extremes=1`, takes the reading path in
+`bars::window`. Quoted from that function:
+
+* `let mut all: Vec<WindowBar> = Vec::with_capacity(usize::try_from(total).unwrap_or(0));`
+  and, per opened month, `let (rows, mut bad) = slots(file, 0, held);`: one
+  `read_record` per stored record in the range (`match file.read_record(index)`
+  in `slots`), and one resident `WindowBar` per readable record, for the whole
+  request.
+* `let extremes = want_extremes.then(|| extremes_of(&all));`: one pass over
+  them.
+* `ordered_page` then partitions once over them
+  (`all.select_nth_unstable_by(keep - 1, cmp);`) and orders the rows it kept
+  (`all.sort_by(cmp);`).
+
+The range is capped at `MAX_WINDOW_MONTHS` (`pub const MAX_WINDOW_MONTHS: usize
+= 240;`) and the page at `MAX_WINDOW_LIMIT` (`pub const MAX_WINDOW_LIMIT: usize
+= 1_000;`). No bar count for a 240-month range is measured here. So a
+sorted or extremes request costs record reads, resident rows and a partition
+that each grow with the bars in the asked months. The `ts` order with no
+extremes seeks and reads only its page; that is unchanged.
+
+**What changed: the ordering is bounded by the nearer end.** The partition
+kept the first `offset + limit` rows, so a deep offset ordered nearly every
+row. `page_side` now keeps the fewer of the first `offset + limit` and the last
+`n - offset`, the front on a tie, and `ordered_page` cuts a back page under the
+reversed order and reverses it. No page orders more than half the rows plus
+its limit: asserted for every row count up to 40 and every offset and limit
+up to 45, and at 2,000,000 rows for one deep page.
+`a_page_is_cut_from_whichever_end_orders_fewer_rows` pins the
+choice, and
+`selecting_the_page_then_ordering_it_equals_ordering_everything_then_slicing`
+compares every offset from 0 to past the end against sorting everything and
+slicing, over primary values each repeated three times.
+
+**Not changed, and why.** The reads, the resident rows and the partition stay
+proportional to the range: no store index answers "the largest closes", and
+`total`, `extremes_of` and the change fold each need every row. Not timed.
+### Unpinned saved-ranking requests discover their checkpoint every time (D-0904)
+
+An `/index-stop-ranking.json` request without a pinned checkpoint cannot
+compare its one cached reader until it knows the newest acknowledged
+checkpoint, so `render` calls `Reader::latest_checkpoint` before the cache
+comparison. That runs on every unpinned request, warm or cold, including one
+the cached reader already answers. A pinned request skips it.
+
+* **What the call costs.** `latest_checkpoint` opens a
+  `search_checkpoint::Snapshot` and then reads one payload
+  (`snapshot.read(sequence, max_bytes)`). Opening the snapshot walks the
+  search's checkpoint directory (`fs::read_dir(directory)`) and, for each
+  reservation it keeps, stats that reservation's completion marker
+  (`fs::symlink_metadata(entry.path().join("complete"))`). The walk is
+  O(reservations) syscalls, not constant; the directory walk refuses at
+  `DIRECTORY_LIMIT` entries. Not timed.
+* **The wording it corrects.** The cli doc on `latest_checkpoint` calls this
+  "bounded cold work". It is bounded, but it is not confined to a cold
+  admission. The call site in `crates/api/src/indexstoprankingjson.rs` now
+  says so.
+* **Two neighbours that open their reader per request.** An expression-search
+  first page with no snapshot opens `expression_search_reader::Reader`, which
+  calls `Snapshot::open`; every Boolean search page calls
+  `QualifiedSearch::open` at the top of its `render`. Both are cold opens on
+  every such request, not a cached path that also scans; this section does
+  not cost them further.
+
+`an_unpinned_ranking_request_walks_the_checkpoint_directory_before_its_cache`
+reads each quoted line above off its source and requires this section.
+## Per-press recovery journal replays (D-0907)
+
+Not O(1), and not bounded by the plan pressed. Every open of a recovery journal
+replays the whole file (`recovery_journal::replay`, `for ordinal in 0..count`,
+called by both `snapshot` and `Journal::open_at`), and nothing compacts one.
+
+- **One start** (`POST /pull/recovery`) runs `preflight_submission` and then
+  `seeded`. Together they replay this plan's journal, the shared
+  `attempts.bin` and `active.bin` three times each, and every replay reads
+  every record the file holds. Counted by
+  `recovery::tests::one_start_replays_each_journal_three_times_and_every_record_each_time`.
+  `drive` then opens `attempts.bin` once more
+  (`Journal::open_existing(&root(&worker_site).join("attempts.bin"))`); that
+  open is not counted by the test. `preflight_plan`'s snapshot of
+  `attempts.bin` is a validation only; its result is not bound, and it is
+  what refuses a start whose shared ledger is missing
+  (`recovery::tests::preflight_refuses_a_start_whose_shared_attempt_ledger_is_missing`).
+- **Growth.** The plan journal grows with every run of that plan, and
+  `attempts.bin` with every attempt of every plan: the cost of a press grows
+  with the recovery history on this store, not with the plan.
+- **Each run's reconcile** (`reconcile_pending`) walks every row of the shared
+  ledger (`attempts`, `.latest`, `.values()`, one chain rustfmt splits over
+  three lines), keeps those `Queued | InFlight |
+  Unverified` (and `Blocked` on an explicit run), and parses each with
+  `checked(&item.body, today)?` before the plan's scope check drops the ones
+  outside it. Each in-scope item gets `assess(site, &item.body, lifecycle)`,
+  which reads the item's month of source records
+  (`read_sources(&source, &read_name, month, window, is_daily)`), and is
+  appended again (`append_attempt(journal, attempts, item)?`), so an item
+  that stays Unverified is re-assessed and re-appended on every run. Not
+  counted by any test.
+
+Not timed. W1-api4-0, W1-api4-1, W1-api4-2.
+## The commit-stamp verifier's mutation evidence, measured — D-0710, 27 September 2026
+
+Gate 18 still cannot mutate `crates/cli/build_provenance.rs` (D-0691), so the
+figures below come from a scratch crate outside any checkout that holds the file
+and `commit_stamp.rs` verbatim, run with `CARGO_TARGET_DIR` unset so each mutant
+is rebuilt in its own copy.
+
+- **Before D-0710, on `origin/main`:** `357 mutants tested in 8m: 131 missed,
+  207 caught, 17 unviable, 2 timeouts`.
+- **After D-0710's first round:** `357 mutants tested in 12m: 8 missed, 323
+  caught, 17 unviable, 9 timeouts`.
+- **After its review round, 28 September:** `357 mutants tested in 13m: 5
+  missed, 326 caught, 17 unviable, 9 timeouts`.
+- **The five survivors** are listed in D-0710 and change nothing observable on
+  this platform: three redundant `||` clauses, the non-Unix `executable` and
+  `|` between disjoint nibbles. The three the first round left on the pack
+  index's minimum-length pre-check are caught by a pack index built at exactly
+  that length, and one a byte shorter, from a searched nonce (D-0710).
+- **The nine timeouts** are six mutants of `pack_offset`'s binary search and
+  three of `apply_delta`'s cursor, named in D-0710. They are reported, not
+  counted as caught.
+
+## Boolean catalog passes per program × side — D-0711, 27 September 2026
+
+- **Once per family now, in cli only.** cli's own three-stream source digest
+  (`SourceDigest`), in TRAINING and in the later comparison, and each side's
+  TRAINING attestation (`PricedSide`). Counted, not timed: 1 cli digest and 2
+  attestations for the fixture's three-program family, and 1 cli digest for
+  its later comparison (C4-CLI-05). The family's three-stream digests are not
+  one: the runner hashes the same streams again for every program × side, as
+  the next item states.
+- **Still once per program × side, in the runner.** Minting each run through
+  `ExecutionRunV1::new_with_daily_reference` hashes the three streams again
+  (`let expected_data_digest =
+  crate::identity::data_digest_with_daily_reference(`), checks the execution
+  subslice (`require_exact_execution_subslice(reference_minute_context,
+  evaluated_execution_1m)?;`) and hashes the execution bars (`execution_digest:
+  crate::identity::data_digest(exact_execution),`); the later comparison's
+  `evaluate_expression_oos` hashes the later bars (`let execution =
+  crate::identity::data_digest(bars);`). None of these is timed here. They are
+  ledgered as W3-runner2-3, W3-runner2-5 and W3-runner2-4 for the runner group.
+
+## The AND checkpoint journal, per boundary — D-0712, 27 September 2026
+
+The stored AND sweep's checkpoint is version 2 (`and-checkpoint-v2`). The
+sentence above that cold AND checkpoint payloads admit 64 MiB still holds per
+journal entry; it no longer bounds the retained history, because no entry holds
+more than one chunk of one level.
+
+- **What a boundary writes.** The new level's engine bytes, `56 + 56 ×
+  survivors` (C4-CLI-06, C4-CLI-08), as chunk entries of at most 32 MiB of level
+  bytes (`CHUNK_BYTES`, which C4-CLI-06's production test holds at `32 << 20`),
+  then one boundary
+  record of `BOUNDARY_HEADER + rows × (DEPTH_BYTES + 8) + prefix + pieces ×
+  PIECE_BYTES` bytes (`boundary_bytes`), the prefix being `192 + 8 × offered +
+  24 × excluded` (C4-CLI-08).
+- **What still grows at every boundary.** The boundary record is written whole
+  each time and lists every depth row and every chunk of every level, so it
+  grows with the depth count and the chunk count. Not timed.
+- **What no longer happens.** Earlier levels are not re-encoded or re-written,
+  and a history past one entry's admission completes: 2,097,151 survivors
+  through the production door (C4-CLI-06).
+- **What still reads the whole history.** A resumed attempt streams every
+  chunk through the engine's decoder, and a completed walk reopens every chunk
+  once before it returns, as version 1 reopened its one payload. The retained
+  history is still held in memory, as `docs/20-sweep-resume.md` states. A
+  replay holds one chunk payload at a time: it releases each before it reads
+  the next (C4-CLI-10).
+- **One buffer per level.** A level's chunks are written through one buffer,
+  reserved whole at the level's first byte and reused for each of its chunks
+  (C4-CLI-11): `CHUNK_HEADER + CHUNK_BYTES` bytes at production sizes, however
+  few bytes the level writes. Not timed.
+- **Orphans.** A boundary interrupted after its chunks leaves them in the
+  journal unreferenced, and the next attempt rebuilds that one level
+  (C4-CLI-07).
+- **The admission that remains.** A boundary record that cannot fit one entry
+  refuses, naming its size and the admission (C4-CLI-07).
+- **The journal's open-time scan.** Every walk, fresh or resumed, first opens
+  its journal, and `Journal::open` lists the identity's whole entry directory
+  with `read_dir`, refusing past `DIRECTORY_LIMIT` entries, before recovery
+  reads anything. Version 2 publishes at least two entries per boundary, one
+  or more chunks and then the boundary record (20 chunks and a boundary record
+  per depth in C4-CLI-06's SMALL fixture), and orphaned chunks stay in the
+  directory, so that scan lists more entries than version 1's one entry per
+  boundary. The scan is linear in the entry count. Not timed.
+- **A named chunk that cannot be read.** A chunk the newest boundary names that
+  has vanished or lost its completion marker refuses the resume, or the final
+  re-read, naming its sequence, depth and index beside the journal's reason
+  (C4-CLI-14). A refused rerun runs no callback and publishes nothing.
+
+## A resumed Boolean campaign rung prices its pinned families again — D-0713, 27 September 2026
+
+A resume skips only a rung already `Completed`. A rung saved `Refused`, or left
+`Running` by an interrupted process, goes back through `execute_rung`, which
+prices every family of the rung again even where the family's completion pin is
+recorded; the new pin must equal the recorded one or the retry refuses.
+Reproduced and pinned by C4-CLI-09. The cost is the rung's complete catalog
+pricing, paid again on each such resume. Not timed. Not fixed: reopening a
+pinned family needs runner capabilities its saved body does not hold (D-0713).
+## Three resumable Boolean paths re-verify all completed work on every step — D-1400, 29 September 2026
+
+Each of these is a loop whose one step repeats a check over everything the
+earlier steps finished. None is O(1) per step, none is timed, and none was
+stated here before. The checks are the tamper detection each path relies on,
+so they are recorded, not removed. Every source line quoted below is found in
+that file by `c4_cli_02_limits::each_quoted_line_is_in_the_source_it_names`.
+
+* **`boolean-grammar-campaign-stored`, one batch per invocation.** In
+  `crates/cli/src/boolean_grammar_campaign.rs`, `restore` walks the whole
+  checkpoint chain (`for (sequence, pin) in chain.into_iter().rev() {`) and,
+  for every nonempty completed batch, calls
+  `complete(id, pin, batch.programs())?;`. The `complete` that
+  `execute_with` passes prepares that batch's campaign again
+  (`let expected = prepare(&request.campaign(programs), &mut String::new())?;`)
+  and verifies its saved campaign
+  (`crate::boolean_campaign::verify_complete(request.root, id, pin, ancestry_bytes)`).
+  So invocation n re-verifies every nonempty batch completed before it (at
+  most n − 1; an empty batch takes `if batch.programs().is_empty() {` and
+  never reaches `complete`), and the work of a whole grammar can grow with
+  the square of its batch count.
+  `cli::boolean_grammar_campaign::tests::every_invocation_reverifies_every_completed_batch_in_order`
+  counts the calls: after one, two and three completed batches, `restore`
+  calls `complete` one, two and three times, in chain order. The comment on
+  `restore` said "O(checkpoints + replayed grammar work + saved campaign
+  evidence)" and named neither the source preparation nor the growth per
+  invocation; it now names both.
+* **`boolean-search-stored`, each resume and each batch completion.** In
+  `crates/cli/src/boolean_search_command.rs`, whenever it resumes a saved
+  search it opens the whole history
+  (`let reader = Reader::open(request.input.output, identity, observe, records)?;`)
+  and verifies every completed batch
+  (`for batch in 0..reader.completed_batches() {`,
+  `reader.verify_batch(batch as u64)?;`) before any completed work is skipped.
+  Then, before each completion is published, the command opens the whole
+  history
+  (`let prior = Reader::open(request.input.output, identity, observe, records)?;`)
+  and verifies every completed batch (`prior.verify_batch(batch as u64)?;`),
+  and after publishing it does both again (`saved.verify_batch(batch as u64)?;`).
+  In `crates/cli/src/boolean_search_reader.rs`, `verify_batch` of a nonempty
+  batch opens its campaign (`QualifiedCampaign::open(`) and each selected rung
+  (`drop(open_rung(&self.root, &record, rung, allowance)?);`), and every `verify_batch`
+  ends by rereading every retained record (`for old in &self.history {`). So
+  a resume pays one pass over every completed batch and a completion pays
+  two, and each pass costs work that grows with the completed batches times
+  the retained history, as well as each batch's campaign and rung ancestry.
+  D-0549's section above says a cold reader "charges every declared replay
+  allowance"; it did not say the command repeats that for every completed
+  batch at every completion.
+* **Later-period OOS, each program and side.** In
+  `crates/cli/src/boolean_oos_v1.rs` the producer loops over every training
+  anchor (`for (group, anchor) in training.anchors.iter().enumerate() {`), and
+  each group ends with `training.require_current()?;`. In
+  `crates/cli/src/boolean_candidate_v1.rs` that check loops over every
+  retained row (`for row in &self.rows {`) and re-verifies the saved training
+  body (`persistence::verify(`). `request` refuses unless
+  `training.anchors.len()` equals the program count `.checked_mul(2)`
+  (`return Err("Boolean training anchors incomplete".into());`), two anchors
+  per program, so the whole comparison costs work
+  that grows with the programs times the retained rows and body bytes.
+
+## The generated search child has no time bound of its own — D-0911, 1 October 2026
+
+`run_fixture_child` in `crates/cli/src/boolean_search_integration_tests.rs`
+kills its child only when the child's log passes 8MiB; it no longer kills it
+on a clock. A child that never exits therefore holds the test until something
+outside it stops the run. Every file and line named below is checked by
+`c4_cli_02_limits::the_d0911_costs_are_the_ones_in_ci_and_the_source`.
+
+* **No job bound of this repository's own.** In `.github/workflows/ci.yml` the
+  `language-purity`, `build` and `coverage` jobs run this test and declare no
+  `timeout-minutes`, so a hang runs until the platform's default job limit,
+  whose figure `docs/00-charter.md` does not record: UNVERIFIED.
+* **Gate 1e names nothing on a kill.** It captures the whole run in one
+  variable (`tout="$(PATH="$stub:$PATH" cargo test --workspace --locked 2>&1)"`)
+  and prints from it only after `cargo test` returns, so a killed run there
+  names no test.
+* **A hang shows none of the child's output.** In every job the child writes
+  only to its log file (`.stdout(file.try_clone().map_err(display)?)`,
+  `.stderr(file)`), and the parent reads that file only once the child has
+  exited or passed 8MiB.
+* **A hang-only mutant is a timeout, not a catch.** The mutation job runs with
+  `--minimum-test-timeout 900 --timeout-multiplier 2`, and
+  `.github/mutation_gate.rs` fails on any timeout
+  (`if status != "0" || !missed.is_empty() || !timeout.is_empty() {`).
+* **The same class remains elsewhere, unchanged.**
+  `if started.elapsed() > std::time::Duration::from_secs(2) {` in
+  `crates/cli/src/checksum_receipts_tests.rs` and
+  `crates/store/src/checksum_audit_tests.rs`, and
+  `if start.elapsed() > std::time::Duration::from_secs(45)` in
+  `crates/api/src/booleanlaunch_tests.rs` and
+  `crates/api/src/indexstoplaunch_tests.rs`.
+## `fold-audit` has no dated cash schedule — D-0912, 29 September 2026
+
+Derive passes a dated cash-session schedule for an NSE cash equity; the audit
+passes `None`. On a cash day that needs dated eligibility
+(`pull::vendor::cash_auction_eligibility_required`) the reference writes no
+bucket, so every stored bar on that day is reported as a disagreement, not as
+an agreement. It fails loud:
+`a_cash_day_needing_dated_eligibility_is_withheld_and_never_silently_agrees`.
+Records are still paired by position (`match (stored.get(index),
+folded.get(index))`), not by timestamp; that is not changed here.
+
+## A read-only frontier refresh is O(delta) over damaged history too — D-0913, 29 September 2026
+
+`Frontier::refresh` on a read-only handle reads only the rows past its scan,
+one `BufReader` pass, and indexes each with `index_row`, the rule `index_of`
+applies at open. It no longer refuses over damage the handle opened past, so
+`api`'s cached `/frontier.json` handle is not dropped and reopened, O(rows), on
+every other request. The first open is still O(rows). The refresh holds the
+shared lock, so it waits for an append in progress rather than reading part of
+one: `a_read_only_refresh_waits_for_an_append_in_progress`.
+`a_read_only_handle_over_damaged_history_refreshes_by_the_delta`. Not timed.
+
+## Boolean integrity checks re-read whole bodies, and nesting doubles them — W2-cli2-4, 29 September 2026
+
+**Not O(1), and not fixed here.** The family, statistics, admission,
+out-of-sample and qualification `require_current` methods of the Boolean
+research chain each re-read and re-hash their own complete body through
+`persistence::verify`:
+`let body = read_exact(&directory.join("body.bin"), bytes)?;`
+then `hash(&body) != payload`. Each one above the family also checks its parent
+before and after, so each level calls the level below it twice:
+
+* statistics: `self.group.require_current()?; persistence::verify(..)?;
+  self.group.require_current()`, and the group calls every source family's
+  `require_current`, which runs `persistence::verify` on that family's body;
+* admission: `self.statistics.require_current()?;` then its own verify, then
+  `self.statistics.require_current()`;
+* out-of-sample: `self.training.require_current()?;` before and after its own
+  verify;
+* qualification: `current(self.training, self.later)?;` before and after its
+  own verify, and `current` checks the admission and every out-of-sample
+  source.
+
+So one check is O(total evidence bytes below it), and the reads of a family's
+body double with each level of nesting above it. The number of calls per
+campaign or qualification rung is **not measured and not counted by any test**;
+it is read off the source, and
+`the_boolean_integrity_cost_entry_is_read_off_the_source` finds every line
+quoted here in the source and counts two parent checks around one
+`persistence::verify` in each level's method. The bracketing is what proves nothing changed while
+the check ran, and removing either side would weaken that proof; a cheaper
+proof is a design change this entry does not make.
+## Interrupted Population ledger writes: what recovers and what still refuses — D-0916, D-0917, 29 September 2026
+
+* **Recovered.** An Admission V3 or V4 record append whose `write_all` returns
+  an error is truncated back to its committed length. An Admission V4 or
+  Finalization V4 data file left empty or as an exact prefix of its constant
+  header is completed by the next writer. A Finalization V3 whole-row prefix
+  with no Completion is completed by the exact retry. Each is proved by the
+  tests named in `docs/04-invariants.md` rows C4-CLI-05-01 to C4-CLI-05-04.
+* **Still refused.** Rollback runs only when the error returns inside the
+  process. A process killed, or a machine that loses power, partway through a
+  record leaves a ragged tail, and the open path still refuses it: Admission V4
+  with `Admission V4 data file is ragged`, Admission V3 and Finalization V3
+  through `checked_record_count` (`if !bytes.is_multiple_of(stride_u64)`). A
+  failed `set_len` during rollback also leaves the tail and says so in its
+  refusal. Finalization V3's own `append_raw` is still
+  `file.seek(SeekFrom::End(0)).and_then(|_| file.write_all(raw))` with no
+  rollback. A short header whose bytes are not an exact prefix of the constant
+  header is refused, never rewritten.
+* **Not measured.** The failures are injected by a write closure that writes
+  half a record and returns an error, and by files written by hand. No test
+  physically injects ENOSPC, EIO, a kill or a power loss.
+## A Selection V6 read replays its Population source four times — D-0918
+
+W2-cli15-0. Before this section, this document stated Selection V6's record
+size ("Selection V6 uses fixed 16 KiB records and a CLI ceiling of 64 GiB per
+file") and did not say that reading its winners re-runs the Population V6
+source and its Execution V3 exit-grid replay. It does, by design: each layer re-reads its
+source before and after, so a source that changes mid-read is refused rather
+than served. That re-reading is the cost, and it is stated here rather than
+removed.
+
+The chain, each factor a call site that
+`a_selection_v6_read_counts_its_population_replays_and_the_limits_say_so`
+counts in the source:
+
+* `top_twenty_five` calls
+  `Prepared::from_execution(&mut self.source, self.policy)?` twice, once
+  before and once after `require_committed` checks the committed block.
+  `top_ten` calls `top_twenty_five` once. `snapshot` calls `top_twenty_five` once and
+  `Prepared::from_execution` once more, so three. `commit_stored_selection_v6`
+  calls it twice.
+* `Prepared::from_execution` is
+  `Self::from_source(&source.selection_v6_source()?, policy)`: one Execution V4
+  `selection_v6_source` per call.
+* `selection_v6_source` calls
+  `let source_before = self.population_execution_source()?;` and
+  `let source_after = self.population_execution_source()?;`, and each of those
+  is one Population V6 `execution_v4_source`.
+* `execution_v4_source` calls `let before = self.upstream.authenticate()?;`
+  and `let after = self.upstream.authenticate()?;`, and between them
+  `let replay = candidate_source.execution_v3_replay_authority()?;` once for
+  each retained Candidate family.
+* `authenticate` calls
+  `authenticate_candidate_authorities(&self.candidates)?` twice and reads the
+  Finalization source twice.
+
+So one `top_twenty_five` or `top_ten` read is 2 × 2 = four Population V6
+`execution_v4_source` calls: four Execution V3 exit-grid replays for each
+retained Candidate family, and eight upstream authentications, each reading
+every retained Candidate authority's population rows twice. A `snapshot` is
+six `execution_v4_source` calls, and `stored_oos_witnesses` takes two
+snapshots around its own replay.
+
+The Population replays are not the whole cost. Each layer also repeats full
+reads of its own durable file, and the same test counts each call:
+
+* `selection_v6_source` calls
+  `.ordered_authenticated_dispositions()?;` once, reading every durable
+  Execution V4 disposition, so a `top_twenty_five` reads them twice.
+* `top_twenty_five` calls
+  `require_committed(&self.root, self.bounds, &before.block()?)?;` once, and
+  `require_committed` calls `scan(&mut file, &path, bounds, expected)` over
+  the Selection V6 file under a shared lock.
+* `execution_v4_source` calls
+  `let (source, families, population_rows) = self.population.projection()?;`
+  once, reading the Population V6 rows, so four times per `top_twenty_five`.
+
+None of this is O(1). What one Execution V3 replay authority, one upstream
+authentication or any of these full reads costs is not measured here, and no
+latency is claimed; the products above are call counts read from the source,
+not timings.
+
+## A zero-length Population V6 data file is initialised by the next writer — D-0918
+
+GAP11-2. `PopulationV6Ledger::open` wrote the 64-byte header only when that
+call created `population-v6.bin`. A writer killed or refused between creating
+the file and writing its header left a 0-byte file, and every later open
+refused it with "cannot read Population V6 header". A writer now initialises a
+data file whose length is zero whoever created it, under the exclusive writer
+lock; a reader never initialises, and a 1-byte header still refuses unchanged.
+`a_zero_length_data_file_left_by_a_failed_header_write_is_initialised_by_the_writer`
+pins all three. The same header window in Admission V4 and Finalization V4 is
+tracked by other ledger rows and is not changed here.
+
+**A committed ledger truncated to zero bytes is reinitialised too.** A zero-length
+file carries no byte that tells a writer stopped before its header from committed
+history truncated to nothing, so both are given a header and the writer reports
+`record_count` 0. The loss is not silent: a writer that initialises a
+zero-length file it did not create first emits a `Warn` event on target
+`cli.population_v6`, message "Population V6 zero-length data file reinitialised",
+naming the path and both causes;
+`a_writer_names_an_empty_data_file_it_did_not_create_before_initialising_it`
+pins that one event is emitted there and none for a file the writer created.
+Whether a downstream authority that named a record of the lost history detects
+the truncation is UNVERIFIED: no test here exercises one.
+
+**A header write that fails part-way still wedges.** The header write has no
+rollback: `data_file.write_all(&header())` that puts down 1 to 63 bytes and then
+fails (a short write under a small `RLIMIT_FSIZE`, or a full disk) leaves those
+bytes, and every later open refuses them as a short header, the same wedge by a
+different injection. This is a residual, found by reading the source; it was not
+reproduced, and no test pins it.
+
+## `/trades.json` refreshes past a damaged row in O(new rows) — D-0919
+
+W2-cli16-0 and W2-cli16-6. `Trades::refresh` refused as soon as the handle had
+recorded any integrity failure, before reading the file, so one damaged,
+schema-invalid or non-contiguous row anywhere in `chosen-trades.bin` made the
+cached `/trades.json` handle drop on every other request and re-walk every row
+on the one between. A refresh now indexes each new row as the cold walk does,
+through the one `index_row` both call, resuming at `scanned`: a row already
+indexed is not read again, and
+`a_read_refresh_over_a_damaged_row_keeps_indexing_only_the_new_rows` rewrites
+row 0 behind `scanned` with a validly sealed row of a new identity and shows
+the refresh neither indexes it nor changes the index. Writers
+still refuse: `append_all` and `confirm_durable` go through `absorb_new_rows`,
+which refuses on the recorded failure first. The refresh is O(rows appended
+since the last refresh) row reads, plus one shared lock, one unlock, one
+descriptor `metadata` and one `symlink_metadata`; it is not timed.
+
+**Two consequences of never re-reading a row.** A refresh takes the shared lock
+before it reads, because `append_all` writes under the exclusive one, so it
+never indexes a row a writer is still putting down;
+`a_refresh_waits_for_a_writer_holding_the_exclusive_lock` holds that lock,
+writes a row in two halves, and shows the refresh waits and then records no
+damage. A request therefore waits for any append in progress. And a file
+replaced under its path, which is how a reviewed repair is installed, is refused
+by name (`was replaced since this handle opened`) rather than refreshed, since
+the held descriptor would otherwise go on indexing the unlinked file:
+`a_refresh_refuses_a_file_replaced_or_removed_under_its_path` pins the refusal
+and a removed path, and
+`a_repair_renamed_into_place_is_served_after_one_named_refusal` shows
+`/trades.json` answers 400 naming the replacement once, then 200 for the
+repaired run. A row rewritten IN PLACE behind `scanned` keeps the same file and
+is still not seen by a held handle until it is reopened.
+## Audited span joins, and two per-call rescans that stay — D-0923, 30 September 2026
+
+* **An audited span's months are joined once, in `finish`.**
+  `audited_range::Builder::append` holds each later non-empty month apart and
+  copies no bar; `finish` makes one exact reservation and copies each held bar
+  once; the reservation may relocate the first month's bars, once. A bar is
+  therefore copied at most once after it is appended, where before each later
+  month's reservation could relocate it again. Each
+  append pushes one vector header onto the held months, which is amortised
+  O(1), not worst-case O(1). While the span is joined, the held months and the
+  joined span are both alive, so the transient peak is about twice the span's
+  bars. The join reserves exactly the held months' bars on top of the first
+  month's buffer.
+  `appending_a_month_never_relocates_the_bars_already_held` pins that no append
+  relocates the held bars and, for a first month decoded without spare
+  capacity, that the finished capacity equals the length.
+  The peak memory is read from the source, not measured. (W2-cli1-1.)
+* **Each Anchored Search V4 lineage persist rescans the whole ledger.**
+  `append_completion` ends with `self.scan()`, and `scan` reads and validates
+  every completed pair (`for sequence in 0..completion_records`); `open`, which
+  both `open_write` and `open_read` call, hashes each ledger file through
+  `file_generation` and scans too. One persist therefore costs
+  O(file bytes + pair records), as the module rustdoc says, and N persists to
+  one root cost Theta(N^2) in the records already written, bounded by the
+  ledger's explicit `pair_records` bound. Not timed. (W2-cli1-0.)
+* **Each Boolean search batch prepares its sources twice over.**
+  `boolean_search_command::execute_observed` calls `request.prepare` for the
+  training and later windows when it declares a new batch, and again in the
+  work phase before it compares the plan; the invocation start makes one more
+  pair. Each call reaches `boolean_campaign::prepare`, which builds
+  `prepared::Prepared::new` over the sources, so a batch costs a multiple of
+  its source bytes rather than O(1) in them. Not timed. (W2-cli2-7.)
+### Knob reads of an unset knob are not constant-time (D-0931)
+
+`cli::knobs::var` for a knob nothing has set reads `std::env::var_os`, a
+lookup over the process environment. Its cost depends on the size of that
+environment, which this workspace neither bounds nor measures, so it is not
+claimed O(1); `count` inherits it. A set knob is answered by the store and does
+not read the environment (`a_set_knob_never_reads_the_environment`). Knobs are
+read once per rung or once per run, never inside a loop over bars or
+candidates, as the module documentation states. UNVERIFIED as a measured bound:
+no bench times it.
+## Four ledger calls that rehash or rescan whole files per call — D-0934, 30 September 2026
+
+Four crate-private ledger calls in `crates/cli` did more whole-file work per
+call than their docs said, or said nothing of it. None is changed here; each
+cost is now stated where the call is documented and here, and
+`crates/cli/tests/ledger_scan_costs.rs` reads the source to require, for each
+cost, the calls and delegations its bullet names, and the sentences that state
+it. Not timed: no bench
+in this workspace measures any of the four.
+
+* **Finalization V3, one authenticated row** (`row_projection`, W2-cli11-1).
+  `row_projection` delegates to the ledger's `authenticated_row`, and every
+  generation goes through `file_generation`. Each call runs the generation
+  check before and after its one fixed-offset read, and each check hashes the
+  lock, row and Completion files whole, twice each. One row read therefore hashes the row file and the Completion file four
+  times each: O(row-file bytes + Completion-file bytes) per row, not O(1), and
+  O(R × those bytes) for R rows read one at a time. The bulk path,
+  `ordered_row_projections`, performs "one bounded bulk read between one
+  before/after generation-validation pair" in its own rustdoc's words.
+* **Finalization V4, one append** (`append_locked`, W2-cli11-0). After the
+  Completion is synced, the append hashes the whole data file and then calls
+  `scan`, which walks every block and ends by hashing the data file again. One
+  append is therefore O(F) in the ledger's file bytes F, not O(D) in its own decisions,
+  and the appends into one ledger cost quadratically in its length over its
+  life. This supersedes, for append, §168's "Encoding, ordered hashing,
+  exact-prefix comparison and append are O(D)." The rescan that follows the
+  synced Completion walks every earlier block as well as the new one. The
+  append opens with a generation check that hashes the whole data file, and an
+  exact reuse runs another before it returns, so a reused append that writes
+  nothing is O(F) as well.
+* **Population V5, one authenticated row**
+  (`CommittedStoredPopulationV5::authenticated_row`, W2-cli12-3). Each call
+  calls `PreparedPopulationV5::from_authority` twice, and each of those joins
+  every upstream input and derives all C rows, to compare one row. One row read
+  is therefore Θ(C) row derivation twice, plus the upstream joins and the V5
+  generation hashing, not O(1). The one row read goes through
+  `PopulationV5Authority::authenticated_row` to the ledger's fixed-offset
+  `authenticated_row`, not through the whole-block `authenticated_rows`.
+* **Population V5, one commit** (`commit_population_v5`, W2-cli12-4). Each
+  scan decodes every row of every Population already in the ledger, and
+  decoding a row validates it, re-encodes it (which validates it again), and
+  `validate_complete_block` validates it once more, so the V5 ledger work of
+  one commit is O(R) in the ledger's total rows R, not O(C). A written commit
+  scans the ledger three times and a reused one twice. On top of the ledger
+  work, `PreparedPopulationV5::from_authority` runs twice, before the write
+  and after the reopen, and each run joins every upstream input. One commit is
+  therefore O(R) plus two whole upstream joins, not O(R) alone. The module
+  doc's former "Sequential codec, hashing and persistence work is O(C) in
+  Candidate count." is replaced.
+
+The Finalization V4 and Population V5 bounds above are expected, not worst
+case: the block validation that each rescan repeats inserts every decision or
+row into hash sets built by `bounded_set`.
+
+Each rescan re-authenticates the ledger after a write or around a read.
+Making any of them incremental would change what the call proves, and is
+recorded here, not done.
+## The weekly expiry takes more than one pass near a regime change — D-0770, 30 September 2026
+
+Since D-0770, `costs::expiry::next_weekly_on` reads the regime at the day
+asked and, when a later row starts on or before that regime's next weekday,
+moves to that start and reads again (`Some(start) => from = start`). An ask
+with no row start in the way answers on its first pass; an ask in the days
+before a row start takes another pass for each start it crosses. `from` only
+moves to a strictly later start in the fixed `later` array
+(`[Option<DatedRow<V>>; MAX_LATER_ROWS]`, `dated.rs`), so the pass count is
+bounded by that compile-time constant and by no input. The call stays
+constant-bounded; it is no longer the same work at every calendar position.
+
+What is measured does not cover the difference. C-K-08
+(`the_calendar_position_does_not_change_the_expiry_cost`, `benches/ratio.rs`)
+times NIFTY asked on 2024-06-06 against 2024-06-07, two days inside one
+regime, each a single pass. A boundary-crossing ask is not timed, and its cost
+relative to a single pass is UNMEASURED.
+- **Corrected 2026-09-30, D-0946.** The AF-19 correction above says "No page
+  under `web/` renders `equity_note`". The report page now renders the open
+  run's `equity_note`, trimmed of leading and trailing blanks, in its
+  breakdown pane and over its trade list, and labels every run that is not a note-free NIFTY or BANKNIFTY run gross of
+  every charge (`web/tests/charge-scope.test.js`). No other page under `web/`
+  was changed.
+## `crates/lake` refuses chunk bytes a declared value count leaves unread, and that is unmeasured on the real lake — D-0776, 30 September 2026
+
+A column chunk whose page walk stops at its declared `num_values` with a page
+still unread that is not a dictionary page or a data page declaring no values
+is refused as `LakeError::UnreadChunkBytes`, once the column has otherwise
+decoded its declared rows. The format makes a conforming chunk's byte range
+exactly its pages (`parquet-format-safe` 0.2.4 documents
+`total_compressed_size` as the "total byte size of all compressed, and
+potentially encrypted, pages in this column chunk (including the headers)"), so
+every byte of a conforming chunk belongs to one of its pages. That is not a
+proof that no conforming file reaches the refusal: a writer that put a page
+declaring values past the chunk's own `num_values` would reach it.
+
+**Whether every real lake file conforms is UNMEASURED.** `~/.brutex/lake` was
+not present when D-0776 was written, and every test in `tests/real_lake.rs` is
+`#[ignore]`d with the reason "needs ~/.brutex/lake, which cannot be tracked". A
+writer that padded a chunk past its last page, or wrote a page the chunk's
+count does not cover, would make every read of that file a refusal, named by
+column and byte count rather than a silent read. `cargo test -p lake -- --ignored` on a machine with the lake
+would measure it on the files those tests decode — the two named samples and
+the month files under the first 40 NSE F&O directories `read_dir` yields, which
+`a_spread_of_real_files_decodes_with_no_failures` walks — and not on the rest.
+
+## `crates/lake` does not catch a footer whose row-group counts sum to its file-level count — D-0777, D-0778, 1 October 2026
+
+A footer that understates a row group's `num_rows`, every chunk's `num_values`
+and every chunk's `total_compressed_size` together, on a page boundary, is
+refused only when the row groups' declared counts no longer sum to the
+file-level `num_rows` (`LakeError::RowCountsDisagree`). Any footer whose
+row-group counts do sum to it passes that check, whatever made them sum, and
+nothing else this reader checks covers bytes outside a chunk's declared range
+or two entries naming the same bytes. Three such footers are pinned:
+
+- **The file-level count cut too.** The cut group decodes as the declared
+  prefix: the timestamps `0, 1, 2, 3` of eight.
+  `reader::tests::row_value_and_byte_counts_understated_together_are_refused_on_the_file_count`.
+- **Another group raised to make up the cut.** Of two eight-row groups, group 0
+  cut to four and group 1 raised to twelve, with the file-level 16 untouched:
+  group 0 read on its own decodes as its first four rows. Group 1 is refused
+  when read (`ShortColumnChunk`, 8 of 12 rows arrived), and so is `read_all`,
+  but a caller reading group 0 alone is not told.
+  `reader::tests::a_cut_group_padded_by_another_reads_short_alone_and_the_padded_one_is_refused`.
+- **A row-group entry listed twice.** A cut group plus a copy of its entry sums
+  to the untouched file-level 8 and `read_all` returns rows `0..4` twice and
+  drops rows `4..8`; a sound group listed twice under a file-level 16 returns
+  every row twice. Neither touches a page.
+  `reader::tests::row_group_counts_that_sum_to_the_file_count_pass_however_they_were_made_to`.
+
+What would close all three is a check that the chunks' byte ranges tile the
+file, each starting where the previous one ends, with no gap and no overlap.
+It is **not implemented**, because whether the Polars writer that wrote the
+lake lays every chunk out that way is **UNMEASURED**: `~/.brutex/lake` is not on
+this machine and `tests/real_lake.rs` is `#[ignore]`d, so such a check could
+refuse real files and nothing here would show it. Whether every real lake
+file's counts agree is UNMEASURED for the same reason.
+
+A file whose counts disagree still opens: the comparison is made in
+`read_row_group`, not at open, so `LakeFile::num_rows` answers the footer's
+claim unqualified and only a group read is refused.
+`reader::tests::a_file_count_that_disagrees_opens_and_refuses_every_group_read`
+pins that for file-level counts of 9, 11, 0, -1, `i64::MAX` and `i64::MIN`
+against groups summing to 10.
+
+The D-0776 section above gives the refusal and not its cost. When a page walk
+stops, stepping over the leftover rowless pages costs one header parse for each
+such page, so it is linear in those pages for that chunk, not constant, and
+bounded by the chunk's bytes. No body is decompressed there.
+## A folder walk holds every decoded row of the folder — D-0720, 26 September 2026
+
+`archive::read_dir` and `archive::read_dir_reporting` each return one
+`Vec<Member>` holding every member's rows (C4-PULL-01). A folder walk's peak
+memory therefore grows with every decoded row of the folder, not with one
+file, whether the walk is an ingest (`ingest::from_dir`) or a census
+(`folder::read_census` and `folder::read_reach`). Until D-0720 `archive.rs`
+claimed the opposite.
+
+- **The ceilings on rows are counts.** `MAX_MEMBERS` members
+  (`pub const MAX_MEMBERS: usize = 50_000;`), each refused by `csv::decode`
+  past `fetch::MAX_ROWS` rows. No byte figure for a real folder has been
+  measured. A census also keeps a finding per member it rejects, and until
+  D-0725 neither their number nor their length was capped; the D-0725 entry
+  below records both bounds.
+- **The ingest path needs the rows held.** It writes nothing until the walk
+  returns, which is what makes a malformed member refuse the folder before
+  any bar is written. Closing the limit there needs a decision between a
+  second decoding pass and giving that up.
+- **The census path does not need them.** What it returns holds no row.
+  `folder::read_census` returns a `Census`, whose fields are
+  `pub reach: Reach`, `pub instruments: Vec<String>`,
+  `pub collisions: usize` and `pub rejected: Vec<Rejected>`. A `Rejected` is
+  `pub path: PathBuf` and `pub why: String`, and `Reach` is an enum deriving
+  `Copy`. `folder::read_reach` returns `Result<Reach, FolderError>`. Both hold every row while they walk, because
+  `read_census` walks through `archive::read_dir_reporting` and `read_reach`
+  through `archive::read_dir`. Closing it there would be a walk that folds
+  each member into the census and drops its rows before decoding the next.
+
+## A CSV row costs time linear in its line, and neither a line nor a member is capped — D-0721, 26 September 2026
+
+`csv::decode_rows` borrows a row's fields into a fixed ten-slot array
+(C4-PULL-02), so a row allocates nothing whatever its line holds. Until D-0721
+it collected them into a vector sized to the line's commas.
+
+- **A row's time is linear in its line's bytes.** `body.lines()` finds the
+  line's end and `fields_of` counts every comma, so both read the whole line.
+- **No line-length cap exists, and no member-size cap either.**
+  `archive::descend` reads a member with `fs::read(&path)` and decodes it
+  whole, so one line can be as long as its member and one member as large as
+  its file. No real line or member length has been measured here, so no cap
+  is set. Setting one needs the longest real row measured first.
+- **The row vector is not reserved.** `decode_rows` starts from
+  `let mut rows: Vec<RawRow> = Vec::new();` and `decode` takes no bound, so an
+  append is amortised O(1), not worst-case O(1). The module doc used to say
+  otherwise.
+
+## A rolling answer is read under `MAX_RESPONSE_BYTES` — D-0723, 27 September 2026
+
+`HttpSource::post_json`, the rolling (Dhan expired-options) POST, now reads its
+success body through `strict_discovery_body` with `MAX_RESPONSE_BYTES`
+(C4-PULL-04). Until D-0723 it read the whole answer with `text()` and no cap,
+while its `# Cost` said O(1).
+
+- **One request costs time linear in the answer's bytes, and the bytes held
+  never pass the cap.** `pub const MAX_RESPONSE_BYTES: usize = 64 * 1024 *
+  1024;`. An answer declaring more is refused before its body is read, and one
+  declaring nothing is abandoned once the bytes held would pass the cap:
+  `if held.len().saturating_add(chunk.len()) > cap` refuses before that chunk
+  is kept. C4-PULL-04's flood test offers 64 MiB past the cap and asserts the
+  client hangs up with fewer than 32 MiB past it sent.
+- **The buffer's allocation is not held to the cap the way its bytes are.**
+  `strict_discovery_body` starts from `let mut held = Vec::new();` and grows
+  it with `held.extend_from_slice(&chunk);`, and no `reserve` or
+  `with_capacity` bounds its capacity. So the allocation is whatever `Vec`'s
+  growth gives on the way to the cap, and it can be larger than the bytes
+  held. How large it grows has not been measured.
+- **The cap is the bars window's, not a measured rolling size.** No real
+  rolling answer's size has been measured here, so how far below the cap a
+  real answer sits is unmeasured.
+- **Nothing here bounds how many rolling requests one run sends.** That is
+  the `api` cross product's count, and this entry does not change it.
+
+## A census visits at most `MAX_MEMBERS` members and keeps a bounded part of each refusal — D-0725, 28 September 2026
+
+`archive::read_dir_reporting`, the census walk `folder::read_census` goes
+through, keeps a member that will not decode as a `Rejected` finding and walks
+on. Until D-0725 its cap compared only the members that decoded
+(`if out.len() >= MAX_MEMBERS {`), and each finding kept the decoder's
+sentence whole, so neither the number of findings nor their length had a
+ceiling (C4-PULL-05).
+
+- **Decoded and rejected members count together.** `descend` compares
+  `out.len().saturating_add(rejected.len())` with `MAX_MEMBERS`, so a census
+  visits at most `MAX_MEMBERS` members whatever they hold. An ingest walk
+  never pushes onto `rejected`, so its bound is unchanged.
+- **A finding keeps at most `MAX_FINDING_BYTES` of its refusal.**
+  `pub const MAX_FINDING_BYTES: usize = 1024;`. A longer sentence keeps its
+  first bytes up to that bound, cut back to a character boundary, and
+  ` [trimmed: N of M bytes not kept]`. Each finding also keeps its member's
+  path. The bound is chosen, not measured: no real refusal's length has been
+  measured here.
+- **What a rejected member costs on the way is not capped.** It is read whole
+  with `fs::read(&path)`, as every member is (the D-0721 entry above), and
+  `finding` renders its sentence whole with `let whole = why.to_string();`
+  before cutting it. Both are that member's locals, gone before the next
+  member is read. What the census keeps is the cut copy.
+## The 2xx refusal check parses nothing of its own — D-0956, 29 September 2026
+
+§83.1 says calling the linear refusal read on a success path would make it a
+defect, and that no such call existed. One did: `window_async` called
+`refusal::disposition_of` on every 2xx body of a feed declaring `error_names`,
+and `decode_body` then parsed the same body again. Since D-0956 that path
+parses the body once, in `HttpSource::settle_answer`, and the refusal check
+reads the parsed value through `refusal::disposition_of_value`. The one parse
+is the decode's own and is still O(body), bounded by `MAX_RESPONSE_BYTES`.
+`pull::http::tests::a_success_body_is_parsed_once_for_both_the_refusal_check_and_the_decode`
+counts calls to `http::parse_answer`, which `disposition_of` and `decode_body`
+both parse through, and asserts one per `settle_answer`;
+`pull::http::tests::a_window_fetched_over_a_socket_parses_its_body_once` asserts
+one across a whole `window_async` call over loopback. `disposition_of` itself
+still parses. Its one remaining non-test caller is
+`refusal_words`, the non-2xx door, which reads at most `MAX_REFUSAL_BYTES`;
+the calls in `dhan.rs` are inside its `mod tests`.
+## Two pull costs stated as they are paid — D-0961, 29 September 2026
+
+* **`GET /indexmap.json` scans the NSE catalogue per request.**
+  `api::indexmap::join` calls `Catalogue::resolve` for each feed index symbol
+  on every request, twice when the feed renames the symbol (the renamed-from
+  name first), and each `resolve` does one hash probe and, when the name is
+  not published verbatim, one scan of the catalogue that compares the symbol
+  with each collapsed name. `Catalogue::index`, which would pay that scan once
+  per distinct symbol, has no production caller. Not timed.
+* **`pull::rate::note_absorbed` is a compare-exchange loop.** It calls
+  `AtomicU64::fetch_update`, which retries `compare_exchange_weak` while
+  another thread changes the counter in between or the weak exchange fails
+  spuriously. The number of attempts grows with that contention; it is not
+  one `fetch_add`. Not timed.
+## Admission no longer re-reconciles the search per candidate — D-0740, 29 September 2026
+
+§167 said Runner evaluation of Admission V4 is O(C). Until D-0740 it was not:
+each decision re-ran the opaque validation's full reconciliation, whose work
+grows with the folds and each fold's candidate list, so C decisions paid that
+fold-wide cost C times. Each decision now reads the projection sealed at
+issuance, a copy of fixed-size fields, so the reconciliation runs once when
+the validation is issued and not per decision
+(`per_candidate_admission_never_re_reconciles_the_opaque_validation`). The
+rest of each decision (Statistics verification, the evidence join and the
+policy) is unchanged and was not re-measured here. Not timed.
+
+## Attested pricing no longer rebuilds the slice facts per run — D-0741, 29 September 2026
+
+`evaluate_with_attested`, the expression pricing door and coordinate
+materialization each derived `SliceFacts` (a pass over every execution bar,
+one `HashMap` and two prefix vectors of the slice's length) on every call. The
+attestation now derives them once and the doors read them
+(`pricing_runs_over_one_attestation_derives_the_slice_facts_once`,
+`programs_and_coordinates_over_one_attestation_derive_the_slice_facts_once`).
+A priced run still walks every column row, so its cost grows with the signal
+rows of the slice and the grid, not with a constant. The single-shot
+`evaluate_training_grid_attested` still attests per call, so a caller that
+uses it per candidate still reads the whole slice per candidate. Not timed.
+
+## The stationary bootstrap's block ceiling is arithmetic, not statistical — D-0742, 30 September 2026
+
+The continuation draw is `1_000_000_u64.saturating_sub(1_000_000 / block as u64)`
+ppm, so a block above `bootstrap::MAX_BLOCK` (1,000,000) would never restart
+and is now refused by every entry point
+(`a_block_the_ppm_draw_cannot_restart_is_refused_by_every_entry_point`). A
+block at or below the ceiling is still accepted however it compares with the
+series length — the same test answers at a block of 1,000,000 over 200
+periods — and the integer division quantizes the restart probability, so a
+large accepted block is resampled at `1_000_000 / (1_000_000 / block)` rather
+than at `block`. Neither is refused or measured here.
+
+## Admission V2/V3 refuses, rather than decides, a floor-hidden probability — D-0743, 30 September 2026
+
+A max-gated probability whose floor ppm is within its ceiling while its exact
+fraction is above it is refused by the three projection doors
+(`a_floor_ppm_on_the_ceiling_never_passes_an_exact_probability_above_it`);
+a V2/V3 verdict, re-derived from the floor ppm slots, cannot carry the
+correct failure. The cli V1 builders
+that fill the same fields with `.ppm()` are not changed by D-0743.
+## Grammar search: what a node budget bounds, and what display cannot re-run — D-0751 to D-0753, 29 September 2026
+
+* **A node budget bounds choices, not progress (D-0752).** `Cursor::advance`
+  tries every alphabet rank and all three operators at every position. A leaf
+  that leaves too many reductions, and a reversed sibling pair, are each
+  refused only after they are tried, so nodes per emitted candidate grow with
+  the alphabet. Counted over every program of one to three instructions: 78
+  nodes for 12 candidates with 2 live bits, 1,092 for 96 with 8, and 40,428 for
+  1,152 with 32. With 2 live bits, 6,577 nodes pass between candidate 7,115 and
+  candidate 7,116, more than the 4,096 nodes one checkpoint transition replays.
+  `grammar_nodes_per_candidate_grow_with_the_alphabet_and_gaps_exceed_one_replay`
+  counts all of these. Counted, not timed. **Not changed**: skipping a refused
+  leaf's remaining ranks would change every saved search's node accounting and
+  pause points, and is left for a decision of its own.
+* **One node is not O(1) (D-0753).** Each choice calls `valid_prefix` on the
+  whole prefix, which walks it from its first instruction
+  (`for (index, op) in code.iter().enumerate()`) over a fresh stack
+  (`let mut starts = [0_usize; MAX_INSTRUCTIONS];`, 9,208 bytes on a 64-bit
+  target) and compares sibling subtrees at every AND and OR. Its cost grows
+  with the prefix and is bounded only by the fixed 1,151-instruction capacity.
+  `prefix_validation_rescans_from_the_first_instruction_over_a_fixed_stack`
+  pins both edges of the stack width (`MAX_INSTRUCTIONS` operands accepted,
+  one more refused), an invalid first instruction refusing a prefix whose tail
+  alone is valid, and by source shape the inline array and `advance`'s one
+  whole-prefix call per choice (D-0754). **UNMEASURED**: the time per node; no
+  bench covers it.
+* **Display is not a parser round trip (D-0751).** A program `Expression::parse`
+  accepted can render past its limits: 16 NOTs over one bit render to 49 bytes
+  and are refused `NestingCapacity`; a 576-leaf AND chain of bit 0 renders to
+  3,451 bytes and is refused `NestingCapacity`; the same chain of bit 369
+  renders to 4,603 bytes and is refused `SourceCapacity`. Each still survives
+  `encode` and `decode` exactly.
+  `display_can_exceed_the_parser_limits_for_programs_the_parser_accepted` pins
+  all three. `cli expression-stored` reads its EXPRESSION through
+  `Expression::parse(source)`, and the explicit program catalog reads each line
+  through `Expression::parse(line)` (`parse_catalog` in
+  `crates/cli/src/boolean_catalog_command.rs`), so a candidate's displayed text
+  cannot always be re-run through either (D-0754).
+## Global Replay V1 appends and V3 commits re-read their whole ledger — D-0927, 30 September 2026
+
+§140 states what OPENING the V1 replay files costs, and §166 bounds one V3
+block in its own record count. Neither said what each later V1 append or V3
+commit costs, and both re-read every committed record.
+Nothing here was timed; every statement is read off the source named beside it.
+
+* **V1, every append.** `append_complete_locked` begins with
+  `self.require_files_unchanged()?;`, and on a new publication ends with
+  `self.refresh_file_digests()?;` (`crates/cli/src/global_replay.rs`). Each of
+  those two functions calls `digest_file` on the stream, decision, trade and
+  completion files, and `digest_file` seeks to `SeekFrom::Start(0)` and reads
+  in 16 KiB chunks until `read == 0`. One new publication therefore hashes all
+  four files twice, and an exact reuse hashes them once before it returns
+  `Reused`. The bytes hashed per append grow with every publication already
+  committed, so P appends hash O(P²) record-bytes in total when publications
+  are of similar size (an extrapolation from the loop, not a measurement).
+* **Why the first hash is kept.** `require_files_unchanged` is the check
+  that refuses a writer whose files were changed underneath it by an
+  equal-length overwrite.
+  `global_replay::tests::same_length_external_mutation_makes_open_writer_stale`
+  overwrites one byte at `HEADER_BYTES + 10` of the stream file, inside its
+  first record, and requires the next append to refuse with "changed after
+  open". That pins that a pre-append check exists and covers that byte; it does
+  not prove the check must span the whole file, and a check over a prefix
+  would pass it too. A replacement would have to keep that refusal, and none is
+  attempted here.
+* **The second hash is kept only for simplicity.** `refresh_file_digests`
+  rehashes all four files after the append to set the next baseline, and no
+  test requires that it read them again: the hasher from the first pass,
+  extended with only the bytes this call appended, would give the same
+  baseline. Removing it would halve the hashing per new publication and leave
+  it O(P) per append, so the class above is unchanged either way. It is a
+  separate, removable cost, recorded here rather than removed.
+* **V3, every open, commit and audit.** `GlobalReplayLedgerV3::open` ends with
+  `ledger.load_snapshot()?;`, `commit_locked` runs
+  `let snapshot = self.load_snapshot()?;` before its duplicate-publication
+  probe, and `audit` runs `let snapshot = self.ledger.load_snapshot()?;`
+  (`crates/cli/src/global_replay_v3.rs`). `load_snapshot` calls `read_records`
+  for the witness, candidate, decision, money and completion files, and
+  `read_records` decodes every record of its file. It then walks
+  `for (ordinal, completion) in snapshot.completions.iter().enumerate()` and
+  calls `validate_committed_block(completion, &snapshot)?;` for every prior
+  completion. That runs `let summary = validate_semantics(`, which runs
+  `let scheduled = schedule_candidates(witnesses, candidates, Some(&persisted_vix))?;`,
+  and `schedule_candidates` begins with `order.sort_unstable_by_key(` over the
+  block's candidates. So each call decodes every record ever committed to the
+  five V3 files AND re-schedules every committed block, a sort of C_i
+  candidates for block i: about Θ(R + Σ C_i log C_i) per call, where R is the
+  record count of the five files, not the one block §166 bounds. K commits of
+  similar size are therefore at least quadratic in K (an extrapolation from the
+  loops, not a measurement).
+
+**A process killed mid-append still leaves a refused tail.** D-0926 rolls a
+failed V1, V2 or V3 append back to its starting length when an encode or a write
+returns an error. A process that dies between two writes runs no rollback, so
+its partial record remains, and the next open refuses the file for its ragged
+body, loudly, as before. No open path truncates such a tail on its own.
+
+**A rollback is not synced before the refusal returns.** `append_encoded_with`
+calls `file.cut_to(start)` (`set_len` on a `File`) and returns its refusal with
+no `sync_all` after it, so the truncation may not have reached the disk. A
+power loss then can bring back the bytes the rollback cut: a partial record,
+which the next open refuses for its ragged body as for the killed process
+above, or whole records of the refused call, which are then in the same state
+as the whole records D-0926 says a commit failing on a later file leaves in its
+earlier files. This is not synced here and not tested; it is read off the
+source.
+## Selection growth rechecks its indexed records; two lookups are not O(1) — D-0936, D-0937, 29 September 2026
+
+* **Selection V1, V2 and V3 absorb after another handle appended (W2-cli14-5).**
+  When the file grew past what a handle indexed, `absorb_new` now calls
+  `require_indexed_records_unchanged`, which re-reads every indexed record and
+  compares it with the canonical bytes held in memory. That is O(indexed
+  records) of reads and encodes, paid on the growth branch only; an append
+  through the same handle keeps the length equal to `self.scanned` and does not
+  pay it. The comparison is of bytes, not of authenticity: an actor who puts
+  identical bytes back is not seen, and neither is one who forges metadata on
+  a same-length change. Not timed.
+* **Population V6 scan (W2-cli13-2).** The receipt index reservation is now
+  `min(record_count / 4, authorities)`, not the authority bound. The scan
+  still reads every record on open and after every append, so open and append
+  remain O(F); what no longer grows with the configured ceiling is the
+  allocation. Not timed.
+* **Population V6 replay lookup, `selected_stored_oos_witnesses` (W2-cli13-3).** Each of at most 25 strategies is
+  found by a linear `find` over the C source rows: O(C) per strategy and
+  O(25 * C) per call, inside a call that already runs `execution_v4_source`
+  twice. Not changed and not timed.
+* **Selection V5 exact lookup (W2-cli14-0).** `structural_receipt` rehashes
+  both the rows and the Completions file before its hash-map probe, so a lookup
+  is O(F) in those files' bytes; only the probe is average O(1). Not changed and
+  not timed.
+## The census walk is bounded by every member it opens, and a derived calendar's session count is O(1) — D-0953, 29 September 2026
+
+**The census walk.** §65 says the folder walk's own bound is
+`archive::MAX_MEMBERS`. Until D-0953 that was true of the ingest walk only: the
+census walk kept going past the cap as long as the members failed to decode.
+The cap now counts accepted and rejected members together, so both walks open
+at most `MAX_MEMBERS` members, held by
+`pull::archive::tests::a_census_of_malformed_members_is_refused_at_the_member_cap`.
+Each member is still read in full before it is decoded or rejected, so the
+walk's cost is still O(members × member bytes). Not timed.
+
+**The session count.** `pull::calendar::Calendar::sessions` is now a field read,
+held by `pull::calendar::extreme_day_tests::sessions_is_counted_once_at_construction_not_per_call`.
+The derived-calendar render that calls it is still O(span): the next statement
+in `api::calendar_of` is
+`for day in calendar.first_day()..=calendar.last_day() {`, which visits every
+day. That loop is unchanged. Not timed.
+---
+
+## The legacy Romano--Wolf stepdown's cost is stated, and its thresholds are the adjusted receipt's — D-0973, 29 September 2026
+
+`romano_wolf` and `romano_wolf_receipt` walk the canonical order once:
+O(S·B·N + S·B + S log S) time for S strategies, B draws and N periods,
+and O(B·N + B + S) space. The `S·B` term is one `select_nth_unstable_by` per
+suffix, whose documentation in the pinned toolchain says its fallback
+"guarantees linear runtime for all inputs". The former loop was O(R·B·S·N) over R
+rounds and this file did not say so. None of these is measured by a bench;
+`each_null_statistic_is_computed_once_however_many_rounds` counts the null
+statistics (2,400 for eight strategies at 300 draws) rather than timing them.
+
+§74's statement that `romano_wolf` "does not expose its per-round critical
+thresholds" still holds. What changed is what they are: each is a bar on the
+exact `(1 + count) / (B + 1)` rule, and
+`the_stepdown_rejects_exactly_what_the_adjusted_receipt_rejects` checks the
+resulting decisions against `romano_wolf_adjusted_p_values_v1` over a
+3,000-decision grid. That is a grid, not a proof at every discrete equality
+boundary.
+### One expression-grammar node walks its whole prefix, not O(1) (D-0983)
+
+`vocab::expression_search::Cursor::advance` counts one unit of `work` per
+grammar node, and the unit is not constant. Every tried instruction revalidates
+the whole prefix it ends:
+
+* `let prefix = self.code.get(..=at).ok_or(Refusal::Cursor)?;` then
+  `if !valid_prefix(prefix, usize::from(self.length)) {`.
+* `valid_prefix` zeroes a fixed stack, `let mut starts = [0_usize; MAX_INSTRUCTIONS];`
+  (`MAX_INSTRUCTIONS` is 1,151), and walks every instruction of the prefix,
+  `for (index, op) in code.iter().enumerate() {`.
+* At each `And` or `Or` it compares the two sibling operands as slices,
+  `if code.get(left..right) > code.get(right..index) {`.
+
+So one node costs a fixed 1,151-entry zeroing, a walk of every instruction up
+to `at`, which the fixed language bounds below 1,151 but which is not
+independent of it, and the sibling comparisons. Those are not claimed linear in
+`at`: the refusal is only `>`, so equal siblings are admitted, and siblings that
+differ only in their last instruction are told apart only there, so one
+comparison can read a whole operand
+(`a_sibling_comparison_can_read_the_whole_operand`). Their total per node is
+not measured or bounded here. The `work` counter and every node budget count
+nodes, not this walk. Nothing here is timed; the shape is read off the source, and
+`the_per_node_prefix_scan_the_limit_names_is_the_code` fails if any quoted line
+leaves `expression_search.rs` or this section.
+
+## One archive member's text is capped before it is read — D-1362, 2 October 2026
+
+- **One member's text is now capped at `archive::MAX_MEMBER_BYTES`
+  (256 MiB).** It used to be read whole by `fs::read` before the decoder's row
+  cap could act, and a file of blank lines is never refused by a row cap at
+  all. The cap is an engineering bound, not a vendor fact: `fetch::MAX_ROWS`
+  rows at 268 bytes each, against an observed GDFL row under 80 bytes. Proven
+  by `archive::tests::a_member_past_the_byte_cap_is_refused_before_it_is_read`.
+  The walk's total resident rows are the bound D-0720 already states.
+  D-1362.
+## Recovery seeding and plan ordering (D-1380, D-1381)
+
+- **Seeding syncs once.** `seeded` and `prepare_successor` write a plan's new
+  windows with `Journal::append_new`: one record sync for the batch, where it
+  was one per window. Counted on this thread: 3 record syncs to seed 2 or 40
+  windows (before: 4 and 42), 2 to prepare 2 or 40 (before: 3 and 41). Bytes
+  written still grow with the plan, 1,024 per window, and the sync's own
+  latency grows with what it flushes; neither is claimed O(1). Not timed.
+- **Plan ordering ranks once.** `plan` and `validate_seal` order `n` windows
+  with `n` rank computations (a body parse and clone each) and O(n log n)
+  comparisons of those ranks. Before D-1381 an unsorted 80-window plan took
+  1,032 rank computations. Counted, not timed.
+
+## Pull-run and recovery row counts (D-1382)
+
+Not O(1) on a miss, and not bounded by the run. `pullrun::rows_now` is
+`census_now`:
+
+- **Hit** (no manifest's stamp moved since the cached read): five `stat`s, or
+  six when no manifest answered, and no manifest read.
+- **Miss** (the first call after any manifest moved): `census::read_all` reads
+  every vendor's whole manifest, up to `MAX_MANIFEST_BYTES` (268,468,224) each,
+  and `held_entries` sorts every held entry: O(manifest bytes + E log E), E the
+  store's held entries. It grows with the store, not with the run.
+- **Callers.** `conduct_with` calls it at start, before and after every pass,
+  at the end, and on its ticker every `ROWS_TICK` (5 s); during a pull every
+  committed leg rewrites its vendor's manifest, so those calls miss. At most one
+  miss per tick plus two per pass come from the conductor. `recovery::execute`
+  calls it once and `retry_day` once per attempt, after the attempt's own
+  `recovery_spot`, which already makes one `census::read_all`; so recovery adds
+  at most one more rebuild per attempt.
+- **Why it stays.** A header-only read of `total_rows` would be O(vendors) and
+  would count a generation `Manifest::load` steps over as damaged. The census
+  a miss builds is shared with every other `census_now` caller until a stamp
+  moves.
+
+UNMEASURED: no count or timing of rebuilds during a run was taken.
+## The prefix cadence is O(n log g) per slice — D-1410, 2 October 2026
+
+`runner::outcome::prefix_median_steps_over` replaces the whole-slice median
+selection, which was O(n) per slice, with a two-heap running median. Each bar
+costs at most one push and one rebalance, O(log g), where `g` is the number
+of qualifying gaps seen so far. The heaps and the per-bar output take O(n)
+memory: one `i64` per bar, held in `SliceFacts` alongside the two existing
+prefix-count vectors. The cost is paid once per `SliceFacts::of`,
+`SessionBounds::of` or `trade::forced_exits` call, so once per slice, never
+per candidate. Every lookup afterwards (`SliceFacts::step_at`) is one
+bounds-checked read. A constant-per-bar running median would need a bounded
+alphabet of step values, and the slice does not guarantee one. **UNVERIFIED as
+a measured bound**: no bench row times it (`CLAUDE.md` §3 rule 6).
 ## A following append verifies the old tail block before re-sealing it — D-0910, 2 October 2026
 
 - **One block verification per append that lands inside a partially covered
@@ -10036,6 +11203,9 @@ not:
   re-check every caller. The fix needs a cadence supplied by the caller (or
   read from the rung's declared timeframe), which changes the `grid` and `cli`
   call sites. It is deferred, and the direction of the error is not one-sided.
+  **Closed on the merged tree by D-1410** (D-1198): the cadence at bar `i` is
+  measured over bars `0..=i` only, and the test is inverted as
+  `a_signal_sourced_cadence_is_not_read_from_bars_after_the_signal`.
 
 ## Runner lane-2b follow-ups — D-1183 onward, 2 October 2026
 
