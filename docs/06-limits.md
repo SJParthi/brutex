@@ -10122,3 +10122,95 @@ recorded; the new pin must equal the recorded one or the retry refuses.
 Reproduced and pinned by C4-CLI-09. The cost is the rung's complete catalog
 pricing, paid again on each such resume. Not timed. Not fixed: reopening a
 pinned family needs runner capabilities its saved body does not hold (D-0713).
+## Three resumable Boolean paths re-verify all completed work on every step — D-0910, 29 September 2026
+
+Each of these is a loop whose one step repeats a check over everything the
+earlier steps finished. None is O(1) per step, none is timed, and none was
+stated here before. The checks are the tamper detection each path relies on,
+so they are recorded, not removed. Every source line quoted below is found in
+that file by `c4_cli_02_limits::each_quoted_line_is_in_the_source_it_names`.
+
+* **`boolean-grammar-campaign-stored`, one batch per invocation.** In
+  `crates/cli/src/boolean_grammar_campaign.rs`, `restore` walks the whole
+  checkpoint chain (`for (sequence, pin) in chain.into_iter().rev() {`) and,
+  for every nonempty completed batch, calls
+  `complete(id, pin, batch.programs())?;`. The `complete` that
+  `execute_with` passes prepares that batch's campaign again
+  (`let expected = prepare(&request.campaign(programs), &mut String::new())?;`)
+  and verifies its saved campaign
+  (`crate::boolean_campaign::verify_complete(request.root, id, pin, ancestry_bytes)`).
+  So invocation n re-verifies every nonempty batch completed before it (at
+  most n − 1; an empty batch takes `if batch.programs().is_empty() {` and
+  never reaches `complete`), and the work of a whole grammar can grow with
+  the square of its batch count.
+  `cli::boolean_grammar_campaign::tests::every_invocation_reverifies_every_completed_batch_in_order`
+  counts the calls: after one, two and three completed batches, `restore`
+  calls `complete` one, two and three times, in chain order. The comment on
+  `restore` said "O(checkpoints + replayed grammar work + saved campaign
+  evidence)" and named neither the source preparation nor the growth per
+  invocation; it now names both.
+* **`boolean-search-stored`, each resume and each batch completion.** In
+  `crates/cli/src/boolean_search_command.rs`, whenever it resumes a saved
+  search it opens the whole history
+  (`let reader = Reader::open(request.input.output, identity, observe, records)?;`)
+  and verifies every completed batch
+  (`for batch in 0..reader.completed_batches() {`,
+  `reader.verify_batch(batch as u64)?;`) before any completed work is skipped.
+  Then, before each completion is published, the command opens the whole
+  history
+  (`let prior = Reader::open(request.input.output, identity, observe, records)?;`)
+  and verifies every completed batch (`prior.verify_batch(batch as u64)?;`),
+  and after publishing it does both again (`saved.verify_batch(batch as u64)?;`).
+  In `crates/cli/src/boolean_search_reader.rs`, `verify_batch` of a nonempty
+  batch opens its campaign (`QualifiedCampaign::open(`) and each selected rung
+  (`drop(open_rung(&self.root, &record, rung, allowance)?);`), and every `verify_batch`
+  ends by rereading every retained record (`for old in &self.history {`). So
+  a resume pays one pass over every completed batch and a completion pays
+  two, and each pass costs work that grows with the completed batches times
+  the retained history, as well as each batch's campaign and rung ancestry.
+  D-0549's section above says a cold reader "charges every declared replay
+  allowance"; it did not say the command repeats that for every completed
+  batch at every completion.
+* **Later-period OOS, each program and side.** In
+  `crates/cli/src/boolean_oos_v1.rs` the producer loops over every training
+  anchor (`for (group, anchor) in training.anchors.iter().enumerate() {`), and
+  each group ends with `training.require_current()?;`. In
+  `crates/cli/src/boolean_candidate_v1.rs` that check loops over every
+  retained row (`for row in &self.rows {`) and re-verifies the saved training
+  body (`persistence::verify(`). `request` refuses unless
+  `training.anchors.len()` equals the program count `.checked_mul(2)`
+  (`return Err("Boolean training anchors incomplete".into());`), two anchors
+  per program, so the whole comparison costs work
+  that grows with the programs times the retained rows and body bytes.
+
+## The generated search child has no time bound of its own — D-0911, 1 October 2026
+
+`run_fixture_child` in `crates/cli/src/boolean_search_integration_tests.rs`
+kills its child only when the child's log passes 8MiB; it no longer kills it
+on a clock. A child that never exits therefore holds the test until something
+outside it stops the run. Every file and line named below is checked by
+`c4_cli_02_limits::the_d0911_costs_are_the_ones_in_ci_and_the_source`.
+
+* **No job bound of this repository's own.** In `.github/workflows/ci.yml` the
+  `language-purity`, `build` and `coverage` jobs run this test and declare no
+  `timeout-minutes`, so a hang runs until the platform's default job limit,
+  whose figure `docs/00-charter.md` does not record: UNVERIFIED.
+* **Gate 1e names nothing on a kill.** It captures the whole run in one
+  variable (`tout="$(PATH="$stub:$PATH" cargo test --workspace --locked 2>&1)"`)
+  and prints from it only after `cargo test` returns, so a killed run there
+  names no test.
+* **A hang shows none of the child's output.** In every job the child writes
+  only to its log file (`.stdout(file.try_clone().map_err(display)?)`,
+  `.stderr(file)`), and the parent reads that file only once the child has
+  exited or passed 8MiB.
+* **A hang-only mutant is a timeout, not a catch.** The mutation job runs with
+  `--minimum-test-timeout 900 --timeout-multiplier 2`, and
+  `.github/mutation_gate.rs` fails on any timeout
+  (`if status != "0" || !missed.is_empty() || !timeout.is_empty() {`).
+* **The same class remains elsewhere, unchanged.**
+  `if started.elapsed() > std::time::Duration::from_secs(2) {` in
+  `crates/cli/src/checksum_receipts_tests.rs` and
+  `crates/store/src/checksum_audit_tests.rs`, and
+  `if start.elapsed() > std::time::Duration::from_secs(45)` in
+  `crates/api/src/booleanlaunch_tests.rs` and
+  `crates/api/src/indexstoplaunch_tests.rs`.

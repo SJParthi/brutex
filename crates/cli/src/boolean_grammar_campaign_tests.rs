@@ -1030,3 +1030,49 @@ fn done_link_requires_exact_plan_sequence_seal_and_record_width() {
         }
     }
 }
+
+/// D-0910: every invocation re-verifies EVERY completed nonempty batch, in
+/// chain order, before it advances one more. The work of one invocation grows
+/// with the batches already done; `docs/06-limits.md` states it.
+#[test]
+fn every_invocation_reverifies_every_completed_batch_in_order() {
+    let initial = Cursor::new(&[30, 31]).unwrap();
+    let chosen = Budget {
+        programs: 1,
+        ..budget()
+    };
+    let scratch = Scratch::new().unwrap();
+    let mut journal = Journal::open(&scratch.0, NAMESPACE, [39; 32]).unwrap();
+    let mut batch = Batch::prepare(initial.clone(), 0, 0, chosen).unwrap();
+    let mut previous = (0, [0; 32]);
+    let mut done = Vec::new();
+    // After `completed` nonempty batches, the next invocation's recovery
+    // re-verifies exactly those `completed` batches.
+    for completed in 1_u8..=3 {
+        assert!(!batch.programs().is_empty() && !batch.exhausted());
+        let plan = journal
+            .publish(&plan_record(previous, &batch).unwrap(), BYTES)
+            .unwrap();
+        previous = journal
+            .publish(&done_record(plan, ([completed; 32], [9; 32])), BYTES)
+            .unwrap();
+        done.push(([completed; 32], batch.programs().to_vec()));
+        let mut seen = Vec::new();
+        let resumed = restore(
+            &journal,
+            journal.latest(BYTES).unwrap().as_ref(),
+            &initial,
+            chosen,
+            100,
+            |id, pin, programs| {
+                assert_eq!(pin, [9; 32]);
+                seen.push((id, programs.to_vec()));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(seen, done, "after {completed} completed batches");
+        assert_eq!(seen.len(), usize::from(completed));
+        batch = Batch::prepare(resumed.cursor, resumed.work, resumed.programs, chosen).unwrap();
+    }
+}

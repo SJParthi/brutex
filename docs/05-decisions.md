@@ -44538,3 +44538,89 @@ reader rebuilds rows with `selected: None`; skipping them needs a runner
 constructor that re-mints a family's capabilities from its sealed bytes. The
 runner's per program × side digests (W3-runner2-3, W3-runner2-4, W3-runner2-5)
 stay with the runner group, as D-0711 records.
+### D-0910 — Record that three resumable Boolean paths re-verify all completed work on every step — 2026-09-29
+
+**What was found.** Three C4 audit rows (W2-cli2-2, W2-cli2-1, W2-cli2-0)
+name one shape in three commands: a loop whose single step repeats a check
+over everything earlier steps finished, and no limit said so.
+
+- `boolean-grammar-campaign-stored` advances one batch per invocation, and
+  `restore` calls its `complete` callback once for every nonempty completed
+  batch in the chain; the callback `execute_with` passes prepares that batch's
+  campaign again and verifies its saved campaign. Invocation n re-verifies
+  every nonempty batch completed before it (at most n − 1); an empty batch
+  never reaches `complete`.
+  `cli::boolean_grammar_campaign::tests::every_invocation_reverifies_every_completed_batch_in_order`
+  requires one, two and three calls, in chain order, after one, two and three
+  completed batches.
+- `boolean-search-stored` opens the whole history and calls `verify_batch` for
+  every completed batch whenever it resumes a saved search, before any work,
+  and again
+  before and after it publishes each completion.
+  `verify_batch` ends by rereading every retained record.
+- The later-period OOS producer loops over every training anchor, two per
+  program, and each group ends with `training.require_current()?;`, which loops
+  over every retained row and re-verifies the saved training body.
+
+**The choice.** The repeated checks are the tamper detection each path relies
+on before it skips or builds on finished work, so they are recorded, not
+removed. `docs/06-limits.md` states each one, and quotes the source lines that
+pay for it; `c4_cli_02_limits::each_quoted_line_is_in_the_source_it_names`
+fails if a quote leaves the section or the source. The comment on `restore`,
+which named only a per-invocation bound, now also names the growth. No code
+path changed, so no run identity moves.
+
+### D-0911 — Bound the generated search child by its log, not by the clock — 2026-09-29
+
+**What was found (ET-rust-only-purity-11).** `run_fixture_child` in
+`crates/cli/src/boolean_search_integration_tests.rs` killed its child and
+failed once `started.elapsed()` passed six minutes (fifteen under
+`LLVM_PROFILE_FILE`). The time measures how loaded the machine is, not
+anything the test checks, so under load Gate 1e's test clause and the `Tests`
+step could fail with nothing §2-related changed. The comment this change
+removes recorded one such overrun, on the instrumented run: "Instrumented
+complete-calendar replay exceeded the ordinary deadline on the Linux CI
+runner."
+
+**The change.** The deadline is removed. The child is still killed, and the
+test still fails, when its log passes 8MiB, and the parent still requires the
+child's success and its `1 passed` line.
+`cli::boolean_search_command::integration_tests::the_generated_search_child_is_bounded_by_its_log_and_not_by_the_clock`
+reads the function's source, pins its whole wait loop and everything after
+it, and requires that the body
+names no `Instant`, `SystemTime`, `elapsed`, `now(`, `duration_since`,
+`from_mins`, `from_secs`, `timeout`, `deadline`, `thread::spawn`, `const ` or
+`static `. Test-only; no production path and no run identity changes.
+
+**What it costs, named rather than hidden.** A child that never exits is no
+longer failed by the test; it holds the test until something outside it stops
+the run. `docs/06-limits.md` states the consequences under this number, each
+checked against the file it names by
+`c4_cli_02_limits::the_d0911_costs_are_the_ones_in_ci_and_the_source`:
+
+- The `language-purity`, `build` and `coverage` jobs, which run this test,
+  declare no `timeout-minutes`, so a hang there runs until the platform's own
+  default job limit. That figure is not recorded in `docs/00-charter.md`:
+  UNVERIFIED.
+- Gate 1e captures the whole test run into one variable
+  (`tout="$(PATH="$stub:$PATH" cargo test --workspace --locked 2>&1)"`) and
+  prints from it only after `cargo test` returns, so when that job is killed
+  its log names no test.
+- In every job the child's own output goes only to its log file
+  (`.stdout(file.try_clone().map_err(display)?)`, `.stderr(file)`), which the
+  parent reads only once the child has exited or passed 8MiB, so a killed hang
+  shows none of it.
+- The mutation job runs with `--minimum-test-timeout 900 --timeout-multiplier 2`
+  and `.github/mutation_gate.rs` refuses a timeout
+  (`if status != "0" || !missed.is_empty() || !timeout.is_empty() {`). A mutant
+  whose only effect is to hang the generated child used to fail the test at
+  the six-minute deadline and count as caught whenever that deadline came
+  before the mutant's test timeout; it is now recorded as a timeout, and the
+  mutation job fails.
+- The same class of clock bound stays in other tests and is not changed here:
+  `if started.elapsed() > std::time::Duration::from_secs(2) {` in
+  `crates/cli/src/checksum_receipts_tests.rs` and
+  `crates/store/src/checksum_audit_tests.rs`, and
+  `if start.elapsed() > std::time::Duration::from_secs(45)` in
+  `crates/api/src/booleanlaunch_tests.rs` and
+  `crates/api/src/indexstoplaunch_tests.rs`.

@@ -343,6 +343,12 @@ struct Restored {
 
 /// Cold recovery is explicitly O(checkpoints + replayed grammar work + saved
 /// campaign evidence). Each allocation and each replay has a physical ceiling.
+/// That bound is per invocation, and it grows: `complete` runs once for every
+/// nonempty completed batch in the chain, and the caller's `complete` prepares
+/// that batch's campaign sources again before verifying its saved campaign.
+/// Invocation n re-verifies every nonempty batch completed before it (at most
+/// n - 1); an empty batch takes the `batch.programs().is_empty()` branch and
+/// never reaches `complete` (D-0910).
 fn restore(
     journal: &Journal,
     latest: Option<&Saved>,
