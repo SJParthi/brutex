@@ -324,7 +324,9 @@ impl ExecutionRunV1 {
     /// already computed in `source`. What remains is the fixed-size identity
     /// hash and the same refusals in the same order, so this is O(1) in the
     /// stream lengths. The result is field-for-field the value
-    /// [`Self::new_with_daily_reference`] returns for the same inputs.
+    /// [`Self::new_with_daily_reference`] returns for the same inputs. Proven by
+    /// `runner::exit_grid_policy::a_daily_reference_source_is_sealed_once_and_reproduces_every_run`
+    /// (CUH-01).
     ///
     /// # Errors
     ///
@@ -6156,11 +6158,11 @@ mod tests {
     /// per `(closed mask, side)`. The sealed source must reproduce every run
     /// exactly while hashing the daily-reference digest once in total, and must
     /// not authorize a run over other streams.
-    #[test]
     #[expect(
         clippy::too_many_lines,
         reason = "one identity test keeps the equality, the count and every refusal of the sealed source together"
     )]
+    #[test]
     fn a_daily_reference_source_is_sealed_once_and_reproduces_every_run() {
         let signal = bars(20);
         let reference_context = shifted_bars(120, 1);
@@ -6327,11 +6329,11 @@ mod tests {
     /// D-0960: one attestation derives the slice facts once; pricing several
     /// runs and replaying EVERY cell of every grid derives them zero more
     /// times, and each replay is byte-identical to the one-off door.
-    #[test]
     #[expect(
         clippy::too_many_lines,
         reason = "one capability test keeps the count, the byte-identity, the zero-trade edge and every refusal together"
     )]
+    #[test]
     fn an_attested_replay_prices_and_replays_every_cell_over_one_set_of_slice_facts() {
         let input = crate::synthetic::sessions(6);
         let instrument = nifty();

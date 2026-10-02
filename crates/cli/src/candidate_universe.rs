@@ -4752,7 +4752,9 @@ fn hoisted_execution_series<'h, 's>(
 /// `try_reserve_exact` grew the retained buffer by exactly one grid width per
 /// `(closed mask, side)`, so every grid moved the whole buffer. `try_reserve`
 /// keeps `Vec`'s amortised-O(1) append (`CLAUDE.md` §3 rule 4); the configured
-/// `max_rows` bound is checked by the caller before this runs. D-0960.
+/// `max_rows` bound is checked by the caller before this runs. D-0960, proven by
+/// `cli::candidate_universe::retained_candidate_rows_grow_geometrically_per_directional_grid`
+/// (CUH-04).
 fn reserve_directional_grid_rows<T>(
     rows: &mut Vec<T>,
     additional: usize,
@@ -8684,7 +8686,10 @@ mod tests {
     /// per `(closed mask, side)`, so every append of a new grid moved the whole
     /// buffer: Θ(rows retained) per grid, the amortised-O(1) guarantee of
     /// `CLAUDE.md` §3 rule 4 lost. Sixty-four one-row grids must therefore
-    /// change capacity at most ⌈log2 64⌉ + 1 times, never sixty-four.
+    /// change capacity at most ⌈log2 64⌉ + 1 times, never sixty-four; it is
+    /// `cli::candidate_universe::retained_candidate_rows_grow_geometrically_per_directional_grid`,
+    /// invariant
+    /// row CUH-04.
     #[test]
     fn retained_candidate_rows_grow_geometrically_per_directional_grid() {
         let mut rows: Vec<u64> = Vec::new();
@@ -8715,11 +8720,11 @@ mod tests {
     /// D-0960: the series-invariant execution authority is sealed exactly once
     /// per Candidate block, however many closed masks are expanded through it,
     /// for production and for Execution V3 replay; a rerun is byte-identical.
-    #[test]
     #[expect(
         clippy::too_many_lines,
         reason = "one fixture proves the per-member reuse, the production count, the rerun and the replay count together"
     )]
+    #[test]
     fn candidate_production_seals_the_execution_series_once_for_every_closed_mask() {
         let fixture = ProductionFixture::new();
         let source = fixture.source();

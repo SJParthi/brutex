@@ -22,6 +22,10 @@
 //!   start descriptor. A changed catalog is still refused.
 //! * Cold `TradeReader::open` verifies every trade row of its file, and
 //!   retained history grows with every capture; neither is O(1).
+//!
+//! Proven by invariant rows CUH-06, CUH-07 and CUH-08 in
+//! `docs/04-invariants.md`, including
+//! `cli::candidate_trades::a_capture_derives_slice_facts_once_and_counts_four_syncs_per_candidate_side`.
 
 mod codec;
 
@@ -797,7 +801,9 @@ fn decode_summary(raw: &[u8], digest: [u8; 32], model: Model) -> Result<Summary,
 /// whole catalog is re-read and hashed, O(C), and its generation remembered.
 /// Warm: one shared-lock open plus an `fstat`/`stat` generation comparison and
 /// the bounded start-descriptor check, O(1) in C. Any rewrite, replacement or
-/// truncation of `catalog.bin` changes its generation and is refused. D-0973.
+/// truncation of `catalog.bin` changes its generation and is refused. D-0973, proven by
+/// `cli::candidate_trades::a_summary_hashes_its_catalog_once_across_pages_and_still_refuses_a_change`
+/// (CUH-06).
 fn pinned(root: &Path, summary: &Summary, max_bytes: u64) -> Result<PathBuf, String> {
     let dir = directory_for(root, &summary.identity, summary.attempt, summary.model);
     if let Some(expected) = summary.catalog_generation.get().copied() {
