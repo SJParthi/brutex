@@ -51,6 +51,65 @@ pub const DEFAULT_ADDR: SocketAddr =
 /// is the framework's and it is loud, not a truncation.
 const MAX_FORM_BYTES: usize = 8 * 1024;
 
+/// One line of operator-facing text on stdout, written without a panic.
+///
+/// `println!` PANICS when stdout is gone, and the release profile aborts on a
+/// panic. The audit ran `api serve 127.0.0.1:18794 | head -1`: `head` took the
+/// first banner line and exited, the second `println!` met a closed pipe, and
+/// the process died with exit 101 AFTER it had taken `serve.lock` and opened
+/// telemetry — an abort runs no destructor, so both were left behind for the
+/// next start to trip over. probeapi-7, D-1202.
+///
+/// A closed stdout is not a reason to stop a server: the banner is for whoever
+/// is watching, and the durable record of the same facts is the
+/// `api.serve listening` event. So the line is dropped and the drop is SAID on
+/// stderr, where a reader may still be; if stderr is gone too there is nobody
+/// left to tell, and that is the only failure this swallows.
+macro_rules! say {
+    ($($arg:tt)*) => {
+        {
+            let _shown = $crate::server::say_line(
+                &mut ::std::io::stdout(),
+                &mut ::std::io::stderr(),
+                format_args!($($arg)*),
+            );
+        }
+    };
+}
+
+/// [`say!`] for stderr. A closed stderr has no second channel to report on.
+macro_rules! warn_line {
+    ($($arg:tt)*) => {
+        {
+            let _shown = $crate::server::shout_line(&mut ::std::io::stderr(), format_args!($($arg)*));
+        }
+    };
+}
+
+/// What [`say!`] does, over writers a test can close. Returns whether the line
+/// reached `out`.
+pub(crate) fn say_line(
+    out: &mut impl std::io::Write,
+    fallback: &mut impl std::io::Write,
+    line: std::fmt::Arguments<'_>,
+) -> bool {
+    match writeln!(out, "{line}") {
+        Ok(()) => true,
+        Err(why) => {
+            shout_line(
+                fallback,
+                format_args!("stdout is not writable ({why}); a banner line was not shown: {line}"),
+            );
+            false
+        }
+    }
+}
+
+/// What [`warn_line!`] does. Returns whether the line was written.
+pub(crate) fn shout_line(out: &mut impl std::io::Write, line: std::fmt::Arguments<'_>) -> bool {
+    writeln!(out, "{line}").is_ok()
+}
+
 /// The signal that stops the server.
 ///
 /// A boxed future rather than a type parameter, deliberately. A generic
@@ -80,17 +139,38 @@ impl Command {
     /// silently starts a server is a typo nobody finds.
     pub fn parse(args: &[String]) -> Result<Self, String> {
         let mut args = args.iter().map(String::as_str);
-        match (args.next(), args.next()) {
+        let command = match (args.next(), args.next()) {
             // No command at all serves, because that is what the operator has
             // always typed. A WRONG command does not: see the last arm.
-            (None, _) | (Some("serve"), None) => Ok(Self::Serve(DEFAULT_ADDR)),
-            (Some("serve"), Some(addr)) => loopback_serve_addr(addr).map(Self::Serve),
-            (Some("report"), None) => Ok(Self::Report),
-            (Some(other), _) => Err(format!(
-                "unknown argument {other:?}; usage: api [serve [ADDR] | report]"
-            )),
+            (None, _) | (Some("serve"), None) => Self::Serve(DEFAULT_ADDR),
+            (Some("serve"), Some(addr)) => Self::Serve(loopback_serve_addr(addr)?),
+            (Some("report"), None) => Self::Report,
+            (Some("report"), Some(extra)) => return Err(trailing_argument("report", extra)),
+            (Some(other), _) => {
+                return Err(format!(
+                    "unknown argument {other:?}; usage: api [serve [ADDR] | report]"
+                ));
+            }
+        };
+        // NOTHING AFTER THE ADDRESS. `serve ADDR --typo-flag 0.0.0.0:80` used
+        // to bind ADDR and serve, the rest unread: the operator who meant the
+        // third word got a server they did not ask for and no sentence saying
+        // so. A word this parser never reads is a word it does not
+        // understand. probeapi-4, D-1202.
+        match args.next() {
+            None => Ok(command),
+            Some(extra) => Err(trailing_argument("serve ADDR", extra)),
         }
     }
+}
+
+/// The refusal for a word after a complete command. Says `unknown argument`,
+/// the phrase every other refusal of [`Command::parse`] carries.
+fn trailing_argument(after: &str, extra: &str) -> String {
+    format!(
+        "unknown argument {extra:?} after `{after}`; nothing was started; \
+         usage: api [serve [ADDR] | report]"
+    )
 }
 
 /// One listening address this unauthenticated server may expose.
@@ -688,15 +768,25 @@ pub fn parse_query(raw: &str) -> String {
 /// Named rather than positional because the page now carries two — the search
 /// text and the sort column — and reading the second by position would make
 /// `?sort=isin&q=NIFTY` mean something different from `?q=NIFTY&sort=isin`.
+///
+/// # Cost (o1api-4, D-1202)
+///
+/// One scan of `raw` per call and no allocation until the value is decoded. A
+/// route that reads seven fields scans its query seven times; that is bounded
+/// rather than parsed once, because every query reaching a handler is at most
+/// [`MAX_REQUEST_TARGET_BYTES`] and every form body at most [`MAX_FORM_BYTES`],
+/// and [`request_bounds_refusal`] has already refused a repeated query key, so
+/// the first match is the only one. `docs/06-limits.md` states the bound.
 #[must_use]
 pub fn param(raw: &str, name: &str) -> String {
-    let prefix = format!("{name}=");
-    for pair in raw.split('&') {
-        if let Some(v) = pair.strip_prefix(prefix.as_str()) {
-            return percent_decode(v);
-        }
-    }
-    String::new()
+    raw.split('&')
+        .find_map(|pair| field_value(pair, name))
+        .map_or_else(String::new, percent_decode)
+}
+
+/// The still-encoded value of `pair` when its key is exactly `name`.
+fn field_value<'a>(pair: &'a str, name: &str) -> Option<&'a str> {
+    pair.strip_prefix(name)?.strip_prefix('=')
 }
 
 /// EVERY value a repeated field carries, in the order they were sent.
@@ -716,9 +806,8 @@ pub fn param(raw: &str, name: &str) -> String {
 /// boundary.
 #[must_use]
 pub fn params(raw: &str, name: &str) -> Vec<String> {
-    let prefix = format!("{name}=");
     raw.split('&')
-        .filter_map(|pair| pair.strip_prefix(prefix.as_str()))
+        .filter_map(|pair| field_value(pair, name))
         .map(percent_decode)
         .collect()
 }
@@ -3380,6 +3469,10 @@ pub type CensusCache = std::sync::Mutex<
 
 #[path = "store_wire.rs"]
 mod store_wire;
+
+#[cfg(test)]
+#[path = "serve_edge_tests.rs"]
+mod serve_edge_tests;
 
 /// What [`census_now`] hands back: the two cached halves, shared not copied.
 ///
@@ -15772,6 +15865,11 @@ pub fn router_serving(
 ///    not the `403`, not an audit `503`, not the fallback.
 fn admitted(table: axum::Router<Loaded>, site: Loaded, local_addr: SocketAddr) -> axum::Router {
     table
+        // THE REQUEST'S OWN SIZE AND SHAPE, DECIDED ONCE. Innermost, so the
+        // origin check below still answers first and the log above still sees
+        // the refusal; outside `table`, so a refused request reaches no handler
+        // and no audit journal. See [`request_bounds_refusal`]. D-1202.
+        .layer(axum::middleware::from_fn(within_request_bounds))
         // WHO ASKED, NOT ONLY WHICH VERB. `post` stops a crawler; it does not
         // stop the other tab in the operator's browser. Registered INSIDE
         // `note_request` so the log sees the 403. `DefaultBodyLimit` is
@@ -15787,6 +15885,139 @@ fn admitted(table: axum::Router<Loaded>, site: Loaded, local_addr: SocketAddr) -
         .layer(axum::extract::DefaultBodyLimit::max(MAX_FORM_BYTES))
         .layer(axum::middleware::map_response(never_framed))
         .with_state(site)
+}
+
+/// The longest request target (path plus query) this server reads.
+///
+/// A choice, not a vendor or exchange fact. The longest target any page of
+/// this build composes is a handful of named fields — a feed, a series, a
+/// symbol of at most `brutex_core::symbol::SYMBOL_CAPACITY` bytes, two dates, a
+/// page — and every repeated field travels in a POST body bounded by
+/// [`MAX_FORM_BYTES`], never on the query. 8 KiB is the same ceiling.
+///
+/// Stated because the bound that applied before was a dependency's: hyper
+/// 1.11 refuses a target over `u16::MAX - 1` bytes (`MAX_URI_LEN`,
+/// `proto/h1/role.rs`) and nothing in this crate said so. It also bounds the
+/// one cost the query readers have: [`param`] scans the query once per field
+/// it is asked for, so a query this short makes that scan a constant. o1api-3,
+/// o1api-4, D-1202.
+pub const MAX_REQUEST_TARGET_BYTES: usize = 8 * 1024;
+
+/// The most header bytes (every name plus every value) this server reads.
+///
+/// Generous on purpose: a browser sends every cookie any other program on
+/// `localhost` has set, whatever its port, and refusing the operator's own
+/// browser over somebody else's cookies would be a refusal nobody could fix
+/// from this page. 64 KiB is still far below the transport's own ceiling.
+///
+/// THE TRANSPORT CEILING IS STILL HYPER'S, AND IT IS NAMED HERE RATHER THAN
+/// CHANGED. `axum::serve` exposes no read-buffer setting, so hyper 1.11 reads
+/// a request head into a buffer of at most `DEFAULT_MAX_BUFFER_SIZE` = 8192 +
+/// 4096 × 100 = 417,792 bytes (`proto/h1/io.rs`) and at most 100 header lines
+/// (`DEFAULT_MAX_HEADERS`, `proto/h1/role.rs`), answering 431 past either. This
+/// cap is enforced after that read, so it bounds what a handler is ever given,
+/// not what a connection may buffer. `docs/06-limits.md` states it. o1api-3,
+/// D-1202.
+pub const MAX_HEADER_BYTES: usize = 64 * 1024;
+
+/// Applies [`request_bounds_refusal`]; holds no logic of its own, for the
+/// reason [`same_origin_writes_only`] gives.
+async fn within_request_bounds(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    match request_bounds_refusal(request.uri(), request.headers()) {
+        None => next.run(request).await,
+        Some((code, why)) => (
+            code,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8",
+            )],
+            why,
+        )
+            .into_response(),
+    }
+}
+
+/// Why a request is refused before any handler reads it, or `None`.
+///
+/// Three refusals, cheapest first, each one pass over bytes the transport has
+/// already bounded:
+///
+/// 1. `414` — a target over [`MAX_REQUEST_TARGET_BYTES`].
+/// 2. `431` — headers over [`MAX_HEADER_BYTES`].
+/// 3. `400` — a query that names one field twice. [`param`] answers with the
+///    FIRST value and never sees the rest, so `?feed=zerodha&feed=dhan` was
+///    answered as Zerodha and `?feed=dhan&feed=bogus` as Dhan, the bogus
+///    value unread — a query silently made into a different query, which is
+///    the one thing [`param`]'s own doc says must never happen. Refusing is
+///    the same rule [`sole_visible_header`] already applies to `Host`.
+///    probeapi-5, D-1202.
+///
+/// Keys are compared as sent, undecoded, because that is how [`param`]
+/// matches them: `fe%65d` is not `feed` to any reader in this crate, so it
+/// cannot make one ambiguous. A segment with no `=` is a key with no value
+/// and counts. Empty segments (`a=1&&b=2`) name nothing and are skipped.
+fn request_bounds_refusal(
+    uri: &axum::http::Uri,
+    headers: &axum::http::HeaderMap,
+) -> Option<(axum::http::StatusCode, String)> {
+    let target = uri.path_and_query().map_or(0, |pq| pq.as_str().len());
+    if target > MAX_REQUEST_TARGET_BYTES {
+        return Some((
+            axum::http::StatusCode::URI_TOO_LONG,
+            format!(
+                "REFUSED — the request target is {target} bytes and this server \
+                 reads at most {MAX_REQUEST_TARGET_BYTES}. Nothing was read or run.\n"
+            ),
+        ));
+    }
+    let header_bytes = headers.iter().fold(0usize, |sum, (name, value)| {
+        sum.saturating_add(name.as_str().len())
+            .saturating_add(value.as_bytes().len())
+    });
+    if header_bytes > MAX_HEADER_BYTES {
+        return Some((
+            axum::http::StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+            format!(
+                "REFUSED — the request headers are {header_bytes} bytes and this \
+                 server reads at most {MAX_HEADER_BYTES}. Nothing was read or run.\n"
+            ),
+        ));
+    }
+    repeated_query_key(uri.query().unwrap_or("")).map(|key| {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            format!(
+                "REFUSED — the query names {:?} more than once. Every field this \
+                 server reads from a query is read once, so a second value would \
+                 be silently ignored; send each field once. Nothing was read or \
+                 run.\n",
+                note_alphabet(key)
+            ),
+        )
+    })
+}
+
+/// The first query key that appears twice, or `None`.
+///
+/// One pass, one set insert per segment. The set is sized from the segment
+/// count the target cap already bounds, so it does not grow mid-pass.
+fn repeated_query_key(query: &str) -> Option<&str> {
+    let mut seen = std::collections::HashSet::with_capacity(
+        query
+            .bytes()
+            .filter(|b| *b == b'&')
+            .count()
+            .saturating_add(1),
+    );
+    query
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| pair.split_once('=').map_or(pair, |(key, _)| key))
+        .find(|key| !seen.insert(*key))
 }
 
 /// Every answer refuses to be framed and refuses to be content-sniffed.
@@ -17162,7 +17393,7 @@ mod head_deadline_tests {
 /// the sources beside it all printed `serving` while every page answered 503.
 /// See [`assets::Build`].
 fn announce_front_end(front: &assets::Assets) {
-    println!(
+    say!(
         "  web:     {} ({})",
         front.named().display(),
         front.build().note()
@@ -17204,7 +17435,7 @@ fn sole_server(store_root: &Path, addr: std::net::SocketAddr) -> Result<ServeLoc
                 )
                 .with("why", telemetry::Value::Str(&why)),
             );
-            eprintln!("{why}");
+            warn_line!("{why}");
             Err(FAILED)
         }
     }
@@ -17223,13 +17454,13 @@ fn sole_server(store_root: &Path, addr: std::net::SocketAddr) -> Result<ServeLoc
 /// The word is [`Read::status`]'s own, so the banner, `/health`, `/audit.json`
 /// and the exit code cannot drift into four opinions about one read.
 fn announce_universe(read: &Read) -> bool {
-    println!("  universe: {}", read.status());
+    say!("  universe: {}", read.status());
     let clean = read.is_clean();
     if !clean {
         for note in &read.notes {
-            println!("            {note}");
+            say!("            {note}");
         }
-        println!(
+        say!(
             "            this process will exit {DEGRADED} when it stops, because it \
              served this whole session over a universe it could not fully read."
         );
@@ -17482,7 +17713,7 @@ fn stopped_over(outcome: std::io::Result<()>, clean: bool) -> u8 {
                 )
                 .with("exit", telemetry::Value::Uint(u64::from(DEGRADED))),
             );
-            eprintln!(
+            warn_line!(
                 "server stopped: the universe was DEGRADED for this whole session — \
                  exiting {DEGRADED} rather than 0, because every answer it gave was \
                  drawn over a read that did not complete. /health said so throughout."
@@ -17502,7 +17733,7 @@ fn stopped_over(outcome: std::io::Result<()>, clean: bool) -> u8 {
                 )
                 .with("why", telemetry::Value::Str(&e.to_string())),
             );
-            eprintln!("server stopped: {e}");
+            warn_line!("server stopped: {e}");
             FAILED
         }
     }
@@ -17536,7 +17767,8 @@ pub const DEGRADED: u8 = 3;
 /// directly.
 fn reported(dir: &Path) -> u8 {
     let (text, clean) = report(dir);
-    print!("{text}");
+    // `report_from` ends its text with exactly one newline; `say!` adds it back.
+    say!("{}", text.strip_suffix('\n').unwrap_or(&text));
     if clean { OK } else { DEGRADED }
 }
 
@@ -17564,7 +17796,7 @@ async fn run_from(dir: Result<PathBuf, String>, args: &[String], shutdown: Shutd
     match dir {
         Ok(dir) => run_in(&dir, args, shutdown).await,
         Err(why) => {
-            eprintln!("{why}");
+            warn_line!("{why}");
             FAILED
         }
     }
@@ -17727,6 +17959,24 @@ pub const NO_OPEN_ENV: &str = "BRUTEX_NO_OPEN";
 /// toolchain — is untouched, because the only thing spawned here is the
 /// operating system's own URL handler, at run time, on a machine that by
 /// definition already has a browser the operator is about to look at.
+///
+/// # On Linux the handler may be a script, and that is allowed (rustonly-4, D-1202)
+///
+/// Off macOS and Windows the handler is `xdg-open`. The freedesktop.org
+/// `xdg-utils` implementation of it is a shell script, so on such a host this
+/// binary can start a shell at run time. Whether a given host's `xdg-open` is
+/// that script, a wrapper, or absent is UNVERIFIED and is not this crate's to
+/// decide: it is the operator's desktop, chosen and installed by them, exactly
+/// as `open` and `explorer.exe` are on the other two families.
+///
+/// D-1202 records why that is not the "interpreted runtime, as a dependency, a
+/// dev-dependency, or a tool" `CLAUDE.md` §2 forbids: nothing in the workspace
+/// names it, `cargo build`, `cargo test` and `cargo clippy` never reach it (no
+/// test calls [`open_in_browser`]; the tests drive [`open_unless_suppressed`]
+/// only on its suppressed arm, and a `:0` listener never opens), the URL it is
+/// handed is this server's own `http://` loopback address and never operator
+/// text, and [`NO_OPEN_ENV`] turns it off. A spawn failure is printed, never
+/// swallowed.
 ///
 /// # Why it is opt-OUT rather than opt-in
 ///
@@ -17905,15 +18155,15 @@ fn served_store_root() -> Result<PathBuf, String> {
 fn announce_log(logging: Result<&&'static telemetry::Sink, &String>, level_note: &str) {
     match logging {
         Ok(sink) => {
-            println!(
+            say!(
                 "  log:     {} (rolling, {} files x {} MiB ceiling)",
                 sink.path().display(),
                 telemetry::DEFAULT_KEEP_FILES,
                 telemetry::DEFAULT_MAX_FILE_BYTES / (1024 * 1024),
             );
-            println!("  level:   {level_note}");
+            say!("  level:   {level_note}");
         }
-        Err(why) => println!("  log:     NOT WRITABLE — {why}"),
+        Err(why) => say!("  log:     NOT WRITABLE — {why}"),
     }
 }
 
@@ -17963,7 +18213,7 @@ async fn run_in_over(
                 let bound_addr = match listener.local_addr() {
                     Ok(bound) => bound,
                     Err(why) => {
-                        eprintln!(
+                        warn_line!(
                             "REFUSED — the bound listener's local address could not be read: {why}. No request was served."
                         );
                         return FAILED;
@@ -17976,7 +18226,7 @@ async fn run_in_over(
                 let store_root = match store {
                     Ok(root) => root,
                     Err(why) => {
-                        eprintln!("{why}");
+                        warn_line!("{why}");
                         return FAILED;
                     }
                 };
@@ -18017,9 +18267,9 @@ async fn run_in_over(
                     dir: log_dir,
                     ..asked
                 });
-                println!("brutex api listening on http://{addr}/");
-                println!("  masters: {}", dir.display());
-                println!("  store:   {}", store_root.display());
+                say!("brutex api listening on http://{addr}/");
+                say!("  masters: {}", dir.display());
+                say!("  store:   {}", store_root.display());
                 announce_log(logging.as_ref(), &level_note);
                 // NAMED WHETHER OR NOT IT IS THERE. A front end that silently
                 // is not being served looks exactly like a front end that is
@@ -18062,12 +18312,12 @@ async fn run_in_over(
                 // start is the same defect wearing the opposite sign.
                 let flying_on_start = autopilot::flies_on_startup();
                 if flying_on_start {
-                    println!(
+                    say!(
                         "  autopilot: starting in {}s — http://{addr}/autopilot.json",
                         autopilot::GRACE_SECS
                     );
                 } else {
-                    println!(
+                    say!(
                         "  autopilot: PAUSED — nothing will be asked of any vendor. \
                          Set {}={} to fly on start, or press Resume at http://{addr}/autopilot",
                         autopilot::AUTOPILOT_ENV,
@@ -18106,7 +18356,7 @@ async fn run_in_over(
                         .with("autopilot_flies", telemetry::Value::Bool(flying_on_start)),
                 );
                 if !first.is_written() {
-                    println!("  log:     FIRST EVENT NOT WRITTEN — {first:?}");
+                    say!("  log:     FIRST EVENT NOT WRITTEN — {first:?}");
                 }
                 // THE LAST STEP OF THE RUN PROCEDURE, PERFORMED RATHER THAN
                 // PRINTED. The listener is already bound above, so the address
@@ -18127,11 +18377,11 @@ async fn run_in_over(
                 // flag has to be remembered by every future harness, and the
                 // one that forgets is the one that opens the window.
                 if addr.port() == 0 {
-                    println!("  opening: skipped — port 0 addresses nothing");
+                    say!("  opening: skipped — port 0 addresses nothing");
                 } else {
                     match open_in_browser(&home) {
-                        Ok(()) => println!("  opening: {home}"),
-                        Err(why) => println!("  opening: NOT OPENED ({why}) — go to {home}"),
+                        Ok(()) => say!("  opening: {home}"),
+                        Err(why) => say!("  opening: NOT OPENED ({why}) — go to {home}"),
                     }
                 }
                 // SPAWNED, NOT AWAITED. The listener is already bound and
@@ -18142,7 +18392,7 @@ async fn run_in_over(
                 let flying = tokio::spawn(autopilot::fly(Loaded::clone(&site)));
                 if let Err(why) = crate::recovery::resume(Loaded::clone(&site)) {
                     note_recovery_not_resumed(&why);
-                    eprintln!("Recovery NOT resumed: {why}");
+                    warn_line!("Recovery NOT resumed: {why}");
                 }
                 let code = stopped_over(
                     serve(
@@ -18175,12 +18425,12 @@ async fn run_in_over(
                     .with("addr", telemetry::Value::Str(&addr.to_string()))
                     .with("why", telemetry::Value::Str(&e.to_string())),
                 );
-                eprintln!("cannot bind {addr}: {e}");
+                warn_line!("cannot bind {addr}: {e}");
                 FAILED
             }
         },
         Err(usage) => {
-            eprintln!("{usage}");
+            warn_line!("{usage}");
             MISUSED
         }
     }

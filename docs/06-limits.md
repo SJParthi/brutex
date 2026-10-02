@@ -12131,6 +12131,42 @@ C-E-10, C-E-11, C-E-12) ran in a shared four-core container with other builds
 in flight; their recorded ratios are what that run printed and are not a
 quiet-machine measurement.
 
+## Request bounds and repeated query keys — D-1202, 2 October 2026
+
+- **The transport ceiling is still hyper's, and it is larger than this
+  crate's caps.** `axum::serve` exposes no read-buffer setting, so hyper 1.11
+  reads a request head into at most `DEFAULT_MAX_BUFFER_SIZE` = 8,192 + 4,096
+  × 100 = 417,792 bytes (`proto/h1/io.rs`), at most 100 header lines
+  (`DEFAULT_MAX_HEADERS`, `proto/h1/role.rs`) and a target of at most
+  65,534 bytes (`MAX_URI_LEN`), answering 431 or 414 past them. The crate's
+  own caps, `MAX_REQUEST_TARGET_BYTES` (8,192) and `MAX_HEADER_BYTES` (65,536,
+  names plus values), are applied by a middleware AFTER hyper has parsed the
+  head. They bound what any handler is given; they do not bound what one
+  connection may buffer, which stays 417,792 bytes. Both numbers are this
+  repository's choices for a loopback-only listener, not vendor facts.
+- **`param` scans the query once per field, bounded rather than parsed once.**
+  A route reading `k` fields does `k` scans of a query of at most 8,192 bytes
+  (a form body: at most `MAX_FORM_BYTES`, 8,192). That is constant per
+  request because both lengths are capped, not because the reader is O(1) in
+  the query length. Parsing once into slices was rejected for this change:
+  `param` has over 130 call sites in 20 files, several of them on branches still
+  open. Not timed: no bench row covers it.
+- **The repeated-key check is one pass and one set insert per segment**
+  (amortised O(1) per insert, `HashSet` pre-sized from the `&` count, so no
+  rehash mid-pass). It reads the query only; a repeated key in a POST form body
+  is read by `params` where the field is meant to repeat (`member`,
+  `cash_identity`) and by `param`'s first match elsewhere, as before.
+- **The audit roll-up (o1api-21) is covered by D-0732, not by D-1202.** Its
+  cost is stated in D-0732's own section above, "`/audit.json`'s store block:
+  one count per census snapshot, of the asked feed only". D-1202's earlier
+  wire-cache path for it was removed when this branch merged
+  `final/all-fixes`, so the census wire cache again holds at most two bodies
+  per vendor, `/store.json`'s two formats.
+- **A closed stdout drops banner lines.** The serve banner is written through
+  `say!`; a failed write is reported once per line on stderr and the server
+  keeps serving. If stderr is closed too, the line and its report are both
+  lost; the `api.serve listening` telemetry event remains the durable record.
+
 
 ## Slice facts per slice, cell replay per grid, and what is still linear — D-1141, 2 October 2026
 

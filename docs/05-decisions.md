@@ -51531,6 +51531,96 @@ and written, not counted. `CLAUDE.md`, `drain`'s doc, §5 and `batch.rs` describ
 what the code does: one reserved `out`, disjoint count slices, one serial
 in-order push per survivor, `Vec::try_reserve`, and `1 << 27`.
 
+### D-1202 — The api serve edge refuses what it used to ignore, and states its request caps; the audit roll-up is D-0732's — 2026-10-02
+
+**The defects (audit findings probeapi-4, probeapi-5, probeapi-7, rustonly-4,
+o1api-3, o1api-4, o1api-21; all low).**
+
+1. *probeapi-4.* `Command::parse` read two words and never looked for a third,
+   so `api serve 127.0.0.1:18794 --typo-flag 0.0.0.0:80` bound the first
+   address and served, although the function's own doc says an unrecognised
+   argument is refused.
+2. *probeapi-5.* `param` answers with the first match and never sees a second,
+   so `/audit.json?feed=zerodha&feed=dhan` was answered as Zerodha and
+   `?feed=dhan&feed=bogus` as Dhan with 200, the bogus value unread: a query
+   silently made into a different one, against `param`'s own rule. A repeated
+   `Host` was already refused (403).
+3. *probeapi-7.* The serve banner was `println!`, which panics on a closed
+   stdout; the release profile aborts on a panic, so `api serve | head -1`
+   exited 101 after taking `serve.lock` and opening telemetry, and the abort
+   ran no destructor.
+4. *rustonly-4.* Off macOS and Windows the browser handler is `xdg-open`,
+   which the freedesktop.org `xdg-utils` implementation ships as a shell
+   script, and no document said so.
+5. *o1api-3.* No request-size limit was stated; the one that applied was
+   hyper's default read buffer of 417,792 bytes.
+6. *o1api-4.* Each `param` call formatted a prefix and rescanned the query, so
+   a route reading seven fields scanned an unbounded query seven times.
+7. *o1api-21.* `/audit.json`, polled every few seconds, walked every held entry
+   of every vendor on each poll to roll one feed up by month, with nothing kept.
+
+**The choice.**
+
+1. `Command::parse` refuses any word after a complete command with
+   `unknown argument "<word>" after ...; nothing was started` and the usage
+   line. `report <word>` now names the word, not `report`. The address is still
+   judged first.
+2. A new innermost layer in `admitted`, `within_request_bounds`, refuses before
+   any handler or audit journal: a request target over
+   `MAX_REQUEST_TARGET_BYTES` (8 KiB) with 414, headers over `MAX_HEADER_BYTES`
+   (64 KiB, names plus values) with 431, and a query naming one key twice with
+   400. Keys are compared undecoded, as `param` matches them. Both caps are
+   choices for a loopback listener whose clients are the operator's browser:
+   8 KiB matches `MAX_FORM_BYTES`, and 64 KiB leaves room for cookies other
+   programs set on `localhost`. hyper's own ceilings still apply underneath and
+   `docs/06-limits.md` names them.
+3. `param` and `params` match `key=` through `strip_prefix` twice instead of
+   formatting a prefix; the per-field scan is now bounded by the 8 KiB target
+   cap (and the existing 8 KiB form cap), and a repeated query key cannot reach
+   it.
+4. Every print in `server.rs`'s production code goes through `say!` (stdout)
+   or `warn_line!` (stderr), which call `say_line` / `shout_line`: a failed
+   write returns false and a failed stdout line is reported on stderr. The
+   server keeps serving with a closed stdout; the `api.serve listening` event
+   is the durable record of the banner. A source test refuses a print macro
+   anywhere before `server.rs`'s test module.
+5. `xdg-open` is ALLOWED as the operating system's URL handler, not dropped.
+   `CLAUDE.md` §2 forbids an interpreted runtime "as a dependency, a
+   dev-dependency, or a tool" of this repository; this is none of those.
+   Nothing in the workspace names it as a dependency, `cargo build`, `cargo
+   test` and `cargo clippy` never reach it (the tests drive only the
+   suppressed arm, and a `:0` listener never opens a browser), the URL is the
+   server's own loopback `http://` address, `BRUTEX_NO_OPEN` turns it off, and
+   a failed spawn is printed. It is the operator's desktop, as `open` and
+   `explorer.exe` are on the other two families. Whether a given host's
+   `xdg-open` is a script is UNVERIFIED; the doc on `open_in_browser` says so.
+6. *o1api-21 is covered by D-0732, not by this entry.* This branch first
+   cached the month roll-up in the census wire cache under a separate key.
+   `final/all-fixes` fixed the same finding independently in W1-api1-0
+   (D-0732): `site.audit_rollup`, a `RollupCache` keyed on the census `Arc`
+   that counts only the asked feed. Folding the two would have left two caches
+   for one fact, so the wire-cache path, its `audit_months` accessor, its key
+   and its test were removed when this branch merged `final/all-fixes`, and
+   D-0732's implementation is the only one. D-1202 changes nothing in
+   `audit_json.rs`.
+
+**Rejected.** (1) Parsing the query once into a slice table for every handler:
+it changes over 130 call sites in 20 files, several on branches still open, to
+remove a cost the target cap already makes constant. (2) Setting hyper's
+`max_buf_size`: `axum::serve` does not expose it, and replacing it with a
+hand-built hyper connection loop for one knob is what D-1200 also declined.
+(3) First-wins or last-wins for a repeated key: either silently discards a
+value the client sent. (4) Dropping the browser auto-open on Linux: the run
+procedure is one click, and the opt-out already exists. (5) Exiting when stdout
+closes: the banner is a convenience, the server is the product. (6) A new
+`Site` field for the roll-up: the wire cache already has the right key and
+lifetime. (Moot: D-0732's `RollupCache` is the one cache; see choice 6.)
+
+Invariants AF-PROBEAPI4-a, AF-PROBEAPI5-a, AF-PROBEAPI7-a, AF-O1API3-a,
+AF-O1API4-a and AF-O1API21-a (the last points at D-0732's tests);
+`docs/06-limits.md` states what the caps do not bound, and D-0732's own
+section states what the roll-up costs on a miss.
+
 ### D-1140 — Stop applying exact ratio admission to the quantile target, so `ratios: true` keeps every stop-and-target cell — 2026-10-02
 
 **Finding.** W3-runner3-6. In `runner::grid::evaluate_timed`, `Levels::ratios`
