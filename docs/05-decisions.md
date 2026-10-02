@@ -43718,3 +43718,48 @@ second wait's sleep and the closing brace before it. Gate 20 declares
 coverage run on this PR is that check. The 21 `sink.rs` lines that stay
 uncovered are assertion messages, test-double methods and one guarded
 `return 0`, none of them a wait.
+
+### D-0912 — Serve a sealed month's records from the verified block's own bytes, not a fresh read the check never saw — 2026-10-02
+
+**What was wrong (ET-bars-candles-store-0).** `BarFile::read_row` read the
+record with its own `pread` and then called `verify_block_of`, which returned
+`Ok` at once whenever the handle's `verified: AtomicU64` already named that
+block. So after the first read in a block, every later read in it served fresh
+disk bytes that no check had run over: a record damaged after its block was
+verified came back as a plausible wrong price. The field's doc called the
+single-block cache "a cost, not a correctness hole: a re-verification reaches
+the same verdict", but on the warm path no re-verification happened at all.
+`a_block_is_verified_once_per_handle_and_not_once_per_record` damaged only the
+sidecar, so the bars it served stayed correct and it could not see this.
+
+**The change.** The handle now caches the verified block's BYTES as well as
+its index: `verified: Mutex<VerifiedBlock>`, with a fixed
+`[u8; MAX_BLOCK_LEN]` (4,096; a `const` assertion walks `Layout::KNOWN` so a
+wider geometry fails to compile). A cold read of a block is one `pread` of its
+covered range into that buffer. The CRC check runs over exactly those bytes,
+and every read in the block, the first included, copies its record out of
+them. The cache is keyed by `(block, n_valid)`, so an append that grows the
+tail block is a miss. `seal_committed` still clears it. The block field is set
+to `NO_BLOCK` before a fill and to the block only after the check passes, so a
+refused or interrupted fill leaves nothing cached. The per-cold-block
+`vec![0u8; span]` in `verify_block_of` is gone with it, which is the
+allocation ET-o1-proof-coverage-4 names. An unsealed file is unchanged: it
+reads its record directly, because there is nothing to verify it against.
+
+**What it costs, said rather than claimed.** Cold read: one `pread` of at
+most one block (it was two, record then block), plus the sidecar's four bytes,
+plus the tail block's `fstat`. Warm read: one uncontended lock and one copy of
+the record's bytes, with no syscall (it was one `pread`). Still O(1) per read
+(§3 rule 4), and **UNVERIFIED as a measured bound**: no bench was run for this
+change. `BarFile` grows by about 4 KiB. Reads through ONE handle shared across
+threads now serialise on the lock; two handles do not share it.
+
+**Refusal order kept.** When the block read comes up short, the record alone
+is read again, on that failure path only, so a truncated record is still named
+`ShortRead` at its own offset (`tests/write.rs`). With the sidecar gone, that
+record read still comes before `ChecksumsMissing`.
+
+**What a warm read means now.** It serves the bytes that matched the sidecar
+when they were read, even if the disk has since changed. It is never an
+unverified byte. A block left and re-entered gets a fresh check against the
+disk as it then stands. Invariants ETBCS-01..03.

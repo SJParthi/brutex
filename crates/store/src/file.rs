@@ -145,7 +145,7 @@ use std::fs::{self, File, TryLockError};
 use std::io::{self, ErrorKind};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
 
 use crate::format::{
     Bar, FormatError, GREEK_LEN, HEADER_LEN, MAX_SLOT_COUNT, OVERLAY_LEN, RECORD_LEN, Row,
@@ -211,9 +211,91 @@ const _: () = assert!(REGION_LEN_U64 == 32_768);
 /// `u64::MAX` at a one-record block, and `Layout::offset_of` refuses that as
 /// [`FormatError::OffsetOverflow`] long before a read gets here.
 ///
-/// The alternative was an `Option<u64>` behind a lock, which is a lock on the
-/// read path to express a value that already has a spare bit pattern.
+/// It still names "nothing cached" inside [`VerifiedBlock`], which since
+/// D-0912 sits behind a lock for a different reason: the lock guards the
+/// verified BYTES, and a spare bit pattern is still the cheapest way to say
+/// "none of them yet".
 const NO_BLOCK: u64 = u64::MAX;
+
+/// The verified-block buffer's capacity, in bytes — D-0912.
+///
+/// A capacity and not a format fact: the format's block lengths are 4,088
+/// (bars), 4,080 (overlay) and 4,080 (greeks), and the assertion below walks
+/// every geometry a [`BarFile`] can resolve, so a new row with a wider block
+/// fails to compile here instead of being refused at its first read.
+const MAX_BLOCK_LEN: usize = 4_096;
+
+const _: () = {
+    let mut rest = Layout::KNOWN;
+    while let [layout, tail @ ..] = rest {
+        assert!(
+            layout.block_len() <= MAX_BLOCK_LEN as u64,
+            "a block wider than MAX_BLOCK_LEN cannot be verified into the \
+             handle's buffer; widen MAX_BLOCK_LEN in crates/store/src/file.rs"
+        );
+        rest = tail;
+    }
+};
+
+/// The one checksum block this handle verified, and the bytes it verified —
+/// D-0912.
+///
+/// **The bytes, not only the index.** Until D-0912 the handle remembered the
+/// block INDEX and re-read each later record from the disk, so every read after
+/// the first in a block served bytes nobody had checksummed: a record damaged
+/// after its block was verified was served as a plausible wrong price
+/// (ET-bars-candles-store-0). Serving from this buffer means the bytes returned
+/// are the bytes summed, and a warm read costs no syscall at all.
+///
+/// Keyed by `(block, n_valid)` because the tail block's covered range is a
+/// function of the counter (`Layout::covered_byte_range`): bytes verified at
+/// three records do not hold a fourth, and an append must not be answered from
+/// them. [`BarFile::seal_committed`] also clears it, so the two keys agree.
+///
+/// `Debug` is written by hand so a `BarFile` in a panic message or a log
+/// names the block and its extent rather than dumping 4,096 bytes.
+struct VerifiedBlock {
+    /// The block these bytes are, or [`NO_BLOCK`].
+    block: u64,
+    /// The commit counter the covered range was taken against.
+    n_valid: u64,
+    /// The file offset of `bytes[0]`.
+    start: u64,
+    /// How many leading bytes of `bytes` were read and verified.
+    len: usize,
+    /// The verified block, as read in one `pread`.
+    bytes: [u8; MAX_BLOCK_LEN],
+}
+
+impl VerifiedBlock {
+    /// Nothing verified yet.
+    const EMPTY: Self = Self {
+        block: NO_BLOCK,
+        n_valid: 0,
+        start: 0,
+        len: 0,
+        bytes: [0u8; MAX_BLOCK_LEN],
+    };
+
+    /// The verified bytes of the record at file offset `at`, `width` long, or
+    /// `None` when they are not inside what was verified.
+    fn record(&self, at: u64, width: usize) -> Option<&[u8]> {
+        let from = usize::try_from(at.checked_sub(self.start)?).ok()?;
+        let to = from.checked_add(width)?;
+        self.bytes.get(..self.len)?.get(from..to)
+    }
+}
+
+impl fmt::Debug for VerifiedBlock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VerifiedBlock")
+            .field("block", &self.block)
+            .field("n_valid", &self.n_valid)
+            .field("start", &self.start)
+            .field("len", &self.len)
+            .finish_non_exhaustive()
+    }
+}
 
 /// Which syscall refused, so an error names the operation and not only the
 /// path.
@@ -841,9 +923,10 @@ pub struct BarFile {
     /// The fourth row cannot happen: the flag branch refuses with
     /// [`StoreError::NotABarPath`] when it is handed no path at all.
     crc_path: Option<PathBuf>,
-    /// The last checksum block this handle verified, or [`NO_BLOCK`].
+    /// The last checksum block this handle verified **and its verified bytes**,
+    /// or [`NO_BLOCK`] — see [`VerifiedBlock`].
     ///
-    /// # Why a single block index and not a set of them
+    /// # Why a single block and not a set of them
     ///
     /// Verification has to be **lazy** — `Self::validated`'s own comment is that
     /// checking every block at open would make opening a month O(file), and
@@ -852,13 +935,25 @@ pub struct BarFile {
     /// checksum 4,088 bytes per 56-byte record: seventy-three times the work,
     /// per bar, for an answer it computed one bar ago.
     ///
-    /// So the answer is remembered, and this is the cheapest thing that can
-    /// remember it. One relaxed load and one comparison, no allocation at open
+    /// So the answer is remembered, and one block is the cheapest thing that
+    /// can remember it: a fixed buffer inside the handle, no allocation at open
     /// and none ever, which is what keeps the O(1) open the constraint asks for.
     /// A `HashSet` of verified blocks would be the general answer and it is not
     /// available here: CI gate 11 rule 3 refuses `HashSet::new()` in shipping
     /// source outright, and rule 7 refuses the `.contains(&…)` that would probe
     /// it — both for the reason this field is sized the way it is.
+    ///
+    /// # Records are served FROM these bytes — D-0912
+    ///
+    /// This field used to remember only the block index, and a later read in
+    /// that block re-read its record from the disk and checked nothing. This
+    /// doc then said a re-verification "reaches the same verdict", and that was
+    /// the hole: no re-verification ever happened, so a record damaged after its
+    /// block was first verified was served as a plausible wrong price
+    /// (ET-bars-candles-store-0). Now the cold read of a block is one `pread`
+    /// of its covered range into this buffer, the check runs over exactly those
+    /// bytes, and every read in the block — the first included — copies its
+    /// record out of them. A warm read costs no syscall.
     ///
     /// # What it therefore does NOT do, said rather than left to be found
     ///
@@ -866,19 +961,31 @@ pub struct BarFile {
     /// access pattern this store actually has: `cli::stored` walks `0..n_valid`
     /// in order, `api::bars::page` walks a window in order, and the bench reads
     /// one index two thousand times. A pattern that ALTERNATES between two
-    /// blocks re-verifies on each alternation — the bisection in
+    /// blocks re-reads and re-verifies on each alternation — the bisection in
     /// [`first_at_or_after`] is the one that can, at fourteen probes for a
-    /// one-minute month. That is bounded per read and it is a cost, not a
-    /// correctness hole: a re-verification reaches the same verdict.
+    /// one-minute month. That is bounded per read and it is a cost. It is a
+    /// FRESH verdict against the disk as it then stands, not a repeat of the
+    /// old one: a block damaged while the handle was elsewhere is refused on
+    /// return.
     ///
-    /// `AtomicU64` rather than a `Cell`, because it is the only shape that keeps
-    /// `BarFile` `Sync` — a reader shared across threads must not become a
-    /// compile error in a caller because a cache moved in here.
+    /// The cache is what a handle verified, not what the disk holds now: a
+    /// warm read serves the bytes that matched the sidecar when they were read,
+    /// even if the disk has since been damaged. That is the stronger of the two
+    /// honest answers — a verified value, never an unverified one.
+    ///
+    /// A [`Mutex`] and not a `Cell`, because it is the only shape that keeps
+    /// `BarFile` `Sync` with a buffer behind it — a reader shared across threads
+    /// must not become a compile error in a caller because a cache moved in
+    /// here. Reads through ONE shared handle therefore serialise on it; two
+    /// handles do not share it. A poisoned lock is recovered rather than
+    /// refused, because the block field is set to [`NO_BLOCK`] before any fill
+    /// and to the block only after its check passed, so a panic mid-fill leaves
+    /// "nothing cached", never "cached but unchecked".
     ///
     /// **UNVERIFIED as a measured bound.** No bench in this workspace
     /// times this, so the shape above is read from the source rather
     /// than measured. `CLAUDE.md` §3 rule 6.
-    verified: AtomicU64,
+    verified: Mutex<VerifiedBlock>,
     /// The advisory lock, held for its **drop** and never read again.
     ///
     /// Underscored because that is what it is: dropping this guard is what
@@ -1511,7 +1618,7 @@ impl BarFile {
             // "this file was sealed", and the read path could no longer tell an
             // unsealed month from a sealed one that lost its `.crc`.
             crc_path: if sealed { crc_path } else { None },
-            verified: AtomicU64::new(NO_BLOCK),
+            verified: Mutex::new(VerifiedBlock::EMPTY),
             _lock: lock,
         })
     }
@@ -1566,9 +1673,14 @@ impl BarFile {
         // Cleared rather than narrowed to `first..last`, because
         // `BarFile::verified` remembers one block and not a set: there is
         // nothing to intersect with, and "forget it" is the whole operation.
-        // One relaxed store, off the read path entirely — this runs once per
-        // commit, never per record.
-        self.verified.store(NO_BLOCK, Ordering::Relaxed);
+        // One uncontended lock and one store, off the read path entirely — this
+        // runs once per commit, never per record. Since D-0912 the cache is
+        // also keyed by `n_valid`, so a read after the commit misses it either
+        // way; this keeps the two keys saying the same thing.
+        self.verified
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .block = NO_BLOCK;
 
         for block in first..last {
             // BLOCK FIRST, COUNTER SECOND — and `block::seal` below takes them
@@ -1960,17 +2072,19 @@ impl BarFile {
     /// shape and is exactly wrong — it disappears in release, which is where
     /// the store runs.
     ///
-    /// # The record is READ first and the block is verified second
+    /// # A truncated record is still named as the RECORD
     ///
-    /// Both orders refuse the same records — nothing is returned until
-    /// [`Self::verify_block_of`] has passed — so the choice is only about which
-    /// refusal an operator is handed for a file that is BOTH truncated and
-    /// checksummed. Reading first names the record: `ShortRead` at that record's
-    /// own offset, owing that record's own bytes, which is the sentence
-    /// `crates/store/tests/write.rs` asserts and the one that answers "is the
-    /// bar I asked for there". Verifying first would name the block's offset and
-    /// the block's length for every index inside it, so a caller walking a month
-    /// would be told the same thing 73 times about 73 different records.
+    /// Since D-0912 a sealed file reads the whole covered block in one `pread`
+    /// and serves the record out of it, so the record is no longer read on its
+    /// own. Only the refusal for a file that is BOTH truncated and checksummed
+    /// could change with that, and it does not: when the block read comes up
+    /// short, [`Self::verify_block_of`] reads the record by itself — on that
+    /// failure path only — and hands back the record's `ShortRead`, at that
+    /// record's own offset, owing that record's own bytes, which is the
+    /// sentence `crates/store/tests/write.rs` asserts and the one that answers
+    /// "is the bar I asked for there". Naming the block's offset and length for
+    /// every index inside it would tell a caller walking a month the same thing
+    /// 73 times about 73 different records.
     ///
     /// # Errors
     ///
@@ -1992,20 +2106,57 @@ impl BarFile {
             index,
             n_valid: self.header.n_valid,
         })?;
-        read_fully(&self.bars, &self.bars_path, at, image)?;
-        let row = refused(W::read_from(image), &self.bars_path)?;
-        // THE ONE LINE THAT MAKES THE SIDECAR MEAN ANYTHING.
+        // THE ONE BRANCH THAT MAKES THE SIDECAR MEAN ANYTHING.
         //
         // Every read in this crate funnels through here — `read_record`,
         // `first_at_or_after`'s bisection, `already_stored`'s comparison,
         // `suffix_that_follows`' overlap — so this is the single place the check
-        // has to go for none of them to serve an unverified byte.
-        self.verify_block_of(index)?;
-        Ok(row)
+        // has to go for none of them to serve an unverified byte. A sealed file
+        // is served from the verified block's own bytes (D-0912); an unsealed
+        // one has nothing to verify against and reads its record directly.
+        match self.crc_path.as_deref() {
+            Some(sidecar) => self.read_verified(sidecar, index, at, image)?,
+            None => read_fully(&self.bars, &self.bars_path, at, image)?,
+        }
+        refused(W::read_from(image), &self.bars_path)
     }
 
-    /// Verifies the checksum block record `index` lives in, once per run of
-    /// reads inside it.
+    /// Copies record `index`, at file offset `at`, out of its verified block —
+    /// D-0912.
+    ///
+    /// Warm (the handle's cached block is this block at this counter): one
+    /// uncontended lock and one copy of the record's bytes, no syscall. Cold:
+    /// [`Self::verify_block_of`] reads and checks the block into the cache,
+    /// and only then is the record copied out of it. Either way the bytes
+    /// returned are bytes the check ran over.
+    fn read_verified(
+        &self,
+        sidecar: &Path,
+        index: u64,
+        at: u64,
+        image: &mut [u8],
+    ) -> Result<(), StoreError> {
+        let n_valid = self.header.n_valid;
+        let block = self.layout.block_of(index);
+        let mut cache = self.verified.lock().unwrap_or_else(PoisonError::into_inner);
+        if cache.block != block || cache.n_valid != n_valid {
+            // FORGET FIRST, so a refusal or a panic below leaves nothing cached.
+            cache.block = NO_BLOCK;
+            self.verify_block_of(sidecar, block, at, image, &mut cache)?;
+            cache.block = block;
+            cache.n_valid = n_valid;
+        }
+        let verified = cache
+            .record(at, image.len())
+            .ok_or(StoreError::NotCommitted { index, n_valid })?;
+        image.copy_from_slice(verified);
+        Ok(())
+    }
+
+    /// Reads `block`'s covered range into the handle's cache and verifies it,
+    /// once per run of reads inside it — called by [`Self::read_verified`] on a
+    /// cache miss only. On success the cache's `start` and `len` describe the
+    /// verified bytes; the caller sets its key. D-0912.
     ///
     /// # The defect this closes, measured rather than reasoned about
     ///
@@ -2022,8 +2173,9 @@ impl BarFile {
     ///
     /// # Three states, and only one of them refuses for want of a sidecar
     ///
-    /// * **No flag.** The file was born unsealed, `crc_path` is `None`, and this
-    ///   returns `Ok` without a syscall. `docs/02-store-format.md` §6 provides
+    /// * **No flag.** The file was born unsealed, `crc_path` is `None`, and
+    ///   [`Self::read_row`] never calls this: it reads the record directly,
+    ///   with nothing to verify it against. `docs/02-store-format.md` §6 provides
     ///   for exactly that, and §3 rule 8 says the flag is not added later — a
     ///   sidecar written for it now would cover the tail while claiming the
     ///   file, which converts "unverified" into a false "verified".
@@ -2040,9 +2192,11 @@ impl BarFile {
     ///
     /// # Cost
     ///
-    /// One `pread` of four bytes and one CRC-32C over at most
-    /// [`Layout::block_len`] — 4,088 bytes at the bar geometry — on the FIRST
-    /// touch of a block, and one relaxed load on every touch after it. A forward
+    /// One `pread` of the covered range (at most [`Layout::block_len`], 4,088
+    /// bytes at the bar geometry) into the handle's fixed buffer, one `pread`
+    /// of four sidecar bytes and one CRC-32C over the covered range, on the
+    /// FIRST touch of a block; every touch after it is served from the buffer
+    /// with no syscall and never reaches this function. A forward
     /// walk of a month therefore pays this once per 73 records, never once per
     /// record. It is not free and is not claimed to be: `CLAUDE.md` §3 rule 4
     /// bounds the per-operation cost and this is bounded by the block, which is
@@ -2069,22 +2223,27 @@ impl BarFile {
     /// [`StoreError::ShortRead`] for a sidecar too short to hold this block's
     /// entry, [`StoreError::Format`] if the geometry refuses the block, and
     /// anything the host refuses measuring or reading either file.
-    fn verify_block_of(&self, index: u64) -> Result<(), StoreError> {
-        // ASKED OF THE PATH, WHICH IS ASKED OF THE FLAG. `crc_path` is `Some`
-        // exactly when `validated` saw `FLAG_CHECKSUMS`, so this is the header's
-        // answer with the sidecar's name already in hand — which the refusal
-        // below needs and `Header::checksums_present()` alone could not give.
-        let Some(at) = self.crc_path.as_ref() else {
-            return Ok(());
-        };
-        let block = self.layout.block_of(index);
-        if self.verified.load(Ordering::Relaxed) == block {
-            return Ok(());
-        }
+    fn verify_block_of(
+        &self,
+        at: &Path,
+        block: u64,
+        record_at: u64,
+        image: &mut [u8],
+        cache: &mut VerifiedBlock,
+    ) -> Result<(), StoreError> {
+        // `at` IS ASKED OF THE PATH, WHICH IS ASKED OF THE FLAG. `crc_path` is
+        // `Some` exactly when `validated` saw `FLAG_CHECKSUMS`, and
+        // `Self::read_row` calls this only then — so this is the header's answer
+        // with the sidecar's name already in hand, which the refusal below needs
+        // and `Header::checksums_present()` alone could not give.
         let Some(crc) = self.checksums.as_ref() else {
+            // THE RECORD'S OWN SHORT READ STILL COMES FIRST, as it did when the
+            // record was read before anything else. One `pread`, on this
+            // refusal path only.
+            read_fully(&self.bars, &self.bars_path, record_at, image)?;
             return Err(StoreError::ChecksumsMissing {
                 path: self.bars_path.clone(),
-                sidecar: at.clone(),
+                sidecar: at.to_path_buf(),
                 block,
             });
         };
@@ -2098,12 +2257,24 @@ impl BarFile {
             self.layout.covered_byte_range(block, self.header.n_valid),
             &self.bars_path,
         )?;
-        let span = usize::try_from(end.saturating_sub(start)).map_err(|_| StoreError::Format {
-            path: self.bars_path.clone(),
-            source: FormatError::OffsetOverflow,
-        })?;
-        let mut bytes = vec![0u8; span];
-        read_fully(&self.bars, &self.bars_path, start, &mut bytes)?;
+        // INTO THE HANDLE'S OWN FIXED BUFFER, which is what the reads after
+        // this one are served from (D-0912). It used to be a `vec![0u8; span]`
+        // per cold block, checked and then thrown away. `MAX_BLOCK_LEN` is
+        // asserted at compile time to hold every geometry a `BarFile` resolves,
+        // so the refusal here is for a covered range no `Layout` can produce.
+        let bytes = usize::try_from(end.saturating_sub(start))
+            .ok()
+            .and_then(|span| cache.bytes.get_mut(..span))
+            .ok_or_else(|| StoreError::Format {
+                path: self.bars_path.clone(),
+                source: FormatError::OffsetOverflow,
+            })?;
+        if let Err(short) = read_fully(&self.bars, &self.bars_path, start, bytes) {
+            // NAME THE RECORD WHEN IT IS THE RECORD THAT IS MISSING — see
+            // `Self::read_row`. Only on this failure path.
+            read_fully(&self.bars, &self.bars_path, record_at, image)?;
+            return Err(short);
+        }
 
         // FOUR BYTES AT `block * 4`, AND THE `.crc` IS THE PATH A FAILURE HERE
         // NAMES. A short sidecar is a short read of the SIDECAR, not of the
@@ -2127,7 +2298,7 @@ impl BarFile {
         // admitted, visible in `/logs` as well as in the return value. A second
         // comparison in this module would be a second answer to one question.
         let checked =
-            crate::block::verify_through(&self.header, self.layout, block, &bytes, &past, stored);
+            crate::block::verify_through(&self.header, self.layout, block, bytes, &past, stored);
         if let Err(FormatError::BlockChecksum { computed, .. }) = checked {
             return Err(StoreError::BlockChecksum {
                 path: self.bars_path.clone(),
@@ -2137,7 +2308,8 @@ impl BarFile {
             });
         }
         refused(checked, &self.bars_path)?;
-        self.verified.store(block, Ordering::Relaxed);
+        cache.start = start;
+        cache.len = bytes.len();
         Ok(())
     }
 
@@ -3650,6 +3822,286 @@ mod tests {
         );
         drop(fresh);
         scrub_month(&path);
+    }
+
+    /// Overwrites `bytes` into the bar file at `offset`, under any open handle.
+    ///
+    /// The damage a disk, a stray writer or a bad copy does after a block was
+    /// verified — the case ET-bars-candles-store-0 found served unchecked.
+    fn damage_bars(path: &Path, offset: u64, bytes: &[u8]) {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut raw = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("the month is writable");
+        raw.seek(SeekFrom::Start(offset)).expect("the offset seeks");
+        raw.write_all(bytes).expect("the damage lands");
+        raw.sync_all().expect("and is on disk");
+    }
+
+    /// Flips bit 22 of record `index`'s `high`, on disk, and returns the forgery.
+    ///
+    /// `high` is the third `i64` after `ts_micros` and `open`, so it starts 16
+    /// bytes into the record. Bit 22 is clear in every `bar(..)` high (bit 21
+    /// is set), so the flip makes a LARGER high that still clears
+    /// `Bar::ohlc_is_sane` — nothing but the checksum can tell it from a price.
+    fn flip_high(path: &Path, layout: Layout, index: u64) -> Bar {
+        let at = layout.offset_of(index).expect("a record offset") + 16;
+        let mut forged = bar(i64::try_from(index).expect("a small index"));
+        forged.high ^= 1 << 22;
+        damage_bars(path, at, &forged.high.to_le_bytes());
+        assert!(forged.ohlc_is_sane(), "the forgery is a plausible price");
+        forged
+    }
+
+    /// A record corrupted AFTER its block was verified is never served as the
+    /// corrupted value — D-0912, ET-bars-candles-store-0.
+    ///
+    /// Before D-0912 the first read verified block 0 and remembered only its
+    /// INDEX, then every later read in that block re-read the record from disk
+    /// and checked nothing: the bytes served were never the bytes summed. Now
+    /// the verified block's own bytes are what later reads are served from.
+    /// The first, a middle and the last record of a full block are each
+    /// damaged after the first read, and the fresh handle at the end is the
+    /// control proving the damage is real.
+    #[test]
+    fn a_record_damaged_after_its_block_verified_is_served_as_verified_d0912() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+
+        let (path, mut file) = month("d0912afterverify");
+        let held: Vec<Bar> = (0..80).map(bar).collect();
+        assert_eq!(
+            file.append(&held),
+            Ok(Appended::Committed {
+                first_index: 0,
+                n_valid: 80,
+            })
+        );
+        drop(file);
+
+        let reader = reopen_readonly(&path).expect("the month opens");
+        let layout = reader.layout;
+        assert_eq!(reader.read_record(1), Ok(bar(1)), "block 0 verifies here");
+
+        for index in [0u64, 36, 72] {
+            let forged = flip_high(&path, layout, index);
+            let served = reader.read_record(index);
+            assert_ne!(
+                served,
+                Ok(forged),
+                "record {index}: the forgery is never served"
+            );
+            assert_eq!(
+                served,
+                Ok(bar(i64::try_from(index).expect("small"))),
+                "record {index} comes from the verified block, not the disk"
+            );
+        }
+        assert_eq!(
+            reader.read_record(72),
+            Ok(bar(72)),
+            "a rerun serves the same"
+        );
+
+        // Block 1 has not been touched by this handle; its damage is seen.
+        let _forged = flip_high(&path, layout, 73);
+        assert!(
+            matches!(
+                reader.read_record(73),
+                Err(StoreError::BlockChecksum { block: 1, .. })
+            ),
+            "a cold block is checked against the disk as it now stands"
+        );
+        // Block 0's verified bytes did not outlive the move: coming back
+        // re-verifies, and block 0 is damaged on disk now.
+        assert!(
+            matches!(
+                reader.read_record(0),
+                Err(StoreError::BlockChecksum { block: 0, .. })
+            ),
+            "a block left is re-verified on return"
+        );
+        drop(reader);
+
+        let fresh = reopen_readonly(&path).expect("the month still opens");
+        assert!(
+            matches!(
+                fresh.read_record(5),
+                Err(StoreError::BlockChecksum { block: 0, .. })
+            ),
+            "the control: the damage is real, so the reads above were served \
+             from verified bytes and not from a disk that still matched"
+        );
+        drop(fresh);
+        scrub_month(&path);
+    }
+
+    /// Two handles on one month each serve the bytes they verified — D-0912.
+    #[test]
+    fn two_handles_each_serve_the_bytes_they_verified_d0912() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+
+        let (path, mut file) = month("d0912twohandles");
+        let held: Vec<Bar> = (0..3).map(bar).collect();
+        assert!(file.append(&held).is_ok());
+        drop(file);
+
+        let one = reopen_readonly(&path).expect("the month opens");
+        let two = reopen_readonly(&path).expect("the month opens twice");
+        assert_eq!(one.read_record(0), Ok(bar(0)));
+        assert_eq!(two.read_record(2), Ok(bar(2)));
+        let forged = flip_high(&path, one.layout, 2);
+        assert_eq!(
+            one.read_record(2),
+            Ok(bar(2)),
+            "handle one, the last record"
+        );
+        assert_eq!(
+            two.read_record(2),
+            Ok(bar(2)),
+            "handle two, the same record"
+        );
+        assert_ne!(one.read_record(2), Ok(forged));
+        drop((one, two));
+        scrub_month(&path);
+    }
+
+    /// The tail block grows on append, and the cache follows the counter —
+    /// D-0912.
+    ///
+    /// A cache of the tail block taken at three records holds no fourth; a
+    /// read of record 3 after an append must neither slice past what was
+    /// verified nor be refused as uncommitted. It is re-verified over the new
+    /// covered range and served, and damage to record 4 after that read is
+    /// still not served.
+    #[test]
+    fn the_tail_block_cache_follows_an_append_d0912() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+
+        let (path, mut file) = month("d0912tailgrows");
+        assert!(file.append(&[bar(0), bar(1), bar(2)]).is_ok());
+        assert_eq!(
+            file.read_record(2),
+            Ok(bar(2)),
+            "the 3-record tail is cached"
+        );
+        assert!(file.append(&[bar(3), bar(4)]).is_ok());
+        assert_eq!(file.read_record(3), Ok(bar(3)), "the grown tail is re-read");
+        assert_eq!(file.read_record(4), Ok(bar(4)), "to its new last record");
+        let forged = flip_high(&path, file.layout, 4);
+        assert_ne!(
+            file.read_record(4),
+            Ok(forged),
+            "and damage after is not served"
+        );
+        assert_eq!(file.read_record(0), Ok(bar(0)));
+        drop(file);
+        scrub_month(&path);
+    }
+
+    /// A block that fills to exactly `records_per_block` and then spills into a
+    /// second: the last record of block 0 and the first of block 1 are each
+    /// served from their own verified bytes — D-0912.
+    #[test]
+    fn the_block_edge_is_served_from_each_side_s_own_verified_bytes_d0912() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+
+        let (path, mut file) = month("d0912edge");
+        let per = Layout::V2.records_per_block();
+        let full: Vec<Bar> = (0..i64::try_from(per).expect("73")).map(bar).collect();
+        assert!(file.append(&full).is_ok());
+        // n_valid AT the block boundary: block 0 is whole, block 1 is empty.
+        assert_eq!(file.read_record(per - 1), Ok(bar(72)), "the last record");
+        assert_eq!(
+            file.read_record(per),
+            Err(StoreError::NotCommitted {
+                index: per,
+                n_valid: per,
+            }),
+            "the first index of an empty block is not committed"
+        );
+        assert!(file.append(&[bar(73)]).is_ok());
+        assert_eq!(file.read_record(per), Ok(bar(73)), "block 1, one record");
+        let forged = flip_high(&path, file.layout, per);
+        assert_ne!(file.read_record(per), Ok(forged));
+        assert_eq!(file.read_record(per), Ok(bar(73)));
+        let forged_edge = flip_high(&path, file.layout, per - 1);
+        assert!(
+            matches!(
+                file.read_record(per - 1),
+                Err(StoreError::BlockChecksum { block: 0, .. })
+            ),
+            "crossing back over the edge is a cold read of block 0"
+        );
+        assert_ne!(file.read_record(per - 1), Ok(forged_edge));
+        drop(file);
+        scrub_month(&path);
+    }
+
+    /// With the sidecar gone, a record that is ALSO truncated away is still
+    /// named as the record — the order the reads had before D-0912 kept them.
+    #[test]
+    fn a_missing_record_is_named_before_a_missing_sidecar_d0912() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+
+        let (path, mut file) = month("d0912nosidecarshort");
+        assert!(file.append(&[bar(0), bar(1), bar(2)]).is_ok());
+        let layout = file.layout;
+        drop(file);
+        std::fs::remove_file(sidecar_of(&path)).expect("take the sidecar away");
+        let reader = reopen_readonly(&path).expect("the month opens");
+        // Truncated UNDER the open handle: an open would refuse it outright.
+        let cut = layout.offset_of(2).expect("an offset");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("writable")
+            .set_len(cut)
+            .expect("truncated");
+
+        assert_eq!(
+            reader.read_record(2),
+            Err(StoreError::ShortRead {
+                path: path.clone(),
+                offset: cut,
+                asked: crate::format::RECORD_LEN,
+                read: 0,
+            }),
+            "the record that is gone is named first"
+        );
+        assert!(
+            matches!(
+                reader.read_record(1),
+                Err(StoreError::ChecksumsMissing { block: 0, .. })
+            ),
+            "a record that survives is refused for the sidecar"
+        );
+        drop(reader);
+        scrub_month(&path);
+    }
+
+    /// `VerifiedBlock::record` serves only bytes inside what was verified.
+    #[test]
+    fn a_verified_block_serves_only_inside_its_verified_extent_d0912() {
+        let mut cache = super::VerifiedBlock::EMPTY;
+        assert_eq!(cache.record(0, 1), None, "nothing verified, nothing served");
+        cache.start = 100;
+        cache.len = 8;
+        if let Some(head) = cache.bytes.get_mut(..8) {
+            head.copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        }
+        assert_eq!(cache.record(100, 8), Some(&[1, 2, 3, 4, 5, 6, 7, 8][..]));
+        assert_eq!(cache.record(104, 4), Some(&[5, 6, 7, 8][..]), "the last");
+        assert_eq!(cache.record(105, 4), None, "one byte past the extent");
+        assert_eq!(cache.record(99, 1), None, "one byte before it");
+        assert_eq!(cache.record(108, 0), Some(&[][..]), "the empty tail");
+        assert_eq!(cache.record(u64::MAX, 1), None, "the largest offset");
+        assert_eq!(cache.record(100, usize::MAX), None, "an overflowing width");
+        let shown = format!("{cache:?}");
+        assert!(
+            shown.contains("start: 100") && shown.contains("len: 8") && !shown.contains("bytes"),
+            "Debug names the extent and not the buffer: {shown}"
+        );
     }
 
     /// Opening a month reads no sidecar byte, however damaged the sidecar is.
