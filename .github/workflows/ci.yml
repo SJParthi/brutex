@@ -5216,15 +5216,28 @@ jobs:
           #     no-arbitrage volatility bracket the fixed-step bisection starts
           #     from. A volatility is a statistic with no paisa representation,
           #     the same reason the other 13 in this file are allowed.
-          #   runner/bootstrap.rs 48 -> 49 (D-1197). The new line is the
-          #     Romano--Wolf null table, `Vec<Vec<f64>>` of studentized resampled
-          #     means, built once instead of per round. A t-statistic has no paisa
-          #     representation, the reason the other 48 are allowed.
-          #   runner/bootstrap.rs 49 -> 51 (D-0973, D-1198). The merge with
-          #     lane 4 replaced that null table with D-0973's one-walk stepdown,
-          #     whose running maxima, selection scratch and per-rank bars are
-          #     the same studentized statistics; lane 4's own tree measured 51
-          #     against its allowance of 48. No price is among them.
+          #   runner/bootstrap.rs 48 -> 51 -- one from D-0972 and a net two from
+          #     D-0973, every one a test STATISTIC. D-0972 added
+          #     `white_point_mass_would_mint_evidence(.., observed: f64)`, which
+          #     reads the SIGN of White's observed studentised statistic. D-0973
+          #     rewrote the legacy stepdown `romano_wolf_aligned` as one backward
+          #     walk: the observed statistics, the per-draw maxima seeded at
+          #     `f64::NEG_INFINITY`, a scratch copy of them, the per-suffix bars
+          #     seeded at `f64::INFINITY`, the `total_cmp` selection of the bar and
+          #     `null_statistic`'s return type came in; the `sqrt` of the period
+          #     count, the old per-round maxima, their running `best` and both
+          #     lines of `quantile` went out. The return series are still `i64`
+          #     and no cost or price enters the module.
+          #   cli/institutional_evidence.rs 7 -> 8 -- GAP5-54 (D-0930) replaced
+          #     `probability_ppm`, two lines that took `ceil(p * PPM)` in `f64`,
+          #     with `bootstrap_fraction`, three lines that recover the exact
+          #     integer `k/(draws+1)` behind the runner's p-value: `value *
+          #     denominator as f64` rounded to the `u64` numerator, the bit-exact
+          #     check that `numerator / denominator` reproduces the p-value, and
+          #     the refusal message naming the `f64` it cannot represent above
+          #     2^53. The float is again the input discarded for an integer, the
+          #     direction of travel `runner/report.rs` is allowed for, and the ppm
+          #     and the decision are now integer arithmetic on that fraction.
           allow_float='
           crates/api/src/ingest.rs 1
           crates/api/src/server.rs 4
@@ -5251,7 +5264,7 @@ jobs:
           crates/telemetry/src/encode.rs 1
           crates/telemetry/src/record.rs 1
           crates/cli/src/live.rs 1
-          crates/cli/src/institutional_evidence.rs 7
+          crates/cli/src/institutional_evidence.rs 8
           crates/cli/src/institutional_statistics.rs 19
           crates/cli/src/population_statistics_v2.rs 18
           crates/cli/src/population_statistics_v3.rs 11
@@ -5447,6 +5460,13 @@ jobs:
           # (`HashMap::with_capacity(candidates)`, and the proved-day set at
           # `required.len()`), so the file has no unsized map left and its row
           # was only loose. D-1189 deletes it; a new unsized map there is red.
+          # `api/recovery_journal.rs` 1, D-1380 -- SHAPE 1. `append_new`'s `fresh`, the
+          # set that refuses a seed batch naming one recovery key twice, is bound
+          # `HashSet::new()` and its very next statement is
+          # `fresh.try_reserve(records.len())`, the batch length counted before
+          # the walk; no insert precedes it. The `images` Vec just above it
+          # is reserved the same way. `with_capacity` would abort on allocation
+          # failure where this path returns the `io::Error` the journal reports.
           allow_unsized='
           crates/api/src/catalog.rs 1
           crates/pull/src/manifest.rs 1
@@ -5508,6 +5528,7 @@ jobs:
           crates/pull/src/cash_session_cache.rs 2
           crates/cli/src/selection_v6.rs 1
           crates/cli/src/index_stop_store.rs 1
+          crates/api/src/recovery_journal.rs 1
           '
 
           # ---- rule 4. docs/07 layer 12: bounded page, never O(universe). ---
@@ -5955,11 +5976,37 @@ jobs:
           #     again (D-0606): `sort_unstable_by` on `total_cmp`, ties broken by
           #     position, over the same slice of strategies and in the same
           #     decreasing order as the first `runner/bootstrap.rs` entry.
+          #   runner/bootstrap.rs 2 -> 4 -- D-0973 rewrote the legacy stepdown
+          #     `romano_wolf_aligned` as one backward walk. `quantile` and its
+          #     sort went; three came in, each over strategies or draws and never
+          #     over bars or the universe. (1) `order.sort_unstable_by` is the
+          #     same descending-statistic order, ties by caller position, as the
+          #     adjusted receipt's `stepdown_order` -- D-0973 makes the legacy
+          #     vector decide on that receipt's order, so it must build it.
+          #     (2) `select_nth_unstable_by(position, f64::total_cmp)` is a
+          #     SELECTION of each suffix's bar from the B draw maxima: O(B) per
+          #     strategy, the "linear runtime for all inputs" fallback its doc
+          #     comment quotes. (3) `this_round.sort_unstable_by_key` orders one
+          #     round's rejected strategies by caller position; rounds partition
+          #     the strategies, so all rounds together sort S once. The stated
+          #     cost is O(S·B·N + S·B + S log S), in the function's own doc.
+          #   runner/outcome.rs 1 -> 4 -- D-1410. The production cadence is now
+          #     `prefix_median_steps_over`, a two-heap running median so bar `i`
+          #     reads only bars `0..=i`: `use std::collections::BinaryHeap` and
+          #     the `lower`/`upper` heaps are the three `BinaryHeap` lines. It
+          #     runs once per `SliceFacts::of`, `SessionBounds::of` or
+          #     `trade::forced_exits` -- once per slice, never per candidate --
+          #     and docs/06-limits.md "The prefix cadence is O(n log g) per slice"
+          #     states it. The fourth is the former entry's
+          #     `select_nth_unstable` in `median_step_micros`, now a
+          #     `#[cfg(test)] fn` kept as the oracle the prefix cadence must end
+          #     on. This scanner drops `#[cfg(test)] mod` blocks, not a
+          #     `#[cfg(test)]` fn, so it still counts a line no build runs.
           allow_sort='
           crates/runner/src/audit.rs 2
-          crates/runner/src/bootstrap.rs 2
+          crates/runner/src/bootstrap.rs 4
           crates/runner/src/bootstrap_family_pass.rs 1
-          crates/runner/src/outcome.rs 1
+          crates/runner/src/outcome.rs 4
           crates/runner/src/pbo.rs 2
           crates/runner/src/excursion.rs 1
           crates/pull/src/folder.rs 1
