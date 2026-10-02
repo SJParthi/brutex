@@ -52965,3 +52965,46 @@ operator did not type.
 Invariants AF-PROBEAPI1-a through AF-PROBEAPI1-e, AF-PROBEAPI2-a and
 AF-PROBEAPI3-a; `docs/06-limits.md` states what the deadline and the cap do
 not cover.
+
+### D-1204 — Correct three `docs/06-limits.md` statements that no longer match the code, and pin them to it — 2026-10-02
+
+**What was false (audit findings o1runner-9, o1runner-10, rustonly-3).**
+
+* §126 said each fold's execution prefix is cut by a binary `partition_point`
+  costing O(log E). No `partition_point` remains in `crates/runner` or
+  `crates/cli`; the cut is `MonotonicExecutionPrefix::advance` in
+  `crates/runner/src/validate.rs`, a forward-only cursor whose index only
+  grows and which refuses a decreasing boundary. All F cuts of one monotone
+  family together cost O(E + F): amortised O(1) per execution bar. The old
+  sentence was pessimistic. The new one says plainly that this is amortised and
+  that one cut can walk many bars, so it is not worst-case O(1) per cut.
+* §113 said a trade walk is linear in the signals it must decide. `walk_core` in
+  `crates/runner/src/trade.rs` loops over every row of the column and asks
+  `fires` of each before it does anything else, so a row that never fires still
+  costs one test. The walk is linear in the column's rows. The old sentence
+  understated the cost.
+* §96 said no build script exists in this repository and that gate 13 layer 3
+  refuses one existing at all. `crates/cli/build.rs` exists (D-0348), with its
+  two modules, and gate 13 allow-lists those three files by name. The section
+  now names them. What it set out to hold still holds: the script reads git's
+  files, starts no process, and gate 2 checks that.
+
+**The change.** Documentation, plus one test file. Each corrected sentence
+keeps a note of what it used to say, because `docs/06-limits.md` records honest
+bounds and a reader comparing it with an older copy should see why it moved.
+`crates/runner/tests/limits_doc_drift.rs` reads the three sections and the
+source each describes at compile time. Each test first checks that the source
+still has the shape the corrected sentence relies on (the cursor's forward walk
+and its refusal of a decreasing boundary, the row loop's `fires` test, the
+build script and gate 13's allow-list line). Then it checks the section. A
+change on either side fails the build. All three tests failed against the
+documents on `main` before this change.
+
+**Rejected.** Leaving §126's O(log E) as a safe upper bound: it is the bound of
+code that no longer exists, and `CLAUDE.md` §3 rule 6 asks for the bound that is
+true, not the one that is merely not exceeded. Writing a separate test per
+crate (a `cli` test for §96): `runner` already reads the two runner sources,
+and one file keeps the three corrections in one place. It reads `cli`'s build
+script by path and does not depend on `cli`.
+
+Invariant AF-D1204.

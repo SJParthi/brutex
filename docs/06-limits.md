@@ -6104,7 +6104,7 @@ See D-0310 and D-0311.
 `CLAUDE.md` §2 forbids *"any `build.rs` that invokes an external process"* and
 lists it under **"forbidden without exception"**. Two gates enforce it — gate 2
 greps every tracked `build.rs` for `Command::new` and `std::process`, and gate 13
-layer 3 refuses a tracked build script existing at all. **Both read
+layer 3 refuses every tracked build script its allowlist does not name. **Both read
 `git ls-files`.** Neither has ever looked at a dependency.
 
 **Measured, 2026-08-26**, by walking every package in `Cargo.lock` and grepping
@@ -6131,8 +6131,13 @@ pass everything on the list forever and say nothing about the fifteenth. Neither
 is worth the ceremony, and inventing a narrower rule here would be `CLAUDE.md`'s
 own warning about a gate that widens the law to match the tree, run in reverse.
 
-**What IS held.** No build script in this repository exists at all (gate 13
-layer 3), so nothing here shells out. No dependency vendors C or assembly and
+**What IS held.** One build script exists in this repository,
+`crates/cli/build.rs`, with its two modules `crates/cli/build_provenance.rs` and
+`crates/cli/commit_stamp.rs`. D-0348 permitted it to stamp the commit, gate 13
+layer 3 allow-lists those three files by name and refuses any other, and it
+reads git's files and starts no process, which gate 2 checks. Nothing here
+shells out. (This sentence used to say no build script existed at all; that
+stopped being true at D-0348, and D-1204 corrects it.) No dependency vendors C or assembly and
 compiles it — the case §2's `ring` paragraph is actually about, and the reason
 `graviola` replaced it. Gate 1's extension allowlist refuses a vendored foreign
 source tree in the tracked tree, and `cargo deny`'s `[bans]` list refuses the
@@ -6600,7 +6605,10 @@ the forward vector and the session table remain linear in B and cannot be O(1)
 total while retaining one answer per input bar.
 
 The larger operations keep their real bounds. A trade walk is linear in the
-signals it must decide. Excursion/crossing construction reads the relevant
+rows of the column it walks: `walk_core` visits every row and asks `fires` of each, so a row that never fires
+still costs one test, and the signal count bounds only the work after a row
+fires. (This sentence used to say the walk was linear in the signals it decides,
+which understated it; D-1204 corrects it.) Excursion/crossing construction reads the relevant
 paths. An exit grid evaluates its bounded configured cells over ordered
 candidates, and chosen-row replay plus persistence is output-sensitive. The
 brute-force combination ladder, complete durable history, API response and
@@ -7030,8 +7038,13 @@ delivery or end-to-end trade decision is O(1) in total time or space.
 After preparation, a bar/member/prefix lookup is a fixed number of vector reads
 and subtractions. Rust `HashMap` exact-timestamp and identity lookups are
 expected/amortized O(1), not an adversarial collision-proof worst-case
-guarantee. Binary `partition_point` used to cut each fold's execution prefix is
-O(log E). Run identity hashing must read every input byte, and no digest can be
+guarantee. Each fold's execution prefix is cut by a forward-only cursor,
+`MonotonicExecutionPrefix` in `crates/runner/src/validate.rs`, one per
+monotonically increasing family of fold boundaries. Its index only grows and a
+decreasing boundary refuses, so all F cuts of one family together cost
+O(E + F): amortised O(1) per execution bar, not worst-case O(1) per cut, since
+one cut can walk many bars. (This sentence used to name a logarithmic binary
+search per cut; the code no longer has one, and D-1204 corrects it.) Run identity hashing must read every input byte, and no digest can be
 both sensitive to an arbitrarily changed hidden bar and independent of input
 length. These are honest boundaries to the repository's constant
 **per-operation** rule; they do not support claims of universal O(1) latency,
