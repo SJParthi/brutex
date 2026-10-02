@@ -176,7 +176,16 @@ impl LakeFile {
     /// for a compression this reader does not implement;
     /// [`LakeError::PageDecode`] if a page will not decode;
     /// [`LakeError::UnexpectedNull`] if a column that must not be null is;
-    /// [`LakeError::NotRepresentable`] if a price will not become paisa.
+    /// [`LakeError::NotRepresentable`] if a price will not become paisa;
+    /// [`LakeError::SentinelValue`] if `open_interest` stores `i64::MIN`.
+    ///
+    /// # What is NOT checked
+    ///
+    /// Values are typed and converted, not judged. A negative price or
+    /// volume, a `low` above a `high`, an `open` or `close` outside the bar's
+    /// range, a negative open interest, and a timestamp at either end of
+    /// `i64` all decode as written. A consumer that needs a sane bar must check
+    /// it; this reader states that it does not.
     pub fn read_row_group(&self, index: usize) -> Result<Batch, LakeError> {
         let held = self.row_groups();
         if index >= held {
@@ -262,12 +271,22 @@ impl LakeFile {
 
         // Open interest is the one column whose null is meaningful, and
         // CLAUDE.md section 7 fixes its representation: i64::MIN, distinct
-        // from a real zero.
+        // from a real zero. A STORED i64::MIN is refused by name: mapped
+        // through, it read back as "none reported", which is a null the file
+        // never held.
         let open_interest = cols
             .int64("open_interest")?
             .into_iter()
-            .map(|v| v.unwrap_or(OPEN_INTEREST_NULL))
-            .collect();
+            .enumerate()
+            .map(|(row, v)| match v {
+                Some(OPEN_INTEREST_NULL) => Err(LakeError::SentinelValue {
+                    column: "open_interest",
+                    row,
+                }),
+                Some(v) => Ok(v),
+                None => Ok(OPEN_INTEREST_NULL),
+            })
+            .collect::<Result<Vec<i64>, LakeError>>()?;
 
         let (spot_at_bar, greeks, greeks_provenance_id) = if self.layout.has_greeks() {
             let spot = cols.optional_price("spot_at_bar")?;

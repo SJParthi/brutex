@@ -5359,3 +5359,10 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### A stored open-interest sentinel is refused; unjudged values are stated — audit 2026-10-02 probestore-7
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| AU-PROBESTORE-7a — **`LakeFile::read_row_group` refuses an `open_interest` that stores `i64::MIN` with `LakeError::SentinelValue` naming the column and row, at the first, a middle and the last row.** `i64::MIN + 1`, zero, `-1` and `i64::MAX` read as themselves and a real null reads as `None`. Before the fix the stored sentinel read back as "none reported", a null the file never held | `a_stored_open_interest_sentinel_is_refused_by_row` in `crates/lake/tests/refusals.rs`; `lake::error::tests::every_error_variant_renders_and_names_its_own_fields` | ✓ |
+| AU-PROBESTORE-7b — **What the lake reader does not judge decodes as written, and its crate header and `read_row_group` doc say so.** A row with timestamp `i64::MIN`, a `low` above the `high`, an `open` outside the range, a negative close, volume and open interest reads back exactly as stored; the header's "Everything is refused by name" now limits itself to malformations of the file | `values_the_reader_does_not_judge_decode_as_written` in `crates/lake/tests/refusals.rs` | ✓ |

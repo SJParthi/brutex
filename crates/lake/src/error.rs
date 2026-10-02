@@ -240,6 +240,19 @@ pub enum LakeError {
         present: u8,
     },
 
+    /// A column held, as a real value, the sentinel this crate uses to mean
+    /// "no value".
+    ///
+    /// `open_interest` maps a null to `i64::MIN` (`CLAUDE.md` §7). A file that
+    /// stores `i64::MIN` itself would otherwise read back as "the vendor
+    /// reported none", indistinguishable from a null, so it is refused.
+    SentinelValue {
+        /// The column.
+        column: &'static str,
+        /// Which row of the row group.
+        row: usize,
+    },
+
     /// A row group index was past the end of the file.
     NoSuchRowGroup {
         /// The index asked for.
@@ -326,6 +339,10 @@ impl fmt::Display for LakeError {
             Self::PartialGreeks { row, present } => write!(
                 f,
                 "row {row} carries {present} of the 8 greeks; the block is null as a unit in every row measured, so a mixed row is refused rather than guessed at"
+            ),
+            Self::SentinelValue { column, row } => write!(
+                f,
+                "column `{column}` at row {row} holds i64::MIN, the value this reader uses for a null; a stored sentinel would read back as \"none reported\", so it is refused"
             ),
             Self::NoSuchRowGroup { asked, held } => {
                 write!(f, "row group {asked} asked for, file holds {held}")
@@ -581,6 +598,13 @@ mod tests {
                     present: 4,
                 },
                 "88",
+            ),
+            (
+                LakeError::SentinelValue {
+                    column: "open_interest",
+                    row: 63,
+                },
+                "row 63",
             ),
         ]
     }
