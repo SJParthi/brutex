@@ -43718,3 +43718,45 @@ second wait's sleep and the closing brace before it. Gate 20 declares
 coverage run on this PR is that check. The 21 `sink.rs` lines that stay
 uncovered are assertion messages, test-double methods and one guarded
 `return 0`, none of them a wait.
+
+### D-0911 — The store's read door opens nonblocking and refuses a non-regular file; the catalog does not hold one — 2026-10-02
+
+**What was wrong (AC-whp-cx-0).** `BarFile::open_existing` is the read door
+behind every stored sweep, `/bars`, the pull's ingest and scrub, and
+`store::repair`. It opened the bar file and the `.lock` with `File::open` and
+the `.crc` with a plain read-only open. None passed `O_NONBLOCK` and nothing
+checked the file type, so a FIFO (or a symlink to one) at any of the three
+names parked the caller in `open(2)` until a writer appeared: no refusal, no
+timeout, no log line. `catalog::walk` sent every non-directory entry to
+`classify`, so a FIFO spelled like a month was listed as a held month and then
+hung the first reader. Reproduced before the fix: a probe test made a real
+FIFO at each sibling and every open was still blocked at the 3 s bound, and the
+walk returned `["2024-06", "2024-07"]` for one real month beside a FIFO.
+
+**The change.** `file::open_read` now opens with `O_NONBLOCK`, using the values
+`checksum_audit::open_regular` already carries for Linux x86_64/aarch64 and
+macOS, then asks the handle by `fstat` whether it is a regular file. A
+directory is refused as `StoreError::IsADirectory`. Anything else that is not
+a regular file is the new `StoreError::NotARegularFile { path, action }`, which
+names the path the store asked for. All three read opens in `open_existing`
+use it, and an absent `.lock` or `.crc` is still `None`. Symlinks are still
+followed, with no `O_NOFOLLOW`, so a symlink to a real bar file stays readable,
+as it was. The audited door is unchanged. `catalog::walk` now uses `stat`
+instead of `open` for each entry. A FIFO, device, socket or dangling link is
+counted in the new `Census::not_regular` bucket and is never classified, and
+`Census::reconciles` adds that bucket. `StoreError` is `#[non_exhaustive]` and
+no other crate builds `Census` field by field, so no caller changes.
+
+**Honest limits.** `O_NONBLOCK` stays set on the returned handle. That has no
+effect on `pread` of a regular file, and the lock is taken with `LOCK_NB`
+anyway. On a unix host outside the verified list, the name is `stat`ed before
+the open. That check races a concurrent swap, so the guarantee there is weaker,
+and only Linux x86_64 has run the tests. The write door `open_or_create` is not
+covered by this entry. It creates files and opens them read-write, and this
+finding was about the read path. A dangling symlink named like a month used to
+be listed and then refused as `Missing` on open. It is now counted as
+`not_regular` and not listed.
+
+**Proof.** `crates/store/tests/fifo.rs` has eight tests, recorded as
+`docs/04-invariants.md` S-WHPCX-01 and S-WHPCX-02. The S-25 bucket count is
+updated from seven to eight.

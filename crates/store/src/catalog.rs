@@ -106,6 +106,14 @@ pub struct Census {
     pub malformed_month: u64,
     /// The path had neither the spot depth nor the contract depth.
     pub wrong_depth: u64,
+    /// The entry is not a regular file once symlinks are followed — a FIFO, a
+    /// device, a socket, or a link that reaches nothing — and so is never
+    /// classified, whatever it is named.
+    ///
+    /// A FIFO spelled `2026-08.bin` used to be listed as a held month, and the
+    /// first reader to open it blocked forever. Counted here so the census
+    /// still reconciles and the operator can see it. D-0911, AC-whp-cx-0.
+    pub not_regular: u64,
 }
 
 impl Census {
@@ -123,7 +131,8 @@ impl Census {
             .saturating_add(self.unknown_vendor)
             .saturating_add(self.unknown_rung)
             .saturating_add(self.malformed_month)
-            .saturating_add(self.wrong_depth);
+            .saturating_add(self.wrong_depth)
+            .saturating_add(self.not_regular);
         parts == self.seen
     }
 }
@@ -204,11 +213,19 @@ pub fn walk(root: &Path) -> Result<Holdings, CatalogError> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else {
-                out.census.seen = out.census.seen.saturating_add(1);
-                classify(&bars, &path, &mut out);
+            // `stat`, never `open`: asking the type cannot block on a FIFO the
+            // way opening it does. Symlinks are followed, as `is_dir` did.
+            match std::fs::metadata(&path) {
+                Ok(meta) if meta.is_dir() => stack.push(path),
+                Ok(meta) if meta.is_file() => {
+                    out.census.seen = out.census.seen.saturating_add(1);
+                    classify(&bars, &path, &mut out);
+                }
+                // A FIFO, device, socket, or a link to nothing: never a month.
+                _ => {
+                    out.census.seen = out.census.seen.saturating_add(1);
+                    out.census.not_regular = out.census.not_regular.saturating_add(1);
+                }
             }
         }
     }
