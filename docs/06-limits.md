@@ -9895,3 +9895,10 @@ The text above is kept as it was written.
   linear in the candidate's own trades, not in the bars. Expected rather than
   worst-case: `select_nth_unstable`'s documented bound is expected linear.
   Not timed.
+* **`edge`'s overlap correction: O(1) amortised per hit, at any horizon
+  (D-1171, D-1174).** The queue holds at most one hit per bar of one session's
+  window. Each hit is pushed and popped once, and its pairs are read from four
+  exact running sums, so no queued hit is visited. A candidate costs O(rows of
+  the column), whatever `H` the operator sets. The working set is
+  `min(H, bars in one session)` entries. Not timed. No bench row covers `edge`
+  or the ranking pass.

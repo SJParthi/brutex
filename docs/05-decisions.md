@@ -43880,3 +43880,41 @@ the exact sum converted once. On the previous tree it fails: `adverse_sum` and
 gate 11's float allowlist for `outcome.rs` (29) now has headroom, since this
 removes six float lines. Tightening that number and its rationale is a `ci.yml`
 edit, which belongs to another lane.
+
+### D-1174 — `edge` folds each hit's Newey-West pairs in O(1) from exact running sums — 2026-10-02
+
+**What was wrong (audit W3-runner3-0).** For every measured hit, `edge` visited
+every queued hit still inside the horizon. That cost O(min(H - 1, hits in the
+last H bars)) per hit and O(rows + n·min(H, n)) per candidate. `rank` calls
+`edge` once per frequent itemset. `Horizon::bars` accepts any non-zero `u32`,
+so once `H` covered the hits the cost was quadratic in the candidate's own hits.
+The doc said only that the working set was O(H).
+
+**The change.** The Bartlett weight of a queued hit `o` against the new hit `s`
+is `(H - (s - o)) / H`, which is linear in `o`. So each new hit's three pair
+sums factor into four running sums over the queue: its count, `Σ y`, `Σ o` and
+`Σ o·y`. `OverlapWindow` adds a hit's terms on push and subtracts them on pop.
+Every hit therefore costs O(1) amortised, and no queued hit is visited. The
+running sums are exact `i128`, so pops leave no rounding drift. Moves are
+centred on the sample's first move, `y = x - x₀`, before anything is
+multiplied, so the uncentred sums are formed at the scale of the spread and not
+of the price. Offsets are taken from the hit that opened the current overlap
+cluster. Under D-1171 a cluster lies inside one day's priced minutes, which
+bounds every product below 2^108, inside `i128`.
+
+**Outputs that change.** `t`, in its last bits. The pair sums are now formed
+from exact integers and rounded once per hit, where before they were rounded
+once per pair at the price's scale. `no_overlap_pair_crosses_a_session` and
+`a_horizon_past_every_session_is_measured_per_session` hold `edge`'s `t` within
+1e-9 and 1e-6 relative of the pairwise definition written out in the test.
+`the_running_sums_reproduce_every_pair` holds the running form against the
+pairwise form across six horizons. The mean, counts and sums are untouched.
+`edge` dropped below the hundred-line lint, so its `too_many_lines` expectation
+was removed.
+
+**Tests.** `edge_visits_no_queued_hit` fails on the previous tree (the pair loop
+`for … in &recent` is there). `moves_at_the_ends_of_i64_neither_overflow_nor_cancel`
+drives moves near `i64::MAX` with a spread of a few paisa, and alternating
+`i64::MIN` and `i64::MAX`. `empty_single_and_reopened_windows` covers no hit,
+one hit, and a drain to empty that re-anchors. **Not measured:** no bench row
+covers `edge`. The O(1) per hit is argued from the code (§3 rule 6).

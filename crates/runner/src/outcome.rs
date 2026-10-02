@@ -1490,6 +1490,140 @@ fn long_run_sum_squares(m2: f64, mean: f64, cross_a: f64, cross_b: f64, cross_c:
     2.0f64.mul_add(cross, m2)
 }
 
+/// The hits whose forward windows still share a bar with the newest one, and
+/// the Newey-West cross-sums they have contributed — O(1) amortised per hit.
+///
+/// # Why the pair loop had to go — D-1174
+///
+/// `edge` visited every queued hit for every new one: O(min(H, hits in the
+/// window)) per hit. Before D-1171 nothing bounded the queue but `H`, which the
+/// operator sets up to `u32::MAX`, so a candidate's cost reached Θ(n²) in its
+/// own hits. The session drain bounds the queue to one day, but a hit per bar
+/// over a whole session is still a few hundred visits per hit.
+///
+/// Every queued hit `o` contributes Bartlett weight `(H - (s - o)) / H` to a
+/// pair with the new hit `s`. That weight is LINEAR in `o`, so each per-hit sum
+/// factors into a few running sums over the queue:
+///
+/// * `Σ a_o y_o = (H - s)·Σ y_o + Σ o·y_o`
+/// * `Σ a_o     = (H - s)·k   + Σ o`
+///
+/// where `a_o = H - (s - o)`. A push adds a hit's terms and a pop subtracts
+/// them, so each hit costs O(1) amortised and the queue is visited by nobody.
+///
+/// # Exact, and centred on the first observation
+///
+/// The running sums are `i128` integers and so are EXACT. Pushing and popping
+/// therefore leave no rounding drift, which a floating running sum would
+/// accumulate on every pop. Offsets are taken from the hit that opened the
+/// current overlap cluster, and moves from the sample's first move:
+/// `y = x - x₀`. A cluster lies inside one day's contiguous priced minutes, so
+/// an offset is below 1,440 and `|y| < 2^64`. Every product is then below 2^108.
+/// `i128` holds that with nineteen bits to spare, so the saturating operations
+/// below cannot saturate on a priced slice.
+///
+/// Shifting by `x₀` also removes the level, which was the catastrophic
+/// cancellation the `m2 <= 0` guard in `edge` documents. The uncentred sums are
+/// formed at the scale of the SPREAD, not of the price.
+///
+/// **UNVERIFIED as a measured bound.** No bench row covers `edge`. The O(1)
+/// claim is argued from the code (§3 rule 6).
+struct OverlapWindow {
+    /// The horizon `H`, in bars.
+    horizon: usize,
+    /// `x₀`: the first observation, which every `y` is measured from.
+    shift: Option<i64>,
+    /// The hit that opened the current cluster. Offsets are taken from it.
+    anchor: usize,
+    /// `(offset from anchor, y, exit bar)` per queued hit, oldest first.
+    queue: std::collections::VecDeque<(i128, i128, usize)>,
+    /// `k`, `Σ y`, `Σ o` and `Σ o·y` over the queue, exact.
+    sums: [i128; 4],
+    /// `Σ w·y_i·y_j`, `Σ w·(y_i + y_j)` and `Σ w` over every overlapping pair.
+    cross: [f64; 3],
+}
+
+impl OverlapWindow {
+    fn new(horizon: usize, capacity: usize) -> Self {
+        Self {
+            horizon,
+            shift: None,
+            anchor: 0,
+            queue: std::collections::VecDeque::with_capacity(capacity),
+            sums: [0; 4],
+            cross: [0.0; 3],
+        }
+    }
+
+    /// Fold one measured hit: drop the hits it shares no bar with, add its
+    /// pairs with every hit that remains, and queue it.
+    fn observe(&mut self, source: usize, moved: i64, exit: usize) {
+        let first = *self.shift.get_or_insert(moved);
+        let lifted = i128::from(moved).saturating_sub(i128::from(first));
+        // TWO WAYS OUT OF RANGE, AND THE SECOND IS THE SESSION -- D-1171. A
+        // pair at a bar gap of `H` or more shares no bar. Neither does a pair
+        // whose OLDER window had already EXITED by this entry: `forward` ends
+        // every window at the earlier of the horizon and that day's forced
+        // close, so a 15:08 hit and the next day's 09:15 hit are some 22 bars
+        // apart and share nothing at any horizon. `sources` strictly increase
+        // and exits only advance with the entry (see `WindowExtremes`), so both
+        // halves drain from the front and the drain is complete.
+        while let Some(&(offset, y_old, old_exit)) = self.queue.front() {
+            let older = self
+                .anchor
+                .saturating_add(usize::try_from(offset).unwrap_or(usize::MAX));
+            if source.saturating_sub(older) < self.horizon && old_exit > source {
+                break;
+            }
+            self.queue.pop_front();
+            self.add(offset, y_old, -1);
+        }
+        if self.queue.is_empty() {
+            self.anchor = source;
+        }
+        let offset = i128::try_from(source.saturating_sub(self.anchor)).unwrap_or(i128::MAX);
+        let span = i128::try_from(self.horizon).unwrap_or(i128::MAX);
+        let [held, total_lifted, total_offset, total_product] = self.sums;
+        // `a_o = H - (s - o)` is in `1..H` for every queued hit, by the drain.
+        let lead = span.saturating_sub(offset);
+        let weighted = lead
+            .saturating_mul(total_lifted)
+            .saturating_add(total_product);
+        let weights = lead.saturating_mul(held).saturating_add(total_offset);
+        let both = weighted.saturating_add(lifted.saturating_mul(weights));
+        let [products, pair_sums, weight_sum] = &mut self.cross;
+        let horizon = wide(span);
+        *products += wide(lifted) * wide(weighted) / horizon;
+        *pair_sums += wide(both) / horizon;
+        *weight_sum += wide(weights) / horizon;
+        self.queue.push_back((offset, lifted, exit));
+        self.add(offset, lifted, 1);
+    }
+
+    /// Add (`sign = 1`) or remove (`sign = -1`) one hit's terms, exactly.
+    fn add(&mut self, offset: i128, lifted: i128, sign: i128) {
+        let [held, total_lifted, total_offset, total_product] = &mut self.sums;
+        *held = held.saturating_add(sign);
+        *total_lifted = total_lifted.saturating_add(sign.saturating_mul(lifted));
+        *total_offset = total_offset.saturating_add(sign.saturating_mul(offset));
+        *total_product =
+            total_product.saturating_add(sign.saturating_mul(offset.saturating_mul(lifted)));
+    }
+
+    /// How many hits are still queued.
+    fn held(&self) -> usize {
+        self.queue.len()
+    }
+
+    /// `long_run_sum_squares` over these cross-sums, for a sample whose
+    /// Welford mean is `mean` and centred sum of squares is `m2`.
+    fn sum_squares(&self, m2: f64, mean: f64) -> f64 {
+        let x0 = wide(i128::from(self.shift.unwrap_or(0)));
+        let [a, b, c] = self.cross;
+        long_run_sum_squares(m2, mean - x0, a, b, c)
+    }
+}
+
 /// Measures one mask's forward moves over the bars where it fired.
 ///
 /// # Cost
@@ -1502,24 +1636,16 @@ fn long_run_sum_squares(m2: f64, mean: f64, cross_a: f64, cross_b: f64, cross_c:
 ///
 /// **It is no longer strictly no-storage, and the bound is stated rather than
 /// glossed.** The overlap correction keeps the hits whose forward windows still
-/// touch the current bar, which is at most one per bar over the last `H` bars.
-/// So the working set is `O(H)` — fifteen entries at the default horizon — and
-/// `H` is a run PARAMETER, not a function of how many bars were loaded or how
-/// many the mask hit. Constant in the data, linear in a number the operator
-/// chose. Still one pass.
+/// share a bar with the current one. That is at most one per bar of one
+/// session's window: `min(H, bars in a session)` entries, fifteen at the default
+/// horizon and never more than one day's minutes at any horizon (D-1171). Each
+/// hit is folded in O(1) amortised through `OverlapWindow`'s exact running
+/// sums, and no queued hit is ever visited (D-1174). It was
+/// `O(min(H, hits in the window))` per hit, quadratic in the hits once `H`
+/// passed their span. Still one pass.
 ///
 /// UNVERIFIED as a measured figure: no bench row covers this yet.
 #[must_use]
-#[expect(
-    clippy::too_many_lines,
-    reason = "ONE FOLD over the column, and the length is comment rather than \
-              control flow: the body is a single loop with no branching to lift \
-              out, and every paragraph in it records a defect this function \
-              already had -- the overlap correction, the refused-bar guard, the \
-              split sum, and now the path sums. Splitting it would put the \
-              accumulation in one function and the only place that can check the \
-              accumulators agree in another."
-)]
 pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
     let mut n: u64 = 0;
     let mut mismatched: u64 = 0;
@@ -1602,16 +1728,14 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
     // Nothing measured this. `crates/runner/benches/ratio.rs` has no row
     // covering `edge` or the ranking pass, and `rank::rank`'s own doc says so.
     // The change is argued from the shape, not from a timing. §3 rule 6.
-    let mut recent: std::collections::VecDeque<(usize, f64, usize)> =
-        std::collections::VecDeque::with_capacity(
-            horizon_bars.min(forward.bars_len.saturating_add(1)),
-        );
-    // Uncentered, because the mean is not known until the walk ends. The three
-    // together reconstruct the centered weighted cross-sum exactly:
+    // The queue and its exact running sums -- see `OverlapWindow`. Its three
+    // cross-sums are uncentred, because the mean is not known until the walk
+    // ends, and together reconstruct the centred weighted cross-sum exactly:
     // `Σ w (x_i - m)(x_j - m) = A - m·B + m²·C`.
-    let mut cross_a = 0.0_f64; // Σ w · x_i · x_j
-    let mut cross_b = 0.0_f64; // Σ w · (x_i + x_j)
-    let mut cross_c = 0.0_f64; // Σ w
+    let mut recent = OverlapWindow::new(
+        horizon_bars,
+        horizon_bars.min(forward.bars_len.saturating_add(1)),
+    );
 
     // WHOLE-SLICE AGREEMENT, ASKED ONCE. `covers` is a per-index test and every
     // index of a SHORTER column satisfies it, so on its own it lets a `Forward`
@@ -1716,45 +1840,12 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
         favourable_sum =
             favourable_sum.saturating_add(i128::from(forward.favourable_at(source).unwrap_or(0)));
 
-        // EVERY EARLIER HIT WHOSE WINDOW STILL TOUCHES THIS ONE.
-        //
-        // `sources` is strictly increasing, so the front of the queue is the
-        // oldest and the moment it falls out of range every entry behind it is
-        // in range. Dropping from the front is therefore complete, not a
-        // heuristic.
-        //
-        // TWO WAYS OUT OF RANGE, AND THE SECOND IS THE SESSION -- D-1171. A
-        // pair at a bar gap of `H` or more shares no bar. Neither does a pair
-        // whose OLDER window had already EXITED by this entry: `forward` ends
-        // every window at the earlier of the horizon and that day's forced
-        // close, so a 15:08 hit and the next day's 09:15 hit are some 22 bars
-        // apart and share nothing at any horizon. The gap alone paired them at
-        // `H >= 23` with a weight above zero. Exits only advance with the entry
-        // (see `WindowExtremes`), so this half drains from the front too.
-        while let Some(&(older, _, older_exit)) = recent.front() {
-            if source.saturating_sub(older) >= horizon_bars || older_exit <= source {
-                recent.pop_front();
-            } else {
-                break;
-            }
-        }
-        for &(older, x_older, _) in &recent {
-            let gap = source.saturating_sub(older);
-            // `gap` is in `1..horizon_bars` by the drain above, so the weight is
-            // in `(0, 1)` and never the `d = 0` self-pair, which is `m2`'s job.
-            #[allow(
-                clippy::cast_precision_loss,
-                reason = "a bar gap below the horizon cannot reach 2^52."
-            )]
-            let w = 1.0 - (gap as f64) / (horizon_bars as f64);
-            cross_a += w * x_older * x;
-            cross_b += w * (x_older + x);
-            cross_c += w;
-        }
-        // `exit_at` is `Some` wherever `at` was, which is the only way here; the
-        // `source` fallback would share no bar with the next hit and drain at
-        // once, so it could not pair anything that does not overlap.
-        recent.push_back((source, x, forward.exit_at(source).unwrap_or(source)));
+        // EVERY EARLIER HIT WHOSE WINDOW STILL TOUCHES THIS ONE, paired in O(1)
+        // amortised -- see `OverlapWindow`. `exit_at` is `Some` wherever `at`
+        // was, which is the only way here; the `source` fallback would share no
+        // bar with the next hit and drain at once, so it could not pair anything
+        // that does not overlap.
+        recent.observe(source, r, forward.exit_at(source).unwrap_or(source));
     }
 
     // ONE ASSEMBLY POINT FOR BOTH EXITS. The early return and the final one
@@ -1870,7 +1961,7 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
     // drain above confines a pair to one day, so a sample spread over two or
     // more days always leaves the queue. Only a sample inside one shared
     // window reaches this line.
-    if u64::try_from(recent.len()).is_ok_and(|held| held == n) {
+    if u64::try_from(recent.held()).is_ok_and(|held| held == n) {
         return assemble(0.0);
     }
     #[allow(
@@ -1878,7 +1969,7 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
         reason = "the observation count is bounded by the column length."
     )]
     let count = n as f64;
-    let sum_squares = long_run_sum_squares(m2, mean, cross_a, cross_b, cross_c);
+    let sum_squares = recent.sum_squares(m2, mean);
     let variance = sum_squares / (count - 1.0);
     let standard_error = (variance / count).sqrt();
     let t = if standard_error > 0.0 && standard_error.is_finite() {
@@ -3967,6 +4058,169 @@ mod money_tests {
             e.favourable_sum.to_bits(),
             wide(favourable).to_bits(),
             "favourable_sum"
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes."
+)]
+mod overlap_window_tests {
+    use super::{OverlapWindow, long_run_sum_squares};
+
+    /// The cross-sums written out pair by pair in `f64`, from the definition:
+    /// every earlier hit whose window still reaches past the new entry and whose
+    /// gap is under `H`, at weight `1 - gap/H`, on the raw moves `x`.
+    fn pairwise(hits: &[(usize, i64, usize)], horizon: usize) -> [f64; 3] {
+        let mut out = [0.0; 3];
+        for (j, &(s, x, _)) in hits.iter().enumerate() {
+            for &(o, xo, exit) in hits.iter().take(j) {
+                if s - o < horizon && exit > s {
+                    #[allow(clippy::cast_precision_loss, reason = "test values")]
+                    let (w, x, xo) = (1.0 - (s - o) as f64 / horizon as f64, x as f64, xo as f64);
+                    out[0] += w * xo * x;
+                    out[1] += w * (xo + x);
+                    out[2] += w;
+                }
+            }
+        }
+        out
+    }
+
+    /// A day of hits with irregular gaps, each window ending at the earlier of
+    /// `H` bars and a forced bar, then the next day.
+    fn session_hits(horizon: usize, moves: impl Fn(usize) -> i64) -> Vec<(usize, i64, usize)> {
+        let mut hits = Vec::new();
+        for day in 0..3_usize {
+            let open = day * 400;
+            let forced = open + 360;
+            let mut at = open;
+            let mut step = 1;
+            while at < forced {
+                hits.push((at, moves(at), (at + horizon).min(forced)));
+                at += step;
+                step = step % 5 + 1;
+            }
+        }
+        hits
+    }
+
+    #[test]
+    fn the_running_sums_reproduce_every_pair() {
+        for horizon in [1_usize, 2, 15, 23, 400, 1_000_000] {
+            let hits = session_hits(horizon, |at| {
+                let k = i64::try_from(at).expect("small");
+                (k * 7_919) % 211 - 100
+            });
+            let mut window = OverlapWindow::new(horizon, 16);
+            for &(s, x, exit) in &hits {
+                window.observe(s, x, exit);
+            }
+            // The window works on y = x - x0; recentre the pairwise reference
+            // with the same algebra the walk uses and compare the long-run sum.
+            let want = pairwise(&hits, horizon);
+            #[allow(clippy::cast_precision_loss, reason = "test values")]
+            let mean = hits.iter().map(|h| h.1 as f64).sum::<f64>() / hits.len() as f64;
+            let got = window.sum_squares(1_000.0, mean);
+            let expected = long_run_sum_squares(1_000.0, mean, want[0], want[1], want[2]);
+            assert!(
+                (got - expected).abs() <= 1e-6 * expected.abs().max(1.0),
+                "H={horizon}: running {got}, pairwise {expected}"
+            );
+        }
+    }
+
+    /// The level is removed before anything is multiplied, so moves near the
+    /// top of `i64` with a spread of a few paisa do not cancel into noise, and
+    /// nothing saturates.
+    #[test]
+    fn moves_at_the_ends_of_i64_neither_overflow_nor_cancel() {
+        let base = i64::MAX - 1_000;
+        let hits = session_hits(15, |at| base + i64::try_from(at % 7).expect("small"));
+        let mut window = OverlapWindow::new(15, 16);
+        for &(s, x, exit) in &hits {
+            window.observe(s, x, exit);
+        }
+        let shifted: Vec<(usize, i64, usize)> =
+            hits.iter().map(|&(s, x, e)| (s, x - base, e)).collect();
+        let want = pairwise(&shifted, 15);
+        let [a, b, c] = window.cross;
+        // `x0 = base + 0`, so the window's y equals the shifted reference.
+        assert!(
+            (a - want[0]).abs() <= 1e-9 * want[0].abs().max(1.0),
+            "A {a} vs {}",
+            want[0]
+        );
+        assert!(
+            (b - want[1]).abs() <= 1e-9 * want[1].abs().max(1.0),
+            "B {b} vs {}",
+            want[1]
+        );
+        assert!(
+            (c - want[2]).abs() <= 1e-9 * want[2].abs().max(1.0),
+            "C {c} vs {}",
+            want[2]
+        );
+        assert!(
+            window.sums.iter().all(|s| s.abs() < 1_i128 << 100),
+            "a sum ran away"
+        );
+
+        // AND THE OTHER END: alternating extremes, one per window, so every
+        // product is as large as `y` can be.
+        let mut ends = OverlapWindow::new(2, 4);
+        for (i, x) in [i64::MIN, i64::MAX, i64::MIN, i64::MAX]
+            .into_iter()
+            .enumerate()
+        {
+            ends.observe(i, x, i + 2);
+        }
+        let [a, b, c] = ends.cross;
+        assert!(a.is_finite() && b.is_finite() && c.is_finite());
+        assert!(ends.sums.iter().all(|s| s.abs() < 1_i128 << 110));
+    }
+
+    /// One observation, none, and a window that drains to empty and reopens.
+    #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "exactly zero, with nothing added, is the claim"
+    )]
+    fn empty_single_and_reopened_windows() {
+        let empty = OverlapWindow::new(15, 0);
+        assert_eq!(empty.held(), 0);
+        assert_eq!(empty.cross, [0.0; 3]);
+        let mut one = OverlapWindow::new(15, 1);
+        one.observe(10, 5, 25);
+        assert_eq!(
+            (one.held(), one.cross),
+            (1, [0.0; 3]),
+            "no pair from one hit"
+        );
+        one.observe(100, 7, 115);
+        assert_eq!(one.held(), 1, "the first hit drained");
+        assert_eq!(one.cross, [0.0; 3], "and paired with nothing");
+        assert_eq!(
+            one.anchor, 100,
+            "the reopened cluster is anchored on its hit"
+        );
+        assert_eq!(one.sums, [1, 2, 0, 0], "y = 7 - 5, at offset zero");
+    }
+
+    /// The pair loop is gone: no hit visits the queue.
+    #[test]
+    fn edge_visits_no_queued_hit() {
+        let source = include_str!("outcome.rs");
+        let live = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("a source prefix");
+        assert!(!live.contains("in &recent {"), "the per-pair loop is back");
+        assert!(
+            live.contains("recent.observe(source, r,"),
+            "edge must fold O(1)"
         );
     }
 }
