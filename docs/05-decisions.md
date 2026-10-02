@@ -46443,3 +46443,190 @@ Benjamini and Hochberg (1995). This change adds none: no source for it is
 recorded in `docs/00-charter.md`, and writing one without reading the source
 would be the invention §3 rule 1 forbids. The citation remains UNVERIFIED in
 the charter's sense.
+### D-0765 — Count a directory the store catalog cannot list, rather than skip it — 2026-09-29
+
+**What happened (W3-store1-4).** `store::catalog::walk` kept the walk going
+when a directory below `bars/` failed `read_dir`, which is right: one locked
+corner must not hide the rest of the store. But it did so with a bare
+`continue` and no census bucket, and it read entries with `flatten()`, which
+throws away an entry the operating system could not read. Reproduced on
+origin/main 2c209309: two months, the `BANKNIFTY` directory at mode 000, gave
+`Census { seen: 1, spot: 1, .. }` with `reconciles()` true. The second month
+was on disk and the census did not mention it, although the module header
+says nothing is dropped silently (S-25).
+
+**The change.** `Census` gains `unreadable`: a directory below `bars/` that
+could not be listed, or an entry that could not be read, is counted there
+once and toward `seen`, and `reconciles` sums it with the other buckets. The
+walk still continues past it, and the root failing is still
+`CatalogError::BarsUnreadable`. The same fixture now gives `seen 2, spot 1,
+unreadable 1`, and the readable month is still the one row
+(`a_directory_the_walk_cannot_list_is_counted_not_dropped`). What the locked
+directory holds stays unknown: it is counted once, not per file, because the
+walk cannot see its files.
+
+**Printed since D-0769.** When this entry was written, the `cli` reports that
+print a catalog census (`batch::census_lines`, `research::render`, and the
+pool surface) did not print the new bucket. D-0769 prints it in all three.
+
+### D-0766 — The store catalog does not follow a symbolic link; it counts it — 2026-09-29
+
+**What happened (W3-store1-5).** `store::catalog::walk` decided whether to
+descend with `Path::is_dir`, which follows a link. Reproduced on origin/main
+2c209309: one real month plus `bars/groww/NSE/back -> ../..` gave
+`Census { seen: 33, spot: 1, wrong_depth: 32, .. }` on macOS, the walk
+re-entering the tree through the link until `read_dir` failed on the kernel's
+link limit and that failure was swallowed. The count depends on the scratch
+root, and was re-measured on 2026-09-30 with the same test binary: `seen 34,
+wrong_depth 33` with the root under `/private/tmp/claude-501/`, and `seen 33,
+wrong_depth 32` for the same directory reached as `/tmp/claude-501/`, because
+`/tmp` is itself a link (`/tmp -> private/tmp`) and spends one of the limit's
+links. No test asserts either count. The comment above the walk's stack
+said the explicit stack dealt with a symlink loop; it did not. A link that
+resolved to nothing answered `is_dir` false and was classified as a bar file.
+
+**The change.** The walk reads `DirEntry::file_type`, which describes the entry
+itself. A symbolic link, to a file or a directory, resolving or not, is counted
+once in the new `Census::linked` bucket and toward `seen`, and is never
+followed; `reconciles` sums it with the other buckets. An entry whose type
+cannot be read is `unreadable` (D-0765). The same fixture now gives
+`seen 2, spot 1, linked 1, wrong_depth 0`
+(`a_symlink_loop_is_counted_once_and_not_walked`).
+
+**Why not follow links with a visited set.** `docs/02-store-format.md` §9 lists
+a symlink at a path component as a hazard that defeats vendor-prefix
+isolation, so a link under `bars/` is counted as something this store does
+not produce rather than resolved.
+
+**What this narrows, and where it is named.** A vendor or symbol directory
+under `bars/` that is itself a symbolic link was walked and its months offered
+to `sweep-all` before this entry, and is not offered now: its months are absent
+from `sweep-all`, `research-plan` and `pool` (the reviewer's probe: a linked
+`bars/dhan` gave `held=1` on origin/main 2c209309 and `held=0, linked: 1` here).
+`sweep-stored`, which is given the month by name and opens it through
+`BarFile::open_existing`, still reaches it by reading: that open is
+`fault(File::open(&bars_path), &bars_path, Action::Open)` in
+`crates/store/src/file.rs`, and `File::open` follows a link (not run here). D-0769 prints the `linked`
+count in all three reports, so the narrowing is named on the page rather than
+silent.
+
+### D-0767 — A month stem must be digits only before it is parsed — 2026-09-29
+
+**What happened (W3-store1-6).** `store::catalog::parse_month` checked the
+width of `yyyy` and `mm` and then parsed them as integers. Rust's unsigned
+integer `FromStr` accepts a leading `+`, so the stem `2026-+8` passed the width
+check and was listed as the month `2026-08`. Reproduced on origin/main
+2c209309: `groww/NSE/INDEX/NIFTY/1min/2026-+8.bin` alone gave `spot 1,
+malformed_month 0` and a held `2026-08`, a path the renderer would write as
+`2026-08.bin`, which did not exist. The comment above the width check says a
+hand-made name must not masquerade as one the writer produced.
+
+**The change.** After the width check, every byte of both fields must be an
+ASCII digit, or the stem is `malformed_month`. `2026-+8.bin` and `+026-08.bin`
+beside `2026-08.bin` now give `malformed_month 2, spot 1` and one row
+(`a_signed_month_field_is_malformed_not_a_second_spelling`).
+
+### D-0768 — A non-UTF-8 path component is counted, not dropped — 2026-09-29
+
+**What happened (W3-store1-7).** `store::catalog::classify` built the path's
+components with `filter_map(|c| c.as_os_str().to_str())`, which drops a
+component that is not UTF-8. The depth test then ran on a list one level
+short. Reproduced on origin/main 2c209309 by calling `classify` on
+`bars/<0xFF>/groww/NSE/INDEX/NIFTY/1min/2026-08.bin`: `spot 1` and a held
+`groww` NIFTY `2026-08` for a seven-level path under an unnamed first level.
+
+**The change.** The components are collected as `Option<Vec<&str>>`; one
+non-UTF-8 component files the whole path in the new `Census::non_utf8` bucket,
+which counts toward `reconciles`. The store renders its paths from a `String`
+(`StorePath::to_path_buf` pushes `self.to_string()`), so no such name is one it
+wrote.
+
+**Honest limit.** The proof calls `classify` directly
+(`a_non_utf8_component_is_counted_and_never_dropped`). The walk-level fixture
+could not be built on this machine: `create_dir_all` with a `0xFF 0xFE`
+component returned `Illegal byte sequence` (errno 92) on the APFS volume the
+tests run on. The ledger names ext4 as a filesystem that allows such names;
+that was not run here.
+
+### D-0769 — The store catalog refuses a `bars` it cannot stat, and names every entry it did not offer — 2026-10-01
+
+**What happened (root probe).** `store::catalog::walk` opened with
+`if !bars.is_dir() { return Ok(Holdings::default()) }`. `Path::is_dir` answers
+false on every failure to stat, so three different faults returned `Ok` with a
+zero census that reconciled, the same answer as "nothing pulled yet": a store
+root at mode 000 holding a real month, a `bars` that is a regular file, and a
+`bars` link that resolves to nothing. Found by a review of D-0765 and
+reproduced on this branch before the change:
+`a_bars_path_that_is_not_a_directory_is_refused_by_name`,
+`a_dangling_bars_link_is_refused_not_empty` and
+`a_store_root_that_cannot_be_searched_is_refused` each failed with
+`Holdings { held: [], census: Census { seen: 0, .. } }` where a refusal was
+expected. It predates the branch: the reviewer's probe gave the same `Ok` on
+origin/main 2c209309.
+
+**The change.** `bars_present` stats `root/bars` without following it
+(`symlink_metadata`); `NotFound` there, and only there, is the empty store.
+Anything else is followed with `metadata`: a directory is walked, and a
+non-directory or a failure to stat is `CatalogError::BarsUnreadable` naming
+the reason (`it is not a directory`, or the operating system's own message).
+`bars` itself may still be a link to a directory, because the root is
+operator configuration (`a_bars_link_to_a_real_directory_is_walked`); links
+below it stay counted and not followed (D-0766). The test
+`a_bars_path_that_is_not_a_directory_reports_an_empty_store`, which pinned the
+old answer, is replaced by
+`a_bars_path_that_is_not_a_directory_is_refused_by_name`: the old behaviour
+is the defect.
+
+**What happened (entry dispatch).** Two further gaps in the per-entry step,
+found by the same review. First, `walk` counted an entry the operating
+system could not read, and an entry whose type could not be read, as
+`unreadable`, but no test reached either branch: deleting both
+`count_unreadable()` calls left every store test green (a surviving mutant,
+`CLAUDE.md` §4). Second, every entry that was neither a link nor a directory
+went to `classify` as a bar file, so a FIFO named `2026-09.bin` at spot depth
+became a held spot month (the reviewer's `mkfifo` probe gave
+`held=["2026-08", "2026-09"]`, and origin/main 2c209309 gives the same).
+
+**The change.** The per-entry decision is one function, `admit`, which takes
+`io::Result<(FileType, PathBuf)>`: a failure to read the entry and a failure
+to read its type arrive as one `Err` and are counted by one call, which
+`an_entry_the_os_could_not_read_is_one_unreadable_entry` reaches with an
+injected `io::Error`. Only `FileType::is_file` is classified; anything that
+is not a regular file, a directory or a link is counted in the new
+`Census::not_regular` bucket, which `reconciles` sums
+(`an_entry_that_is_not_a_regular_file_is_never_classified_as_a_month` with
+the type of `/dev/null`, and `a_socket_named_like_a_month_is_not_a_held_month`
+on a real tree, where the socket stands in for a FIFO because the standard
+library can create one).
+
+**What happened (the operator surface).** D-0765 to D-0768 counted the new
+buckets on `store::catalog::Census`, and no report printed them. The review's
+fixture held `RELIANCE` and `TCS` under `NSE/CASH` and `NIFTY` and `BANKNIFTY`
+under `NSE/INDEX`, with `TCS` and `BANKNIFTY` at mode 000: `research-plan`
+printed `TCS | 0/81 | ...`, the same row as a stock never pulled, and
+`sweep-all` printed `store holds 2 spot instrument-month(s)` and nothing about
+the two locked directories. A linked `BANKNIFTY` directory, which D-0766
+stopped offering, likewise appeared on no line.
+
+**The change.** `Census::unoffered_report` is the one spelling: a `NOT
+OFFERED` line naming the `unreadable`, `linked`, `non_utf8` and `not_regular`
+counts when any is non-zero, and a `CATALOG CENSUS DOES NOT RECONCILE` line
+when the buckets do not sum to `seen`; an empty string otherwise
+(`the_unoffered_report_names_every_unwalked_bucket_and_is_silent_otherwise`).
+`batch::census_lines` (`sweep-all`), `research::render` (`research-plan`)
+and the pool's `head_under` print it
+(`the_report_names_the_entries_the_catalog_did_not_offer`,
+`a_sweep_over_a_store_with_a_linked_symbol_directory_names_the_link`,
+`the_inventory_names_the_entries_the_catalog_did_not_offer`,
+`the_pool_page_names_the_entries_the_catalog_did_not_offer`).
+
+**Printed, not refused.** One locked or linked corner does not refuse the
+whole report, for the reason `walk` does not refuse it: it must not hide the
+rest of the store. The report degrades loudly and names the count, as
+`CLAUDE.md` §4 allows. What an unreadable directory or a link holds stays
+unknown, and the line says so.
+
+**Not changed here.** The walk keeps no set of visited `(device, inode)`
+pairs, so a cycle made by a bind mount or a directory hard link is still
+descended; `docs/06-limits.md` §86 records that the linear bound holds for an
+acyclic tree only. Not run on this machine.

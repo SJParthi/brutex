@@ -392,10 +392,12 @@ fn head_under(
         symbols: surface,
         elsewhere,
         unrecognised,
+        unoffered,
     } = surface_under(root, vendor, rung)?;
     let mut unread = String::new();
     not_on_the_surface(&mut unread, &elsewhere);
     not_catalogued(&mut unread, unrecognised);
+    not_walked(&mut unread, &unoffered);
     if surface.is_empty() && !elsewhere.is_empty() {
         return Err(format!(
             "no instrument is on the surface for {vendor_word} at {rung}; the catalog \
@@ -443,6 +445,19 @@ fn not_catalogued(out: &mut String, (feeds, rungs): (u64, u64)) {
          volume a directory spelt as a feed or rung in another case is the one a load\n  \
          opens, so a month counted here can be one this page reads or says is not held.\n"
     );
+}
+
+/// The catalog's `unoffered_report`, indented like the other blocks the pool
+/// names without reading, under a blank line. Nothing when it is empty.
+/// D-0769.
+fn not_walked(out: &mut String, unoffered: &str) {
+    if unoffered.is_empty() {
+        return;
+    }
+    out.push('\n');
+    for line in unoffered.lines() {
+        let _ = writeln!(out, "  {line}");
+    }
 }
 
 /// `usize` as the `u64` a telemetry field takes, saturating rather than
@@ -564,6 +579,7 @@ fn surface_under(
         symbols: symbols.into_iter().collect(),
         elsewhere: elsewhere.into_values().collect(),
         unrecognised: (holdings.census.unknown_vendor, holdings.census.unknown_rung),
+        unoffered: holdings.census.unoffered_report(),
     })
 }
 
@@ -581,6 +597,9 @@ struct Surface {
     /// directory, that is spelt as no feed or rung this engine knows: the
     /// catalog census's `unknown_vendor` and `unknown_rung`, store-wide.
     unrecognised: (u64, u64),
+    /// The catalog's own `unoffered_report`, store-wide: the entries it saw
+    /// below `bars/` and offered to nobody, or empty. D-0769.
+    unoffered: String,
 }
 
 /// The holdings the surface names and does not read, under the opening they
@@ -1677,6 +1696,47 @@ mod tests {
             super::not_catalogued(&mut one, counts);
             assert!(one.contains("NOT CATALOGUED"), "{counts:?}: {one}");
         }
+    }
+
+    /// **The pool page names what the catalog saw and offered to nobody.**
+    /// D-0769.
+    ///
+    /// The surface read only `unknown_vendor` and `unknown_rung` from the
+    /// census, so a linked symbol directory, which the catalog stops
+    /// offering at D-0766, was absent from the page without a line (found by a
+    /// review). A store with none of those entries gets no block.
+    #[test]
+    fn the_pool_page_names_the_entries_the_catalog_did_not_offer() {
+        let root =
+            std::env::temp_dir().join(format!("brutex-pool-unoffered-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let cash = root.join("bars/zerodha/NSE/CASH");
+        std::fs::create_dir_all(cash.join("RELIANCE/60min")).expect("dirs");
+        std::fs::write(cash.join("RELIANCE/60min/2026-07.bin"), b"").expect("a month");
+        std::os::unix::fs::symlink(cash.join("RELIANCE"), cash.join("TCS")).expect("a link");
+        let head = super::head_under(&root, "zerodha", "60min", (2026, 7), (2026, 7), None);
+        let _ = std::fs::remove_dir_all(&root);
+        let (page, _, unread) = head.expect("the head renders");
+        let census = store::catalog::Census {
+            seen: 2,
+            spot: 1,
+            linked: 1,
+            ..store::catalog::Census::default()
+        };
+        let mut block = String::new();
+        super::not_walked(&mut block, &census.unoffered_report());
+        assert_eq!(unread, block, "`unread` is the block alone");
+        assert!(
+            block.starts_with(
+                "\n  NOT OFFERED: below bars/ the catalog could not read 0 director(ies) or \
+                 entr(ies), did not follow 1 symbolic link(s)"
+            ) && block.ends_with(".\n"),
+            "{block}"
+        );
+        assert!(page.contains(&block), "{page}");
+        let mut quiet = String::new();
+        super::not_walked(&mut quiet, "");
+        assert!(quiet.is_empty(), "no block when nothing went unoffered");
     }
 
     #[test]
