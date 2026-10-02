@@ -548,6 +548,22 @@ pub fn put_equity_note(body: &mut serde_json::Value, note: String) -> Result<(),
     Ok(())
 }
 
+/// Whether a Boolean observation route must authenticate its saved body again
+/// rather than project from the reader its single slot holds. W1-api1-5, D-0951.
+///
+/// `held` is whether the slot holds a reader for exactly this root, identity,
+/// model and budget. A pinned request (`pinned`) over a held reader reuses it
+/// and lets the projection refuse a changed generation, as it always did. An
+/// unpinned request -- every first page -- used to authenticate afresh every
+/// time; it now reuses a held reader whose `current` check passes (the same
+/// generation and lease check a warm page makes) and authenticates again only
+/// when that check refuses. `current` is not called when nothing is held or the
+/// request is pinned. What a cold admission still costs is stated in
+/// `docs/06-limits.md` under D-0951 and is UNVERIFIED as a measurement.
+pub(crate) fn must_admit(held: bool, pinned: bool, current: impl FnOnce() -> bool) -> bool {
+    !held || (!pinned && !current())
+}
+
 #[cfg(test)]
 #[allow(
     clippy::expect_used,
@@ -558,8 +574,46 @@ pub fn put_equity_note(body: &mut serde_json::Value, note: String) -> Result<(),
 mod tests {
     use super::{
         Cached, IDENTITY_REFUSAL, MAX_PAGE_ROWS, MAX_QUERY_BYTES, MAX_SCAN_BYTES, Page, Selector,
-        preflight, run, window,
+        must_admit, preflight, run, window,
     };
+
+    /// THE ADMISSION DECISION, EVERY INPUT. W1-api1-5, D-0951.
+    ///
+    /// Nothing held: admit, and the currency check is never asked (there is
+    /// no reader to ask). Held and pinned: reuse without asking, so the
+    /// projection's own check is what refuses a changed generation. Held and
+    /// unpinned: reuse exactly when the reader is current.
+    #[test]
+    fn a_held_reader_is_reused_when_pinned_or_current_and_admitted_again_otherwise() {
+        for pinned in [false, true] {
+            for current in [false, true] {
+                let mut asked = 0;
+                assert!(
+                    must_admit(false, pinned, || {
+                        asked += 1;
+                        current
+                    }),
+                    "nothing held: pinned={pinned} current={current}"
+                );
+                assert_eq!(asked, 0, "nothing held is never asked about currency");
+                let mut asked = 0;
+                let admit = must_admit(true, pinned, || {
+                    asked += 1;
+                    current
+                });
+                assert_eq!(
+                    admit,
+                    !pinned && !current,
+                    "pinned={pinned} current={current}"
+                );
+                assert_eq!(
+                    asked,
+                    usize::from(!pinned),
+                    "pinned={pinned}: asked once if unpinned"
+                );
+            }
+        }
+    }
 
     /// ONLY AN ABSENT LEDGER IS AN ABSENCE.
     ///
