@@ -1,7 +1,7 @@
 //! Moving averages, swing levels, `SuperTrend` and market structure.
 //!
-//! **14 vocabulary positions**: 0–5, 56–59, 64–65 and 72–73 — the last of the 232
-//! live positions that had no computation behind them.
+//! **14 vocabulary positions**: 0–5, 56–59, 64–65 and 72–73 — when written, the
+//! last of the then 232 live positions that had no computation behind them.
 //!
 //! # Every threshold here is UNVERIFIED, and that is stated rather than hidden
 //!

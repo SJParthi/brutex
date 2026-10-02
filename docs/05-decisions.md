@@ -43718,3 +43718,60 @@ second wait's sleep and the closing brace before it. Gate 20 declares
 coverage run on this PR is that check. The 21 `sink.rs` lines that stay
 uncovered are assertion messages, test-double methods and one guarded
 `return 0`, none of them a wait.
+
+### D-0947 — The `indicators` crate header states the code's position counts, and a test now reads it; four stale mechanism and cost claims corrected — 2026-10-02
+
+**What was stale (cloud audits ET-indicators-7, ET-indicators-10, UC-1).**
+
+- `crates/indicators/src/lib.rs` said **eleven** of the vocabulary's **232**
+  live positions were computable in its first paragraph and **52** of 232 in
+  its summary. Its table summed to 205, omitted `gap`, `trend`, the crossings
+  and their ordinals, 276–279 and the weekday rows, and its `fib` row listed 17
+  positions (19–29 includes tombstones 19 and 25) beside a Count of 15.
+  Counted from the code on this change: `Evaluator::positions()` returns
+  **328**, `vocab::table::LIVE` has **328** bits, and the twelve sources are
+  CurDayFib 11, `daily` 44, `fib` 27, `orb` 20, `pattern` 62, `session` 25,
+  `vwap` 20, `gap` 11, `trend` 14, crossings 85 (17 levels × 5), 276–279 4,
+  weekdays 5 — disjoint, summing to 328.
+- The same header said `PastPrefix` "enforces" no look-ahead "by removing the
+  future from the borrow". `PastPrefix` has no production caller; what holds
+  the property is that `Column::build` streams one bar at a time, as
+  `CLAUDE.md` §3 rule 7 (D-0212) already says. `docs/04-invariants.md` V-02
+  credited an "index-guarded accessor" the same way.
+- Its cost paragraph described one family's work and quoted 24.4 → 22.4 ns per
+  bar, a figure from when the crate computed the current-day ladder alone. It
+  now cites `C-I-01` (1.009×) and `C-I-05` (404,052 to 496,491 ps, the D-0690
+  runs) as cited, not re-measured.
+- `Evaluator::positions()`'s doc said "238 positions today, which is every live
+  bit". 238 is the module half (the sources above minus crossings and
+  weekdays); the total is 328. The test below it said "323 = 238 + 85" and now
+  says 328 = 238 + 85 + 5, matching its own assertion.
+- `docs/06-limits.md` §51 said `isqrt_i128` "does not execute at all" on swept
+  data. Since D-0507 `cli::stored::vwap_availability` returns `Present` for
+  every cash equity, so equity sweeps reach it through the VWAP sigma bands.
+- `docs/03-vocabulary.md` called 56–59 "break events ... true only on the
+  handful of bars where a level was taken out". `Structure::classify` makes
+  56–57 (`bos_*`) states, true on every bar beyond the latched swing in the
+  direction in force; 58–59 (`choch_*`) fire on the flip bar, because
+  `Structure::advance` moves the latch. (The audit's wording says all four are
+  states; the code says only the `bos` pair is, which is also F-A9DB2D's
+  reading.)
+
+**The guard.** `crates/indicators/tests/module_doc_counts.rs` gains
+`the_crate_header_table_and_summary_are_the_code`. It parses the lib.rs header
+table and requires: each row's Count equals the positions it lists; no position
+in two rows; the rows' union equals `Evaluator::positions()`; each module's own
+`positions()`, the current-day range and `CROSSINGS` each equal exactly one row;
+and the summary's two numbers equal `Evaluator::positions().len()` and
+`LIVE.popcount()`. **Against origin/main's lib.rs it fails**: `lib.rs row
+[`fib`] — previous-day ladders, both directions: Count says 15 and the Positions
+cell lists 17`. Hand mutations of the new header also fail it: the old "52 of
+232" summary, a deleted weekday row, and `gap` split over two rows. The existing
+module-header test now also reads `gap.rs` and `trend.rs`, which state their
+counts in the checked form and were not read (8 modules, was 6).
+
+Not added to `docs/11-findings.md`, which records the 2026-08-11 sweep and its
+digest. **Left open:** `CLAUDE.md` §3 rule 7 still says `cli` and `runner` pass
+`Availability::Absent`; the stored equity path passes `Present` by kind
+(D-0507), which does not read the slice and so does not reopen the look-ahead
+point that sentence makes. That file is the session law and is not edited here.

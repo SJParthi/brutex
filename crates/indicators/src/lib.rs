@@ -1,46 +1,61 @@
 //! Bars in, condition bits out.
 //!
-//! This is the crate `CLAUDE.md` §5 names and that did not exist until now, so
-//! **eleven of the vocabulary's 232 live positions become computable here and
-//! the other 221 remain names.** That ratio is the honest state of the engine and
-//! is stated first rather than buried.
+//! This is the crate `CLAUDE.md` §5 names, and every live position in the
+//! vocabulary is computed here. The table below is read by
+//! `tests/module_doc_counts.rs` and checked against the code: each row against
+//! the `positions()` of the source it names, the rows together against
+//! [`evaluator::Evaluator::positions`], and the summary against the live mask.
 //!
 //! # What is implemented
 //!
-//! | Module | Positions | Count |
+//! | Source | Positions | Count |
 //! |---|---|---:|
 //! | [`CurDayFib`] — the current-session Fibonacci ladder | 121–131 | 11 |
-//! | [`daily`] — the pivot ladder, the CPR, and yesterday's high and low | 7–18, 54–55, 60–62, 74–85, 178–189 | 41 |
+//! | [`daily`] — the pivot ladder, the CPR, CPR width and yesterday's high and low | 7–18, 54–55, 60–63, 74–85, 178–189, 274–275 | 44 |
+//! | [`fib`] — previous-day ladders both ways, and [`fib::Prev5`] | 20–24, 26–29, 69–71, 106–120 | 27 |
 //! | [`orb`] — the opening range at four windows | 86–105 | 20 |
-//! | [`fib`] — previous-day ladders, both directions | 19–29, 69–70, 106–109 | 15 |
-//! | [`fib::Prev5`] — the five completed sessions | 110–120 | 11 |
 //! | [`pattern`] — all 62 candlestick patterns | 153–177, 198–234 | 62 |
 //! | [`session`] — bar shape, prior run, day position, time of day, day type, opening gap | 30–51, 66–68 | 25 |
 //! | [`vwap`] — session VWAP and three sigma bands | 52–53, 143–152, 190–197 | 20 |
+//! | [`gap`] — the opening-gap Fibonacci ladder | 132–142 | 11 |
+//! | [`trend`] — EMA, `SuperTrend`, swings and market structure | 0–5, 56–59, 64–65, 72–73 | 14 |
+//! | [`evaluator`] — level crossings and their ordinals, from `vocab::table::CROSSINGS` | 280–364 | 85 |
+//! | [`evaluator`] — close against the day's open, structure in force | 276–279 | 4 |
+//! | [`evaluator`] — the weekday rows | 365–369 | 5 |
 //!
-//! **52 of the vocabulary'''s 232 live positions are computable. 180 remain names.**
+//! **328 of the vocabulary's 328 live positions are computable.** Every other position
+//! in the table is not live (`vocab::table::LIVE` excludes it) and is never set.
 //!
 //! # The three rules this crate exists to keep
 //!
 //! 1. **No look-ahead** (§3 rule 7). At bar *N* the evaluator may read bars
-//!    `0..=N` and nothing later. [`PastPrefix`] enforces it by removing the
-//!    future from the borrow, so a look-ahead read is a compile error rather than
-//!    a bounds check that might be skipped.
+//!    `0..=N` and nothing later. What holds it is the shape of the fold:
+//!    [`column::Column::build`] hands the evaluator one bar at a time and the
+//!    evaluator keeps its own running state, so a later bar is not in scope when
+//!    an earlier one folds. [`PastPrefix`] exists for a caller that indexes a
+//!    slice rather than streams it, and has no production caller today; it
+//!    enforces nothing on the fold. A new consumer that takes `&[Candle]` and
+//!    indexes into it inherits no protection from either (D-0212, D-0947).
 //! 2. **An anchor never includes the bar it is measured against.** The order is
 //!    reset, then emit, then fold — fused into [`CurDayFib::step`] so a caller
 //!    cannot transpose them. Folding first puts the close inside its own anchor
 //!    range by construction, which kills every rung outside that range.
-//! 3. **Integers only** (§7). Not one `f32` or `f64`, and no division on the
-//!    evaluation path: the rung test is cross-multiplied, so there is no rounding
-//!    policy for two platforms to disagree about.
+//! 3. **Integers only** (§7). Not one `f32` or `f64` on the evaluation path: the
+//!    rung tests are cross-multiplied, so there is no rounding policy for two
+//!    platforms to disagree about.
 //!
 //! # Cost
 //!
-//! Per bar: one session comparison, eleven cross-multiplied rung tests, two
-//! extreme updates. No loop whose length depends on the data, no allocation, and
-//! a fixed state whose size is asserted at compile time. Measured on the proof
-//! harness at 24.4 → 22.4 nanoseconds per bar across a 100× larger input — level,
-//! which is the evidence for §3 rule 4 rather than a claim about it.
+//! Per bar: every family above folds once into fixed-size state (the
+//! evaluator's size is asserted at compile time), and the crossing pass is
+//! `CROSSINGS.len()` iterations, a constant of this crate's vocabulary.
+//! `vwap::isqrt_i128` is bounded, not flat (`docs/06-limits.md` §51). Cited, not
+//! re-measured here: `C-I-01` holds one `Evaluator::step` level at 1.009× from
+//! 1,000 to 200,000 candles folded, and `C-I-05` read one `step` at 404,052 to
+//! 496,491 ps on an Apple M4 Pro laptop (`docs/06-limits.md`, the D-0690
+//! section). This header used to quote 24.4 → 22.4 ns per bar, a figure from
+//! when the crate computed the current-day ladder alone; it is not the cost of
+//! a bar today.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
