@@ -5437,6 +5437,12 @@ the guard. The existing emits test pins the warning's message and level.
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
 
+### The screen's two full sorts are stated — audit 2026-10-02 o1cli-6
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| AU-O1CLI-6 — **`docs/06-limits.md` states that `screen` sorts every priced row twice (money key, then the calendar key led by `admitted`), O(n log n) for up to 10,000,000 rows once per screen, and why a top-first selection is not equivalent; and the code still sorts and reads the whole order.** The test reads the section, `SCREEN_CAP_CEILING`, the two `rows.sort_by_key` calls in `screen` around `measure_top`, the `admitted` lead of the calendar key, and `final_selection`'s fallback past the top rows. Removing either reason fails it, so a later top-first selection must withdraw the limit | `the_screens_two_full_sorts_are_stated_and_the_full_order_still_read` in `crates/cli/tests/limits_o1cli_6.rs` | ✓ |
+
 ### Spans loaded for one number are stated — audit 2026-10-02 o1cli-5
 
 | Invariant | Test that proves it | Status |
